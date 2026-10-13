@@ -38,16 +38,28 @@ import {
   salesOrderSample,
   withoutCostColumns as stripCost,
 } from '../shared/salesOrderTemplate';
+import {
+  COSTING_COLUMNS,
+  COSTING_COLUMN_LABELS,
+  COSTING_FIELDS,
+  COSTING_FIELD_KEYS,
+  COSTING_TEMPLATE_KEY,
+  STANDARD_COSTING_DESIGN,
+  costingDesign,
+  costingSample,
+} from '../shared/costingTemplate';
 import { printableQuotation, quotationPrintData } from './sales';
+import { costingPaper } from './costing';
 import { canSeeOrderCost, printableSalesOrder, salesOrderPrintData } from './salesOrders';
 import { contentDisposition, paperFileName, kindOfFile } from '../shared/paperName';
 
 /**
  * PDF Templates — the layout a designed document prints with (see
- * `shared/pdfDesign.ts`). Two documents are laid out this way: the quotation
- * (the paper a customer receives) and the sales order (the internal booking
- * record, landscape, the one layout that may place the cost columns). Every
- * other document keeps the house style, which is code.
+ * `shared/pdfDesign.ts`). Three documents are laid out this way: the quotation
+ * (the paper a customer receives), the sales order (the internal booking
+ * record, landscape, the one layout that may place the cost columns) and the
+ * Project Costing (2026-10-13; internal, its lines ARE cost). Every other
+ * document keeps the house style, which is code.
  *
  * Each layout is one `Setting` row. Saving checks its shape, every field it
  * names and every column it places, so a typo in a placeholder is refused
@@ -62,13 +74,15 @@ export const pdfTemplateRoutes = Router();
 pdfTemplateRoutes.use(authenticate);
 
 interface TemplateDoc {
-  type: 'quotation' | 'sales_order';
+  type: 'quotation' | 'sales_order' | 'costing';
   label: string;
   settingKey: string;
   fields: DesignField[];
   fieldKeys: Set<string>;
   /** The columns this document's line table may place. */
   columns: readonly ItemColumnKey[];
+  /** What a column means on this document, where it differs (the costing's unit COST). */
+  columnLabels?: Partial<Record<ItemColumnKey, string>>;
   standard: PdfDesign;
   design: () => Promise<{ design: PdfDesign; saved: boolean; unreadable: boolean }>;
   sample: (long: boolean) => DesignData;
@@ -105,7 +119,25 @@ const DOCS: Record<string, TemplateDoc> = {
     previewPermissions: ['gops.sales_orders.view_all', 'gops.sales_orders.view_own'],
     previewDenied: 'Previewing a real sales order needs access to sales orders',
   },
+  // The Project Costing (2026-10-13): internal paper, portrait; its Scope of
+  // Work chart is an appendix the costing's own route joins behind the layout.
+  costing: {
+    type: 'costing',
+    label: 'Costing',
+    settingKey: COSTING_TEMPLATE_KEY,
+    fields: COSTING_FIELDS,
+    fieldKeys: COSTING_FIELD_KEYS,
+    columns: COSTING_COLUMNS,
+    columnLabels: COSTING_COLUMN_LABELS,
+    standard: STANDARD_COSTING_DESIGN,
+    design: costingDesign,
+    sample: costingSample,
+    previewPermissions: ['gops.costing.view_all', 'gops.costing.view_own'],
+    previewDenied: 'Previewing a real costing needs access to costings',
+  },
 };
+
+const columnLabel = (doc: TemplateDoc, key: ItemColumnKey) => doc.columnLabels?.[key] ?? ITEM_COLUMN_LABELS[key];
 
 function documentType(param: string): TemplateDoc {
   const doc = DOCS[param];
@@ -123,7 +155,7 @@ function checkedDesign(doc: TemplateDoc, body: unknown): PdfDesign {
     const barred = b.columns.filter((c) => !doc.columns.includes(c.key));
     if (barred.length) {
       throw badRequest(
-        `The ${doc.label.toLowerCase()}'s line table cannot print ${barred.map((c) => ITEM_COLUMN_LABELS[c.key].toLowerCase()).join(', ')}`,
+        `The ${doc.label.toLowerCase()}'s line table cannot print ${barred.map((c) => columnLabel(doc, c.key).toLowerCase()).join(', ')}`,
       );
     }
   }
@@ -159,7 +191,7 @@ pdfTemplateRoutes.get(
       unreadable,
       standard: doc.standard,
       fields: [...doc.fields, ...COMPANY_FIELDS.map((f) => ({ ...f, sample: mine[f.key] ?? '' })), ...PAGE_FIELDS],
-      columns: doc.columns.map((key) => ({ key, label: ITEM_COLUMN_LABELS[key] })),
+      columns: doc.columns.map((key) => ({ key, label: columnLabel(doc, key) })),
       sample: doc.sample(false),
       hasLogo: !!company?.logoPath && fs.existsSync(company.logoPath),
     });
@@ -274,6 +306,14 @@ pdfTemplateRoutes.post(
             action: 'EXPORTED',
             summary: `Previewed ${quotation.number} R${revision.revision} with a PDF template`,
           },
+          req,
+        );
+      } else if (doc.type === 'costing') {
+        // The designed pages only: the chart behind them is the engine's, not the layout's.
+        const paper = await costingPaper(me, documentId);
+        data = paper.data;
+        await audit(
+          { entityType: 'costing', entityId: paper.costing.id, action: 'EXPORTED', summary: `Previewed ${paper.costing.number} with a PDF template` },
           req,
         );
       } else {

@@ -27,6 +27,7 @@
  */
 
 import bcrypt from 'bcryptjs';
+import { PDFDocument } from 'pdf-lib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -40,6 +41,7 @@ import { workingDayKey, workingDaysBetween as webWorkingDaysBetween } from '../.
 import { migrateCostingMargins } from '../src/shared/costingLegacy';
 // Registers the costing's onApprovalSettled subscriber in this process.
 import '../src/routes/costing';
+import { COSTING_TEMPLATE_KEY, STANDARD_COSTING_DESIGN } from '../src/shared/costingTemplate';
 import {
   flat,
   LANDSCAPE,
@@ -85,7 +87,28 @@ const BASE = `http://localhost:${env.port}/api`;
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
+const LAYOUT_STASH = `${COSTING_TEMPLATE_KEY}.__verify__`;
+
+/** Sets the install's own costing layout aside for the run (absent is remembered as absent). */
+async function stashCostingLayout() {
+  if (await prisma.setting.findUnique({ where: { key: LAYOUT_STASH } })) return;
+  const own = await prisma.setting.findUnique({ where: { key: COSTING_TEMPLATE_KEY } });
+  await prisma.setting.create({ data: { key: LAYOUT_STASH, value: own ? { layout: own.value as object } : { absent: true } } });
+  if (own) await prisma.setting.delete({ where: { key: COSTING_TEMPLATE_KEY } });
+}
+
+/** Puts it back — also run first, so a run that died leaves nothing behind. */
+async function restoreCostingLayout() {
+  const stash = await prisma.setting.findUnique({ where: { key: LAYOUT_STASH } });
+  if (!stash) return;
+  const v = stash.value as { layout?: object; absent?: boolean };
+  await prisma.setting.deleteMany({ where: { key: COSTING_TEMPLATE_KEY } });
+  if (v.layout) await prisma.setting.create({ data: { key: COSTING_TEMPLATE_KEY, value: v.layout } });
+  await prisma.setting.delete({ where: { key: LAYOUT_STASH } });
+}
+
 async function cleanup() {
+  await restoreCostingLayout();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
@@ -1258,7 +1281,15 @@ async function main() {
   check('GET /costings/:id/pdf renders a PDF', pdfRes.status === 200 && pdfRes.headers.get('content-type') === 'application/pdf' && pdfRaw.startsWith('%PDF'));
   const pages = (pdfRaw.match(/\/Type \/Page\b/g) ?? []).length;
   check('the estimate is followed by the Scope of Work on its own page', pages >= 2, `${pages} page(s)`);
-  check('that page is landscape', /\/MediaBox \[0 0 841\.89 595\.28\]/.test(pdfRaw));
+  // The designed estimate and the chart are joined by pdf-lib (2026-10-13), so
+  // the pages are read through it: the estimate portrait, the chart landscape and last.
+  const joined = await PDFDocument.load(pdf);
+  const sizes = joined.getPages().map((pg) => `${Math.round(pg.getWidth())}x${Math.round(pg.getHeight())}`);
+  check(
+    'that page is landscape, and last — the designed estimate before it is portrait',
+    sizes.length >= 2 && sizes[sizes.length - 1] === '842x595' && sizes[0] === '595x842',
+    sizes.join(' '),
+  );
   check(
     'the paper is called Project Costing (2026-10-13, the owner\'s call) — its title and its file name',
     /Project\s+Costing/i.test(pdfPieces(pdf).slice(0, 40).join(' ')) && !/Material Cost Estimate/i.test(pdfPieces(pdf).join(' ')) &&
@@ -1294,6 +1325,49 @@ async function main() {
     runs.filter((r) => /total|VAT|Margin|cost/i.test(r)).join(' | '),
   );
   check('its money columns name the code in the head', runs.includes('AMOUNT (PHP)') || runs.join(' ').includes('AMOUNT (PHP)'));
+  // A designed document since 2026-10-13 (Admin › PDF Templates › Costing):
+  // the buckets as numbered headings, each with its subtotal, in the layout.
+  check(
+    'the designed estimate keeps the bucket headings and their subtotals (Materials subtotal, Equipment subtotal)',
+    runs.some((r) => /^1\s+Materials$/.test(r)) && runs.includes('Materials subtotal') && runs.includes('Equipment subtotal'),
+    runs.filter((r) => /subtotal|Materials|Equipment/.test(r)).join(' | '),
+  );
+  {
+    // A layout saved in Admin › PDF Templates prints in place of the standard;
+    // the install's own is set aside for the run (`pdfTemplate.costing.__verify__`).
+    await stashCostingLayout();
+    const custom = structuredClone(STANDARD_COSTING_DESIGN);
+    const title = custom.blocks.find((bl) => bl.id === 'title');
+    if (title && title.type === 'text') title.text = 'ZZ COST ESTIMATE';
+    await prisma.setting.create({ data: { key: COSTING_TEMPLATE_KEY, value: custom as unknown as object } });
+    const customPdf = Buffer.from(await (await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer());
+    check('a layout saved for the costing prints in place of the standard one', pdfPieces(customPdf).join(' ').includes('ZZ COST ESTIMATE'));
+    await restoreCostingLayout();
+    const admin = await prisma.user.findFirst({ where: { isSuperAdmin: true, isActive: true }, select: { id: true, email: true } });
+    if (admin) {
+      const tAdmin = signToken(admin.id, admin.email);
+      const shown = await api(tAdmin, 'GET', '/pdf-templates/costing');
+      const columns = (shown.body.columns ?? []) as { key: string; label: string }[];
+      check(
+        'Admin › PDF Templates offers the costing: its standard layout, its fields, and the unit COST as its column',
+        shown.status === 200 && shown.body.label === 'Costing' && columns.some((c) => c.key === 'unitPrice' && c.label === 'Unit cost') && !columns.some((c) => c.key === 'cost'),
+        `${shown.status} ${JSON.stringify(columns)}`,
+      );
+      const badField = structuredClone(STANDARD_COSTING_DESIGN);
+      const bt = badField.blocks.find((bl) => bl.id === 'title');
+      if (bt && bt.type === 'text') bt.text = '{{costing.nonsense}}';
+      const refusedField = await api(tAdmin, 'POST', '/pdf-templates/costing/check', badField);
+      const marginCol = structuredClone(STANDARD_COSTING_DESIGN);
+      const items = marginCol.blocks.find((bl) => bl.type === 'items');
+      if (items && items.type === 'items') items.columns.push({ key: 'margin', label: 'Margin', width: 40, align: 'right' });
+      const refusedColumn = await api(tAdmin, 'POST', '/pdf-templates/costing/check', marginCol);
+      check(
+        'a costing layout naming a field it does not have, or a column it cannot print, is refused (400)',
+        refusedField.status === 400 && refusedColumn.status === 400,
+        `${refusedField.status} ${refusedColumn.status}`,
+      );
+    }
+  }
   check('the validity prints as a record’s date (October 30, 2026)', runs.some((r) => r.includes('Valid until: October 30, 2026')), runs.filter((r) => r.includes('Valid')).join(' | '));
   {
     const shown = await api(tEstimator, 'GET', `/costings/${sheetId}`);

@@ -49,6 +49,9 @@ import {
 import { LIST_CAP, listReference, recordNamed, sendListPdf, totalLabel, choice, ratePct } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { SCOPE_PRELOAD } from '../shared/scopePreload';
+import { renderDesigned, type DesignData } from '../shared/pdfDesign';
+import { costingDesign, costingLineRow, costingSubtotalRow } from '../shared/costingTemplate';
+import { appendPdf } from '../shared/pdfAttachments';
 
 /**
  * Costing (model §5.3).
@@ -1877,180 +1880,169 @@ async function costingRouteSlots(costing: { id: string; status: string; ownerId:
 const pct = (v: number, places = 2) => `${(v * 100).toFixed(places).replace(/\.?0+$/, '')}%`;
 const qty = (v: number) => (Number.isInteger(v) ? String(v) : String(Number(v.toFixed(3))));
 
-costingRoutes.get(
-  '/:id/pdf',
-  requireAnyOrDecider('gops.costing.view_all', 'gops.costing.view_own'),
-  handler(async (req, res) => {
-    const me = currentUser(req);
-    const costing = await loadFull(req.params.id);
-    if (!costing) throw notFound('Costing not found');
-    await assertCostingVisible(me, costing, res.locals.deciderOnly === true);
+/**
+ * The Project Costing on paper, worked out for the designed layout
+ * (2026-10-13, Admin › PDF Templates › Costing): its fields, the cost table —
+ * each bucket a numbered heading, its lines (code, name over description,
+ * unit, quantity, unit cost, amount; a subheading as a heading) and its
+ * subtotal — the summary (cost, the margin as a share of the price, the
+ * subtotal, VAT, the total; only the last bold), and the sign-offs: Prepared
+ * by, then the route as the workflow names its steps, who signed and when,
+ * else who is assigned with "Pending" (a DRAFT prints the route submitting it
+ * now would take; a costing final with no approval behind it prints none).
+ * Internal notes never print. Also the Scope of Work chart, the appendix the
+ * route joins behind the designed pages.
+ */
+export async function costingPaper(me: ReturnType<typeof currentUser>, id: string, deciderOnly = false) {
+  const costing = await loadFull(id);
+  if (!costing) throw notFound('Costing not found');
+  await assertCostingVisible(me, costing, deciderOnly);
 
-    const [ranks, currency] = await Promise.all([categoryRanks(), companyCurrency()]);
-    const view = present(costing as unknown as Record<string, unknown>, ranks);
-    const lines = view.lines as unknown as {
-      code: string | null;
-      name: string | null;
-      description: string;
-      isHeading: boolean;
-      unit: string;
-      quantity: number;
-      unitCost: number;
-      amount: number;
-      costCategory: { id: string; name: string };
-    }[];
+  const [ranks, currency] = await Promise.all([categoryRanks(), companyCurrency()]);
+  const view = present(costing as unknown as Record<string, unknown>, ranks);
+  const lines = view.lines as unknown as {
+    code: string | null;
+    name: string | null;
+    description: string;
+    isHeading: boolean;
+    unit: string;
+    quantity: number;
+    unitCost: number;
+    amount: number;
+    costCategory: { id: string; name: string };
+  }[];
+  const day = (key: unknown) => (key ? formatDate(new Date(`${key as string}T00:00:00Z`)) : '');
 
-    // Who the estimate is for, then where and on what.
-    const location = costing.site
-      ? [costing.site.name, costing.site.address, costing.site.city].filter(Boolean).join(', ')
-      : '';
-    const sections: PdfSection[] = [
-      {
-        kind: 'fields',
-        columns: 2,
-        fields: [
-          { label: 'Project', value: costing.title },
-          { label: 'Customer', value: costing.customer?.name ?? '' },
-          { label: 'Location', value: location },
-          { label: 'System / Unit', value: costing.systemUnit ?? '' },
-          { label: 'Valid until', value: costing.validUntil ? formatDate(costing.validUntil) : '' },
-          { label: 'Prepared by', value: costing.owner.name },
-          // The plan's dates, when it has a start (2026-10-13): the finish is
-          // the plan's last working day, Mon–Sat — derived, as on the page.
-          ...(view.plannedStart
-            ? [
-                { label: 'Start date', value: formatDate(new Date(`${view.plannedStart as string}T00:00:00Z`)) },
-                { label: 'Finish date', value: view.plannedFinish ? formatDate(new Date(`${view.plannedFinish as string}T00:00:00Z`)) : '' },
-              ]
-            : []),
-        ],
-      },
-    ];
-
-    // One table, the five buckets as numbered headings, each line's name bold
-    // over its description, a subtotal under every bucket that has lines.
-    const rows: PdfRow[] = [];
-    const buckets = new Map<string, { name: string; rank: number; lines: typeof lines }>();
-    for (const l of lines) {
-      const b = buckets.get(l.costCategory.id) ?? { name: l.costCategory.name, rank: ranks.get(l.costCategory.id) ?? 0, lines: [] };
-      b.lines.push(l);
-      buckets.set(l.costCategory.id, b);
-    }
-    for (const b of [...buckets.values()].sort((a, c) => a.rank - c.rank)) {
-      rows.push({ heading: `${b.rank}   ${b.name}` });
-      let subtotal = 0;
-      for (const l of b.lines) {
-        if (l.isHeading) {
-          rows.push({ heading: l.name || l.description });
-          continue;
-        }
-        const title = l.name || l.description;
-        const body = l.name && l.description && l.description !== l.name ? l.description : undefined;
-        rows.push([
-          l.code ?? '',
-          body ? { title, body } : { title },
-          l.unit,
-          qty(l.quantity),
-          formatAmount(l.unitCost),
-          formatAmount(l.amount),
-        ]);
-        subtotal += Math.round(l.amount * 100);
+  const rows: DesignData['rows'] = [];
+  const buckets = new Map<string, { name: string; rank: number; lines: typeof lines }>();
+  for (const l of lines) {
+    const b = buckets.get(l.costCategory.id) ?? { name: l.costCategory.name, rank: ranks.get(l.costCategory.id) ?? 0, lines: [] };
+    b.lines.push(l);
+    buckets.set(l.costCategory.id, b);
+  }
+  for (const b of [...buckets.values()].sort((a, c) => a.rank - c.rank)) {
+    rows.push({ heading: `${b.rank}   ${b.name}` });
+    let subtotal = 0;
+    for (const l of b.lines) {
+      if (l.isHeading) {
+        rows.push({ heading: l.name || l.description });
+        continue;
       }
-      rows.push(['', { title: `${b.name} subtotal` }, '', '', '', { title: formatAmount(subtotal / 100) }]);
+      rows.push(
+        costingLineRow({
+          code: l.code,
+          name: l.name || l.description,
+          description: l.name ? l.description : null,
+          unit: l.unit,
+          quantity: l.quantity,
+          unitCost: formatAmount(l.unitCost),
+          amount: formatAmount(l.amount),
+        }),
+      );
+      subtotal += Math.round(l.amount * 100);
     }
-    if (rows.length) {
-      sections.push({
-        kind: 'table',
-        head: ['No.', 'Description', 'Unit', 'Qty', `Unit cost (${currency})`, `Amount (${currency})`],
-        widths: [7, 47, 8, 8, 14, 16],
-        align: ['left', 'left', 'left', 'right', 'right', 'right'],
-        // A bucket's heading wraps inside No. + Description, the way the
-        // designed table keeps a subheading to its product column.
-        headingSpan: 2,
-        rows,
-      });
-    }
+    rows.push(costingSubtotalRow(b.name, formatAmount(subtotal / 100)));
+  }
 
-    // The owner's summary (2026-10-09): cost, the margin as a share of the
-    // price, the subtotal, VAT, the total — no contingency line and no
-    // discount in the foot (a contingency is a cost line of its own bucket).
-    // The labels are the quotation's; only the last row is bold.
-    const summary = [
-      { label: 'Project budgeted cost', value: formatMoney(view.totalCost, currency) },
-      {
-        label: `Margin (${pct(view.grossMarginPct)} of the price${view.targetContractValue ? ', fixed price' : ''})`,
-        value: formatMoney(view.marginAmount, currency),
-      },
-      { label: 'Subtotal', value: formatMoney(view.contractValue, currency) },
-    ];
-    if (view.vatRate > 0) summary.push({ label: `VAT (${ratePct(view.vatRate)})`, value: formatMoney(view.vatAmount, currency) });
-    sections.push({
-      kind: 'totals',
-      rows: [...summary, { label: 'Total', value: formatMoney(view.grandTotal, currency), bold: true }],
-    });
+  const totals = [
+    { label: 'Project budgeted cost', value: formatMoney(view.totalCost, currency) },
+    {
+      label: `Margin (${pct(view.grossMarginPct)} of the price${view.targetContractValue ? ', fixed price' : ''})`,
+      value: formatMoney(view.marginAmount, currency),
+    },
+    { label: 'Subtotal', value: formatMoney(view.contractValue, currency) },
+    ...(view.vatRate > 0 ? [{ label: `VAT (${ratePct(view.vatRate)})`, value: formatMoney(view.vatAmount, currency) }] : []),
+    { label: 'Total', value: formatMoney(view.grandTotal, currency), bold: true },
+  ];
 
-    if (costing.terms) sections.push({ kind: 'text', title: 'Terms & Conditions', body: costing.terms });
-    // Internal notes stay on the screen: this is the paper that leaves the office.
+  const [author, slots] = await Promise.all([contactOf(costing.ownerId), costingRouteSlots(costing)]);
+  const signatories: Signatory[] = [
+    { role: 'Prepared by', name: costing.owner.name, ...author, at: preparedAt(slots) ?? costing.createdAt },
+    ...(slots.length ? slotSignatories(slots) : costing.status === 'DRAFT' ? [{ role: 'Approved by' }] : []),
+  ];
 
-    // The Scope of Work: the phases and their tasks on a working-day grid.
-    const scope = view.scopeSections as unknown as {
-      name: string;
-      startDay: number | null;
-      endDay: number | null;
-      planDays: number;
-      tasks: { name: string; start: number; durationDays: number }[];
-    }[];
-    // Always the Gantt chart, on landscape pages of its own after the
-    // sign-offs (2026-10-09, the owner's call: "Gantt chart on PDF have 2nd
-    // page") — a phase without tasks is a bar over its own planned days, the
-    // way the costing page draws it; there is no table fallback any more.
-    const groups: PdfGanttGroup[] = scope.map((s) => ({
-      name: s.name,
-      start: s.startDay ?? undefined,
-      days: s.planDays,
-      tasks: s.tasks.map((t) => ({ name: t.name, start: t.start, days: t.durationDays })),
-    }));
-    if (groups.length) {
-      sections.push({
+  const location = costing.site ? [costing.site.name, costing.site.address, costing.site.city].filter(Boolean).join(', ') : '';
+  const fields: Record<string, string> = {
+    'costing.number': costing.number,
+    'costing.title': costing.title,
+    'costing.date': formatShortDate(costing.createdAt),
+    'costing.dateLong': formatDate(costing.createdAt),
+    'costing.status': statusLabel(costing.status),
+    'costing.systemUnit': costing.systemUnit ?? '',
+    'costing.location': location,
+    'costing.validUntil': costing.validUntil ? formatDate(costing.validUntil) : '',
+    'costing.plannedStart': day(view.plannedStart),
+    'costing.plannedFinish': day(view.plannedFinish),
+    'costing.planDays': view.planDays > 0 ? `${view.planDays} working day${view.planDays === 1 ? '' : 's'} (Mon–Sat)` : '',
+    'costing.terms': costing.terms ?? '',
+    'costing.currency': currency,
+    'costing.totalCost': formatAmount(view.totalCost),
+    'costing.marginPct': pct(view.grossMarginPct),
+    'costing.marginAmount': formatAmount(view.marginAmount),
+    'costing.contractValue': formatAmount(view.contractValue),
+    'costing.vatRate': ratePct(view.vatRate),
+    'costing.vatAmount': formatAmount(view.vatAmount),
+    'costing.grandTotal': formatAmount(view.grandTotal),
+    'customer.name': costing.customer?.name ?? '',
+    'owner.name': costing.owner.name,
+    'owner.position': (costing.owner as { position?: string | null }).position ?? '',
+    'owner.email': author.email ?? '',
+    'owner.phone': author.phone ?? '',
+  };
+
+  // The Scope of Work: always the Gantt chart, on landscape pages of its own
+  // behind the estimate (2026-10-09) — a phase without tasks is a bar over its
+  // own planned days, dated from the start when the costing has one.
+  const scope = view.scopeSections as unknown as {
+    name: string;
+    startDay: number | null;
+    planDays: number;
+    tasks: { name: string; start: number; durationDays: number }[];
+  }[];
+  const groups: PdfGanttGroup[] = scope.map((sec) => ({
+    name: sec.name,
+    start: sec.startDay ?? undefined,
+    days: sec.planDays,
+    tasks: sec.tasks.map((t) => ({ name: t.name, start: t.start, days: t.durationDays })),
+  }));
+  const appendix: PdfSection | null = groups.length
+    ? {
         kind: 'gantt',
         title: 'Scope of work',
         landscape: true,
         groups,
         legend: planLegend(view.planDays, view.plannedStart as string | null, view.plannedFinish as string | null),
         startDate: (view.plannedStart as string | null) ?? undefined,
-      });
-    }
+      }
+    : null;
 
-    // Prepared by the author at creation, with how to reach them (read for
-    // the paper only — the costing's JSON carries no mobile); then the route
-    // as the workflow names its steps (rule 6, `slotSignatories`): Technical
-    // Manager, Team Leader, CEO (CTG) — who signed and when, else who is
-    // assigned with "Pending" under them. A DRAFT prints the route
-    // submitting it now WOULD take, whatever an earlier request said (one
-    // returned, or one approved before the costing was reopened, is no
-    // longer the costing's approval); a draft with no route at all prints
-    // one open "Approved by". A costing that went final with no approval
-    // standing behind it (`costingRouteSlots`) prints no approval slot:
-    // nobody will ever sign it.
-    const [author, slots] = await Promise.all([contactOf(costing.ownerId), costingRouteSlots(costing)]);
-    const signatories: Signatory[] = [
-      { role: 'Prepared by', name: costing.owner.name, ...author, at: preparedAt(slots) ?? costing.createdAt },
-      ...(slots.length ? slotSignatories(slots) : costing.status === 'DRAFT' ? [{ role: 'Approved by' }] : []),
-    ];
+  const data: DesignData = { title: `Project Costing ${costing.number}`, fields, rows, totals, signatories };
+  return { costing, data, appendix };
+}
 
-    const pdf = await renderDocument({
-      title: 'Project Costing',
-      documentNumber: costing.number,
-      date: costing.createdAt,
-      reference: `${costing.title}${costing.customer ? ` — ${costing.customer.name}` : ''}`,
-      sections,
-      signatories,
-    });
+/** The Scope of Work chart on landscape pages of its own, to join behind the designed estimate. */
+export async function costingAppendix(costing: { number: string; title: string; createdAt: Date; customer: { name: string } | null }, appendix: PdfSection) {
+  return renderDocument({
+    title: 'Project Costing',
+    documentNumber: costing.number,
+    date: costing.createdAt,
+    reference: `${costing.title}${costing.customer ? ` — ${costing.customer.name}` : ''}`,
+    sections: [appendix],
+    appendixOnly: true,
+  });
+}
 
-    await audit(
-      { entityType: 'costing', entityId: costing.id, action: 'EXPORTED', summary: 'Printed the material cost estimate' },
-      req,
-    );
+costingRoutes.get(
+  '/:id/pdf',
+  requireAnyOrDecider('gops.costing.view_all', 'gops.costing.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const { costing, data, appendix } = await costingPaper(me, req.params.id, res.locals.deciderOnly === true);
+    const { design } = await costingDesign();
+    const estimate = await renderDesigned(design, data);
+    const pdf = appendix ? await appendPdf(estimate, await costingAppendix(costing, appendix)) : estimate;
+
+    await audit({ entityType: 'costing', entityId: costing.id, action: 'EXPORTED', summary: `Printed the Project Costing ${costing.number}` }, req);
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Project Costing', number: costing.number, author: costing.owner.name, date: costing.createdAt })));

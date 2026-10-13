@@ -137,6 +137,13 @@ export interface PdfDocumentSpec {
    * dress is the same; only the width changes.
    */
   landscape?: boolean;
+  /**
+   * Only the sections — the costing's Scope of Work chart — on landscape
+   * pages with the page furniture, and no letterhead, details or sign-offs:
+   * the appendix a designed document joins behind its own pages
+   * (`appendPdf`, 2026-10-13).
+   */
+  appendixOnly?: boolean;
 }
 
 // ── The dress ─────────────────────────────────────────────────────────────────
@@ -211,7 +218,7 @@ export async function renderDocument(input: PdfDocumentSpec): Promise<Buffer> {
   const spec = safeSpec(input);
   const row = await prisma.company.findUnique({ where: { id: 'company' } });
   const company = row && safeCompany(row);
-  pageLandscape = !!spec.landscape;
+  pageLandscape = !!spec.landscape || !!spec.appendixOnly;
   const doc = new PDFDocument({
     size: 'A4',
     layout: pageLandscape ? 'landscape' : 'portrait',
@@ -231,6 +238,15 @@ export async function renderDocument(input: PdfDocumentSpec): Promise<Buffer> {
   const done = new Promise<Buffer>((resolve) => {
     doc.on('end', () => resolve(Buffer.concat(chunks)));
   });
+
+  if (spec.appendixOnly) {
+    // The first page is already landscape: a chart starts on it rather than
+    // turning a page, and runs over onto landscape pages (`pageLandscape`).
+    for (const section of spec.sections) drawSection(doc, isAppendix(section) ? ({ ...section, landscape: false } as PdfSection) : section);
+    paginate(doc, spec, company);
+    doc.end();
+    return done;
+  }
 
   drawLetterhead(doc, spec, company);
   // A landscape section at the end is an APPENDIX (the costing's Scope of

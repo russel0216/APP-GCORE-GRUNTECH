@@ -142,12 +142,13 @@ four databases and four copies of "customer".
    route names in a table head or a total; `statusLabel()` is how an enum
    prints ("Pending approval"); `formatDate` is a record's date ("October 9,
    2026"), `formatShortDate` a list's (MM/DD/YYYY); a quantity is `formatQuantity` ("4,704", "0.5" — thousands separators, three decimals at most, no trailing zeros), on the quotation and sales order papers and in both designed samples.
-   **The quotation and the sales order are designed documents.** Each
+   **The quotation, the sales order and the costing are designed
+   documents** (the costing since 2026-10-13). Each
    layout is DATA — boxes on an A4 page that an administrator places in
    Admin › PDF Templates — and prints through `renderDesigned(design, data)`
    in `shared/pdfDesign.ts`, the same engine's other door. The module still
-   draws nothing: `quotationPrintData()` / `salesOrderPrintData()` supply
-   fields, rows, totals and signatories; the engine places every box, keeps
+   draws nothing: `quotationPrintData()` / `salesOrderPrintData()` /
+   `costingPaper()` supply fields, rows, totals and signatories; the engine places every box, keeps
    the dated sign-offs, and puts every string through `pdfSafe`. A layout
    carries its `orientation`: the sales order's standard is LANDSCAPE, in the
    quotation template's dress, because the cost and margin columns do not
@@ -611,7 +612,8 @@ were found one at a time by documents refusing to submit — run this instead.
 `verify-sales.ts` checks the STANDARD designed layouts' wording, so it sets an
 administrator's saved quotation AND sales order layouts aside for the run
 (`pdfTemplate.<type>.__verify__`, Settings of their own) and `cleanup()` —
-which also runs first — puts them back. `verify-finance.ts` does the same
+which also runs first — puts them back; `verify-costing.ts` does the same
+with the costing's (`pdfTemplate.costing.__verify__`). `verify-finance.ts` does the same
 with the finance rules (`finance.rules.__verify__`): it changes the
 liquidation days to prove which rule a deadline read, and a run that dies
 leaves the stash for the next run's `cleanup()` to restore. `verify-hr.ts`
@@ -3996,9 +3998,10 @@ these are what every document and list says in it.
 
 Admin › PDF Templates (`/admin/pdf-templates`, `admin.pdf_templates.*`,
 `PdfTemplates.tsx`) lays out a designed document's PDF: boxes on an A4 page,
-each printing fixed text and `{{fields}}`. Two documents are designed — the
-quotation and, since 2026-10-07, the sales order (`?doc=sales_order`, the
-page's switcher) — and both go through the same editor, routes and engine.
+each printing fixed text and `{{fields}}`. Three documents are designed — the
+quotation, since 2026-10-07 the sales order (`?doc=sales_order`, the
+page's switcher) and since 2026-10-13 the costing (`?doc=costing`) — and
+all go through the same editor, routes and engine.
 Adding another means a field catalogue, a sample, a standard layout and a
 data builder like `quotationTemplate.ts` / `salesOrderTemplate.ts` and
 `quotationPrintData()` / `salesOrderPrintData()`, plus one entry in the
@@ -4015,6 +4018,31 @@ import for the wrong document is refused.
   The registry entry says which columns a document's line table may place;
   the quotation's refuses them on save (`verify-sales` proves it), and the
   sales order strips them server-side for a caller without cost rights.
+- **The costing is the third** (2026-10-13, the owner's call: "add PDF
+  template of costing in Admin Setting to modify";
+  `docs/notes/P-scope-dates-rfa-people-flow-2026-10-13.md` §2).
+  `shared/costingTemplate.ts` holds `COSTING_FIELDS` (`costing.*` — number,
+  title, dates, start and finish, plan days, terms, the summary's figures —
+  `customer.name`, `owner.*`), the sample, `STANDARD_COSTING_DESIGN`
+  (portrait, the quotation's dress: PROJECT COSTING, a PROJECT and a
+  DETAILS box with the start and finish dates, the line table, the summary
+  `after` it, Terms and the schedule note, the sign-offs `last`) and
+  `costingDesign()` on `pdfTemplate.costing`. Its line table places
+  `no`, `product`, `qtyUnit`, `qty`, `unit`, `unitPrice` and `amount` only
+  — never `group`, `cost` or `margin` (a costing's every figure is cost) —
+  and the registry's `columnLabels` names them as the costing prints them
+  (Line code, Line with its description, Unit cost). `costingPaper(me, id,
+  deciderOnly)` in `routes/costing.ts` is the ONE data builder for the
+  route and the editor's "a costing…" preview: the buckets as numbered
+  heading rows with a subtotal row each (`costingLineRow`,
+  `costingSubtotalRow`), the summary as `totals`, the route's sign-offs.
+  **The Gantt chart is not a box**: `costingAppendix()` draws it through
+  `renderDocument({ appendixOnly: true })` — the sections alone on
+  landscape pages with the page furniture, no letterhead, details or
+  sign-offs — and `appendPdf()` (`shared/pdfAttachments.ts`, pdf-lib)
+  joins it behind the designed estimate, so a layout never has to make
+  room for a chart. verify-costing reads such a paper's pages through
+  pdf-lib, never by regex over the file.
 
 - **The layout is one `Setting` row, `pdfTemplate.quotation`**, read by
   `quotationDesign()`; none (or one that no longer parses — it is logged and
@@ -4384,7 +4412,7 @@ Cost Estimate" PDF) in G-CORE's own style.
   (approval, "Mark final", a job built on a draft) and cleared on reopen;
   the seed dates older final costings from `updatedAt`, once. The G-OPS
   funnel no longer has a "Being costed" stage.
-- **The PDF is "Project Costing"** (2026-10-13, the owner's call; it was "Material Cost Estimate", and its file name's kind follows: "Project Costing <number> - …"): details, one table with
+- **The PDF is "Project Costing"** (2026-10-13, the owner's call; it was "Material Cost Estimate", and its file name's kind follows: "Project Costing <number> - …"), a designed document since the same day (see "Quotation PDF template": the layout is Admin › PDF Templates › Costing, the chart joined behind it): details, one table with
   numbered bucket headings, name-over-description cells, subtotals, the summary
   as `totals`, Terms & Conditions — **never the internal notes** — the
   sign-offs, then the Scope of Work as the engine's **`gantt` section** on

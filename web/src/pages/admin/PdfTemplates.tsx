@@ -75,8 +75,18 @@ import { useUnsavedChanges } from '../../components/Navigation';
 const DOCS = [
   { type: 'quotation', label: 'Quotation', plural: 'Quotations' },
   { type: 'sales_order', label: 'Sales Order', plural: 'Sales orders' },
+  // The Project Costing (2026-10-13): its Scope of Work chart prints behind the layout, unchanged by it.
+  { type: 'costing', label: 'Costing', plural: 'Costings' },
 ] as const;
 type DocType = (typeof DOCS)[number]['type'];
+
+/** A costing as the real-document picker lists it. */
+interface CostingPick {
+  id: string;
+  number: string;
+  title: string;
+  customer: { name: string } | null;
+}
 
 interface Loaded {
   type: string;
@@ -346,7 +356,7 @@ const HIDDEN_NOTE_KEY = 'pdfTemplates.hiddenCompanyNote';
  */
 export function PdfTemplates() {
   const [params] = useSearchParams();
-  const docType: DocType = params.get('doc') === 'sales_order' ? 'sales_order' : 'quotation';
+  const docType: DocType = DOCS.find((d) => d.type === params.get('doc'))?.type ?? 'quotation';
   return <PdfTemplateEditor key={docType} docType={docType} />;
 }
 
@@ -2021,9 +2031,13 @@ function PreviewControl({
           ? api
               .get<{ rows: QuoteRow[] }>(`/quotations${qs({ search, pageSize: 6 })}`)
               .then((r) => r.rows.map((x) => ({ id: x.id, number: x.number, name: x.customer?.name ?? '', sub: x.subject })))
-          : api
-              .get<{ rows: OrderRow[] }>(`/sales-orders${qs({ search, pageSize: 6 })}`)
-              .then((r) => r.rows.map((x) => ({ id: x.id, number: x.number, name: x.customer?.name ?? '', sub: x.quotation?.subject ?? '' })));
+          : docType === 'costing'
+            ? api
+                .get<{ rows: CostingPick[] }>(`/costings${qs({ search, pageSize: 6 })}`)
+                .then((r) => r.rows.map((x) => ({ id: x.id, number: x.number, name: x.customer?.name ?? '', sub: x.title })))
+            : api
+                .get<{ rows: OrderRow[] }>(`/sales-orders${qs({ search, pageSize: 6 })}`)
+                .then((r) => r.rows.map((x) => ({ id: x.id, number: x.number, name: x.customer?.name ?? '', sub: x.quotation?.subject ?? '' })));
       load
         .then((list) => {
           setRows(list);
