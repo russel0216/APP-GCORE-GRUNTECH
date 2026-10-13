@@ -61,10 +61,21 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const res = await fetch(`/api${path}`, { method, headers, body: payload });
 
   if (res.status === 401) {
-    setToken(null);
-    // Let the auth provider notice rather than hard-reloading mid-typing.
-    window.dispatchEvent(new CustomEvent('gcore:signed-out'));
-    throw new ApiError(401, 'Your session has expired — please sign in again');
+    // The server's own words: a refused sign-in says "Email or password is
+    // incorrect", not that a session expired — there was none.
+    let message = token ? 'Your session has expired — please sign in again' : 'Email or password is incorrect';
+    try {
+      const data = await res.json();
+      if (typeof data?.error === 'string' && data.error) message = data.error;
+    } catch {
+      /* non-JSON error body */
+    }
+    if (token) {
+      setToken(null);
+      // Let the auth provider notice rather than hard-reloading mid-typing.
+      window.dispatchEvent(new CustomEvent('gcore:signed-out'));
+    }
+    throw new ApiError(401, message);
   }
 
   if (!res.ok) {
