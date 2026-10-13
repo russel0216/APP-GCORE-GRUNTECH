@@ -22,7 +22,7 @@ import {
   useToast,
   type Tone,
 } from '../../components/ui';
-import { parseDay, todayLocal } from '../../lib/day';
+import { todayLocal, workingDaysBetween } from '../../lib/day';
 import { NewReportModal, reportPermission } from './Reports';
 import { VisitBadge } from './Schedule';
 import { NumberInput } from '../../components/NumberInput';
@@ -129,19 +129,8 @@ interface JobOrderDetailRow extends JobOrderRow {
   route: { step: string; names: string[] }[];
 }
 
-/** Working days (Mon–Fri) from one day to another, both counted; the API's `workingDaysBetween`. */
-function workingDays(from: string, to: string): number {
-  if (!from || !to) return 0;
-  const d = parseDay(from);
-  const end = parseDay(to).getTime();
-  let days = 0;
-  while (d.getTime() <= end) {
-    const dow = d.getDay();
-    if (dow !== 0 && dow !== 6) days++;
-    d.setDate(d.getDate() + 1);
-  }
-  return days;
-}
+/** Working days (Mon–Sat) from one day to another, both counted; the API's `workingDaysBetween`. */
+const workingDays = (from: string, to: string): number => (from && to ? workingDaysBetween(from, to) : 0);
 
 const daysLabel = (n: number) => `${n} working day${n === 1 ? '' : 's'}`;
 
@@ -644,7 +633,7 @@ export function JobOrderModal({
         </Field>
         <Field
           label="Target finish"
-          hint={finishBeforeStart ? 'Before the start' : form.targetStart && form.targetFinish ? `${daysLabel(duration)} (Mon–Fri)` : undefined}
+          hint={finishBeforeStart ? 'Before the start' : form.targetStart && form.targetFinish ? `${daysLabel(duration)} (Mon–Sat)` : undefined}
         >
           <input type="date" value={form.targetFinish} min={form.targetStart || undefined} onChange={(e) => set('targetFinish', e.target.value)} />
         </Field>

@@ -371,11 +371,15 @@ async function main() {
   const jan1 = new Date('2026-01-01');
   const onDay = (n: number) => workingDayDate(jan1, n).toISOString().slice(0, 10);
   check(
-    'a working day counts Mon–Fri from the start, skipping weekends',
-    onDay(1) === '2026-01-01' && onDay(2) === '2026-01-02' && onDay(3) === '2026-01-05' && onDay(7) === '2026-01-09' && onDay(8) === '2026-01-12',
-    [1, 2, 3, 7, 8].map(onDay).join(' '),
+    'a working day counts Mon–Sat from the start, skipping Sundays',
+    onDay(1) === '2026-01-01' && onDay(3) === '2026-01-03' && onDay(4) === '2026-01-05' && onDay(9) === '2026-01-10' && onDay(10) === '2026-01-12',
+    [1, 3, 4, 9, 10].map(onDay).join(' '),
   );
-  check('a start on a weekend counts from the Monday after it', workingDayDate(new Date('2026-01-03'), 1).toISOString().slice(0, 10) === '2026-01-05');
+  check(
+    'a start on a Sunday counts from the Monday after it; a Saturday is a working day',
+    workingDayDate(new Date('2026-01-04'), 1).toISOString().slice(0, 10) === '2026-01-05' &&
+      workingDayDate(new Date('2026-01-03'), 1).toISOString().slice(0, 10) === '2026-01-03',
+  );
 
   // ── 2. Document numbering ──────────────────────────────────────────────────
   console.log('\nNumbering');

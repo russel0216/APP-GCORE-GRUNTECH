@@ -1611,8 +1611,8 @@ async function main() {
       supportIds: [manager.id, engineer.id, manager.id],
     });
     check(
-      'a salesperson can raise a job order on a quotation under negotiation; the working days are counted',
-      raised.status === 201 && raised.body.durationDays === 10 && raised.body.targetFinish?.startsWith('2026-11-13'),
+      'a salesperson can raise a job order on a quotation under negotiation; the working days are counted Mon–Sat',
+      raised.status === 201 && raised.body.durationDays === 11 && raised.body.targetFinish?.startsWith('2026-11-13'),
       `${raised.status} ${raised.body.durationDays ?? raised.body.error}`,
     );
     check(

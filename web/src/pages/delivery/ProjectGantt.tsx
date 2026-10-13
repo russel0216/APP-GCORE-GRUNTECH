@@ -248,7 +248,7 @@ export function ProjectGantt({
                       return (
                         <div
                           key={d.key}
-                          className={`gantt-day${dow === 0 || dow === 6 ? ' is-weekend' : ''}${d.key === today ? ' is-today' : ''}`}
+                          className={`gantt-day${dow === 0 ? ' is-off' : ''}${d.key === today ? ' is-today' : ''}`}
                           title={formatDate(d.key)}
                         >
                           {d.date.getDate()}

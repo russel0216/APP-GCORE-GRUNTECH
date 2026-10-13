@@ -144,3 +144,36 @@ export function daysBetween(a: string, b: string): number {
 export function toLocalInput(d: Date): string {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
+
+// ── The work week (2026-10-13, the owner's call: Mon–Sat) ────────────────────
+// The mirror of `api/src/shared/day.ts` on day keys: every day but Sunday is
+// a working day. verify-costing pins the two equal.
+
+/** Sunday is the one day off. */
+export const isWorkingDow = (dow: number): boolean => dow !== 0;
+
+/** Working days (Mon–Sat) from one day key to another, both counted; 0 when `to` is before `from`. */
+export function workingDaysBetween(from: string, to: string): number {
+  if (!isDayKey(from) || !isDayKey(to)) return 0;
+  const d = parseDay(from);
+  const end = parseDay(to).getTime();
+  let days = 0;
+  while (d.getTime() <= end) {
+    if (isWorkingDow(d.getDay())) days++;
+    d.setDate(d.getDate() + 1);
+  }
+  return days;
+}
+
+/** The day key of working day `day` (Mon–Sat, day 1 = the first) counted from `start`. */
+export function workingDayKey(start: string, day: number): string {
+  const d = parseDay(start);
+  let left = Math.max(1, Math.floor(day));
+  for (;;) {
+    if (isWorkingDow(d.getDay())) {
+      left--;
+      if (left === 0) return dayKeyOf(d);
+    }
+    d.setDate(d.getDate() + 1);
+  }
+}

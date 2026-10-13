@@ -236,7 +236,8 @@
   border-right: 1px solid var(--line-soft);
 }
 
-.gantt-day.is-weekend {
+/* Sunday — the one day off in a Mon–Sat week (2026-10-13). */
+.gantt-day.is-off {
   background: var(--surface-3);
 }
 

@@ -1195,6 +1195,10 @@ model Costing {
   vatRate        Decimal   @default(0.12) @db.Decimal(6, 4)
   /// The date the prices on the estimate stop holding.
   validUntil     DateTime? @db.Date
+  /// The day the scope of work starts (2026-10-13). With it, the plan's
+  /// finish is derived — `workingDayDate(plannedStart, planDays)`, Mon–Sat —
+  /// and never stored, so a changed plan moves the finish with it.
+  plannedStart   DateTime? @db.Date
   /// "System / Unit" — the plant or equipment the estimate is for.
   systemUnit     String?
 

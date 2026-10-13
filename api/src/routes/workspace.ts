@@ -1101,7 +1101,7 @@ pdfRoutes.get(
           kind: 'gantt',
           title: 'Schedule',
           landscape: true,
-          legend: 'Planned duration in working days (Mon–Fri) — 30 working days in all.',
+          legend: 'Planned duration in working days (Mon–Sat) — 30 working days in all.',
           groups: [
             {
               name: 'Mobilisation',

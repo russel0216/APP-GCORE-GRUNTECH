@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
+import { parseDay } from '../../lib/day';
 import { useAuth } from '../../lib/auth';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -43,6 +44,9 @@ export interface CostLine {
   item: Ref | null;
 }
 
+/** "Oct 14" — a plan's day on the calendar, short enough for a Start or End cell. */
+const shortDay = (key: string) => parseDay(key).toLocaleDateString('en-PH', { month: 'short', day: 'numeric' });
+
 export interface ScopeTask {
   id: string;
   name: string;
@@ -50,6 +54,9 @@ export interface ScopeTask {
   durationDays: number;
   start: number;
   end: number;
+  /** The working days' dates once the costing has a start date (Mon–Sat). */
+  startDate?: string | null;
+  endDate?: string | null;
 }
 
 export interface ScopeSection {
@@ -66,6 +73,8 @@ export interface ScopeSection {
   startDay: number | null;
   endDay: number | null;
   planDays: number;
+  startDate?: string | null;
+  endDate?: string | null;
   tasks: ScopeTask[];
 }
 
@@ -81,6 +90,9 @@ export interface CostingDetail extends Omit<CostingRow, 'status'> {
   vatAmount: number;
   grandTotal: number;
   validUntil: string | null;
+  /** The day the scope of work starts, and the plan's last working day (derived, Mon–Sat). */
+  plannedStart?: string | null;
+  plannedFinish?: string | null;
   systemUnit: string | null;
   notes: string | null;
   terms: string | null;
@@ -395,6 +407,10 @@ export function CostingDetailPage() {
           <Fact label="Date" value={formatDate(costing.createdAt)} />
           <Fact label="Project / job" value={costing.title} />
           <Fact label="Valid until" value={costing.validUntil ? formatDate(`${costing.validUntil}T00:00:00`) : null} />
+          {costing.plannedStart && <Fact label="Start date" value={formatDate(`${costing.plannedStart}T00:00:00`)} />}
+          {costing.plannedStart && (
+            <Fact label="Finish date" value={costing.plannedFinish ? formatDate(`${costing.plannedFinish}T00:00:00`) : 'No phase is planned yet'} />
+          )}
           <Fact
             label="Customer"
             value={
@@ -594,7 +610,10 @@ export function CostingDetailPage() {
           </h2>
           <div className="row">
             <span className="faint">
-              {costing.planDays > 0 ? `${costing.planDays} working days (Mon–Fri)` : ''}
+              {costing.planDays > 0 ? `${costing.planDays} working days (Mon–Sat)` : ''}
+              {costing.planDays > 0 && costing.plannedStart && costing.plannedFinish
+                ? ` · ${formatDate(`${costing.plannedStart}T00:00:00`)} – ${formatDate(`${costing.plannedFinish}T00:00:00`)}`
+                : ''}
             </span>
             {editable && costing.scopeSections.length > 0 && (
               <button
@@ -632,8 +651,14 @@ export function CostingDetailPage() {
                           <strong>{s.name}</strong> <span className="faint">· {KIND_LABEL[s.kind]}</span>
                           {s.description && <div className="faint">{s.description}</div>}
                         </td>
-                        <td className="right mono">{s.startDay ? `Day ${s.startDay}` : '—'}</td>
-                        <td className="right mono">{s.endDay ? `Day ${s.endDay}` : '—'}</td>
+                        <td className="right mono">
+                          {s.startDay ? `Day ${s.startDay}` : '—'}
+                          {s.startDate && <div className="faint">{shortDay(s.startDate)}</div>}
+                        </td>
+                        <td className="right mono">
+                          {s.endDay ? `Day ${s.endDay}` : '—'}
+                          {s.endDate && <div className="faint">{shortDay(s.endDate)}</div>}
+                        </td>
                         <td className="right mono">{s.planDays}</td>
                         <td className="cs-col-bar">
                           {s.startDay && <PlanBar start={s.startDay} days={s.planDays} total={Math.max(costing.planDays, 1)} />}
@@ -646,8 +671,14 @@ export function CostingDetailPage() {
                       {s.tasks.map((t) => (
                         <tr key={t.id}>
                           <td className="cs-task-name">{t.name}</td>
-                          <td className="right mono">Day {t.start}</td>
-                          <td className="right mono">Day {t.end}</td>
+                          <td className="right mono">
+                            Day {t.start}
+                            {t.startDate && <div className="faint">{shortDay(t.startDate)}</div>}
+                          </td>
+                          <td className="right mono">
+                            Day {t.end}
+                            {t.endDate && <div className="faint">{shortDay(t.endDate)}</div>}
+                          </td>
                           <td className="right mono">{t.durationDays}</td>
                           <td className="cs-col-bar">
                             <PlanBar start={t.start} days={t.durationDays} total={Math.max(costing.planDays, 1)} />

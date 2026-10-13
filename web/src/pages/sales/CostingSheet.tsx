@@ -2,11 +2,11 @@ import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FocusEv
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { addDays, todayLocal } from '../../lib/day';
+import { addDays, isDayKey, parseDay, todayLocal, workingDayKey } from '../../lib/day';
 import { costingFigures, lineAmount, lineCodes, planTasks, scheduleOfValues, type ValueSource } from '../../lib/costingMath';
 import { TickPicker } from '../../components/TickPicker';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
-import { Checkbox, ErrorBox, Field, Loading, formatMoney, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Loading, formatDate, formatMoney, useToast } from '../../components/ui';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import type { CostingDetail } from './CostingDetail';
 import { NumberInput } from '../../components/NumberInput';
@@ -23,7 +23,9 @@ import { NumberInput } from '../../components/NumberInput';
                           straight from Excel
     Cost summary          the margin on the price, VAT, grand total — and
                           "set the grand total" to price to a figure
-    Scope of work         phases and their tasks on working days (Mon–Fri)
+    Scope of work         phases and their tasks on working days (Mon–Sat);
+                          with a start date, each falls on a date and the
+                          plan has a finish date
     Terms & Conditions    printed; Internal notes, never printed
 
   One Save sends it all (POST /costings or PUT /costings/:id/sheet), and the
@@ -89,6 +91,8 @@ interface Header {
   leadId: string;
   systemUnit: string;
   validUntil: string;
+  /** The day the scope of work starts ('' = not yet known); the finish date is derived from the plan. */
+  plannedStart: string;
   /** The margin on the price, in percent as typed ("25" = 25%). */
   marginPct: string;
   /** A fixed price, net of VAT, as a plain number; '' prices from the margin (2026-10-13). */
@@ -309,6 +313,7 @@ export function CostingSheet() {
     leadId: params.get('leadId') ?? '',
     systemUnit: '',
     validUntil: addDays(todayLocal(), 30),
+    plannedStart: '',
     marginPct: '15',
     fixedPrice: '',
     vatOn: true,
@@ -381,6 +386,7 @@ export function CostingSheet() {
           leadId: c.lead?.id ?? '',
           systemUnit: c.systemUnit ?? '',
           validUntil: c.validUntil ?? '',
+          plannedStart: c.plannedStart ?? '',
           marginPct: percentString(c.marginPct),
           fixedPrice: c.targetContractValue ? String(c.targetContractValue) : '',
           vatOn: c.vatRate > 0,
@@ -556,6 +562,13 @@ export function CostingSheet() {
       tasks: s.tasks.map((t) => ({ startDay: t.startDay ? figure(t.startDay) : null, durationDays: figure(t.durationDays) })),
     })),
   );
+  // The plan on the calendar (2026-10-13): working day n from the start date,
+  // Mon–Sat — the server's `present()` derives the same dates.
+  const startKey = isDayKey(header.plannedStart) ? header.plannedStart : null;
+  const onDay = (day: number | null): string | null => (startKey && day ? workingDayKey(startKey, day) : null);
+  const finishKey = onDay(plan.totalDays || null);
+  const showDay = (key: string) => formatDate(parseDay(key));
+  const shortDay = (key: string) => parseDay(key).toLocaleDateString('en-PH', { month: 'short', day: 'numeric' });
   // The schedule of values as it will be saved — the server runs the same rule (`scheduleOfValues`).
   const bucketCost: Record<string, number> = {};
   for (const l of lines) {
@@ -801,6 +814,7 @@ export function CostingSheet() {
       siteId: header.siteId || null,
       systemUnit: header.systemUnit.trim() || null,
       validUntil: header.validUntil || null,
+      plannedStart: header.plannedStart || null,
       // At a fixed price the margin is what the price amounts to; the server derives it again.
       marginPct: fixed ? totals.marginPct : rates.marginPct,
       targetContractValue: fixed ? figure(header.fixedPrice) : null,
@@ -1007,6 +1021,15 @@ export function CostingSheet() {
             <Field label="Valid until">
               <input type="date" value={header.validUntil} onChange={(e) => setH('validUntil', e.target.value)} />
             </Field>
+            <Field label="Start date" hint="The day the scope of work starts — the finish date follows from its working days (Mon–Sat)">
+              <input type="date" value={header.plannedStart} onChange={(e) => setH('plannedStart', e.target.value)} />
+            </Field>
+            {startKey && (
+              <div className="field qe-static">
+                <span className="qe-static-label">Finish date</span>
+                <div>{finishKey ? showDay(finishKey) : 'No phase is planned yet'}</div>
+              </div>
+            )}
             {editing && costing && (
               <div className="field qe-static">
                 <span className="qe-static-label">Prepared by</span>
@@ -1299,7 +1322,9 @@ export function CostingSheet() {
         <div className="row cs-block-head">
           <h2 className="cs-section-title">Scope of work</h2>
           <p className="faint cs-paste-hint">
-            {plan.totalDays} working day{plan.totalDays === 1 ? '' : 's'} in all (Mon–Fri). A task with no start day follows the one before it.
+            Duration: {plan.totalDays} working day{plan.totalDays === 1 ? '' : 's'} (Mon–Sat)
+            {startKey && finishKey ? ` · ${showDay(startKey)} – ${showDay(finishKey)}` : ''}. A task with no start day follows the one
+            before it.
           </p>
         </div>
         {sections.length === 0 && (
@@ -1392,6 +1417,7 @@ export function CostingSheet() {
                 </div>
                 <span className="faint cs-phase-span">
                   {planned.start ? `Day ${planned.start}–${planned.end} · ${planned.days} d` : `${planned.days} d`}
+                  {planned.start && planned.end && startKey ? ` · ${shortDay(onDay(planned.start)!)} – ${shortDay(onDay(planned.end)!)}` : ''}
                 </span>
                 <button type="button" className="btn btn-sm btn-ghost" aria-label={`Remove ${phaseLabel}`} onClick={() => setSections((ss) => ss.filter((x) => x.key !== s.key))}>
                   Remove
@@ -1454,7 +1480,9 @@ export function CostingSheet() {
                               }}
                             />
                           </td>
-                          <td className="cs-col-day right mono">Day {pt.end}</td>
+                          <td className="cs-col-day right mono" title={startKey ? showDay(onDay(pt.end)!) : undefined}>
+                            Day {pt.end}
+                          </td>
                           <td className="cs-col-bar">
                             <PlanBar start={pt.start} days={pt.days} total={Math.max(plan.totalDays, 1)} />
                           </td>

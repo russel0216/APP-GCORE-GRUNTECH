@@ -1279,6 +1279,26 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   `manilaMonthKey`). Deep links and forecast columns bucket on these, never on
   the host clock, because the server's clock is not the business's day.
   Numbering keeps its local-getter `{YYYY}`/`{MM}`.
+- **The work week is Mon–Sat** (2026-10-13, the owner's call): Sunday is
+  the one day off (`DAY_OFF`, `isWorkingDow()` in `shared/day.ts`), for the
+  costing's plan, a project's dates, "Plan from costing" and a job order's
+  working days alike — `workingDaysBetween()` and `workingDayDate()` read it,
+  and `web/src/lib/day.ts` mirrors them on day keys (`workingDaysBetween`,
+  `workingDayKey`), pinned equal on every start in a month by verify-costing.
+  No holidays yet. Leave days (`leaveDays()` in `shared/hr.ts`) are HR's
+  own rule and still skip both weekend days. The project Gantt shades
+  Sunday alone (`.gantt-day.is-off`).
+- **A project's dates tally with its scope** (2026-10-13): `createJobRecord()`
+  places each scope item on the costing's own plan (`scopeDates()` in
+  `routes/jobs.ts` — `planTasks` put on working days from the start, both
+  ends inclusive; an unplanned phase sits on the day the phase before it
+  ends; a costing with no plan at all gives each phase one working day) and
+  takes the plan's last day as `targetEndDate` when none is given; POST
+  /jobs starts on the costing's `plannedStart` when the form names none,
+  and the form's hint names the finish. A target typed by hand is kept:
+  `GET /jobs/:id` sends `schedule` (`scheduleTally()`: `planFinish`,
+  `planDays`, `targetDays`, working days from the start) and the overview's
+  Schedule card shows both, saying where they differ.
 - **Today, for a DATE column, is `manilaDate(new Date())`** (`shared/day.ts`).
   Until 08:00 in Manila the UTC date is still yesterday's, and it arrives
   unasked three ways: `getUTC*`; a bare `new Date()` written into, or compared
@@ -2142,7 +2162,7 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   raises it for a customer with its LINKS — the quotation (any one still on,
   **one under negotiation included**), the sales order and/or the project —
   the project's name, the contact and their number, the **target start and
-  target finish** (the working days between them are `workingDaysBetween()`
+  target finish** (the working days, Mon–Sat, between them are `workingDaysBetween()`
   in `shared/day.ts`, computed and never stored; `requestedFor` mirrors the
   start so one index serves both shapes), the **scope of work in one box**,
   the amount, Customer PO, and the **personnel to send**: project manager,
@@ -4086,7 +4106,8 @@ tab inside a project, and the Projects page keeps them one click away
 - **"Plan from costing" is `POST /jobs/:id/tasks/from-costing`**: the
   costing's `ScopeTask`s, planned in working days (`planTasks`), written as
   dated tasks from the project's start date through `workingDayDate()` in
-  `shared/day.ts` (Mon–Fri; a weekend start counts from the Monday after).
+  `shared/day.ts` (Mon–Sat since 2026-10-13; a Sunday start counts from the
+  Monday after).
   Only scope lines with NO tasks yet are planned, so a second run overwrites
   nobody's hand work (`{ created, skipped }`); a planned line's dates become
   its tasks' span, which the planned S-curve reads. Audited. Needs a start
@@ -4216,6 +4237,19 @@ Cost Estimate" PDF) in G-CORE's own style.
   schedule reads those. "Sequence tasks" only writes the computed starts
   down. `spread: true` on a save runs `spreadSections()` (the same rule as
   `/sections/distribute`) so the SOV equals the contract value.
+- **A start date gives the plan its dates** (2026-10-13, the owner's call:
+  "if there is Start Date there should be Finished Date … Mon–Sat"):
+  `Costing.plannedStart` (DATE, nullable; "Start date" under Valid until on
+  the sheet, never copied by Duplicate). With one, `present()` derives —
+  never stores — `plannedFinish` (`workingDayDate(plannedStart, planDays)`)
+  and each phase's and task's `startDate` / `endDate`; the sheet works the
+  same out live (`workingDayKey`, `web/src/lib/day.ts`) and shows "Duration:
+  85 working days (Mon–Sat) · Oct 14, 2026 – Jan 23, 2027" over the scope,
+  the Finish date under the start and each phase's dates beside its days.
+  The paper prints Start date and Finish date in its DETAILS block, the
+  legend "Planned duration in working days (Mon–Sat) — N working days in
+  all, <start> to <finish>." (`planLegend()`), and the Gantt appendix dates
+  its columns ("Oct 14", the `gantt` section's `startDate`).
 - **VAT is the company rate or 0%** (`checkVatRate`, as on the quotation),
   snapshotted at creation; a draft keeps its rate after Settings change.
 - **Approval is the seeded `costing` workflow — TWO signatures since the

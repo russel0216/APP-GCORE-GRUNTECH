@@ -78,6 +78,8 @@ interface Job {
   startDate: string | null;
   targetEndDate: string | null;
   actualEndDate: string | null;
+  /** Whether the dates tally with the scope of work: its last planned day, and working days (Mon–Sat) to it and to the target end. */
+  schedule?: { planFinish: string | null; planDays: number | null; targetDays: number | null };
   notes: string | null;
   downpaymentPct: number | null;
   retentionPct: number | null;
@@ -557,7 +559,38 @@ export function ProjectWorkspace() {
             <h3 className="card-title">Schedule</h3>
             <dl className="kv">
               <Row label="Start" value={job.startDate ? formatDate(job.startDate) : null} />
-              <Row label="Target end" value={job.targetEndDate ? formatDate(job.targetEndDate) : null} />
+              <Row
+                label="Target end"
+                value={
+                  job.targetEndDate ? (
+                    <>
+                      {formatDate(job.targetEndDate)}
+                      {job.schedule?.targetDays != null && (
+                        <span className="muted"> · {job.schedule.targetDays} working days (Mon–Sat)</span>
+                      )}
+                    </>
+                  ) : null
+                }
+              />
+              {job.schedule?.planFinish && (
+                <Row
+                  label="Scope of work ends"
+                  value={
+                    <>
+                      {formatDate(job.schedule.planFinish)}
+                      {job.schedule.planDays != null && <span className="muted"> · {job.schedule.planDays} working days</span>}
+                      {job.schedule.targetDays != null &&
+                        job.schedule.planDays != null &&
+                        job.schedule.targetDays !== job.schedule.planDays && (
+                          <div className="hint">
+                            The target end is {job.schedule.targetDays} working days after the start — the scope of work plans{' '}
+                            {job.schedule.planDays}.
+                          </div>
+                        )}
+                    </>
+                  }
+                />
+              )}
               <Row label="Actual end" value={job.actualEndDate ? formatDate(job.actualEndDate) : null} />
               <Row label="Project manager" value={job.projectManager?.name} />
               <Row label="Site" value={job.site ? [job.site.name, job.site.city].filter(Boolean).join(' — ') : null} />

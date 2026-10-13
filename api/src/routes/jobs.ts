@@ -23,7 +23,8 @@ import { renderDocument, formatAmount, formatMoney, formatShortDate, statusLabel
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { addMonths, dayKey, planSchedule } from '../shared/aftermarket';
-import { addDays } from '../shared/day';
+import { workingDayDate, workingDaysBetween } from '../shared/day';
+import { planTasks } from '../shared/costingMath';
 import { LIST_CAP, listReference, totalLabel, bracketed, bracketNote, listNotes, listDay, namedInFilter, choice, sendListPdf } from '../shared/listPaper';
 
 const d = (v: number | string | null | undefined) =>
@@ -638,7 +639,7 @@ function asDate(v: string | null | undefined): Date | null {
   return date;
 }
 
-type JobCosting = Prisma.CostingGetPayload<{ include: { lines: true; scopeSections: true } }>;
+type JobCosting = Prisma.CostingGetPayload<{ include: { lines: true; scopeSections: { include: { tasks: true } } } }>;
 
 /**
  * The costing a project is built on, checked: decided (not with the
@@ -651,7 +652,7 @@ export async function costingForJob(costingId: string, customerId: string): Prom
     where: { id: costingId },
     include: {
       lines: true,
-      scopeSections: { orderBy: { sortOrder: 'asc' } },
+      scopeSections: { orderBy: { sortOrder: 'asc' }, include: { tasks: { orderBy: { sortOrder: 'asc' } } } },
     },
   });
   if (!costing) throw notFound('Costing not found');
@@ -683,6 +684,19 @@ export async function costingForJob(costingId: string, customerId: string): Prom
   return costing;
 }
 
+/**
+ * Whether the project's dates tally with its scope of work (2026-10-13):
+ * the day its last scope item is planned to end, and the working days
+ * (Mon–Sat) from the start to that day and to the target end. The overview
+ * says so where the two differ — a target typed by hand is kept, never moved.
+ */
+export function scheduleTally(job: { startDate: Date | null; targetEndDate: Date | null; scopeItems: { plannedEnd: Date | null }[] }) {
+  const ends = job.scopeItems.map((i) => i.plannedEnd).filter((d): d is Date => !!d);
+  const planFinish = ends.length ? new Date(Math.max(...ends.map((d) => d.getTime()))) : null;
+  const span = (to: Date | null) => (job.startDate && to ? workingDaysBetween(job.startDate, to) : null);
+  return { planFinish, planDays: span(planFinish), targetDays: span(job.targetEndDate) };
+}
+
 export interface NewJobInput {
   name: string;
   type: 'PROJECT' | 'SERVICE_CONTRACT';
@@ -694,28 +708,53 @@ export interface NewJobInput {
   customerPoNumber?: string | null;
   customerPoDate?: Date | null;
   contractDate?: Date | null;
-  /** Manila's day; the scope items are scheduled back to back from it. */
+  /** Manila's day; the scope items are placed on the costing's plan from it, in working days. */
   startDate: Date;
-  /** Given, the project's target end; else the day the last scope item ends. */
+  /** Given, the project's target end; else the day the costing's plan finishes. */
   targetEndDate?: Date | null;
   notes?: string | null;
   createdById: string;
 }
 
 /**
+ * Where each scope item falls on the calendar (2026-10-13, the owner's call:
+ * "Finished Date should tally on Total Date declared in the Scope of Work"):
+ * the costing's own plan (`planTasks`, working days) put on real dates from
+ * the start, Mon–Sat, both ends inclusive — so a plan of 85 working days
+ * finishes 85 working days after the start, Sundays skipped. A phase the
+ * costing left unplanned (no tasks, no duration) sits on the day the phase
+ * before it ends and adds nothing; a costing with no plan at all gives every
+ * phase one working day, back to back, so the S-curve still has a shape.
+ */
+export function scopeDates(
+  sections: { durationDays: number; tasks: { startDay: number | null; durationDays: number }[] }[],
+  start: Date,
+): { items: { plannedStart: Date; plannedEnd: Date }[]; finish: Date } {
+  const plan = planTasks(sections.map((s) => ({ durationDays: s.durationDays, tasks: s.tasks })));
+  const planned = plan.totalDays > 0;
+  let cursor = 1;
+  const items = plan.sections.map((p) => {
+    const from = planned ? p.start ?? Math.max(1, cursor - 1) : cursor;
+    const to = planned ? p.end ?? from : cursor;
+    if (planned && p.end) cursor = Math.max(cursor, p.end + 1);
+    if (!planned) cursor++;
+    return { plannedStart: workingDayDate(start, from), plannedEnd: workingDayDate(start, to) };
+  });
+  return { items, finish: workingDayDate(start, planned ? plan.totalDays : Math.max(1, cursor - 1)) };
+}
+
+/**
  * Writes the project in the caller's transaction: its number, the scope
- * items snapshotted from the costing (back to back from the start date — a
- * sensible default, not a claim about the plan), the opening budget as
- * BUDGETED ledger rows per category, and the costing marked FINAL — a costing
- * that has produced a job is a commercial record.
+ * items snapshotted from the costing (placed on the costing's plan from the
+ * start date, `scopeDates`), the opening budget as BUDGETED ledger rows per
+ * category, and the costing marked FINAL — a costing that has produced a job
+ * is a commercial record.
  */
 export async function createJobRecord(tx: Prisma.TransactionClient, costing: JobCosting, input: NewJobInput) {
   const number = await nextNumber('project', tx);
-  let cursor = new Date(input.startDate);
+  const dates = scopeDates(costing.scopeSections, input.startDate);
   const scopeData = costing.scopeSections.map((s, i) => {
-    const plannedStart = new Date(cursor);
-    const plannedEnd = addDays(cursor, Math.max(s.durationDays, 1));
-    cursor = plannedEnd;
+    const { plannedStart, plannedEnd } = dates.items[i];
     return {
       sourceSectionId: s.id,
       kind: s.kind,
@@ -746,7 +785,7 @@ export async function createJobRecord(tx: Prisma.TransactionClient, costing: Job
       customerPoDate: input.customerPoDate ?? null,
       contractDate: input.contractDate ?? null,
       startDate: input.startDate,
-      targetEndDate: input.targetEndDate ?? cursor,
+      targetEndDate: input.targetEndDate ?? dates.finish,
       notes: input.notes || null,
       scopeItems: { create: scopeData },
     },
@@ -830,8 +869,9 @@ jobRoutes.post(
     }
     const type = renewing ? ('SERVICE_CONTRACT' as const) : body.type;
 
+    // The costing's planned start when the form names none (2026-10-13), else
     // Manila's date: a bare new Date() is stored as the UTC date, yesterday's until 08:00.
-    const start = asDate(body.startDate) ?? dayKey(new Date());
+    const start = asDate(body.startDate) ?? costing.plannedStart ?? dayKey(new Date());
 
     const job = await prisma.$transaction(async (tx) => {
       const created = await createJobRecord(tx, costing, {
@@ -1028,6 +1068,7 @@ jobRoutes.get(
       })),
       budgetRequestCount: job._count.budgetRequests,
       installedAssetCount: job._count.installedAssets,
+      schedule: scheduleTally(job),
       position,
       curve,
       summary: {

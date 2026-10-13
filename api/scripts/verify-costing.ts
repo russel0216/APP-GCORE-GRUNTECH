@@ -35,6 +35,8 @@ import { nextNumber } from '../src/shared/numbering';
 import { act } from '../src/shared/approvals';
 import * as serverMath from '../src/shared/costingMath';
 import * as webMath from '../../web/src/lib/costingMath';
+import { workingDayDate, workingDaysBetween } from '../src/shared/day';
+import { workingDayKey, workingDaysBetween as webWorkingDaysBetween } from '../../web/src/lib/day';
 import { migrateCostingMargins } from '../src/shared/costingLegacy';
 // Registers the costing's onApprovalSettled subscriber in this process.
 import '../src/routes/costing';
@@ -745,6 +747,34 @@ async function main() {
   const serverPlan = serverMath.planTasks(planSample);
   const plansAgree = JSON.stringify(serverPlan) === JSON.stringify(webMath.planTasks(planSample));
   check('and its plan is the server\'s plan', plansAgree);
+  // The work week (2026-10-13, the owner's call): Mon–Sat on the server and in
+  // the page alike — every start in October 2026 against every length to 40.
+  {
+    let weekAgrees = true;
+    let weekDetail = '';
+    for (let dom = 1; dom <= 31 && weekAgrees; dom++) {
+      const key = `2026-10-${String(dom).padStart(2, '0')}`;
+      const start = new Date(`${key}T00:00:00Z`);
+      for (let n = 1; n <= 40; n++) {
+        const server = workingDayDate(start, n).toISOString().slice(0, 10);
+        const web = workingDayKey(key, n);
+        const back = workingDaysBetween(start, workingDayDate(start, n));
+        const webBack = webWorkingDaysBetween(workingDayKey(key, 1), web);
+        if (server !== web || back !== webBack || new Date(`${server}T00:00:00Z`).getUTCDay() === 0) {
+          weekAgrees = false;
+          weekDetail = `${key} day ${n}: server ${server} (${back}) web ${web} (${webBack})`;
+          break;
+        }
+      }
+    }
+    check('the work week is Mon–Sat on the server and in the page alike — no working day falls on a Sunday', weekAgrees, weekDetail);
+    check(
+      'a week of working days is six: Monday 12 October to Saturday 17 October, and Sunday adds nothing',
+      workingDaysBetween(new Date('2026-10-12T00:00:00Z'), new Date('2026-10-17T00:00:00Z')) === 6 &&
+        workingDaysBetween(new Date('2026-10-12T00:00:00Z'), new Date('2026-10-18T00:00:00Z')) === 6 &&
+        webWorkingDaysBetween('2026-10-12', '2026-10-18') === 6,
+    );
+  }
   check(
     'a phase with no tasks but a duration takes its place in the sequence; one with neither is unplanned and moves nothing',
     serverPlan.sections[1].start === 13 &&
@@ -953,6 +983,8 @@ async function main() {
     siteId: site.id,
     systemUnit: `${TAG} Booster pump controller`,
     validUntil: '2026-10-30',
+    // A Wednesday: the plan's 20 working days (Mon–Sat) run to Thursday 5 November.
+    plannedStart: '2026-10-14',
     marginPct: 0.35,
     vatRate: 0,
     terms: `${TAG} terms: 50% down payment`,
@@ -1027,6 +1059,23 @@ async function main() {
     JSON.stringify(planned[2]),
   );
   check('the costing lasts as long as its plan (20 working days, the taskless phase included)', stored?.durationDays === 20, String(stored?.durationDays));
+  check(
+    'a start date gives a finish date: 20 working days (Mon–Sat) from Wednesday 14 October end on Thursday 5 November, two Sundays skipped',
+    stored?.plannedStart?.toISOString().slice(0, 10) === '2026-10-14' &&
+      created.body.plannedStart === '2026-10-14' &&
+      created.body.plannedFinish === '2026-11-05',
+    `${created.body.plannedStart} → ${created.body.plannedFinish}`,
+  );
+  check(
+    'each phase and task takes its dates: Day 16 is Saturday 31 October, Day 18 Tuesday 3 November, Day 19–20 4–5 November',
+    planned[0]?.startDate === '2026-10-14' &&
+      rows(planned[0]?.tasks)[1]?.endDate === '2026-10-30' &&
+      planned[1]?.startDate === '2026-10-31' &&
+      planned[1]?.endDate === '2026-11-03' &&
+      planned[2]?.startDate === '2026-11-04' &&
+      planned[2]?.endDate === '2026-11-05',
+    planned.map((x) => `${x.startDate}–${x.endDate}`).join(' | '),
+  );
   check(
     'spread: the schedule of values adds up to the contract value exactly',
     money(stored!.scopeSections.reduce((n, x) => n + num(x.value), 0), num(stored?.contractValue)),
@@ -1246,6 +1295,21 @@ async function main() {
   );
   check('its money columns name the code in the head', runs.includes('AMOUNT (PHP)') || runs.join(' ').includes('AMOUNT (PHP)'));
   check('the validity prints as a record’s date (October 30, 2026)', runs.some((r) => r.includes('Valid until: October 30, 2026')), runs.filter((r) => r.includes('Valid')).join(' | '));
+  {
+    const shown = await api(tEstimator, 'GET', `/costings/${sheetId}`);
+    const finish = new Date(`${shown.body.plannedFinish}T00:00:00Z`).toLocaleDateString('en-PH', { timeZone: 'Asia/Manila', year: 'numeric', month: 'long', day: 'numeric' });
+    const text = runs.join(' ');
+    check(
+      'the paper prints the start and the finish date, and the chart’s legend says Mon–Sat with both dates',
+      runs.some((r) => r.includes('Start date: October 14, 2026')) &&
+        runs.some((r) => r.includes(`Finish date: ${finish}`)) &&
+        text.includes('(Mon–Sat)') &&
+        text.includes(`October 14, 2026 to ${finish}`) &&
+        !text.includes('Mon–Fri'),
+      `${finish} ; ${runs.filter((r) => /date|Mon/.test(r)).join(' | ')}`,
+    );
+    check('the Gantt chart dates its columns from the start ("Oct 14", never "Day 1")', runs.includes('Oct 14') && !runs.includes('Day 1'), runs.filter((r) => /^(Day \d+|Oct \d+)$/.test(r)).slice(0, 8).join(' | '));
+  }
   check(
     'printing the estimate is audited as an export',
     !!(await prisma.auditLog.findFirst({ where: { entityType: 'costing', entityId: sheetId, action: 'EXPORTED', actorId: estimator.id } })),

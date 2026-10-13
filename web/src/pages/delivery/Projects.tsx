@@ -17,7 +17,7 @@ import {
 import { Meter as ProgressBar } from '../../components/charts';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { PersonSelect, usePeople } from '../../components/People';
-import { todayLocal } from '../../lib/day';
+import { isDayKey, parseDay, todayLocal, workingDayKey } from '../../lib/day';
 
 export const JOB_STATUSES = [
   { value: 'PLANNING', label: 'Planning' },
@@ -274,6 +274,9 @@ interface CostingDetail {
   contractValue: number;
   customer: { id: string; name: string } | null;
   site: { id: string; name: string } | null;
+  /** The scope of work's start and its working days (Mon–Sat). */
+  plannedStart: string | null;
+  planDays: number;
   quotationRevisions: {
     id: string;
     revision: number;
@@ -377,6 +380,8 @@ function NewJobModal({
         name: f.name || c.title,
         customer: c.customer ? { id: c.customer.id, name: c.customer.name } : f.customer,
         siteId: c.site?.id ?? (c.customer ? '' : f.siteId),
+        // The costing's planned start, when it names one (2026-10-13).
+        startDate: c.plannedStart ?? f.startDate,
         quotationRevisionId:
           f.quotationRevisionId || (approved.length === 1 ? approved[0].id : ''),
       }));
@@ -567,7 +572,14 @@ function NewJobModal({
             placeholder="— unassigned —"
           />
         </Field>
-        <Field label="Start date" hint="Scope sections are scheduled back to back from here">
+        <Field
+          label="Start date"
+          hint={
+            chosen && chosen.planDays > 0 && isDayKey(form.startDate)
+              ? `The scope of work's ${chosen.planDays} working days (Mon–Sat) finish on ${formatDate(parseDay(workingDayKey(form.startDate, chosen.planDays)))} — the target end`
+              : 'The scope of work is placed on working days (Mon–Sat) from here'
+          }
+        >
           <input
             type="date"
             value={form.startDate}

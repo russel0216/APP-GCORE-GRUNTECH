@@ -1,6 +1,7 @@
 import PDFDocument from 'pdfkit';
 import fs from 'node:fs';
 import { prisma } from '../prisma';
+import { workingDayDate } from './day';
 
 /**
  * The document engine (model §7).
@@ -92,8 +93,10 @@ export type PdfSection =
    * A schedule drawn as bars against numbered working days: Task, Start, End,
    * Days, then the day grid. `landscape` starts it on a landscape page (and
    * keeps its overflow pages landscape), for the width a long plan needs.
+   * `startDate` ('YYYY-MM-DD', 2026-10-13) puts working day 1 on that date:
+   * Start, End and the day head print dates (Mon–Sat) instead of "Day n".
    */
-  | { kind: 'gantt'; title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string };
+  | { kind: 'gantt'; title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string; startDate?: string };
 
 export interface Signatory {
   role: string;
@@ -705,6 +708,8 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
 }
 
 /** The last working day a plan reaches. */
+const GANTT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
 function ganttEnd(groups: PdfGanttGroup[]): number {
   let end = 0;
   for (const g of groups) {
@@ -735,13 +740,22 @@ function dayStep(dayWidth: number): number {
 /**
  * The schedule as bars (the costing's Scope of Work page): each phase a shaded
  * row with a purple bar over the span of its tasks, each task a row with a
- * light bar labelled with its length. Days are numbered working days, not
- * dates — a costing is priced before anybody knows the start date.
+ * light bar labelled with its length. Days are numbered working days — a
+ * costing is often priced before anybody knows the start date — and dated
+ * (Mon–Sat) once the section names one.
  */
 function drawGantt(
   doc: PDFKit.PDFDocument,
-  section: { title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string },
+  section: { title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string; startDate?: string },
 ) {
+  // Working day n as the paper names it: its date when the plan has a start
+  // (Mon–Sat, `workingDayDate`), else "Day n".
+  const start = section.startDate && /^\d{4}-\d{2}-\d{2}$/.test(section.startDate) ? new Date(`${section.startDate}T00:00:00Z`) : null;
+  const dayName = (day: number) => {
+    if (!start) return `Day ${day}`;
+    const d = workingDayDate(start, day);
+    return `${GANTT_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+  };
   const newPage = () => {
     if (section.landscape || pageLandscape) doc.addPage({ size: 'A4', layout: 'landscape', margins: doc.page.margins });
     else doc.addPage();
@@ -756,7 +770,7 @@ function drawGantt(
   // Start and End are as wide as the longest "Day n" a phase prints in bold,
   // so a year-long plan's "Day 360" stays on one line.
   doc.font('Helvetica-Bold').fontSize(8);
-  const colStart = Math.max(40, Math.ceil(doc.widthOfString(`Day ${total}`)) + 12);
+  const colStart = Math.max(40, Math.ceil(Math.max(doc.widthOfString(dayName(total)), doc.widthOfString('Sep 30'))) + 12);
   const colEnd = colStart;
   const colDays = 30;
   const fixed = colTask + colStart + colEnd + colDays;
@@ -784,7 +798,7 @@ function drawGantt(
     }
     doc.font('Helvetica').fontSize(6.5);
     for (let day = 1; day <= total; day += step) {
-      doc.text(`Day ${day}`, dayX(day) + 1.5, top + 7.5, { width: Math.max(step * dayW - 2, 10), lineBreak: false });
+      doc.text(dayName(day), dayX(day) + 1.5, top + 7.5, { width: Math.max(step * dayW - 2, 10), lineBreak: false });
     }
     hairline(doc, top + height, usable);
     doc.y = top + height;
@@ -818,8 +832,8 @@ function drawGantt(
     const span = groupSpan(group);
     if (span) {
       doc.font('Helvetica-Bold').fontSize(size).fillColor(INK);
-      doc.text(`Day ${span.from}`, T.left + colTask + 5, gTop + 5, { width: colStart - 10, lineBreak: false });
-      doc.text(`Day ${span.to}`, T.left + colTask + colStart + 5, gTop + 5, { width: colEnd - 10, lineBreak: false });
+      doc.text(dayName(span.from), T.left + colTask + 5, gTop + 5, { width: colStart - 10, lineBreak: false });
+      doc.text(dayName(span.to), T.left + colTask + colStart + 5, gTop + 5, { width: colEnd - 10, lineBreak: false });
       doc.text(String(span.to - span.from + 1), T.left + colTask + colStart + colEnd + 5, gTop + 5, {
         width: colDays - 10,
         align: 'right',
@@ -840,8 +854,8 @@ function drawGantt(
       doc.font('Helvetica').fontSize(size).fillColor(INK);
       doc.text(task.name, T.left + 14, top + 4, { width: colTask - 20 });
       const mid = top + rowH / 2 - size / 2 + 0.5;
-      doc.text(`Day ${task.start}`, T.left + colTask + 5, mid, { width: colStart - 10, lineBreak: false });
-      doc.text(`Day ${end}`, T.left + colTask + colStart + 5, mid, { width: colEnd - 10, lineBreak: false });
+      doc.text(dayName(task.start), T.left + colTask + 5, mid, { width: colStart - 10, lineBreak: false });
+      doc.text(dayName(end), T.left + colTask + colStart + 5, mid, { width: colEnd - 10, lineBreak: false });
       doc.text(String(task.days), T.left + colTask + colStart + colEnd + 5, mid, {
         width: colDays - 10,
         align: 'right',

@@ -258,7 +258,7 @@ export interface PlannedSection {
 }
 
 /**
- * Where every task falls, in working days (Mon–Fri, day 1 = the first).
+ * Where every task falls, in working days (Mon–Sat, day 1 = the first).
  *
  * A task with a start day keeps it. One without follows the task before it —
  * the day after that one ends — so a plan typed as a plain list of durations

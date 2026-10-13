@@ -1404,7 +1404,7 @@ planRoutes.patch(
 /**
  * The costing's scope of work as this project's tasks (2026-10-06).
  *
- * A costing plans each phase's tasks on working days (Mon–Fri, day 1 = the
+ * A costing plans each phase's tasks on working days (Mon–Sat, day 1 = the
  * first); the project's Scope of Work tab draws them as a Gantt chart on real
  * dates. This writes them down once, from the project's start date, for every
  * scope line that still has no task — a line somebody has already planned by

@@ -14,7 +14,7 @@ import {
   idsFilter,
   type ListQuery,
 } from '../http/kit';
-import { manilaDayStart, manilaMonthKey } from '../shared/day';
+import { manilaDayStart, manilaMonthKey, workingDayDate } from '../shared/day';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, resolveUser } from '../permissions/resolve';
 import { notify } from '../shared/notifications';
@@ -208,6 +208,10 @@ function present(costing: Record<string, unknown>, ranks?: Map<string, number>) 
   const codeOf = new Map(ordered.map((l, i) => [l.id as string, codes[i]]));
 
   const plan = planTasks(sections.map((s) => ({ durationDays: s.durationDays, tasks: s.tasks ?? [] })));
+  // With a start date the plan's working days become calendar dates (Mon–Sat):
+  // derived on every read, never stored, so a changed plan moves them with it.
+  const plannedStart = (costing.plannedStart as Date | null) ?? null;
+  const on = (day: number | null) => (plannedStart && day ? dayKey(workingDayDate(plannedStart, day)) : null);
 
   return {
     ...costing,
@@ -222,6 +226,9 @@ function present(costing: Record<string, unknown>, ranks?: Map<string, number>) 
     // and only one of them is what the business calls margin (model §5.3).
     grossMarginPct: contractValue > 0 ? (contractValue - totalCost) / contractValue : 0,
     validUntil: dayKey(costing.validUntil as Date | null),
+    plannedStart: dayKey(plannedStart),
+    /** The day the plan's last working day falls on; null without a start date or a plan. */
+    plannedFinish: on(plan.totalDays || null),
     lines: ordered.map((l) => ({
       ...l,
       code: ranks ? codeOf.get(l.id as string) ?? null : null,
@@ -237,11 +244,31 @@ function present(costing: Record<string, unknown>, ranks?: Map<string, number>) 
       startDay: plan.sections[i].start,
       endDay: plan.sections[i].end,
       planDays: plan.sections[i].days,
-      tasks: (s.tasks ?? []).map((t, j) => ({ ...t, start: plan.sections[i].tasks[j].start, end: plan.sections[i].tasks[j].end })),
+      startDate: on(plan.sections[i].start),
+      endDate: on(plan.sections[i].end),
+      tasks: (s.tasks ?? []).map((t, j) => ({
+        ...t,
+        start: plan.sections[i].tasks[j].start,
+        end: plan.sections[i].tasks[j].end,
+        startDate: on(plan.sections[i].tasks[j].start),
+        endDate: on(plan.sections[i].tasks[j].end),
+      })),
     })),
     planDays: plan.totalDays,
     scopeTotal: sections.reduce((sum, s) => sum + num(s.value as Prisma.Decimal), 0),
   };
+}
+
+/**
+ * The paper's line under the Scope of Work chart, and the figure the owner
+ * asked to see: "Planned duration in working days (Mon–Sat) — 85 working
+ * days in all, October 14, 2026 to January 23, 2027."
+ */
+export function planLegend(planDays: number, start: string | null, finish: string | null): string {
+  const days = `${planDays} working day${planDays === 1 ? '' : 's'} in all`;
+  const on = (key: string) => formatDate(new Date(`${key}T00:00:00Z`));
+  const span = start && finish ? `, ${on(start)} to ${on(finish)}` : '';
+  return `Planned duration in working days (Mon–Sat) — ${days}${span}.`;
 }
 
 /** Someone with only view_own never sees another person's costing. */
@@ -1096,6 +1123,8 @@ const headerSchema = z.object({
   /** The company's VAT rate, or 0 for a zero-rated job — see `checkVatRate`. */
   vatRate: z.number().min(0).max(1).optional(),
   validUntil: z.string().regex(DAY, 'Use a date').optional().nullable(),
+  /** The day the scope of work starts; the finish is derived from the plan. */
+  plannedStart: z.string().regex(DAY, 'Use a date').optional().nullable(),
   systemUnit: z.string().trim().max(200).optional().nullable(),
   durationDays: z.number().int().min(0).optional().nullable(),
   notes: z.string().max(20000).optional().nullable(),
@@ -1284,6 +1313,7 @@ costingRoutes.post(
           // does not reprint the tax this estimate was made with.
           vatRate: d(vatRate ?? (company ? Number(company.vatRate) : 0.12)),
           validUntil: asDay(body.validUntil),
+          plannedStart: asDay(body.plannedStart),
           systemUnit: body.systemUnit?.trim() || null,
           durationDays: body.durationDays ?? null,
           notes: body.notes || null,
@@ -1452,6 +1482,7 @@ function headerData(body: Partial<z.infer<typeof headerSchema>>, vatRate: number
   if (body.targetContractValue !== undefined) data.targetContractValue = body.targetContractValue ? d(body.targetContractValue) : null;
   if (vatRate !== undefined) data.vatRate = d(vatRate);
   if (body.validUntil !== undefined) data.validUntil = asDay(body.validUntil);
+  if (body.plannedStart !== undefined) data.plannedStart = asDay(body.plannedStart);
   if (body.systemUnit !== undefined) data.systemUnit = body.systemUnit?.trim() || null;
   if (body.customerId !== undefined) {
     data.customer = body.customerId ? { connect: { id: body.customerId } } : { disconnect: true };
@@ -1884,6 +1915,14 @@ costingRoutes.get(
           { label: 'System / Unit', value: costing.systemUnit ?? '' },
           { label: 'Valid until', value: costing.validUntil ? formatDate(costing.validUntil) : '' },
           { label: 'Prepared by', value: costing.owner.name },
+          // The plan's dates, when it has a start (2026-10-13): the finish is
+          // the plan's last working day, Mon–Sat — derived, as on the page.
+          ...(view.plannedStart
+            ? [
+                { label: 'Start date', value: formatDate(new Date(`${view.plannedStart as string}T00:00:00Z`)) },
+                { label: 'Finish date', value: view.plannedFinish ? formatDate(new Date(`${view.plannedFinish as string}T00:00:00Z`)) : '' },
+              ]
+            : []),
         ],
       },
     ];
@@ -1977,7 +2016,8 @@ costingRoutes.get(
         title: 'Scope of work',
         landscape: true,
         groups,
-        legend: `Planned duration in working days (Mon–Fri) — ${view.planDays} working day${view.planDays === 1 ? '' : 's'} in all.`,
+        legend: planLegend(view.planDays, view.plannedStart as string | null, view.plannedFinish as string | null),
+        startDate: (view.plannedStart as string | null) ?? undefined,
       });
     }
 

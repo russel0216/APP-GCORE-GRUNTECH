@@ -906,18 +906,19 @@ async function main() {
     const plannedJob = await http(leadToken, 'GET', `/jobs/${job.id}`);
     const plannedTasks = ((plannedJob.body.tasks ?? []) as { name: string; startDate: string; dueDate: string; scopeItemId: string }[])
       .filter((t) => t.name.startsWith(TAG));
-    // Thursday 1 Jan 2026: days 1–2 are Thu–Fri; day 3 skips the weekend to Monday.
+    // Thursday 1 Jan 2026: days 1–2 are Thu–Fri; day 3 is Saturday, a working
+    // day since 2026-10-13 (Mon–Sat), and day 5 skips Sunday to Tuesday.
     check(
-      'working days land on real dates, skipping the weekend',
+      'working days land on real dates, Mon–Sat, skipping Sunday',
       iso(plannedTasks[0]?.startDate) === '2026-01-01' && iso(plannedTasks[0]?.dueDate) === '2026-01-02' &&
-        iso(plannedTasks[1]?.startDate) === '2026-01-05' && iso(plannedTasks[1]?.dueDate) === '2026-01-07',
+        iso(plannedTasks[1]?.startDate) === '2026-01-03' && iso(plannedTasks[1]?.dueDate) === '2026-01-06',
       JSON.stringify(plannedTasks.map((t) => [t.name, iso(t.startDate), iso(t.dueDate)])),
     );
     const fabrication = (plannedJob.body.scopeItems as { id: string; name: string; plannedStart: string; plannedEnd: string }[])
       .find((s) => s.name === `${TAG} Fabrication`);
     check(
       'and the scope line takes its tasks’ span as its planned dates',
-      plannedTasks.every((t) => t.scopeItemId === fabrication?.id) && iso(fabrication!.plannedStart) === '2026-01-01' && iso(fabrication!.plannedEnd) === '2026-01-07',
+      plannedTasks.every((t) => t.scopeItemId === fabrication?.id) && iso(fabrication!.plannedStart) === '2026-01-01' && iso(fabrication!.plannedEnd) === '2026-01-06',
       `${fabrication?.plannedStart} → ${fabrication?.plannedEnd}`,
     );
     const replanned = await http(leadToken, 'POST', `/jobs/${job.id}/tasks/from-costing`);
@@ -981,6 +982,42 @@ async function main() {
       JSON.stringify(costingRead.body.jobs ?? null).slice(0, 160),
     );
     check('a plain project answers serviceContractId null', created.body.serviceContractId === null);
+
+    // (a2) The project's dates tally with its scope (2026-10-13, the owner's
+    //      call): a costing that starts on Monday 2 November with a 30-day
+    //      plan finishes on Saturday 5 December — five Mon–Sat weeks, the
+    //      Sundays skipped — and a project built on it without a start of its
+    //      own takes the costing's start and that finish as its target end.
+    const tCosting = await readyCosting('Tally', pm.id, customer.id);
+    await prisma.costing.update({ where: { id: tCosting.id }, data: { plannedStart: new Date('2026-11-02T00:00:00Z') } });
+    const tallied = await http(leadToken, 'POST', '/jobs', { costingId: tCosting.id, name: `${TAG} Tally`, customerId: customer.id });
+    const tallyRead = tallied.body.id ? await http(leadToken, 'GET', `/jobs/${tallied.body.id}`) : null;
+    const tItem = tallyRead?.body?.scopeItems?.[0];
+    check(
+      "a project takes its costing's start, places the scope on working days and ends on the plan's last one (30 working days: 2 November → 5 December)",
+      tallied.status === 201 &&
+        iso(tallyRead?.body?.startDate ?? 0) === '2026-11-02' &&
+        iso(tallyRead?.body?.targetEndDate ?? 0) === '2026-12-05' &&
+        iso(tItem?.plannedStart ?? 0) === '2026-11-02' &&
+        iso(tItem?.plannedEnd ?? 0) === '2026-12-05',
+      `${tallied.status} ${tallyRead?.body?.startDate} → ${tallyRead?.body?.targetEndDate}; item ${tItem?.plannedStart} → ${tItem?.plannedEnd}`,
+    );
+    check(
+      'the overview tallies them: the scope of work and the target end are both 30 working days after the start',
+      tallyRead?.body?.schedule?.planDays === 30 &&
+        tallyRead?.body?.schedule?.targetDays === 30 &&
+        iso(tallyRead?.body?.schedule?.planFinish ?? 0) === '2026-12-05',
+      JSON.stringify(tallyRead?.body?.schedule ?? null),
+    );
+    if (tallied.body.id) {
+      await http(leadToken, 'PATCH', `/jobs/${tallied.body.id}`, { targetEndDate: '2026-12-12' });
+      const moved = await http(leadToken, 'GET', `/jobs/${tallied.body.id}`);
+      check(
+        'a target typed by hand is kept, and the overview says it is 36 working days against the plan\'s 30',
+        iso(moved.body.targetEndDate) === '2026-12-12' && moved.body.schedule?.targetDays === 36 && moved.body.schedule?.planDays === 30,
+        JSON.stringify(moved.body.schedule ?? null),
+      );
+    }
 
     // (b) The customer comes from the costing — a mismatch is refused.
     const otherCustomer = await prisma.customer.create({ data: { code: `${TAG}-C2`, name: `${TAG} Other clinic` } });
