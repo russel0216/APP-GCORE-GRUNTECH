@@ -97,7 +97,7 @@ import {
   NO_GROUP, lostKindAfter } from '../shared/pipeline';
 import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../shared/day';
 import { env } from '../env';
-import { googleCalendarUrl } from '../shared/calendar-links';
+import { googleCalendarUrl, mapLinkFor } from '../shared/calendar-links';
 import { pipelineStageOverrides, pipelineStages, stageSettingsSchema, STAGE_SETTING_KEY, DEFAULT_STAGES, mergeStages } from '../shared/pipelineStages';
 import {
   buildForecast,
@@ -3626,7 +3626,10 @@ activityRoutes.get(
           uid: row.id,
           number: shown.typeName,
           title: row.subject,
-          description: [row.callLink ? `Call: ${row.callLink}` : null, row.notes].filter(Boolean).join('\n\n') || null,
+          description:
+            [row.callLink ? `Call: ${row.callLink}` : null, row.mapUrl ? `Map: ${mapLinkFor(row.location, row.mapUrl)}` : null, row.notes]
+              .filter(Boolean)
+              .join('\n\n') || null,
           location: row.location,
           startsAt: row.startsAt,
           endsAt: shown.endsAt,
@@ -3673,6 +3676,8 @@ const activitySchema = z.object({
   isPrivate: z.boolean().optional(),
   /** Conference call link, http(s) only. */
   callLink: z.string().trim().max(500).optional().nullable(),
+  /** A Google Maps link for the address (2026-10-13), http(s) only. */
+  mapUrl: z.string().trim().max(2000).optional().nullable(),
   /** The customer's contact person — one of the customer's contacts. */
   contactId: z.string().optional().nullable(),
   /** The project it is for. */
@@ -3751,6 +3756,7 @@ activityRoutes.post(
     const links = { customerId: body.customerId || null, contactId: body.contactId || null, jobId: body.jobId || null };
     await checkActivityLinks(links);
     const callLink = body.callLink ? safeHttpUrl(body.callLink) : null;
+    const mapUrl = body.mapUrl ? safeHttpUrl(body.mapUrl) : null;
     const names = await activityTypeNames();
     const firstStart = allDay ? allDayStart(new Date(body.startsAt)) : new Date(body.startsAt);
     // A repeating booking (SCORO's "Recurring"): every occurrence is a row of its own.
@@ -3763,6 +3769,7 @@ activityRoutes.post(
       notes: body.notes || null,
       location: body.location || null,
       callLink,
+      mapUrl,
       allDay,
       isPrivate: body.isPrivate ?? false,
       assignedToId,
@@ -3822,7 +3829,7 @@ activityRoutes.post(
         body: `${activityWhen(activity)}${activity.location ? ` · ${activity.location}` : ''}${repeats} · from ${me.name}`,
         link: activityLink(activity),
       },
-      { respondLinks: true },
+      { respondLinks: true, map: mapLinkFor(activity.location, activity.mapUrl) },
     );
     const typeName = (names.get(typeKey) ?? humaniseTypeKey(typeKey)).toLowerCase();
     for (const [i, row] of rows.entries()) {
@@ -3888,6 +3895,7 @@ activityRoutes.patch(
       });
     }
     const callLink = body.callLink !== undefined ? (body.callLink ? safeHttpUrl(body.callLink) : null) : undefined;
+    const mapUrl = body.mapUrl !== undefined ? (body.mapUrl ? safeHttpUrl(body.mapUrl) : null) : undefined;
 
     const { invitees: _invitees, ...existingRow } = existing;
     void _invitees;
@@ -3899,6 +3907,7 @@ activityRoutes.patch(
           ...(body.allDay !== undefined ? { allDay: body.allDay } : {}),
           ...(body.isPrivate !== undefined ? { isPrivate: body.isPrivate } : {}),
           ...(callLink !== undefined ? { callLink } : {}),
+          ...(mapUrl !== undefined ? { mapUrl } : {}),
           ...(body.contactId !== undefined ? { contactId: body.contactId || null } : {}),
           ...(body.jobId !== undefined ? { jobId: body.jobId || null } : {}),
           // A new time or a new reminder is a reminder not yet sent.
@@ -3939,7 +3948,7 @@ activityRoutes.patch(
         body: `${activityWhen(updated)}${updated.location ? ` · ${updated.location}` : ''} · from ${me.name}`,
         link,
       },
-      { respondLinks: true },
+      { respondLinks: true, map: mapLinkFor(updated.location, updated.mapUrl) },
     );
     const stayed = [updated.assignedToId, ...inviteeIds.filter((id) => !added.includes(id))].filter((id) => id !== me.id);
     if (body.status === 'CANCELLED' && existing.status !== 'CANCELLED') {

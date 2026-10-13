@@ -217,6 +217,11 @@ a {
   text-decoration: none;
 }
 
+/* "Open in Google Maps ↗" (components/MapLink.tsx) keeps its words together. */
+.map-link {
+  white-space: nowrap;
+}
+
 button,
 input,
 select,

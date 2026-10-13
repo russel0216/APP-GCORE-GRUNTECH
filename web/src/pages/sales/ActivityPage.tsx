@@ -10,6 +10,7 @@ import { useBackLink } from '../../components/Navigation';
 import { Avatar, ErrorBox, Loading, durationLabel, formatDateTime, formatTime, useToast } from '../../components/ui';
 import { usePeople } from '../../components/People';
 import { ActivityModal } from './ActivityForm';
+import { MapLink } from '../../components/MapLink';
 import {
   ACTIVITY_TONES,
   ANSWERS,
@@ -308,6 +309,11 @@ export function ActivityPage() {
             {!activity.allDay && <span className="faint"> · {durationLabel(activity.durationMinutes)}</span>}
           </p>
           {activity.location && <p className="act-where">{activity.location}</p>}
+          {!activity.masked && (activity.location || activity.mapUrl) && (
+            <p className="act-where">
+              <MapLink place={activity.location} mapUrl={activity.mapUrl} />
+            </p>
+          )}
           {activity.masked && <p className="faint">A private activity — only the people on it see the details.</p>}
           {activity.callLink && (
             <p className="act-call">

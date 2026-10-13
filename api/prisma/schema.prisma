@@ -81,6 +81,7 @@ model User {
   clearancesReceived     EmployeeClearance[]  @relation("ClearanceReceiver")
   clearanceItemsCleared  ClearanceItem[]      @relation("ClearanceClearer")
   meetingsOrganized      Meeting[]            @relation("MeetingOrganizer")
+  meetingMinutesWritten  Meeting[]            @relation("MeetingMinutesBy")
   meetingInvites         MeetingInvitee[]     @relation("MeetingInvitee")
   evaluationsGiven       EmployeeEvaluation[] @relation("Evaluator")
   evaluationsScheduled   EmployeeEvaluation[] @relation("EvaluationScheduler")
@@ -1754,6 +1755,9 @@ model SalesActivity {
   isPrivate Boolean @default(false)
   /// Conference call link, http(s) only (`safeHttpUrl`).
   callLink  String?
+  /// A Google Maps link for the address (2026-10-13), http(s) only — the
+  /// meeting's rule; with none the page searches Google Maps for the address.
+  mapUrl    String?
 
   /// The customer's contact person it is with — one of the customer's contacts.
   contactId String?
@@ -3116,6 +3120,16 @@ model Meeting {
   title            String
   agenda           String?
   location         String?
+  /// A Google Maps link for the place (2026-10-13), http(s) only — G-CORE
+  /// holds no Google credentials, so a place is tagged by a pasted link.
+  mapUrl           String?
+  /// Minutes of meeting (2026-10-13): what was said and decided, written by
+  /// the organiser or anyone invited once it has started; who last wrote
+  /// them, and when.
+  minutes          String?
+  minutesAt        DateTime?
+  minutesById      String?
+  minutesBy        User?            @relation("MeetingMinutesBy", fields: [minutesById], references: [id], onDelete: SetNull)
   startsAt         DateTime
   endsAt           DateTime
   status           ActivityStatus   @default(PLANNED)

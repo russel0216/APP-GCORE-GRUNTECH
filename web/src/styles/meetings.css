@@ -63,6 +63,16 @@
   line-height: 1.55;
 }
 
+/* The minutes' own Save under the text, and who wrote them under the text. */
+.meeting-minutes-foot {
+  justify-content: flex-end;
+  gap: var(--s-2);
+}
+
+.meeting-minutes-by {
+  margin: var(--s-2) 0 0;
+}
+
 .meeting-invitees td {
   vertical-align: top;
 }

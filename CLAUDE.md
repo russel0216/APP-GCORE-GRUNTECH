@@ -2571,6 +2571,29 @@ leave the approver deciding on stale figures).
   people were told.
 - **Visibility is one function, `visibleWhere(user)`**; a `view_own` holder who is
   not on the list gets a 404. Only the invitee answers for themselves.
+- **Minutes of meeting** (2026-10-13, the owner's call: "so anyone can back
+  track what have been talked about"): `Meeting.minutes`, `minutesAt`,
+  `minutesBy` — ONE text, replaced whole by `PUT /meetings/:id/minutes`,
+  in the **Minutes of meeting** card under the Agenda (written in the card,
+  never a dialog). `minutesProblem()` is the one rule for the route and the
+  page's `canWriteMinutes`: the organiser, anyone invited or `edit_all`;
+  never before the start (409), never on a cancelled meeting (409). An
+  empty save clears all three. Each save audits (the length, never the
+  text); everyone on the meeting but the writer is told once per Manila day
+  of edits ("Minutes: …"). The list and Ctrl+K search the minutes, list rows
+  carry `hasMinutes`, and a project's Meetings & Records shows a Minutes
+  column. Files stay on the Documents card. Attendance is still the
+  invitees' answers — no roll call.
+- **A place is tagged by a link** (2026-10-13, "allow Google Map tagging";
+  no Google credentials): `Meeting.mapUrl` and `SalesActivity.mapUrl`,
+  http(s) only (`safeHttpUrl`), pasted in the form's "Google Maps link"
+  beside Where / Address, whose hint opens Google Maps on the place typed.
+  `mapLinkFor(place, mapUrl)` (`shared/calendar-links.ts`) is the one rule —
+  the link, else Google Maps' search for the address, else nothing — and
+  `components/MapLink.tsx` its twin on the page ("Open in Google Maps ↗" /
+  "Find on Google Maps ↗"). A tagged place rides in the meeting's `.ics` and
+  Google hand-off description, the activity's hand-off and its invitation
+  email ("Map: …"); `maskPrivate` hides an activity's map with its address.
 
 ### Academy
 

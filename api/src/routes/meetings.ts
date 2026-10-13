@@ -42,6 +42,7 @@ import {
 } from '../shared/meetings';
 import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
 import { manilaDayKey } from '../shared/day';
+import { safeHttpUrl } from '../shared/partners';
 import { LIST_CAP, listReference, sendListPdf, choice } from '../shared/listPaper';
 
 /**
@@ -74,6 +75,10 @@ const detailSelect = {
   title: true,
   agenda: true,
   location: true,
+  mapUrl: true,
+  minutes: true,
+  minutesAt: true,
+  minutesBy: { select: { id: true, name: true } },
   startsAt: true,
   endsAt: true,
   status: true,
@@ -111,14 +116,29 @@ async function loadVisible(id: string, user: Parameters<typeof visibleWhere>[0])
   return meeting;
 }
 
+/**
+ * Who may write the minutes (2026-10-13): the organiser, anyone invited, or
+ * `edit_all` — once the meeting has started, and never on a cancelled one.
+ * `minutesProblem` says why not, in the words the route refuses with.
+ */
+function minutesProblem(m: { status: string; startsAt: Date; organizerId: string; invitees: { userId: string }[] }, user: ReturnType<typeof currentUser>, now = new Date()): { status: 403 | 409; message: string } | null {
+  const onIt = m.organizerId === user.id || m.invitees.some((i) => i.userId === user.id) || can(user, 'ghr.meetings.edit_all');
+  if (!onIt) return { status: 403, message: 'Only the organiser and the people invited write the minutes' };
+  if (m.status === 'CANCELLED') return { status: 409, message: 'The meeting was cancelled — there are no minutes to keep' };
+  if (m.startsAt.getTime() > now.getTime()) return { status: 409, message: 'Minutes are written once the meeting has started' };
+  return null;
+}
+
 /** The record as the page reads it: the row plus what the viewer may do. */
-function present(m: MeetingDetail, viewerId: string, canEdit: boolean) {
+function present(m: MeetingDetail, viewer: ReturnType<typeof currentUser>, canEdit: boolean) {
+  const viewerId = viewer.id;
   const mine = m.invitees.find((i) => i.userId === viewerId) ?? null;
   const unsent = m.invitees.filter((i) => !i.notifiedAt).length;
   const guests = m.invitees.map((i) => ({ email: i.user.email }));
   return {
     ...m,
     canEdit,
+    canWriteMinutes: minutesProblem(m, viewer) === null,
     live: isLive(m),
     myResponse: mine?.response ?? null,
     isOrganizer: m.organizerId === viewerId,
@@ -138,6 +158,8 @@ const meetingSchema = z.object({
   title: z.string().trim().min(3, 'Give the meeting a title').max(200),
   agenda: z.string().trim().max(5000).nullable().optional(),
   location: z.string().trim().max(200).nullable().optional(),
+  /** A Google Maps link for the place — http(s) only; '' or null clears it. */
+  mapUrl: z.string().trim().max(2000).nullable().optional(),
   startsAt: z.string().min(1, 'When does it start?'),
   endsAt: z.string().min(1, 'When does it end?'),
   inviteeIds: inviteeIds.optional(),
@@ -237,6 +259,7 @@ function meetingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Pri
         { title: { contains: q.search, mode: 'insensitive' } },
         { number: { contains: q.search, mode: 'insensitive' } },
         { agenda: { contains: q.search, mode: 'insensitive' } },
+        { minutes: { contains: q.search, mode: 'insensitive' } },
         { location: { contains: q.search, mode: 'insensitive' } },
         { organizer: { name: { contains: q.search, mode: 'insensitive' } } },
       ],
@@ -276,6 +299,7 @@ meetingRoutes.get(
           endsAt: true,
           status: true,
           meetLink: true,
+          minutesAt: true,
           organizer: { select: { id: true, name: true } },
           job: { select: { id: true, number: true, name: true } },
           invitees: { select: { userId: true, response: true, notifiedAt: true } },
@@ -286,8 +310,10 @@ meetingRoutes.get(
 
     res.json(
       listResult(
-        rows.map(({ invitees, ...m }) => ({
+        rows.map(({ invitees, minutesAt, ...m }) => ({
           ...m,
+          // Cleared minutes clear the stamp too, so the stamp says whether there are any.
+          hasMinutes: minutesAt !== null,
           inviteeCount: invitees.length,
           acceptedCount: invitees.filter((i) => i.response === 'ACCEPTED').length,
           sent: invitees.some((i) => i.notifiedAt !== null),
@@ -410,7 +436,7 @@ meetingRoutes.get(
     const canEdit =
       m.status !== 'CANCELLED' &&
       (can(me, 'ghr.meetings.edit_all') || (m.organizerId === me.id && can(me, 'ghr.meetings.edit_own')));
-    res.json(present(m, me.id, canEdit));
+    res.json(present(m, me, canEdit));
   }),
 );
 
@@ -467,6 +493,7 @@ meetingRoutes.post(
           title: body.title,
           agenda: body.agenda || null,
           location: body.location || null,
+          mapUrl: body.mapUrl ? safeHttpUrl(body.mapUrl) : null,
           startsAt: slot.startsAt,
           endsAt: slot.endsAt,
           organizerId: me.id,
@@ -494,7 +521,7 @@ meetingRoutes.post(
       },
       req,
     );
-    res.status(201).json(present(meeting, me.id, true));
+    res.status(201).json(present(meeting, me, true));
   }),
 );
 
@@ -527,6 +554,7 @@ meetingRoutes.patch(
     if (body.title !== undefined) data.title = body.title;
     if (body.agenda !== undefined) data.agenda = body.agenda || null;
     if (body.location !== undefined) data.location = body.location || null;
+    if (body.mapUrl !== undefined) data.mapUrl = body.mapUrl ? safeHttpUrl(body.mapUrl) : null;
     if (body.jobId !== undefined) {
       const jobId = await jobFor(body.jobId);
       data.job = jobId ? { connect: { id: jobId } } : { disconnect: true };
@@ -556,7 +584,7 @@ meetingRoutes.patch(
     }
 
     if (!Object.keys(data).length) {
-      res.json(present(before, me.id, true));
+      res.json(present(before, me, true));
       return;
     }
 
@@ -592,7 +620,66 @@ meetingRoutes.patch(
       );
     }
 
-    res.json(present(meeting, me.id, true));
+    res.json(present(meeting, me, true));
+  }),
+);
+
+// ── Minutes ─────────────────────────────────────────────────────────────────
+
+const minutesSchema = z.object({
+  minutes: z.string().max(50000, 'Minutes run to 50,000 characters at most'),
+});
+
+/**
+ * The minutes of meeting (2026-10-13, the owner's call: "so anyone can back
+ * track what have been talked about"). One text, replaced whole by each save,
+ * with who wrote it last and when; an empty save clears them. Everyone on the
+ * meeting but the writer is told — once per Manila day of edits, so a page
+ * of minutes typed in five saves rings one bell. Audited, the text kept out
+ * of the trail (the record holds it).
+ */
+meetingRoutes.put(
+  '/:id/minutes',
+  requireAny(...VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const before = await loadVisible(req.params.id, me);
+    const problem = minutesProblem(before, me);
+    if (problem) throw problem.status === 403 ? forbidden(problem.message) : conflict(problem.message);
+    const body = parseBody(minutesSchema, req.body);
+    const text = body.minutes.trim();
+    const now = new Date();
+
+    const meeting = await prisma.meeting.update({
+      where: { id: before.id },
+      data: text ? { minutes: text, minutesAt: now, minutesById: me.id } : { minutes: null, minutesAt: null, minutesById: null },
+      select: detailSelect,
+    });
+    await audit(
+      {
+        entityType: 'meeting',
+        entityId: meeting.id,
+        action: 'UPDATED',
+        summary: `${meeting.number}: minutes ${!text ? 'cleared' : before.minutes ? 'changed' : 'written'}`,
+        after: { minutesLength: text.length },
+      },
+      req,
+    );
+
+    const firstToday = !before.minutesAt || manilaDayKey(before.minutesAt) !== manilaDayKey(now);
+    if (text && firstToday) {
+      const everyone = [meeting.organizerId, ...meeting.invitees.map((i) => i.userId)].filter((id) => id !== me.id);
+      await notify(
+        [...new Set(everyone)].map((userId) => ({
+          userId,
+          type: 'meeting.updated' as const,
+          title: `Minutes: ${meeting.title}`,
+          body: `${meeting.number} — ${before.minutes ? 'updated' : 'written'} by ${me.name}`,
+          link: MEETING_LINK(meeting.id),
+        })),
+      );
+    }
+    res.json(present(meeting, me, meeting.status !== 'CANCELLED' && (can(me, 'ghr.meetings.edit_all') || (meeting.organizerId === me.id && can(me, 'ghr.meetings.edit_own')))));
   }),
 );
 
@@ -631,7 +718,7 @@ meetingRoutes.post(
       );
     }
     const meeting = await loadVisible(before.id, me);
-    res.json(present(meeting, me.id, true));
+    res.json(present(meeting, me, true));
   }),
 );
 
@@ -665,7 +752,7 @@ meetingRoutes.delete(
       });
     }
     const meeting = await loadVisible(before.id, me);
-    res.json(present(meeting, me.id, true));
+    res.json(present(meeting, me, true));
   }),
 );
 
@@ -685,7 +772,7 @@ meetingRoutes.post(
     if (before.status !== 'PLANNED') throw conflict('Only a planned meeting can send invitations');
     const pending = before.invitees.filter((i) => !i.notifiedAt);
     if (!pending.length) {
-      res.json({ ...present(before, me.id, true), sent: 0 });
+      res.json({ ...present(before, me, true), sent: 0 });
       return;
     }
     const now = new Date();
@@ -718,7 +805,7 @@ meetingRoutes.post(
       );
     });
     const meeting = await loadVisible(before.id, me);
-    res.json({ ...present(meeting, me.id, true), sent: pending.length });
+    res.json({ ...present(meeting, me, true), sent: pending.length });
   }),
 );
 
@@ -764,7 +851,7 @@ meetingRoutes.post(
       });
     }
     const after = await loadVisible(meeting.id, me);
-    res.json(present(after, me.id, false));
+    res.json(present(after, me, false));
   }),
 );
 
@@ -812,7 +899,7 @@ meetingRoutes.post(
         link: MEETING_LINK(meeting.id),
       })),
     );
-    res.json(present(meeting, me.id, false));
+    res.json(present(meeting, me, false));
   }),
 );
 
@@ -879,6 +966,7 @@ registerSearch({
               { title: { contains: term, mode: 'insensitive' } },
               { number: { contains: term, mode: 'insensitive' } },
               { location: { contains: term, mode: 'insensitive' } },
+              { minutes: { contains: term, mode: 'insensitive' } },
             ],
           },
         ],

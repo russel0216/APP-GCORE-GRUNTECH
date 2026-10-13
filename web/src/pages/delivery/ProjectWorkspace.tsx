@@ -2107,6 +2107,8 @@ interface ProjectMeeting {
   startsAt: string;
   status: string;
   organizer: { id: string; name: string };
+  /** Minutes have been written (2026-10-13) — the trail at a glance. */
+  hasMinutes?: boolean;
 }
 
 /**
@@ -2141,8 +2143,8 @@ function ProjectMeetingsCard({ job }: { job: Job }) {
         )}
       </div>
       <p className="muted del-lede">
-        Kick-off, site and turnover meetings held for this project. Minutes and other records go in the documents
-        below.
+        Kick-off, site and turnover meetings held for this project — each with its minutes of meeting, so anyone can
+        look back on what was discussed. Other records go in the documents below.
       </p>
       <ErrorBox error={error} />
       {!rows && !error ? (
@@ -2158,6 +2160,7 @@ function ProjectMeetingsCard({ job }: { job: Job }) {
                 <th>Meeting</th>
                 <th>When</th>
                 <th>Organiser</th>
+                <th>Minutes</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -2175,6 +2178,7 @@ function ProjectMeetingsCard({ job }: { job: Job }) {
                   </td>
                   <td>{formatDateTime(m.startsAt)}</td>
                   <td>{m.organizer.name}</td>
+                  <td>{m.hasMinutes ? '✓ Written' : <span className="faint">—</span>}</td>
                   <td>
                     <StatusBadge status={m.status} />
                   </td>

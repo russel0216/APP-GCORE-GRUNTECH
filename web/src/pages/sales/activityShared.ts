@@ -72,6 +72,8 @@ export interface Activity {
   isPrivate: boolean;
   /** Conference call link, http(s). */
   callLink: string | null;
+  /** A Google Maps link for the address (2026-10-13), http(s); null searches the address. */
+  mapUrl?: string | null;
   /** The customer's contact person it is with. */
   contact: { id: string; name: string; position: string | null } | null;
   /** The project it is for. */

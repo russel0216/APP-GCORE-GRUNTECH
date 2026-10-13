@@ -8,6 +8,7 @@ import { useConfirm } from '../../components/Confirm';
 import { PeoplePicker } from '../../components/PeoplePicker';
 import { toPerson, usePeople } from '../../components/People';
 import { MeetLink } from '../../components/MeetLink';
+import { MapLink, mapsSearchUrl } from '../../components/MapLink';
 import { Attachments } from '../../components/Attachments';
 import {
   CalendarToolbar,
@@ -106,6 +107,14 @@ interface Meeting {
   title: string;
   agenda: string | null;
   location: string | null;
+  /** A Google Maps link for the place (http(s) only); null searches the Where text. */
+  mapUrl: string | null;
+  /** What was said and decided — written during or after the meeting. */
+  minutes: string | null;
+  minutesAt: string | null;
+  minutesBy: { id: string; name: string } | null;
+  /** The organiser or anyone invited, once it has started, never on a cancelled one. */
+  canWriteMinutes: boolean;
   startsAt: string;
   endsAt: string;
   status: string;
@@ -497,6 +506,7 @@ function MeetingModal({
   const [form, setForm] = useState({
     title: initial?.title ?? '',
     location: initial?.location ?? '',
+    mapUrl: initial?.mapUrl ?? '',
     agenda: initial?.agenda ?? '',
     startsAt: toLocalInput(initial ? new Date(initial.startsAt) : defaultStart),
     endsAt: toLocalInput(initial ? new Date(initial.endsAt) : new Date(defaultStart.getTime() + 3_600_000)),
@@ -530,6 +540,7 @@ function MeetingModal({
       const payload = {
         title: form.title.trim(),
         location: form.location.trim() || null,
+        mapUrl: form.mapUrl.trim() || null,
         agenda: form.agenda.trim() || null,
         startsAt: new Date(form.startsAt).toISOString(),
         endsAt: new Date(form.endsAt).toISOString(),
@@ -623,6 +634,26 @@ function MeetingModal({
           value={form.location}
           onChange={(e) => setForm({ ...form, location: e.target.value })}
           placeholder="Board room"
+        />
+      </Field>
+
+      <Field
+        label="Google Maps link"
+        hint={
+          <>
+            Tag the place: find it on{' '}
+            <a href={form.location.trim() ? mapsSearchUrl(form.location) : 'https://www.google.com/maps'} target="_blank" rel="noopener noreferrer">
+              Google Maps ↗
+            </a>
+            , press Share and paste the link here. Left blank, the page searches Google Maps for the Where.
+          </>
+        }
+      >
+        <input
+          value={form.mapUrl}
+          onChange={(e) => setForm({ ...form, mapUrl: e.target.value })}
+          placeholder="https://maps.app.goo.gl/…"
+          inputMode="url"
         />
       </Field>
 
@@ -770,6 +801,12 @@ export function MeetingDetail() {
             <strong>{formatSpan(m.startsAt, m.endsAt)}</strong> · {durationText(m.startsAt, m.endsAt)} · organised
             by {m.isOrganizer ? 'you' : m.organizer.name}
             {m.location ? ` · ${m.location}` : ''}
+            {(m.location || m.mapUrl) && (
+              <>
+                {' '}
+                · <MapLink place={m.location} mapUrl={m.mapUrl} />
+              </>
+            )}
             {m.job && (
               <>
                 {' '}
@@ -909,6 +946,8 @@ export function MeetingDetail() {
               <p className="collection-empty">No agenda written.</p>
             )}
           </div>
+
+          <MinutesCard meeting={m} onSaved={load} />
         </div>
 
         <div className="card">
@@ -1043,6 +1082,89 @@ export function MeetingDetail() {
             void load();
           }}
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Minutes of meeting (2026-10-13, the owner's call: "so anyone can back track
+ * what have been talked about"): one text under the Agenda, written IN the
+ * card by the organiser or anyone invited once the meeting has started, and
+ * kept with who last wrote it and when. Files go on the Documents card.
+ */
+function MinutesCard({ meeting: m, onSaved }: { meeting: Meeting; onSaved: () => Promise<void> }) {
+  const toast = useToast();
+  const [draft, setDraft] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  async function save() {
+    if (draft === null) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.put(`/meetings/${m.id}/minutes`, { minutes: draft });
+      toast('ok', draft.trim() ? 'Minutes saved' : 'Minutes cleared');
+      setDraft(null);
+      await onSaved();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="row meeting-split meeting-card-head">
+        <h3 className="card-title meeting-flush">Minutes of meeting</h3>
+        {m.canWriteMinutes && draft === null && (
+          <button type="button" className="btn btn-sm" onClick={() => setDraft(m.minutes ?? '')}>
+            {m.minutes ? 'Modify' : 'Write minutes'}
+          </button>
+        )}
+      </div>
+      <ErrorBox error={error} />
+      {draft !== null ? (
+        <div className="stack">
+          <textarea
+            rows={10}
+            value={draft}
+            maxLength={50000}
+            aria-label="Minutes of meeting"
+            placeholder={'Who attended, what was discussed, what was decided, and who does what by when.'}
+            onChange={(e) => setDraft(e.target.value)}
+            autoFocus
+          />
+          <div className="row meeting-minutes-foot">
+            <button type="button" className="btn btn-sm" onClick={() => setDraft(null)} disabled={busy}>
+              Cancel
+            </button>
+            <button type="button" className="btn btn-sm btn-primary" onClick={save} disabled={busy || draft === (m.minutes ?? '')}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+      ) : m.minutes ? (
+        <>
+          <p className="meeting-agenda">{m.minutes}</p>
+          {m.minutesAt && (
+            <p className="faint meeting-minutes-by">
+              Written by {m.minutesBy?.name ?? 'someone no longer here'} · {formatDateTime(m.minutesAt)}
+            </p>
+          )}
+        </>
+      ) : (
+        <p className="collection-empty">
+          {m.status === 'CANCELLED'
+            ? 'The meeting was cancelled.'
+            : m.canWriteMinutes
+              ? 'Nothing written yet — record what was discussed and decided, so anyone can look back on it.'
+              : new Date(m.startsAt).getTime() > Date.now()
+                ? 'Minutes are written once the meeting has started.'
+                : 'Nothing written yet.'}
+        </p>
       )}
     </div>
   );

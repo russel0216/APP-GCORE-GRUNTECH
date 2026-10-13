@@ -430,7 +430,8 @@ export function Field({
   children,
 }: {
   label: string;
-  hint?: string;
+  /** Words under the control — a sentence, or a sentence with a link in it. */
+  hint?: ReactNode;
   error?: string | null;
   required?: boolean;
   /** The control's id, when the child is a component (a PasswordInput) the label cannot find by itself. */

@@ -132,6 +132,7 @@ export function maskPrivate<
     notes: null,
     location: null,
     callLink: null,
+    mapUrl: null,
     lead: null,
     quotation: null,
     customer: null,
@@ -175,8 +176,12 @@ export function activityLink(a: { id: string }): string {
 export async function tellAboutActivity(
   userIds: string[],
   message: { type: NotificationType; title: string; body: string; link: string },
-  /** `respondLinks`: an invitation — the email carries Going / Not going / Maybe links (2026-10-08). */
-  opts: { respondLinks?: boolean } = {},
+  /**
+   * `respondLinks`: an invitation — the email carries Going / Not going /
+   * Maybe links (2026-10-08). `map`: where the place opens on Google Maps
+   * (`mapLinkFor`, 2026-10-13), a line of the email.
+   */
+  opts: { respondLinks?: boolean; map?: string | null } = {},
 ): Promise<void> {
   const ids = [...new Set(userIds)];
   if (!ids.length) return;
@@ -195,7 +200,7 @@ export async function tellAboutActivity(
           to: person.email,
           toName: person.name,
           subject: message.title,
-          text: activityEmailText(message, url, opts.respondLinks ?? false),
+          text: activityEmailText(message, url, opts.respondLinks ?? false, opts.map),
         },
         cfg,
       );
@@ -210,8 +215,8 @@ export async function tellAboutActivity(
  * links: the activity's page opens and records the answer the link carries
  * (`?respond=`), so "Going" is one tap from the inbox.
  */
-export function activityEmailText(message: { title: string; body: string }, url: string, respondLinks = false): string {
-  const lines = [message.title, '', message.body, '', `Open it in G-CORE: ${url}`];
+export function activityEmailText(message: { title: string; body: string }, url: string, respondLinks = false, map?: string | null): string {
+  const lines = [message.title, '', message.body, ...(map ? ['', `Map: ${map}`] : []), '', `Open it in G-CORE: ${url}`];
   if (respondLinks) {
     const answer = (r: string) => `${url}${url.includes('?') ? '&' : '?'}respond=${r}`;
     lines.push('', 'Let them know:', `Going: ${answer('ACCEPTED')}`, `Not going: ${answer('DECLINED')}`, `Maybe: ${answer('TENTATIVE')}`);
