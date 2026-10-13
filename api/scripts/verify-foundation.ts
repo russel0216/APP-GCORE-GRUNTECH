@@ -112,7 +112,7 @@ import { readAppearance } from '../src/routes/appearance';
 import { contentStreams, pdfRuns, pdfText, runWidth, shown, type PdfRun } from './lib/paper';
 import { attachmentKind, fitImage } from '../src/shared/pdfAttachments';
 import { contentDisposition, kindOfFile, paperFileName } from '../src/shared/paperName';
-import { issueTicket, redeemTicket, ticketPath, TICKET_TTL_MS } from '../src/shared/printTickets';
+import { issueTicket, redeemTicket, ticketPath, TICKET_TTL_MS, TICKET_REUSE_MS } from '../src/shared/printTickets';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -2955,16 +2955,20 @@ async function main() {
     const forgedUser = redeemTicket(t.replace('.user1.', '.user2.'), paper, t0 + 1000);
     const late = redeemTicket(issueTicket('user1', paper, t0), paper, t0 + TICKET_TTL_MS + 1);
     const first = redeemTicket(t, paper, t0 + 1000);
-    const again = redeemTicket(t, paper, t0 + 2000);
+    const viewer = redeemTicket(t, paper, t0 + 1000 + TICKET_REUSE_MS);
+    const again = redeemTicket(t, paper, t0 + 1001 + TICKET_REUSE_MS);
+    const muchLater = redeemTicket(t, paper, t0 + 1000 + TICKET_TTL_MS + TICKET_REUSE_MS - 1);
     check(
-      'a ticket opens its own path once, for its own person, within two minutes — another path, another person, late or again are refused',
+      'a ticket opens its own path for its own person within two minutes, and again for a minute after (a viewer extension) — another path, another person, late or after that minute are refused',
       'userId' in first && first.userId === 'user1' &&
+        'userId' in viewer && viewer.userId === 'user1' &&
         'refused' in other && other.refused === 'forged' &&
         'refused' in forgedUser && forgedUser.refused === 'forged' &&
         'refused' in late && late.refused === 'expired' &&
         'refused' in again && again.refused === 'used' &&
+        'refused' in muchLater && muchLater.refused === 'used' &&
         'refused' in (redeemTicket('garbage', paper, t0) as object),
-      JSON.stringify({ first, other, forgedUser, late, again }),
+      JSON.stringify({ first, viewer, other, forgedUser, late, again, muchLater }),
     );
   }
 

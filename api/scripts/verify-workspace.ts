@@ -968,11 +968,17 @@ async function main() {
     `${issued.status} ${opened.status} ${disposition}`,
   );
   const reused = await raw(`${paperPath}?ticket=${encodeURIComponent(printTicket)}`);
-  const reusedText = await reused.text();
   check(
-    'the same ticket a second time is a 401, and the tab reads a page saying why, not JSON',
-    reused.status === 401 && reusedText.includes('already used') && (reused.headers.get('content-type') ?? '').includes('text/html'),
-    `${reused.status} ${reusedText.slice(0, 120)}`,
+    'the same ticket opens the paper again within the minute — a PDF viewer extension fetching it a second time',
+    reused.status === 200 && Buffer.from(await reused.arrayBuffer()).subarray(0, 5).toString() === '%PDF-',
+    String(reused.status),
+  );
+  const stale = await raw(`${paperPath}?ticket=${encodeURIComponent(printTicket.replace(/^\d+/, String(Date.now() - 3 * 60_000)))}`);
+  const staleText = await stale.text();
+  check(
+    'a ticket altered (here its time moved back) is a 401, and the tab reads a page saying why, not JSON',
+    stale.status === 401 && staleText.includes('could not be opened') && (stale.headers.get('content-type') ?? '').includes('text/html'),
+    `${stale.status} ${staleText.slice(0, 120)}`,
   );
   const elsewhere = (await api(workerToken, 'POST', '/pdf/tickets', { path: paperPath })).body.ticket as string;
   const otherPath = await raw(`/api/my-work?ticket=${encodeURIComponent(elsewhere)}`);

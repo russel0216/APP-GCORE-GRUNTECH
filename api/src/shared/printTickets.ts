@@ -10,20 +10,33 @@ import { env } from '../env';
  * first — `POST /api/print-tickets { path }` — and opens `path?ticket=…`.
  * The ticket is the liveness challenge's design (`shared/liveness.ts`):
  * stateless, an HMAC with the JWT secret over `userId.path.issuedAt.nonce`,
- * good for `TICKET_TTL_MS` and ONCE — the only memory is the set of nonces
- * spent within that window, which a restart forgets (a ticket is then
- * still good for what is left of its two minutes, for the same person and
- * the same address). It opens exactly one GET of exactly the path and query
+ * good for `TICKET_TTL_MS` and spent at its first use — reopened only within
+ * `TICKET_REUSE_MS` after it (a viewer extension fetching the paper again).
+ * The only memory is the set of spent nonces, which a restart forgets (a
+ * ticket is then still good for what is left of its two minutes, for the
+ * same person and the same address). It opens exactly one GET of exactly the path and query
  * it was issued for, as the person it was issued to; every permission check,
  * guard and audit row runs as for a bearer.
  */
 export const TICKET_TTL_MS = 2 * 60 * 1000;
+/**
+ * How long a ticket keeps opening its paper after its FIRST use (2026-10-13,
+ * a user's report: the WPS PDF extension, like other viewer extensions and
+ * download managers, takes the tab's address and fetches the paper again
+ * itself — a one-use ticket answered that second fetch "already used", and
+ * the viewer said "Document Loading Failure"). Still the same person and the
+ * same address only; after this minute the ticket is spent.
+ */
+export const TICKET_REUSE_MS = 60 * 1000;
 
 const sign = (payload: string) => crypto.createHmac('sha256', env.jwtSecret).update(payload).digest('base64url');
 
+/** nonce → when the ticket was FIRST used. */
 const spent = new Map<string, number>();
 function sweep(now: number) {
-  for (const [nonce, issuedAt] of spent) if (now - issuedAt > TICKET_TTL_MS) spent.delete(nonce);
+  // Kept until the ticket could no longer be taken as fresh either (it was
+  // issued no later than its first use), so a forgotten nonce never reopens.
+  for (const [nonce, firstUsed] of spent) if (now - firstUsed > TICKET_TTL_MS + TICKET_REUSE_MS) spent.delete(nonce);
 }
 
 /**
@@ -70,12 +83,17 @@ export function redeemTicket(
   const [issued, nonce, userId, mac] = parts;
   const issuedAt = Number(issued);
   if (!Number.isFinite(issuedAt) || !nonce || !userId || !mac) return { refused: 'malformed' };
-  if (now - issuedAt > TICKET_TTL_MS || issuedAt - now > 5000) return { refused: 'expired' };
+  if (issuedAt - now > 5000) return { refused: 'expired' };
   const expected = Buffer.from(sign(`${userId}.${path}.${issued}.${nonce}`));
   const given = Buffer.from(mac);
   if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return { refused: 'forged' };
   sweep(now);
-  if (spent.has(nonce)) return { refused: 'used' };
-  spent.set(nonce, issuedAt);
+  const firstUsed = spent.get(nonce);
+  if (firstUsed !== undefined) {
+    // A viewer fetching the same paper again, within the minute.
+    return now - firstUsed <= TICKET_REUSE_MS ? { userId } : { refused: 'used' };
+  }
+  if (now - issuedAt > TICKET_TTL_MS) return { refused: 'expired' };
+  spent.set(nonce, now);
   return { userId };
 }

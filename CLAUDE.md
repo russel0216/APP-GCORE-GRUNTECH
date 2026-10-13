@@ -509,7 +509,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,936 assertions across twenty-two scripts** (counted 2026-10-13, after
+**3,937 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -552,12 +552,13 @@ ticket, and 7 on foundation, 2 on costing, 5 on chain and 4 on delivery for
 the routing sheet of 2026-10-13 and one signature per person, and 3 on
 accounts for a login email already in use, and 2 on sales for one name
 per person on the quotation's paper, and 5 on accounts for the admin's
-address moving once):
+address moving once, and one on workspace for a print ticket reopened by
+a viewer extension):
 foundation
 362, masters 92, sales 603, costing 159, pipeline 113, calendar 96, numbering
 79, partners 120, delivery 149, chain 202, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
-insights 98, insights-brief 50, workspace 81, accounts 133. The
+insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -1370,15 +1371,18 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   asks `POST /api/pdf/tickets { path }` (a paper's address only: a `/pdf`
   or `.pdf` path under /api) and points the tab at `path?ticket=…`.
   The ticket is the liveness challenge's design — an HMAC with the JWT
-  secret over `userId.path.issuedAt.nonce`, two minutes, ONE use (a map of
-  spent nonces), the path compared in one spelling (`ticketPath()`, the
+  secret over `userId.path.issuedAt.nonce`, two minutes, spent at its
+  first use (a map of spent nonces) and reopened only within
+  `TICKET_REUSE_MS` (a minute) after it — 2026-10-13, a user's report: the
+  WPS PDF extension fetches the tab's paper a second time itself and read
+  "Document Loading Failure" off a one-use ticket — the path compared in one spelling (`ticketPath()`, the
   `ticket` parameter taken out). `authenticate` takes it in place of a
   bearer on a GET of exactly that path, then every guard and audit row
   runs as for a bearer; a second router under the same prefix keeps the
   user the ticket resolved. Reused, expired, another path, another login
   or a non-GET is a 401, and `errorMiddleware` answers a ticketed GET with
-  a small page saying why, never JSON. Reloading such a tab is refused
-  (the ticket is spent): print again from G-CORE.
+  a small page saying why, never JSON. Reloading such a tab after the
+  minute is refused (the ticket is spent): print again from G-CORE.
 - **Shared web pieces from Phase 10**: `PeoplePicker` (pure UI over
   `{ id, name, sub?, group? }[]`), `MeetLink`, `SettingListCard` (the
   `/hr-settings/lists/:key` editor), `RecordHeader`'s `statusExtra`,
