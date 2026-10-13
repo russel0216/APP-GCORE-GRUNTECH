@@ -3803,9 +3803,11 @@ async function main() {
     );
     check('the signature is dated the submit instant itself', tlReq.actions[0]?.actedAt.getTime() === tlReq.createdAt.getTime());
     const tlPaper = await paperOf(String(tlQuote.body.id), tlRev.id, managerToken);
+    // One name per person on paper (2026-10-13): the preparer's own step is
+    // their Prepared by, so the Team Leader slot is not printed again.
     check(
-      'its PDF prints Prepared by and the Team Leader step with ONE timestamp, nothing Pending',
-      timesIn(tlPaper, tlReq.createdAt) >= 2 && !tlPaper.includes('Pending'),
+      'its PDF prints the preparer once — Prepared by at the submit instant, no Team Leader slot, nothing Pending',
+      timesIn(tlPaper, tlReq.createdAt) === 1 && !tlPaper.includes('TEAM LEADER') && !tlPaper.includes('Pending'),
       `${formatDateTime(tlReq.createdAt)} ×${timesIn(tlPaper, tlReq.createdAt)}`,
     );
 
@@ -3853,8 +3855,12 @@ async function main() {
     );
     const ceoHalf = await paperOf(String(ceoQuote.body.id), ceoRev.id, ceoToken);
     check(
-      'halfway, its PDF prints the CEO once as preparer and once as approver under one timestamp, the Team Leader Pending',
-      timesIn(ceoHalf, ceoReq.createdAt) >= 2 && ceoHalf.includes('Pending') && ceoHalf.includes(sitLeader.name),
+      'halfway, its PDF prints the CEO once, as Prepared by — not again under CEO / President — and the Team Leader Pending',
+      timesIn(ceoHalf, ceoReq.createdAt) === 1 &&
+        !ceoHalf.includes('CEO / PRESIDENT') &&
+        ceoHalf.includes('TEAM LEADER') &&
+        ceoHalf.includes('Pending') &&
+        ceoHalf.includes(sitLeader.name),
       `${formatDateTime(ceoReq.createdAt)} ×${timesIn(ceoHalf, ceoReq.createdAt)}`,
     );
     const ceoCanAct = async (token: string) =>
@@ -3873,9 +3879,44 @@ async function main() {
     );
     const ceoPaper = await paperOf(String(ceoQuote.body.id), ceoRev.id, ceoToken);
     check(
-      'and the signed PDF keeps the one timestamp, nothing Pending',
-      timesIn(ceoPaper, ceoReq.createdAt) >= 2 && !ceoPaper.includes('Pending') && ceoPaper.includes(sitLeader.name),
+      'and the signed PDF keeps the one timestamp, the Team Leader signed, nothing Pending',
+      ceoPaper.split(ceo.name).length - 1 === 1 && !ceoPaper.includes('CEO / PRESIDENT') && !ceoPaper.includes('Pending') && ceoPaper.includes(sitLeader.name),
     );
+
+    // An approver holding both steps signs both with one Approve, and the
+    // paper names them once — under Team Leader (2026-10-13, the owner's call).
+    const ceoRole = await prisma.role.findUniqueOrThrow({ where: { key: 'ceo' } });
+    await prisma.userRole.create({ data: { userId: manager.id, roleId: ceoRole.id } });
+    try {
+      const both = await http(salesToken, 'POST', '/quotations', {
+        customerId: clinic.id,
+        subject: `${TAG} Leader who is CEO`,
+        lines: [{ group: `${TAG} Installation`, title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 2_000_000 }],
+      });
+      const bothRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(both.body.id) } });
+      const bothDraft = await paperOf(String(both.body.id), bothRev.id, salesToken);
+      check(
+        'a draft whose Team Leader is also the CEO / President prints them once, under Team Leader',
+        bothDraft.includes('TEAM LEADER') && !bothDraft.includes('CEO / PRESIDENT') && bothDraft.split(manager.name).length - 1 === 1,
+      );
+      await http(salesToken, 'POST', `/quotations/${both.body.id}/revisions/${bothRev.id}/submit`);
+      const bothReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'quotation', documentId: bothRev.id, status: 'PENDING' } });
+      await act({ requestId: bothReq.id, userId: manager.id, action: 'APPROVED' });
+      const bothDone = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: bothReq.id }, include: { actions: true } });
+      const bothPaper = await paperOf(String(both.body.id), bothRev.id, salesToken);
+      check(
+        'approved with one Approve (the CEO / President step co-signed), the paper names them once, under Team Leader',
+        bothDone.status === 'APPROVED' &&
+          bothDone.actions.length === 2 &&
+          bothPaper.split(manager.name).length - 1 === 1 &&
+          bothPaper.includes('TEAM LEADER') &&
+          !bothPaper.includes('CEO / PRESIDENT') &&
+          !bothPaper.includes('Pending'),
+        `${bothDone.status} ${bothDone.actions.length}`,
+      );
+    } finally {
+      await prisma.userRole.deleteMany({ where: { userId: manager.id, roleId: ceoRole.id } });
+    }
 
     // A stand-in: the approver's manager may decide the step from the
     // document — never listed, never told, never queued.

@@ -1052,6 +1052,37 @@ export function slotSignatories(slots: ApprovalSlot[]): Signatory[] {
   });
 }
 
+/**
+ * One name per person on paper (2026-10-13, the owner's call for the
+ * quotation: "any name with multiple roles … is one name only"). The slots
+ * to print after the document's own "Prepared by" (`preparerId`): a step
+ * signed by somebody already on the paper is left out — the preparer's own
+ * steps (signed at submit, or named on a draft's preview) are their
+ * Prepared by, an approver's co-signed steps their first signature — and so
+ * is an open step that somebody already on it may sign. Only what
+ * is PRINTED changes: the request keeps every signature, and the Approval
+ * panel still shows each step.
+ */
+export function onePerPerson(slots: ApprovalSlot[], preparerId: string): ApprovalSlot[] {
+  const seen = new Set<string>([preparerId]);
+  const kept: ApprovalSlot[] = [];
+  for (const slot of slots) {
+    if (slot.name) {
+      if (slot.userId && seen.has(slot.userId)) continue;
+      if (slot.userId) seen.add(slot.userId);
+    } else {
+      // Somebody already on the paper who may sign this step will sign it
+      // with their own earlier signature (`act()` co-signs every later step
+      // the decider holds), so it is not printed again.
+      const who = slot.assigned ?? [];
+      if (who.some((p) => seen.has(p.id))) continue;
+      if (who.length === 1) seen.add(who[0].id);
+    }
+    kept.push(slot);
+  }
+  return kept;
+}
+
 /** One step of a document's sign-off block. */
 export interface ApprovalSlot {
   step: string;
@@ -1063,6 +1094,8 @@ export interface ApprovalSlot {
   at?: Date;
   /** A step still open: who may yet sign it (never the requester). */
   assigned?: StepPerson[];
+  /** Who signed it — set with `name`. */
+  userId?: string;
   /** Signed by the preparer at submit (`preparerSigns`), at the submit instant. */
   selfSigned?: boolean;
   /** Signed with the same approver's Approve on an earlier step, at that instant. */
@@ -1140,6 +1173,7 @@ export async function approvalSlots(documentType: string, documentId: string, dr
       if (a) {
         return {
           step: st.name,
+          userId: a.approverId,
           name: a.approver.name,
           position: a.approver.position ?? undefined,
           phone: contactPhone(a.approver),

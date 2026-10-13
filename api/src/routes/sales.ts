@@ -32,6 +32,7 @@ import {
   routeBrief,
   mayDecide,
   preparedAt,
+  onePerPerson,
   slotSignatories,
 } from '../shared/approvals';
 import {
@@ -3350,7 +3351,14 @@ export async function quotationPrintData(
       // (a Team Leader's own quotation): one timestamp for both (2026-10-12).
       at: preparedAt(slots) ?? revision.createdAt,
     },
-    ...(revision.importedUnchanged ? [] : slots.length ? slotSignatories(slots) : await unroutedApproval(revision)),
+    // Each person once (`onePerPerson`): a Team Leader who is also CEO /
+    // President signs under Team Leader alone, and the author's own steps
+    // are their "Prepared by".
+    ...(revision.importedUnchanged
+      ? []
+      : slots.length
+        ? slotSignatories(onePerPerson(slots, owner.id))
+        : await unroutedApproval(revision)),
   ];
 
   return {
