@@ -84,6 +84,10 @@ const ROLES: RoleSeed[] = [
       'gops.projects.view_all',
       // A partner's catalogue and price list are what a salesperson sells from.
       'gops.partners.view_all',
+      // "Add … as a new supplier" from a quotation line's cost cell
+      // (2026-10-13, the owner's call): the supplier is filed by name, the
+      // rest filled on its page by procurement later.
+      'gchain.suppliers.create',
       // Sales takes the service call and raises the job order for it.
       ...VIEW_OWN_SELF('gops', 'job_orders'),
       // And asks the design team for a drawing (2026-10-09).
@@ -111,6 +115,8 @@ const ROLES: RoleSeed[] = [
     only: [
       'gops.dashboard.view_all',
       'gops.projects.view_all',
+      // A supplier not on file, added from a quotation line (2026-10-13).
+      'gchain.suppliers.create',
       // The pipeline analytics are their own numbers, seen whole.
       'insights.pipeline.view_all',
       'insights.pipeline.export',

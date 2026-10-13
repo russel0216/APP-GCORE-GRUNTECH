@@ -86,6 +86,7 @@ import '../src/routes/sales';
 import { leadListSummary, leadListWhere, printableQuotation, quotationListSummary, quotationListWhere, quotationPrintData } from '../src/routes/sales';
 import { capsParts, markUnchangedScoroImports, upperText } from '../src/shared/quotation';
 import { upperText as webUpperText } from '../../web/src/lib/caps';
+import { withSupplierNote } from '../../web/src/lib/supplierNote';
 import { deleteGroup, deletedGroupKeys, setDeletedGroupKeys } from '../src/shared/quotationGroups';
 import { documentAddress } from '../src/shared/customerAddress';
 import { salesOrderListSummary, salesOrderListWhere } from '../src/routes/salesOrders';
@@ -2549,6 +2550,22 @@ async function main() {
       JSON.stringify(samples.map(upperText)),
     );
     check('the web’s copy capitalises exactly as the server does', samples.every((t) => webUpperText(t) === upperText(t)));
+    // The cost cell's supplier not on file (2026-10-13, the owner's call).
+    check(
+      'a supplier not on file is kept on the line as "Supplier: X", before the note there, and only once',
+      withSupplierNote('', ' Acme Pumps ') === 'Supplier: Acme Pumps' &&
+        withSupplierNote('freight extra', 'Acme Pumps') === 'Supplier: Acme Pumps — freight extra' &&
+        withSupplierNote('Supplier: Acme Pumps — freight extra', 'acme pumps') === 'Supplier: Acme Pumps — freight extra',
+    );
+    const sellingRoles = await prisma.role.findMany({
+      where: { key: { in: ['sales', 'sales_manager', 'team_leader', 'industry_specialist'] } },
+      select: { key: true, permissions: { select: { permission: { select: { key: true } } } } },
+    });
+    check(
+      'the selling roles may add a supplier from a quotation line (gchain.suppliers.create; run the seed if this fails)',
+      sellingRoles.length === 4 && sellingRoles.every((r) => r.permissions.some((p) => p.permission.key === 'gchain.suppliers.create')),
+      sellingRoles.filter((r) => !r.permissions.some((p) => p.permission.key === 'gchain.suppliers.create')).map((r) => r.key).join(),
+    );
     const parts = capsParts({ brand: ' schneider electric ', productType: 'circuit breaker', partNumber: '' });
     check(
       'a line’s Brand, Product type and Part number are stored in capitals, an empty one null',

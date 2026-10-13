@@ -3163,6 +3163,17 @@ SCORO.
   total ÷ quantity to the centavo (`CostCell` keeps the typed total while
   the box has focus and shows the derived one after); only the unit cost
   is sent and the server derives the amount, as before.
+  **A supplier not on file** (2026-10-13, the owner's call): once the
+  provider lookup has answered for what is typed, the menu ends with
+  "add “X” as a new supplier" for a `gchain.suppliers.create` holder (the
+  ordinary `POST /suppliers { name }`, then picked — the seed gives the
+  right to sales, sales managers, team leaders and industry specialists),
+  else "keep “X” as a note on this line", which writes `Supplier: X` into
+  the line's cost note (`withSupplierNote()`, `web/src/lib/supplierNote.ts`,
+  the SCORO import's words) and adds nothing to the master; "could not be
+  listed" when the lookup failed — SupplierPicker's rules, in
+  `ProviderLookup` (`editorParts.tsx`), so the sales order editor has it
+  too.
 
 ## Quotation groups (2026-10-06; required since 2026-10-08)
 
