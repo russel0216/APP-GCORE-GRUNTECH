@@ -206,6 +206,9 @@ const ROLES: RoleSeed[] = [
       'gops.customers.view_all',
       'gops.projects.view_all',
       'gops.plans.view_all',
+      // The first signature on every Request for Approval, and a preparer of
+      // them too (2026-10-13).
+      ...VIEW_OWN_SELF('gops', 'plans'),
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       ...VIEW_OWN_SELF('ghr', 'meetings'),
@@ -298,10 +301,12 @@ const ROLES: RoleSeed[] = [
   {
     key: 'project_engineer',
     name: 'Project Engineer',
-    description: 'Executes the work: progress reports, purchase requests, plans — and costs the work (the costing route starts with an engineer)',
+    description: 'Executes the work: progress reports, purchase requests, requests for approval — and costs the work (the costing route starts with an engineer)',
     only: [
       'gops.projects.view_all',
       'gops.plans.view_all',
+      // Sends the project's drawings for approval (2026-10-13).
+      ...VIEW_OWN_SELF('gops', 'plans'),
       // The costing route's creator (2026-10-09, the owner's call): an
       // engineer raises and edits their own costings.
       ...VIEW_OWN_SELF('gops', 'costing'),
@@ -810,6 +815,36 @@ const WORKFLOWS: WorkflowSeed[] = [
     steps: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+  },
+  // REQUEST FOR APPROVAL (2026-10-13, the owner's call: "Internal Approval
+  // (Technical Manager, Team Leader and CEO more than 1 million Project
+  // Costing)"): a project's drawing or document, decided by the Technical
+  // Manager, then the preparer's Team Leader, and the CEO / President too
+  // when the PROJECT's contract value is above ₱1,000,000 (the amount the
+  // submit snapshots). The costing's two switches: a preparer who holds a
+  // step signs it at submit, and a manager may stand in.
+  {
+    documentType: 'plan_approval',
+    name: 'Request for Approval — technical manager, team leader',
+    maxAmount: 1_000_000,
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+  },
+  {
+    documentType: 'plan_approval',
+    name: 'Request for Approval — technical manager, team leader, then CEO / President over ₱1,000,000',
+    minAmount: 1_000_000.01,
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 3, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   // ── The owner's routing sheet (2026-10-12) ─────────────────────────────
@@ -1364,6 +1399,14 @@ async function main() {
         `  · Withdrew ${withdrawn.length} approval request(s) left open on quotation revisions no longer awaiting approval: ${withdrawn.join(', ')}`,
       );
     }
+  }
+
+  // A plan registered before 2026-10-13 waited "for approval" with no route
+  // behind it; it is a draft Request for Approval now, for its requester to
+  // send. A second run moves none.
+  {
+    const { count } = await prisma.approvedPlan.updateMany({ where: { status: 'FOR_APPROVAL' }, data: { status: 'DRAFT' } });
+    if (count) console.log(`  · ${count} plan(s) registered before Requests for Approval are drafts now, for their requesters to send`);
   }
 
   // The Quotation Groups master (Admin › Categories) starts from the groups

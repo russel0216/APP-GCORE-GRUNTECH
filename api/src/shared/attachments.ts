@@ -83,9 +83,10 @@ export const cadUpload = multer({
   fileFilter: accept,
 });
 
-/** Which uploads take the CAD ceiling: the files on a CAD job order, its revisions and its comments. */
+/** Which uploads take the CAD ceiling: the files on a CAD job order, its revisions and its comments, and a Request for Approval's. */
 export function isCadEntity(entityType: string): boolean {
-  return entityType === 'cad_job_order' || entityType === 'cad_revision' || entityType === 'cad_comment';
+  // A Request for Approval (`approved_plan`, 2026-10-13) carries drawings too.
+  return entityType === 'cad_job_order' || entityType === 'cad_revision' || entityType === 'cad_comment' || entityType === 'approved_plan';
 }
 
 export interface SaveAttachmentInput {

@@ -2198,23 +2198,48 @@ model ProgressBillingLine {
 }
 
 enum PlanStatus {
-  FOR_APPROVAL
+  /// Being prepared; Submit for approval routes it (2026-10-13).
+  DRAFT
+  PENDING_APPROVAL
   APPROVED
+  /// A later request on the same drawing reference was approved.
   SUPERSEDED
+  /// Before 2026-10-13 only (a plan registered and approved by hand); the
+  /// seed moves any left to DRAFT.
+  FOR_APPROVAL
   REJECTED
+  CANCELLED
 }
 
-/// "Approved Plan — documents, approved plan required attachments or time
-/// stamp." Work should not start on an unapproved plan (model §4.2).
+/// The REQUEST FOR APPROVAL (2026-10-13, the owner's call: "replace the
+/// Approved Plans with Request for Approval … Internal Approval (Technical
+/// Manager, Team Leader and CEO more than 1 million) … Drawing Reference
+/// Number (it could come from a CAD J.O.)"). The table keeps its old name and
+/// keys (`gops.plans.*`); it is a routed document now — submitted through
+/// `shared/approvals.ts` as `plan_approval`, never approved by hand.
+/// "Work should not start on an unapproved plan" (model §4.2).
 model ApprovedPlan {
   id         String     @id @default(cuid())
+  /// RFA number (`nextNumber('plan_approval')`); null on a plan registered
+  /// before 2026-10-13 until it is submitted. Indexed, not @unique: adding a
+  /// unique constraint to an existing table makes `prisma db push` stop for
+  /// confirmation, and the server's deploy runs it unattended — nextNumber
+  /// never issues a number twice.
+  number     String?
   jobId      String
   job        Job        @relation(fields: [jobId], references: [id], onDelete: Cascade)
   title      String
+  /// What is asked to be approved.
+  description String?
+  /// The drawing reference number — typed, or a CAD J.O.'s number and revision.
   drawingNo  String?
   revision   String     @default("0")
   discipline String?
-  status     PlanStatus @default(FOR_APPROVAL)
+  status     PlanStatus @default(DRAFT)
+  /// The project's contract value, snapshotted at submit — the amount band
+  /// that adds the CEO / President above ₱1,000,000.
+  amount     Decimal?   @db.Decimal(18, 2)
+  cancelReason String?
 
   submittedAt DateTime?
   approvedAt  DateTime?
@@ -2231,6 +2256,7 @@ model ApprovedPlan {
   updatedAt DateTime @updatedAt
 
   @@index([jobId])
+  @@index([number])
 }
 
 enum TaskStatus {

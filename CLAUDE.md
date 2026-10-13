@@ -2275,13 +2275,16 @@ Designer Support; the output is always a PDF for the requestor".
   admins are not designers). **Attachment guards** on the three entity
   types apply the request's own visibility (`mayOpen`: view_all, or the
   requestor or the designer on it).
-- **One click files the accepted revision as an Approved Plan** on the
-  linked project (`POST /:id/file-plan`, once, `CadJobOrder.approvedPlanId`
-  unique): a FOR_APPROVAL plan with the request's number as drawing number,
-  `R<n>` as revision, the drawing type as discipline, and the revision's
-  files COPIED onto `approved_plan` — a copy, because deleting an attachment
-  row unlinks its bytes and the revision keeps its own. The plan is then the
-  project's to approve, as any other.
+- **One click raises the accepted revision as a Request for Approval** on
+  the linked project ("Raise request for approval"; `POST /:id/file-plan`,
+  once, `CadJobOrder.approvedPlanId` unique, claimed on null): a numbered
+  DRAFT request with the CAD J.O.'s number as its drawing reference, `R<n>`
+  as revision, the drawing type as discipline, and the revision's files
+  COPIED onto `approved_plan` — a copy, because deleting an attachment row
+  unlinks its bytes and the revision keeps its own. `requestFromCad()` in
+  `routes/planApprovals.ts` is the one way, shared with the request form's
+  "From a CAD J.O."; the page opens the new request for its requester to
+  submit.
 - **Drawing types are data** (`CadDrawingType`, Admin › Categories ›
   Drawing types, `/reference/cad-drawing-types`, `admin.categories.*` to
   change, anyone signed in to read): `CAD_DRAWING_TYPES` in
@@ -4103,8 +4106,8 @@ tab inside a project, and the Projects page keeps them one click away
   routes check `gchain.purchase_requests.*`, but the project's Purchase
   Requisition tab and its routes in `App.tsx` are guarded by
   `gops.purchase_requests.*`. verify-foundation lists the hidden entries.
-- **A project's tabs are, in order**: Overview, Meetings & Records, Approved
-  Plans, Budget Monitoring, Purchase Requisition, Budget Requests, Scope of
+- **A project's tabs are, in order**: Overview, Meetings & Records, Request
+  for Approval (the `plans` key), Budget Monitoring, Purchase Requisition, Budget Requests, Scope of
   Work (Gantt), Progress & Billing — then Finance and Service, which hold the
   invoices and the turnover register and belong nowhere else. `TAB_ALIASES`
   in `ProjectWorkspace.tsx` keeps every old `?tab=` landing: `billing` →
@@ -4135,6 +4138,68 @@ tab inside a project, and the Projects page keeps them one click away
   nobody's hand work (`{ created, skipped }`); a planned line's dates become
   its tasks' span, which the planned S-curve reads. Audited. Needs a start
   date, and says so.
+
+## Request for Approval (2026-10-13)
+
+The owner's call: "replace the Approved Plans with Request for Approval — a
+form with internal approval (Technical Manager, Team Leader and the CEO more
+than 1 million project costing) and a Drawing Reference Number (it could be
+from a CAD J.O.)". `routes/planApprovals.ts` (`/api/plans`),
+`pages/delivery/PlanApprovals.tsx`.
+
+- **The record is the old `ApprovedPlan`, routed now.** Its table and keys
+  stay (`gops.plans.*` OWNED; the registry label, the project tab and the
+  register say "Request for Approval"; `/g-ops/plans` and `?tab=plans`
+  hold), with `number` (numbering type `plan_approval`, GT-RFA-2026-0001 —
+  indexed, not @unique, because a unique constraint on an existing table
+  stops the server's unattended `db push`), `description`, `amount`,
+  `cancelReason`, and the statuses DRAFT → PENDING_APPROVAL → APPROVED,
+  SUPERSEDED, CANCELLED (FOR_APPROVAL is the old registered-by-hand state:
+  the seed moves any left to DRAFT; REJECTED is history). The requester is
+  `uploadedById`. **Nobody approves one by hand**: the old `PATCH
+  /jobs/:jobId/plans/:planId { status }` and its POST/DELETE are gone.
+- **The route is the engine's `plan_approval`** (rule 2): seeded "Request
+  for Approval — technical manager, team leader" (up to ₱1,000,000) and
+  "… then CEO / President over ₱1,000,000" (`minAmount` 1,000,000.01),
+  both `preparerSigns` and `standIns` as the costing's. The amount is the
+  PROJECT's contract value, snapshotted onto `amount` at submit.
+  `POST /plans/:id/submit` claims DRAFT, numbers a legacy row, refuses with
+  no file attached, files the request in the requester's name and goes back
+  to DRAFT if the engine refuses; `/withdraw` pulls a pending one back
+  (`cancelOpenRequest`, same transaction); `/cancel { reason }` cancels a
+  draft or a pending one; `DELETE` takes a draft or a cancelled one
+  (`gops.plans.delete` + `canEditRecord`), its files and its CAD link with
+  it. `settlePlanApproval()` claims PENDING → APPROVED (dated, `approvedBy`
+  the last signer) and SUPERSEDES an earlier approved request on the same
+  project and drawing reference (case-blind); a return or a rejection goes
+  back to DRAFT; a decision after a cancel is "not applied". The Technical
+  Manager and the project engineer raise them (`VIEW_OWN_SELF('gops',
+  'plans')`); `audit-workflows.ts` knows.
+- **Reading one**: `view_all`, its requester, or — through
+  `requireAnyOrDecider` — whoever may decide its open request (a Team
+  Leader or the CEO with no right to the module). The files are attachments
+  on `approved_plan` with a guard: read as the request, written only on a
+  draft by whoever may edit it — what the approvers decide on is what they
+  were sent. A request takes drawing files (DWG and the rest, the CAD
+  ceiling: `isCadEntity`).
+- **The page** `/g-ops/plans/:id` (no Guard — the API decides): RecordHeader
+  (Submit for approval, Print, ⋯ Pull back / Cancel request / Delete,
+  Modify on a draft), "Submit for approval sends it to …" on a draft
+  (`approvalRoute`, `previewSteps`), the `DocumentApproval` panel once sent,
+  The request card and the Drawings and documents card. **The paper**
+  "Request for Approval" through `renderDocument`: the project, the drawing
+  reference, the request, Requested by and one slot per step
+  (`approvalSlots`, a draft printing the route it would take), and the files
+  behind it (`withAttachments`, `?attachments=0` bare). **The register**
+  `/g-ops/plans` is a DataList over `planListWhere()` with its paper
+  `GET /plans/pdf`; a project's tab lists its own from `GET /jobs/:id`'s
+  `plans`.
+- **The form** ("+ New request for approval" on the tab, Modify on a
+  draft): what is to be approved, description, drawing reference number,
+  revision, discipline, notes — or **From a CAD J.O.**
+  (`GET /plans/cad-options?jobId=`: the project's accepted drawings not yet
+  raised), which takes the reference and copies the files through
+  `requestFromCad()`.
 
 ## Spreadsheet attachments (2026-10-05)
 

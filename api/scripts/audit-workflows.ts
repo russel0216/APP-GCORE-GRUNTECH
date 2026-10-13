@@ -33,6 +33,9 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   // The costing route starts with an engineer (2026-10-09); sales and the
   // project managers still cost work too, and a Technical Manager may.
   costing: ['project_engineer', 'sales', 'sales_manager', 'project_manager', 'technical_manager', 'team_leader'],
+  // A project's drawings sent for internal approval (2026-10-13): the
+  // engineers and managers on the project raise them, a Technical Manager may.
+  plan_approval: ['project_engineer', 'project_manager', 'technical_manager'],
   // Admin Back Support and the Purchasing Manager prepare them (2026-10-13).
   purchase_order: ['back_support', 'purchasing_manager', 'procurement'],
   expense: ['employee', 'project_engineer', 'sales'],

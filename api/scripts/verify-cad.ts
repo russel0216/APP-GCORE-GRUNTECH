@@ -343,8 +343,14 @@ async function main() {
   const editClosed = await http(requestorT, 'PATCH', `/cad-job-orders/${id}`, { title: `${TAG} renamed` });
   check('a completed request is a record — no edits', editClosed.status === 403, String(editClosed.status));
 
+  const final0Number = String((await http(leadT, 'GET', `/cad-job-orders/${id}`)).body.number);
   const filed = await http(requestorT, 'POST', `/cad-job-orders/${id}/file-plan`, { discipline: 'Mechanical' });
   check('the accepted revision files as an Approved Plan on the project', filed.status === 201 && filed.body.revision === 'R1' && filed.body.jobId === job.id, filed.text.slice(0, 300));
+  check(
+    'it is a numbered DRAFT Request for Approval (2026-10-13), its drawing reference the request\'s own number — for its requester to submit',
+    filed.body.status === 'DRAFT' && /RFA/.test(String(filed.body.number)) && filed.body.drawingNo === final0Number,
+    `${filed.body.status} ${filed.body.number} ${filed.body.drawingNo}`,
+  );
   const planFiles = await prisma.attachment.findMany({ where: { entityType: 'approved_plan', entityId: String(filed.body.id) } });
   const r1Files = await prisma.attachment.findMany({ where: { entityType: 'cad_revision', entityId: String(revision1.body.id) } });
   check('its files are COPIES of R1’s — the revision keeps its own', planFiles.length === r1Files.length && planFiles.every((p) => !r1Files.some((r) => r.storedName === p.storedName)) && planFiles.every((p) => fs.existsSync(attachmentPath(p.storedName))));

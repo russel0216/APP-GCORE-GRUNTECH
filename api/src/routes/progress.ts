@@ -1215,106 +1215,15 @@ billingRoutes.get(
 );
 
 // ════════════════════════════════════════════════════════════════════
-//  APPROVED PLANS  &  TASKS
+//  TASKS (a project's Requests for Approval live in routes/planApprovals.ts)
 // ════════════════════════════════════════════════════════════════════
 
 export const planRoutes = Router();
 planRoutes.use(authenticate);
 
-planRoutes.post(
-  '/:jobId/plans',
-  require_('gops.plans.create'),
-  handler(async (req, res) => {
-    const me = currentUser(req);
-    const body = parseBody(
-      z.object({
-        title: z.string().trim().min(2),
-        drawingNo: z.string().trim().optional().nullable(),
-        revision: z.string().trim().default('0'),
-        discipline: z.string().trim().optional().nullable(),
-        notes: z.string().optional().nullable(),
-      }),
-      req.body,
-    );
-
-    const plan = await prisma.approvedPlan.create({
-      data: {
-        jobId: req.params.jobId,
-        title: body.title,
-        drawingNo: body.drawingNo || null,
-        revision: body.revision,
-        discipline: body.discipline || null,
-        notes: body.notes || null,
-        uploadedById: me.id,
-        submittedAt: new Date(),
-      },
-    });
-    await audit(
-      { entityType: 'job', entityId: req.params.jobId, action: 'UPDATED', summary: `Added plan ${plan.title}` },
-      req,
-    );
-    res.status(201).json(plan);
-  }),
-);
-
-planRoutes.patch(
-  '/:jobId/plans/:planId',
-  require_('gops.plans.edit_all'),
-  handler(async (req, res) => {
-    const me = currentUser(req);
-    const body = parseBody(
-      z.object({
-        status: z.enum(['FOR_APPROVAL', 'APPROVED', 'SUPERSEDED', 'REJECTED']).optional(),
-        notes: z.string().optional().nullable(),
-      }),
-      req.body,
-    );
-    const plan = await prisma.approvedPlan.findFirst({
-      where: { id: req.params.planId, jobId: req.params.jobId },
-    });
-    if (!plan) throw notFound('Plan not found');
-
-    const updated = await prisma.approvedPlan.update({
-      where: { id: plan.id },
-      data: {
-        ...(body.status !== undefined
-          ? {
-              status: body.status,
-              approvedAt: body.status === 'APPROVED' ? new Date() : null,
-              approvedBy: body.status === 'APPROVED' ? me.name : null,
-            }
-          : {}),
-        ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
-      },
-    });
-    await audit(
-      {
-        entityType: 'job',
-        entityId: req.params.jobId,
-        action: body.status === 'APPROVED' ? 'APPROVED' : 'UPDATED',
-        summary: `Plan ${updated.title} — ${updated.status}`,
-      },
-      req,
-    );
-    res.json(updated);
-  }),
-);
-
-planRoutes.delete(
-  '/:jobId/plans/:planId',
-  require_('gops.plans.delete'),
-  handler(async (req, res) => {
-    const plan = await prisma.approvedPlan.findFirst({
-      where: { id: req.params.planId, jobId: req.params.jobId },
-    });
-    if (!plan) throw notFound('Plan not found');
-    if (plan.status === 'APPROVED') {
-      throw badRequest('An approved plan is a record — supersede it instead of deleting it');
-    }
-    await prisma.approvedPlan.delete({ where: { id: plan.id } });
-    res.json({ ok: true });
-  }),
-);
+// The project's drawings are Requests for Approval since 2026-10-13
+// (`routes/planApprovals.ts`, `/api/plans`): raised, submitted and decided
+// through the approval engine — never approved here by hand.
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
 

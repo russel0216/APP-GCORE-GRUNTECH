@@ -4,7 +4,6 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
-  Empty,
   ErrorBox,
   StatusBadge,
   Field,
@@ -1054,41 +1053,3 @@ export function BudgetMonitoring() {
   );
 }
 
-/** Register of approved plans across every project. */
-export function PlansRegister() {
-  const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
-
-  useEffect(() => {
-    // Closed jobs too: an as-built drawing is looked up long after turnover.
-    api.get<typeof jobs>('/jobs/lookup?includeClosed=true').then(setJobs).catch(() => {});
-  }, []);
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <h1>Approved Plans</h1>
-          <p>
-            Plans are registered and approved inside each project, on its Plans tab. Work should not
-            start on an unapproved plan.
-          </p>
-        </div>
-      </div>
-
-      {jobs.length === 0 ? (
-        <div className="card">
-          <Empty title="No projects yet" />
-        </div>
-      ) : (
-        <div className="grid grid-3">
-          {jobs.map((j) => (
-            <Link key={j.id} className="card card-button" to={`/g-ops/projects/${j.id}?tab=plans`}>
-              <div className="mono faint del-small">{j.number}</div>
-              <strong>{j.name}</strong>
-            </Link>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}

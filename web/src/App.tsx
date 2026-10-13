@@ -44,8 +44,8 @@ import {
   ProgressReportDetail,
   BillingDetailPage,
   BudgetMonitoring,
-  PlansRegister,
 } from './pages/delivery/Progress';
+import { PlanApprovalsRegister, PlanApprovalPage } from './pages/delivery/PlanApprovals';
 import { PurchaseRequests, PurchaseRequestDetail } from './pages/chain/PurchaseRequests';
 import {
   Canvasses,
@@ -621,11 +621,13 @@ function Routed() {
         <Route
           path="/g-ops/plans"
           element={
-            <Guard permission="gops.plans.view_all">
-              <PlansRegister />
-            </Guard>
+            <GuardAny permissions={['gops.plans.view_all', 'gops.plans.view_own']}>
+              <PlanApprovalsRegister />
+            </GuardAny>
           }
         />
+        {/* No Guard: an approver standing in may hold no right to the module — the API decides. */}
+        <Route path="/g-ops/plans/:id" element={<PlanApprovalPage />} />
 
         {/* G-CHAIN (Phase 5) */}
         <Route

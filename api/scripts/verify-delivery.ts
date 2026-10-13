@@ -9,6 +9,7 @@
  */
 
 import bcrypt from 'bcryptjs';
+import { PDFDocument } from 'pdf-lib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -21,6 +22,9 @@ import { statusLabel } from '../src/shared/pdf';
 import { curveTicks } from '../../web/src/lib/sCurve';
 // Side-effect import: registers the budget_request approval subscriber.
 import '../src/routes/budgetRequests';
+// …and the Request for Approval's (2026-10-13), whose settle is called directly too.
+import { settlePlanApproval } from '../src/routes/planApprovals';
+import { deleteAttachmentsOf } from '../src/shared/attachments';
 import {
   flat,
   LANDSCAPE,
@@ -79,6 +83,9 @@ async function cleanup() {
   await prisma.budgetRequest.deleteMany({ where: { id: { in: requests.map((r) => r.id) } } });
   await prisma.serviceContract.deleteMany({ where: { job: { name: { startsWith: TAG } } } });
   await prisma.installedAsset.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
+  // A project's Requests for Approval cascade with it; their files on disk do not.
+  const plans = await prisma.approvedPlan.findMany({ where: { job: { name: { startsWith: TAG } } }, select: { id: true } });
+  await deleteAttachmentsOf('approved_plan', plans.map((p) => p.id));
   await prisma.job.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.quotation.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
@@ -1018,6 +1025,146 @@ async function main() {
         JSON.stringify(moved.body.schedule ?? null),
       );
     }
+
+    // (a3) Request for Approval (2026-10-13, the owner's call: "replace the
+    //      Approved Plans with Request for Approval … Technical Manager, Team
+    //      Leader and CEO more than 1 million"). Raised as a draft, sent with
+    //      its drawing through the one engine, decided by the route; the
+    //      project's contract value (₱1,000,000 here) picks the band.
+    console.log('\nRequest for Approval');
+    const rfaTm = await makeUser('Verify Technical Manager', 'tm@verifyd.local', ['technical_manager']);
+    await prisma.user.update({ where: { id: rfaTm.id }, data: { supervisorId: pm.id } });
+    const rfaEngToken = signToken(engineer.id, engineer.email);
+    const rfaTmToken = signToken(rfaTm.id, rfaTm.email);
+    const rfaPmToken = signToken(pm.id, pm.email);
+    const attachRfa = async (token: string, planId: string, name = 'layout.pdf') => {
+      const form = new FormData();
+      form.set('files', new Blob(['%PDF-1.4\n%verify\n'], { type: 'application/pdf' }), name);
+      return (await fetch(`${BASE}/attachments/approved_plan/${planId}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form })).status;
+    };
+    const rfaRequest = (planId: string) =>
+      prisma.approvalRequest.findFirstOrThrow({
+        where: { documentType: 'plan_approval', documentId: planId },
+        orderBy: { createdAt: 'desc' },
+        include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } }, actions: true },
+      });
+    const rfa = await http(rfaEngToken, 'POST', '/plans', {
+      jobId: job.id,
+      title: `${TAG} Pump room layout`,
+      description: 'Layout of the booster pumps and the header',
+      drawingNo: 'ZZ-M-101',
+      revision: 'R0',
+    });
+    const rfaId = String(rfa.body.id ?? '');
+    const rfaRoute = (rfa.body.approvalRoute as { steps: { name: string; approvers: { id: string }[] }[] } | null)?.steps ?? [];
+    check(
+      'an engineer raises a Request for Approval: a numbered DRAFT, the route named before Submit — Technical Manager, then the Team Leader they report to',
+      rfa.status === 201 &&
+        rfa.body.status === 'DRAFT' &&
+        /RFA/.test(String(rfa.body.number)) &&
+        rfaRoute.map((st) => st.name).join(' › ') === 'Technical Manager › Team Leader' &&
+        rfaRoute[1].approvers.some((p) => p.id === pm.id),
+      `${rfa.status} ${rfa.body.number} ${rfaRoute.map((st) => st.name).join(' › ')}`,
+    );
+    const bareSubmit = await http(rfaEngToken, 'POST', `/plans/${rfaId}/submit`);
+    check('nothing is sent without the drawing attached (400)', bareSubmit.status === 400, String(bareSubmit.status));
+    check('the requester attaches the drawing to the draft', (await attachRfa(rfaEngToken, rfaId)) === 201);
+    const rfaSent = await http(rfaEngToken, 'POST', `/plans/${rfaId}/submit`);
+    check(
+      'submitted: pending, with the project’s contract value snapshotted as its amount',
+      rfaSent.status === 200 && rfaSent.body.status === 'PENDING_APPROVAL' && rfaSent.body.amount === 1_000_000,
+      `${rfaSent.status} ${rfaSent.body.status} ${rfaSent.body.amount}`,
+    );
+    check('its files are frozen while it is with the approvers (403)', (await attachRfa(rfaEngToken, rfaId, 'late.pdf')) === 403);
+    const rfaRoute2 = async (amount: number) => (await pickWorkflow('plan_approval', amount))?.steps.map((st) => st.name).join(' › ');
+    check(
+      'up to ₱1,000,000.00 of contract value it takes two signatures; above it the CEO / President signs too',
+      (await rfaRoute2(1_000_000)) === 'Technical Manager › Team Leader' &&
+        (await rfaRoute2(1_000_000.01)) === 'Technical Manager › Team Leader › CEO / President',
+      `${await rfaRoute2(1_000_000)} | ${await rfaRoute2(1_000_000.01)}`,
+    );
+    const rfaReq = await rfaRequest(rfaId);
+    await act({ requestId: rfaReq.id, userId: rfaTm.id, action: 'APPROVED' });
+    const afterTm = await http(rfaEngToken, 'GET', `/plans/${rfaId}`);
+    check('the Technical Manager’s signature alone approves nothing', afterTm.body.status === 'PENDING_APPROVAL', String(afterTm.body.status));
+    await act({ requestId: rfaReq.id, userId: pm.id, action: 'APPROVED' });
+    const rfaApproved = await http(rfaEngToken, 'GET', `/plans/${rfaId}`);
+    check(
+      'the Team Leader’s signature approves it, dated, last signed by them',
+      rfaApproved.body.status === 'APPROVED' && !!rfaApproved.body.approvedAt && rfaApproved.body.approvedBy === 'Verify PM',
+      `${rfaApproved.body.status} ${rfaApproved.body.approvedBy}`,
+    );
+    const rfaPaper = await printed(rfaEngToken, `/plans/${rfaId}/pdf?attachments=0`);
+    const rfaText = flat(rfaPaper.text);
+    check(
+      'the paper is a Request for Approval: the drawing reference, then Requested by, Technical Manager and Team Leader, each signed and dated',
+      rfaPaper.status === 200 &&
+        /Request for Approval/i.test(rfaText) &&
+        rfaText.includes('ZZ-M-101') &&
+        rfaText.includes('REQUESTED BY') &&
+        rfaText.includes('TECHNICAL MANAGER') &&
+        rfaText.includes('TEAM LEADER') &&
+        signedCount(rfaPaper.text) === 3 &&
+        pendingCount(rfaPaper.text) === 0,
+      `${rfaPaper.status} ${signedCount(rfaPaper.text)} signed, ${pendingCount(rfaPaper.text)} pending`,
+    );
+    const rfaWithFiles = await printed(rfaEngToken, `/plans/${rfaId}/pdf`);
+    // The merged paper is pdf-lib's (object streams), so its pages are counted by pdf-lib.
+    const pagesOf = async (bytes: Buffer | null) => (bytes ? (await PDFDocument.load(bytes)).getPageCount() : 0);
+    const [barePages, wholePages] = [await pagesOf(rfaPaper.bytes), await pagesOf(rfaWithFiles.bytes)];
+    check('printed whole, an Attachments page and the drawing follow it', rfaWithFiles.status === 200 && wholePages > barePages, `${wholePages} vs ${barePages}`);
+
+    // A Technical Manager's own request: step 1 is theirs, signed at submit.
+    const rfa2 = await http(rfaTmToken, 'POST', '/plans', { jobId: job.id, title: `${TAG} Pump room layout, R1`, drawingNo: 'zz-m-101', revision: 'R1' });
+    const rfa2Id = String(rfa2.body.id ?? '');
+    await attachRfa(rfaTmToken, rfa2Id);
+    const rfa2Sent = await http(rfaTmToken, 'POST', `/plans/${rfa2Id}/submit`);
+    const rfa2Req = await rfaRequest(rfa2Id);
+    check(
+      'a Technical Manager’s own request is signed at step 1 when submitted, and waits on their Team Leader',
+      rfa2Sent.status === 200 && rfa2Req.currentSequence === 2 && rfa2Req.actions.some((x) => x.sequence === 1 && x.selfSigned),
+      `${rfa2Sent.status} seq=${rfa2Req.currentSequence}`,
+    );
+    await act({ requestId: rfa2Req.id, userId: pm.id, action: 'APPROVED' });
+    const rfaSuperseded = await prisma.approvedPlan.findUniqueOrThrow({ where: { id: rfaId } });
+    const rfaLater = await prisma.approvedPlan.findUniqueOrThrow({ where: { id: rfa2Id } });
+    check(
+      'approving the later revision SUPERSEDES the earlier approval on the same drawing reference (case-blind)',
+      rfaLater.status === 'APPROVED' && rfaSuperseded.status === 'SUPERSEDED',
+      `${rfaLater.status} / ${rfaSuperseded.status}`,
+    );
+
+    // Cancelled while pending, then a decision lands: nothing is applied.
+    const rfa3 = await http(rfaEngToken, 'POST', '/plans', { jobId: job.id, title: `${TAG} Cable tray route`, drawingNo: 'ZZ-E-201' });
+    const rfa3Id = String(rfa3.body.id ?? '');
+    await attachRfa(rfaEngToken, rfa3Id);
+    await http(rfaEngToken, 'POST', `/plans/${rfa3Id}/submit`);
+    const cancelledRfa = await http(rfaEngToken, 'POST', `/plans/${rfa3Id}/cancel`, { reason: 'Wrong drawing attached' });
+    const rfa3Req = await rfaRequest(rfa3Id);
+    check(
+      'cancelling a pending request withdraws its approval request through the engine',
+      cancelledRfa.status === 200 && cancelledRfa.body.status === 'CANCELLED' && rfa3Req.status === 'CANCELLED',
+      `${cancelledRfa.status} ${cancelledRfa.body.status} ${rfa3Req.status}`,
+    );
+    await settlePlanApproval(rfa3Req, 'APPROVED');
+    const rfaLateTrail = await prisma.auditLog.count({ where: { entityType: 'approved_plan', entityId: rfa3Id, summary: { contains: 'not applied' } } });
+    check(
+      'a decision that lands after the cancel changes nothing, and the trail says so',
+      (await prisma.approvedPlan.findUniqueOrThrow({ where: { id: rfa3Id } })).status === 'CANCELLED' && rfaLateTrail === 1,
+      String(rfaLateTrail),
+    );
+    const rfa3Files = await prisma.attachment.findMany({ where: { entityType: 'approved_plan', entityId: rfa3Id } });
+    const rfaDeleted = await http(rfaPmToken, 'DELETE', `/plans/${rfa3Id}`);
+    check(
+      'a cancelled request may be deleted, its files with it',
+      rfaDeleted.status === 200 && (await prisma.approvedPlan.count({ where: { id: rfa3Id } })) === 0 && (await prisma.attachment.count({ where: { id: { in: rfa3Files.map((f) => f.id) } } })) === 0,
+      String(rfaDeleted.status),
+    );
+    const rfaNobody = await makeUser('Verify Nobody', 'nobody@verifyd.local', []);
+    const rfaPeek = await http(signToken(rfaNobody.id, rfaNobody.email), 'GET', `/plans/${rfaId}`);
+    check('someone with no right to it and no step on it does not learn it exists (404)', rfaPeek.status === 404, String(rfaPeek.status));
+    const rfaOldApprove = await http(rfaPmToken, 'PATCH', `/jobs/${job.id}/plans/${rfaId}`, { status: 'APPROVED' });
+    check('the old approve-by-hand route is gone (404)', rfaOldApprove.status === 404, String(rfaOldApprove.status));
 
     // (b) The customer comes from the costing — a mismatch is refused.
     const otherCustomer = await prisma.customer.create({ data: { code: `${TAG}-C2`, name: `${TAG} Other clinic` } });

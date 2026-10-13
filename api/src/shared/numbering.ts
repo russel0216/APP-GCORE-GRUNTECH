@@ -72,6 +72,8 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   { type: 'costing', code: 'COST', label: 'Costing' },
   { type: 'project', code: 'PRJ', label: 'Project' },
   { type: 'budget_request', code: 'BR', label: 'Budget Request' },
+  // A project's drawing or document sent for internal approval (2026-10-13).
+  { type: 'plan_approval', code: 'RFA', label: 'Request for Approval' },
   { type: 'purchase_request', code: 'PR', label: 'Purchase Request' },
   { type: 'canvass', code: 'RFQ', label: 'Canvass / RFQ' },
   { type: 'purchase_order', code: 'PO', label: 'Purchase Order' },

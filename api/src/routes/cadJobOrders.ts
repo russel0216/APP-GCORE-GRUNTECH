@@ -2,7 +2,6 @@ import { Router } from 'express';
 import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { Prisma, CadJobOrderStatus, CadPriority } from '@prisma/client';
 import { prisma } from '../prisma';
 import { env } from '../env';
@@ -27,11 +26,12 @@ import { mailConfig, sendMail } from '../shared/mail';
 import { renderDocument, formatDate, formatShortDate, formatDateTime, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { contactsOf } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
-import { registerAttachmentGuard, cadUpload, saveAttachment, attachmentPath, deleteAttachmentsOf } from '../shared/attachments';
+import { registerAttachmentGuard, cadUpload, saveAttachment, deleteAttachmentsOf } from '../shared/attachments';
 import { dayKey } from '../shared/aftermarket';
 import { safeHttpUrl } from '../shared/partners';
 import { LIST_CAP, listReference, rangeNamed, namedInFilter, filterDay, dayOf, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { requestFromCad } from './planApprovals';
 
 /**
  * CAD job orders — the design team's queue (2026-10-09, the owner's call:
@@ -93,7 +93,7 @@ const cadInclude = {
   requestedBy: person,
   assignedTo: person,
   completedBy: { select: { id: true, name: true } },
-  approvedPlan: { select: { id: true, title: true, drawingNo: true, revision: true, status: true } },
+  approvedPlan: { select: { id: true, number: true, title: true, drawingNo: true, revision: true, status: true } },
   revisions: { select: { sequence: true, submittedAt: true }, orderBy: { sequence: 'desc' as const }, take: 1 },
   _count: { select: { revisions: true, comments: true } },
 } satisfies Prisma.CadJobOrderInclude;
@@ -995,14 +995,15 @@ cadJobOrderRoutes.post(
   }),
 );
 
-// ── Hand-off: file the accepted revision as an Approved Plan ────────────────
+// ── Hand-off: raise the accepted revision as a Request for Approval ─────────
 
 /**
- * One click files the accepted revision on the linked project's Approved
- * Plans (the owner's call): a plan row FOR_APPROVAL with the drawing number
- * and revision carried over, and the revision's files copied onto it — a
- * copy, because deleting an attachment row removes its bytes from disk, and
- * the revision keeps its own. The plan is then the project's to approve.
+ * One click raises the accepted revision as a Request for Approval on the
+ * linked project (2026-10-13; "file as approved plan" before): a DRAFT
+ * request with the request's number as the drawing reference, `R<n>` as the
+ * revision and the revision's files copied onto it — `requestFromCad()`, the
+ * same function the request form's "From a CAD J.O." uses. The requester then
+ * submits it on its own page, where the approval route decides it.
  */
 cadJobOrderRoutes.post(
   '/:id/file-plan',
@@ -1012,7 +1013,7 @@ cadJobOrderRoutes.post(
     const body = parseBody(
       z.object({
         title: z.string().trim().min(2).max(300).optional().nullable(),
-        drawingNo: z.string().trim().max(80).optional().nullable(),
+        description: z.string().trim().max(5000).optional().nullable(),
         discipline: z.string().trim().max(80).optional().nullable(),
       }),
       req.body,
@@ -1021,45 +1022,21 @@ cadJobOrderRoutes.post(
     if (!flags(me, row).canFilePlan) {
       throw badRequest(
         row.approvedPlanId
-          ? 'This drawing is already filed on the project'
+          ? 'This drawing has already been raised for approval'
           : !row.jobId
             ? 'Link the request to a project first'
             : row.status !== 'COMPLETED'
-              ? 'Only an accepted drawing is filed as an approved plan'
-              : 'Only whoever raised this request, its designer or the Designer Lead files it',
+              ? 'Only an accepted drawing is raised for approval'
+              : 'Only whoever raised this request, its designer or the Designer Lead raises it for approval',
       );
     }
-    const latest = await prisma.cadRevision.findFirst({ where: { cadJobOrderId: row.id }, orderBy: { sequence: 'desc' } });
-    if (!latest) throw badRequest('There is no revision to file');
-    const files = await prisma.attachment.findMany({ where: { entityType: 'cad_revision', entityId: latest.id } });
-
-    const plan = await prisma.$transaction(async (tx) => {
-      const made = await tx.approvedPlan.create({
-        data: {
-          jobId: row.jobId!,
-          title: body.title?.trim() || row.title,
-          drawingNo: body.drawingNo?.trim() || row.number,
-          revision: `R${latest.sequence}`,
-          discipline: body.discipline?.trim() || row.drawingType?.name || null,
-          notes: `Filed from CAD job order ${row.number}: ${latest.note}`,
-          uploadedById: me.id,
-          submittedAt: new Date(),
-        },
-      });
-      await tx.cadJobOrder.update({ where: { id: row.id }, data: { approvedPlanId: made.id } });
-      return made;
+    const { plan, revision } = await requestFromCad(row.id, row.jobId!, me, {
+      title: body.title ?? undefined,
+      description: body.description ?? undefined,
+      discipline: body.discipline ?? undefined,
     });
-    for (const f of files) {
-      const source = attachmentPath(f.storedName);
-      if (!fs.existsSync(source)) continue;
-      const storedName = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${path.extname(f.storedName).slice(0, 12)}`;
-      fs.copyFileSync(source, attachmentPath(storedName));
-      await prisma.attachment.create({
-        data: { entityType: 'approved_plan', entityId: plan.id, fileName: f.fileName, storedName, mimeType: f.mimeType, size: f.size, uploadedById: me.id, caption: `From ${row.number} R${latest.sequence}` },
-      });
-    }
-    await audit({ entityType: 'job', entityId: row.jobId!, action: 'UPDATED', summary: `Added plan ${plan.title} (${plan.drawingNo} ${plan.revision}) from CAD job order ${row.number}` }, req);
-    await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'CONVERTED', summary: `${row.number} R${latest.sequence} filed as approved plan ${plan.drawingNo ?? plan.title} on ${row.job?.number ?? 'the project'}` }, req);
+    await audit({ entityType: 'approved_plan', entityId: plan.id, action: 'CREATED', summary: `Raised ${plan.number} for ${row.job?.number ?? 'the project'} from CAD job order ${row.number} R${revision}` }, req);
+    await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'CONVERTED', summary: `${row.number} R${revision} raised for approval as ${plan.number}` }, req);
     res.status(201).json(plan);
   }),
 );

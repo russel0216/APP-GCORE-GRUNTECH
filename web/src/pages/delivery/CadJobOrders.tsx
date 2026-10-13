@@ -118,7 +118,7 @@ export interface CadRow {
   requestedBy: Person;
   assignedTo: Person | null;
   completedBy: { id: string; name: string } | null;
-  approvedPlan: { id: string; title: string; drawingNo: string | null; revision: string; status: string } | null;
+  approvedPlan: { id: string; number: string | null; title: string; drawingNo: string | null; revision: string; status: string } | null;
   latestRevision: { sequence: number; label: string; submittedAt: string } | null;
   revisionCount: number;
   commentCount: number;
@@ -914,7 +914,7 @@ export function CadJobOrderDetail() {
             )}
             {r.canFilePlan && (
               <button type="button" className={btn('plan')} aria-expanded={panel === 'plan'} onClick={() => setPanel(panel === 'plan' ? null : 'plan')} disabled={busy}>
-                File as Approved Plan
+                Raise request for approval
               </button>
             )}
           </>
@@ -992,8 +992,11 @@ export function CadJobOrderDetail() {
           {r.approvedPlan && r.job ? (
             <>
               {' '}
-              · filed as approved plan {r.approvedPlan.drawingNo ?? r.approvedPlan.title} {r.approvedPlan.revision} on{' '}
-              <Link to={`/g-ops/projects/${r.job.id}?tab=plans`}>{r.job.number}</Link>
+              · raised for approval as{' '}
+              <Link className="mono" to={`/g-ops/plans/${r.approvedPlan.id}`}>
+                {r.approvedPlan.number ?? r.approvedPlan.drawingNo ?? r.approvedPlan.title}
+              </Link>{' '}
+              ({r.approvedPlan.status.toLowerCase().replace(/_/g, ' ')}) on {r.job.number}
             </>
           ) : null}
         </div>
@@ -1030,7 +1033,7 @@ export function CadJobOrderDetail() {
         </div>
       )}
       {panel === 'revision' && r.canSubmitRevision && <SubmitRevisionPanel row={r} next={nextLabel} busy={busy} onClose={() => setPanel(null)} onRun={run} />}
-      {panel === 'plan' && r.canFilePlan && <FilePlanPanel row={r} busy={busy} onClose={() => setPanel(null)} onRun={run} />}
+      {panel === 'plan' && r.canFilePlan && <FilePlanPanel row={r} busy={busy} onClose={() => setPanel(null)} />}
 
       <div className="svc-detail-grid">
         <section className="card">
@@ -1362,56 +1365,75 @@ function ThreadCard({ row: r, busy, onRun }: { row: CadDetail; busy: boolean; on
   );
 }
 
-/** Files the accepted revision on the linked project's Approved Plans. */
+/**
+ * Raises the accepted revision as a Request for Approval on the linked
+ * project (2026-10-13): a draft with this request's number as the drawing
+ * reference and the revision's files copied on, opened for its requester to
+ * submit to the approval route.
+ */
 function FilePlanPanel({
   row: r,
   busy,
   onClose,
-  onRun,
 }: {
   row: CadDetail;
   busy: boolean;
   onClose: () => void;
-  onRun: (label: string, fn: () => Promise<unknown>, close?: boolean) => Promise<void>;
 }) {
+  const navigate = useNavigate();
+  const toast = useToast();
   const latest = r.revisions[0];
   const [title, setTitle] = useState(r.title);
-  const [drawingNo, setDrawingNo] = useState(r.number);
+  const [description, setDescription] = useState('');
   const [discipline, setDiscipline] = useState(r.drawingType?.name ?? '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  async function raise() {
+    setSaving(true);
+    setError(null);
+    try {
+      const made = await api.post<{ id: string; number: string }>(`/cad-job-orders/${r.id}/file-plan`, {
+        title: title.trim(),
+        description: description.trim() || null,
+        discipline: discipline.trim() || null,
+      });
+      toast('ok', `${made.number} raised — submit it for approval on its page`);
+      navigate(`/g-ops/plans/${made.id}`);
+    } catch (err) {
+      setError(err);
+      setSaving(false);
+    }
+  }
+
   return (
-    <div className="cad-panel" role="group" aria-label="File as an approved plan">
+    <div className="cad-panel" role="group" aria-label="Raise a request for approval">
       <h4 className="svc-subhead" style={{ marginTop: 0 }}>
-        File {latest?.label ?? 'the drawing'} on {r.job?.number} as an approved plan
+        Raise {latest?.label ?? 'the drawing'} on {r.job?.number} for approval
       </h4>
       <p className="muted">
-        The revision’s files are copied onto the project’s Approved Plans, for approval there. The request keeps its own copy.
+        A draft Request for Approval with {r.number} as its drawing reference and the revision’s files copied on — the
+        Technical Manager, then the Team Leader, and the CEO / President on a project above ₱1,000,000. The request keeps its
+        own copy.
       </p>
+      <ErrorBox error={error} />
       <div className="grid grid-3">
-        <Field label="Plan title">
+        <Field label="What is to be approved">
           <input value={title} onChange={(e) => setTitle(e.target.value)} />
         </Field>
-        <Field label="Drawing number">
-          <input className="mono" value={drawingNo} onChange={(e) => setDrawingNo(e.target.value)} />
+        <Field label="Description">
+          <input value={description} placeholder="What the approvers are asked to decide" onChange={(e) => setDescription(e.target.value)} />
         </Field>
         <Field label="Discipline">
           <input value={discipline} placeholder="Mechanical, Electrical, Civil…" onChange={(e) => setDiscipline(e.target.value)} />
         </Field>
       </div>
       <div className="cad-panel-actions">
-        <button type="button" className="btn btn-sm" onClick={onClose} disabled={busy}>
+        <button type="button" className="btn btn-sm" onClick={onClose} disabled={busy || saving}>
           Cancel
         </button>
-        <button
-          type="button"
-          className="btn btn-sm btn-primary"
-          disabled={busy || title.trim().length < 2}
-          onClick={() =>
-            onRun('Filed on the project’s Approved Plans', () =>
-              api.post(`/cad-job-orders/${r.id}/file-plan`, { title: title.trim(), drawingNo: drawingNo.trim() || null, discipline: discipline.trim() || null }),
-            )
-          }
-        >
-          File as Approved Plan
+        <button type="button" className="btn btn-sm btn-primary" disabled={busy || saving || title.trim().length < 2} onClick={raise}>
+          {saving ? 'Raising…' : 'Raise request for approval'}
         </button>
       </div>
     </div>

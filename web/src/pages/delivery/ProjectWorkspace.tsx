@@ -18,7 +18,7 @@ import {
 import { Stat } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
 import { RecordHeader } from '../../components/RecordHeader';
-import { useConfirm, type ConfirmApi } from '../../components/Confirm';
+import { useConfirm } from '../../components/Confirm';
 import { recordLink } from '../../lib/links';
 import { SCurve, type CurvePoint } from './SCurve';
 import { ProjectGantt } from './ProjectGantt';
@@ -27,6 +27,7 @@ import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
 import { ProjectBudgetRequestsCard, BudgetRequestModal } from './BudgetRequests';
+import { ProjectPlanApprovalsCard } from './PlanApprovals';
 
 /**
  * The project workspace (model §8.1).
@@ -113,8 +114,10 @@ interface Job {
     grossAmount: number;
     netCollectible: number;
   }[];
+  /** The project's Requests for Approval (2026-10-13). */
   plans: {
     id: string;
+    number: string | null;
     title: string;
     drawingNo: string | null;
     revision: string;
@@ -123,6 +126,7 @@ interface Job {
     approvedAt: string | null;
     approvedBy: string | null;
     createdAt: string;
+    uploadedBy: { id: string; name: string } | null;
   }[];
   tasks: {
     id: string;
@@ -172,7 +176,7 @@ type Tab =
 
 /**
  * The owner's order (2026-10-06), after the old gasiontech G-CORE's project
- * menu: Overview, Meetings & Records, Approved Plans, Budget Monitoring,
+ * menu: Overview, Meetings & Records, Request for Approval, Budget Monitoring,
  * Purchase Requisition, Budget Requests, Scope of Work (the Gantt chart),
  * Progress & Billing. Finance and Service stay at the end: the turnover
  * register and the project's invoices live nowhere else.
@@ -183,8 +187,6 @@ const TABS: Tab[] = ['overview', 'meetings', 'plans', 'budget', 'procurement', '
 const TAB_ALIASES: Record<string, Tab> = { billing: 'progress', tasks: 'scope', documents: 'meetings', activity: 'meetings' };
 
 /** Plan statuses the shared rules do not already colour. */
-const PLAN_TONES = { FOR_APPROVAL: 'warn', SUPERSEDED: '' } as const;
-
 export function ProjectWorkspace() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -199,7 +201,6 @@ export function ProjectWorkspace() {
   const [editing, setEditing] = useState(false);
   const [budgetRequest, setBudgetRequest] = useState(false);
   const [newReport, setNewReport] = useState(false);
-  const [newPlan, setNewPlan] = useState(false);
   const [turnover, setTurnover] = useState<'turnover' | 'register' | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const [activity, setActivity] = useState<
@@ -294,7 +295,7 @@ export function ProjectWorkspace() {
   const tabLabel: Record<Tab, string> = {
     overview: 'Overview',
     meetings: 'Meetings & Records',
-    plans: `Approved Plans (${job.plans.length})`,
+    plans: `Request for Approval (${job.plans.length})`,
     budget: 'Budget Monitoring',
     procurement: 'Purchase Requisition',
     requests: `Budget Requests (${job.budgetRequestCount})`,
@@ -682,14 +683,7 @@ export function ProjectWorkspace() {
         </div>
       )}
 
-      {current === 'plans' && (
-        <PlansTab
-          job={job}
-          onAdd={can('gops.plans.create') ? () => setNewPlan(true) : undefined}
-          onChanged={load}
-          confirm={confirm}
-        />
-      )}
+      {current === 'plans' && <ProjectPlanApprovalsCard job={job} plans={job.plans} onChanged={() => void load()} />}
 
       {current === 'procurement' && <ProcurementTab job={job} />}
 
@@ -880,17 +874,6 @@ export function ProjectWorkspace() {
           job={job}
           onClose={() => setNewReport(false)}
           onCreated={(reportId) => navigate(`/g-ops/progress/${reportId}`)}
-        />
-      )}
-
-      {newPlan && (
-        <NewPlanModal
-          job={job}
-          onClose={() => setNewPlan(false)}
-          onSaved={() => {
-            setNewPlan(false);
-            void load();
-          }}
         />
       )}
 
@@ -1948,154 +1931,6 @@ function LedgerCard({ job, reloadToken }: { job: Job; reloadToken: number }) {
   );
 }
 
-// ── Plans ────────────────────────────────────────────────────────────────────
-
-function PlansTab({
-  job,
-  onAdd,
-  onChanged,
-  confirm,
-}: {
-  job: Job;
-  onAdd?: () => void;
-  onChanged: () => Promise<void>;
-  /** The page's confirm bar, under the project's header. */
-  confirm: ConfirmApi;
-}) {
-  const { can } = useAuth();
-  const toast = useToast();
-  const [open, setOpen] = useState<string | null>(null);
-  const mayApprove = can('gops.plans.edit_all');
-  const mayAttach = can('gops.plans.create') || can('gops.plans.edit_all');
-
-  /** Asked in the confirm bar first; a refusal is shown there. */
-  function approve(plan: Job['plans'][number]) {
-    const name = plan.drawingNo ? `${plan.drawingNo} rev ${plan.revision}` : `“${plan.title}” rev ${plan.revision}`;
-    confirm.ask({
-      title: `Approve ${name}?`,
-      body: 'Work may start on it once it is approved.',
-      confirmLabel: 'Approve',
-      tone: 'primary',
-      onConfirm: async () => {
-        await api.patch(`/jobs/${job.id}/plans/${plan.id}`, { status: 'APPROVED' });
-        toast('ok', 'Plan approved');
-        await onChanged();
-      },
-    });
-  }
-
-  return (
-    <section className="card">
-      <div className="del-card-head">
-        <h3 className="card-title">Approved plans</h3>
-        {onAdd && (
-          <button className="btn btn-sm" onClick={onAdd}>
-            + Add plan
-          </button>
-        )}
-      </div>
-      {job.plans.length === 0 ? (
-        <Empty
-          title="No plans registered"
-          hint="Work should not start on an unapproved plan — register the drawings here."
-        />
-      ) : (
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr>
-                <th>Drawing</th>
-                <th>Title</th>
-                <th>Rev</th>
-                <th>Discipline</th>
-                <th>Status</th>
-                <th>Approved</th>
-                <th>
-                  <span className="visually-hidden">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {job.plans.map((p) => (
-                <PlanRow
-                  key={p.id}
-                  plan={p}
-                  open={open === p.id}
-                  onToggle={() => setOpen(open === p.id ? null : p.id)}
-                  onApprove={mayApprove && p.status === 'FOR_APPROVAL' ? () => approve(p) : undefined}
-                  mayAttach={mayAttach}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function PlanRow({
-  plan: p,
-  open,
-  onToggle,
-  onApprove,
-  mayAttach,
-}: {
-  plan: Job['plans'][number];
-  open: boolean;
-  onToggle: () => void;
-  onApprove?: () => void;
-  mayAttach: boolean;
-}) {
-  return (
-    <>
-      <tr>
-        <td className="mono">{p.drawingNo ?? '—'}</td>
-        <td>{p.title}</td>
-        <td className="mono">{p.revision}</td>
-        <td>{p.discipline ?? '—'}</td>
-        <td>
-          <StatusBadge status={p.status} extra={PLAN_TONES} />
-        </td>
-        <td className="muted">
-          {p.approvedAt ? `${formatDate(p.approvedAt)}${p.approvedBy ? ` · ${p.approvedBy}` : ''}` : '—'}
-        </td>
-        <td>
-          <div className="row">
-            <button
-              type="button"
-              className="btn btn-sm btn-ghost"
-              aria-expanded={open}
-              aria-controls={`plan-files-${p.id}`}
-              onClick={onToggle}
-            >
-              Files
-            </button>
-            {onApprove && (
-              <button className="btn btn-sm" onClick={onApprove}>
-                Approve
-              </button>
-            )}
-          </div>
-        </td>
-      </tr>
-      {open && (
-        <tr className="del-expand-row">
-          <td colSpan={7} id={`plan-files-${p.id}`}>
-            <Attachments
-              entityType="approved_plan"
-              entityId={p.id}
-              title={`Files — ${p.drawingNo ?? p.title} rev ${p.revision}`}
-              hint="The drawing itself, and the approval stamp or transmittal that went with it."
-              canEdit={mayAttach}
-            />
-          </td>
-        </tr>
-      )}
-    </>
-  );
-}
-
 // ── Tasks ────────────────────────────────────────────────────────────────────
 
 /** A meeting held for this project — GET /meetings?jobId=, the list's own row. */
@@ -2389,77 +2224,6 @@ function NewReportModal({
           />
         </Field>
       </div>
-    </Modal>
-  );
-}
-
-function NewPlanModal({ job, onClose, onSaved }: { job: Job; onClose: () => void; onSaved: () => void }) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [form, setForm] = useState({ title: '', drawingNo: '', revision: '0', discipline: '' });
-
-  async function save() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.post(`/jobs/${job.id}/plans`, {
-        title: form.title,
-        drawingNo: form.drawingNo || null,
-        revision: form.revision,
-        discipline: form.discipline || null,
-      });
-      toast('ok', 'Plan registered');
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title="Add plan"
-      onClose={onClose}
-      footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={save} disabled={busy || form.title.length < 2}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </ModalFoot>
-      }
-    >
-      <ErrorBox error={error} />
-      <Field label="Title">
-        <input value={form.title} autoFocus onChange={(e) => setForm({ ...form, title: e.target.value })} />
-      </Field>
-      <div className="grid grid-3">
-        <Field label="Drawing no.">
-          <input
-            className="mono"
-            value={form.drawingNo}
-            onChange={(e) => setForm({ ...form, drawingNo: e.target.value })}
-          />
-        </Field>
-        <Field label="Revision">
-          <input
-            className="mono"
-            value={form.revision}
-            onChange={(e) => setForm({ ...form, revision: e.target.value })}
-          />
-        </Field>
-        <Field label="Discipline">
-          <input
-            value={form.discipline}
-            placeholder="Mechanical, electrical…"
-            onChange={(e) => setForm({ ...form, discipline: e.target.value })}
-          />
-        </Field>
-      </div>
-      <p className="faint del-note">
-        Attach the drawing from the plan's <em>Files</em> once it is registered. A plan starts as{' '}
-        <em>for approval</em> — work should not begin until it is approved.
-      </p>
     </Modal>
   );
 }

@@ -47,6 +47,7 @@ import {
 import { jobRoutes } from './routes/jobs';
 import { budgetRequestRoutes } from './routes/budgetRequests';
 import { progressRoutes, billingRoutes, planRoutes } from './routes/progress';
+import { planApprovalRoutes } from './routes/planApprovals';
 import {
   purchaseRequestRoutes,
   canvassRoutes,
@@ -171,6 +172,7 @@ app.use('/api/partners', partnerRoutes);
 // Delivery (Phase 4)
 app.use('/api/jobs', jobRoutes);
 app.use('/api/jobs', planRoutes);
+app.use('/api/plans', planApprovalRoutes);
 app.use('/api/budget-requests', budgetRequestRoutes);
 app.use('/api/progress-reports', progressRoutes);
 app.use('/api/billings', billingRoutes);

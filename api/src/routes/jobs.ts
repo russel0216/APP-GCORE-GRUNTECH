@@ -1000,7 +1000,7 @@ async function loadJob(id: string) {
           netCollectible: true,
         },
       },
-      plans: { orderBy: { createdAt: 'desc' } },
+      plans: { orderBy: { createdAt: 'desc' }, include: { uploadedBy: { select: { id: true, name: true } } } },
       tasks: {
         orderBy: { sortOrder: 'asc' },
         include: { assignedTo: { select: { id: true, name: true } } },

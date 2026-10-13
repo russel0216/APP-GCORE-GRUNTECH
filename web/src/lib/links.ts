@@ -52,6 +52,9 @@ const DETAIL: Record<string, string> = {
   inspection_report: '/g-ops/service-reports',
   job_order: '/g-ops/job-orders',
   cad_job_order: '/g-ops/cad-job-orders',
+  // A project's drawing sent for approval (2026-10-13); the engine files it as plan_approval.
+  approved_plan: '/g-ops/plans',
+  plan_approval: '/g-ops/plans',
   help_ticket: '/admin/help-tickets',
   // HR
   leave_request: '/g-hr/leave',

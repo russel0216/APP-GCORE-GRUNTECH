@@ -198,7 +198,7 @@ export function Projects() {
       {/* The registers across every project (2026-10-06): off the menu — each
           is a tab inside a project — but kept one click away here. */}
       <p className="del-registers">
-        {(can('gops.plans.view_all') || can('gops.plans.view_own')) && <Link to="/g-ops/plans">Approved plans</Link>}
+        {(can('gops.plans.view_all') || can('gops.plans.view_own')) && <Link to="/g-ops/plans">Requests for approval</Link>}
         {can('gops.budget_monitoring.view_all') && <Link to="/g-ops/budget-monitoring">Budget monitoring</Link>}
         {(can('gops.purchase_requests.view_all') || can('gops.purchase_requests.view_own')) && (
           <Link to="/g-ops/purchase-requests">Purchase requests</Link>
