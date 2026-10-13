@@ -1092,6 +1092,132 @@ async function main() {
     const otherRequesterToken = signToken(otherRequester.id, otherRequester.email);
     const prOfficerToken = signToken(prOfficer.id, prOfficer.email);
 
+    // ── The requisition page: header and lines in one save (2026-10-13) ──
+    console.log('\nThe purchase requisition page (over HTTP)');
+    const labour = categories[1];
+    await prisma.costingLine.createMany({
+      data: [
+        { costingId: costing.id, costCategoryId: materials.id, name: `${TAG} Gasket set`, description: 'EPDM, 16 bar', quantity: D(4), unit: 'set', unitCost: D(950), amount: D(3800), sortOrder: 0 },
+        { costingId: costing.id, costCategoryId: materials.id, description: `${TAG} heading`, isHeading: true, sortOrder: 1 },
+      ],
+    });
+    const sheetLines = [
+      { costCategoryId: materials.id, partNumber: 'GK-16', name: `${TAG} Gasket set`, description: 'EPDM, 16 bar', quantity: 4, unit: 'set', estimatedCost: 950.555 },
+      { itemId: item.id, name: `${TAG} Stainless pipe`, quantity: 3, unit: 'pcs', estimatedCost: 100 },
+    ];
+    const sheetA = await api(requesterToken, 'POST', '/purchase-requests', {
+      kind: 'DIRECT_TO_JOB',
+      jobId: job.id,
+      purpose: `${TAG} sheet save`,
+      preferredSupplier: 'GiTi Warehouse',
+      lines: sheetLines,
+    });
+    const sheetId = String(sheetA.body.id);
+    const sheetRead = await api(requesterToken, 'GET', `/purchase-requests/${sheetId}`);
+    const sheetItems = (sheetRead.body.items ?? []) as { id: string; name: string | null; partNumber: string | null; description: string; estimatedAmount: number; costCategory: { id: string } | null }[];
+    check(
+      'POST /purchase-requests takes the header and its lines in one save',
+      sheetA.status === 201 && sheetItems.length === 2 && sheetRead.body.preferredSupplier === 'GiTi Warehouse',
+      `${sheetA.status} ${sheetItems.length} ${JSON.stringify(sheetA.body).slice(0, 160)}`,
+    );
+    check(
+      'a line keeps its part number and name, its amount is the server\'s centavo rule',
+      sheetItems[0]?.partNumber === 'GK-16' && sheetItems[0]?.name === `${TAG} Gasket set` && sheetItems[0]?.description === 'EPDM, 16 bar' &&
+        sheetItems[0]?.estimatedAmount === Math.round(4 * 950.555 * 100) / 100,
+      JSON.stringify(sheetItems[0]),
+    );
+    check(
+      'a line named by item alone takes the item\'s budget line, and its name as its description',
+      sheetItems[1]?.costCategory?.id === materials.id && sheetItems[1]?.description === `${TAG} Stainless pipe`,
+      JSON.stringify(sheetItems[1]),
+    );
+    const counterBefore = await prisma.purchaseRequest.count();
+    const bareSheet = await api(requesterToken, 'POST', '/purchase-requests', {
+      kind: 'DIRECT_TO_JOB',
+      jobId: job.id,
+      purpose: `${TAG} refused sheet`,
+      lines: [{ name: `${TAG} no budget line`, quantity: 1, estimatedCost: 5 }],
+    });
+    const sheetB = await api(requesterToken, 'POST', '/purchase-requests', { kind: 'DIRECT_TO_JOB', jobId: job.id, purpose: `${TAG} next number`, lines: [] });
+    const seq = (n: unknown) => Number(String(n).match(/(\d+)$/)?.[1] ?? NaN);
+    check(
+      'a direct-to-job line with no budget line is refused naming the line, and burns no number',
+      bareSheet.status === 400 && /Line 1/.test(String(bareSheet.body.error ?? bareSheet.body.message ?? JSON.stringify(bareSheet.body))) &&
+        (await prisma.purchaseRequest.count()) === counterBefore + 1 && seq(sheetB.body.number) === seq(sheetA.body.number) + 1,
+      `${bareSheet.status} ${JSON.stringify(bareSheet.body).slice(0, 140)} ${sheetA.body.number} ${sheetB.body.number}`,
+    );
+    const version = String(sheetRead.body.version);
+    const sheetPut = await api(requesterToken, 'PUT', `/purchase-requests/${sheetId}/sheet`, {
+      kind: 'DIRECT_TO_JOB',
+      jobId: job.id,
+      purpose: `${TAG} sheet save, modified`,
+      preferredSupplier: 'GiTi Warehouse',
+      version,
+      lines: [
+        { ...sheetLines[0], id: sheetItems[0].id, quantity: 6 },
+        { costCategoryId: labour.id, name: `${TAG} Rigging crew`, quantity: 2, unit: 'day', estimatedCost: 4500 },
+      ],
+    });
+    const afterPut = await prisma.purchaseRequestItem.findMany({ where: { requestId: sheetId }, orderBy: { sortOrder: 'asc' } });
+    check(
+      'PUT /:id/sheet updates a line in place, drops the one left out, adds the new one',
+      sheetPut.status === 200 && afterPut.length === 2 && afterPut[0].id === sheetItems[0].id && Number(afterPut[0].quantity) === 6 &&
+        afterPut[1].name === `${TAG} Rigging crew` && !afterPut.some((l) => l.id === sheetItems[1].id),
+      `${sheetPut.status} ${JSON.stringify(sheetPut.body).slice(0, 160)}`,
+    );
+    const stalePut = await api(requesterToken, 'PUT', `/purchase-requests/${sheetId}/sheet`, {
+      kind: 'DIRECT_TO_JOB', jobId: job.id, purpose: `${TAG} stale`, version, lines: [],
+    });
+    check('a save on what changed since it was read is refused, nothing written', stalePut.status === 400 && (await prisma.purchaseRequestItem.count({ where: { requestId: sheetId } })) === 2, String(stalePut.status));
+    const fresh = await api(requesterToken, 'GET', `/purchase-requests/${sheetId}`);
+    const foreignLine = await api(requesterToken, 'PUT', `/purchase-requests/${sheetId}/sheet`, {
+      kind: 'DIRECT_TO_JOB', jobId: job.id, purpose: `${TAG} foreign`, version: String(fresh.body.version),
+      lines: [{ id: 'clnotthisrequestsline', costCategoryId: materials.id, name: 'x', quantity: 1, estimatedCost: 1 }],
+    });
+    check('a line id that is not the request\'s own is refused', foreignLine.status === 400, String(foreignLine.status));
+    const strangerSheet = await api(otherRequesterToken, 'PUT', `/purchase-requests/${sheetId}/sheet`, {
+      kind: 'DIRECT_TO_JOB', jobId: job.id, purpose: `${TAG} not mine`, lines: [],
+    });
+    check('another requester cannot save over it', strangerSheet.status === 403, String(strangerSheet.status));
+
+    const budgetRead = await api(requesterToken, 'GET', `/purchase-requests/budget?jobId=${job.id}`);
+    const budgetLines = (budgetRead.body.lines ?? []) as { id: string; budgeted: number; committed: number; incurred: number; available: number }[];
+    const positions = await budgetPosition(job.id);
+    const agrees = budgetLines.every((b) => {
+      const p = positions.find((x) => x.costCategoryId === b.id);
+      return p ? Math.abs(p.available - b.available) < 0.005 && Math.abs(p.budgeted - b.budgeted) < 0.005 : b.budgeted === 0 && b.available === 0;
+    });
+    check(
+      'GET /budget gives every budget line as Budget Monitoring has it, and names the project',
+      budgetRead.status === 200 && agrees && (budgetRead.body.job as { id: string })?.id === job.id && budgetLines.length > 0,
+      `${budgetRead.status} ${JSON.stringify(budgetLines.slice(0, 2))}`,
+    );
+    const suggestAll = await api(requesterToken, 'GET', `/purchase-requests/suggest?jobId=${job.id}`);
+    const fromCosting = (suggestAll.body.costing ?? []) as { name: string; unitCost: number | null; costCategory: { id: string } | null }[];
+    check(
+      'GET /suggest lists the costing\'s lines (no headings), and no cost to a requester who may not see it',
+      suggestAll.status === 200 && fromCosting.length === 1 && fromCosting[0].name === `${TAG} Gasket set` && fromCosting.every((l) => l.unitCost === null),
+      `${suggestAll.status} ${JSON.stringify(fromCosting)}`,
+    );
+    const suggestPm = await api(signToken(pm.id, pm.email), 'GET', `/purchase-requests/suggest?jobId=${job.id}&q=${encodeURIComponent('gasket')}`);
+    check(
+      'the project\'s manager is sent the costing\'s cost',
+      ((suggestPm.body.costing ?? []) as { unitCost: number | null }[])[0]?.unitCost === 950,
+      JSON.stringify(suggestPm.body).slice(0, 200),
+    );
+    const routeRead = await api(requesterToken, 'GET', `/purchase-requests/route?amount=1000&jobId=${job.id}&requestId=${sheetId}`);
+    check(
+      'GET /route previews the route submitting would take',
+      routeRead.status === 200 && ((routeRead.body.route as { steps: unknown[] } | null)?.steps.length ?? 0) > 0,
+      JSON.stringify(routeRead.body).slice(0, 160),
+    );
+    const sheetPaper = flat((await printed(requesterToken, `/purchase-requests/${sheetId}/pdf`)).text);
+    check(
+      'its paper prints the part number, the name and the preferred supplier',
+      sheetPaper.includes('GK-16') && sheetPaper.includes('Gasket set') && sheetPaper.includes('GiTi Warehouse'),
+      sheetPaper.slice(0, 200),
+    );
+
     const prCreated = await api(requesterToken, 'POST', '/purchase-requests', {
       kind: 'DIRECT_TO_JOB',
       jobId: job.id,

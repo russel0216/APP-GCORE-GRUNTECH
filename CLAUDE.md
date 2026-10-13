@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,062 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,078 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -565,10 +565,11 @@ meetings and 2 on calendar for the minutes and the map links, 17 on
 delivery and one on cad for the Request for Approval, 4 on costing for the
 costing's PDF template and 37 on hr for People Flow, and 2 on foundation
 for the Technical Manager on the preparer's team, and one on foundation
-for Back Support's own team):
+for Back Support's own team, and 3 on foundation and 13 on chain for the
+purchase requisition page):
 foundation
-365, masters 92, sales 608, costing 192, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 202, hr 468, plantilla 123, meetings
+368, masters 92, sales 608, costing 192, pipeline 121, calendar 98, numbering
+79, partners 120, delivery 171, chain 215, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4324,6 +4325,52 @@ one path per person (`docs/notes/P-scope-dates-rfa-people-flow-2026-10-13.md`
   open items of each person's current stage that are overdue or due within
   `DUE_SOON_DAYS` (7), ten at most; for the person, their own open
   onboarding items while they stand in Onboarding ("HR ticks it off").
+
+## The purchase requisition page (2026-10-13)
+
+The owner's call: "Purchase request in Project should not be popup window, it
+should be a full form with line item and budget allocation, something like in
+gasiontech G-CORE" (the mockup, approved first: `docs/mockups/purchase-
+requisition-page.png`). `pages/chain/PurchaseRequisitionEditor.tsx`,
+`lib/prLines.ts`, the `prq-*` rules in `styles/procurement.css`.
+
+- **One page for New and Modify**, never a dialog: `/g-ops/purchase-requests/
+  new?jobId=` (the project's Purchase Requisition tab — the project fixed,
+  direct to project), `/g-chain/purchase-requests/new` (the register — Kind
+  and Project or Warehouse chosen) and `/…/purchase-requests/:id/edit` on a
+  draft (the record page's Modify). `PrModal` and `PrLineModal` are gone; an
+  old `?new=1&jobId=` link redirects to `/new`. The record page keeps no line
+  buttons of its own — its lines change on the page, with the header.
+- **One save**: `POST /purchase-requests` takes `lines[]`, `PUT /purchase-
+  requests/:id/sheet` the header and the lines (a line sent with its `id` is
+  updated in place, one left out removed — the costing sheet's rule), claimed
+  on DRAFT and on the `version` (`updatedAt`) the page read: "changed a moment
+  ago — reload". `checkPrLines()` checks every line before the number is
+  issued — the item and budget line exist, the line says what it is, a direct-
+  to-job line names its budget line (else the item's) or is refused naming it
+  — and `writePrLines()` writes them. The single-line routes stay for scripts.
+- **A line** is Budget line | Part No. | Item (bold, `PurchaseRequestItem.
+  name`) over its description | Unit | Qty | Est. unit cost | Amount
+  (`prLineAmount`, the server's `cents()`); `partNumber` and `name` are new
+  nullable columns, a name alone is the description too. The request has a
+  `preferredSupplier` (text, a hint for purchasing; printed).
+- **Filled three ways**: typing in Item asks `GET /purchase-requests/suggest
+  ?q=&jobId=` — the project's costing lines, then the item master (a cost only
+  to a costing or budget reader or the project's manager, an item's standard
+  cost to an item or costing reader); **Add from costing…** (a panel of tick
+  boxes, the costing's lines with their quantity); **Import CSV** or a block
+  pasted into an empty Item box — `parseDelimited()` / `rowsToPrLines()`,
+  pinned by verify-foundation: headings read by name, else the page's column
+  order from Part No.; a row that cannot be read is named, never dropped.
+- **Budget — live** beside the lines: `GET /purchase-requests/budget?jobId=`
+  (`projectBudgetByLine()`, every active category in one GROUP BY, equal to
+  Budget Monitoring — verify-chain asserts it) less what the page asks, per
+  budget line and overall, red where it goes over and saying whether submit
+  will be refused (`procurement.blockOverBudget`). A draft commits nothing.
+- **Approval** under the lines: `GET /purchase-requests/route?amount=&jobId=
+  &requestId=` (`routeBrief`, the requester's name) through `previewSteps` —
+  nobody is picked on the form. "Submit for approval" saves, then submits; a
+  refused submit leaves the saved draft and says why.
 
 ## Spreadsheet attachments (2026-10-05)
 

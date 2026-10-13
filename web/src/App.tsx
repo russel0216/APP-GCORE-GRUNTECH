@@ -47,6 +47,7 @@ import {
 } from './pages/delivery/Progress';
 import { PlanApprovalsRegister, PlanApprovalPage } from './pages/delivery/PlanApprovals';
 import { PurchaseRequests, PurchaseRequestDetail } from './pages/chain/PurchaseRequests';
+import { PurchaseRequisitionEditor } from './pages/chain/PurchaseRequisitionEditor';
 import {
   Canvasses,
   CanvassDetail,
@@ -684,6 +685,40 @@ function Routed() {
         {/* The detail page under both modules too, for the same reason: a
             project manager who raised a PR from the Delivery menu opens it
             from the Delivery menu, and either module's permission is enough. */}
+        {/* The requisition page (2026-10-13): New and Modify, header and lines in one save. */}
+        <Route
+          path="/g-ops/purchase-requests/new"
+          element={
+            <Guard permission="gchain.purchase_requests.create">
+              <PurchaseRequisitionEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/purchase-requests/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.purchase_requests.edit_own', 'gchain.purchase_requests.edit_all']}>
+              <PurchaseRequisitionEditor />
+            </GuardAny>
+          }
+        />
+        {/* The requisition page (2026-10-13): New and Modify, header and lines in one save. */}
+        <Route
+          path="/g-chain/purchase-requests/new"
+          element={
+            <Guard permission="gchain.purchase_requests.create">
+              <PurchaseRequisitionEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/purchase-requests/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.purchase_requests.edit_own', 'gchain.purchase_requests.edit_all']}>
+              <PurchaseRequisitionEditor />
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-ops/purchase-requests/:id"
           element={

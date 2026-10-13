@@ -121,3 +121,240 @@
 .proc-qty {
   width: calc(var(--s-8) * 2.75);
 }
+
+/* ── The purchase requisition page (pages/chain/PurchaseRequisitionEditor.tsx) ──
+   The form on the left, the project's budget beside it, as gasiontech's
+   Purchase Requisition had it. Tokens only. */
+
+.prq-head-card {
+  margin-bottom: var(--card-gap);
+}
+
+.prq-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18rem;
+  gap: var(--card-gap);
+  align-items: start;
+}
+
+.prq-grid-solo {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.prq-main {
+  min-width: 0;
+}
+
+.prq-main > .card {
+  margin-bottom: var(--card-gap);
+}
+
+@media (max-width: 1100px) {
+  .prq-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The details in two columns, each label beside its value (.qe-rows). */
+.prq-rows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: var(--s-6);
+}
+
+@media (max-width: 760px) {
+  .prq-rows {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.prq-hint {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin: var(--s-2) 0 0;
+}
+
+.prq-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--s-3);
+}
+
+.prq-card-head .card-title {
+  margin: 0;
+  flex: 1;
+}
+
+.prq-source {
+  font-size: var(--fs-sm);
+}
+
+/* The lines: every column but the item fixed, so the item takes what is left. */
+.prq-lines {
+  table-layout: fixed;
+  min-width: 56rem;
+}
+
+.prq-col-no { width: 2.5rem; }
+.prq-col-cat { width: 8.5rem; }
+.prq-col-part { width: 6.5rem; }
+.prq-col-unit { width: 5rem; }
+.prq-col-qty { width: 6rem; }
+.prq-col-cost { width: 7rem; }
+.prq-col-amount { width: 7.5rem; }
+.prq-col-remove { width: 3rem; }
+
+.prq-lines td {
+  vertical-align: top;
+}
+
+.prq-lines th,
+.prq-lines td {
+  padding-left: var(--s-2);
+  padding-right: var(--s-2);
+}
+
+.prq-lines td input,
+.prq-lines td select {
+  width: 100%;
+  min-width: 0;
+  padding-left: var(--s-2);
+  padding-right: var(--s-2);
+}
+
+.prq-lines .prq-name {
+  font-weight: 600;
+}
+
+.prq-lines .prq-desc {
+  margin-top: var(--s-1);
+}
+
+.prq-lines .field-error {
+  color: var(--danger);
+  font-size: var(--fs-xs);
+  margin-top: var(--s-1);
+}
+
+.prq-lines [aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+.prq-skipped {
+  margin-top: var(--s-3);
+}
+
+/* "Add from costing…" — a panel in the card, never a dialog. */
+.prq-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: var(--card-pad-y) var(--card-pad-x);
+  margin-bottom: var(--s-3);
+}
+
+.prq-panel-list {
+  max-height: 22rem;
+  overflow-y: auto;
+  margin-top: var(--s-2);
+}
+
+.prq-panel fieldset {
+  border: none;
+  margin: 0 0 var(--s-3);
+  padding: 0;
+}
+
+.prq-panel legend {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  margin-bottom: var(--s-1);
+}
+
+.prq-pick {
+  display: flex;
+  gap: var(--s-2);
+  align-items: flex-start;
+  padding: var(--s-1) 0;
+  font-size: var(--fs-md);
+}
+
+.prq-panel-foot {
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+
+.prq-panel-foot .spacer {
+  flex: 1;
+}
+
+/* The summary: count, then the total in green over its rule. */
+.prq-total {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s-2);
+  max-width: 22rem;
+  margin: 0 0 0 auto;
+  font-size: var(--fs-md);
+}
+
+.prq-total dd {
+  margin: 0;
+  text-align: right;
+  font-weight: 600;
+}
+
+.prq-total .prq-total-big {
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  color: var(--ok);
+  border-top: 2px solid var(--ok);
+  padding-top: var(--s-2);
+}
+
+/* The budget, live. */
+.prq-budget {
+  position: sticky;
+  top: var(--s-4);
+}
+
+.prq-bud {
+  border-top: 1px solid var(--line-soft);
+  padding: var(--s-3) 0;
+}
+
+.prq-bud:first-of-type {
+  border-top: none;
+}
+
+.prq-bud-top {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-2);
+  font-size: var(--fs-sm);
+  margin-bottom: var(--s-1);
+}
+
+.prq-bud-top strong {
+  font-size: var(--fs-md);
+}
+
+.prq-bud-sub {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin-top: var(--s-1);
+}
+
+.prq-over {
+  color: var(--danger);
+}
+
+@media (max-width: 1100px) {
+  .prq-budget {
+    position: static;
+  }
+}

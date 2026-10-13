@@ -1053,7 +1053,7 @@ function ProcurementTab({ job }: { job: Job }) {
           empty="Nothing requested for this project yet."
           action={
             can('gchain.purchase_requests.create') ? (
-              <Link className="btn btn-primary btn-sm" to={`/g-chain/purchase-requests?new=1&jobId=${job.id}`}>
+              <Link className="btn btn-primary btn-sm" to={`/g-ops/purchase-requests/new?jobId=${job.id}`}>
                 + New purchase request
               </Link>
             ) : undefined

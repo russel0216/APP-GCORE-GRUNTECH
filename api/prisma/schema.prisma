@@ -2347,6 +2347,9 @@ model PurchaseRequest {
   purpose  String
   neededBy DateTime? @db.Date
   notes    String?
+  /// The supplier the requester would like asked first — a hint for
+  /// procurement, kept as typed; the canvass and the order name the real one.
+  preferredSupplier String?
 
   approvedAt DateTime?
 
@@ -2373,6 +2376,11 @@ model PurchaseRequestItem {
   costCategoryId String?
   costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
 
+  /// The short name, printed bold over the description (the costing line's
+  /// rule). Null on a line typed before the page editor: its description
+  /// then serves as the name.
+  name            String?
+  partNumber      String?
   description     String
   quantity        Decimal @db.Decimal(18, 3)
   unit            String  @default("pcs")

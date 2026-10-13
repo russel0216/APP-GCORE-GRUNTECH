@@ -29,6 +29,7 @@ import {
   slotSignatories,
   contactOf,
   cancelOpenRequest,
+  routeBrief,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import {
@@ -37,6 +38,7 @@ import {
   formatAmount,
   formatDate,
   formatShortDate,
+  formatQuantity,
   statusLabel,
   companyCurrency,
   type PdfSection,
@@ -270,6 +272,197 @@ purchaseRequestRoutes.get(
   }),
 );
 
+// ── The requisition page's helpers (2026-10-13) ─────────────────────────────
+//
+// The owner's call: "Purchase request in Project should not be popup window,
+// it should be a full form with line item and budget allocation". The page
+// (`/g-ops/projects/:jobId/purchase-requests/new`, `/…/:id/edit`) reads three
+// things before anything is saved, each declared above `/:id`: the project's
+// budget by budget line, what a line may be filled from (the project's
+// costing and the item master), and the route submitting would take.
+
+/** Whoever may raise or change a request — the page's own readers. */
+const PR_WRITERS = [
+  'gchain.purchase_requests.create',
+  'gchain.purchase_requests.edit_own',
+  'gchain.purchase_requests.edit_all',
+] as const;
+
+/**
+ * The project's budget by budget line: budgeted, committed, incurred and
+ * available (`availableBudget()`'s arithmetic, every category in one query),
+ * one row per ACTIVE cost category in its order, and the project's whole.
+ * A draft commits nothing, so nothing is left out for the request being
+ * edited; the page subtracts its own lines live.
+ */
+export async function projectBudgetByLine(jobId: string) {
+  const [categories, rows] = await Promise.all([
+    prisma.costCategory.findMany({
+      where: { isActive: true },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      select: { id: true, code: true, name: true },
+    }),
+    prisma.jobCostEntry.groupBy({ by: ['costCategoryId', 'state'], where: { jobId }, _sum: { amount: true } }),
+  ]);
+  const sum = (categoryId: string | null, state: string) =>
+    rows
+      .filter((r) => (categoryId === null || r.costCategoryId === categoryId) && r.state === state)
+      .reduce((s, r) => s + num(r._sum.amount), 0);
+  const position = (categoryId: string | null) => {
+    const budgeted = sum(categoryId, 'BUDGETED');
+    const committed = sum(categoryId, 'COMMITTED');
+    const incurred = sum(categoryId, 'INCURRED');
+    return {
+      budgeted: cents(budgeted),
+      committed: cents(committed),
+      incurred: cents(incurred),
+      available: cents(budgeted - committed - incurred),
+    };
+  };
+  return {
+    lines: categories.map((c) => ({ ...c, ...position(c.id) })),
+    total: position(null),
+  };
+}
+
+purchaseRequestRoutes.get(
+  '/budget',
+  requireAny(...PR_WRITERS),
+  handler(async (req, res) => {
+    const jobId = String(req.query.jobId ?? '');
+    if (!jobId) throw badRequest('Name the project');
+    const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, number: true, name: true } });
+    if (!job) throw notFound('Project not found');
+    // The project's number and name come too: the page's header names it for
+    // a requester who cannot list projects.
+    res.json({ job, ...(await projectBudgetByLine(jobId)), blocked: await overBudgetIsBlocked() });
+  }),
+);
+
+/**
+ * What a line may be filled from, as it is typed: the project's costing lines
+ * (its own estimate — name, description, unit, quantity, budget line) and the
+ * item master (code, part number, name, unit, budget line). A COST comes only
+ * where the caller may see it: the costing's to a costing or budget reader or
+ * the project's manager, an item's standard cost to an item or costing
+ * reader — the quotation's suggestion rule. Without `q` the costing's lines
+ * come whole ("Add from costing…"); the items need a word.
+ */
+purchaseRequestRoutes.get(
+  '/suggest',
+  requireAny(...PR_WRITERS),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const term = String(req.query.q ?? '').trim();
+    const jobId = String(req.query.jobId ?? '');
+    const job = jobId
+      ? await prisma.job.findUnique({ where: { id: jobId }, select: { costingId: true, projectManagerId: true } })
+      : null;
+    const seesCostingCost =
+      can(me, 'gops.costing.view_all') ||
+      can(me, 'gops.budget_monitoring.view_all') ||
+      (job !== null && job.projectManagerId === me.id);
+    const seesItemCost = can(me, 'gchain.items.view_all') || can(me, 'gops.costing.view_all');
+    const words = term
+      ? {
+          OR: [
+            { name: { contains: term, mode: 'insensitive' as const } },
+            { description: { contains: term, mode: 'insensitive' as const } },
+          ],
+        }
+      : {};
+    const [costing, items] = await Promise.all([
+      job
+        ? prisma.costingLine.findMany({
+            where: { costingId: job.costingId, isHeading: false, ...words },
+            orderBy: [{ costCategory: { sortOrder: 'asc' } }, { sortOrder: 'asc' }],
+            take: term ? 25 : 500,
+            select: {
+              id: true,
+              name: true,
+              description: true,
+              quantity: true,
+              unit: true,
+              unitCost: true,
+              itemId: true,
+              item: { select: { partNumber: true } },
+              costCategory: { select: { id: true, code: true, name: true } },
+            },
+          })
+        : [],
+      term
+        ? prisma.item.findMany({
+            where: {
+              isActive: true,
+              OR: [
+                { name: { contains: term, mode: 'insensitive' } },
+                { code: { contains: term, mode: 'insensitive' } },
+                { partNumber: { contains: term, mode: 'insensitive' } },
+              ],
+            },
+            orderBy: { name: 'asc' },
+            take: 15,
+            select: {
+              id: true,
+              code: true,
+              partNumber: true,
+              name: true,
+              description: true,
+              unit: true,
+              standardCost: true,
+              costCategory: { select: { id: true, code: true, name: true } },
+            },
+          })
+        : [],
+    ]);
+    res.json({
+      costing: costing.map((l) => ({
+        id: l.id,
+        itemId: l.itemId,
+        partNumber: l.item?.partNumber ?? null,
+        name: l.name ?? l.description,
+        description: l.name && l.description !== l.name ? l.description : '',
+        quantity: num(l.quantity),
+        unit: l.unit,
+        unitCost: seesCostingCost ? num(l.unitCost) : null,
+        costCategory: l.costCategory,
+      })),
+      items: items.map((i) => ({
+        id: i.id,
+        code: i.code,
+        partNumber: i.partNumber,
+        name: i.name,
+        description: i.description ?? '',
+        unit: i.unit,
+        unitCost: seesItemCost && i.standardCost != null ? num(i.standardCost) : null,
+        costCategory: i.costCategory,
+      })),
+    });
+  }),
+);
+
+/**
+ * The route submitting would take — "Submit for approval sends it to …" on
+ * the page, as the request stands (`amount`) and in its requester's name (the
+ * request's own when one is named, else the caller's).
+ */
+purchaseRequestRoutes.get(
+  '/route',
+  requireAny(...PR_WRITERS),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const amount = Number(req.query.amount ?? 0);
+    if (!Number.isFinite(amount) || amount < 0) throw badRequest('The amount is not a number');
+    const requestId = req.query.requestId ? String(req.query.requestId) : null;
+    const pr = requestId
+      ? await prisma.purchaseRequest.findUnique({ where: { id: requestId }, select: { requestedById: true, jobId: true } })
+      : null;
+    if (requestId && !pr) throw notFound('Purchase request not found');
+    const jobId = pr?.jobId ?? (req.query.jobId ? String(req.query.jobId) : null);
+    res.json({ route: await routeBrief('purchase_request', amount, pr?.requestedById ?? me.id, null, { jobId }) });
+  }),
+);
+
 async function loadPr(id: string) {
   return prisma.purchaseRequest.findUnique({
     where: { id },
@@ -327,12 +520,113 @@ purchaseRequestRoutes.get(
       // The routes' own rules (prForEdit, /withdraw): a draft is changed, and
       // a pending one pulled back, by its requester or an edit_all holder.
       canEdit: pr.status === 'DRAFT' && mayEditPr(me, pr),
+      /** What the page's save claims on (`PUT /:id/sheet`'s `version`). */
+      version: pr.updatedAt.toISOString(),
       canWithdraw: pr.status === 'PENDING_APPROVAL' && mayEditPr(me, pr),
       // POST /:id/cancel's own rule, short of the canvass check it makes itself.
       canCancel: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'].includes(pr.status) && pr.orders.length === 0 && mayEditPr(me, pr),
     });
   }),
 );
+
+/**
+ * One line of the requisition page's save — `POST /` with `lines[]` and
+ * `PUT /:id/sheet`. A line sent with its `id` is updated in place; a line
+ * left out is removed (the costing sheet's rule, never delete-and-recreate).
+ * `name` is the bold title; a line typed as a name alone carries it as its
+ * description too, because every older reader prints `description`.
+ */
+const prLineSchema = z.object({
+  id: z.string().optional().nullable(),
+  itemId: z.string().optional().nullable(),
+  costCategoryId: z.string().optional().nullable(),
+  partNumber: z.string().trim().max(120).optional().nullable(),
+  name: z.string().trim().max(300).optional().nullable(),
+  description: z.string().trim().max(4000).optional().nullable(),
+  quantity: z.number().positive('Quantity must be more than zero'),
+  unit: z.string().trim().max(40).optional().nullable(),
+  estimatedCost: z.number().min(0, 'An estimated cost cannot be negative').default(0),
+});
+type PrLineInput = z.infer<typeof prLineSchema>;
+
+interface CheckedPrLine {
+  id: string | null;
+  itemId: string | null;
+  costCategoryId: string | null;
+  partNumber: string | null;
+  name: string | null;
+  description: string;
+  quantity: number;
+  unit: string;
+  estimatedCost: number;
+}
+
+/**
+ * The lines as they will be written, every reference checked first: the item
+ * and the budget line must exist, a line must say what it is, and on a
+ * direct-to-job request every line names its budget line — the item's own
+ * where it has one, else refused naming the line. `existingIds` are the
+ * request's own lines; an id that is not one of them is a 400.
+ */
+async function checkPrLines(kind: string, lines: PrLineInput[], existingIds: string[]): Promise<CheckedPrLine[]> {
+  const itemIds = [...new Set(lines.map((l) => l.itemId).filter((v): v is string => !!v))];
+  const categoryIds = [...new Set(lines.map((l) => l.costCategoryId).filter((v): v is string => !!v))];
+  const [items, categories] = await Promise.all([
+    itemIds.length
+      ? prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, costCategoryId: true } })
+      : [],
+    categoryIds.length ? prisma.costCategory.findMany({ where: { id: { in: categoryIds } }, select: { id: true } }) : [],
+  ]);
+  const itemById = new Map(items.map((i) => [i.id, i]));
+  const known = new Set(categories.map((c) => c.id));
+  const own = new Set(existingIds);
+  return lines.map((l, index) => {
+    const n = index + 1;
+    if (l.id && !own.has(l.id)) throw badRequest(`Line ${n} is not on this request`);
+    if (l.itemId && !itemById.has(l.itemId)) throw badRequest(`Line ${n}: that item is not in the item master`);
+    if (l.costCategoryId && !known.has(l.costCategoryId)) throw badRequest(`Line ${n}: that budget line does not exist`);
+    const name = l.name?.trim() || null;
+    const description = l.description?.trim() || name;
+    if (!description) throw badRequest(`Line ${n}: say what is needed`);
+    const costCategoryId = l.costCategoryId || (l.itemId ? itemById.get(l.itemId)?.costCategoryId : null) || null;
+    if (kind === 'DIRECT_TO_JOB' && !costCategoryId) {
+      throw badRequest(`Line ${n} (${name ?? description}): choose its budget line — it is how the cost finds the project budget`);
+    }
+    return {
+      id: l.id || null,
+      itemId: l.itemId || null,
+      costCategoryId,
+      partNumber: l.partNumber?.trim() || null,
+      name,
+      description,
+      quantity: l.quantity,
+      unit: l.unit?.trim() || 'pcs',
+      estimatedCost: l.estimatedCost,
+    };
+  });
+}
+
+/** Writes the checked lines in order: updates the ones with an id, creates the rest, removes what was left out. */
+async function writePrLines(tx: Prisma.TransactionClient, requestId: string, lines: CheckedPrLine[]) {
+  const keep = lines.map((l) => l.id).filter((v): v is string => !!v);
+  await tx.purchaseRequestItem.deleteMany({ where: { requestId, id: { notIn: keep } } });
+  for (const [sortOrder, l] of lines.entries()) {
+    const data = {
+      itemId: l.itemId,
+      costCategoryId: l.costCategoryId,
+      partNumber: l.partNumber,
+      name: l.name,
+      description: l.description,
+      quantity: D(l.quantity),
+      unit: l.unit,
+      estimatedCost: D(l.estimatedCost),
+      estimatedAmount: D(cents(l.quantity * l.estimatedCost)),
+      sortOrder,
+    };
+    if (l.id) await tx.purchaseRequestItem.update({ where: { id: l.id }, data });
+    else await tx.purchaseRequestItem.create({ data: { requestId, ...data } });
+  }
+}
 
 const prSchema = z.object({
   kind: z.enum(['DIRECT_TO_JOB', 'STOCK_REPLENISHMENT']).default('DIRECT_TO_JOB'),
@@ -341,6 +635,7 @@ const prSchema = z.object({
   purpose: z.string().trim().min(3, 'Say what this is for'),
   neededBy: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
+  preferredSupplier: z.string().trim().max(200).optional().nullable(),
 });
 
 /** The rights on the request's edit routes: its requester's, or anybody's. */
@@ -370,12 +665,19 @@ purchaseRequestRoutes.post(
   require_('gchain.purchase_requests.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(prSchema, req.body);
+    const body = parseBody(prSchema.extend({ lines: z.array(prLineSchema).max(500).optional() }), req.body);
     checkPrTarget(body.kind, body.jobId, body.warehouseId);
+    if (body.jobId && body.kind === 'DIRECT_TO_JOB') {
+      const job = await prisma.job.findUnique({ where: { id: body.jobId }, select: { id: true } });
+      if (!job) throw badRequest('That project does not exist');
+    }
+    // Every line is checked before the number is issued: a refused line
+    // burns no number (the costing sheet's rule).
+    const lines = body.lines ? await checkPrLines(body.kind, body.lines, []) : [];
 
     const pr = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('purchase_request', tx);
-      return tx.purchaseRequest.create({
+      const created = await tx.purchaseRequest.create({
         data: {
           number,
           kind: body.kind,
@@ -385,19 +687,23 @@ purchaseRequestRoutes.post(
           purpose: body.purpose,
           neededBy: asDate(body.neededBy),
           notes: body.notes || null,
+          preferredSupplier: body.preferredSupplier || null,
         },
       });
+      await writePrLines(tx, created.id, lines);
+      await audit(
+        {
+          entityType: 'purchase_request',
+          entityId: created.id,
+          action: 'CREATED',
+          summary: `Raised ${created.number} — ${created.purpose}${lines.length ? ` (${lines.length} line${lines.length === 1 ? '' : 's'})` : ''}`,
+        },
+        req,
+        tx,
+      );
+      return created;
     });
 
-    await audit(
-      {
-        entityType: 'purchase_request',
-        entityId: pr.id,
-        action: 'CREATED',
-        summary: `Raised ${pr.number} — ${pr.purpose}`,
-      },
-      req,
-    );
     res.status(201).json(pr);
   }),
 );
@@ -439,6 +745,7 @@ purchaseRequestRoutes.patch(
         purpose: z.string().trim().min(3, 'Say what this is for').optional(),
         neededBy: z.string().optional().nullable(),
         notes: z.string().optional().nullable(),
+        preferredSupplier: z.string().trim().max(200).optional().nullable(),
       }),
       req.body,
     );
@@ -487,6 +794,9 @@ purchaseRequestRoutes.patch(
       changed.push('needed by');
     }
     if (body.notes !== undefined && (body.notes || null) !== pr.notes) changed.push('notes');
+    if (body.preferredSupplier !== undefined && (body.preferredSupplier || null) !== pr.preferredSupplier) {
+      changed.push('preferred supplier');
+    }
     if (categoryFills.length) changed.push(`budget line filled on ${categoryFills.length} line${categoryFills.length === 1 ? '' : 's'}`);
 
     await prisma.$transaction(async (tx) => {
@@ -500,6 +810,7 @@ purchaseRequestRoutes.patch(
           ...(body.purpose !== undefined ? { purpose: body.purpose } : {}),
           ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
           ...(body.neededBy !== undefined ? { neededBy: asDate(body.neededBy) } : {}),
+          ...(body.preferredSupplier !== undefined ? { preferredSupplier: body.preferredSupplier || null } : {}),
         },
       });
       if (!claimed.count) throw badRequest(`${pr.number} was submitted a moment ago and cannot be changed`);
@@ -637,6 +948,72 @@ purchaseRequestRoutes.delete(
       req,
     );
     const full = await loadPr(req.params.id);
+    res.json(presentPr(full as unknown as Record<string, unknown>));
+  }),
+);
+
+/**
+ * The requisition page's save: the header AND the lines in one transaction
+ * (`PUT /:id/sheet`). The header follows PATCH's rules — the kind, the
+ * project and the warehouse under `checkPrTarget` — and the lines
+ * `checkPrLines()`, all checked before anything is written. Claimed on DRAFT
+ * and on the `updatedAt` the page read (`version`), so a submit, or another
+ * save, that landed in between wins: "It changed a moment ago — reload".
+ */
+purchaseRequestRoutes.put(
+  '/:id/sheet',
+  requireAny(...PR_EDIT),
+  handler(async (req, res) => {
+    const { pr } = await prForEdit(req, req.params.id);
+    const body = parseBody(
+      prSchema.extend({ lines: z.array(prLineSchema).max(500), version: z.string().optional().nullable() }),
+      req.body,
+    );
+    const kind = body.kind;
+    const jobId = kind === 'STOCK_REPLENISHMENT' ? null : body.jobId || null;
+    const warehouseId = body.warehouseId || null;
+    checkPrTarget(kind, jobId, warehouseId);
+    if (jobId && jobId !== pr.jobId) {
+      const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true } });
+      if (!job) throw badRequest('That project does not exist');
+    }
+    if (warehouseId && warehouseId !== pr.warehouseId) {
+      const warehouse = await prisma.warehouse.findUnique({ where: { id: warehouseId }, select: { id: true } });
+      if (!warehouse) throw badRequest('That warehouse does not exist');
+    }
+    const lines = await checkPrLines(kind, body.lines, pr.items.map((i) => i.id));
+    const version = body.version ? new Date(body.version) : null;
+    if (version && Number.isNaN(version.getTime())) throw badRequest('The version is not a date');
+
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.purchaseRequest.updateMany({
+        where: { id: pr.id, status: 'DRAFT', ...(version ? { updatedAt: version } : {}) },
+        data: {
+          kind,
+          jobId,
+          warehouseId,
+          purpose: body.purpose,
+          neededBy: asDate(body.neededBy),
+          notes: body.notes || null,
+          preferredSupplier: body.preferredSupplier || null,
+        },
+      });
+      if (!claimed.count) throw badRequest(`${pr.number} changed a moment ago — reload it and make the change again`);
+      await writePrLines(tx, pr.id, lines);
+      const total = lines.reduce((sum, l) => sum + cents(l.quantity * l.estimatedCost), 0);
+      await audit(
+        {
+          entityType: 'purchase_request',
+          entityId: pr.id,
+          action: 'UPDATED',
+          summary: `Modified ${pr.number}: ${lines.length} line${lines.length === 1 ? '' : 's'}, ${formatMoney(cents(total))} estimated`,
+        },
+        req,
+        tx,
+      );
+    });
+
+    const full = await loadPr(pr.id);
     res.json(presentPr(full as unknown as Record<string, unknown>));
   }),
 );
@@ -2498,18 +2875,22 @@ purchaseRequestRoutes.get(
             { label: 'Requested by', value: pr.requestedBy.name },
             { label: 'Needed by', value: pr.neededBy ? formatDate(pr.neededBy) : '—' },
             { label: 'Status', value: statusLabel(pr.status) },
+            ...(pr.preferredSupplier ? [{ label: 'Preferred supplier', value: pr.preferredSupplier }] : []),
           ],
         },
         {
           kind: 'table',
           title: 'Items requested',
-          head: ['No.', 'Description', 'Category', 'Qty', 'Unit', `Est. cost (${currency})`, `Est. amount (${currency})`],
-          align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
+          head: ['No.', 'Budget line', 'Part No.', 'Item', 'Qty', 'Unit', `Est. cost (${currency})`, `Est. amount (${currency})`],
+          align: ['right', 'left', 'left', 'left', 'right', 'left', 'right', 'right'],
           rows: pr.items.map((i, n) => [
             String(n + 1),
-            i.description,
             i.costCategory?.name ?? '—',
-            String(num(i.quantity)),
+            i.partNumber ?? '',
+            // The bold name over its description (the costing's cell), or
+            // the description alone on a line typed before the page editor.
+            i.name && i.description !== i.name ? { title: i.name, body: i.description } : (i.name ?? i.description),
+            formatQuantity(num(i.quantity)),
             i.unit,
             formatAmount(num(i.estimatedCost)),
             formatAmount(num(i.estimatedAmount)),

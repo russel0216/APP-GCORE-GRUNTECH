@@ -107,6 +107,7 @@ import { readWorkbook } from '../../web/src/lib/spreadsheetRead';
 import { workingDayDate } from '../src/shared/day';
 import { ARCHIVE_ATTACHMENT, ARCHIVE_LIST_KEY, SCORO_ARCHIVE_REMOVED, removeScoroArchive } from '../src/shared/scoroArchive';
 import { recordLink } from '../../web/src/lib/links';
+import { parseDelimited, rowsToPrLines, prLineAmount, matchCategory } from '../../web/src/lib/prLines';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
 import { contentStreams, pdfRuns, pdfText, runWidth, shown, type PdfRun } from './lib/paper';
@@ -2496,6 +2497,36 @@ async function main() {
     'and a selector with nothing left to say is not stored as an empty rule',
     editor.rules['.empty'] === undefined,
   );
+
+  // ── The requisition page's lines (web/src/lib/prLines.ts) ─────────────────
+  {
+    console.log('\nPurchase requisition lines: import and paste');
+    const cats = [
+      { id: 'mat', code: 'MAT', name: 'Materials' },
+      { id: 'eqp', code: 'EQP', name: 'Equipment' },
+    ];
+    const csv = 'Budget line,Part No.,Item,Description,Unit,Qty,Est. unit cost\r\nMaterials,S3 R 68,"COMPRESSOR OIL, 4L","Corena ""S3""",pcs,2,"1,240.00"\r\n2,A048199,OIL FILTER,,,1,1650\r\n,,,,,,\r\n';
+    const fromCsv = rowsToPrLines(parseDelimited(csv), cats);
+    check(
+      'an imported CSV is read by its headings: quotes, doubled quotes, commas in a figure, a budget line by name or place',
+      fromCsv.lines.length === 2 && fromCsv.lines[0].name === 'COMPRESSOR OIL, 4L' && fromCsv.lines[0].description === 'Corena "S3"' &&
+        fromCsv.lines[0].estimatedCost === '1240' && fromCsv.lines[0].costCategoryId === 'mat' && fromCsv.lines[1].costCategoryId === 'eqp' &&
+        fromCsv.lines[1].unit === 'pcs',
+      JSON.stringify(fromCsv),
+    );
+    const pasted = rowsToPrLines(parseDelimited('A1\tAIR FILTER\t\tpc\t3\t1,250\nB2\t\t\tpc\t1\t5\nC3\tSEPARATOR\t\tpc\tx\t5'), cats);
+    check(
+      'a block pasted from a spreadsheet (tabs, no headings) is read in the page\'s column order, and a row that cannot be read is named, never dropped silently',
+      pasted.lines.length === 1 && pasted.lines[0].partNumber === 'A1' && pasted.lines[0].quantity === '3' && pasted.lines[0].estimatedCost === '1250' &&
+        pasted.skipped.length === 2 && /Row 2/.test(pasted.skipped[0]) && /Row 3/.test(pasted.skipped[1]),
+      JSON.stringify(pasted),
+    );
+    check(
+      'a line\'s amount is the server\'s centavo rule, and a budget line matches by code, name or "1 Materials"',
+      prLineAmount(4, 950.555) === Math.round(4 * 950.555 * 100) / 100 && matchCategory('eqp', cats) === 'eqp' &&
+        matchCategory('1 Materials', cats) === 'mat' && matchCategory('Labour', cats) === '',
+    );
+  }
 
   // ── Numeric inputs (web/src/lib/number.ts) ─────────────────────────────────
   console.log('\nNumeric inputs');
