@@ -724,6 +724,8 @@ async function main() {
       // A margin anywhere the API allows, −95% to 95%, to six decimals.
       marginPct: ((Math.floor(rand() * 1_900_000) - 950_000) / 1_000_000).toString(),
       vatRate: rand() < 0.3 ? '0' : '0.12',
+      // A fixed price on a quarter of the sheets (2026-10-13).
+      targetContractValue: rand() < 0.25 ? (Math.floor(rand() * 100_000_000_00) / 100 + 0.01).toString() : null,
     };
     const a = JSON.stringify(serverMath.costingFigures(lines, rates));
     const b = JSON.stringify(webMath.costingFigures(lines, rates));
@@ -768,6 +770,18 @@ async function main() {
       serverMath.costingFigures([{ quantity: 1, unitCost: 100 }], { marginPct: -0.25 }).contractValue === 80 &&
       serverMath.costingFigures([{ quantity: 1, unitCost: 100 }], { marginPct: 1 }).contractValue === 100,
   );
+  const fixedA = serverMath.costingFigures([{ quantity: 1, unitCost: 75000 }], { marginPct: 0.1, targetContractValue: '116071.43', vatRate: 0.12 });
+  check(
+    'a fixed price IS the contract value, to the centavo — 116,071.43 before VAT lands the grand total on 130,000.00 — and the margin is what it amounts to',
+    fixedA.fixedPrice && fixedA.contractValue === 116071.43 && fixedA.grandTotal === 130000 && fixedA.marginPct === 0.353846,
+    JSON.stringify(fixedA),
+  );
+  const fixedB = serverMath.costingFigures([{ quantity: 1, unitCost: 75000 }, { quantity: 1, unitCost: 5000 }], { marginPct: 0.353846, targetContractValue: '116071.43' });
+  check(
+    'a line added under a fixed price keeps the price and moves the margin',
+    fixedB.contractValue === 116071.43 && fixedB.marginPct === 0.310769 && !serverMath.costingFigures([{ quantity: 1, unitCost: 1 }], { marginPct: 0.2, targetContractValue: null }).fixedPrice,
+    JSON.stringify(fixedB),
+  );
   check('vatOn() is VAT on a stored amount, rounded once', serverMath.vatOn('116049.02', '0.12') === 13925.88 && webMath.vatOn('116049.02', '0.12') === 13925.88);
   check('a 25% markup on cost is a 20% margin on the price', serverMath.marginOfMarkup(0.25) === 0.2 && webMath.marginOfMarkup(0.25) === 0.2);
   check(
@@ -795,6 +809,49 @@ async function main() {
     lines: [{ costCategoryId: mat.id, quantity: 1, unitCost: 1 }],
   });
   check('a line with neither name nor description is refused', unnamed.status === 400, `status ${unnamed.status}`);
+  // A fixed price through the API (2026-10-13).
+  const fixedLines = [{ costCategoryId: mat.id, name: `${TAG} Fixed-price pump`, quantity: 1, unit: 'unit', unitCost: 75000 }];
+  const fixedSheet = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} fixed price`,
+    marginPct: 0.1,
+    targetContractValue: 116071.43,
+    lines: fixedLines,
+  });
+  const fixedBack = fixedSheet.status === 201 ? (await api(tEstimator, 'GET', `/costings/${fixedSheet.body.id}`)).body : {};
+  check(
+    'POST with targetContractValue stores the price exactly and the margin it amounts to; the grand total is the 130,000.00 typed',
+    fixedSheet.status === 201 && fixedBack.contractValue === 116071.43 && fixedBack.targetContractValue === 116071.43 &&
+      fixedBack.marginPct === 0.353846 && fixedBack.grandTotal === 130000,
+    `status ${fixedSheet.status} ${JSON.stringify({ c: fixedBack.contractValue, t: fixedBack.targetContractValue, m: fixedBack.marginPct, g: fixedBack.grandTotal })}`,
+  );
+  if (fixedSheet.status === 201) {
+    const morePut = await api(tEstimator, 'PUT', `/costings/${fixedSheet.body.id}/sheet`, {
+      title: `${TAG} fixed price`,
+      marginPct: 0.353846,
+      targetContractValue: 116071.43,
+      lines: [...fixedLines, { costCategoryId: eqp.id, name: `${TAG} Crane`, quantity: 1, unit: 'day', unitCost: 5000 }],
+    });
+    check(
+      'a line added on the sheet keeps the fixed price and moves the margin',
+      morePut.status === 200 && morePut.body.contractValue === 116071.43 && morePut.body.marginPct === 0.310769 && morePut.body.totalCost === 80000,
+      `status ${morePut.status} ${JSON.stringify({ c: morePut.body.contractValue, m: morePut.body.marginPct })}`,
+    );
+    const fixedPaper = pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${fixedSheet.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer()));
+    check('the paper says the margin stands on a fixed price', /Margin \(31\.08% of the price, fixed\s+price\)/.test(fixedPaper.join(' ')), fixedPaper.filter((r) => /Margin|price/.test(r)).join(' | '));
+    const loss = await api(tEstimator, 'PATCH', `/costings/${fixedSheet.body.id}`, { targetContractValue: 1000 });
+    check('a fixed price past a ±95% margin of the cost is refused, and nothing changes', loss.status === 400 &&
+      Number((await prisma.costing.findUnique({ where: { id: fixedSheet.body.id } }))!.targetContractValue) === 116071.43, `status ${loss.status}`);
+    const released = await api(tEstimator, 'PATCH', `/costings/${fixedSheet.body.id}`, { targetContractValue: null });
+    const releasedBack = (await api(tEstimator, 'GET', `/costings/${fixedSheet.body.id}`)).body;
+    check(
+      'released, it prices from the margin it stood on (six decimals) — the contract value within ten centavos of the fixed price',
+      released.status === 200 && releasedBack.targetContractValue === null && Math.abs(releasedBack.contractValue - 116071.43) <= 0.1,
+      JSON.stringify({ status: released.status, t: releasedBack.targetContractValue, c: releasedBack.contractValue }),
+    );
+  }
+  const noCost = await api(tEstimator, 'POST', '/costings', { title: `${TAG} fixed price, no cost`, targetContractValue: 1000 });
+  check('a fixed price with no cost lines is refused', noCost.status === 400, `status ${noCost.status}`);
+
   const oddVat = await api(tEstimator, 'POST', '/costings', { title: `${TAG} odd VAT`, vatRate: 0.05 });
   check('a VAT rate that is neither the company rate nor 0% is refused', oddVat.status === 400, `status ${oddVat.status}`);
 

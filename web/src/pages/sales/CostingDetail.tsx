@@ -70,6 +70,8 @@ export interface CostingDetail extends Omit<CostingRow, 'status'> {
   status: 'DRAFT' | 'PENDING_APPROVAL' | 'FINAL';
   /** The margin on the price, a fraction to six decimals. */
   marginPct: number;
+  /** A fixed price, net of VAT (2026-10-13); null when priced from the margin. */
+  targetContractValue?: number | null;
   vatRate: number;
   /** Contract value − cost, from the stored figures. */
   marginAmount: number;

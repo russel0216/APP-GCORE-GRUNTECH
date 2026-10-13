@@ -1171,6 +1171,12 @@ model Costing {
   /// must not silently change when someone edits a cost line months later.
   contractValue Decimal @default(0) @db.Decimal(18, 2)
   totalCost     Decimal @default(0) @db.Decimal(18, 2)
+  /// A FIXED PRICE (2026-10-13, the owner's call): the contract value, net of
+  /// VAT, as typed on the sheet's "Set the grand total". While set, `recalc()`
+  /// writes `contractValue` = this exactly and `marginPct` = what it amounts to
+  /// over the cost, so a line changed afterwards keeps the price and moves the
+  /// margin. Null: priced from `marginPct`.
+  targetContractValue Decimal? @db.Decimal(18, 2)
 
   durationDays Int?
   /// Internal notes — shown on the screen, never printed.

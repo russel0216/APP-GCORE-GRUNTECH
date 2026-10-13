@@ -77,6 +77,15 @@ export interface CostingRates {
    */
   marginPct: Num;
   vatRate?: Num;
+  /**
+   * A FIXED PRICE (2026-10-13, the owner's call: "the percentage is hard to
+   * hit the desired value"): the contract value, net of VAT, as typed. When
+   * set, the contract value IS it, to the centavo, and the margin is what it
+   * amounts to over the cost — a line changed afterwards keeps the price and
+   * moves the margin, as a fixed-price bid does. Null or 0: priced from
+   * `marginPct`.
+   */
+  targetContractValue?: Num;
 }
 
 export interface CostingFigures {
@@ -91,6 +100,10 @@ export interface CostingFigures {
   grossProfit: number;
   /** Profit over the contract value, never over cost. */
   grossMarginPct: number;
+  /** The margin the price stands on, to six decimals: the rate given, or — at a fixed price — what the price amounts to. */
+  marginPct: number;
+  /** Priced from `targetContractValue`. */
+  fixedPrice: boolean;
 }
 
 const TENK = BigInt(10000);
@@ -101,7 +114,8 @@ const MILLION = BigInt(1_000_000);
  *
  *   project budgeted cost   Σ line amounts (a subheading costs nothing)
  *   = contract value        cost ÷ (1 − margin), rounded once to the centavo;
- *                           net of VAT. A margin of 100% or more is no price
+ *                           net of VAT — or, at a fixed price, the price as
+ *                           typed, the margin then derived from it. A margin of 100% or more is no price
  *                           at all, so it prices at cost — the API refuses it
  *                           long before (±95% is the limit).
  *   + VAT                   contract value × VAT rate
@@ -114,8 +128,11 @@ const MILLION = BigInt(1_000_000);
 export function costingFigures(lines: MathLine[], rates: CostingRates): CostingFigures {
   let total = ZERO;
   for (const l of lines) if (!l.isHeading) total += lineAmountCents(l.quantity, l.unitCost);
+  const target = toUnits(rates.targetContractValue, 2);
+  const fixedPrice = target > ZERO;
   const denominator = MILLION - toUnits(rates.marginPct, 6);
-  const contract = denominator > ZERO ? roundDiv(total * MILLION, denominator) : total;
+  const contract = fixedPrice ? target : denominator > ZERO ? roundDiv(total * MILLION, denominator) : total;
+  const marginUnits = fixedPrice ? roundDiv((contract - total) * MILLION, contract) : toUnits(rates.marginPct, 6);
   const vat = roundDiv(contract * toUnits(rates.vatRate, 4), TENK);
   const profit = contract - total;
   return {
@@ -126,6 +143,8 @@ export function costingFigures(lines: MathLine[], rates: CostingRates): CostingF
     grandTotal: cents(contract + vat),
     grossProfit: cents(profit),
     grossMarginPct: contract > ZERO ? Number(profit) / Number(contract) : 0,
+    marginPct: Number(marginUnits) / 1_000_000,
+    fixedPrice,
   };
 }
 

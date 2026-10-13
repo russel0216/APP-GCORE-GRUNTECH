@@ -87,6 +87,8 @@ interface Header {
   validUntil: string;
   /** The margin on the price, in percent as typed ("25" = 25%). */
   marginPct: string;
+  /** A fixed price, net of VAT, as a plain number; '' prices from the margin (2026-10-13). */
+  fixedPrice: string;
   vatOn: boolean;
   notes: string;
   terms: string;
@@ -232,36 +234,42 @@ function parsePasted(text: string, categoryId: string): SheetLine[] {
 }
 
 /**
- * Prices the sheet to a grand total: the margin (to the 0.0001% it is stored
- * at) that lands the estimate nearest the figure. A margin is a share of the
- * price, so the estimate may miss the target by a centavo or two; the toast
- * says where it landed. (The markup rule used a discount to make up the
- * difference — there is no discount on a costing any more, 2026-10-09.)
+ * Fixes the sheet's price (2026-10-13, the owner's call: a margin cannot
+ * always land on the figure wanted). Typed WITH VAT, the price is the
+ * contract value whose VAT brings it nearest the figure — exact unless VAT's
+ * own rounding makes that impossible, which the toast then says; typed
+ * before VAT, it is the figure itself. The margin is whatever the price
+ * amounts to over the cost, within the margin's ±95%.
  */
 function priceTo(
   target: number,
+  withVat: boolean,
   lines: { quantity: string; unitCost: string; isHeading?: boolean }[],
   vatRate: number,
-): { marginPct: number; grand: number } | null {
+): { contract: number; marginPct: number; grand: number } | { problem: string } {
   const base = costingFigures(lines, { marginPct: 0, vatRate });
-  if (base.totalCost <= 0 || target <= 0) return null;
-  // The contract value whose VAT brings it to the target, to the centavo.
+  if (base.totalCost <= 0) return { problem: 'Enter the cost lines first — a price is set on top of a cost.' };
+  if (target <= 0) return { problem: 'Enter a price above zero.' };
   const targetCents = Math.round(target * 100);
-  const guess = Math.round(targetCents / (1 + vatRate));
-  let contractCents = guess;
-  let best = Infinity;
-  for (const c of [guess - 2, guess - 1, guess, guess + 1, guess + 2]) {
-    const grand = c + Math.round(c * vatRate);
-    if (Math.abs(grand - targetCents) < best) {
-      best = Math.abs(grand - targetCents);
-      contractCents = c;
+  let contractCents = targetCents;
+  if (withVat) {
+    // The contract value whose VAT brings it to the target, to the centavo.
+    const guess = Math.round(targetCents / (1 + vatRate));
+    let best = Infinity;
+    for (const c of [guess - 2, guess - 1, guess, guess + 1, guess + 2]) {
+      const grand = c + Math.round(c * vatRate);
+      if (Math.abs(grand - targetCents) < best) {
+        best = Math.abs(grand - targetCents);
+        contractCents = c;
+      }
     }
   }
   const contract = contractCents / 100;
-  if (contract <= 0) return null;
-  const marginPct = Math.round(((contract - base.totalCost) / contract) * 1_000_000) / 1_000_000;
-  if (marginPct >= 0.95 || marginPct <= -0.95) return null;
-  return { marginPct, grand: costingFigures(lines, { marginPct, vatRate }).grandTotal };
+  const f = costingFigures(lines, { marginPct: 0, vatRate, targetContractValue: contract });
+  if (f.marginPct >= 0.95 || f.marginPct <= -0.95) {
+    return { problem: `That price is a ${(f.marginPct * 100).toFixed(1)}% margin on the cost — within ±95% only.` };
+  }
+  return { contract, marginPct: f.marginPct, grand: f.grandTotal };
 }
 
 export function CostingSheet() {
@@ -290,6 +298,7 @@ export function CostingSheet() {
     systemUnit: '',
     validUntil: addDays(todayLocal(), 30),
     marginPct: '15',
+    fixedPrice: '',
     vatOn: true,
     notes: '',
     terms: '',
@@ -303,6 +312,8 @@ export function CostingSheet() {
   const [leadNote, setLeadNote] = useState<{ id: string; number: string; companyName: string } | null>(null);
   const [templateId, setTemplateId] = useState(params.get('template') ?? '');
   const [target, setTarget] = useState('');
+  /** Whether "Set the grand total" is typed with VAT (the grand total) or before it (the contract value). */
+  const [targetWithVat, setTargetWithVat] = useState(true);
   const [templatePanel, setTemplatePanel] = useState(false);
   const focusNext = useRef<string | null>(null);
 
@@ -359,6 +370,7 @@ export function CostingSheet() {
           systemUnit: c.systemUnit ?? '',
           validUntil: c.validUntil ?? '',
           marginPct: percentString(c.marginPct),
+          fixedPrice: c.targetContractValue ? String(c.targetContractValue) : '',
           vatOn: c.vatRate > 0,
           notes: c.notes ?? '',
           terms: c.terms ?? '',
@@ -497,6 +509,7 @@ export function CostingSheet() {
     // Typed in percent, stored as a fraction to six decimals; a minus sign is a loss-making bid, said as such.
     marginPct: marginOk(header.marginPct) ? Math.round(Number(header.marginPct.replace(/[,\s%]/g, '')) * 10000) / 1_000_000 : 0,
     vatRate,
+    targetContractValue: header.fixedPrice ? figure(header.fixedPrice) : null,
   };
   const mathLines = lines.map((l) => ({ quantity: l.quantity || '0', unitCost: l.unitCost || '0', isHeading: l.isHeading }));
   const totals = costingFigures(mathLines, rates);
@@ -693,13 +706,25 @@ export function CostingSheet() {
   }
 
   function applyTarget() {
-    const result = priceTo(figure(target), mathLines, vatRate);
-    if (!result) {
-      toast('error', 'Enter the cost lines first — a price is set on top of a cost, and within a 95% margin of it.');
+    const typed = figure(target);
+    const result = priceTo(typed, targetWithVat, mathLines, vatRate);
+    if ('problem' in result) {
+      toast('error', result.problem);
       return;
     }
-    setHeader((h) => ({ ...h, marginPct: percentString(result.marginPct) }));
-    toast('ok', `A ${percentString(result.marginPct)}% margin lands on ${formatMoney(result.grand)}`);
+    setHeader((h) => ({ ...h, fixedPrice: String(result.contract), marginPct: percentString(result.marginPct) }));
+    const missed = targetWithVat && Math.round(result.grand * 100) !== Math.round(typed * 100);
+    toast(
+      'ok',
+      `Fixed at ${formatMoney(result.contract)} before VAT — grand total ${formatMoney(result.grand)}${
+        missed ? ` (VAT's rounding cannot land on ${formatMoney(typed)} exactly)` : ''
+      }, a ${percentString(result.marginPct)}% margin`,
+    );
+  }
+
+  /** Prices from the margin again, at the margin the fixed price stood on — nothing moves until it is changed. */
+  function releasePrice() {
+    setHeader((h) => ({ ...h, fixedPrice: '', marginPct: percentString(totals.marginPct) }));
   }
 
   // ── Saving ─────────────────────────────────────────────────────────────────
@@ -714,7 +739,14 @@ export function CostingSheet() {
   const sectionProblems = new Map<string, string>();
   for (const s of keptSections) if (s.name.trim().length < 2) sectionProblems.set(s.key, 'Name the phase');
   const titleProblem = header.title.trim().length < 2 ? 'Give the costing a title' : null;
-  const rateProblem = !marginOk(header.marginPct) ? 'The margin is a percentage of the price, between −95 and 95' : null;
+  const fixed = !!header.fixedPrice;
+  const rateProblem = fixed
+    ? totals.marginPct >= 0.95 || totals.marginPct <= -0.95
+      ? `The fixed price is a ${(totals.marginPct * 100).toFixed(1)}% margin on the cost now — within ±95% only. Set the price again or release it.`
+      : null
+    : !marginOk(header.marginPct)
+      ? 'The margin is a percentage of the price, between −95 and 95'
+      : null;
   const valid = !titleProblem && !rateProblem && !lineProblems.size && !sectionProblems.size;
 
   function sheetPayload() {
@@ -724,7 +756,9 @@ export function CostingSheet() {
       siteId: header.siteId || null,
       systemUnit: header.systemUnit.trim() || null,
       validUntil: header.validUntil || null,
-      marginPct: rates.marginPct,
+      // At a fixed price the margin is what the price amounts to; the server derives it again.
+      marginPct: fixed ? totals.marginPct : rates.marginPct,
+      targetContractValue: fixed ? figure(header.fixedPrice) : null,
       vatRate,
       notes: header.notes,
       terms: header.terms,
@@ -1137,15 +1171,31 @@ export function CostingSheet() {
                 <td>
                   <label htmlFor="cs-margin">Margin on the price</label>
                   <div className="faint cs-note">= {markupNote}% markup on cost</div>
+                  {fixed && (
+                    <div className="faint cs-note">
+                      Fixed price — the margin follows it.{' '}
+                      <button type="button" className="btn btn-sm btn-ghost" onClick={releasePrice} title="Price from the margin again">
+                        Release
+                      </button>
+                    </div>
+                  )}
                 </td>
                 <td className="cs-rate">
-                  <NumberInput kind="percent" id="cs-margin" className="qe-num" value={header.marginPct} onChange={(e) => setH('marginPct', e.target.value)} />
+                  <NumberInput
+                    kind="percent"
+                    id="cs-margin"
+                    className="qe-num"
+                    value={fixed ? percentString(totals.marginPct) : header.marginPct}
+                    disabled={fixed}
+                    title={fixed ? 'Worked out from the fixed price' : undefined}
+                    onChange={(e) => setH('marginPct', e.target.value)}
+                  />
                   <span aria-hidden="true">%</span>
                 </td>
                 <td className="right mono">{formatMoney(totals.marginAmount)}</td>
               </tr>
               <tr className="cs-strong">
-                <td>Subtotal (contract value)</td>
+                <td>Subtotal (contract value){fixed && <span className="faint"> — fixed price</span>}</td>
                 <td />
                 <td className="right mono">{formatMoney(totals.contractValue)}</td>
               </tr>
@@ -1163,7 +1213,14 @@ export function CostingSheet() {
           </table>
           <div className="cs-summary-side">
             {rateProblem && attempted && <div className="alert error">{rateProblem}</div>}
-            <Field label="Set the grand total" hint="Works out the margin that lands on this figure — to the centavo where a margin can.">
+            <Field
+              label="Set the grand total"
+              hint={
+                targetWithVat
+                  ? 'Fixes the price at this grand total, VAT included — the margin follows it, and lines changed later keep the price.'
+                  : 'Fixes the contract value, before VAT — the margin follows it, and lines changed later keep the price.'
+              }
+            >
               <div className="row cs-target">
                 <NumberInput
                   kind="money"
@@ -1181,6 +1238,7 @@ export function CostingSheet() {
                   Apply
                 </button>
               </div>
+              <Checkbox checked={!targetWithVat} onChange={(v) => setTargetWithVat(!v)} label="Before VAT (the contract value)" />
             </Field>
             <p className="faint cs-note">
               The project budgeted cost — every line, contingency included, without the margin — becomes the project's

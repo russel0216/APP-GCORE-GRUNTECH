@@ -81,14 +81,18 @@ function num(v: Prisma.Decimal | null | undefined): number {
 type Tx = Prisma.TransactionClient;
 
 /** The costing's stored rates, as costingMath takes them. */
-function ratesOf(c: { marginPct: Prisma.Decimal; vatRate: Prisma.Decimal }) {
-  return { marginPct: c.marginPct.toString(), vatRate: c.vatRate.toString() };
+function ratesOf(c: { marginPct: Prisma.Decimal; vatRate: Prisma.Decimal; targetContractValue?: Prisma.Decimal | null }) {
+  return {
+    marginPct: c.marginPct.toString(),
+    vatRate: c.vatRate.toString(),
+    targetContractValue: c.targetContractValue ? c.targetContractValue.toString() : null,
+  };
 }
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
 
 /** Recomputes totals from the lines and rewrites the stored figures. */
-async function recalc(costingId: string, tx: Tx = prisma) {
+async function recalc(costingId: string, tx: Tx = prisma, opts: { strict?: boolean } = {}) {
   const costing = await tx.costing.findUnique({
     where: { id: costingId },
     include: { lines: true },
@@ -99,9 +103,26 @@ async function recalc(costingId: string, tx: Tx = prisma) {
     costing.lines.map((l) => ({ quantity: l.quantity.toString(), unitCost: l.unitCost.toString(), isHeading: l.isHeading })),
     ratesOf(costing),
   );
+  // A fixed price stands on the margin it amounts to, within the margin's own
+  // ±95%: refused at a save (the caller's transaction rolls back), never on a
+  // background recalculation.
+  if (opts.strict && f.fixedPrice && (f.marginPct >= 0.95 || f.marginPct <= -0.95)) {
+    throw badRequest(
+      f.totalCost <= 0
+        ? 'Enter the cost lines first — a fixed price is set on top of a cost.'
+        : `A price of ${formatMoney(f.contractValue)} on a cost of ${formatMoney(f.totalCost)} is a ${Math.round(f.marginPct * 1000) / 10}% margin — within ±95% only.`,
+      [{ field: 'targetContractValue', message: 'Outside a ±95% margin of the cost' }],
+    );
+  }
   return tx.costing.update({
     where: { id: costingId },
-    data: { totalCost: d(f.totalCost), contractValue: d(f.contractValue) },
+    data: {
+      totalCost: d(f.totalCost),
+      contractValue: d(f.contractValue),
+      // At a fixed price the margin is what the price amounts to, stored for
+      // every reader of the costing's margin (the budget, the board).
+      ...(f.fixedPrice ? { marginPct: d(f.marginPct) } : {}),
+    },
   });
 }
 
@@ -151,6 +172,7 @@ function present(costing: Record<string, unknown>, ranks?: Map<string, number>) 
   const rates = {
     marginPct: num(costing.marginPct as Prisma.Decimal),
     vatRate: num(costing.vatRate as Prisma.Decimal),
+    targetContractValue: costing.targetContractValue == null ? null : num(costing.targetContractValue as Prisma.Decimal),
   };
   // The summary's figures come from the STORED cost and contract value — the
   // commercial facts — never re-derived from the rate: a costing carried over
@@ -1050,6 +1072,8 @@ const headerSchema = z.object({
   leadId: z.string().optional().nullable(),
   /** The gross margin on the price, a fraction: ±95% at most — at 100% there is no price. */
   marginPct: z.number().gt(-0.95, 'A margin of −95% or below prices nothing').lt(0.95, 'A margin of 95% or more is no price at all').optional(),
+  /** A fixed price, net of VAT (2026-10-13): the contract value as typed; null prices from the margin again. */
+  targetContractValue: z.number().gt(0, 'A price above zero').max(1e13).nullable().optional(),
   /** The company's VAT rate, or 0 for a zero-rated job — see `checkVatRate`. */
   vatRate: z.number().min(0).max(1).optional(),
   validUntil: z.string().regex(DAY, 'Use a date').optional().nullable(),
@@ -1177,7 +1201,7 @@ async function writeSheet(tx: Tx, costingId: string, body: SheetBody) {
     if (plan.totalDays > 0) await tx.costing.update({ where: { id: costingId }, data: { durationDays: plan.totalDays } });
   }
 
-  await recalc(costingId, tx);
+  await recalc(costingId, tx, { strict: true });
   if (body.spread) await spreadSections(tx, costingId);
 }
 
@@ -1217,6 +1241,7 @@ costingRoutes.post(
           leadId: lead?.id ?? null,
           ownerId: me.id,
           marginPct: d(body.marginPct ?? 0),
+          targetContractValue: body.targetContractValue ? d(body.targetContractValue) : null,
           // Snapshotted, like a quotation revision's: a Settings change later
           // does not reprint the tax this estimate was made with.
           vatRate: d(vatRate ?? (company ? Number(company.vatRate) : 0.12)),
@@ -1386,6 +1411,7 @@ function headerData(body: Partial<z.infer<typeof headerSchema>>, vatRate: number
   if (body.terms !== undefined) data.terms = body.terms || null;
   if (body.durationDays !== undefined) data.durationDays = body.durationDays ?? null;
   if (body.marginPct !== undefined) data.marginPct = d(body.marginPct);
+  if (body.targetContractValue !== undefined) data.targetContractValue = body.targetContractValue ? d(body.targetContractValue) : null;
   if (vatRate !== undefined) data.vatRate = d(vatRate);
   if (body.validUntil !== undefined) data.validUntil = asDay(body.validUntil);
   if (body.systemUnit !== undefined) data.systemUnit = body.systemUnit?.trim() || null;
@@ -1466,8 +1492,10 @@ costingRoutes.patch(
     // When it became final, for "Final this month"; reopening clears it.
     if (body.status === 'FINAL' && before.status !== 'FINAL') data.finalAt = new Date();
     if (body.status === 'DRAFT') data.finalAt = null;
-    await prisma.costing.update({ where: { id: req.params.id }, data });
-    await recalc(req.params.id);
+    await prisma.$transaction(async (tx) => {
+      await tx.costing.update({ where: { id: req.params.id }, data });
+      await recalc(req.params.id, tx, { strict: body.targetContractValue !== undefined || body.marginPct !== undefined });
+    });
 
     const costing = await loadFull(req.params.id);
     await audit(
@@ -1654,6 +1682,7 @@ costingRoutes.post(
           siteId: source.siteId,
           ownerId: me.id,
           marginPct: source.marginPct,
+          targetContractValue: source.targetContractValue,
           vatRate: source.vatRate,
           systemUnit: source.systemUnit,
           durationDays: source.durationDays,
@@ -1867,7 +1896,10 @@ costingRoutes.get(
     // The labels are the quotation's; only the last row is bold.
     const summary = [
       { label: 'Project budgeted cost', value: formatMoney(view.totalCost, currency) },
-      { label: `Margin (${pct(view.grossMarginPct)} of the price)`, value: formatMoney(view.marginAmount, currency) },
+      {
+        label: `Margin (${pct(view.grossMarginPct)} of the price${view.targetContractValue ? ', fixed price' : ''})`,
+        value: formatMoney(view.marginAmount, currency),
+      },
       { label: 'Subtotal', value: formatMoney(view.contractValue, currency) },
     ];
     if (view.vatRate > 0) summary.push({ label: `VAT (${ratePct(view.vatRate)})`, value: formatMoney(view.vatAmount, currency) });

@@ -4118,6 +4118,22 @@ Cost Estimate" PDF) in G-CORE's own style.
   value never moves) and zeroes the three; a template saved with a markup
   reads as the margin it amounts to (`marginOfMarkup`). The board's
   "Average discount" is now the valued revision's own `discountPct`.
+  **A fixed price** (2026-10-13, the owner's call: "the percentage is hard
+  to hit the desired value"): `Costing.targetContractValue` (nullable,
+  net of VAT). "Set the grand total" STORES it — typed with VAT by
+  default (the contract value whose VAT lands nearest, `priceTo()`; the
+  toast says when VAT's own rounding cannot land on the figure), or before
+  VAT with the tick — and `costingFigures({ targetContractValue })` /
+  `recalc()` then write `contractValue` = it exactly and `marginPct` = what
+  it amounts to (six decimals; `figures.marginPct`, `fixedPrice`), so a
+  line changed later keeps the price and moves the margin. The Margin box
+  shows the derived margin greyed with **Release**, which prices from that
+  margin again (the price may move by a few centavos — a margin at six
+  decimals cannot always reproduce it). A save whose fixed price lands
+  outside a ±95% margin of the cost is refused (`recalc(…, { strict })`
+  in the save's transaction), as is a fixed price with no cost lines; a
+  background recalculation never refuses. The paper's margin row reads
+  "(x% of the price, fixed price)"; a duplicated costing keeps it.
 - **A line has `name` (bold) and `description`**; a line typed as a name alone
   carries it as its description too, because every older reader prints
   `description`. **`isHeading` is a subheading**: amount 0, no code.
