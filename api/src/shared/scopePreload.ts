@@ -31,13 +31,12 @@ const phase = (name: string, kind: ScopeKind, tasks: string[], valueFrom: string
 });
 
 export const SCOPE_PRELOAD: readonly PreloadPhase[] = [
-  // Its purchases carry the Materials and Equipment cost, priced as the sheet prices it.
-  phase(
-    'PLANNING & ENGINEERING',
-    'MAIN_WORK',
-    ['Review of costing and design', 'Kick-off meeting (Gruntech)', 'Purchase of equipment', 'Purchase of other materials'],
-    ['MAT', 'EQP'],
-  ),
+  phase('PLANNING & ENGINEERING', 'MAIN_WORK', ['Review of costing and design', 'Kick-off meeting (Gruntech)']),
+  // The purchases are phases of their own (2026-10-13, the owner's call), each
+  // carrying its cost bucket priced as the sheet prices it — so each bills on
+  // its own line of the schedule of values.
+  phase('PURCHASE OF EQUIPMENT', 'MAIN_WORK', ['Purchase of equipment'], ['EQP']),
+  phase('PURCHASE OF MATERIALS', 'MAIN_WORK', ['Purchase of other materials'], ['MAT']),
   phase('SITE PREPARATION', 'MAIN_WORK', [
     'Kick-off meeting (Customer)',
     'Site survey',

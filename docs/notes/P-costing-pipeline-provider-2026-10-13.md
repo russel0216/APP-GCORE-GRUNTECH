@@ -24,7 +24,10 @@ save); releasing a fixed price prices from its six-decimal margin, which
 can move the price by a few centavos; the "This month forecast" TILE (off
 by default) stays, only the column went; and the lists' Status filter
 gained no "Cancelled" value — the stage filter is unchanged, a cancelled
-one reads "Cancelled" on its row.
+one reads "Cancelled" on its row. Open question 1 was answered the other way afterwards (the owner's
+call, the same day): the purchases are phases of their own — PURCHASE OF
+EQUIPMENT (Equipment cost) and PURCHASE OF MATERIALS (Materials cost) —
+and Planning & Engineering spreads.
 
 ## 1. Quotation — a provider not on the list
 
