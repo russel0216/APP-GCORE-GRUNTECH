@@ -121,8 +121,6 @@ export const BOARD_COLUMNS: BoardColumn[] = [
   { key: 'ON_HOLD', label: 'On hold', kind: 'parked', leadStatus: 'ON_HOLD' },
 ];
 
-export const FORECAST_KEY = 'FORECAST';
-
 const LEAD_COLUMN_KEYS = ['NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT', 'COSTING', 'ON_HOLD'];
 const QUOTATION_OPEN_KEYS = ['QUOTED', 'SUBMITTED', 'NEGOTIATION'];
 /** Lead statuses that mean "its quotation is the card now". */
@@ -505,7 +503,6 @@ export interface BoardResponse {
   /** The stages as configured — the bands the board draws its columns into. */
   stages: Stage[];
   columns: BoardColumnOut[];
-  forecast: { key: string; label: string; count: number; value: number; weighted: number; cards: Card[] };
   people: BoardPerson[];
 }
 
@@ -867,14 +864,6 @@ export function buildBoard(input: {
     },
     stages,
     columns,
-    forecast: {
-      key: FORECAST_KEY,
-      label: 'This month forecast',
-      count: forecastCards.length,
-      value: forecastValue,
-      weighted: forecastWeighted,
-      cards: forecastCards,
-    },
     people: [...people.values()].sort((a, b) => a.name.localeCompare(b.name)),
   };
 }

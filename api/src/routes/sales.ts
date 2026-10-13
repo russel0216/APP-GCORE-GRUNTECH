@@ -4180,8 +4180,8 @@ pipelineRoutes.get(
   require_('gops.pipeline.export'),
   handler(async (req, res) => {
     const board = await loadBoard(req);
-    const cards = [...board.columns.flatMap((c) => c.cards), ...board.forecast.cards.map((c) => ({ ...c, column: 'FORECAST' }))];
-    const label = (key: string) => (key === 'FORECAST' ? board.forecast.label : (columnByKey(key)?.label ?? key));
+    const cards = board.columns.flatMap((c) => c.cards);
+    const label = (key: string) => columnByKey(key)?.label ?? key;
     const rows = cards.map((c) => [
       label(c.column),
       c.kind,

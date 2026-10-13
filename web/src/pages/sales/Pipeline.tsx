@@ -97,7 +97,7 @@ interface StageDef {
 interface Column {
   key: string;
   label: string;
-  kind: 'lead' | 'quotation' | 'terminal' | 'parked' | 'forecast' | 'stage';
+  kind: 'lead' | 'quotation' | 'terminal' | 'parked' | 'stage';
   count: number;
   value: number;
   weighted: number;
@@ -135,7 +135,6 @@ interface Board {
   kpis: Kpis;
   stages: StageDef[];
   columns: Column[];
-  forecast: Omit<Column, 'kind'>;
   people: BoardPerson[];
 }
 
@@ -154,7 +153,6 @@ const BOARD_KEYS = [
   'LOST',
   'ON_HOLD',
 ];
-const FORECAST = 'FORECAST';
 /** The stage keys, so a collapsed stage is remembered like a collapsed column. */
 const STAGE_KEYS = ['OPPORTUNITY', 'NEGOTIATION', 'CLOSING', 'CONFIRMED', 'COMPLETED', 'LOST', 'HOLD'];
 const LEAD_KEYS = ['NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT', 'COSTING', 'ON_HOLD'];
@@ -213,7 +211,7 @@ interface PipelineView {
 const DEFAULT_VIEW: PipelineView = {
   v: 1,
   stages: 'stages',
-  columns: [...BOARD_KEYS, FORECAST],
+  columns: [...BOARD_KEYS],
   collapsed: ['ON_HOLD'],
   cardFields: CARD_FIELDS.map((f) => f.key),
   kpis: DEFAULT_KPIS,
@@ -232,7 +230,7 @@ const VIEW_STORAGE = 'gcore_pipeline_view';
  */
 function sanitiseView(raw: unknown): PipelineView {
   const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-  const all = [...BOARD_KEYS, FORECAST];
+  const all = [...BOARD_KEYS];
   const list = (v: unknown, allowed: string[]) =>
     Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && allowed.includes(x)) : null;
   const columns = list(r.columns, all);
@@ -293,7 +291,6 @@ const LABELS: Record<string, string> = {
   WON: 'Won',
   LOST: 'Lost',
   ON_HOLD: 'On hold',
-  FORECAST: 'This month forecast',
 };
 
 /**
@@ -304,7 +301,6 @@ const LABELS: Record<string, string> = {
 function refusalFor(card: Card, key: string): string | null {
   if (key === card.column) return null;
   if (card.allowedTargets.includes(key)) return null;
-  if (key === FORECAST) return 'The forecast is worked out from expected closing — set the date on the record';
   if (!card.canMove) return 'Only the owner (or a manager) can move this';
   if (card.kind === 'lead') return 'Raise a quotation from this lead first — a lead is won by its quotation';
   if (card.column === 'WON' && card.job) return `This quotation became ${card.job.number} — it stays won`;
@@ -320,7 +316,9 @@ function payloadFor(card: Card, key: string, lostReason?: string) {
 
 /**
  * SCORO's column tints (the owner's pipeline screenshot): opportunity cream,
- * negotiation orange, closing light green, confirmed green, forecast yellow.
+ * negotiation orange, closing light green, confirmed green. (The "This month
+ * forecast" column went on 2026-10-13, the owner's call — the Forecast menu
+ * consolidates closing dates.)
  * Mapped onto G-CORE's own stages; the colours come from the tone tokens.
  */
 const COLUMN_TONE: Record<string, string> = {
@@ -337,7 +335,6 @@ const COLUMN_TONE: Record<string, string> = {
   WON: 'won',
   LOST: 'lost',
   ON_HOLD: '',
-  [FORECAST]: 'forecast',
 };
 
 const byClosing = (c: Card) => (c.expectedClosing ? c.expectedClosing : '9999-12-31');
@@ -616,7 +613,6 @@ export function Pipeline() {
    * own column the server allows; in the detailed view the column itself.
    */
   function resolveDrop(card: Card, key: string): { key: string | null; reason: string | null } {
-    if (key === FORECAST) return { key: null, reason: refusalFor(card, FORECAST) };
     if (stageMode) {
       const stage = board?.stages.find((s) => s.key === key);
       return stage ? stageTarget(card, stage) : { key: null, reason: 'Not a stage' };
@@ -638,7 +634,7 @@ export function Pipeline() {
       }
       return null;
     }
-    const order = view.columns.filter((k) => k !== FORECAST);
+    const order = view.columns;
     let i = order.indexOf(card.column);
     if (i < 0) return null;
     for (i += dir; i >= 0 && i < order.length; i += dir) {
@@ -781,14 +777,12 @@ export function Pipeline() {
   const columnsByKey = useMemo(() => {
     const map = new Map<string, Column>();
     for (const c of board?.columns ?? []) map.set(c.key, c);
-    if (board) map.set(FORECAST, { ...board.forecast, kind: 'forecast' });
     return map;
   }, [board]);
 
-  const forecastColumn = columnsByKey.get(FORECAST);
   const ordered = stageMode
     ? board
-      ? [...stageColumns(board), ...(forecastColumn ? [forecastColumn] : [])]
+      ? stageColumns(board)
       : []
     : view.columns.map((k) => columnsByKey.get(k)).filter((c): c is Column => !!c);
   const peopleList = [...knownPeople.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -862,11 +856,10 @@ export function Pipeline() {
             <PipeCard
               key={`${col.key}-${card.ref}`}
               card={card}
-              inForecast={col.key === FORECAST}
               fields={view.cardFields}
               dragging={dragging?.ref === card.ref}
               menuOptions={stageOptions(card)}
-              menuOpen={menuFor === card.ref && col.key !== FORECAST}
+              menuOpen={menuFor === card.ref}
               onOpenMenu={() => setMenuFor(card.ref)}
               onCloseMenu={() => setMenuFor(null)}
               onKeyDown={(e) => onCardKey(e, card)}
@@ -1018,7 +1011,7 @@ export function Pipeline() {
       ) : lanes ? (
         <div className="pipe-lanes">
           {lanes.map(({ person, columns }) => {
-            const cards = columns.filter((c) => c.key !== FORECAST).flatMap((c) => c.cards);
+            const cards = columns.flatMap((c) => c.cards);
             return (
               <section key={person.id} className="pipe-lane" aria-label={person.name}>
                 <div className="pipe-lane-head">
@@ -1103,7 +1096,6 @@ function narrow(col: Column, ownerId: string): Column {
  * so the link says the same: `scope=all`, and the owner where one is picked.
  */
 function listLinkFor(column: Column, stages: StageDef[], ownerId: string): string | null {
-  if (column.key === FORECAST) return null;
   const open = (list: 'leads' | 'quotations', filter: Record<string, string>) =>
     `/g-ops/${list}${qs({ ...filter, scope: 'all', [list === 'leads' ? 'assignedToId' : 'ownerId']: ownerId || undefined })}`;
   if (column.kind === 'stage') {
@@ -1215,7 +1207,7 @@ function PipeColumn({
 }: {
   column: Column;
   color?: string;
-  /** Where "Open as list ›" goes (`listLinkFor`); null for the forecast. */
+  /** Where "Open as list ›" goes (`listLinkFor`); null where no list says the same. */
   listLink: string | null;
   collapsed: boolean;
   over: boolean;
@@ -1226,8 +1218,7 @@ function PipeColumn({
   onDrop: (e: React.DragEvent) => void;
   children: ReactNode;
 }) {
-  const forecast = column.key === FORECAST;
-  const cls = `pipe-col${forecast ? ' forecast' : ''}${collapsed ? ' collapsed' : ''}${over ? ' over' : ''}${refusal ? ' refused' : ''}${color ? ' has-color' : ''}`;
+  const cls = `pipe-col${collapsed ? ' collapsed' : ''}${over ? ' over' : ''}${refusal ? ' refused' : ''}${color ? ' has-color' : ''}`;
   return (
     <section
       className={cls}
@@ -1235,10 +1226,9 @@ function PipeColumn({
       data-tone={color ? undefined : COLUMN_TONE[column.key] || undefined}
       role="listitem"
       aria-label={`${column.label}: ${column.count} card${column.count === 1 ? '' : 's'}, ${formatMoney(column.value)}`}
-      // The forecast never calls preventDefault, so nothing can be dropped on it.
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
-      onDrop={forecast ? undefined : onDrop}
+      onDrop={onDrop}
     >
       {/* SCORO's column band: the stage, "N deals", and the total sum on a tint. */}
       <div className="pipe-band">
@@ -1266,12 +1256,11 @@ function PipeColumn({
           <div className="pipe-total weighted faint mono">{formatMoney(column.weighted)} weighted</div>
         )}
       </div>
-      {forecast && !collapsed && <div className="pipe-note">Worked out from expected closing — not a drop target.</div>}
       {refusal && <div className="pipe-refusal">{refusal}</div>}
       {!collapsed && (
         <div className="pipe-body">
           {children}
-          {column.count === 0 && <div className="pipe-note">Nothing here{forecast ? ' closing this month' : ''}.</div>}
+          {column.count === 0 && <div className="pipe-note">Nothing here.</div>}
         </div>
       )}
       {!collapsed && listLink && (
@@ -1287,7 +1276,6 @@ function PipeColumn({
 
 function PipeCard({
   card,
-  inForecast,
   fields,
   dragging,
   menuOptions,
@@ -1300,7 +1288,6 @@ function PipeCard({
   onMove,
 }: {
   card: Card;
-  inForecast: boolean;
   fields: string[];
   dragging: boolean;
   /** The stage view's choices; null in the detailed view, where the columns are the choices. */
@@ -1315,8 +1302,8 @@ function PipeCard({
 }) {
   const self = useRef<HTMLDivElement>(null);
   const show = (f: string) => fields.includes(f);
-  const ageId = `age-${card.kind}-${card.id}${inForecast ? '-f' : ''}`;
-  const movable = card.canMove && !inForecast;
+  const ageId = `age-${card.kind}-${card.id}`;
+  const movable = card.canMove;
   const next = card.nextStep;
   const nextOverdue = !!next?.at && new Date(next.at).getTime() < Date.now();
 
@@ -1326,7 +1313,7 @@ function PipeCard({
       className={`pipe-card${dragging ? ' dragging' : ''}`}
       role="listitem"
       tabIndex={0}
-      data-card-ref={inForecast ? undefined : card.ref}
+      data-card-ref={card.ref}
       draggable={movable}
       aria-roledescription="pipeline card"
       aria-label={`${card.number}, ${card.title}, ${formatMoney(card.value)}, ${LABELS[card.column] ?? card.column}`}
@@ -1391,9 +1378,6 @@ function PipeCard({
           {next.at ? ` · ${formatDate(next.at)}` : ''}
           {nextOverdue ? ' · overdue' : ''}
         </div>
-      )}
-      {card.expectedClosing && inForecast && (
-        <div className="pipe-card-sub">Closing {formatDate(card.expectedClosing)}</div>
       )}
       {card.column === 'LOST' && card.lostReason && <div className="pipe-card-sub">Lost: {card.lostReason}</div>}
       {show('job') && card.column === 'WON' && (

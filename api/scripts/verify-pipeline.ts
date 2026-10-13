@@ -389,6 +389,11 @@ async function main() {
   const sb = searched.body as unknown as BoardBody;
   const cards = sb.columns.flatMap((c) => c.cards);
   check(
+    'the board has no "This month forecast" column any more (2026-10-13, the owner\'s call — the Forecast menu does it)',
+    !('forecast' in (searched.body as Record<string, unknown>)) && !sb.columns.some((c) => c.key === 'FORECAST'),
+    Object.keys(searched.body as Record<string, unknown>).join(),
+  );
+  check(
     'a lead with a quotation is not a card',
     !cards.some((c) => c.ref === `lead:${quotedLead.id}`),
   );

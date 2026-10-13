@@ -1188,8 +1188,8 @@ async function main() {
   );
   check(
     'an ON_HOLD lead is left out of the forecast even when dated this month',
-    b2.forecast.count === 2,
-    `${b2.forecast.count}`,
+    b2.kpis.forecastCount === 2,
+    `${b2.kpis.forecastCount}`,
   );
   check(
     'forecastWeighted = Σ value × probability',

@@ -1697,10 +1697,14 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   (Total sum)" — mapped by POSITION onto SCORO's ladder (`COLUMN_TONE`:
   lead stages and drafted quotes = Opportunity cream, SUBMITTED =
   Negotiation orange, NEGOTIATION = Closing light green, WON = Confirmed
-  green, forecast yellow), tinted with the tone tokens' rgb values; a card
+  green), tinted with the tone tokens' rgb values; a card
   is the deal's name in bold, the company under it, the owner's face
   top-right (name in the tooltip and aria), and a footer of age against
-  amount. The field toggles still shape it.
+  amount. The field toggles still shape it. **The "This month forecast"
+  column is gone** (2026-10-13, the owner's call): `GET /pipeline` sends
+  no `forecast`, the board draws no such column and its CSV no such rows —
+  the Forecast menu consolidates closing dates. The optional "This month
+  forecast" tile (off by default) still reads `kpis.forecast*`.
 - **"Forecast deal" on the board is manual forecast input** (the owner's
   call): "+ New → Forecast deal" asks company, value, probability and
   expected closing and files a LEAD with `source: "Forecast"` — the
