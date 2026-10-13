@@ -300,7 +300,8 @@ export function BudgetRequestModal({
       <ErrorBox error={error} />
       <p className="muted del-lede">
         Cash for the project team to buy what it needs without a purchase requisition. It goes to
-        the project manager, then finance, who releases it in one voucher. It is accounted for
+        the team leader, back support and the finance manager (and the CEO / President above
+        ₱100,000), then finance releases it in one voucher. It is accounted for
         afterwards with receipts, in Expenses — and only what was spent reaches the project.
       </p>
 
@@ -682,7 +683,7 @@ export function BudgetRequestDetail() {
 
       {row.status === 'DRAFT' && <div className="alert info">A draft. Nothing happens until it is submitted for approval.</div>}
       {row.status === 'PENDING_APPROVAL' && (
-        <div className="alert info">With the project manager, then finance. Nothing is charged to the project until it is liquidated.</div>
+        <div className="alert info">Waiting for approval — the Approval panel says with whom. Nothing is charged to the project until it is liquidated.</div>
       )}
       {row.status === 'APPROVED' && (
         <div className="alert info">

@@ -21,7 +21,7 @@ import { stockOnHand } from '../src/shared/chain';
 import { manilaDayKey } from '../src/shared/day';
 import { statusLabel } from '../src/shared/pdf';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act } from '../src/shared/approvals';
+import { submitForApproval, act, pickWorkflow } from '../src/shared/approvals';
 import { budgetPosition } from '../src/routes/jobs';
 import {
   receiveStock,
@@ -202,10 +202,20 @@ async function main() {
   await cleanup();
 
   const engineer = await makeUser('Verify Engineer', 'eng@verifyc.local', ['project_engineer']);
-  const pm = await makeUser('Verify PM', 'pm@verifyc.local', ['project_manager']);
+  // The routing sheet of 2026-10-13: a requisition goes to the Technical
+  // Manager, then the requester's Team Leader ("Reports to"); a purchase
+  // order to the Purchasing Manager, and the CEO / President above ₱100,000.
+  // The PM here is also a Technical Manager and the engineer's (and the
+  // buyer's) Team Leader, so one Approve signs both steps (one signature per
+  // person); the requester further down reports to a Team Leader of their own.
+  const pm = await makeUser('Verify PM', 'pm@verifyc.local', ['project_manager', 'technical_manager']);
   const pm2 = await makeUser('Verify PM Two', 'pm2@verifyc.local', ['project_manager']);
   const finance = await makeUser('Verify Finance', 'fin@verifyc.local', ['finance']);
   const procurement = await makeUser('Verify Procurement', 'proc@verifyc.local', ['procurement']);
+  const leader = await makeUser('Verify Team Leader', 'leader@verifyc.local', ['team_leader']);
+  const purchMgr = await makeUser('Verify Purchasing Manager', 'purchmgr@verifyc.local', ['purchasing_manager']);
+  const ceoUser = await makeUser('Verify CEO', 'ceo@verifyc.local', ['ceo']);
+  await prisma.user.updateMany({ where: { id: { in: [engineer.id, procurement.id] } }, data: { supervisorId: pm.id } });
 
   const customer = await prisma.customer.create({
     data: { code: `${TAG}-C1`, name: `${TAG} Hospital` },
@@ -419,6 +429,22 @@ async function main() {
     requesterId: engineer.id,
   });
   await act({ requestId: prApproval.id, userId: pm.id, action: 'APPROVED' });
+  const prSigned = await prisma.approvalAction.findMany({ where: { requestId: prApproval.id }, orderBy: { sequence: 'asc' } });
+  check(
+    'a requisition goes to the Technical Manager, then the Team Leader — and one person holding both signs both with one Approve, at one instant',
+    (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: prApproval.id } })).status === 'APPROVED' &&
+      prSigned.length === 2 &&
+      prSigned.every((a) => a.approverId === pm.id) &&
+      prSigned[1].coSignedWith === 1 &&
+      prSigned[0].actedAt.getTime() === prSigned[1].actedAt.getTime(),
+    JSON.stringify(prSigned.map((a) => [a.sequence, a.coSignedWith])),
+  );
+  const poRoute = async (amount: number) => (await pickWorkflow('purchase_order', amount))?.steps.map((st) => st.name).join(' › ');
+  check(
+    'a purchase order up to ₱100,000.00 goes to the Purchasing Manager alone; above it, the CEO / President follows',
+    (await poRoute(100_000)) === 'Purchasing Manager' && (await poRoute(100_000.01)) === 'Purchasing Manager › CEO / President',
+    `${await poRoute(100_000)} | ${await poRoute(100_000.01)}`,
+  );
 
   check(
     'approving the request commits at the ESTIMATED price',
@@ -468,8 +494,7 @@ async function main() {
     amount: 14_560,
     requesterId: procurement.id,
   });
-  await act({ requestId: poApproval.id, userId: pm.id, action: 'APPROVED' });
-  await act({ requestId: poApproval.id, userId: finance.id, action: 'APPROVED' });
+  await act({ requestId: poApproval.id, userId: purchMgr.id, action: 'APPROVED' });
 
   const afterPo = await position();
   // 15,000 committed by the request, released, then 13,000 by the order.
@@ -727,7 +752,9 @@ async function main() {
 
   // Engineers and PMs raise PRs from the G-OPS menu, but every PR route checks
   // gchain keys. Without these grants the create button never appears.
-  for (const roleKey of ['project_engineer', 'project_manager']) {
+  // The routing sheet of 2026-10-13 adds Industry Specialists, Technical
+  // Managers and Team Leaders as preparers.
+  for (const roleKey of ['project_engineer', 'project_manager', 'industry_specialist', 'technical_manager', 'team_leader']) {
     const holds = await prisma.rolePermission.count({
       where: { role: { key: roleKey }, permission: { key: 'gchain.purchase_requests.create' } },
     });
@@ -995,13 +1022,13 @@ async function main() {
       where: { documentType: 'purchase_order', documentId: draftId, status: 'PENDING' },
     });
     if (pending) {
-      await act({ requestId: pending.id, userId: pm.id, action: 'REJECTED', comment: 'Wrong flange rating' });
+      await act({ requestId: pending.id, userId: purchMgr.id, action: 'REJECTED', comment: 'Wrong flange rating' });
     }
     const afterReject = await api(buyerToken, 'GET', `/purchase-orders/${draftId}`);
     const returned = afterReject.body.returned as { by: string | null; comment: string | null } | null;
     check(
       'a rejected order is back in draft and says who returned it and why',
-      afterReject.body.status === 'DRAFT' && returned?.by === pm.name && returned?.comment === 'Wrong flange rating',
+      afterReject.body.status === 'DRAFT' && returned?.by === purchMgr.name && returned?.comment === 'Wrong flange rating',
       JSON.stringify(returned),
     );
 
@@ -1059,6 +1086,7 @@ async function main() {
     ]);
     const requester = await mkUser('Verify Requester', 'requester@verifyc.local', requesterRole.id);
     const otherRequester = await mkUser('Verify Other Requester', 'requester2@verifyc.local', requesterRole.id);
+    await prisma.user.update({ where: { id: requester.id }, data: { supervisorId: leader.id } });
     const prOfficer = await mkUser('Verify PR Officer', 'profficer@verifyc.local', prOfficerRole.id);
     const requesterToken = signToken(requester.id, requester.email);
     const otherRequesterToken = signToken(otherRequester.id, otherRequester.email);
@@ -1236,7 +1264,10 @@ async function main() {
     const openAgain = await prisma.approvalRequest.findFirst({
       where: { documentType: 'purchase_request', documentId: prId, status: 'PENDING' },
     });
-    if (openAgain) await act({ requestId: openAgain.id, userId: pm.id, action: 'APPROVED' });
+    if (openAgain) {
+      await act({ requestId: openAgain.id, userId: pm.id, action: 'APPROVED' });
+      await act({ requestId: openAgain.id, userId: leader.id, action: 'APPROVED' });
+    }
     const prLines = await prisma.purchaseRequestItem.findMany({ where: { requestId: prId } });
     const prEstimate = prLines.reduce((s, l) => s + num(l.estimatedAmount), 0);
     const committedRows = async () =>
@@ -1337,10 +1368,10 @@ async function main() {
     );
 
     // ── The printed request after a pull-back ──────────────────────────────
-    // ₱50,000 and more takes the three-step route. Pulled back after the
-    // project manager signed, nothing stands: the paper must not date his
+    // The requisition's two steps (2026-10-13). Pulled back after the
+    // technical manager signed, nothing stands: the paper must not date his
     // approval as though it still did.
-    const big = await raisePr('big enough for three steps', 60_000);
+    const big = await raisePr('big enough to print', 60_000);
     const bigSteps = big.request?.workflow?.steps ?? [];
     if (big.request) await act({ requestId: big.request.id, userId: pm.id, action: 'APPROVED' });
     const pendingPdf = await printed(requesterToken, `/purchase-requests/${big.id}/pdf`);
@@ -1351,22 +1382,22 @@ async function main() {
     // requester's always and each step's once it has signed.
     const currency = (await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } }))?.currency?.trim() || 'PHP';
     check(
-      'pending at step 2 of three, the paper prints the project manager who signed, dated, and the two steps still to sign as Pending',
+      'pending at step 2 of two, the paper prints the technical manager who signed, dated, and the team leader still to sign as Pending',
       big.submitted === 200 &&
-        bigSteps.length === 3 &&
+        bigSteps.length === 2 &&
         pendingText.includes('Verify PM') &&
         signedCount(pendingText) === 2 &&
-        pendingCount(pendingText) === 2 &&
+        pendingCount(pendingText) === 1 &&
         bigSteps.every((st) => flat(pendingText).includes(st.name.toUpperCase())),
       `${big.submitted} ${bigSteps.length} steps, ${signedCount(pendingText)} signed, ${pendingCount(pendingText)} pending, PM ${pendingText.includes('Verify PM')}`,
     );
     // The sign-offs are the engine's one mapping (slotSignatories): the step's
-    // name alone is the role — never "Approved by — Finance review" — and the
-    // finance step still open names who may sign it over its Pending.
+    // name alone is the role — never "Approved by — Team Leader" — and the
+    // team leader's step still open names who may sign it over its Pending.
     check(
       'each step signs in its own name — no "Approved by —" prefix — and an open step names who may sign it',
-      !flat(pendingText).includes('APPROVED BY') && flat(pendingText).includes('Verify Finance'),
-      `approved-by ${flat(pendingText).includes('APPROVED BY')}, finance named ${flat(pendingText).includes('Verify Finance')}`,
+      !flat(pendingText).includes('APPROVED BY') && flat(pendingText).includes('Verify Team Leader'),
+      `approved-by ${flat(pendingText).includes('APPROVED BY')}, leader named ${flat(pendingText).includes('Verify Team Leader')}`,
     );
     check(
       'the paper says "Pending approval" (never the enum), heads its lines "No." and names the currency in the column head, and prints its money as a totals block',
@@ -1433,7 +1464,7 @@ async function main() {
     check(
       'rejected at its first step, the request prints no Pending and no open "Approved by" — only the requester\'s dated sign-off',
       rejectedFirst.submitted === 200 &&
-        rejectedFirstSteps.length === 3 &&
+        rejectedFirstSteps.length === 2 &&
         rejectedFirstNow.status === 'REJECTED' &&
         rejectedFirstPdf.status === 200 &&
         pendingCount(rejectedFirstText) === 0 &&
@@ -1445,18 +1476,18 @@ async function main() {
       `${rejectedFirst.submitted} ${rejectedFirstNow.status} ${rejectedFirstPdf.status}: ${signedCount(rejectedFirstText)} signed, ${pendingCount(rejectedFirstText)} pending`,
     );
 
-    const rejectedLater = await raisePr('rejected by finance', 60_000);
+    const rejectedLater = await raisePr('rejected by the team leader', 60_000);
     const rejectedLaterSteps = rejectedLater.request?.workflow?.steps ?? [];
     if (rejectedLater.request) {
       await act({ requestId: rejectedLater.request.id, userId: pm.id, action: 'APPROVED' });
-      await act({ requestId: rejectedLater.request.id, userId: finance.id, action: 'REJECTED', comment: `${TAG} over budget` });
+      await act({ requestId: rejectedLater.request.id, userId: leader.id, action: 'REJECTED', comment: `${TAG} over budget` });
     }
     const rejectedLaterNow = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: rejectedLater.id } });
     const rejectedLaterPdf = await printed(requesterToken, `/purchase-requests/${rejectedLater.id}/pdf`);
     const rejectedLaterText = rejectedLaterPdf.text;
     check(
-      'rejected at finance after the project manager signed, it prints his dated sign-off and nothing for the steps nobody will sign',
-      rejectedLaterSteps.length === 3 &&
+      'rejected by the team leader after the technical manager signed, it prints his dated sign-off and nothing for the step nobody will sign',
+      rejectedLaterSteps.length === 2 &&
         rejectedLaterNow.status === 'REJECTED' &&
         rejectedLaterPdf.status === 200 &&
         pendingCount(rejectedLaterText) === 0 &&
@@ -1464,7 +1495,7 @@ async function main() {
         rejectedLaterText.includes('Verify PM') &&
         stepNamed(rejectedLaterText, rejectedLaterSteps[0].name) &&
         !rejectedLaterSteps.slice(1).some((st) => stepNamed(rejectedLaterText, st.name)) &&
-        !flat(rejectedLaterText).includes('Verify Finance'),
+        !flat(rejectedLaterText).includes('Verify Team Leader'),
       `${rejectedLaterNow.status} ${rejectedLaterPdf.status}: ${signedCount(rejectedLaterText)} signed, ${pendingCount(rejectedLaterText)} pending`,
     );
 
@@ -1522,10 +1553,10 @@ async function main() {
     );
 
     // ── The printed order: every step of its route, and the money block ──
-    // The order was signed by the project manager AND finance; the paper
-    // prints both, dated, in the steps' own names — it used to print only the
-    // first approver, under "Approved by". Nothing waits on a "Received by":
-    // receiving is its own document.
+    // The order was signed by the Purchasing Manager (its route under
+    // ₱100,000, the sheet of 2026-10-13); the paper prints the step, dated, in
+    // its own name — never under "Approved by". Nothing waits on a "Received
+    // by": receiving is its own document.
     console.log('\nThe printed purchase order and supplier list');
     const poPrintsBefore = await prisma.auditLog.count({ where: { entityType: 'purchase_order', entityId: po.id, action: 'EXPORTED' } });
     const poPdf = await printed(buyerToken, `/purchase-orders/${po.id}/pdf`);
@@ -1536,13 +1567,12 @@ async function main() {
       include: { workflow: { select: { steps: { orderBy: { sequence: 'asc' } } } } },
     })).workflow?.steps ?? [];
     check(
-      'an issued order prints every step of its route — the project manager and finance, each dated — and nothing Pending',
+      'an issued order prints every step of its route — the purchasing manager under ₱100,000, dated — and nothing Pending',
       poPdf.status === 200 &&
-        poSteps.length === 2 &&
+        poSteps.length === 1 &&
         poSteps.every((st) => flat(poText).includes(st.name.toUpperCase())) &&
-        flat(poText).includes('Verify PM') &&
-        flat(poText).includes('Verify Finance') &&
-        signedCount(poText) === 3 &&
+        flat(poText).includes('Verify Purchasing Manager') &&
+        signedCount(poText) === 2 &&
         pendingCount(poText) === 0 &&
         !flat(poText).includes('APPROVED BY') &&
         !flat(poText).includes('RECEIVED BY'),
@@ -1571,13 +1601,12 @@ async function main() {
     const poDraftPdf = await printed(buyerToken, `/purchase-orders/${poDraftId}/pdf`);
     const poDraftText = poDraftPdf.text;
     check(
-      'a draft order prints the route it would take: both steps Pending under who may sign them, the buyer\'s the only dated sign-off',
+      'a draft order prints the route it would take: its step Pending under who may sign it, the buyer\'s the only dated sign-off',
       poDraftPdf.status === 200 &&
         poSteps.every((st) => flat(poDraftText).includes(st.name.toUpperCase())) &&
-        pendingCount(poDraftText) === 2 &&
+        pendingCount(poDraftText) === 1 &&
         signedCount(poDraftText) === 1 &&
-        flat(poDraftText).includes('Verify PM') &&
-        flat(poDraftText).includes('Verify Finance') &&
+        flat(poDraftText).includes('Verify Purchasing Manager') &&
         flat(poDraftText).includes('Status: Draft'),
       `${poDraftPdf.status} ${signedCount(poDraftText)} signed, ${pendingCount(poDraftText)} pending`,
     );
@@ -1615,19 +1644,20 @@ async function main() {
 
     // ── A colleague submits someone else's order ──────────────────────────
     // The approval is filed in the BUYER's name whoever presses Submit, as a
-    // purchase request is in its requester's. A buyer who also holds Project
-    // Manager would otherwise sit on the first step of their own order —
-    // eligible to approve what they raised (rule 3) — and the paper, which
-    // names the buyer as the one who prepared it, would print a route that
-    // is not the one taken.
+    // purchase request is in its requester's. Here the buyer is the
+    // Purchasing Manager (the routing sheet of 2026-10-13): filed in their
+    // name, step 1 is THEIR signature at submit (one signature per person),
+    // the CEO / President's still to come above ₱100,000, and they can never
+    // approve what is left of their own order. Filed in the colleague's name,
+    // nobody would have signed and the paper would print a route not taken.
     console.log('\nAn order submitted by a colleague stays the buyer\'s');
-    const pmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'project_manager' } });
+    const purchasingRole = await prisma.role.findUniqueOrThrow({ where: { key: 'purchasing_manager' } });
     const buyerPm = await prisma.user.create({
       data: {
         name: 'Verify Buyer PM',
         email: 'buyerpm@verifyc.local',
         passwordHash: await bcrypt.hash('x', 10),
-        roles: { create: [{ roleId: buyerRole.id }, { roleId: pmRole.id }] },
+        roles: { create: [{ roleId: buyerRole.id }, { roleId: purchasingRole.id }] },
       },
     });
     const buyerPmToken = signToken(buyerPm.id, buyerPm.email);
@@ -1638,11 +1668,12 @@ async function main() {
       costCategoryId: materials.id,
       quantity: 4,
       unit: 'pcs',
-      unitPrice: 250,
+      unitPrice: 30_000,
     });
     const handedOnSubmit = await api(colleagueToken, 'POST', `/purchase-orders/${handedOnId}/submit`);
     const handedOnRequest = await prisma.approvalRequest.findFirst({
       where: { documentType: 'purchase_order', documentId: handedOnId, status: 'PENDING' },
+      include: { workflow: { select: { steps: true } }, actions: true },
     });
     let selfApproval = 'not tried';
     if (handedOnRequest) {
@@ -1655,23 +1686,31 @@ async function main() {
     }
     const handedOnNow = handedOnRequest ? await prisma.approvalRequest.findUniqueOrThrow({ where: { id: handedOnRequest.id } }) : null;
     check(
-      'a colleague\'s submit files the order in the buyer\'s name, so the buyer — a project manager too — cannot approve their own order',
+      'a colleague\'s submit files the order in the buyer\'s name: the Purchasing Manager signs their step at submit, the CEO / President waits, and the buyer cannot approve the rest',
       handedOnSubmit.status === 200 &&
         handedOnRequest?.requesterId === buyerPm.id &&
+        handedOnRequest.workflow?.steps.length === 2 &&
+        handedOnRequest.currentSequence === 2 &&
+        handedOnRequest.actions.length === 1 &&
+        handedOnRequest.actions[0].selfSigned &&
+        handedOnRequest.actions[0].approverId === buyerPm.id &&
         /raised yourself/.test(selfApproval) &&
         handedOnNow?.status === 'PENDING' &&
-        handedOnNow.currentSequence === handedOnRequest.currentSequence,
+        handedOnNow.currentSequence === 2,
       `${handedOnSubmit.status} requester ${handedOnRequest?.requesterId === buyerPm.id ? 'the buyer' : handedOnRequest?.requesterId === colleague.id ? 'the colleague' : 'none'}, self-approval: ${selfApproval}`,
     );
     const handedOnPdf = await printed(buyerPmToken, `/purchase-orders/${handedOnId}/pdf`);
     const handedOnText = handedOnPdf.text;
+    const preparedLine = (t: string) => (flat(t).match(/PREPARED BY Verify Buyer PM .*?(\w{3} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M)/) ?? [])[1];
+    const managerLine = (t: string) => (flat(t).match(/PURCHASING MANAGER Verify Buyer PM .*?(\w{3} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M)/) ?? [])[1];
     check(
-      'and its paper names the buyer once — as who prepared it — never among who may sign the project manager\'s step',
+      'and its paper prints the buyer as who prepared it and as the Purchasing Manager, under ONE timestamp, with the CEO / President Pending',
       handedOnPdf.status === 200 &&
-        flat(handedOnText).split('Verify Buyer PM').length - 1 === 1 &&
-        flat(handedOnText).includes('Verify PM') &&
-        pendingCount(handedOnText) === 2,
-      `${handedOnPdf.status}: buyer named ${flat(handedOnText).split('Verify Buyer PM').length - 1} time(s), ${pendingCount(handedOnText)} pending`,
+        !!preparedLine(handedOnText) &&
+        preparedLine(handedOnText) === managerLine(handedOnText) &&
+        flat(handedOnText).includes('Verify CEO') &&
+        pendingCount(handedOnText) === 1,
+      `${handedOnPdf.status}: prepared ${preparedLine(handedOnText)}, manager ${managerLine(handedOnText)}, ${pendingCount(handedOnText)} pending — ${flat(handedOnText).slice(-400)}`,
     );
 
     // ── A canvass: its notes and its supplier rows, while OPEN ───────────

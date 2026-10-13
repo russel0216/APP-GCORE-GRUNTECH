@@ -487,6 +487,11 @@ model ApprovalAction {
   /// the route lets the preparer sign (`ApprovalWorkflow.preparerSigns`).
   /// Never pressed by anybody; dated the request's own instant.
   selfSigned   Boolean            @default(false)
+  /// Signed by the engine with an approver's own Approve (2026-10-13, "one
+  /// signature per person"): the approver may decide this later step in
+  /// their own right too, so it is signed at the same instant. The sequence
+  /// of the step whose Approve carried it; null for a step pressed.
+  coSignedWith Int?
   /// A stand-in's decision: the approver of the step they decided in place of
   /// (their direct report). `approverId` is who really acted.
   onBehalfOfId String?

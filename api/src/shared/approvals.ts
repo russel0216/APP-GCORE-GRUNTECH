@@ -754,7 +754,25 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     ),
   );
   const steps = request.workflow!.steps;
-  const next = steps.slice(steps.findIndex((s) => s.sequence === step.sequence) + 1).find((s) => !signed.has(s.sequence));
+  const later = steps.slice(steps.findIndex((s) => s.sequence === step.sequence) + 1).filter((s) => !signed.has(s.sequence));
+
+  // One signature per person (2026-10-13, the owner's call: "the time stamp
+  // of the same employee with multiple roles … make it uniform"). On a route
+  // where the preparer signs the steps they hold, an approver's Approve also
+  // signs every LATER unsigned step they may decide in their own right —
+  // never as a stand-in, never the requester — at the same instant, so one
+  // person is asked once and prints one timestamp. A stand-in signs only the
+  // step they stood in for.
+  const coSigned: ApprovalStep[] = [];
+  if (input.action === 'APPROVED' && request.workflow?.preparerSigns && !decider.onBehalfOfId) {
+    for (const st of later) {
+      const eligible = await approversForStep(st, request.requesterId, prisma, ctxOf(request));
+      if (eligible.includes(input.userId)) coSigned.push(st);
+    }
+  }
+  const coSignedSeqs = new Set(coSigned.map((s) => s.sequence));
+  const next = later.find((s) => !coSignedSeqs.has(s.sequence));
+  const at = new Date();
 
   const settled = await prisma.$transaction(async (tx) => {
     // Claimed, never simply written: the request must still be open at this
@@ -765,10 +783,10 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
       where: { id: request.id, status: 'PENDING', currentSequence: step.sequence },
       data:
         input.action !== 'APPROVED'
-          ? { status: input.action === 'REJECTED' ? 'REJECTED' : 'CANCELLED', closedAt: new Date() }
+          ? { status: input.action === 'REJECTED' ? 'REJECTED' : 'CANCELLED', closedAt: at }
           : next
             ? { currentSequence: next.sequence }
-            : { status: 'APPROVED', closedAt: new Date() },
+            : { status: 'APPROVED', closedAt: at },
     });
     if (!claimed.count) {
       throw badRequest('This request was decided or withdrawn a moment ago — reload to see where it stands');
@@ -783,8 +801,22 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
         onBehalfOfId: decider.onBehalfOfId,
         action: input.action,
         comment: input.comment ?? null,
+        actedAt: at,
       },
     });
+    if (coSigned.length) {
+      await tx.approvalAction.createMany({
+        data: coSigned.map((st) => ({
+          requestId: request.id,
+          stepId: st.id,
+          sequence: st.sequence,
+          approverId: input.userId,
+          action: 'APPROVED' as const,
+          coSignedWith: step.sequence,
+          actedAt: at,
+        })),
+      });
+    }
     return tx.approvalRequest.findUniqueOrThrow({ where: { id: request.id } });
   });
 
@@ -795,6 +827,15 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     summary: `${step.name} — ${actor?.name ?? 'unknown'}${stoodInFor ? ` (standing in for ${stoodInFor.name})` : ''}${input.comment ? `: ${input.comment}` : ''}`,
     actorId: input.userId,
   });
+  for (const st of coSigned) {
+    await audit({
+      entityType: request.documentType,
+      entityId: request.documentId,
+      action: 'APPROVED',
+      summary: `${st.name} — ${actor?.name ?? 'unknown'}, signed with ${step.name} (holds both)`,
+      actorId: input.userId,
+    });
+  }
 
   if (settled.status === 'PENDING') {
     await notifyCurrentStep(settled);
@@ -1024,6 +1065,8 @@ export interface ApprovalSlot {
   assigned?: StepPerson[];
   /** Signed by the preparer at submit (`preparerSigns`), at the submit instant. */
   selfSigned?: boolean;
+  /** Signed with the same approver's Approve on an earlier step, at that instant. */
+  coSigned?: boolean;
 }
 
 /**
@@ -1103,6 +1146,7 @@ export async function approvalSlots(documentType: string, documentId: string, dr
           email: a.approver.email,
           at: a.actedAt,
           ...(a.selfSigned ? { selfSigned: true } : {}),
+          ...(a.coSignedWith != null ? { coSigned: true } : {}),
         };
       }
       return open ? { step: st.name, assigned: await namedApprovers(st, request.requesterId, prisma, ctxOf(request)) } : null;

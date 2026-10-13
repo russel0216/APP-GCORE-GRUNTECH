@@ -137,7 +137,7 @@ export function Workflows() {
                 {w.optionLabel && <div className="faint">Offered as “{w.optionLabel}”</div>}
                 {(w.preparerSigns || w.standIns) && (
                   <div className="faint">
-                    {[w.preparerSigns && 'The preparer signs the steps they hold', w.standIns && 'managers may stand in']
+                    {[w.preparerSigns && 'One signature per person', w.standIns && 'managers may stand in']
                       .filter(Boolean)
                       .join(' · ')}
                   </div>
@@ -380,8 +380,12 @@ function WorkflowEditor({
       <label className="checkbox">
         <input type="checkbox" checked={preparerSigns} onChange={(e) => setPreparerSigns(e.target.checked)} />
         <span>
-          The preparer signs the steps they hold
-          <span className="faint"> — a step whose role the preparer holds is signed when they submit, with the same time as Prepared by</span>
+          One signature per person
+          <span className="faint">
+            {' '}
+            — the preparer signs the steps they hold when they submit, with the same time as Prepared by, and an approver
+            signs every later step they hold with their one Approve
+          </span>
         </span>
       </label>
       <label className="checkbox">

@@ -20,9 +20,12 @@ import { prisma } from '../src/prisma';
 const TYPICAL_REQUESTER: Record<string, string[]> = {
   leave_request: ['employee', 'supervisor', 'project_engineer', 'service_engineer'],
   overtime_request: ['employee', 'project_engineer', 'service_engineer'],
-  purchase_request: ['project_engineer', 'project_manager', 'service_engineer', 'procurement'],
-  // Project cash: the team asks, so engineers raise them as often as the PM.
-  budget_request: ['project_manager', 'project_engineer'],
+  // The routing sheet of 2026-10-13: Project Engineers, Industry
+  // Specialists, Technical Managers and Team Leaders prepare requisitions.
+  purchase_request: ['project_engineer', 'industry_specialist', 'technical_manager', 'team_leader', 'project_manager', 'service_engineer', 'procurement'],
+  // Project cash: the team asks — engineers, specialists, Back Support,
+  // Team Leaders and the Finance Manager (the sheet of 2026-10-13).
+  budget_request: ['project_engineer', 'industry_specialist', 'back_support', 'team_leader', 'finance_manager', 'project_manager'],
   // The routing sheet (2026-10-12): Industry Specialists, Team Leaders and
   // the CEO / President all prepare them, on the one route.
   quotation: ['industry_specialist', 'sales', 'team_leader', 'ceo', 'sales_manager'],
@@ -30,7 +33,8 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   // The costing route starts with an engineer (2026-10-09); sales and the
   // project managers still cost work too, and a Technical Manager may.
   costing: ['project_engineer', 'sales', 'sales_manager', 'project_manager', 'technical_manager', 'team_leader'],
-  purchase_order: ['procurement'],
+  // Admin Back Support and the Purchasing Manager prepare them (2026-10-13).
+  purchase_order: ['back_support', 'purchasing_manager', 'procurement'],
   expense: ['employee', 'project_engineer', 'sales'],
   // A supplier's invoice arrives in finance, so finance keys it in. Routing a
   // step back to finance is the same fault the budget-request and

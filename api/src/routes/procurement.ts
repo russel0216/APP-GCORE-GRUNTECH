@@ -25,6 +25,7 @@ import {
   submitForApproval,
   onApprovalSettled,
   approvalSlots,
+  preparedAt,
   slotSignatories,
   contactOf,
   cancelOpenRequest,
@@ -2424,7 +2425,8 @@ purchaseOrderRoutes.get(
       po.status === 'DRAFT' ? { amount: view.total, requesterId: po.createdById } : undefined,
     );
     const signatories: Signatory[] = [
-      { role: 'Prepared by', name: po.createdBy.name, ...(await contactOf(po.createdById)), at: po.createdAt },
+      // A Purchasing Manager's own order: step 1 signed at submit, one timestamp.
+      { role: 'Prepared by', name: po.createdBy.name, ...(await contactOf(po.createdById)), at: preparedAt(slots) ?? po.createdAt },
       ...(slots.length ? slotSignatories(slots) : po.status === 'CANCELLED' ? [] : [{ role: 'Approved by' }]),
     ];
 
@@ -2476,7 +2478,7 @@ purchaseRequestRoutes.get(
       pr.status === 'DRAFT' ? { amount: estimatedTotal, requesterId: pr.requestedById } : undefined,
     );
     const signatories: Signatory[] = [
-      { role: 'Requested by', name: pr.requestedBy.name, ...(await contactOf(pr.requestedById)), at: pr.createdAt },
+      { role: 'Requested by', name: pr.requestedBy.name, ...(await contactOf(pr.requestedById)), at: preparedAt(slots) ?? pr.createdAt },
       ...(slots.length ? slotSignatories(slots) : closed ? [] : [{ role: 'Approved by' }]),
     ];
 

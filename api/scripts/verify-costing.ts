@@ -202,18 +202,17 @@ async function main() {
     'gops.costing.edit_own',
   ]);
   const readRole = await makeRole('zzcost_read', `${TAG} read-only costing`, ['gops.costing.view_all']);
-  // The seeded costing route (2026-10-09, the owner's call): the Technical
-  // Manager reviews, the author's Team Leader ("Reports to") approves, CTG
-  // gives the second approval. The signers hold the seeded roles; the team
-  // leader is whoever the estimator reports to.
+  // The seeded costing route (the owner's routing sheet of 2026-10-13): the
+  // Technical Manager reviews, the author's Team Leader ("Reports to")
+  // approves — two signatures, the CEO (CTG) step of 2026-10-09 retired. The
+  // signers hold the seeded roles; the team leader is whoever the estimator
+  // reports to.
   const roleByKey = async (key: string) => {
     const role = await prisma.role.findUnique({ where: { key } });
     if (!role) throw new Error(`Expected the seeded ${key} role`);
     return role;
   };
   const technicalManagerRole = await roleByKey('technical_manager');
-  // CTG is the CEO (Carter T. Gasiong): the executive role, as on every CEO step.
-  const ctgRole = await roleByKey('executive');
 
   const estimator = await makeUser(`${TAG} Estimator`, `estimator${MAIL}`, [ownRole.id]);
   const colleague = await makeUser(`${TAG} Colleague`, `colleague${MAIL}`, [ownRole.id]);
@@ -221,7 +220,11 @@ async function main() {
   const reader = await makeUser(`${TAG} Reader`, `reader${MAIL}`, [readRole.id]);
   const reviewer = await makeUser(`${TAG} Technical Manager`, `techmgr${MAIL}`, [technicalManagerRole.id]);
   const teamLeader = await makeUser(`${TAG} Team Leader`, `teamleader${MAIL}`, [allRole.id]);
-  const ctg = await makeUser(`${TAG} CEO`, `ctg${MAIL}`, [ctgRole.id]);
+  // One person holding both steps (2026-10-13): a Technical Manager who is
+  // also their author's Team Leader signs both with one Approve.
+  const tmLeader = await makeUser(`${TAG} Two-hat Lead`, `techlead${MAIL}`, [technicalManagerRole.id]);
+  const estimator2 = await makeUser(`${TAG} Second Estimator`, `estimator2${MAIL}`, [ownRole.id]);
+  await prisma.user.update({ where: { id: estimator2.id }, data: { supervisorId: tmLeader.id } });
   await prisma.user.update({ where: { id: estimator.id }, data: { supervisorId: teamLeader.id } });
 
   /** The route's signatures, in the order given — each on the request still open. */
@@ -439,24 +442,24 @@ async function main() {
   check('the approval request is raised in the author\'s name', request?.requesterId === estimator.id);
   let outOfTurn = false;
   try {
-    await act({ requestId: request!.id, userId: ctg.id, action: 'APPROVED' });
+    await act({ requestId: request!.id, userId: teamLeader.id, action: 'APPROVED' });
   } catch {
     outOfTurn = true;
   }
-  check('CTG cannot sign before the technical manager — the route runs in order', outOfTurn);
-  await signCosting(sourceId, [reviewer, teamLeader]);
+  check('the team leader cannot sign before the technical manager — the route runs in order', outOfTurn);
+  await signCosting(sourceId, [reviewer]);
   check(
-    'after the technical manager and the team leader it is still pending — FINAL takes every signature',
+    'after the technical manager alone it is still pending — FINAL takes both signatures',
     (await prisma.costing.findUnique({ where: { id: sourceId } }))?.status === 'PENDING_APPROVAL',
   );
   const history = await api(tEstimator, 'GET', `/approvals/history/costing/${sourceId}`);
   const historyText = JSON.stringify(history.body);
   check(
-    "the route is Technical Manager › Team Leader (the author's supervisor) › CTG, and the open step waits on CTG by name",
-    history.status === 200 && historyText.includes('Technical Manager') && historyText.includes('Team Leader') && historyText.includes('CTG') && historyText.includes(ctg.name),
+    "the route is Technical Manager › Team Leader (the author's supervisor) and no CEO step, the open step waiting on the team leader by name",
+    history.status === 200 && historyText.includes('Technical Manager') && historyText.includes('Team Leader') && !historyText.includes('CTG') && historyText.includes(teamLeader.name),
     historyText.slice(0, 400),
   );
-  await signCosting(sourceId, [ctg]);
+  await signCosting(sourceId, [teamLeader]);
   const finalised = await api(tEstimator, 'GET', `/costings/${sourceId}`);
   check('the source costing is FINAL once approved', finalised.status === 200 && finalised.body.status === 'FINAL', String(finalised.body.status));
   // 2×150,000 + 12×2,500 = 330,000 cost; ÷ (1 − 0.2) = 412,500 contract.
@@ -989,20 +992,20 @@ async function main() {
   await act({ requestId: rejectReq!.id, userId: reviewer.id, action: 'REJECTED', comment: 'Recheck the crane' });
   check('a costing the technical manager rejects comes back to draft to rework', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'DRAFT');
   await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
-  await signCosting(sheetId, [reviewer, teamLeader, ctg]);
-  check('resubmitted and signed by all three, it is FINAL', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'FINAL');
+  await signCosting(sheetId, [reviewer, teamLeader]);
+  check('resubmitted and signed by both, it is FINAL', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'FINAL');
   const reopen = await api(tEstimator, 'PATCH', `/costings/${sheetId}`, { status: 'DRAFT' });
   check('the author can still reopen a final costing', reopen.status === 200 && reopen.body.status === 'DRAFT');
   // Reopened, its last request (approved) is no longer its approval: the
   // paper prints the route submitting it now would take, every step open.
   const reopened = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
   check(
-    'a reopened costing prints the route anew — all three steps Pending, none of the old signatures dated',
-    (reopened.match(/Pending/g) ?? []).length === 3 && reopened.includes(`TECHNICAL MANAGER ${reviewer.name}`),
+    'a reopened costing prints the route anew — both steps Pending, none of the old signatures dated',
+    (reopened.match(/Pending/g) ?? []).length === 2 && reopened.includes(`TECHNICAL MANAGER ${reviewer.name}`),
     reopened,
   );
   await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
-  await signCosting(sheetId, [reviewer, teamLeader, ctg]);
+  await signCosting(sheetId, [reviewer, teamLeader]);
 
   // The estimate: a PDF with the landscape Scope of Work page after it.
   await prisma.scopeTask.create({ data: { scopeSectionId: afterPut!.scopeSections[0].id, name: `${TAG} Long task`, startDay: 3, durationDays: 20, sortOrder: 5 } });
@@ -1022,18 +1025,18 @@ async function main() {
   const runs = pdfPieces(pdf);
   const signed = signoffs(runs);
   check(
-    'the estimate signs off PREPARED BY the author, then TECHNICAL MANAGER, TEAM LEADER and CEO (CTG) by their steps’ names',
+    'the estimate signs off PREPARED BY the author, then TECHNICAL MANAGER and TEAM LEADER by their steps’ names, and no CEO (CTG)',
     signed.startsWith(`PREPARED BY ${estimator.name} `) &&
       signed.includes(`TECHNICAL MANAGER ${reviewer.name} `) &&
       signed.includes(`TEAM LEADER ${teamLeader.name} `) &&
-      signed.includes(`CEO (CTG) ${ctg.name} `) &&
+      !signed.includes('CEO (CTG)') &&
       !signed.includes('APPROVED BY') &&
       !signed.includes('Pending'),
     signed,
   );
   check(
     'each signer with how to reach them, the author too',
-    runs.includes(estimator.email) && runs.includes(reviewer.email) && runs.includes(ctg.email),
+    runs.includes(estimator.email) && runs.includes(reviewer.email) && runs.includes(teamLeader.email),
   );
   check(
     'its money block reads as the quotation’s — Subtotal, VAT (12%), Total, the bold row last — and no GRAND TOTAL',
@@ -1051,7 +1054,7 @@ async function main() {
   const drafted = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${empty.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
   check(
     'a draft prints the route it would take: each step by name, who is assigned, Pending under them — never the author',
-    drafted.includes(`TECHNICAL MANAGER ${reviewer.name}`) && (drafted.match(/Pending/g) ?? []).length === 3 && !drafted.includes(`TECHNICAL MANAGER ${estimator.name}`),
+    drafted.includes(`TECHNICAL MANAGER ${reviewer.name}`) && (drafted.match(/Pending/g) ?? []).length === 2 && !drafted.includes(`TECHNICAL MANAGER ${estimator.name}`),
     drafted,
   );
 
@@ -1098,6 +1101,37 @@ async function main() {
     'returned by the team leader and then made final by a project, it prints no step of the returned request — signed or Pending',
     returned.status === 201 && !!returnReq && noRoute(returnedFinal),
     returnedFinal,
+  );
+
+  // One signature per person (the routing sheet of 2026-10-13): a Technical
+  // Manager who is also the author's Team Leader approves once, and both
+  // steps carry that one instant — on the record and on the paper.
+  const tEstimator2 = signToken(estimator2.id, estimator2.email);
+  const twoSteps = await api(tEstimator2, 'POST', '/costings', {
+    title: `${TAG} one signature for two steps`,
+    lines: [{ costCategoryId: mat.id, name: `${TAG} Both steps line`, quantity: 1, unit: 'lot', unitCost: 2000 }],
+  });
+  await api(tEstimator2, 'POST', `/costings/${twoSteps.body.id}/submit`);
+  await signCosting(twoSteps.body.id as string, [tmLeader]);
+  const twoStepActions = await prisma.approvalAction.findMany({
+    where: { request: { documentType: 'costing', documentId: twoSteps.body.id as string } },
+    orderBy: { sequence: 'asc' },
+  });
+  check(
+    'a technical manager who is also the author’s team leader approves once: both steps signed at one instant, the costing FINAL',
+    twoSteps.status === 201 &&
+      (await prisma.costing.findUnique({ where: { id: twoSteps.body.id as string } }))?.status === 'FINAL' &&
+      twoStepActions.length === 2 &&
+      twoStepActions.every((a) => a.approverId === tmLeader.id) &&
+      twoStepActions[1].coSignedWith === 1 &&
+      twoStepActions[0].actedAt.getTime() === twoStepActions[1].actedAt.getTime(),
+    JSON.stringify(twoStepActions.map((a) => [a.sequence, a.coSignedWith, a.actedAt])),
+  );
+  const twoStepPaper = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${twoSteps.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator2}` } })).arrayBuffer())));
+  check(
+    'and the estimate prints the one name under both steps, with no Pending',
+    twoStepPaper.includes(`TECHNICAL MANAGER ${tmLeader.name} `) && twoStepPaper.includes(`TEAM LEADER ${tmLeader.name} `) && !twoStepPaper.includes('Pending'),
+    twoStepPaper,
   );
 
   // ══ The margin rule, the sixth bucket and the carry-over ═══════════════════

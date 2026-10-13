@@ -384,6 +384,12 @@ async function main() {
   const finance = await makeUser('ZZ Finance', 'fin@verifyf.local', ['finance']);
   const engineer = await makeUser('ZZ Engineer', 'eng@verifyf.local', ['project_engineer'], pm.id);
   const procurement = await makeUser('ZZ Procurement', 'proc@verifyf.local', ['procurement']);
+  // A budget request's route (the sheet of 2026-10-13): the requester's Team
+  // Leader (the engineer reports to the PM), Admin Back Support, the Finance
+  // Manager — each needs a holder.
+  const backSup = await makeUser('ZZ Back Support', 'backsupport@verifyf.local', ['back_support']);
+  const finMgr = await makeUser('ZZ Finance Manager', 'finmgr@verifyf.local', ['finance_manager']);
+  const teamLeader = await makeUser('ZZ Team Leader', 'teamleader@verifyf.local', ['team_leader']);
   await makeUser('ZZ Director', 'exec@verifyf.local', ['executive']);
   // Throwaway roles for the route guards: nothing at all, project access
   // without budget monitoring, and the right to file a claim and nothing else.
@@ -1339,31 +1345,33 @@ async function main() {
     return { claim, request };
   };
 
-  // (1) The project's manager, then finance; nothing on the ledger either way.
+  // (1) The requester's team leader, Back Support, the Finance Manager;
+  // nothing on the ledger either way.
   const b1 = await newRequest(engineer, 20_000, 'fittings for the tie-in');
   check('a budget request takes a BR number', /^GT-BR-\d{4}-\d{4}$/.test(b1.number), b1.number);
   const ledgerBeforeRequest = await ledgerCount();
   const b1Request = await submitRequest(b1);
   const b1Step = await prisma.approvalStep.findFirstOrThrow({ where: { workflowId: b1Request.workflowId!, sequence: b1Request.currentSequence } });
   const b1Approvers = await approversForStep(b1Step, engineer.id, prisma, { jobId: job.id });
-  check('step 1 is the project’s manager — the person the job names', b1Approvers.length === 1 && b1Approvers[0] === pm.id, b1Approvers.join(','));
+  check('step 1 is the requester’s team leader — who they report to', b1Approvers.length === 1 && b1Approvers[0] === pm.id, b1Approvers.join(','));
   await act({ requestId: b1Request.id, userId: pm.id, action: 'APPROVED' });
-  check('the manager alone does not approve it — finance is the second step', (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } })).status === 'PENDING_APPROVAL');
+  check('the team leader alone does not approve it — Back Support and the Finance Manager follow', (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } })).status === 'PENDING_APPROVAL');
   await settle(b1Request.id);
   const b1Approved = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } });
   check('approved, it owes a release and nothing else', b1Approved.status === 'APPROVED' && !!b1Approved.approvedAt, b1Approved.status);
   check('approval moves no money and raises no budget — the ledger is untouched', (await ledgerCount()) === ledgerBeforeRequest);
   check('the whole amount is owed to the team', money((await settleable('budget_request', b1.id))!.outstanding, 20_000));
 
-  // (2) The manager's own request goes up to Executive, never to themself.
+  // (2) A requester who reports to nobody goes to the Team Leaders — the
+  // step's fallback — never to nobody and never to themself.
   const b2 = await newRequest(pm, 5_000, 'the manager’s own');
   const b2Request = await submitRequest(b2);
   const b2Step = await prisma.approvalStep.findFirstOrThrow({ where: { workflowId: b2Request.workflowId!, sequence: b2Request.currentSequence } });
   const b2Approvers = await approversForStep(b2Step, pm.id, prisma, { jobId: job.id });
-  const executives = await prisma.userRole.findMany({ where: { role: { key: 'executive' }, user: { isActive: true } }, select: { userId: true } });
+  const leaders = await prisma.userRole.findMany({ where: { role: { key: 'team_leader' }, user: { isActive: true } }, select: { userId: true } });
   check(
-    'the manager’s own request routes to Executive, not to the manager',
-    !b2Approvers.includes(pm.id) && b2Approvers.length > 0 && b2Approvers.every((id) => executives.some((e) => e.userId === id)),
+    'a requester with no "Reports to" goes to the Team Leaders, not to themself',
+    !b2Approvers.includes(pm.id) && b2Approvers.includes(teamLeader.id) && b2Approvers.every((id) => leaders.some((e) => e.userId === id)),
     b2Approvers.join(','),
   );
   await settle(b2Request.id, 'REJECTED');
@@ -1658,27 +1666,28 @@ async function main() {
     const raisedId = String(raised.body.id);
     const draftPage = await eng('GET', `/budget-requests/${raisedId}`);
     check(
-      'the draft names its route — the project’s manager, then finance — before it is submitted',
+      'the draft names its route — the team leader, back support, the finance manager — before it is submitted',
       draftPage.status === 200 &&
         draftPage.body.approvalRoute?.steps?.[0]?.approvers?.some((p: { id: string }) => p.id === pm.id) &&
-        draftPage.body.approvalRoute?.steps?.[1]?.approvers?.some((p: { id: string }) => p.id === finance.id),
+        draftPage.body.approvalRoute?.steps?.[1]?.approvers?.some((p: { id: string }) => p.id === backSup.id) &&
+        draftPage.body.approvalRoute?.steps?.[2]?.approvers?.some((p: { id: string }) => p.id === finMgr.id),
       String(JSON.stringify(draftPage.body.approvalRoute ?? draftPage.body)).slice(0, 200),
     );
     const brDraftPdf = await eng('GET', `/budget-requests/${raisedId}/pdf`);
     const brDraftText = brDraftPdf.bytes ? pdfText(brDraftPdf.bytes) : '';
     const brSteps = ((draftPage.body.approvalRoute?.steps ?? []) as { name: string }[]).map((st) => st.name.toUpperCase());
     check(
-      'and prints it: each step by its own name — never "Approved by — …" — "Pending" under the manager and finance',
+      'and prints it: each step by its own name — never "Approved by — …" — "Pending" under each',
       brDraftPdf.status === 200 &&
-        brSteps.length === 2 &&
+        brSteps.length === 3 &&
         brSteps.every((st) => flat(brDraftText).includes(st)) &&
         !flat(brDraftText).includes('APPROVED BY') &&
         !flat(brDraftText).includes('RECEIVED BY') &&
         // "A or B" wraps where the names run long: read them across the breaks.
         flat(brDraftText).includes(pm.name) &&
-        flat(brDraftText).includes(finance.name) &&
+        flat(brDraftText).includes(finMgr.name) &&
         signedCount(brDraftText) === 1 &&
-        pendingCount(brDraftText) === 2,
+        pendingCount(brDraftText) === 3,
       `${brDraftPdf.status} ${brSteps.join(' / ')} · ${signedCount(brDraftText)} signed, ${pendingCount(brDraftText)} pending`,
     );
     const bothKinds = await eng('POST', '/expense-claims', { purpose: `${TAG} both`, advanceId: a4.id, budgetRequestId: raisedId, lines: receipt1 });
@@ -1695,7 +1704,7 @@ async function main() {
     check('the manager can — they are asked to decide it', managerRead.status === 200, String(managerRead.status));
     const openReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'budget_request', documentId: raisedId, status: 'PENDING' } });
     await act({ requestId: openReq.id, userId: pm.id, action: 'APPROVED' });
-    await act({ requestId: openReq.id, userId: finance.id, action: 'APPROVED' });
+    await settle(openReq.id);
     const half = await fin('POST', '/payments', { kind: 'DISBURSEMENT', method: 'CASH', payeeUserId: engineer.id, allocations: [{ kind: 'budget_request', id: raisedId, amount: 3_000 }] });
     check('half of it cannot be released — one voucher', half.status === 400 && String(half.body.error).includes('one voucher'), `${half.status} ${JSON.stringify(half.body).slice(0, 120)}`);
     const whole = await fin('POST', '/payments', { kind: 'DISBURSEMENT', method: 'CASH', payeeUserId: engineer.id, allocations: [{ kind: 'budget_request', id: raisedId, amount: 6_000 }] });
@@ -1733,7 +1742,7 @@ async function main() {
         brSteps.every((st) => brText.includes(st)) &&
         brText.includes('RECEIVED BY') &&
         !brText.includes('APPROVED BY') &&
-        signedCount(brRaw) === 4 &&
+        signedCount(brRaw) === 5 &&
         pendingCount(brRaw) === 0,
       `${brPdf.status} ${signedCount(brRaw)} signed, ${pendingCount(brRaw)} pending · ${brText.slice(0, 300)}`,
     );

@@ -132,10 +132,20 @@ const ROLES: RoleSeed[] = [
     // stall at step 2, and audit-workflows.ts says so.
     key: 'back_support',
     name: 'Back Support / Admin',
-    description: 'Checks a sales order after the team leader — the second signature on the sales order route',
+    description: 'Checks a sales order and a budget request after the team leader; prepares purchase orders',
     only: [
       'gops.dashboard.view_all',
       'gops.sales_orders.view_all',
+      // The routing sheet of 2026-10-13: Back Support prepares purchase
+      // orders (from the requisitions and canvasses it reads) and budget
+      // requests, and is the second signature on every budget request.
+      ...VIEW_OWN_SELF('gchain', 'purchase_orders'),
+      'gchain.purchase_requests.view_all',
+      'gchain.canvass.view_all',
+      'gchain.suppliers.view_all',
+      ...VIEW_OWN_SELF('gops', 'budget_requests'),
+      'gops.budget_requests.view_all',
+      'gops.projects.view_all',
       'gops.quotations.view_all',
       'gops.customers.view_all',
       'gops.partners.view_all',
@@ -173,10 +183,18 @@ const ROLES: RoleSeed[] = [
     // holds it, costings stall at step 1 and audit-workflows.ts says so.
     key: 'technical_manager',
     name: 'Technical Manager',
-    description: 'Reviews a costing before the team leader — the first signature on the costing route',
+    description: 'Reviews a costing and a purchase requisition before the team leader — the first signature on both routes',
     only: [
       'gops.dashboard.view_all',
       'gops.costing.view_all',
+      // The routing sheet of 2026-10-13: a Technical Manager prepares
+      // costings and purchase requisitions too, and is the first signature on
+      // every requisition, so reads them all.
+      ...VIEW_OWN_SELF('gops', 'costing'),
+      ...VIEW_OWN_SELF('gops', 'purchase_requests'),
+      ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
+      'gops.purchase_requests.view_all',
+      'gchain.purchase_requests.view_all',
       'gops.quotations.view_all',
       'gops.customers.view_all',
       'gops.projects.view_all',
@@ -600,16 +618,59 @@ const ROLES: RoleSeed[] = [
     {
       key: 'team_leader',
       name: 'Team Leader',
-      description: 'Leads a sales team — approves the industry specialists\' quotations and sales orders; their own go to the CEO / President',
+      description: 'Leads a sales team — approves its quotations, sales orders, costings, purchase requisitions and budget requests',
       grants: like('sales_manager').grants,
-      only: like('sales_manager').only,
+      only: [
+        ...(like('sales_manager').only ?? []),
+        // The routing sheet of 2026-10-13: a Team Leader prepares purchase
+        // requisitions and budget requests, and is a signature on both, so
+        // reads every one.
+        ...VIEW_OWN_SELF('gops', 'purchase_requests'),
+        ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
+        'gops.purchase_requests.view_all',
+        'gchain.purchase_requests.view_all',
+        ...VIEW_OWN_SELF('gops', 'budget_requests'),
+        'gops.budget_requests.view_all',
+      ],
     },
     {
       key: 'industry_specialist',
       name: 'Industry Specialist',
-      description: 'Prepares quotations and sales orders — the team leader approves, and the CEO / President too above ₱1,000,000',
+      description: 'Prepares quotations, sales orders, purchase requisitions and budget requests — the team leader approves first',
       grants: like('sales').grants,
-      only: like('sales').only,
+      only: [
+        ...(like('sales').only ?? []),
+        ...VIEW_OWN_SELF('gops', 'purchase_requests'),
+        ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
+        ...VIEW_OWN_SELF('gops', 'budget_requests'),
+      ],
+    },
+  );
+}
+
+// The routing sheet of 2026-10-13 (APPROVAL_ROUTE.xlsx): two managers the
+// purchase order and the budget request route to. Each starts from the role
+// whose work it manages — Procurement's, Finance's — and is edited in Admin ›
+// Roles from there; Procurement and Finance stay for the staff who are not
+// the manager. Assign both in Admin › Users: until somebody holds them,
+// purchase orders and budget requests stall at their steps, and
+// audit-workflows.ts says so.
+{
+  const like = (key: string) => ROLES.find((r) => r.key === key)!;
+  ROLES.push(
+    {
+      key: 'purchasing_manager',
+      name: 'Purchasing Manager',
+      description: 'Approves every purchase order — the first signature; the CEO / President follows above ₱100,000',
+      grants: like('procurement').grants,
+      only: like('procurement').only,
+    },
+    {
+      key: 'finance_manager',
+      name: 'Finance Manager',
+      description: 'Approves budget requests after the team leader and back support; the CEO / President follows above ₱100,000',
+      grants: like('finance').grants,
+      only: [...(like('finance').only ?? []), ...VIEW_OWN_SELF('gops', 'budget_requests')],
     },
   );
 }
@@ -680,75 +741,68 @@ const WORKFLOWS: WorkflowSeed[] = [
       { sequence: 2, name: 'HR approval', approverType: 'HR' },
     ],
   },
+  // ── The routing sheet of 2026-10-13 (APPROVAL_ROUTE.xlsx) ──────────────
+  // One route per document whoever prepared it, as the quotation's and the
+  // sales order's: the preparer signs the steps they hold at submit, an
+  // approver signs every later step they hold with their one Approve (one
+  // timestamp per person), and an approver's manager may stand in.
   {
+    // PURCHASE REQUISITION: Technical Manager, then Team Leader — prepared by
+    // a Project Engineer, an Industry Specialist, a Technical Manager or a
+    // Team Leader. No amount band: the budget guard still refuses an
+    // over-budget direct-to-job request. The two banded routes are RETIRED.
     documentType: 'purchase_request',
-    name: 'Purchase Request — up to ₱50,000',
-    maxAmount: 50_000,
-    steps: [
-      { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
-    ],
-  },
-  {
-    documentType: 'purchase_request',
-    name: 'Purchase Request — ₱50,000 and above',
-    minAmount: 50_000,
-    steps: [
-      { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
-      { sequence: 2, name: 'Finance review', approverType: 'ROLE', roleKey: 'finance' },
-      { sequence: 3, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
-    ],
-  },
-  {
-    // A budget request is project cash (2026-10-07, the owner's call): the
-    // project's own manager allows the spend, then finance approves and
-    // releases the cash. The PM step resolves to the project's manager — not
-    // to the project_manager ROLE, which is what the requester usually holds
-    // — and falls back to Executive when the project has no manager or the
-    // manager raised it themself, so a PM's own request goes up, never to
-    // nobody.
-    documentType: 'budget_request',
-    name: 'Budget Request — project manager then finance',
-    steps: [
-      { sequence: 1, name: 'Project Manager', approverType: 'PROJECT_MANAGER', roleKey: 'executive' },
-      { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
-    ],
-  },
-  {
-    // The margin a costing sets is what the company commits to on every
-    // quotation and project built from it, so management signs it off. Sales
-    // and project managers raise costings; routing to either would leave a
-    // one-person team approving their own. To go without costing approval,
-    // DEACTIVATE this workflow (Admin › Approval Workflows) rather than
-    // deleting it — a deleted seeded workflow is recreated on the next seed,
-    // a deactivated one is left alone, and the page returns to "Mark final".
-    // The costing route (2026-10-09, the owner's call: "creator engineer ›
-    // reviewer technical manager › approval team leader › 2nd approval
-    // CTG" — CTG being the CEO's initials, Carter T. Gasiong, so the last
-    // step is the executive role, as the quotation's and the sales order's
-    // CEO steps are). Step 2 is a SUPERVISOR step — the author's "Reports
-    // to" — falling back to the sales managers, as the other Team Leader
-    // steps do; audit-workflows.ts checks the fallback is held. "Costing —
-    // management approval" (one step, the executive role) is RETIRED below:
-    // a costing pending on it finishes on it. `previously` is the route as
-    // it was seeded for a few minutes with a role of its own for CTG.
-    //
-    // Since 2026-10-12 the Team Leader step falls back to the Team Leader
-    // role, as the quotation's and the sales order's do (it was the sales
-    // managers), and the preparer signs the steps they hold: a Technical
-    // Manager's own costing is signed at step 1 when it is submitted.
-    documentType: 'costing',
-    name: 'Costing — technical manager, team leader, CTG',
+    name: 'Purchase Request — technical manager, team leader',
     preparerSigns: true,
     standIns: true,
     steps: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
-      { sequence: 3, name: 'CEO (CTG)', approverType: 'ROLE', roleKey: 'executive' },
     ],
-    previously: [
+  },
+  {
+    // BUDGET REQUEST (project cash): Team Leader, Admin Back Support (the
+    // holders supporting the preparer's team), Finance Manager, and the CEO /
+    // President above ₱100,000. The project manager's step of 2026-10-07 is
+    // not on the sheet; that route is RETIRED.
+    documentType: 'budget_request',
+    name: 'Budget Request — team leader, back support, finance manager',
+    maxAmount: 100_000,
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 3, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+    ],
+  },
+  {
+    documentType: 'budget_request',
+    name: 'Budget Request — team leader, back support, finance manager, then CEO / President over ₱100,000',
+    minAmount: 100_000.01,
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 3, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+      { sequence: 4, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+  },
+  {
+    // COSTING (the sheet of 2026-10-13): Technical Manager, then Team Leader —
+    // prepared by a Project Engineer or a Technical Manager. The three-step
+    // route with the CEO (CTG) is RETIRED: the step count changed, which
+    // `previously` cannot update in place; a costing pending on it finishes
+    // on it. To go without costing approval, DEACTIVATE this workflow — a
+    // deleted seeded workflow is recreated on the next seed.
+    documentType: 'costing',
+    name: 'Costing — technical manager, team leader',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
-      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
-      { sequence: 3, name: 'CEO (CTG)', approverType: 'ROLE', roleKey: 'executive' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
     ],
   },
   // ── The owner's routing sheet (2026-10-12) ─────────────────────────────
@@ -812,17 +866,26 @@ const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
+    // PURCHASE ORDER (the sheet of 2026-10-13): the Purchasing Manager, and
+    // the CEO / President too above ₱100,000 — prepared by Admin Back Support
+    // or a Purchasing Manager, whose own order is signed at step 1 when it is
+    // submitted. "Purchase Order — project manager then finance" is RETIRED.
     documentType: 'purchase_order',
-    name: 'Purchase Order — project manager then finance',
-    // NOT routed to procurement: procurement is who raises a purchase order,
-    // and nobody approves their own document. Routing step 1 back to their own
-    // role would stall every order in a team with one buyer.
-    //
-    // The project manager owns the budget it spends; finance owns the cash that
-    // leaves. Those are the two people with a reason to look.
+    name: 'Purchase Order — purchasing manager',
+    maxAmount: 100_000,
+    preparerSigns: true,
+    standIns: true,
+    steps: [{ sequence: 1, name: 'Purchasing Manager', approverType: 'ROLE', roleKey: 'purchasing_manager' }],
+  },
+  {
+    documentType: 'purchase_order',
+    name: 'Purchase Order — purchasing manager, then CEO / President over ₱100,000',
+    minAmount: 100_000.01,
+    preparerSigns: true,
+    standIns: true,
     steps: [
-      { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
-      { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 1, name: 'Purchasing Manager', approverType: 'ROLE', roleKey: 'purchasing_manager' },
+      { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   {
@@ -1140,6 +1203,15 @@ async function main() {
     'Quotation — prepared by a Team Leader: CEO / President',
     'Sales Order — prepared by the CEO / President: back support, cost controller',
     'Sales Order — prepared by a Team Leader: back support, cost controller, CEO / President',
+    // The routing sheet of 2026-10-13 (APPROVAL_ROUTE.xlsx): the costing
+    // loses its CEO step, the purchase requisition its amount bands, the
+    // purchase order and the budget request their project manager and
+    // finance steps.
+    'Costing — technical manager, team leader, CTG',
+    'Purchase Request — up to ₱50,000',
+    'Purchase Request — ₱50,000 and above',
+    'Purchase Order — project manager then finance',
+    'Budget Request — project manager then finance',
   ];
   for (const name of RETIRED) {
     const stale = await prisma.approvalWorkflow.findFirst({ where: { name, isActive: true } });

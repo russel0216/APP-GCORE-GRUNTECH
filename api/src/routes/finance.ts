@@ -31,7 +31,7 @@ import { notify } from '../shared/notifications';
 import {
   submitForApproval,
   onApprovalSettled,
-  approvalSlots,
+  approvalSlots, preparedAt,
   slotSignatories,
   contactOf,
   contactsOf,
@@ -230,7 +230,9 @@ export async function cashRequestSignatories(input: {
     input.status === 'DRAFT' ? { amount: input.amount, requesterId: input.requester.id, jobId: input.jobId } : undefined,
   );
   return [
-    { role: 'Requested by', ...requester, at: input.raisedAt },
+    // One timestamp per person: a preparer who signed a step at submit (a
+    // Team Leader's own budget request) prints that instant here too.
+    { role: 'Requested by', ...requester, at: preparedAt(slots) ?? input.raisedAt },
     ...(slots.length ? slotSignatories(slots) : awaitsApproval(input.status) ? [{ role: 'Approved by' }] : []),
     ...(input.releasedOn ? [{ role: 'Received by', ...requester, at: input.releasedOn }] : []),
   ];

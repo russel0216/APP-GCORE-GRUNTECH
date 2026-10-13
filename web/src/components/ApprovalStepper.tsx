@@ -134,6 +134,8 @@ interface Action {
   approver: { id: string; name: string };
   /** Signed by the preparer when they submitted — they hold this step. */
   selfSigned?: boolean;
+  /** Signed with the same person's Approve on an earlier step (the step's sequence): one signature per person. */
+  coSignedWith?: number | null;
   /** A stand-in's decision: the approver they decided in place of. */
   onBehalfOf?: { id: string; name: string } | null;
 }
@@ -249,9 +251,11 @@ export function DocumentApproval({
         label: step.name,
         approver: acted.selfSigned
           ? `${acted.approver.name} · signed on submitting · ${when}`
-          : acted.onBehalfOf
-            ? `${acted.approver.name}, for ${acted.onBehalfOf.name} · ${when}`
-            : `${acted.approver.name} · ${when}`,
+          : acted.coSignedWith != null
+            ? `${acted.approver.name} · signed with ${workflowSteps.find((w) => w.sequence === acted.coSignedWith)?.name ?? 'an earlier step'} · ${when}`
+            : acted.onBehalfOf
+              ? `${acted.approver.name}, for ${acted.onBehalfOf.name} · ${when}`
+              : `${acted.approver.name} · ${when}`,
         // The action as taken. Folding RETURNED into APPROVED drew a document
         // sent back for changes with the tick of one that had passed.
         status: acted.action,

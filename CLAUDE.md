@@ -509,7 +509,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,908 assertions across twenty-two scripts** (counted 2026-10-12, after
+**3,926 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -548,10 +548,11 @@ behind the quotation and the sales order, and 9 on sales and 9 on pipeline
 for the Forecast's breakdowns and its date range, and 7 on sales and 12
 on pipeline for its tick-box filters and the comparison range, and 6 on
 foundation and 5 on workspace for the paper's file name and the print
-ticket):
+ticket, and 7 on foundation, 2 on costing, 5 on chain and 4 on delivery for
+the routing sheet of 2026-10-13 and one signature per person):
 foundation
-355, masters 92, sales 601, costing 157, pipeline 113, calendar 96, numbering
-79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
+362, masters 92, sales 601, costing 159, pipeline 113, calendar 96, numbering
+79, partners 120, delivery 149, chain 202, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 81, accounts 125. The
 verify scripts share
@@ -2305,8 +2306,14 @@ leave the approver deciding on stale figures).
   under the old rule (released, spent and liquidated at their own amount on
   the day they were approved, a note saying so; their ledger rows stay) so
   they do not sit in finance's "to release" queue for ever.
-- **The route is the project's manager, then finance** — the seeded
-  "Budget Request — project manager then finance". Step 1 is the engine's
+- **The route is the routing sheet's since 2026-10-13**: Team Leader
+  (the requester's "Reports to", else a Team Leader), Admin Back Support
+  (the holders supporting the requester's team), Finance Manager, and the
+  CEO / President above ₱100,000 — see "The routing sheet of 2026-10-13".
+  The project's manager is no longer a step; "Budget Request — project
+  manager then finance" is RETIRED. What follows is how that route worked,
+  and how the engine's PROJECT_MANAGER type still works for the job order:
+  step 1 was the engine's
   new **`PROJECT_MANAGER` approver type**: the manager the document's job
   names (`ApprovalRequest.jobId`, set by `submitForApproval({ jobId })`,
   read by `approversForStep(step, requesterId, tx, { jobId })` everywhere —
@@ -3184,9 +3191,74 @@ SCORO.
   "No group" is last. The pipeline CSV appends a Groups column. Verify
   scripts tag their test groups (`ZZSALES …`) and delete them by `key`.
 
-## Approval by who prepared it (2026-10-11; one route since 2026-10-12)
+## Approval by who prepared it (2026-10-11; one route since 2026-10-12; six documents since 2026-10-13)
 
-The owner's routing sheet ("APPROVAL ROUTER — SALES ORDER AND QUOTATION").
+The owner's routing sheets ("APPROVAL ROUTER — SALES ORDER AND QUOTATION", then
+`APPROVAL_ROUTE.xlsx` for six documents).
+
+### The routing sheet of 2026-10-13 — six documents, one signature per person
+
+The owner's `APPROVAL_ROUTE.xlsx` (`docs/notes/P-approval-routes-2026-10-13.md`):
+every row of a block names the same approvals whoever prepared it, so each
+document is ONE route (two where an amount band adds the CEO / President),
+every one with `preparerSigns` and `standIns`:
+
+| Document | Route | Retired |
+|---|---|---|
+| Quotation | Team Leader; CEO / President above ₱1,000,000 | — (unchanged) |
+| Sales order | Team Leader › Back Support › Cost Controller › CEO / President | — (unchanged) |
+| Costing | Technical Manager › Team Leader | "… team leader, CTG" |
+| Purchase requisition | Technical Manager › Team Leader, no band | the ₱50,000 bands |
+| Purchase order | Purchasing Manager; CEO / President above ₱100,000 | "… project manager then finance" |
+| Budget request | Team Leader › Admin Back Support › Finance Manager; CEO / President above ₱100,000 | "… project manager then finance" |
+
+"More than" is strict: ₱100,000.00 takes the shorter route (`minAmount`
+100,000.01 on the longer one; verify-chain and verify-delivery pin the
+edge). A Team Leader step is the preparer's "Reports to", else a Team
+Leader on their team, else any (`leadersFor`); Back Support is team-scoped
+(`supportersFor`).
+
+- **Two new roles**, seeded from the role whose work they manage:
+  `purchasing_manager` **Purchasing Manager** (Procurement's rights) and
+  `finance_manager` **Finance Manager** (Finance's, plus raising budget
+  requests). Procurement and Finance stay for the staff. **Assign both in
+  Admin › Users** — until then purchase orders and budget requests stall
+  at their steps, and `audit-workflows.ts` says so.
+- **The preparers on the sheet can prepare**: Industry Specialist,
+  Technical Manager and Team Leader raise purchase requisitions; Industry
+  Specialist, Team Leader, Back Support and Finance Manager budget
+  requests; Back Support purchase orders (with the requisitions, canvasses
+  and suppliers it reads); a Technical Manager costings. Each approver
+  reads what it signs (`*.view_all` on the Technical Manager, Team Leader
+  and Back Support roles), so the Approval panel on the document is
+  reachable. The never-offered rule carries every pair to the live install.
+  `audit-workflows.ts` knows the new typical requesters.
+- **One signature per person — the approver's turn** (the owner's call:
+  "the time stamp of the same employee with multiple roles … make it
+  uniform, just like on the quotation and sales order"). The preparer's
+  rule of 2026-10-12 signs at submit; this is its other half, in `act()`:
+  on a route with `preparerSigns`, an Approve also signs every LATER
+  unsigned step the decider may decide in their own right
+  (`approversForStep`), in turn or out of it — a Team Leader who is also
+  Finance Manager signs steps 1 and 3 of a budget request while Back
+  Support's step 2 still waits — each an `ApprovalAction` with
+  `coSignedWith` (the sequence pressed) and the SAME `actedAt`, one
+  APPROVED audit row each ("Finance Manager — Maria Santos, signed with
+  Team Leader (holds both)"). `currentSequence` moves to the first step
+  still unsigned; none left settles it through the same subscribers.
+  Never as a stand-in (a stand-in signs only the step they stood in for),
+  never on a return or a rejection, never on a route without
+  `preparerSigns` — a supervisor who is also HR is still asked as HR. A
+  co-signed step is never queued or told. `ApprovalSlot.coSigned` marks
+  it, so every paper prints one name with one timestamp; the Approval
+  panel reads "<name> · signed with <step> · <when>". Admin › Approval
+  Workflows calls the switch **"One signature per person"**. The purchase
+  request's, purchase order's and budget request's (and cash advance's)
+  first slot now prints `preparedAt(slots) ?? createdAt`, as the
+  quotation's, the sales order's and the costing's do.
+- **Several roles on one person** needed nothing else: every step is
+  judged by every role held, at submit (`heldSequences`), at eligibility
+  (`approversForStep`, `deciderFor`) and in the team fallbacks.
 
 ### The routing sheet of 2026-10-12 — what holds now
 
@@ -4011,10 +4083,14 @@ Cost Estimate" PDF) in G-CORE's own style.
   `/sections/distribute`) so the SOV equals the contract value.
 - **VAT is the company rate or 0%** (`checkVatRate`, as on the quotation),
   snapshotted at creation; a draft keeps its rate after Settings change.
-- **Approval is the seeded `costing` workflow — the owner's three
-  signatures** (2026-10-09: "creator engineer › reviewer technical manager ›
-  approval team leader › 2nd approval CTG"): "Costing — technical manager,
-  team leader, CTG" — step 1 ROLE `technical_manager` (**Technical
+- **Approval is the seeded `costing` workflow — TWO signatures since the
+  routing sheet of 2026-10-13**: "Costing — technical manager, team leader"
+  (Technical Manager, then the author's Team Leader); the route below with
+  the CEO (CTG) third is RETIRED, and a costing pending on it finishes on
+  it. A Technical Manager who is also the author's Team Leader signs both
+  with one Approve (verify-costing). As built on 2026-10-09 ("creator
+  engineer › reviewer technical manager › approval team leader › 2nd
+  approval CTG"): "Costing — technical manager, team leader, CTG" — step 1 ROLE `technical_manager` (**Technical
   Manager**, a seeded role that reads every costing), step 2 a SUPERVISOR
   step named **Team Leader** (the author's "Reports to", falling back to
   `team_leader` on the author's team since 2026-10-12 — it was
@@ -4031,8 +4107,9 @@ Cost Estimate" PDF) in G-CORE's own style.
   **Assign Technical Manager in Admin › Users** — until somebody holds it,
   costings stall at step 1 and `audit-workflows.ts` says so (it also knows
   engineers raise costings).
-  FINAL takes every signature (verify-costing proves two of three leave it
-  pending, and that CTG cannot sign out of turn). With the route active the
+  FINAL takes every signature (verify-costing proves the technical
+  manager's alone leaves it pending, and that the team leader cannot sign
+  out of turn). With the route active the
   author cannot PATCH to FINAL; `POST /:id/submit` claims DRAFT →
   PENDING_APPROVAL with a conditional update, submits in the AUTHOR's name, and
   reverts to DRAFT if the engine refuses. `settleCosting()` moves APPROVED →

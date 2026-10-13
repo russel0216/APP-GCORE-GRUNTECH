@@ -873,15 +873,103 @@ async function main() {
     `${mineReq.status} ${settledMine}`,
   );
 
+  // One signature per person (2026-10-13): an approver's Approve signs every
+  // LATER step they hold in their own right, at the same instant — only where
+  // the route lets the preparer sign — and a stand-in signs only their step.
+  console.log('\nOne signature per person');
+  const roleC = await prisma.role.create({ data: { key: `${TAG}_rolec`, name: 'Verify Finance Manager' } });
+  const dual = await makeUser('Verify Dual', 'dual@verify.local', []);
+  const coPrep = await makeUser('Verify Co Preparer', 'coprep@verify.local', []);
+  await prisma.userRole.createMany({
+    data: [
+      { userId: dual.id, roleId: roleA.id },
+      { userId: dual.id, roleId: roleC.id },
+    ],
+  });
+  const threeSteps = [
+    ...twoSteps,
+    { sequence: 3, name: 'Finance Manager', approverType: 'ROLE' as const, roleId: roleC.id },
+  ];
+  await prisma.approvalWorkflow.create({
+    data: { documentType: `${TAG}_cosign_doc`, name: 'Verify — one signature per person', preparerSigns: true, standIns: true, steps: { create: threeSteps } },
+  });
+  await prisma.approvalWorkflow.create({
+    data: { documentType: `${TAG}_coplain_doc`, name: 'Verify — asked at every step', steps: { create: threeSteps } },
+  });
+  const coReq = await submitForApproval({ documentType: `${TAG}_cosign_doc`, documentId: `${TAG}-cosign`, subject: `${SUBJECT} co-sign`, requesterId: coPrep.id });
+  await act({ requestId: coReq.id, userId: dual.id, action: 'APPROVED' });
+  const coActions = await prisma.approvalAction.findMany({ where: { requestId: coReq.id }, orderBy: { sequence: 'asc' } });
+  const coAfter = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: coReq.id } });
+  check(
+    'an approver holding a later step signs it with the same Approve, at the same instant — even with a step between',
+    coActions.length === 2 &&
+      coActions[0].sequence === 1 && coActions[0].coSignedWith === null &&
+      coActions[1].sequence === 3 && coActions[1].coSignedWith === 1 && coActions[1].approverId === dual.id &&
+      coActions[1].actedAt.getTime() === coActions[0].actedAt.getTime() &&
+      coAfter.status === 'PENDING' && coAfter.currentSequence === 2,
+    JSON.stringify({ coActions, status: coAfter.status, at: coAfter.currentSequence }),
+  );
+  check(
+    'nobody is asked for the step already signed: the next step waits, the co-signed one never queues',
+    (await pendingFor(approverB.id)).some((r) => r.id === coReq.id) &&
+      !(await pendingFor(dual.id)).some((r) => r.id === coReq.id) &&
+      (await prisma.notification.count({ where: { userId: dual.id, type: 'approval.required', title: { startsWith: 'Finance Manager:' } } })) === 0,
+  );
+  await act({ requestId: coReq.id, userId: approverB.id, action: 'APPROVED' });
+  const coDone = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: coReq.id } });
+  const coSlots = await approvalSlots(`${TAG}_cosign_doc`, `${TAG}-cosign`);
+  check(
+    'the middle step settles it, the co-signed step already standing; the paper prints one timestamp for the one person',
+    coDone.status === 'APPROVED' &&
+      coSlots.length === 3 &&
+      coSlots[2].coSigned === true && coSlots[2].name === dual.name &&
+      coSlots[2].at?.getTime() === coSlots[0].at?.getTime() && !coSlots[0].coSigned,
+    JSON.stringify(coSlots.map((x) => [x.step, x.name, x.at, x.coSigned])),
+  );
+  check(
+    'the trail says so',
+    (await prisma.auditLog.count({ where: { entityId: `${TAG}-cosign`, summary: { contains: 'signed with Reviewer (holds both)' } } })) === 1,
+  );
+  // A stand-in who also holds a later step signs only the step they stood in for.
+  await prisma.userRole.create({ data: { userId: bossOf.id, roleId: roleC.id } });
+  const standReq = await submitForApproval({ documentType: `${TAG}_cosign_doc`, documentId: `${TAG}-costand`, subject: `${SUBJECT} co-sign stand-in`, requesterId: coPrep.id });
+  await act({ requestId: standReq.id, userId: signer.id, action: 'APPROVED' });
+  await act({ requestId: standReq.id, userId: bossOf.id, action: 'APPROVED' });
+  const standAfter = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: standReq.id } });
+  check(
+    'a step held by nobody who pressed it is not signed; a stand-in signs only the step they stood in for',
+    standAfter.status === 'PENDING' &&
+      standAfter.currentSequence === 3 &&
+      (await prisma.approvalAction.count({ where: { requestId: standReq.id, coSignedWith: { not: null } } })) === 0,
+    `${standAfter.status} ${standAfter.currentSequence}`,
+  );
+  const plainCo = await submitForApproval({ documentType: `${TAG}_coplain_doc`, documentId: `${TAG}-coplain`, subject: `${SUBJECT} co-sign off`, requesterId: coPrep.id });
+  await act({ requestId: plainCo.id, userId: dual.id, action: 'APPROVED' });
+  check(
+    'where the route does not let the preparer sign, the same person is asked again at their later step',
+    (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: plainCo.id } })).currentSequence === 2 &&
+      (await prisma.approvalAction.count({ where: { requestId: plainCo.id } })) === 1,
+  );
+  const returnedCo = await submitForApproval({ documentType: `${TAG}_cosign_doc`, documentId: `${TAG}-coreturn`, subject: `${SUBJECT} co-sign returned`, requesterId: coPrep.id });
+  await act({ requestId: returnedCo.id, userId: dual.id, action: 'RETURNED', comment: 'fix it' });
+  check(
+    'a return signs nothing more',
+    (await prisma.approvalAction.count({ where: { requestId: returnedCo.id } })) === 1 &&
+      (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: returnedCo.id } })).status === 'CANCELLED',
+  );
+
   // ── 5. Amount bands pick the workflow ──────────────────────────────────────
   console.log('\nApproval thresholds');
 
   // Someone has to hold the project_manager role, or these workflows route to
   // nobody. The engine warns loudly in that case rather than silently stalling.
+  // The supplier bill's routes: the purchase requisition's became one route
+  // with no band on 2026-10-13, and the bill's still band at ₱50,000 and do
+  // not let the preparer sign — what these checks are about.
   const pm = await makeUser('Verify PM', 'pm@verify.local', ['project_manager']);
 
   const small = await submitForApproval({
-    documentType: 'purchase_request',
+    documentType: 'supplier_bill',
     documentId: `${TAG}-pr-small`,
     subject: `${SUBJECT} small PR`,
     amount: 20_000,
@@ -931,7 +1019,7 @@ async function main() {
   // self-approval rule is what stops the requester acting on it.
   const pm2 = await makeUser('Verify PM Two', 'pm2@verify.local', ['project_manager']);
   const pmOwnRequest = await submitForApproval({
-    documentType: 'purchase_request',
+    documentType: 'supplier_bill',
     documentId: `${TAG}-pr-pm-own`,
     subject: `${SUBJECT} PM raises their own PR`,
     amount: 20_000,
@@ -958,7 +1046,7 @@ async function main() {
   check('a small request takes the short route', smallWf?.steps.length === 1, `${smallWf?.steps.length} steps`);
 
   const large = await submitForApproval({
-    documentType: 'purchase_request',
+    documentType: 'supplier_bill',
     documentId: `${TAG}-pr-large`,
     subject: `${SUBJECT} large PR`,
     amount: 450_000,
@@ -968,13 +1056,13 @@ async function main() {
     where: { id: large.workflowId! },
     include: { steps: true },
   });
-  check('a large request collects more signatures', (largeWf?.steps.length ?? 0) === 3, `${largeWf?.steps.length} steps`);
+  check('a large request collects more signatures', (largeWf?.steps.length ?? 0) === 2, `${largeWf?.steps.length} steps`);
 
   await expectRejection(
     'the same document cannot be submitted twice while pending',
     () =>
       submitForApproval({
-        documentType: 'purchase_request',
+        documentType: 'supplier_bill',
         documentId: `${TAG}-pr-small`,
         subject: `${SUBJECT} duplicate`,
         amount: 20_000,

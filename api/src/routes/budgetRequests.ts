@@ -316,7 +316,8 @@ budgetRequestRoutes.get(
     const row = await loadRequest(req.params.id);
     if (!row) throw notFound('Budget request not found');
     assertCanSee(me, row);
-    // The route a draft WOULD take — the project's manager, then finance —
+    // The route a draft WOULD take — the team leader, back support, the finance
+    // manager (and the CEO / President above ₱100,000) —
     // named before anybody presses Submit (names only).
     const approvalRoute =
       row.status === 'DRAFT' ? await routeBrief('budget_request', num(row.amount), row.requestedById, null, { jobId: row.jobId }) : null;
@@ -595,8 +596,8 @@ budgetRequestRoutes.delete(
  * The request on paper — the same document as a cash advance, through the
  * same builders (`cashRequestSections` / `cashRequestSignatories`): the
  * request, its money as a totals block, the liquidation, and every step of
- * its route by the step's own name — the project's manager, then finance —
- * with who received the cash once it is out.
+ * its route by the step's own name — the team leader, back support, the
+ * finance manager — with who received the cash once it is out.
  */
 budgetRequestRoutes.get(
   '/:id/pdf',

@@ -7,7 +7,15 @@ sometimes has multiple roles (consider it). 4. The time stamp of the same
 employee (with multiple roles) in an approval route: make it uniform, just
 like on the quotation and sales order."
 
-Status: **planned, not built.**
+Status: **built 2026-10-13** on the defaults below — see CLAUDE.md, "The
+routing sheet of 2026-10-13". Three differences from the plan: the
+co-signing is checked on the engine (verify-foundation), the costing, the
+requisition and the budget request, not separately on a quotation — the
+quotation runs the same `act()`; the budget request's page no longer
+names its route in words (the Approval panel does); and the cash advance's
+paper takes `preparedAt` too, since it shares the budget request's
+sign-off builder (an advance's route has no `preparerSigns`, so nothing
+changes there).
 
 ## The sheet, document by document, against what runs today
 

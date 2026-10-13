@@ -13,7 +13,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, approversForStep, routePreview } from '../src/shared/approvals';
+import { submitForApproval, act, approversForStep, routePreview, pickWorkflow } from '../src/shared/approvals';
 import { financeSettings, refreshSettlement, settleable, addDays, dayKey } from '../src/shared/finance';
 import { signToken } from '../src/auth/middleware';
 import { budgetPosition, sCurve, renewalTerm } from '../src/routes/jobs';
@@ -194,9 +194,13 @@ async function main() {
   const pm = await makeUser('Verify PM', 'pm@verifyd.local', ['project_manager']);
   const exec = await makeUser('Verify Exec', 'exec@verifyd.local', ['executive']);
   const engineer = await makeUser('Verify Engineer', 'eng@verifyd.local', ['project_engineer']);
-  // Budget requests route to the project's manager, then Finance; the
+  // Budget requests route (the sheet of 2026-10-13) to the requester's Team
+  // Leader — who they report to, here the PM — then Admin Back Support, then
+  // the Finance Manager, and the CEO / President above ₱100,000; the
   // liquidation (an expense claim) to the filer's supervisor, then Finance.
   const finance = await makeUser('Verify Finance', 'fin@verifyd.local', ['finance']);
+  const backSupport = await makeUser('Verify Back Support', 'backsupport@verifyd.local', ['back_support']);
+  const finMgr = await makeUser('Verify Finance Manager', 'finmgr@verifyd.local', ['finance_manager']);
   await prisma.user.update({ where: { id: engineer.id }, data: { supervisorId: pm.id } });
 
   const customer = await prisma.customer.create({
@@ -403,25 +407,34 @@ async function main() {
     jobId: job.id,
   });
 
-  // Step 1 is the PROJECT'S manager — whoever the job names, not whoever
-  // holds the project_manager role.
+  // The routing sheet of 2026-10-13: Team Leader (whoever the requester
+  // reports to), Admin Back Support, Finance Manager — the CEO / President
+  // too above ₱100,000. No project manager step any more.
   const brWorkflow = await prisma.approvalWorkflow.findUniqueOrThrow({
     where: { id: request.workflowId! },
     include: { steps: { orderBy: { sequence: 'asc' } } },
   });
+  check(
+    'a ₱50,000 request takes the three signatures of the sheet: Team Leader, Admin Back Support, Finance Manager',
+    brWorkflow.steps.map((st) => st.name).join(' › ') === 'Team Leader › Admin Back Support › Finance Manager',
+    brWorkflow.steps.map((st) => st.name).join(' › '),
+  );
   const step1 = await approversForStep(brWorkflow.steps[0], engineer.id, prisma, { jobId: job.id });
-  check('step 1 is the project’s own manager', step1.length === 1 && step1[0] === pm.id, step1.join(','));
+  check('step 1 is the requester’s team leader — who they report to', step1.length === 1 && step1[0] === pm.id, step1.join(','));
   check('the request remembers its project', request.jobId === job.id);
   position = await budgetPosition(job.id);
   check('a pending request does not change the budget', money(mat().budgeted, 400_000));
 
   await act({ requestId: request.id, userId: pm.id, action: 'APPROVED' });
   const step2 = await approversForStep(brWorkflow.steps[1], engineer.id, prisma, { jobId: job.id });
-  check('then finance decides', step2.includes(finance.id) && !step2.includes(pm.id));
+  check('then Admin Back Support', step2.includes(backSupport.id) && !step2.includes(pm.id), step2.join(','));
   position = await budgetPosition(job.id);
-  check('the budget does not move after the manager’s approval', money(mat().budgeted, 400_000), String(mat().budgeted));
+  check('the budget does not move after the team leader’s approval', money(mat().budgeted, 400_000), String(mat().budgeted));
+  await act({ requestId: request.id, userId: backSupport.id, action: 'APPROVED' });
+  const step3 = await approversForStep(brWorkflow.steps[2], engineer.id, prisma, { jobId: job.id });
+  check('then the Finance Manager decides', step3.includes(finMgr.id) && !step3.includes(finance.id), step3.join(','));
 
-  await act({ requestId: request.id, userId: finance.id, action: 'APPROVED' });
+  await act({ requestId: request.id, userId: finMgr.id, action: 'APPROVED' });
   position = await budgetPosition(job.id);
   check('approval changes NO budget — it is cash, not a budget increase', money(mat().budgeted, 400_000), String(mat().budgeted));
   check('and writes no ledger row', (await brLedger()) === 0);
@@ -429,13 +442,66 @@ async function main() {
   check('the request is APPROVED and owes a release', brApproved.status === 'APPROVED' && !!brApproved.approvedAt, brApproved.status);
   check('what finance owes is the whole amount', money((await settleable('budget_request', br.id))!.outstanding, 50_000));
 
-  // The manager's own request cannot wait on them: it goes up to Executive.
-  const ownStep = await approversForStep(brWorkflow.steps[0], pm.id, prisma, { jobId: job.id });
-  check('the manager’s own request goes to Executive instead', ownStep.includes(exec.id) && !ownStep.includes(pm.id), ownStep.join(','));
-  const unmanaged = await approversForStep(brWorkflow.steps[0], engineer.id, prisma, { jobId: null });
-  check('and so does one on a project with no manager', unmanaged.includes(exec.id) && !unmanaged.includes(pm.id));
-  const ownPreview = await routePreview('budget_request', 50_000, pm.id, null, { jobId: job.id });
-  check('the page names Executive before the manager presses Submit', !!ownPreview?.steps[0].approvers.some((p) => p.id === exec.id));
+  const brRoute = async (amount: number) => (await pickWorkflow('budget_request', amount))?.steps.map((st) => st.name).join(' › ');
+  check(
+    'up to ₱100,000.00 it stops at the Finance Manager; above it the CEO / President signs last',
+    (await brRoute(100_000)) === 'Team Leader › Admin Back Support › Finance Manager' &&
+      (await brRoute(100_000.01)) === 'Team Leader › Admin Back Support › Finance Manager › CEO / President',
+    `${await brRoute(100_000)} | ${await brRoute(100_000.01)}`,
+  );
+  const loner = await makeUser('Verify Loner Engineer', 'loner@verifyd.local', ['project_engineer']);
+  const lonerStep = await approversForStep(brWorkflow.steps[0], loner.id, prisma, { jobId: job.id });
+  const leaders = await prisma.userRole.count({ where: { role: { key: 'team_leader' }, user: { isActive: true } } });
+  check(
+    'a requester with no "Reports to" goes to the Team Leaders, never to nobody',
+    leaders === 0 ? lonerStep.length === 0 : lonerStep.length > 0 && !lonerStep.includes(loner.id),
+    `${leaders} leader(s), step 1 → ${lonerStep.length}`,
+  );
+  const ownPreview = await routePreview('budget_request', 50_000, engineer.id, null, { jobId: job.id });
+  check('the page names the team leader before Submit is pressed', !!ownPreview?.steps[0].approvers.some((p) => p.id === pm.id));
+
+  // One signature per person: a Team Leader who is also the Finance Manager
+  // signs step 3 with their step-1 Approve — Back Support still between.
+  const leadFin = await makeUser('Verify Leader Finance', 'leadfin@verifyd.local', ['finance_manager']);
+  const eng2 = await makeUser('Verify Engineer Two', 'eng2@verifyd.local', ['project_engineer']);
+  await prisma.user.update({ where: { id: eng2.id }, data: { supervisorId: leadFin.id } });
+  const br2 = await prisma.budgetRequest.create({
+    data: {
+      number: await nextNumber('budget_request'),
+      jobId: job.id,
+      costCategoryId: materials.id,
+      amount: d(20_000),
+      reason: `${TAG} two hats`,
+      requestedById: eng2.id,
+      status: 'PENDING_APPROVAL',
+    },
+  });
+  const twoHats = await submitForApproval({
+    documentType: 'budget_request',
+    documentId: br2.id,
+    documentNumber: br2.number,
+    subject: `${TAG} budget request, two hats`,
+    amount: 20_000,
+    requesterId: eng2.id,
+    jobId: job.id,
+  });
+  await act({ requestId: twoHats.id, userId: leadFin.id, action: 'APPROVED' });
+  const twoHatsNow = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: twoHats.id }, include: { actions: { orderBy: { sequence: 'asc' } } } });
+  check(
+    'a team leader who is also the Finance Manager signs both with one Approve, at one instant — Back Support still between',
+    twoHatsNow.status === 'PENDING' &&
+      twoHatsNow.currentSequence === 2 &&
+      twoHatsNow.actions.map((a) => a.sequence).join() === '1,3' &&
+      twoHatsNow.actions[1].coSignedWith === 1 &&
+      twoHatsNow.actions[0].actedAt.getTime() === twoHatsNow.actions[1].actedAt.getTime(),
+    JSON.stringify(twoHatsNow.actions.map((a) => [a.sequence, a.coSignedWith])),
+  );
+  await act({ requestId: twoHats.id, userId: backSupport.id, action: 'APPROVED' });
+  check(
+    'Back Support’s signature then settles it — nobody asks the Finance Manager again',
+    (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: twoHats.id } })).status === 'APPROVED' &&
+      (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: br2.id } })).status === 'APPROVED',
+  );
 
   // Released in one voucher, on its own deadline — the budget request's days,
   // not the cash advance's.
@@ -1203,8 +1269,9 @@ async function main() {
         !brFlat.includes('APPROVED BY') &&
         brText.includes('Verify Engineer') &&
         brText.includes('Verify PM') &&
-        brText.includes('Verify Finance') &&
-        signedCount(brText) === 4 &&
+        brText.includes('Verify Back Support') &&
+        brText.includes('Verify Finance Manager') &&
+        signedCount(brText) === 5 &&
         pendingCount(brText) === 0,
       `${brPdf.status} ${brSteps.join(' / ')} · ${signedCount(brText)} signed, ${pendingCount(brText)} pending`,
     );
