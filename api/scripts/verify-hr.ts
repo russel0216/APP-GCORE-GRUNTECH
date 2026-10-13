@@ -82,6 +82,7 @@ import { formatAmount, formatMoney, statusLabel } from '../src/shared/pdf';
 // Registers the leave and overtime approval subscribers (a side effect), and
 // lends the overtime paper's stage words.
 import { OT_STAGE_LABEL } from '../src/routes/hr';
+import { manilaDayKey } from '../src/shared/day';
 import {
   checkListPaper,
   checkOwnPaper,
@@ -1932,14 +1933,14 @@ async function main() {
     );
 
     /*
-      The LOCAL calendar date, not toISOString(). Attendance is keyed on the
-      local day by `dayKey()`, so asking for the UTC one extracted the wrong
-      day's rows for the eight hours either side of midnight in Manila — which
-      is how this assertion failed at 07:00 with the route working correctly.
+      MANILA's calendar date, not toISOString() and not the host's: attendance
+      is keyed on Manila's day by `dayKey()`, so asking for the UTC one
+      extracted the wrong day's rows for the eight hours either side of
+      midnight in Manila — which is how this assertion failed at 07:00 with the
+      route working correctly — and the host's local day does the same on a
+      machine whose clock is not set to Manila (a UTC sandbox after 16:00).
     */
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const now = new Date();
-    const localDay = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const localDay = manilaDayKey(new Date());
     const csv = await fetch(
       `${BASE}/attendance/export?from=${localDay}&to=${localDay}`,
       { headers: { Authorization: `Bearer ${hrToken}` } },
