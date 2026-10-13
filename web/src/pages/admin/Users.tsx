@@ -511,7 +511,7 @@ function UserEditor({
               label="Team"
               hint={
                 detail?.employee
-                  ? 'Their quotations, leads and sales orders count under this team — the team cards, the Team view and the forecast. Team Leaders and sales need one.'
+                  ? 'Their quotations, leads and sales orders count under this team — the team cards, the Team view and the forecast — and a Technical Manager or Team Leader approves for their own team. Team Leaders, Technical Managers and sales need one.'
                   : 'This login has no employee record, so it cannot keep a team — add one in HR › Employees.'
               }
             >

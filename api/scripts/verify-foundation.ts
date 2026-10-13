@@ -782,6 +782,23 @@ async function main() {
   check('the SUPERVISOR step reads it', leaderStep.join() === leadKat.id, JSON.stringify(leaderStep));
   await prisma.userRole.deleteMany({ where: { roleId: roleB.id } });
 
+  // A Technical Manager step goes to the Technical Manager on the preparer's
+  // team (2026-10-13, the owner's report: a HIT costing waited on every
+  // Technical Manager), else every one. Real holders of the role may be on
+  // file, so the checks name only this script's two.
+  const tmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'technical_manager' } });
+  await prisma.userRole.createMany({ data: [{ userId: leadKat.id, roleId: tmRole.id }, { userId: leadHit.id, roleId: tmRole.id }] });
+  const tmStep = { approverType: 'ROLE', roleId: tmRole.id, userId: null } as unknown as ApprovalStep;
+  const tmForKat = await approversForStep(tmStep, katSeller.id);
+  const tmForLoner = await approversForStep(tmStep, loner.id);
+  check(
+    'a Technical Manager step goes to the Technical Manager on the preparer’s own team, not to every one',
+    tmForKat.includes(leadKat.id) && !tmForKat.includes(leadHit.id),
+    JSON.stringify(tmForKat),
+  );
+  check('a preparer with no team goes to every Technical Manager', tmForLoner.includes(leadKat.id) && tmForLoner.includes(leadHit.id));
+  await prisma.userRole.deleteMany({ where: { roleId: tmRole.id, userId: { in: [leadKat.id, leadHit.id] } } });
+
   // The preparer signs, at submit, the steps whose role they hold — only
   // where the route says so — and a manager may stand in only where it says so.
   const signer = await makeUser('Verify Signer', 'signer@verify.local', []);

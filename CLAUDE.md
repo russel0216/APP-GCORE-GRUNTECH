@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,059 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,061 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -563,9 +563,10 @@ evening of 2026-10-13: 2 on delivery for the S-curve's ticks, 6 on costing
 and 3 on delivery for Mon–Sat and the start and finish dates, 14 on
 meetings and 2 on calendar for the minutes and the map links, 17 on
 delivery and one on cad for the Request for Approval, 4 on costing for the
-costing's PDF template and 37 on hr for People Flow):
+costing's PDF template and 37 on hr for People Flow, and 2 on foundation
+for the Technical Manager on the preparer's team):
 foundation
-362, masters 92, sales 608, costing 192, pipeline 121, calendar 98, numbering
+364, masters 92, sales 608, costing 192, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 171, chain 202, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
@@ -3364,7 +3365,16 @@ every one with `preparerSigns` and `standIns`:
 100,000.01 on the longer one; verify-chain and verify-delivery pin the
 edge). A Team Leader step is the preparer's "Reports to", else a Team
 Leader on their team, else any (`leadersFor`); Back Support is team-scoped
-(`supportersFor`).
+(`supportersFor`). **A Technical Manager step goes to the Technical Manager
+on the preparer's own team** (2026-10-13, the owner's report: Ivan's HIT
+costing waited on every Technical Manager, where Ricardo alone handles
+HIT): `OWN_TEAM_ROLES` in `shared/approvals.ts` (`technical_manager`) sends
+a ROLE step naming it through `leadersFor` — the holders whose
+`Employee.industryId` (the Team on Admin › Users) is the preparer's, else
+every holder, never nobody. It covers the costing, the purchase requisition
+and the Request for Approval alike, and reads live, so a request already
+pending follows it. A Technical Manager with no Team is only ever the
+fallback.
 
 - **Two new roles**, seeded from the role whose work they manage:
   `purchasing_manager` **Purchasing Manager** (Procurement's rights) and

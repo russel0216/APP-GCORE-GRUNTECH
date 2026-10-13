@@ -215,8 +215,10 @@ export async function approversForStep(
         select: { userId: true, role: { select: { key: true } } },
       });
       const holders = rows.map((r) => r.userId);
-      if (!rows.length || !TEAM_SCOPED_ROLES.includes(rows[0].role.key)) return holders;
-      return supportersFor(holders, requesterId, tx);
+      if (!rows.length) return holders;
+      if (TEAM_SCOPED_ROLES.includes(rows[0].role.key)) return supportersFor(holders, requesterId, tx);
+      if (OWN_TEAM_ROLES.includes(rows[0].role.key)) return leadersFor(holders, requesterId, tx);
+      return holders;
     }
 
     case 'SUPERVISOR': {
@@ -253,6 +255,17 @@ export async function approversForStep(
 export const TEAM_SCOPED_ROLES = ['back_support'];
 
 /**
+ * Roles whose ROLE step goes to the holders on the PREPARER's own team
+ * (`Employee.industryId`, the Team on Admin › Users), as a Team Leader step
+ * does (`leadersFor`): a Technical Manager handles their own team's costings,
+ * purchase requisitions and requests for approval (2026-10-13, the owner's
+ * report: Ivan's HIT costing was waiting on every Technical Manager, where
+ * Ricardo alone handles HIT). A preparer with no team, or a team with no
+ * Technical Manager, goes to every holder — never to nobody.
+ */
+export const OWN_TEAM_ROLES = ['technical_manager'];
+
+/**
  * The holders of a team-scoped role who decide for this requester: those
  * supporting the requester's team (`Employee.industryId`), else those who
  * name no team (they support every team), else every holder — a document
@@ -274,7 +287,8 @@ export async function supportersFor(holders: string[], requesterId: string, tx: 
 
 /**
  * The holders of a SUPERVISOR step's fallback role who decide for a requester
- * with no "Reports to": those on the requester's own team
+ * with no "Reports to" — and of an `OWN_TEAM_ROLES` step (the Technical
+ * Manager's) for every requester: those on the requester's own team
  * (`Employee.industryId`) — the CEO on SIT goes to SIT's Team Leader, not to
  * every Team Leader (2026-10-12) — else every holder, so a document never
  * stalls because the team has no leader. The requester is never the reason a
