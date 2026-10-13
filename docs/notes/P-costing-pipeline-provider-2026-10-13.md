@@ -13,9 +13,18 @@ add/remove-able. 6. Costing: the scope of work value editable to declare
 the value; assume the costing's materials cost is allocated to purchasing
 of materials, and the equipment cost to purchasing of equipment."
 
-Status: **planned**, not built. The defaults below are what "build it" means
-unless the owner answers the open questions differently. Written for the
-agent that will build it (Opus 5.5); the effort table is at the end.
+Status: **built 2026-10-13** on the defaults below, one commit per item —
+see CLAUDE.md (the costing sheet notes, "Hold and Cancel on the Move menu",
+the board's dress, the quotation cost cell). Differences from the plan:
+the preload's tasks start at one working day each, not zero (a zero-day
+task still takes a day in `planTasks`, so "plans nothing" was not on
+offer); a fixed price is bounded by the margin's own ±95% rather than
+refused below cost (a cost that grows after the price is fixed must still
+save); releasing a fixed price prices from its six-decimal margin, which
+can move the price by a few centavos; the "This month forecast" TILE (off
+by default) stays, only the column went; and the lists' Status filter
+gained no "Cancelled" value — the stage filter is unchanged, a cancelled
+one reads "Cancelled" on its row.
 
 ## 1. Quotation — a provider not on the list
 

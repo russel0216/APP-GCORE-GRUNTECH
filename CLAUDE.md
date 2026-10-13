@@ -509,7 +509,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,937 assertions across twenty-two scripts** (counted 2026-10-13, after
+**3,973 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -553,9 +553,13 @@ the routing sheet of 2026-10-13 and one signature per person, and 3 on
 accounts for a login email already in use, and 2 on sales for one name
 per person on the quotation's paper, and 5 on accounts for the admin's
 address moving once, and one on workspace for a print ticket reopened by
-a viewer extension):
+a viewer extension, and 5 on sales for the supplier kept as a note, the
+selling roles' supplier right and Hold and Cancel's rules, 23 on costing for
+the Project Costing paper, the preloaded scope, the fixed price and the
+schedule of values, and 8 on pipeline for the board without its forecast
+column and Hold and Cancel's round trip):
 foundation
-362, masters 92, sales 603, costing 159, pipeline 113, calendar 96, numbering
+362, masters 92, sales 608, costing 182, pipeline 121, calendar 96, numbering
 79, partners 120, delivery 149, chain 202, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
