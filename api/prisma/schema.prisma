@@ -1112,6 +1112,8 @@ model Lead {
   nextAction     String?
   nextActionDate DateTime? @db.Date
   lostReason     String?
+  /// LOST or CANCELLED while lost (2026-10-13); null otherwise.
+  lostKind   LostKind?
   notes          String?
 
   quotations Quotation[]
@@ -1348,6 +1350,17 @@ enum QuotationOutcome {
   NEGOTIATION
   WON
   LOST
+  /// Put on hold (2026-10-13, the owner's call): not open — no forecast, no
+  /// open counts — and resumed by moving it back to an open stage.
+  ON_HOLD
+}
+
+/// What a LOST lead or quotation was (2026-10-13): lost to a competitor or a
+/// no, or CANCELLED — the customer dropped the requirement. Cancelled counts
+/// as neither won nor lost in a win rate. Null unless the record is LOST.
+enum LostKind {
+  LOST
+  CANCELLED
 }
 
 /// The container. Commercial content lives on its revisions, which are never
@@ -1380,6 +1393,8 @@ model Quotation {
   submittedAt     DateTime?
   decidedAt       DateTime?
   lostReason      String?
+  /// LOST or CANCELLED while lost (2026-10-13); null otherwise.
+  lostKind    LostKind?
   /// When the salesperson expects the decision. Copied from the lead when the
   /// quotation is raised from one; editable on the quotation. The board's
   /// forecast column reads this, so a quotation with no lead can still be forecast.

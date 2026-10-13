@@ -94,8 +94,7 @@ import {
   valueRevision,
   standsApproved,
   groupShares,
-  NO_GROUP,
-} from '../shared/pipeline';
+  NO_GROUP, lostKindAfter } from '../shared/pipeline';
 import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../shared/day';
 import { env } from '../env';
 import { googleCalendarUrl } from '../shared/calendar-links';
@@ -329,7 +328,7 @@ leadRoutes.get(
             ...presentLead(r as unknown as Record<string, unknown>),
             quotationCount: r._count.quotations,
             stage,
-            stageLabel: stages.find((st) => st.key === stage)?.label ?? null,
+            stageLabel: cancelledLabel(stages.find((st) => st.key === stage)?.label ?? null, r.lostKind),
             // What the mass actions plan with; the PATCH still decides.
             canEdit: canEditRecord(me, 'gops', 'leads', r.assignedToId),
           };
@@ -655,6 +654,8 @@ const leadSchema = z.object({
   nextActionDate: z.string().optional().nullable(),
   status: z.enum(LEAD_STATUSES).optional(),
   lostReason: z.string().optional().nullable(),
+  /** Lost, or cancelled by the customer (2026-10-13) — only with LOST. */
+  lostKind: z.enum(['LOST', 'CANCELLED']).optional(),
   notes: z.string().optional().nullable(),
 });
 
@@ -765,6 +766,8 @@ leadRoutes.patch(
     }
     if (body.probability !== undefined) data.probability = body.probability;
     if (body.status !== undefined) data.status = body.status;
+    const leadLostKind = lostKindAfter(before.status, body.status, body.lostKind);
+    if (leadLostKind !== undefined) data.lostKind = leadLostKind;
     // SCORO's ladder: a stage move sets the odds — unless this same request
     // typed them, because an explicit value is somebody's judgement.
     if (body.status !== undefined && body.status !== before.status && body.probability === undefined) {
@@ -1320,8 +1323,9 @@ quotationRoutes.get(
             number: r.number,
             subject: r.subject,
             outcome: r.outcome,
+            lostKind: r.lostKind,
             stage: quotationStage(r.outcome, booked, stages),
-            stageLabel: stages.find((st) => st.key === quotationStage(r.outcome, booked, stages))?.label ?? null,
+            stageLabel: cancelledLabel(stages.find((st) => st.key === quotationStage(r.outcome, booked, stages))?.label ?? null, r.lostKind),
             probability: r.probability,
             expectedClosing: r.expectedClosing,
             currency: r.currency,
@@ -1940,7 +1944,7 @@ quotationRoutes.get(
       stages,
       closedInDays,
       stage: stageKey,
-      stageLabel: pipeline.find((s) => s.key === stageKey)?.label ?? null,
+      stageLabel: cancelledLabel(pipeline.find((s) => s.key === stageKey)?.label ?? null, quotation.lostKind),
       quotationStages: quotationStages(pipeline).map((st) => ({
         key: st.key,
         label: st.label,
@@ -2357,14 +2361,21 @@ async function revisionForEdit(req: Parameters<typeof currentUser>[0], quotation
   return { quotation, revision };
 }
 
+/** A lost record the customer cancelled reads "Cancelled" wherever its stage is named (2026-10-13). */
+export function cancelledLabel(label: string | null, lostKind: string | null | undefined): string | null {
+  return lostKind === 'CANCELLED' ? 'Cancelled' : label;
+}
+
 quotationRoutes.patch(
   '/:id',
   require_('gops.quotations.edit_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(quotationSchema.partial().extend({
-      outcome: z.enum(['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON', 'LOST']).optional(),
+      outcome: z.enum(['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON', 'LOST', 'ON_HOLD']).optional(),
       lostReason: z.string().optional().nullable(),
+      /** Lost, or cancelled by the customer (2026-10-13) — only with LOST. */
+      lostKind: z.enum(['LOST', 'CANCELLED']).optional(),
     }), req.body);
 
     const before = await prisma.quotation.findUnique({
@@ -2391,6 +2402,8 @@ quotationRoutes.patch(
         jobNumber: job?.number ?? null,
       });
     }
+
+    const lostKind = lostKindAfter(before.outcome, body.outcome, body.lostKind);
 
     const renumber = body.number !== undefined && body.number !== before.number;
     if (renumber) await checkQuoteNumber(body.number!, before.id);
@@ -2423,6 +2436,7 @@ quotationRoutes.patch(
       const teamId = await pickedTeam(body.teamId, before.teamId);
       data.team = teamId ? { connect: { id: teamId } } : { disconnect: true };
     }
+    if (lostKind !== undefined) data.lostKind = lostKind;
     if (body.outcome !== undefined) {
       data.outcome = body.outcome;
       if (body.outcome === 'SUBMITTED') data.submittedAt = new Date();
@@ -2455,9 +2469,11 @@ quotationRoutes.patch(
               ? 'QUOTATION_SUBMITTED'
               : body.outcome === 'NEGOTIATION'
                 ? 'NEGOTIATION'
-                : body.outcome === 'OPEN'
-                  ? 'QUOTATION_CREATED' // pulled back to a draft
-                  : null;
+                : body.outcome === 'ON_HOLD'
+                  ? 'ON_HOLD'
+                  : body.outcome === 'OPEN'
+                    ? 'QUOTATION_CREATED' // pulled back to a draft
+                    : null;
       if (leadStatus) {
         const lead = await prisma.lead.findUnique({ where: { id: before.leadId }, select: { status: true, probability: true } });
         await prisma.lead.update({
@@ -2467,6 +2483,8 @@ quotationRoutes.patch(
             // The lead follows the stage's odds too, so the funnel stays coherent.
             ...(lead ? { probability: probabilityAfterMove(lead.status, leadStatus, lead.probability, await pipelineStages()) } : {}),
             ...(body.outcome === 'LOST' && body.lostReason ? { lostReason: body.lostReason } : {}),
+            // Cancelled or lost, the lead says the same as its quotation.
+            lostKind: body.outcome === 'LOST' ? (lostKind ?? 'LOST') : null,
           },
         });
       }
@@ -4052,7 +4070,8 @@ async function loadBoard(req: Parameters<typeof currentUser>[0]): Promise<BoardR
     prisma.quotation.findMany({
       where: {
         OR: [
-          { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] } },
+          // On hold (2026-10-13) stays on the board, parked, like a held lead.
+          { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'ON_HOLD'] } },
           { outcome: { in: ['WON', 'LOST'] }, decidedAt: { gte: decidedFrom } },
         ],
         ...(ownerId ? { ownerId } : {}),

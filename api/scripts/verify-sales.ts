@@ -55,8 +55,7 @@ import {
   quotationStages,
   leadStage,
   leadStages,
-  standsApproved,
-} from '../src/shared/pipeline';
+  standsApproved, lostKindAfter } from '../src/shared/pipeline';
 import { DEFAULT_STAGES } from '../src/shared/pipelineStages';
 import { valueRevision as valuedRevisionOf } from '../src/shared/pipeline';
 import {
@@ -933,6 +932,28 @@ async function main() {
     'nor negotiated',
     refuses(() => assertLeadStatusChange('COSTING', 'NEGOTIATION', { hasQuotations: false }), 'won by its quotation'),
   );
+  // Hold and Cancel (2026-10-13).
+  check(
+    'an open quotation may be put on hold; a held one goes back to an open stage or Lost, never straight to Won',
+    allowedTargets({ kind: 'quotation', column: 'SUBMITTED', hasApprovedRevision: true }).includes('ON_HOLD') &&
+      (() => {
+        const t = allowedTargets({ kind: 'quotation', column: 'ON_HOLD', hasApprovedRevision: true });
+        return t.includes('QUOTED') && t.includes('NEGOTIATION') && t.includes('LOST') && !t.includes('WON') && !t.includes('ON_HOLD');
+      })() &&
+      !allowedTargets({ kind: 'quotation', column: 'WON', hasApprovedRevision: true }).includes('ON_HOLD'),
+  );
+  check(
+    'a held quotation stands in the On hold column and stage',
+    columnFor({ kind: 'quotation', outcome: 'ON_HOLD' }) === 'ON_HOLD',
+  );
+  check(
+    'lostKindAfter: Lost by default, Cancelled when asked, cleared on leaving Lost, refused without Lost',
+    lostKindAfter('SUBMITTED', 'LOST', undefined) === 'LOST' &&
+      lostKindAfter('SUBMITTED', 'LOST', 'CANCELLED') === 'CANCELLED' &&
+      lostKindAfter('LOST', 'NEGOTIATION', undefined) === null &&
+      lostKindAfter('SUBMITTED', 'NEGOTIATION', undefined) === undefined &&
+      refuses(() => lostKindAfter('SUBMITTED', 'NEGOTIATION', 'CANCELLED'), 'Only a lost one'),
+  );
   check(
     'a lead card can be dropped on its own stages and Lost, never on a quotation stage',
     (() => {
@@ -1351,8 +1372,8 @@ async function main() {
     });
 
     check(
-      'a quotation stands in the board’s stages: Opportunity to Lost, never On hold',
-      quotationStages(stages).map((st) => st.key).join(',') === 'OPPORTUNITY,NEGOTIATION,CLOSING,CONFIRMED,COMPLETED,LOST',
+      'a quotation stands in the board’s stages: Opportunity to Lost, and On hold since 2026-10-13',
+      quotationStages(stages).map((st) => st.key).join(',') === 'OPPORTUNITY,NEGOTIATION,CLOSING,CONFIRMED,COMPLETED,LOST,HOLD',
       quotationStages(stages).map((st) => st.key).join(','),
     );
     check(
@@ -1403,7 +1424,8 @@ async function main() {
     const perStage = Object.entries(summary.tabCounts).filter(([k]) => k !== '');
     check(
       'every stage has one, and the stage counts add up to All',
-      perStage.every(([, n]) => n === 1) && perStage.reduce((t, [, n]) => t + n, 0) === summary.tabCounts[''],
+      // Six quotations, one per stage — none of them held.
+      perStage.every(([k, n]) => n === (k === 'HOLD' ? 0 : 1)) && perStage.reduce((t, [, n]) => t + n, 0) === summary.tabCounts[''],
       JSON.stringify(summary.tabCounts),
     );
     check(
@@ -1413,7 +1435,7 @@ async function main() {
     );
     check(
       'the summary carries the tabs, named and coloured as the stages are',
-      (summary.tabs ?? []).map((t) => t.label).join(',') === 'Opportunity,Negotiation,Closing,Confirmed,Completed,Lost' &&
+      (summary.tabs ?? []).map((t) => t.label).join(',') === 'Opportunity,Negotiation,Closing,Confirmed,Completed,Lost,On hold' &&
         (summary.tabs ?? []).every((t) => /^#[0-9A-F]{6}$/i.test(t.color ?? '')),
     );
 
@@ -1489,7 +1511,7 @@ async function main() {
     check('"Expected closing" includes the day it names', closing === 1, String(closing));
 
     let refused = 0;
-    for (const bad of [{ stage: 'HOLD' }, { stage: 'NOPE' }, { createdFrom: '30/04/2026' }, { revision: 'SUPERSEDED' }, { salesOrder: 'maybe' }]) {
+    for (const bad of [{ stage: 'ON_HOLD' }, { stage: 'NOPE' }, { createdFrom: '30/04/2026' }, { revision: 'SUPERSEDED' }, { salesOrder: 'maybe' }]) {
       try {
         quotationListWhere(superUser, listQ(bad), stages);
       } catch (err) {

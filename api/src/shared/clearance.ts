@@ -228,7 +228,7 @@ export async function scanAccountabilities(employee: {
     const [tasks, leads, quotations, visits, activities, sessions, reports, approvals] = await Promise.all([
       prisma.jobTask.count({ where: { assignedToId: userId, status: { notIn: ['DONE'] } } }),
       prisma.lead.count({ where: { assignedToId: userId, status: { notIn: ['WON', 'LOST'] } } }),
-      prisma.quotation.count({ where: { ownerId: userId, outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] } } }),
+      prisma.quotation.count({ where: { ownerId: userId, outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'ON_HOLD'] } } }),
       prisma.serviceVisit.count({ where: { assignedToId: userId, status: 'SCHEDULED' } }),
       prisma.salesActivity.count({ where: { assignedToId: userId, status: 'PLANNED', startsAt: { gte: today } } }),
       prisma.trainingSession.count({ where: { trainerId: userId, status: 'SCHEDULED' } }),

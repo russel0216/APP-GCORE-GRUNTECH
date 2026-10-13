@@ -69,6 +69,8 @@ interface Card {
   hasApprovedRevision: boolean;
   job: { id: string; number: string } | null;
   lostReason: string | null;
+  /** LOST or CANCELLED while lost (2026-10-13). */
+  lostKind?: 'LOST' | 'CANCELLED' | null;
   overdue: boolean;
   canMove: boolean;
   allowedTargets: string[];
@@ -309,9 +311,24 @@ function refusalFor(card: Card, key: string): string | null {
   return 'Not a move this card can make';
 }
 
-function payloadFor(card: Card, key: string, lostReason?: string) {
-  if (card.kind === 'lead') return { status: key, ...(lostReason ? { lostReason } : {}) };
-  return { outcome: key === 'QUOTED' ? 'OPEN' : key, ...(lostReason ? { lostReason } : {}) };
+/**
+ * The Move menu's "Cancel…" (2026-10-13, the owner's call): not a column —
+ * Lost with its kind, so the deal counts as neither won nor lost in a win rate.
+ */
+const CANCEL = 'CANCEL';
+
+function payloadFor(card: Card, key: string, lostReason?: string, lostKind?: 'LOST' | 'CANCELLED') {
+  const lost = lostReason ? { lostReason, ...(lostKind ? { lostKind } : {}) } : {};
+  if (card.kind === 'lead') return { status: key, ...lost };
+  return { outcome: key === 'QUOTED' ? 'OPEN' : key, ...lost };
+}
+
+/** What a Move menu item says: Lost and Cancel ask a reason; On hold parks the card. */
+function moveLabel(target: string, label: string): string {
+  if (target === 'LOST') return 'Mark lost…';
+  if (target === CANCEL) return 'Cancel…';
+  if (target === 'ON_HOLD') return 'Put on hold';
+  return `Move to ${label}`;
 }
 
 /**
@@ -527,7 +544,7 @@ export function Pipeline() {
    * theirs); every other move goes straight through.
    */
   async function move(card: Card, key: string) {
-    const reason = refusalFor(card, key);
+    const reason = refusalFor(card, key === CANCEL ? 'LOST' : key);
     if (reason) {
       announce(reason);
       toast('warn', reason);
@@ -545,7 +562,20 @@ export function Pipeline() {
         minReason: 3,
         // Through the ref: the bar outlives this render, and the move must
         // roll back to the board as it is when the person confirms.
-        onConfirm: (lostReason) => sendMoveRef.current(card, 'LOST', lostReason),
+        onConfirm: (lostReason) => sendMoveRef.current(card, 'LOST', lostReason, 'LOST'),
+      });
+      return;
+    }
+    if (key === CANCEL) {
+      viewInQuestion.current = null;
+      confirm.ask({
+        title: `Cancel ${card.number}?`,
+        body: 'The customer dropped it. It goes to Lost marked cancelled, and a win rate counts it as neither won nor lost.',
+        confirmLabel: 'Cancel it',
+        reason: 'required',
+        reasonLabel: 'Why was it cancelled?',
+        minReason: 3,
+        onConfirm: (lostReason) => sendMoveRef.current(card, 'LOST', lostReason, 'CANCELLED'),
       });
       return;
     }
@@ -558,7 +588,7 @@ export function Pipeline() {
    * board back and is THROWN — the bar shows it and stays open with the reason
    * typed so far — rather than toasted.
    */
-  async function sendMove(card: Card, key: string, lostReason?: string) {
+  async function sendMove(card: Card, key: string, lostReason?: string, lostKind?: 'LOST' | 'CANCELLED') {
     const asked = lostReason !== undefined;
     const before = board;
     if (board) {
@@ -570,7 +600,7 @@ export function Pipeline() {
             return { ...col, cards, count: cards.length, value: valueOf(cards), weighted: weightedOf(cards) };
           }
           if (col.key === key) {
-            const cards = [{ ...card, column: key, allowedTargets: [] }, ...col.cards];
+            const cards = [{ ...card, column: key, allowedTargets: [], lostKind: lostKind ?? null }, ...col.cards];
             return { ...col, cards, count: cards.length, value: valueOf(cards), weighted: weightedOf(cards) };
           }
           return col;
@@ -579,12 +609,12 @@ export function Pipeline() {
     }
     pendingFocus.current = card.ref;
     try {
-      await api.patch(card.kind === 'lead' ? `/leads/${card.id}` : `/quotations/${card.id}`, payloadFor(card, key, lostReason));
+      await api.patch(card.kind === 'lead' ? `/leads/${card.id}` : `/quotations/${card.id}`, payloadFor(card, key, lostReason, lostKind));
       // In the stage view the person dropped the card on a STAGE, so the
       // toast names the stage — the status the quotation page prints too
       // (2026-10-08) — not the fine column the drop resolved to.
       const stageLabel = view.stages !== 'detailed' ? board?.stages.find((s) => s.columns.includes(key))?.label : undefined;
-      const where = stageLabel ?? LABELS[key] ?? key;
+      const where = lostKind === 'CANCELLED' ? 'Cancelled' : (stageLabel ?? LABELS[key] ?? key);
       const text = `Moved ${card.number} to ${where}${card.kind === 'quotation' ? ` — the quotation's status now reads ${where}` : ''}`;
       toast('ok', text);
       announce(text);
@@ -656,6 +686,13 @@ export function Pipeline() {
     if (!board.stages.some((s) => s.key === 'LOST' && s.inActiveList) && card.allowedTargets.includes('LOST')) {
       options.push({ key: 'LOST', label: 'Lost', target: 'LOST', why: null });
     }
+    // Hold and Cancel are always on the list where the card may take them
+    // (2026-10-13, the owner's call) — On hold is off the board's active
+    // stages, so it would never be offered otherwise.
+    if (card.allowedTargets.includes('ON_HOLD') && !options.some((o) => o.target === 'ON_HOLD')) {
+      options.push({ key: 'HOLD', label: board.stages.find((s) => s.key === 'HOLD')?.label ?? 'On hold', target: 'ON_HOLD', why: null });
+    }
+    if (card.allowedTargets.includes('LOST')) options.push({ key: CANCEL, label: 'Cancelled', target: CANCEL, why: null });
     return options;
   }
 
@@ -1379,7 +1416,11 @@ function PipeCard({
           {nextOverdue ? ' · overdue' : ''}
         </div>
       )}
-      {card.column === 'LOST' && card.lostReason && <div className="pipe-card-sub">Lost: {card.lostReason}</div>}
+      {card.column === 'LOST' && card.lostReason && (
+        <div className="pipe-card-sub">
+          {card.lostKind === 'CANCELLED' ? 'Cancelled' : 'Lost'}: {card.lostReason}
+        </div>
+      )}
       {show('job') && card.column === 'WON' && (
         <div className="pipe-card-sub">
           {card.job ? (
@@ -1438,7 +1479,7 @@ function MoveMenu({
         ? options.map((o) =>
             o.target ? (
               <button key={o.key} role="menuitem" onClick={() => onMove(o.target!)}>
-                {o.target === 'LOST' ? 'Mark lost…' : `Move to ${o.label}`}
+                {moveLabel(o.target, o.label)}
               </button>
             ) : (
               <button key={o.key} role="menuitem" aria-disabled="true" onClick={(e) => e.preventDefault()}>
@@ -1447,9 +1488,9 @@ function MoveMenu({
               </button>
             ),
           )
-        : targets.map((key) => (
+        : [...targets, ...(targets.includes('LOST') ? [CANCEL] : [])].map((key) => (
             <button key={key} role="menuitem" onClick={() => onMove(key)}>
-              {key === 'LOST' ? 'Mark lost…' : `Move to ${LABELS[key] ?? key}`}
+              {moveLabel(key, LABELS[key] ?? key)}
             </button>
           ))}
       {cannotWin && (

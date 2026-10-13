@@ -1783,6 +1783,32 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   the owner's bell says "moved to Closing (negotiation)" — the stage first,
   the step after it where the words differ. verify-pipeline asserts the
   board card, the list row and the page agree after a drop.
+- **Hold and Cancel on the Move menu** (2026-10-13, the owner's call).
+  **A quotation can be put on hold**: `ON_HOLD` is a `QuotationOutcome`,
+  NOT open — the forecast, the open counts and the open filters list
+  OPEN / SUBMITTED / NEGOTIATION and so leave it out; a leaver's clearance
+  counts it. It stands in the board's parked On hold column and the On
+  hold stage (`columnFor`, `quotationStages()` now lists HOLD; the board
+  query fetches held quotations), `allowedTargets` puts an open card on
+  hold and a held one back on an open stage or Lost — never straight to
+  Won — and its lead follows to ON_HOLD and back. SCORO's "Hold" imports
+  as ON_HOLD. **Cancel is Lost with a kind**, not a stage:
+  `Lead.lostKind` / `Quotation.lostKind` (`LostKind` LOST | CANCELLED,
+  null unless lost), set by the PATCH's `lostKind` through
+  `lostKindAfter()` (`shared/pipeline.ts` — LOST by default, cleared on
+  leaving Lost, a 400 without Lost); the lead takes its quotation's kind.
+  A cancelled one reads "Cancelled" wherever its stage is named
+  (`cancelledLabel()` in `routes/sales.ts` — the list rows, the quotation
+  page, the lead rows; "Cancelled because" on the pages, "Cancelled:" on
+  its card) and counts as NEITHER won nor lost: the board's `lostCount`
+  and Insights' lost counts, win rates and lost reasons leave it out
+  (`NOT_CANCELLED` in `routes/insights.ts`, null-safe), `cancelledCount`
+  and Sales Analytics' `cancelled` say how many; SCORO's "Cancelled"
+  imports cancelled. The Move menu offers "Put on hold" and "Cancel…"
+  (the reason asked in the confirm bar) in both views; the quotation page
+  has "Cancel quotation" and the lead page "Cancel lead" in ⋯ beside
+  Mark lost, and the quotation list's Change status gains On hold and
+  Cancelled.
 - **The move rules are `assertLeadStatusChange` / `assertOutcomeChange`** in
   `shared/pipeline.ts`, called from the PATCH routes; the board's drop targets
   come from `allowedTargets()` on the same rules. Do not add a board-only move
@@ -3761,7 +3787,7 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
 - **The stage is a filter** (`?stage=`; the tab strip went on 2026-10-08,
   the owner's call). All quotes, Opportunity, Negotiation, Closing,
   Confirmed, Completed, Lost — `quotationStages()` in `shared/pipeline.ts`,
-  the stages a quotation can stand in (never On hold), named and coloured
+  the stages a quotation can stand in (On hold too since 2026-10-13), named and coloured
   as Admin › Pipeline Stages has them and sent with the list's
   `summary.tabs` (the filter's choices; a reader needs no pipeline right
   to see them) and counted in `summary.tabCounts`. A quotation's stage is
