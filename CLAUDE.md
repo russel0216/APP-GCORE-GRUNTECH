@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,061 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,062 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -564,9 +564,10 @@ and 3 on delivery for Mon–Sat and the start and finish dates, 14 on
 meetings and 2 on calendar for the minutes and the map links, 17 on
 delivery and one on cad for the Request for Approval, 4 on costing for the
 costing's PDF template and 37 on hr for People Flow, and 2 on foundation
-for the Technical Manager on the preparer's team):
+for the Technical Manager on the preparer's team, and one on foundation
+for Back Support's own team):
 foundation
-364, masters 92, sales 608, costing 192, pipeline 121, calendar 98, numbering
+365, masters 92, sales 608, costing 192, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 171, chain 202, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
@@ -3374,7 +3375,8 @@ a ROLE step naming it through `leadersFor` — the holders whose
 every holder, never nobody. It covers the costing, the purchase requisition
 and the Request for Approval alike, and reads live, so a request already
 pending follows it. A Technical Manager with no Team is only ever the
-fallback.
+fallback. Back Support follows the same rule, its "Supports teams"
+ticks replacing the holder's own team (`supportersFor`).
 
 - **Two new roles**, seeded from the role whose work they manage:
   `purchasing_manager` **Purchasing Manager** (Procurement's rights) and
@@ -3546,11 +3548,13 @@ stand-in's door, queue, bell and trail, and both switches off.
   /users/:id { supportTeamIds }`, an unknown team a 400, audited with the
   user). A ROLE step whose role is in `TEAM_SCOPED_ROLES`
   (`shared/approvals.ts`, `back_support` only) goes through
-  `supportersFor()`: the holders supporting the PREPARER's team
-  (`Employee.industryId`), else the holders naming no team (they support
-  every team), else every holder — a document never stalls for want of a
-  supporter. "Reports to" is untouched by it. Nothing set is the old rule:
-  every holder.
+  `supportersFor()`: the holders handling the PREPARER's team
+  (`Employee.industryId`), else every holder — a document never stalls for
+  want of a supporter. "Reports to" is untouched by it. **Since 2026-10-13
+  (the owner's call: "apply the same team rule to Back Support") a holder
+  with nothing ticked handles their OWN team** (their Team on Admin ›
+  Users), the Technical Manager's rule — no longer every team; ticked
+  teams replace their own.
 - **A person's TEAM is picked on Admin › Users too** (2026-10-12, the
   owner's call: "on users edit allow selection of Team, particularly in
   Team Leader Role and sales to categorize their quotation and sales order

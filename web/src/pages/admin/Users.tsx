@@ -582,7 +582,7 @@ function UserEditor({
           {roles.some((r) => TEAM_SCOPED_ROLES.includes(r.key) && form.roleIds.includes(r.id)) && (
             <Field
               label="Supports teams (Back Support)"
-              hint="Where they support in back admin: a Back Support approval goes to whoever supports the preparer's team, whoever their own manager is. None ticked supports every team."
+              hint="Where they support in back admin: a Back Support approval goes to whoever supports the preparer's team, whoever their own manager is. None ticked: their own Team (Details)."
             >
               <div className="row">
                 {teams

@@ -719,6 +719,11 @@ async function main() {
   const bsKat = await makeUser('Verify BS KAT', 'bskat@verify.local', ['back_support']);
   const bsHit = await makeUser('Verify BS HIT', 'bshit@verify.local', ['back_support']);
   const bsAll = await makeUser('Verify BS All', 'bsall@verify.local', ['back_support']);
+  // Nothing ticked: handles their own team (2026-10-13, the Technical Manager's rule).
+  const bsOwn = await makeUser('Verify BS Own', 'bsown@verify.local', ['back_support']);
+  await prisma.employee.create({
+    data: { employeeNo: `${TAG}EMP5`, firstName: 'Verify', lastName: 'BS Own', userId: bsOwn.id, industryId: kat.id },
+  });
   await prisma.userSupportTeam.createMany({
     data: [
       { userId: bsKat.id, industryId: kat.id },
@@ -735,9 +740,15 @@ async function main() {
     JSON.stringify(forKat),
   );
   check(
-    'a preparer with no team goes to the Back Support naming no team; nobody on the team never stalls it',
-    forNoTeam.join() === bsAll.id && onlyHit.join() === bsHit.id,
+    'a preparer with no team goes to every Back Support; nobody on the team never stalls it',
+    forNoTeam.length === 3 && onlyHit.join() === bsHit.id,
     `${JSON.stringify(forNoTeam)} / ${JSON.stringify(onlyHit)}`,
+  );
+  const withOwn = await supportersFor([...three, bsOwn.id], preparer.id);
+  check(
+    'with nothing ticked a Back Support handles their own team — never every team',
+    withOwn.includes(bsKat.id) && withOwn.includes(bsOwn.id) && !withOwn.includes(bsAll.id) && !withOwn.includes(bsHit.id),
+    JSON.stringify(withOwn),
   );
   const backRole = await prisma.role.findUniqueOrThrow({ where: { key: 'back_support' } });
   const viaStep = await approversForStep(

@@ -266,23 +266,31 @@ export const TEAM_SCOPED_ROLES = ['back_support'];
 export const OWN_TEAM_ROLES = ['technical_manager'];
 
 /**
- * The holders of a team-scoped role who decide for this requester: those
- * supporting the requester's team (`Employee.industryId`), else those who
- * name no team (they support every team), else every holder — a document
- * never stalls because nobody was set for its team. A requester with no team
- * goes to the holders who name none, else every holder.
+ * The holders of a team-scoped role (Back Support) who decide for this
+ * requester — the Technical Manager's team rule (2026-10-13, the owner's
+ * call: "apply the same team rule to Back Support"), with the teams a holder
+ * is set to support on top: a holder handles the teams ticked under
+ * "Supports teams" on Admin › Users, else their OWN team
+ * (`Employee.industryId`). The step goes to those handling the requester's
+ * team, else to every holder — a requester with no team, or a team nobody
+ * handles, never stalls. (Until this, a holder with nothing ticked handled
+ * every team.)
  */
 export async function supportersFor(holders: string[], requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<string[]> {
   if (!holders.length) return holders;
-  const [requester, links] = await Promise.all([
+  const [requester, links, own] = await Promise.all([
     tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } }),
     tx.userSupportTeam.findMany({ where: { userId: { in: holders } }, select: { userId: true, industryId: true } }),
+    tx.employee.findMany({ where: { userId: { in: holders } }, select: { userId: true, industryId: true } }),
   ]);
   const team = requester?.industryId ?? null;
-  const onTeam = team ? holders.filter((h) => links.some((l) => l.userId === h && l.industryId === team)) : [];
-  if (onTeam.length) return onTeam;
-  const everyTeam = holders.filter((h) => !links.some((l) => l.userId === h));
-  return everyTeam.length ? everyTeam : holders;
+  if (!team) return holders;
+  const handles = (h: string) => {
+    const ticked = links.filter((l) => l.userId === h);
+    return ticked.length ? ticked.some((l) => l.industryId === team) : own.some((e) => e.userId === h && e.industryId === team);
+  };
+  const onTeam = holders.filter(handles);
+  return onTeam.length ? onTeam : holders;
 }
 
 /**
