@@ -250,12 +250,14 @@ Then open http://localhost:5173.
 | Health | http://localhost:5100/api/health |
 | Postgres | localhost:**5433** (5433, not 5432, so it cannot collide with an existing local Postgres) |
 
-First sign-in on a fresh database: `admin@gruntech.com` / `ChangeMe!2026` —
+First sign-in on a fresh database: `gcore@gruntechnology.com` / `ChangeMe!2026` —
 **change it immediately** under Account. Override the defaults with
 `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD` before running the seed if you
-prefer. The seed creates that account only when it does not exist, so on a
-database whose admin password has been changed, re-seeding does not reset it
-(see "Locked out" below).
+prefer. The seed creates that account only on a database with no super admin
+yet, so on a database whose admin password has been changed, re-seeding does
+not reset it (see "Locked out" below). An existing install whose admin signed
+in as `admin@gruntech.com` has that login moved to `gcore@gruntechnology.com`
+once, by the seed — same password.
 
 ### Verifying
 
@@ -474,7 +476,7 @@ administrator issues a reset link from Admin › Users and passes it on. For the
 administrator's own account, or with nobody else in, shell access is the way:
 
 ```bash
-cd api && npx tsx scripts/reset-password.ts admin@gruntech.com
+cd api && npx tsx scripts/reset-password.ts gcore@gruntechnology.com
 ```
 
 Generates a password and prints it once. Pass one as a second argument to

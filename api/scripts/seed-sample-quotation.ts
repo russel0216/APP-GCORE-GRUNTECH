@@ -21,7 +21,7 @@
  * here. Idempotent: a quotation already carrying the number stops the script.
  *
  * The owner is OWNER_EMAIL, else the login whose name contains the SCORO
- * author's surname, else admin@gruntech.com.
+ * author's surname, else the first super admin.
  */
 
 import { Prisma } from '@prisma/client';
@@ -141,7 +141,7 @@ async function pickOwner() {
     where: { isActive: true, name: { contains: 'Ugaban', mode: 'insensitive' } },
   });
   if (byName) return byName;
-  const admin = await prisma.user.findUnique({ where: { email: 'admin@gruntech.com' } });
+  const admin = await prisma.user.findFirst({ where: { isSuperAdmin: true, isActive: true }, orderBy: { createdAt: 'asc' } });
   if (!admin) throw new Error('No owner found: set OWNER_EMAIL');
   return admin;
 }

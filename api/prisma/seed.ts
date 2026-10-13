@@ -16,10 +16,11 @@ import { migrateFaceThreshold } from '../src/shared/faceSamples';
 import { removeScoroArchive } from '../src/shared/scoroArchive';
 import { backfillCustomerAddresses } from '../src/shared/customerAddress';
 import { prisma as sharedPrisma } from '../src/prisma';
+import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
 const prisma = new PrismaClient();
 
-const ADMIN_EMAIL = process.env.SEED_ADMIN_EMAIL ?? 'admin@gruntech.com';
+const ADMIN_EMAIL = process.env.SEED_ADMIN_EMAIL ?? SEEDED_ADMIN_EMAIL;
 const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD ?? 'ChangeMe!2026';
 
 /**
@@ -1856,7 +1857,12 @@ async function main() {
   console.log(`  ✓ Report templates (${TEMPLATES.length})`);
 
   // ── Super admin ────────────────────────────────────────────────────────────
-  const existingAdmin = await prisma.user.findUnique({ where: { email: ADMIN_EMAIL } });
+  // Made only on a database with no super admin at all — never because the
+  // configured address is not on file (it may have moved, below), which
+  // would leave a second super admin behind on the known starting password.
+  const existingAdmin =
+    (await prisma.user.findUnique({ where: { email: ADMIN_EMAIL } })) ??
+    (await prisma.user.findFirst({ where: { isSuperAdmin: true }, orderBy: { createdAt: 'asc' } }));
   if (!existingAdmin) {
     await prisma.user.create({
       data: {
@@ -1871,8 +1877,12 @@ async function main() {
     console.log(`\n  ⚠  Password: ${ADMIN_PASSWORD}`);
     console.log('     Change it on first sign-in — Account › Change password.\n');
   } else {
-    console.log(`  ✓ Super admin already exists: ${ADMIN_EMAIL}`);
+    console.log(`  ✓ Super admin already exists: ${existingAdmin.email}`);
   }
+  // Once: the seeded admin signs in as gcore@gruntechnology.com (2026-10-13).
+  const adminMove = await moveAdminEmail([OLD_ADMIN_EMAIL, process.env.SEED_ADMIN_EMAIL ?? OLD_ADMIN_EMAIL]);
+  if (adminMove.moved) console.log(`  ✓ Super admin's sign-in email moved: ${adminMove.from} → ${adminMove.to}`);
+  else if (adminMove.reason === 'taken') console.log(`  ⚠  ${adminMove.to} is already another login's email — the admin's address was left as it is`);
 
   console.log('Seed complete.');
 }

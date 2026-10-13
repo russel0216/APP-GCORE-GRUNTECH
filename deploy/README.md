@@ -303,7 +303,7 @@ server's reason, rather than on the first person you invite.
 
 ```powershell
 cd C:\G-CORE-GRUNTECH\api
-npx tsx scripts\reset-password.ts admin@gruntech.com
+npx tsx scripts\reset-password.ts gcore@gruntechnology.com
 ```
 
 Prints a generated password once. With no arguments it lists the accounts on

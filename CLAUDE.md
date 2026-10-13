@@ -509,7 +509,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,931 assertions across twenty-two scripts** (counted 2026-10-13, after
+**3,936 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -551,12 +551,13 @@ foundation and 5 on workspace for the paper's file name and the print
 ticket, and 7 on foundation, 2 on costing, 5 on chain and 4 on delivery for
 the routing sheet of 2026-10-13 and one signature per person, and 3 on
 accounts for a login email already in use, and 2 on sales for one name
-per person on the quotation's paper):
+per person on the quotation's paper, and 5 on accounts for the admin's
+address moving once):
 foundation
 362, masters 92, sales 603, costing 159, pipeline 113, calendar 96, numbering
 79, partners 120, delivery 149, chain 202, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
-insights 98, insights-brief 50, workspace 81, accounts 128. The
+insights 98, insights-brief 50, workspace 81, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -634,11 +635,18 @@ docker compose up -d
 Postgres is on host port **5433**, not 5432, so it cannot collide with an
 existing local install. Then `cd api && npm run dev` and `cd web && npm run dev`.
 
-Seeded admin: the seed creates `admin@gruntech.com` / `ChangeMe!2026` (or
-`SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`) **only on a fresh database** — when
-the account already exists it is left alone. The local dev database's admin
-password has since been changed, so that pair will not sign in here; use
-`npx tsx scripts/reset-password.ts admin@gruntech.com` if you need in.
+Seeded admin: the seed creates `gcore@gruntechnology.com` / `ChangeMe!2026` (or
+`SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`) **only on a database with no super
+admin at all** — never because the configured address is not on file, which
+would leave a second super admin on the known password. **The admin's address
+moved once** (2026-10-13, the owner's call): `moveAdminEmail()` in
+`shared/adminEmail.ts`, run by the seed on every deploy, gives the super admin
+signing in as `admin@gruntech.com` (or the old `SEED_ADMIN_EMAIL`) the address
+`gcore@gruntechnology.com` — same login, password and history, audited, marked
+in `seed.adminEmailMoved`; it waits, unmarked, while another login holds the
+new address. The local dev database's admin password has since been changed,
+so that pair will not sign in here; use
+`npx tsx scripts/reset-password.ts gcore@gruntechnology.com` if you need in.
 
 Re-running `npm run seed` is safe, and the rule it follows is worth knowing
 before you change it:
