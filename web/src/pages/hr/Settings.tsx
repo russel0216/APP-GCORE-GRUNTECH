@@ -7,6 +7,7 @@ import { ProbationCard } from './settings/ProbationCard';
 import { ClearanceChecklistCard } from './settings/ClearanceChecklistCard';
 import { AcademyCard } from './settings/AcademyCard';
 import { GreetingsCard } from './settings/GreetingsCard';
+import { PeopleFlowCard } from './PeopleFlow';
 import { FaceHealthPanel } from './settings/FaceHealthPanel';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -359,6 +360,8 @@ export function HrSettingsPage() {
         <ClearanceChecklistCard />
         <AcademyCard />
       </div>
+
+      <PeopleFlowCard />
 
       <GreetingsCard />
 

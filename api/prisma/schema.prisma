@@ -82,6 +82,7 @@ model User {
   clearanceItemsCleared  ClearanceItem[]      @relation("ClearanceClearer")
   meetingsOrganized      Meeting[]            @relation("MeetingOrganizer")
   meetingMinutesWritten  Meeting[]            @relation("MeetingMinutesBy")
+  flowItemsUpdated       EmployeeFlowItem[]   @relation("FlowItemUpdater")
   meetingInvites         MeetingInvitee[]     @relation("MeetingInvitee")
   evaluationsGiven       EmployeeEvaluation[] @relation("Evaluator")
   evaluationsScheduled   EmployeeEvaluation[] @relation("EvaluationScheduler")
@@ -898,6 +899,7 @@ model Employee {
   evaluations         EmployeeEvaluation[]
   trainingAttendances TrainingAttendee[]
   trainingRecords     TrainingRecord[]
+  flowItems           EmployeeFlowItem[]
 
   @@index([isActive])
   @@index([lastName, firstName])
@@ -1114,7 +1116,7 @@ model Lead {
   nextActionDate DateTime? @db.Date
   lostReason     String?
   /// LOST or CANCELLED while lost (2026-10-13); null otherwise.
-  lostKind   LostKind?
+  lostKind       LostKind?
   notes          String?
 
   quotations Quotation[]
@@ -1172,8 +1174,8 @@ model Costing {
 
   /// Stored rather than derived: the contract value is a commercial fact that
   /// must not silently change when someone edits a cost line months later.
-  contractValue Decimal @default(0) @db.Decimal(18, 2)
-  totalCost     Decimal @default(0) @db.Decimal(18, 2)
+  contractValue       Decimal  @default(0) @db.Decimal(18, 2)
+  totalCost           Decimal  @default(0) @db.Decimal(18, 2)
   /// A FIXED PRICE (2026-10-13, the owner's call): the contract value, net of
   /// VAT, as typed on the sheet's "Set the grand total". While set, `recalc()`
   /// writes `contractValue` = this exactly and `marginPct` = what it amounts to
@@ -1288,7 +1290,7 @@ model ScopeSection {
 
   /// This section's share of the contract value. The sum across sections is
   /// validated against the costing's contract value.
-  value Decimal @default(0) @db.Decimal(18, 2)
+  value           Decimal          @default(0) @db.Decimal(18, 2)
   /// Where `value` comes from (2026-10-13): SPREAD (the default, as before),
   /// DECLARED (typed, kept) or CATEGORY (`costCategoryIds`' cost, priced).
   valueSource     ScopeValueSource @default(SPREAD)
@@ -1399,7 +1401,7 @@ model Quotation {
   decidedAt       DateTime?
   lostReason      String?
   /// LOST or CANCELLED while lost (2026-10-13); null otherwise.
-  lostKind    LostKind?
+  lostKind        LostKind?
   /// When the salesperson expects the decision. Copied from the lead when the
   /// quotation is raised from one; editable on the quotation. The board's
   /// forecast column reads this, so a quotation with no lead can still be forecast.
@@ -2219,26 +2221,26 @@ enum PlanStatus {
 /// `shared/approvals.ts` as `plan_approval`, never approved by hand.
 /// "Work should not start on an unapproved plan" (model §4.2).
 model ApprovedPlan {
-  id         String     @id @default(cuid())
+  id           String     @id @default(cuid())
   /// RFA number (`nextNumber('plan_approval')`); null on a plan registered
   /// before 2026-10-13 until it is submitted. Indexed, not @unique: adding a
   /// unique constraint to an existing table makes `prisma db push` stop for
   /// confirmation, and the server's deploy runs it unattended — nextNumber
   /// never issues a number twice.
-  number     String?
-  jobId      String
-  job        Job        @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  title      String
+  number       String?
+  jobId        String
+  job          Job        @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  title        String
   /// What is asked to be approved.
-  description String?
+  description  String?
   /// The drawing reference number — typed, or a CAD J.O.'s number and revision.
-  drawingNo  String?
-  revision   String     @default("0")
-  discipline String?
-  status     PlanStatus @default(DRAFT)
+  drawingNo    String?
+  revision     String     @default("0")
+  discipline   String?
+  status       PlanStatus @default(DRAFT)
   /// The project's contract value, snapshotted at submit — the amount band
   /// that adds the CEO / President above ₱1,000,000.
-  amount     Decimal?   @db.Decimal(18, 2)
+  amount       Decimal?   @db.Decimal(18, 2)
   cancelReason String?
 
   submittedAt DateTime?
@@ -3429,6 +3431,43 @@ model TrainingRecord {
   @@index([employeeId, courseId])
   @@index([expiresAt])
   @@index([status])
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  PEOPLE FLOW — one person's path from start to separation (2026-10-13)
+// ════════════════════════════════════════════════════════════════════
+
+enum FlowItemStatus {
+  PENDING
+  DONE
+  WAIVED
+  NA
+}
+
+/// What HR recorded against one item of the People Flow checklist
+/// (`hr.peopleFlow` in Settings, `shared/peopleFlow.ts`) for one person. A
+/// row exists only once HR has said something about the item — the path is
+/// the checklist merged with these rows and with the records that answer
+/// for the derived items (an evaluation, training, the clearance), read
+/// every time. A derived item is only ever WAIVED here, with a reason; its
+/// DONE comes from its record. `itemKey` is the checklist's permanent key, so
+/// an item dropped from the checklist leaves its rows as history.
+model EmployeeFlowItem {
+  id          String         @id @default(cuid())
+  employeeId  String
+  employee    Employee       @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  itemKey     String
+  status      FlowItemStatus @default(PENDING)
+  /// The day it was done (a DATE, the Manila day) — typed by HR, today by default.
+  doneOn      DateTime?      @db.Date
+  /// The 30-60-90 goals, the exit interview's feedback, a waiver's reason.
+  notes       String?
+  updatedById String?
+  updatedBy   User?          @relation("FlowItemUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@unique([employeeId, itemKey])
 }
 
 /// Saved filters for the shared list pattern (model §8.4).

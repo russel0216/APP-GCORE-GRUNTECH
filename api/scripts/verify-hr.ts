@@ -83,6 +83,7 @@ import { formatAmount, formatMoney, statusLabel } from '../src/shared/pdf';
 // lends the overtime paper's stage words.
 import { OT_STAGE_LABEL } from '../src/routes/hr';
 import { manilaDayKey } from '../src/shared/day';
+import { PEOPLE_FLOW_DEFAULTS, addDaysKey, addMonthsKey, buildPath, type FlowFacts } from '../src/shared/peopleFlow';
 import {
   checkListPaper,
   checkOwnPaper,
@@ -4458,6 +4459,255 @@ async function main() {
       'Employees: an unknown employment type is a 400 naming the choices in words, on the register and its paper, never a 500',
       unknownType.every((r) => r.status === 400 && r.error.includes('Employment type') && r.error.includes('Project based')),
       unknownType.map((r) => `${r.status} ${r.error}`).join(' · '),
+    );
+  }
+
+  // ══ People Flow (2026-10-13) ══════════════════════════════════════════════
+  console.log('\nPeople Flow — one person’s path from start to separation');
+  {
+    const flowToday = manilaDayKey(new Date());
+    const ago = (days: number) => addDaysKey(flowToday, -days);
+    const flowFacts = (over: Partial<FlowFacts> = {}): FlowFacts => ({
+      employmentType: 'PROBATIONARY',
+      hiredOn: ago(10),
+      createdOn: ago(10),
+      regularizedOn: null,
+      separatedOn: null,
+      periodEndOn: null,
+      loginActive: true,
+      evaluation: null,
+      training: { count: 0, latestTitle: null, latestOn: null },
+      clearance: null,
+      stored: {},
+      ...over,
+    });
+    const done = (keys: string[]): FlowFacts['stored'] =>
+      Object.fromEntries(keys.map((k) => [k, { status: 'DONE' as const, doneOn: ago(1), notes: null, by: 'HR', at: new Date().toISOString() }]));
+    const pathOf = (f: FlowFacts) => buildPath(PEOPLE_FLOW_DEFAULTS, f, 'emp', flowToday, 6);
+    const itemOf = (p: ReturnType<typeof pathOf>, key: string) => p.items.find((i) => i.key === key)!;
+
+    const keys = PEOPLE_FLOW_DEFAULTS.map((d) => d.key);
+    check(
+      'the checklist starts as the owner’s file: five stages in order, 18 items, every key once, six that follow a record',
+      PEOPLE_FLOW_DEFAULTS.length === 18 &&
+        new Set(keys).size === keys.length &&
+        [...new Set(PEOPLE_FLOW_DEFAULTS.map((d) => d.stage))].join() === 'ONBOARDING,INTEGRATION,DEVELOPMENT,RETENTION,SEPARATION' &&
+        PEOPLE_FLOW_DEFAULTS.filter((d) => d.source).length === 6,
+      `${PEOPLE_FLOW_DEFAULTS.length} items`,
+    );
+
+    const newHire = pathOf(flowFacts());
+    check(
+      'a hire of ten days stands in Onboarding, and pre-boarding (due on Day 1) is overdue while orientation (day 5) is too',
+      newHire.stage === 'ONBOARDING' && itemOf(newHire, 'preboarding').overdue && itemOf(newHire, 'preboarding').dueOn === ago(10) && newHire.overdue === 2,
+      `${newHire.stage} · ${newHire.overdue} overdue`,
+    );
+    const future = pathOf(flowFacts({ hiredOn: addDaysKey(flowToday, 5) }));
+    check('someone hired for next week is in Onboarding (pre-boarding), nothing overdue yet', future.stage === 'ONBOARDING' && future.overdue === 0, future.stage);
+
+    const fortyDays = (over: Partial<FlowFacts> = {}) => pathOf(flowFacts({ hiredOn: ago(40), createdOn: ago(40), ...over }));
+    check('past thirty days, an onboarding item still open keeps a new hire in Onboarding', fortyDays().stage === 'ONBOARDING', fortyDays().stage);
+    const integrating = fortyDays({ stored: done(['preboarding', 'orientation', 'role_alignment']) });
+    check(
+      'with the onboarding recorded, a probationary employee moves to Integration — and the probation review is due at the end of the period',
+      integrating.stage === 'INTEGRATION' && itemOf(integrating, 'probation_review').status === 'PENDING' && integrating.probationDueOn === addMonthsKey(ago(40), 6),
+      `${integrating.stage} · due ${integrating.probationDueOn}`,
+    );
+    const pastWindow = pathOf(flowFacts({ hiredOn: ago(200), createdOn: ago(200), stored: done(['preboarding', 'orientation']) }));
+    check(
+      'past the new-hire window an onboarding item left open no longer holds the stage, and is not chased — Integration’s overdue items are',
+      pastWindow.stage === 'INTEGRATION' && !itemOf(pastWindow, 'role_alignment').overdue && itemOf(pastWindow, 'job_training').overdue,
+      pastWindow.stage,
+    );
+    const regularised = fortyDays({
+      employmentType: 'REGULAR',
+      regularizedOn: ago(1),
+      evaluation: { id: 'ev', number: `${TAG}-EV`, recommendation: 'REGULARIZE', approvedOn: ago(1), extendedTo: null },
+      stored: done(['preboarding', 'orientation', 'role_alignment', 'job_training', 'early_feedback']),
+    });
+    check(
+      'an approved evaluation that regularises ends Integration: Development & Growth, the review done and naming the evaluation',
+      regularised.stage === 'DEVELOPMENT' && itemOf(regularised, 'probation_review').status === 'DONE' && /ZZHR-EV approved: regularize/.test(itemOf(regularised, 'probation_review').fact ?? ''),
+      `${regularised.stage} · ${itemOf(regularised, 'probation_review').fact}`,
+    );
+    const extended = fortyDays({ evaluation: { id: 'ev', number: `${TAG}-EV`, recommendation: 'EXTEND', approvedOn: ago(1), extendedTo: '2027-02-01' } });
+    check('an EXTEND keeps the review open and says to when', itemOf(extended, 'probation_review').status === 'PENDING' && /extended the period to 2027-02-01/.test(itemOf(extended, 'probation_review').fact ?? ''));
+    check('a contractual employee has no probation: the review is not applicable', itemOf(pathOf(flowFacts({ employmentType: 'CONTRACTUAL' })), 'probation_review').status === 'NA');
+    const veteran = pathOf(flowFacts({ employmentType: 'REGULAR', hiredOn: ago(3650), createdOn: ago(3650) }));
+    check(
+      'a regular employee of ten years with nothing recorded stands in Retention & Engagement — never held in Onboarding — and nothing is overdue',
+      veteran.stage === 'RETENTION' && veteran.overdue === 0,
+      `${veteran.stage} · ${veteran.overdue}`,
+    );
+    check('a regular hire of seven months, past the window, is in Development & Growth', pathOf(flowFacts({ employmentType: 'REGULAR', hiredOn: ago(210), createdOn: ago(210) })).stage === 'DEVELOPMENT');
+    check(
+      'skill building follows verified training',
+      itemOf(pathOf(flowFacts({ training: { count: 2, latestTitle: 'Confined space', latestOn: ago(3) } })), 'skill_building').status === 'DONE' &&
+        itemOf(newHire, 'skill_building').status === 'PENDING',
+    );
+
+    const clearance = (over: Partial<NonNullable<FlowFacts['clearance']>> = {}) => ({
+      id: 'cl',
+      number: `${TAG}-CL`,
+      status: 'OPEN',
+      reason: 'RESIGNATION',
+      lastDay: addDaysKey(flowToday, 10),
+      raisedOn: flowToday,
+      clearedOn: null,
+      items: [
+        { sourceType: 'job', status: 'CLEARED' },
+        { sourceType: 'leads', status: 'PENDING' },
+        { sourceType: null, status: 'CLEARED' },
+        { sourceType: 'borrow_slip', status: 'WAIVED' },
+      ],
+      ...over,
+    });
+    const leaving = pathOf(flowFacts({ employmentType: 'REGULAR', hiredOn: ago(900), createdOn: ago(900), clearance: clearance() }));
+    check(
+      'a clearance puts the person in Separation: notice done, one of two handover lines settled, the exit interview due on the last day',
+      leaving.stage === 'SEPARATION' &&
+        itemOf(leaving, 'notice').status === 'DONE' &&
+        itemOf(leaving, 'knowledge_transfer').status === 'PENDING' &&
+        /1 of 2 handover lines settled/.test(itemOf(leaving, 'knowledge_transfer').fact ?? '') &&
+        itemOf(leaving, 'exit_interview').dueOn === addDaysKey(flowToday, 10),
+      `${leaving.stage} · ${itemOf(leaving, 'knowledge_transfer').fact}`,
+    );
+    check(
+      'property returned is not access revoked: the item waits for the login to close',
+      itemOf(leaving, 'access_property').status === 'PENDING' &&
+        itemOf(pathOf(flowFacts({ loginActive: false, clearance: clearance() })), 'access_property').status === 'DONE',
+      itemOf(leaving, 'access_property').fact ?? '',
+    );
+    check(
+      'the clearance certificate follows the clearance’s approval',
+      itemOf(leaving, 'clearance_certificate').status === 'PENDING' &&
+        itemOf(pathOf(flowFacts({ clearance: clearance({ status: 'CLEARED', clearedOn: flowToday }) })), 'clearance_certificate').status === 'DONE',
+    );
+    const waived = pathOf(flowFacts({ stored: { skill_building: { status: 'WAIVED', doneOn: flowToday, notes: 'Trained abroad', by: 'HR', at: new Date().toISOString() } } }));
+    check('a derived item HR waived reads waived, with the reason', itemOf(waived, 'skill_building').status === 'WAIVED' && itemOf(waived, 'skill_building').notes === 'Trained abroad');
+  }
+
+  if (await apiReachable()) {
+    const flowRole = await makeRole('zzhr_flow_hr', `${TAG} People Flow HR`, ['ghr.people_flow.view_all', 'ghr.people_flow.edit_all']);
+    const ownRole = await makeRole('zzhr_flow_own', `${TAG} People Flow own`, ['ghr.people_flow.view_own']);
+    const bossRole = await makeRole('zzhr_flow_boss', `${TAG} People Flow boss`, ['ghr.people_flow.view_own', 'ghr.dashboard.view_all']);
+    const flowHr = await makeUser('ZZ Flow HR', 'flowhr@verifyhr.local', [flowRole.id]);
+    const flowBoss = await makeUser('ZZ Flow Boss', 'flowboss@verifyhr.local', [bossRole.id]);
+    const flowStaff = await makeUser('ZZ Flow Staff', 'flowstaff@verifyhr.local', [ownRole.id], flowBoss.id);
+    const flowOther = await makeUser('ZZ Flow Other', 'flowother@verifyhr.local', [ownRole.id]);
+    const flowHire = await prisma.employee.create({
+      data: {
+        employeeNo: `${TAG}-PF1`,
+        firstName: `${TAG} Flora`,
+        lastName: 'Path',
+        employmentType: 'PROBATIONARY',
+        dateHired: new Date(`${addDaysKey(manilaDayKey(new Date()), -10)}T00:00:00Z`),
+        userId: flowStaff.id,
+      },
+    });
+    await prisma.employee.create({ data: { employeeNo: `${TAG}-PF2`, firstName: `${TAG} Otto`, lastName: 'Other', userId: flowOther.id } });
+    const hrT = signToken(flowHr.id, flowHr.email);
+    const staffT = signToken(flowStaff.id, flowStaff.email);
+    const bossT = signToken(flowBoss.id, flowBoss.email);
+    const otherT = signToken(flowOther.id, flowOther.email);
+
+    const hrPath = await api(hrT, 'GET', `/people-flow/${flowHire.id}`);
+    const hrItems = (hrPath.body.items ?? []) as { key: string; status: string; doneOn: string | null; derived: boolean }[];
+    check(
+      'HR opens a new hire’s path: Onboarding, every checklist item, and the right to record',
+      hrPath.status === 200 && hrPath.body.stage === 'ONBOARDING' && hrItems.length >= 1 && hrPath.body.canEdit === true,
+      `${hrPath.status} ${hrPath.body.stage}`,
+    );
+    const derivedTick = await api(hrT, 'PUT', `/people-flow/${flowHire.id}/items/probation_review`, { status: 'DONE' });
+    check(
+      'an item a record answers for cannot be ticked by hand — the refusal names the record',
+      derivedTick.status === 400 && /follows the probation evaluation/i.test(String(derivedTick.body.error)),
+      `${derivedTick.status} ${derivedTick.body.error}`,
+    );
+    const bareWaive = await api(hrT, 'PUT', `/people-flow/${flowHire.id}/items/skill_building`, { status: 'WAIVED' });
+    check('a waiver needs its reason', bareWaive.status === 400, String(bareWaive.body.error));
+    const tomorrow = await api(hrT, 'PUT', `/people-flow/${flowHire.id}/items/orientation`, { status: 'DONE', doneOn: addDaysKey(manilaDayKey(new Date()), 1) });
+    check('something done cannot be dated tomorrow', tomorrow.status === 400, String(tomorrow.body.error));
+    const ticked = await api(hrT, 'PUT', `/people-flow/${flowHire.id}/items/orientation`, { status: 'DONE', notes: 'Met the team' });
+    const orientation = ((ticked.body.items ?? []) as { key: string; status: string; doneOn: string | null; notes: string | null; by: string | null }[]).find((i) => i.key === 'orientation');
+    check(
+      'HR records orientation done — today by default, with the note and who recorded it — and the audit trail says so',
+      ticked.status === 200 &&
+        orientation?.status === 'DONE' &&
+        orientation.doneOn === manilaDayKey(new Date()) &&
+        orientation.notes === 'Met the team' &&
+        orientation.by === 'ZZ Flow HR' &&
+        !!(await prisma.auditLog.findFirst({ where: { entityType: 'people_flow', entityId: flowHire.id, actorId: flowHr.id, summary: { contains: 'Orientation: done' } } })),
+      JSON.stringify(orientation),
+    );
+    const waivedSkill = await api(hrT, 'PUT', `/people-flow/${flowHire.id}/items/skill_building`, { status: 'WAIVED', notes: 'Certified before joining' });
+    check(
+      'a derived item is waived with a reason',
+      waivedSkill.status === 200 && ((waivedSkill.body.items ?? []) as { key: string; status: string }[]).some((i) => i.key === 'skill_building' && i.status === 'WAIVED'),
+    );
+    check('an item not on the checklist is a 404', (await api(hrT, 'PUT', `/people-flow/${flowHire.id}/items/no_such_item`, { status: 'DONE' })).status === 404);
+
+    const mine = await api(staffT, 'GET', '/people-flow/mine');
+    check('the person reads their own path', mine.status === 200 && (mine.body.employee as { id: string })?.id === flowHire.id && mine.body.canEdit === false);
+    check('and may not record on it', (await api(staffT, 'PUT', `/people-flow/${flowHire.id}/items/preboarding`, { status: 'DONE' })).status === 403);
+    check('their supervisor (the HR dashboard right) reads a direct report’s path', (await api(bossT, 'GET', `/people-flow/${flowHire.id}`)).status === 200);
+    check('a colleague gets a 404 — that a path exists is the person’s business', (await api(otherT, 'GET', `/people-flow/${flowHire.id}`)).status === 404);
+    const reports = await api(bossT, 'GET', '/people-flow?reports=true');
+    const reportIds = ((reports.body.rows ?? []) as { id: string }[]).map((r) => r.id);
+    check('the supervisor’s list of direct reports holds the report and not themself', reports.status === 200 && reportIds.length === 1 && reportIds[0] === flowHire.id, JSON.stringify(reportIds));
+    const ownList = await api(otherT, 'GET', '/people-flow');
+    check('a person without HR’s right lists only themself', ownList.status === 200 && ownList.body.total === 1, String(ownList.body.total));
+
+    const flowList = await api(hrT, 'GET', `/people-flow?search=${TAG}&pageSize=100`);
+    const flowSummary = flowList.body.summary as { stages: Record<string, number>; overdue: number; total: number };
+    const onboardingList = await api(hrT, 'GET', `/people-flow?search=${TAG}&stage=ONBOARDING&pageSize=100`);
+    const overdueList = await api(hrT, 'GET', `/people-flow?search=${TAG}&overdue=true&pageSize=100`);
+    check(
+      'each tile is the list it opens: the Onboarding count and the With-overdue count equal those filtered lists’ totals',
+      flowList.status === 200 &&
+        flowSummary.stages.ONBOARDING === onboardingList.body.total &&
+        flowSummary.overdue === overdueList.body.total &&
+        Object.values(flowSummary.stages).reduce((a, b) => a + b, 0) === flowList.body.total,
+      `${JSON.stringify(flowSummary)} · ${onboardingList.body.total} · ${overdueList.body.total}`,
+    );
+    check('an unknown stage is a 400 naming the choices', (await api(hrT, 'GET', '/people-flow?stage=LIMBO')).status === 400);
+    const flowPaper = await printed(hrT, `/people-flow/pdf?search=${TAG}`);
+    check(
+      'the list prints, with the person and their stage, and the print is audited',
+      flowPaper.status === 200 &&
+        squash(flowPaper.text).includes(squash(`Path, ${TAG} Flora`)) &&
+        flat(flowPaper.text).includes('Onboarding') &&
+        !!(await prisma.auditLog.findFirst({ where: { entityType: 'people_flow', entityId: 'list', action: 'EXPORTED', actorId: flowHr.id } })),
+      flat(flowPaper.text).slice(0, 200),
+    );
+    const staffWork = await api(staffT, 'GET', '/my-work');
+    const staffRows = ((staffWork.body.assignedToMe ?? []) as { kind: string; title: string; subtitle?: string }[]).filter((r) => r.kind === 'people_flow');
+    check(
+      'My Work shows the new hire their own open onboarding — pre-boarding and role alignment, not the orientation HR recorded',
+      staffRows.some((r) => r.title === 'Pre-boarding') && staffRows.some((r) => r.title === 'Role alignment') && !staffRows.some((r) => r.title === 'Orientation'),
+      staffRows.map((r) => r.title).join(', '),
+    );
+    const hrWork = await api(hrT, 'GET', '/my-work');
+    check('HR’s My Work carries People Flow items that are due', ((hrWork.body.assignedToMe ?? []) as { kind: string }[]).some((r) => r.kind === 'people_flow'));
+
+    const dupKeys = await api(signToken(flowHr.id, flowHr.email), 'PUT', '/hr-settings/lists/hr.peopleFlow', { rows: [] });
+    check('the checklist is HR Settings’ to change, not People Flow’s', dupKeys.status === 403);
+    const settingsRole = await makeRole('zzhr_flow_settings', `${TAG} HR settings`, ['ghr.settings.view_all', 'ghr.settings.edit_all']);
+    const settingsUser = await makeUser('ZZ Flow Settings', 'flowsettings@verifyhr.local', [settingsRole.id]);
+    const settingsT = signToken(settingsUser.id, settingsUser.email);
+    const twice = await api(settingsT, 'PUT', '/hr-settings/lists/hr.peopleFlow', {
+      rows: [
+        { stage: 'ONBOARDING', key: 'preboarding', title: 'Pre-boarding' },
+        { stage: 'ONBOARDING', key: 'preboarding', title: 'Again' },
+      ],
+    });
+    check('a key used twice is refused, and nothing is saved', twice.status === 400 && /used twice/.test(String(twice.body.error)), String(twice.body.error));
+    const stored = await prisma.setting.findUnique({ where: { key: 'hr.peopleFlow' } });
+    const listed = await api(settingsT, 'GET', '/hr-settings/lists/hr.peopleFlow');
+    check(
+      'unstored, the checklist reads as the owner’s file',
+      stored !== null || ((listed.body.rows ?? []) as unknown[]).length === PEOPLE_FLOW_DEFAULTS.length,
+      String(((listed.body.rows ?? []) as unknown[]).length),
     );
   }
 

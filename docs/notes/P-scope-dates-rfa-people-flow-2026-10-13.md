@@ -14,9 +14,14 @@ Team Leader, and CEO over ₱1,000,000 project costing) and a Drawing Reference
 Number, which could come from a CAD J.O. 6. G-HR People Flow, per the
 attached file."
 
-Status: **planned**, not built. The defaults below are what "build it"
-means unless the owner answers the open questions differently. The effort
-table is at the end.
+Status: **built** (2026-10-13), in the order 3, 1, 4, 5, 2, 6, one commit
+each, with the defaults below. Two departures, both in CLAUDE.md: the
+costing's bucket subtotals are ordinary `{ cells }` rows of the designed
+line table (no new `subtotal` row kind), and People Flow's stage rule holds
+a person in Onboarding or Integration only within the new-hire window — the
+plan's "while any Onboarding item is open" would have put every employee
+in Onboarding on the day it deployed, since nobody's onboarding is recorded
+yet.
 
 ## 1. Working days are Mon–Sat; a start date gives a finish date
 

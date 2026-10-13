@@ -526,6 +526,7 @@ const ROLES: RoleSeed[] = [
       ['ghr', 'training_calendar'],
       ['ghr', 'training_sessions'],
       ['ghr', 'passports'],
+      ['ghr', 'people_flow'],
     ],
     only: [
       'ghr.clock.view_own',
@@ -542,6 +543,8 @@ const ROLES: RoleSeed[] = [
     only: [
       'ghr.clock.view_own',
       'ghr.dashboard.view_all',
+      // Their own path, and through the dashboard right their reports'.
+      'ghr.people_flow.view_own',
       ...VIEW_OWN_SELF('ghr', 'leave'),
       'ghr.leave.view_all',
       ...VIEW_OWN_SELF('ghr', 'overtime'),
@@ -572,6 +575,7 @@ const ROLES: RoleSeed[] = [
       'ghr.clearances.view_own',
       'ghr.clearances.create',
       'ghr.evaluations.view_own',
+      'ghr.people_flow.view_own',
       ...VIEW_OWN_SELF('ghr', 'meetings'),
       'ghr.training_calendar.view_all',
       'ghr.passport.view_own',

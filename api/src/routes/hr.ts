@@ -89,6 +89,7 @@ import {
   dayKey,
   toMinutes,
 } from '../shared/hr';
+import { PEOPLE_FLOW_KEY, flowChecklist } from '../shared/peopleFlow';
 
 const D = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -3470,6 +3471,19 @@ const criterionRow = z.object({
   isActive: z.boolean(),
 });
 
+const flowRow = z.object({
+  stage: z.enum(['ONBOARDING', 'INTEGRATION', 'DEVELOPMENT', 'RETENTION', 'SEPARATION']),
+  key: z.string().trim().regex(/^[a-z0-9_]{2,32}$/, 'A key is 2–32 lower-case letters, digits or underscores'),
+  title: z.string().trim().min(2, 'Name the item'),
+  description: z.string().trim().max(500).optional().nullable(),
+  dueDays: z.number().int().min(-365).max(730).optional().nullable(),
+  source: z
+    .enum(['probation_review', 'training', 'clearance_raised', 'clearance_handover', 'clearance_property', 'clearance_cleared'])
+    .optional()
+    .nullable()
+    .or(z.literal('').transform(() => null)),
+});
+
 const SETTING_LISTS = {
   'hr.clearanceChecklist': {
     description: 'Company property and accountabilities every leaver clears, by area',
@@ -3478,6 +3492,13 @@ const SETTING_LISTS = {
   'hr.evaluationCriteria': {
     description: 'What an evaluation rates, with weights — snapshotted onto each form',
     schema: z.array(criterionRow).max(30),
+  },
+  // People Flow (2026-10-13): the path every person walks, from pre-boarding
+  // to the clearance certificate — shared/peopleFlow.ts. Unstored, it reads
+  // as the owner's file (PEOPLE_FLOW_DEFAULTS).
+  [PEOPLE_FLOW_KEY]: {
+    description: 'The People Flow checklist — stages, items, due days and the records that answer for them',
+    schema: z.array(flowRow).max(60),
   },
 } as const;
 
@@ -3493,7 +3514,7 @@ hrSettingsRoutes.get(
   require_('ghr.settings.view_all'),
   handler(async (req, res) => {
     const key = settingListKey(req.params.key);
-    res.json({ key, rows: await settingList<unknown>(key, []) });
+    res.json({ key, rows: key === PEOPLE_FLOW_KEY ? await flowChecklist() : await settingList<unknown>(key, []) });
   }),
 );
 
@@ -3508,6 +3529,11 @@ hrSettingsRoutes.put(
       const keys = (rows as z.infer<typeof criterionRow>[]).map((r) => r.key);
       const dup = keys.find((k, i) => keys.indexOf(k) !== i);
       if (dup) throw badRequest(`Criterion key "${dup}" is used twice`);
+    }
+    if (key === PEOPLE_FLOW_KEY) {
+      const keys = (rows as z.infer<typeof flowRow>[]).map((r) => r.key);
+      const dup = keys.find((k, i) => keys.indexOf(k) !== i);
+      if (dup) throw badRequest(`Item key "${dup}" is used twice`);
     }
 
     await prisma.setting.upsert({

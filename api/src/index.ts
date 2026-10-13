@@ -48,6 +48,7 @@ import { jobRoutes } from './routes/jobs';
 import { budgetRequestRoutes } from './routes/budgetRequests';
 import { progressRoutes, billingRoutes, planRoutes } from './routes/progress';
 import { planApprovalRoutes } from './routes/planApprovals';
+import { peopleFlowRoutes } from './routes/peopleFlow';
 import {
   purchaseRequestRoutes,
   canvassRoutes,
@@ -195,6 +196,7 @@ app.use('/api/overtime', overtimeRoutes);
 app.use('/api/hr-settings', hrSettingsRoutes);
 app.use('/api/positions', positionRoutes);
 app.use('/api/clearances', clearanceRoutes);
+app.use('/api/people-flow', peopleFlowRoutes);
 // The turnover report shares the hr-reports prefix; it mounts first so its
 // own paths are matched before hrReportRoutes gets a look.
 app.use('/api/hr-reports', turnoverReportRoutes);

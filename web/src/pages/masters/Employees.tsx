@@ -8,6 +8,7 @@ import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, formatDate, forma
 import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { EmployeeEvaluationsTab } from '../hr/EmployeeEvaluationsTab';
+import { EmployeeFlowTab } from '../hr/PeopleFlow';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople, type PersonRow } from '../../components/People';
 import { FaceSamplesPanel } from '../hr/FaceSamples';
@@ -370,7 +371,7 @@ export function Employees() {
   );
 }
 
-type EmployeeTab = 'person' | 'employment' | 'login' | 'pay' | 'evaluations' | 'face';
+type EmployeeTab = 'person' | 'employment' | 'login' | 'pay' | 'evaluations' | 'face' | 'flow';
 
 /**
  * Which door a new person comes in by (2026-10-10, the owner's call: "unite
@@ -468,6 +469,7 @@ function EmployeeForm({
   const seeRates = can('ghr.employee_rates.view_all');
   const setRates = can('ghr.employee_rates.edit_all');
   const seeEvaluations = !!employee && can('ghr.evaluations.view_all');
+  const seeFlow = !!employee && can('ghr.people_flow.view_all');
   // The samples the clock matches this person against: HR's to look at and
   // remove (a blurred one, or someone else's); they are only ever ADDED by
   // the person on the Clock page.
@@ -923,6 +925,11 @@ function EmployeeForm({
               Evaluations
             </button>
           )}
+          {seeFlow && (
+            <button className={tab === 'flow' ? 'active' : ''} onClick={() => setTab('flow')}>
+              People Flow
+            </button>
+          )}
           {seeFaces && (
             <button className={tab === 'face' ? 'active' : ''} onClick={() => setTab('face')}>
               Face samples
@@ -1272,6 +1279,8 @@ function EmployeeForm({
       {tab === 'face' && seeFaces && employee && (
         <FaceSamplesPanel employeeId={employee.id} self={false} editable flaggedSampleId={flaggedSampleId} />
       )}
+
+      {tab === 'flow' && seeFlow && employee && <EmployeeFlowTab employeeId={employee.id} />}
 
       {tab === 'evaluations' && seeEvaluations && employee && (
         <EmployeeEvaluationsTab

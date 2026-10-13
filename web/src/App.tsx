@@ -73,6 +73,7 @@ import { HrSettingsPage } from './pages/hr/Settings';
 import { HrReports } from './pages/hr/Reports';
 import { Plantilla } from './pages/hr/Plantilla';
 import { Clearances, ClearanceDetail } from './pages/hr/Clearances';
+import { PeopleFlow, PeopleFlowPage } from './pages/hr/PeopleFlow';
 import { Meetings, MeetingDetail } from './pages/hr/Meetings';
 import { Evaluations, EvaluationDetail } from './pages/hr/Evaluations';
 import { Courses } from './pages/hr/academy/Courses';
@@ -898,6 +899,16 @@ function Routed() {
             </Guard>
           }
         />
+        <Route
+          path="/g-hr/people-flow"
+          element={
+            <GuardAny permissions={['ghr.people_flow.view_all', 'ghr.people_flow.view_own']}>
+              <PeopleFlow />
+            </GuardAny>
+          }
+        />
+        {/* No Guard of its own: the API decides — HR, the person, or their supervisor (a 404 otherwise). */}
+        <Route path="/g-hr/people-flow/:employeeId" element={<PeopleFlowPage />} />
         <Route
           path="/g-hr/clearances"
           element={

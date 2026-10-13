@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { peopleFlowWork } from '../shared/peopleFlow';
 import { Prisma } from '@prisma/client';
 import { ratePct } from '../shared/listPaper';
 import fs from 'node:fs';
@@ -530,6 +531,9 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
       overdue: isOverdue(r.neededBy, dayStart),
       link: `/g-ops/cad-job-orders/${r.id}`,
     })),
+    // People Flow (2026-10-13): HR's items due this week, or the person's
+    // own onboarding while they stand in it — shared/peopleFlow.ts.
+    ...(await peopleFlowWork(me)),
   ];
   return rows.sort(byUrgency);
 }

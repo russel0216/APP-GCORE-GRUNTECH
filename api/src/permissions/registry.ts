@@ -197,6 +197,11 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'plantilla', group: 'Records', label: 'Plantilla', path: '/g-hr/plantilla', actions: SHARED, phase: 6 },
       // Pay data and evaluations are the two things on an employee a colleague
       // must not see; both live behind their own key rather than under employees.
+      // One person's path from pre-boarding to the clearance certificate
+      // (2026-10-13, the owner's PEOPLE_FLOW file). HR ticks; the person
+      // reads their own; a supervisor with the dashboard right their direct
+      // reports' — shared/peopleFlow.ts.
+      { key: 'people_flow', group: 'People', label: 'People Flow', path: '/g-hr/people-flow', actions: ['view_all', 'view_own', 'edit_all'], phase: 10, note: 'Edit All ticks the checklist; View Own reads your own path' },
       { key: 'evaluations', group: 'People', label: 'Evaluations', path: '/g-hr/evaluations', actions: OWNED_KEPT, phase: 6, note: 'Probationary and trainee evaluations — the evaluator owns the record; the person evaluated reads it once approved' },
       // Turnover of accountabilities before someone leaves, cleared by the area
       // that owns each item and signed off through the approval engine. The

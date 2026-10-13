@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,973 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,059 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -558,11 +558,16 @@ a viewer extension, and 5 on sales for the supplier kept as a note, the
 selling roles' supplier right and Hold and Cancel's rules, 23 on costing for
 the Project Costing paper, the preloaded scope, the fixed price and the
 schedule of values, and 8 on pipeline for the board without its forecast
-column and Hold and Cancel's round trip):
+column and Hold and Cancel's round trip, and for the owner's six of the
+evening of 2026-10-13: 2 on delivery for the S-curve's ticks, 6 on costing
+and 3 on delivery for Mon–Sat and the start and finish dates, 14 on
+meetings and 2 on calendar for the minutes and the map links, 17 on
+delivery and one on cad for the Request for Approval, 4 on costing for the
+costing's PDF template and 37 on hr for People Flow):
 foundation
-362, masters 92, sales 608, costing 182, pipeline 121, calendar 96, numbering
-79, partners 120, delivery 149, chain 202, hr 431, plantilla 123, meetings
-97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
+362, masters 92, sales 608, costing 192, pipeline 121, calendar 98, numbering
+79, partners 120, delivery 171, chain 202, hr 468, plantilla 123, meetings
+111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -4228,6 +4233,83 @@ from a CAD J.O.)". `routes/planApprovals.ts` (`/api/plans`),
   (`GET /plans/cad-options?jobId=`: the project's accepted drawings not yet
   raised), which takes the reference and copies the files through
   `requestFromCad()`.
+
+## People Flow (2026-10-13)
+
+The owner's `PEOPLE_FLOW_FROM_START_TO_SEPARATION` file — Onboarding,
+Integration, Development & Growth, Retention & Engagement, Separation — as
+one path per person (`docs/notes/P-scope-dates-rfa-people-flow-2026-10-13.md`
+§6). G-HR › People › **People Flow** (`ghr.people_flow`: `view_all` and
+`edit_all` for HR, `view_own` for everyone through the `employee` and
+`supervisor` roles), `/g-hr/people-flow` and `/g-hr/people-flow/:employeeId`,
+`routes/peopleFlow.ts`, `shared/peopleFlow.ts`, `pages/hr/PeopleFlow.tsx`,
+`styles/people-flow.css`, verify-hr.
+
+- **The checklist is data**: `hr.peopleFlow`, a Settings list on HR
+  Settings' People Flow card (`SETTING_LISTS` in `routes/hr.ts`, a row
+  schema of its own: stage, key, title, description, `dueDays`, `source`).
+  Unstored it reads as `PEOPLE_FLOW_DEFAULTS` — the owner's file, eighteen
+  items. A key is permanent (rename the title freely); one used twice is a
+  400. `dueDays` counts from the hire date for Onboarding and Integration
+  and from the last working day for Separation (negative is before it);
+  Development and Retention are a steady state with no due date.
+- **What HR recorded is `EmployeeFlowItem`** (employee × item key, unique;
+  PENDING / DONE / WAIVED / NA, `doneOn` a DATE, notes, who and when). A row
+  exists only once HR has said something; the path is the checklist merged
+  with the rows and the records on EVERY read (`pathsFor()`: five queries
+  whatever the number of people). `PUT /people-flow/:employeeId/items/:key`
+  (`edit_all`): DONE on a day (today by default, never tomorrow), WAIVED
+  with a reason, NA, or open again; audited as `people_flow` on the
+  employee's id. Files on an item are attachments on `employee_flow_item`
+  with entityId `<employeeId>~<key>` — read by whoever reads the path,
+  written by HR alone; deleting an employee deletes them.
+- **Six items follow a record** (`source`, the clearance's rule): the
+  probation review ← the latest APPROVED evaluation (REGULARIZE / ABSORB /
+  END done; EXTEND still open, saying to when; a regular employee done; a
+  project-based, contractual or part-time one not applicable; due at the
+  period end), skill building ← VERIFIED training records, notice ← a
+  clearance raised, knowledge transfer ← the clearance's handover lines
+  (`HANDOVER_SOURCES`, the SUPERVISOR scan's types), access and property ←
+  the clearance's other lines AND the login closed, the clearance
+  certificate ← the clearance CLEARED. Such an item is never ticked by
+  hand (a 400 naming the record), only waived with a reason or put back to
+  follow its record; a done one offers nothing.
+- **The stage is derived, never stored** — `stageOf()`, pure, on
+  'YYYY-MM-DD' keys: SEPARATION once a clearance stands (OPEN, PENDING or
+  CLEARED, raised since the hire) or a separation date is on file;
+  ONBOARDING for the first `ONBOARDING_DAYS` (30; a future hire is in
+  pre-boarding) and after that while an onboarding item is open within the
+  new-hire window (the typed period end, else `probationMonths` from the
+  hire); INTEGRATION while PROBATIONARY or a TRAINEE, or within the window
+  while an integration item is open; then DEVELOPMENT until the first
+  anniversary and RETENTION after it. **This departs from the plan's
+  "Onboarding while any onboarding item is open"**: on deploy nobody's
+  onboarding is recorded, and that rule would have put every employee in
+  Onboarding — past the window, only the dates decide. An item is overdue
+  only in the stage the person stands in, so nobody is chased for an
+  onboarding left open years ago.
+- **Who reads**: HR everyone; the person their own (`GET /mine`); a
+  supervisor holding `ghr.dashboard.view_all` their DIRECT REPORTS' (the
+  clock capture's rule, `mayReadFlow()`); anyone else a 404. `/:employeeId`
+  carries no Guard on the web — the API decides.
+- **The screens**: for HR, seven tiles (a stage each, With overdue items,
+  Probation reviews due — within a week or overdue) over the shared list
+  (Employee, Department, Hired, Stage, Open, Overdue, Next; filters `stage`,
+  `overdue`, `probation`, `departmentId`), each tile linking to the list it
+  counts (the summary is computed under everything but those three filters,
+  so a tile equals the list it opens — verify-hr asserts it). The list is
+  computed for every visible ACTIVE employee and paged after the stage
+  filter. Everybody else: their own path, and — with the dashboard right —
+  "My direct reports" (`?reports=true`). The path page is a `RecordHeader`
+  (the stage as its pill), a five-step strip and a card per stage; HR's
+  "Record…" / "Waive…" opens a panel under the item, never a dialog. The
+  employee record has a People Flow tab for `view_all`. The list prints
+  (`GET /people-flow/pdf`, above `/:employeeId`, `?ids=`, audited); no
+  paper per person.
+- **My Work** (`peopleFlowWork()`, appended to `assignedTo`): for HR, the
+  open items of each person's current stage that are overdue or due within
+  `DUE_SOON_DAYS` (7), ten at most; for the person, their own open
+  onboarding items while they stand in Onboarding ("HR ticks it off").
 
 ## Spreadsheet attachments (2026-10-05)
 

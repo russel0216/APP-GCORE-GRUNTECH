@@ -18,6 +18,7 @@ import {
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { deletePhotoIfUnused, dropAccountPhotoFromSamples } from '../shared/faceSamples';
+import { deleteAttachment } from '../shared/attachments';
 import { nextNumber } from '../shared/numbering';
 import { can } from '../permissions/resolve';
 import { positionFields, setEmployeePosition } from '../shared/plantilla';
@@ -859,6 +860,12 @@ employeeRoutes.delete(
       select: { id: true },
     });
     for (const f of faces) await deletePhotoIfUnused(f.id);
+    // Their People Flow rows cascade; the files filed on those items go too.
+    const flowFiles = await prisma.attachment.findMany({
+      where: { entityType: 'employee_flow_item', entityId: { startsWith: `${employee.id}~` } },
+      select: { id: true },
+    });
+    for (const f of flowFiles) await deleteAttachment(f.id);
     await audit(
       {
         entityType: 'employee',

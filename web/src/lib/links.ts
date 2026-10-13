@@ -63,6 +63,8 @@ const DETAIL: Record<string, string> = {
   // The enrolment photo is attached to the employee.
   face_enrollment: '/g-hr/employees',
   clearance: '/g-hr/clearances',
+  // One person's path (2026-10-13); the audit files HR's ticks under the employee's id.
+  people_flow: '/g-hr/people-flow',
   meeting: '/g-hr/meetings',
   evaluation: '/g-hr/evaluations',
   training_session: '/g-hr/academy/sessions',
