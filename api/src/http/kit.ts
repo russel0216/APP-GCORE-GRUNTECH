@@ -32,7 +32,7 @@ export async function deleteOrRefuse<T>(what: string, run: () => Promise<T>): Pr
     throw err;
   }
 }
-export const conflict = (m: string) => new HttpError(409, m);
+export const conflict = (m: string, d?: unknown) => new HttpError(409, m, d);
 
 /** Wraps an async handler so a rejected promise reaches the error middleware. */
 export function handler(fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>): RequestHandler {

@@ -509,7 +509,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,926 assertions across twenty-two scripts** (counted 2026-10-13, after
+**3,929 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -549,12 +549,13 @@ for the Forecast's breakdowns and its date range, and 7 on sales and 12
 on pipeline for its tick-box filters and the comparison range, and 6 on
 foundation and 5 on workspace for the paper's file name and the print
 ticket, and 7 on foundation, 2 on costing, 5 on chain and 4 on delivery for
-the routing sheet of 2026-10-13 and one signature per person):
+the routing sheet of 2026-10-13 and one signature per person, and 3 on
+accounts for a login email already in use):
 foundation
 362, masters 92, sales 601, costing 159, pipeline 113, calendar 96, numbering
 79, partners 120, delivery 149, chain 202, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
-insights 98, insights-brief 50, workspace 81, accounts 125. The
+insights 98, insights-brief 50, workspace 81, accounts 128. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -2628,6 +2629,18 @@ receive the tickets".
   new record's Save follows the branch — `create` for a new person,
   `edit_all` for one on the register); `UserEditor` in
   `pages/admin/Users.tsx` only modifies.
+- **A login email already in use says whose it is** (2026-10-13, the
+  owner's report: "i can't add employee in the user" — Karen's login had
+  been made before her employee record, and the form only said "Someone
+  already uses that email address"). `assertLoginEmailFree()` in
+  `routes/employees.ts` runs before anything is written on `POST
+  /employees { login }` and `POST /employees/:id/login`: a 409 whose
+  `details[0].existingLogin` names the login and `linkable` — true when
+  it has no employee (the form then offers **Link the existing login**,
+  the same save with `userId` in place of `login`, its roles and
+  "Reports to" kept), false when it is another employee's (the message
+  names their number: open that record instead). `createLogin()` keeps
+  its own check for any other caller.
 - **No password is typed for a new person — they are invited.** `invitePending`
   marks the account; its password hash is of random bytes nobody sees. The
   invitation (7 days), a self-service reset (1 hour) and an admin-issued reset

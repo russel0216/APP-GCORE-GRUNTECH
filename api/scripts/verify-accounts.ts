@@ -570,6 +570,34 @@ async function main() {
   });
   check('a login email already in use refuses the save (409)', taken.status === 409);
   check('and the employee is not created without it', (await prisma.employee.count({ where: { employeeNo: `${TAG}-003` } })) === 0);
+  const takenBy = taken.body?.details?.[0]?.existingLogin;
+  check(
+    'the refusal names the employee already on that login, and offers no link',
+    takenBy?.linkable === false && /already the G-CORE login of .*on the register/.test(taken.body?.error ?? ''),
+    JSON.stringify(taken.body),
+  );
+
+  // A login made before its person was on the register: the save says whose
+  // it is and the form links the new employee to it instead (userId).
+  const orphan = await makeUser(`Orphan ${TAG}`, `orphan${DOMAIN}`, ['employee']);
+  const orphanTry = await http(adminT, 'POST', '/employees', {
+    employeeNo: `${TAG}-009`,
+    firstName: 'Orphan',
+    lastName: `${TAG} Login`,
+    login: { email: `ORPHAN${DOMAIN}` },
+  });
+  const offer = orphanTry.body?.details?.[0]?.existingLogin;
+  check(
+    'an email that is a login with no employee is a 409 offering to link it',
+    orphanTry.status === 409 && offer?.linkable === true && offer?.id === orphan.id && (orphanTry.body?.error ?? '').includes(orphan.name),
+    JSON.stringify(orphanTry.body),
+  );
+  const orphanLinked = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-009`, firstName: 'Orphan', lastName: `${TAG} Login`, userId: offer?.id });
+  check(
+    'and the same save with that login linked creates the employee on it',
+    orphanLinked.status === 201 && (await prisma.employee.findUnique({ where: { employeeNo: `${TAG}-009` } }))?.userId === orphan.id,
+    JSON.stringify(orphanLinked.body),
+  );
 
   // Every refusal lands before the person is written: nothing half-made.
   const inactive = await http(adminT, 'POST', '/employees', {
