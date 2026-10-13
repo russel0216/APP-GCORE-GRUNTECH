@@ -1750,7 +1750,7 @@ costingRoutes.post(
   }),
 );
 
-// ── PDF: the Material Cost Estimate and the Scope of Work ────────────────────
+// ── PDF: the Project Costing and the Scope of Work ────────────────────
 
 /**
  * The costing's route, one slot a step: a DRAFT — returned, or reopened
@@ -1921,7 +1921,7 @@ costingRoutes.get(
     ];
 
     const pdf = await renderDocument({
-      title: 'Material Cost Estimate',
+      title: 'Project Costing',
       documentNumber: costing.number,
       date: costing.createdAt,
       reference: `${costing.title}${costing.customer ? ` — ${costing.customer.name}` : ''}`,
@@ -1935,7 +1935,7 @@ costingRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Costing', number: costing.number, author: costing.owner.name, date: costing.createdAt })));
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Project Costing', number: costing.number, author: costing.owner.name, date: costing.createdAt })));
     res.send(pdf);
   }),
 );

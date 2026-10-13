@@ -1016,6 +1016,12 @@ async function main() {
   const pages = (pdfRaw.match(/\/Type \/Page\b/g) ?? []).length;
   check('the estimate is followed by the Scope of Work on its own page', pages >= 2, `${pages} page(s)`);
   check('that page is landscape', /\/MediaBox \[0 0 841\.89 595\.28\]/.test(pdfRaw));
+  check(
+    'the paper is called Project Costing (2026-10-13, the owner\'s call) — its title and its file name',
+    /Project\s+Costing/i.test(pdfPieces(pdf).slice(0, 40).join(' ')) && !/Material Cost Estimate/i.test(pdfPieces(pdf).join(' ')) &&
+      /filename\*=UTF-8''Project%20Costing%20/.test(pdfRes.headers.get('content-disposition') ?? ''),
+    `${pdfPieces(pdf).slice(0, 40).join(' | ')} ; ${pdfRes.headers.get('content-disposition')}`,
+  );
   const colleaguePdf = await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tColleague}` } });
   check("own scope: a colleague cannot print somebody else's estimate", colleaguePdf.status === 403, `status ${colleaguePdf.status}`);
 

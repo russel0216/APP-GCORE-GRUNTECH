@@ -4165,7 +4165,7 @@ Cost Estimate" PDF) in G-CORE's own style.
   (approval, "Mark final", a job built on a draft) and cleared on reopen;
   the seed dates older final costings from `updatedAt`, once. The G-OPS
   funnel no longer has a "Being costed" stage.
-- **The PDF is "Material Cost Estimate"**: details, one table with
+- **The PDF is "Project Costing"** (2026-10-13, the owner's call; it was "Material Cost Estimate", and its file name's kind follows: "Project Costing <number> - …"): details, one table with
   numbered bucket headings, name-over-description cells, subtotals, the summary
   as `totals`, Terms & Conditions — **never the internal notes** — the
   sign-offs, then the Scope of Work as the engine's **`gantt` section** on
