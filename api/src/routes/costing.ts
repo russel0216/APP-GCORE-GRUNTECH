@@ -48,6 +48,7 @@ import {
 } from '../shared/pdf';
 import { LIST_CAP, listReference, recordNamed, sendListPdf, totalLabel, choice, ratePct } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { SCOPE_PRELOAD } from '../shared/scopePreload';
 
 /**
  * Costing (model §5.3).
@@ -601,8 +602,9 @@ costingRoutes.get(
 
 /**
  * The short lists the sheet's inputs offer as you type: units, System / Unit
- * names, phase and task names — the most used first — and the caller's own
- * latest Terms & Conditions, which a new costing starts from.
+ * names, phase and task names — the most used first — the caller's own
+ * latest Terms & Conditions, which a new costing starts from, and the scope
+ * of work it opens on (`SCOPE_PRELOAD`).
  */
 costingRoutes.get(
   '/suggest/lists',
@@ -654,6 +656,8 @@ costingRoutes.get(
       terms: lastTerms?.terms ?? null,
       // What a new sheet's VAT toggle switches on.
       companyVatRate: company ? Number(company.vatRate) : 0.12,
+      // The scope of work a new sheet opens on (2026-10-13, the owner's sheet).
+      scopePreload: SCOPE_PRELOAD,
     });
   }),
 );

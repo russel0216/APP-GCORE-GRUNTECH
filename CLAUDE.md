@@ -4124,6 +4124,18 @@ Cost Estimate" PDF) in G-CORE's own style.
   **Codes are derived, never stored**: `lineCodes()` numbers cost lines 101,
   102… per bucket by the bucket's rank (Materials 1 … Indirect 5,
   Contingency 6).
+- **A new sheet opens on the owner's scope of work** (2026-10-13,
+  `SCOPE_OF_WORK_PRELOADED.xlsx`): `SCOPE_PRELOAD` in
+  `shared/scopePreload.ts` — PLANNING & ENGINEERING, SITE PREPARATION,
+  DELIVERY, UNLOADING & PLACEMENT, INSTALLATION & INTEGRATION (main work),
+  TESTING & COMMISSIONING (`TESTING_COMMISSIONING`), HAND OVER & CLOSURE
+  (`TURNOVER`), fifteen tasks under them, each one working day to start
+  with — sent by `GET /costings/suggest/lists` as `scopePreload` and
+  loaded by `/new` once; every phase and task stays removable. A template
+  chosen on a new sheet REPLACES the preload while nobody has touched it
+  (`sectionsSignature()`), and appends otherwise; "Start from the standard
+  scope" brings it back to a sheet with no phases. A change to the list
+  is a commit to that file.
 - **The plan is working days, not dates** (`planTasks()`): a task with a
   `startDay` keeps it; one without starts the day after the previous task ends.
   **A phase with no tasks but a typed duration takes its place in the same

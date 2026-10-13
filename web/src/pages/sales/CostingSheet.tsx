@@ -99,6 +99,8 @@ interface Lists {
   tasks: string[];
   terms: string | null;
   companyVatRate: number;
+  /** The scope of work a new sheet opens on (2026-10-13, the owner's sheet). */
+  scopePreload?: { name: string; kind: Kind; tasks: { name: string; durationDays: number }[] }[];
 }
 
 interface TemplateRow {
@@ -175,6 +177,26 @@ const blankSection = (): SheetSection => ({
   durationDays: '0',
   tasks: [blankTask()],
 });
+
+/** The preload as rows to type into — the phases and tasks, nothing priced. */
+function preloadSections(preload: NonNullable<Lists['scopePreload']>): SheetSection[] {
+  return preload.map((p) => ({
+    key: nextKey('s'),
+    kind: p.kind,
+    name: p.name,
+    description: '',
+    value: '0',
+    durationDays: '0',
+    tasks: p.tasks.map((t) => ({ key: nextKey('t'), name: t.name, startDay: '', durationDays: String(t.durationDays) })),
+  }));
+}
+
+/** What a set of phases says, keys aside — to tell an untouched preload from one somebody worked on. */
+function sectionsSignature(ss: SheetSection[]): string {
+  return JSON.stringify(
+    ss.map((x) => [x.kind, x.name, x.description, x.value, x.durationDays, x.tasks.map((t) => [t.name, t.startDay, t.durationDays])]),
+  );
+}
 
 /** A typed figure as a number: commas, spaces, "PHP" and ₱ are allowed in. */
 function figure(s: string): number {
@@ -302,6 +324,24 @@ export function CostingSheet() {
     if (editing || !lists.terms) return;
     setHeader((h) => (h.terms ? h : { ...h, terms: lists.terms ?? '' }));
   }, [editing, lists.terms]);
+  // ...and the owner's scope of work (2026-10-13): the first thing a new
+  // costing shows, every phase and task still removable. A template chosen
+  // on a new sheet replaces it while nobody has touched it.
+  const preloadSignature = useRef<string | null>(null);
+  const preloadApplied = useRef(false);
+  useEffect(() => {
+    if (editing || preloadApplied.current || !lists.scopePreload?.length) return;
+    preloadApplied.current = true;
+    const preload = preloadSections(lists.scopePreload);
+    preloadSignature.current = sectionsSignature(preload);
+    setSections((ss) => (ss.length ? ss : preload));
+  }, [editing, lists.scopePreload]);
+  function startFromPreload() {
+    if (!lists.scopePreload?.length) return;
+    const preload = preloadSections(lists.scopePreload);
+    preloadSignature.current = sectionsSignature(preload);
+    setSections(preload);
+  }
 
   // Editing: the saved draft, as rows to type into.
   useEffect(() => {
@@ -631,9 +671,13 @@ export function CostingSheet() {
           durationDays: String(task.durationDays),
         })),
       }));
-      const empty = lines.every(isBlankLine) && sections.every((s) => !s.name.trim());
+      // The preload, untouched, is not anybody's work: a template's own phases replace it.
+      const untouchedPreload = !!preloadSignature.current && sectionsSignature(sections) === preloadSignature.current;
+      const empty = lines.every(isBlankLine) && (untouchedPreload || sections.every((s) => !s.name.trim()));
       setLines((ls) => [...ls.filter((l) => !isBlankLine(l)), ...newLines]);
-      setSections((ss) => [...ss.filter((s) => s.name.trim()), ...newSections]);
+      setSections((ss) =>
+        untouchedPreload && newSections.length ? newSections : [...ss.filter((s) => s.name.trim()), ...newSections],
+      );
       if (empty) {
         setHeader((h) => ({
           ...h,
@@ -1303,6 +1347,11 @@ export function CostingSheet() {
           <button type="button" className="btn btn-sm" onClick={addSection}>
             + Add phase
           </button>
+          {sections.length === 0 && !!lists.scopePreload?.length && (
+            <button type="button" className="btn btn-sm" onClick={startFromPreload} title="The six standard phases and their tasks">
+              Start from the standard scope
+            </button>
+          )}
           {sections.some((s) => s.tasks.length) && (
             <button type="button" className="btn btn-sm" onClick={sequence} title="Each task starts the working day after the one before it ends">
               Sequence tasks

@@ -951,6 +951,46 @@ async function main() {
   );
   check('a search under two characters answers nothing', rows((await api(tEstimator, 'GET', '/costings/suggest?q=Z')).body).length === 0);
 
+  // The owner's scope of work, preloaded on a new sheet (2026-10-13).
+  type Preload = { name: string; kind: string; tasks: { name: string; durationDays: number }[] }[];
+  const preload = (lists.body.scopePreload ?? []) as Preload;
+  check(
+    'the lists send the preloaded scope: six phases, fifteen tasks, in the owner’s order',
+    preload.map((p) => p.name).join(' | ') ===
+      'PLANNING & ENGINEERING | SITE PREPARATION | DELIVERY, UNLOADING & PLACEMENT | INSTALLATION & INTEGRATION | TESTING & COMMISSIONING | HAND OVER & CLOSURE' &&
+      preload.reduce((n, p) => n + p.tasks.length, 0) === 15 &&
+      preload[0].tasks.map((t) => t.name).join(' | ') === 'Review of costing and design | Kick-off meeting (Gruntech) | Purchase of equipment | Purchase of other materials' &&
+      preload[5].tasks[1].name === 'Turn over of all documents and as-built plan',
+    JSON.stringify(preload.map((p) => [p.name, p.tasks.length])),
+  );
+  check(
+    'testing & commissioning and hand over keep their kinds, the rest are main work; every task starts at one day',
+    preload.map((p) => p.kind).join() === 'MAIN_WORK,MAIN_WORK,MAIN_WORK,MAIN_WORK,TESTING_COMMISSIONING,TURNOVER' &&
+      preload.every((p) => p.tasks.every((t) => t.durationDays === 1)),
+  );
+  const preloaded = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} preloaded scope`,
+    marginPct: 0.2,
+    sections: preload.map((p) => ({ kind: p.kind, name: p.name, tasks: p.tasks.map((t) => ({ name: t.name, durationDays: t.durationDays })) })),
+    spread: true,
+  });
+  const preloadedBack = preloaded.status === 201 ? await api(tEstimator, 'GET', `/costings/${preloaded.body.id}`) : null;
+  const backSections = (preloadedBack?.body.scopeSections ?? []) as { name: string; tasks: unknown[] }[];
+  check(
+    'a sheet saved with the preload as it came keeps six phases and fifteen tasks, planned one day after another',
+    preloaded.status === 201 && backSections.length === 6 && backSections.reduce((n, x) => n + x.tasks.length, 0) === 15 &&
+      preloadedBack?.body.durationDays === 15,
+    `status ${preloaded.status}, ${backSections.length} phases, ${preloadedBack?.body.durationDays} days`,
+  );
+  const trimmed = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} preloaded scope, one phase removed`,
+    sections: preload.slice(1).map((p) => ({ kind: p.kind, name: p.name, tasks: p.tasks.map((t) => ({ name: t.name, durationDays: t.durationDays })) })),
+  });
+  check(
+    'a phase removed from the preload stays removed',
+    trimmed.status === 201 && ((await api(tEstimator, 'GET', `/costings/${trimmed.body.id}`)).body.scopeSections as unknown[]).length === 5,
+  );
+
   // ══ Templates ═══════════════════════════════════════════════════════════════
   console.log('Templates');
 
