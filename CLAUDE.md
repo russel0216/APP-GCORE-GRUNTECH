@@ -787,6 +787,24 @@ launcher as the way out) — never a stale phase sentence.
 - **The SOV must total the contract value.** `POST /costings/:id/sections/
   distribute` reconciles it, putting the rounding remainder on the last section
   so the sum is exact rather than a centavo out.
+- **A phase's value is spread, declared or priced from cost** (2026-10-13,
+  the owner's call: "the scope of work value editable to declare the value;
+  the materials cost is allocated to purchasing of materials, the equipment
+  cost to purchasing of equipment"). `ScopeSection.valueSource` — SPREAD
+  (the default, as before), DECLARED (typed, kept) or CATEGORY with
+  `costCategoryIds` (those buckets' cost priced as the sheet prices it:
+  cost × contract ÷ total cost, so the buckets together come to the
+  contract value) — and `scheduleOfValues()` in `costingMath.ts` (web
+  mirror, pinned by verify-costing) is the ONE rule: with the spread on,
+  what the declared and cost-priced phases leave is spread over the SPREAD
+  ones, exactly, and more than the contract holds is refused at save;
+  with it off, only cost-priced phases are worked out. `spreadSections()`
+  writes it on every save, the distribute route and a PATCH of the price;
+  a bucket on two phases is a 400. On the sheet each phase has a "Value"
+  select (Spread / Declared / From cost) with a `TickPicker` of buckets,
+  and typing a figure in a spread phase declares it. The preload's
+  PLANNING & ENGINEERING takes Materials and Equipment (`valueFrom` codes
+  in `SCOPE_PRELOAD`), its purchase tasks being where that money goes.
 - **No Opportunity entity.** The requirements treat the opportunity as the lead
   until a quotation exists, so the pipeline is a view over leads + quotations.
   Do not introduce a third record to keep in step.

@@ -1255,6 +1255,15 @@ enum ScopeKind {
   OTHER
 }
 
+/// Where a scope phase's value comes from (2026-10-13): spread from what the
+/// others leave of the contract value, typed (declared) by hand, or the
+/// named cost buckets' cost priced as the sheet prices it — `scheduleOfValues()`.
+enum ScopeValueSource {
+  SPREAD
+  DECLARED
+  CATEGORY
+}
+
 /// A scope-of-work section AND a Schedule of Values line — the same row.
 ///
 /// That identity is the point (model §5.3): what you scoped is what you bill
@@ -1273,6 +1282,13 @@ model ScopeSection {
   /// This section's share of the contract value. The sum across sections is
   /// validated against the costing's contract value.
   value Decimal @default(0) @db.Decimal(18, 2)
+  /// Where `value` comes from (2026-10-13): SPREAD (the default, as before),
+  /// DECLARED (typed, kept) or CATEGORY (`costCategoryIds`' cost, priced).
+  valueSource     ScopeValueSource @default(SPREAD)
+  /// CATEGORY: the cost buckets (CostCategory ids) this phase carries — the
+  /// owner's "materials cost to purchasing of materials". A bucket on one
+  /// phase at most.
+  costCategoryIds String[]         @default([])
 
   sortOrder Int         @default(0)
   tasks     ScopeTask[]

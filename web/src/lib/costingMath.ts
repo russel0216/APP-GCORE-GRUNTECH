@@ -144,6 +144,97 @@ export function marginOfMarkup(markupPct: number): number {
   return markupPct > -1 ? Math.round((markupPct / (1 + markupPct)) * 1_000_000) / 1_000_000 : 0;
 }
 
+// ── The schedule of values ───────────────────────────────────────────────────
+
+export type ValueSource = 'SPREAD' | 'DECLARED' | 'CATEGORY';
+
+export interface SovSection {
+  valueSource: ValueSource;
+  /** What is on the phase now: typed (DECLARED), or the last spread (SPREAD). */
+  value: Num;
+  /** CATEGORY: the cost buckets whose cost, priced like the sheet, is the phase's value. */
+  costCategoryIds?: string[];
+}
+
+export interface SovResult {
+  values: number[];
+  /** The contract value less what the declared and cost-priced phases take. */
+  remaining: number;
+  /** Why the phases cannot add up to the contract value, or null. */
+  problem: 'over' | 'unbalanced' | null;
+}
+
+/**
+ * The schedule of values (2026-10-13, the owner's call: "the scope of work
+ * value editable to declare the value; the materials cost is allocated to
+ * purchasing of materials, the equipment cost to purchasing of equipment").
+ *
+ *   DECLARED   the value typed, kept as typed.
+ *   CATEGORY   the named buckets' cost priced as the sheet prices its cost:
+ *              cost × contract value ÷ total cost, rounded once — so the
+ *              buckets together come to the contract value.
+ *   SPREAD     with `spread` on, what the others leave, spread in proportion
+ *              to what the SPREAD phases hold (evenly when nothing), the
+ *              remainder on the last of them; with it off, the value typed.
+ *
+ * With `spread` on the phases add up to the contract value exactly: a
+ * centavo or two of rounding with no SPREAD phase lands on the last
+ * cost-priced one. More declared than the contract holds is `over`; any
+ * other gap left with no phase to take it is `unbalanced`.
+ */
+export function scheduleOfValues(
+  sections: SovSection[],
+  bucketCost: Record<string, Num>,
+  contractValue: Num,
+  totalCost: Num,
+  spread: boolean,
+): SovResult {
+  const contract = toUnits(contractValue, 2);
+  const total = toUnits(totalCost, 2);
+  const values = sections.map((sec) => {
+    if (sec.valueSource === 'CATEGORY') {
+      if (total <= ZERO) return ZERO;
+      let cost = ZERO;
+      for (const id of sec.costCategoryIds ?? []) cost += toUnits(bucketCost[id], 2);
+      return roundDiv(cost * contract, total);
+    }
+    return toUnits(sec.value, 2);
+  });
+  const isSpread = (i: number) => spread && sections[i].valueSource === 'SPREAD';
+  let fixed = ZERO;
+  values.forEach((v, i) => {
+    if (!isSpread(i)) fixed += v;
+  });
+  const rest = contract - fixed;
+  let problem: SovResult['problem'] = null;
+  if (spread) {
+    const spreadIdx = sections.map((_, i) => i).filter(isSpread);
+    if (rest < ZERO) {
+      problem = 'over';
+      for (const i of spreadIdx) values[i] = ZERO;
+    } else if (spreadIdx.length) {
+      const held = spreadIdx.reduce((n, i) => n + (values[i] > ZERO ? values[i] : ZERO), ZERO);
+      let given = ZERO;
+      spreadIdx.forEach((i, k) => {
+        if (k === spreadIdx.length - 1) {
+          values[i] = rest - given;
+        } else {
+          const share = held > ZERO ? roundDiv((values[i] > ZERO ? values[i] : ZERO) * rest, held) : roundDiv(rest, BigInt(spreadIdx.length));
+          values[i] = share;
+          given += share;
+        }
+      });
+    } else if (rest !== ZERO) {
+      const fromCost = sections.map((_, i) => i).filter((i) => sections[i].valueSource === 'CATEGORY');
+      const drift = rest < ZERO ? -rest : rest;
+      if (fromCost.length && drift <= BigInt(fromCost.length)) values[fromCost[fromCost.length - 1]] += rest;
+      else problem = 'unbalanced';
+    }
+  }
+  const sum = values.reduce((n, v) => n + v, ZERO);
+  return { values: values.map(cents), remaining: cents(contract - sum), problem };
+}
+
 // ── The scope-of-work plan ───────────────────────────────────────────────────
 
 export interface PlanTask {

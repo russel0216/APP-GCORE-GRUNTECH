@@ -32,7 +32,7 @@ import {
   submitForApproval,
   type ApprovalSlot,
 } from '../shared/approvals';
-import { costingFigures, lineAmount, lineCodes, marginOfMarkup, planTasks, vatOn } from '../shared/costingMath';
+import { scheduleOfValues, costingFigures, lineAmount, lineCodes, marginOfMarkup, planTasks, vatOn } from '../shared/costingMath';
 import {
   companyCurrency,
   formatAmount,
@@ -127,26 +127,42 @@ async function recalc(costingId: string, tx: Tx = prisma, opts: { strict?: boole
 }
 
 /**
- * Spreads the contract value across the scope sections in proportion to what
- * is already there, or evenly when nothing has been set. Rounded to centavos,
- * with the rounding remainder on the last section, so the sum is exact.
+ * Writes the schedule of values (`scheduleOfValues()` in costingMath, the
+ * rule the sheet shows live): every cost-priced phase from its buckets' cost,
+ * and — with `spread` — what the declared and cost-priced phases leave of
+ * the contract value over the SPREAD phases, so the sum is exact. Without
+ * `spread` the SPREAD and DECLARED phases keep what was typed. With `strict`
+ * (a save, a distribute) a schedule that cannot add up is refused; the
+ * caller's transaction rolls back.
  */
-async function spreadSections(tx: Tx, costingId: string): Promise<number> {
-  const costing = await tx.costing.findUnique({ where: { id: costingId }, select: { contractValue: true } });
+async function spreadSections(tx: Tx, costingId: string, opts: { spread?: boolean; strict?: boolean } = {}): Promise<number> {
+  const spread = opts.spread ?? true;
+  const costing = await tx.costing.findUnique({ where: { id: costingId }, select: { contractValue: true, totalCost: true } });
   const sections = await tx.scopeSection.findMany({ where: { costingId }, orderBy: { sortOrder: 'asc' } });
   if (!costing || !sections.length) return 0;
 
-  const contractValue = num(costing.contractValue);
-  const currentTotal = sections.reduce((s, x) => s + num(x.value), 0);
-  const raw = sections.map((s) =>
-    currentTotal > 0 ? (num(s.value) / currentTotal) * contractValue : contractValue / sections.length,
+  const buckets = await tx.costingLine.groupBy({
+    by: ['costCategoryId'],
+    where: { costingId, isHeading: false },
+    _sum: { amount: true },
+  });
+  const bucketCost = Object.fromEntries(buckets.map((b) => [b.costCategoryId, (b._sum.amount ?? new Prisma.Decimal(0)).toString()]));
+  const sov = scheduleOfValues(
+    sections.map((s) => ({ valueSource: s.valueSource, value: s.value.toString(), costCategoryIds: s.costCategoryIds })),
+    bucketCost,
+    costing.contractValue.toString(),
+    costing.totalCost.toString(),
+    spread,
   );
-  const rounded = raw.map((v) => Math.round(v * 100) / 100);
-  const drift = Math.round((contractValue - rounded.reduce((a, b) => a + b, 0)) * 100) / 100;
-  rounded[rounded.length - 1] = Math.round((rounded[rounded.length - 1] + drift) * 100) / 100;
-
+  if (opts.strict && sov.problem === 'over') {
+    throw badRequest(
+      `The declared and cost-priced phases come to more than the contract value of ${formatMoney(num(costing.contractValue))} — lower one, or let it spread.`,
+      [{ field: 'sections', message: 'More than the contract value' }],
+    );
+  }
+  // Only what changed is written: a declared phase, or an unspread one, comes back as it went in.
   for (const [i, s] of sections.entries()) {
-    await tx.scopeSection.update({ where: { id: s.id }, data: { value: d(rounded[i]) } });
+    if (sov.values[i] !== num(s.value)) await tx.scopeSection.update({ where: { id: s.id }, data: { value: d(sov.values[i]) } });
   }
   return sections.length;
 }
@@ -1061,6 +1077,9 @@ const sheetSectionSchema = z.object({
   description: z.string().trim().max(2000).optional().nullable(),
   durationDays: z.number().int().min(0).max(3650).default(0),
   value: z.number().min(0).default(0),
+  /** Where the value comes from (2026-10-13): SPREAD (default), DECLARED, or CATEGORY with its buckets. */
+  valueSource: z.enum(['SPREAD', 'DECLARED', 'CATEGORY']).default('SPREAD'),
+  costCategoryIds: z.array(z.string()).max(10).default([]),
   tasks: z.array(sheetTaskSchema).max(200).default([]),
 });
 
@@ -1124,6 +1143,22 @@ async function checkReferences(body: SheetBody, tx: Tx) {
     const site = await tx.customerSite.findUnique({ where: { id: body.siteId }, select: { customerId: true } });
     if (!site || site.customerId !== body.customerId) throw badRequest('That location is not one of the customer\'s sites');
   }
+  // A phase priced from cost names its buckets, each real and each on one phase only —
+  // a bucket on two phases would count its money twice.
+  const seen = new Map<string, string>();
+  for (const sec of body.sections ?? []) {
+    if (sec.valueSource !== 'CATEGORY') continue;
+    if (!sec.costCategoryIds.length) throw badRequest(`Choose the cost the phase “${sec.name}” takes its value from`);
+    for (const id of new Set(sec.costCategoryIds)) {
+      const other = seen.get(id);
+      if (other) throw badRequest(`One cost bucket is on both “${other}” and “${sec.name}” — its money would count twice`);
+      seen.set(id, sec.name);
+    }
+  }
+  if (seen.size) {
+    const found = await tx.costCategory.count({ where: { id: { in: [...seen.keys()] } } });
+    if (found !== seen.size) throw badRequest('A phase names a cost category that does not exist');
+  }
 }
 
 const asDay = (v: string | null | undefined) => (v ? new Date(`${v}T00:00:00Z`) : null);
@@ -1175,6 +1210,8 @@ async function writeSheet(tx: Tx, costingId: string, body: SheetBody) {
         // A phase with tasks lasts as long as they do; one without keeps what was typed.
         durationDays: s.tasks.length ? plan.sections[i].days : s.durationDays,
         value: d(s.value),
+        valueSource: s.valueSource,
+        costCategoryIds: s.valueSource === 'CATEGORY' ? [...new Set(s.costCategoryIds)] : [],
         sortOrder: i,
       };
       let sectionId: string;
@@ -1202,7 +1239,8 @@ async function writeSheet(tx: Tx, costingId: string, body: SheetBody) {
   }
 
   await recalc(costingId, tx, { strict: true });
-  if (body.spread) await spreadSections(tx, costingId);
+  // Cost-priced phases follow the cost on every save; the rest spread only when asked.
+  await spreadSections(tx, costingId, { spread: !!body.spread, strict: !!body.spread });
 }
 
 costingRoutes.post(
@@ -1495,6 +1533,8 @@ costingRoutes.patch(
     await prisma.$transaction(async (tx) => {
       await tx.costing.update({ where: { id: req.params.id }, data });
       await recalc(req.params.id, tx, { strict: body.targetContractValue !== undefined || body.marginPct !== undefined });
+      // A cost-priced phase follows the price.
+      await spreadSections(tx, req.params.id, { spread: false });
     });
 
     const costing = await loadFull(req.params.id);
@@ -1709,6 +1749,8 @@ costingRoutes.post(
               description: s.description,
               durationDays: s.durationDays,
               value: s.value,
+              valueSource: s.valueSource,
+              costCategoryIds: s.costCategoryIds,
               sortOrder: s.sortOrder,
               tasks: {
                 create: s.tasks.map((t) => ({
@@ -1765,7 +1807,7 @@ costingRoutes.post(
   require_('gops.costing.edit_own'),
   handler(async (req, res) => {
     const costing = await forEdit(req, req.params.id);
-    const count = await prisma.$transaction((tx) => spreadSections(tx, req.params.id));
+    const count = await prisma.$transaction((tx) => spreadSections(tx, req.params.id, { spread: true, strict: true }));
     if (!count) throw badRequest('Add at least one scope section first');
 
     await audit(

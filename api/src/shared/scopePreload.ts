@@ -14,22 +14,30 @@ export type ScopeKind = 'MAIN_WORK' | 'TESTING_COMMISSIONING' | 'TURNOVER' | 'OT
 export interface PreloadPhase {
   name: string;
   kind: ScopeKind;
+  /**
+   * The cost buckets (CostCategory CODES) whose cost is this phase's value —
+   * the owner's "materials cost to purchasing of materials, equipment cost
+   * to purchasing of equipment" (2026-10-13). Empty: the phase spreads.
+   */
+  valueFrom: string[];
   tasks: { name: string; durationDays: number }[];
 }
 
-const phase = (name: string, kind: ScopeKind, tasks: string[]): PreloadPhase => ({
+const phase = (name: string, kind: ScopeKind, tasks: string[], valueFrom: string[] = []): PreloadPhase => ({
   name,
   kind,
+  valueFrom,
   tasks: tasks.map((t) => ({ name: t, durationDays: 1 })),
 });
 
 export const SCOPE_PRELOAD: readonly PreloadPhase[] = [
-  phase('PLANNING & ENGINEERING', 'MAIN_WORK', [
-    'Review of costing and design',
-    'Kick-off meeting (Gruntech)',
-    'Purchase of equipment',
-    'Purchase of other materials',
-  ]),
+  // Its purchases carry the Materials and Equipment cost, priced as the sheet prices it.
+  phase(
+    'PLANNING & ENGINEERING',
+    'MAIN_WORK',
+    ['Review of costing and design', 'Kick-off meeting (Gruntech)', 'Purchase of equipment', 'Purchase of other materials'],
+    ['MAT', 'EQP'],
+  ),
   phase('SITE PREPARATION', 'MAIN_WORK', [
     'Kick-off meeting (Customer)',
     'Site survey',

@@ -59,6 +59,9 @@ export interface ScopeSection {
   description: string | null;
   durationDays: number;
   value: number;
+  /** Where the value comes from (2026-10-13). */
+  valueSource?: 'SPREAD' | 'DECLARED' | 'CATEGORY';
+  costCategoryIds?: string[];
   sortOrder: number;
   startDay: number | null;
   endDay: number | null;

@@ -3,7 +3,8 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, todayLocal } from '../../lib/day';
-import { costingFigures, lineAmount, lineCodes, planTasks } from '../../lib/costingMath';
+import { costingFigures, lineAmount, lineCodes, planTasks, scheduleOfValues, type ValueSource } from '../../lib/costingMath';
+import { TickPicker } from '../../components/TickPicker';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { Checkbox, ErrorBox, Field, Loading, formatMoney, useToast } from '../../components/ui';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
@@ -74,6 +75,9 @@ interface SheetSection {
   name: string;
   description: string;
   value: string;
+  /** Where the value comes from (2026-10-13): spread, typed (declared), or cost buckets priced. */
+  valueSource: ValueSource;
+  costCategoryIds: string[];
   durationDays: string;
   tasks: SheetTask[];
 }
@@ -102,7 +106,7 @@ interface Lists {
   terms: string | null;
   companyVatRate: number;
   /** The scope of work a new sheet opens on (2026-10-13, the owner's sheet). */
-  scopePreload?: { name: string; kind: Kind; tasks: { name: string; durationDays: number }[] }[];
+  scopePreload?: { name: string; kind: Kind; valueFrom: string[]; tasks: { name: string; durationDays: number }[] }[];
 }
 
 interface TemplateRow {
@@ -176,27 +180,35 @@ const blankSection = (): SheetSection => ({
   name: '',
   description: '',
   value: '0',
+  valueSource: 'SPREAD',
+  costCategoryIds: [],
   durationDays: '0',
   tasks: [blankTask()],
 });
 
 /** The preload as rows to type into — the phases and tasks, nothing priced. */
-function preloadSections(preload: NonNullable<Lists['scopePreload']>): SheetSection[] {
-  return preload.map((p) => ({
+function preloadSections(preload: NonNullable<Lists['scopePreload']>, categories: Category[]): SheetSection[] {
+  return preload.map((p) => {
+    // The buckets are named by code in the preload; a bucket not on file is passed over.
+    const ids = (p.valueFrom ?? []).map((code) => categories.find((c) => c.code === code)?.id).filter((v): v is string => !!v);
+    return {
     key: nextKey('s'),
     kind: p.kind,
     name: p.name,
     description: '',
     value: '0',
+    valueSource: ids.length ? ('CATEGORY' as const) : ('SPREAD' as const),
+    costCategoryIds: ids,
     durationDays: '0',
     tasks: p.tasks.map((t) => ({ key: nextKey('t'), name: t.name, startDay: '', durationDays: String(t.durationDays) })),
-  }));
+    };
+  });
 }
 
 /** What a set of phases says, keys aside — to tell an untouched preload from one somebody worked on. */
 function sectionsSignature(ss: SheetSection[]): string {
   return JSON.stringify(
-    ss.map((x) => [x.kind, x.name, x.description, x.value, x.durationDays, x.tasks.map((t) => [t.name, t.startDay, t.durationDays])]),
+    ss.map((x) => [x.kind, x.name, x.description, x.value, x.valueSource, x.costCategoryIds, x.durationDays, x.tasks.map((t) => [t.name, t.startDay, t.durationDays])]),
   );
 }
 
@@ -341,15 +353,15 @@ export function CostingSheet() {
   const preloadSignature = useRef<string | null>(null);
   const preloadApplied = useRef(false);
   useEffect(() => {
-    if (editing || preloadApplied.current || !lists.scopePreload?.length) return;
+    if (editing || preloadApplied.current || !lists.scopePreload?.length || !categories.length) return;
     preloadApplied.current = true;
-    const preload = preloadSections(lists.scopePreload);
+    const preload = preloadSections(lists.scopePreload, categories);
     preloadSignature.current = sectionsSignature(preload);
     setSections((ss) => (ss.length ? ss : preload));
-  }, [editing, lists.scopePreload]);
+  }, [editing, lists.scopePreload, categories]);
   function startFromPreload() {
     if (!lists.scopePreload?.length) return;
-    const preload = preloadSections(lists.scopePreload);
+    const preload = preloadSections(lists.scopePreload, categories);
     preloadSignature.current = sectionsSignature(preload);
     setSections(preload);
   }
@@ -397,6 +409,8 @@ export function CostingSheet() {
             name: s.name,
             description: s.description ?? '',
             value: String(s.value),
+            valueSource: s.valueSource ?? 'SPREAD',
+            costCategoryIds: s.costCategoryIds ?? [],
             durationDays: String(s.durationDays),
             tasks: s.tasks.map((t) => ({
               key: nextKey('t'),
@@ -542,7 +556,23 @@ export function CostingSheet() {
       tasks: s.tasks.map((t) => ({ startDay: t.startDay ? figure(t.startDay) : null, durationDays: figure(t.durationDays) })),
     })),
   );
-  const scopeTotal = sections.reduce((sum, s) => sum + figure(s.value), 0);
+  // The schedule of values as it will be saved — the server runs the same rule (`scheduleOfValues`).
+  const bucketCost: Record<string, number> = {};
+  for (const l of lines) {
+    if (l.isHeading) continue;
+    bucketCost[l.categoryId] = (bucketCost[l.categoryId] ?? 0) + lineAmount(l.quantity || '0', l.unitCost || '0');
+  }
+  const sov = scheduleOfValues(
+    sections.map((s) => ({ valueSource: s.valueSource, value: figure(s.value), costCategoryIds: s.costCategoryIds })),
+    bucketCost,
+    totals.contractValue,
+    totals.totalCost,
+    spread,
+  );
+  /** What a phase's value box shows: the value it will be saved with. */
+  const shownValue = (i: number) => sov.values[i] ?? 0;
+  const scopeTotal = sections.reduce((sum, _s, i) => sum + shownValue(i), 0);
+  const bucketChoices = visibleCategories.map((c) => ({ value: c.id, label: c.name }));
 
   // ── Editing the rows ───────────────────────────────────────────────────────
 
@@ -676,6 +706,8 @@ export function CostingSheet() {
         name: s.name,
         description: s.description ?? '',
         value: '0',
+        valueSource: 'SPREAD' as const,
+        costCategoryIds: [],
         durationDays: String(s.durationDays),
         tasks: s.tasks.map((task) => ({
           key: nextKey('t'),
@@ -738,6 +770,19 @@ export function CostingSheet() {
   const keptSections = sections.filter((s) => s.name.trim() || s.tasks.some((t) => !isBlankTask(t)));
   const sectionProblems = new Map<string, string>();
   for (const s of keptSections) if (s.name.trim().length < 2) sectionProblems.set(s.key, 'Name the phase');
+  {
+    const bucketOn = new Map<string, string>();
+    for (const s of keptSections) {
+      if (s.valueSource !== 'CATEGORY' || sectionProblems.has(s.key)) continue;
+      if (!s.costCategoryIds.length) sectionProblems.set(s.key, 'Choose the cost it takes its value from');
+      for (const id of s.costCategoryIds) {
+        const other = bucketOn.get(id);
+        if (other && !sectionProblems.has(s.key)) sectionProblems.set(s.key, `${categories.find((c) => c.id === id)?.name ?? 'A bucket'} is already on “${other}”`);
+        bucketOn.set(id, s.name || 'another phase');
+      }
+    }
+  }
+  const sovProblem = spread && sov.problem === 'over' ? 'The typed and cost-priced phases come to more than the contract value' : null;
   const titleProblem = header.title.trim().length < 2 ? 'Give the costing a title' : null;
   const fixed = !!header.fixedPrice;
   const rateProblem = fixed
@@ -747,7 +792,7 @@ export function CostingSheet() {
     : !marginOk(header.marginPct)
       ? 'The margin is a percentage of the price, between −95 and 95'
       : null;
-  const valid = !titleProblem && !rateProblem && !lineProblems.size && !sectionProblems.size;
+  const valid = !titleProblem && !rateProblem && !sovProblem && !lineProblems.size && !sectionProblems.size;
 
   function sheetPayload() {
     return {
@@ -779,7 +824,9 @@ export function CostingSheet() {
         name: s.name.trim(),
         description: s.description.trim() || null,
         durationDays: figure(s.durationDays),
-        value: figure(s.value),
+        value: shownValue(sections.indexOf(s)),
+        valueSource: s.valueSource,
+        costCategoryIds: s.valueSource === 'CATEGORY' ? s.costCategoryIds : [],
         tasks: s.tasks
           .filter((t) => !isBlankTask(t))
           .map((t) => ({
@@ -1296,18 +1343,53 @@ export function CostingSheet() {
                     </option>
                   ))}
                 </select>
-                <label className="cs-phase-value">
+                <div className="cs-phase-value">
                   <span className="faint">Value</span>
+                  <select
+                    aria-label={`${phaseLabel}: where its value comes from`}
+                    value={s.valueSource}
+                    onChange={(e) => {
+                      const source = e.target.value as ValueSource;
+                      updateSection(s.key, {
+                        valueSource: source,
+                        // Typed from what it shows now, so nothing jumps.
+                        value: source === 'DECLARED' ? String(shownValue(si)) : s.value,
+                      });
+                    }}
+                  >
+                    <option value="SPREAD">{spread ? 'Spread' : 'Typed'}</option>
+                    <option value="DECLARED">Declared</option>
+                    <option value="CATEGORY">From cost</option>
+                  </select>
+                  {s.valueSource === 'CATEGORY' && (
+                    <TickPicker
+                      choices={bucketChoices}
+                      value={s.costCategoryIds}
+                      onChange={(ids) => updateSection(s.key, { costCategoryIds: ids })}
+                      none="Choose the cost"
+                      noun="cost buckets"
+                      label={`${phaseLabel}: the cost it takes its value from`}
+                    />
+                  )}
                   <NumberInput
                     kind="money"
                     className="qe-num"
                     aria-label={`${phaseLabel} value (schedule of values)`}
-                    value={s.value}
-                    disabled={spread}
-                    title={spread ? 'Spread from the contract value on save' : undefined}
-                    onChange={(e) => updateSection(s.key, { value: e.target.value })}
+                    value={
+                      s.valueSource === 'CATEGORY' || (spread && s.valueSource === 'SPREAD') ? String(shownValue(si)) : s.value
+                    }
+                    disabled={s.valueSource === 'CATEGORY'}
+                    title={
+                      s.valueSource === 'CATEGORY'
+                        ? 'The chosen cost, priced as the sheet prices it'
+                        : spread && s.valueSource === 'SPREAD'
+                          ? 'Spread from what the other phases leave — type a figure to declare it'
+                          : undefined
+                    }
+                    // Typing a figure declares it: kept as typed, the others spread around it.
+                    onChange={(e) => updateSection(s.key, { value: e.target.value, valueSource: s.valueSource === 'SPREAD' && spread ? 'DECLARED' : s.valueSource })}
                   />
-                </label>
+                </div>
                 <span className="faint cs-phase-span">
                   {planned.start ? `Day ${planned.start}–${planned.end} · ${planned.days} d` : `${planned.days} d`}
                 </span>
@@ -1418,7 +1500,12 @@ export function CostingSheet() {
         </div>
         {sections.length > 0 && (
           <div className="cs-sov">
-            <Checkbox checked={spread} onChange={setSpread} label="Keep the schedule of values equal to the contract value (spread it across the phases on save)" />
+            <Checkbox
+              checked={spread}
+              onChange={setSpread}
+              label="Keep the schedule of values equal to the contract value (what the declared and cost-priced phases leave is spread across the others on save)"
+            />
+            {sovProblem && <div className="alert error">{sovProblem} — {formatMoney(-sov.remaining)} over. Lower a declared figure, or let one spread.</div>}
             {!spread && Math.abs(scopeTotal - totals.contractValue) > 0.009 && (
               <div className="alert warn">
                 The phases add up to {formatMoney(scopeTotal)} against a contract value of {formatMoney(totals.contractValue)}. A

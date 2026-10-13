@@ -782,6 +782,41 @@ async function main() {
     fixedB.contractValue === 116071.43 && fixedB.marginPct === 0.310769 && !serverMath.costingFigures([{ quantity: 1, unitCost: 1 }], { marginPct: 0.2, targetContractValue: null }).fixedPrice,
     JSON.stringify(fixedB),
   );
+  const sovA = serverMath.scheduleOfValues(
+    [
+      { valueSource: 'CATEGORY', value: 0, costCategoryIds: ['M', 'E'] },
+      { valueSource: 'DECLARED', value: 10000 },
+      { valueSource: 'SPREAD', value: 0 },
+      { valueSource: 'SPREAD', value: 0 },
+    ],
+    { M: 60000, E: 15000, L: 25000 },
+    125000,
+    100000,
+    true,
+  );
+  check(
+    'schedule of values: a cost-priced phase is its buckets priced like the sheet (75,000 × 1.25), a declared one stays, the rest spread what is left — exactly the contract value',
+    JSON.stringify(sovA.values) === JSON.stringify([93750, 10000, 10625, 10625]) && sovA.remaining === 0 && sovA.problem === null,
+    JSON.stringify(sovA),
+  );
+  const sovOver = serverMath.scheduleOfValues([{ valueSource: 'DECLARED', value: 200000 }, { valueSource: 'SPREAD', value: 0 }], {}, 125000, 100000, true);
+  check('more declared than the contract holds is "over"', sovOver.problem === 'over', JSON.stringify(sovOver));
+  const sovOdd = serverMath.scheduleOfValues(
+    [{ valueSource: 'CATEGORY', value: 0, costCategoryIds: ['M'] }, { valueSource: 'CATEGORY', value: 0, costCategoryIds: ['E'] }],
+    { M: 33333.33, E: 33333.34 },
+    100000.01,
+    66666.67,
+    true,
+  );
+  check(
+    'with every phase cost-priced, the centavo of rounding lands on the last of them, so the sum is still exact',
+    sovOdd.problem === null && Math.round((sovOdd.values[0] + sovOdd.values[1]) * 100) === 10000001,
+    JSON.stringify(sovOdd),
+  );
+  check(
+    'the web’s copy of the schedule of values agrees',
+    JSON.stringify(webMath.scheduleOfValues([{ valueSource: 'CATEGORY', value: 0, costCategoryIds: ['M', 'E'] }, { valueSource: 'DECLARED', value: 10000 }, { valueSource: 'SPREAD', value: 0 }, { valueSource: 'SPREAD', value: 0 }], { M: 60000, E: 15000, L: 25000 }, 125000, 100000, true)) === JSON.stringify(sovA),
+  );
   check('vatOn() is VAT on a stored amount, rounded once', serverMath.vatOn('116049.02', '0.12') === 13925.88 && webMath.vatOn('116049.02', '0.12') === 13925.88);
   check('a 25% markup on cost is a 20% margin on the price', serverMath.marginOfMarkup(0.25) === 0.2 && webMath.marginOfMarkup(0.25) === 0.2);
   check(
@@ -851,6 +886,63 @@ async function main() {
   }
   const noCost = await api(tEstimator, 'POST', '/costings', { title: `${TAG} fixed price, no cost`, targetContractValue: 1000 });
   check('a fixed price with no cost lines is refused', noCost.status === 400, `status ${noCost.status}`);
+
+  // Declared and cost-priced scope values through the API (2026-10-13).
+  const sovLines = [
+    { costCategoryId: mat.id, name: `${TAG} SOV materials`, quantity: 1, unit: 'lot', unitCost: 60000 },
+    { costCategoryId: eqp.id, name: `${TAG} SOV equipment`, quantity: 1, unit: 'unit', unitCost: 15000 },
+    { costCategoryId: lab.id, name: `${TAG} SOV labour`, quantity: 1, unit: 'lot', unitCost: 25000 },
+  ];
+  const sovSections = (over: Record<string, unknown>[] = []) => [
+    { name: 'PLANNING & ENGINEERING', valueSource: 'CATEGORY', costCategoryIds: [mat.id, eqp.id], ...over[0] },
+    { name: 'SITE PREPARATION', valueSource: 'DECLARED', value: 10000, ...over[1] },
+    { name: 'INSTALLATION', valueSource: 'SPREAD', ...over[2] },
+    { name: 'HAND OVER', valueSource: 'SPREAD', ...over[3] },
+  ];
+  const sovSheet = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} schedule of values`,
+    marginPct: 0.2,
+    lines: sovLines,
+    sections: sovSections(),
+    spread: true,
+  });
+  const sovBack = sovSheet.status === 201 ? (await api(tEstimator, 'GET', `/costings/${sovSheet.body.id}`)).body : { scopeSections: [] };
+  const sovValues = (sovBack.scopeSections as { value: number; valueSource: string }[]).map((x) => x.value);
+  check(
+    'saved: Planning & Engineering carries Materials + Equipment priced (93,750), Site preparation its declared 10,000, the rest spread 10,625 each — 125,000 in all',
+    sovSheet.status === 201 && JSON.stringify(sovValues) === JSON.stringify([93750, 10000, 10625, 10625]) &&
+      (sovBack.scopeSections as { valueSource: string }[]).map((x) => x.valueSource).join() === 'CATEGORY,DECLARED,SPREAD,SPREAD',
+    `status ${sovSheet.status} ${JSON.stringify(sovValues)}`,
+  );
+  if (sovSheet.status === 201) {
+    const repriced = await api(tEstimator, 'PATCH', `/costings/${sovSheet.body.id}`, { marginPct: 0.5 });
+    const repricedValues = ((await api(tEstimator, 'GET', `/costings/${sovSheet.body.id}`)).body.scopeSections as { value: number }[]).map((x) => x.value);
+    check('a cost-priced phase follows the price (margin 50%: 75,000 × 2 = 150,000); a declared one stays', repriced.status === 200 && repricedValues[0] === 150000 && repricedValues[1] === 10000, JSON.stringify(repricedValues));
+  }
+  const bucketTwice = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} bucket twice`,
+    lines: sovLines,
+    sections: sovSections([{}, {}, { valueSource: 'CATEGORY', costCategoryIds: [mat.id] }]),
+    spread: true,
+  });
+  check('a cost bucket on two phases is refused — its money would count twice', bucketTwice.status === 400 && /count twice/.test(String(bucketTwice.body.error)), `status ${bucketTwice.status} ${bucketTwice.body.error}`);
+  const overDeclared = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} declared over`,
+    marginPct: 0.2,
+    lines: sovLines,
+    sections: sovSections([{}, { value: 200000 }]),
+    spread: true,
+  });
+  check('declared and cost-priced phases over the contract value are refused while the spread is on', overDeclared.status === 400, `status ${overDeclared.status}`);
+  const unspread = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} schedule typed`,
+    marginPct: 0.2,
+    lines: sovLines,
+    sections: sovSections([{}, {}, { value: 1 }, { value: 2 }]),
+    spread: false,
+  });
+  const unspreadValues = unspread.status === 201 ? ((await api(tEstimator, 'GET', `/costings/${unspread.body.id}`)).body.scopeSections as { value: number }[]).map((x) => x.value) : [];
+  check('with the spread off, the cost-priced phase is still worked out and the others keep what was typed', JSON.stringify(unspreadValues) === JSON.stringify([93750, 10000, 1, 2]), JSON.stringify(unspreadValues));
 
   const oddVat = await api(tEstimator, 'POST', '/costings', { title: `${TAG} odd VAT`, vatRate: 0.05 });
   check('a VAT rate that is neither the company rate nor 0% is refused', oddVat.status === 400, `status ${oddVat.status}`);
@@ -1019,6 +1111,11 @@ async function main() {
       preload[0].tasks.map((t) => t.name).join(' | ') === 'Review of costing and design | Kick-off meeting (Gruntech) | Purchase of equipment | Purchase of other materials' &&
       preload[5].tasks[1].name === 'Turn over of all documents and as-built plan',
     JSON.stringify(preload.map((p) => [p.name, p.tasks.length])),
+  );
+  check(
+    'Planning & Engineering takes its value from the Materials and Equipment cost; the other phases spread',
+    JSON.stringify(preload.map((p) => (p as { valueFrom?: string[] }).valueFrom)) === JSON.stringify([['MAT', 'EQP'], [], [], [], [], []]),
+    JSON.stringify(preload.map((p) => (p as { valueFrom?: string[] }).valueFrom)),
   );
   check(
     'testing & commissioning and hand over keep their kinds, the rest are main work; every task starts at one day',
