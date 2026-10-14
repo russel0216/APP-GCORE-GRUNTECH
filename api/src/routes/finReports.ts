@@ -10,7 +10,7 @@ import { bucketFor, bucketLabels, claimPayable, financeSettings } from '../share
 import { termsLabel } from '../shared/receivables';
 import { billTermsLabel } from '../shared/payables';
 import { TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
-import { ExpenseStatus, RequestStatus } from '@prisma/client';
+import { CashAdvanceStatus, ExpenseStatus, RequestStatus } from '@prisma/client';
 import { Series, byValue, cents, dayOf, mountReports, monthsOf, num, table, tally, type Col, type Report, type ReportContext } from '../shared/reportKit';
 
 /**
@@ -671,6 +671,90 @@ async function reimbursements(range: Range, ctx: ReportContext): Promise<Report>
   };
 }
 
+// ── Cash advances: money lent (the owner's module 7) ─────────────────────────
+
+/**
+ * The CA Report Generator: advances requested in the range (drafts left out),
+ * narrowed by requester, team and status — granted, released, repaid, still
+ * owed — by month of the request, requester, team and status, and the
+ * repayments made in the range by method (salary deduction among them).
+ */
+async function cashAdvances(range: Range, ctx: ReportContext): Promise<Report> {
+  const q = ctx.query;
+  const and: Prisma.CashAdvanceWhereInput[] = [{ status: { not: 'DRAFT' } }, { requestDate: { gte: range.from, lte: range.to } }];
+  const words: string[] = [];
+  if (q.requestedById) {
+    and.push({ requestedById: q.requestedById });
+    words.push(`requested by ${(await prisma.user.findUnique({ where: { id: q.requestedById }, select: { name: true } }))?.name ?? 'someone not on file'}`);
+  }
+  if (q.teamId) {
+    and.push({ requestedBy: userTeamWhere(q.teamId) });
+    words.push(q.teamId === 'none' ? 'no team' : `team ${(await prisma.industry.findUnique({ where: { id: q.teamId }, select: { code: true } }))?.code ?? '?'}`);
+  }
+  if (q.status) {
+    if (!(q.status in CashAdvanceStatus)) throw badRequest(`Status — one of ${Object.keys(CashAdvanceStatus).join(', ')}`);
+    and.push({ status: q.status as CashAdvanceStatus });
+    words.push(statusLabel(q.status));
+  }
+  const [rows, repayments] = await Promise.all([
+    prisma.cashAdvance.findMany({
+      where: { AND: and },
+      select: {
+        number: true,
+        status: true,
+        repayable: true,
+        requestDate: true,
+        amount: true,
+        amountReleased: true,
+        amountRefunded: true,
+        requestedBy: { select: { name: true, ...TEAM_OR_DEPT_SELECT.select } },
+      },
+    }),
+    prisma.paymentAllocation.findMany({
+      where: { advance: { repayable: true }, payment: { kind: 'RECEIPT', paymentDate: { gte: range.from, lte: range.to } } },
+      select: { amount: true, payment: { select: { method: true } } },
+    }),
+  ]);
+  type Row = (typeof rows)[number];
+  const standing = (r: Row) => r.status !== 'REJECTED' && r.status !== 'CANCELLED';
+  const live = rows.filter(standing);
+  const repaid = (r: Row) => (r.repayable ? num(r.amountRefunded) : 0);
+  const owed = (r: Row) => (r.repayable && r.status === 'RELEASED' ? Math.max(0, cents(num(r.amountReleased) - num(r.amountRefunded))) : 0);
+  const series = new Series('Requested by month', [count('Advances'), money('Granted'), money('Released'), money('Repaid'), money('Outstanding')], monthsOf(range));
+  for (const r of live) {
+    series.add(r.requestDate, 0, 1);
+    series.add(r.requestDate, 1, num(r.amount));
+    series.add(r.requestDate, 2, num(r.amountReleased));
+    series.add(r.requestDate, 3, repaid(r));
+    series.add(r.requestDate, 4, owed(r));
+  }
+  const figures = (r: Row) => [1, num(r.amount), repaid(r), owed(r)];
+  const cols = [count('Advances'), money('Granted'), money('Repaid'), money('Outstanding')];
+  const sum = (fn: (r: Row) => number) => cents(live.reduce((s, r) => s + fn(r), 0));
+  const unit = (r: Row) => teamOrDepartment(r.requestedBy)?.label ?? NO_TEAM;
+  return {
+    kind: 'cash-advances',
+    title: 'Cash Advance Report',
+    from: dayOf(range.from),
+    to: dayOf(range.to),
+    filterLine: words.length ? words.join(' · ') : undefined,
+    cards: [
+      { label: 'Total granted', value: sum((r) => num(r.amount)), money: true, sub: `${live.length} advance${live.length === 1 ? '' : 's'} requested in the range` },
+      { label: 'Released', value: sum((r) => num(r.amountReleased)), money: true },
+      { label: 'Payments made', value: sum(repaid), money: true },
+      { label: 'Net outstanding balance', value: sum(owed), money: true },
+    ],
+    series: series.done(),
+    tables: [
+      table('By requester', [{ label: 'Requester' }, ...cols], rowsOf(tally(live, (r) => r.requestedBy.name, figures), 1)),
+      table('By team', [{ label: 'Team / department' }, ...cols], rowsOf(tally(live, unit, figures), 1)),
+      table('By status', [{ label: 'Status' }, ...cols], rowsOf(tally(rows, (r) => statusLabel(r.status), figures), 1)),
+      table('Repayments in the range, by method', [{ label: 'Method' }, money('Repaid')], rowsOf(tally(repayments, (a) => statusLabel(a.payment.method), (a) => [num(a.amount)]), 0)),
+    ],
+    notes: ['An advance raised before 2026-10-15 is accounted for by its liquidation, not repaid; its repaid and outstanding read zero here.'],
+  };
+}
+
 async function payablesAging(range: Range): Promise<Report> {
   const asOf = range.to;
   const settings = await financeSettings();
@@ -798,6 +882,7 @@ const KINDS = {
   'budget-requests': budgetRequests,
   liquidations,
   reimbursements,
+  'cash-advances': cashAdvances,
   payments: paymentsOut,
 };
 export const FIN_REPORT_KINDS = Object.keys(KINDS);
@@ -815,6 +900,7 @@ mountReports(finReportRoutes, {
     'budget-requests': 'gfin.budget_requests.view_all',
     liquidations: 'gfin.budget_liquidations.view_all',
     reimbursements: 'gfin.expenses.view_all',
+    'cash-advances': 'gfin.cash_advances.view_all',
     'payables-aging': 'gfin.ap.view_all',
     payments: 'gfin.ap.view_all',
   },

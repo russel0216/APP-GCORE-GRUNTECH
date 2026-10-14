@@ -4292,6 +4292,8 @@ enum CashAdvanceStatus {
   REFUND_DUE
   /// Liquidation approved and nothing is owed either way.
   LIQUIDATED
+  /// A loan (`repayable`) repaid in full — the owner's "Paid" (2026-10-15).
+  PAID
   REJECTED
   CANCELLED
 }
@@ -4322,8 +4324,17 @@ model CashAdvance {
   amountReleased Decimal @default(0) @db.Decimal(18, 2)
   /// Re-derived by refreshAdvance(): the approved liquidation's total, else 0.
   amountSpent    Decimal @default(0) @db.Decimal(18, 2)
-  /// Re-derived by refreshAdvance(): Σ RECEIPT allocations (unspent cash returned).
+  /// Re-derived by refreshAdvance(): Σ RECEIPT allocations (unspent cash
+  /// returned; on a loan, the repayments made — salary deductions included).
   amountRefunded Decimal @default(0) @db.Decimal(18, 2)
+
+  /// MONEY LENT (2026-10-15, the owner's module 7): true on every advance
+  /// raised from then on. Released, it is repaid in instalments (receipts,
+  /// salary deductions) until PAID — never liquidated with receipts. An
+  /// advance raised before keeps false and its liquidation.
+  repayable Boolean   @default(false)
+  /// When the last repayment cleared the balance.
+  repaidAt  DateTime? @db.Date
 
   /// releasedAt + finance.rules.advanceLiquidationDays, snapshotted at release.
   liquidationDueDate DateTime? @db.Date
@@ -4358,6 +4369,9 @@ enum PaymentMethod {
   BANK_TRANSFER
   ONLINE
   OFFSET
+  /// A cash advance repaid out of the employee's pay (2026-10-15) — entered
+  /// by finance, cleared as recorded.
+  SALARY_DEDUCTION
 }
 
 /// One movement of money, allocated across one or more documents.

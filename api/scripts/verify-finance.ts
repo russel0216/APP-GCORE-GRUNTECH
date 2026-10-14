@@ -3890,6 +3890,101 @@ async function main() {
       rmbRep.status === 200 && money(rmbCard ?? -1, Number(rmbDb._sum.total ?? 0)) && String(rmbRep.body.filterLine).includes(engineer.name),
       `${rmbCard} vs ${rmbDb._sum.total}`,
     );
+
+    // ══ Cash advance as money lent (the owner's module 7) ═══════════════════
+    console.log('\nCash advances — money lent, repaid in instalments and by salary deduction');
+    await saveFinanceSettings({ blockAdvanceWhileUnliquidated: false });
+    const loan = await eng('POST', '/cash-advances', { purpose: `${TAG} roadshow allowance`, amount: 3_500 });
+    await eng('POST', `/cash-advances/${loan.body.id}/submit`);
+    const loanReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'cash_advance', documentId: String(loan.body.id), status: 'PENDING' } });
+    const loanRoute = await stepNames(loanReq?.workflowId ?? null);
+    await settle(loanReq!.id);
+    const loanRelease = await fin('POST', '/payments', {
+      kind: 'DISBURSEMENT',
+      method: 'CASH',
+      payeeUserId: engineer.id,
+      allocations: [{ kind: 'advance', id: loan.body.id, amount: 3_500 }],
+    });
+    const loanOut = await prisma.cashAdvance.findUnique({ where: { id: String(loan.body.id) } });
+    check(
+      'a new advance is money lent: five signatures, released, then RELEASED with no liquidation deadline',
+      loan.body.repayable === true &&
+        JSON.stringify(loanRoute) === JSON.stringify(['TEAM LEADER', 'BACK SUPPORT', 'CHECKING (FINANCE STAFF)', 'FINANCE MANAGER', 'CEO / PRESIDENT']) &&
+        loanRelease.status === 201 &&
+        loanOut?.status === 'RELEASED' &&
+        loanOut.liquidationDueDate === null,
+      `${loan.body.repayable} ${JSON.stringify(loanRoute)} ${loanRelease.status} ${loanOut?.status} ${loanOut?.liquidationDueDate}`,
+    );
+    const loanLiquidate = await eng('POST', '/expense-claims', {
+      purpose: `${TAG} wrong door`,
+      advanceId: loan.body.id,
+      lines: [{ spentOn: todayIso, description: 'x', receiptNo: 'OR', amount: 1 }],
+    });
+    check('money lent is repaid, never liquidated with receipts', loanLiquidate.status === 400 && /repaid, not liquidated/.test(String(loanLiquidate.body.error)), `${loanLiquidate.status} ${loanLiquidate.body.error}`);
+    const deduction = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'SALARY_DEDUCTION',
+      payeeUserId: engineer.id,
+      allocations: [{ kind: 'advance_refund', id: loan.body.id, amount: 1_000 }],
+    });
+    const badDeduction = await fin('POST', '/payments', {
+      kind: 'DISBURSEMENT',
+      method: 'SALARY_DEDUCTION',
+      payeeUserId: engineer.id,
+      allocations: [{ kind: 'advance', id: loan.body.id, amount: 1 }],
+    });
+    const loanList = await fin('GET', `/cash-advances?pageSize=5&search=${encodeURIComponent(String(loan.body.number))}`);
+    const loanRow = loanList.body.rows?.[0];
+    check(
+      'a salary deduction repays part of it: the list says Repaying, 1,000 made, 2,500 left; a deduction settles nothing else',
+      deduction.status === 201 &&
+        !!deduction.body.clearedAt &&
+        loanRow?.stage === 'Repaying' &&
+        money(loanRow?.paymentsMade, 1_000) &&
+        money(loanRow?.balance, 2_500) &&
+        badDeduction.status === 400,
+      `${deduction.status} ${deduction.body.clearedAt} ${loanRow?.stage} ${loanRow?.paymentsMade} ${loanRow?.balance} · ${badDeduction.status}`,
+    );
+    const [caAll, caOwing] = await Promise.all([fin('GET', '/cash-advances?pageSize=1'), fin('GET', '/cash-advances?pageSize=200&owing=true')]);
+    const owingSum = (caOwing.body.rows ?? []).reduce((s: number, r: { balance: number }) => s + r.balance, 0);
+    check(
+      'the Net outstanding balance card is the balances of the loans still being repaid',
+      money(caAll.body.summary?.outstanding, owingSum) && caAll.body.summary?.owingCount === caOwing.body.total,
+      `${JSON.stringify(caAll.body.summary)} vs ${owingSum}`,
+    );
+    const tooMuch = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'CASH',
+      payeeUserId: engineer.id,
+      allocations: [{ kind: 'advance_refund', id: loan.body.id, amount: 2_600 }],
+    });
+    const rest = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'CASH',
+      payeeUserId: engineer.id,
+      allocations: [{ kind: 'advance_refund', id: loan.body.id, amount: 2_500 }],
+    });
+    const loanPaid = await prisma.cashAdvance.findUnique({ where: { id: String(loan.body.id) } });
+    check(
+      'more than the balance is refused; the last 2,500 makes it PAID, dated',
+      tooMuch.status === 400 && rest.status === 201 && loanPaid?.status === 'PAID' && !!loanPaid.repaidAt,
+      `${tooMuch.status} ${rest.status} ${loanPaid?.status} ${loanPaid?.repaidAt}`,
+    );
+    const undo = await fin('DELETE', `/payments/${rest.body.id}`);
+    const loanBack = await prisma.cashAdvance.findUnique({ where: { id: String(loan.body.id) } });
+    check(
+      'deleting a repayment puts the balance back — re-derived, never incremented',
+      undo.status === 200 && loanBack?.status === 'RELEASED' && money(Number(loanBack.amountRefunded), 1_000) && loanBack.repaidAt === null,
+      `${undo.status} ${loanBack?.status} ${loanBack?.amountRefunded} ${loanBack?.repaidAt}`,
+    );
+    const caRep = await fin('GET', `/fin-reports/cash-advances?from=${todayIso}&to=${todayIso}&requestedById=${engineer.id}`);
+    const caCard = (label: string) => (caRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === label)?.value ?? -1;
+    check(
+      'the CA report counts the payments made and the balance still owed',
+      caRep.status === 200 && caCard('Payments made') >= 1_000 - 0.005 && caCard('Net outstanding balance') >= 2_500 - 0.005,
+      JSON.stringify(caRep.body.cards),
+    );
+    await saveFinanceSettings({ blockAdvanceWhileUnliquidated: true });
   }
 
   await cleanup();

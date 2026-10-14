@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,253 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,260 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 171, chain 329, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 364, aftermarket 259, cad 101,
+115, evaluations 152, academy 120, finance 371, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -5164,6 +5164,48 @@ Team Leader.
 - **The report** is the `reimbursements` kind (claims dated in the range,
   drafts out; by month, requester, team, kind, status; narrowed by
   `requestedById`, `teamId`, `status`; `gfin.expenses.view_all`).
+
+## Cash advances as money lent (2026-10-15)
+
+The owner's module 7 ("Cash Advance (Money Lent to Employee)") and his
+answer: yes, a loan repaid in payments — salary deduction included, entered
+by finance; an advance already released keeps its liquidation.
+
+- **`CashAdvance.repayable`** (default false) is set on every advance
+  raised from now on (`POST /cash-advances`); `repaidAt` dates the last
+  repayment. A **repayable** advance is approved on the five-signature
+  route (see Reimbursements), released in one voucher as before, then
+  **repaid**: RECEIPT allocations of kind `advance_refund` (the same column,
+  `amountRefunded`, holds the repayments) until nothing is left —
+  `refreshAdvance()` gives APPROVED → RELEASED (owing) → **PAID**
+  (`CashAdvanceStatus.PAID`, new), re-derived from the allocations so a
+  deleted repayment puts the balance back; no liquidation deadline. A loan
+  is never liquidated: an expense claim naming it is a 400. An older
+  advance (`repayable` false) keeps everything as it was: liquidation,
+  refund, REFUND_DUE, LIQUIDATED. `settleable('advance_refund')` owes a
+  loan's released less repaid while RELEASED; `GET /payments/open?kind=
+  advance_refund` lists loans being repaid beside refunds due;
+  `financePosition`'s `advancesInHand` counts a loan's unrepaid balance.
+  "One advance at a time" reads "has not been repaid yet" for a loan.
+- **Salary deduction** is a `PaymentMethod` (`SALARY_DEDUCTION`): money in
+  on a cash advance only (anything else is a 400), cleared as recorded; the
+  repayment form offers it only on an advance.
+- **The register is the sample's**: CA No., Date requested, Requester, Team
+  (else department), Project / Purpose, Amount, Status in the owner's words
+  (`advanceStage()`: the open step's TL Approval … CEO Approval, For
+  Release, **Repaying** while a balance is owed, Paid), Total payment made
+  (with what is left; "by liquidation" on an older one), Payment history
+  (the advance's page, `#payments`). Filters status, repayment (`owing`),
+  approval, for release, liquidation overdue, requester, team, date range.
+  **Cards** (`advanceListSummary()`): Total granted CA, Less total payments
+  made, Net outstanding balance (= the balances of the loans still being
+  repaid, asserted), In approval. **Payment entry** (the A/R create right)
+  picks an active CA, then the ordinary repayment form. The page reads
+  "Repaying", shows Repaid and Balance, the Payment history, and **Record
+  repayment**; Liquidate is offered on an older advance only.
+- **The report** is the `cash-advances` kind (requested in the range: granted,
+  released, repaid, outstanding; by requester, team, status; repayments in
+  the range by method; `gfin.cash_advances.view_all`).
 
 ## Spreadsheet attachments (2026-10-05)
 

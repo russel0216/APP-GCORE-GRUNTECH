@@ -451,9 +451,10 @@ export const FIN_REPORT_KINDS: readonly ReportKind[] = [
   { key: 'budget-requests', label: 'Budget requests (by date needed)', list: '/g-fin/budget-requests' },
   { key: 'liquidations', label: 'Budget liquidations', list: '/g-fin/budget-liquidations' },
   { key: 'reimbursements', label: 'Reimbursements', list: '/g-fin/expenses' },
+  { key: 'cash-advances', label: 'Cash advances (money lent)', list: '/g-fin/cash-advances' },
 ];
 const AR_KINDS = ['receivables', 'aging', 'collection-forecast', 'collections'];
-const REQUEST_KINDS = ['budget-requests', 'liquidations', 'reimbursements'];
+const REQUEST_KINDS = ['budget-requests', 'liquidations', 'reimbursements', 'cash-advances'];
 /** The right each kind needs beside Reports' — the API's `rights`. */
 const KIND_RIGHT = (key: string) =>
   AR_KINDS.includes(key)
@@ -464,7 +465,10 @@ const KIND_RIGHT = (key: string) =>
         ? 'gfin.budget_liquidations.view_all'
         : key === 'reimbursements'
           ? 'gfin.expenses.view_all'
-          : 'gfin.ap.view_all';
+          : key === 'cash-advances'
+            ? 'gfin.cash_advances.view_all'
+            : 'gfin.ap.view_all';
+const ADVANCE_STATUSES = ['PENDING_APPROVAL', 'APPROVED', 'RELEASED', 'PAID', 'REFUND_DUE', 'LIQUIDATED', 'REJECTED', 'CANCELLED'];
 const CLAIM_STATUSES = ['PENDING_APPROVAL', 'APPROVED', 'REIMBURSED', 'SETTLED', 'REJECTED', 'CANCELLED'];
 const REQUEST_STATUSES = ['PENDING_APPROVAL', 'APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED', 'REJECTED', 'CANCELLED'];
 
@@ -521,6 +525,7 @@ export function FinanceReports() {
   const { people: buyers } = usePeople('gchain.purchase_orders.create');
   const { people: requesters } = usePeople('gops.budget_requests.create');
   const { people: claimants } = usePeople('gfin.expenses.create');
+  const { people: borrowers } = usePeople('gfin.cash_advances.create');
   const teams = useTeams();
   const kinds = FIN_REPORT_KINDS.filter((k) => can(KIND_RIGHT(k.key)));
   return (
@@ -538,7 +543,7 @@ export function FinanceReports() {
               <PersonSelect
                 value={params.get('requestedById') ?? ''}
                 onChange={(id) => set({ requestedById: id })}
-                people={kind === 'reimbursements' ? claimants : requesters}
+                people={kind === 'reimbursements' ? claimants : kind === 'cash-advances' ? borrowers : requesters}
                 placeholder="— all requesters —"
               />
             </label>
@@ -559,7 +564,7 @@ export function FinanceReports() {
                 <span className="faint">Status</span>
                 <select value={params.get('status') ?? ''} onChange={(e) => set({ status: e.target.value })}>
                   <option value="">— all statuses —</option>
-                  {(kind === 'reimbursements' ? CLAIM_STATUSES : REQUEST_STATUSES).map((st) => (
+                  {(kind === 'reimbursements' ? CLAIM_STATUSES : kind === 'cash-advances' ? ADVANCE_STATUSES : REQUEST_STATUSES).map((st) => (
                     <option key={st} value={st}>
                       {humanise(st)}
                     </option>

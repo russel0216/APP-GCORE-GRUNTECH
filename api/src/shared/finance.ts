@@ -245,6 +245,13 @@ export async function settleable(
   if (kind === 'advance_refund') {
     const row = await tx.cashAdvance.findUnique({ where: { id } });
     if (!row) return null;
+    // A loan (2026-10-15): everything released is owed back, in instalments,
+    // while it is out — the repayment, salary deduction or not.
+    if (row.repayable) {
+      const payable = num(row.amountReleased);
+      const paid = num(row.amountRefunded);
+      return { kind, id, number: row.number, payable, paid, outstanding: row.status === 'RELEASED' ? cents(payable - paid) : 0 };
+    }
     // Nothing is owed back until a liquidation has said what was spent.
     const payable = row.liquidatedAt ? cents(Math.max(0, num(row.amountReleased) - num(row.amountSpent))) : 0;
     const paid = num(row.amountRefunded);
@@ -390,7 +397,16 @@ export async function refreshAdvance(
 
   const frozen = ['DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED'].includes(row.status);
   let status: string = row.status;
-  if (!frozen) {
+  let repaidAt: Date | null = null;
+  if (!frozen && row.repayable) {
+    // A loan: released, then repaid until nothing is left — no liquidation.
+    if (released + 0.005 < amount) status = 'APPROVED';
+    else if (refunded + 0.005 >= released) {
+      status = 'PAID';
+      const receipts = allocations.filter((a) => a.payment.kind === 'RECEIPT');
+      repaidAt = row.repaidAt ?? receipts[receipts.length - 1]?.payment.paymentDate ?? dayKey(new Date());
+    } else status = 'RELEASED';
+  } else if (!frozen) {
     if (!liquidation) {
       status = released + 0.005 >= amount ? 'RELEASED' : 'APPROVED';
     } else {
@@ -404,7 +420,8 @@ export async function refreshAdvance(
   const isReleased = !frozen && status !== 'APPROVED';
   const releasedAt = isReleased ? (row.releasedAt ?? releases[0]?.payment.paymentDate ?? dayKey(new Date())) : null;
   let liquidationDueDate: Date | null = null;
-  if (releasedAt) {
+  // A loan has no liquidation deadline — it is repaid, not accounted for.
+  if (releasedAt && !row.repayable) {
     if (row.liquidationDueDate) liquidationDueDate = row.liquidationDueDate;
     else {
       const settings = await financeSettings();
@@ -421,9 +438,12 @@ export async function refreshAdvance(
       liquidatedAt,
       releasedAt,
       liquidationDueDate,
+      repaidAt,
       status: status as never,
     },
   });
+
+  if (row.repayable && status !== 'APPROVED') return { paid: refunded, outstanding: cents(released - refunded), status };
 
   const payable = status === 'REFUND_DUE' ? cents(Math.max(0, released - spent)) : amount;
   const paid = status === 'REFUND_DUE' ? refunded : released;
@@ -560,7 +580,7 @@ export async function financePosition(today: Date): Promise<FinancePosition> {
     }),
     prisma.cashAdvance.findMany({
       where: { status: { in: ['APPROVED', 'RELEASED', 'REFUND_DUE'] } },
-      select: { status: true, amount: true, amountReleased: true, amountSpent: true, amountRefunded: true },
+      select: { status: true, repayable: true, amount: true, amountReleased: true, amountSpent: true, amountRefunded: true },
     }),
     prisma.budgetRequest.findMany({
       where: { status: { in: ['APPROVED', 'RELEASED', 'REFUND_DUE'] } },
@@ -598,7 +618,10 @@ export async function financePosition(today: Date): Promise<FinancePosition> {
         (s, a) =>
           s +
           (a.status === 'RELEASED'
-            ? num(a.amountReleased)
+            ? // A loan out with a person is what they have not yet repaid.
+              a.repayable
+              ? Math.max(0, num(a.amountReleased) - num(a.amountRefunded))
+              : num(a.amountReleased)
             : Math.max(0, num(a.amountReleased) - num(a.amountSpent) - num(a.amountRefunded))),
         0,
       ),

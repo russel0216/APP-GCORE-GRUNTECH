@@ -2894,6 +2894,7 @@ expenseRoutes.post(
         },
       });
       if (!advance) throw notFound('Cash advance not found');
+      if (advance.repayable) throw badRequest(`${advance.number} is money lent — it is repaid, not liquidated with receipts`);
       if (advance.requestedById !== me.id && !me.isSuperAdmin) {
         throw forbidden('Only the person who received the advance can liquidate it');
       }
@@ -3972,7 +3973,7 @@ paymentRoutes.get(
 
 const paymentSchema = z.object({
   kind: z.enum(['RECEIPT', 'DISBURSEMENT']),
-  method: z.enum(['CASH', 'CHECK', 'BANK_TRANSFER', 'ONLINE', 'OFFSET']).default('BANK_TRANSFER'),
+  method: z.enum(['CASH', 'CHECK', 'BANK_TRANSFER', 'ONLINE', 'OFFSET', 'SALARY_DEDUCTION']).default('BANK_TRANSFER'),
   paymentDate: z.string().optional(),
   customerId: z.string().optional().nullable(),
   supplierId: z.string().optional().nullable(),
@@ -4016,6 +4017,11 @@ paymentRoutes.post(
     // unspent advance coming back. Money out settles what we owe: a bill, a
     // claim, or the advance itself.
     const MONEY_IN = ['invoice', 'advance_refund', 'budget_request_refund'];
+    // A salary deduction repays a cash advance out of the person's pay; it
+    // settles nothing else.
+    if (body.method === 'SALARY_DEDUCTION' && (body.kind !== 'RECEIPT' || body.allocations.some((a) => a.kind !== 'advance_refund'))) {
+      throw badRequest('A salary deduction repays a cash advance — record anything else as cash, cheque or transfer');
+    }
     if (body.kind === 'RECEIPT' && body.allocations.some((a) => !MONEY_IN.includes(a.kind))) {
       throw badRequest('A receipt settles customer invoices or returns unspent cash. Record money going out as a disbursement.');
     }
@@ -4036,7 +4042,9 @@ paymentRoutes.post(
       if (!target) throw notFound(`That ${allocation.kind.replace(/_/g, ' ')} does not exist`);
       if (allocation.amount > target.outstanding + 0.005) {
         throw badRequest(
-          `${target.number} has only ${target.outstanding} outstanding, but ${allocation.amount} is being applied to it.`,
+          target.outstanding <= 0.005 && allocation.kind === 'advance_refund'
+            ? `${target.number} has nothing to repay or return`
+            : `${target.number} has only ${target.outstanding} outstanding, but ${allocation.amount} is being applied to it.`,
         );
       }
       // An advance — and a budget request — is released in one voucher. Half
@@ -4297,7 +4305,9 @@ paymentRoutes.get(
     if (kind === 'advance' || kind === 'advance_refund') {
       const rows = await prisma.cashAdvance.findMany({
         where: {
-          status: kind === 'advance' ? 'APPROVED' : 'REFUND_DUE',
+          // Money back on an advance: unspent cash after a liquidation, or a
+          // loan's repayments while it is out (2026-10-15).
+          ...(kind === 'advance' ? { status: 'APPROVED' as const } : { OR: [{ status: 'REFUND_DUE' as const }, { status: 'RELEASED' as const, repayable: true }] }),
           ...(partyId ? { requestedById: partyId } : {}),
         },
         include: { requestedBy: { select: { id: true, name: true } } },
@@ -4310,7 +4320,9 @@ paymentRoutes.get(
             const outstanding =
               kind === 'advance'
                 ? cents(num(r.amount) - released)
-                : cents(Math.max(0, released - num(r.amountSpent)) - num(r.amountRefunded));
+                : r.repayable
+                  ? cents(released - num(r.amountRefunded))
+                  : cents(Math.max(0, released - num(r.amountSpent)) - num(r.amountRefunded));
             return {
               id: r.id,
               number: r.number,

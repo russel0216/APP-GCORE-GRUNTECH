@@ -1751,6 +1751,8 @@ export function RecordPaymentModal({
             <option value="CASH">Cash</option>
             <option value="ONLINE">Online</option>
             <option value="OFFSET">Offset</option>
+            {/* A cash advance repaid out of the person's pay (2026-10-15). */}
+            {targetKind === 'advance_refund' && <option value="SALARY_DEDUCTION">Salary deduction</option>}
           </select>
         </Field>
       </div>
