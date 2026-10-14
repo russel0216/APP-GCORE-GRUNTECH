@@ -526,3 +526,64 @@
   gap: var(--s-2);
   font-size: var(--fs-xs);
 }
+
+/* The Incoming page (2026-10-14): against an order or without one. */
+.inc-mode {
+  margin-bottom: var(--s-4);
+}
+.inc-item-cell {
+  min-width: 20rem;
+}
+.inc-unit-cell input {
+  width: 5rem;
+}
+.inc-num-cell input {
+  width: 8rem;
+}
+
+/* Under the stock (2026-10-14, the owner's inventory screen): the movement log beside the quick operations. */
+.inv-foot {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: var(--s-4);
+  margin-top: var(--s-4);
+}
+@media (max-width: 760px) {
+  .inv-foot {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.inv-moves {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.inv-moves li + li {
+  border-top: 1px solid var(--line);
+}
+.inv-move {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) 0;
+  color: var(--text);
+  text-decoration: none;
+}
+a.inv-move:hover .inv-move-what {
+  text-decoration: underline;
+}
+.inv-move-dir {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+.inv-move-dir.is-in {
+  color: var(--ok);
+}
+.inv-move-dir.is-out {
+  color: var(--danger);
+}
+.inv-move-where {
+  font-size: var(--fs-sm);
+  text-align: right;
+}

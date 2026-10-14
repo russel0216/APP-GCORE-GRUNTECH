@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,180 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,185 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 307, hr 468, plantilla 123, meetings
-111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
+79, partners 120, delivery 171, chain 308, hr 468, plantilla 123, meetings
+115, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -2592,6 +2592,25 @@ leave the approver deciding on stale figures).
   people were told.
 - **Visibility is one function, `visibleWhere(user)`**; a `view_own` holder who is
   not on the list gets a 404. Only the invitee answers for themselves.
+- **The attendees agree the minutes** (2026-10-14, the owner's call:
+  "approval of attendees agreeing the minutes" — only those who said
+  Going). `Meeting.minutesStatus` DRAFT → FOR_AGREEMENT → AGREED,
+  `minutesRound`, `minutesSentAt`, `minutesAgreedAt`; `MinutesAgreement`
+  (meeting × round × user, PENDING / AGREED / CHANGE_ASKED with a
+  comment), never deleted. `POST /meetings/:id/minutes/send` — the
+  organiser or `edit_all` (`mayLeadMinutes`), written minutes, at least one
+  invitee ACCEPTED (the organiser aside) — opens a round, each attendee
+  told (`minutes.to_agree`); `POST …/minutes/respond { response, comment }`
+  is the asked attendee's own (a change needs words), changeable while the
+  round is open; the last agreement closes it AGREED and tells the
+  organiser, as does every change asked (`minutes.answered`). Once sent,
+  only the organiser changes the minutes, and a change sets the round
+  aside (DRAFT, its rows kept) to send again. **Not the approval engine**:
+  the minutes are a record the people who were there sign, not a document
+  a role decides (rule 2 is about documents). `GET …/minutes/pdf` is the
+  Minutes of Meeting paper (the meeting's Print): MEETING DETAILS,
+  agenda, minutes, attendance, Prepared by and one ATTENDEE sign-off each,
+  "Pending" until agreed. verify-meetings pins it.
 - **Minutes of meeting** (2026-10-13, the owner's call: "so anyone can back
   track what have been talked about"): `Meeting.minutes`, `minutesAt`,
   `minutesBy` — ONE text, replaced whole by `PUT /meetings/:id/minutes`,
@@ -4595,6 +4614,42 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   The record pages show "Submit for approval sends it to …", the Approval
   panel once sent, and Pull back / Cancel in ⋯; the supervisor's door is
   `requireAnyOrDecider` on the record and its paper.
+- **Incoming Reports, with or without a purchase order** (2026-10-14,
+  the owner's call). `Receiving.orderId` and `ReceivingItem.orderItemId`
+  are nullable: a report WITHOUT an order names `supplierId` or
+  `sourceName`, a `reason`, a warehouse (required), and per line an item
+  (`ReceivingItem.itemId`, `description`, `unit`) with the unit cost it is
+  taken into stock at; approved, it builds stock only — no order, no
+  project, no supplier bill (finance's unbilled queue and bill matching
+  skip it). `checkReceivingSheet()` is the one check for create and
+  `PUT /receivings/:id/sheet` (a draft, modified whole, claimed on
+  `version`); `postReceiving()` posts either kind. The page is
+  `pages/chain/IncomingEditor.tsx` (`/g-chain/incoming/new`,
+  `?order=` from the purchase order's "Receive goods" — the pop-up is gone;
+  `/:id/edit` on a draft), fed by `GET /receivings/options`, `/order/:id`
+  (each line's ordered, received, pending and left), `/items` and
+  `/route`, all behind the receiving rights. The list is **Incoming
+  Reports** (+ New incoming, a From column, cards, `?against=order|none`).
+  **The route is "Incoming — back support, purchasing manager"**
+  (`preparerSigns`, `standIns`; Back Support team-scoped), the
+  supervisor's route RETIRED. The paper is the purchase order's dress:
+  ORDER DETAILS, Received from / Received at, the lines, Prepared by and
+  the steps. The record page has no web Guard (the API decides — the
+  approvers may hold no warehouse right). verify-chain pins both kinds.
+- **The inventory screen** (2026-10-14, the owner's design): cards (Total
+  items, Total valuation, Low stock alerts, Pending POs) from the list's
+  `summary` under its own query; columns Item code, Description,
+  Category, Brand / Partner (the item's preferred supplier — the item
+  master has no brand), Qty, Unit cost, Status (`stockState()`: On order
+  when low or out with an issued order still to arrive, Out of stock, Low
+  stock, In stock); under it the Recent stock movement log
+  (`GET /inventory/movements`, linked to each document) and Quick
+  operations (+ Receive new stock, Generate stock report). No category
+  filter yet — the owner will decide.
+- **An email prints on ONE line** (2026-10-14, the owner's call): in the
+  `blocks` sections and `renderDocument`'s sign-offs an address too wide
+  for its column is drawn smaller (`fitSize()`, 6pt the floor), never
+  broken; an email in a block is never underlined.
 - **Anyone asks to borrow** (push 4b; the owner's call: "anyone can request
   to borrow; approval by the Team Leader / Technical Manager they report to
   or within the team; the warehouse processes it, with its reports-to's

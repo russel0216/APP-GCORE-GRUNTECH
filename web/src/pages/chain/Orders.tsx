@@ -6,10 +6,7 @@ import { DataList, type Column } from '../../components/DataList';
 import {
   Empty,
   ErrorBox,
-  Field,
   Loading,
-  Modal,
-  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -19,7 +16,6 @@ import { Stat } from '../../components/charts';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { ProgressBar } from '../delivery/Projects';
-import { NumberInput } from '../../components/NumberInput';
 
 // ════════════════════════════════════════════════════════════════════
 //  PURCHASE ORDERS
@@ -187,7 +183,6 @@ export function PurchaseOrderDetail() {
   const [po, setPo] = useState<PoDetailData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
-  const [receiving, setReceiving] = useState(false);
   // Bumped on every load so the approval chain re-reads after a submit.
   const [reload, setReload] = useState(0);
 
@@ -288,9 +283,9 @@ export function PurchaseOrderDetail() {
             )}
             {(po.status === 'ISSUED' || po.status === 'PARTIALLY_RECEIVED') &&
               can('gchain.receiving.create') && (
-                <button className="btn btn-primary" onClick={() => setReceiving(true)}>
+                <Link className="btn btn-primary" to={`/g-chain/incoming/new?order=${po.id}`}>
                   Receive goods
-                </button>
+                </Link>
               )}
           </>
         }
@@ -459,139 +454,7 @@ export function PurchaseOrderDetail() {
         </div>
       )}
 
-      {receiving && (
-        <ReceiveModal
-          po={po}
-          onClose={() => setReceiving(false)}
-          onReceived={(receivingId) => navigate(`/g-chain/incoming/${receivingId}`)}
-        />
-      )}
     </div>
   );
 }
 
-function ReceiveModal({
-  po,
-  onClose,
-  onReceived,
-}: {
-  po: PoDetailData;
-  onClose: () => void;
-  onReceived: (id: string) => void;
-}) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
-  const [warehouseId, setWarehouseId] = useState(po.warehouse?.id ?? '');
-  const [deliveryRefNo, setDeliveryRefNo] = useState('');
-  const [quantities, setQuantities] = useState<Record<string, string>>(() =>
-    Object.fromEntries(po.items.map((i) => [i.id, String(i.outstandingQty)])),
-  );
-
-  useEffect(() => {
-    api.get<typeof warehouses>('/warehouses').then(setWarehouses).catch(() => {});
-  }, []);
-
-  async function receive() {
-    setBusy(true);
-    setError(null);
-    try {
-      const created = await api.post<{ id: string; needsApproval?: boolean }>('/receivings', {
-        orderId: po.id,
-        warehouseId: warehouseId || null,
-        deliveryRefNo: deliveryRefNo || null,
-        items: po.items
-          .filter((i) => Number(quantities[i.id]) > 0)
-          .map((i) => ({ orderItemId: i.id, quantity: Number(quantities[i.id]) })),
-      });
-      // With the Incoming route active the report is a draft: its page takes
-      // the packing list, then goes for approval — nothing moves until then.
-      toast('ok', created.needsApproval ? 'Saved — attach the packing list, then submit it for approval' : 'Goods received');
-      onReceived(created.id);
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  const receivingValue = po.items.reduce(
-    (s, i) => s + (Number(quantities[i.id]) || 0) * i.unitPrice,
-    0,
-  );
-
-  return (
-    <Modal
-      wide
-      title={`Receive goods against ${po.number}`}
-      onClose={onClose}
-      footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={receive} disabled={busy || receivingValue <= 0}>
-            {busy ? 'Receiving…' : 'Receive goods'}
-          </button>
-        </ModalFoot>
-      }
-    >
-      <ErrorBox error={error} />
-      <div className="alert info">
-        {po.kind === 'DIRECT_TO_JOB'
-          ? `This charges ${po.job?.number ?? 'the project'} ${formatMoney(receivingValue)} and releases the same from committed.`
-          : `This adds ${formatMoney(receivingValue)} of stock. No project is charged until it is issued.`}
-      </div>
-
-      <div className="grid grid-2">
-        <Field label="Into warehouse" hint="Leave blank if it went straight to site">
-          <select value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
-            <option value="">— straight to site —</option>
-            {warehouses.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Delivery receipt no.">
-          <input value={deliveryRefNo} onChange={(e) => setDeliveryRefNo(e.target.value)} />
-        </Field>
-      </div>
-
-      <div className="table-wrap">
-        <table className="data">
-          <thead>
-            <tr>
-              <th>Item</th>
-              <th className="right">Ordered</th>
-              <th className="right">Already in</th>
-              <th className="right proc-col-input">Receiving now</th>
-            </tr>
-          </thead>
-          <tbody>
-            {po.items.map((i) => (
-              <tr key={i.id}>
-                <td>{i.description}</td>
-                <td className="right mono">{i.quantity}</td>
-                <td className="right mono faint">{i.receivedQty}</td>
-                <td>
-                  <NumberInput
-                    kind="quantity"
-                    className="mono proc-cell-input"
-                    step="0.001"
-                    max={i.outstandingQty}
-                    aria-label={`Quantity received of ${i.description}`}
-                    value={quantities[i.id] ?? ''}
-                    onChange={(e) => setQuantities({ ...quantities, [i.id]: e.target.value })}
-                  />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <p className="faint proc-small">
-        Receiving more than was ordered is refused — amend the order if the delivery is genuinely
-        larger.
-      </p>
-    </Modal>
-  );
-}

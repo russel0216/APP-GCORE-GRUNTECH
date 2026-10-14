@@ -2023,8 +2023,9 @@ async function main() {
     );
     const clearanceLines = pdfText(clearance).split('\n');
     check(
-      'an email too long for its column breaks after its @',
-      clearanceLines.includes('camille.reyes@') && clearanceLines.includes('gruntechnology.com'),
+      // One line, shrunk to fit (2026-10-14, the owner's call: "email is only one liner throughout the PDF").
+      'an email too long for its column stays on one line, smaller, never broken after its @',
+      clearanceLines.includes('camille.reyes@gruntechnology.com') && !clearanceLines.includes('camille.reyes@'),
       clearanceLines.filter((l) => l.includes('camille') || l.includes('gruntech')).join(' / '),
     );
     const houseOverruns = signoffOverruns(clearanceRuns, 'REQUESTED BY', 595.28 - 36, 841.89 - 57.38);

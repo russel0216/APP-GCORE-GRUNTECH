@@ -33,6 +33,9 @@ export type NotificationType =
   | 'meeting.invited'
   | 'meeting.updated'
   | 'meeting.cancelled'
+  /** The minutes went out for the attendees to agree (2026-10-14), and an attendee answered. */
+  | 'minutes.to_agree'
+  | 'minutes.answered'
   | 'evaluation.due'
   | 'training.enrolled'
   | 'training.assigned'

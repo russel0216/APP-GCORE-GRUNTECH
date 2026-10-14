@@ -115,6 +115,16 @@ interface Meeting {
   minutesBy: { id: string; name: string } | null;
   /** The organiser or anyone invited, once it has started, never on a cancelled one. */
   canWriteMinutes: boolean;
+  /** The attendees agree the minutes (2026-10-14): DRAFT, FOR_AGREEMENT, AGREED. */
+  minutesStatus: 'DRAFT' | 'FOR_AGREEMENT' | 'AGREED';
+  minutesRound: number;
+  minutesSentAt: string | null;
+  minutesAgreedAt: string | null;
+  /** Who said Going (the organiser aside) — those who agree the minutes. */
+  attendees: UserRef[];
+  agreementRound: { id: string; userId: string; response: 'PENDING' | 'AGREED' | 'CHANGE_ASKED'; comment: string | null; respondedAt: string | null; user: UserRef }[];
+  canSendMinutes: boolean;
+  myAgreement: { response: 'PENDING' | 'AGREED' | 'CHANGE_ASKED'; comment: string | null } | null;
   startsAt: string;
   endsAt: string;
   status: string;
@@ -796,6 +806,7 @@ export function MeetingDetail() {
         title={m.title}
         status={m.status}
         statusExtra={MEETING_TONES}
+        print={m.minutes ? `/api/meetings/${m.id}/minutes/pdf` : undefined}
         meta={
           <>
             <strong>{formatSpan(m.startsAt, m.endsAt)}</strong> · {durationText(m.startsAt, m.endsAt)} · organised
@@ -1090,44 +1101,101 @@ export function MeetingDetail() {
 /**
  * Minutes of meeting (2026-10-13, the owner's call: "so anyone can back track
  * what have been talked about"): one text under the Agenda, written IN the
- * card by the organiser or anyone invited once the meeting has started, and
- * kept with who last wrote it and when. Files go on the Documents card.
+ * card by the organiser or anyone invited once the meeting has started.
+ * Since 2026-10-14 the attendees AGREE them ("approval of attendees agreeing
+ * the minutes" — those who said Going): the organiser sends them, each
+ * attendee agrees or asks for a change, and once every one has agreed they
+ * read Agreed. Changing them after that sends them round again. Files go on
+ * the Documents card; Print is the minutes on paper.
  */
+const MINUTES_TONES = { DRAFT: '', FOR_AGREEMENT: 'warn', AGREED: 'ok' } as const;
+const MINUTES_LABEL = { DRAFT: 'Draft', FOR_AGREEMENT: 'Out for agreement', AGREED: 'Agreed' } as const;
+const ANSWER_LABEL = { PENDING: 'Waiting', AGREED: 'Agreed', CHANGE_ASKED: 'Change asked' } as const;
+const ANSWER_TONES = { PENDING: 'warn', AGREED: 'ok', CHANGE_ASKED: 'danger' } as const;
+
 function MinutesCard({ meeting: m, onSaved }: { meeting: Meeting; onSaved: () => Promise<void> }) {
   const toast = useToast();
+  const confirm = useConfirm();
   const [draft, setDraft] = useState<string | null>(null);
+  const [asking, setAsking] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
-  async function save() {
-    if (draft === null) return;
+  async function run(fn: () => Promise<unknown>, ok: string) {
     setBusy(true);
     setError(null);
     try {
-      await api.put(`/meetings/${m.id}/minutes`, { minutes: draft });
-      toast('ok', draft.trim() ? 'Minutes saved' : 'Minutes cleared');
-      setDraft(null);
+      await fn();
+      toast('ok', ok);
       await onSaved();
+      return true;
     } catch (err) {
       setError(err);
+      return false;
     } finally {
       setBusy(false);
     }
   }
+  async function save() {
+    if (draft === null) return;
+    const sent = m.minutesStatus !== 'DRAFT';
+    if (await run(() => api.put(`/meetings/${m.id}/minutes`, { minutes: draft }), draft.trim() ? (sent ? 'Minutes saved — send them again for agreement' : 'Minutes saved') : 'Minutes cleared')) setDraft(null);
+  }
+  const answer = (response: 'AGREED' | 'CHANGE_ASKED', comment?: string) =>
+    run(() => api.post(`/meetings/${m.id}/minutes/respond`, { response, comment: comment ?? null }), response === 'AGREED' ? 'You agreed the minutes' : 'Your change was sent to the organiser').then((ok) => ok && setAsking(null));
+
+  const round = m.agreementRound;
+  const agreed = round.filter((a) => a.response === 'AGREED').length;
 
   return (
     <div className="card">
       <div className="row meeting-split meeting-card-head">
-        <h3 className="card-title meeting-flush">Minutes of meeting</h3>
-        {m.canWriteMinutes && draft === null && (
-          <button type="button" className="btn btn-sm" onClick={() => setDraft(m.minutes ?? '')}>
-            {m.minutes ? 'Modify' : 'Write minutes'}
-          </button>
-        )}
+        <h3 className="card-title meeting-flush">
+          Minutes of meeting{' '}
+          {m.minutes && <StatusBadge status={m.minutesStatus} extra={MINUTES_TONES} label={MINUTES_LABEL[m.minutesStatus]} />}
+        </h3>
+        <div className="row">
+          {m.canSendMinutes && draft === null && (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              disabled={busy}
+              onClick={() =>
+                confirm.ask({
+                  title: 'Send the minutes for agreement?',
+                  body: m.attendees.length
+                    ? `${m.attendees.map((a) => a.name).join(', ')} ${m.attendees.length === 1 ? 'is' : 'are'} asked to agree them — the people who said Going.`
+                    : 'Nobody said Going, so there is no one to agree them.',
+                  confirmLabel: 'Send for agreement',
+                  tone: 'primary',
+                  onConfirm: async () => {
+                    await api.post(`/meetings/${m.id}/minutes/send`);
+                    toast('ok', 'Minutes sent for agreement');
+                    await onSaved();
+                  },
+                })
+              }
+            >
+              Send for agreement
+            </button>
+          )}
+          {m.canWriteMinutes && draft === null && (
+            <button type="button" className="btn btn-sm" onClick={() => setDraft(m.minutes ?? '')}>
+              {m.minutes ? 'Modify' : 'Write minutes'}
+            </button>
+          )}
+        </div>
       </div>
+      {confirm.bar}
       <ErrorBox error={error} />
       {draft !== null ? (
         <div className="stack">
+          {m.minutesStatus !== 'DRAFT' && (
+            <div className="alert info">
+              {m.minutesStatus === 'AGREED' ? 'The attendees agreed these minutes.' : 'These minutes are out for agreement.'} Changing them sets this
+              round aside — the answers are kept — and they go out again.
+            </div>
+          )}
           <textarea
             rows={10}
             value={draft}
@@ -1152,6 +1220,89 @@ function MinutesCard({ meeting: m, onSaved }: { meeting: Meeting; onSaved: () =>
           {m.minutesAt && (
             <p className="faint meeting-minutes-by">
               Written by {m.minutesBy?.name ?? 'someone no longer here'} · {formatDateTime(m.minutesAt)}
+              {m.minutesSentAt && m.minutesStatus !== 'DRAFT' ? ` · sent for agreement ${formatDateTime(m.minutesSentAt)}` : ''}
+            </p>
+          )}
+
+          {m.myAgreement && (
+            <div className="minutes-mine">
+              {asking === null ? (
+                <>
+                  <span>
+                    {m.myAgreement.response === 'PENDING'
+                      ? 'Do you agree these minutes?'
+                      : m.myAgreement.response === 'AGREED'
+                        ? 'You agreed these minutes.'
+                        : `You asked for a change: ${m.myAgreement.comment ?? ''}`}
+                  </span>
+                  <div className="row">
+                    {m.myAgreement.response !== 'AGREED' && (
+                      <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => void answer('AGREED')}>
+                        Agree
+                      </button>
+                    )}
+                    <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setAsking(m.myAgreement?.comment ?? '')}>
+                      Ask for a change
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="stack minutes-ask">
+                  <label htmlFor="minutes-ask">What should change?</label>
+                  <textarea id="minutes-ask" rows={3} value={asking} maxLength={2000} onChange={(e) => setAsking(e.target.value)} autoFocus />
+                  <div className="row meeting-minutes-foot">
+                    <button type="button" className="btn btn-sm" onClick={() => setAsking(null)} disabled={busy}>
+                      Cancel
+                    </button>
+                    <button type="button" className="btn btn-sm btn-primary" disabled={busy || !asking.trim()} onClick={() => void answer('CHANGE_ASKED', asking)}>
+                      Send to the organiser
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {round.length > 0 && (
+            <div className="minutes-round">
+              <p className="muted">
+                {m.minutesStatus === 'AGREED'
+                  ? `Agreed by every attendee${m.minutesAgreedAt ? ` · ${formatDateTime(m.minutesAgreedAt)}` : ''}`
+                  : m.minutesStatus === 'FOR_AGREEMENT'
+                    ? `${agreed} of ${round.length} attendee${round.length === 1 ? '' : 's'} agreed`
+                    : `Round ${m.minutesRound} was set aside when the minutes changed — send them again`}
+              </p>
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Attendee</th>
+                    <th>Answer</th>
+                    <th>When</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {round.map((a) => (
+                    <tr key={a.id}>
+                      <td>
+                        <div>{a.user.name}</div>
+                        {a.user.position && <div className="faint">{a.user.position}</div>}
+                      </td>
+                      <td>
+                        <StatusBadge status={a.response} extra={ANSWER_TONES} label={ANSWER_LABEL[a.response]} />
+                        {a.comment && <div className="faint">{a.comment}</div>}
+                      </td>
+                      <td className="faint">{a.respondedAt ? formatDateTime(a.respondedAt) : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {m.minutesStatus === 'DRAFT' && round.length === 0 && m.canSendMinutes && (
+            <p className="faint">
+              {m.attendees.length
+                ? `When they read right, send them to the ${m.attendees.length} attendee${m.attendees.length === 1 ? '' : 's'} who said Going to agree.`
+                : 'Nobody said Going, so there is no one to agree them.'}
             </p>
           )}
         </>

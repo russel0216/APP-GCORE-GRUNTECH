@@ -201,7 +201,8 @@ async function cleanup() {
   // Cascade, and deliberately so — a receiving report is evidence that goods
   // arrived and should not vanish because someone deleted the order.
   await prisma.receiving.deleteMany({
-    where: { order: { notes: { startsWith: TAG } } },
+    // …and the reports received without an order, by the name they came from.
+    where: { OR: [{ order: { notes: { startsWith: TAG } } }, { sourceName: { startsWith: TAG } }] },
   });
   await prisma.purchaseOrder.deleteMany({ where: { notes: { startsWith: TAG } } });
   await prisma.purchaseRequest.deleteMany({ where: { purpose: { startsWith: TAG } } });
@@ -3482,6 +3483,13 @@ async function main() {
     const receiverRole = await makeRole('zzchain_receiver', 'ZZ Receiver', ['gchain.receiving.view_all', 'gchain.receiving.create']);
     const receiver = await mkUser('Verify Receiver', 'receiver@verifyc.local', receiverRole.id);
     await prisma.user.update({ where: { id: receiver.id }, data: { supervisorId: boss.id } });
+    // Incoming routes to Back Support, then the Purchasing Manager
+    // (2026-10-14): the store supervisor holds both here, so one Approve
+    // signs both steps (one signature per person).
+    for (const key of ['back_support', 'purchasing_manager']) {
+      const r = await prisma.role.findUniqueOrThrow({ where: { key } });
+      await prisma.userRole.upsert({ where: { userId_roleId: { userId: boss.id, roleId: r.id } }, create: { userId: boss.id, roleId: r.id }, update: {} });
+    }
     const receiverToken = signToken(receiver.id, receiver.email);
     const billerRole = await makeRole('zzchain_biller', 'ZZ Biller', ['gfin.ap.view_all', 'gfin.ap.create', 'gchain.receiving.view_all']);
     const biller = await mkUser('Verify Biller', 'biller@verifyc.local', billerRole.id);
@@ -3523,7 +3531,7 @@ async function main() {
     );
     const inRead = await api(receiverToken, 'GET', `/receivings/${firstInId}`);
     check(
-      'it offers Submit for approval and names the receiver’s supervisor as who signs',
+      'it offers Submit for approval and names Back Support and the Purchasing Manager as who signs',
       inRead.body.canSubmit === true &&
         inRead.body.needsApproval === true &&
         ((inRead.body.approvalRoute as { steps: { approvers: { name: string }[] }[] } | null)?.steps ?? [])
@@ -3559,14 +3567,15 @@ async function main() {
     // The report, its Attachments page, then the packing list's own page.
     const draftInPages = draftInPdf.bytes ? (await PDFDocument.load(draftInPdf.bytes)).getPageCount() : 0;
     check(
-      'the Incoming Report prints who received it, dated, the supervisor over Pending, and the packing list behind it',
+      'the Incoming Report prints who prepared it, dated, Back Support and the Purchasing Manager over Pending, and the packing list behind it',
       draftInPdf.status === 200 &&
-        flat(draftInPdf.text).includes('RECEIVED BY') &&
-        flat(draftInPdf.text).includes('SUPERVISOR') &&
+        flat(draftInPdf.text).includes('PREPARED BY') &&
+        flat(draftInPdf.text).includes('BACK SUPPORT') &&
+        flat(draftInPdf.text).includes('PURCHASING MANAGER') &&
         flat(draftInPdf.text).includes('Verify Receiver') &&
         flat(draftInPdf.text).includes('Verify Store Supervisor') &&
         signedCount(draftInPdf.text) === 1 &&
-        pendingCount(draftInPdf.text) === 1 &&
+        pendingCount(draftInPdf.text) === 2 &&
         draftInPdf.text.includes(`${TAG}-packing-list.pdf`) &&
         draftInPages === 3,
       `${draftInPdf.status} ${signedCount(draftInPdf.text)} signed, ${pendingCount(draftInPdf.text)} pending, ${draftInPages} page(s); ` +
@@ -3582,7 +3591,7 @@ async function main() {
     const inRow = await prisma.receiving.findUniqueOrThrow({ where: { id: firstInId } });
     const inMoves = await prisma.inventoryTransaction.count({ where: { sourceType: 'receiving', sourceId: firstInId } });
     check(
-      'the receiver cannot approve their own report; the supervisor’s approval receives it — six into stock, once, and the order part received',
+      'the receiver cannot approve their own report; one approval by the holder of both steps receives it — six into stock, once, and the order part received',
       receiverSelf !== 'acted' &&
         inApproved.status === 200 &&
         inRow.status === 'RECEIVED' &&
@@ -3598,6 +3607,38 @@ async function main() {
       'a second settlement of the same approval receives nothing again',
       (await prisma.inventoryTransaction.count({ where: { sourceType: 'receiving', sourceId: firstInId } })) === 1 && money((await onHand()) - mainBefore, 6),
       String(await onHand()),
+    );
+
+    // Without a purchase order (2026-10-14): where from, why, a warehouse and
+    // an item per line; refused without them; approved, it builds stock at
+    // the typed cost and charges no order.
+    const noWhy = await api(receiverToken, 'POST', '/receivings', { sourceName: `${TAG} site return`, warehouseId: warehouse.id, items: [{ itemId: item.id, quantity: 2, unitCost: 100 }] });
+    const freeNoWarehouse = await api(receiverToken, 'POST', '/receivings', { sourceName: `${TAG} site return`, reason: 'returned', items: [{ itemId: item.id, quantity: 2, unitCost: 100 }] });
+    const freeIn = await api(receiverToken, 'POST', '/receivings', {
+      sourceName: `${TAG} site return`,
+      reason: `${TAG} returned unused from site`,
+      warehouseId: warehouse.id,
+      items: [{ itemId: item.id, quantity: 2, unitCost: 100 }],
+    });
+    const freeId = String(freeIn.body.id);
+    const freeBefore = await onHand();
+    const freeSubmit = await api(receiverToken, 'POST', `/receivings/${freeId}/submit`);
+    const freeRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'receiving', documentId: freeId, status: 'PENDING' } });
+    const freeApproved = freeRequest ? await api(bossToken, 'POST', `/approvals/${freeRequest.id}/act`, { action: 'APPROVED' }) : { status: 0, body: {} };
+    const freeRow = await prisma.receiving.findUniqueOrThrow({ where: { id: freeId } });
+    const freeList = await api(receiverToken, 'GET', `/receivings?against=none&search=${TAG}`);
+    check(
+      'goods without a purchase order: refused without a reason or a warehouse; approved, two go into stock at the typed cost, and the list says where they came from',
+      noWhy.status === 400 &&
+        freeNoWarehouse.status === 400 &&
+        freeIn.status === 201 &&
+        freeSubmit.status === 200 &&
+        freeApproved.status === 200 &&
+        freeRow.status === 'RECEIVED' &&
+        freeRow.orderId === null &&
+        money((await onHand()) - freeBefore, 2) &&
+        ((freeList.body.rows ?? []) as { id: string; from: string; order: unknown }[]).some((r) => r.id === freeId && r.from === `${TAG} site return` && r.order === null),
+      `${noWhy.status} ${freeNoWarehouse.status} ${freeIn.status} ${freeSubmit.status} ${freeApproved.status} ${freeRow.status}; ${freeBefore} → ${await onHand()}`,
     );
 
     // The last four: pulled back, sent again, then cancelled while waiting —
@@ -3622,7 +3663,7 @@ async function main() {
         fitsRequestAfter?.status === 'CANCELLED' &&
         fitsRow.status === 'CANCELLED' &&
         fitsRow.cancelReason === `${TAG} wrong delivery` &&
-        money((await onHand()) - mainBefore, 6) &&
+        money((await onHand()) - mainBefore, 8) &&
         !!fitsTrail,
       `${fitsSubmit.status} ${fitsBack.status}/${fitsBack.body.status} ${fitsAgain.status} ${fitsCancel.status}; req ${fitsRequestAfter?.status}; ${fitsRow.status}; ${fitsTrail?.summary ?? 'no trail'}`,
     );
@@ -3816,7 +3857,7 @@ async function main() {
       {
         path: 'receivings',
         entity: 'receiving',
-        noun: ['receiving', 'receivings'],
+        noun: ['incoming report', 'incoming reports'],
         page: LANDSCAPE,
         key: (r) => String(r.number),
         filter: [`orderId=${po.id}`, `order ${po.number}`],

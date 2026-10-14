@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, qs } from '../../lib/api';
+import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
@@ -42,7 +42,9 @@ interface ReceivingRow {
     kind: string;
     supplier: { id: string; name: string };
     job: { id: string; number: string; name: string } | null;
-  };
+  } | null;
+  /** Where it came from: the order's supplier, else the supplier or name on the report. */
+  from: string;
   warehouse: { id: string; name: string } | null;
   receivedBy: { id: string; name: string };
 }
@@ -52,20 +54,21 @@ const RECEIVING_TONES = { RECEIVED: 'ok', PENDING_APPROVAL: 'warn' } as const;
 
 export function Receivings() {
   const navigate = useNavigate();
+  const { can } = useAuth();
 
   const columns: Column<ReceivingRow>[] = [
     { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (r) => <span className="mono">{r.number}</span> },
     {
       key: 'order',
-      label: 'Against',
+      label: 'From',
       render: (r) => (
         <div>
-          <div>{r.order.supplier.name}</div>
-          <div className="faint mono">{r.order.number}</div>
+          <div>{r.from}</div>
+          {r.order ? <div className="faint mono">{r.order.number}</div> : <div className="faint">No purchase order</div>}
         </div>
       ),
     },
-    { key: 'for', label: 'For', render: (r) => r.order.job ? `${r.order.job.number}` : <span className="faint">Stock</span> },
+    { key: 'for', label: 'For', render: (r) => (r.order?.job ? `${r.order.job.number}` : <span className="faint">Stock</span>) },
     { key: 'warehouse', label: 'Into', render: (r) => r.warehouse?.name ?? <span className="faint">site</span> },
     { key: 'receivedDate', label: 'Received', sortKey: 'receivedDate', render: (r) => formatDate(r.receivedDate) },
     { key: 'lines', label: 'Lines', align: 'right', render: (r) => r.lineCount },
@@ -79,7 +82,7 @@ export function Receivings() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Incoming</h1>
+          <h1>Incoming Reports</h1>
         </div>
       </div>
 
@@ -92,8 +95,35 @@ export function Receivings() {
         searchPlaceholder="Search number, order, supplier…"
         onRowClick={(r) => navigate(`/g-chain/incoming/${r.id}`)}
         emptyTitle="Nothing received yet"
-        emptyHint="Receive against an issued purchase order."
+        emptyHint="Receive against an issued purchase order, or without one."
+        actions={
+          can('gchain.receiving.create') ? (
+            <Link className="btn btn-primary btn-sm" to="/g-chain/incoming/new">
+              + New incoming
+            </Link>
+          ) : undefined
+        }
+        summary={(raw, total) => {
+          const sum = raw as { receivedValue?: number; waiting?: number; drafts?: number; withoutOrder?: number };
+          return (
+            <>
+              <Stat label="Incoming reports" value={total} />
+              <Stat label="Value received" value={formatMoney(sum.receivedValue ?? 0)} />
+              <Stat label="Waiting for approval" value={sum.waiting ?? 0} to="/g-chain/incoming?status=PENDING_APPROVAL" />
+              <Stat label="Drafts" value={sum.drafts ?? 0} accent="quiet" to="/g-chain/incoming?status=DRAFT" />
+              <Stat label="Without a purchase order" value={sum.withoutOrder ?? 0} accent="quiet" to="/g-chain/incoming?against=none" />
+            </>
+          );
+        }}
         filters={[
+          {
+            key: 'against',
+            label: 'Received against',
+            options: [
+              { value: 'order', label: 'A purchase order' },
+              { value: 'none', label: 'No purchase order' },
+            ],
+          },
           {
             key: 'status',
             label: 'Status',
@@ -146,7 +176,9 @@ export function ReceivingDetail() {
     kind: string;
     supplier: { id: string; name: string };
     job: { id: string; number: string; name: string } | null;
-  };
+  } | null;
+  const from = String(rec.from ?? '');
+  const fromSupplier = (rec.supplier ?? null) as { id: string; name: string } | null;
   // Empty unless the caller holds gfin.ap.view_all (billsVisible says which).
   const bills = (rec.bills ?? []) as { id: string; number: string; status: string }[];
   const billsVisible = rec.billsVisible === true;
@@ -155,12 +187,16 @@ export function ReceivingDetail() {
   const canEnterBill = can('gfin.ap.create') && (!billsVisible || bills.length === 0);
   const items = rec.items as {
     id: string;
+    code: string | null;
+    name: string | null;
+    description: string;
+    unit: string;
     quantity: number;
     unitCost: number;
     amount: number;
     serialNo: string | null;
     batchNo: string | null;
-    orderItem: { description: string; item: { code: string } | null; costCategory: { name: string } | null };
+    orderItem: { costCategory: { name: string } | null } | null;
   }[];
 
   const status = String(rec.status ?? 'RECEIVED');
@@ -197,22 +233,32 @@ export function ReceivingDetail() {
       <RecordHeader
         type="Incoming"
         code={String(rec.number)}
-        title={order.supplier.name}
+        title={from}
         status={status}
         statusExtra={RECEIVING_TONES}
         amount={formatMoney(Number(rec.value))}
         amountLabel={received ? 'Value received' : 'Value'}
         meta={
           <>
-            Against <Link to={`/g-chain/purchase-orders/${order.id}`}>{order.number}</Link> ·{' '}
-            {order.job ? (
-              <Link to={`/g-ops/projects/${order.job.id}`}>
-                {order.job.number} — {order.job.name}
-              </Link>
+            {order ? (
+              <>
+                Against <Link to={`/g-chain/purchase-orders/${order.id}`}>{order.number}</Link> ·{' '}
+                {order.job ? (
+                  <Link to={`/g-ops/projects/${order.job.id}`}>
+                    {order.job.number} — {order.job.name}
+                  </Link>
+                ) : (
+                  'Stock'
+                )}{' '}
+                · from <Link to={`/g-chain/suppliers/${order.supplier.id}`}>{order.supplier.name}</Link>
+              </>
             ) : (
-              'Stock'
+              <>
+                No purchase order · from{' '}
+                {fromSupplier ? <Link to={`/g-chain/suppliers/${fromSupplier.id}`}>{fromSupplier.name}</Link> : from}
+              </>
             )}{' '}
-            · from <Link to={`/g-chain/suppliers/${order.supplier.id}`}>{order.supplier.name}</Link> · received{' '}
+            · received{' '}
             {formatDate(String(rec.receivedDate))}
             {warehouse ? ` into ${warehouse.name}` : ''}
             {refs.deliveryRefNo ? ` · DR ${refs.deliveryRefNo}` : ''}
@@ -252,6 +298,7 @@ export function ReceivingDetail() {
             </button>
           ) : (
             received &&
+            order &&
             canEnterBill && (
               // The bill picks up the supplier, order and these goods from the
               // receiving, and — because it names the receiving — posts no job
@@ -289,8 +336,8 @@ export function ReceivingDetail() {
             },
           },
         ]}
-        // Its references only: what arrived is the record.
-        modify={rec.canEdit === true ? () => setModifying(true) : undefined}
+        // A draft is modified whole on its page; past a draft, its references only.
+        modify={rec.canModify === true ? `/g-chain/incoming/${recId}/edit` : rec.canEdit === true ? () => setModifying(true) : undefined}
         confirm={confirm}
       />
 
@@ -305,8 +352,8 @@ export function ReceivingDetail() {
       <ErrorBox error={error} />
 
       {received ? (
-        <div className={`alert ${order.kind === 'DIRECT_TO_JOB' ? 'ok' : 'info'}`}>
-          {order.kind === 'DIRECT_TO_JOB'
+        <div className={`alert ${order?.kind === 'DIRECT_TO_JOB' ? 'ok' : 'info'}`}>
+          {order?.kind === 'DIRECT_TO_JOB'
             ? `${formatMoney(Number(rec.value))} charged to ${order.job?.number ?? 'the project'}, and the same released from committed.`
             : `${formatMoney(Number(rec.value))} added to stock. No project has been charged — that happens at issuance.`}
         </div>
@@ -317,6 +364,13 @@ export function ReceivingDetail() {
           {status === 'PENDING_APPROVAL'
             ? 'Waiting for approval. Nothing has moved yet: the approval puts the goods into stock or onto the project.'
             : 'A draft. Nothing has moved yet — attach the packing list or delivery receipt below, then submit it for approval.'}
+        </div>
+      )}
+
+      {typeof rec.reason === 'string' && (
+        <div className="card proc-card">
+          <h3 className="card-title">Why there is no purchase order</h3>
+          <p className="activity-notes">{rec.reason}</p>
         </div>
       )}
 
@@ -345,11 +399,14 @@ export function ReceivingDetail() {
               {items.map((i) => (
                 <tr key={i.id}>
                   <td>
-                    <div>{i.orderItem.description}</div>
-                    {i.orderItem.item && <div className="faint mono">{i.orderItem.item.code}</div>}
+                    <div>{i.name ?? i.description}</div>
+                    {i.name && i.description && i.description !== i.name && <div className="faint">{i.description}</div>}
+                    {i.code && <div className="faint mono">{i.code}</div>}
                   </td>
-                  <td>{i.orderItem.costCategory?.name ?? <span className="faint">—</span>}</td>
-                  <td className="right mono">{i.quantity}</td>
+                  <td>{i.orderItem?.costCategory?.name ?? <span className="faint">—</span>}</td>
+                  <td className="right mono">
+                    {i.quantity} {i.unit}
+                  </td>
                   <td className="right mono">{formatMoney(i.unitCost)}</td>
                   <td className="right mono">{formatMoney(i.amount)}</td>
                   <td className="faint mono">{[i.serialNo, i.batchNo].filter(Boolean).join(' / ') || '—'}</td>
@@ -1130,16 +1187,100 @@ interface StockRow {
   averageCost: number;
   value: number;
   needsReorder: boolean;
+  /** In stock, low, out, or on order (an issued order still to arrive). */
+  state: 'IN_STOCK' | 'LOW_STOCK' | 'OUT_OF_STOCK' | 'ON_ORDER';
   item: {
     id: string;
     code: string;
+    partNumber: string | null;
     name: string;
     unit: string;
     minStock: number | null;
     reorderLevel: number | null;
     category: { name: string } | null;
+    preferredSupplier: { id: string; name: string } | null;
   };
   warehouse: { id: string; name: string };
+}
+
+const STOCK_STATE_LABEL = { IN_STOCK: 'In stock', LOW_STOCK: 'Low stock', OUT_OF_STOCK: 'Out of stock', ON_ORDER: 'On order' } as const;
+const STOCK_STATE_TONES = { IN_STOCK: 'ok', LOW_STOCK: 'warn', OUT_OF_STOCK: 'danger', ON_ORDER: 'info' } as const;
+
+interface Movement {
+  id: string;
+  type: 'RECEIPT' | 'ISSUE' | 'BORROW' | 'RETURN' | 'ADJUSTMENT';
+  quantity: number;
+  sourceNumber: string | null;
+  occurredAt: string;
+  link: string | null;
+  item: { id: string; code: string; name: string; unit: string };
+  warehouse: { id: string; name: string };
+}
+
+/** "2h ago", "Yesterday", "Oct 9" — how long since a movement. */
+function since(at: string) {
+  const mins = Math.round((Date.now() - new Date(at).getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 24 * 60) return `${Math.round(mins / 60)}h ago`;
+  if (mins < 48 * 60) return 'Yesterday';
+  return formatDate(at);
+}
+
+/**
+ * Under the stock (2026-10-14, the owner's inventory screen): the latest
+ * movements in and out, each linking to its document, and the quick
+ * operations — receive new stock, and the stock report.
+ */
+function InventoryFoot() {
+  const { can } = useAuth();
+  const [rows, setRows] = useState<Movement[] | null>(null);
+  useEffect(() => {
+    api.get<Movement[]>('/inventory/movements?limit=8').then(setRows).catch(() => setRows([]));
+  }, []);
+  return (
+    <div className="inv-foot">
+      <section className="card" aria-labelledby="inv-moves">
+        <h2 id="inv-moves" className="card-title">Recent stock movement</h2>
+        {!rows ? (
+          <Loading />
+        ) : !rows.length ? (
+          <p className="collection-empty">Nothing has moved yet.</p>
+        ) : (
+          <ul className="inv-moves">
+            {rows.map((m) => {
+              const into = m.quantity > 0;
+              const line = (
+                <>
+                  <span className={`inv-move-dir ${into ? 'is-in' : 'is-out'}`}>{into ? 'IN' : 'OUT'}</span>
+                  <span className="inv-move-what">
+                    {Math.abs(m.quantity)} {m.item.unit} {m.item.name} <span className="faint mono">({m.item.code})</span>
+                  </span>
+                  <span className="inv-move-where faint">
+                    {m.sourceNumber ?? m.type.toLowerCase()} · {m.warehouse.name} · {since(m.occurredAt)}
+                  </span>
+                </>
+              );
+              return <li key={m.id}>{m.link ? <Link to={m.link} className="inv-move">{line}</Link> : <div className="inv-move">{line}</div>}</li>;
+            })}
+          </ul>
+        )}
+      </section>
+      <section className="card" aria-labelledby="inv-quick">
+        <h2 id="inv-quick" className="card-title">Quick operations</h2>
+        <div className="stack">
+          {can('gchain.receiving.create') && (
+            <Link className="btn btn-sm btn-primary" to="/g-chain/incoming/new">
+              + Receive new stock
+            </Link>
+          )}
+          <button type="button" className="btn btn-sm" onClick={() => openPdf('/api/inventory/pdf', () => {})}>
+            Generate stock report
+          </button>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 /** Which view of the stock a viewer opened last — a per-browser convenience; a link's `?view=` wins. */
@@ -1176,42 +1317,33 @@ export function Inventory() {
   }, []);
 
   const columns: Column<StockRow>[] = [
+    { key: 'code', label: 'Item code', render: (s) => <span className="mono">{s.item.code}</span> },
     {
       key: 'item',
-      label: 'Item',
+      label: 'Description',
       render: (s) => (
         <div>
           <div>{s.item.name}</div>
-          <div className="faint mono">{s.item.code}</div>
+          {s.item.partNumber && <div className="faint mono">{s.item.partNumber}</div>}
         </div>
       ),
     },
-    { key: 'category', label: 'Category', render: (s) => s.item.category?.name ?? '—', optional: true },
-    { key: 'warehouse', label: 'Warehouse', render: (s) => s.warehouse.name },
+    { key: 'category', label: 'Category', render: (s) => s.item.category?.name ?? <span className="faint">—</span> },
+    { key: 'supplier', label: 'Brand / Partner', render: (s) => s.item.preferredSupplier?.name ?? <span className="faint">—</span> },
+    { key: 'warehouse', label: 'Warehouse', render: (s) => s.warehouse.name, optional: true },
     {
-      key: 'quantity',
-      label: 'On hand',
+      key: 'available',
+      label: 'Qty',
       align: 'right',
       render: (s) => (
-        <span className="mono">
-          {s.quantity} {s.item.unit}
+        <span className={`mono${s.needsReorder ? ' proc-short' : ''}`}>
+          {s.available} {s.item.unit}
+          {s.borrowedQty ? <div className="faint">{s.borrowedQty} on loan</div> : null}
         </span>
       ),
     },
-    {
-      key: 'borrowed',
-      label: 'On loan',
-      align: 'right',
-      render: (s) => (s.borrowedQty ? <span className="mono warn">{s.borrowedQty}</span> : <span className="faint">—</span>),
-    },
-    {
-      key: 'available',
-      label: 'Available',
-      align: 'right',
-      render: (s) => (
-        <span className={`mono${s.needsReorder ? ' proc-short' : ''}`}>{s.available}</span>
-      ),
-    },
+    { key: 'averageCost', label: 'Unit cost', align: 'right', render: (s) => <span className="mono">{formatMoney(s.averageCost)}</span> },
+    { key: 'value', label: 'Value', align: 'right', render: (s) => <span className="mono">{formatMoney(s.value)}</span>, optional: true },
     {
       key: 'reorder',
       label: 'Reorder at',
@@ -1220,16 +1352,15 @@ export function Inventory() {
       optional: true,
     },
     {
-      key: 'averageCost',
-      label: 'Avg. cost',
-      align: 'right',
-      render: (s) => <span className="mono">{formatMoney(s.averageCost)}</span>,
-    },
-    { key: 'value', label: 'Value', align: 'right', render: (s) => <span className="mono">{formatMoney(s.value)}</span> },
-    {
-      key: 'flag',
-      label: '',
-      render: (s) => (s.needsReorder ? <span className="badge warn">reorder</span> : null),
+      key: 'status',
+      label: 'Status',
+      render: (s) => (
+        <StatusBadge
+          status={s.state}
+          extra={STOCK_STATE_TONES}
+          label={s.state === 'LOW_STOCK' ? `Low stock (${s.available})` : STOCK_STATE_LABEL[s.state]}
+        />
+      ),
     },
   ];
 
@@ -1263,6 +1394,17 @@ export function Inventory() {
           onRowClick={(s) => navigate(`/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}`)}
           emptyTitle="No stock yet"
           emptyHint="Stock appears once goods are received into a warehouse."
+          summary={(raw) => {
+            const sum = raw as { items?: number; valuation?: number; lowStock?: number; pendingOrders?: number };
+            return (
+              <>
+                <Stat label="Total items" value={sum.items ?? 0} sub="Stocked items" />
+                <Stat label="Total valuation" value={formatMoney(sum.valuation ?? 0)} sub="Valued stock" />
+                <Stat label="Low stock alerts" value={sum.lowStock ?? 0} sub="Action required" to="/g-chain/inventory?needsReorder=true" />
+                <Stat label="Pending POs" value={sum.pendingOrders ?? 0} sub="In transit" to="/g-chain/purchase-orders?awaiting=true" />
+              </>
+            );
+          }}
           filters={[
             {
               key: 'warehouseId',
@@ -1273,6 +1415,7 @@ export function Inventory() {
           ]}
         />
       )}
+      <InventoryFoot />
     </div>
   );
 }

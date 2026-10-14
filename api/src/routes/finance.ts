@@ -1502,6 +1502,8 @@ async function billLinks(input: {
     if (input.orderId && receiving.orderId !== input.orderId) {
       throw badRequest('That receiving is against a different order');
     }
+    // Goods received without an order have no supplier's bill behind them.
+    if (!receiving.order) throw badRequest(`${receiving.number} was received without a purchase order — there is no bill to match`);
     if (receiving.order.supplierId !== input.supplierId) {
       throw badRequest('Those goods came from a different supplier');
     }
@@ -1891,7 +1893,8 @@ billRoutes.get(
   require_('gfin.ap.view_all'),
   handler(async (_req, res) => {
     const receivings = await prisma.receiving.findMany({
-      where: { status: 'RECEIVED', bills: { none: {} } },
+      // Goods received without an order are billed by nobody.
+      where: { status: 'RECEIVED', orderId: { not: null }, bills: { none: {} } },
       include: {
         order: {
           select: {
@@ -1914,7 +1917,7 @@ billRoutes.get(
         number: r.number,
         receivedDate: r.receivedDate,
         invoiceRefNo: r.invoiceRefNo,
-        order: { ...r.order, total: num(r.order.total) },
+        order: { ...r.order!, total: num(r.order!.total) },
         receivedValue: cents(r.items.reduce((s, i) => s + num(i.quantity) * num(i.unitCost), 0)),
         waitingDays: daysBetween(r.receivedDate, new Date()),
       })),
@@ -4113,7 +4116,7 @@ financeReportRoutes.get(
         _sum: { grossAmount: true },
       }),
       prisma.progressBilling.count({ where: { status: 'APPROVED', invoice: null } }),
-      prisma.receiving.count({ where: { status: 'RECEIVED', bills: { none: {} } } }),
+      prisma.receiving.count({ where: { status: 'RECEIVED', orderId: { not: null }, bills: { none: {} } } }),
       prisma.cashAdvance.count({ where: { status: 'APPROVED' } }),
       prisma.cashAdvance.count({ where: { status: 'RELEASED', liquidationDueDate: { lt: today } } }),
       prisma.cashAdvance.count({ where: { status: 'REFUND_DUE' } }),

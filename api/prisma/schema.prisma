@@ -153,9 +153,10 @@ model User {
 
   accountTokens AccountToken[]
 
-  lastLoginAt DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  lastLoginAt       DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  minutesAgreements MinutesAgreement[] @relation("MinutesAgreement")
 
   @@index([isActive])
   @@index([supervisorId])
@@ -763,10 +764,11 @@ model Supplier {
   payments       Payment[]
   quoteLines     QuotationItem[]
 
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  salesOrderLines SalesOrderLine[]
-  costingLines    CostingLine[]
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  salesOrderLines      SalesOrderLine[]
+  costingLines         CostingLine[]
+  receivedWithoutOrder Receiving[]      @relation("ReceivingFrom")
 
   @@index([isActive])
   @@index([name])
@@ -1008,15 +1010,16 @@ model Item {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  costingLines    CostingLine[]
-  prItems         PurchaseRequestItem[]
-  poItems         PurchaseOrderItem[]
-  issueItems      StockIssueItem[]
-  borrowItems     BorrowSlipItem[]
-  balances        InventoryBalance[]
-  pulloutItems    PulloutItem[]
-  stockMoves      InventoryTransaction[]
-  installedAssets InstalledAsset[]
+  costingLines         CostingLine[]
+  prItems              PurchaseRequestItem[]
+  poItems              PurchaseOrderItem[]
+  issueItems           StockIssueItem[]
+  borrowItems          BorrowSlipItem[]
+  balances             InventoryBalance[]
+  pulloutItems         PulloutItem[]
+  stockMoves           InventoryTransaction[]
+  installedAssets      InstalledAsset[]
+  receivedWithoutOrder ReceivingItem[]        @relation("ReceivedWithoutOrder")
 
   @@index([isActive])
   @@index([name])
@@ -2643,17 +2646,17 @@ model PurchaseOrder {
   createdById String
   createdBy   User   @relation("PoCreator", fields: [createdById], references: [id], onDelete: Restrict)
 
-  orderDate    DateTime  @default(now()) @db.Date
-  deliveryDate DateTime? @db.Date
-  deliverTo    String?
+  orderDate      DateTime  @default(now()) @db.Date
+  deliveryDate   DateTime? @db.Date
+  deliverTo      String?
   /// The supplier's quotation the order answers (2026-10-14) — printed in DETAILS.
-  quoteRef     String?
+  quoteRef       String?
   /// The currency the supplier is paid in (2026-10-14, the owner's layout): printed under ORDER DETAILS; nothing is converted.
   /// The delivery address under Deliver to (2026-10-14): blank prints the company's.
   deliverAddress String?
-  currency      String    @default("PHP")
-  terms        String?
-  notes        String?
+  currency       String    @default("PHP")
+  terms          String?
+  notes          String?
 
   /// Snapshotted so an old order still prints the tax it was issued with.
   vatRate      Decimal @default(0.12) @db.Decimal(6, 4)
@@ -2713,8 +2716,20 @@ model Receiving {
   id     String @id @default(cuid())
   number String @unique
 
-  orderId String
-  order   PurchaseOrder @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  /// The purchase order it receives against — or none (2026-10-14, the
+  /// owner's call: "possible receive without a purchase order, approve it
+  /// too"): a return, a free replacement, a customer-supplied item. Such a
+  /// report names where the goods came from and why there is no order, and
+  /// builds stock at the cost typed on each line.
+  orderId String?
+  order   PurchaseOrder? @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// Without an order: the supplier it came from, when one is on file, else
+  /// the name typed (a customer, a site), and why there is no order.
+  supplierId String?
+  supplier   Supplier? @relation("ReceivingFrom", fields: [supplierId], references: [id], onDelete: SetNull)
+  sourceName String?
+  reason     String?
 
   warehouseId String?
   warehouse   Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
@@ -2757,8 +2772,15 @@ model ReceivingItem {
   receivingId String
   receiving   Receiving @relation(fields: [receivingId], references: [id], onDelete: Cascade)
 
-  orderItemId String
-  orderItem   PurchaseOrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  /// The order line it receives — null on a report with no order, whose
+  /// line names its item from the item master instead.
+  orderItemId String?
+  orderItem   PurchaseOrderItem? @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  itemId      String?
+  item        Item?   @relation("ReceivedWithoutOrder", fields: [itemId], references: [id], onDelete: Restrict)
+  description String?
+  unit        String?
 
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
@@ -3434,8 +3456,8 @@ enum InviteeResponse {
 }
 
 model Meeting {
-  id               String           @id @default(cuid())
-  number           String           @unique
+  id               String             @id @default(cuid())
+  number           String             @unique
   title            String
   agenda           String?
   location         String?
@@ -3448,17 +3470,28 @@ model Meeting {
   minutes          String?
   minutesAt        DateTime?
   minutesById      String?
-  minutesBy        User?            @relation("MeetingMinutesBy", fields: [minutesById], references: [id], onDelete: SetNull)
+  minutesBy        User?              @relation("MeetingMinutesBy", fields: [minutesById], references: [id], onDelete: SetNull)
+  /// The attendees agree the minutes (2026-10-14, the owner's call: "approval
+  /// of attendees agreeing the minutes" — those who said Going). DRAFT while
+  /// they are written; FOR_AGREEMENT once the organiser sends them (round
+  /// `minutesRound`, one `MinutesAgreement` row per attendee); AGREED once
+  /// every one has agreed. A change to the minutes after sending sets that
+  /// round aside (its rows are kept) and they go out again.
+  minutesStatus    MinutesStatus      @default(DRAFT)
+  minutesRound     Int                @default(0)
+  minutesSentAt    DateTime?
+  minutesAgreedAt  DateTime?
+  agreements       MinutesAgreement[]
   startsAt         DateTime
   endsAt           DateTime
-  status           ActivityStatus   @default(PLANNED)
+  status           ActivityStatus     @default(PLANNED)
   organizerId      String
-  organizer        User             @relation("MeetingOrganizer", fields: [organizerId], references: [id], onDelete: Restrict)
+  organizer        User               @relation("MeetingOrganizer", fields: [organizerId], references: [id], onDelete: Restrict)
   /// The project it is held for — a kick-off, a site meeting, a turnover —
   /// so the project's Meetings & Records tab lists it. Optional: most
   /// meetings are nobody's project.
   jobId            String?
-  job              Job?             @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  job              Job?               @relation(fields: [jobId], references: [id], onDelete: SetNull)
   /// https://meet.google.com/abc-defg-hij — pasted back, never derived.
   meetLink         String?
   calendarEventUrl String?
@@ -3466,16 +3499,46 @@ model Meeting {
   googleEventId    String?
   /// RFC 5545 SEQUENCE — bumped on every time change so a re-downloaded .ics
   /// replaces the event instead of duplicating it.
-  icsSequence      Int              @default(0)
+  icsSequence      Int                @default(0)
   cancelReason     String?
   invitees         MeetingInvitee[]
-  createdAt        DateTime         @default(now())
-  updatedAt        DateTime         @updatedAt
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
 
   @@index([startsAt])
   @@index([organizerId, startsAt])
   @@index([status, startsAt])
   @@index([jobId, startsAt])
+}
+
+enum MinutesStatus {
+  DRAFT
+  FOR_AGREEMENT
+  AGREED
+}
+
+enum MinutesResponse {
+  PENDING
+  AGREED
+  CHANGE_ASKED
+}
+
+/// One attendee's answer to one round of the minutes (2026-10-14). Rows are
+/// never deleted: an earlier round is the record of what was agreed then.
+model MinutesAgreement {
+  id          String          @id @default(cuid())
+  meetingId   String
+  meeting     Meeting         @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  round       Int
+  userId      String
+  user        User            @relation("MinutesAgreement", fields: [userId], references: [id], onDelete: Cascade)
+  response    MinutesResponse @default(PENDING)
+  comment     String?
+  respondedAt DateTime?
+  createdAt   DateTime        @default(now())
+
+  @@unique([meetingId, round, userId])
+  @@index([userId, response])
 }
 
 model MeetingInvitee {

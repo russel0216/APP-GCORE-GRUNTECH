@@ -98,22 +98,31 @@ export const receivingRoutes = Router();
 receivingRoutes.use(authenticate);
 
 /*
- * INCOMING goes for approval (2026-10-14, the owner's call: "Incoming — the
- * warehouse receives this, approval of his/her report to; can attach the
- * packing list or documents"). Saving a receiving report writes a DRAFT that
- * moves nothing; "Submit for approval" files it in the receiver's name
- * through the seeded "Incoming — the receiver's supervisor" route (their
- * "Reports to", else a Warehouse Supervisor); the approval posts what the
- * save used to post — the stock, the job cost, the order's received
- * quantities and status (`postReceiving`, through `settleReceiving`). A
- * pending report holds its quantities against the order, so two cannot both
- * receive the same goods. With the route deactivated, a save posts at once
- * (RECEIVED), as it did before — the sales order's rule.
+ * INCOMING goes for approval. Saving a report writes a DRAFT that moves
+ * nothing; "Submit for approval" files it in the receiver's name through the
+ * seeded "Incoming — back support, purchasing manager" route (2026-10-14,
+ * the owner's call: WAREHOUSE — creator › back support › purchasing
+ * manager); the approval posts it (`postReceiving`, through
+ * `settleReceiving`). With the route deactivated a save posts at once.
+ *
+ * A report receives AGAINST AN ISSUED PURCHASE ORDER — its lines are the
+ * order's, at the order's price, a pending report holding its quantities —
+ * or WITHOUT ONE (the owner's call: "possible receive without a purchase
+ * order, approve it too"): a return, a free replacement, a customer-supplied
+ * item. Such a report names where the goods came from (a supplier on file,
+ * else a name) and why there is no order, goes into a warehouse, and each
+ * line names an item from the item master with the unit cost it is taken
+ * into stock at. It builds stock and charges no project and no supplier.
  */
 
 const RECEIVING_SORTS = ['number', 'receivedDate'];
 const RECEIVING_DOC = 'receiving';
 const RECEIVING_VIEW = 'gchain.receiving.view_all';
+
+/** Where a report's goods came from: the order's supplier, else the one named on it. */
+function receivedFrom(r: { order: { supplier: { name: string } } | null; supplier?: { name: string } | null; sourceName?: string | null }) {
+  return r.order?.supplier.name ?? r.supplier?.name ?? r.sourceName ?? '—';
+}
 
 /** Which receivings a list query means — one rule for the list and its printed twin. */
 function receivingListWhere(q: ListQuery): Prisma.ReceivingWhereInput {
@@ -121,6 +130,10 @@ function receivingListWhere(q: ListQuery): Prisma.ReceivingWhereInput {
   const status = choice(q.filters.status, ReceivingStatus, 'Status');
   if (status) and.push({ status });
   if (q.filters.orderId) and.push({ orderId: q.filters.orderId });
+  const against = choice(q.filters.against, { order: 'order', none: 'none' }, 'Against');
+  if (against === 'order') and.push({ orderId: { not: null } });
+  if (against === 'none') and.push({ orderId: null });
+  if (q.filters.warehouseId) and.push({ warehouseId: q.filters.warehouseId });
   // A receiving has no job of its own — it inherits its order's. The job
   // workspace's Procurement tab lists a project's deliveries through this.
   if (q.filters.jobId) and.push({ order: { jobId: q.filters.jobId } });
@@ -129,6 +142,8 @@ function receivingListWhere(q: ListQuery): Prisma.ReceivingWhereInput {
       OR: [
         { number: { contains: q.search, mode: 'insensitive' } },
         { deliveryRefNo: { contains: q.search, mode: 'insensitive' } },
+        { sourceName: { contains: q.search, mode: 'insensitive' } },
+        { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
         { order: { number: { contains: q.search, mode: 'insensitive' } } },
         { order: { supplier: { name: { contains: q.search, mode: 'insensitive' } } } },
       ],
@@ -139,6 +154,22 @@ function receivingListWhere(q: ListQuery): Prisma.ReceivingWhereInput {
   return and.length ? { AND: and } : {};
 }
 
+const LIST_INCLUDE = {
+  order: {
+    select: {
+      id: true,
+      number: true,
+      kind: true,
+      supplier: { select: { id: true, name: true } },
+      job: { select: { id: true, number: true, name: true } },
+    },
+  },
+  supplier: { select: { id: true, name: true } },
+  warehouse: { select: { id: true, name: true } },
+  receivedBy: { select: { id: true, name: true } },
+  items: { select: { quantity: true, unitCost: true } },
+} satisfies Prisma.ReceivingInclude;
+
 receivingRoutes.get(
   '/',
   require_(RECEIVING_VIEW),
@@ -146,32 +177,23 @@ receivingRoutes.get(
     const q = listQuery(req);
     const where = receivingListWhere(q);
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, received, waiting, drafts, withoutOrder] = await Promise.all([
       prisma.receiving.findMany({
         where,
-        include: {
-          order: {
-            select: {
-              id: true,
-              number: true,
-              kind: true,
-              supplier: { select: { id: true, name: true } },
-              job: { select: { id: true, number: true, name: true } },
-            },
-          },
-          warehouse: { select: { id: true, name: true } },
-          receivedBy: { select: { id: true, name: true } },
-          items: { select: { quantity: true, unitCost: true } },
-        },
+        include: LIST_INCLUDE,
         orderBy: orderBy(q, RECEIVING_SORTS, { receivedDate: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.receiving.count({ where }),
+      prisma.receivingItem.findMany({ where: { receiving: { AND: [where, { status: 'RECEIVED' }] } }, select: { quantity: true, unitCost: true } }),
+      prisma.receiving.count({ where: { AND: [where, { status: 'PENDING_APPROVAL' }] } }),
+      prisma.receiving.count({ where: { AND: [where, { status: 'DRAFT' }] } }),
+      prisma.receiving.count({ where: { AND: [where, { orderId: null }] } }),
     ]);
 
-    res.json(
-      listResult(
+    res.json({
+      ...listResult(
         rows.map((r) => ({
           id: r.id,
           number: r.number,
@@ -179,6 +201,8 @@ receivingRoutes.get(
           receivedDate: r.receivedDate,
           deliveryRefNo: r.deliveryRefNo,
           order: r.order,
+          from: receivedFrom(r),
+          reason: r.reason,
           warehouse: r.warehouse,
           receivedBy: r.receivedBy,
           lineCount: r.items.length,
@@ -187,16 +211,161 @@ receivingRoutes.get(
         total,
         q,
       ),
-    );
+      // The cards over the list, under the list's own query.
+      summary: {
+        count: total,
+        receivedValue: cents(received.reduce((s, i) => s + num(i.quantity) * num(i.unitCost), 0)),
+        waiting,
+        drafts,
+        withoutOrder,
+      },
+    });
+  }),
+);
+
+/**
+ * What the Incoming page offers: the warehouses, and the issued orders that
+ * still have something to receive (newest first, a search narrowing them).
+ * Behind the create right, so the warehouse need hold no purchasing right.
+ */
+receivingRoutes.get(
+  '/options',
+  requireAny('gchain.receiving.create', 'gchain.receiving.edit_all'),
+  handler(async (req, res) => {
+    const term = String(req.query.q ?? '').trim();
+    const [warehouses, orders] = await Promise.all([
+      prisma.warehouse.findMany({ where: { isActive: true }, orderBy: { name: 'asc' }, select: { id: true, code: true, name: true } }),
+      prisma.purchaseOrder.findMany({
+        where: {
+          status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] },
+          ...(term
+            ? {
+                OR: [
+                  { number: { contains: term, mode: 'insensitive' } },
+                  { supplier: { name: { contains: term, mode: 'insensitive' } } },
+                  { job: { number: { contains: term, mode: 'insensitive' } } },
+                ],
+              }
+            : {}),
+        },
+        orderBy: { orderDate: 'desc' },
+        take: 50,
+        select: {
+          id: true,
+          number: true,
+          status: true,
+          orderDate: true,
+          supplier: { select: { name: true } },
+          job: { select: { number: true, name: true } },
+        },
+      }),
+    ]);
+    res.json({ warehouses, orders });
+  }),
+);
+
+/** The route a report of this value would take, in the caller's name — the Incoming page's "Submit for approval sends it to …". */
+receivingRoutes.get(
+  '/route',
+  requireAny('gchain.receiving.create', 'gchain.receiving.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const amount = Number(req.query.amount ?? 0) || 0;
+    const route = (await pickWorkflow(RECEIVING_DOC, amount, { requesterId: me.id })) ? await routeBrief(RECEIVING_DOC, amount, me.id) : null;
+    res.json({ route });
+  }),
+);
+
+/** An item from the item master, for a line received without an order (behind the create right). */
+receivingRoutes.get(
+  '/items',
+  requireAny('gchain.receiving.create', 'gchain.receiving.edit_all'),
+  handler(async (req, res) => {
+    const term = String(req.query.q ?? '').trim();
+    const items = await prisma.item.findMany({
+      where: {
+        isActive: true,
+        ...(term
+          ? {
+              OR: [
+                { code: { contains: term, mode: 'insensitive' } },
+                { name: { contains: term, mode: 'insensitive' } },
+                { partNumber: { contains: term, mode: 'insensitive' } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: { name: 'asc' },
+      take: 20,
+      select: { id: true, code: true, name: true, partNumber: true, unit: true, standardCost: true },
+    });
+    res.json(items.map((i) => ({ ...i, standardCost: num(i.standardCost) })));
+  }),
+);
+
+/**
+ * An order's lines as a report receives them: ordered, received, held by
+ * other reports pending approval, and what is left — the figures
+ * `checkOutstanding` refuses against.
+ */
+receivingRoutes.get(
+  '/order/:orderId',
+  requireAny('gchain.receiving.create', 'gchain.receiving.edit_all'),
+  handler(async (req, res) => {
+    const order = await prisma.purchaseOrder.findUnique({
+      where: { id: req.params.orderId },
+      include: {
+        supplier: { select: { id: true, name: true } },
+        job: { select: { id: true, number: true, name: true } },
+        warehouse: { select: { id: true, name: true } },
+        items: { include: { item: { select: { id: true, code: true } } }, orderBy: { id: 'asc' } },
+      },
+    });
+    if (!order) throw notFound('Purchase order not found');
+    const exceptId = req.query.except ? String(req.query.except) : undefined;
+    const held = await prisma.receivingItem.groupBy({
+      by: ['orderItemId'],
+      where: {
+        orderItemId: { in: order.items.map((i) => i.id) },
+        receiving: { status: 'PENDING_APPROVAL', ...(exceptId ? { id: { not: exceptId } } : {}) },
+      },
+      _sum: { quantity: true },
+    });
+    const pending = new Map(held.map((h) => [h.orderItemId, num(h._sum.quantity)]));
+    res.json({
+      id: order.id,
+      number: order.number,
+      status: order.status,
+      kind: order.kind,
+      supplier: order.supplier,
+      job: order.job,
+      warehouse: order.warehouse,
+      receivable: order.status === 'ISSUED' || order.status === 'PARTIALLY_RECEIVED',
+      lines: order.items.map((i) => {
+        const waiting = pending.get(i.id) ?? 0;
+        return {
+          id: i.id,
+          code: i.item?.code ?? null,
+          partNumber: i.partNumber,
+          name: i.name,
+          description: i.description,
+          unit: i.unit,
+          quantity: num(i.quantity),
+          receivedQty: num(i.receivedQty),
+          pendingQty: waiting,
+          left: Math.max(0, Math.round((num(i.quantity) - num(i.receivedQty) - waiting) * 1000) / 1000),
+          unitPrice: num(i.unitPrice),
+        };
+      }),
+    });
   }),
 );
 
 /**
  * The receiving list on paper, through `receivingListWhere` (or the rows
- * ticked, `?ids=`): what arrived, against which order, into where, and its
- * value at the order's price — the figure the screen shows. A report not
- * received yet (a draft, one pending approval, a cancelled one) moved
- * nothing: its value prints in brackets and is not summed. Above `/:id`.
+ * ticked, `?ids=`). A report not received yet (a draft, one pending
+ * approval, a cancelled one) moved nothing: its value prints in brackets and
+ * is not summed. Above `/:id`.
  */
 receivingRoutes.get(
   '/pdf',
@@ -208,27 +377,21 @@ receivingRoutes.get(
     const [rows, count, lines, notYet, currency, project, order] = await Promise.all([
       prisma.receiving.findMany({
         where,
-        include: {
-          order: { select: { number: true, supplier: { select: { name: true } }, job: { select: { number: true } } } },
-          warehouse: { select: { name: true } },
-          receivedBy: { select: { name: true } },
-          items: { select: { quantity: true, unitCost: true } },
-        },
+        include: LIST_INCLUDE,
         orderBy: orderBy(q, RECEIVING_SORTS, { receivedDate: 'desc' }),
         take: LIST_CAP,
       }),
       prisma.receiving.count({ where }),
-      // Every line of every RECEIVED report listed, for the total — summed
-      // exactly and rounded once, never the sum of rounded rows.
       prisma.receivingItem.findMany({ where: { receiving: { AND: [where, { status: 'RECEIVED' }] } }, select: { quantity: true, unitCost: true } }),
       prisma.receiving.count({ where: { AND: [where, { status: { not: 'RECEIVED' } }] } }),
       companyCurrency(),
       recordNamed('project', f.jobId),
       f.orderId ? prisma.purchaseOrder.findUnique({ where: { id: f.orderId }, select: { number: true } }) : null,
     ]);
-    const reference = listReference(count, rows.length, ['receiving', 'receivings'], [
+    const reference = listReference(count, rows.length, ['incoming report', 'incoming reports'], [
       q.search && `search "${q.search}"`,
       f.status && `status ${statusLabel(f.status)}`,
+      f.against && (f.against === 'none' ? 'without a purchase order' : 'against a purchase order'),
       f.orderId && `order ${order?.number ?? 'not found'}`,
       project,
       f.ids && 'the rows selected',
@@ -236,21 +399,21 @@ receivingRoutes.get(
     const valueOf = (items: { quantity: Prisma.Decimal; unitCost: Prisma.Decimal }[]) =>
       items.reduce((s, i) => s.add(i.quantity.mul(i.unitCost)), new Prisma.Decimal(0));
 
-    // Ten columns: landscape, each sized from what it holds (rule 6).
     const pdf = await renderDocument({
-      title: 'Incoming',
+      title: 'Incoming Reports',
       date: new Date(),
       reference,
       landscape: true,
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Against', 'For', 'Into', 'Received', 'Lines', `Value (${currency})`, 'Received by', 'DR no.', 'Status'],
-          align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left', 'left', 'left'],
+          head: ['Number', 'From', 'Against', 'For', 'Into', 'Received', 'Lines', `Value (${currency})`, 'Received by', 'DR no.', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'left', 'right', 'right', 'left', 'left', 'left'],
           rows: rows.map((r) => [
             r.number,
-            { title: r.order.supplier.name, body: r.order.number },
-            r.order.job?.number ?? 'Stock',
+            receivedFrom(r),
+            r.order?.number ?? 'No purchase order',
+            r.order?.job?.number ?? 'Stock',
             r.warehouse?.name ?? 'Site',
             formatShortDate(r.receivedDate),
             String(r.items.length),
@@ -268,7 +431,7 @@ receivingRoutes.get(
       ],
     });
     await audit(
-      { entityType: 'receiving', entityId: 'list', action: 'EXPORTED', summary: `Exported the receiving list as PDF (${rows.length} receiving(s))` },
+      { entityType: 'receiving', entityId: 'list', action: 'EXPORTED', summary: `Exported the incoming list as PDF (${rows.length} report(s))` },
       req,
     );
     sendListPdf(res, pdf, 'incoming.pdf');
@@ -285,6 +448,7 @@ async function loadReceiving(id: string) {
           job: { select: { id: true, number: true, name: true } },
         },
       },
+      supplier: { select: { id: true, name: true } },
       warehouse: { select: { id: true, name: true } },
       receivedBy: { select: { id: true, name: true } },
       // The bill that covers these goods. Its presence is what stops the
@@ -301,8 +465,10 @@ async function loadReceiving(id: string) {
               costCategory: { select: { id: true, name: true } },
             },
           },
+          item: { select: { id: true, code: true, name: true, partNumber: true, unit: true } },
           location: { select: { id: true, code: true } },
         },
+        orderBy: { id: 'asc' },
       },
     },
   });
@@ -313,13 +479,30 @@ type LoadedReceiving = NonNullable<Awaited<ReturnType<typeof loadReceiving>>>;
 const receivingValue = (items: { quantity: Prisma.Decimal; unitCost: Prisma.Decimal }[]) =>
   cents(items.reduce((s, i) => s + num(i.quantity) * num(i.unitCost), 0));
 
-/** Who may move a report on — submit, pull back, cancel: whoever received it, or edit_all. */
+/** A received line as every reader shows it, whichever way it was received. */
+function lineFacts(i: LoadedReceiving['items'][number]) {
+  if (i.orderItem) {
+    return {
+      code: i.orderItem.item?.code ?? i.orderItem.partNumber ?? null,
+      name: i.orderItem.name,
+      description: i.orderItem.description,
+      unit: i.orderItem.unit,
+    };
+  }
+  return {
+    code: i.item?.code ?? null,
+    name: i.item?.name ?? null,
+    description: i.description ?? i.item?.name ?? '',
+    unit: i.unit ?? i.item?.unit ?? '',
+  };
+}
+
+/** Who may move a report on — submit, modify, pull back, cancel: whoever received it, or edit_all. */
 function mayHandleReceiving(me: ResolvedUser, r: { receivedById: string }) {
   return r.receivedById === me.id || can(me, 'gchain.receiving.edit_all');
 }
 
 async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
-  // Finance's register, listed only to those who can open it.
   const seesBills = can(me, 'gfin.ap.view_all');
   const value = receivingValue(receiving.items);
   const draft = receiving.status === 'DRAFT';
@@ -327,28 +510,40 @@ async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
   const route = draft ? await pickWorkflow(RECEIVING_DOC, value, { requesterId: receiving.receivedById }) : null;
   return {
     ...receiving,
+    from: receivedFrom(receiving),
     bills: seesBills ? receiving.bills : [],
     billsVisible: seesBills,
-    // Its references only (PATCH /:id): what arrived is the record.
+    // Its references only (PATCH /:id) once it is past a draft.
     canEdit: can(me, 'gchain.receiving.edit_all'),
+    // A draft is modified whole on its page (PUT /:id/sheet).
+    canModify: draft && handler_ && can(me, 'gchain.receiving.create'),
     canSubmit: draft && handler_ && can(me, 'gchain.receiving.create'),
     needsApproval: draft ? !!route : null,
     canWithdraw: receiving.status === 'PENDING_APPROVAL' && handler_,
     canCancel: (draft || receiving.status === 'PENDING_APPROVAL') && handler_,
-    // The route a draft WOULD take, by name — who signs it.
     approvalRoute: draft && route ? await routeBrief(RECEIVING_DOC, value, receiving.receivedById) : null,
-    order: { ...receiving.order, total: num(receiving.order.total) },
+    order: receiving.order ? { ...receiving.order, total: num(receiving.order.total) } : null,
     items: receiving.items.map((i) => ({
-      ...i,
+      id: i.id,
+      orderItemId: i.orderItemId,
+      itemId: i.itemId,
+      ...lineFacts(i),
+      locationId: i.locationId,
+      location: i.location,
+      serialNo: i.serialNo,
+      batchNo: i.batchNo,
+      remarks: i.remarks,
       quantity: num(i.quantity),
       unitCost: num(i.unitCost),
       amount: cents(num(i.quantity) * num(i.unitCost)),
-      orderItem: {
-        ...i.orderItem,
-        quantity: num(i.orderItem.quantity),
-        unitPrice: num(i.orderItem.unitPrice),
-        receivedQty: num(i.orderItem.receivedQty),
-      },
+      orderItem: i.orderItem
+        ? {
+            ...i.orderItem,
+            quantity: num(i.orderItem.quantity),
+            unitPrice: num(i.orderItem.unitPrice),
+            receivedQty: num(i.orderItem.receivedQty),
+          }
+        : null,
     })),
     value,
   };
@@ -356,8 +551,8 @@ async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
 
 /**
  * The report as its reader may see it: the register's right, or — through
- * `requireAnyOrDecider` — whoever may decide its open request (a supervisor
- * with no warehouse right), only while it waits on them.
+ * `requireAnyOrDecider` — whoever may decide its open request, only while it
+ * waits on them.
  */
 async function visibleReceiving(me: ResolvedUser, id: string, deciderOnly: boolean) {
   const receiving = await loadReceiving(id);
@@ -377,11 +572,10 @@ receivingRoutes.get(
 );
 
 /**
- * A receiving report's paper references change at any time — the delivery
- * receipt and supplier invoice numbers, and the notes. What arrived (lines,
- * quantities, costs, warehouse, date) is the record once received; a draft
- * that is wrong is cancelled and saved again. A key it cannot change is
- * refused, not ignored.
+ * A report's paper references change at any time — the delivery receipt and
+ * supplier invoice numbers, and the notes. What arrived is the record once it
+ * is past a draft (a draft is modified whole on its page). A key it cannot
+ * change is refused, not ignored.
  */
 receivingRoutes.patch(
   '/:id',
@@ -428,27 +622,33 @@ receivingRoutes.patch(
 );
 
 /**
- * Receiving goods against a purchase order.
+ * One report, as the Incoming page saves it. Against an order (`orderId`):
+ * each line names an order line (`orderItemId`), at the order's price unless
+ * a cost is typed. Without one: `supplierId` or `sourceName`, a `reason`, a
+ * warehouse, and each line an item (`itemId`) with its unit cost.
  *
  * This is the moment the two purchase kinds diverge (model §4.3):
- *
  *   DIRECT_TO_JOB        releases the commitment and charges the job (INCURRED)
  *   STOCK_REPLENISHMENT  adds to inventory; the job is charged later, at issue
- *
- * Both raise the warehouse balance when a warehouse is named — direct-to-job
- * material often still passes through the store.
  */
 const receivingSchema = z.object({
-  orderId: z.string().min(1),
+  orderId: z.string().min(1).optional().nullable(),
+  supplierId: z.string().optional().nullable(),
+  sourceName: z.string().trim().max(200).optional().nullable(),
+  reason: z.string().trim().max(2000).optional().nullable(),
   warehouseId: z.string().optional().nullable(),
   receivedDate: z.string().optional().nullable(),
   deliveryRefNo: z.string().trim().optional().nullable(),
   invoiceRefNo: z.string().trim().optional().nullable(),
   notes: z.string().optional().nullable(),
+  version: z.string().optional(),
   items: z
     .array(
       z.object({
-        orderItemId: z.string().min(1),
+        orderItemId: z.string().optional().nullable(),
+        itemId: z.string().optional().nullable(),
+        description: z.string().trim().max(2000).optional().nullable(),
+        unit: z.string().trim().max(40).optional().nullable(),
         quantity: z.number().positive(),
         unitCost: z.number().min(0).optional(),
         locationId: z.string().optional().nullable(),
@@ -459,19 +659,18 @@ const receivingSchema = z.object({
     )
     .min(1, 'Receive at least one line'),
 });
+type ReceivingBody = z.infer<typeof receivingSchema>;
 
 /**
  * What a report may still receive of each order line: ordered less received
- * less what OTHER reports pending approval hold — so two pending reports
- * cannot both receive the same goods. Over-delivery is refused outright:
- * receiving more than was ordered means either the delivery or the order is
- * wrong, and quietly accepting it corrupts the commitment release and the
- * stock value.
+ * less what OTHER reports pending approval hold. Over-delivery is refused
+ * outright: receiving more than was ordered means either the delivery or the
+ * order is wrong.
  */
 async function checkOutstanding(
   db: Prisma.TransactionClient | typeof prisma,
   orderItems: { id: string; description: string; quantity: Prisma.Decimal; receivedQty: Prisma.Decimal }[],
-  lines: { orderItemId: string; quantity: number }[],
+  lines: { orderItemId?: string | null; quantity: number }[],
   exceptReceivingId?: string,
 ) {
   const held = await db.receivingItem.groupBy({
@@ -485,7 +684,7 @@ async function checkOutstanding(
   const pending = new Map(held.map((h) => [h.orderItemId, num(h._sum.quantity)]));
   const byOrderItem = new Map(orderItems.map((i) => [i.id, i]));
   for (const line of lines) {
-    const orderItem = byOrderItem.get(line.orderItemId);
+    const orderItem = line.orderItemId ? byOrderItem.get(line.orderItemId) : undefined;
     if (!orderItem) throw badRequest('One of the lines is not on that order');
     const waiting = pending.get(orderItem.id) ?? 0;
     const outstanding = num(orderItem.quantity) - num(orderItem.receivedQty) - waiting;
@@ -500,9 +699,99 @@ async function checkOutstanding(
 }
 
 /**
- * Posts a receiving report: the order's received quantities and status, the
- * stock (a replenishment), the job cost (direct to a project) — what the
- * save did before the route. Inside the caller's transaction, after its claim.
+ * Checks a report as the page sends it, before anything is written or a
+ * number issued, and returns the rows to write. One rule for the create and
+ * the modify.
+ */
+async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: string) {
+  const warehouseId = body.warehouseId || null;
+  if (warehouseId && !(await prisma.warehouse.findFirst({ where: { id: warehouseId }, select: { id: true } }))) {
+    throw badRequest('That warehouse is not on file');
+  }
+  const misc = {
+    warehouseId,
+    receivedDate: asDate(body.receivedDate) ?? today(),
+    deliveryRefNo: body.deliveryRefNo || null,
+    invoiceRefNo: body.invoiceRefNo || null,
+    notes: body.notes?.trim() || null,
+  };
+  const extras = (l: ReceivingBody['items'][number]) => ({
+    locationId: l.locationId || null,
+    serialNo: l.serialNo || null,
+    batchNo: l.batchNo || null,
+    remarks: l.remarks || null,
+  });
+
+  if (body.orderId) {
+    const order = await prisma.purchaseOrder.findUnique({ where: { id: body.orderId }, include: { items: true } });
+    if (!order) throw notFound('Purchase order not found');
+    if (order.status === 'DRAFT' || order.status === 'PENDING_APPROVAL') throw badRequest(`${order.number} has not been issued yet`);
+    if (order.status === 'CANCELLED') throw badRequest(`${order.number} was cancelled`);
+    if (order.status === 'RECEIVED') throw badRequest(`${order.number} has been received in full`);
+    await checkOutstanding(prisma, order.items, body.items, exceptReceivingId);
+    const byOrderItem = new Map(order.items.map((i) => [i.id, i]));
+    const rows = body.items.map((l) => ({
+      orderItemId: l.orderItemId!,
+      itemId: null,
+      description: null,
+      unit: null,
+      quantity: D(l.quantity),
+      unitCost: D(l.unitCost ?? num(byOrderItem.get(l.orderItemId!)!.unitPrice)),
+      ...extras(l),
+    }));
+    return {
+      header: { orderId: order.id, supplierId: null, sourceName: null, reason: null, ...misc, warehouseId: warehouseId ?? order.warehouseId ?? null },
+      rows,
+      label: `against ${order.number}`,
+    };
+  }
+
+  // Without an order: where from, why, into which warehouse, and an item per line.
+  let supplierName: string | null = null;
+  if (body.supplierId) {
+    const supplier = await prisma.supplier.findUnique({ where: { id: body.supplierId }, select: { name: true } });
+    if (!supplier) throw badRequest('That supplier is not on file');
+    supplierName = supplier.name;
+  }
+  if (!supplierName && !body.sourceName?.trim()) throw badRequest('Say where the goods came from — a supplier, or a name');
+  if (!body.reason?.trim()) throw badRequest('Say why there is no purchase order');
+  if (!warehouseId) throw badRequest('Goods received without a purchase order go into a warehouse — choose one');
+  const itemIds = [...new Set(body.items.map((l) => l.itemId).filter((v): v is string => !!v))];
+  const items = await prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, name: true, unit: true } });
+  const byItem = new Map(items.map((i) => [i.id, i]));
+  const rows = body.items.map((l, n) => {
+    if (l.orderItemId) throw badRequest(`Line ${n + 1}: there is no purchase order on this report`);
+    const item = l.itemId ? byItem.get(l.itemId) : undefined;
+    if (!item) throw badRequest(`Line ${n + 1}: choose the item from the item master — stock is kept by item`);
+    if (l.unitCost === undefined) throw badRequest(`Line ${n + 1}: type the unit cost it is taken into stock at (0 for a free item)`);
+    return {
+      orderItemId: null,
+      itemId: item.id,
+      description: l.description?.trim() || item.name,
+      unit: l.unit?.trim() || item.unit,
+      quantity: D(l.quantity),
+      unitCost: D(l.unitCost),
+      ...extras(l),
+    };
+  });
+  return {
+    header: {
+      orderId: null,
+      supplierId: body.supplierId || null,
+      sourceName: supplierName ? null : body.sourceName!.trim(),
+      reason: body.reason.trim(),
+      ...misc,
+    },
+    rows,
+    label: `from ${supplierName ?? body.sourceName!.trim()}, without a purchase order`,
+  };
+}
+
+/**
+ * Posts a receiving report: against an order, the order's received
+ * quantities and status, the stock (a replenishment), the job cost (direct
+ * to a project); without one, the stock alone at each line's cost. Inside
+ * the caller's transaction, after its claim.
  */
 async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, actorId: string) {
   const receiving = await tx.receiving.findUniqueOrThrow({
@@ -510,12 +799,32 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     include: { items: true, order: { include: { items: true, supplier: { select: { name: true } } } } },
   });
   const order = receiving.order;
+
+  if (!order) {
+    if (!receiving.warehouseId) throw badRequest(`${receiving.number} names no warehouse`);
+    for (const line of receiving.items) {
+      if (!line.itemId) throw badRequest(`${receiving.number} has a line with no item`);
+      await receiveStock(tx, {
+        itemId: line.itemId,
+        warehouseId: receiving.warehouseId,
+        quantity: num(line.quantity),
+        unitCost: num(line.unitCost),
+        sourceType: 'receiving',
+        sourceId: receiving.id,
+        sourceNumber: receiving.number,
+        createdById: actorId,
+      });
+    }
+    return;
+  }
+
   if (order.status === 'CANCELLED') throw badRequest(`${order.number} was cancelled`);
   const byOrderItem = new Map(order.items.map((i) => [i.id, i]));
   const byCategory = new Map<string, number>();
 
   for (const line of receiving.items) {
-    const orderItem = byOrderItem.get(line.orderItemId)!;
+    const orderItem = line.orderItemId ? byOrderItem.get(line.orderItemId) : undefined;
+    if (!orderItem) throw badRequest(`${receiving.number} has a line that is not on ${order.number}`);
     const quantity = num(line.quantity);
     const unitCost = num(line.unitCost);
     const amount = cents(quantity * unitCost);
@@ -525,14 +834,9 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
       data: { receivedQty: { increment: line.quantity } },
     });
 
-    // ONLY a stock replenishment builds inventory.
-    //
-    // Direct-to-job material is charged to the project the moment it
-    // arrives. If it also entered stock, issuing it to that same project
-    // later would charge it a second time at average cost — the exact
-    // double-count the two purchase kinds exist to prevent. It may still
-    // physically pass through the store; that is a storage detail, not a
-    // stock balance.
+    // ONLY a stock replenishment builds inventory. Direct-to-job material is
+    // charged to the project the moment it arrives; entering stock as well
+    // would charge it twice at issue.
     if (order.kind === 'STOCK_REPLENISHMENT' && receiving.warehouseId && orderItem.itemId) {
       await receiveStock(tx, {
         itemId: orderItem.itemId,
@@ -551,8 +855,6 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     }
   }
 
-  // Direct-to-job: the cost is now real. Release the commitment in the same
-  // amount and record it as incurred.
   if (order.kind === 'DIRECT_TO_JOB' && order.jobId) {
     for (const [costCategoryId, amount] of byCategory) {
       await releaseCommitment(tx, {
@@ -578,7 +880,6 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     }
   }
 
-  // Order status follows what is outstanding.
   const refreshed = await tx.purchaseOrderItem.findMany({ where: { orderId: order.id } });
   const fully = refreshed.every((i) => num(i.receivedQty) >= num(i.quantity) - 0.0005);
   await tx.purchaseOrder.update({
@@ -587,13 +888,13 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
   });
 }
 
-/** Tells the receiver the goods are in, for a project's order (the bell the save rang before). */
+/** Tells the receiver the goods are in, for a project's order. */
 async function tellReceived(receivingId: string, userId: string) {
   const r = await prisma.receiving.findUnique({
     where: { id: receivingId },
     select: { id: true, number: true, order: { select: { number: true, job: { select: { number: true } } } } },
   });
-  if (!r?.order.job) return;
+  if (!r?.order?.job) return;
   await notify({
     userId,
     type: 'po.received',
@@ -609,23 +910,10 @@ receivingRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(receivingSchema, req.body);
-
-    const order = await prisma.purchaseOrder.findUnique({
-      where: { id: body.orderId },
-      include: { items: true, supplier: true, job: true },
-    });
-    if (!order) throw notFound('Purchase order not found');
-    if (order.status === 'DRAFT' || order.status === 'PENDING_APPROVAL') {
-      throw badRequest('That order has not been issued yet');
-    }
-    if (order.status === 'CANCELLED') throw badRequest('That order was cancelled');
-
-    const warehouseId = body.warehouseId ?? order.warehouseId ?? null;
-    await checkOutstanding(prisma, order.items, body.items);
-    const byOrderItem = new Map(order.items.map((i) => [i.id, i]));
-    const value = cents(body.items.reduce((s, l) => s + l.quantity * (l.unitCost ?? num(byOrderItem.get(l.orderItemId)!.unitPrice)), 0));
+    const { header, rows, label } = await checkReceivingSheet(body);
+    const value = cents(rows.reduce((s, l) => s + num(l.quantity) * num(l.unitCost), 0));
     // With the Incoming route active the report waits for its approval;
-    // without one it posts now, as it always did.
+    // without one it posts now.
     const routed = !!(await pickWorkflow(RECEIVING_DOC, value, { requesterId: me.id }));
 
     const receiving = await prisma.$transaction(async (tx) => {
@@ -633,28 +921,10 @@ receivingRoutes.post(
       const created = await tx.receiving.create({
         data: {
           number,
-          orderId: order.id,
-          warehouseId,
+          ...header,
           receivedById: me.id,
-          receivedDate: asDate(body.receivedDate) ?? today(),
-          deliveryRefNo: body.deliveryRefNo || null,
-          invoiceRefNo: body.invoiceRefNo || null,
-          notes: body.notes || null,
           status: routed ? 'DRAFT' : 'RECEIVED',
-          items: {
-            create: body.items.map((l) => {
-              const orderItem = byOrderItem.get(l.orderItemId)!;
-              return {
-                orderItemId: l.orderItemId,
-                locationId: l.locationId || null,
-                quantity: D(l.quantity),
-                unitCost: D(l.unitCost ?? num(orderItem.unitPrice)),
-                serialNo: l.serialNo || null,
-                batchNo: l.batchNo || null,
-                remarks: l.remarks || null,
-              };
-            }),
-          },
+          items: { create: rows },
         },
       });
       if (!routed) await postReceiving(tx, created.id, me.id);
@@ -666,7 +936,7 @@ receivingRoutes.post(
         entityType: 'receiving',
         entityId: receiving.id,
         action: 'CREATED',
-        summary: routed ? `${receiving.number} saved against ${order.number}, to submit for approval` : `${receiving.number} received against ${order.number}`,
+        summary: routed ? `${receiving.number} saved ${label}, to submit for approval` : `${receiving.number} received ${label}`,
       },
       req,
     );
@@ -676,11 +946,40 @@ receivingRoutes.post(
 );
 
 /**
+ * Modify a DRAFT whole — header and lines — claimed on the `version`
+ * (`updatedAt`) the page read. The lines are replaced: nothing points at a
+ * draft's lines.
+ */
+receivingRoutes.put(
+  '/:id/sheet',
+  require_('gchain.receiving.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(receivingSchema, req.body);
+    const existing = await prisma.receiving.findUnique({ where: { id: req.params.id } });
+    if (!existing) throw notFound('Receiving report not found');
+    if (!mayHandleReceiving(me, existing)) throw forbidden('This report is someone else’s — they, or the warehouse lead, modify it');
+    if (existing.status !== 'DRAFT') throw badRequest(`${existing.number} is ${statusLabel(existing.status).toLowerCase()} — only a draft is modified`);
+    const { header, rows } = await checkReceivingSheet(body, existing.id);
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.receiving.updateMany({
+        where: { id: existing.id, status: 'DRAFT', ...(body.version ? { updatedAt: new Date(body.version) } : {}) },
+        data: header,
+      });
+      if (!claimed.count) throw badRequest(`${existing.number} changed a moment ago — reload to see where it stands`);
+      await tx.receivingItem.deleteMany({ where: { receivingId: existing.id } });
+      await tx.receivingItem.createMany({ data: rows.map((r) => ({ ...r, receivingId: existing.id })) });
+    });
+    await audit({ entityType: 'receiving', entityId: existing.id, action: 'UPDATED', summary: `Modified ${existing.number} (${rows.length} line${rows.length === 1 ? '' : 's'})` }, req);
+    res.json(await presentReceiving((await loadReceiving(existing.id))!, me));
+  }),
+);
+
+/**
  * Submit for approval: claims the DRAFT on the `updatedAt` it carries,
- * checks the order can still take its quantities (other pending reports
- * counted), and files the request in the RECEIVER's name whoever presses it
- * — so the receiver's own supervisor decides, never the receiver. A refused
- * submit puts it back to a draft.
+ * checks the order can still take its quantities, and files the request in
+ * the RECEIVER's name whoever presses it. A refused submit puts it back to a
+ * draft.
  */
 receivingRoutes.post(
   '/:id/submit',
@@ -689,32 +988,41 @@ receivingRoutes.post(
     const me = currentUser(req);
     const receiving = await prisma.receiving.findUnique({
       where: { id: req.params.id },
-      include: { items: true, order: { include: { items: true, supplier: { select: { name: true } }, job: { select: { number: true } } } } },
+      include: {
+        items: true,
+        supplier: { select: { name: true } },
+        order: { include: { items: true, supplier: { select: { name: true } }, job: { select: { number: true } } } },
+      },
     });
     if (!receiving) throw notFound('Receiving report not found');
     if (!mayHandleReceiving(me, receiving)) throw forbidden('This report is someone else’s — they, or the warehouse lead, submit it');
     if (receiving.status !== 'DRAFT') throw badRequest(`${receiving.number} is ${statusLabel(receiving.status).toLowerCase()}`);
-    if (['DRAFT', 'PENDING_APPROVAL', 'CANCELLED'].includes(receiving.order.status)) {
-      throw badRequest(`${receiving.order.number} is ${statusLabel(receiving.order.status).toLowerCase()} — goods are received against an issued order`);
+    if (receiving.order) {
+      if (['DRAFT', 'PENDING_APPROVAL', 'CANCELLED'].includes(receiving.order.status)) {
+        throw badRequest(`${receiving.order.number} is ${statusLabel(receiving.order.status).toLowerCase()} — goods are received against an issued order`);
+      }
+      await checkOutstanding(
+        prisma,
+        receiving.order.items,
+        receiving.items.map((i) => ({ orderItemId: i.orderItemId, quantity: num(i.quantity) })),
+        receiving.id,
+      );
     }
-    await checkOutstanding(
-      prisma,
-      receiving.order.items,
-      receiving.items.map((i) => ({ orderItemId: i.orderItemId, quantity: num(i.quantity) })),
-      receiving.id,
-    );
     const value = receivingValue(receiving.items);
     const claimed = await prisma.receiving.updateMany({
       where: { id: receiving.id, status: 'DRAFT', updatedAt: receiving.updatedAt },
       data: { status: 'PENDING_APPROVAL' },
     });
     if (!claimed.count) throw badRequest(`${receiving.number} changed a moment ago — reload to see where it stands`);
+    const subject = receiving.order
+      ? `${receiving.order.supplier.name} — ${receiving.order.number}${receiving.order.job ? ` · ${receiving.order.job.number}` : ''}`
+      : `${receivedFrom(receiving)} — without a purchase order`;
     try {
       await submitForApproval({
         documentType: RECEIVING_DOC,
         documentId: receiving.id,
         documentNumber: receiving.number,
-        subject: `${receiving.order.supplier.name} — ${receiving.order.number}${receiving.order.job ? ` · ${receiving.order.job.number}` : ''}`,
+        subject,
         amount: value,
         link: `/g-chain/incoming/${receiving.id}`,
         requesterId: receiving.receivedById,
@@ -830,11 +1138,14 @@ onApprovalSettled(RECEIVING_DOC, async (request, outcome) => {
 });
 
 /**
- * The receiving report on paper: what arrived against which order, into
- * where, valued at the order's price; RECEIVED BY (whoever saved it, dated)
- * and one slot per step of its route (a draft prints the route submitting
+ * The incoming report on paper, in the purchase order's dress (2026-10-14,
+ * the owner's call: "printed PDF should pattern to the standard template"):
+ * ORDER DETAILS (the purchase order or why there is none, the DR and invoice
+ * numbers, the date received, what it is for), "Received from" and
+ * "Received at" side by side, the lines and their total, then Prepared by
+ * and one slot per step of the route (a draft prints the route submitting
  * would take; "Pending" until signed). The packing list, the DR and the
- * photos attached to it follow it (`withAttachments`) unless `?attachments=0`.
+ * photos attached to it follow it unless `?attachments=0`.
  */
 receivingRoutes.get(
   '/:id/pdf',
@@ -843,59 +1154,86 @@ receivingRoutes.get(
     const me = currentUser(req);
     const receiving = await visibleReceiving(me, req.params.id, res.locals.deciderOnly === true);
     const view = await presentReceiving(receiving, me);
-    const currency = await companyCurrency();
     const slots =
       receiving.status === 'DRAFT'
         ? await approvalSlots(RECEIVING_DOC, receiving.id, { amount: view.value, requesterId: receiving.receivedById })
         : await approvalSlots(RECEIVING_DOC, receiving.id);
     const signatories: Signatory[] = [
-      { role: 'Received by', name: receiving.receivedBy.name, ...(await contactOf(receiving.receivedById)), at: preparedAt(slots) ?? receiving.createdAt },
+      { role: 'Prepared by', name: receiving.receivedBy.name, ...(await contactOf(receiving.receivedById)), at: preparedAt(slots) ?? receiving.createdAt },
       ...slotSignatories(slots),
     ];
+
+    // Received from: the supplier's own block where one is on file.
+    const supplierId = receiving.order?.supplier.id ?? receiving.supplierId;
+    const supplier = supplierId
+      ? await prisma.supplier.findUnique({ where: { id: supplierId }, select: { name: true, address: true, city: true, phone: true, email: true } })
+      : null;
+    const warehouse = receiving.warehouseId
+      ? await prisma.warehouse.findUnique({ where: { id: receiving.warehouseId }, select: { name: true, address: true, city: true } })
+      : null;
+    const company = await prisma.company.findUnique({ where: { id: 'company' } });
+    const place = (...parts: (string | null | undefined)[]) => parts.filter((p) => p?.trim()).join(', ');
+    const fromLines = [
+      receivedFrom(receiving),
+      place(supplier?.address, supplier?.city),
+      supplier?.phone ?? '',
+      supplier?.email ?? '',
+    ].filter((l) => l.trim());
+    const atLines = warehouse
+      ? [company?.legalName || company?.name || '', warehouse.name, place(warehouse.address, warehouse.city) || place(company?.address, company?.city)]
+      : [company?.legalName || company?.name || '', 'Straight to site', receiving.order?.job ? `${receiving.order.job.number} — ${receiving.order.job.name}` : ''];
+
     const sections: PdfSection[] = [
-      {
-        kind: 'fields',
-        columns: 3,
-        fields: [
-          { label: 'Purchase order', value: receiving.order.number },
-          { label: 'Supplier', value: receiving.order.supplier.name },
-          { label: 'For', value: receiving.order.job ? `${receiving.order.job.number} — ${receiving.order.job.name}` : 'Stock' },
-          { label: 'Into', value: receiving.warehouse?.name ?? 'Site' },
-          { label: 'DR no.', value: receiving.deliveryRefNo ?? '—' },
-          { label: 'Invoice no.', value: receiving.invoiceRefNo ?? '—' },
-          { label: 'Received', value: formatDate(receiving.receivedDate) },
-          { label: 'Status', value: statusLabel(receiving.status) },
-        ],
-      },
+      { kind: 'blocks', titleSize: 11, blocks: [{ title: 'Received from', lines: fromLines }, { title: 'Received at', lines: atLines.filter((l) => l.trim()) }] },
       {
         kind: 'table',
-        title: 'Goods received',
-        head: ['No.', 'Code', 'Description', 'Qty', `Unit cost (${currency})`, `Amount (${currency})`],
-        align: ['right', 'left', 'left', 'right', 'right', 'right'],
+        // No widths: each column from its content, the description taking what is left (rule 6).
+        head: ['No.', 'Code', 'Description', 'Qty', 'Unit', 'Unit cost', 'Amount'],
+        align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
         rows: view.items.map((i, n) => [
           String(n + 1),
-          i.orderItem.item?.code ?? i.orderItem.partNumber ?? '',
-          i.orderItem.name && i.orderItem.description !== i.orderItem.name ? { title: i.orderItem.name, body: i.orderItem.description } : (i.orderItem.name ?? i.orderItem.description),
+          i.code ?? '',
+          i.name && i.description && i.description !== i.name ? { title: i.name, body: i.description } : (i.name ?? i.description ?? ''),
           qty(i.quantity),
+          i.unit ?? '',
           formatAmount(i.unitCost),
           formatAmount(i.amount),
         ]),
       },
-      { kind: 'totals', rows: [{ label: 'Total', value: formatMoney(view.value, currency), bold: true }] },
+      { kind: 'totals', rows: [{ label: 'Total', value: formatAmount(view.value), bold: true }] },
     ];
+    if (receiving.reason) sections.push({ kind: 'text', title: 'Why there is no purchase order', body: receiving.reason });
     if (receiving.notes) sections.push({ kind: 'text', title: 'Notes', body: receiving.notes });
     if (receiving.cancelReason && receiving.status === 'CANCELLED') sections.push({ kind: 'text', title: 'Cancelled', body: receiving.cancelReason });
 
+    const currency = await companyCurrency();
     const bare = await renderDocument({
       title: 'Incoming Report',
+      titleBold: true,
       documentNumber: receiving.number,
       date: receiving.receivedDate,
-      reference: `${receiving.order.number} — ${receiving.order.supplier.name}`,
+      numberNote: `Date: ${formatDate(receiving.receivedDate)}`,
+      detailsTitle: 'Order details',
+      detailsTitleSize: 11,
+      details: [
+        [
+          ['Purchase order', receiving.order?.number ?? 'None'],
+          ['For', receiving.order?.job ? receiving.order.job.number : 'Stock'],
+        ],
+        [
+          ['Delivery receipt no.', receiving.deliveryRefNo ?? '—'],
+          ['Invoice no.', receiving.invoiceRefNo ?? '—'],
+          ['Currency', currency],
+        ],
+      ],
       sections,
       signatories,
+      signoffNote: 'The name, date and time are considered a digital signature of approval.',
+      footerNote:
+        receiving.status === 'DRAFT' || receiving.status === 'PENDING_APPROVAL' ? 'DRAFT — NOT YET RECEIVED.' : receiving.status === 'CANCELLED' ? 'CANCELLED.' : undefined,
     });
     const files = req.query.attachments === '0' ? [] : await attachedFiles('receiving', receiving.id);
-    const { pdf, listed } = await withAttachments(bare, files, { title: 'Incoming Report', number: receiving.number, reference: receiving.order.supplier.name });
+    const { pdf, listed } = await withAttachments(bare, files, { title: 'Incoming Report', number: receiving.number, reference: receivedFrom(receiving) });
     await audit(
       { entityType: 'receiving', entityId: receiving.id, action: 'EXPORTED', summary: `Printed ${receiving.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}` },
       req,
@@ -2754,6 +3092,29 @@ async function inventoryListWhere(q: ListQuery): Promise<Prisma.InventoryBalance
   return and.length ? { AND: and } : {};
 }
 
+/**
+ * Each row's state, as the owner's inventory screen shows it (2026-10-14):
+ * On order (below its level or out, with an issued order still to arrive),
+ * Out of stock (nothing available), Low stock (below its reorder level),
+ * In stock.
+ */
+function stockState(available: number, needsReorder: boolean, onOrder: boolean) {
+  if ((needsReorder || available <= 0) && onOrder) return 'ON_ORDER';
+  if (available <= 0) return 'OUT_OF_STOCK';
+  if (needsReorder) return 'LOW_STOCK';
+  return 'IN_STOCK';
+}
+
+/** Items with an issued purchase order still to arrive, from those asked about. */
+async function itemsOnOrder(itemIds: string[]) {
+  if (!itemIds.length) return new Set<string>();
+  const open = await prisma.purchaseOrderItem.findMany({
+    where: { itemId: { in: itemIds }, order: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } } },
+    select: { itemId: true, quantity: true, receivedQty: true },
+  });
+  return new Set(open.filter((o) => num(o.receivedQty) < num(o.quantity) - 0.0005).map((o) => o.itemId!));
+}
+
 inventoryRoutes.get(
   '/',
   require_('gchain.inventory.view_all'),
@@ -2761,7 +3122,7 @@ inventoryRoutes.get(
     const q = listQuery(req);
     const where = await inventoryListWhere(q);
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, everything, pendingOrders] = await Promise.all([
       prisma.inventoryBalance.findMany({
         where,
         include: {
@@ -2769,11 +3130,13 @@ inventoryRoutes.get(
             select: {
               id: true,
               code: true,
+              partNumber: true,
               name: true,
               unit: true,
               minStock: true,
               reorderLevel: true,
               category: { select: { name: true } },
+              preferredSupplier: { select: { id: true, name: true } },
             },
           },
           warehouse: { select: { id: true, name: true } },
@@ -2783,12 +3146,22 @@ inventoryRoutes.get(
         take: q.pageSize,
       }),
       prisma.inventoryBalance.count({ where }),
+      // The cards over the list, under the list's own query.
+      prisma.inventoryBalance.findMany({
+        where,
+        select: { itemId: true, quantity: true, borrowedQty: true, averageCost: true, item: { select: { reorderLevel: true } } },
+      }),
+      prisma.purchaseOrder.count({ where: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } } }),
     ]);
+    const onOrder = await itemsOnOrder([...new Set(rows.map((r) => r.itemId))]);
+    const valuation = everything.reduce((s, b) => s.add(b.quantity.mul(b.averageCost)), new Prisma.Decimal(0));
 
-    res.json(
-      listResult(
+    res.json({
+      ...listResult(
         rows.map((r) => {
           const quantity = num(r.quantity);
+          const available = availableOf(r);
+          const needsReorder = belowReorder(r);
           return {
             id: r.id,
             item: {
@@ -2799,15 +3172,62 @@ inventoryRoutes.get(
             warehouse: r.warehouse,
             quantity,
             borrowedQty: num(r.borrowedQty),
-            available: availableOf(r),
+            available,
             averageCost: num(r.averageCost),
             value: cents(quantity * num(r.averageCost)),
-            needsReorder: belowReorder(r),
+            needsReorder,
+            state: stockState(available, needsReorder, onOrder.has(r.itemId)),
           };
         }),
         total,
         q,
       ),
+      summary: {
+        items: new Set(everything.map((b) => b.itemId)).size,
+        valuation: Number(valuation.toFixed(2)),
+        lowStock: everything.filter(belowReorder).length,
+        pendingOrders,
+      },
+    });
+  }),
+);
+
+/**
+ * The latest stock movements — the owner's "Recent stock movement log":
+ * each movement in or out, its item, warehouse and the document behind it.
+ */
+inventoryRoutes.get(
+  '/movements',
+  require_('gchain.inventory.view_all'),
+  handler(async (req, res) => {
+    const take = Math.min(30, Math.max(1, Number(req.query.limit) || 8));
+    const rows = await prisma.inventoryTransaction.findMany({
+      orderBy: { occurredAt: 'desc' },
+      take,
+      select: {
+        id: true,
+        type: true,
+        quantity: true,
+        sourceType: true,
+        sourceId: true,
+        sourceNumber: true,
+        occurredAt: true,
+        item: { select: { id: true, code: true, name: true, unit: true } },
+        warehouse: { select: { id: true, name: true } },
+      },
+    });
+    const LINKS: Record<string, string> = {
+      receiving: '/g-chain/incoming/',
+      stock_issue: '/g-chain/outgoing/',
+      borrow_slip: '/g-chain/borrow-slips/',
+      pullout_slip: '/g-chain/pullout-slips/',
+    };
+    res.json(
+      rows.map((r) => ({
+        ...r,
+        quantity: num(r.quantity),
+        link: r.sourceId && LINKS[r.sourceType] ? `${LINKS[r.sourceType]}${r.sourceId}` : null,
+      })),
     );
   }),
 );
@@ -3185,6 +3605,7 @@ registerSearch({
           { number: { contains: term, mode: 'insensitive' } },
           { deliveryRefNo: { contains: term, mode: 'insensitive' } },
           { order: { number: { contains: term, mode: 'insensitive' } } },
+          { sourceName: { contains: term, mode: 'insensitive' } },
         ],
       },
       orderBy: { receivedDate: 'desc' },
@@ -3192,14 +3613,16 @@ registerSearch({
       select: {
         id: true,
         number: true,
+        sourceName: true,
+        supplier: { select: { name: true } },
         order: { select: { number: true, supplier: { select: { name: true } } } },
       },
     });
     return rows.map((r) => ({
       kind: 'receiving',
       id: r.id,
-      title: `${r.number} — ${r.order.supplier.name}`,
-      subtitle: `Against ${r.order.number}`,
+      title: `${r.number} — ${receivedFrom(r)}`,
+      subtitle: r.order ? `Against ${r.order.number}` : 'Without a purchase order',
       link: `/g-chain/incoming/${r.id}`,
     }));
   },

@@ -961,9 +961,17 @@ const WORKFLOWS: WorkflowSeed[] = [
   // a Warehouse Supervisor (on their team first). The approval posts the
   // stock and the job cost; nothing moves while it waits.
   {
+    // The owner's route for Incoming (2026-10-14: "WAREHOUSE — creator ›
+    // back support › purchasing manager"), with or without a purchase
+    // order. Back Support is the one supporting the preparer's team.
     documentType: 'receiving',
-    name: "Incoming — the receiver's supervisor",
-    steps: [{ sequence: 1, name: 'Supervisor', approverType: 'SUPERVISOR', roleKey: 'warehouse_supervisor' }],
+    name: 'Incoming — back support, purchasing manager',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 2, name: 'Purchasing Manager', approverType: 'ROLE', roleKey: 'purchasing_manager' },
+    ],
   },
   {
     documentType: 'stock_issue',
@@ -1283,6 +1291,9 @@ async function main() {
   // but deactivated, so they stop matching new documents while any history
   // routed through them stays readable. Deleting them would orphan that.
   const RETIRED = [
+    // Incoming routes to Back Support, then the Purchasing Manager
+    // (2026-10-14); a report pending on the supervisor's route finishes on it.
+    "Incoming — the receiver's supervisor",
     'Budget Request — management',
     // A budget request stopped changing the budget and became project cash
     // (2026-10-07); its route now opens with the project's manager.

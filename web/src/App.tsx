@@ -49,6 +49,7 @@ import { PlanApprovalsRegister, PlanApprovalPage } from './pages/delivery/PlanAp
 import { PurchaseRequests, PurchaseRequestDetail } from './pages/chain/PurchaseRequests';
 import { PurchaseRequisitionEditor } from './pages/chain/PurchaseRequisitionEditor';
 import { PurchaseOrderEditor } from './pages/chain/PurchaseOrderEditor';
+import { IncomingEditor } from './pages/chain/IncomingEditor';
 import { RfqDetail, RfqEditor, Rfqs } from './pages/chain/Rfq';
 import {
   PurchaseOrders,
@@ -841,12 +842,26 @@ function Routed() {
           }
         />
         <Route
-          path="/g-chain/incoming/:id"
+          path="/g-chain/incoming/new"
           element={
-            <Guard permission="gchain.receiving.view_all">
-              <ReceivingDetail />
+            <Guard permission="gchain.receiving.create">
+              <IncomingEditor />
             </Guard>
           }
+        />
+        <Route
+          path="/g-chain/incoming/:id/edit"
+          element={
+            <Guard permission="gchain.receiving.create">
+              <IncomingEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/incoming/:id"
+          // No Guard: the API decides — the register's readers, and Back
+          // Support or the Purchasing Manager while it waits on them.
+          element={<ReceivingDetail />}
         />
         <Route
           path="/g-chain/outgoing"
