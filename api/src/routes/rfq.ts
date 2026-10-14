@@ -180,6 +180,8 @@ rfqRoutes.get(
       title: 'Requests for Quotation',
       date: new Date(),
       reference,
+      // Eight columns: landscape (rule 6, A5).
+      landscape: true,
       sections: [
         {
           kind: 'table',
@@ -403,6 +405,7 @@ function presentRfq(rfq: LoadedRfq, me: ResolvedUser) {
   });
   const open = OPEN.includes(rfq.status);
   const editable = open && mayEditRfq(me, rfq);
+  const liveCanvass = rfq.canvasses.find((c) => c.status !== 'CANCELLED') ?? null;
   return {
     ...rfq,
     items: undefined,
@@ -414,7 +417,11 @@ function presentRfq(rfq: LoadedRfq, me: ResolvedUser) {
     canEditLines: editable && rfq.status === 'DRAFT',
     canSend: editable && rfq.status === 'DRAFT' && rfq.suppliers.length > 0,
     canRecordQuotes: editable && rfq.status !== 'DRAFT',
-    canCancel: editable,
+    canCancel: editable && !liveCanvass,
+    liveCanvass,
+    // The next step once quotes are in: the comparison sheet (one live at a time).
+    canStartCanvass:
+      (rfq.status === 'SENT' || rfq.status === 'QUOTED') && !liveCanvass && suppliers.some((s) => s.quotedCount > 0) && can(me, 'gchain.canvass.create'),
     canDelete: (rfq.status === 'DRAFT' || rfq.status === 'CANCELLED') && can(me, 'gchain.rfq.delete') && mayEditRfq(me, rfq),
   };
 }

@@ -41,6 +41,14 @@ interface PdfField {
  */
 export type PdfCell = string | { title: string; body?: string; plain?: boolean; accent?: string; note?: string };
 
+/** A run of a table's columns named in a band over its head — `accent` sets the name in green (the canvass's award). */
+export interface PdfColumnGroup {
+  label: string;
+  sub?: string;
+  span: number;
+  accent?: boolean;
+}
+
 /**
  * A table row: its cells, or a subheading between the lines — 9.5pt green on
  * white, wrapped inside the table's leading column(s) (`headingSpan`) and
@@ -88,6 +96,14 @@ export type PdfSection =
        * "No." — in which case the heading takes the item column too.
        */
       headingSpan?: number;
+      /**
+       * A band over the head naming runs of columns (2026-10-14, the canvass
+       * sheet: each supplier's name and contact over its unit cost and
+       * amount). Spans run left to right from the first column; a group with
+       * no label leaves its columns' band blank. Redrawn with the head on
+       * every page.
+       */
+      groups?: PdfColumnGroup[];
     }
   | { kind: 'text'; title?: string; body: string }
   /**
@@ -402,6 +418,7 @@ function safeSection(section: PdfSection): PdfSection {
         ...section,
         title: t(section.title),
         head: section.head.map(pdfSafe),
+        ...(section.groups ? { groups: section.groups.map((g) => ({ ...g, label: pdfSafe(g.label ?? ''), ...(g.sub !== undefined ? { sub: pdfSafe(g.sub) } : {}) })) } : {}),
         rows: section.rows.map((r) =>
           isHeading(r)
             ? { heading: pdfSafe(r.heading ?? '') }
@@ -719,7 +736,7 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
           ? normalise(section.widths, usable)
           : autoWidths(doc, section.head, section.rows, usable);
       const align = section.align ?? section.head.map(() => 'left' as const);
-      const head = tableHead(doc, section.head, widths);
+      const head = tableHead(doc, section.head, widths, section.groups);
       // The title goes over with the head and a one-line row, never alone.
       sectionTitle(doc, section.title, head.height + T.size * LINE + T.padRow);
       drawTable(doc, section, head, widths, align);
@@ -1109,26 +1126,57 @@ function cellLines(doc: PDFKit.PDFDocument, cell: PdfCell | undefined, width: nu
 interface TableHead {
   lines: string[][];
   height: number;
+  /** The band over the head, when the table names runs of columns. */
+  groups: { x: number; width: number; label: string[]; sub: string[]; accent: boolean }[];
+  groupHeight: number;
 }
 
 /**
  * The table head as the designed line table sets it: 8.5pt bold purple
  * capitals on white, text 11pt down, the band at least 30pt (taller when a
- * label wraps), and ONE rule — under it.
+ * label wraps), and ONE rule — under it. With `groups`, a band over it names
+ * runs of columns (bold capitals, a grey line under), each ruled across
+ * only its own columns.
  */
-function tableHead(doc: PDFKit.PDFDocument, head: string[], widths: number[]): TableHead {
+function tableHead(doc: PDFKit.PDFDocument, head: string[], widths: number[], groups?: PdfColumnGroup[]): TableHead {
   const size = T.size - 0.5;
   const lines = head.map((cell, i) => wrapText(doc, caps(cell), widths[i] - T.padX * 2, true, size));
-  const height = Math.max(30, Math.max(...lines.map((l) => l.length)) * size * LINE + 20);
-  return { lines, height };
+  const headHeight = Math.max(30, Math.max(...lines.map((l) => l.length)) * size * LINE + 20);
+  const band: TableHead['groups'] = [];
+  let groupHeight = 0;
+  if (groups?.length) {
+    let col = 0;
+    for (const g of groups) {
+      if (col >= widths.length) break;
+      const span = Math.max(1, Math.min(Math.round(g.span), widths.length - col));
+      const x = sum(widths.slice(0, col));
+      const width = sum(widths.slice(col, col + span));
+      const label = g.label.trim() ? wrapText(doc, caps(g.label), width - T.padX * 2, true, size) : [];
+      const sub = g.sub?.trim() ? wrapText(doc, g.sub, width - T.padX * 2, false, size) : [];
+      band.push({ x, width, label, sub, accent: !!g.accent });
+      groupHeight = Math.max(groupHeight, (label.length + sub.length) * size * LINE + 14);
+      col += span;
+    }
+  }
+  return { lines, height: groupHeight + headHeight, groups: band, groupHeight };
 }
 
 function drawTableHead(doc: PDFKit.PDFDocument, head: TableHead, widths: number[], align: Align[]) {
   const size = T.size - 0.5;
   const top = doc.y;
+  for (const g of head.groups) {
+    const at = (n: number) => top + 8 + n * size * LINE;
+    g.label.forEach((line, n) => drawLine(doc, line, T.left + g.x + T.padX, at(n), g.width - T.padX * 2, 'left', true, size, g.accent ? GREEN : PURPLE));
+    g.sub.forEach((line, n) => drawLine(doc, line, T.left + g.x + T.padX, at(g.label.length + n), g.width - T.padX * 2, 'left', false, size, GREY));
+    if (g.label.length) {
+      const y = top + head.groupHeight;
+      doc.moveTo(T.left + g.x + 2, y).lineTo(T.left + g.x + g.width - 2, y).strokeColor(RULE).lineWidth(0.75).stroke();
+    }
+  }
+  const headTop = top + head.groupHeight;
   let x = T.left;
   head.lines.forEach((lines, i) => {
-    lines.forEach((line, n) => drawLine(doc, line, x + T.padX, top + 11 + n * size * LINE, widths[i] - T.padX * 2, align[i], true, size, PURPLE));
+    lines.forEach((line, n) => drawLine(doc, line, x + T.padX, headTop + 11 + n * size * LINE, widths[i] - T.padX * 2, align[i], true, size, PURPLE));
     x += widths[i];
   });
   hairline(doc, top + head.height, sum(widths));

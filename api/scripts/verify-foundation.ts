@@ -1720,6 +1720,36 @@ async function main() {
     );
     check('and still carries the strapline', wideListText.toUpperCase().includes((co.documentTagline ?? co.website ?? '').toUpperCase().slice(0, 12)));
 
+    // A table's group band (2026-10-14, the canvass sheet): runs of columns
+    // named over the head — the supplier's name in capitals, its contact
+    // under it — and redrawn with the head on every page the rows reach.
+    const grouped = await renderDocument({
+      title: 'Canvass Sheet',
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Item', 'Qty', 'Unit cost', 'Amount', 'Unit cost', 'Amount'],
+          groups: [
+            { label: '', span: 2 },
+            { label: 'Reference budget', sub: 'approved PR estimate', span: 2 },
+            { label: `${TAG} Supply Co.`, sub: 'Tel 0917 · Ana', span: 2, accent: true },
+          ],
+          rows: Array.from({ length: 40 }, (_, i) => [`Line ${i + 1}`, '1', '1.00', '1.00', '2.00', '2.00']),
+        },
+      ],
+    });
+    const groupedLines = pdfText(grouped).split('\n');
+    const groupedPages = pages(grouped);
+    check(
+      'a table can name runs of its columns over its head, the band repeated with the head on every page',
+      groupedPages >= 2 &&
+        groupedLines.filter((l) => l === `${TAG.toUpperCase()} SUPPLY CO.`).length === groupedPages &&
+        groupedLines.filter((l) => l === 'REFERENCE BUDGET').length === groupedPages &&
+        groupedLines.filter((l) => l === 'Tel 0917 · Ana').length === groupedPages,
+      `${groupedPages} pages: ${groupedLines.filter((l) => l.includes('SUPPLY') || l.includes('REFERENCE')).join(' | ')}`,
+    );
+
     // A document long enough for a second page carries the running header
     // — reference, document and number, the date as MM/DD/YYYY — on every
     // page after the first, and "Page n of m" on every page.

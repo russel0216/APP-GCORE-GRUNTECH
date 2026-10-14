@@ -380,3 +380,44 @@
 .rfq-quote-terms {
   margin-top: var(--s-4);
 }
+
+/* ── The canvass sheet (2026-10-14) ───────────────────────────────────── */
+/* The band over the head: each supplier's name, Tel No. and contact over its
+   unit cost and amount, as the owner's sample sheet sets it. */
+.cvs-sheet .cvs-group-row th {
+  vertical-align: bottom;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.cvs-sheet .cvs-group {
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+.cvs-group-sub {
+  font-weight: normal;
+  font-size: var(--fs-xs);
+}
+.cvs-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin-top: var(--s-1);
+}
+/* The awarded column, tinted — its badge says it in words too. */
+.cvs-sheet .cvs-awarded {
+  background: rgb(var(--neon-rgb) / 0.08);
+}
+.cvs-sheet .cvs-total td {
+  border-top: 2px solid var(--line);
+}
+/* The description keeps room to read; the item code stays on one line; a
+   supplier's buttons wrap under one another rather than widening its column. */
+.cvs-sheet .cvs-desc {
+  min-width: 14rem;
+}
+.cvs-sheet .cvs-code {
+  white-space: nowrap;
+}
+.cvs-sheet .cvs-actions {
+  flex-wrap: wrap;
+}

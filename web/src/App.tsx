@@ -51,11 +51,10 @@ import { PurchaseRequisitionEditor } from './pages/chain/PurchaseRequisitionEdit
 import { PurchaseOrderEditor } from './pages/chain/PurchaseOrderEditor';
 import { RfqDetail, RfqEditor, Rfqs } from './pages/chain/Rfq';
 import {
-  Canvasses,
-  CanvassDetail,
   PurchaseOrders,
   PurchaseOrderDetail,
 } from './pages/chain/Orders';
+import { CanvassDetail, Canvasses } from './pages/chain/Canvass';
 import {
   Receivings,
   ReceivingDetail,

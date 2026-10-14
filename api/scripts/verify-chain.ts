@@ -22,6 +22,7 @@ import { manilaDayKey } from '../src/shared/day';
 import { statusLabel } from '../src/shared/pdf';
 import { nextNumber } from '../src/shared/numbering';
 import { CANVASS_CODE_MOVED, moveCanvassCode } from '../src/shared/canvassCode';
+import { canvassFigures } from '../src/shared/canvassMath';
 import { submitForApproval, act, pickWorkflow } from '../src/shared/approvals';
 import { budgetPosition } from '../src/routes/jobs';
 import {
@@ -2275,6 +2276,129 @@ async function main() {
         JSON.stringify(hits.map((h) => h.kind)),
       );
 
+      // ── The canvass sheet from the RFQ (push 3) ─────────────────────────
+      console.log('\nThe canvass sheet (over HTTP)');
+      const sheetRole = await makeRole('zzchain_sheet', 'ZZ Canvasser of sheets', [
+        'gchain.canvass.view_all',
+        'gchain.canvass.create',
+        'gchain.canvass.edit_own',
+        'gchain.canvass.edit_all',
+        'gchain.canvass.delete',
+        'gchain.purchase_orders.view_all',
+      ]);
+      const sheetBuyer = await mkUser('Verify Sheet Buyer', 'sheetbuyer@verifyc.local', sheetRole.id);
+      const sheetToken = signToken(sheetBuyer.id, sheetBuyer.email);
+      // A partial quote too: the late supplier prices the tray alone, under the complete one.
+      const partial = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/suppliers/${lateRow!.id}/quote`, {
+        quotes: [{ requestItemId: trayLine.id, unitPrice: 1_100 }],
+      });
+      const draftRfq = await api(rfqBuyerToken, 'POST', '/rfqs', { requestId: rfqPr.id, itemIds: [bracketLine.id] });
+      const fromDraftRfq = await api(sheetToken, 'POST', '/canvasses', { rfqId: draftRfq.body.id });
+      await api(rfqBuyerToken, 'DELETE', `/rfqs/${String(draftRfq.body.id)}`);
+      const sheetMade = await api(sheetToken, 'POST', '/canvasses', { rfqId });
+      const sheetId = String(sheetMade.body.id);
+      const secondSheet = await api(sheetToken, 'POST', '/canvasses', { rfqId });
+      const sheetRow = await prisma.canvass.findUniqueOrThrow({ where: { id: sheetId }, include: { suppliers: { include: { quotes: true } } } });
+      check(
+        'a sheet is raised only from an RFQ that went out, one live at a time, snapshotting its lines and the suppliers that quoted with their quotes',
+        partial.status === 200 && fromDraftRfq.status === 400 && sheetMade.status === 201 && secondSheet.status === 400 &&
+          sheetRow.rfqId === rfqId && sheetRow.lineIds.length === 2 && sheetRow.suppliers.length === 2 &&
+          sheetRow.suppliers.every((r) => !!r.rfqSupplierId) && sheetRow.suppliers.reduce((n, r) => n + r.quotes.length, 0) === 3,
+        `${partial.status} ${fromDraftRfq.status} ${sheetMade.status} ${secondSheet.status} ${sheetRow.lineIds.length} ${sheetRow.suppliers.length}`,
+      );
+      type SheetCol = { id: string; supplierId: string; total: number; savings: number; savingsPct: number | null; budgetOnQuoted: number; complete: boolean; quotedCount: number };
+      const sheet1 = await api(sheetToken, 'GET', `/canvasses/${sheetId}`);
+      const cols1 = sheet1.body.suppliers as SheetCol[];
+      const fullCol = cols1.find((c) => c.supplierId === supplier.id)!;
+      const partCol = cols1.find((c) => c.supplierId === otherSupplier.id)!;
+      check(
+        'the sheet reads the reference budget off the request (₱60,000), each column\'s saving against it, a partial quote measured on its own lines and kept out of "lowest"',
+        sheet1.body.budget === 60_000 &&
+          fullCol.total === 57_220 && fullCol.savings === 2_780 && fullCol.savingsPct === 4.63 && fullCol.complete &&
+          partCol.total === 44_000 && partCol.budgetOnQuoted === 48_000 && partCol.savings === 4_000 && partCol.savingsPct === 8.33 && !partCol.complete &&
+          sheet1.body.lowestSupplierId === fullCol.id,
+        JSON.stringify({ budget: sheet1.body.budget, cols1, lowest: sheet1.body.lowestSupplierId }),
+      );
+      const figures = canvassFigures(
+        [
+          { id: 'a', quantity: 3, estimatedCost: 33.33, estimatedAmount: 99.99 },
+          { id: 'b', quantity: 0.5, estimatedCost: 10.01, estimatedAmount: 5.01 },
+        ],
+        [{ id: 'x', prices: { a: 33.34, b: 10.01 } }, { id: 'y', prices: {} }],
+      );
+      check(
+        'the sheet\'s arithmetic is exact to the centavo, half away from zero, and a column with no quote has no saving',
+        // 0.5 × 10.01 = 5.005 → 5.01 (half away from zero); −0.03 of 105 is −0.0286% → −0.03%.
+        figures.budget === 105 && figures.columns[0].amounts.a === 100.02 && figures.columns[0].amounts.b === 5.01 &&
+          figures.columns[0].total === 105.03 && figures.columns[0].savingsPct === -0.03 && figures.columns[1].savingsPct === null &&
+          figures.lowestCompleteId === 'x',
+        JSON.stringify(figures),
+      );
+
+      // The snapshot: a quote changed on the RFQ moves nothing until "Refresh from RFQ".
+      await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/suppliers/${keepRow.id}/quote`, {
+        quotes: [
+          { requestItemId: trayLine.id, unitPrice: 1_000 },
+          { requestItemId: bracketLine.id, unitPrice: 140 },
+        ],
+        quoteRef: 'Q-7781-B',
+      });
+      const unmoved = ((await api(sheetToken, 'GET', `/canvasses/${sheetId}`)).body.suppliers as SheetCol[]).find((c) => c.supplierId === supplier.id)!;
+      const refreshed = await api(sheetToken, 'POST', `/canvasses/${sheetId}/refresh`);
+      const moved = (refreshed.body.suppliers as SheetCol[] | undefined)?.find((c) => c.supplierId === supplier.id);
+      check(
+        'the sheet keeps the quotes it was raised with until "Refresh from RFQ" copies them again',
+        unmoved.total === 57_220 && refreshed.status === 200 && moved?.total === 51_200 && moved.savingsPct === 14.67,
+        `${unmoved.total} ${refreshed.status} ${moved?.total} ${moved?.savingsPct}`,
+      );
+      const offSheet = await api(sheetToken, 'PUT', `/canvasses/${sheetId}/suppliers/${fullCol.id}/quotes`, {
+        quotes: [{ requestItemId: pr.items[0].id, unitPrice: 1 }],
+      });
+      const recommended = await api(sheetToken, 'PATCH', `/canvasses/${sheetId}`, { recommendedRowId: partCol.id });
+      const rfqCancelLive = await api(rfqBuyerToken, 'POST', `/rfqs/${rfqId}/cancel`, { reason: 'too early' });
+      check(
+        'a price for a line the sheet does not compare is refused; the buyer recommends a column; the RFQ is not cancelled while a sheet compares it',
+        offSheet.status === 400 && recommended.status === 200 && recommended.body.recommendedRowId === partCol.id &&
+          rfqCancelLive.status === 400 && String(rfqCancelLive.body.error).includes(String(sheetMade.body.number)),
+        `${offSheet.status} ${recommended.status} ${rfqCancelLive.status} ${String(rfqCancelLive.body.error)}`,
+      );
+
+      const awardedSheet = await api(sheetToken, 'POST', `/canvasses/${sheetId}/award/${fullCol.id}`);
+      const awardAgain = await api(sheetToken, 'POST', `/canvasses/${sheetId}/award/${partCol.id}`);
+      const afterAward = await prisma.canvass.findUniqueOrThrow({ where: { id: sheetId } });
+      const rfqAfterAward = await prisma.rfq.findUniqueOrThrow({ where: { id: rfqId } });
+      const listed = await api(sheetToken, 'GET', `/canvasses?rfqId=${rfqId}`);
+      const listRow = (listed.body.rows as { id: string; budget: number; pick: { name: string; awarded: boolean; savingsPct: number } | null }[]).find((r) => r.id === sheetId);
+      check(
+        'the award records who awarded it, closes the RFQ, cannot land twice, and the list reads the sheet\'s saving off the award',
+        awardedSheet.status === 200 && awardAgain.status === 400 && afterAward.status === 'AWARDED' && afterAward.awardedById === sheetBuyer.id &&
+          rfqAfterAward.status === 'CLOSED' && listRow?.budget === 60_000 && listRow.pick?.awarded === true && listRow.pick.savingsPct === 14.67,
+        `${awardedSheet.status} ${awardAgain.status} ${afterAward.status} ${rfqAfterAward.status} ${JSON.stringify(listRow)}`,
+      );
+
+      const sheetPaper = await printed(sheetToken, `/canvasses/${sheetId}/pdf`);
+      const sheetText = flat(sheetPaper.text);
+      check(
+        'the canvass sheet prints landscape: the reference budget, each supplier with its contact, the total, the savings (pesos and %), and who canvassed and who awarded it, each with the timestamp',
+        sheetPaper.status === 200 && sheetPaper.pages.every((pg) => pg === LANDSCAPE) && /CANVASS SHEET/.test(sheetText) &&
+          /REFERENCE BUDGET/.test(sheetText) && sheetText.includes(`${TAG} STEEL SUPPLY`) && sheetText.includes(`${TAG} OTHER SUPPLY`) &&
+          /SAVINGS vs reference budget/.test(sheetText) && sheetText.includes('8,800.00') && sheetText.includes('14.67%') &&
+          sheetText.includes('not quoted') && sheetText.includes('60,000.00') &&
+          /CANVASSED BY Verify Sheet Buyer .*?\w{3} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/.test(sheetText) &&
+          /AWARDED BY Verify Sheet Buyer .*?\w{3} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/.test(sheetText),
+        `${sheetPaper.status} ${sheetPaper.pages.join()} — ${sheetText.slice(0, 600)}`,
+      );
+
+      const sheetCancel = await api(sheetToken, 'POST', `/canvasses/${sheetId}/cancel`, { reason: 'the scope changed' });
+      const rfqAfterCancel = await prisma.rfq.findUniqueOrThrow({ where: { id: rfqId } });
+      check(
+        'an award withdrawn (no order on it) opens its RFQ again, to be canvassed anew',
+        sheetCancel.status === 200 && rfqAfterCancel.status === 'QUOTED',
+        `${sheetCancel.status} ${rfqAfterCancel.status}`,
+      );
+      await api(sheetToken, 'DELETE', `/canvasses/${sheetId}`);
+      await prisma.auditLog.deleteMany({ where: { entityType: 'canvass', entityId: sheetId } });
+
       // The request cannot be cancelled while it is out for quotation.
       await prisma.user.update({ where: { id: rfqBuyer.id }, data: { isSuperAdmin: true } });
       const prCancel = await api(rfqBuyerToken, 'POST', `/purchase-requests/${rfqPr.id}/cancel`, { reason: 'not needed any more' });
@@ -2314,26 +2438,51 @@ async function main() {
       // The canvass gave its numbering code to the RFQ: a template still on
       // 'RFQ' moves to 'CVS' once, and a code set afterwards is kept.
       {
-        const template = await prisma.numberSequence.findFirst({ where: { documentType: 'canvass', periodKey: '' } });
+        const rows = await prisma.numberSequence.findMany({ where: { documentType: 'canvass' }, select: { id: true, periodKey: true, typeCode: true } });
+        const template = rows.find((r) => r.periodKey === '');
         const mark = await prisma.setting.findUnique({ where: { key: CANVASS_CODE_MOVED } });
+        const codes = async () => (await prisma.numberSequence.findMany({ where: { documentType: 'canvass' }, select: { typeCode: true } })).map((r) => r.typeCode);
         try {
           if (template) {
             await prisma.setting.deleteMany({ where: { key: CANVASS_CODE_MOVED } });
-            await prisma.numberSequence.update({ where: { id: template.id }, data: { typeCode: 'RFQ' } });
+            // A period counter too: it prints with its own copy of the code.
+            const year = await prisma.numberSequence.upsert({
+              where: { documentType_periodKey: { documentType: 'canvass', periodKey: '2099' } },
+              create: { documentType: 'canvass', periodKey: '2099', label: 'Canvass', pattern: '{PREFIX}-{TYPE}-{YYYY}-{SEQ}', typeCode: 'RFQ', period: 'YEAR', scope: 'GLOBAL', padding: 4, lastNumber: 0 },
+              update: { typeCode: 'RFQ' },
+            });
+            // Every row on RFQ — a fresh move.
+            await prisma.numberSequence.updateMany({ where: { documentType: 'canvass' }, data: { typeCode: 'RFQ' } });
             const first = await moveCanvassCode();
-            const afterFirst = (await prisma.numberSequence.findUniqueOrThrow({ where: { id: template.id } })).typeCode;
+            const afterFirst = await codes();
+            // Once only: a code set afterwards stays.
             await prisma.numberSequence.update({ where: { id: template.id }, data: { typeCode: 'RFQ' } });
             const second = await moveCanvassCode();
             const afterSecond = (await prisma.numberSequence.findUniqueOrThrow({ where: { id: template.id } })).typeCode;
+            // What the first version left on an install: the template moved, the counter not.
+            await prisma.setting.deleteMany({ where: { key: CANVASS_CODE_MOVED } });
+            await prisma.numberSequence.update({ where: { id: template.id }, data: { typeCode: 'CVS' } });
+            await prisma.numberSequence.update({ where: { id: year.id }, data: { typeCode: 'RFQ' } });
+            const mended = await moveCanvassCode();
+            const afterMend = await codes();
+            // An administrator's own code is theirs.
+            await prisma.setting.deleteMany({ where: { key: CANVASS_CODE_MOVED } });
+            await prisma.numberSequence.updateMany({ where: { documentType: 'canvass' }, data: { typeCode: 'CNV' } });
+            const theirs = await moveCanvassCode();
+            const afterTheirs = await codes();
             const rfqTemplate = await prisma.numberSequence.findFirst({ where: { documentType: 'rfq', periodKey: '' } });
+            await prisma.numberSequence.delete({ where: { id: year.id } });
             check(
-              'the canvass\'s numbering code moves from RFQ to CVS once, never again over a code set afterwards, and RFQ numbers the RFQ',
-              first.moved && afterFirst === 'CVS' && !second.moved && afterSecond === 'RFQ' && rfqTemplate?.typeCode === 'RFQ',
-              `${first.moved} ${afterFirst} ${second.moved} ${afterSecond} ${rfqTemplate?.typeCode}`,
+              'the canvass\'s numbering code moves from RFQ to CVS once — the template and every period counter, mending an install where only the template moved — never over a code set afterwards or an administrator\'s own, and RFQ numbers the RFQ',
+              first.moved && afterFirst.every((c) => c === 'CVS') && !second.moved && afterSecond === 'RFQ' &&
+                mended.moved && afterMend.every((c) => c === 'CVS') && !theirs.moved && afterTheirs.every((c) => c === 'CNV') &&
+                rfqTemplate?.typeCode === 'RFQ',
+              `${first.moved} ${afterFirst.join()} ${second.moved} ${afterSecond} ${mended.moved} ${afterMend.join()} ${theirs.moved} ${afterTheirs.join()} ${rfqTemplate?.typeCode}`,
             );
           }
         } finally {
-          if (template) await prisma.numberSequence.update({ where: { id: template.id }, data: { typeCode: template.typeCode } });
+          for (const r of rows) await prisma.numberSequence.updateMany({ where: { id: r.id }, data: { typeCode: r.typeCode } });
+          await prisma.numberSequence.deleteMany({ where: { documentType: 'canvass', periodKey: '2099' } });
           await prisma.setting.deleteMany({ where: { key: CANVASS_CODE_MOVED } });
           if (mark) await prisma.setting.create({ data: { key: mark.key, value: mark.value as Prisma.InputJsonValue, description: mark.description } });
           await prisma.auditLog.deleteMany({ where: { entityType: 'number_sequence', entityId: 'canvass', summary: { contains: 'moved from RFQ to CVS' }, at: { gte: started } } });
@@ -2821,7 +2970,7 @@ async function main() {
         path: 'canvasses',
         entity: 'canvass',
         noun: ['canvass', 'canvasses'],
-        page: PORTRAIT,
+        page: LANDSCAPE,
         key: (r) => String(r.number),
         // Neither canvass here is still open: filter on a status one has and the other has not.
         filter: (rows) => {

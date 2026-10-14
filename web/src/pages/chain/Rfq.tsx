@@ -211,6 +211,9 @@ interface RfqDetailData {
   canRecordQuotes: boolean;
   canCancel: boolean;
   canDelete: boolean;
+  /** The sheet comparing it, while one is open or awarded. */
+  liveCanvass: { id: string; number: string; status: string } | null;
+  canStartCanvass: boolean;
 }
 
 interface Source {
@@ -752,6 +755,7 @@ export function RfqDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [quoting, setQuoting] = useState<string | null>(null);
+  const [choosing, setChoosing] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -789,6 +793,12 @@ export function RfqDetail() {
     toast('ok', `${rfq.number} deleted`);
     navigate('/g-chain/rfq');
   }
+  /** Opens the comparison sheet from this RFQ's quotes — the suppliers that quoted, or the six chosen. */
+  async function startCanvass(supplierRowIds?: string[]) {
+    if (!rfq) return;
+    const created = await api.post<{ id: string }>('/canvasses', { rfqId: rfq.id, ...(supplierRowIds ? { supplierRowIds } : {}) });
+    navigate(`/g-chain/canvass/${created.id}`);
+  }
 
   const forLabel = rfq.request.job ? (
     <Link to={`/g-ops/projects/${rfq.request.job.id}`}>
@@ -801,6 +811,24 @@ export function RfqDetail() {
   );
   const quoted = rfq.suppliers.filter((s) => s.quotedCount > 0);
   const row = quoting ? rfq.suppliers.find((s) => s.id === quoting) ?? null : null;
+  const startButton = rfq.canStartCanvass && (
+    <button
+      className="btn btn-primary"
+      onClick={() =>
+        quoted.length > 6
+          ? setChoosing(true)
+          : confirm.ask({
+              title: `Start a canvass sheet from ${rfq.number}?`,
+              body: `It compares the ${quoted.length} supplier${quoted.length === 1 ? '' : 's'} that quoted against the request's estimate, line by line. The sheet keeps the quotes as they stand now.`,
+              confirmLabel: 'Start canvass',
+              tone: 'primary',
+              onConfirm: () => startCanvass(),
+            })
+      }
+    >
+      Start canvass
+    </button>
+  );
 
   return (
     <div>
@@ -817,10 +845,17 @@ export function RfqDetail() {
             For <Link to={`/g-chain/purchase-requests/${rfq.request.id}`}>{rfq.request.number}</Link>
             {rfq.request.job && <> · {forLabel}</>} · prepared by {rfq.preparedBy.name} on {formatDate(rfq.createdAt)}
             {rfq.dueDate ? ` · quote by ${formatDate(rfq.dueDate)}` : ''}
+            {rfq.liveCanvass && (
+              <>
+                {' '}
+                · compared on <Link to={`/g-chain/canvass/${rfq.liveCanvass.id}`}>{rfq.liveCanvass.number}</Link>
+              </>
+            )}
           </>
         }
         actions={
-          rfq.canSend && (
+          startButton ||
+          (rfq.canSend && (
             <button
               className="btn btn-primary"
               onClick={() =>
@@ -835,7 +870,7 @@ export function RfqDetail() {
             >
               Mark sent
             </button>
-          )
+          ))
         }
         print={`/api/rfqs/${rfq.id}/pdf`}
         more={[
@@ -1006,6 +1041,14 @@ export function RfqDetail() {
           <p className="prq-hint">Print each supplier’s paper, send it, then Mark sent. Their quotes are recorded here once it is sent.</p>
         )}
       </section>
+
+      {choosing && (
+        <ChooseSuppliers
+          rfq={rfq}
+          onClose={() => setChoosing(false)}
+          onStart={(ids) => startCanvass(ids)}
+        />
+      )}
 
       {row && (
         <QuotePanel
@@ -1252,5 +1295,68 @@ function QuotePanel({
       canEdit={rfq.canRecordQuotes}
     />
     </>
+  );
+}
+
+/** More than six suppliers quoted: the sheet takes six, chosen here, in the page. */
+function ChooseSuppliers({ rfq, onClose, onStart }: { rfq: RfqDetailData; onClose: () => void; onStart: (ids: string[]) => Promise<void> }) {
+  const quoted = rfq.suppliers.filter((s) => s.quotedCount > 0).sort((a, b) => Number(b.complete) - Number(a.complete) || a.total - b.total);
+  const [picked, setPicked] = useState<Set<string>>(() => new Set(quoted.slice(0, 6).map((s) => s.id)));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  return (
+    <section className="card" aria-labelledby="rfq-choose">
+      <div className="proc-card-head">
+        <h3 id="rfq-choose" className="card-title">
+          Start canvass — choose six suppliers
+        </h3>
+        <span className="faint">{picked.size} of 6</span>
+      </div>
+      <ErrorBox error={error} />
+      <p className="prq-hint">A sheet compares six suppliers at most. The lowest complete quotes are ticked to start with.</p>
+      <div className="stack">
+        {quoted.map((s) => (
+          <label key={s.id} className="checkbox">
+            <input
+              type="checkbox"
+              checked={picked.has(s.id)}
+              disabled={!picked.has(s.id) && picked.size >= 6}
+              onChange={(e) =>
+                setPicked((p) => {
+                  const next = new Set(p);
+                  if (e.target.checked) next.add(s.id);
+                  else next.delete(s.id);
+                  return next;
+                })
+              }
+            />
+            <span>
+              {s.supplier.name} — {formatMoney(s.total)}
+              {s.complete ? '' : ` (${s.quotedCount} of ${rfq.lines.length} lines)`}
+            </span>
+          </label>
+        ))}
+      </div>
+      <div className="row card-foot">
+        <span className="spacer" />
+        <button type="button" className="btn btn-sm" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm btn-primary"
+          disabled={busy || !picked.size}
+          onClick={() => {
+            setBusy(true);
+            onStart([...picked]).catch((err) => {
+              setError(err);
+              setBusy(false);
+            });
+          }}
+        >
+          Start canvass
+        </button>
+      </div>
+    </section>
   );
 }

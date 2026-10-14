@@ -103,6 +103,7 @@ model User {
 
   prsRequested     PurchaseRequest[]      @relation("PrRequester")
   canvassesCreated Canvass[]              @relation("CanvassCreator")
+  canvassesAwarded Canvass[]              @relation("CanvassAwarder")
   rfqsPrepared     Rfq[]                  @relation("RfqPreparer")
   posCreated       PurchaseOrder[]        @relation("PoCreator")
   receivings       Receiving[]            @relation("Receiver")
@@ -1247,15 +1248,15 @@ model CostingLine {
 
   /// The short name, printed bold over the description. Null on a line that
   /// predates the sheet editor; its description then serves as the name.
-  name        String?
-  description String
+  name         String?
+  description  String
   /// A subheading inside its category: printed as a heading row, costs nothing.
-  isHeading   Boolean @default(false)
-  quantity    Decimal @default(1) @db.Decimal(18, 3)
-  unit        String  @default("pcs")
-  unitCost    Decimal @default(0) @db.Decimal(18, 2)
-  amount      Decimal @default(0) @db.Decimal(18, 2)
-  sortOrder   Int     @default(0)
+  isHeading    Boolean   @default(false)
+  quantity     Decimal   @default(1) @db.Decimal(18, 3)
+  unit         String    @default("pcs")
+  unitCost     Decimal   @default(0) @db.Decimal(18, 2)
+  amount       Decimal   @default(0) @db.Decimal(18, 2)
+  sortOrder    Int       @default(0)
   /// Who supplies it (2026-10-14): a supplier on file, else a name typed.
   /// Printed under the unit cost; carried to a PR as its preferred supplier.
   supplierId   String?
@@ -2354,9 +2355,9 @@ model PurchaseRequest {
   requestedById String
   requestedBy   User   @relation("PrRequester", fields: [requestedById], references: [id], onDelete: Restrict)
 
-  purpose  String
-  neededBy DateTime? @db.Date
-  notes    String?
+  purpose           String
+  neededBy          DateTime? @db.Date
+  notes             String?
   /// The supplier the requester would like asked first — a hint for
   /// procurement, kept as typed; the canvass and the order name the real one.
   preferredSupplier String?
@@ -2533,8 +2534,19 @@ model Canvass {
   rfqId String?
   rfq   Rfq?    @relation(fields: [rfqId], references: [id], onDelete: SetNull)
 
-  notes     String?
-  awardedAt DateTime?
+  /// The request lines the sheet compares (2026-10-14): the RFQ's lines,
+  /// snapshotted when the sheet is raised. Empty on a canvass opened before
+  /// — it compares every line of its request, as it always did.
+  lineIds String[] @default([])
+
+  /// Printed on the sheet as its Remarks; a cancel appends its reason.
+  notes            String?
+  awardedAt        DateTime?
+  /// Who awarded it — AWARDED BY on the sheet, with `awardedAt`.
+  awardedById      String?
+  awardedBy        User?     @relation("CanvassAwarder", fields: [awardedById], references: [id], onDelete: SetNull)
+  /// The buyer's recommendation before the award (a CanvassSupplier id).
+  recommendedRowId String?
 
   suppliers CanvassSupplier[]
 
@@ -2558,6 +2570,13 @@ model CanvassSupplier {
   leadTimeDays Int?
   terms        String?
   remarks      String?
+
+  /// Snapshotted from the RFQ (2026-10-14): whom the sheet names under the
+  /// supplier, their quotation no., and the RFQ row it was copied from.
+  contactName   String?
+  contactPhone  String?
+  quoteRef      String?
+  rfqSupplierId String?
 
   quotes CanvassQuote[]
 

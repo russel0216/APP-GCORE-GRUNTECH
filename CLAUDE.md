@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,117 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,126 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -571,10 +571,10 @@ purchase order page, and one on foundation and 5 on costing for a line's
 supplier and note, and one on chain for an approved request not counted
 twice against its budget, and 2 on foundation for the owner's order of the
 divisions and G-CHAIN's strips, and 20 on chain for the Request for
-Quotation):
+Quotation, and 8 on chain and one on foundation for the canvass sheet):
 foundation
-372, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 245, hr 468, plantilla 123, meetings
+373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
+79, partners 120, delivery 171, chain 253, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4476,11 +4476,57 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   A purchase request is not cancelled while an RFQ is open on it, and its
   delete takes its cancelled RFQs' files. **The canvass gave the RFQ its
   code**: `moveCanvassCode()` (`shared/canvassCode.ts`, the seed, once,
-  marked `seed.canvassCodeMoved`, audited) moves a stored canvass template
-  still on 'RFQ' to 'CVS'; numbers already issued keep their print.
-  `Canvass.rfqId` (nullable, SetNull) links a canvass to the RFQ it
-  compares, for push 3. Procurement holds `gchain.rfq.*`, Back Support
-  reads them.
+  marked `seed.canvassCountersMoved`, audited) moves the canvass's numbering
+  from 'RFQ' to 'CVS' — the template AND every period counter, because a
+  counter prints with its own copy of the code (Admin › Numbering changes
+  every row for the same reason); the first version moved the template
+  alone under `seed.canvassCodeMoved`, so an install that ran it is put
+  right once. Only while the template carries 'RFQ' or 'CVS' — an
+  administrator's own code stays. Numbers already issued keep their print.
+  Procurement holds `gchain.rfq.*`, Back Support reads them.
+- **The canvass is the COMPARISON SHEET** (push 3; the owner's sample
+  sheet). "Start canvass" on the RFQ page (its next step once a quote is
+  in; `POST /canvasses { rfqId, supplierRowIds? }`) raises it from an RFQ
+  that went out, one live sheet per RFQ, and SNAPSHOTS the RFQ's lines
+  (`Canvass.lineIds`), the suppliers that quoted — six at most
+  (`MAX_SHEET_SUPPLIERS`; more and the page asks which six) — with their
+  quotes, contact, lead time, terms and quotation no. (`CanvassSupplier.
+  rfqSupplierId`); a quote changed on the RFQ later moves nothing until
+  "Refresh from RFQ" (⋯, edit_all, OPEN only) copies again. A canvass from
+  a request with no RFQ (`{ requestId }`, a quote already in hand) still
+  compares every line, suppliers typed on it — `lineIds` empty is "every
+  line", as every canvass before. **The arithmetic is
+  `canvassFigures()`** (`shared/canvassMath.ts`, pure, verify-chain): the
+  REFERENCE BUDGET is the request's estimated amount over the sheet's
+  lines; per supplier `total` = Σ qty × price over the lines it quoted
+  (centavos, half away from zero), `savings` = the estimate over THOSE
+  lines less the total, `savingsPct` to two decimals; a partial quote says
+  "n of m lines" / "on the lines quoted" and is never "lowest complete".
+  The buyer may **Recommend** a column (`PATCH { recommendedRowId }`, the
+  opener or edit_all — the header's primary button becomes "Award to …");
+  **Award** (edit_all) is claimed on OPEN, records `awardedById` /
+  `awardedAt`, refuses a supplier that quoted none of the sheet's lines and
+  CLOSES the RFQ; the order then takes only the lines the winner quoted.
+  Cancelling an award no order was placed on opens the RFQ again (QUOTED);
+  an RFQ is not cancelled while a live sheet compares it. Prices typed on
+  the sheet only for its own lines, audited. **The paper** `GET
+  /canvasses/:id/pdf` is LANDSCAPE "Canvass Sheet": the reference line (PR
+  and its approval date, RFQ, project), the lines with the reference
+  budget's unit cost and amount, then per supplier a unit cost and amount
+  under its name, Tel No. and contact — the table's **`groups`** band, a
+  `renderDocument` table option naming runs of columns over the head,
+  redrawn with it on every page — "not quoted" where it gave none; then
+  TOTAL, SAVINGS vs reference budget (pesos | %) and Lead time · Terms,
+  each figure in its own column (those rows are the sheet's structure, as
+  a costing's subtotals are the estimate's); three suppliers to a table, a
+  second table for four to six; Remarks (`notes`, with the
+  recommendation); the order raised; signed **CANVASSED BY** (the opener,
+  its timestamp) and **AWARDED BY** ("Pending" until awarded). The list
+  (`canvassListWhere`, view_own narrowed to what one opened, filters
+  `status`, `rfqId`, `requestId`, `supplierId`) shows the RFQ, the
+  reference budget and the saving of the award (else the lowest complete
+  quote), with Open and Awarded cards; its paper is landscape. The page is
+  `pages/chain/Canvass.tsx` (moved out of `Orders.tsx`).
 
 ## Spreadsheet attachments (2026-10-05)
 
