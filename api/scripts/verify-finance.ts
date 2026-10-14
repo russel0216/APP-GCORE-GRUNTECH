@@ -3619,6 +3619,63 @@ async function main() {
       ],
     });
     check('one collection is from one customer — two customers’ invoices are refused', mixed.status === 400, `${mixed.status} ${mixed.body.error}`);
+
+    // ══ Finance reports (2026-10-15): one per menu, the A/R list's own rule ══
+    console.log('\nFinance reports — the aging, the receivables, the forecast, the collections');
+    const [agingRep, arAll] = await Promise.all([fin('GET', '/fin-reports/aging'), fin('GET', '/invoices?pageSize=1')]);
+    const agingCard = (label: string) => (agingRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === label)?.value;
+    check(
+      'the aging’s Outstanding and Overdue are the A/R list’s Total receivables and Overdue cards',
+      agingRep.status === 200 &&
+        money(agingCard('Outstanding') ?? -1, arAll.body.summary?.receivable) &&
+        money(agingCard('Overdue') ?? -1, arAll.body.summary?.overdue) &&
+        money(agingCard('Awaiting countering') ?? -1, arAll.body.summary?.awaiting),
+      `${JSON.stringify(agingRep.body.cards)} vs ${JSON.stringify(arAll.body.summary).slice(0, 160)}`,
+    );
+    check(
+      'it ages as of one day, an Awaiting countering row first',
+      agingRep.body.from === agingRep.body.to && agingRep.body.series?.rows?.[0]?.label === 'Awaiting countering',
+      JSON.stringify(agingRep.body.series?.rows?.map((r: { label: string }) => r.label)),
+    );
+    const recBySeller = await fin('GET', `/fin-reports/receivables?from=${sixtyAgo}&salespersonId=${engineer.id}`);
+    const sellerRows = (recBySeller.body.tables ?? []).find((t: { title: string }) => t.title === 'By sales personnel')?.rows ?? [];
+    check(
+      'the receivables report narrows to one salesperson and says so',
+      recBySeller.status === 200 && sellerRows.length === 1 && sellerRows[0][0] === engineer.name && String(recBySeller.body.filterLine).includes(engineer.name),
+      JSON.stringify(sellerRows) + ' ' + recBySeller.body.filterLine,
+    );
+    const colRep = await fin('GET', `/fin-reports/collections?salespersonId=${engineer.id}`);
+    const colCard = (colRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === 'Total collections')?.value ?? 0;
+    check(
+      'the collections report credits the salesperson of the invoices settled, by team too',
+      colRep.status === 200 &&
+        colCard >= arLeft - 0.005 &&
+        (colRep.body.tables ?? []).find((t: { title: string }) => t.title === 'By team')?.rows?.some((r: unknown[]) => r[0] === team?.code),
+      JSON.stringify(colRep.body.cards),
+    );
+    const weekly = await fin('GET', '/fin-reports/collection-forecast?by=week');
+    const badBy = await fin('GET', '/fin-reports/collection-forecast?by=year');
+    check(
+      'the forecast looks ahead ninety days by default, by week when asked; an unknown "by" is a 400',
+      weekly.status === 200 && weekly.body.from === todayIso && weekly.body.series?.head === 'Week' && weekly.body.series.rows.length >= 13 && badBy.status === 400,
+      `${weekly.status} ${weekly.body.from} ${weekly.body.series?.head} ${weekly.body.series?.rows?.length} · ${badBy.status}`,
+    );
+    const repCsv = await fetch(`${BASE}/fin-reports/aging.csv`, { headers: { Authorization: `Bearer ${signToken(finance.id, finance.email)}` } });
+    const repPdf = await fin('GET', '/fin-reports/collection-forecast.pdf');
+    const repAudit = await prisma.auditLog.count({ where: { entityType: 'finance_report', actorId: finance.id, action: 'EXPORTED' } });
+    check(
+      'each report has a CSV and a PDF twin, each on the trail',
+      repCsv.status === 200 && (repCsv.headers.get('content-type') ?? '').startsWith('text/csv') && repPdf.status === 200 && !!repPdf.bytes && repAudit >= 2,
+      `${repCsv.status} ${repPdf.status} ${repAudit}`,
+    );
+    await throwaway('zzfin_reports', ['gfin.reports.view_all']);
+    const reportsOnly = as(await makeUser('ZZ Reports Only', 'reports@verifyf.local', ['zzfin_reports']));
+    const [noAr, noRight] = await Promise.all([reportsOnly('GET', '/fin-reports/receivables'), eng('GET', '/fin-reports/payments')]);
+    check(
+      'the Reports right opens the page, but a receivables report also needs A/R’s; without Reports it is a 403',
+      noAr.status === 403 && noRight.status === 403,
+      `${noAr.status} ${noRight.status}`,
+    );
   }
 
   await cleanup();

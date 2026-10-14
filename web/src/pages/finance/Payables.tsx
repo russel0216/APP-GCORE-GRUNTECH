@@ -308,6 +308,7 @@ export function Payables() {
         listKey="supplier-bills"
         endpoint="/supplier-bills"
         printPath="/api/supplier-bills/pdf"
+        reportPath="/g-fin/reports?kind=payables-aging"
         columns={columns}
         rowKey={(r) => r.id}
         reloadToken={reload}

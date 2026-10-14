@@ -1,14 +1,11 @@
-import { Router, type Request, type Response } from 'express';
-import { Prisma } from '@prisma/client';
+import { Router } from 'express';
 import { prisma } from '../prisma';
-import { handler, badRequest } from '../http/kit';
-import { authenticate, require_ } from '../auth/middleware';
-import { audit } from '../shared/audit';
-import { parseRange, toCsv, type Range } from '../shared/insights';
+import { authenticate } from '../auth/middleware';
+import { type Range } from '../shared/insights';
 import { manilaDate, manilaMonthKey } from '../shared/day';
 import { availableOf, belowReorder } from '../shared/chain';
-import { renderDocument, formatDate, formatAmount, formatMoney, statusLabel, companyCurrency, type PdfSection } from '../shared/pdf';
-import { contentDisposition, paperFileName } from '../shared/paperName';
+import { statusLabel } from '../shared/pdf';
+import { Series, byValue, cents, dayOf, mountReports, monthsOf, num, pct, round3, table, tally, type Report, type Table } from '../shared/reportKit';
 import { figuresOf } from './procurement';
 import { PULLOUT_PURPOSES, purposeOf } from './pullouts';
 import { BORROW_TYPES } from './warehouse';
@@ -31,84 +28,6 @@ export const chainReportRoutes = Router();
 chainReportRoutes.use(authenticate);
 
 const VIEW = 'gchain.reports.view_all';
-
-type Cell = string | number | null;
-interface Col {
-  label: string;
-  money?: boolean;
-  align?: 'left' | 'right';
-}
-interface Table {
-  title: string;
-  columns: Col[];
-  rows: Cell[][];
-}
-interface Report {
-  kind: string;
-  title: string;
-  from: string;
-  to: string;
-  cards: { label: string; value: number; money?: boolean; sub?: string }[];
-  series: { title: string; columns: Col[]; rows: { label: string; values: number[] }[] };
-  tables: Table[];
-  notes?: string[];
-}
-
-const num = (v: Prisma.Decimal | number | null | undefined) => (v == null ? 0 : Number(v));
-const cents = (n: number) => Math.round(n * 100) / 100;
-const round3 = (n: number) => Math.round(n * 1000) / 1000;
-const dayOf = (d: Date) => d.toISOString().slice(0, 10);
-
-/** The months of a range, oldest first, as 'YYYY-MM' keys with their labels. */
-function monthsOf(range: Range): { key: string; label: string }[] {
-  const out: { key: string; label: string }[] = [];
-  const first = new Date(Date.UTC(range.from.getUTCFullYear(), range.from.getUTCMonth(), 1));
-  const lastKey = dayOf(range.to).slice(0, 7);
-  for (let d = first; dayOf(d).slice(0, 7) <= lastKey && out.length < 120; d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1))) {
-    out.push({ key: dayOf(d).slice(0, 7), label: d.toLocaleDateString('en-PH', { month: 'short', year: 'numeric', timeZone: 'UTC' }) });
-  }
-  return out;
-}
-
-/** A month-by-month tally: one row per month of the range, every column at zero until something lands in it. */
-class Series {
-  private readonly rows = new Map<string, number[]>();
-  constructor(
-    readonly title: string,
-    readonly columns: Col[],
-    readonly months: { key: string; label: string }[],
-  ) {
-    for (const m of months) this.rows.set(m.key, columns.map(() => 0));
-  }
-  add(at: Date | null | undefined, col: number, v: number) {
-    if (!at) return;
-    const row = this.rows.get(manilaMonthKey(at));
-    if (row) row[col] = col === 0 || Number.isInteger(row[col] + v) ? row[col] + v : round3(row[col] + v);
-  }
-  done() {
-    return {
-      title: this.title,
-      columns: this.columns,
-      rows: this.months.map((m) => ({ label: m.label, values: (this.rows.get(m.key) ?? []).map((v, i) => (this.columns[i].money ? cents(v) : round3(v))) })),
-    };
-  }
-}
-
-/** Groups rows under a key, summing the figures each gives, for a "By …" table. */
-function tally<T>(rows: T[], keyOf: (r: T) => string, figuresOf: (r: T) => number[]): Map<string, number[]> {
-  const out = new Map<string, number[]>();
-  for (const r of rows) {
-    const key = keyOf(r);
-    const fig = figuresOf(r);
-    const cur = out.get(key) ?? fig.map(() => 0);
-    out.set(key, cur.map((v, i) => v + fig[i]));
-  }
-  return out;
-}
-const byValue = (m: Map<string, number[]>, col: number, top = 10) =>
-  [...m.entries()].sort((a, b) => b[1][col] - a[1][col]).slice(0, top);
-const table = (title: string, columns: Col[], rows: Cell[][]): Table => ({ title, columns, rows });
-const pct = (part: number, whole: number) => (whole > 0 ? Math.round((part / whole) * 1000) / 10 : 0);
 
 // ── The reports ──────────────────────────────────────────────────────────────
 
@@ -618,86 +537,4 @@ const KINDS: Record<string, (range: Range) => Promise<Report>> = {
 };
 export const REPORT_KINDS = Object.keys(KINDS);
 
-async function build(req: Request): Promise<Report> {
-  const kind = String(req.params.kind ?? '');
-  const builder = KINDS[kind];
-  if (!builder) throw badRequest(`No such report — one of ${REPORT_KINDS.join(', ')}`);
-  const range = parseRange(typeof req.query.from === 'string' ? req.query.from : undefined, typeof req.query.to === 'string' ? req.query.to : undefined);
-  return builder(range);
-}
-
-const fmt = (v: Cell, money?: boolean) => (v === null || v === undefined ? '' : typeof v === 'number' ? (money ? formatAmount(v) : new Intl.NumberFormat('en-PH', { maximumFractionDigits: 3 }).format(v)) : v);
-
-/** Above `/:kind`: the CSV twin — the series, then each table under its title. */
-chainReportRoutes.get(
-  '/:kind.csv',
-  require_(VIEW),
-  handler(async (req, res: Response) => {
-    const r = await build(req);
-    const rows: (string | number | null)[][] = r.series.rows.map((x) => [x.label, ...x.values]);
-    for (const t of r.tables) {
-      rows.push([], [t.title], t.columns.map((c) => c.label));
-      for (const row of t.rows) rows.push(row);
-    }
-    await audit({ entityType: 'chain_report', entityId: r.kind, action: 'EXPORTED', summary: `${r.title} exported as CSV (${r.from} to ${r.to})` }, req);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${r.kind}-${r.from}-${r.to}.csv"`);
-    res.send(toCsv(['Period', ...r.series.columns.map((c) => c.label)], rows));
-  }),
-);
-
-/** Above `/:kind`: the paper — the cards, the series and the tables, landscape past seven columns. */
-chainReportRoutes.get(
-  '/:kind.pdf',
-  require_(VIEW),
-  handler(async (req, res: Response) => {
-    const r = await build(req);
-    const currency = await companyCurrency();
-    const head = (cols: Col[]) => cols.map((c) => (c.money ? `${c.label} (${currency})` : c.label));
-    const align = (cols: Col[]) => cols.map((c) => (c.money || c.align === 'right' ? ('right' as const) : ('left' as const)));
-    const sections: PdfSection[] = [
-      {
-        kind: 'fields',
-        columns: 2,
-        fields: r.cards.map((c) => ({ label: c.label, value: `${c.money ? formatMoney(c.value, currency) : fmt(c.value)}${c.sub ? ` — ${c.sub}` : ''}` })),
-      },
-      {
-        kind: 'table',
-        title: r.series.title,
-        head: ['Period', ...head(r.series.columns)],
-        align: ['left', ...align(r.series.columns)],
-        rows: r.series.rows.map((x) => [x.label, ...x.values.map((v, i) => fmt(v, r.series.columns[i].money))]),
-      },
-      ...r.tables.map(
-        (t): PdfSection => ({
-          kind: 'table',
-          title: t.title,
-          head: head(t.columns),
-          align: align(t.columns),
-          rows: t.rows.map((row) => row.map((v, i) => fmt(v, t.columns[i]?.money))),
-        }),
-      ),
-    ];
-    if (r.notes?.length) sections.push({ kind: 'text', title: 'Notes', body: r.notes.join('\n') });
-    const widest = Math.max(r.series.columns.length + 1, ...r.tables.map((t) => t.columns.length));
-    const pdf = await renderDocument({
-      title: r.title,
-      date: new Date(),
-      reference: `${formatDate(new Date(`${r.from}T00:00:00Z`))} – ${formatDate(new Date(`${r.to}T00:00:00Z`))}`,
-      landscape: widest > 7,
-      sections,
-    });
-    await audit({ entityType: 'chain_report', entityId: r.kind, action: 'EXPORTED', summary: `${r.title} printed (${r.from} to ${r.to})` }, req);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: r.title, number: `${r.from} to ${r.to}`, author: req.user?.name ?? '', date: new Date() })));
-    res.send(pdf);
-  }),
-);
-
-chainReportRoutes.get(
-  '/:kind',
-  require_(VIEW),
-  handler(async (req, res: Response) => {
-    res.json(await build(req));
-  }),
-);
+mountReports(chainReportRoutes, { view: VIEW, auditType: 'chain_report', kinds: KINDS });

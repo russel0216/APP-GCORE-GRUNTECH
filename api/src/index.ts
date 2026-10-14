@@ -57,6 +57,7 @@ import {
 import { rfqRoutes } from './routes/rfq';
 import { pulloutRoutes } from './routes/pullouts';
 import { chainReportRoutes } from './routes/chainReports';
+import { finReportRoutes } from './routes/finReports';
 import {
   receivingRoutes,
   stockIssueRoutes,
@@ -191,6 +192,7 @@ app.use('/api/stock-issues', stockIssueRoutes);
 app.use('/api/borrow-slips', borrowRoutes);
 app.use('/api/pullout-slips', pulloutRoutes);
 app.use('/api/chain-reports', chainReportRoutes);
+app.use('/api/fin-reports', finReportRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/gchain', chainRoutes);
 

@@ -709,3 +709,14 @@ a.inv-move:hover .inv-move-what {
 .rep-bar-cell .mini-bar {
   width: 6rem;
 }
+/* G-FIN's reports narrow by customer too: the picker needs room for a name. */
+.rep-customer {
+  min-width: 18rem;
+}
+.rep-customer > div {
+  flex: 1;
+}
+/* A breakdown with many columns (an aging by bucket) takes the full width. */
+.rep-wide {
+  grid-column: 1 / -1;
+}

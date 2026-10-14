@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,229 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,236 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 23 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices and collections):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 171, chain 329, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 340, aftermarket 259, cad 101,
+115, evaluations 152, academy 120, finance 347, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -4779,7 +4779,17 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   `reportPath` on `DataList` (beside the screen's actions, rule 9) opens
   the page with that list's kind preset. The old Supply Chain Reports page
   (stock by warehouse, needs reordering, overdue borrows) is the `overview`
-  kind.
+  kind. **The engine is shared** (2026-10-15, when G-FIN's
+  reports came): `shared/reportKit.ts` holds the report shape (`Report`,
+  with an optional `series.head` — "Age", "Week" — and a `filterLine`),
+  `Series` (a period per row, the Manila month unless a report gives its
+  own key), `tally`, `byValue`, `monthsOf` and `mountReports()`, which puts
+  `/:kind.csv`, `/:kind.pdf` and `/:kind` on a router with the menu's view
+  right, a per-kind right (`rights`) and the audit type; the paper says "As
+  of" when from and to are one day. The web page is
+  `components/ReportPage.tsx` (a kind's `mode`: `range`, `asOf` or
+  `ahead`, with their presets; `controls` and `extraKeys` for a division's
+  own narrowing, in the URL); `ChainReports` is a wrapper over it.
 - **The borrow slip is the EQUIPMENT & TOOL BORROWER'S SLIP** (2026-10-15,
   the owner's form as the guide). `BorrowSlip.borrowType` (`BorrowType`:
   Internal / office use, On-site project / customer site, Personal request,
@@ -4994,6 +5004,34 @@ salesperson, team, customer and terms.
   applied, the amount received, signed by whoever recorded it — "Cheque
   received — not yet cleared." in the foot until it clears. The payment
   page has Print and shows the OR.
+
+- **G-FIN › Reports is one report per money menu** (the owner's "Create
+  Report" — the aging, the receivables, the collections — and "Forecast
+  Collection", which he wanted by salesperson, team, customer and terms):
+  `routes/finReports.ts` at `/api/fin-reports/:kind` on the shared engine
+  (audited `finance_report`), `FinanceReports` on `ReportPage` at
+  `/g-fin/reports` (it replaced the old aging tabs; the
+  `/finance-reports/ar-aging` and `ap-aging` routes stay). Kinds:
+  **receivables** (invoices dated in the range, by month; by customer,
+  salesperson, team, terms), **aging** (as of one day: Awaiting countering
+  apart, then the Finance Settings buckets — never overdue until
+  countered; by customer, salesperson and team with a column per bucket,
+  and the most overdue — its Outstanding, Overdue and Awaiting countering
+  are the A/R list's own cards, verify-finance asserts it),
+  **collection-forecast** (looking ahead — the next ninety days unless
+  dated — by month or `?by=week`: the countered day plus the terms, an
+  uncountered invoice placed as if countered today, past-due ones apart
+  as owed already; by salesperson, team, customer and terms),
+  **collections** (customer receipts by month, credited to each settled
+  invoice's salesperson and team by the amount applied; by method; days
+  to collect, weighted by amount), **payables-aging** (bills by bucket and
+  supplier, claims to reimburse, advances to liquidate) and **payments**
+  (money out by month, payee, what it settled, method). The A/R kinds take
+  `?salespersonId=` / `?teamId=` (or `none`) / `?customerId=`. Each kind
+  needs `gfin.reports.view_all` AND its menu's right — A/R's for the four
+  receivables kinds, A/P's for the two payables kinds (`rights` in
+  `mountReports`). Report buttons: A/R → receivables, Payments →
+  collections, A/P → payables aging.
 
 ## Spreadsheet attachments (2026-10-05)
 
