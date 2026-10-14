@@ -75,10 +75,10 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   // A project's drawing or document sent for internal approval (2026-10-13).
   { type: 'plan_approval', code: 'RFA', label: 'Request for Approval' },
   { type: 'purchase_request', code: 'PR', label: 'Purchase Request' },
-  { type: 'canvass', code: 'RFQ', label: 'Canvass / RFQ' },
+  { type: 'canvass', code: 'RFQ', label: 'Canvass' },
   { type: 'purchase_order', code: 'PO', label: 'Purchase Order' },
-  { type: 'receiving', code: 'RR', label: 'Receiving Report' },
-  { type: 'stock_issue', code: 'SI', label: 'Stock Issuance' },
+  { type: 'receiving', code: 'RR', label: 'Incoming Report' },
+  { type: 'stock_issue', code: 'SI', label: 'Outgoing Slip' },
   { type: 'borrow_slip', code: 'BS', label: 'Borrow Slip' },
   { type: 'progress_report', code: 'PGR', label: 'Progress Report' },
   { type: 'progress_billing', code: 'PB', label: 'Progress Billing' },

@@ -34,8 +34,8 @@ const DETAIL: Record<string, string> = {
   purchase_request: '/g-chain/purchase-requests',
   canvass: '/g-chain/canvass',
   purchase_order: '/g-chain/purchase-orders',
-  receiving: '/g-chain/receiving',
-  stock_issue: '/g-chain/stock-issuance',
+  receiving: '/g-chain/incoming',
+  stock_issue: '/g-chain/outgoing',
   borrow_slip: '/g-chain/borrow-slips',
   // Finance
   invoice: '/g-fin/ar',

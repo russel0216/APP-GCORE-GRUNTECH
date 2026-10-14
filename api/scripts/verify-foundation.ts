@@ -144,6 +144,9 @@ async function expectRejection(label: string, fn: () => Promise<unknown>, expect
 }
 
 const TAG = '__verify__';
+/** G-CHAIN's two flows (the owner's order of 2026-10-14), as built so far. */
+const PROCUREMENT_STRIP = 'Purchase Requests,Canvass,Purchase Orders';
+const WAREHOUSE_STRIP = 'Incoming,Inventory,Outgoing,Borrow Slips';
 /**
  * What every approval this script submits is about. A seeded workflow routes
  * to whoever really holds the role, so its notifications reach real people;
@@ -357,7 +360,18 @@ async function main() {
     .find((m) => m.key === 'gops')!
     .submodules.filter((s) => s.group === 'Project Management' && !s.hidden)
     .map((s) => s.label);
-  check('Project Management shows Costing, Job Orders, CAD J.O., Projects in that order', pmStrip.join() === 'Costing,Job Orders,CAD J.O.,Projects', pmStrip.join());
+  check('Project Management shows Costing, Projects, Job Orders, CAD J.O. in that order', pmStrip.join() === 'Costing,Projects,Job Orders,CAD J.O.', pmStrip.join());
+  // The owner's order of 2026-10-14: the divisions G-OPS, G-CHAIN, G-FIN,
+  // G-HR, and G-CHAIN's two flows.
+  const divisions = menuFor(superUser).map((m) => m.key).filter((k) => ['gops', 'gchain', 'gfin', 'ghr'].includes(k));
+  check('the divisions run G-OPS, G-CHAIN, G-FIN, G-HR', divisions.join() === 'gops,gchain,gfin,ghr', divisions.join());
+  const chainStrip = (group: string) =>
+    menuFor(superUser).find((m) => m.key === 'gchain')!.submodules.filter((s) => s.group === group && !s.hidden).map((s) => s.label).join();
+  check(
+    `Procurement is ${PROCUREMENT_STRIP.replace(/,/g, ', ')}; Warehouse is ${WAREHOUSE_STRIP.replace(/,/g, ', ')}`,
+    chainStrip('Procurement') === PROCUREMENT_STRIP && chainStrip('Warehouse') === WAREHOUSE_STRIP,
+    `${chainStrip('Procurement')} | ${chainStrip('Warehouse')}`,
+  );
   // The Sales strip is the sales flow (2026-10-08, the owner's call).
   const salesStrip = menuFor(superUser)
     .find((m) => m.key === 'gops')!

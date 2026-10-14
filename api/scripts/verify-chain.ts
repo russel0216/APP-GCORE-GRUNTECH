@@ -792,7 +792,7 @@ async function main() {
   const recHits = await globalSearch(receiving.number, (await resolveUser(storekeeper.id))!);
   check(
     'a receiving report is findable by number too',
-    recHits.some((h) => h.kind === 'receiving' && h.link === `/g-chain/receiving/${receiving.id}`),
+    recHits.some((h) => h.kind === 'receiving' && h.link === `/g-chain/incoming/${receiving.id}`),
   );
   const prHits = await globalSearch(pr.number, (await resolveUser(engineer.id))!);
   check(

@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,095 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,097 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -569,9 +569,10 @@ for Back Support's own team, and 3 on foundation and 13 on chain for the
 purchase requisition page, and one on foundation and 9 on chain for the
 purchase order page, and one on foundation and 5 on costing for a line's
 supplier and note, and one on chain for an approved request not counted
-twice against its budget):
+twice against its budget, and 2 on foundation for the owner's order of the
+divisions and G-CHAIN's strips):
 foundation
-370, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
+372, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 171, chain 225, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
@@ -2231,8 +2232,8 @@ team, consolidating job orders: attach files, revision traceability, the
 designer updates the status by percentage, the requestor comments for
 changes, the designer sets the priority; there is a Designer Lead and a
 Designer Support; the output is always a PDF for the requestor".
-`/g-ops/cad-job-orders` under Project Management (Costing · Job Orders ·
-**CAD J.O.** · Projects — pinned by verify-foundation), `gops.cad_job_orders`,
+`/g-ops/cad-job-orders` under Project Management (Costing · Projects · Job
+Orders · **CAD J.O.** since 2026-10-14 — pinned by verify-foundation), `gops.cad_job_orders`,
 `routes/cadJobOrders.ts`, `pages/delivery/CadJobOrders.tsx`,
 `styles/cad.css`, numbering type `cad_job_order` (CJO), verify-cad.
 
@@ -4140,8 +4141,9 @@ import for the wrong document is refused.
 ## Project Management (2026-10-06)
 
 The owner's arrangement, after the old gasiontech G-CORE: the G-OPS section
-is **Project Management** and its strip is **Costing, Job Orders, Projects**
-(the registry's order carries it; verify-foundation pins it). The five
+is **Project Management** and its strip is **Costing, Projects, Job Orders,
+CAD J.O.** (the owner's order of 2026-10-14; the registry's order carries it;
+verify-foundation pins it). The five
 registers that used to sit there — Approved Plans, Budget Monitoring, Purchase
 Requests, Budget Requests, Progress & Billing — are `hidden: true`: each is a
 tab inside a project, and the Projects page keeps them one click away
@@ -4417,6 +4419,28 @@ page's dress (`prq-*`) and reusing its `ItemCell` and `lib/prLines.ts`.
   `GET /purchase-orders/suggest` (`lineSuggestions()`, the requisition's
   rule behind the order's rights); the route is `GET /purchase-orders/route
   ?amount=&orderId=` at the order's total, in its buyer's name.
+
+## G-CHAIN's flows (2026-10-14)
+
+The owner's six of 2026-10-14 (`docs/notes/P-chain-flow-2026-10-14.md`,
+previews `docs/mockups/chain-flow-*.png`), built push by push.
+
+- **The divisions run G-OPS, G-CHAIN, G-FIN, G-HR** — the registry's
+  module order (the launcher's `DIVISIONS` in `pages/Home.tsx`, the top
+  bar and Ctrl+K follow it); verify-foundation pins it with the strips.
+- **Procurement** is Purchase Requests, RFQ, Canvass, Purchase Orders and
+  **Warehouse** is Incoming, Inventory, Outgoing, Borrow Slips, Pull-out
+  Slips (`PROCUREMENT_STRIP` / `WAREHOUSE_STRIP` in verify-foundation, the
+  strips as built so far). **Incoming and Outgoing are Receiving and Stock
+  Issuance renamed**: the registry KEYS (`receiving`, `stock_issuance`) and
+  every permission string stay, so no right moved; the paths are
+  `/g-chain/incoming` and `/g-chain/outgoing`, and the old
+  `/g-chain/receiving[/:id]` and `/g-chain/stock-issuance[/:id]` land there
+  (`MovedTo` in `App.tsx`, the query kept) — notifications already sent
+  carry the old links. The papers are "Incoming", "Outgoing" and "Outgoing
+  Slip"; the numbering labels "Incoming Report" and "Outgoing Slip" (the
+  seed updates labels only, so RR and SI stay unless an administrator
+  changes them).
 
 ## Spreadsheet attachments (2026-10-05)
 

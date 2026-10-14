@@ -72,7 +72,7 @@ export function Receivings() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Receiving</h1>
+          <h1>Incoming</h1>
         </div>
       </div>
 
@@ -83,7 +83,7 @@ export function Receivings() {
         columns={columns}
         rowKey={(r) => r.id}
         searchPlaceholder="Search number, order, supplier…"
-        onRowClick={(r) => navigate(`/g-chain/receiving/${r.id}`)}
+        onRowClick={(r) => navigate(`/g-chain/incoming/${r.id}`)}
         emptyTitle="Nothing received yet"
         emptyHint="Receive against an issued purchase order."
       />
@@ -153,7 +153,7 @@ export function ReceivingDetail() {
   return (
     <div>
       <RecordHeader
-        type="Receiving"
+        type="Incoming"
         code={String(rec.number)}
         title={order.supplier.name}
         amount={formatMoney(Number(rec.value))}
@@ -401,7 +401,7 @@ export function StockIssues() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Stock Issuance</h1>
+          <h1>Outgoing</h1>
         </div>
       </div>
 
@@ -413,7 +413,7 @@ export function StockIssues() {
         rowKey={(i) => i.id}
         searchPlaceholder="Search number, purpose, project…"
         reloadToken={reload}
-        onRowClick={(i) => navigate(`/g-chain/stock-issuance/${i.id}`)}
+        onRowClick={(i) => navigate(`/g-chain/outgoing/${i.id}`)}
         emptyTitle="Nothing issued yet"
         emptyHint="Stock issued to a project charges it here, at the moving average cost."
         filters={[
@@ -429,7 +429,7 @@ export function StockIssues() {
         actions={
           can('gchain.stock_issuance.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-              + New stock issue
+              + New outgoing slip
             </button>
           ) : null
         }
@@ -441,7 +441,7 @@ export function StockIssues() {
           onSaved={(id) => {
             setCreating(false);
             setReload((r) => r + 1);
-            navigate(`/g-chain/stock-issuance/${id}`);
+            navigate(`/g-chain/outgoing/${id}`);
           }}
         />
       )}
@@ -536,7 +536,7 @@ function IssueModal({
 
   return (
     <Modal
-      title={existing ? `Modify stock issue ${existing.number}` : 'New stock issue'}
+      title={existing ? `Modify outgoing slip ${existing.number}` : 'New outgoing slip'}
       onClose={onClose}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
@@ -653,7 +653,7 @@ export function StockIssueDetail() {
   async function remove() {
     await api.del(`/stock-issues/${id}`);
     toast('ok', `${number} deleted`);
-    navigate('/g-chain/stock-issuance');
+    navigate('/g-chain/outgoing');
   }
 
   const addItemButton = canEdit ? (
@@ -665,7 +665,7 @@ export function StockIssueDetail() {
   return (
     <div>
       <RecordHeader
-        type="Stock Issue"
+        type="Outgoing"
         code={number}
         title={String(issue.purpose)}
         status={String(issue.status)}

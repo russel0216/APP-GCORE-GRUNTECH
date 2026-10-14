@@ -23,12 +23,12 @@ import { kindLabel, type ScheduleRow, type WorkRow } from './MyWork';
  * keyboard could not reach (rule 13).
  */
 
-/** The four divisions, in the order the original landing page had them. */
+/** The four divisions, in the owner's order (2026-10-14): G-OPS, G-CHAIN, G-FIN, G-HR — the registry's. */
 const DIVISIONS: { key: string; art: string; alt: string }[] = [
   { key: 'gops', art: '/modules/g-ops.gif', alt: 'Interlocking gears forming a G' },
-  { key: 'ghr', art: '/modules/g-hr.gif', alt: 'A head drawn as a network of nodes' },
-  { key: 'gfin', art: '/modules/g-fin.gif', alt: 'A rising chart over stacked peso notes and coins' },
   { key: 'gchain', art: '/modules/g-chain.gif', alt: 'Warehouse racking feeding a delivery van' },
+  { key: 'gfin', art: '/modules/g-fin.gif', alt: 'A rising chart over stacked peso notes and coins' },
+  { key: 'ghr', art: '/modules/g-hr.gif', alt: 'A head drawn as a network of nodes' },
 ];
 
 interface MyWork {

@@ -168,7 +168,7 @@ export function Payables() {
             {r.receiving && (
               <>
                 {' · '}
-                <CellLink to={`/g-chain/receiving/${r.receiving.id}`} className="mono">
+                <CellLink to={`/g-chain/incoming/${r.receiving.id}`} className="mono">
                   {r.receiving.number}
                 </CellLink>
               </>
@@ -274,7 +274,7 @@ export function Payables() {
                 {queue.map((r) => (
                   <tr key={r.id}>
                     <td>
-                      <Link to={`/g-chain/receiving/${r.id}`} className="mono">
+                      <Link to={`/g-chain/incoming/${r.id}`} className="mono">
                         {r.number}
                       </Link>
                       <div className="faint">{formatDate(r.receivedDate)}</div>
@@ -829,7 +829,7 @@ export function BillDetail() {
       {row.receiving ? (
         <div className="alert info">
           Matched to{' '}
-          <Link to={`/g-chain/receiving/${row.receiving.id}`} className="mono">
+          <Link to={`/g-chain/incoming/${row.receiving.id}`} className="mono">
             {row.receiving.number}
           </Link>
           , received{' '}

@@ -1,4 +1,4 @@
-import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './lib/auth';
 import { ToastProvider, Loading } from './components/ui';
 import { Shell } from './components/Shell';
@@ -800,7 +800,7 @@ function Routed() {
           }
         />
         <Route
-          path="/g-chain/receiving"
+          path="/g-chain/incoming"
           element={
             <Guard permission="gchain.receiving.view_all">
               <Receivings />
@@ -808,7 +808,7 @@ function Routed() {
           }
         />
         <Route
-          path="/g-chain/receiving/:id"
+          path="/g-chain/incoming/:id"
           element={
             <Guard permission="gchain.receiving.view_all">
               <ReceivingDetail />
@@ -816,7 +816,7 @@ function Routed() {
           }
         />
         <Route
-          path="/g-chain/stock-issuance"
+          path="/g-chain/outgoing"
           element={
             <Guard permission="gchain.stock_issuance.view_all">
               <StockIssues />
@@ -824,7 +824,7 @@ function Routed() {
           }
         />
         <Route
-          path="/g-chain/stock-issuance/:id"
+          path="/g-chain/outgoing/:id"
           element={
             <Guard permission="gchain.stock_issuance.view_all">
               <StockIssueDetail />
@@ -1444,6 +1444,12 @@ function Routed() {
         <Route path="/g-fin/*" element={<NotFound />} />
         <Route path="/g-chain/*" element={<NotFound />} />
 
+        {/* The warehouse's old addresses (Receiving and Stock Issuance, renamed
+            Incoming and Outgoing on 2026-10-14) still land, query and all. */}
+        <Route path="/g-chain/receiving" element={<MovedTo base="/g-chain/incoming" />} />
+        <Route path="/g-chain/receiving/:id" element={<MovedTo base="/g-chain/incoming" />} />
+        <Route path="/g-chain/stock-issuance" element={<MovedTo base="/g-chain/outgoing" />} />
+        <Route path="/g-chain/stock-issuance/:id" element={<MovedTo base="/g-chain/outgoing" />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
@@ -1503,4 +1509,11 @@ export function App() {
       </AuthProvider>
     </BrowserRouter>
   );
+}
+
+/** A renamed screen's old address: the same record and query at the new path. */
+function MovedTo({ base }: { base: string }) {
+  const { id } = useParams();
+  const { search } = useLocation();
+  return <Navigate to={`${base}${id ? `/${id}` : ''}${search}`} replace />;
 }

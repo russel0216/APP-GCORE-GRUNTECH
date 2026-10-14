@@ -77,7 +77,7 @@ export function Canvasses() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Canvass / RFQ</h1>
+          <h1>Canvass</h1>
         </div>
       </div>
 
@@ -1168,7 +1168,7 @@ export function PurchaseOrderDetail() {
               <h3 className="card-title">Receiving reports</h3>
               <div className="proc-links">
                 {po.receivings.map((r) => (
-                  <Link key={r.id} to={`/g-chain/receiving/${r.id}`} className="proc-link-row">
+                  <Link key={r.id} to={`/g-chain/incoming/${r.id}`} className="proc-link-row">
                     <span className="mono">{r.number}</span>
                     <span>{formatDate(r.receivedDate)}</span>
                     <span className="faint">{r.receivedBy.name}</span>
@@ -1206,7 +1206,7 @@ export function PurchaseOrderDetail() {
         <ReceiveModal
           po={po}
           onClose={() => setReceiving(false)}
-          onReceived={(receivingId) => navigate(`/g-chain/receiving/${receivingId}`)}
+          onReceived={(receivingId) => navigate(`/g-chain/incoming/${receivingId}`)}
         />
       )}
     </div>

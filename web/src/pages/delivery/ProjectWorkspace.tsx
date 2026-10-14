@@ -1111,7 +1111,7 @@ function ProcurementTab({ job }: { job: Job }) {
           belongs={(r) => onJob(r.order?.job)}
           empty="Nothing received against this project's orders."
           columns={[
-            { label: 'Number', render: (r) => <DocLink to={`/g-chain/receiving/${r.id}`}>{r.number}</DocLink> },
+            { label: 'Number', render: (r) => <DocLink to={`/g-chain/incoming/${r.id}`}>{r.number}</DocLink> },
             { label: 'Order', render: (r) => <DocLink to={`/g-chain/purchase-orders/${r.order.id}`}>{r.order.number}</DocLink> },
             { label: 'Supplier', render: (r) => r.order.supplier.name },
             { label: 'Received', render: (r) => formatDate(r.receivedDate) },
@@ -1136,7 +1136,7 @@ function ProcurementTab({ job }: { job: Job }) {
           belongs={(r) => onJob(r.job)}
           empty="No stock issued to this project."
           columns={[
-            { label: 'Number', render: (r) => <DocLink to={`/g-chain/stock-issuance/${r.id}`}>{r.number}</DocLink> },
+            { label: 'Number', render: (r) => <DocLink to={`/g-chain/outgoing/${r.id}`}>{r.number}</DocLink> },
             { label: 'Date', render: (r) => formatDate(r.issueDate) },
             { label: 'Issued to', render: (r) => r.issuedToName ?? '—' },
             { label: 'Value', align: 'right', render: (r) => formatMoney(r.value) },

@@ -127,6 +127,7 @@ export const REGISTRY: ModuleDef[] = [
       // registers that follow are hidden (rule: hidden, never deleted): each
       // is a tab inside the project, and a link from the Projects page.
       { key: 'costing', group: 'Project Management', label: 'Costing', path: '/g-ops/costing', actions: OWNED, phase: 3 },
+      { key: 'projects', group: 'Project Management', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
       { key: 'job_orders', group: 'Project Management', label: 'Job Orders', path: '/g-ops/job-orders', actions: OWNED, phase: 8, note: 'The project work order: sales raises it on a quotation, the project manager and the team leader approve, and approval builds the project' },
       // The design team's queue (2026-10-09, the owner's call): a request for a
       // drawing, with files, revisions and a comment thread. No approval
@@ -134,7 +135,6 @@ export const REGISTRY: ModuleDef[] = [
       // assign and reassign requests, set priority on any, close any.
       { key: 'cad_job_orders', group: 'Project Management', label: 'CAD J.O.', path: '/g-ops/cad-job-orders', actions: ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete', 'export', 'approve'], phase: 9,
         note: 'Requests to the design team: files, revisions (R0, R1…), progress, priority and a comment thread. Edit All = the design team (progress, revisions, priority on what is assigned to them); Approve = the Designer Lead (assigns, reassigns, closes any).' },
-      { key: 'projects', group: 'Project Management', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
       { key: 'plans', group: 'Project Management', label: 'Request for Approval', path: '/g-ops/plans', actions: OWNED, phase: 4, hidden: true, note: 'Raised from a project’s Request for Approval tab; decided through the approval engine' },
       { key: 'budget_monitoring', group: 'Project Management', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4, hidden: true },
       { key: 'purchase_requests', group: 'Project Management', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: ['view_own', 'view_all', 'edit_own', 'edit_all'], phase: 5, hidden: true },
@@ -153,6 +153,62 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'pm_reports', group: 'Service reports', label: 'Preventive Maintenance', path: '/g-ops/pm', actions: OWNED_KEPT, phase: 8 },
       { key: 'inspection_reports', group: 'Service reports', label: 'Service Inspections', path: '/g-ops/inspections', actions: OWNED_KEPT, phase: 8 },
       { key: 'service_costing', group: 'Aftermarket', label: 'Service Costing', path: '/g-ops/service-costing', actions: ['view_own', 'view_all', 'edit_own', 'edit_all'], phase: 8, hidden: true },
+    ],
+  },
+  {
+    key: 'gchain',
+    label: 'G-CHAIN',
+    blurb: 'Supply chain — procurement, receiving, inventory',
+    submodules: [
+      { key: 'dashboard', group: 'Overview', label: 'Dashboard', path: '/g-chain', actions: REPORT, phase: 5 },
+      { key: 'purchase_requests', group: 'Procurement', label: 'Purchase Requests', path: '/g-chain/purchase-requests', actions: OWNED, phase: 5 },
+      { key: 'canvass', group: 'Procurement', label: 'Canvass', path: '/g-chain/canvass', actions: OWNED, phase: 5 },
+      { key: 'purchase_orders', group: 'Procurement', label: 'Purchase Orders', path: '/g-chain/purchase-orders', actions: OWNED, phase: 5 },
+      // The warehouse flow (2026-10-14, the owner's call): Incoming › Inventory
+      // › Outgoing › Borrow Slips › Pull-out Slips. Incoming and Outgoing keep
+      // the keys of Receiving and Stock Issuance, so no right moves.
+      { key: 'receiving', group: 'Warehouse', label: 'Incoming', path: '/g-chain/incoming', actions: SHARED_KEPT, phase: 5 },
+      { key: 'inventory', group: 'Warehouse', label: 'Inventory', path: '/g-chain/inventory', actions: ['view_all', 'edit_all'], phase: 5 },
+      { key: 'stock_issuance', group: 'Warehouse', label: 'Outgoing', path: '/g-chain/outgoing', actions: SHARED, phase: 5 },
+      { key: 'borrow_slips', group: 'Warehouse', label: 'Borrow Slips', path: '/g-chain/borrow-slips', actions: SHARED_KEPT, phase: 5 },
+      { key: 'items', group: 'Master data', label: 'Item Master', path: '/g-chain/items', actions: SHARED, phase: 2 },
+      { key: 'suppliers', group: 'Master data', label: 'Suppliers', path: '/g-chain/suppliers', actions: SHARED, phase: 2 },
+      { key: 'warehouses', group: 'Master data', label: 'Warehouses', path: '/g-chain/warehouses', actions: SHARED, phase: 2 },
+      { key: 'reports', group: 'Analysis', label: 'Reports', path: '/g-chain/reports', actions: READ, phase: 5 },
+    ],
+  },
+  {
+    key: 'gfin',
+    label: 'G-FIN',
+    blurb: 'Finance — receivables, payables, cash',
+    submodules: [
+      { key: 'dashboard', group: 'Overview', label: 'Executive Dashboard', path: '/g-fin', actions: REPORT, phase: 7 },
+      { key: 'ar', group: 'Money in', label: 'Accounts Receivable', path: '/g-fin/ar', actions: SHARED, phase: 7 },
+      { key: 'ap', group: 'Money out', label: 'Accounts Payable', path: '/g-fin/ap', actions: SHARED, phase: 7 },
+      { key: 'expenses', group: 'Money out', label: 'Expenses', path: '/g-fin/expenses', actions: OWNED, phase: 7 },
+      { key: 'cash_advances', group: 'Money out', label: 'Cash Advances', path: '/g-fin/cash-advances', actions: OWNED_KEPT, phase: 7 },
+      // Project cash: the budget requests finance releases and the teams
+      // liquidate. Raised on the project (gops.budget_requests); this is
+      // finance's window on every one of them — awaiting release, out with a
+      // team, overdue, done.
+      { key: 'budget_requests', group: 'Money out', label: 'Budget Requests', path: '/g-fin/budget-requests', actions: READ, phase: 7, note: 'Every project’s budget requests: approved ones to release, released ones awaiting liquidation. Releasing is the A/P create right.' },
+      // Every movement of money, in or out. Recording one is gated by the A/R
+      // or A/P create permission depending on direction — seeing the register
+      // is its own, lesser right.
+      { key: 'payments', group: 'Money in', label: 'Payments', path: '/g-fin/payments', actions: READ, phase: 7 },
+      { key: 'cashflow', group: 'Analysis', label: 'Cash Flow', path: '/g-fin/cash-flow', actions: READ, phase: 7 },
+      { key: 'budget_vs_actual', group: 'Analysis', label: 'Budget vs Actual', path: '/g-fin/budget-vs-actual', actions: READ, phase: 7 },
+      { key: 'reports', group: 'Analysis', label: 'Reports', path: '/g-fin/reports', actions: READ, phase: 7 },
+      // Payment terms, supplier withholding and the aging buckets. Finance's
+      // own rules — owning them should not require being a system
+      // administrator, the same way HR owns the working day.
+      {
+        key: 'settings', group: 'Administration',
+        label: 'Finance Settings',
+        path: '/g-fin/settings',
+        actions: SETTINGS,
+        phase: 7,
+      },
     ],
   },
   {
@@ -215,59 +271,6 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'passports', group: 'Academy', label: 'Training Passports', path: '/g-hr/academy/passports', actions: ['view_all', 'create', 'edit_all', 'delete', 'approve'], phase: 6, note: 'Every employee’s passport; verify external certifications; record training directly' },
       { key: 'reports', group: 'Administration', label: 'HR Reports', path: '/g-hr/reports', actions: REPORT, phase: 6 },
       { key: 'settings', group: 'Administration', label: 'HR Settings', path: '/g-hr/settings', actions: SETTINGS, phase: 6 },
-    ],
-  },
-  {
-    key: 'gfin',
-    label: 'G-FIN',
-    blurb: 'Finance — receivables, payables, cash',
-    submodules: [
-      { key: 'dashboard', group: 'Overview', label: 'Executive Dashboard', path: '/g-fin', actions: REPORT, phase: 7 },
-      { key: 'ar', group: 'Money in', label: 'Accounts Receivable', path: '/g-fin/ar', actions: SHARED, phase: 7 },
-      { key: 'ap', group: 'Money out', label: 'Accounts Payable', path: '/g-fin/ap', actions: SHARED, phase: 7 },
-      { key: 'expenses', group: 'Money out', label: 'Expenses', path: '/g-fin/expenses', actions: OWNED, phase: 7 },
-      { key: 'cash_advances', group: 'Money out', label: 'Cash Advances', path: '/g-fin/cash-advances', actions: OWNED_KEPT, phase: 7 },
-      // Project cash: the budget requests finance releases and the teams
-      // liquidate. Raised on the project (gops.budget_requests); this is
-      // finance's window on every one of them — awaiting release, out with a
-      // team, overdue, done.
-      { key: 'budget_requests', group: 'Money out', label: 'Budget Requests', path: '/g-fin/budget-requests', actions: READ, phase: 7, note: 'Every project’s budget requests: approved ones to release, released ones awaiting liquidation. Releasing is the A/P create right.' },
-      // Every movement of money, in or out. Recording one is gated by the A/R
-      // or A/P create permission depending on direction — seeing the register
-      // is its own, lesser right.
-      { key: 'payments', group: 'Money in', label: 'Payments', path: '/g-fin/payments', actions: READ, phase: 7 },
-      { key: 'cashflow', group: 'Analysis', label: 'Cash Flow', path: '/g-fin/cash-flow', actions: READ, phase: 7 },
-      { key: 'budget_vs_actual', group: 'Analysis', label: 'Budget vs Actual', path: '/g-fin/budget-vs-actual', actions: READ, phase: 7 },
-      { key: 'reports', group: 'Analysis', label: 'Reports', path: '/g-fin/reports', actions: READ, phase: 7 },
-      // Payment terms, supplier withholding and the aging buckets. Finance's
-      // own rules — owning them should not require being a system
-      // administrator, the same way HR owns the working day.
-      {
-        key: 'settings', group: 'Administration',
-        label: 'Finance Settings',
-        path: '/g-fin/settings',
-        actions: SETTINGS,
-        phase: 7,
-      },
-    ],
-  },
-  {
-    key: 'gchain',
-    label: 'G-CHAIN',
-    blurb: 'Supply chain — procurement, receiving, inventory',
-    submodules: [
-      { key: 'dashboard', group: 'Overview', label: 'Dashboard', path: '/g-chain', actions: REPORT, phase: 5 },
-      { key: 'purchase_requests', group: 'Procurement', label: 'Purchase Requests', path: '/g-chain/purchase-requests', actions: OWNED, phase: 5 },
-      { key: 'canvass', group: 'Procurement', label: 'Canvass / RFQ', path: '/g-chain/canvass', actions: OWNED, phase: 5 },
-      { key: 'purchase_orders', group: 'Procurement', label: 'Purchase Orders', path: '/g-chain/purchase-orders', actions: OWNED, phase: 5 },
-      { key: 'receiving', group: 'Warehouse', label: 'Receiving', path: '/g-chain/receiving', actions: SHARED_KEPT, phase: 5 },
-      { key: 'stock_issuance', group: 'Warehouse', label: 'Stock Issuance', path: '/g-chain/stock-issuance', actions: SHARED, phase: 5 },
-      { key: 'borrow_slips', group: 'Warehouse', label: 'Borrow Slips', path: '/g-chain/borrow-slips', actions: SHARED_KEPT, phase: 5 },
-      { key: 'inventory', group: 'Warehouse', label: 'Inventory', path: '/g-chain/inventory', actions: ['view_all', 'edit_all'], phase: 5 },
-      { key: 'items', group: 'Master data', label: 'Item Master', path: '/g-chain/items', actions: SHARED, phase: 2 },
-      { key: 'suppliers', group: 'Master data', label: 'Suppliers', path: '/g-chain/suppliers', actions: SHARED, phase: 2 },
-      { key: 'warehouses', group: 'Master data', label: 'Warehouses', path: '/g-chain/warehouses', actions: SHARED, phase: 2 },
-      { key: 'reports', group: 'Analysis', label: 'Reports', path: '/g-chain/reports', actions: READ, phase: 5 },
     ],
   },
   {

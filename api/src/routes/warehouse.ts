@@ -199,7 +199,7 @@ receivingRoutes.get(
 
     // Nine columns: landscape, each sized from what it holds (rule 6).
     const pdf = await renderDocument({
-      title: 'Receiving',
+      title: 'Incoming',
       date: new Date(),
       reference,
       landscape: true,
@@ -230,7 +230,7 @@ receivingRoutes.get(
       { entityType: 'receiving', entityId: 'list', action: 'EXPORTED', summary: `Exported the receiving list as PDF (${rows.length} receiving(s))` },
       req,
     );
-    sendListPdf(res, pdf, 'receivings.pdf');
+    sendListPdf(res, pdf, 'incoming.pdf');
   }),
 );
 
@@ -546,7 +546,7 @@ receivingRoutes.post(
         type: 'po.received',
         title: `Goods received — ${order.number}`,
         body: `${order.job.number} · ${receiving.number}`,
-        link: `/g-chain/receiving/${receiving.id}`,
+        link: `/g-chain/incoming/${receiving.id}`,
       });
     }
 
@@ -699,12 +699,12 @@ stockIssueRoutes.get(
       ]),
     );
 
-    const pdf = await renderDocument({ title: 'Stock Issuance', date: new Date(), reference, landscape: true, sections });
+    const pdf = await renderDocument({ title: 'Outgoing', date: new Date(), reference, landscape: true, sections });
     await audit(
       { entityType: 'stock_issue', entityId: 'list', action: 'EXPORTED', summary: `Exported the stock issue list as PDF (${rows.length} issue(s))` },
       req,
     );
-    sendListPdf(res, pdf, 'stock-issues.pdf');
+    sendListPdf(res, pdf, 'outgoing.pdf');
   }),
 );
 
@@ -1936,7 +1936,7 @@ stockIssueRoutes.get(
     }
 
     const pdf = await renderDocument({
-      title: 'Stock Issuance',
+      title: 'Outgoing Slip',
       documentNumber: issue.number,
       date: issue.issueDate,
       reference: issue.job ? `${issue.job.number} — ${issue.job.name}` : issue.purpose,
@@ -1981,7 +1981,7 @@ stockIssueRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Stock Issue', number: issue.number, author: issue.issuedBy.name, date: issue.issueDate })));
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Outgoing Slip', number: issue.number, author: issue.issuedBy.name, date: issue.issueDate })));
     res.send(pdf);
   }),
 );
@@ -1992,7 +1992,7 @@ stockIssueRoutes.get(
 
 registerSearch({
   kind: 'receiving',
-  label: 'Receiving',
+  label: 'Incoming',
   permission: 'gchain.receiving.view_all',
   async search(term, _user, limit) {
     const rows = await prisma.receiving.findMany({
@@ -2016,14 +2016,14 @@ registerSearch({
       id: r.id,
       title: `${r.number} — ${r.order.supplier.name}`,
       subtitle: `Against ${r.order.number}`,
-      link: `/g-chain/receiving/${r.id}`,
+      link: `/g-chain/incoming/${r.id}`,
     }));
   },
 });
 
 registerSearch({
   kind: 'stock_issue',
-  label: 'Stock issues',
+  label: 'Outgoing',
   permission: 'gchain.stock_issuance.view_all',
   async search(term, _user, limit) {
     const rows = await prisma.stockIssue.findMany({
@@ -2043,7 +2043,7 @@ registerSearch({
       id: r.id,
       title: `${r.number} — ${r.purpose}`,
       subtitle: [r.job?.number, r.status.toLowerCase()].filter(Boolean).join(' · '),
-      link: `/g-chain/stock-issuance/${r.id}`,
+      link: `/g-chain/outgoing/${r.id}`,
     }));
   },
 });
