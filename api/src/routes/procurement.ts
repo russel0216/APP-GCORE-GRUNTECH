@@ -348,96 +348,97 @@ purchaseRequestRoutes.get(
  * reader — the quotation's suggestion rule. Without `q` the costing's lines
  * come whole ("Add from costing…"); the items need a word.
  */
+export async function lineSuggestions(me: ResolvedUser, term: string, jobId: string) {
+  const job = jobId
+    ? await prisma.job.findUnique({ where: { id: jobId }, select: { costingId: true, projectManagerId: true } })
+    : null;
+  const seesCostingCost =
+    can(me, 'gops.costing.view_all') ||
+    can(me, 'gops.budget_monitoring.view_all') ||
+    (job !== null && job.projectManagerId === me.id);
+  const seesItemCost = can(me, 'gchain.items.view_all') || can(me, 'gops.costing.view_all');
+  const words = term
+    ? {
+        OR: [
+          { name: { contains: term, mode: 'insensitive' as const } },
+          { description: { contains: term, mode: 'insensitive' as const } },
+        ],
+      }
+    : {};
+  const [costing, items] = await Promise.all([
+    job
+      ? prisma.costingLine.findMany({
+          where: { costingId: job.costingId, isHeading: false, ...words },
+          orderBy: [{ costCategory: { sortOrder: 'asc' } }, { sortOrder: 'asc' }],
+          take: term ? 25 : 500,
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            quantity: true,
+            unit: true,
+            unitCost: true,
+            itemId: true,
+            item: { select: { partNumber: true } },
+            costCategory: { select: { id: true, code: true, name: true } },
+          },
+        })
+      : [],
+    term
+      ? prisma.item.findMany({
+          where: {
+            isActive: true,
+            OR: [
+              { name: { contains: term, mode: 'insensitive' } },
+              { code: { contains: term, mode: 'insensitive' } },
+              { partNumber: { contains: term, mode: 'insensitive' } },
+            ],
+          },
+          orderBy: { name: 'asc' },
+          take: 15,
+          select: {
+            id: true,
+            code: true,
+            partNumber: true,
+            name: true,
+            description: true,
+            unit: true,
+            standardCost: true,
+            costCategory: { select: { id: true, code: true, name: true } },
+          },
+        })
+      : [],
+  ]);
+  return {
+    costing: costing.map((l) => ({
+      id: l.id,
+      itemId: l.itemId,
+      partNumber: l.item?.partNumber ?? null,
+      name: l.name ?? l.description,
+      description: l.name && l.description !== l.name ? l.description : '',
+      quantity: num(l.quantity),
+      unit: l.unit,
+      unitCost: seesCostingCost ? num(l.unitCost) : null,
+      costCategory: l.costCategory,
+    })),
+    items: items.map((i) => ({
+      id: i.id,
+      code: i.code,
+      partNumber: i.partNumber,
+      name: i.name,
+      description: i.description ?? '',
+      unit: i.unit,
+      unitCost: seesItemCost && i.standardCost != null ? num(i.standardCost) : null,
+      costCategory: i.costCategory,
+    })),
+  };
+}
+
 purchaseRequestRoutes.get(
   '/suggest',
   requireAny(...PR_WRITERS),
   handler(async (req, res) => {
-    const me = currentUser(req);
-    const term = String(req.query.q ?? '').trim();
-    const jobId = String(req.query.jobId ?? '');
-    const job = jobId
-      ? await prisma.job.findUnique({ where: { id: jobId }, select: { costingId: true, projectManagerId: true } })
-      : null;
-    const seesCostingCost =
-      can(me, 'gops.costing.view_all') ||
-      can(me, 'gops.budget_monitoring.view_all') ||
-      (job !== null && job.projectManagerId === me.id);
-    const seesItemCost = can(me, 'gchain.items.view_all') || can(me, 'gops.costing.view_all');
-    const words = term
-      ? {
-          OR: [
-            { name: { contains: term, mode: 'insensitive' as const } },
-            { description: { contains: term, mode: 'insensitive' as const } },
-          ],
-        }
-      : {};
-    const [costing, items] = await Promise.all([
-      job
-        ? prisma.costingLine.findMany({
-            where: { costingId: job.costingId, isHeading: false, ...words },
-            orderBy: [{ costCategory: { sortOrder: 'asc' } }, { sortOrder: 'asc' }],
-            take: term ? 25 : 500,
-            select: {
-              id: true,
-              name: true,
-              description: true,
-              quantity: true,
-              unit: true,
-              unitCost: true,
-              itemId: true,
-              item: { select: { partNumber: true } },
-              costCategory: { select: { id: true, code: true, name: true } },
-            },
-          })
-        : [],
-      term
-        ? prisma.item.findMany({
-            where: {
-              isActive: true,
-              OR: [
-                { name: { contains: term, mode: 'insensitive' } },
-                { code: { contains: term, mode: 'insensitive' } },
-                { partNumber: { contains: term, mode: 'insensitive' } },
-              ],
-            },
-            orderBy: { name: 'asc' },
-            take: 15,
-            select: {
-              id: true,
-              code: true,
-              partNumber: true,
-              name: true,
-              description: true,
-              unit: true,
-              standardCost: true,
-              costCategory: { select: { id: true, code: true, name: true } },
-            },
-          })
-        : [],
-    ]);
-    res.json({
-      costing: costing.map((l) => ({
-        id: l.id,
-        itemId: l.itemId,
-        partNumber: l.item?.partNumber ?? null,
-        name: l.name ?? l.description,
-        description: l.name && l.description !== l.name ? l.description : '',
-        quantity: num(l.quantity),
-        unit: l.unit,
-        unitCost: seesCostingCost ? num(l.unitCost) : null,
-        costCategory: l.costCategory,
-      })),
-      items: items.map((i) => ({
-        id: i.id,
-        code: i.code,
-        partNumber: i.partNumber,
-        name: i.name,
-        description: i.description ?? '',
-        unit: i.unit,
-        unitCost: seesItemCost && i.standardCost != null ? num(i.standardCost) : null,
-        costCategory: i.costCategory,
-      })),
-    });
+    res.json(await lineSuggestions(currentUser(req), String(req.query.q ?? '').trim(), String(req.query.jobId ?? '')));
   }),
 );
 
@@ -2192,6 +2193,8 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
     bills: seesBills ? bills.map((b) => ({ ...b, total: num(b.total) })) : [],
     billsVisible: seesBills,
     canEdit: !!me && po.status === 'DRAFT' && mayEditPo(me, po),
+    /** What the order page's save claims on (`PUT /:id/sheet`'s `version`). */
+    version: po.updatedAt.toISOString(),
     vatRate: num(po.vatRate),
     subtotal: num(po.subtotal),
     vatAmount: num(po.vatAmount),
@@ -2206,6 +2209,92 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
     })),
   };
 }
+
+// ── The order page's helpers (2026-10-13) ─────────────────────────────────
+// Declared above `/:id`: what an order from a request or canvass starts with,
+// the project's budget as the order would leave it, line suggestions and the
+// route submitting would take.
+
+const PO_WRITERS = [
+  'gchain.purchase_orders.create',
+  'gchain.purchase_orders.edit_own',
+  'gchain.purchase_orders.edit_all',
+] as const;
+
+purchaseOrderRoutes.get(
+  '/draft',
+  require_('gchain.purchase_orders.create'),
+  handler(async (req, res) => {
+    const requestId = req.query.requestId ? String(req.query.requestId) : null;
+    const canvassId = req.query.canvassId ? String(req.query.canvassId) : null;
+    const source = await orderSource(requestId, canvassId);
+    const pr = source.pr;
+    if (pr && !source.lines.length) throw badRequest('Everything on that request has already been ordered');
+    const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+    res.json({
+      vatRate: company ? num(company.vatRate) : 0.12,
+      kind: pr?.kind ?? 'DIRECT_TO_JOB',
+      request: pr ? { id: pr.id, number: pr.number, purpose: pr.purpose, preferredSupplier: pr.preferredSupplier } : null,
+      job: pr?.job ?? null,
+      warehouse: pr?.warehouse ?? null,
+      canvass: source.canvass,
+      supplier: source.supplier,
+      neededBy: pr?.neededBy ?? null,
+      lines: source.lines,
+    });
+  }),
+);
+
+/**
+ * The project's budget by budget line (`projectBudgetByLine()`), and — for an
+ * order from a request — what issuing it releases: the request's net
+ * commitment per budget line, which `settlePurchaseOrder` releases whole
+ * before it commits the order's own figure.
+ */
+purchaseOrderRoutes.get(
+  '/budget',
+  requireAny(...PO_WRITERS),
+  handler(async (req, res) => {
+    const jobId = String(req.query.jobId ?? '');
+    if (!jobId) throw badRequest('Name the project');
+    const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, number: true, name: true } });
+    if (!job) throw notFound('Project not found');
+    const requestId = req.query.requestId ? String(req.query.requestId) : null;
+    const released: Record<string, number> = {};
+    if (requestId) {
+      const rows = await prisma.jobCostEntry.groupBy({
+        by: ['costCategoryId'],
+        where: { jobId, state: 'COMMITTED', sourceType: 'purchase_request', sourceId: requestId },
+        _sum: { amount: true },
+      });
+      for (const r of rows) if (Math.abs(num(r._sum.amount)) >= 0.005) released[r.costCategoryId] = cents(num(r._sum.amount));
+    }
+    res.json({ job, ...(await projectBudgetByLine(jobId)), released, blocked: await overBudgetIsBlocked() });
+  }),
+);
+
+purchaseOrderRoutes.get(
+  '/suggest',
+  requireAny(...PO_WRITERS),
+  handler(async (req, res) => {
+    res.json(await lineSuggestions(currentUser(req), String(req.query.q ?? '').trim(), String(req.query.jobId ?? '')));
+  }),
+);
+
+/** "Submit for approval sends it to …" — at the order's total, in its buyer's name (the order's own, else the caller's). */
+purchaseOrderRoutes.get(
+  '/route',
+  requireAny(...PO_WRITERS),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const amount = Number(req.query.amount ?? 0);
+    if (!Number.isFinite(amount) || amount < 0) throw badRequest('The amount is not a number');
+    const orderId = req.query.orderId ? String(req.query.orderId) : null;
+    const po = orderId ? await prisma.purchaseOrder.findUnique({ where: { id: orderId }, select: { createdById: true } }) : null;
+    if (orderId && !po) throw notFound('Purchase order not found');
+    res.json({ route: await routeBrief('purchase_order', amount, po?.createdById ?? me.id) });
+  }),
+);
 
 purchaseOrderRoutes.get(
   '/:id',
@@ -2238,89 +2327,199 @@ const poSchema = z.object({
   vatInclusive: z.boolean().default(false),
 });
 
+/** One line of the order page's save — `POST /` with `lines[]` and `PUT /:id/sheet`. */
+const poLineSchema = z.object({
+  id: z.string().optional().nullable(),
+  requestItemId: z.string().optional().nullable(),
+  itemId: z.string().optional().nullable(),
+  costCategoryId: z.string().optional().nullable(),
+  partNumber: z.string().trim().max(120).optional().nullable(),
+  name: z.string().trim().max(300).optional().nullable(),
+  description: z.string().trim().max(4000).optional().nullable(),
+  quantity: z.number().positive('Quantity must be more than zero'),
+  unit: z.string().trim().max(40).optional().nullable(),
+  unitPrice: z.number().min(0, 'A unit price cannot be negative'),
+});
+type PoLineInput = z.infer<typeof poLineSchema>;
+
+interface OrderLine {
+  id: string | null;
+  requestItemId: string | null;
+  itemId: string | null;
+  costCategoryId: string | null;
+  partNumber: string | null;
+  name: string | null;
+  description: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+}
+
+/**
+ * What an order raised from a request or an awarded canvass starts with: the
+ * request, the canvass, the supplier the canvass decided and the lines still
+ * to be ordered — at the winner's quoted prices from a canvass, at the
+ * request's estimates otherwise. ONE rule for `POST /` and the page's
+ * `GET /draft`, so the page shows exactly what a save would write.
+ */
+async function orderSource(requestId: string | null | undefined, canvassId: string | null | undefined) {
+  if (canvassId) {
+    const canvass = await prisma.canvass.findUnique({
+      where: { id: canvassId },
+      include: {
+        request: { include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, warehouse: { select: { id: true, name: true } } } },
+        suppliers: { where: { isSelected: true }, include: { quotes: true, supplier: { select: { id: true, name: true, paymentTerms: true } } } },
+      },
+    });
+    if (!canvass) throw notFound('Canvass not found');
+    if (canvass.status !== 'AWARDED') throw badRequest('Award the canvass before raising the order');
+    const winner = canvass.suppliers[0];
+    if (!winner) throw badRequest('That canvass has no awarded supplier');
+    const priced = new Map(winner.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)]));
+    const pr = canvass.request;
+    const lines: OrderLine[] = pr.items
+      .filter((i) => priced.has(i.id))
+      .map((i) => fromRequestItem(i, priced.get(i.id) ?? 0))
+      .filter((l) => l.quantity > 0);
+    return { pr, canvass: { id: canvass.id, number: canvass.number }, supplier: winner.supplier, lines };
+  }
+  if (requestId) {
+    const pr = await prisma.purchaseRequest.findUnique({
+      where: { id: requestId },
+      include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, warehouse: { select: { id: true, name: true } } },
+    });
+    if (!pr) throw notFound('Purchase request not found');
+    if (pr.status !== 'APPROVED' && pr.status !== 'PARTIALLY_ORDERED') {
+      throw badRequest('Only an approved request can be ordered');
+    }
+    const lines = pr.items.map((i) => fromRequestItem(i, num(i.estimatedCost))).filter((l) => l.quantity > 0);
+    return { pr, canvass: null, supplier: null, lines };
+  }
+  return { pr: null, canvass: null, supplier: null, lines: [] as OrderLine[] };
+}
+
+function fromRequestItem(
+  i: { id: string; itemId: string | null; costCategoryId: string | null; partNumber: string | null; name: string | null; description: string; quantity: Prisma.Decimal; orderedQty: Prisma.Decimal; unit: string },
+  unitPrice: number,
+): OrderLine {
+  return {
+    id: null,
+    requestItemId: i.id,
+    itemId: i.itemId,
+    costCategoryId: i.costCategoryId,
+    partNumber: i.partNumber,
+    name: i.name,
+    description: i.description,
+    quantity: num(i.quantity) - num(i.orderedQty),
+    unit: i.unit,
+    unitPrice,
+  };
+}
+
+/**
+ * The order's lines as they will be written, every reference checked first:
+ * a request line must be one of the order's request's, the item and the
+ * budget line must exist, a line says what it is, and a direct-to-job line
+ * names its budget line (else its item's) — refused naming the line.
+ */
+async function checkPoLines(
+  kind: string,
+  lines: PoLineInput[],
+  existingIds: string[],
+  requestItemIds: string[],
+): Promise<OrderLine[]> {
+  const itemIds = [...new Set(lines.map((l) => l.itemId).filter((v): v is string => !!v))];
+  const categoryIds = [...new Set(lines.map((l) => l.costCategoryId).filter((v): v is string => !!v))];
+  const [items, categories] = await Promise.all([
+    itemIds.length ? prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, costCategoryId: true } }) : [],
+    categoryIds.length ? prisma.costCategory.findMany({ where: { id: { in: categoryIds } }, select: { id: true } }) : [],
+  ]);
+  const itemById = new Map(items.map((i) => [i.id, i]));
+  const known = new Set(categories.map((c) => c.id));
+  const own = new Set(existingIds);
+  const fromRequest = new Set(requestItemIds);
+  return lines.map((l, index) => {
+    const n = index + 1;
+    if (l.id && !own.has(l.id)) throw badRequest(`Line ${n} is not on this order`);
+    if (l.requestItemId && !fromRequest.has(l.requestItemId)) throw badRequest(`Line ${n} is not a line of the order's purchase request`);
+    if (l.itemId && !itemById.has(l.itemId)) throw badRequest(`Line ${n}: that item is not in the item master`);
+    if (l.costCategoryId && !known.has(l.costCategoryId)) throw badRequest(`Line ${n}: that budget line does not exist`);
+    const name = l.name?.trim() || null;
+    const description = l.description?.trim() || name;
+    if (!description) throw badRequest(`Line ${n}: say what is ordered`);
+    const costCategoryId = l.costCategoryId || (l.itemId ? itemById.get(l.itemId)?.costCategoryId : null) || null;
+    if (kind === 'DIRECT_TO_JOB' && !costCategoryId) {
+      throw badRequest(`Line ${n} (${name ?? description}): choose its budget line — it is how the committed cost finds the project budget`);
+    }
+    return {
+      id: l.id || null,
+      requestItemId: l.requestItemId || null,
+      itemId: l.itemId || null,
+      costCategoryId,
+      partNumber: l.partNumber?.trim() || null,
+      name,
+      description,
+      quantity: l.quantity,
+      unit: l.unit?.trim() || 'pcs',
+      unitPrice: l.unitPrice,
+    };
+  });
+}
+
+/** Writes the checked lines in order: updates those with an id, creates the rest, removes what was left out. */
+async function writePoLines(tx: Prisma.TransactionClient, orderId: string, lines: OrderLine[]) {
+  const keep = lines.map((l) => l.id).filter((v): v is string => !!v);
+  await tx.purchaseOrderItem.deleteMany({ where: { orderId, id: { notIn: keep } } });
+  for (const [sortOrder, l] of lines.entries()) {
+    const data = {
+      requestItemId: l.requestItemId,
+      itemId: l.itemId,
+      costCategoryId: l.costCategoryId,
+      partNumber: l.partNumber,
+      name: l.name,
+      description: l.description,
+      quantity: D(l.quantity),
+      unit: l.unit,
+      unitPrice: D(l.unitPrice),
+      amount: D(cents(l.quantity * l.unitPrice)),
+      sortOrder,
+    };
+    if (l.id) await tx.purchaseOrderItem.update({ where: { id: l.id }, data });
+    else await tx.purchaseOrderItem.create({ data: { orderId, ...data } });
+  }
+}
+
 purchaseOrderRoutes.post(
   '/',
   require_('gchain.purchase_orders.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(poSchema, req.body);
+    const body = parseBody(poSchema.extend({ lines: z.array(poLineSchema).max(500).optional() }), req.body);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
 
-    let pr: Awaited<ReturnType<typeof prisma.purchaseRequest.findUnique>> = null;
-    let lines: {
-      requestItemId: string | null;
-      itemId: string | null;
-      costCategoryId: string | null;
-      description: string;
-      quantity: number;
-      unit: string;
-      unitPrice: number;
-    }[] = [];
-
-    if (body.canvassId) {
-      const canvass = await prisma.canvass.findUnique({
-        where: { id: body.canvassId },
-        include: {
-          request: { include: { items: true } },
-          suppliers: { where: { isSelected: true }, include: { quotes: true } },
-        },
-      });
-      if (!canvass) throw notFound('Canvass not found');
-      if (canvass.status !== 'AWARDED') throw badRequest('Award the canvass before raising the order');
-
-      const winner = canvass.suppliers[0];
-      if (!winner) throw badRequest('That canvass has no awarded supplier');
-      if (winner.supplierId !== body.supplierId) {
-        throw badRequest('The order supplier does not match the awarded supplier');
-      }
-
-      const priced = new Map(winner.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)]));
-      pr = canvass.request;
-      lines = canvass.request.items
-        .filter((i) => priced.has(i.id))
-        .map((i) => ({
-          requestItemId: i.id,
-          itemId: i.itemId,
-          costCategoryId: i.costCategoryId,
-          description: i.description,
-          quantity: num(i.quantity) - num(i.orderedQty),
-          unit: i.unit,
-          unitPrice: priced.get(i.id) ?? 0,
-        }))
-        .filter((l) => l.quantity > 0);
-    } else if (body.requestId) {
-      const found = await prisma.purchaseRequest.findUnique({
-        where: { id: body.requestId },
-        include: { items: true },
-      });
-      if (!found) throw notFound('Purchase request not found');
-      if (found.status !== 'APPROVED' && found.status !== 'PARTIALLY_ORDERED') {
-        throw badRequest('Only an approved request can be ordered');
-      }
-      pr = found;
-      lines = found.items
-        .map((i) => ({
-          requestItemId: i.id,
-          itemId: i.itemId,
-          costCategoryId: i.costCategoryId,
-          description: i.description,
-          quantity: num(i.quantity) - num(i.orderedQty),
-          unit: i.unit,
-          unitPrice: num(i.estimatedCost),
-        }))
-        .filter((l) => l.quantity > 0);
+    const source = await orderSource(body.requestId, body.canvassId);
+    const pr = source.pr;
+    if (source.supplier && source.supplier.id !== body.supplierId) {
+      throw badRequest('The order supplier does not match the awarded supplier');
     }
-
-    if (pr && !lines.length) {
+    if (pr && !source.lines.length) {
       throw badRequest('Everything on that request has already been ordered');
     }
+    const kind = pr?.kind ?? 'DIRECT_TO_JOB';
+    // The page sends the lines as it shows them; a caller that sends none
+    // gets the source's lines, as before. Every line is checked before the
+    // number is issued.
+    const lines = body.lines
+      ? await checkPoLines(kind, body.lines, [], pr ? pr.items.map((i) => i.id) : [])
+      : source.lines;
+    if (pr && !lines.length) throw badRequest('An order from a request needs at least one of its lines');
 
     const po = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('purchase_order', tx);
       const created = await tx.purchaseOrder.create({
         data: {
           number,
-          kind: pr?.kind ?? 'DIRECT_TO_JOB',
+          kind,
           supplierId: body.supplierId,
           requestId: pr?.id ?? null,
           jobId: pr?.jobId ?? null,
@@ -2335,34 +2534,23 @@ purchaseOrderRoutes.post(
           notes: body.notes || null,
           vatRate: company?.vatRate ?? D(0.12),
           vatInclusive: body.vatInclusive,
-          items: {
-            create: lines.map((l, i) => ({
-              requestItemId: l.requestItemId,
-              itemId: l.itemId,
-              costCategoryId: l.costCategoryId,
-              description: l.description,
-              quantity: D(l.quantity),
-              unit: l.unit,
-              unitPrice: D(l.unitPrice),
-              amount: D(cents(l.quantity * l.unitPrice)),
-              sortOrder: i,
-            })),
-          },
         },
       });
-      await recalcPo(created.id, tx);
-      return created;
+      await writePoLines(tx, created.id, lines);
+      const totals = await recalcPo(created.id, tx);
+      await audit(
+        {
+          entityType: 'purchase_order',
+          entityId: created.id,
+          action: 'CREATED',
+          summary: `Raised ${created.number}${pr ? ` from ${pr.number}` : ''}${body.lines ? ` (${lines.length} line${lines.length === 1 ? '' : 's'})` : ''}`,
+        },
+        req,
+        tx,
+      );
+      return totals ?? created;
     });
 
-    await audit(
-      {
-        entityType: 'purchase_order',
-        entityId: po.id,
-        action: 'CREATED',
-        summary: `Raised ${po.number}${pr ? ` from ${pr.number}` : ''}`,
-      },
-      req,
-    );
     res.status(201).json({ ...po, total: num(po.total) });
   }),
 );
@@ -2536,6 +2724,68 @@ purchaseOrderRoutes.patch(
       req,
     );
     res.json(presentPo((await loadPo(req.params.id))!, me));
+  }),
+);
+
+/**
+ * The order page's save: header and lines in one transaction (the
+ * requisition's `PUT /:id/sheet`). Claimed on DRAFT and on the `version` the
+ * page read. The supplier an awarded canvass decided cannot be swapped; a
+ * line's request line must be one of the order's request's.
+ */
+purchaseOrderRoutes.put(
+  '/:id/sheet',
+  requireAny(...PO_EDIT),
+  handler(async (req, res) => {
+    const { po, me } = await poForEdit(req, req.params.id);
+    const body = parseBody(
+      poSchema.omit({ requestId: true, canvassId: true }).extend({
+        lines: z.array(poLineSchema).max(500),
+        version: z.string().optional().nullable(),
+      }),
+      req.body,
+    );
+    const loaded = (await loadPo(po.id))!;
+    if (body.supplierId !== po.supplierId) {
+      const canvass = awardedCanvass(loaded);
+      if (canvass) throw badRequest(`The supplier was awarded on ${canvass.number} and cannot be changed on the order`);
+      const supplier = await prisma.supplier.findUnique({ where: { id: body.supplierId }, select: { id: true } });
+      if (!supplier) throw badRequest('That supplier does not exist');
+    }
+    const requestItemIds = po.requestId
+      ? (await prisma.purchaseRequestItem.findMany({ where: { requestId: po.requestId }, select: { id: true } })).map((i) => i.id)
+      : [];
+    const lines = await checkPoLines(po.kind, body.lines, loaded.items.map((i) => i.id), requestItemIds);
+    const version = body.version ? new Date(body.version) : null;
+    if (version && Number.isNaN(version.getTime())) throw badRequest('The version is not a date');
+
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.purchaseOrder.updateMany({
+        where: { id: po.id, status: 'DRAFT', ...(version ? { updatedAt: version } : {}) },
+        data: {
+          supplierId: body.supplierId,
+          deliveryDate: asDate(body.deliveryDate),
+          deliverTo: body.deliverTo || null,
+          terms: body.terms || null,
+          notes: body.notes || null,
+          vatInclusive: body.vatInclusive,
+        },
+      });
+      if (!claimed.count) throw badRequest(`${po.number} changed a moment ago — reload it and make the change again`);
+      await writePoLines(tx, po.id, lines);
+      const totals = await recalcPo(po.id, tx);
+      await audit(
+        {
+          entityType: 'purchase_order',
+          entityId: po.id,
+          action: 'UPDATED',
+          summary: `Modified ${po.number}: ${lines.length} line${lines.length === 1 ? '' : 's'}, ${formatMoney(num(totals?.total))} in all`,
+        },
+        req,
+        tx,
+      );
+    });
+    res.json(presentPo((await loadPo(po.id))!, me));
   }),
 );
 
@@ -2760,12 +3010,14 @@ purchaseOrderRoutes.get(
         kind: 'table',
         title: 'Order',
         // No widths: each column from its content, the description taking what is left (rule 6).
-        head: ['No.', 'Description', 'Qty', 'Unit', `Unit price (${currency})`, `Amount (${currency})`],
-        align: ['right', 'left', 'right', 'left', 'right', 'right'],
+        head: ['No.', 'Part No.', 'Description', 'Qty', 'Unit', `Unit price (${currency})`, `Amount (${currency})`],
+        align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
         rows: view.items.map((i, n) => [
           String(n + 1),
-          i.description,
-          String(i.quantity),
+          i.partNumber ?? '',
+          // The bold name over its description, or the description alone on a line typed before the order page.
+          i.name && i.description !== i.name ? { title: i.name, body: i.description } : (i.name ?? i.description),
+          formatQuantity(i.quantity),
           i.unit,
           formatAmount(i.unitPrice),
           formatAmount(i.amount),

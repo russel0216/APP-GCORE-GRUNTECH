@@ -177,3 +177,17 @@ export function rowsToPrLines(rows: string[][], categories: CategoryRef[]): Pars
   });
   return { lines, skipped };
 }
+
+/**
+ * A purchase order's money — `recalcPo()` in routes/procurement.ts, exactly:
+ * the subtotal is the lines' amounts; VAT is added to it, or, when the
+ * supplier's prices include VAT, taken out of it and the total is the
+ * subtotal itself.
+ */
+export function orderTotals(amounts: number[], vatRate: number, vatInclusive: boolean) {
+  const cents = (n: number) => Math.round(n * 100) / 100;
+  const subtotal = cents(amounts.reduce((s, a) => s + a, 0));
+  const vatAmount = vatInclusive ? cents(subtotal - subtotal / (1 + vatRate)) : cents(subtotal * vatRate);
+  const total = vatInclusive ? subtotal : cents(subtotal + vatAmount);
+  return { subtotal, vatAmount, total };
+}

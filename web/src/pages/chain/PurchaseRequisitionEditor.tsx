@@ -26,13 +26,13 @@ import { parseDelimited, prLineAmount, rowsToPrLines, type PrLineDraft } from '.
  * the approval engine (nobody is picked on the form).
  */
 
-interface Category {
+export interface Category {
   id: string;
   code: string;
   name: string;
 }
 
-interface BudgetLine extends Category {
+export interface BudgetLine extends Category {
   budgeted: number;
   committed: number;
   incurred: number;
@@ -46,7 +46,7 @@ interface Budget {
   blocked: boolean;
 }
 
-interface Suggestion {
+export interface Suggestion {
   id: string;
   itemId?: string | null;
   code?: string;
@@ -59,7 +59,7 @@ interface Suggestion {
   costCategory: Category | null;
 }
 
-interface Route {
+export interface Route {
   name: string;
   steps: { name: string; held?: boolean; approvers: { id: string; name: string }[] }[];
 }
@@ -861,20 +861,23 @@ export function PurchaseRequisitionEditor() {
  * project's costing first, then the item master), the description under it.
  * A block pasted from a spreadsheet into an empty name becomes rows.
  */
-function ItemCell({
+export function ItemCell({
   n,
   line,
   jobId,
+  suggestPath = '/purchase-requests/suggest',
   invalid,
   onChange,
   onPick,
   onPasteRows,
 }: {
   n: number;
-  line: Line;
+  line: Pick<Line, 'name' | 'description'>;
   jobId: string;
+  /** The suggestion endpoint — the requisition's, or the order's twin behind the order's rights. */
+  suggestPath?: string;
   invalid: boolean;
-  onChange: (patch: Partial<Line>) => void;
+  onChange: (patch: { name?: string; description?: string; itemId?: string | null }) => void;
   onPick: (sg: Suggestion) => void;
   onPasteRows: (text: string) => void;
 }) {
@@ -892,7 +895,7 @@ function ItemCell({
     let live = true;
     const timer = window.setTimeout(() => {
       api
-        .get<{ costing: Suggestion[]; items: Suggestion[] }>(`/purchase-requests/suggest${qs({ q: term, jobId })}`)
+        .get<{ costing: Suggestion[]; items: Suggestion[] }>(`${suggestPath}${qs({ q: term, jobId })}`)
         .then((r) => {
           if (!live) return;
           setMatches([
@@ -906,7 +909,7 @@ function ItemCell({
       live = false;
       window.clearTimeout(timer);
     };
-  }, [open, term, jobId]);
+  }, [open, term, jobId, suggestPath]);
 
   const buttons = () => Array.from(menuRef.current?.querySelectorAll('button') ?? []);
 

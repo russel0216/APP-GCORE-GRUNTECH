@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,078 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,088 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -566,10 +566,11 @@ delivery and one on cad for the Request for Approval, 4 on costing for the
 costing's PDF template and 37 on hr for People Flow, and 2 on foundation
 for the Technical Manager on the preparer's team, and one on foundation
 for Back Support's own team, and 3 on foundation and 13 on chain for the
-purchase requisition page):
+purchase requisition page, and one on foundation and 9 on chain for the
+purchase order page):
 foundation
-368, masters 92, sales 608, costing 192, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 215, hr 468, plantilla 123, meetings
+369, masters 92, sales 608, costing 192, pipeline 121, calendar 98, numbering
+79, partners 120, delivery 171, chain 224, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4371,6 +4372,42 @@ requisition-page.png`). `pages/chain/PurchaseRequisitionEditor.tsx`,
   &requestId=` (`routeBrief`, the requester's name) through `previewSteps` —
   nobody is picked on the form. "Submit for approval" saves, then submits; a
   refused submit leaves the saved draft and says why.
+
+## The purchase order page (2026-10-13)
+
+The owner's call, after the requisition page: "do the same full page for
+purchase orders". `pages/chain/PurchaseOrderEditor.tsx`, in the requisition
+page's dress (`prq-*`) and reusing its `ItemCell` and `lib/prLines.ts`.
+
+- **One page for New and Modify**: `/g-chain/purchase-orders/new` — with
+  `?fromRequest=` or `?fromCanvass=` the request's lines are on the page
+  before anything is saved — and `/g-chain/purchase-orders/:id/edit` on a
+  draft. `NewPoModal`, `PoHeaderModal` and `PoLineModal` are gone; the
+  request page's "Raise order" and the canvass's order button open the page,
+  and an old `?fromRequest=` / `?fromCanvass=` link on the list redirects.
+- **What an order starts with is `orderSource()`** — the request, the
+  canvass, the supplier an award decided, the lines still to order (the
+  winner's quoted prices, else the request's estimates), with the request
+  line's part number and name. `GET /purchase-orders/draft` shows it and
+  `POST /purchase-orders` writes it, so the page shows what a save writes.
+- **One save**: `POST /` takes `lines[]` (sent without, the source's lines,
+  as before); `PUT /:id/sheet` the header and the lines, claimed on DRAFT
+  and the `version` read. `checkPoLines()` before the number: a line's
+  `requestItemId` must be one of the order's request's, the item and budget
+  line exist, a direct-to-job line names its budget line; `writePoLines()`
+  keeps a line sent with its id. The awarded supplier still cannot be
+  swapped. `PurchaseOrderItem.name` and `partNumber` are new nullable
+  columns; the order's paper prints both.
+- **The money** is `orderTotals()` in `lib/prLines.ts`, `recalcPo()`'s rule
+  to the centavo (verify-foundation pins it), with the "Supplier prices
+  include VAT" tick on the page.
+- **Budget — on issue**: `GET /purchase-orders/budget?jobId=&requestId=` is
+  `projectBudgetByLine()` plus `released` — the request's net commitment per
+  budget line, which issuing releases whole before it commits the order's
+  lines; the panel shows what is left after issue. Line suggestions are
+  `GET /purchase-orders/suggest` (`lineSuggestions()`, the requisition's
+  rule behind the order's rights); the route is `GET /purchase-orders/route
+  ?amount=&orderId=` at the order's total, in its buyer's name.
 
 ## Spreadsheet attachments (2026-10-05)
 

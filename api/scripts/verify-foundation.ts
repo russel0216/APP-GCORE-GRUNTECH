@@ -107,7 +107,7 @@ import { readWorkbook } from '../../web/src/lib/spreadsheetRead';
 import { workingDayDate } from '../src/shared/day';
 import { ARCHIVE_ATTACHMENT, ARCHIVE_LIST_KEY, SCORO_ARCHIVE_REMOVED, removeScoroArchive } from '../src/shared/scoroArchive';
 import { recordLink } from '../../web/src/lib/links';
-import { parseDelimited, rowsToPrLines, prLineAmount, matchCategory } from '../../web/src/lib/prLines';
+import { parseDelimited, rowsToPrLines, prLineAmount, matchCategory, orderTotals } from '../../web/src/lib/prLines';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
 import { contentStreams, pdfRuns, pdfText, runWidth, shown, type PdfRun } from './lib/paper';
@@ -2525,6 +2525,14 @@ async function main() {
       'a line\'s amount is the server\'s centavo rule, and a budget line matches by code, name or "1 Materials"',
       prLineAmount(4, 950.555) === Math.round(4 * 950.555 * 100) / 100 && matchCategory('eqp', cats) === 'eqp' &&
         matchCategory('1 Materials', cats) === 'mat' && matchCategory('Labour', cats) === '',
+    );
+    const added = orderTotals([3502, 1200], 0.12, false);
+    const inside = orderTotals([2626.5], 0.12, true);
+    check(
+      'the order page\'s money is recalcPo\'s: VAT added to the subtotal, or taken out of it when the prices include it',
+      added.subtotal === 4702 && added.vatAmount === 564.24 && added.total === 5266.24 &&
+        inside.subtotal === 2626.5 && inside.vatAmount === 281.41 && inside.total === 2626.5,
+      JSON.stringify([added, inside]),
     );
   }
 

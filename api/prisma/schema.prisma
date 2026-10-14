@@ -2532,6 +2532,11 @@ model PurchaseOrderItem {
   costCategoryId String?
   costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
 
+  /// The bold name over the description and the part number — the
+  /// requisition line's, carried over (2026-10-13). Null on a line typed
+  /// before the order page: its description then serves as the name.
+  name        String?
+  partNumber  String?
   description String
   quantity    Decimal @db.Decimal(18, 3)
   unit        String  @default("pcs")

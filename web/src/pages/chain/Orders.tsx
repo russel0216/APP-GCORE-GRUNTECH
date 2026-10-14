@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -242,7 +242,7 @@ export function CanvassDetail() {
           can('gchain.purchase_orders.create') && (
             <button
               className="btn btn-primary"
-              onClick={() => navigate(`/g-chain/purchase-orders?fromCanvass=${canvass.id}`)}
+              onClick={() => navigate(`/g-chain/purchase-orders/new?fromCanvass=${canvass.id}`)}
             >
               Raise order
             </button>
@@ -788,11 +788,11 @@ interface PoRow {
 export function PurchaseOrders() {
   const navigate = useNavigate();
   const { can } = useAuth();
-  const [params, setParams] = useSearchParams();
-  const [creating, setCreating] = useState(
-    () => params.has('fromRequest') || params.has('fromCanvass'),
-  );
-  const [reload, setReload] = useState(0);
+  const [params] = useSearchParams();
+  // An old `?fromRequest=` / `?fromCanvass=` link opens the order page with the same preset.
+  if (params.has('fromRequest') || params.has('fromCanvass')) {
+    return <Navigate to={`/g-chain/purchase-orders/new?${params.toString()}`} replace />;
+  }
 
   const columns: Column<PoRow>[] = [
     { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (o) => <span className="mono">{o.number}</span> },
@@ -844,7 +844,6 @@ export function PurchaseOrders() {
         columns={columns}
         rowKey={(o) => o.id}
         searchPlaceholder="Search number, supplier, project…"
-        reloadToken={reload}
         onRowClick={(o) => navigate(`/g-chain/purchase-orders/${o.id}`)}
         emptyTitle="No purchase orders yet"
         filters={[
@@ -865,140 +864,14 @@ export function PurchaseOrders() {
         ]}
         actions={
           can('gchain.purchase_orders.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+            <Link className="btn btn-primary btn-sm" to="/g-chain/purchase-orders/new">
               + New purchase order
-            </button>
+            </Link>
           ) : null
         }
       />
 
-      {creating && (
-        <NewPoModal
-          fromRequest={params.get('fromRequest')}
-          fromCanvass={params.get('fromCanvass')}
-          onClose={() => {
-            setCreating(false);
-            setParams({});
-          }}
-          onCreated={(id) => {
-            setCreating(false);
-            setParams({});
-            setReload((r) => r + 1);
-            navigate(`/g-chain/purchase-orders/${id}`);
-          }}
-        />
-      )}
     </div>
-  );
-}
-
-function NewPoModal({
-  fromRequest,
-  fromCanvass,
-  onClose,
-  onCreated,
-}: {
-  fromRequest: string | null;
-  fromCanvass: string | null;
-  onClose: () => void;
-  onCreated: (id: string) => void;
-}) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [supplier, setSupplier] = useState<SupplierRef | null>(null);
-  const [context, setContext] = useState<string | null>(null);
-  const [form, setForm] = useState({ deliveryDate: '', terms: '', vatInclusive: false });
-
-  // From an awarded canvass the supplier is decided — preselect and explain.
-  useEffect(() => {
-    if (!fromCanvass) return;
-    api
-      .get<CanvassDetailData>(`/canvasses/${fromCanvass}`)
-      .then((c) => {
-        const winner = c.suppliers.find((s) => s.isSelected);
-        if (winner) {
-          setSupplier({ id: winner.supplier.id, name: winner.supplier.name });
-          setContext(`From ${c.number}, awarded to ${winner.supplier.name} at ${formatMoney(winner.total)}.`);
-        }
-      })
-      .catch(() => {});
-  }, [fromCanvass]);
-
-  useEffect(() => {
-    if (!fromRequest || fromCanvass) return;
-    api
-      .get<{ number: string; purpose: string }>(`/purchase-requests/${fromRequest}`)
-      .then((pr) => setContext(`From ${pr.number} — ${pr.purpose}. Lines carry over at estimated prices.`))
-      .catch(() => {});
-  }, [fromRequest, fromCanvass]);
-
-  async function create() {
-    if (!supplier) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const created = await api.post<{ id: string }>('/purchase-orders', {
-        supplierId: supplier.id,
-        requestId: fromRequest || null,
-        canvassId: fromCanvass || null,
-        deliveryDate: form.deliveryDate || null,
-        terms: form.terms || null,
-        vatInclusive: form.vatInclusive,
-      });
-      toast('ok', 'Order created');
-      onCreated(created.id);
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title="New purchase order"
-      onClose={onClose}
-      footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={create} disabled={busy || !supplier}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </ModalFoot>
-      }
-    >
-      <ErrorBox error={error} />
-      {context && <div className="alert info">{context}</div>}
-
-      <Field label="Supplier" required>
-        <SupplierPicker
-          value={supplier}
-          onChange={setSupplier}
-          onError={setError}
-          disabled={!!fromCanvass}
-          autoFocus={!fromCanvass}
-        />
-      </Field>
-      <div className="grid grid-2">
-        <Field label="Required by">
-          <input
-            type="date"
-            value={form.deliveryDate}
-            onChange={(e) => setForm({ ...form, deliveryDate: e.target.value })}
-          />
-        </Field>
-        <Field label="Terms">
-          <input value={form.terms} onChange={(e) => setForm({ ...form, terms: e.target.value })} />
-        </Field>
-      </div>
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={form.vatInclusive}
-          onChange={(e) => setForm({ ...form, vatInclusive: e.target.checked })}
-        />
-        <span>Supplier prices include VAT</span>
-      </label>
-    </Modal>
   );
 }
 
@@ -1037,6 +910,8 @@ interface PoDetailData {
 
 interface PoLine {
   id: string;
+  name: string | null;
+  partNumber: string | null;
   description: string;
   quantity: number;
   unit: string;
@@ -1058,9 +933,6 @@ export function PurchaseOrderDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [receiving, setReceiving] = useState(false);
-  const [modifying, setModifying] = useState(false);
-  /** A line being edited, or 'new' for "+ Add line". */
-  const [lineEditing, setLineEditing] = useState<PoLine | 'new' | null>(null);
   // Bumped on every load so the approval chain re-reads after a submit.
   const [reload, setReload] = useState(0);
 
@@ -1109,10 +981,11 @@ export function PurchaseOrderDetail() {
     navigate('/g-chain/purchase-orders');
   }
 
+  // The lines change on the order page, with the header — Modify.
   const addLineButton = po.canEdit ? (
-    <button className="btn btn-sm" onClick={() => setLineEditing('new')}>
-      + Add line
-    </button>
+    <Link className="btn btn-sm" to={`/g-chain/purchase-orders/${po.id}/edit`}>
+      Add lines
+    </Link>
   ) : null;
 
   return (
@@ -1178,7 +1051,7 @@ export function PurchaseOrderDetail() {
             },
           },
         ]}
-        modify={po.canEdit ? () => setModifying(true) : undefined}
+        modify={po.canEdit ? `/g-chain/purchase-orders/${po.id}/edit` : undefined}
       />
 
       <DocumentApproval documentType="purchase_order" documentId={po.id} reloadToken={reload} />
@@ -1230,7 +1103,6 @@ export function PurchaseOrderDetail() {
       <div className="card proc-card">
         <div className="proc-card-head">
           <h3 className="card-title">Order lines</h3>
-          {po.items.length > 0 && addLineButton}
         </div>
         {po.items.length === 0 ? (
           <Empty
@@ -1247,25 +1119,32 @@ export function PurchaseOrderDetail() {
           <table className="data">
             <thead>
               <tr>
-                <th>Description</th>
                 <th>Budget line</th>
+                <th>Part No.</th>
+                <th>Item</th>
                 <th className="right">Qty</th>
                 <th>Unit</th>
                 <th className="right">Unit price</th>
                 <th className="right">Amount</th>
                 <th className="right">Received</th>
                 <th className="right">Outstanding</th>
-                {po.canEdit && <th className="proc-col-actions" aria-label="Actions" />}
               </tr>
             </thead>
             <tbody>
               {po.items.map((i) => (
                 <tr key={i.id}>
-                  <td>
-                    <div>{i.description}</div>
-                    {i.item && <div className="faint mono">{i.item.code}</div>}
-                  </td>
                   <td>{i.costCategory?.name ?? <span className="faint">—</span>}</td>
+                  <td className="mono">{i.partNumber ?? (i.item ? i.item.code : '')}</td>
+                  <td>
+                    {i.name && i.name !== i.description ? (
+                      <>
+                        <strong>{i.name}</strong>
+                        <div className="faint">{i.description}</div>
+                      </>
+                    ) : (
+                      <strong>{i.name ?? i.description}</strong>
+                    )}
+                  </td>
                   <td className="right mono">{i.quantity}</td>
                   <td>{i.unit}</td>
                   <td className="right mono">{formatMoney(i.unitPrice)}</td>
@@ -1274,20 +1153,6 @@ export function PurchaseOrderDetail() {
                   <td className={`right mono${i.outstandingQty > 0 && !isDraft ? ' proc-short' : ''}`}>
                     {i.outstandingQty || '—'}
                   </td>
-                  {po.canEdit && (
-                    <td>
-                      {/* Removing the line is in its modal, behind a question. */}
-                      <div className="proc-row-actions">
-                        <button
-                          className="btn btn-sm"
-                          aria-label={`Modify ${i.description}`}
-                          onClick={() => setLineEditing(i)}
-                        >
-                          Modify
-                        </button>
-                      </div>
-                    </td>
-                  )}
                 </tr>
               ))}
             </tbody>
@@ -1337,30 +1202,6 @@ export function PurchaseOrderDetail() {
         </div>
       )}
 
-      {modifying && (
-        <PoHeaderModal
-          po={po}
-          onClose={() => setModifying(false)}
-          onSaved={() => {
-            setModifying(false);
-            toast('ok', 'Order updated');
-            void load();
-          }}
-        />
-      )}
-
-      {lineEditing && (
-        <PoLineModal
-          po={po}
-          line={lineEditing === 'new' ? null : lineEditing}
-          onClose={() => setLineEditing(null)}
-          onSaved={() => {
-            setLineEditing(null);
-            void load();
-          }}
-        />
-      )}
-
       {receiving && (
         <ReceiveModal
           po={po}
@@ -1369,277 +1210,6 @@ export function PurchaseOrderDetail() {
         />
       )}
     </div>
-  );
-}
-
-/** A date from the API as the `YYYY-MM-DD` a date input wants. */
-function dateInput(value: string | null): string {
-  return value ? value.slice(0, 10) : '';
-}
-
-/**
- * The order header, while it is still a draft.
- *
- * The supplier is fixed when the order came from an awarded canvass — the
- * prices on it are that supplier's quote, and the server refuses the swap.
- */
-function PoHeaderModal({
-  po,
-  onClose,
-  onSaved,
-}: {
-  po: PoDetailData;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  // The order's own supplier is the picked value; the lookup need not list it.
-  const [supplier, setSupplier] = useState<SupplierRef | null>({ id: po.supplier.id, name: po.supplier.name });
-  const [form, setForm] = useState({
-    deliveryDate: dateInput(po.deliveryDate),
-    terms: po.terms ?? '',
-    deliverTo: po.deliverTo ?? '',
-    notes: po.notes ?? '',
-    vatInclusive: po.vatInclusive,
-  });
-
-  async function save() {
-    if (!supplier) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.patch(`/purchase-orders/${po.id}`, {
-        ...(po.fromCanvass ? {} : { supplierId: supplier.id }),
-        deliveryDate: form.deliveryDate || null,
-        terms: form.terms || null,
-        deliverTo: form.deliverTo || null,
-        notes: form.notes || null,
-        vatInclusive: form.vatInclusive,
-      });
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title={`Modify purchase order ${po.number}`}
-      onClose={onClose}
-      footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={save} disabled={busy || !supplier}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </ModalFoot>
-      }
-    >
-      <ErrorBox error={error} />
-      <Field
-        label="Supplier"
-        required
-        hint={po.fromCanvass ? `Awarded on ${po.fromCanvass.number} — raise a new canvass to change it` : undefined}
-      >
-        <SupplierPicker value={supplier} onChange={setSupplier} onError={setError} disabled={!!po.fromCanvass} />
-      </Field>
-      <div className="grid grid-2">
-        <Field label="Required by">
-          <input
-            type="date"
-            value={form.deliveryDate}
-            onChange={(e) => setForm({ ...form, deliveryDate: e.target.value })}
-          />
-        </Field>
-        <Field label="Terms" hint={po.supplier.paymentTerms ? `Supplier default: ${po.supplier.paymentTerms}` : undefined}>
-          <input value={form.terms} onChange={(e) => setForm({ ...form, terms: e.target.value })} />
-        </Field>
-      </div>
-      <Field label="Deliver to" hint={po.warehouse ? `Blank prints ${po.warehouse.name}` : 'Site address, or blank'}>
-        <input value={form.deliverTo} onChange={(e) => setForm({ ...form, deliverTo: e.target.value })} />
-      </Field>
-      <Field label="Notes">
-        <textarea rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-      </Field>
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={form.vatInclusive}
-          onChange={(e) => setForm({ ...form, vatInclusive: e.target.checked })}
-        />
-        <span>Supplier prices include VAT</span>
-      </label>
-    </Modal>
-  );
-}
-
-/**
- * Add or modify one order line.
- *
- * A direct-to-job line must name its budget line — the server refuses one
- * without, because that is how the committed cost finds its category.
- */
-function PoLineModal({
-  po,
-  line,
-  onClose,
-  onSaved,
-}: {
-  po: PoDetailData;
-  line: PoLine | null;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [items, setItems] = useState<
-    { id: string; code: string; name: string; unit: string; standardCost: string | number | null }[]
-  >([]);
-  const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
-  const [form, setForm] = useState({
-    itemId: line?.item?.id ?? '',
-    costCategoryId: line?.costCategory?.id ?? '',
-    description: line?.description ?? '',
-    quantity: line ? String(line.quantity) : '1',
-    unit: line?.unit ?? 'pcs',
-    unitPrice: line ? String(line.unitPrice) : '',
-  });
-
-  useEffect(() => {
-    api.get<typeof items>('/items/lookup').then(setItems).catch(() => {});
-    api.get<typeof categories>('/reference/cost-categories').then(setCategories).catch(() => {});
-  }, []);
-
-  function pickItem(itemId: string) {
-    const item = items.find((i) => i.id === itemId);
-    setForm((f) => ({
-      ...f,
-      itemId,
-      description: item && !f.description ? item.name : f.description,
-      unit: item?.unit ?? f.unit,
-      unitPrice: item?.standardCost != null && !f.unitPrice ? String(item.standardCost) : f.unitPrice,
-    }));
-  }
-
-  const direct = po.kind === 'DIRECT_TO_JOB';
-  const needsCategory = direct && !form.costCategoryId;
-  const quantity = Number(form.quantity);
-  const price = Number(form.unitPrice || 0);
-  const valid = !!form.description.trim() && quantity > 0 && price >= 0 && !needsCategory;
-
-  async function save() {
-    setBusy(true);
-    setError(null);
-    const body = {
-      itemId: form.itemId || null,
-      costCategoryId: form.costCategoryId || null,
-      description: form.description.trim(),
-      quantity,
-      unit: form.unit.trim() || 'pcs',
-      unitPrice: price,
-    };
-    try {
-      if (line) await api.patch(`/purchase-orders/${po.id}/items/${line.id}`, body);
-      else await api.post(`/purchase-orders/${po.id}/items`, body);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title={line ? 'Modify line' : 'Add line'}
-      onClose={onClose}
-      footer={
-        <ModalFoot
-          onCancel={onClose}
-          busy={busy}
-          danger={
-            line
-              ? {
-                  label: 'Remove',
-                  question: `Remove ${line.description} from ${po.number}?`,
-                  onConfirm: async () => {
-                    await api.del(`/purchase-orders/${po.id}/items/${line.id}`);
-                    toast('ok', 'Line removed');
-                    onSaved();
-                  },
-                }
-              : undefined
-          }
-        >
-          <button
-            className="btn btn-primary"
-            onClick={save}
-            disabled={busy || !valid}
-            title={needsCategory ? 'Choose the budget line first' : undefined}
-          >
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </ModalFoot>
-      }
-    >
-      <ErrorBox error={error} />
-      <Field label="Item" hint="Optional — picking one fills the rest in">
-        <select value={form.itemId} onChange={(e) => pickItem(e.target.value)}>
-          <option value="">— not from the item master —</option>
-          {items.map((i) => (
-            <option key={i.id} value={i.id}>
-              {i.code} — {i.name}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <Field label="Description">
-        <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-      </Field>
-      {direct && (
-        <Field label="Budget line" hint="Required — which part of the project budget this is charged to">
-          <select
-            value={form.costCategoryId}
-            onChange={(e) => setForm({ ...form, costCategoryId: e.target.value })}
-          >
-            <option value="">— choose —</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
-      <div className="grid grid-3">
-        <Field label="Quantity">
-          <NumberInput
-            kind="quantity"
-            step="0.001"
-            min="0"
-            value={form.quantity}
-            onChange={(e) => setForm({ ...form, quantity: e.target.value })}
-          />
-        </Field>
-        <Field label="Unit">
-          <input value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
-        </Field>
-        <Field label="Unit price" hint="The price agreed with the supplier">
-          <NumberInput
-            kind="money"
-            step="0.01"
-            min="0"
-            value={form.unitPrice}
-            onChange={(e) => setForm({ ...form, unitPrice: e.target.value })}
-          />
-        </Field>
-      </div>
-      <div className="alert info proc-card-note">
-        Line amount: <strong>{formatMoney((quantity || 0) * price)}</strong>
-        {po.vatInclusive ? ' (VAT included)' : ' before VAT'}
-      </div>
-    </Modal>
   );
 }
 

@@ -48,6 +48,7 @@ import {
 import { PlanApprovalsRegister, PlanApprovalPage } from './pages/delivery/PlanApprovals';
 import { PurchaseRequests, PurchaseRequestDetail } from './pages/chain/PurchaseRequests';
 import { PurchaseRequisitionEditor } from './pages/chain/PurchaseRequisitionEditor';
+import { PurchaseOrderEditor } from './pages/chain/PurchaseOrderEditor';
 import {
   Canvasses,
   CanvassDetail,
@@ -770,6 +771,23 @@ function Routed() {
           element={
             <GuardAny permissions={['gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own']}>
               <PurchaseOrders />
+            </GuardAny>
+          }
+        />
+        {/* The order page (2026-10-13): New and Modify, header and lines in one save. */}
+        <Route
+          path="/g-chain/purchase-orders/new"
+          element={
+            <Guard permission="gchain.purchase_orders.create">
+              <PurchaseOrderEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/purchase-orders/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.purchase_orders.edit_own', 'gchain.purchase_orders.edit_all']}>
+              <PurchaseOrderEditor />
             </GuardAny>
           }
         />

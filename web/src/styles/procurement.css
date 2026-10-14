@@ -358,3 +358,9 @@
     position: static;
   }
 }
+
+/* The order page's mark on a line that came from the purchase request. */
+.prq-from {
+  display: block;
+  font-size: var(--fs-xs);
+}

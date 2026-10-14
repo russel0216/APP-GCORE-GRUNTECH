@@ -1218,6 +1218,97 @@ async function main() {
       sheetPaper.slice(0, 200),
     );
 
+    // ── The purchase order page: header and lines in one save (2026-10-13) ──
+    console.log('\nThe purchase order page (over HTTP)');
+    const approvedPr = await prisma.purchaseRequest.create({
+      data: {
+        number: await nextNumber('purchase_request'),
+        kind: 'DIRECT_TO_JOB',
+        status: 'APPROVED',
+        jobId: job.id,
+        requestedById: requester.id,
+        purpose: `${TAG} order page request`,
+        preferredSupplier: 'GiTi Warehouse',
+        items: {
+          create: [
+            { costCategoryId: materials.id, partNumber: 'GK-16', name: `${TAG} Gasket set`, description: 'EPDM', quantity: D(4), unit: 'set', estimatedCost: D(900), estimatedAmount: D(3600), sortOrder: 0 },
+            { costCategoryId: materials.id, name: `${TAG} Flange`, description: `${TAG} Flange`, quantity: D(2), unit: 'pcs', estimatedCost: D(500), estimatedAmount: D(1000), sortOrder: 1 },
+          ],
+        },
+      },
+      include: { items: { orderBy: { sortOrder: 'asc' } } },
+    });
+    await prisma.jobCostEntry.create({
+      data: { jobId: job.id, costCategoryId: materials.id, state: 'COMMITTED', amount: D(4600), sourceType: 'purchase_request', sourceId: approvedPr.id, sourceNumber: approvedPr.number },
+    });
+    const poDraftRead = await api(buyerToken, 'GET', `/purchase-orders/draft?requestId=${approvedPr.id}`);
+    const draftLines = (poDraftRead.body.lines ?? []) as { requestItemId: string; partNumber: string | null; name: string | null; unitPrice: number; quantity: number }[];
+    check(
+      'GET /purchase-orders/draft gives the request\'s lines still to order, with part number and name, at its estimates',
+      poDraftRead.status === 200 && draftLines.length === 2 && draftLines[0].partNumber === 'GK-16' && draftLines[0].unitPrice === 900 &&
+        (poDraftRead.body.request as { preferredSupplier: string })?.preferredSupplier === 'GiTi Warehouse',
+      JSON.stringify(poDraftRead.body).slice(0, 200),
+    );
+    const poBudget = await api(buyerToken, 'GET', `/purchase-orders/budget?jobId=${job.id}&requestId=${approvedPr.id}`);
+    check(
+      'GET /purchase-orders/budget says what issuing releases from the request, per budget line',
+      poBudget.status === 200 && (poBudget.body.released as Record<string, number>)?.[materials.id] === 4600,
+      JSON.stringify(poBudget.body.released),
+    );
+    const foreignRequestLine = await api(buyerToken, 'POST', '/purchase-orders', {
+      supplierId: supplier.id, requestId: approvedPr.id, notes: `${TAG} foreign line`,
+      lines: [{ requestItemId: sheetItems[0].id, costCategoryId: materials.id, name: 'x', quantity: 1, unitPrice: 1 }],
+    });
+    check('a line pointing at another request\'s line is refused', foreignRequestLine.status === 400, String(foreignRequestLine.status));
+    const pageOrder = await api(buyerToken, 'POST', '/purchase-orders', {
+      supplierId: supplier.id,
+      requestId: approvedPr.id,
+      notes: `${TAG} order page`,
+      vatInclusive: false,
+      lines: [
+        { requestItemId: approvedPr.items[0].id, costCategoryId: materials.id, partNumber: 'GK-16', name: `${TAG} Gasket set`, description: 'EPDM', quantity: 4, unit: 'set', unitPrice: 875.5 },
+        { costCategoryId: labour.id, name: `${TAG} Delivery`, quantity: 1, unit: 'lot', unitPrice: 1200 },
+      ],
+    });
+    const pageOrderId = String(pageOrder.body.id);
+    const pageOrderRead = await api(buyerToken, 'GET', `/purchase-orders/${pageOrderId}`);
+    const pageLines = (pageOrderRead.body.items ?? []) as { id: string; requestItemId: string | null; partNumber: string | null; name: string | null; amount: number }[];
+    check(
+      'POST /purchase-orders takes the lines as the page shows them: the request\'s line at the agreed price, and a line of its own',
+      pageOrder.status === 201 && pageLines.length === 2 && pageLines[0].requestItemId === approvedPr.items[0].id &&
+        pageLines[0].amount === 3502 && pageLines[1].requestItemId === null && pageOrderRead.body.subtotal === 4702 &&
+        pageOrderRead.body.total === Math.round(4702 * 1.12 * 100) / 100,
+      `${pageOrder.status} ${JSON.stringify(pageOrderRead.body).slice(0, 200)}`,
+    );
+    const pagePut = await api(buyerToken, 'PUT', `/purchase-orders/${pageOrderId}/sheet`, {
+      supplierId: supplier.id,
+      notes: `${TAG} order page, modified`,
+      vatInclusive: true,
+      version: String(pageOrderRead.body.version),
+      lines: [{ id: pageLines[0].id, requestItemId: approvedPr.items[0].id, costCategoryId: materials.id, partNumber: 'GK-16B', name: `${TAG} Gasket set`, quantity: 3, unit: 'set', unitPrice: 875.5 }],
+    });
+    const afterPagePut = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: pageOrderId }, include: { items: true } });
+    check(
+      'PUT /purchase-orders/:id/sheet saves header and lines together, the totals recalculated',
+      pagePut.status === 200 && afterPagePut.items.length === 1 && afterPagePut.items[0].id === pageLines[0].id &&
+        afterPagePut.items[0].partNumber === 'GK-16B' && Number(afterPagePut.subtotal) === 2626.5 && Number(afterPagePut.total) === 2626.5 && afterPagePut.vatInclusive,
+      `${pagePut.status} ${JSON.stringify(pagePut.body).slice(0, 160)}`,
+    );
+    const stalePo = await api(buyerToken, 'PUT', `/purchase-orders/${pageOrderId}/sheet`, {
+      supplierId: supplier.id, notes: `${TAG} stale`, version: String(pageOrderRead.body.version), lines: [],
+    });
+    check('a save on what changed since it was read is refused', stalePo.status === 400, String(stalePo.status));
+    const strangerPo = await api(otherRequesterToken, 'PUT', `/purchase-orders/${pageOrderId}/sheet`, { supplierId: supplier.id, lines: [] });
+    check('someone without the order\'s edit rights cannot save over it', strangerPo.status === 403, String(strangerPo.status));
+    const poRoute = await api(buyerToken, 'GET', `/purchase-orders/route?amount=150000&orderId=${pageOrderId}`);
+    check(
+      'GET /purchase-orders/route previews the route at the order\'s total — the CEO / President above ₱100,000',
+      poRoute.status === 200 && ((poRoute.body.route as { steps: unknown[] } | null)?.steps.length ?? 0) >= 2,
+      JSON.stringify(poRoute.body).slice(0, 200),
+    );
+    const poPaper = flat((await printed(buyerToken, `/purchase-orders/${pageOrderId}/pdf`)).text);
+    check('the order\'s paper prints the part number and the name', poPaper.includes('GK-16B') && poPaper.includes('Gasket set'), poPaper.slice(0, 200));
+
     const prCreated = await api(requesterToken, 'POST', '/purchase-requests', {
       kind: 'DIRECT_TO_JOB',
       jobId: job.id,

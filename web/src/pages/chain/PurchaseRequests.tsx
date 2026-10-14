@@ -294,7 +294,7 @@ export function PurchaseRequestDetail() {
 
   async function raiseOrder() {
     if (!pr) return;
-    navigate(`/g-chain/purchase-orders?fromRequest=${pr.id}`);
+    navigate(`/g-chain/purchase-orders/new?fromRequest=${pr.id}`);
   }
 
   // Which budget lines this request would strain.
