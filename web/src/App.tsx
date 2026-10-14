@@ -51,6 +51,7 @@ import { PurchaseRequisitionEditor } from './pages/chain/PurchaseRequisitionEdit
 import { PurchaseOrderEditor } from './pages/chain/PurchaseOrderEditor';
 import { IncomingEditor } from './pages/chain/IncomingEditor';
 import { OutgoingEditor, StockIssueDetail, StockIssues } from './pages/chain/Outgoing';
+import { ChainReports } from './pages/chain/ChainReports';
 import { RfqDetail, RfqEditor, Rfqs } from './pages/chain/Rfq';
 import {
   PurchaseOrders,
@@ -62,7 +63,6 @@ import {
   ReceivingDetail,
   Inventory,
   StockCard,
-  ChainReports,
   ChainDashboard,
 } from './pages/chain/Warehouse';
 import { BorrowSlips, BorrowSlipDetail, BorrowRequestEditor } from './pages/chain/BorrowSlips';

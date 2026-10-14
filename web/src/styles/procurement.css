@@ -669,3 +669,43 @@ a.inv-move:hover .inv-move-what {
 .inv-bin select {
   max-width: 12rem;
 }
+
+/* G-CHAIN › Reports (2026-10-15): the report and period controls, and the series' bar cells. */
+.rep-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.rep-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+}
+.rep-label {
+  min-width: 4.5rem;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--muted);
+}
+.rep-row select {
+  width: auto;
+  min-width: 14rem;
+}
+.rep-date {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.rep-date input {
+  width: auto;
+}
+.rep-bar-cell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s-2);
+}
+.rep-bar-cell .mini-bar {
+  width: 6rem;
+}

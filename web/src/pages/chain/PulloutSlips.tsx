@@ -111,6 +111,7 @@ export function PulloutSlips() {
         listKey="pullout-slips"
         endpoint="/pullout-slips"
         printPath="/api/pullout-slips/pdf"
+        reportPath="/g-chain/reports?kind=pullout"
         columns={columns}
         rowKey={(r) => r.id}
         searchPlaceholder="Search number, document, destination, courier…"

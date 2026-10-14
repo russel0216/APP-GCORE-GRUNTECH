@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api, openPdf, qs, type ListResult, type ListSummary } from '../lib/api';
 import { parseDay, todayLocal } from '../lib/day';
 import {
@@ -134,6 +134,13 @@ interface Props<T> {
    */
   printPath?: string;
   /**
+   * The screen's report (2026-10-15, the owner's call: "a Report button per
+   * menu, any applicable to the list, selectable time range"): a Report
+   * button beside the screen's actions, opening this path — the report page
+   * with the list's kind preset.
+   */
+  reportPath?: string;
+  /**
    * Tick boxes on the rows and a bar of mass actions over the table (SCORO's
    * mass actions): Export selected, Print selected where there is a
    * `printPath`, and the screen's own `bulkActions`. Never a bulk delete — a
@@ -181,6 +188,7 @@ export function DataList<T>({
   reloadToken = 0,
   urlState = true,
   printPath,
+  reportPath,
   selectable = false,
   bulkActions,
   rowLabel,
@@ -646,6 +654,11 @@ export function DataList<T>({
       <div className="list-toolbar list-toolbar-main">
         <div className="list-lead">
           {actions}
+          {reportPath && (
+            <Link className="btn btn-sm" to={reportPath}>
+              Report
+            </Link>
+          )}
 
           <input
             className="list-search"

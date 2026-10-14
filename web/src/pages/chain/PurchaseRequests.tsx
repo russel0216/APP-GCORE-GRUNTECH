@@ -144,6 +144,7 @@ export function PurchaseRequests() {
         listKey="purchase-requests"
         endpoint="/purchase-requests"
         printPath="/api/purchase-requests/pdf"
+        reportPath="/g-chain/reports?kind=purchase-requests"
         columns={columns}
         rowKey={(r) => r.id}
         scoped

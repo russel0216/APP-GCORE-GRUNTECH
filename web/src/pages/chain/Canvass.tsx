@@ -120,6 +120,7 @@ export function Canvasses() {
         listKey="canvasses"
         endpoint="/canvasses"
         printPath="/api/canvasses/pdf"
+        reportPath="/g-chain/reports?kind=canvass"
         columns={columns}
         rowKey={(c) => c.id}
         searchPlaceholder="Search number, request, RFQ, supplier…"

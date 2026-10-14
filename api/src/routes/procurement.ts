@@ -1466,8 +1466,8 @@ function sheetLinesOf<T extends { id: string }>(canvass: { lineIds: string[] }, 
 type FigureItem = { id: string; quantity: Prisma.Decimal; estimatedCost: Prisma.Decimal; estimatedAmount: Prisma.Decimal };
 type FigureSupplier = { id: string; quotes: { requestItemId: string; unitPrice: Prisma.Decimal }[] };
 
-/** The sheet's figures — the reference budget and each supplier column's total and saving. */
-function figuresOf(canvass: { lineIds: string[] }, items: FigureItem[], suppliers: FigureSupplier[]) {
+/** The sheet's figures — the reference budget and each supplier column's total and saving (the G-CHAIN reports read it too). */
+export function figuresOf(canvass: { lineIds: string[] }, items: FigureItem[], suppliers: FigureSupplier[]) {
   const lines: SheetLine[] = sheetLinesOf(canvass, items).map((i) => ({
     id: i.id,
     quantity: num(i.quantity),

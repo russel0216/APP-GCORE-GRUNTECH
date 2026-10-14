@@ -3702,6 +3702,79 @@ async function main() {
       );
     }
 
+    // ── G-CHAIN reports (2026-10-15) ─────────────────────────────────────
+    // One report per menu over a chosen range, each with a CSV and a PDF
+    // twin behind the one reports right; a figure the report shows is the
+    // menu's own figure (rule: where a report disagrees with a screen, the
+    // report is wrong).
+    console.log('\nG-CHAIN reports (over HTTP)');
+    {
+      const KINDS = ['overview', 'purchase-requests', 'rfq', 'canvass', 'purchase-orders', 'incoming', 'inventory', 'outgoing', 'borrow', 'pullout'];
+      const range = `from=${todayKey.slice(0, 4)}-01-01&to=${todayKey}`;
+      const answers = await Promise.all(
+        KINDS.map(async (k) => {
+          const j = await api(keeperToken, 'GET', `/chain-reports/${k}?${range}`);
+          const c = await printed(keeperToken, `/chain-reports/${k}.csv?${range}`);
+          const p = await printed(keeperToken, `/chain-reports/${k}.pdf?${range}`);
+          const body = j.body as { kind?: string; cards?: unknown[]; series?: { rows: unknown[] }; tables?: unknown[] };
+          return {
+            k,
+            ok:
+              j.status === 200 &&
+              body.kind === k &&
+              Array.isArray(body.cards) &&
+              body.cards.length >= 3 &&
+              (body.series?.rows.length ?? 0) === Number(todayKey.slice(5, 7)) &&
+              Array.isArray(body.tables) &&
+              c.status === 200 &&
+              c.type.startsWith('text/csv') &&
+              !!c.bytes &&
+              p.status === 200 &&
+              p.text.length > 100,
+            why: `${j.status}/${c.status}/${p.status} months ${body.series?.rows.length}`,
+          };
+        }),
+      );
+      check(
+        'every report answers for the reports right — the JSON with its cards and a row per month of the year to date, and its CSV and PDF twins',
+        answers.every((a) => a.ok),
+        answers.filter((a) => !a.ok).map((a) => `${a.k}: ${a.why}`).join('; '),
+      );
+      const noReportsRole = await makeRole('zzchain_noreports', 'ZZ No reports right', ['gchain.dashboard.view_all']);
+      const nobody = await mkUser('Verify Nobody', 'nobody@verifyc.local', noReportsRole.id);
+      const nobodyToken = signToken(nobody.id, nobody.email);
+      const noRight = await api(nobodyToken, 'GET', `/chain-reports/outgoing?${range}`);
+      const noRightPdf = await printed(nobodyToken, `/chain-reports/outgoing.pdf?${range}`);
+      const badKind = await api(keeperToken, 'GET', `/chain-reports/nope?${range}`);
+      const badRange = await api(keeperToken, 'GET', `/chain-reports/outgoing?from=${todayKey}&to=2020-01-01`);
+      check(
+        'without the reports right the report and its paper are refused; an unknown report and a range that ends before it starts are 400s',
+        noRight.status === 403 && noRightPdf.status === 403 && badKind.status === 400 && badRange.status === 400,
+        `${noRight.status} ${noRightPdf.status} ${badKind.status} ${badRange.status}`,
+      );
+      // The outgoing report reconciles to the slips: its count and value are
+      // the ISSUED slips of the range, read off the register's own rows.
+      const rep = await api(keeperToken, 'GET', `/chain-reports/outgoing?${range}`);
+      const repCards = (rep.body.cards ?? []) as { label: string; value: number }[];
+      const repSeries = (rep.body.series as { rows: { values: number[] }[] }).rows;
+      const issuedRows = await prisma.stockIssue.findMany({
+        where: { status: 'ISSUED', issueDate: { gte: new Date(`${todayKey.slice(0, 4)}-01-01T00:00:00Z`), lte: new Date(`${todayKey}T00:00:00Z`) } },
+        include: { items: { select: { amount: true } } },
+      });
+      const issuedValue = Math.round(issuedRows.reduce((s, r) => s + r.items.reduce((t, i) => t + num(i.amount), 0), 0) * 100) / 100;
+      const seriesValue = Math.round(repSeries.reduce((s, r) => s + (r.values[2] ?? 0), 0) * 100) / 100;
+      check(
+        'the outgoing report counts and values exactly the issued slips of its range, and its months add up to its cards',
+        repCards.find((c) => c.label === 'Slips issued')?.value === issuedRows.length &&
+          money(repCards.find((c) => c.label === 'Value issued')?.value ?? -1, issuedValue) &&
+          repSeries.reduce((s, r) => s + r.values[0], 0) === issuedRows.length &&
+          money(seriesValue, issuedValue),
+        `report ${repCards.find((c) => c.label === 'Slips issued')?.value} / ${repCards.find((c) => c.label === 'Value issued')?.value}; slips ${issuedRows.length} / ${issuedValue}; series ${seriesValue}`,
+      );
+      const exported = await prisma.auditLog.count({ where: { entityType: 'chain_report', entityId: 'outgoing', action: 'EXPORTED' } });
+      check('each CSV and PDF of a report is on the trail as EXPORTED', exported >= 2, String(exported));
+    }
+
     // ── Inventory as a board (2026-10-14) ────────────────────────────────
     // The Kanban view reads the list's own query: the same rows, every
     // warehouse a column of what it has available, the rest Out of stock.

@@ -107,6 +107,7 @@ export function Rfqs() {
         listKey="rfqs"
         endpoint="/rfqs"
         printPath="/api/rfqs/pdf"
+        reportPath="/g-chain/reports?kind=rfq"
         columns={columns}
         rowKey={(r) => r.id}
         searchPlaceholder="Search number, request, supplier…"

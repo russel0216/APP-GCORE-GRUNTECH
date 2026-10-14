@@ -107,6 +107,7 @@ export function StockIssues() {
         listKey="stock-issues"
         endpoint="/stock-issues"
         printPath="/api/stock-issues/pdf"
+        reportPath="/g-chain/reports?kind=outgoing"
         columns={columns}
         rowKey={(i) => i.id}
         selectable

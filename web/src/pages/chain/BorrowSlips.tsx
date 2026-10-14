@@ -150,6 +150,7 @@ export function BorrowSlips() {
         listKey="borrow-slips"
         endpoint="/borrow-slips"
         printPath="/api/borrow-slips/pdf"
+        reportPath="/g-chain/reports?kind=borrow"
         columns={columns}
         rowKey={(b) => b.id}
         searchPlaceholder="Search number, borrower, purpose…"

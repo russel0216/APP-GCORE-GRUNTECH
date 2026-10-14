@@ -91,6 +91,7 @@ export function PurchaseOrders() {
         listKey="purchase-orders"
         endpoint="/purchase-orders"
         printPath="/api/purchase-orders/pdf"
+        reportPath="/g-chain/reports?kind=purchase-orders"
         columns={columns}
         rowKey={(o) => o.id}
         searchPlaceholder="Search number, supplier, project…"

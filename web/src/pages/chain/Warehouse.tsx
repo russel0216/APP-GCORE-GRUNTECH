@@ -89,6 +89,7 @@ export function Receivings() {
         listKey="receivings"
         endpoint="/receivings"
         printPath="/api/receivings/pdf"
+        reportPath="/g-chain/reports?kind=incoming"
         columns={columns}
         rowKey={(r) => r.id}
         searchPlaceholder="Search number, order, supplier…"
@@ -784,6 +785,7 @@ export function Inventory() {
           listKey="inventory"
           endpoint="/inventory"
           printPath="/api/inventory/pdf"
+        reportPath="/g-chain/reports?kind=inventory"
           columns={columns}
           rowKey={(s) => s.id}
           searchPlaceholder="Search item name, code, part number…"
@@ -1184,139 +1186,7 @@ export function StockCard() {
 
 // ── Reports ──────────────────────────────────────────────────────────────────
 
-export function ChainReports() {
-  const [data, setData] = useState<{
-    warehouses: { id: string; name: string; items: number; value: number }[];
-    totalValue: number;
-    reorder: {
-      itemId: string;
-      warehouseId: string;
-      item: string;
-      code: string;
-      warehouse: string;
-      available: number;
-      reorderLevel: number;
-    }[];
-    overdueBorrows: number;
-  } | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<unknown>(null);
-
-  useEffect(() => {
-    api
-      .get<NonNullable<typeof data>>('/inventory/reports/summary')
-      .then(setData)
-      .catch(setError)
-      .finally(() => setLoading(false));
-  }, []);
-
-  if (loading) return <Loading />;
-  if (!data) return <ErrorBox error={error} />;
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <h1>Supply Chain Reports</h1>
-          <p>Stock valuation, what needs reordering, and what is overdue back.</p>
-        </div>
-      </div>
-
-      <div className="kpi-grid proc-stats">
-        <Stat
-          label="Stock value"
-          value={formatMoney(data.totalValue)}
-          sub="on hand, at moving average cost"
-          accent="neon"
-          figure
-          more="Open inventory"
-          to="/g-chain/inventory"
-        />
-        <Stat
-          label="Below reorder level"
-          value={data.reorder.length}
-          sub={data.reorder.length ? 'listed below' : 'everything above its level'}
-          accent={data.reorder.length ? 'warn' : 'quiet'}
-          more="Open reorder list"
-          to="/g-chain/inventory?needsReorder=true"
-        />
-        <Stat
-          label="Overdue borrow slips"
-          value={data.overdueBorrows}
-          sub={data.overdueBorrows ? 'tools out past their return date' : 'everything back on time'}
-          accent={data.overdueBorrows ? 'danger' : 'quiet'}
-          more="Open overdue slips"
-          to="/g-chain/borrow-slips?overdue=true"
-        />
-      </div>
-
-      <div className="grid grid-2">
-        <div className="card">
-          <h3 className="card-title">Stock by warehouse</h3>
-          {data.warehouses.length === 0 ? (
-            <Empty title="No stock" />
-          ) : (
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>Warehouse</th>
-                    <th className="right">Item lines</th>
-                    <th className="right">Value</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.warehouses.map((w) => (
-                    <tr key={w.id}>
-                      <td>{w.name}</td>
-                      <td className="right mono">{w.items}</td>
-                      <td className="right mono">{formatMoney(w.value)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        <div className="card">
-          <h3 className="card-title">Needs reordering</h3>
-          {data.reorder.length === 0 ? (
-            <Empty title="Everything is above its reorder level" />
-          ) : (
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>Item</th>
-                    <th>Warehouse</th>
-                    <th className="right">Available</th>
-                    <th className="right">Reorder at</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.reorder.map((r) => (
-                    <tr key={`${r.itemId}-${r.warehouseId}`}>
-                      <td>
-                        {/* The stock card for that item in that store — where
-                            the reorder decision is actually made. */}
-                        <Link to={`/g-chain/inventory/${r.itemId}?warehouseId=${r.warehouseId}`}>{r.item}</Link>
-                        <div className="faint mono">{r.code}</div>
-                      </td>
-                      <td>{r.warehouse}</td>
-                      <td className="right mono proc-short">{r.available}</td>
-                      <td className="right mono faint">{r.reorderLevel}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
+// Reports live in ChainReports.tsx (2026-10-15): one report per menu over a chosen range.
 
 interface ChainOverview {
   requestsAwaitingApproval: number | null;
