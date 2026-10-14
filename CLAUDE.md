@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,194 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,199 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,10 +574,10 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 317, hr 468, plantilla 123, meetings
+79, partners 120, delivery 171, chain 322, hr 468, plantilla 123, meetings
 115, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4798,6 +4798,35 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   say what came from stock. The list (`listWhere` → `{ base, where }`,
   cards Waiting for approval / Pulled out / Drafts) prints; Ctrl+K finds
   slips.
+- **The pull-out slip is the INTERNAL RELEASE SLIP** (2026-10-15, the
+  owner's form as the guide, and his calls: "internal, allowing the
+  warehouse to release the item; no customer involved" and "yes" to a slip
+  with no source document). `PulloutKind` gains **OTHER** — no sales order
+  or request (a supplier return, testing, a repair): `reason` required, the
+  lines any item the warehouse holds (no `sourceLineId`), no project, no
+  job cost; `loadSource()` answers `NO_SOURCE` and `GET /source?kind=OTHER`
+  the warehouses and stock. Every slip carries `purpose` (`PulloutPurpose`:
+  Sales order fulfilment, Project / site use, Site installation, Testing /
+  audit, Repair / service, Supplier return, Other — `PULLOUT_PURPOSES`;
+  OTHER takes only the last five; null on a slip from before reads from its
+  kind through `purposeOf()`, in the list's `?purpose=` filter too),
+  `requestedById` (who asked — sales or the project; the form starts on the
+  sales order's author or the request's requester, the API on the
+  preparer), `poReference` / `drReference` (a sales order's PO and DR
+  numbers to start with), the courier (`receivedByName` is the authorized
+  person, `courierCompany`, `courierContact`, `vehicle`), `destination`,
+  `returnBy` and per line `serialNo` and `condition`. **The route is the
+  REQUESTER's** (`requesterOf()`: their "Reports to", else a Warehouse
+  Supervisor), and who asked reads the slip and its files with no
+  warehouse right and is told when it goes out. The paper: REFERENCES (SO,
+  PR, PO ref., DR ref., purpose, project), "Authorized person / courier"
+  beside "Destination" (with the warehouse source and Expected back), the
+  items with part no., serial and condition — never a cost — the reason,
+  the special instructions, and the gate clearance the guard signs by hand
+  ("Guard on duty: ____ Time out: ____", printed while not cancelled);
+  signed REQUESTED BY → the step → WAREHOUSE RELEASED BY → PULLED OUT /
+  RECEIVED BY, DRAFT — NOT YET RELEASED in the foot until it goes out. The
+  list adds Purpose, Destination and Requested by, and its paper.
 - **Inventory switches between List and Kanban** (push 4d; the owner's
   call, like gasiontech's). A List / Kanban switch in the page head;
   `?view=kanban|list` in the URL (a link's view wins), and the viewer's last

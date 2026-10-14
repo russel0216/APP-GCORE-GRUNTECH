@@ -163,7 +163,14 @@ async function cleanup() {
   }
   // Pull-out slips hold their request, order and warehouse (Restrict), so go first.
   const taggedPullouts = await prisma.pulloutSlip.findMany({
-    where: { OR: [{ request: { purpose: { startsWith: TAG } } }, { warehouse: { name: { startsWith: TAG } } }, { salesOrder: { number: { startsWith: TAG } } }] },
+    where: {
+      OR: [
+        { request: { purpose: { startsWith: TAG } } },
+        { warehouse: { name: { startsWith: TAG } } },
+        { salesOrder: { number: { startsWith: TAG } } },
+        { reason: { startsWith: TAG } },
+      ],
+    },
     select: { id: true },
   });
   if (taggedPullouts.length) {
@@ -3473,9 +3480,9 @@ async function main() {
       );
       const pullPaper = await printed(pullerToken, `/pullout-slips/${slipId}/pdf`);
       check(
-        'its paper signs PREPARED BY, the supervisor, RELEASED BY and RECEIVED BY — each dated — and prints no cost',
+        'its paper signs REQUESTED BY, the supervisor, WAREHOUSE RELEASED BY and PULLED OUT / RECEIVED BY — each dated — and prints no cost',
         pullPaper.status === 200 &&
-          ['PREPARED BY', 'SUPERVISOR', 'RELEASED BY', 'RECEIVED BY'].every((r) => flat(pullPaper.text).includes(r)) &&
+          ['REQUESTED BY', 'SUPERVISOR', 'WAREHOUSE RELEASED BY', 'PULLED OUT / RECEIVED BY'].every((r) => flat(pullPaper.text).includes(r)) &&
           flat(pullPaper.text).includes('Verify Site Foreman') &&
           signedCount(pullPaper.text) === 4 &&
           pendingCount(pullPaper.text) === 0 &&
@@ -3565,6 +3572,82 @@ async function main() {
       });
       const stockSource = await api(pullerToken, 'GET', `/pullout-slips/source?requestId=${stockPr.id}`);
       check('a request that buys for warehouse stock is not pulled out against', stockSource.status === 400, String(stockSource.status));
+
+      // No source document (2026-10-15, the owner's call): a supplier
+      // return, testing, a repair — the reason kept, no project charged.
+      // Who asked for it reads the slip with no warehouse right, and it goes
+      // to THEIR supervisor; the paper is the internal release slip.
+      const asker = await makeUser('Verify Asker', 'asker@verifyc.local', ['sales']);
+      await prisma.user.update({ where: { id: asker.id }, data: { supervisorId: boss.id } });
+      const askerToken = signToken(asker.id, asker.email);
+      const freeBody = {
+        kind: 'OTHER',
+        warehouseId: warehouse.id,
+        purpose: 'SUPPLIER_RETURN',
+        requestedById: asker.id,
+        reason: `${TAG} wrong size delivered — back to the supplier`,
+        receivedByName: 'Verify Courier',
+        courierCompany: 'Express Logistics',
+        courierContact: '+63 917 000 0000',
+        vehicle: 'NFK-8921 (Canter truck)',
+        destination: 'Supplier warehouse, Pasig',
+        poReference: `${TAG}-PO-77`,
+        returnBy: null,
+        notes: 'With the original box',
+        lines: [{ itemId: item.id, quantity: 1, serialNo: 'SN-RET-01', condition: 'For return' }],
+      };
+      const noReason = await api(pullerToken, 'POST', '/pullout-slips', { ...freeBody, reason: '' });
+      const projectPurpose = await api(pullerToken, 'POST', '/pullout-slips', { ...freeBody, purpose: 'PROJECT_USE' });
+      const answersLine = await api(pullerToken, 'POST', '/pullout-slips', { ...freeBody, lines: [{ ...freeBody.lines[0], sourceLineId: prLine.id }] });
+      check(
+        'with no source document the reason is required, the purpose is not a sales order or a project’s use, and no line answers a source',
+        noReason.status === 400 && projectPurpose.status === 400 && answersLine.status === 400,
+        `${noReason.status} ${projectPurpose.status} ${answersLine.status}`,
+      );
+      const freeShelf = await onShelf();
+      const free = await api(pullerToken, 'POST', '/pullout-slips', freeBody);
+      const freeId = String(free.body.id);
+      const askerReads = await api(askerToken, 'GET', `/pullout-slips/${freeId}`);
+      await api(pullerToken, 'POST', `/pullout-slips/${freeId}/submit`);
+      const freeReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'pullout_slip', documentId: freeId, status: 'PENDING' } });
+      check(
+        'a slip with no source document is saved for whoever asked, who reads it with no warehouse right — and it goes for approval in their name',
+        free.status === 201 && askerReads.status === 200 && askerReads.body.purposeLabel === 'Supplier return' && freeReq?.requesterId === asker.id,
+        `${free.status} ${askerReads.status} ${askerReads.body.purposeLabel} ${freeReq?.requesterId === asker.id}`,
+      );
+      if (freeReq) await api(bossToken, 'POST', `/approvals/${freeReq.id}/act`, { action: 'APPROVED' });
+      const freeRow = await prisma.pulloutSlip.findUniqueOrThrow({ where: { id: freeId }, include: { items: true } });
+      check(
+        'approved, it goes out — the stock leaves, no project is charged, and who asked is told',
+        freeRow.status === 'PULLED_OUT' &&
+          freeRow.jobId === null &&
+          freeRow.items[0]?.serialNo === 'SN-RET-01' &&
+          money(freeShelf - (await onShelf()), 1) &&
+          (await prisma.jobCostEntry.count({ where: { sourceType: 'pullout_slip', sourceId: freeId } })) === 0 &&
+          (await prisma.notification.count({ where: { userId: asker.id, type: 'pullout.done', link: `/g-chain/pullout-slips/${freeId}` } })) === 1,
+        `${freeRow.status} ${freeRow.jobId} ${freeShelf} → ${await onShelf()}`,
+      );
+      const freePaper = await printed(askerToken, `/pullout-slips/${freeId}/pdf`);
+      check(
+        'its paper is the internal release slip: references, purpose, courier and destination, serial and condition, the reason, the gate clearance — and who asked signs first',
+        freePaper.status === 200 &&
+          ['REFERENCES', 'AUTHORIZED PERSON / COURIER', 'DESTINATION', 'SERIAL / BATCH NO.', 'WAREHOUSE GATE CLEARANCE & INSPECTION', 'WHY THERE IS NO SOURCE DOCUMENT'].every((w) =>
+            flat(freePaper.text).includes(w),
+          ) &&
+          ['Supplier return', 'Express Logistics', 'NFK-8921 (Canter truck)', 'Supplier warehouse, Pasig', 'SN-RET-01', 'For return', `${TAG}-PO-77`].every((w) => flat(freePaper.text).includes(w)) &&
+          /REQUESTED BY\s+Verify Asker/.test(freePaper.text) &&
+          pendingCount(freePaper.text) === 0,
+        `${freePaper.status} ${['REFERENCES', 'AUTHORIZED PERSON / COURIER', 'WAREHOUSE GATE CLEARANCE & INSPECTION'].filter((w) => !flat(freePaper.text).includes(w))}`,
+      );
+      const byKind = await api(pullerToken, 'GET', `/pullout-slips?kind=OTHER&search=${encodeURIComponent('Supplier warehouse, Pasig')}`);
+      const byPurpose = await api(pullerToken, 'GET', `/pullout-slips?purpose=SUPPLIER_RETURN&search=${encodeURIComponent('Supplier warehouse, Pasig')}`);
+      await prisma.pulloutSlip.update({ where: { id: soSlipId }, data: { purpose: null } });
+      const byOldPurpose = await api(pullerToken, 'GET', `/pullout-slips?purpose=SALES_ORDER&salesOrderId=${so.id}`);
+      check(
+        'the list filters by no source document and by purpose — a slip from before the purposes reads its purpose from its kind',
+        byKind.body.total === 1 && byPurpose.body.total === 1 && byOldPurpose.body.total === 1,
+        `${byKind.body.total} ${byPurpose.body.total} ${byOldPurpose.body.total}`,
+      );
     }
 
     // ── Inventory as a board (2026-10-14) ────────────────────────────────

@@ -943,7 +943,7 @@ function Routed() {
             </GuardAny>
           }
         />
-        {/* No Guard: the API decides — the approver may hold no warehouse right. */}
+        {/* No Guard: the API decides — the approver, or who asked for it, may hold no warehouse right. */}
         <Route path="/g-chain/pullout-slips/:id" element={<PulloutDetail />} />
         <Route
           path="/g-chain/inventory"

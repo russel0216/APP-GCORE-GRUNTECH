@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma, PulloutKind, PulloutStatus } from '@prisma/client';
+import { Prisma, PulloutKind, PulloutPurpose, PulloutStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, type ListQuery } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
@@ -25,7 +25,7 @@ import {
 } from '../shared/approvals';
 import { registerAttachmentGuard } from '../shared/attachments';
 import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
-import { renderDocument, formatDate, formatShortDate, statusLabel, type Signatory } from '../shared/pdf';
+import { renderDocument, formatDate, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { manilaDate } from '../shared/day';
 import { LIST_CAP, listReference, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { issueStock, postJobCost, releaseCommitment } from '../shared/inventory';
@@ -49,9 +49,21 @@ import { contentDisposition, paperFileName } from '../shared/paperName';
  *   charged INCURRED + CONSUMED at the warehouse's average, the stock
  *   issue's rule.
  *
+ * - no source document at all (2026-10-15, the owner's call: "yes" — a
+ *   supplier return, testing, a repair): the reason is kept, the lines are
+ *   whatever the warehouse holds, and no project is charged.
+ *
+ * It is the INTERNAL release slip (the owner's call: "Pull-out Slip — internal,
+ * allowing the warehouse to release the item; no customer involved"): what it
+ * is for, who asked for it (sales or the project — their manager approves),
+ * the references written on it, the authorized person or courier and their
+ * vehicle, where it goes and when it is expected back, each line's serial and
+ * condition, and on paper the gate clearance for the guard.
+ *
  * DRAFT → PENDING_APPROVAL → PULLED_OUT, or CANCELLED with a reason. The route
- * is the preparer's "Reports to" (else a Warehouse Supervisor); with it
- * switched off "Pull out" posts at once, the Outgoing rule.
+ * is the REQUESTER's "Reports to" (else a Warehouse Supervisor) — the
+ * preparer's when nobody else asked; with it switched off "Pull out" posts at
+ * once, the Outgoing rule.
  */
 export const pulloutRoutes = Router();
 pulloutRoutes.use(authenticate);
@@ -69,6 +81,22 @@ const qty = (v: number) => new Intl.NumberFormat('en-PH', { maximumFractionDigit
 
 /** A request whose lines may be pulled: approved, direct to a project, not yet wholly ordered. */
 const PULLABLE_PR = ['APPROVED', 'PARTIALLY_ORDERED'] as const;
+
+/** What a pull-out is for, as the slip prints it (the owner's "purpose / transaction type"). */
+export const PULLOUT_PURPOSES: Record<PulloutPurpose, string> = {
+  SALES_ORDER: 'Sales order fulfilment',
+  PROJECT_USE: 'Project / site use',
+  SITE_INSTALLATION: 'Site installation',
+  TESTING_AUDIT: 'Testing / audit',
+  REPAIR_SERVICE: 'Repair / service',
+  SUPPLIER_RETURN: 'Supplier return',
+  OTHER: 'Other',
+};
+/** The purposes a slip with no source document may carry — a sales order or a project's use has its document. */
+const OTHER_PURPOSES: PulloutPurpose[] = ['SITE_INSTALLATION', 'TESTING_AUDIT', 'REPAIR_SERVICE', 'SUPPLIER_RETURN', 'OTHER'];
+/** A slip's purpose: its own, else what its kind means (a slip from before the purposes). */
+export const purposeOf = (slip: { purpose: PulloutPurpose | null; kind: PulloutKind }): PulloutPurpose =>
+  slip.purpose ?? (slip.kind === 'SALES_ORDER' ? 'SALES_ORDER' : slip.kind === 'PURCHASE_REQUEST' ? 'PROJECT_USE' : 'OTHER');
 
 // ── The source document ──────────────────────────────────────────────────────
 
@@ -98,8 +126,29 @@ interface Source {
   jobId: string | null;
   job: { id: string; number: string; name: string } | null;
   customerName: string | null;
+  /** Who asked for it: the sales order's author, the request's requester — the slip's "Requested by" to start with. */
+  owner: { id: string; name: string } | null;
+  /** The references the source carries: the customer's PO and the DR on a sales order. */
+  poReference: string | null;
+  drReference: string | null;
   lines: SourceLine[];
 }
+
+/** A slip with no source document: nothing to answer, no project. */
+const NO_SOURCE: Source = {
+  kind: 'OTHER',
+  salesOrderId: null,
+  requestId: null,
+  number: '',
+  label: 'No source document',
+  jobId: null,
+  job: null,
+  customerName: null,
+  owner: null,
+  poReference: null,
+  drReference: null,
+  lines: [],
+};
 
 /**
  * What each source line already gave: the quantities on other slips that are
@@ -118,11 +167,13 @@ async function pulledBySource(lineIds: string[], exceptSlipId?: string, statuses
 
 /** The source a slip pulls against, with what is left on each line. Refuses one that cannot be pulled against. */
 async function loadSource(kind: PulloutKind, id: string, exceptSlipId?: string): Promise<Source> {
+  if (kind === 'OTHER') return NO_SOURCE;
   if (kind === 'SALES_ORDER') {
     const so = await prisma.salesOrder.findUnique({
       where: { id },
       include: {
         customer: { select: { name: true } },
+        owner: { select: { id: true, name: true } },
         lines: { where: { isHeading: false }, orderBy: { sortOrder: 'asc' } },
       },
     });
@@ -156,6 +207,9 @@ async function loadSource(kind: PulloutKind, id: string, exceptSlipId?: string):
       jobId: job?.id ?? null,
       job,
       customerName: so.customer.name,
+      owner: so.owner,
+      poReference: so.poNumber,
+      drReference: so.drNumber,
       lines: so.lines.map((l) => ({
         id: l.id,
         title: l.title || l.description || 'Line',
@@ -172,7 +226,11 @@ async function loadSource(kind: PulloutKind, id: string, exceptSlipId?: string):
   }
   const pr = await prisma.purchaseRequest.findUnique({
     where: { id },
-    include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } } },
+    include: {
+      items: { orderBy: { sortOrder: 'asc' } },
+      job: { select: { id: true, number: true, name: true } },
+      requestedBy: { select: { id: true, name: true } },
+    },
   });
   if (!pr) throw notFound('Purchase request not found');
   if (pr.kind !== 'DIRECT_TO_JOB' || !pr.job) throw badRequest(`${pr.number} buys for warehouse stock — only a project's request is pulled from the shelf`);
@@ -191,6 +249,9 @@ async function loadSource(kind: PulloutKind, id: string, exceptSlipId?: string):
     jobId: pr.job.id,
     job: pr.job,
     customerName: null,
+    owner: pr.requestedBy,
+    poReference: null,
+    drReference: null,
     lines: pr.items.map((i) => ({
       id: i.id,
       title: i.name || i.description,
@@ -209,10 +270,15 @@ async function loadSource(kind: PulloutKind, id: string, exceptSlipId?: string):
 // ── The sheet ────────────────────────────────────────────────────────────────
 
 const lineSchema = z.object({
-  sourceLineId: z.string().min(1),
+  /** The source line it answers — none on a slip with no source document. */
+  sourceLineId: z.string().optional().nullable(),
   itemId: z.string().min(1, 'Which item?'),
   quantity: z.number().positive(),
+  serialNo: z.string().trim().max(120).optional().nullable(),
+  condition: z.string().trim().max(80).optional().nullable(),
 });
+
+const text = (max: number) => z.string().trim().max(max).optional().nullable();
 
 const sheetSchema = z
   .object({
@@ -221,11 +287,28 @@ const sheetSchema = z
     requestId: z.string().optional().nullable(),
     warehouseId: z.string().min(1, 'Which warehouse?'),
     pulloutDate: z.string().optional().nullable(),
-    receivedByName: z.string().trim().max(200).optional().nullable(),
+    purpose: z.nativeEnum(PulloutPurpose).optional().nullable(),
+    requestedById: z.string().optional().nullable(),
+    receivedByName: text(200),
+    courierCompany: text(200),
+    courierContact: text(80),
+    vehicle: text(120),
+    destination: text(300),
+    poReference: text(120),
+    drReference: text(120),
+    returnBy: z.string().optional().nullable(),
+    reason: text(2000),
     notes: z.string().max(4000).optional().nullable(),
     lines: z.array(lineSchema).min(1, 'Pull out at least one line'),
   })
-  .refine((b) => (b.kind === 'SALES_ORDER' ? !!b.salesOrderId : !!b.requestId), { message: 'Name the sales order or the request it pulls against' });
+  .refine((b) => (b.kind === 'SALES_ORDER' ? !!b.salesOrderId : b.kind === 'PURCHASE_REQUEST' ? !!b.requestId : true), {
+    message: 'Name the sales order or the request it pulls against',
+  })
+  .refine((b) => b.kind !== 'OTHER' || (b.reason ?? '').trim().length >= 3, { message: 'Say why there is no source document', path: ['reason'] })
+  .refine((b) => b.kind !== 'OTHER' || (!!b.purpose && OTHER_PURPOSES.includes(b.purpose)), {
+    message: 'Say what it is for — site installation, testing, a repair, a supplier return or other',
+    path: ['purpose'],
+  });
 
 function asDate(v: string | null | undefined): Date | null {
   if (!v) return null;
@@ -242,8 +325,12 @@ function asDate(v: string | null | undefined): Date | null {
  * line (the request line's, else the item's) — refused naming the item.
  */
 async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: string) {
-  const sourceId = body.kind === 'SALES_ORDER' ? body.salesOrderId! : body.requestId!;
+  const sourceId = body.kind === 'SALES_ORDER' ? body.salesOrderId! : body.kind === 'PURCHASE_REQUEST' ? body.requestId! : '';
   const source = await loadSource(body.kind, sourceId, exceptSlipId);
+  const free = body.kind === 'OTHER';
+  if (body.requestedById && !(await prisma.user.findUnique({ where: { id: body.requestedById }, select: { id: true } }))) {
+    throw badRequest('The person who asked for it is not on file');
+  }
   const warehouse = await prisma.warehouse.findUnique({ where: { id: body.warehouseId }, select: { isActive: true, name: true } });
   if (!warehouse || !warehouse.isActive) throw badRequest('That warehouse is not available');
   const byLine = new Map(source.lines.map((l) => [l.id, l]));
@@ -255,7 +342,14 @@ async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: stri
   const perLine = new Map<string, number>();
   const perItem = new Map<string, number>();
   for (const l of body.lines) {
-    const src = byLine.get(l.sourceLineId);
+    if (free) {
+      if (l.sourceLineId) throw badRequest('A slip with no source document answers no source line');
+      const item = itemById.get(l.itemId);
+      if (!item || !item.isActive) throw badRequest('One of the items is not in the item master');
+      perItem.set(item.id, (perItem.get(item.id) ?? 0) + l.quantity);
+      continue;
+    }
+    const src = l.sourceLineId ? byLine.get(l.sourceLineId) : undefined;
     if (!src) throw badRequest(`One of the lines is not on ${source.number}`);
     const item = itemById.get(l.itemId);
     if (!item || !item.isActive) throw badRequest(`The item for "${src.title}" is not in the item master`);
@@ -282,7 +376,25 @@ async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: stri
     const free = b ? availableOf(b) : 0;
     if (free < q - 0.0005) throw badRequest(`Only ${qty(free)} of ${itemById.get(itemId)!.name} is available in ${warehouse.name} now`);
   }
-  return { source, balByItem, pulloutDate: asDate(body.pulloutDate) ?? today() };
+  return { source, balByItem, pulloutDate: asDate(body.pulloutDate) ?? today(), returnBy: asDate(body.returnBy) };
+}
+
+/** The header a sheet writes, beyond its source and warehouse. */
+function headerData(body: z.infer<typeof sheetSchema>, returnBy: Date | null) {
+  const t = (v: string | null | undefined) => v?.trim() || null;
+  return {
+    purpose: body.purpose ?? (body.kind === 'SALES_ORDER' ? ('SALES_ORDER' as const) : body.kind === 'PURCHASE_REQUEST' ? ('PROJECT_USE' as const) : null),
+    receivedByName: t(body.receivedByName),
+    courierCompany: t(body.courierCompany),
+    courierContact: t(body.courierContact),
+    vehicle: t(body.vehicle),
+    destination: t(body.destination),
+    poReference: t(body.poReference),
+    drReference: t(body.drReference),
+    returnBy,
+    reason: body.kind === 'OTHER' ? t(body.reason) : null,
+    notes: t(body.notes),
+  };
 }
 
 /** Writes the lines of a draft, each priced at the warehouse's average now — an estimate until it goes out. */
@@ -296,7 +408,17 @@ async function writeLines(
   await tx.pulloutItem.createMany({
     data: lines.map((l, n) => {
       const avg = num(balByItem.get(l.itemId)?.averageCost);
-      return { slipId, itemId: l.itemId, sourceLineId: l.sourceLineId, quantity: D(l.quantity), unitCost: D(avg), amount: D(cents(avg * l.quantity)), sortOrder: n };
+      return {
+        slipId,
+        itemId: l.itemId,
+        sourceLineId: l.sourceLineId || null,
+        quantity: D(l.quantity),
+        unitCost: D(avg),
+        amount: D(cents(avg * l.quantity)),
+        sortOrder: n,
+        serialNo: l.serialNo?.trim() || null,
+        condition: l.condition?.trim() || null,
+      };
     }),
   });
 }
@@ -312,11 +434,21 @@ function listWhere(q: ListQuery) {
   if (f.jobId) base.push({ jobId: f.jobId });
   const kind = choice(f.kind, PulloutKind, 'Kind');
   if (kind) base.push({ kind });
+  const purpose = choice(f.purpose, PulloutPurpose, 'Purpose');
+  // A slip from before the purposes reads its purpose from its kind.
+  if (purpose === 'SALES_ORDER') base.push({ OR: [{ purpose }, { purpose: null, kind: 'SALES_ORDER' }] });
+  else if (purpose === 'PROJECT_USE') base.push({ OR: [{ purpose }, { purpose: null, kind: 'PURCHASE_REQUEST' }] });
+  else if (purpose) base.push({ purpose });
   if (q.search) {
     base.push({
       OR: [
         { number: { contains: q.search, mode: 'insensitive' } },
         { receivedByName: { contains: q.search, mode: 'insensitive' } },
+        { destination: { contains: q.search, mode: 'insensitive' } },
+        { courierCompany: { contains: q.search, mode: 'insensitive' } },
+        { poReference: { contains: q.search, mode: 'insensitive' } },
+        { drReference: { contains: q.search, mode: 'insensitive' } },
+        { reason: { contains: q.search, mode: 'insensitive' } },
         { salesOrder: { number: { contains: q.search, mode: 'insensitive' } } },
         { salesOrder: { customer: { name: { contains: q.search, mode: 'insensitive' } } } },
         { request: { number: { contains: q.search, mode: 'insensitive' } } },
@@ -339,6 +471,7 @@ const LIST_INCLUDE = {
   job: { select: { id: true, number: true, name: true } },
   warehouse: { select: { id: true, name: true } },
   preparedBy: { select: { id: true, name: true } },
+  requestedBy: { select: { id: true, name: true } },
   items: { select: { quantity: true } },
 } satisfies Prisma.PulloutSlipInclude;
 
@@ -372,11 +505,16 @@ pulloutRoutes.get(
           pulloutDate: r.pulloutDate,
           releasedAt: r.releasedAt,
           receivedByName: r.receivedByName,
+          purpose: purposeOf(r),
+          purposeLabel: PULLOUT_PURPOSES[purposeOf(r)],
+          destination: r.destination,
+          returnBy: r.returnBy,
           salesOrder: r.salesOrder,
           request: r.request,
           job: r.job,
           warehouse: r.warehouse,
           preparedBy: r.preparedBy,
+          requestedBy: r.requestedBy ?? r.preparedBy,
           lineCount: r.items.length,
           quantity: cents(r.items.reduce((s, i) => s + num(i.quantity), 0)),
         })),
@@ -406,7 +544,8 @@ pulloutRoutes.get(
     const reference = listReference(count, rows.length, ['pull-out slip', 'pull-out slips'], [
       q.search && `search "${q.search}"`,
       f.status && `status ${statusLabel(f.status)}`,
-      f.kind && (f.kind === 'SALES_ORDER' ? 'against sales orders' : 'against purchase requests'),
+      f.kind && (f.kind === 'SALES_ORDER' ? 'against sales orders' : f.kind === 'PURCHASE_REQUEST' ? 'against purchase requests' : 'with no source document'),
+      f.purpose && `for ${PULLOUT_PURPOSES[f.purpose as PulloutPurpose].toLowerCase()}`,
       so,
       pr,
       project,
@@ -420,15 +559,17 @@ pulloutRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Against', 'Project', 'Warehouse', 'Date', 'Lines', 'Received by', 'Status'],
-          align: ['left', 'left', 'left', 'left', 'left', 'right', 'left', 'left'],
+          head: ['Number', 'Against', 'Purpose', 'Destination', 'Warehouse', 'Date', 'Lines', 'Requested by', 'Courier / received by', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'left', 'right', 'left', 'left', 'left'],
           rows: rows.map((r) => [
             r.number,
-            r.salesOrder ? { title: r.salesOrder.number, body: r.salesOrder.customer.name } : (r.request?.number ?? ''),
-            r.job?.number ?? '',
+            r.salesOrder ? { title: r.salesOrder.number, body: r.job?.number } : r.request ? { title: r.request.number, body: r.job?.number } : 'No source document',
+            PULLOUT_PURPOSES[purposeOf(r)],
+            r.destination ?? '',
             r.warehouse.name,
             formatShortDate(r.pulloutDate),
             String(r.items.length),
+            (r.requestedBy ?? r.preparedBy).name,
             r.receivedByName ?? '',
             statusLabel(r.status),
           ]),
@@ -495,20 +636,22 @@ pulloutRoutes.get(
     const requestId = typeof req.query.requestId === 'string' ? req.query.requestId : '';
     const warehouseId = typeof req.query.warehouseId === 'string' ? req.query.warehouseId : '';
     const exceptSlipId = typeof req.query.slipId === 'string' ? req.query.slipId : undefined;
-    if (!salesOrderId && !requestId) throw badRequest('Name the sales order or the request');
-    const source = await loadSource(salesOrderId ? 'SALES_ORDER' : 'PURCHASE_REQUEST', salesOrderId || requestId, exceptSlipId);
+    const none = req.query.kind === 'OTHER';
+    if (!none && !salesOrderId && !requestId) throw badRequest('Name the sales order or the request');
+    const source = none ? NO_SOURCE : await loadSource(salesOrderId ? 'SALES_ORDER' : 'PURCHASE_REQUEST', salesOrderId || requestId, exceptSlipId);
     const [warehouses, stock] = await Promise.all([
       prisma.warehouse.findMany({ where: { isActive: true }, select: { id: true, code: true, name: true }, orderBy: { name: 'asc' } }),
       warehouseId
         ? prisma.inventoryBalance.findMany({
             where: { warehouseId, item: { isActive: true } },
-            include: { item: { select: { id: true, code: true, partNumber: true, name: true, unit: true } } },
+            include: { item: { select: { id: true, code: true, partNumber: true, brand: true, name: true, unit: true } } },
             orderBy: { item: { name: 'asc' } },
           })
         : [],
     ]);
     res.json({
       source,
+      purposes: Object.entries(PULLOUT_PURPOSES).map(([key, label]) => ({ key, label, noSource: OTHER_PURPOSES.includes(key as PulloutPurpose) })),
       warehouses,
       items: stock.map((b) => ({ ...b.item, available: availableOf(b) })),
     });
@@ -525,7 +668,8 @@ async function loadSlip(id: string) {
       warehouse: { select: { id: true, name: true } },
       preparedBy: { select: { id: true, name: true } },
       releasedBy: { select: { id: true, name: true } },
-      items: { include: { item: { select: { id: true, code: true, partNumber: true, name: true, unit: true } } }, orderBy: { sortOrder: 'asc' } },
+      requestedBy: { select: { id: true, name: true, position: true } },
+      items: { include: { item: { select: { id: true, code: true, partNumber: true, brand: true, name: true, unit: true } } }, orderBy: { sortOrder: 'asc' } },
     },
   });
 }
@@ -535,9 +679,13 @@ type LoadedSlip = NonNullable<Awaited<ReturnType<typeof loadSlip>>>;
 async function visibleSlip(me: ResolvedUser, id: string, deciderOnly: boolean): Promise<LoadedSlip> {
   const slip = await loadSlip(id);
   if (!slip) throw notFound('Pull-out slip not found');
-  if (deciderOnly && !(await mayDecide(me.id, DOC, [slip.id]))) throw notFound('Pull-out slip not found');
+  // Who asked for it reads it — sales or the project, who may hold no warehouse right.
+  if (deciderOnly && slip.requestedById !== me.id && !(await mayDecide(me.id, DOC, [slip.id]))) throw notFound('Pull-out slip not found');
   return slip;
 }
+
+/** In whose name it goes for approval: who asked for it, else who prepared it. */
+const requesterOf = (slip: { requestedById: string | null; preparedById: string }) => slip.requestedById ?? slip.preparedById;
 
 /** Whoever may move a slip on — modify, submit, pull back, cancel, pull out: who prepared it, or edit_all. */
 const mayHandle = (me: ResolvedUser, slip: { preparedById: string }) =>
@@ -558,17 +706,20 @@ async function sourceLinesOf(slip: LoadedSlip) {
 async function presentSlip(slip: LoadedSlip, me: ResolvedUser) {
   const draft = slip.status === 'DRAFT';
   const handles = mayHandle(me, slip);
-  const route = draft ? await pickWorkflow(DOC, null, { requesterId: slip.preparedById }) : null;
+  const route = draft ? await pickWorkflow(DOC, null, { requesterId: requesterOf(slip) }) : null;
   const lines = await sourceLinesOf(slip);
   return {
     ...slip,
+    purpose: purposeOf(slip),
+    purposeLabel: PULLOUT_PURPOSES[purposeOf(slip)],
+    requestedBy: slip.requestedBy ?? { ...slip.preparedBy, position: null },
     canEdit: draft && handles,
     needsApproval: draft ? !!route : null,
     canSubmit: draft && handles && !!route && slip.items.length > 0,
     canPullOut: draft && handles && !route && slip.items.length > 0,
     canWithdraw: slip.status === 'PENDING_APPROVAL' && handles,
     canCancel: (draft || slip.status === 'PENDING_APPROVAL') && handles,
-    approvalRoute: draft && route ? await routeBrief(DOC, null, slip.preparedById) : null,
+    approvalRoute: draft && route ? await routeBrief(DOC, null, requesterOf(slip)) : null,
     items: slip.items.map((i) => ({
       ...i,
       quantity: num(i.quantity),
@@ -589,13 +740,16 @@ pulloutRoutes.get(
 );
 
 /**
- * The slip on paper — what goes out, never what it cost (the slip travels
- * with the delivery): the source and its customer or project, the lines
- * against the source lines they answer, then PREPARED BY (its timestamp),
- * the route's step ("Pending" until signed; a draft prints the route
- * submitting would take), RELEASED BY and RECEIVED BY — the name written on
- * the slip, dated when it went out. The delivery receipt or photos attached
- * follow it (`?attachments=0` bare).
+ * The slip on paper — the internal release slip (2026-10-15, the owner's
+ * pull-out slip as the guide), what goes out, never what it cost: the
+ * references (sales order, purchase request, PO and DR refs, the purpose and
+ * the project), the authorized person or courier beside where it goes, the
+ * items with their serial and condition, the reason (no source document),
+ * the instructions, and the gate clearance the guard signs on paper. Then
+ * REQUESTED BY (who asked, dated when the slip was raised), the route's step
+ * ("Pending" until signed; a draft prints the route submitting would take),
+ * WAREHOUSE RELEASED BY and PULLED OUT / RECEIVED BY — the name written on the
+ * slip, dated when it went out. Attachments follow it (`?attachments=0` bare).
  */
 pulloutRoutes.get(
   '/:id/pdf',
@@ -604,64 +758,100 @@ pulloutRoutes.get(
     const me = currentUser(req);
     const slip = await visibleSlip(me, req.params.id, res.locals.deciderOnly === true);
     const lines = await sourceLinesOf(slip);
+    const requesterId = requesterOf(slip);
+    const requester = slip.requestedBy ?? slip.preparedBy;
     const slots =
       slip.status === 'DRAFT'
-        ? await approvalSlots(DOC, slip.id, { amount: null, requesterId: slip.preparedById })
+        ? await approvalSlots(DOC, slip.id, { amount: null, requesterId })
         : await approvalSlots(DOC, slip.id);
     const out = slip.status === 'PULLED_OUT';
     const signatories: Signatory[] = [
-      { role: 'Prepared by', name: slip.preparedBy.name, ...(await contactOf(slip.preparedBy.id)), at: preparedAt(slots) ?? slip.createdAt },
+      { role: 'Requested by', name: requester.name, ...(await contactOf(requester.id)), at: preparedAt(slots) ?? slip.createdAt },
       ...slotSignatories(slots),
     ];
     if (out && slip.releasedBy) {
-      signatories.push({ role: 'Released by', name: slip.releasedBy.name, ...(await contactOf(slip.releasedBy.id)), at: slip.releasedAt });
+      signatories.push({ role: 'Warehouse released by', name: slip.releasedBy.name, ...(await contactOf(slip.releasedBy.id)), at: slip.releasedAt });
     }
     if (slip.receivedByName && slip.status !== 'CANCELLED') {
-      signatories.push({ role: 'Received by', name: slip.receivedByName, at: out ? slip.releasedAt : null });
+      signatories.push({ role: 'Pulled out / received by', name: slip.receivedByName, at: out ? slip.releasedAt : null });
     }
-    const against = slip.salesOrder ? `${slip.salesOrder.number} — ${slip.salesOrder.customer.name}` : (slip.request?.number ?? '');
-    const pdf = await renderDocument({
-      title: 'Pull-out Slip',
-      documentNumber: slip.number,
-      date: slip.pulloutDate,
-      reference: against,
-      sections: [
-        {
-          kind: 'fields',
-          columns: 3,
-          fields: [
-            { label: slip.kind === 'SALES_ORDER' ? 'Sales order' : 'Purchase request', value: slip.salesOrder?.number ?? slip.request?.number ?? '—' },
-            { label: slip.kind === 'SALES_ORDER' ? 'Customer' : 'Project', value: slip.salesOrder ? slip.salesOrder.customer.name : (slip.job ? `${slip.job.number} — ${slip.job.name}` : '—') },
-            { label: 'Warehouse', value: slip.warehouse.name },
-            ...(slip.kind === 'SALES_ORDER' && slip.job ? [{ label: 'Project', value: `${slip.job.number} — ${slip.job.name}` }] : []),
-            { label: 'Date', value: formatDate(slip.pulloutDate) },
-            { label: 'Status', value: statusLabel(slip.status) },
-          ],
-        },
-        {
-          kind: 'table',
-          title: 'Items pulled out',
-          head: ['No.', 'Code', 'Item', 'Against', 'Qty', 'Unit'],
-          align: ['right', 'left', 'left', 'left', 'right', 'left'],
-          rows: slip.items.map((i, n) => [
+    const purpose = PULLOUT_PURPOSES[purposeOf(slip)];
+    const against = slip.salesOrder?.number ?? slip.request?.number ?? purpose;
+    const courierLines = [
+      slip.receivedByName ?? '—',
+      slip.courierCompany ?? '',
+      slip.courierContact ? `Contact: ${slip.courierContact}` : '',
+      slip.vehicle ? `Vehicle: ${slip.vehicle}` : '',
+    ].filter((l) => l.trim());
+    const destinationLines = [
+      slip.destination ?? (slip.job ? `${slip.job.number} — ${slip.job.name}` : '—'),
+      `Warehouse source: ${slip.warehouse.name}`,
+      slip.returnBy ? `Expected back: ${formatDate(slip.returnBy)}` : '',
+    ].filter((l) => l.trim());
+    const sections: PdfSection[] = [
+      { kind: 'blocks', titleSize: 11, blocks: [{ title: 'Authorized person / courier', lines: courierLines }, { title: 'Destination', lines: destinationLines }] },
+      {
+        kind: 'table',
+        title: 'Authorized warehouse items to pull out',
+        head: ['Item', 'Part / SKU no.', 'Item description & specifications', 'Serial / batch no.', 'Qty', 'Unit', 'Condition'],
+        align: ['right', 'left', 'left', 'left', 'right', 'left', 'left'],
+        rows: slip.items.map((i, n) => {
+          const answers = i.sourceLineId ? lines.get(i.sourceLineId)?.title : undefined;
+          return [
             String(n + 1),
-            i.item.code,
-            i.item.partNumber ? { title: i.item.name, body: i.item.partNumber } : i.item.name,
-            (i.sourceLineId && lines.get(i.sourceLineId)?.title) || '',
+            i.item.partNumber ?? i.item.code,
+            { title: i.item.name, body: [i.item.brand, answers && answers !== i.item.name ? `For: ${answers}` : null].filter(Boolean).join(' · ') || undefined },
+            i.serialNo ?? '',
             qty(num(i.quantity)),
             i.item.unit,
-          ]),
-        },
-        ...(slip.notes ? [{ kind: 'text' as const, title: 'Notes', body: slip.notes }] : []),
-        ...(slip.status === 'CANCELLED' && slip.cancelReason ? [{ kind: 'text' as const, title: 'Cancelled', body: slip.cancelReason }] : []),
+            i.condition ?? '',
+          ];
+        }),
+      },
+    ];
+    if (slip.reason) sections.push({ kind: 'text', title: 'Why there is no source document', body: slip.reason });
+    if (slip.notes) sections.push({ kind: 'text', title: 'Special instructions / remarks / accessories included', body: slip.notes });
+    if (slip.status === 'CANCELLED' && slip.cancelReason) sections.push({ kind: 'text', title: 'Cancelled', body: slip.cancelReason });
+    if (slip.status !== 'CANCELLED') {
+      sections.push({
+        kind: 'text',
+        title: 'Warehouse gate clearance & inspection',
+        body: 'Security must check the item serial numbers and count against this slip before the vehicle is released.\n\nGuard on duty: ______________________________    Time out: ______________',
+      });
+    }
+    const pdf = await renderDocument({
+      title: 'Pull-out Slip',
+      titleBold: true,
+      documentNumber: slip.number,
+      date: slip.pulloutDate,
+      numberNote: `Date: ${formatDate(slip.pulloutDate)}`,
+      detailsTitle: 'References',
+      detailsTitleSize: 11,
+      details: [
+        [
+          ['Sales order (SO)', slip.salesOrder?.number ?? '—'],
+          ['Purchase request (PR)', slip.request?.number ?? '—'],
+        ],
+        [
+          ['PO ref.', slip.poReference ?? '—'],
+          ['DR ref.', slip.drReference ?? '—'],
+        ],
+        [
+          ['Purpose', purpose],
+          ['Project', slip.job ? slip.job.number : '—'],
+        ],
       ],
+      sections,
       signatories,
+      signoffNote: 'The name, date and time are considered a digital signature.',
+      footerNote:
+        slip.status === 'DRAFT' || slip.status === 'PENDING_APPROVAL' ? 'DRAFT — NOT YET RELEASED.' : slip.status === 'CANCELLED' ? 'CANCELLED.' : undefined,
     });
     const files = req.query.attachments === '0' ? [] : await attachedFiles('pullout_slip', slip.id);
     const { pdf: withFiles, listed } = await withAttachments(pdf, files, { title: 'Pull-out Slip', number: slip.number, reference: against });
     await audit({ entityType: 'pullout_slip', entityId: slip.id, action: 'EXPORTED', summary: `Printed ${slip.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Pull-out Slip', number: slip.number, author: slip.preparedBy.name, date: slip.pulloutDate })));
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Pull-out Slip', number: slip.number, author: requester.name, date: slip.pulloutDate })));
     res.send(withFiles);
   }),
 );
@@ -674,7 +864,7 @@ pulloutRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(sheetSchema, req.body);
-    const { source, balByItem, pulloutDate } = await checkSheet(body);
+    const { source, balByItem, pulloutDate, returnBy } = await checkSheet(body);
     const slip = await prisma.$transaction(async (tx) => {
       const number = await nextNumber(DOC, tx);
       const created = await tx.pulloutSlip.create({
@@ -686,16 +876,24 @@ pulloutRoutes.post(
           jobId: source.jobId,
           warehouseId: body.warehouseId,
           preparedById: me.id,
+          requestedById: body.requestedById || null,
           pulloutDate,
-          receivedByName: body.receivedByName?.trim() || null,
-          notes: body.notes?.trim() || null,
+          ...headerData(body, returnBy),
         },
       });
       await writeLines(tx, created.id, body.lines, balByItem);
       return created;
     });
-    await audit({ entityType: 'pullout_slip', entityId: slip.id, action: 'CREATED', summary: `${slip.number} raised against ${source.number}` }, req);
-    const routed = !!(await pickWorkflow(DOC, null, { requesterId: me.id }));
+    await audit(
+      {
+        entityType: 'pullout_slip',
+        entityId: slip.id,
+        action: 'CREATED',
+        summary: `${slip.number} raised ${source.number ? `against ${source.number}` : `with no source document — ${PULLOUT_PURPOSES[slip.purpose ?? 'OTHER'].toLowerCase()}`}`,
+      },
+      req,
+    );
+    const routed = !!(await pickWorkflow(DOC, null, { requesterId: slip.requestedById ?? me.id }));
     res.status(201).json({ ...slip, needsApproval: routed });
   }),
 );
@@ -715,11 +913,11 @@ pulloutRoutes.put(
       throw badRequest('A slip keeps the document it pulls against — raise another for a different one');
     }
     if (body.version && new Date(body.version).getTime() !== slip.updatedAt.getTime()) throw badRequest(`${slip.number} changed a moment ago — reload to see it`);
-    const { balByItem, pulloutDate } = await checkSheet(body, slip.id);
+    const { balByItem, pulloutDate, returnBy } = await checkSheet(body, slip.id);
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.pulloutSlip.updateMany({
         where: { id: slip.id, status: 'DRAFT', updatedAt: slip.updatedAt },
-        data: { warehouseId: body.warehouseId, pulloutDate, receivedByName: body.receivedByName?.trim() || null, notes: body.notes?.trim() || null },
+        data: { warehouseId: body.warehouseId, pulloutDate, requestedById: body.requestedById || null, ...headerData(body, returnBy) },
       });
       if (!claimed.count) throw badRequest(`${slip.number} changed a moment ago — reload to see it`);
       await writeLines(tx, slip.id, body.lines, balByItem);
@@ -738,9 +936,11 @@ async function recheck(slip: LoadedSlip) {
       requestId: slip.requestId,
       warehouseId: slip.warehouseId,
       pulloutDate: slip.pulloutDate.toISOString().slice(0, 10),
+      purpose: slip.purpose,
+      reason: slip.reason,
       receivedByName: slip.receivedByName,
       notes: slip.notes,
-      lines: slip.items.map((i) => ({ sourceLineId: i.sourceLineId ?? '', itemId: i.itemId, quantity: num(i.quantity) })),
+      lines: slip.items.map((i) => ({ sourceLineId: i.sourceLineId, itemId: i.itemId, quantity: num(i.quantity) })),
     },
     slip.id,
   );
@@ -770,10 +970,10 @@ pulloutRoutes.post(
         documentType: DOC,
         documentId: slip.id,
         documentNumber: slip.number,
-        subject: `${slip.salesOrder ? `${slip.salesOrder.number} — ${slip.salesOrder.customer.name}` : (slip.request?.number ?? '')} · ${slip.warehouse.name}`,
+        subject: `${slip.salesOrder ? `${slip.salesOrder.number} — ${slip.salesOrder.customer.name}` : (slip.request?.number ?? PULLOUT_PURPOSES[purposeOf(slip)])} · ${slip.warehouse.name}`,
         amount: null,
         link: `/g-chain/pullout-slips/${slip.id}`,
-        requesterId: slip.preparedById,
+        requesterId: requesterOf(slip),
       });
     } catch (err) {
       await prisma.pulloutSlip.updateMany({ where: { id: slip.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
@@ -910,15 +1110,17 @@ async function postPullout(tx: Prisma.TransactionClient, slipId: string, actorId
 async function tellPulledOut(slipId: string, actorId: string | null) {
   const slip = await loadSlip(slipId);
   if (!slip) return;
-  const to = slip.salesOrder?.ownerId ?? slip.request?.requestedById;
-  if (!to || to === actorId) return;
-  await notify({
-    userId: to,
-    type: 'pullout.done',
-    title: `${slip.number} pulled out — ${slip.salesOrder?.number ?? slip.request?.number ?? ''}`,
-    body: `${slip.items.length} line${slip.items.length === 1 ? '' : 's'} from ${slip.warehouse.name}${slip.receivedByName ? `, received by ${slip.receivedByName}` : ''}`,
-    link: `/g-chain/pullout-slips/${slip.id}`,
-  });
+  // Who asked for it, and the owner of the document it answers — once each.
+  const to = [...new Set([slip.requestedById, slip.salesOrder?.ownerId, slip.request?.requestedById].filter((u): u is string => !!u && u !== actorId))];
+  for (const userId of to) {
+    await notify({
+      userId,
+      type: 'pullout.done',
+      title: `${slip.number} pulled out — ${slip.salesOrder?.number ?? slip.request?.number ?? PULLOUT_PURPOSES[purposeOf(slip)]}`,
+      body: `${slip.items.length} line${slip.items.length === 1 ? '' : 's'} from ${slip.warehouse.name}${slip.receivedByName ? `, received by ${slip.receivedByName}` : ''}`,
+      link: `/g-chain/pullout-slips/${slip.id}`,
+    });
+  }
 }
 
 /** Without a route (switched off), the preparer pulls it out at once — the Outgoing rule. */
@@ -931,7 +1133,7 @@ pulloutRoutes.post(
     if (!slip) throw notFound('Pull-out slip not found');
     if (!mayHandle(me, slip)) throw forbidden('This slip is someone else’s');
     if (slip.status !== 'DRAFT') throw badRequest(`${slip.number} is ${statusLabel(slip.status).toLowerCase()}`);
-    if (await pickWorkflow(DOC, null, { requesterId: slip.preparedById })) {
+    if (await pickWorkflow(DOC, null, { requesterId: requesterOf(slip) })) {
       throw badRequest(`${slip.number} goes for approval — Submit for approval, and its approval pulls it out`);
     }
     await recheck(slip);
@@ -1018,6 +1220,7 @@ registerAttachmentGuard(
   'pullout_slip',
   async (user, id) => {
     if (can(user, VIEW)) return !!(await prisma.pulloutSlip.findUnique({ where: { id }, select: { id: true } }));
+    if ((await prisma.pulloutSlip.count({ where: { id, requestedById: user.id } })) > 0) return true;
     return mayDecide(user.id, DOC, [id]);
   },
   {
@@ -1039,17 +1242,27 @@ registerSearch({
           { number: { contains: term, mode: 'insensitive' } },
           { salesOrder: { number: { contains: term, mode: 'insensitive' } } },
           { request: { number: { contains: term, mode: 'insensitive' } } },
+          { destination: { contains: term, mode: 'insensitive' } },
         ],
       },
       orderBy: { createdAt: 'desc' },
       take: limit,
-      select: { id: true, number: true, status: true, salesOrder: { select: { number: true, customer: { select: { name: true } } } }, request: { select: { number: true } } },
+      select: {
+        id: true,
+        number: true,
+        status: true,
+        kind: true,
+        purpose: true,
+        destination: true,
+        salesOrder: { select: { number: true, customer: { select: { name: true } } } },
+        request: { select: { number: true } },
+      },
     });
     return rows.map((r) => ({
       kind: 'pullout_slip',
       id: r.id,
-      title: `${r.number} — ${r.salesOrder ? r.salesOrder.customer.name : (r.request?.number ?? '')}`,
-      subtitle: `${r.salesOrder ? `Against ${r.salesOrder.number}` : `Against ${r.request?.number ?? ''}`} · ${statusLabel(r.status)}`,
+      title: `${r.number} — ${r.salesOrder ? r.salesOrder.customer.name : (r.request?.number ?? PULLOUT_PURPOSES[purposeOf(r)])}`,
+      subtitle: `${r.salesOrder ? `Against ${r.salesOrder.number}` : r.request ? `Against ${r.request.number}` : `No source document${r.destination ? ` · ${r.destination}` : ''}`} · ${statusLabel(r.status)}`,
       link: `/g-chain/pullout-slips/${r.id}`,
     }));
   },

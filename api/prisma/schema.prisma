@@ -101,20 +101,21 @@ model User {
   plansUploaded   ApprovedPlan[]   @relation("PlanUploader")
   tasksAssigned   JobTask[]        @relation("TaskAssignee")
 
-  prsRequested     PurchaseRequest[]      @relation("PrRequester")
-  canvassesCreated Canvass[]              @relation("CanvassCreator")
-  canvassesAwarded Canvass[]              @relation("CanvassAwarder")
-  rfqsPrepared     Rfq[]                  @relation("RfqPreparer")
-  posCreated       PurchaseOrder[]        @relation("PoCreator")
-  receivings       Receiving[]            @relation("Receiver")
-  stockIssued      StockIssue[]           @relation("Issuer")
-  stockReceivedBy  StockIssue[]           @relation("IssuedTo")
-  borrowsTaken     BorrowSlip[]           @relation("Borrower")
-  borrowsIssued    BorrowSlip[]           @relation("BorrowIssuer")
-  borrowsRequested BorrowSlip[]           @relation("BorrowRequester")
-  pulloutsPrepared PulloutSlip[]          @relation("PulloutPreparer")
-  pulloutsReleased PulloutSlip[]          @relation("PulloutReleaser")
-  stockMoves       InventoryTransaction[]
+  prsRequested      PurchaseRequest[]      @relation("PrRequester")
+  canvassesCreated  Canvass[]              @relation("CanvassCreator")
+  canvassesAwarded  Canvass[]              @relation("CanvassAwarder")
+  rfqsPrepared      Rfq[]                  @relation("RfqPreparer")
+  posCreated        PurchaseOrder[]        @relation("PoCreator")
+  receivings        Receiving[]            @relation("Receiver")
+  stockIssued       StockIssue[]           @relation("Issuer")
+  stockReceivedBy   StockIssue[]           @relation("IssuedTo")
+  borrowsTaken      BorrowSlip[]           @relation("Borrower")
+  borrowsIssued     BorrowSlip[]           @relation("BorrowIssuer")
+  borrowsRequested  BorrowSlip[]           @relation("BorrowRequester")
+  pulloutsPrepared  PulloutSlip[]          @relation("PulloutPreparer")
+  pulloutsReleased  PulloutSlip[]          @relation("PulloutReleaser")
+  pulloutsRequested PulloutSlip[]          @relation("PulloutRequester")
+  stockMoves        InventoryTransaction[]
 
   facesEnrolled      FaceEnrollment[] @relation("FaceEnroller")
   attendanceRecorded Attendance[]     @relation("AttendanceRecorder")
@@ -2897,6 +2898,21 @@ enum PulloutKind {
   SALES_ORDER
   /// Stock a project takes from the shelf instead of buying it, against an approved request.
   PURCHASE_REQUEST
+  /// No source document (2026-10-15, the owner's call): a supplier return,
+  /// testing, a repair — the reason is kept on the slip.
+  OTHER
+}
+
+/// What a pull-out is for (2026-10-15, the owner's pull-out slip: the
+/// "purpose / transaction type" boxes — internal, no customer delivery).
+enum PulloutPurpose {
+  SALES_ORDER
+  PROJECT_USE
+  SITE_INSTALLATION
+  TESTING_AUDIT
+  REPAIR_SERVICE
+  SUPPLIER_RETURN
+  OTHER
 }
 
 enum PulloutStatus {
@@ -2936,10 +2952,28 @@ model PulloutSlip {
   releasedAt   DateTime?
 
   pulloutDate    DateTime @db.Date
-  /// Who took it: the customer's representative, or the project's.
+  /// Who takes it out: the authorized person or courier.
   receivedByName String?
+  /// Special instructions, remarks, accessories included.
   notes          String?
   cancelReason   String?
+
+  /// The internal release slip (2026-10-15, the owner's pull-out slip): what
+  /// it is for (null on a slip from before: read from its kind), who asked
+  /// for it (their manager approves; null = the preparer), the references
+  /// written on it, the courier, where it goes, when it is expected back, and
+  /// — with no source document — why.
+  purpose        PulloutPurpose?
+  requestedById  String?
+  requestedBy    User?           @relation("PulloutRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  poReference    String?
+  drReference    String?
+  courierCompany String?
+  courierContact String?
+  vehicle        String?
+  destination    String?
+  returnBy       DateTime?       @db.Date
+  reason         String?
 
   items PulloutItem[]
 
@@ -2967,6 +3001,9 @@ model PulloutItem {
   unitCost     Decimal @default(0) @db.Decimal(18, 2)
   amount       Decimal @default(0) @db.Decimal(18, 2)
   sortOrder    Int     @default(0)
+  /// Serial or batch, and its condition as it left (2026-10-15).
+  serialNo     String?
+  condition    String?
 
   @@index([slipId])
   @@index([sourceLineId])
