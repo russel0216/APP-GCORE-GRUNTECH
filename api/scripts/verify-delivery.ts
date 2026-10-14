@@ -24,6 +24,7 @@ import { curveTicks } from '../../web/src/lib/sCurve';
 import '../src/routes/budgetRequests';
 // …and the Request for Approval's (2026-10-13), whose settle is called directly too.
 import { settlePlanApproval } from '../src/routes/planApprovals';
+import '../src/routes/progress';
 import { deleteAttachmentsOf } from '../src/shared/attachments';
 import {
   flat,
@@ -1270,26 +1271,36 @@ async function main() {
     );
     check('the print is on the report\'s trail as EXPORTED', (await exports('progress_report', r1.id)) === 1);
 
-    // A billing raised and approved through the routes: the trail names both.
-    const billerRole = await makeRole('biller', ['gops.progress_billing.view_all', 'gops.progress_billing.create']);
-    const approverRole = await makeRole('billapprover', ['gops.progress_billing.view_all', 'gops.progress_billing.approve']);
+    // A billing raised and sent on its route (2026-10-15, the owner's call:
+    // the creator › Technical Manager › Team Leader): the draft prints the
+    // route it would take, Pending; the engine decides; the paper then names
+    // who signed each step.
+    const billerRole = await makeRole('biller', ['gops.progress_billing.view_all', 'gops.progress_billing.create', 'gops.progress_billing.edit_own']);
     const biller = await makeUser(`${TAG} Biller`, 'biller@verifyd.local', [billerRole.key]);
-    const billApprover = await makeUser(`${TAG} Approver`, 'billapprover@verifyd.local', [approverRole.key]);
+    const progTm = await makeUser(`${TAG} Approver`, 'billapprover@verifyd.local', ['technical_manager']);
+    await prisma.user.update({ where: { id: biller.id }, data: { supervisorId: pm.id } });
     const billerToken = signToken(biller.id, biller.email);
+    const approverToken = signToken(progTm.id, progTm.email);
     const raised = await http(billerToken, 'POST', '/billings', { progressReportId: r2.id });
     const draftBill = await printed(billerToken, `/billings/${raised.body.id}/pdf`);
     const draftBillText = draftBill.text;
     check(
-      'a draft billing prints who raised it, dated, and "Approved by" Pending under nobody — never the creator as its approver',
-      raised.status === 201 &&
-        draftBill.status === 200 &&
+      'a billing is numbered under its project — <project>-PB-nn — so two projects never collide',
+      raised.status === 201 && raised.body.number === `${job.number}-PB-${String(raised.body.billingNo).padStart(2, '0')}`,
+      `${raised.status} ${raised.body.number}`,
+    );
+    check(
+      'a draft billing prints who raised it, dated, and its route Pending — never the creator as its approver',
+      draftBill.status === 200 &&
         draftBillText.includes(`${TAG} Biller`) &&
+        flat(draftBillText).includes('TECHNICAL MANAGER') &&
+        flat(draftBillText).includes('TEAM LEADER') &&
         signedCount(draftBillText) === 1 &&
-        pendingCount(draftBillText) === 1 &&
+        pendingCount(draftBillText) === 2 &&
         (draftBillText.match(new RegExp(`${TAG} Biller`, 'g')) ?? []).length === 1 &&
         !flat(draftBillText).includes('CHECKED BY') &&
         !flat(draftBillText).includes('CONFORME'),
-      `${raised.status} ${draftBill.status} ${signedCount(draftBillText)} signed, ${pendingCount(draftBillText)} pending`,
+      `${draftBill.status} ${signedCount(draftBillText)} signed, ${pendingCount(draftBillText)} pending`,
     );
     check(
       `its money is the quotation's block: Gross amount, VAT (${rate(vatRate)}), Invoice total, Less: EWT (${rate(ewtRate)}), Net collectible`,
@@ -1307,9 +1318,6 @@ async function main() {
         flat(draftBillText).includes(`THIS BILLING (${currency})`),
       draftBillText.split('\n').filter((l) => /Gross|VAT|Total|total|TOTAL|EWT|Net|BILLING/.test(l)).join(' | ').slice(0, 260),
     );
-    // The table speaks the billing screen's words: what was billed BEFORE
-    // this billing is "Previously billed" — never "Billed to date", which on
-    // a second billing would print the earlier figure as the running total.
     check(
       'its table heads what came before "Previously billed", as the screen does — never "Billed to date"',
       flat(draftBillText).includes('PREVIOUSLY BILLED %') &&
@@ -1317,9 +1325,6 @@ async function main() {
         !flat(draftBillText).includes('BILLED TO DATE'),
       flat(draftBillText).match(/SCOPE.{0,160}/)?.[0] ?? '',
     );
-    // The billings list on paper counts only what has been approved: a draft
-    // prints its figures in brackets, the totals leave it out, and the note
-    // says so in finance's words.
     const fmt2 = (n: number) => n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const draftList = await printed(billerToken, `/billings/pdf?ids=${raised.body.id}`);
     check(
@@ -1333,84 +1338,133 @@ async function main() {
       flat(draftList.text).match(/Gross amount.{0,160}/)?.[0] ?? String(draftList.status),
     );
 
-    // Rule 3: whoever raised a billing never approves it — given the right,
-    // and as a super admin too — and the page does not offer the button.
-    const selfRole = await makeRole('billself', ['gops.progress_billing.approve']);
-    await prisma.userRole.create({ data: { userId: biller.id, roleId: selfRole.id } });
-    const selfApprove = await http(billerToken, 'POST', `/billings/${raised.body.id}/approve`);
-    const selfPage = await http(billerToken, 'GET', `/billings/${raised.body.id}`);
-    await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: true } });
-    const selfAsAdmin = await http(billerToken, 'POST', `/billings/${raised.body.id}/approve`);
-    await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: false } });
-    const approverPage = await http(signToken(billApprover.id, billApprover.email), 'GET', `/billings/${raised.body.id}`);
+    // The one engine: submit, the Technical Manager, then the Team Leader
+    // (the biller's "Reports to"). The preparer never decides (rule 3).
+    const billPage = await http(billerToken, 'GET', `/billings/${raised.body.id}`);
+    const sentBill = await http(billerToken, 'POST', `/billings/${raised.body.id}/submit`);
+    const billReq = await prisma.approvalRequest.findFirstOrThrow({
+      where: { documentType: 'progress_billing', documentId: raised.body.id },
+      orderBy: { createdAt: 'desc' },
+      include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } } },
+    });
     check(
-      'whoever raised a billing cannot approve it, a super admin included — and only somebody else is offered the button',
-      selfApprove.status === 403 &&
-        selfAsAdmin.status === 403 &&
-        selfPage.body.canApprove === false &&
-        approverPage.body.canApprove === true &&
-        (await prisma.progressBilling.findUnique({ where: { id: raised.body.id } }))?.status === 'DRAFT',
-      `${selfApprove.status} / admin ${selfAsAdmin.status} · offered ${selfPage.body.canApprove} / ${approverPage.body.canApprove}`,
+      'Submit for approval sends a billing on its route — Technical Manager, then Team Leader — and the page said so first',
+      billPage.body.canSubmit === true &&
+        Array.isArray(billPage.body.approvalRoute?.steps ?? billPage.body.approvalRoute) &&
+        sentBill.status === 200 &&
+        billReq.workflow.steps.map((st) => st.name).join(' › ') === 'Technical Manager › Team Leader' &&
+        (await prisma.progressBilling.findUnique({ where: { id: raised.body.id } }))?.status === 'PENDING_APPROVAL',
+      `${sentBill.status} ${billReq.workflow.steps.map((st) => st.name).join(' › ')}`,
     );
-    const approvedBill = await http(signToken(billApprover.id, billApprover.email), 'POST', `/billings/${raised.body.id}/approve`);
+    let selfRefused = false;
+    try {
+      await act({ requestId: billReq.id, userId: biller.id, action: 'APPROVED' });
+    } catch {
+      selfRefused = true;
+    }
+    await act({ requestId: billReq.id, userId: progTm.id, action: 'APPROVED' });
+    const midBill = await prisma.progressBilling.findUnique({ where: { id: raised.body.id } });
+    await act({ requestId: billReq.id, userId: pm.id, action: 'APPROVED' });
+    const approvedBillRow = await prisma.progressBilling.findUnique({ where: { id: raised.body.id } });
+    check(
+      'whoever raised it cannot approve it; one signature leaves it pending, the last approves it',
+      selfRefused && midBill?.status === 'PENDING_APPROVAL' && approvedBillRow?.status === 'APPROVED' && !!approvedBillRow.approvedAt,
+      `${selfRefused} ${midBill?.status} → ${approvedBillRow?.status}`,
+    );
     const finalBill = await printed(billerToken, `/billings/${raised.body.id}/pdf`);
     const finalBillText = finalBill.text;
     check(
-      'approved, it prints the approver by name, dated, and nothing Pending',
-      approvedBill.status === 200 &&
-        finalBillText.includes(`${TAG} Biller`) &&
+      'approved, it prints each step by name, signed and dated, and nothing Pending',
+      finalBillText.includes(`${TAG} Biller`) &&
         finalBillText.includes(`${TAG} Approver`) &&
-        signedCount(finalBillText) === 2 &&
+        finalBillText.includes('Verify PM') &&
+        signedCount(finalBillText) === 3 &&
         pendingCount(finalBillText) === 0,
-      `${approvedBill.status} ${signedCount(finalBillText)} signed, ${pendingCount(finalBillText)} pending`,
+      `${finalBill.status} ${signedCount(finalBillText)} signed, ${pendingCount(finalBillText)} pending`,
     );
     check('both prints are on the billing\'s trail as EXPORTED', (await exports('progress_billing', raised.body.id)) === 2);
 
-    // Rule 3 on the progress report too: whoever prepared it never approves
-    // it — given the right, and as a super admin — the page offers the button
-    // only to somebody else, and two approvals at once land once.
-    const approverToken = signToken(billApprover.id, billApprover.email);
+    // The Accomplishment Report on the same route: numbered under its project,
+    // its days written with pictures, weighed against the schedule, decided
+    // by the engine.
     const r3 = await http(billerToken, 'POST', '/progress-reports', { jobId: job.id, periodFrom: '2026-03-01', periodTo: '2026-03-31' });
-    const r3Self = await http(billerToken, 'POST', `/progress-reports/${r3.body.id}/approve`);
-    const r3SelfPage = await http(billerToken, 'GET', `/progress-reports/${r3.body.id}`);
-    await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: true } });
-    const r3AsAdmin = await http(billerToken, 'POST', `/progress-reports/${r3.body.id}/approve`);
-    const r3AdminPage = await http(billerToken, 'GET', `/progress-reports/${r3.body.id}`);
-    await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: false } });
-    const r3ApproverPage = await http(approverToken, 'GET', `/progress-reports/${r3.body.id}`);
     check(
-      'whoever prepared a progress report cannot approve it, a super admin included — and only somebody else is offered the button',
-      r3.status === 201 &&
-        r3Self.status === 403 &&
-        r3AsAdmin.status === 403 &&
-        r3SelfPage.body.canApprove === false &&
-        r3AdminPage.body.canApprove === false &&
-        r3ApproverPage.body.canApprove === true &&
-        (await prisma.progressReport.findUnique({ where: { id: r3.body.id } }))?.status === 'DRAFT',
-      `${r3.status} · ${r3Self.status} / admin ${r3AsAdmin.status} · offered ${r3SelfPage.body.canApprove} / ${r3AdminPage.body.canApprove} / ${r3ApproverPage.body.canApprove}`,
+      'a progress report is numbered under its project — <project>-PR-nn',
+      r3.status === 201 && r3.body.number === `${job.number}-PR-${String(r3.body.reportNo).padStart(2, '0')}`,
+      `${r3.status} ${r3.body.number}`,
     );
-    const r3Race = await Promise.all([
-      http(approverToken, 'POST', `/progress-reports/${r3.body.id}/approve`),
-      http(approverToken, 'POST', `/progress-reports/${r3.body.id}/approve`),
-    ]);
-    const r3Approvals = await prisma.auditLog.count({ where: { entityType: 'progress_report', entityId: r3.body.id, action: 'APPROVED' } });
-    const r3After = await http(approverToken, 'GET', `/progress-reports/${r3.body.id}`);
+    const emptySubmit = await http(billerToken, 'POST', `/progress-reports/${r3.body.id}/submit`);
+    check('a report with no summary and no day written is refused at submit', emptySubmit.status === 400, String(emptySubmit.status));
+    const outside = await http(billerToken, 'POST', `/progress-reports/${r3.body.id}/days`, { workDate: '2026-04-02', actions: 'Outside the period' });
+    const day = await http(billerToken, 'POST', `/progress-reports/${r3.body.id}/days`, {
+      workDate: '2026-03-05',
+      actions: 'Installed the booster pumps on their plinths',
+      findings: 'One anchor bolt short',
+      headcount: 6,
+    });
+    const dayId: string | undefined = day.body.days?.[0]?.id;
     check(
-      'two approvals pressed at once approve it once — the second is refused, never written over the first',
-      r3Race.map((r) => r.status).sort().join(',') === '200,400' && r3Approvals === 1 && r3After.body.canApprove === false,
-      `${r3Race.map((r) => r.status).join(',')} · ${r3Approvals} APPROVED row(s)`,
+      'a day is written inside the period only, with its actions and findings',
+      outside.status === 400 && day.status === 201 && !!dayId,
+      `${outside.status} / ${day.status}`,
     );
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    const upload = async (token: string) => {
+      const form = new FormData();
+      form.set('files', new Blob([png], { type: 'image/png' }), 'pumps.png');
+      return (await fetch(`${BASE}/attachments/progress_report_day/${dayId}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form })).status;
+    };
+    const strangerUp = await upload(approverToken);
+    const ownUp = await upload(billerToken);
+    check('the day takes a picture from whoever may edit the report, and from nobody else', ownUp === 201 && strangerUp === 403, `${ownUp} / ${strangerUp}`);
+    const patched = await http(billerToken, 'PATCH', `/progress-reports/${r3.body.id}`, {
+      accomplishment: 'Pumps set; piping to follow',
+      milestones: 'Pump room: equipment placed',
+      overallStatus: 'BEHIND',
+      overallStatusNote: 'Awaiting anchor bolts',
+    });
+    const r3Page = await http(billerToken, 'GET', `/progress-reports/${r3.body.id}`);
+    const lines = (r3Page.body.lines ?? []) as { weightPct: number; weightedPct: number; toDatePct: number }[];
+    const weights = lines.reduce((s2, l) => s2 + l.weightPct, 0);
+    const weighted = lines.reduce((s2, l) => s2 + l.weightedPct, 0);
+    check(
+      'each scope line carries its weight (value over the schedule), the weights add up to 100, and the weighted figures to the report’s own %',
+      patched.status === 200 &&
+        Math.abs(weights - 100) < 0.05 &&
+        Math.abs(weighted - r3Page.body.totals.toDatePct) < 0.05 &&
+        r3Page.body.overallStatusText === 'Behind schedule – Awaiting anchor bolts' &&
+        r3Page.body.days?.[0]?.pictures === 1,
+      `${patched.status} weights ${weights} weighted ${weighted} vs ${r3Page.body.totals?.toDatePct} · ${r3Page.body.overallStatusText}`,
+    );
+    const sentReport = await http(billerToken, 'POST', `/progress-reports/${r3.body.id}/submit`);
+    const repReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'progress_report', documentId: r3.body.id }, orderBy: { createdAt: 'desc' } });
+    const lockedDay = await http(billerToken, 'POST', `/progress-reports/${r3.body.id}/days`, { workDate: '2026-03-06', actions: 'Late entry' });
+    const decider = await http(approverToken, 'GET', `/progress-reports/${r3.body.id}`);
+    check(
+      'submitted, it waits on the Technical Manager — who opens it without the module right — and takes no more entries',
+      sentReport.status === 200 && lockedDay.status === 400 && decider.status === 200,
+      `${sentReport.status} / ${lockedDay.status} / ${decider.status}`,
+    );
+    await act({ requestId: repReq.id, userId: progTm.id, action: 'APPROVED' });
+    await act({ requestId: repReq.id, userId: pm.id, action: 'APPROVED' });
+    const r3Row = await prisma.progressReport.findUnique({ where: { id: r3.body.id } });
+    check('the last signature approves the report', r3Row?.status === 'APPROVED' && r3Row.approvedById === pm.id, `${r3Row?.status}`);
     const r3Pdf = await printed(approverToken, `/progress-reports/${r3.body.id}/pdf`);
     const r3Text = r3Pdf.text;
     const times = (t: string, name: string) => (t.match(new RegExp(name, 'g')) ?? []).length;
     check(
-      'its paper prints the preparer once and the approver once, each dated — never one name as both',
+      'the Accomplishment Report prints the weights, the day and its finding, the status, and each signature once',
       r3Pdf.status === 200 &&
+        /accomplishment\s*report/i.test(r3Text) &&
+        flat(r3Text).includes('WEIGHT') &&
+        r3Text.includes('Installed the booster pumps') &&
+        r3Text.includes('Findings: One anchor bolt short') &&
+        r3Text.includes('Behind schedule') &&
         times(r3Text, `${TAG} Biller`) === 1 &&
         times(r3Text, `${TAG} Approver`) === 1 &&
-        signedCount(r3Text) === 2 &&
+        signedCount(r3Text) === 3 &&
         pendingCount(r3Text) === 0,
-      `${r3Pdf.status} biller ×${times(r3Text, `${TAG} Biller`)}, approver ×${times(r3Text, `${TAG} Approver`)}, ${signedCount(r3Text)} signed`,
+      `${r3Pdf.status} biller ×${times(r3Text, `${TAG} Biller`)}, approver ×${times(r3Text, `${TAG} Approver`)}, ${signedCount(r3Text)} signed · ${[/accomplishment\s*report/i.test(r3Text), flat(r3Text).includes('WEIGHT'), r3Text.includes('Installed the booster pumps'), r3Text.includes('Findings: One anchor bolt short'), r3Text.includes('Behind schedule')].join(',')}`,
     );
     // A billing written outside the routes has no trail to name anybody: the
     // paper names nobody rather than the project's manager it used to guess.

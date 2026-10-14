@@ -224,7 +224,7 @@ const statusWord = (status: string) => statusLabel(status === 'REJECTED' ? 'RETU
  * printed twin. A `view_own` holder sees what they raised or are sent on;
  * `?ids=` (the rows ticked) is ANDed with that.
  */
-function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobOrderWhereInput {
+async function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma.JobOrderWhereInput> {
   const where: Prisma.JobOrderWhereInput = {};
   const and: Prisma.JobOrderWhereInput[] = [];
 
@@ -243,6 +243,18 @@ function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobOrderWhere
   }
   for (const key of ['customerId', 'jobId', 'quotationId', 'salesOrderId', 'projectManagerId', 'assignedToId'] as const) {
     if (q.filters[key]) where[key] = q.filters[key];
+  }
+  // A project's Job Orders tab (2026-10-15, the owner's call: "so they can
+  // see if the project owner already requested this"): the orders built into
+  // it or linked to it, and those raised on the quotation it was won from —
+  // a request still waiting shows there before it becomes the project.
+  if (q.filters.forProject) {
+    const job = await prisma.job.findUnique({
+      where: { id: q.filters.forProject },
+      select: { id: true, quotationRevision: { select: { quotationId: true } } },
+    });
+    if (!job) throw badRequest('That project does not exist');
+    and.push({ OR: [{ jobId: job.id }, ...(job.quotationRevision ? [{ quotationId: job.quotationRevision.quotationId }] : [])] });
   }
   // requestedFor mirrors the target start, so one index serves both shapes.
   const from = filterDay(q.filters.from, 'From');
@@ -269,7 +281,7 @@ jobOrderRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where = jobOrderListWhere(me, q);
+    const where = await jobOrderListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.jobOrder.findMany({
@@ -300,7 +312,7 @@ jobOrderRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where = jobOrderListWhere(me, q);
+    const where = await jobOrderListWhere(me, q);
     const f = q.filters;
     const [rows, count, live, cancelled, currency, named, assignee, quotation, salesOrder] = await Promise.all([
       prisma.jobOrder.findMany({ where, include: jobOrderInclude, orderBy: orderBy(q, JOB_ORDER_SORTS, { requestedFor: 'asc' }), take: LIST_CAP }),

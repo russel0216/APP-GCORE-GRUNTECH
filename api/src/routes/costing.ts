@@ -351,6 +351,9 @@ costingRoutes.get(
         include: {
           customer: { select: { id: true, name: true } },
           owner: { select: { id: true, name: true } },
+          // The project the costing became (2026-10-15, the owner's call: the
+          // list says when a costing has been converted).
+          jobs: { select: { id: true, number: true, name: true, status: true }, orderBy: { createdAt: 'asc' } },
           _count: { select: { lines: true, scopeSections: true } },
         },
         orderBy: orderBy(q, COSTING_SORTS, { createdAt: 'desc' }),

@@ -18,6 +18,7 @@ import { removeScoroArchive } from '../src/shared/scoroArchive';
 import { backfillCustomerAddresses } from '../src/shared/customerAddress';
 import { backfillInvoiceCountering, fillInvoiceCredit } from '../src/shared/receivables';
 import { fillBillTerms } from '../src/shared/payables';
+import { renumberProgressDocs } from '../src/shared/progressReport';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -95,6 +96,9 @@ const ROLES: RoleSeed[] = [
       ...VIEW_OWN_SELF('gops', 'job_orders'),
       // And asks the design team for a drawing (2026-10-09).
       ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
+      // Writes the project's Accomplishment Report and raises its billing
+      // (2026-10-15, the owner's call: "creator (Project Engineer) or Sales").
+      ...VIEW_OWN_SELF('gops', 'progress_billing'),
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       ...VIEW_OWN_SELF('ghr', 'meetings'),
@@ -213,6 +217,8 @@ const ROLES: RoleSeed[] = [
       // The first signature on every Request for Approval, and a preparer of
       // them too (2026-10-13).
       ...VIEW_OWN_SELF('gops', 'plans'),
+      // The first signature on every progress report and billing (2026-10-15).
+      'gops.progress_billing.view_all',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       ...VIEW_OWN_SELF('ghr', 'meetings'),
@@ -656,6 +662,8 @@ const ROLES: RoleSeed[] = [
         'gchain.purchase_requests.view_all',
         ...VIEW_OWN_SELF('gops', 'budget_requests'),
         'gops.budget_requests.view_all',
+        // The second signature on every progress report and billing (2026-10-15).
+        'gops.progress_billing.view_all',
       ],
     },
     {
@@ -839,6 +847,31 @@ const WORKFLOWS: WorkflowSeed[] = [
     // deleted seeded workflow is recreated on the next seed.
     documentType: 'costing',
     name: 'Costing — technical manager, team leader',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+  },
+  // PROGRESS REPORT and PROGRESS BILLING (2026-10-15, the owner's call:
+  // "creator (Project Engineer) or Sales › Technical Manager › Team
+  // Leader"). Nobody approves one by hand any more. The Technical Manager
+  // is the preparer's team's (OWN_TEAM_ROLES), the Team Leader their
+  // "Reports to", else their team's leader.
+  {
+    documentType: 'progress_report',
+    name: 'Progress report — technical manager, team leader',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+  },
+  {
+    documentType: 'progress_billing',
+    name: 'Progress billing — technical manager, team leader',
     preparerSigns: true,
     standIns: true,
     steps: [
@@ -1565,6 +1598,8 @@ async function main() {
     const credited = await fillInvoiceCredit();
     if (credited) console.log(`  · Credited ${credited} invoice(s) to their salesperson and team`);
     // Accounts Payable: delivery, terms and purchaser from what is on file.
+    const renumbered = await renumberProgressDocs();
+    if (renumbered) console.log(`  · Numbered ${renumbered} progress report(s) and billing(s) under their project`);
     const bills = await fillBillTerms();
     if (bills) console.log(`  · Gave ${bills} supplier bill(s) their delivery date, terms and purchaser`);
   }

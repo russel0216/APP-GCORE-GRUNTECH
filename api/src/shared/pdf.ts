@@ -126,7 +126,14 @@ export type PdfSection =
    * `startDate` ('YYYY-MM-DD', 2026-10-13) puts working day 1 on that date:
    * Start, End and the day head print dates (Mon–Sat) instead of "Day n".
    */
-  | { kind: 'gantt'; title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string; startDate?: string };
+  | { kind: 'gantt'; title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string; startDate?: string }
+  /**
+   * Pictures in a grid, three to a row by default, each fitted inside its
+   * cell (never enlarged) with its caption under it — the Accomplishment
+   * Report's site photographs (2026-10-15). `data` is JPEG or PNG bytes; the
+   * route turns anything else into one. A row goes over whole.
+   */
+  | { kind: 'photos'; title?: string; perRow?: number; photos: { data: Buffer; caption?: string }[] };
 
 export interface Signatory {
   role: string;
@@ -436,6 +443,8 @@ function safeSection(section: PdfSection): PdfSection {
           tasks: g.tasks.map((task) => ({ ...task, name: pdfSafe(task.name ?? '') })),
         })),
       };
+    case 'photos':
+      return { ...section, title: t(section.title), photos: section.photos.map((p) => ({ data: p.data, caption: t(p.caption) })) };
     case 'blocks':
       return {
         ...section,
@@ -610,7 +619,13 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
   let size = 24;
   const bold = !!spec.titleBold;
   let titleLines = wrapText(doc, title, titleW, bold, size);
-  while (size > 13 && (titleLines.length > 2 || titleLines.some((l) => doc.widthOfString(l) > titleW))) {
+  // A word wider than the box is shrunk, never broken: wrapText would cut
+  // "ACCOMPLISHMENT" into "ACCOMPLISHM" over "ENT".
+  const wordTooWide = () => {
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size);
+    return title.split(/\s+/).some((w) => doc.widthOfString(w) > titleW);
+  };
+  while (size > 13 && (titleLines.length > 2 || wordTooWide() || titleLines.some((l) => doc.widthOfString(l) > titleW))) {
     size -= 1;
     titleLines = wrapText(doc, title, titleW, bold, size);
   }
@@ -757,6 +772,45 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
     case 'gantt':
       drawGantt(doc, section);
       return;
+
+    case 'photos': {
+      const perRow = Math.max(1, Math.min(4, section.perRow ?? 3));
+      const gap = 10;
+      const width = usableWidth(doc);
+      const cellW = (width - gap * (perRow - 1)) / perRow;
+      const imageH = cellW * 0.75;
+      const CAP = 7.5;
+      const capLine = CAP * LINE + 0.5;
+      sectionTitle(doc, section.title, imageH + capLine * 2);
+      for (let i = 0; i < section.photos.length; i += perRow) {
+        const row = section.photos.slice(i, i + perRow);
+        const captions = row.map((p) => (p.caption ? wrapText(doc, p.caption, cellW, false, CAP).slice(0, 3) : []));
+        const rowH = imageH + 4 + Math.max(0, ...captions.map((c) => c.length)) * capLine + 8;
+        ensureSpace(doc, rowH);
+        const top = doc.y;
+        row.forEach((p, k) => {
+          const x = T.left + k * (cellW + gap);
+          try {
+            const img = (doc as unknown as { openImage(d: Buffer): { width: number; height: number } }).openImage(p.data);
+            const scale = Math.min(cellW / img.width, imageH / img.height, 1);
+            const w = img.width * scale;
+            const h = img.height * scale;
+            doc.image(img as unknown as Buffer, x + (cellW - w) / 2, top + (imageH - h) / 2, { width: w, height: h });
+          } catch {
+            doc.rect(x, top, cellW, imageH).strokeColor(RULE).lineWidth(0.75).stroke();
+            drawLine(doc, 'Picture could not be read', x, top + imageH / 2 - CAP / 2, cellW, 'center', false, CAP, GREY);
+          }
+          let y = top + imageH + 4;
+          for (const part of captions[k]) {
+            drawLine(doc, part, x, y, cellW, 'center', false, CAP, GREY);
+            y += capLine;
+          }
+        });
+        doc.x = T.left;
+        doc.y = top + rowH;
+      }
+      return;
+    }
 
     case 'blocks': {
       const n = Math.max(1, section.blocks.length);

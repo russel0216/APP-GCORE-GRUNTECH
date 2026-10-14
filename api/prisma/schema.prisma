@@ -162,6 +162,7 @@ model User {
   updatedAt         DateTime           @updatedAt
   minutesAgreements MinutesAgreement[] @relation("MinutesAgreement")
   issuesReceived    StockIssue[]       @relation("IssueReceivedBy")
+  billingsPrepared  ProgressBilling[]  @relation("BillingPreparer")
 
   @@index([isActive])
   @@index([supervisorId])
@@ -2103,7 +2104,10 @@ model BudgetRequest {
 
 enum ProgressStatus {
   DRAFT
+  /// Never written since 2026-10-15; the seed moves any left to DRAFT.
   SUBMITTED
+  /// With its approvers on the engine's route (2026-10-15).
+  PENDING_APPROVAL
   APPROVED
 }
 
@@ -2129,9 +2133,26 @@ model ProgressReport {
   weather        String?
   manpower       String?
   equipment      String?
+  /// The Accomplishment Report's SUMMARY (2026-10-15, the owner's sample).
   accomplishment String?
   issues         String?
+  /// The Accomplishment Report's REMAINING WORKS, one per line.
   nextPeriodPlan String?
+
+  /// KEY MILESTONES ACHIEVED, one per line — "Title: what was done".
+  milestones        String?
+  /// One of PROGRESS_OVERALL (shared/progressReport.ts), else free text.
+  overallStatus     String?
+  /// The words after it — "For Corrective Works".
+  overallStatusNote String?
+  /// PERSONNEL PRESENT: the project in charge and the project support, by
+  /// name (an employee may have no login).
+  personnelInCharge String?
+  personnelSupport  String[]            @default([])
+  /// The number the report carried before project-scoped numbering
+  /// (2026-10-15), kept for anyone holding the old paper.
+  legacyNumber      String?
+  days              ProgressReportDay[]
 
   preparedById String
   preparedBy   User      @relation("ReportPreparer", fields: [preparedById], references: [id], onDelete: Restrict)
@@ -2147,6 +2168,27 @@ model ProgressReport {
 
   @@unique([jobId, reportNo])
   @@index([jobId])
+}
+
+/// One day of an Accomplishment Report (2026-10-15, the owner's sample):
+/// the actions done that day, in order, its findings, recommendation and
+/// remarks, and its pictures (attachments on `progress_report_day`).
+model ProgressReportDay {
+  id       String         @id @default(cuid())
+  reportId String
+  report   ProgressReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  workDate       DateTime @db.Date
+  /// The actions, one per line, printed numbered.
+  actions        String
+  findings       String?
+  recommendation String?
+  remarks        String?
+  /// How many people were on site that day.
+  headcount      Int?
+  sortOrder      Int      @default(0)
+
+  @@index([reportId])
 }
 
 model ProgressReportLine {
@@ -2178,10 +2220,15 @@ enum BillingStatus {
 /// Generated from a progress report against the Schedule of Values — never
 /// keyed independently (model §4.2).
 model ProgressBilling {
-  id        String        @id @default(cuid())
-  number    String        @unique
-  billingNo Int
-  status    BillingStatus @default(DRAFT)
+  id           String        @id @default(cuid())
+  number       String        @unique
+  billingNo    Int
+  /// The number before project-scoped numbering (2026-10-15).
+  legacyNumber String?
+  /// Who raised it — the requester on its approval route (2026-10-15).
+  preparedById String?
+  preparedBy   User?         @relation("BillingPreparer", fields: [preparedById], references: [id], onDelete: SetNull)
+  status       BillingStatus @default(DRAFT)
 
   jobId String
   job   Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
@@ -2320,6 +2367,9 @@ model JobTask {
   description String?
   status      TaskStatus @default(NOT_STARTED)
   progressPct Int        @default(0)
+  /// The task's share of its phase when a report works the phase's % out
+  /// from its tasks (2026-10-15). Null counts as 1 — equal shares.
+  weight      Decimal?   @db.Decimal(9, 3)
 
   assignedToId String?
   assignedTo   User?   @relation("TaskAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)

@@ -19,6 +19,7 @@ import { Stat } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
+import { ApprovalStepper, DocumentApproval, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { useBackLink } from '../../components/Navigation';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -225,7 +226,7 @@ export function ProgressReports() {
             label: 'Status',
             options: [
               { value: 'DRAFT', label: 'Draft' },
-              { value: 'SUBMITTED', label: 'Awaiting approval' },
+              { value: 'PENDING_APPROVAL', label: 'Pending approval' },
               { value: 'APPROVED', label: 'Approved' },
             ],
           },
@@ -237,7 +238,7 @@ export function ProgressReports() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  REPORT DETAIL
+//  REPORT DETAIL — the Accomplishment Report (2026-10-15)
 // ════════════════════════════════════════════════════════════════════
 
 interface ReportLine {
@@ -249,12 +250,30 @@ interface ReportLine {
   previousAmount: number;
   thisPeriodAmount: number;
   toDateAmount: number;
+  /** The line's share of the schedule, and what it adds to the project's %. */
+  weightPct: number;
+  weightedPct: number;
+  /** Its phase's % from the Scope of Work tasks (weight × progress), null with none. */
+  fromTasksPct: number | null;
+  tasks: { name: string; status: string; progressPct: number; weight: number | null }[];
   scopeItem: { id: string; name: string; value: number; kind: string };
+}
+
+interface ReportDay {
+  id: string;
+  workDate: string;
+  actions: string;
+  findings: string | null;
+  recommendation: string | null;
+  remarks: string | null;
+  headcount: number | null;
+  pictures: number;
 }
 
 interface ReportDetail {
   id: string;
   number: string;
+  legacyNumber: string | null;
   reportNo: number;
   status: string;
   periodFrom: string;
@@ -265,12 +284,32 @@ interface ReportDetail {
   accomplishment: string | null;
   issues: string | null;
   nextPeriodPlan: string | null;
+  milestones: string | null;
+  overallStatus: string | null;
+  overallStatusNote: string | null;
+  overallStatusText: string | null;
+  overallChoices: { key: string; label: string }[];
+  personnelInCharge: string | null;
+  personnelSupport: string[];
+  days: ReportDay[];
   canEdit: boolean;
-  /** The approve route's own checks: still open, the right held, and not the person who prepared it. */
-  canApprove: boolean;
-  job: { id: string; number: string; name: string; contractValue: number; customer: { name: string } };
+  canSubmit: boolean;
+  canWithdraw: boolean;
+  canDelete: boolean;
+  approvalRoute: PreviewRoute | null;
+  job: {
+    id: string;
+    number: string;
+    name: string;
+    contractValue: number;
+    customer: { name: string };
+    site: { name: string; address: string | null; city: string | null } | null;
+    startDate: string | null;
+    targetEndDate: string | null;
+  };
   preparedBy: { id: string; name: string };
   approvedBy: { id: string; name: string } | null;
+  approvedAt: string | null;
   previousReport: { id: string; number: string; reportNo: number } | null;
   nextReport: { id: string; number: string; reportNo: number } | null;
   billing: { id: string; number: string; status: string; grossAmount: number } | null;
@@ -295,6 +334,8 @@ export function ProgressReportDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [narrative, setNarrative] = useState(false);
+  const [day, setDay] = useState<ReportDay | 'new' | null>(null);
+  const [reload, setReload] = useState(0);
 
   // A report belongs to its project: back goes to the project's Progress & Billing tab.
   const seesProjects = can('gops.projects.view_all') || can('gops.projects.view_own');
@@ -319,9 +360,6 @@ export function ProgressReportDetail() {
     void load();
   }, [load]);
 
-  // A question is about the record on screen: opening another from here
-  // (the report before or after) withdraws it, rather than leave it to act on
-  // the one left behind.
   const closeConfirm = confirm.close;
   useEffect(() => {
     closeConfirm();
@@ -330,14 +368,15 @@ export function ProgressReportDetail() {
   if (loading) return <Loading />;
   if (!report) return <ErrorBox error={error ?? new Error('Report not found')} />;
 
+  const done = () => {
+    setReload((r) => r + 1);
+    void load();
+  };
+
   async function setPct(lineId: string, field: 'thisPeriodPct' | 'toDatePct', value: number) {
     if (!report) return;
     try {
-      setReport(
-        await api.patch<ReportDetail>(`/progress-reports/${report.id}/lines/${lineId}`, {
-          [field]: value,
-        }),
-      );
+      setReport(await api.patch<ReportDetail>(`/progress-reports/${report.id}/lines/${lineId}`, { [field]: value }));
       setError(null);
     } catch (err) {
       setError(err);
@@ -345,12 +384,26 @@ export function ProgressReportDetail() {
     }
   }
 
-  /** Asked in the confirm bar first; a refusal is shown there. */
-  async function approve() {
+  async function fromTasks(lineId: string) {
     if (!report) return;
-    await api.post(`/progress-reports/${report.id}/approve`);
-    toast('ok', 'Report approved — it can now be billed');
-    await load();
+    try {
+      setReport(await api.post<ReportDetail>(`/progress-reports/${report.id}/lines/${lineId}/from-tasks`));
+      setError(null);
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  async function submit() {
+    if (!report) return;
+    setError(null);
+    try {
+      await api.post(`/progress-reports/${report.id}/submit`);
+      toast('ok', allHeld(report.approvalRoute) ? 'Approved — you hold every step' : 'Sent for approval');
+      done();
+    } catch (err) {
+      setError(err);
+    }
   }
 
   async function bill() {
@@ -364,13 +417,19 @@ export function ProgressReportDetail() {
     }
   }
 
+  const route = report.approvalRoute;
+  const draft = report.status === 'DRAFT';
+  const site = report.job.site ? [report.job.site.address, report.job.site.city].filter(Boolean).join(', ') || report.job.site.name : null;
+
   return (
     <div>
       <RecordHeader
-        type="Progress report"
+        type="Accomplishment report"
         code={report.number}
         title={`${report.job.name} · Report #${report.reportNo}`}
         status={report.status}
+        amount={`${report.totals.toDatePct.toFixed(2)}%`}
+        amountLabel="Complete to date"
         meta={
           <>
             <Link className="mono" to={`/g-ops/projects/${report.job.id}`}>
@@ -378,11 +437,11 @@ export function ProgressReportDetail() {
             </Link>{' '}
             · {report.job.customer.name} · {formatDate(report.periodFrom)} — {formatDate(report.periodTo)} · prepared by{' '}
             {report.preparedBy.name}
+            {report.legacyNumber && <> · formerly {report.legacyNumber}</>}
             {report.previousReport && (
               <>
                 {' '}
-                · after{' '}
-                <Link to={`/g-ops/progress/${report.previousReport.id}`}>#{report.previousReport.reportNo}</Link>
+                · after <Link to={`/g-ops/progress/${report.previousReport.id}`}>#{report.previousReport.reportNo}</Link>
               </>
             )}
             {report.nextReport && (
@@ -395,20 +454,9 @@ export function ProgressReportDetail() {
         }
         actions={
           <>
-            {report.canApprove && (
-              <button
-                className="btn btn-primary"
-                onClick={() =>
-                  confirm.ask({
-                    title: `Approve ${report.number}?`,
-                    body: 'Its percentages become the record of what was reported and cannot be changed. It can then be billed.',
-                    confirmLabel: 'Approve',
-                    tone: 'primary',
-                    onConfirm: approve,
-                  })
-                }
-              >
-                Approve
+            {report.canSubmit && (
+              <button className="btn btn-primary" onClick={submit}>
+                Submit for approval
               </button>
             )}
             {report.status === 'APPROVED' && !report.billing && can('gops.progress_billing.create') && (
@@ -419,56 +467,111 @@ export function ProgressReportDetail() {
           </>
         }
         print={`/api/progress-reports/${report.id}/pdf`}
+        more={[
+          report.canWithdraw && {
+            label: 'Pull back to draft',
+            confirm: {
+              title: `Pull ${report.number} back?`,
+              body: 'The approval request is withdrawn and its approvers are told. It comes back as a draft to change and send again.',
+              confirmLabel: 'Pull it back',
+              onConfirm: async () => {
+                await api.post(`/progress-reports/${report.id}/withdraw`);
+                toast('ok', 'Back to draft');
+                done();
+              },
+            },
+          },
+          report.canDelete && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${report.number}?`,
+              body: 'It goes for good, with its daily entries and pictures.',
+              confirmLabel: 'Delete',
+              onConfirm: async () => {
+                await api.del(`/progress-reports/${report.id}`);
+                toast('ok', 'Deleted');
+                navigate(`/g-ops/projects/${report.job.id}?tab=progress`);
+              },
+            },
+          },
+        ]}
         modify={report.canEdit ? () => setNarrative(true) : undefined}
         confirm={confirm}
       />
+
+      {draft && route && route.steps.length > 0 && (
+        <div className="qd-route">
+          <span className="qd-route-label">{allHeld(route) ? 'No one else’s approval needed — you hold every step' : 'Submit for approval sends it to'}</span>
+          <ApprovalStepper steps={previewSteps(route)} />
+        </div>
+      )}
+      {!draft && <DocumentApproval documentType="progress_report" documentId={report.id} reloadToken={reload} />}
 
       <ErrorBox error={error} />
 
       {report.billing && (
         <div className="alert ok">
-          Billed as{' '}
-          <Link to={`/g-ops/billings/${report.billing.id}`}>{report.billing.number}</Link> —{' '}
-          {formatMoney(report.billing.grossAmount)}
+          Billed as <Link to={`/g-ops/billings/${report.billing.id}`}>{report.billing.number}</Link> — {formatMoney(report.billing.grossAmount)}
         </div>
       )}
       {report.status === 'APPROVED' && (
         <div className="alert info">
-          Approved{report.approvedBy ? ` by ${report.approvedBy.name}` : ''}. The percentages here
-          are now the record of what was reported and cannot be changed.
+          Approved{report.approvedBy ? ` — last signed by ${report.approvedBy.name}` : ''}. Its percentages are now the record of what was
+          reported and cannot be changed.
         </div>
       )}
 
       <div className="kpi-grid">
         <Stat label="Contract value" value={formatMoney(report.totals.contractValue)} figure />
-        <Stat
-          label="This period"
-          value={formatMoney(report.totals.thisPeriodValue)}
-          figure
-          accent="neon"
-          hint="value reported this period"
-        />
+        <Stat label="This period" value={formatMoney(report.totals.thisPeriodValue)} figure accent="neon" hint={`${report.totals.thisPeriodPct.toFixed(2)}% of the contract`} />
         <Stat label="Earned to date" value={formatMoney(report.totals.earnedValue)} figure />
         <Stat label="Complete" value={<ProgressBar pct={report.totals.toDatePct} />} />
       </div>
 
-      <div className="card">
+      <div className="grid grid-2">
+        <section className="card">
+          <h3 className="card-title">Project</h3>
+          <dl className="kv">
+            <dt>Location</dt>
+            <dd>{site ?? '—'}</dd>
+            <dt>Start</dt>
+            <dd>{report.job.startDate ? formatDate(report.job.startDate) : '—'}</dd>
+            <dt>Target completion</dt>
+            <dd>{report.job.targetEndDate ? formatDate(report.job.targetEndDate) : '—'}</dd>
+            <dt>Overall status</dt>
+            <dd>{report.overallStatusText ?? '—'}</dd>
+          </dl>
+        </section>
+        <section className="card">
+          <h3 className="card-title">Personnel present</h3>
+          <dl className="kv">
+            <dt>Project in charge</dt>
+            <dd>{report.personnelInCharge ?? '—'}</dd>
+            <dt>Project support</dt>
+            <dd>{report.personnelSupport.length ? report.personnelSupport.join(', ') : '—'}</dd>
+          </dl>
+        </section>
+      </div>
+
+      <div className="card del-gap-top">
         <h3 className="card-title">Accomplishment against the schedule of values</h3>
         <p className="muted del-lede">
           {report.canEdit
-            ? 'Enter either the percentage done this period or the cumulative to-date figure — the other follows.'
-            : 'Percentages as reported for this period.'}
+            ? 'Each phase weighs its share of the contract. Type this period’s or the to-date figure — the other follows — or take it from the phase’s tasks on the Scope of Work.'
+            : 'Percentages as reported for this period, each weighed by its share of the contract.'}
         </p>
-
         <div className="table-wrap">
           <table className="data">
             <thead>
               <tr>
-                <th>Scope</th>
+                <th>Scope of work</th>
                 <th className="right">Value</th>
+                <th className="right">Weight</th>
                 <th className="right">Previous</th>
                 <th className="right del-col-pct">This period</th>
                 <th className="right del-col-pct">To date</th>
+                <th className="right">Weighted</th>
                 <th className="right">Earned to date</th>
               </tr>
             </thead>
@@ -477,9 +580,25 @@ export function ProgressReportDetail() {
                 <tr key={l.id}>
                   <td>
                     <div>{l.scopeItem.name}</div>
-                    <div className="faint">{l.scopeItem.kind.toLowerCase().replace(/_/g, ' ')}</div>
+                    {l.fromTasksPct !== null ? (
+                      <div className="faint">
+                        {l.tasks.length} task{l.tasks.length === 1 ? '' : 's'} · {l.fromTasksPct.toFixed(2)}% by their weights
+                        {report.canEdit && l.fromTasksPct !== l.toDatePct && (
+                          <>
+                            {' '}
+                            ·{' '}
+                            <button type="button" className="pr-link" onClick={() => fromTasks(l.id)}>
+                              Use it
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="faint">{l.scopeItem.kind.toLowerCase().replace(/_/g, ' ')}</div>
+                    )}
                   </td>
                   <td className="right mono">{formatMoney(l.scopeItem.value)}</td>
+                  <td className="right mono">{l.weightPct.toFixed(2)}%</td>
                   <td className="right mono faint">{l.previousPct.toFixed(2)}%</td>
                   <td className="right">
                     {report.canEdit ? (
@@ -495,88 +614,110 @@ export function ProgressReportDetail() {
                       <span className="mono">{l.toDatePct.toFixed(2)}%</span>
                     )}
                   </td>
+                  <td className="right mono">{l.weightedPct.toFixed(2)}%</td>
                   <td className="right mono">{formatMoney(l.toDateAmount)}</td>
                 </tr>
               ))}
-              <tr>
-                <td>
-                  <strong>TOTAL</strong>
-                </td>
-                <td className="right mono">
-                  <strong>{formatMoney(report.totals.contractValue)}</strong>
-                </td>
-                <td />
-                <td className="right mono">{report.totals.thisPeriodPct.toFixed(2)}%</td>
-                <td className="right mono">
-                  <strong>{report.totals.toDatePct.toFixed(2)}%</strong>
-                </td>
-                <td className="right mono">
-                  <strong>{formatMoney(report.totals.earnedValue)}</strong>
-                </td>
-              </tr>
             </tbody>
           </table>
         </div>
       </div>
 
-      {(report.accomplishment || report.manpower || report.issues || report.nextPeriodPlan) && (
-        <div className="grid grid-2 del-gap-top">
-          {report.accomplishment && (
-            <div className="card">
-              <h3 className="card-title">Work accomplished</h3>
-              <div className="del-prose">{report.accomplishment}</div>
-            </div>
-          )}
-          {(report.manpower || report.equipment) && (
-            <div className="card">
-              <h3 className="card-title">Resources</h3>
-              <dl className="kv">
-                {report.manpower && (
-                  <>
-                    <dt>Manpower</dt>
-                    <dd>{report.manpower}</dd>
-                  </>
-                )}
-                {report.equipment && (
-                  <>
-                    <dt>Equipment</dt>
-                    <dd>{report.equipment}</dd>
-                  </>
-                )}
-                {report.weather && (
-                  <>
-                    <dt>Weather / delays</dt>
-                    <dd>{report.weather}</dd>
-                  </>
-                )}
-              </dl>
-            </div>
-          )}
-          {report.issues && (
-            <div className="card">
-              <h3 className="card-title">Issues</h3>
-              <div className="del-prose">{report.issues}</div>
-            </div>
-          )}
-          {report.nextPeriodPlan && (
-            <div className="card">
-              <h3 className="card-title">Next period</h3>
-              <div className="del-prose">{report.nextPeriodPlan}</div>
-            </div>
+      <div className="grid grid-2 del-gap-top">
+        <section className="card">
+          <h3 className="card-title">Summary</h3>
+          <div className="del-prose">{report.accomplishment || <span className="faint">Not written yet.</span>}</div>
+        </section>
+        <section className="card">
+          <h3 className="card-title">Key milestones achieved</h3>
+          <div className="del-prose">{report.milestones || <span className="faint">None stated.</span>}</div>
+        </section>
+        <section className="card">
+          <h3 className="card-title">Remaining works</h3>
+          <div className="del-prose">{report.nextPeriodPlan || <span className="faint">None stated.</span>}</div>
+        </section>
+        <section className="card">
+          <h3 className="card-title">Issues and resources</h3>
+          <dl className="kv">
+            <dt>Issues</dt>
+            <dd>{report.issues ?? '—'}</dd>
+            <dt>Manpower</dt>
+            <dd>{report.manpower ?? '—'}</dd>
+            <dt>Equipment</dt>
+            <dd>{report.equipment ?? '—'}</dd>
+            <dt>Weather / delays</dt>
+            <dd>{report.weather ?? '—'}</dd>
+          </dl>
+        </section>
+      </div>
+
+      <section className="card del-gap-top">
+        <div className="pr-card-head">
+          <h3 className="card-title">Daily accomplishments</h3>
+          {report.canEdit && (
+            <button className="btn btn-sm" onClick={() => setDay('new')}>
+              + Add day
+            </button>
           )}
         </div>
-      )}
+        {report.days.length === 0 ? (
+          <p className="muted">No day written yet. Each day takes what was done, the findings, the recommendation and its pictures.</p>
+        ) : (
+          <div className="stack">
+            {report.days.map((d) => (
+              <div key={d.id} className="pr-day">
+                <div className="pr-day-head">
+                  <strong>{formatDate(d.workDate)}</strong>
+                  {d.headcount !== null && <span className="faint"> · {d.headcount} on site</span>}
+                  {report.canEdit && (
+                    <button className="btn btn-sm" onClick={() => setDay(d)}>
+                      Modify
+                    </button>
+                  )}
+                </div>
+                <div className="del-prose">{d.actions}</div>
+                {(d.findings || d.recommendation || d.remarks) && (
+                  <dl className="kv">
+                    {d.findings && (
+                      <>
+                        <dt>Findings</dt>
+                        <dd>{d.findings}</dd>
+                      </>
+                    )}
+                    {d.recommendation && (
+                      <>
+                        <dt>Recommendation</dt>
+                        <dd>{d.recommendation}</dd>
+                      </>
+                    )}
+                    {d.remarks && (
+                      <>
+                        <dt>Remarks</dt>
+                        <dd>{d.remarks}</dd>
+                      </>
+                    )}
+                  </dl>
+                )}
+                <Attachments
+                  entityType="progress_report_day"
+                  entityId={d.id}
+                  title={`Pictures (${d.pictures})`}
+                  hint="Pictures of the day’s work — they print under it, three to a row."
+                  canEdit={report.canEdit}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
-      {/* The site photos are the evidence the percentages rest on (model §2.10).
-          The PDF already prints them; an approved report's evidence is frozen
-          with it. */}
       <div className="del-gap-top">
         <Attachments
           entityType="progress_report"
           entityId={report.id}
-          title="Photos"
-          hint="Site photos for this period — they print on the report."
-          canEdit={report.canEdit && report.status !== 'APPROVED'}
+          title="Other photos and files"
+          hint="Anything for the whole period — pictures print at the end of the report."
+          canEdit={report.canEdit}
         />
       </div>
 
@@ -587,6 +728,17 @@ export function ProgressReportDetail() {
           onSaved={() => {
             setNarrative(false);
             void load();
+          }}
+        />
+      )}
+      {day && (
+        <DayModal
+          report={report}
+          day={day === 'new' ? null : day}
+          onClose={() => setDay(null)}
+          onSaved={(r) => {
+            setDay(null);
+            setReport(r);
           }}
         />
       )}
@@ -618,37 +770,43 @@ function PctInput({ value, onCommit }: { value: number; onCommit: (v: number) =>
   );
 }
 
-function NarrativeModal({
-  report,
-  onClose,
-  onSaved,
-}: {
-  report: ReportDetail;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
+function NarrativeModal({ report, onClose, onSaved }: { report: ReportDetail; onClose: () => void; onSaved: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState({
+    overallStatus: report.overallStatus ?? '',
+    overallStatusNote: report.overallStatusNote ?? '',
+    personnelInCharge: report.personnelInCharge ?? '',
+    personnelSupport: report.personnelSupport.join('\n'),
     accomplishment: report.accomplishment ?? '',
+    milestones: report.milestones ?? '',
+    nextPeriodPlan: report.nextPeriodPlan ?? '',
+    issues: report.issues ?? '',
     manpower: report.manpower ?? '',
     equipment: report.equipment ?? '',
     weather: report.weather ?? '',
-    issues: report.issues ?? '',
-    nextPeriodPlan: report.nextPeriodPlan ?? '',
   });
+  const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
 
   async function save() {
     setBusy(true);
     setError(null);
     try {
       await api.patch(`/progress-reports/${report.id}`, {
+        overallStatus: form.overallStatus || null,
+        overallStatusNote: form.overallStatusNote || null,
+        personnelInCharge: form.personnelInCharge || null,
+        personnelSupport: form.personnelSupport
+          .split(/\n|,/)
+          .map((s) => s.trim())
+          .filter(Boolean),
         accomplishment: form.accomplishment || null,
+        milestones: form.milestones || null,
+        nextPeriodPlan: form.nextPeriodPlan || null,
+        issues: form.issues || null,
         manpower: form.manpower || null,
         equipment: form.equipment || null,
         weather: form.weather || null,
-        issues: form.issues || null,
-        nextPeriodPlan: form.nextPeriodPlan || null,
       });
       onSaved();
     } catch (err) {
@@ -657,10 +815,12 @@ function NarrativeModal({
     }
   }
 
+  const known = report.overallChoices.some((c) => c.key === form.overallStatus);
+
   return (
     <Modal
       wide
-      title={`Modify progress report ${report.number}`}
+      title={`Modify accomplishment report ${report.number}`}
       onClose={onClose}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
@@ -671,40 +831,146 @@ function NarrativeModal({
       }
     >
       <ErrorBox error={error} />
-      <Field label="Work accomplished this period">
-        <textarea
-          value={form.accomplishment}
-          onChange={(e) => setForm({ ...form, accomplishment: e.target.value })}
-        />
+      <div className="grid grid-2">
+        <Field label="Overall status">
+          <select value={form.overallStatus} onChange={set('overallStatus')}>
+            <option value="">— not stated —</option>
+            {report.overallChoices.map((c) => (
+              <option key={c.key} value={c.key}>
+                {c.label}
+              </option>
+            ))}
+            {!known && form.overallStatus && <option value={form.overallStatus}>{form.overallStatus}</option>}
+          </select>
+        </Field>
+        <Field label="Status note" hint="Printed after the status — “Awaiting materials”.">
+          <input value={form.overallStatusNote} onChange={set('overallStatusNote')} />
+        </Field>
+        <Field label="Project in charge">
+          <input value={form.personnelInCharge} onChange={set('personnelInCharge')} />
+        </Field>
+        <Field label="Project support" hint="One name per line.">
+          <textarea rows={3} value={form.personnelSupport} onChange={set('personnelSupport')} />
+        </Field>
+      </div>
+      <Field label="Summary">
+        <textarea value={form.accomplishment} onChange={set('accomplishment')} />
+      </Field>
+      <Field label="Key milestones achieved" hint="One per line — “Pump room: equipment placed”.">
+        <textarea value={form.milestones} onChange={set('milestones')} />
+      </Field>
+      <Field label="Remaining works" hint="One per line.">
+        <textarea value={form.nextPeriodPlan} onChange={set('nextPeriodPlan')} />
+      </Field>
+      <Field label="Issues and concerns">
+        <textarea value={form.issues} onChange={set('issues')} />
       </Field>
       <div className="grid grid-2">
         <Field label="Manpower deployed">
-          <input
-            value={form.manpower}
-            placeholder="4 fitters, 2 welders, 1 supervisor"
-            onChange={(e) => setForm({ ...form, manpower: e.target.value })}
-          />
+          <input value={form.manpower} placeholder="4 fitters, 2 welders, 1 supervisor" onChange={set('manpower')} />
         </Field>
         <Field label="Equipment deployed">
-          <input
-            value={form.equipment}
-            placeholder="Welding machine, chain block, boom truck"
-            onChange={(e) => setForm({ ...form, equipment: e.target.value })}
-          />
+          <input value={form.equipment} placeholder="Welding machine, chain block, boom truck" onChange={set('equipment')} />
         </Field>
       </div>
       <Field label="Weather and delays">
-        <input value={form.weather} onChange={(e) => setForm({ ...form, weather: e.target.value })} />
+        <input value={form.weather} onChange={set('weather')} />
       </Field>
-      <Field label="Issues">
-        <textarea value={form.issues} onChange={(e) => setForm({ ...form, issues: e.target.value })} />
+    </Modal>
+  );
+}
+
+/** A day's entry: what was done, the findings and the recommendation. Its pictures go on the page, under it. */
+function DayModal({
+  report,
+  day,
+  onClose,
+  onSaved,
+}: {
+  report: ReportDetail;
+  day: ReportDay | null;
+  onClose: () => void;
+  onSaved: (r: ReportDetail) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [form, setForm] = useState({
+    workDate: (day?.workDate ?? report.periodTo).slice(0, 10),
+    actions: day?.actions ?? '',
+    findings: day?.findings ?? '',
+    recommendation: day?.recommendation ?? '',
+    remarks: day?.remarks ?? '',
+    headcount: day?.headcount === null || day?.headcount === undefined ? '' : String(day.headcount),
+  });
+  const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    const body = {
+      workDate: form.workDate,
+      actions: form.actions,
+      findings: form.findings || null,
+      recommendation: form.recommendation || null,
+      remarks: form.remarks || null,
+      headcount: form.headcount === '' ? null : Number(form.headcount),
+    };
+    try {
+      onSaved(
+        day
+          ? await api.put<ReportDetail>(`/progress-reports/${report.id}/days/${day.id}`, body)
+          : await api.post<ReportDetail>(`/progress-reports/${report.id}/days`, body),
+      );
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    if (!day) return;
+    onSaved(await api.del<ReportDetail>(`/progress-reports/${report.id}/days/${day.id}`));
+  }
+
+  return (
+    <Modal
+      wide
+      title={day ? `Modify ${formatDate(day.workDate)}` : 'Add day'}
+      onClose={onClose}
+      footer={
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={day ? { label: 'Remove', question: 'Remove this day and its pictures?', onConfirm: remove } : undefined}
+        >
+          <button className="btn btn-primary" onClick={save} disabled={busy || !form.actions.trim()}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </ModalFoot>
+      }
+    >
+      <ErrorBox error={error} />
+      <div className="grid grid-2">
+        <Field label="Day" required hint={`Within ${formatDate(report.periodFrom)} – ${formatDate(report.periodTo)}.`}>
+          <input type="date" value={form.workDate} min={report.periodFrom.slice(0, 10)} max={report.periodTo.slice(0, 10)} onChange={set('workDate')} />
+        </Field>
+        <Field label="People on site">
+          <NumberInput kind="count" value={form.headcount} onChange={set('headcount')} />
+        </Field>
+      </div>
+      <Field label="Actions taken" required>
+        <textarea rows={4} value={form.actions} onChange={set('actions')} />
       </Field>
-      <Field label="Plan for next period">
-        <textarea
-          value={form.nextPeriodPlan}
-          onChange={(e) => setForm({ ...form, nextPeriodPlan: e.target.value })}
-        />
+      <Field label="Findings">
+        <textarea value={form.findings} onChange={set('findings')} />
       </Field>
+      <Field label="Recommendation">
+        <textarea value={form.recommendation} onChange={set('recommendation')} />
+      </Field>
+      <Field label="Remarks">
+        <input value={form.remarks} onChange={set('remarks')} />
+      </Field>
+      {!day && <p className="faint">Save the day first, then add its pictures under it on the page.</p>}
     </Modal>
   );
 }
@@ -741,8 +1007,9 @@ interface BillingDetail {
   }[];
   /** The invoice raised from this billing — at most one, by a unique key. */
   invoice: { id: string; number: string; status: string } | null;
-  /** The approve route's own checks: open, the right held, and not the person who raised it. */
-  canApprove: boolean;
+  canSubmit: boolean;
+  canWithdraw: boolean;
+  approvalRoute: PreviewRoute | null;
 }
 
 export function BillingDetailPage() {
@@ -754,6 +1021,7 @@ export function BillingDetailPage() {
   const [billing, setBilling] = useState<BillingDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
+  const [reload, setReload] = useState(0);
 
   // A billing has no menu entry of its own: back goes to its project's
   // Progress & Billing tab, else to the Progress & Billing register.
@@ -782,13 +1050,23 @@ export function BillingDetailPage() {
   if (loading) return <Loading />;
   if (!billing) return <ErrorBox error={error ?? new Error('Billing not found')} />;
 
-  /** Asked in the confirm bar first; a refusal is shown there. */
-  async function approve() {
+  const done = () => {
+    setReload((r) => r + 1);
+    void load();
+  };
+
+  async function submit() {
     if (!billing) return;
-    await api.post(`/billings/${billing.id}/approve`);
-    toast('ok', 'Billing approved');
-    await load();
+    setError(null);
+    try {
+      await api.post(`/billings/${billing.id}/submit`);
+      toast('ok', allHeld(billing.approvalRoute) ? 'Approved — you hold every step' : 'Sent for approval');
+      done();
+    } catch (err) {
+      setError(err);
+    }
   }
+  const route = billing.approvalRoute;
 
   return (
     <div>
@@ -812,20 +1090,9 @@ export function BillingDetailPage() {
         }
         actions={
           <>
-            {billing.canApprove && (
-              <button
-                className="btn btn-primary"
-                onClick={() =>
-                  confirm.ask({
-                    title: `Approve ${billing.number}?`,
-                    body: 'Its figures are fixed, and finance can raise the invoice from it.',
-                    confirmLabel: 'Approve',
-                    tone: 'primary',
-                    onConfirm: approve,
-                  })
-                }
-              >
-                Approve
+            {billing.canSubmit && (
+              <button className="btn btn-primary" onClick={submit}>
+                Submit for approval
               </button>
             )}
             {/* The hand-off to Finance. The invoice copies this billing's figures,
@@ -838,8 +1105,31 @@ export function BillingDetailPage() {
           </>
         }
         print={`/api/billings/${billing.id}/pdf`}
+        more={[
+          billing.canWithdraw && {
+            label: 'Pull back to draft',
+            confirm: {
+              title: `Pull ${billing.number} back?`,
+              body: 'The approval request is withdrawn and its approvers are told.',
+              confirmLabel: 'Pull it back',
+              onConfirm: async () => {
+                await api.post(`/billings/${billing.id}/withdraw`);
+                toast('ok', 'Back to draft');
+                done();
+              },
+            },
+          },
+        ]}
         confirm={confirm}
       />
+
+      {billing.status === 'DRAFT' && route && route.steps.length > 0 && (
+        <div className="qd-route">
+          <span className="qd-route-label">{allHeld(route) ? 'No one else’s approval needed — you hold every step' : 'Submit for approval sends it to'}</span>
+          <ApprovalStepper steps={previewSteps(route)} />
+        </div>
+      )}
+      {billing.status !== 'DRAFT' && <DocumentApproval documentType="progress_billing" documentId={billing.id} reloadToken={reload} />}
 
       <ErrorBox error={error} />
 

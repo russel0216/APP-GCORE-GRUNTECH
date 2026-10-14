@@ -28,6 +28,8 @@ import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
 import { ProjectBudgetRequestsCard, BudgetRequestModal } from './BudgetRequests';
 import { ProjectPlanApprovalsCard } from './PlanApprovals';
+import { ProjectCostingCard } from './ProjectCosting';
+import { ProjectJobOrders } from '../service/JobOrders';
 
 /**
  * The project workspace (model §8.1).
@@ -168,6 +170,8 @@ type Tab =
   | 'plans'
   | 'budget'
   | 'procurement'
+  | 'costing'
+  | 'joborders'
   | 'requests'
   | 'scope'
   | 'progress'
@@ -179,9 +183,11 @@ type Tab =
  * menu: Overview, Meetings & Records, Request for Approval, Budget Monitoring,
  * Purchase Requisition, Budget Requests, Scope of Work (the Gantt chart),
  * Progress & Billing. Finance and Service stay at the end: the turnover
- * register and the project's invoices live nowhere else.
+ * register and the project's invoices live nowhere else. Costing and Job
+ * Orders follow Overview (2026-10-15, the owner's call): the costing the
+ * project was built from, and the job orders raised for it.
  */
-const TABS: Tab[] = ['overview', 'meetings', 'plans', 'budget', 'procurement', 'requests', 'scope', 'progress', 'finance', 'service'];
+const TABS: Tab[] = ['overview', 'costing', 'joborders', 'meetings', 'plans', 'budget', 'procurement', 'requests', 'scope', 'progress', 'finance', 'service'];
 
 /** Where the tabs that used to exist went, so an old link or notification still lands. */
 const TAB_ALIASES: Record<string, Tab> = { billing: 'progress', tasks: 'scope', documents: 'meetings', activity: 'meetings' };
@@ -272,6 +278,8 @@ export function ProjectWorkspace() {
   ];
   const visible: Record<Tab, boolean> = {
     overview: true,
+    costing: true,
+    joborders: can('gops.job_orders.view_all') || can('gops.job_orders.view_own'),
     meetings: true,
     plans: true,
     budget: true,
@@ -294,6 +302,8 @@ export function ProjectWorkspace() {
 
   const tabLabel: Record<Tab, string> = {
     overview: 'Overview',
+    costing: 'Costing',
+    joborders: 'Job Orders',
     meetings: 'Meetings & Records',
     plans: `Request for Approval (${job.plans.length})`,
     budget: 'Budget Monitoring',
@@ -606,6 +616,12 @@ export function ProjectWorkspace() {
             </div>
           )}
         </div>
+      )}
+
+      {current === 'costing' && <ProjectCostingCard costing={job.costing} />}
+
+      {current === 'joborders' && (
+        <ProjectJobOrders jobId={job.id} customerId={job.customer.id} quotationId={job.quotationRevision?.quotation.id ?? null} />
       )}
 
       {current === 'budget' && <BudgetTab job={job} reloadToken={reloadToken} />}

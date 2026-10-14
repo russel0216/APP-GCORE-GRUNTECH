@@ -136,30 +136,8 @@ const daysLabel = (n: number) => `${n} working day${n === 1 ? '' : 's'}`;
 
 // ── The list ────────────────────────────────────────────────────────────────
 
-export function JobOrders() {
-  const { can } = useAuth();
-  const navigate = useNavigate();
-  const [params, setParams] = useSearchParams();
-  // `?new=1&customerId=&quotationId=&siteId=` — how Customer 360 and a
-  // quotation start one without retyping. (`assetId`, from the installed
-  // base's button, is read no more: an order names no machine.)
-  const [raising, setRaising] = useState(() => params.get('new') === '1' && can('gops.job_orders.create'));
-  const [prefill] = useState(() => ({
-    customerId: params.get('customerId') ?? undefined,
-    siteId: params.get('siteId') ?? undefined,
-    quotationId: params.get('quotationId') ?? undefined,
-  }));
-
-  function closeRaising() {
-    setRaising(false);
-    if (params.has('new')) {
-      const next = new URLSearchParams(params);
-      for (const k of ['new', 'customerId', 'siteId', 'assetId', 'quotationId', 'kind']) next.delete(k);
-      setParams(next, { replace: true });
-    }
-  }
-
-  const columns: Column<JobOrderRow>[] = [
+export function jobOrderColumns(): Column<JobOrderRow>[] {
+  return [
     { key: 'number', label: 'Number', sortKey: 'number', width: '130px', render: (r) => <span className="mono">{r.number}</span> },
     {
       key: 'project',
@@ -220,11 +198,95 @@ export function JobOrders() {
       ),
     },
     {
+      // Whether approval has built the project yet (2026-10-15, the owner's
+      // call: the list shows the order already converted to a project).
+      key: 'converted',
+      label: 'Project built',
+      // "Converted" once the approved order stands behind its project; an
+      // order merely linked to a project while still open says "Linked".
+      render: (r) =>
+        r.job ? (
+          <div>
+            {r.status === 'APPROVED' || r.status === 'COMPLETED' ? (
+              <span className="badge ok">Converted</span>
+            ) : (
+              <span className="badge">Linked</span>
+            )}
+            <div className="faint mono">{r.job.number}</div>
+          </div>
+        ) : (
+          <span className="faint">Not yet</span>
+        ),
+    },
+    {
       key: 'status',
       label: 'Status',
       render: (r) => <StatusBadge status={r.status} extra={JOB_ORDER_TONES} label={statusLabel(r.status)} />,
     },
   ];
+}
+
+/**
+ * A project's Job Orders tab (2026-10-15): the orders that built it, link to
+ * it, or were raised on the quotation it was won from — so the project's
+ * people see whether its owner has asked for the work, and whether approval
+ * has converted it. The register's own query (`?forProject=`), its rows only
+ * where the viewer may read them.
+ */
+export function ProjectJobOrders({ jobId, quotationId, customerId }: { jobId: string; quotationId?: string | null; customerId?: string }) {
+  const navigate = useNavigate();
+  const { can } = useAuth();
+  return (
+    <DataList<JobOrderRow>
+      listKey="project-job-orders"
+      endpoint="/job-orders"
+      columns={jobOrderColumns()}
+      rowKey={(r) => r.id}
+      urlState={false}
+      initialFilters={{ forProject: jobId }}
+      onRowClick={(r) => navigate(`/g-ops/job-orders/${r.id}`)}
+      searchPlaceholder="Search number, project…"
+      emptyTitle="No job order on this project yet"
+      emptyHint="A job order raised on the project's quotation shows here, and says when approval has converted it."
+      printPath="/api/job-orders/pdf"
+      actions={
+        can('gops.job_orders.create') && customerId ? (
+          <Link
+            className="btn btn-primary btn-sm"
+            to={`/g-ops/job-orders?new=1&customerId=${customerId}${quotationId ? `&quotationId=${quotationId}` : ''}`}
+          >
+            + New job order
+          </Link>
+        ) : null
+      }
+    />
+  );
+}
+
+export function JobOrders() {
+  const { can } = useAuth();
+  const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  // `?new=1&customerId=&quotationId=&siteId=` — how Customer 360 and a
+  // quotation start one without retyping. (`assetId`, from the installed
+  // base's button, is read no more: an order names no machine.)
+  const [raising, setRaising] = useState(() => params.get('new') === '1' && can('gops.job_orders.create'));
+  const [prefill] = useState(() => ({
+    customerId: params.get('customerId') ?? undefined,
+    siteId: params.get('siteId') ?? undefined,
+    quotationId: params.get('quotationId') ?? undefined,
+  }));
+
+  function closeRaising() {
+    setRaising(false);
+    if (params.has('new')) {
+      const next = new URLSearchParams(params);
+      for (const k of ['new', 'customerId', 'siteId', 'assetId', 'quotationId', 'kind']) next.delete(k);
+      setParams(next, { replace: true });
+    }
+  }
+
+  const columns = jobOrderColumns();
 
   const canCreate = can('gops.job_orders.create');
 

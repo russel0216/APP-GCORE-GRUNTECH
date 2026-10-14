@@ -515,7 +515,7 @@ export const SUMMARY_FIGURES: Record<string, FigureDef> = {
   quotationsNegotiating: { module: 'gops', label: 'Quotations in negotiation', kind: 'count', basis: 'range', to: '/g-ops/quotations' },
   projectsInProgress: { module: 'gops', label: 'Projects in progress', kind: 'count', basis: 'live', to: '/g-ops/projects?status=IN_PROGRESS&type=PROJECT' },
   projectsOnHold: { module: 'gops', label: 'Projects on hold', kind: 'count', basis: 'live', to: '/g-ops/projects?status=ON_HOLD&type=PROJECT' },
-  reportsAwaitingApproval: { module: 'gops', label: 'Progress reports awaiting approval', kind: 'count', basis: 'live', to: '/g-ops/progress?status=SUBMITTED' },
+  reportsAwaitingApproval: { module: 'gops', label: 'Progress reports awaiting approval', kind: 'count', basis: 'live', to: '/g-ops/progress?status=PENDING_APPROVAL' },
   contractsRunning: { module: 'gops', label: 'Service contracts running', kind: 'count', basis: 'live', to: '/g-ops/service-contracts?status=ACTIVE' },
   pmAccomplished: { module: 'gops', label: 'PM visits done', kind: 'count', basis: 'range', to: '/g-ops/visits' },
   // G-CHAIN — the four figures the G-CHAIN dashboard shows, nothing it does not.

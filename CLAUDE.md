@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,260 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,267 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,10 +574,10 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 329, hr 468, plantilla 123, meetings
+79, partners 120, delivery 178, chain 329, hr 468, plantilla 123, meetings
 115, evaluations 152, academy 120, finance 371, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4182,7 +4182,8 @@ tab inside a project, and the Projects page keeps them one click away
   routes check `gchain.purchase_requests.*`, but the project's Purchase
   Requisition tab and its routes in `App.tsx` are guarded by
   `gops.purchase_requests.*`. verify-foundation lists the hidden entries.
-- **A project's tabs are, in order**: Overview, Meetings & Records, Request
+- **A project's tabs are, in order**: Overview, Costing, Job Orders (both
+  2026-10-15 — see "The Accomplishment Report"), Meetings & Records, Request
   for Approval (the `plans` key), Budget Monitoring, Purchase Requisition, Budget Requests, Scope of
   Work (Gantt), Progress & Billing — then Finance and Service, which hold the
   invoices and the turnover register and belong nowhere else. `TAB_ALIASES`
@@ -4214,6 +4215,79 @@ tab inside a project, and the Projects page keeps them one click away
   nobody's hand work (`{ created, skipped }`); a planned line's dates become
   its tasks' span, which the planned S-curve reads. Audited. Needs a start
   date, and says so.
+
+## The Accomplishment Report (2026-10-15)
+
+The owner's call, with his sample (Accomplishment Report — The Village at
+Lipa): the progress report in his format, numbered under its project,
+weighed by scope value, written day by day with pictures, approved by the
+creator (Project Engineer or Sales) › Technical Manager › Team Leader; and
+the costing and the job orders inside the project.
+
+- **Numbers belong to the project**: `reportNumber()` / `billingNumber()`
+  in `shared/progressReport.ts` — `GT-PRJ-2026-0112-PR-03`,
+  `…-PB-01` — derived from the per-project `reportNo` / `billingNo` (unique
+  per project), never `nextNumber`, so two projects never collide.
+  `renumberProgressDocs()` (the seed, once, `seed.progressRenumbered`)
+  renumbered what was on file, the old number kept as `legacyNumber`, and
+  moved SUBMITTED reports to DRAFT. The `progress_report` / `progress_billing`
+  numbering types stay listed but issue nothing.
+- **Both go through the engine** (rule 2): seeded "Progress report —
+  technical manager, team leader" and "Progress billing — …" (TM ROLE, team-
+  scoped through `OWN_TEAM_ROLES`; Team Leader SUPERVISOR falling back to
+  `team_leader`; `preparerSigns`, `standIns`). `POST /:id/submit` (claimed
+  on DRAFT, in the preparer's name, back to DRAFT if refused; a report needs
+  a summary or a day), `/withdraw`, `settleProgressReport` /
+  `settleProgressBilling` (APPROVED sets `approvedAt` / `approvedById` = the
+  last signer; a return goes back to DRAFT; "not applied" after a pull-back).
+  The old `/approve` routes and `gops.progress_billing.approve` are gone.
+  Record and paper take `requireAnyOrDecider`; a `view_own` holder reads
+  only what they prepared. Sales and Industry Specialists hold own-scope
+  `progress_billing`; Technical Manager and Team Leader hold `view_all`.
+  `ProgressBilling.preparedById` is set at raising (an older billing's
+  preparer is its trail's CREATED row).
+- **The report's content**: `overallStatus` (`PROGRESS_OVERALL`: On
+  schedule, Ahead, Behind, Ongoing – For corrective works, On hold,
+  Completed) with a free `overallStatusNote`; `personnelInCharge` and
+  `personnelSupport[]` (names, filled at creation from the previous report,
+  else the project's first job order, else its PM); Summary
+  (`accomplishment`), Key milestones (`milestones`), Remaining works
+  (`nextPeriodPlan`), issues, manpower, equipment, weather.
+  **`ProgressReportDay`** (date inside the period, actions, findings,
+  recommendation, remarks, headcount) through `POST/PUT/DELETE
+  /:id/days[/:dayId]`, its pictures attachments on `progress_report_day`
+  (read as the report; written on a draft by whoever may edit it).
+- **Weights**: each line carries `weightPct` (its scope value over the
+  schedule) and `weightedPct` (weight × to-date %), which add up to the
+  report's own %. `JobTask.weight` (nullable, 1 when blank; the Gantt task
+  panel's "Weight in its phase") gives `phasePctFromTasks()` — Σ weight ×
+  progress ÷ Σ weight, DONE = 100 — shown under a line, and `POST
+  /:id/lines/:lineId/from-tasks` writes it as the to-date figure (never
+  backwards). The Gantt's phase bar reads the same weighted figure.
+- **The paper** "Accomplishment Report": Project (location, period, start,
+  target, overall status and %), Personnel present, the SOV table with
+  Weight and Weighted %, the totals, Summary, Key milestones, Remaining
+  works, Issues, then each day with its pictures — the engine's new
+  **`photos` section** (JPEG/PNG, three to a row, fitted, captioned; the
+  route makes every picture a ≤1200 px JPEG through sharp) — and Prepared
+  by plus the route's slots (a report approved by hand before prints its
+  approver from the record). The engine shrinks a title word wider than its
+  box instead of breaking it. The billing's paper signs the same way.
+- **The page** (`ProgressReportDetail`): Submit for approval with the route
+  preview, `DocumentApproval` once sent, ⋯ Pull back / Delete, Modify (the
+  narrative modal: status, personnel, summary, milestones, remaining works,
+  resources), the weighted SOV table with "Use it" from the tasks, and
+  Daily accomplishments (+ Add day; each day's Attachments card).
+- **Project tabs Costing and Job Orders** after Overview:
+  `ProjectCostingCard` (`pages/delivery/ProjectCosting.tsx`) reads
+  `/costings/:id` for a costing reader — figures, lines by bucket, the scope
+  with each phase's weight, Print and Open costing — else the two figures
+  the project carries; `ProjectJobOrders` (`pages/service/JobOrders.tsx`) is
+  the register on `?forProject=<jobId>` (orders with that `jobId` OR on the
+  quotation the project was won from). The Costing strip entry stays, its
+  list gaining a **Project** column ("Converted" + the number); the job
+  order list gains **Project built** ("Converted" once approved with its
+  project, "Linked" while an open order names one, else "Not yet").
 
 ## Request for Approval (2026-10-13)
 

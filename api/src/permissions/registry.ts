@@ -139,7 +139,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'budget_monitoring', group: 'Project Management', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4, hidden: true },
       { key: 'purchase_requests', group: 'Project Management', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: ['view_own', 'view_all', 'edit_own', 'edit_all'], phase: 5, hidden: true },
       { key: 'budget_requests', group: 'Project Management', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED, phase: 4, hidden: true },
-      { key: 'progress_billing', group: 'Project Management', label: 'Progress & Billing', path: '/g-ops/progress', actions: ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete', 'approve'], phase: 4, hidden: true },
+      { key: 'progress_billing', group: 'Project Management', label: 'Progress & Billing', path: '/g-ops/progress', actions: OWNED, phase: 4, hidden: true },
       // Aftermarket (Phase 8). The installed base is what turns a finished
       // project into a renewal pipeline — without it nobody can answer "what
       // did we put in that hospital, and when does its warranty run out".

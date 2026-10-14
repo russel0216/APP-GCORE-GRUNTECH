@@ -335,7 +335,7 @@ async function main() {
   check('approval goes to the workflow, not to a key: no ghr.clearances.approve, no gops.quotations.approve', !permissionKeys.has('ghr.clearances.approve') && !permissionKeys.has('gops.quotations.approve'));
   check(
     'the three approve rights left are the ones something checks (CAD dispatch, progress reports, certificates)',
-    [...permissionKeys].filter((k) => k.endsWith('.approve')).sort().join() === 'ghr.passports.approve,gops.cad_job_orders.approve,gops.progress_billing.approve',
+    [...permissionKeys].filter((k) => k.endsWith('.approve')).sort().join() === 'ghr.passports.approve,gops.cad_job_orders.approve',
     [...permissionKeys].filter((k) => k.endsWith('.approve')).join(),
   );
 
