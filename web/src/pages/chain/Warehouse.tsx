@@ -1142,9 +1142,34 @@ interface StockRow {
   warehouse: { id: string; name: string };
 }
 
+/** Which view of the stock a viewer opened last — a per-browser convenience; a link's `?view=` wins. */
+const INVENTORY_VIEW_KEY = 'gcore_view_inventory';
+function storedInventoryView(): 'list' | 'kanban' {
+  try {
+    return localStorage.getItem(INVENTORY_VIEW_KEY) === 'kanban' ? 'kanban' : 'list';
+  } catch {
+    return 'list';
+  }
+}
+
 export function Inventory() {
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const asked = params.get('view');
+  const view: 'list' | 'kanban' = asked === 'kanban' || asked === 'list' ? asked : storedInventoryView();
   const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
+
+  function chooseView(next: 'list' | 'kanban') {
+    try {
+      localStorage.setItem(INVENTORY_VIEW_KEY, next);
+    } catch {
+      // A browser that keeps nothing still switches; it just will not remember.
+    }
+    const p = new URLSearchParams(params);
+    p.set('view', next);
+    p.delete('page');
+    setParams(p, { replace: true });
+  }
 
   useEffect(() => {
     api.get<typeof warehouses>('/warehouses').then(setWarehouses).catch(() => {});
@@ -1214,27 +1239,197 @@ export function Inventory() {
         <div>
           <h1>Inventory</h1>
         </div>
+        {/* List or Kanban (2026-10-14, the owner's call) — one query behind both. */}
+        <div className="scope-switch" role="group" aria-label="View">
+          <button type="button" className={view === 'list' ? 'active' : ''} aria-pressed={view === 'list'} onClick={() => chooseView('list')}>
+            List
+          </button>
+          <button type="button" className={view === 'kanban' ? 'active' : ''} aria-pressed={view === 'kanban'} onClick={() => chooseView('kanban')}>
+            Kanban
+          </button>
+        </div>
       </div>
 
-      <DataList<StockRow>
-        listKey="inventory"
-        endpoint="/inventory"
-        printPath="/api/inventory/pdf"
-        columns={columns}
-        rowKey={(s) => s.id}
-        searchPlaceholder="Search item name, code, part number…"
-        onRowClick={(s) => navigate(`/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}`)}
-        emptyTitle="No stock yet"
-        emptyHint="Stock appears once goods are received into a warehouse."
-        filters={[
-          {
-            key: 'warehouseId',
-            label: 'Warehouse',
-            options: warehouses.map((w) => ({ value: w.id, label: w.name })),
-          },
-          { key: 'needsReorder', label: 'Reorder', options: [{ value: 'true', label: 'Below level' }] },
-        ]}
-      />
+      {view === 'kanban' ? (
+        <InventoryBoard warehouses={warehouses} />
+      ) : (
+        <DataList<StockRow>
+          listKey="inventory"
+          endpoint="/inventory"
+          printPath="/api/inventory/pdf"
+          columns={columns}
+          rowKey={(s) => s.id}
+          searchPlaceholder="Search item name, code, part number…"
+          onRowClick={(s) => navigate(`/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}`)}
+          emptyTitle="No stock yet"
+          emptyHint="Stock appears once goods are received into a warehouse."
+          filters={[
+            {
+              key: 'warehouseId',
+              label: 'Warehouse',
+              options: warehouses.map((w) => ({ value: w.id, label: w.name })),
+            },
+            { key: 'needsReorder', label: 'Reorder', options: [{ value: 'true', label: 'Below level' }] },
+          ]}
+        />
+      )}
+    </div>
+  );
+}
+
+interface BoardCard {
+  id: string;
+  item: { id: string; code: string; partNumber: string | null; name: string; unit: string; reorderLevel: number | null };
+  warehouse: { id: string; name: string };
+  quantity: number;
+  borrowedQty: number;
+  available: number;
+  value: number;
+  needsReorder: boolean;
+}
+
+interface Board {
+  total: number;
+  cap: number;
+  columns: { warehouse: { id: string; name: string }; count: number; value: number; cards: BoardCard[] }[];
+  outOfStock: { count: number; cards: BoardCard[] };
+}
+
+/**
+ * The stock as a board: a column per warehouse holding what it has
+ * available, and Out of stock for what has none — the list's own query
+ * (`GET /inventory/board`), its search and filters read from and written to
+ * the same URL keys, so switching views keeps them. No dragging: stock moves
+ * by documents. A card opens the item's stock card.
+ */
+function InventoryBoard({ warehouses }: { warehouses: { id: string; name: string }[] }) {
+  const [params, setParams] = useSearchParams();
+  const q = params.get('q') ?? '';
+  const warehouseId = params.get('warehouseId') ?? '';
+  const needsReorder = params.get('needsReorder') === 'true';
+  const [typed, setTyped] = useState(q);
+  const [board, setBoard] = useState<Board | null>(null);
+  const [error, setError] = useState<unknown>(null);
+
+  const setParam = useCallback(
+    (key: string, value: string) => {
+      setParams(
+        (prev) => {
+          const p = new URLSearchParams(prev);
+          if (value) p.set(key, value);
+          else p.delete(key);
+          p.delete('page');
+          return p;
+        },
+        { replace: true },
+      );
+    },
+    [setParams],
+  );
+
+  // The search box writes `?q=` a moment after typing stops.
+  useEffect(() => {
+    if (typed === q) return;
+    const t = window.setTimeout(() => setParam('q', typed.trim()), 300);
+    return () => window.clearTimeout(t);
+  }, [typed, q, setParam]);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .get<Board>(`/inventory/board${qs({ search: q || undefined, warehouseId: warehouseId || undefined, needsReorder: needsReorder ? 'true' : undefined })}`)
+      .then((b) => {
+        if (!live) return;
+        setBoard(b);
+        setError(null);
+      })
+      .catch((err) => live && setError(err));
+    return () => {
+      live = false;
+    };
+  }, [q, warehouseId, needsReorder]);
+
+  const cardOf = (c: BoardCard, showWarehouse: boolean) => (
+    <Link key={c.id} to={`/g-chain/inventory/${c.item.id}?warehouseId=${c.warehouse.id}`} className={`inv-card${c.needsReorder ? ' is-low' : ''}`}>
+      <span className="inv-card-name">{c.item.name}</span>
+      <span className="inv-card-code mono">
+        {c.item.code}
+        {c.item.partNumber ? ` · ${c.item.partNumber}` : ''}
+      </span>
+      <span className="inv-card-figures">
+        <span className="inv-card-available mono">
+          {c.available} {c.item.unit}
+        </span>
+        <span className="faint">available</span>
+      </span>
+      <span className="inv-card-foot faint">
+        {showWarehouse ? `${c.warehouse.name} · ` : ''}
+        {c.quantity} on hand{c.borrowedQty ? ` · ${c.borrowedQty} on loan` : ''}
+        {c.needsReorder && <span className="badge warn">reorder</span>}
+      </span>
+    </Link>
+  );
+
+  return (
+    <div>
+      <div className="inv-board-tools">
+        <input
+          type="search"
+          className="inv-board-search"
+          aria-label="Search the stock"
+          placeholder="Search item name, code, part number…"
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+        />
+        <select aria-label="Warehouse" value={warehouseId} onChange={(e) => setParam('warehouseId', e.target.value)}>
+          <option value="">Every warehouse</option>
+          {warehouses.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name}
+            </option>
+          ))}
+        </select>
+        <label className="row inv-board-check">
+          <input type="checkbox" checked={needsReorder} onChange={(e) => setParam('needsReorder', e.target.checked ? 'true' : '')} />
+          Below reorder level only
+        </label>
+        {board && <span className="faint">{board.total} stock line{board.total === 1 ? '' : 's'}</span>}
+      </div>
+      <ErrorBox error={error} />
+      {!board ? (
+        <Loading />
+      ) : (
+        <div className="inv-board" role="list" aria-label="Stock by warehouse">
+          {board.columns.map((col) => (
+            <section key={col.warehouse.id} className="inv-col" role="listitem" aria-label={col.warehouse.name}>
+              <header className="inv-col-head">
+                <span className="inv-col-name">{col.warehouse.name}</span>
+                <span className="faint">
+                  {col.count} item{col.count === 1 ? '' : 's'} · {formatMoney(col.value)}
+                </span>
+              </header>
+              <div className="inv-col-cards">
+                {col.cards.length ? col.cards.map((c) => cardOf(c, false)) : <p className="faint inv-col-empty">Nothing available here</p>}
+                {col.count > col.cards.length && <p className="faint inv-col-empty">{col.count - col.cards.length} more — narrow the search to see them</p>}
+              </div>
+            </section>
+          ))}
+          <section className="inv-col is-out" role="listitem" aria-label="Out of stock">
+            <header className="inv-col-head">
+              <span className="inv-col-name">Out of stock</span>
+              <span className="faint">
+                {board.outOfStock.count} item{board.outOfStock.count === 1 ? '' : 's'} · none available
+              </span>
+            </header>
+            <div className="inv-col-cards">
+              {board.outOfStock.cards.length ? board.outOfStock.cards.map((c) => cardOf(c, true)) : <p className="faint inv-col-empty">Nothing has run out</p>}
+              {board.outOfStock.count > board.outOfStock.cards.length && (
+                <p className="faint inv-col-empty">{board.outOfStock.count - board.outOfStock.cards.length} more — narrow the search to see them</p>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

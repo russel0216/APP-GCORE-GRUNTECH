@@ -2812,6 +2812,74 @@ inventoryRoutes.get(
   }),
 );
 
+/** The most cards a board column draws; the column says how many more it holds. */
+const BOARD_CAP = 200;
+
+/**
+ * The Kanban view of the stock (2026-10-14, the owner's call: "Inventory —
+ * can be switched to Kanban or List view"): a column per active warehouse
+ * (and any other warehouse a row names) holding what it has AVAILABLE, and an
+ * "Out of stock" column for every row with nothing available — none on hand,
+ * or everything lent. The SAME query as the list (`inventoryListWhere`, every
+ * filter and search), so the board's total is the list's; no dragging — a
+ * card opens the stock card. Above `/:itemId/card`.
+ */
+inventoryRoutes.get(
+  '/board',
+  require_('gchain.inventory.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = await inventoryListWhere(q);
+    const [rows, active] = await Promise.all([
+      prisma.inventoryBalance.findMany({
+        where,
+        include: {
+          item: { select: { id: true, code: true, partNumber: true, name: true, unit: true, reorderLevel: true } },
+          warehouse: { select: { id: true, name: true } },
+        },
+        orderBy: { item: { name: 'asc' } },
+      }),
+      prisma.warehouse.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    ]);
+    const card = (r: (typeof rows)[number]) => {
+      const quantity = num(r.quantity);
+      return {
+        id: r.id,
+        item: { ...r.item, reorderLevel: r.item.reorderLevel == null ? null : num(r.item.reorderLevel) },
+        warehouse: r.warehouse,
+        quantity,
+        borrowedQty: num(r.borrowedQty),
+        available: availableOf(r),
+        value: cents(quantity * num(r.averageCost)),
+        needsReorder: belowReorder(r),
+      };
+    };
+    const inStock = rows.filter((r) => availableOf(r) > 0);
+    const empty = rows.filter((r) => availableOf(r) <= 0);
+    // Every active warehouse has its column — unless the list is narrowed to
+    // one, which is then the only one — and an inactive one still holding a
+    // row is shown too, so no row falls off the board.
+    const named = q.filters.warehouseId ? active.filter((w) => w.id === q.filters.warehouseId) : active;
+    const seen = new Map(named.map((w) => [w.id, w]));
+    for (const r of inStock) if (!seen.has(r.warehouseId)) seen.set(r.warehouseId, r.warehouse);
+    const columns = [...seen.values()].map((w) => {
+      const here = inStock.filter((r) => r.warehouseId === w.id);
+      return {
+        warehouse: w,
+        count: here.length,
+        value: cents(here.reduce((s, r) => s + num(r.quantity) * num(r.averageCost), 0)),
+        cards: here.slice(0, BOARD_CAP).map(card),
+      };
+    });
+    res.json({
+      total: rows.length,
+      columns,
+      outOfStock: { count: empty.length, cards: empty.slice(0, BOARD_CAP).map(card) },
+      cap: BOARD_CAP,
+    });
+  }),
+);
+
 /**
  * The stock on hand on paper, through `inventoryListWhere` (or the rows
  * ticked, `?ids=`): what the screen shows — on hand, on loan, available, the

@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,177 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,179 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -573,10 +573,11 @@ twice against its budget, and 2 on foundation for the owner's order of the
 divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
-borrow requests, and 17 on chain for pull-out slips):
+borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
+inventory board):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 304, hr 468, plantilla 123, meetings
+79, partners 120, delivery 171, chain 306, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4659,6 +4660,22 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   say what came from stock. The list (`listWhere` → `{ base, where }`,
   cards Waiting for approval / Pulled out / Drafts) prints; Ctrl+K finds
   slips.
+- **Inventory switches between List and Kanban** (push 4d; the owner's
+  call, like gasiontech's). A List / Kanban switch in the page head;
+  `?view=kanban|list` in the URL (a link's view wins), and the viewer's last
+  CHOICE kept per browser in `gcore_view_inventory` (wrapped in try/catch —
+  a browser that keeps nothing still switches). `GET /inventory/board`
+  reads **the list's own query** (`inventoryListWhere`: search,
+  warehouse, below reorder level) and answers a column per active
+  warehouse (only the one a `warehouseId` narrows to; an inactive one still
+  holding a row is shown too) with what it has AVAILABLE, and **Out of
+  stock** for every row with nothing available (none on hand, or all lent),
+  each card naming its warehouse; `total` is the list's, which
+  verify-chain asserts, and a column draws 200 cards at most and says how
+  many more. No dragging — stock moves by documents; a card is a link to
+  the stock card. The board's toolbar writes the list's own URL keys (`q`,
+  `warehouseId`, `needsReorder`), so switching views keeps the filter. The
+  styles are the `inv-*` rules in `styles/procurement.css`.
 
 ## Spreadsheet attachments (2026-10-05)
 

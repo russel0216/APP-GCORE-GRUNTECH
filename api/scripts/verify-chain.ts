@@ -3429,6 +3429,37 @@ async function main() {
       check('a request that buys for warehouse stock is not pulled out against', stockSource.status === 400, String(stockSource.status));
     }
 
+    // ── Inventory as a board (2026-10-14) ────────────────────────────────
+    // The Kanban view reads the list's own query: the same rows, every
+    // warehouse a column of what it has available, the rest Out of stock.
+    console.log('\nInventory as a board (over HTTP)');
+    {
+      const invRole = await makeRole('zzchain_stockview', 'ZZ Stock viewer', ['gchain.inventory.view_all']);
+      const viewer = await mkUser('Verify Stock Viewer', 'stockview@verifyc.local', invRole.id);
+      const viewerToken = signToken(viewer.id, viewer.email);
+      const outItem = await prisma.item.create({ data: { code: `${TAG}-OUT`, name: `${TAG} Spent gasket`, unit: 'pcs' } });
+      await prisma.inventoryBalance.create({ data: { itemId: outItem.id, warehouseId: warehouse.id, quantity: D(0), averageCost: D(10) } });
+      const listed = await api(viewerToken, 'GET', `/inventory?search=${TAG}&pageSize=200`);
+      const board = await api(viewerToken, 'GET', `/inventory/board?search=${TAG}`);
+      type BoardCol = { warehouse: { id: string }; count: number; cards: { id: string; available: number }[] };
+      const cols = (board.body.columns ?? []) as BoardCol[];
+      const out = (board.body.outOfStock ?? { count: 0, cards: [] }) as { count: number; cards: { id: string; available: number; item: { id: string } }[] };
+      const onBoard = cols.reduce((n, c) => n + c.count, 0) + out.count;
+      check(
+        'the board holds exactly the rows the list holds for the same search — every column counted, Out of stock included',
+        board.status === 200 && listed.status === 200 && board.body.total === listed.body.total && onBoard === listed.body.total,
+        `${board.body.total} / ${onBoard} vs ${listed.body.total}`,
+      );
+      check(
+        'a warehouse column holds only what is available there; a row with nothing available is Out of stock',
+        cols.every((c) => c.cards.every((k) => k.available > 0)) &&
+          out.cards.every((k) => k.available <= 0) &&
+          out.cards.some((k) => k.item.id === outItem.id) &&
+          cols.some((c) => c.warehouse.id === warehouse.id),
+        JSON.stringify(out.cards.map((k) => k.available)).slice(0, 120),
+      );
+    }
+
     // ── Incoming goes for approval (2026-10-14) ──────────────────────────
     // A receiving report is saved as a draft and posts NOTHING until the
     // receiver's "Reports to" approves it: the stock, the order's received
