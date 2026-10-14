@@ -32,7 +32,14 @@ interface PdfField {
  * A table cell: plain text, or a bold title with regular text under it — the
  * way a quotation line prints its product title above its description.
  */
-export type PdfCell = string | { title: string; body?: string };
+/**
+ * A cell: plain text, or a title over a body. `plain` draws the title regular
+ * (a figure, not a name); `accent` and `note` are the costing's supplier and
+ * line note under a unit cost (2026-10-14) — the accent in the subheading
+ * colour, the note in the description colour — which a designed layout's line
+ * table may switch off (`lineNotes`). `renderDocument` reads title and body.
+ */
+export type PdfCell = string | { title: string; body?: string; plain?: boolean; accent?: string; note?: string };
 
 /**
  * A table row: its cells, or a subheading between the lines — 9.5pt green on

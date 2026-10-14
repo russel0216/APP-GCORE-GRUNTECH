@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,088 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,094 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -567,9 +567,10 @@ costing's PDF template and 37 on hr for People Flow, and 2 on foundation
 for the Technical Manager on the preparer's team, and one on foundation
 for Back Support's own team, and 3 on foundation and 13 on chain for the
 purchase requisition page, and one on foundation and 9 on chain for the
-purchase order page):
+purchase order page, and one on foundation and 5 on costing for a line's
+supplier and note):
 foundation
-369, masters 92, sales 608, costing 192, pipeline 121, calendar 98, numbering
+370, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 171, chain 224, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
@@ -4546,6 +4547,26 @@ Cost Estimate" PDF) in G-CORE's own style.
   legend "Planned duration in working days (Mon–Sat) — N working days in
   all, <start> to <finish>." (`planLegend()`), and the Gantt appendix dates
   its columns ("Oct 14", the `gantt` section's `startDate`).
+- **A line names its supplier and a note** (2026-10-14, the owner's call:
+  "maximize this space" — the room under the unit cost):
+  `CostingLine.supplierId` (SetNull), `supplierName` (a name not on file,
+  kept as typed) and `lineNote`, all nullable. The sheet's cost cell has a
+  Supplier box (free text, offering active suppliers through `GET
+  /costings/suggest/suppliers`, names only, behind the costing's own right —
+  an engineer need not read the supplier master) and a Note box. At save a
+  typed name equal (case- and space-blind) to ONE active supplier is linked
+  (`suppliersByName()` in `routes/costing.ts`); an unknown `supplierId` is a
+  400; Duplicate keeps both. **The paper prints them under the unit cost** —
+  the supplier in the subheading green, the note in the description grey,
+  the figure regular: `costingLineRow({ supplier, note })` gives that cell
+  `{ title, plain, accent, note }` (`PdfCell`'s optional fields; only the
+  designed engine draws `accent`/`note`), and the line table's **`lineNotes`**
+  switch (default on; "A line's supplier and note, under its unit cost" in
+  Admin › PDF Templates) leaves them off. **They carry to a purchase
+  requisition**: `lineSuggestions()` sends each costing line's `supplier`,
+  and picking lines (typed or "Add from costing…") fills an EMPTY Preferred
+  supplier with their suppliers, each once (`preferredFrom()` in
+  `lib/prLines.ts`, pinned by verify-foundation) — never over one typed.
 - **VAT is the company rate or 0%** (`checkVatRate`, as on the quotation),
   snapshotted at creation; a draft keeps its rate after Settings change.
 - **Approval is the seeded `costing` workflow — TWO signatures since the

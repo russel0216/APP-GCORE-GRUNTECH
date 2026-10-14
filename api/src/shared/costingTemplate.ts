@@ -70,8 +70,21 @@ export const COSTING_COLUMN_LABELS: Partial<Record<ItemColumnKey, string>> = {
 };
 
 /** A line of the cost table — its code, its name over its description, unit, quantity, unit cost, amount. */
-export function costingLineRow(l: { code: string | null; name: string; description?: string | null; unit: string; quantity: number; unitCost: string; amount: string }) {
+export function costingLineRow(l: {
+  code: string | null;
+  name: string;
+  description?: string | null;
+  unit: string;
+  quantity: number;
+  unitCost: string;
+  amount: string;
+  /** Printed under the unit cost (2026-10-14): who supplies it, then the line's note. */
+  supplier?: string | null;
+  note?: string | null;
+}) {
   const body = l.description && l.description !== l.name ? l.description : undefined;
+  const supplier = l.supplier?.trim();
+  const note = l.note?.trim();
   return {
     cells: {
       no: l.code ?? '',
@@ -79,7 +92,7 @@ export function costingLineRow(l: { code: string | null; name: string; descripti
       unit: l.unit,
       qty: formatQuantity(l.quantity),
       qtyUnit: `${formatQuantity(l.quantity)} ${l.unit}`.trim(),
-      unitPrice: l.unitCost,
+      unitPrice: supplier || note ? { title: l.unitCost, plain: true, accent: supplier || undefined, note: note || undefined } : l.unitCost,
       amount: l.amount,
     },
   };
@@ -92,7 +105,7 @@ export function costingSample(long = false): DesignData {
   const fields = Object.fromEntries(COSTING_FIELDS.map((f) => [f.key, f.sample ?? '']));
   const rows: DesignData['rows'] = [
     { heading: '1   Materials' },
-    costingLineRow({ code: '101', name: 'VFD 15 kW', description: 'Variable frequency drive, IP54', unit: 'unit', quantity: 2, unitCost: '45,000.50', amount: '90,001.00' }),
+    costingLineRow({ code: '101', name: 'VFD 15 kW', description: 'Variable frequency drive, IP54', unit: 'unit', quantity: 2, unitCost: '45,000.50', amount: '90,001.00', supplier: 'SCHNEIDER ELECTRIC PH', note: 'Quote SE-2210, 8–10 weeks' }),
     costingLineRow({ code: '102', name: 'Consumables', unit: 'lot', quantity: 1, unitCost: '3,000.00', amount: '3,000.00' }),
   ];
   if (long) for (let i = 3; i <= 40; i++) rows.push(costingLineRow({ code: String(100 + i), name: `Cable tray fitting, item ${i}`, description: 'Hot-dip galvanised, 300 mm', unit: 'pcs', quantity: 4, unitCost: '350.00', amount: '1,400.00' }));
@@ -211,7 +224,7 @@ export const STANDARD_COSTING_DESIGN: PdfDesign = {
         { key: 'unitPrice', label: 'Unit cost ({{costing.currency}})', width: 81, align: 'right' },
         { key: 'amount', label: 'Amount ({{costing.currency}})', width: 90.28, align: 'right' },
       ],
-      size: 9, headColor: PURPLE, headingColor: GREEN, textColor: INK, bodyColor: '#555555', ruleColor: RULE,
+      size: 9, headColor: PURPLE, headingColor: GREEN, textColor: INK, bodyColor: '#555555', ruleColor: RULE, lineNotes: true,
     },
     {
       id: 'totals', name: 'Summary', type: 'totals', anchor: 'after', x: 299.48, y: 496, w: 259.8, h: 128,

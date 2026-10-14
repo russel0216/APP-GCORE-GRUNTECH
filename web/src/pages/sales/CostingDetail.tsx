@@ -42,6 +42,10 @@ export interface CostLine {
   sortOrder: number;
   costCategory: { id: string; code: string; name: string; sortOrder: number };
   item: Ref | null;
+  /** Who supplies it — on file, else the name typed — and the line's note (printed). */
+  supplier?: { id: string; name: string } | null;
+  supplierName?: string | null;
+  lineNote?: string | null;
 }
 
 /** "Oct 14" — a plan's day on the calendar, short enough for a Start or End cell. */
@@ -511,7 +515,13 @@ export function CostingDetailPage() {
                               </td>
                               <td>{line.unit}</td>
                               <td className="right mono">{line.quantity}</td>
-                              <td className="right mono">{formatMoney(line.unitCost)}</td>
+                              <td className="right">
+                                <span className="mono">{formatMoney(line.unitCost)}</span>
+                                {(line.supplier?.name || line.supplierName) && (
+                                  <div className="cs-line-supplier">{line.supplier?.name ?? line.supplierName}</div>
+                                )}
+                                {line.lineNote && <div className="faint cs-line-desc">{line.lineNote}</div>}
+                              </td>
                               <td className="right mono">{formatMoney(line.amount)}</td>
                             </tr>
                           ),

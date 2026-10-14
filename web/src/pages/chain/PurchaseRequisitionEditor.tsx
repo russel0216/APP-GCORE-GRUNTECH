@@ -7,7 +7,7 @@ import { NumberInput } from '../../components/NumberInput';
 import { ApprovalStepper, allHeld, previewSteps } from '../../components/ApprovalStepper';
 import { Meter } from '../../components/charts';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
-import { parseDelimited, prLineAmount, rowsToPrLines, type PrLineDraft } from '../../lib/prLines';
+import { parseDelimited, preferredFrom, prLineAmount, rowsToPrLines, type PrLineDraft } from '../../lib/prLines';
 
 /**
  * The purchase requisition as a PAGE (2026-10-13, the owner's call: "Purchase
@@ -57,6 +57,8 @@ export interface Suggestion {
   unit: string;
   unitCost: number | null;
   costCategory: Category | null;
+  /** The supplier the costing names on the line (costing suggestions only). */
+  supplier?: string | null;
 }
 
 export interface Route {
@@ -319,6 +321,15 @@ export function PurchaseRequisitionEditor() {
       unit: sg.unit || 'pcs',
       ...(sg.unitCost != null ? { estimatedCost: String(sg.unitCost) } : {}),
       ...(sg.costCategory ? { costCategoryId: sg.costCategory.id } : {}),
+    });
+    takeSupplier([sg.supplier]);
+  }
+
+  /** An empty "Preferred supplier" takes the supplier the costing names. */
+  function takeSupplier(names: (string | null | undefined)[]) {
+    setHeader((h) => {
+      const next = preferredFrom(h.preferredSupplier, names);
+      return next === h.preferredSupplier ? h : { ...h, preferredSupplier: next };
     });
   }
 
@@ -628,6 +639,7 @@ export function PurchaseRequisitionEditor() {
                       estimatedCost: sg.unitCost != null ? String(sg.unitCost) : '',
                     })),
                   );
+                  takeSupplier(picked.map((sg) => sg.supplier));
                   setCostingPanel(false);
                   toast('ok', `${picked.length} line${picked.length === 1 ? '' : 's'} added from the costing`);
                 }}

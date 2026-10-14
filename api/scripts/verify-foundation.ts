@@ -107,7 +107,7 @@ import { readWorkbook } from '../../web/src/lib/spreadsheetRead';
 import { workingDayDate } from '../src/shared/day';
 import { ARCHIVE_ATTACHMENT, ARCHIVE_LIST_KEY, SCORO_ARCHIVE_REMOVED, removeScoroArchive } from '../src/shared/scoroArchive';
 import { recordLink } from '../../web/src/lib/links';
-import { parseDelimited, rowsToPrLines, prLineAmount, matchCategory, orderTotals } from '../../web/src/lib/prLines';
+import { parseDelimited, rowsToPrLines, prLineAmount, matchCategory, orderTotals, preferredFrom } from '../../web/src/lib/prLines';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
 import { contentStreams, pdfRuns, pdfText, runWidth, shown, type PdfRun } from './lib/paper';
@@ -2533,6 +2533,14 @@ async function main() {
       added.subtotal === 4702 && added.vatAmount === 564.24 && added.total === 5266.24 &&
         inside.subtotal === 2626.5 && inside.vatAmount === 281.41 && inside.total === 2626.5,
       JSON.stringify([added, inside]),
+    );
+    const many = Array.from({ length: 30 }, (_, i) => `SUPPLIER NUMBER ${i}`);
+    check(
+      'lines from the costing fill an empty preferred supplier with their suppliers, each once, and never overwrite one typed',
+      preferredFrom('', ['ABB', null, ' abb ', 'Schneider  PH', '']) === 'ABB, Schneider PH' &&
+        preferredFrom('Typed Co', ['ABB']) === 'Typed Co' &&
+        preferredFrom('', [null]) === '' &&
+        preferredFrom('', many).length <= 200,
     );
   }
 

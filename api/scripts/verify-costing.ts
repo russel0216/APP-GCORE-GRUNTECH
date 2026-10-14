@@ -118,6 +118,7 @@ async function cleanup() {
   await prisma.costingTemplate.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.item.deleteMany({ where: { code: { startsWith: TAG } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
+  await prisma.supplier.deleteMany({ where: { code: { startsWith: TAG } } });
   await prisma.lead.deleteMany({ where: { companyName: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
 
@@ -1000,6 +1001,8 @@ async function main() {
   const oddVat = await api(tEstimator, 'POST', '/costings', { title: `${TAG} odd VAT`, vatRate: 0.05 });
   check('a VAT rate that is neither the company rate nor 0% is refused', oddVat.status === 400, `status ${oddVat.status}`);
 
+  // A line's supplier (2026-10-14): a name on file is linked, anything else kept as typed.
+  const onFile = await prisma.supplier.create({ data: { code: `${TAG}-SUP`, name: `${TAG} Power Supply` } });
   const sheet = {
     title: `${TAG} Booster VFD controller`,
     customerId: customer.id,
@@ -1014,8 +1017,8 @@ async function main() {
     notes: 'Internal only',
     lines: [
       { costCategoryId: mat.id, isHeading: true, name: 'Panel' },
-      { costCategoryId: mat.id, name: `${TAG} VFD 15KW`, description: 'Variable frequency drive', quantity: 2, unit: 'unit', unitCost: 45000.5 },
-      { costCategoryId: mat.id, name: `${TAG} Consumables`, quantity: 1, unit: 'lot', unitCost: 3000 },
+      { costCategoryId: mat.id, name: `${TAG} VFD 15KW`, description: 'Variable frequency drive', quantity: 2, unit: 'unit', unitCost: 45000.5, supplierName: `${TAG} Drives   Trading`, lineNote: `${TAG} quote 2210, 8 weeks` },
+      { costCategoryId: mat.id, name: `${TAG} Consumables`, quantity: 1, unit: 'lot', unitCost: 3000, supplierName: ` ${TAG.toLowerCase()} power  supply ` },
       { costCategoryId: lab.id, name: `${TAG} Assembly and programming`, quantity: 1, unit: 'lot', unitCost: 39400 },
     ],
     sections: [
@@ -1035,6 +1038,22 @@ async function main() {
   const created = await api(tEstimator, 'POST', '/costings', sheet);
   check('POST /costings writes the header, lines and scope in one save', created.status === 201, `status ${created.status}: ${JSON.stringify(created.body).slice(0, 300)}`);
   const sheetId = created.body.id as string;
+  {
+    const ls = await prisma.costingLine.findMany({ where: { costingId: sheetId, isHeading: false }, orderBy: { sortOrder: 'asc' } });
+    check(
+      'a line’s supplier: a name on file is linked (case- and space-blind), one not on file kept as typed, with the line’s note',
+      ls[0].supplierId === null && ls[0].supplierName === `${TAG} Drives Trading` && ls[0].lineNote === `${TAG} quote 2210, 8 weeks` &&
+        ls[1].supplierId === onFile.id && ls[1].supplierName === null && ls[2].supplierId === null && ls[2].supplierName === null,
+      JSON.stringify(ls.map((l) => [l.supplierId, l.supplierName, l.lineNote])),
+    );
+    const offered = await api(tEstimator, 'GET', `/costings/suggest/suppliers?q=${TAG}%20power`);
+    const ghost = await api(tEstimator, 'POST', '/costings', { title: `${TAG} ghost supplier`, lines: [{ costCategoryId: mat.id, name: 'x', quantity: 1, unitCost: 1, supplierId: 'nope' }] });
+    check(
+      'the Supplier box offers suppliers on file to whoever costs (names only), and an unknown supplier id is refused',
+      offered.status === 200 && Array.isArray(offered.body) && offered.body.length === 1 && Object.keys(offered.body[0]).sort().join() === 'id,name' && ghost.status === 400,
+      `${offered.status} ${JSON.stringify(offered.body)} ${ghost.status}`,
+    );
+  }
   const stored = await prisma.costing.findUnique({
     where: { id: sheetId },
     include: { lines: { orderBy: { sortOrder: 'asc' } }, scopeSections: { orderBy: { sortOrder: 'asc' }, include: { tasks: { orderBy: { sortOrder: 'asc' } } } } },
@@ -1112,8 +1131,8 @@ async function main() {
     title: `${TAG} Booster VFD controller rev`,
     vatRate: 0.12,
     lines: [
-      { id: keepLine.id, costCategoryId: mat.id, name: keepLine.name, description: 'Variable frequency drive, 15 kW', quantity: 3, unit: 'unit', unitCost: 45000.5 },
-      { costCategoryId: eqp.id, name: `${TAG} Crane hire`, quantity: 1, unit: 'day', unitCost: 8000 },
+      { id: keepLine.id, costCategoryId: mat.id, name: keepLine.name, description: 'Variable frequency drive, 15 kW', quantity: 3, unit: 'unit', unitCost: 45000.5, supplierName: `${TAG} Drives Trading`, lineNote: `${TAG} quote 2210, 8 weeks` },
+      { costCategoryId: eqp.id, name: `${TAG} Crane hire`, quantity: 1, unit: 'day', unitCost: 8000, supplierId: onFile.id },
     ],
     sections: [
       {
@@ -1368,6 +1387,26 @@ async function main() {
       );
     }
   }
+  {
+    const text = runs.join(' ');
+    check(
+      'the paper prints each line’s supplier and note under its unit cost, the unit cost itself not bold',
+      // The cost column is narrow, so each wraps onto lines of its own.
+      text.includes(`${TAG} Drives Trading`) && text.includes(`${TAG} quote 2210, 8 weeks`) && text.includes(`${TAG} Power Supply`) && runs.includes('45,000.50'),
+      runs.filter((r) => /ZZCOST|45,000/.test(r)).join(' | '),
+    );
+    await stashCostingLayout();
+    const quiet = structuredClone(STANDARD_COSTING_DESIGN);
+    const items = quiet.blocks.find((bl) => bl.type === 'items');
+    if (items && items.type === 'items') items.lineNotes = false;
+    await prisma.setting.create({ data: { key: COSTING_TEMPLATE_KEY, value: quiet as unknown as object } });
+    const quietRuns = pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer()));
+    await restoreCostingLayout();
+    check(
+      'a layout with the switch off prints neither the supplier nor the note',
+      !quietRuns.join(' ').includes(`${TAG} Drives`) && !quietRuns.join(' ').includes(`${TAG} quote`) && quietRuns.includes('45,000.50'),
+    );
+  }
   check('the validity prints as a record’s date (October 30, 2026)', runs.some((r) => r.includes('Valid until: October 30, 2026')), runs.filter((r) => r.includes('Valid')).join(' | '));
   {
     const shown = await api(tEstimator, 'GET', `/costings/${sheetId}`);
@@ -1407,6 +1446,10 @@ async function main() {
       dupStored?.systemUnit === sheet.systemUnit &&
       dupStored?.scopeSections[0].tasks.some((t) => t.startDay === 3) === true &&
       dupStored?.validUntil === null,
+  );
+  check(
+    'a duplicate keeps each line’s supplier and note',
+    dupStored?.lines.some((l) => l.supplierId === onFile.id) === true && dupStored?.lines.some((l) => l.lineNote === `${TAG} quote 2210, 8 weeks`) === true,
   );
 
   // A FINAL costing prints the approval that made it final — and none when

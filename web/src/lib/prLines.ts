@@ -191,3 +191,28 @@ export function orderTotals(amounts: number[], vatRate: number, vatInclusive: bo
   const total = vatInclusive ? subtotal : cents(subtotal + vatAmount);
   return { subtotal, vatAmount, total };
 }
+
+/**
+ * The request's preferred supplier after lines come from the costing
+ * (2026-10-14): what is typed stays; an empty box takes the suppliers the
+ * costing names on those lines — each once, case-blind, in order — up to the
+ * column's 200 characters.
+ */
+export function preferredFrom(current: string, suppliers: (string | null | undefined)[]): string {
+  if (current.trim()) return current;
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const raw of suppliers) {
+    const name = (raw ?? '').trim().replace(/\s+/g, ' ');
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    names.push(name);
+  }
+  let out = '';
+  for (const n of names) {
+    const next = out ? `${out}, ${n}` : n;
+    if (next.length > 200) break;
+    out = next;
+  }
+  return out;
+}

@@ -81,6 +81,8 @@ export interface ItemsBlock extends Base {
   textColor: string;
   bodyColor: string;
   ruleColor: string;
+  /** A line's supplier and note under its figure, where the line has them (the costing). */
+  lineNotes?: boolean;
 }
 
 export interface TotalsBlock extends Base {
@@ -135,7 +137,7 @@ export interface FieldDef {
   sample?: string;
 }
 
-export type PdfCell = string | { title: string; body?: string };
+export type PdfCell = string | { title: string; body?: string; plain?: boolean; accent?: string; note?: string };
 
 export interface Sample {
   rows: ({ heading: string } | { cells: Partial<Record<ColumnKey, PdfCell>> })[];

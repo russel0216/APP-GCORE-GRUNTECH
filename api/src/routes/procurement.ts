@@ -381,6 +381,8 @@ export async function lineSuggestions(me: ResolvedUser, term: string, jobId: str
             itemId: true,
             item: { select: { partNumber: true } },
             costCategory: { select: { id: true, code: true, name: true } },
+            supplierName: true,
+            supplier: { select: { name: true } },
           },
         })
       : [],
@@ -420,6 +422,8 @@ export async function lineSuggestions(me: ResolvedUser, term: string, jobId: str
       unit: l.unit,
       unitCost: seesCostingCost ? num(l.unitCost) : null,
       costCategory: l.costCategory,
+      /** Who the costing says supplies it — the request's preferred supplier when it names none. */
+      supplier: l.supplier?.name ?? l.supplierName ?? null,
     })),
     items: items.map((i) => ({
       id: i.id,

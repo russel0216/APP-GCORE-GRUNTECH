@@ -58,6 +58,9 @@ interface SheetLine {
   quantity: string;
   unit: string;
   unitCost: string;
+  /** Who supplies it (a name; the server links one on file) and a note — both print under the unit cost. */
+  supplier: string;
+  lineNote: string;
 }
 
 interface SheetTask {
@@ -174,6 +177,8 @@ const blankLine = (categoryId: string, isHeading = false): SheetLine => ({
   quantity: isHeading ? '' : '1',
   unit: isHeading ? '' : 'pc',
   unitCost: '',
+  supplier: '',
+  lineNote: '',
 });
 
 const blankTask = (): SheetTask => ({ key: nextKey('t'), name: '', startDay: '', durationDays: '1' });
@@ -405,6 +410,8 @@ export function CostingSheet() {
             quantity: l.isHeading ? '' : String(l.quantity),
             unit: l.isHeading ? '' : l.unit,
             unitCost: l.isHeading ? '' : String(l.unitCost),
+            supplier: l.supplier?.name ?? l.supplierName ?? '',
+            lineNote: l.lineNote ?? '',
           })),
         );
         setSections(
@@ -712,6 +719,8 @@ export function CostingSheet() {
         quantity: l.isHeading ? '' : String(l.quantity),
         unit: l.isHeading ? '' : l.unit,
         unitCost: l.isHeading || !l.unitCost ? '' : String(l.unitCost),
+        supplier: '',
+        lineNote: '',
       }));
       const newSections: SheetSection[] = t.sections.map((s) => ({
         key: nextKey('s'),
@@ -831,6 +840,8 @@ export function CostingSheet() {
         quantity: l.isHeading ? 0 : figure(l.quantity),
         unit: l.unit.trim() || 'pc',
         unitCost: l.isHeading ? 0 : figure(l.unitCost),
+        supplierName: l.isHeading ? null : l.supplier.trim() || null,
+        lineNote: l.isHeading ? null : l.lineNote.trim() || null,
       })),
       sections: keptSections.map((s) => ({
         ...(s.id ? { id: s.id } : {}),
@@ -1190,6 +1201,19 @@ export function CostingSheet() {
                                         addLine(cat.id);
                                       }
                                     }}
+                                  />
+                                  <SupplierBox
+                                    value={l.supplier}
+                                    label={`${label} supplier`}
+                                    onChange={(v) => updateLine(l.key, { supplier: v })}
+                                  />
+                                  <input
+                                    className="cs-line-note"
+                                    aria-label={`${label} note`}
+                                    placeholder="Note"
+                                    maxLength={500}
+                                    value={l.lineNote}
+                                    onChange={(e) => updateLine(l.key, { lineNote: e.target.value })}
                                   />
                                 </td>
                                 <td className="cs-col-amount right mono">
@@ -1777,3 +1801,48 @@ export function TemplateSavePanel({
   );
 }
 
+
+/**
+ * A line's Supplier box: free text, offering the suppliers on file as it is
+ * typed (`/costings/suggest/suppliers`, names only). A name matching one on
+ * file is linked by the server at save; anything else is kept as typed.
+ */
+function SupplierBox({ value, label, onChange }: { value: string; label: string; onChange: (v: string) => void }) {
+  const [options, setOptions] = useState<{ id: string; name: string }[]>([]);
+  const [focused, setFocused] = useState(false);
+  const listId = useMemo(() => nextKey('sup'), []);
+  useEffect(() => {
+    if (!focused) return;
+    let stale = false;
+    const t = setTimeout(() => {
+      api
+        .get<{ id: string; name: string }[]>(`/costings/suggest/suppliers${qs({ q: value.trim() || undefined })}`)
+        .then((rows) => !stale && setOptions(rows))
+        .catch(() => !stale && setOptions([]));
+    }, 200);
+    return () => {
+      stale = true;
+      clearTimeout(t);
+    };
+  }, [value, focused]);
+  return (
+    <>
+      <input
+        className="cs-line-supplier-input"
+        aria-label={label}
+        placeholder="Supplier"
+        maxLength={200}
+        list={listId}
+        value={value}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <datalist id={listId}>
+        {options.map((o) => (
+          <option key={o.id} value={o.name} />
+        ))}
+      </datalist>
+    </>
+  );
+}

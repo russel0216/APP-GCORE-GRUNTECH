@@ -674,6 +674,31 @@ costingRoutes.get(
  * latest Terms & Conditions, which a new costing starts from, and the scope
  * of work it opens on (`SCOPE_PRELOAD`).
  */
+/**
+ * Supplier names for a line's Supplier box (2026-10-14): active suppliers by
+ * name or code, names only, behind the costing's own right — an engineer
+ * costing a job need not read the supplier master to name who supplies a line.
+ */
+costingRoutes.get(
+  '/suggest/suppliers',
+  requireAny('gops.costing.view_all', 'gops.costing.view_own'),
+  handler(async (req, res) => {
+    const term = String(req.query.q ?? '').trim().slice(0, 100);
+    const rows = await prisma.supplier.findMany({
+      where: {
+        isActive: true,
+        ...(term
+          ? { OR: [{ name: { contains: term, mode: 'insensitive' } }, { code: { contains: term, mode: 'insensitive' } }] }
+          : {}),
+      },
+      orderBy: { name: 'asc' },
+      take: 15,
+      select: { id: true, name: true },
+    });
+    res.json(rows);
+  }),
+);
+
 costingRoutes.get(
   '/suggest/lists',
   requireAny('gops.costing.view_all', 'gops.costing.view_own'),
@@ -1009,6 +1034,7 @@ async function loadFull(id: string, tx: Tx = prisma) {
         include: {
           costCategory: { select: { id: true, code: true, name: true, sortOrder: true } },
           item: { select: { id: true, code: true, name: true } },
+          supplier: { select: { id: true, code: true, name: true } },
         },
       },
       scopeSections: {
@@ -1089,6 +1115,11 @@ const sheetLineSchema = z
     quantity: z.number().min(0).max(1e9).default(0),
     unit: z.string().trim().max(30).optional().nullable(),
     unitCost: z.number().min(0).max(1e12).default(0),
+    /** Who supplies it: a supplier on file, else a name typed (kept as text). */
+    supplierId: z.string().optional().nullable(),
+    supplierName: z.string().trim().max(200).optional().nullable(),
+    /** A short note, printed under the supplier. */
+    lineNote: z.string().trim().max(500).optional().nullable(),
   })
   .refine((l) => !!(l.name?.trim() || l.description?.trim()), { message: 'Name the line', path: ['name'] });
 
@@ -1171,6 +1202,11 @@ async function checkReferences(body: SheetBody, tx: Tx) {
     const found = await tx.item.count({ where: { id: { in: [...itemIds] } } });
     if (found !== itemIds.size) throw badRequest('A line names an item that does not exist');
   }
+  const supplierIds = new Set((body.lines ?? []).map((l) => l.supplierId).filter((v): v is string => !!v));
+  if (supplierIds.size) {
+    const found = await tx.supplier.count({ where: { id: { in: [...supplierIds] } } });
+    if (found !== supplierIds.size) throw badRequest('A line names a supplier that does not exist');
+  }
   if (body.siteId && body.customerId) {
     const site = await tx.customerSite.findUnique({ where: { id: body.siteId }, select: { customerId: true } });
     if (!site || site.customerId !== body.customerId) throw badRequest('That location is not one of the customer\'s sites');
@@ -1201,8 +1237,30 @@ const asDay = (v: string | null | undefined) => (v ? new Date(`${v}T00:00:00Z`) 
  * place, never deleted and recreated), rows left out are removed, and the
  * order on the page is the order stored.
  */
+/**
+ * A supplier typed by name that is ON FILE (one active supplier of that name,
+ * case- and space-blind) is linked; anything else stays the words typed.
+ */
+async function suppliersByName(tx: Tx, lines: SheetBody['lines']) {
+  const key = (n: string) => n.trim().replace(/\s+/g, ' ').toLowerCase();
+  const names = [...new Set((lines ?? []).filter((l) => !l.supplierId && l.supplierName?.trim()).map((l) => key(l.supplierName!)))];
+  const found = new Map<string, string | null>();
+  if (!names.length) return { key, found };
+  const rows = await tx.supplier.findMany({
+    where: { isActive: true, OR: names.map((n) => ({ name: { equals: n, mode: 'insensitive' as const } })) },
+    select: { id: true, name: true },
+  });
+  for (const r of rows) {
+    const k = key(r.name);
+    // Two suppliers of one name: link neither — the words stay as typed.
+    found.set(k, found.has(k) ? null : r.id);
+  }
+  return { key, found };
+}
+
 async function writeSheet(tx: Tx, costingId: string, body: SheetBody) {
   if (body.lines) {
+    const byName = await suppliersByName(tx, body.lines);
     const own = new Set((await tx.costingLine.findMany({ where: { costingId }, select: { id: true } })).map((l) => l.id));
     const kept = body.lines.map((l) => l.id).filter((id): id is string => !!id && own.has(id));
     await tx.costingLine.deleteMany({ where: { costingId, id: { notIn: kept } } });
@@ -1222,6 +1280,13 @@ async function writeSheet(tx: Tx, costingId: string, body: SheetBody) {
         unitCost: d(heading ? 0 : l.unitCost),
         amount: d(heading ? 0 : lineAmount(l.quantity, l.unitCost)),
         sortOrder: i,
+        // A supplier on file wins; a typed name is kept only without one.
+        ...(() => {
+          if (heading) return { supplierId: null, supplierName: null };
+          const linked = l.supplierId || (l.supplierName?.trim() ? byName.found.get(byName.key(l.supplierName)) : null) || null;
+          return { supplierId: linked, supplierName: linked ? null : l.supplierName?.trim().replace(/\s+/g, ' ') || null };
+        })(),
+        lineNote: heading ? null : l.lineNote?.trim() || null,
       };
       if (l.id && own.has(l.id)) await tx.costingLine.update({ where: { id: l.id }, data });
       else await tx.costingLine.create({ data: { ...data, costingId } });
@@ -1774,6 +1839,9 @@ costingRoutes.post(
               unitCost: l.unitCost,
               amount: l.amount,
               sortOrder: l.sortOrder,
+              supplierId: l.supplierId,
+              supplierName: l.supplierName,
+              lineNote: l.lineNote,
             })),
           },
           scopeSections: {
@@ -1910,6 +1978,9 @@ export async function costingPaper(me: ReturnType<typeof currentUser>, id: strin
     unitCost: number;
     amount: number;
     costCategory: { id: string; name: string };
+    supplier: { name: string } | null;
+    supplierName: string | null;
+    lineNote: string | null;
   }[];
   const day = (key: unknown) => (key ? formatDate(new Date(`${key as string}T00:00:00Z`)) : '');
 
@@ -1937,6 +2008,8 @@ export async function costingPaper(me: ReturnType<typeof currentUser>, id: strin
           quantity: l.quantity,
           unitCost: formatAmount(l.unitCost),
           amount: formatAmount(l.amount),
+          supplier: l.supplier?.name ?? l.supplierName,
+          note: l.lineNote,
         }),
       );
       subtotal += Math.round(l.amount * 100);

@@ -756,6 +756,7 @@ model Supplier {
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
   salesOrderLines SalesOrderLine[]
+  costingLines    CostingLine[]
 
   @@index([isActive])
   @@index([name])
@@ -1253,6 +1254,13 @@ model CostingLine {
   unitCost    Decimal @default(0) @db.Decimal(18, 2)
   amount      Decimal @default(0) @db.Decimal(18, 2)
   sortOrder   Int     @default(0)
+  /// Who supplies it (2026-10-14): a supplier on file, else a name typed.
+  /// Printed under the unit cost; carried to a PR as its preferred supplier.
+  supplierId   String?
+  supplier     Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  supplierName String?
+  /// A short note on the line, printed under the supplier.
+  lineNote     String?
 
   @@index([costingId])
 }
