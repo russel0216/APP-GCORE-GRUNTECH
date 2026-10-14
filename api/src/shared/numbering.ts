@@ -84,6 +84,7 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   { type: 'receiving', code: 'RR', label: 'Incoming Report' },
   { type: 'stock_issue', code: 'SI', label: 'Outgoing Slip' },
   { type: 'borrow_slip', code: 'BS', label: 'Borrow Slip' },
+  { type: 'pullout_slip', code: 'PS', label: 'Pull-out Slip' },
   { type: 'progress_report', code: 'PGR', label: 'Progress Report' },
   { type: 'progress_billing', code: 'PB', label: 'Progress Billing' },
   { type: 'invoice', code: 'INV', label: 'Invoice' },

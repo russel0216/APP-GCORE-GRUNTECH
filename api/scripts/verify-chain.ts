@@ -39,6 +39,7 @@ import {
 // called directly to land a decision on a document no longer waiting.
 import { settlePurchaseRequest, settlePurchaseOrder } from '../src/routes/procurement';
 import { settleBorrowSlip, settleReceiving, settleStockIssue } from '../src/routes/warehouse';
+import { settlePullout } from '../src/routes/pullouts';
 // The RFQ's search provider registers on import.
 import '../src/routes/rfq';
 import '../src/routes/jobs';
@@ -159,6 +160,18 @@ async function cleanup() {
     await prisma.auditLog.deleteMany({ where: { entityId: { in: recordIds } } });
     await prisma.approvalRequest.deleteMany({ where: { documentId: { in: recordIds } } });
   }
+  // Pull-out slips hold their request, order and warehouse (Restrict), so go first.
+  const taggedPullouts = await prisma.pulloutSlip.findMany({
+    where: { OR: [{ request: { purpose: { startsWith: TAG } } }, { warehouse: { name: { startsWith: TAG } } }, { salesOrder: { number: { startsWith: TAG } } }] },
+    select: { id: true },
+  });
+  if (taggedPullouts.length) {
+    await prisma.auditLog.deleteMany({ where: { entityId: { in: taggedPullouts.map((t) => t.id) } } });
+    await prisma.approvalRequest.deleteMany({ where: { documentId: { in: taggedPullouts.map((t) => t.id) } } });
+    await prisma.pulloutSlip.deleteMany({ where: { id: { in: taggedPullouts.map((t) => t.id) } } });
+  }
+  await prisma.salesOrder.deleteMany({ where: { number: { startsWith: TAG } } });
+  await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
   // The warehouse's bells about this script's borrow slips name the slip,
   // not the TAG, so they are found by the link.
   const taggedSlips = await prisma.borrowSlip.findMany({ where: { purpose: { startsWith: TAG } }, select: { id: true } });
@@ -3194,6 +3207,226 @@ async function main() {
       );
       const outCancel = await api(keeperToken, 'POST', `/borrow-slips/${dueId}/cancel`, { reason: `${TAG} too late` });
       check('a slip already out is not cancelled — its items are taken back instead', outCancel.status === 400, String(outCancel.status));
+    }
+
+    // ── Pull-out slips (2026-10-14) ──────────────────────────────────────
+    // Stock out against an approved project request (taken from the shelf
+    // instead of bought) or an issued sales order (the customer's delivery),
+    // approved by the preparer's "Reports to"; nothing moves before.
+    console.log('\nPull-out slips (over HTTP)');
+    {
+      const pullerRole = await makeRole('zzchain_puller', 'ZZ Puller', ['gchain.pullout_slips.view_all', 'gchain.pullout_slips.create']);
+      const puller = await mkUser('Verify Puller', 'puller@verifyc.local', pullerRole.id);
+      await prisma.user.update({ where: { id: puller.id }, data: { supervisorId: boss.id } });
+      const pullerToken = signToken(puller.id, puller.email);
+      const procurementToken = signToken(procurement.id, procurement.email);
+      const seller = await makeUser('Verify Seller', 'seller@verifyc.local', ['sales']);
+      const sellerToken = signToken(seller.id, seller.email);
+      await prisma.item.update({ where: { id: item.id }, data: { partNumber: `${TAG}-PN1` } });
+      const onShelf = async () => {
+        const b = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+        return num(b?.quantity) - num(b?.borrowedQty);
+      };
+
+      // An approved project request for five, its estimate committed.
+      const pullPr = await prisma.purchaseRequest.create({
+        data: {
+          number: await nextNumber('purchase_request'),
+          status: 'APPROVED',
+          kind: 'DIRECT_TO_JOB',
+          jobId: job.id,
+          requestedById: engineer.id,
+          purpose: `${TAG} pull-out request`,
+          items: { create: [{ itemId: item.id, costCategoryId: materials.id, description: `${TAG} Stainless pipe`, quantity: D(5), unit: 'pcs', estimatedCost: D(120), estimatedAmount: D(600) }] },
+        },
+        include: { items: true },
+      });
+      const prLine = pullPr.items[0];
+      await prisma.jobCostEntry.create({
+        data: { jobId: job.id, costCategoryId: materials.id, state: 'COMMITTED', amount: D(600), sourceType: 'purchase_request', sourceId: pullPr.id, sourceNumber: pullPr.number, description: 'Approved' },
+      });
+      const committed = async () =>
+        num(
+          (await prisma.jobCostEntry.aggregate({ where: { jobId: job.id, state: 'COMMITTED', sourceType: 'purchase_request', sourceId: pullPr.id }, _sum: { amount: true } }))._sum.amount,
+        );
+
+      const prSource = await api(pullerToken, 'GET', `/pullout-slips/source?requestId=${pullPr.id}&warehouseId=${warehouse.id}`);
+      const prSourceLine = ((prSource.body.source as { lines: { id: string; left: number; itemId: string | null }[] }) ?? { lines: [] }).lines[0];
+      check(
+        'a project request offers its lines to pull out, five left, naming its item',
+        prSource.status === 200 && prSourceLine?.left === 5 && prSourceLine.itemId === item.id && (prSource.body.source as { jobId: string }).jobId === job.id,
+        `${prSource.status} ${JSON.stringify(prSourceLine)}`,
+      );
+      const pullOut = (quantity: number, itemId = item.id) =>
+        api(pullerToken, 'POST', '/pullout-slips', {
+          kind: 'PURCHASE_REQUEST',
+          requestId: pullPr.id,
+          warehouseId: warehouse.id,
+          receivedByName: 'Verify Site Foreman',
+          lines: [{ sourceLineId: prLine.id, itemId, quantity }],
+        });
+      const tooMuch = await pullOut(6);
+      const wrongItem = await pullOut(1, reorderItem.id);
+      check(
+        'more than is left on the line is refused, and so is another item than the line names',
+        tooMuch.status === 400 && String(tooMuch.body.error ?? '').startsWith('Only 5') && wrongItem.status === 400,
+        `${tooMuch.status} ${JSON.stringify(tooMuch.body).slice(0, 90)} ${wrongItem.status}`,
+      );
+      const shelfBefore = await onShelf();
+      const slipRes = await pullOut(3);
+      const slipId = String(slipRes.body.id);
+      check(
+        'a pull-out slip for three is a DRAFT that moves nothing',
+        slipRes.status === 201 && slipRes.body.status === 'DRAFT' && slipRes.body.needsApproval === true && money(await onShelf(), shelfBefore),
+        `${slipRes.status} ${slipRes.body.status} ${slipRes.body.needsApproval}`,
+      );
+      const slipSent = await api(pullerToken, 'POST', `/pullout-slips/${slipId}/submit`);
+      const overPending = await pullOut(3);
+      check(
+        'submitted, its three count against the line: another slip for three more is refused',
+        slipSent.status === 200 && slipSent.body.status === 'PENDING_APPROVAL' && overPending.status === 400 && money(await onShelf(), shelfBefore),
+        `${slipSent.status} ${slipSent.body.status} ${overPending.status}`,
+      );
+      const prCancelBlocked = await api(procurementToken, 'POST', `/purchase-requests/${pullPr.id}/cancel`, { reason: `${TAG} no longer needed` });
+      check(
+        'the request is not cancelled while a pull-out slip stands on it',
+        prCancelBlocked.status === 400 && String(prCancelBlocked.body.error ?? '').includes('Pull-out slip'),
+        `${prCancelBlocked.status} ${JSON.stringify(prCancelBlocked.body).slice(0, 100)}`,
+      );
+
+      const commitBefore = await committed();
+      const pullRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'pullout_slip', documentId: slipId, status: 'PENDING' } });
+      const pullerSelf = pullRequest ? await act({ requestId: pullRequest.id, userId: puller.id, action: 'APPROVED' }).then(() => 'acted', (e: Error) => e.message) : 'none';
+      const bossPull = pullRequest ? await api(bossToken, 'POST', `/approvals/${pullRequest.id}/act`, { action: 'APPROVED' }) : { status: 0, body: {} };
+      const pulledRow = await prisma.pulloutSlip.findUniqueOrThrow({ where: { id: slipId }, include: { items: true } });
+      const prLineAfter = await prisma.purchaseRequestItem.findUniqueOrThrow({ where: { id: prLine.id } });
+      const prAfter = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: pullPr.id } });
+      const ledger = await prisma.jobCostEntry.groupBy({ by: ['state'], where: { sourceType: 'pullout_slip', sourceId: slipId }, _sum: { amount: true } });
+      const ledgerOf = (state: string) => num(ledger.find((l) => l.state === state)?._sum.amount);
+      const pulledAmount = num(pulledRow.items[0]?.amount);
+      check(
+        'the preparer cannot approve it; the supervisor’s approval pulls three out — once — at the average cost',
+        pullerSelf !== 'acted' &&
+          bossPull.status === 200 &&
+          pulledRow.status === 'PULLED_OUT' &&
+          pulledRow.releasedAt !== null &&
+          money(shelfBefore - (await onShelf()), 3) &&
+          (await prisma.inventoryTransaction.count({ where: { sourceType: 'pullout_slip', sourceId: slipId } })) === 1 &&
+          pulledAmount > 0,
+        `self: ${pullerSelf}; ${bossPull.status}; ${pulledRow.status}; ${shelfBefore} → ${await onShelf()}; amount ${pulledAmount}`,
+      );
+      check(
+        'the request line takes three as pulled from stock, the request is partly covered, and its commitment drops by three at its estimate',
+        num(prLineAfter.pulledQty) === 3 && prAfter.status === 'PARTIALLY_ORDERED' && money(commitBefore - (await committed()), 360),
+        `${num(prLineAfter.pulledQty)} ${prAfter.status}; committed ${commitBefore} → ${await committed()}`,
+      );
+      check(
+        'the project is charged INCURRED and CONSUMED at what it cost — the stock issue’s rule',
+        money(ledgerOf('INCURRED'), pulledAmount) && money(ledgerOf('CONSUMED'), pulledAmount),
+        JSON.stringify(ledger),
+      );
+      const poDraft = await api(buyerToken, 'GET', `/purchase-orders/draft?requestId=${pullPr.id}`);
+      const poLine = ((poDraft.body.lines ?? []) as { requestItemId: string; quantity: number }[]).find((l) => l.requestItemId === prLine.id);
+      check('a purchase order raised from the request now offers only the two left to buy', poDraft.status === 200 && poLine?.quantity === 2, `${poDraft.status} ${JSON.stringify(poLine)}`);
+      check(
+        'the requester is told it was pulled out',
+        (await prisma.notification.count({ where: { userId: engineer.id, type: 'pullout.done', link: `/g-chain/pullout-slips/${slipId}` } })) === 1,
+        'no bell',
+      );
+      const pullPaper = await printed(pullerToken, `/pullout-slips/${slipId}/pdf`);
+      check(
+        'its paper signs PREPARED BY, the supervisor, RELEASED BY and RECEIVED BY — each dated — and prints no cost',
+        pullPaper.status === 200 &&
+          ['PREPARED BY', 'SUPERVISOR', 'RELEASED BY', 'RECEIVED BY'].every((r) => flat(pullPaper.text).includes(r)) &&
+          flat(pullPaper.text).includes('Verify Site Foreman') &&
+          signedCount(pullPaper.text) === 4 &&
+          pendingCount(pullPaper.text) === 0 &&
+          !/COST|AMOUNT/.test(pullPaper.text),
+        `${pullPaper.status} ${signedCount(pullPaper.text)} signed, ${pendingCount(pullPaper.text)} pending`,
+      );
+      await settlePullout(slipId, 'APPROVED');
+      check(
+        'a second settlement of the same approval moves nothing again',
+        (await prisma.inventoryTransaction.count({ where: { sourceType: 'pullout_slip', sourceId: slipId } })) === 1 &&
+          num((await prisma.purchaseRequestItem.findUniqueOrThrow({ where: { id: prLine.id } })).pulledQty) === 3,
+        'moved twice',
+      );
+
+      // Pulled back, then cancelled while waiting: the request is withdrawn and a late approval is not applied.
+      const second = await pullOut(2);
+      const secondId = String(second.body.id);
+      await api(pullerToken, 'POST', `/pullout-slips/${secondId}/submit`);
+      const secondReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'pullout_slip', documentId: secondId, status: 'PENDING' } });
+      const secondCancel = await api(pullerToken, 'POST', `/pullout-slips/${secondId}/cancel`, { reason: `${TAG} bought instead` });
+      await settlePullout(secondId, 'APPROVED');
+      const secondRow = await prisma.pulloutSlip.findUniqueOrThrow({ where: { id: secondId } });
+      check(
+        'a pending slip cancelled with its reason withdraws its request, and a late approval moves nothing',
+        secondCancel.status === 200 &&
+          secondRow.status === 'CANCELLED' &&
+          (await prisma.approvalRequest.findUnique({ where: { id: secondReq!.id } }))?.status === 'CANCELLED' &&
+          (await prisma.inventoryTransaction.count({ where: { sourceType: 'pullout_slip', sourceId: secondId } })) === 0 &&
+          !!(await prisma.auditLog.findFirst({ where: { entityType: 'pullout_slip', entityId: secondId, summary: { contains: 'not applied' } } })),
+        `${secondCancel.status} ${secondRow.status}`,
+      );
+
+      // A sales order: the customer's delivery. No project was built from
+      // its quotation, so the order is the whole reference and no job pays.
+      const soQuote = await prisma.quotation.create({
+        data: { number: `${TAG}-Q-${Date.now()}`, customerId: customer.id, ownerId: seller.id, subject: `${TAG} delivery quote` },
+      });
+      const so = await prisma.salesOrder.create({
+        data: {
+          number: `${TAG}-SO-${Date.now()}`,
+          status: 'ISSUED',
+          quotationId: soQuote.id,
+          customerId: customer.id,
+          ownerId: seller.id,
+          orderDate: new Date(`${todayKey}T00:00:00Z`),
+          lines: { create: [{ title: `${TAG} Stainless pipe`, partNumber: `${TAG}-PN1`, quantity: D(2), unit: 'pcs', unitPrice: D(500), amount: D(1000) }] },
+        },
+        include: { lines: true },
+      });
+      const soSource = await api(pullerToken, 'GET', `/pullout-slips/source?salesOrderId=${so.id}`);
+      const soLine = ((soSource.body.source as { lines: { id: string; itemId: string | null; left: number }[] }) ?? { lines: [] }).lines[0];
+      check(
+        'an issued sales order offers its lines, the item matched by part number, and names no project when none was built',
+        soSource.status === 200 && soLine?.itemId === item.id && soLine.left === 2 && (soSource.body.source as { jobId: string | null }).jobId === null,
+        `${soSource.status} ${JSON.stringify(soLine)}`,
+      );
+      const soSlip = await api(pullerToken, 'POST', '/pullout-slips', {
+        kind: 'SALES_ORDER',
+        salesOrderId: so.id,
+        warehouseId: warehouse.id,
+        receivedByName: 'Customer driver',
+        lines: [{ sourceLineId: so.lines[0].id, itemId: item.id, quantity: 2 }],
+      });
+      const soSlipId = String(soSlip.body.id);
+      await api(pullerToken, 'POST', `/pullout-slips/${soSlipId}/submit`);
+      const soReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'pullout_slip', documentId: soSlipId, status: 'PENDING' } });
+      if (soReq) await api(bossToken, 'POST', `/approvals/${soReq.id}/act`, { action: 'APPROVED' });
+      const soRow = await prisma.pulloutSlip.findUniqueOrThrow({ where: { id: soSlipId } });
+      const reopenBlocked = await api(sellerToken, 'POST', `/sales-orders/${so.id}/reopen`);
+      check(
+        'pulled out against the order, no job is charged; the order is not reopened while the slip stands',
+        soRow.status === 'PULLED_OUT' &&
+          soRow.jobId === null &&
+          (await prisma.jobCostEntry.count({ where: { sourceType: 'pullout_slip', sourceId: soSlipId } })) === 0 &&
+          reopenBlocked.status === 400 &&
+          String(reopenBlocked.body.error ?? '').includes('pull-out slip'),
+        `${soRow.status} ${soRow.jobId} ${reopenBlocked.status}`,
+      );
+      const listed = await api(pullerToken, 'GET', `/pullout-slips?salesOrderId=${so.id}`);
+      check(
+        'the sales order’s pull-outs list under it',
+        listed.status === 200 && ((listed.body.rows ?? []) as { id: string }[]).some((r) => r.id === soSlipId) && listed.body.total === 1,
+        `${listed.status} ${listed.body.total}`,
+      );
+      const stockPr = await prisma.purchaseRequest.create({
+        data: { number: await nextNumber('purchase_request'), status: 'APPROVED', kind: 'STOCK_REPLENISHMENT', warehouseId: warehouse.id, requestedById: engineer.id, purpose: `${TAG} stock buy` },
+      });
+      const stockSource = await api(pullerToken, 'GET', `/pullout-slips/source?requestId=${stockPr.id}`);
+      check('a request that buys for warehouse stock is not pulled out against', stockSource.status === 400, String(stockSource.status));
     }
 
     // ── Incoming goes for approval (2026-10-14) ──────────────────────────

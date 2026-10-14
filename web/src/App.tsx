@@ -66,6 +66,7 @@ import {
   ChainDashboard,
 } from './pages/chain/Warehouse';
 import { BorrowSlips, BorrowSlipDetail, BorrowRequestEditor } from './pages/chain/BorrowSlips';
+import { PulloutSlips, PulloutDetail, PulloutEditor } from './pages/chain/PulloutSlips';
 import { Clock } from './pages/hr/Clock';
 import { HrDashboard, AttendanceRegister } from './pages/hr/Dashboard';
 import { Leave } from './pages/hr/Leave';
@@ -889,6 +890,32 @@ function Routed() {
         />
         {/* No Guard: the API decides — a Team Leader deciding the request may hold no warehouse right. */}
         <Route path="/g-chain/borrow-slips/:id" element={<BorrowSlipDetail />} />
+        <Route
+          path="/g-chain/pullout-slips"
+          element={
+            <Guard permission="gchain.pullout_slips.view_all">
+              <PulloutSlips />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/pullout-slips/new"
+          element={
+            <Guard permission="gchain.pullout_slips.create">
+              <PulloutEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/pullout-slips/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.pullout_slips.create', 'gchain.pullout_slips.edit_all']}>
+              <PulloutEditor />
+            </GuardAny>
+          }
+        />
+        {/* No Guard: the API decides — the approver may hold no warehouse right. */}
+        <Route path="/g-chain/pullout-slips/:id" element={<PulloutDetail />} />
         <Route
           path="/g-chain/inventory"
           element={

@@ -1149,11 +1149,22 @@ onApprovalSettled('sales_order', async (request, outcome) => {
   await settleSalesOrder(request.documentId, outcome);
 });
 
+/**
+ * An order stock was pulled out against (2026-10-14) is not reopened or
+ * cancelled while a pull-out slip stands on it: its lines are what the slip
+ * answers, and the stock has gone (or is about to go) to the customer.
+ */
+async function refuseWhilePulledOut(orderId: string, number: string, verb: string) {
+  const slips = await prisma.pulloutSlip.findMany({ where: { salesOrderId: orderId, status: { not: 'CANCELLED' } }, select: { number: true } });
+  if (slips.length) throw badRequest(`${number} cannot be ${verb} — pull-out slip ${slips.map((s) => s.number).join(', ')} stands on it`);
+}
+
 salesOrderRoutes.post(
   '/:id/reopen',
   require_('gops.sales_orders.edit_own'),
   handler(async (req, res) => {
     const { order } = await orderForEdit(req, req.params.id, false);
+    await refuseWhilePulledOut(order.id, order.number, 'reopened');
     const claimed = await prisma.salesOrder.updateMany({
       where: { id: order.id, status: 'ISSUED' },
       data: { status: 'DRAFT' },
@@ -1173,6 +1184,7 @@ salesOrderRoutes.post(
   handler(async (req, res) => {
     const { me, order } = await orderForEdit(req, req.params.id, false);
     const { reason } = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled') }), req.body);
+    await refuseWhilePulledOut(order.id, order.number, 'cancelled');
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.salesOrder.updateMany({
         where: { id: order.id, status: { in: ['DRAFT', 'PENDING_APPROVAL', 'ISSUED'] } },

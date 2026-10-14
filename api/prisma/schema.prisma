@@ -112,6 +112,8 @@ model User {
   borrowsTaken     BorrowSlip[]           @relation("Borrower")
   borrowsIssued    BorrowSlip[]           @relation("BorrowIssuer")
   borrowsRequested BorrowSlip[]           @relation("BorrowRequester")
+  pulloutsPrepared PulloutSlip[]          @relation("PulloutPreparer")
+  pulloutsReleased PulloutSlip[]          @relation("PulloutReleaser")
   stockMoves       InventoryTransaction[]
 
   facesEnrolled      FaceEnrollment[] @relation("FaceEnroller")
@@ -1012,6 +1014,7 @@ model Item {
   issueItems      StockIssueItem[]
   borrowItems     BorrowSlipItem[]
   balances        InventoryBalance[]
+  pulloutItems    PulloutItem[]
   stockMoves      InventoryTransaction[]
   installedAssets InstalledAsset[]
 
@@ -1035,6 +1038,7 @@ model Warehouse {
   receivings       Receiving[]
   stockIssues      StockIssue[]
   borrowSlips      BorrowSlip[]
+  pulloutSlips     PulloutSlip[]
   balances         InventoryBalance[]
   stockMoves       InventoryTransaction[]
 
@@ -1555,8 +1559,9 @@ model SalesOrder {
   vatAmount      Decimal @default(0) @db.Decimal(18, 2)
   total          Decimal @default(0) @db.Decimal(18, 2)
 
-  lines     SalesOrderLine[]
-  jobOrders JobOrder[]
+  lines        SalesOrderLine[]
+  jobOrders    JobOrder[]
+  pulloutSlips PulloutSlip[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1912,6 +1917,7 @@ model Job {
   purchaseRequests PurchaseRequest[]
   purchaseOrders   PurchaseOrder[]
   stockIssues      StockIssue[]
+  pulloutSlips     PulloutSlip[]
   borrowSlips      BorrowSlip[]
   overtime         OvertimeRequest[]
   invoices         Invoice[]
@@ -2369,10 +2375,11 @@ model PurchaseRequest {
 
   approvedAt DateTime?
 
-  items     PurchaseRequestItem[]
-  canvasses Canvass[]
-  rfqs      Rfq[]
-  orders    PurchaseOrder[]
+  items        PurchaseRequestItem[]
+  pulloutSlips PulloutSlip[]
+  canvasses    Canvass[]
+  rfqs         Rfq[]
+  orders       PurchaseOrder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2405,6 +2412,9 @@ model PurchaseRequestItem {
   /// quantity × estimatedCost, stored so the commitment is a recorded fact.
   estimatedAmount Decimal @default(0) @db.Decimal(18, 2)
   orderedQty      Decimal @default(0) @db.Decimal(18, 3)
+  /// Taken from the shelf by a pull-out slip instead of bought (2026-10-14):
+  /// what is left to order is quantity − orderedQty − pulledQty.
+  pulledQty       Decimal @default(0) @db.Decimal(18, 3)
   sortOrder       Int     @default(0)
 
   quotes     CanvassQuote[]
@@ -2818,6 +2828,86 @@ model StockIssueItem {
   remarks  String?
 
   @@index([issueId])
+}
+
+enum PulloutKind {
+  /// Stock leaving for a customer's delivery against an issued sales order.
+  SALES_ORDER
+  /// Stock a project takes from the shelf instead of buying it, against an approved request.
+  PURCHASE_REQUEST
+}
+
+enum PulloutStatus {
+  DRAFT
+  PENDING_APPROVAL
+  PULLED_OUT
+  CANCELLED
+}
+
+/// A pull-out slip (2026-10-14, the owner's call: "Pull-out Slip — approved
+/// Sales Order, or from Purchase Request"; "if no project was created, the
+/// sales order is enough"). Stock out of a warehouse at its average cost,
+/// against the document that asked for it; a project behind it is charged as
+/// a stock issue charges it.
+model PulloutSlip {
+  id     String        @id @default(cuid())
+  number String        @unique
+  kind   PulloutKind
+  status PulloutStatus @default(DRAFT)
+
+  salesOrderId String?
+  salesOrder   SalesOrder?      @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  requestId    String?
+  request      PurchaseRequest? @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  /// The project charged: the request's, or the project built from the sales
+  /// order's quotation. Null when there is none.
+  jobId        String?
+  job          Job?             @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  preparedById String
+  preparedBy   User      @relation("PulloutPreparer", fields: [preparedById], references: [id], onDelete: Restrict)
+  releasedById String?
+  releasedBy   User?     @relation("PulloutReleaser", fields: [releasedById], references: [id], onDelete: Restrict)
+  releasedAt   DateTime?
+
+  pulloutDate    DateTime @db.Date
+  /// Who took it: the customer's representative, or the project's.
+  receivedByName String?
+  notes          String?
+  cancelReason   String?
+
+  items PulloutItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([salesOrderId])
+  @@index([requestId])
+  @@index([jobId])
+}
+
+model PulloutItem {
+  id     String      @id @default(cuid())
+  slipId String
+  slip   PulloutSlip @relation(fields: [slipId], references: [id], onDelete: Cascade)
+
+  itemId String
+  item   Item   @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  /// The sales order line or the request line it answers (one of two tables, so no foreign key).
+  sourceLineId String?
+  quantity     Decimal @db.Decimal(18, 3)
+  /// At the warehouse's average when it went out; an estimate until then.
+  unitCost     Decimal @default(0) @db.Decimal(18, 2)
+  amount       Decimal @default(0) @db.Decimal(18, 2)
+  sortOrder    Int     @default(0)
+
+  @@index([slipId])
+  @@index([sourceLineId])
 }
 
 enum BorrowStatus {

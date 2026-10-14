@@ -93,6 +93,7 @@ function presentPr(pr: Record<string, unknown>) {
       estimatedCost: num(i.estimatedCost as Prisma.Decimal),
       estimatedAmount: num(i.estimatedAmount as Prisma.Decimal),
       orderedQty: num(i.orderedQty as Prisma.Decimal),
+      pulledQty: num(i.pulledQty as Prisma.Decimal),
     })),
     estimatedTotal: items.reduce((s, i) => s + num(i.estimatedAmount as Prisma.Decimal), 0),
   };
@@ -1227,6 +1228,7 @@ purchaseRequestRoutes.post(
         _count: { select: { orders: true } },
         canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
         rfqs: { where: { status: { in: ['DRAFT', 'SENT', 'QUOTED'] } }, select: { number: true } },
+        pulloutSlips: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
       },
     });
     if (!pr) throw notFound('Purchase request not found');
@@ -1237,6 +1239,8 @@ purchaseRequestRoutes.post(
     if (pr._count.orders > 0) throw badRequest('Purchase orders were raised from this request — cancel those first');
     if (pr.canvasses.length) throw badRequest(`Canvass ${pr.canvasses.map((c) => c.number).join(', ')} is still on this request — cancel it first`);
     if (pr.rfqs.length) throw badRequest(`RFQ ${pr.rfqs.map((r) => r.number).join(', ')} is still open on this request — cancel it first`);
+    // Stock pulled from the shelf for it (2026-10-14) is a fact, not an intention.
+    if (pr.pulloutSlips.length) throw badRequest(`Pull-out slip ${pr.pulloutSlips.map((p) => p.number).join(', ')} stands on this request — cancel it first, or keep the request`);
 
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.purchaseRequest.updateMany({
@@ -2917,7 +2921,7 @@ async function orderSource(requestId: string | null | undefined, canvassId: stri
 }
 
 function fromRequestItem(
-  i: { id: string; itemId: string | null; costCategoryId: string | null; partNumber: string | null; name: string | null; description: string; quantity: Prisma.Decimal; orderedQty: Prisma.Decimal; unit: string },
+  i: { id: string; itemId: string | null; costCategoryId: string | null; partNumber: string | null; name: string | null; description: string; quantity: Prisma.Decimal; orderedQty: Prisma.Decimal; pulledQty: Prisma.Decimal; unit: string },
   unitPrice: number,
 ): OrderLine {
   return {
@@ -2928,7 +2932,8 @@ function fromRequestItem(
     partNumber: i.partNumber,
     name: i.name,
     description: i.description,
-    quantity: num(i.quantity) - num(i.orderedQty),
+    // What a pull-out slip took from the shelf is not bought (2026-10-14).
+    quantity: num(i.quantity) - num(i.orderedQty) - num(i.pulledQty),
     unit: i.unit,
     unitPrice,
   };
@@ -3409,7 +3414,7 @@ export async function settlePurchaseOrder(documentId: string, outcome: ApprovalO
 
     if (po.requestId) {
       const reqItems = await tx.purchaseRequestItem.findMany({ where: { requestId: po.requestId } });
-      const fully = reqItems.every((i) => num(i.orderedQty) >= num(i.quantity) - 0.0005);
+      const fully = reqItems.every((i) => num(i.orderedQty) + num(i.pulledQty) >= num(i.quantity) - 0.0005);
       await tx.purchaseRequest.update({
         where: { id: po.requestId },
         data: { status: fully ? 'ORDERED' : 'PARTIALLY_ORDERED' },

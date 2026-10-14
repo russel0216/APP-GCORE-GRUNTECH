@@ -175,6 +175,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'inventory', group: 'Warehouse', label: 'Inventory', path: '/g-chain/inventory', actions: ['view_all', 'edit_all'], phase: 5 },
       { key: 'stock_issuance', group: 'Warehouse', label: 'Outgoing', path: '/g-chain/outgoing', actions: SHARED, phase: 5 },
       { key: 'borrow_slips', group: 'Warehouse', label: 'Borrow Slips', path: '/g-chain/borrow-slips', actions: OWNED_KEPT, phase: 5 },
+      { key: 'pullout_slips', group: 'Warehouse', label: 'Pull-out Slips', path: '/g-chain/pullout-slips', actions: SHARED_KEPT, phase: 5 },
       { key: 'items', group: 'Master data', label: 'Item Master', path: '/g-chain/items', actions: SHARED, phase: 2 },
       { key: 'suppliers', group: 'Master data', label: 'Suppliers', path: '/g-chain/suppliers', actions: SHARED, phase: 2 },
       { key: 'warehouses', group: 'Master data', label: 'Warehouses', path: '/g-chain/warehouses', actions: SHARED, phase: 2 },

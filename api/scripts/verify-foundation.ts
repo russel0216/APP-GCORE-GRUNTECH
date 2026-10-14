@@ -146,7 +146,7 @@ async function expectRejection(label: string, fn: () => Promise<unknown>, expect
 const TAG = '__verify__';
 /** G-CHAIN's two flows (the owner's order of 2026-10-14), as built so far. */
 const PROCUREMENT_STRIP = 'Purchase Requests,RFQ,Canvass,Purchase Orders';
-const WAREHOUSE_STRIP = 'Incoming,Inventory,Outgoing,Borrow Slips';
+const WAREHOUSE_STRIP = 'Incoming,Inventory,Outgoing,Borrow Slips,Pull-out Slips';
 /**
  * What every approval this script submits is about. A seeded workflow routes
  * to whoever really holds the role, so its notifications reach real people;

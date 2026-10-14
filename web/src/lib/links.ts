@@ -38,6 +38,7 @@ const DETAIL: Record<string, string> = {
   receiving: '/g-chain/incoming',
   stock_issue: '/g-chain/outgoing',
   borrow_slip: '/g-chain/borrow-slips',
+  pullout_slip: '/g-chain/pullout-slips',
   // Finance
   invoice: '/g-fin/ar',
   supplier_bill: '/g-fin/ap',

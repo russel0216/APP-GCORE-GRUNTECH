@@ -29,6 +29,7 @@ import { quotationTotals, type LineMargin } from '../../lib/quotationMath';
 import { CostPanelBlock, type Item } from './Quotations';
 import { AppendQuotePanel, linesFromItems } from './QuotationEditor';
 import { loadPeople } from '../../components/People';
+import { PulloutCard } from '../chain/PulloutSlips';
 import {
   DiscountCalculator,
   ProductCells,
@@ -548,6 +549,13 @@ export function SalesOrderDetail() {
             hint: 'The order alone, without the files attached to it',
             onSelect: () => openPdf(`/api/sales-orders/${order.id}/pdf?attachments=0`, (e) => setError(e)),
           },
+          // Stock out of a warehouse for the customer's delivery (2026-10-14).
+          order.status === 'ISSUED' &&
+            can('gchain.pullout_slips.create') && {
+              label: 'Pull out stock…',
+              hint: 'A pull-out slip against this order',
+              onSelect: () => navigate(`/g-chain/pullout-slips/new?salesOrder=${order.id}`),
+            },
           order.canEdit &&
             pending && {
               label: 'Pull back and edit',
@@ -729,6 +737,8 @@ export function SalesOrderDetail() {
           )}
         </div>
       </div>
+
+      <PulloutCard salesOrderId={order.id} />
 
       {/* Last on the page (2026-10-12, the owner's call): the quotation's files,
           copied when the order was raised, and its own — printed behind the order. */}

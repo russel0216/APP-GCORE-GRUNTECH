@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,160 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,177 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -573,10 +573,10 @@ twice against its budget, and 2 on foundation for the owner's order of the
 divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
-borrow requests):
+borrow requests, and 17 on chain for pull-out slips):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 287, hr 468, plantilla 123, meetings
+79, partners 120, delivery 171, chain 304, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4614,6 +4614,51 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   The clearance scan counts only slips on loan. `pages/chain/
   BorrowSlips.tsx` holds the list, the request page (`/new`, `/:id/edit`)
   and the slip, moved out of `Warehouse.tsx`.
+- **Pull-out slips** (push 4c; the owner's call: "Pull-out Slip — approved
+  Sales Order, or from Purchase Request"; "if no project was created, the
+  sales order is enough"). `PulloutSlip` + `PulloutItem` (new tables;
+  numbering `pullout_slip`, GT-PS-2026-0001; `gchain.pullout_slips`
+  SHARED_KEPT, held by the warehouse roles; Warehouse › **Pull-out Slips**,
+  last on the strip — verify-foundation pins it), `routes/pullouts.ts` at
+  `/api/pullout-slips`, `pages/chain/PulloutSlips.tsx`. `kind` SALES_ORDER
+  (an ISSUED order — the customer's delivery) or PURCHASE_REQUEST (an
+  APPROVED or partly ordered DIRECT_TO_JOB request — the project takes from
+  the shelf instead of buying; a stock-replenishment request is refused).
+  `loadSource()` is the one reading of a source: its lines with what is
+  LEFT (a sales order line less what pending and pulled-out slips took; a
+  request line less `orderedQty`, `pulledQty` and pending slips) and, for a
+  sales order line, the item whose part number or code matches; the project
+  charged is the request's, or the one built from the order's quotation,
+  else none. `checkSheet()` is the one rule for create, modify, submit and
+  posting: each line answers a source line and takes no more than is left,
+  a request line that names its item takes that item, the warehouse holds
+  enough AVAILABLE, and a project charged knows each line's budget line.
+  DRAFT → PENDING_APPROVAL → PULLED_OUT, or CANCELLED with its reason;
+  seeded **"Pull-out slip — the warehouse's supervisor"** (SUPERVISOR,
+  fallback `warehouse_supervisor`); with the route off "Pull out" posts at
+  once (the Outgoing rule). **Posting is `postPullout()`**, in the claim's
+  transaction: the stock out at the warehouse's average (`issueStock`); a
+  request line's new **`PurchaseRequestItem.pulledQty`** grows — what is
+  left to order is quantity − ordered − pulled (`fromRequestItem`, the PO's
+  "fully ordered" test), the request becomes PARTIALLY_ORDERED or ORDERED as
+  it is covered, and its commitment is released by the pulled quantity at
+  its estimate; a project is charged INCURRED + CONSUMED by budget line, the
+  stock issue's rule; a sales order with no project posts no job cost.
+  `settlePullout()` (exported, idempotent; a shelf that can no longer honour
+  it sends the slip back to a draft with a bell; "not applied" after a
+  cancel). The sales order's or request's owner is told (`pullout.done`).
+  The paper "Pull-out Slip" prints NO cost (it travels with the delivery):
+  the lines against the source lines they answer, PREPARED BY, the step,
+  RELEASED BY and RECEIVED BY (the name on the slip), attachments behind
+  (`pullout_slip`). A request is not cancelled, and a sales order not
+  reopened or cancelled (`refuseWhilePulledOut`), while a slip stands on it.
+  The sales order page's ⋯ "Pull out stock…" and the request page's ⋯ "Pull
+  out from stock…" open `/g-chain/pullout-slips/new?salesOrder=` /
+  `?request=`; both pages show a **Pulled out** card (`PulloutCard`, the
+  register's own list, hidden without its right) and the request's lines
+  say what came from stock. The list (`listWhere` → `{ base, where }`,
+  cards Waiting for approval / Pulled out / Drafts) prints; Ctrl+K finds
+  slips.
 
 ## Spreadsheet attachments (2026-10-05)
 

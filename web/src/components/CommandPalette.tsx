@@ -133,6 +133,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     receiving: 'Incoming',
     stock_issue: 'Outgoing',
     borrow_slip: 'Borrow slips',
+    pullout_slip: 'Pull-out slips',
     invoice: 'Invoices',
     supplier_bill: 'Supplier bills',
     expense_claim: 'Expense claims',

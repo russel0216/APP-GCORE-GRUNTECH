@@ -432,6 +432,7 @@ const ROLES: RoleSeed[] = [
       ['gchain', 'receiving'],
       ['gchain', 'stock_issuance'],
       ['gchain', 'borrow_slips'],
+      ['gchain', 'pullout_slips'],
       ['gchain', 'inventory'],
     ],
     only: [
@@ -981,6 +982,13 @@ const WORKFLOWS: WorkflowSeed[] = [
       { sequence: 1, name: 'Team Leader / Technical Manager', approverType: 'SUPERVISOR', roleKey: 'team_leader', alsoRoleKeys: ['technical_manager'] },
       { sequence: 2, name: 'Warehouse Supervisor', approverType: 'ROLE', roleKey: 'warehouse_supervisor' },
     ],
+  },
+  {
+    // Stock out against an issued sales order or an approved request
+    // (2026-10-14): the warehouse prepares it, its reports-to approves.
+    documentType: 'pullout_slip',
+    name: "Pull-out slip — the warehouse's supervisor",
+    steps: [{ sequence: 1, name: 'Supervisor', approverType: 'SUPERVISOR', roleKey: 'warehouse_supervisor' }],
   },
   {
     // A service report is written on site by the engineer who did the work, so

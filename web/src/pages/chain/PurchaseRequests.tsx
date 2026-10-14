@@ -19,6 +19,7 @@ import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
 import { RFQ_TONES } from './Rfq';
+import { PulloutCard } from './PulloutSlips';
 
 export const PR_STATUSES = [
   { value: 'DRAFT', label: 'Draft' },
@@ -188,6 +189,8 @@ interface PrItem {
   estimatedCost: number;
   estimatedAmount: number;
   orderedQty: number;
+  /** Taken from the shelf by a pull-out slip instead of bought (2026-10-14). */
+  pulledQty: number;
   item: { id: string; code: string; name: string } | null;
   costCategory: { id: string; code: string; name: string } | null;
 }
@@ -406,6 +409,14 @@ export function PurchaseRequestDetail() {
         }
         print={`/api/purchase-requests/${pr.id}/pdf`}
         more={[
+          // A project's request may be filled from the shelf instead of bought (2026-10-14).
+          pr.kind === 'DIRECT_TO_JOB' &&
+            (pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED') &&
+            can('gchain.pullout_slips.create') && {
+              label: 'Pull out from stock…',
+              hint: 'Take what the warehouse holds instead of buying it',
+              onSelect: () => navigate(`/g-chain/pullout-slips/new?request=${pr.id}`),
+            },
           pr.canWithdraw && {
             label: 'Pull back and edit',
             hint: 'Withdraws it from the approver',
@@ -512,7 +523,10 @@ export function PurchaseRequestDetail() {
                     <td>{i.unit}</td>
                     <td className="right mono">{formatMoney(i.estimatedCost)}</td>
                     <td className="right mono">{formatMoney(i.estimatedAmount)}</td>
-                    <td className="right mono faint">{i.orderedQty || '—'}</td>
+                    <td className="right mono faint">
+                      {i.orderedQty || '—'}
+                      {i.pulledQty > 0 && <div className="faint">{i.pulledQty} from stock</div>}
+                    </td>
                   </tr>
                 ))}
                 <tr>
@@ -583,6 +597,8 @@ export function PurchaseRequestDetail() {
           )}
         </div>
       )}
+
+      <PulloutCard requestId={pr.id} />
 
       {(pr.rfqs.length > 0 || pr.canvasses.length > 0 || pr.orders.length > 0) && (
         <div className="grid grid-2">

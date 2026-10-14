@@ -55,6 +55,7 @@ import {
   purchaseOrderRoutes,
 } from './routes/procurement';
 import { rfqRoutes } from './routes/rfq';
+import { pulloutRoutes } from './routes/pullouts';
 import {
   receivingRoutes,
   stockIssueRoutes,
@@ -187,6 +188,7 @@ app.use('/api/purchase-orders', purchaseOrderRoutes);
 app.use('/api/receivings', receivingRoutes);
 app.use('/api/stock-issues', stockIssueRoutes);
 app.use('/api/borrow-slips', borrowRoutes);
+app.use('/api/pullout-slips', pulloutRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/gchain', chainRoutes);
 

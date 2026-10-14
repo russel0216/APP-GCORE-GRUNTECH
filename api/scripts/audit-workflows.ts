@@ -42,6 +42,7 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   stock_issue: ['warehouse', 'warehouse_supervisor'],
   // Anyone may ask to borrow a tool (2026-10-14); the warehouse writes a walk-in's.
   borrow_slip: ['employee', 'warehouse'],
+  pullout_slip: ['warehouse', 'warehouse_supervisor'],
   expense: ['employee', 'project_engineer', 'sales'],
   // A supplier's invoice arrives in finance, so finance keys it in. Routing a
   // step back to finance is the same fault the budget-request and

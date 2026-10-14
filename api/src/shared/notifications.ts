@@ -22,6 +22,7 @@ export type NotificationType =
   | 'borrow.to_release'
   | 'borrow.released'
   | 'borrow.cancelled'
+  | 'pullout.done'
   | 'invoice.overdue'
   | 'leave.awaiting'
   | 'overtime.awaiting'
