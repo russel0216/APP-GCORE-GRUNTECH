@@ -2706,12 +2706,29 @@ model Receiving {
   invoiceRefNo  String?
   notes         String?
 
+  /// Incoming goes for approval (2026-10-14, the owner's call: "the warehouse
+  /// receives this, approval of his/her report to"): a DRAFT moves nothing;
+  /// the stock, the job cost and the order's received quantities post when
+  /// the route approves it (RECEIVED). A report saved before the route
+  /// existed posted when it was saved, so the default is RECEIVED.
+  status       ReceivingStatus @default(RECEIVED)
+  cancelReason String?
+
   items ReceivingItem[]
   bills SupplierBill[]
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 
   @@index([orderId])
+  @@index([status])
+}
+
+enum ReceivingStatus {
+  DRAFT
+  PENDING_APPROVAL
+  RECEIVED
+  CANCELLED
 }
 
 model ReceivingItem {
@@ -2736,6 +2753,8 @@ model ReceivingItem {
 
 enum IssueStatus {
   DRAFT
+  /// Outgoing goes for approval (2026-10-14): nothing leaves until it is approved.
+  PENDING_APPROVAL
   ISSUED
   CANCELLED
 }

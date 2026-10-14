@@ -19,6 +19,8 @@ import {
 import { Stat } from '../../components/charts';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
+import { ApprovalStepper, DocumentApproval, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
+import { Attachments } from '../../components/Attachments';
 import { label } from './PurchaseRequests';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -29,6 +31,7 @@ import { NumberInput } from '../../components/NumberInput';
 interface ReceivingRow {
   id: string;
   number: string;
+  status: string;
   receivedDate: string;
   deliveryRefNo: string | null;
   lineCount: number;
@@ -43,6 +46,9 @@ interface ReceivingRow {
   warehouse: { id: string; name: string } | null;
   receivedBy: { id: string; name: string };
 }
+
+/** A received report is the record; one still waiting reads as such. */
+const RECEIVING_TONES = { RECEIVED: 'ok', PENDING_APPROVAL: 'warn' } as const;
 
 export function Receivings() {
   const navigate = useNavigate();
@@ -66,6 +72,7 @@ export function Receivings() {
     { key: 'value', label: 'Value', align: 'right', render: (r) => <span className="mono">{formatMoney(r.value)}</span> },
     { key: 'receivedBy', label: 'By', render: (r) => r.receivedBy.name },
     { key: 'ref', label: 'DR no.', render: (r) => r.deliveryRefNo ?? '—', optional: true },
+    { key: 'status', label: 'Status', render: (r) => <StatusBadge status={r.status} extra={RECEIVING_TONES} /> },
   ];
 
   return (
@@ -86,6 +93,18 @@ export function Receivings() {
         onRowClick={(r) => navigate(`/g-chain/incoming/${r.id}`)}
         emptyTitle="Nothing received yet"
         emptyHint="Receive against an issued purchase order."
+        filters={[
+          {
+            key: 'status',
+            label: 'Status',
+            options: [
+              { value: 'DRAFT', label: 'Draft' },
+              { value: 'PENDING_APPROVAL', label: 'Pending approval' },
+              { value: 'RECEIVED', label: 'Received' },
+              { value: 'CANCELLED', label: 'Cancelled' },
+            ],
+          },
+        ]}
       />
     </div>
   );
@@ -95,10 +114,12 @@ export function ReceivingDetail() {
   const { id } = useParams<{ id: string }>();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
   const [rec, setRec] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [modifying, setModifying] = useState(false);
+  const [reload, setReload] = useState(0);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -142,6 +163,27 @@ export function ReceivingDetail() {
     orderItem: { description: string; item: { code: string } | null; costCategory: { name: string } | null };
   }[];
 
+  const status = String(rec.status ?? 'RECEIVED');
+  const received = status === 'RECEIVED';
+  const route = (rec.approvalRoute ?? null) as PreviewRoute | null;
+  const recId = String(rec.id);
+  /** Asked in the confirm bar, which shows a refusal — so these throw rather than catching. */
+  async function submit() {
+    setRec(await api.post<Record<string, unknown>>(`/receivings/${recId}/submit`));
+    setReload((n) => n + 1);
+    toast('ok', `${String(rec?.number)} submitted for approval`);
+  }
+  async function withdraw() {
+    setRec(await api.post<Record<string, unknown>>(`/receivings/${recId}/withdraw`));
+    setReload((n) => n + 1);
+    toast('ok', `${String(rec?.number)} pulled back to a draft`);
+  }
+  async function cancel(reason: string) {
+    await api.post(`/receivings/${recId}/cancel`, { reason });
+    toast('ok', `${String(rec?.number)} cancelled`);
+    await load();
+  }
+
   const warehouse = rec.warehouse as { name: string } | null;
   const refs = {
     number: String(rec.number),
@@ -156,8 +198,10 @@ export function ReceivingDetail() {
         type="Incoming"
         code={String(rec.number)}
         title={order.supplier.name}
+        status={status}
+        statusExtra={RECEIVING_TONES}
         amount={formatMoney(Number(rec.value))}
-        amountLabel="Value received"
+        amountLabel={received ? 'Value received' : 'Value'}
         meta={
           <>
             Against <Link to={`/g-chain/purchase-orders/${order.id}`}>{order.number}</Link> ·{' '}
@@ -191,26 +235,90 @@ export function ReceivingDetail() {
           </>
         }
         actions={
-          canEnterBill && (
-            // The bill picks up the supplier, order and these goods from the
-            // receiving, and — because it names the receiving — posts no job
-            // cost a second time.
-            <Link to={`/g-fin/ap?fromReceiving=${String(rec.id)}`} className="btn btn-primary">
-              Enter supplier bill
-            </Link>
+          rec.canSubmit === true ? (
+            <button
+              className="btn btn-primary"
+              onClick={() =>
+                confirm.ask({
+                  title: `Submit ${String(rec.number)} for approval?`,
+                  body: 'Nothing moves until it is approved: then the goods go into stock or onto the project, and the order shows them received. Attach the packing list or delivery receipt first.',
+                  confirmLabel: 'Submit for approval',
+                  tone: 'primary',
+                  onConfirm: submit,
+                })
+              }
+            >
+              Submit for approval
+            </button>
+          ) : (
+            received &&
+            canEnterBill && (
+              // The bill picks up the supplier, order and these goods from the
+              // receiving, and — because it names the receiving — posts no job
+              // cost a second time.
+              <Link to={`/g-fin/ap?fromReceiving=${recId}`} className="btn btn-primary">
+                Enter supplier bill
+              </Link>
+            )
           )
         }
+        print={`/api/receivings/${recId}/pdf`}
+        more={[
+          rec.canWithdraw === true && {
+            label: 'Pull back to a draft',
+            hint: 'Withdraws it from the approver',
+            confirm: {
+              title: `Pull ${String(rec.number)} back to a draft?`,
+              body: 'Its approval is withdrawn and the approver is told. Submit it again when it is right.',
+              confirmLabel: 'Pull back',
+              tone: 'primary',
+              onConfirm: withdraw,
+            },
+          },
+          rec.canCancel === true && {
+            label: 'Cancel receiving',
+            danger: true,
+            confirm: {
+              title: `Cancel ${String(rec.number)}?`,
+              body: 'Nothing was received on it, and nothing moves. The goods can be received again on a new report.',
+              confirmLabel: 'Cancel receiving',
+              reason: 'required',
+              minReason: 3,
+              reasonLabel: 'Why is it cancelled?',
+              onConfirm: cancel,
+            },
+          },
+        ]}
         // Its references only: what arrived is the record.
         modify={rec.canEdit === true ? () => setModifying(true) : undefined}
+        confirm={confirm}
       />
+
+      {status === 'DRAFT' && route && route.steps.length > 0 && (
+        <div className="qd-route">
+          <span className="qd-route-label">{allHeld(route) ? 'No one else’s approval needed' : 'Submit for approval sends it to'}</span>
+          <ApprovalStepper steps={previewSteps(route)} />
+        </div>
+      )}
+      {(status === 'PENDING_APPROVAL' || received) && <DocumentApproval documentType="receiving" documentId={recId} reloadToken={reload} />}
 
       <ErrorBox error={error} />
 
-      <div className={`alert ${order.kind === 'DIRECT_TO_JOB' ? 'ok' : 'info'}`}>
-        {order.kind === 'DIRECT_TO_JOB'
-          ? `${formatMoney(Number(rec.value))} charged to ${order.job?.number ?? 'the project'}, and the same released from committed.`
-          : `${formatMoney(Number(rec.value))} added to stock. No project has been charged — that happens at issuance.`}
-      </div>
+      {received ? (
+        <div className={`alert ${order.kind === 'DIRECT_TO_JOB' ? 'ok' : 'info'}`}>
+          {order.kind === 'DIRECT_TO_JOB'
+            ? `${formatMoney(Number(rec.value))} charged to ${order.job?.number ?? 'the project'}, and the same released from committed.`
+            : `${formatMoney(Number(rec.value))} added to stock. No project has been charged — that happens at issuance.`}
+        </div>
+      ) : status === 'CANCELLED' ? (
+        <div className="alert info">Cancelled{typeof rec.cancelReason === 'string' ? ` — ${rec.cancelReason}` : ''}. Nothing was received on it.</div>
+      ) : (
+        <div className="alert info">
+          {status === 'PENDING_APPROVAL'
+            ? 'Waiting for approval. Nothing has moved yet: the approval puts the goods into stock or onto the project.'
+            : 'A draft. Nothing has moved yet — attach the packing list or delivery receipt below, then submit it for approval.'}
+        </div>
+      )}
 
       {refs.notes && (
         <div className="card proc-card">
@@ -260,6 +368,14 @@ export function ReceivingDetail() {
           </table>
         </div>
       </div>
+
+      <Attachments
+        entityType="receiving"
+        entityId={recId}
+        title="Packing list and documents"
+        hint="The delivery receipt, packing list, photos of what arrived — printed behind the report"
+        canEdit={status === 'DRAFT' || status === 'PENDING_APPROVAL'}
+      />
 
       {modifying && (
         <ReceivingRefsModal
@@ -422,6 +538,7 @@ export function StockIssues() {
             label: 'Status',
             options: [
               { value: 'DRAFT', label: 'Draft' },
+              { value: 'PENDING_APPROVAL', label: 'Pending approval' },
               { value: 'ISSUED', label: 'Issued' },
             ],
           },
@@ -599,6 +716,7 @@ export function StockIssueDetail() {
   const [error, setError] = useState<unknown>(null);
   const [adding, setAdding] = useState(false);
   const [modifying, setModifying] = useState(false);
+  const [reload, setReload] = useState(0);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -637,11 +755,24 @@ export function StockIssueDetail() {
   const number = String(issue.number);
   const issuedTo = typeof issue.issuedToName === 'string' && issue.issuedToName ? issue.issuedToName : null;
 
+  const status = String(issue.status);
+  const route = (issue.approvalRoute ?? null) as PreviewRoute | null;
+
   /** Asked in the confirm bar, which shows a refusal — so these throw rather than catching. */
   async function commit() {
     setIssue(await api.post<Record<string, unknown>>(`/stock-issues/${id}/issue`));
     toast('ok', job ? 'Issued — the project has been charged' : 'Issued');
     await load();
+  }
+  async function submit() {
+    setIssue(await api.post<Record<string, unknown>>(`/stock-issues/${id}/submit`));
+    setReload((n) => n + 1);
+    toast('ok', `${number} submitted for approval`);
+  }
+  async function withdraw() {
+    setIssue(await api.post<Record<string, unknown>>(`/stock-issues/${id}/withdraw`));
+    setReload((n) => n + 1);
+    toast('ok', `${number} pulled back to a draft`);
   }
 
   async function removeItem(itemRowId: string) {
@@ -687,7 +818,26 @@ export function StockIssueDetail() {
           </>
         }
         actions={
-          isDraft && (
+          isDraft && issue.needsApproval === true ? (
+            <button
+              className="btn btn-primary"
+              disabled={issue.canSubmit !== true}
+              title={items.length === 0 ? 'Add an item first' : undefined}
+              onClick={() =>
+                confirm.ask({
+                  title: `Submit ${number} for approval?`,
+                  body: job
+                    ? `Nothing leaves ${warehouse.name} until it is approved: then the stock goes out and is charged to ${job.number} at the average cost of that moment.`
+                    : `Nothing leaves ${warehouse.name} until it is approved.`,
+                  confirmLabel: 'Submit for approval',
+                  tone: 'primary',
+                  onConfirm: submit,
+                })
+              }
+            >
+              Submit for approval
+            </button>
+          ) : isDraft && (
             <button
               className="btn btn-primary"
               disabled={items.length === 0}
@@ -710,6 +860,17 @@ export function StockIssueDetail() {
         }
         print={`/api/stock-issues/${id}/pdf`}
         more={[
+          issue.canWithdraw === true && {
+            label: 'Pull back to a draft',
+            hint: 'Withdraws it from the approver',
+            confirm: {
+              title: `Pull ${number} back to a draft?`,
+              body: 'Its approval is withdrawn and the approver is told. Change it and submit it again.',
+              confirmLabel: 'Pull back',
+              tone: 'primary',
+              onConfirm: withdraw,
+            },
+          },
           canDelete && {
             label: 'Delete',
             danger: true,
@@ -725,13 +886,24 @@ export function StockIssueDetail() {
         confirm={confirm}
       />
 
+      {isDraft && route && route.steps.length > 0 && (
+        <div className="qd-route">
+          <span className="qd-route-label">{allHeld(route) ? 'No one else’s approval needed' : 'Submit for approval sends it to'}</span>
+          <ApprovalStepper steps={previewSteps(route)} />
+        </div>
+      )}
+      {(status === 'PENDING_APPROVAL' || status === 'ISSUED') && <DocumentApproval documentType="stock_issue" documentId={String(id)} reloadToken={reload} />}
+
       <ErrorBox error={error} />
 
       {isDraft && job && (
         <div className="alert info">
-          Nothing has moved yet. Issuing will take the stock out and charge{' '}
-          {formatMoney(Number(issue.value))} to {job.number} at the current average cost.
+          Nothing has moved yet. {issue.needsApproval === true ? 'Its approval' : 'Issuing'} will take the stock out and charge{' '}
+          {formatMoney(Number(issue.value))} to {job.number} at the average cost of that moment.
         </div>
+      )}
+      {status === 'PENDING_APPROVAL' && (
+        <div className="alert info">Waiting for approval. Nothing has left {warehouse.name} yet.</div>
       )}
 
       <div className="card">
@@ -806,6 +978,14 @@ export function StockIssueDetail() {
           </div>
         )}
       </div>
+
+      <Attachments
+        entityType="stock_issue"
+        entityId={String(id)}
+        title="Gate pass and documents"
+        hint="The signed gate pass, photos of what left — printed behind the slip"
+        canEdit={isDraft || status === 'PENDING_APPROVAL'}
+      />
 
       {modifying && (
         <IssueModal

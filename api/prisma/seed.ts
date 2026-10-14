@@ -691,6 +691,18 @@ const ROLES: RoleSeed[] = [
       grants: like('finance').grants,
       only: [...(like('finance').only ?? []), ...VIEW_OWN_SELF('gops', 'budget_requests')],
     },
+    // The warehouse flow (2026-10-14): Incoming and Outgoing go to the
+    // warehouse person's "Reports to", else a Warehouse Supervisor — who
+    // starts from the Warehouse role's rights (all four registers in full).
+    // Assign in Admin › Users; until somebody holds it, a receiving or an
+    // issue raised by someone with no "Reports to" cannot be submitted.
+    {
+      key: 'warehouse_supervisor',
+      name: 'Warehouse Supervisor',
+      description: 'Approves incoming and outgoing for warehouse staff who report to nobody else; runs the warehouse',
+      grants: like('warehouse').grants,
+      only: like('warehouse').only,
+    },
   );
 }
 
@@ -936,6 +948,22 @@ const WORKFLOWS: WorkflowSeed[] = [
       { sequence: 1, name: 'Purchasing Manager', approverType: 'ROLE', roleKey: 'purchasing_manager' },
       { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
+  },
+  // ── The warehouse flow (2026-10-14, the owner's call) ──────────────────
+  // "Incoming — the warehouse receives this, approval of his/her report to";
+  // "Outgoing — the warehouse issues this, approval of his/her report to".
+  // One SUPERVISOR step each: the receiver's or issuer's "Reports to", else
+  // a Warehouse Supervisor (on their team first). The approval posts the
+  // stock and the job cost; nothing moves while it waits.
+  {
+    documentType: 'receiving',
+    name: "Incoming — the receiver's supervisor",
+    steps: [{ sequence: 1, name: 'Supervisor', approverType: 'SUPERVISOR', roleKey: 'warehouse_supervisor' }],
+  },
+  {
+    documentType: 'stock_issue',
+    name: "Outgoing — the issuer's supervisor",
+    steps: [{ sequence: 1, name: 'Supervisor', approverType: 'SUPERVISOR', roleKey: 'warehouse_supervisor' }],
   },
   {
     // A service report is written on site by the engineer who did the work, so

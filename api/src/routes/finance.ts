@@ -1477,7 +1477,8 @@ async function billLinks(input: {
   if (input.orderId) {
     const order = await prisma.purchaseOrder.findUnique({
       where: { id: input.orderId },
-      include: { receivings: { select: { id: true }, orderBy: { receivedDate: 'desc' } } },
+      // Goods RECEIVED — a report still waiting for its approval posted nothing.
+      include: { receivings: { where: { status: 'RECEIVED' }, select: { id: true }, orderBy: { receivedDate: 'desc' } } },
     });
     if (!order) throw notFound('Purchase order not found');
     if (order.supplierId !== input.supplierId) {
@@ -1492,9 +1493,12 @@ async function billLinks(input: {
   if (receivingId) {
     const receiving = await prisma.receiving.findUnique({
       where: { id: receivingId },
-      select: { orderId: true, order: { select: { supplierId: true } } },
+      select: { orderId: true, status: true, number: true, order: { select: { supplierId: true } } },
     });
     if (!receiving) throw notFound('Receiving not found');
+    // A bill matched to a report that posted nothing would post no cost
+    // either — the cost the receiving was to carry would be charged nowhere.
+    if (receiving.status !== 'RECEIVED') throw badRequest(`${receiving.number} is ${receiving.status.toLowerCase().replace(/_/g, ' ')} — a bill is matched to goods received`);
     if (input.orderId && receiving.orderId !== input.orderId) {
       throw badRequest('That receiving is against a different order');
     }
@@ -1887,7 +1891,7 @@ billRoutes.get(
   require_('gfin.ap.view_all'),
   handler(async (_req, res) => {
     const receivings = await prisma.receiving.findMany({
-      where: { bills: { none: {} } },
+      where: { status: 'RECEIVED', bills: { none: {} } },
       include: {
         order: {
           select: {
@@ -4109,7 +4113,7 @@ financeReportRoutes.get(
         _sum: { grossAmount: true },
       }),
       prisma.progressBilling.count({ where: { status: 'APPROVED', invoice: null } }),
-      prisma.receiving.count({ where: { bills: { none: {} } } }),
+      prisma.receiving.count({ where: { status: 'RECEIVED', bills: { none: {} } } }),
       prisma.cashAdvance.count({ where: { status: 'APPROVED' } }),
       prisma.cashAdvance.count({ where: { status: 'RELEASED', liquidationDueDate: { lt: today } } }),
       prisma.cashAdvance.count({ where: { status: 'REFUND_DUE' } }),

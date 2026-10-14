@@ -38,6 +38,8 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   plan_approval: ['project_engineer', 'project_manager', 'technical_manager'],
   // Admin Back Support and the Purchasing Manager prepare them (2026-10-13).
   purchase_order: ['back_support', 'purchasing_manager', 'procurement'],
+  receiving: ['warehouse', 'warehouse_supervisor'],
+  stock_issue: ['warehouse', 'warehouse_supervisor'],
   expense: ['employee', 'project_engineer', 'sales'],
   // A supplier's invoice arrives in finance, so finance keys it in. Routing a
   // step back to finance is the same fault the budget-request and

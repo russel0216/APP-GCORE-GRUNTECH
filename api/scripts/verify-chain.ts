@@ -23,6 +23,8 @@ import { statusLabel } from '../src/shared/pdf';
 import { nextNumber } from '../src/shared/numbering';
 import { CANVASS_CODE_MOVED, moveCanvassCode } from '../src/shared/canvassCode';
 import { canvassFigures } from '../src/shared/canvassMath';
+import { deleteAttachment } from '../src/shared/attachments';
+import { PDFDocument } from 'pdf-lib';
 import { submitForApproval, act, pickWorkflow } from '../src/shared/approvals';
 import { budgetPosition } from '../src/routes/jobs';
 import {
@@ -36,7 +38,7 @@ import {
 // (and the warehouse one its search providers); the settle functions are
 // called directly to land a decision on a document no longer waiting.
 import { settlePurchaseRequest, settlePurchaseOrder } from '../src/routes/procurement';
-import '../src/routes/warehouse';
+import { settleReceiving, settleStockIssue } from '../src/routes/warehouse';
 // The RFQ's search provider registers on import.
 import '../src/routes/rfq';
 import '../src/routes/jobs';
@@ -156,6 +158,21 @@ async function cleanup() {
   if (recordIds.length) {
     await prisma.auditLog.deleteMany({ where: { entityId: { in: recordIds } } });
     await prisma.approvalRequest.deleteMany({ where: { documentId: { in: recordIds } } });
+  }
+  // The files the warehouse checks attached — rows AND bytes: the rows
+  // would cascade with their uploader, the files on disk would not.
+  for (const f of await prisma.attachment.findMany({ where: { uploadedBy: { email: { endsWith: '@verifyc.local' } } }, select: { id: true } })) {
+    await deleteAttachment(f.id);
+  }
+  // A settled approval's own rows (actor "system") are keyed only by the
+  // warehouse document they posted.
+  const warehouseDocs = [
+    ...(await prisma.stockIssue.findMany({ where: { purpose: { startsWith: TAG } }, select: { id: true } })),
+    ...(await prisma.receiving.findMany({ where: { order: { notes: { startsWith: TAG } } }, select: { id: true } })),
+  ].map((r) => r.id);
+  if (warehouseDocs.length) {
+    await prisma.auditLog.deleteMany({ where: { entityId: { in: warehouseDocs } } });
+    await prisma.approvalRequest.deleteMany({ where: { documentId: { in: warehouseDocs } } });
   }
   await prisma.supplierBill.deleteMany({ where: { supplier: { name: { startsWith: TAG } } } });
   await prisma.borrowSlip.deleteMany({ where: { purpose: { startsWith: TAG } } });
@@ -2617,6 +2634,8 @@ async function main() {
     ]);
     const boss = await mkUser('Verify Store Supervisor', 'storeboss@verifyc.local', bossRole.id);
     const bossToken = signToken(boss.id, boss.email);
+    // Outgoing and Incoming go to the issuer's or receiver's "Reports to".
+    await prisma.user.update({ where: { id: keeper.id }, data: { supervisorId: boss.id } });
     const siteStore = await prisma.warehouse.create({ data: { code: `${TAG}W2`, name: `${TAG} Site Store` } });
     const emptyStore = await prisma.warehouse.create({ data: { code: `${TAG}W3`, name: `${TAG} Empty Store` } });
     await prisma.$transaction((tx) =>
@@ -2673,50 +2692,131 @@ async function main() {
     const issueAudits = await prisma.auditLog.count({ where: { entityType: 'stock_issue', entityId: draftIssueId, action: { in: ['CREATED', 'UPDATED'] } } });
     check('raising it and every change to it are audited', issueAudits >= 7, String(issueAudits));
 
-    // The draft on paper: no route, so only the people who act sign it —
-    // who raised it, dated, and the person it goes to, "Pending" under their
-    // name until it is handed over. Nobody has issued it yet, so no "Issued
-    // by", and never the "Noted by" nobody fills.
+    // Outgoing goes for approval (2026-10-14, the owner's call): the issuer's
+    // "Reports to" decides — here the keeper reports to the store supervisor —
+    // and the approval issues it. The draft on paper: who raised it, dated,
+    // then the route submitting would take and the person it goes to, each
+    // "Pending" under the name. Never an "Issued by" on a routed slip (the
+    // approval moved the stock) and never the "Noted by" nobody fills.
+    check(
+      'a draft says it goes for approval, to the issuer’s supervisor, and offers Submit — not Issue',
+      issueFlags.body.needsApproval === true &&
+        issueFlags.body.canSubmit === true && // edit_all may send it up, in the issuer's name
+        issueFlags.body.canIssue === false &&
+        ((issueFlags.body.approvalRoute as { steps: { approvers: { name: string }[] }[] } | null)?.steps ?? [])
+          .flatMap((s) => s.approvers.map((p) => p.name))
+          .includes('Verify Store Supervisor'),
+      JSON.stringify({ n: issueFlags.body.needsApproval, s: issueFlags.body.canSubmit, i: issueFlags.body.canIssue, r: issueFlags.body.approvalRoute }).slice(0, 220),
+    );
     const issuePrintsBefore = await prisma.auditLog.count({ where: { entityType: 'stock_issue', entityId: draftIssueId, action: 'EXPORTED' } });
     const draftIssuePdf = await printed(bossToken, `/stock-issues/${draftIssueId}/pdf`);
     const draftIssueText = draftIssuePdf.text;
     check(
-      'a draft stock issue prints who raised it, dated, and the receiver over Pending — no "Issued by", no "Noted by"',
+      'a draft outgoing slip prints who raised it, dated, then the supervisor and the receiver over Pending — no "Issued by", no "Noted by"',
       draftIssuePdf.status === 200 &&
         flat(draftIssueText).includes('PREPARED BY') &&
+        flat(draftIssueText).includes('SUPERVISOR') &&
         flat(draftIssueText).includes('RECEIVED BY') &&
         !flat(draftIssueText).includes('ISSUED BY') &&
         !flat(draftIssueText).includes('NOTED BY') &&
         flat(draftIssueText).includes('Verify Keeper') &&
+        flat(draftIssueText).includes('Verify Store Supervisor') &&
         flat(draftIssueText).includes('Verify Rigger') &&
         signedCount(draftIssueText) === 1 &&
-        pendingCount(draftIssueText) === 1 &&
+        pendingCount(draftIssueText) === 2 &&
         flat(draftIssueText).includes('Status: Draft') &&
         !draftIssueText.includes('DRAFT'),
       `${draftIssuePdf.status} ${signedCount(draftIssueText)} signed, ${pendingCount(draftIssueText)} pending`,
     );
 
-    const issuedNow = await api(keeperToken, 'POST', `/stock-issues/${draftIssueId}/issue`);
+    const onHand = async (w = warehouse.id) =>
+      num((await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: w } } }))?.quantity);
+    const pressIssue = await api(keeperToken, 'POST', `/stock-issues/${draftIssueId}/issue`);
+    check(
+      'with its route active, Issue is refused and says the slip goes for approval',
+      pressIssue.status === 400 && String(pressIssue.body.error ?? '').includes('goes for approval'),
+      `${pressIssue.status} ${JSON.stringify(pressIssue.body).slice(0, 140)}`,
+    );
+    const siteBefore = await onHand(siteStore.id);
+    const issueSubmitted = await api(keeperToken, 'POST', `/stock-issues/${draftIssueId}/submit`);
+    const issuePendingEdit = await api(keeperToken, 'PATCH', `/stock-issues/${draftIssueId}`, { purpose: `${TAG} behind the approver` });
+    const issuePendingLine = await api(keeperToken, 'POST', `/stock-issues/${draftIssueId}/items`, { itemId: item.id, quantity: 1 });
+    const siteWhilePending = await onHand(siteStore.id);
+    const issueRequest = await prisma.approvalRequest.findFirst({
+      where: { documentType: 'stock_issue', documentId: draftIssueId, status: 'PENDING' },
+    });
+    check(
+      'issueSubmitted, it waits on the supervisor: nothing has left the shelf, and it cannot be modified behind the approver',
+      issueSubmitted.status === 200 &&
+        issueSubmitted.body.status === 'PENDING_APPROVAL' &&
+        issueSubmitted.body.canWithdraw === true &&
+        !!issueRequest &&
+        issuePendingEdit.status === 400 &&
+        issuePendingLine.status === 400 &&
+        money(siteBefore - siteWhilePending, 0),
+      `${issueSubmitted.status} ${issueSubmitted.body.status} req ${!!issueRequest}; edit ${issuePendingEdit.status} line ${issuePendingLine.status}; ${siteBefore} → ${siteWhilePending}`,
+    );
+
+    // Pulled back and sent again, then the supervisor decides from the
+    // document itself (the Approval panel's door) and the approval issues it.
+    const pulledBack = await api(keeperToken, 'POST', `/stock-issues/${draftIssueId}/withdraw`);
+    const withdrawnRequest = issueRequest ? await prisma.approvalRequest.findUnique({ where: { id: issueRequest.id } }) : null;
+    check(
+      'pulled back, it is a draft again and its request is withdrawn — not left in the supervisor’s queue',
+      pulledBack.status === 200 && pulledBack.body.status === 'DRAFT' && withdrawnRequest?.status === 'CANCELLED',
+      `${pulledBack.status} ${pulledBack.body.status} ${withdrawnRequest?.status}`,
+    );
+    const again = await api(keeperToken, 'POST', `/stock-issues/${draftIssueId}/submit`);
+    const openRequest = await prisma.approvalRequest.findFirst({
+      where: { documentType: 'stock_issue', documentId: draftIssueId, status: 'PENDING' },
+    });
+    const keeperSelf = openRequest ? await act({ requestId: openRequest.id, userId: keeper.id, action: 'APPROVED' }).then(() => 'acted', (e: Error) => e.message) : 'none';
+    const bossDecides = openRequest
+      ? await api(bossToken, 'POST', `/approvals/${openRequest.id}/act`, { action: 'APPROVED' })
+      : { status: 0, body: {} as Record<string, unknown> };
+    const siteAfter = await onHand(siteStore.id);
+    const issuedMoves = await prisma.inventoryTransaction.count({ where: { sourceType: 'stock_issue', sourceId: draftIssueId } });
+    const issuedRow = await prisma.stockIssue.findUniqueOrThrow({ where: { id: draftIssueId } });
+    check(
+      'the storekeeper cannot approve their own slip; the supervisor approves it and the approval issues it — the stock leaves once',
+      again.status === 200 &&
+        keeperSelf !== 'acted' &&
+        bossDecides.status === 200 &&
+        issuedRow.status === 'ISSUED' &&
+        issuedRow.issuedAt !== null &&
+        money(siteBefore - siteAfter, 2) &&
+        issuedMoves === 1,
+      `${again.status} self: ${keeperSelf}; boss ${bossDecides.status} ${JSON.stringify(bossDecides.body).slice(0, 100)}; ${issuedRow.status}; ${siteBefore} → ${siteAfter}; ${issuedMoves} move(s)`,
+    );
+    const settledTwice = await settleStockIssue(draftIssueId, 'APPROVED').then(() => 'ok', (e: Error) => e.message);
+    const movesAfterTwice = await prisma.inventoryTransaction.count({ where: { sourceType: 'stock_issue', sourceId: draftIssueId } });
+    check(
+      'a second settlement of the same approval moves nothing again',
+      settledTwice === 'ok' && movesAfterTwice === 1 && money(siteAfter - (await onHand(siteStore.id)), 0),
+      `${settledTwice} ${movesAfterTwice}`,
+    );
+
     const issuedEdit = await api(keeperToken, 'PATCH', `/stock-issues/${draftIssueId}`, { purpose: `${TAG} after the fact` });
     const issuedDelete = await api(bossToken, 'DELETE', `/stock-issues/${draftIssueId}`);
     const issuedFlags = await api(bossToken, 'GET', `/stock-issues/${draftIssueId}`);
     check(
       'issued, it refuses both Modify and Delete — the stock has moved',
-      issuedNow.status === 200 && issuedEdit.status === 400 && issuedDelete.status === 400 && issuedFlags.body.canEdit === false && issuedFlags.body.canDelete === false,
-      `${issuedNow.status} ${issuedEdit.status} ${issuedDelete.status} ${JSON.stringify(issuedNow.body).slice(0, 120)}`,
+      issuedEdit.status === 400 && issuedDelete.status === 400 && issuedFlags.body.canEdit === false && issuedFlags.body.canDelete === false,
+      `${issuedEdit.status} ${issuedDelete.status}`,
     );
-    // Issued, the paper dates all three: raised, issued (whoever pressed
-    // Issue, from the trail), received on the handover. Its money is the
-    // quotation's block — the figures bare under a head naming the currency,
-    // the total once, with the code — and every print is on the trail.
+    // Issued, the paper dates all three: raised, approved by the supervisor,
+    // received on the handover. Its money is the quotation's block — the
+    // figures bare under a head naming the currency, the total once, with
+    // the code — and every print is on the trail.
     const issuedPdf = await printed(bossToken, `/stock-issues/${draftIssueId}/pdf`);
     const issuedText = issuedPdf.text;
     const issuePrintsAfter = await prisma.auditLog.count({ where: { entityType: 'stock_issue', entityId: draftIssueId, action: 'EXPORTED' } });
     check(
-      'an issued stock issue prints who raised it, who issued it and who received it, each dated, and nothing Pending',
+      'an issued outgoing slip prints who raised it, the supervisor who approved it and who received it, each dated, and nothing Pending',
       issuedPdf.status === 200 &&
-        ['PREPARED BY', 'ISSUED BY', 'RECEIVED BY'].every((r) => flat(issuedText).includes(r)) &&
+        ['PREPARED BY', 'SUPERVISOR', 'RECEIVED BY'].every((r) => flat(issuedText).includes(r)) &&
         !flat(issuedText).includes('NOTED BY') &&
+        !flat(issuedText).includes('ISSUED BY') &&
         signedCount(issuedText) === 3 &&
         pendingCount(issuedText) === 0 &&
         flat(issuedText).includes('Status: Issued'),
@@ -2735,30 +2835,36 @@ async function main() {
     );
     check('both prints of the stock issue are on its trail as EXPORTED', issuePrintsAfter === issuePrintsBefore + 2, `${issuePrintsBefore} → ${issuePrintsAfter}`);
 
-    // Issue claims the draft before anything moves: two presses at once issue
-    // it once, and the second is told rather than taking the stock again.
+    // Submit claims the draft before anything is sent: two presses at once
+    // send it once, and the second is told. A decision that lands after the
+    // slip was pulled back changes nothing.
     const twice = await api(keeperToken, 'POST', '/stock-issues', { warehouseId: warehouse.id, purpose: `${TAG} pressed twice` });
     const twiceId = String(twice.body.id);
     await api(keeperToken, 'POST', `/stock-issues/${twiceId}/items`, { itemId: item.id, quantity: 1 });
-    const onHand = async () =>
-      num((await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } }))?.quantity);
-    const beforePresses = await onHand();
     const presses = await Promise.all([
-      api(keeperToken, 'POST', `/stock-issues/${twiceId}/issue`),
-      api(keeperToken, 'POST', `/stock-issues/${twiceId}/issue`),
+      api(keeperToken, 'POST', `/stock-issues/${twiceId}/submit`),
+      api(keeperToken, 'POST', `/stock-issues/${twiceId}/submit`),
     ]);
-    const afterPresses = await onHand();
-    const twiceMoves = await prisma.inventoryTransaction.count({ where: { sourceType: 'stock_issue', sourceId: twiceId } });
+    const twiceRequests = await prisma.approvalRequest.count({ where: { documentType: 'stock_issue', documentId: twiceId } });
     check(
-      'two presses of Issue at once issue it once: one goes through, the other is refused, and the stock leaves once',
-      presses.filter((p) => p.status === 200).length === 1 &&
-        presses.filter((p) => p.status === 400).length === 1 &&
-        money(beforePresses - afterPresses, 1) &&
-        twiceMoves === 1,
-      `${presses.map((p) => p.status).join(' ')}; ${beforePresses} → ${afterPresses}; ${twiceMoves} movement(s)`,
+      'two presses of Submit at once send it once: one goes through, the other is refused',
+      presses.filter((p) => p.status === 200).length === 1 && presses.filter((p) => p.status === 400).length === 1 && twiceRequests === 1,
+      `${presses.map((p) => p.status).join(' ')}; ${twiceRequests} request(s)`,
     );
     const lateLine = await api(keeperToken, 'POST', `/stock-issues/${twiceId}/items`, { itemId: item.id, quantity: 1 });
-    check('a line cannot be added once it has gone out', lateLine.status === 400, String(lateLine.status));
+    check('a line cannot be added once it has gone for approval', lateLine.status === 400, String(lateLine.status));
+    const beforeLate = await onHand();
+    await api(keeperToken, 'POST', `/stock-issues/${twiceId}/withdraw`);
+    await settleStockIssue(twiceId, 'APPROVED');
+    const issueLateRow = await prisma.stockIssue.findUniqueOrThrow({ where: { id: twiceId } });
+    const issueLateTrail = await prisma.auditLog.findFirst({
+      where: { entityType: 'stock_issue', entityId: twiceId, summary: { contains: 'not applied' } },
+    });
+    check(
+      'an approval that lands after the slip was pulled back issues nothing, and its trail says so',
+      issueLateRow.status === 'DRAFT' && money(beforeLate - (await onHand()), 0) && !!issueLateTrail,
+      `${issueLateRow.status} ${issueLateTrail?.summary ?? 'no trail'}`,
+    );
 
     const spareIssue = await api(keeperToken, 'POST', '/stock-issues', { warehouseId: warehouse.id, purpose: `${TAG} raised by mistake` });
     const spareId = String(spareIssue.body.id);
@@ -2832,6 +2938,183 @@ async function main() {
       'what arrived is the record: its date is refused, and someone with view only can neither change it nor is offered Modify',
       recDate.status === 400 && recStranger.status === 403 && recBuyerRead.body.canEdit === false && recModified.body.canEdit === true,
       `${recDate.status} ${recStranger.status} ${recBuyerRead.body.canEdit}`,
+    );
+
+    // ── Incoming goes for approval (2026-10-14) ──────────────────────────
+    // A receiving report is saved as a draft and posts NOTHING until the
+    // receiver's "Reports to" approves it: the stock, the order's received
+    // quantities and its status all wait. Quantities waiting for approval
+    // count against what the order can still take, so two reports cannot
+    // both receive the last ten.
+    console.log('\nIncoming on approval (over HTTP)');
+    const receiverRole = await makeRole('zzchain_receiver', 'ZZ Receiver', ['gchain.receiving.view_all', 'gchain.receiving.create']);
+    const receiver = await mkUser('Verify Receiver', 'receiver@verifyc.local', receiverRole.id);
+    await prisma.user.update({ where: { id: receiver.id }, data: { supervisorId: boss.id } });
+    const receiverToken = signToken(receiver.id, receiver.email);
+    const billerRole = await makeRole('zzchain_biller', 'ZZ Biller', ['gfin.ap.view_all', 'gfin.ap.create', 'gchain.receiving.view_all']);
+    const biller = await mkUser('Verify Biller', 'biller@verifyc.local', billerRole.id);
+    const billerToken = signToken(biller.id, biller.email);
+    const stockOrder = await prisma.purchaseOrder.create({
+      data: {
+        number: await nextNumber('purchase_order'),
+        status: 'ISSUED',
+        kind: 'STOCK_REPLENISHMENT',
+        supplierId: supplier.id,
+        warehouseId: warehouse.id,
+        createdById: procurement.id,
+        issuedAt: new Date(),
+        notes: `${TAG} stock order for Incoming`,
+        subtotal: D(1500),
+        total: D(1500),
+        items: { create: [{ itemId: item.id, description: `${TAG} Stainless pipe`, quantity: D(10), unit: 'pcs', unitPrice: D(150), amount: D(1500) }] },
+      },
+      include: { items: true },
+    });
+    const stockLine = stockOrder.items[0];
+    const mainBefore = await onHand();
+    const firstIn = await api(receiverToken, 'POST', '/receivings', {
+      orderId: stockOrder.id,
+      deliveryRefNo: 'DR-ZZ-IN-1',
+      items: [{ orderItemId: stockLine.id, quantity: 6 }],
+    });
+    const firstInId = String(firstIn.body.id);
+    const orderAfterDraft = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: stockOrder.id }, include: { items: true } });
+    check(
+      'a receiving saved with the Incoming route active is a DRAFT that moves nothing — no stock, no received quantity, the order still Issued',
+      firstIn.status === 201 &&
+        firstIn.body.needsApproval === true &&
+        firstIn.body.status === 'DRAFT' &&
+        money(await onHand(), mainBefore) &&
+        num(orderAfterDraft.items[0].receivedQty) === 0 &&
+        orderAfterDraft.status === 'ISSUED',
+      `${firstIn.status} ${firstIn.body.status} ${firstIn.body.needsApproval}; ${mainBefore} → ${await onHand()}; ${orderAfterDraft.status}`,
+    );
+    const inRead = await api(receiverToken, 'GET', `/receivings/${firstInId}`);
+    check(
+      'it offers Submit for approval and names the receiver’s supervisor as who signs',
+      inRead.body.canSubmit === true &&
+        inRead.body.needsApproval === true &&
+        ((inRead.body.approvalRoute as { steps: { approvers: { name: string }[] }[] } | null)?.steps ?? [])
+          .flatMap((s) => s.approvers.map((p) => p.name))
+          .includes('Verify Store Supervisor'),
+      JSON.stringify({ s: inRead.body.canSubmit, r: inRead.body.approvalRoute }).slice(0, 200),
+    );
+
+    // The packing list goes on the report while it is a draft, and prints
+    // behind it.
+    const packing = await PDFDocument.create();
+    packing.addPage([300, 400]);
+    const packingForm = new FormData();
+    packingForm.append('files', new Blob([Buffer.from(await packing.save())], { type: 'application/pdf' }), `${TAG}-packing-list.pdf`);
+    const packingUp = await fetch(`${BASE}/attachments/receiving/${firstInId}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${receiverToken}` },
+      body: packingForm,
+    });
+    check('the receiver attaches the packing list to the draft', packingUp.status === 201, String(packingUp.status));
+
+    const inSubmit = await api(receiverToken, 'POST', `/receivings/${firstInId}/submit`);
+    const secondIn = await api(receiverToken, 'POST', '/receivings', { orderId: stockOrder.id, items: [{ orderItemId: stockLine.id, quantity: 5 }] });
+    const fitsIn = await api(receiverToken, 'POST', '/receivings', { orderId: stockOrder.id, items: [{ orderItemId: stockLine.id, quantity: 4 }] });
+    check(
+      'submitted, its six count against the order: a second report for five is refused, one for the last four is not',
+      inSubmit.status === 200 && inSubmit.body.status === 'PENDING_APPROVAL' && secondIn.status === 400 && fitsIn.status === 201,
+      `${inSubmit.status} ${inSubmit.body.status}; ${secondIn.status} ${JSON.stringify(secondIn.body).slice(0, 100)}; ${fitsIn.status}`,
+    );
+    const fitsInId = String(fitsIn.body.id);
+
+    const draftInPdf = await printed(bossToken, `/receivings/${firstInId}/pdf`);
+    // The report, its Attachments page, then the packing list's own page.
+    const draftInPages = draftInPdf.bytes ? (await PDFDocument.load(draftInPdf.bytes)).getPageCount() : 0;
+    check(
+      'the Incoming Report prints who received it, dated, the supervisor over Pending, and the packing list behind it',
+      draftInPdf.status === 200 &&
+        flat(draftInPdf.text).includes('RECEIVED BY') &&
+        flat(draftInPdf.text).includes('SUPERVISOR') &&
+        flat(draftInPdf.text).includes('Verify Receiver') &&
+        flat(draftInPdf.text).includes('Verify Store Supervisor') &&
+        signedCount(draftInPdf.text) === 1 &&
+        pendingCount(draftInPdf.text) === 1 &&
+        draftInPdf.text.includes(`${TAG}-packing-list.pdf`) &&
+        draftInPages === 3,
+      `${draftInPdf.status} ${signedCount(draftInPdf.text)} signed, ${pendingCount(draftInPdf.text)} pending, ${draftInPages} page(s); ` +
+        `listed ${draftInPdf.text.includes(`${TAG}-packing-list.pdf`)}`,
+    );
+
+    const inRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'receiving', documentId: firstInId, status: 'PENDING' } });
+    const receiverSelf = inRequest
+      ? await act({ requestId: inRequest.id, userId: receiver.id, action: 'APPROVED' }).then(() => 'acted', (e: Error) => e.message)
+      : 'none';
+    const inApproved = inRequest ? await api(bossToken, 'POST', `/approvals/${inRequest.id}/act`, { action: 'APPROVED' }) : { status: 0, body: {} };
+    const orderAfterApproval = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: stockOrder.id }, include: { items: true } });
+    const inRow = await prisma.receiving.findUniqueOrThrow({ where: { id: firstInId } });
+    const inMoves = await prisma.inventoryTransaction.count({ where: { sourceType: 'receiving', sourceId: firstInId } });
+    check(
+      'the receiver cannot approve their own report; the supervisor’s approval receives it — six into stock, once, and the order part received',
+      receiverSelf !== 'acted' &&
+        inApproved.status === 200 &&
+        inRow.status === 'RECEIVED' &&
+        money((await onHand()) - mainBefore, 6) &&
+        inMoves === 1 &&
+        num(orderAfterApproval.items[0].receivedQty) === 6 &&
+        orderAfterApproval.status === 'PARTIALLY_RECEIVED',
+      `self: ${receiverSelf}; ${inApproved.status}; ${inRow.status}; ${mainBefore} → ${await onHand()}; ${inMoves} move(s); ` +
+        `${num(orderAfterApproval.items[0].receivedQty)} ${orderAfterApproval.status}`,
+    );
+    await settleReceiving(firstInId, 'APPROVED');
+    check(
+      'a second settlement of the same approval receives nothing again',
+      (await prisma.inventoryTransaction.count({ where: { sourceType: 'receiving', sourceId: firstInId } })) === 1 && money((await onHand()) - mainBefore, 6),
+      String(await onHand()),
+    );
+
+    // The last four: pulled back, sent again, then cancelled while waiting —
+    // its request withdrawn, nothing moved, and a decision that lands after
+    // the cancel changes nothing.
+    const fitsSubmit = await api(receiverToken, 'POST', `/receivings/${fitsInId}/submit`);
+    const fitsBack = await api(receiverToken, 'POST', `/receivings/${fitsInId}/withdraw`);
+    const fitsAgain = await api(receiverToken, 'POST', `/receivings/${fitsInId}/submit`);
+    const fitsRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'receiving', documentId: fitsInId, status: 'PENDING' } });
+    const fitsCancel = await api(receiverToken, 'POST', `/receivings/${fitsInId}/cancel`, { reason: `${TAG} wrong delivery` });
+    const fitsRequestAfter = fitsRequest ? await prisma.approvalRequest.findUnique({ where: { id: fitsRequest.id } }) : null;
+    await settleReceiving(fitsInId, 'APPROVED');
+    const fitsRow = await prisma.receiving.findUniqueOrThrow({ where: { id: fitsInId } });
+    const fitsTrail = await prisma.auditLog.findFirst({ where: { entityType: 'receiving', entityId: fitsInId, summary: { contains: 'not applied' } } });
+    check(
+      'a pending report is pulled back and sent again, then cancelled with its reason: the request is withdrawn, nothing is received, and a late approval is not applied',
+      fitsSubmit.status === 200 &&
+        fitsBack.status === 200 &&
+        fitsBack.body.status === 'DRAFT' &&
+        fitsAgain.status === 200 &&
+        fitsCancel.status === 200 &&
+        fitsRequestAfter?.status === 'CANCELLED' &&
+        fitsRow.status === 'CANCELLED' &&
+        fitsRow.cancelReason === `${TAG} wrong delivery` &&
+        money((await onHand()) - mainBefore, 6) &&
+        !!fitsTrail,
+      `${fitsSubmit.status} ${fitsBack.status}/${fitsBack.body.status} ${fitsAgain.status} ${fitsCancel.status}; req ${fitsRequestAfter?.status}; ${fitsRow.status}; ${fitsTrail?.summary ?? 'no trail'}`,
+    );
+    const afterCancelIn = await api(receiverToken, 'POST', '/receivings', { orderId: stockOrder.id, items: [{ orderItemId: stockLine.id, quantity: 4 }] });
+    check('a cancelled report gives its quantity back: the last four may be received again', afterCancelIn.status === 201, String(afterCancelIn.status));
+    const receivedCancel = await api(receiverToken, 'POST', `/receivings/${firstInId}/cancel`, { reason: `${TAG} too late` });
+    check('a received report is not cancelled — the goods are in', receivedCancel.status === 400, String(receivedCancel.status));
+
+    // A supplier's bill is matched to goods RECEIVED, never to a report
+    // still waiting for its approval — that one posted nothing.
+    const billOn = (receivingId: string) =>
+      api(billerToken, 'POST', '/supplier-bills', {
+        supplierId: supplier.id,
+        orderId: stockOrder.id,
+        receivingId,
+        supplierInvoiceNo: `${TAG}-INV`,
+        notes: `${TAG} bill on a draft`,
+        lines: [{ description: `${TAG} Stainless pipe`, quantity: 4, unitPrice: 150 }],
+      });
+    const billOnDraft = await billOn(String(afterCancelIn.body.id));
+    check(
+      'a bill naming a receiving still in draft is refused, and says why',
+      billOnDraft.status === 400 && String(billOnDraft.body.error ?? '').includes('a bill is matched to goods received'),
+      `${billOnDraft.status} ${JSON.stringify(billOnDraft.body).slice(0, 140)}`,
     );
 
     // ── Closed and late documents, for the printed lists ──────────────────
@@ -3005,7 +3288,15 @@ async function main() {
         page: LANDSCAPE,
         key: (r) => String(r.number),
         filter: [`orderId=${po.id}`, `order ${po.number}`],
-        total: { label: 'Total received', of: (rows) => rows.reduce((t, r) => t + Number(r.value), 0) },
+        // Only goods RECEIVED count: a draft, pending or cancelled report
+        // posted nothing, so its figure prints in brackets (2026-10-14).
+        total: { label: 'Total received', of: (rows) => rows.filter((r) => r.status === 'RECEIVED').reduce((t, r) => t + Number(r.value), 0) },
+        closed: {
+          is: (r) => r.status !== 'RECEIVED',
+          figure: (r) => Number(r.value),
+          note: (n) =>
+            `${n} ${n === 1 ? 'report not received yet (a draft, pending or cancelled), in brackets, is' : 'reports not received yet (drafts, pending or cancelled), in brackets, are'} not counted.`,
+        },
       },
       {
         path: 'stock-issues',
@@ -3021,9 +3312,9 @@ async function main() {
           note: (n) => `${n} cancelled issue${n === 1 ? ', in brackets, is' : 's, in brackets, are'} not counted.`,
         },
         unsettled: {
-          is: (r) => r.status === 'DRAFT',
+          is: (r) => r.status === 'DRAFT' || r.status === 'PENDING_APPROVAL',
           note: (n) =>
-            `The total includes ${n} draft issue${n === 1 ? '' : 's'}, not issued yet — nothing leaves the warehouse on ${n === 1 ? 'it until it is' : 'them until they are'}.`,
+            `The total includes ${n} draft or pending issue${n === 1 ? '' : 's'}, not issued yet — nothing leaves the warehouse on ${n === 1 ? 'it until it is' : 'them until they are'}.`,
         },
       },
       { path: 'borrow-slips', entity: 'borrow_slip', noun: ['borrow slip', 'borrow slips'], page: LANDSCAPE, key: (r) => String(r.number), filter: ['overdue=true', '· overdue'] },

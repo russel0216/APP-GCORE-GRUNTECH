@@ -18,6 +18,7 @@ export type NotificationType =
   | 'quotation.awaiting'
   | 'project.behind_schedule'
   | 'po.received'
+  | 'warehouse.not_posted'
   | 'invoice.overdue'
   | 'leave.awaiting'
   | 'overtime.awaiting'

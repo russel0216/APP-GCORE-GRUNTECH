@@ -321,7 +321,8 @@ supplierRoutes.get(
         : [],
       can(me, 'gchain.receiving.view_all')
         ? prisma.receiving.findMany({
-            where: { order: { supplierId } },
+            // What the supplier delivered: received reports, never one still waiting.
+            where: { order: { supplierId }, status: 'RECEIVED' },
             orderBy: { receivedDate: 'desc' },
             take: 50,
             select: {

@@ -150,7 +150,7 @@ interface PoDetailData {
   request: { id: string; number: string; purpose: string } | null;
   createdBy: { id: string; name: string };
   items: PoLine[];
-  receivings: { id: string; number: string; receivedDate: string; receivedBy: { name: string } }[];
+  receivings: { id: string; number: string; status: string; receivedDate: string; receivedBy: { name: string } }[];
   /** Empty unless the caller holds gfin.ap.view_all — see `billsVisible`. */
   bills: { id: string; number: string; status: string; total: number; dueDate: string }[];
   billsVisible: boolean;
@@ -426,6 +426,7 @@ export function PurchaseOrderDetail() {
                     <span className="mono">{r.number}</span>
                     <span>{formatDate(r.receivedDate)}</span>
                     <span className="faint">{r.receivedBy.name}</span>
+                    {r.status !== 'RECEIVED' && <StatusBadge status={r.status} />}
                   </Link>
                 ))}
               </div>
@@ -494,7 +495,7 @@ function ReceiveModal({
     setBusy(true);
     setError(null);
     try {
-      const created = await api.post<{ id: string }>('/receivings', {
+      const created = await api.post<{ id: string; needsApproval?: boolean }>('/receivings', {
         orderId: po.id,
         warehouseId: warehouseId || null,
         deliveryRefNo: deliveryRefNo || null,
@@ -502,7 +503,9 @@ function ReceiveModal({
           .filter((i) => Number(quantities[i.id]) > 0)
           .map((i) => ({ orderItemId: i.id, quantity: Number(quantities[i.id]) })),
       });
-      toast('ok', 'Goods received');
+      // With the Incoming route active the report is a draft: its page takes
+      // the packing list, then goes for approval — nothing moves until then.
+      toast('ok', created.needsApproval ? 'Saved — attach the packing list, then submit it for approval' : 'Goods received');
       onReceived(created.id);
     } catch (err) {
       setError(err);

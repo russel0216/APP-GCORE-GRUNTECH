@@ -2644,6 +2644,7 @@ async function loadPo(id: string) {
         select: {
           id: true,
           number: true,
+          status: true,
           receivedDate: true,
           receivedBy: { select: { name: true } },
         },

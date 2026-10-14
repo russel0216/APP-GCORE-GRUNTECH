@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,126 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,145 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -571,10 +571,11 @@ purchase order page, and one on foundation and 5 on costing for a line's
 supplier and note, and one on chain for an approved request not counted
 twice against its budget, and 2 on foundation for the owner's order of the
 divisions and G-CHAIN's strips, and 20 on chain for the Request for
-Quotation, and 8 on chain and one on foundation for the canvass sheet):
+Quotation, and 8 on chain and one on foundation for the canvass sheet,
+and 19 on chain for Incoming and Outgoing on approval):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 253, hr 468, plantilla 123, meetings
+79, partners 120, delivery 171, chain 272, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4527,6 +4528,49 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   reference budget and the saving of the award (else the lowest complete
   quote), with Open and Awarded cards; its paper is landscape. The page is
   `pages/chain/Canvass.tsx` (moved out of `Orders.tsx`).
+- **Incoming and Outgoing go for approval** (push 4a; the owner's call:
+  "approval of his/her report to"). Seeded "Incoming — the receiver's
+  supervisor" (`receiving`) and "Outgoing — the issuer's supervisor"
+  (`stock_issue`): one SUPERVISOR step each, the warehouse person's
+  "Reports to", falling back to the new **Warehouse Supervisor** role
+  (`warehouse_supervisor`, seeded from the warehouse role's rights) on
+  their team, else any holder. **Assign "Reports to" on every warehouse
+  login, or give somebody Warehouse Supervisor** — until then a submit is
+  refused for want of an approver and `audit-workflows.ts` says so.
+  `ReceivingStatus` DRAFT → PENDING_APPROVAL → RECEIVED, or CANCELLED with
+  `cancelReason` (the column defaults to RECEIVED, so every report on file
+  stays as it was); `IssueStatus` gains PENDING_APPROVAL. **A draft moves
+  nothing**: `POST /receivings` saves a DRAFT while the route is active
+  (`needsApproval` in its answer) and posts at once only when the route is
+  switched off — the sales order's rule; `/submit` claims the draft on
+  `updatedAt`, files the request in the RECEIVER's name, and goes back to
+  DRAFT if the engine refuses; `/withdraw` and `/cancel { reason }`
+  withdraw through `cancelOpenRequest` in the same transaction. A report
+  waiting for approval COUNTS against what its order can still take
+  (`checkOutstanding`), so two cannot both receive the last ten; a
+  cancelled one gives it back. `settleReceiving()` / `settleStockIssue()`
+  (exported, idempotent) claim PENDING_APPROVAL and post in the same
+  transaction — the stock, the order's received quantities and status,
+  the job's commitment and cost (`postReceiving`, `postStockIssue`, the one
+  posting each, shared with the unrouted path); a return or rejection puts
+  it back to a draft; a decision after a cancel or withdrawal is "… — not
+  applied"; an approval the shelf or the order can no longer honour goes
+  back to a draft, said on its trail and by a `warehouse.not_posted` bell,
+  never half posted. **Issue is refused while the Outgoing route is
+  active** ("goes for approval"); a slip is checked against the shelf at
+  submit. Only goods RECEIVED count anywhere money looks: a supplier bill
+  is matched to a RECEIVED report only (`billLinks`), finance's unbilled
+  queue, Supplier 360 and the Incoming list's "Total received" (the rest in
+  brackets) read RECEIVED. **Attachments**: the packing list, the DR and
+  photos on `receiving`, the signed gate pass on `stock_issue` — read as
+  the document is (a decider through `mayDecide`), written while DRAFT or
+  pending by whoever may move it on — and both papers print them behind
+  (`withAttachments`, `?attachments=0` bare). The papers sign RECEIVED BY /
+  PREPARED BY, then the route's step ("Pending" until signed), then the
+  receiver on an Outgoing Slip; an unrouted slip still prints "Issued by".
+  The record pages show "Submit for approval sends it to …", the Approval
+  panel once sent, and Pull back / Cancel in ⋯; the supervisor's door is
+  `requireAnyOrDecider` on the record and its paper.
 
 ## Spreadsheet attachments (2026-10-05)
 

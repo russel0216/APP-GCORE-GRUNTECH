@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma, IssueStatus, BorrowStatus } from '@prisma/client';
+import { Prisma, IssueStatus, BorrowStatus, ReceivingStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import {
   handler,
@@ -10,17 +10,32 @@ import {
   orderBy,
   notFound,
   badRequest,
+  forbidden,
   idsFilter,
   type ListQuery,
 } from '../http/kit';
-import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { registerSearch } from '../shared/search';
 import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES } from '../shared/chain';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { contactOf } from '../shared/approvals';
+import {
+  contactOf,
+  submitForApproval,
+  onApprovalSettled,
+  cancelOpenRequest,
+  pickWorkflow,
+  routeBrief,
+  approvalSlots,
+  slotSignatories,
+  preparedAt,
+  mayDecide,
+  type ApprovalOutcome,
+} from '../shared/approvals';
+import { registerAttachmentGuard } from '../shared/attachments';
+import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
 import {
   renderDocument,
   formatMoney,
@@ -81,11 +96,29 @@ const qty = (v: number) => new Intl.NumberFormat('en-PH', { maximumFractionDigit
 export const receivingRoutes = Router();
 receivingRoutes.use(authenticate);
 
+/*
+ * INCOMING goes for approval (2026-10-14, the owner's call: "Incoming — the
+ * warehouse receives this, approval of his/her report to; can attach the
+ * packing list or documents"). Saving a receiving report writes a DRAFT that
+ * moves nothing; "Submit for approval" files it in the receiver's name
+ * through the seeded "Incoming — the receiver's supervisor" route (their
+ * "Reports to", else a Warehouse Supervisor); the approval posts what the
+ * save used to post — the stock, the job cost, the order's received
+ * quantities and status (`postReceiving`, through `settleReceiving`). A
+ * pending report holds its quantities against the order, so two cannot both
+ * receive the same goods. With the route deactivated, a save posts at once
+ * (RECEIVED), as it did before — the sales order's rule.
+ */
+
 const RECEIVING_SORTS = ['number', 'receivedDate'];
+const RECEIVING_DOC = 'receiving';
+const RECEIVING_VIEW = 'gchain.receiving.view_all';
 
 /** Which receivings a list query means — one rule for the list and its printed twin. */
 function receivingListWhere(q: ListQuery): Prisma.ReceivingWhereInput {
   const and: Prisma.ReceivingWhereInput[] = [];
+  const status = choice(q.filters.status, ReceivingStatus, 'Status');
+  if (status) and.push({ status });
   if (q.filters.orderId) and.push({ orderId: q.filters.orderId });
   // A receiving has no job of its own — it inherits its order's. The job
   // workspace's Procurement tab lists a project's deliveries through this.
@@ -107,7 +140,7 @@ function receivingListWhere(q: ListQuery): Prisma.ReceivingWhereInput {
 
 receivingRoutes.get(
   '/',
-  require_('gchain.receiving.view_all'),
+  require_(RECEIVING_VIEW),
   handler(async (req, res) => {
     const q = listQuery(req);
     const where = receivingListWhere(q);
@@ -141,6 +174,7 @@ receivingRoutes.get(
         rows.map((r) => ({
           id: r.id,
           number: r.number,
+          status: r.status,
           receivedDate: r.receivedDate,
           deliveryRefNo: r.deliveryRefNo,
           order: r.order,
@@ -159,16 +193,18 @@ receivingRoutes.get(
 /**
  * The receiving list on paper, through `receivingListWhere` (or the rows
  * ticked, `?ids=`): what arrived, against which order, into where, and its
- * value at the order's price — the figure the screen shows. Above `/:id`.
+ * value at the order's price — the figure the screen shows. A report not
+ * received yet (a draft, one pending approval, a cancelled one) moved
+ * nothing: its value prints in brackets and is not summed. Above `/:id`.
  */
 receivingRoutes.get(
   '/pdf',
-  require_('gchain.receiving.view_all'),
+  require_(RECEIVING_VIEW),
   handler(async (req, res) => {
     const q = listQuery(req);
     const where = receivingListWhere(q);
     const f = q.filters;
-    const [rows, count, lines, currency, project, order] = await Promise.all([
+    const [rows, count, lines, notYet, currency, project, order] = await Promise.all([
       prisma.receiving.findMany({
         where,
         include: {
@@ -181,15 +217,17 @@ receivingRoutes.get(
         take: LIST_CAP,
       }),
       prisma.receiving.count({ where }),
-      // Every line of every receiving listed, for the total — summed exactly
-      // and rounded once, never the sum of rounded rows.
-      prisma.receivingItem.findMany({ where: { receiving: where }, select: { quantity: true, unitCost: true } }),
+      // Every line of every RECEIVED report listed, for the total — summed
+      // exactly and rounded once, never the sum of rounded rows.
+      prisma.receivingItem.findMany({ where: { receiving: { AND: [where, { status: 'RECEIVED' }] } }, select: { quantity: true, unitCost: true } }),
+      prisma.receiving.count({ where: { AND: [where, { status: { not: 'RECEIVED' } }] } }),
       companyCurrency(),
       recordNamed('project', f.jobId),
       f.orderId ? prisma.purchaseOrder.findUnique({ where: { id: f.orderId }, select: { number: true } }) : null,
     ]);
     const reference = listReference(count, rows.length, ['receiving', 'receivings'], [
       q.search && `search "${q.search}"`,
+      f.status && `status ${statusLabel(f.status)}`,
       f.orderId && `order ${order?.number ?? 'not found'}`,
       project,
       f.ids && 'the rows selected',
@@ -197,7 +235,7 @@ receivingRoutes.get(
     const valueOf = (items: { quantity: Prisma.Decimal; unitCost: Prisma.Decimal }[]) =>
       items.reduce((s, i) => s.add(i.quantity.mul(i.unitCost)), new Prisma.Decimal(0));
 
-    // Nine columns: landscape, each sized from what it holds (rule 6).
+    // Ten columns: landscape, each sized from what it holds (rule 6).
     const pdf = await renderDocument({
       title: 'Incoming',
       date: new Date(),
@@ -206,8 +244,8 @@ receivingRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Against', 'For', 'Into', 'Received', 'Lines', `Value (${currency})`, 'Received by', 'DR no.'],
-          align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left', 'left'],
+          head: ['Number', 'Against', 'For', 'Into', 'Received', 'Lines', `Value (${currency})`, 'Received by', 'DR no.', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left', 'left', 'left'],
           rows: rows.map((r) => [
             r.number,
             { title: r.order.supplier.name, body: r.order.number },
@@ -215,15 +253,17 @@ receivingRoutes.get(
             r.warehouse?.name ?? 'Site',
             formatShortDate(r.receivedDate),
             String(r.items.length),
-            formatAmount(valueOf(r.items).toFixed(2)),
+            bracketed(formatAmount(valueOf(r.items).toFixed(2)), r.status === 'RECEIVED'),
             r.receivedBy.name,
             r.deliveryRefNo ?? '',
+            statusLabel(r.status),
           ]),
         },
         {
           kind: 'totals',
           rows: [{ label: totalLabel('Total received', count, rows.length), value: formatMoney(valueOf(lines).toFixed(2), currency), bold: true }],
         },
+        ...listNotes([bracketNote(notYet, ['report not received yet (a draft, pending or cancelled)', 'reports not received yet (drafts, pending or cancelled)'])]),
       ],
     });
     await audit(
@@ -267,15 +307,35 @@ async function loadReceiving(id: string) {
   });
 }
 
-function presentReceiving(receiving: NonNullable<Awaited<ReturnType<typeof loadReceiving>>>, me: ResolvedUser) {
+type LoadedReceiving = NonNullable<Awaited<ReturnType<typeof loadReceiving>>>;
+
+const receivingValue = (items: { quantity: Prisma.Decimal; unitCost: Prisma.Decimal }[]) =>
+  cents(items.reduce((s, i) => s + num(i.quantity) * num(i.unitCost), 0));
+
+/** Who may move a report on — submit, pull back, cancel: whoever received it, or edit_all. */
+function mayHandleReceiving(me: ResolvedUser, r: { receivedById: string }) {
+  return r.receivedById === me.id || can(me, 'gchain.receiving.edit_all');
+}
+
+async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
   // Finance's register, listed only to those who can open it.
   const seesBills = can(me, 'gfin.ap.view_all');
+  const value = receivingValue(receiving.items);
+  const draft = receiving.status === 'DRAFT';
+  const handler_ = mayHandleReceiving(me, receiving);
+  const route = draft ? await pickWorkflow(RECEIVING_DOC, value, { requesterId: receiving.receivedById }) : null;
   return {
     ...receiving,
     bills: seesBills ? receiving.bills : [],
     billsVisible: seesBills,
     // Its references only (PATCH /:id): what arrived is the record.
     canEdit: can(me, 'gchain.receiving.edit_all'),
+    canSubmit: draft && handler_ && can(me, 'gchain.receiving.create'),
+    needsApproval: draft ? !!route : null,
+    canWithdraw: receiving.status === 'PENDING_APPROVAL' && handler_,
+    canCancel: (draft || receiving.status === 'PENDING_APPROVAL') && handler_,
+    // The route a draft WOULD take, by name — who signs it.
+    approvalRoute: draft && route ? await routeBrief(RECEIVING_DOC, value, receiving.receivedById) : null,
     order: { ...receiving.order, total: num(receiving.order.total) },
     items: receiving.items.map((i) => ({
       ...i,
@@ -289,26 +349,38 @@ function presentReceiving(receiving: NonNullable<Awaited<ReturnType<typeof loadR
         receivedQty: num(i.orderItem.receivedQty),
       },
     })),
-    value: cents(receiving.items.reduce((s, i) => s + num(i.quantity) * num(i.unitCost), 0)),
+    value,
   };
+}
+
+/**
+ * The report as its reader may see it: the register's right, or — through
+ * `requireAnyOrDecider` — whoever may decide its open request (a supervisor
+ * with no warehouse right), only while it waits on them.
+ */
+async function visibleReceiving(me: ResolvedUser, id: string, deciderOnly: boolean) {
+  const receiving = await loadReceiving(id);
+  if (!receiving) throw notFound('Receiving report not found');
+  if (deciderOnly && !(await mayDecide(me.id, RECEIVING_DOC, [receiving.id]))) throw notFound('Receiving report not found');
+  return receiving;
 }
 
 receivingRoutes.get(
   '/:id',
-  require_('gchain.receiving.view_all'),
+  requireAnyOrDecider(RECEIVING_VIEW),
   handler(async (req, res) => {
-    const receiving = await loadReceiving(req.params.id);
-    if (!receiving) throw notFound('Receiving report not found');
-    res.json(presentReceiving(receiving, currentUser(req)));
+    const me = currentUser(req);
+    const receiving = await visibleReceiving(me, req.params.id, res.locals.deciderOnly === true);
+    res.json(await presentReceiving(receiving, me));
   }),
 );
 
 /**
- * A receiving report is a record of what arrived: its lines, quantities,
- * costs, warehouse and date moved stock and job cost, and stay as they were.
- * Only its paper references change — the delivery receipt and supplier
- * invoice numbers, and the notes — and a key it cannot change is refused,
- * not ignored.
+ * A receiving report's paper references change at any time — the delivery
+ * receipt and supplier invoice numbers, and the notes. What arrived (lines,
+ * quantities, costs, warehouse, date) is the record once received; a draft
+ * that is wrong is cancelled and saved again. A key it cannot change is
+ * refused, not ignored.
  */
 receivingRoutes.patch(
   '/:id',
@@ -350,7 +422,7 @@ receivingRoutes.patch(
       },
       req,
     );
-    res.json(presentReceiving((await loadReceiving(existing.id))!, currentUser(req)));
+    res.json(await presentReceiving((await loadReceiving(existing.id))!, currentUser(req)));
   }),
 );
 
@@ -387,6 +459,149 @@ const receivingSchema = z.object({
     .min(1, 'Receive at least one line'),
 });
 
+/**
+ * What a report may still receive of each order line: ordered less received
+ * less what OTHER reports pending approval hold — so two pending reports
+ * cannot both receive the same goods. Over-delivery is refused outright:
+ * receiving more than was ordered means either the delivery or the order is
+ * wrong, and quietly accepting it corrupts the commitment release and the
+ * stock value.
+ */
+async function checkOutstanding(
+  db: Prisma.TransactionClient | typeof prisma,
+  orderItems: { id: string; description: string; quantity: Prisma.Decimal; receivedQty: Prisma.Decimal }[],
+  lines: { orderItemId: string; quantity: number }[],
+  exceptReceivingId?: string,
+) {
+  const held = await db.receivingItem.groupBy({
+    by: ['orderItemId'],
+    where: {
+      orderItemId: { in: orderItems.map((i) => i.id) },
+      receiving: { status: 'PENDING_APPROVAL', ...(exceptReceivingId ? { id: { not: exceptReceivingId } } : {}) },
+    },
+    _sum: { quantity: true },
+  });
+  const pending = new Map(held.map((h) => [h.orderItemId, num(h._sum.quantity)]));
+  const byOrderItem = new Map(orderItems.map((i) => [i.id, i]));
+  for (const line of lines) {
+    const orderItem = byOrderItem.get(line.orderItemId);
+    if (!orderItem) throw badRequest('One of the lines is not on that order');
+    const waiting = pending.get(orderItem.id) ?? 0;
+    const outstanding = num(orderItem.quantity) - num(orderItem.receivedQty) - waiting;
+    if (line.quantity > outstanding + 0.0005) {
+      throw badRequest(
+        `${orderItem.description}: ${qty(Math.max(0, outstanding))} outstanding on the order` +
+          `${waiting ? ` (${qty(waiting)} more on a report pending approval)` : ''}, ${qty(line.quantity)} being received. ` +
+          'Amend the order if the delivery is genuinely larger.',
+      );
+    }
+  }
+}
+
+/**
+ * Posts a receiving report: the order's received quantities and status, the
+ * stock (a replenishment), the job cost (direct to a project) — what the
+ * save did before the route. Inside the caller's transaction, after its claim.
+ */
+async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, actorId: string) {
+  const receiving = await tx.receiving.findUniqueOrThrow({
+    where: { id: receivingId },
+    include: { items: true, order: { include: { items: true, supplier: { select: { name: true } } } } },
+  });
+  const order = receiving.order;
+  if (order.status === 'CANCELLED') throw badRequest(`${order.number} was cancelled`);
+  const byOrderItem = new Map(order.items.map((i) => [i.id, i]));
+  const byCategory = new Map<string, number>();
+
+  for (const line of receiving.items) {
+    const orderItem = byOrderItem.get(line.orderItemId)!;
+    const quantity = num(line.quantity);
+    const unitCost = num(line.unitCost);
+    const amount = cents(quantity * unitCost);
+
+    await tx.purchaseOrderItem.update({
+      where: { id: orderItem.id },
+      data: { receivedQty: { increment: line.quantity } },
+    });
+
+    // ONLY a stock replenishment builds inventory.
+    //
+    // Direct-to-job material is charged to the project the moment it
+    // arrives. If it also entered stock, issuing it to that same project
+    // later would charge it a second time at average cost — the exact
+    // double-count the two purchase kinds exist to prevent. It may still
+    // physically pass through the store; that is a storage detail, not a
+    // stock balance.
+    if (order.kind === 'STOCK_REPLENISHMENT' && receiving.warehouseId && orderItem.itemId) {
+      await receiveStock(tx, {
+        itemId: orderItem.itemId,
+        warehouseId: receiving.warehouseId,
+        quantity,
+        unitCost,
+        sourceType: 'receiving',
+        sourceId: receiving.id,
+        sourceNumber: receiving.number,
+        createdById: actorId,
+      });
+    }
+
+    if (order.kind === 'DIRECT_TO_JOB' && orderItem.costCategoryId) {
+      byCategory.set(orderItem.costCategoryId, (byCategory.get(orderItem.costCategoryId) ?? 0) + amount);
+    }
+  }
+
+  // Direct-to-job: the cost is now real. Release the commitment in the same
+  // amount and record it as incurred.
+  if (order.kind === 'DIRECT_TO_JOB' && order.jobId) {
+    for (const [costCategoryId, amount] of byCategory) {
+      await releaseCommitment(tx, {
+        jobId: order.jobId,
+        sourceType: 'purchase_order',
+        sourceId: order.id,
+        costCategoryId,
+        amount,
+        reason: `Received on ${receiving.number}`,
+        createdById: actorId,
+      });
+      await postJobCost(tx, {
+        jobId: order.jobId,
+        costCategoryId,
+        state: 'INCURRED',
+        amount,
+        sourceType: 'receiving',
+        sourceId: receiving.id,
+        sourceNumber: receiving.number,
+        description: `Goods received from ${order.supplier.name}`,
+        createdById: actorId,
+      });
+    }
+  }
+
+  // Order status follows what is outstanding.
+  const refreshed = await tx.purchaseOrderItem.findMany({ where: { orderId: order.id } });
+  const fully = refreshed.every((i) => num(i.receivedQty) >= num(i.quantity) - 0.0005);
+  await tx.purchaseOrder.update({
+    where: { id: order.id },
+    data: { status: fully ? 'RECEIVED' : 'PARTIALLY_RECEIVED' },
+  });
+}
+
+/** Tells the receiver the goods are in, for a project's order (the bell the save rang before). */
+async function tellReceived(receivingId: string, userId: string) {
+  const r = await prisma.receiving.findUnique({
+    where: { id: receivingId },
+    select: { id: true, number: true, order: { select: { number: true, job: { select: { number: true } } } } },
+  });
+  if (!r?.order.job) return;
+  await notify({
+    userId,
+    type: 'po.received',
+    title: `Goods received — ${r.order.number}`,
+    body: `${r.order.job.number} · ${r.number}`,
+    link: `/g-chain/incoming/${r.id}`,
+  });
+}
+
 receivingRoutes.post(
   '/',
   require_('gchain.receiving.create'),
@@ -405,22 +620,12 @@ receivingRoutes.post(
     if (order.status === 'CANCELLED') throw badRequest('That order was cancelled');
 
     const warehouseId = body.warehouseId ?? order.warehouseId ?? null;
-
-    // Over-delivery is refused outright: receiving more than was ordered means
-    // either the delivery or the order is wrong, and quietly accepting it
-    // corrupts both the commitment release and the stock value.
+    await checkOutstanding(prisma, order.items, body.items);
     const byOrderItem = new Map(order.items.map((i) => [i.id, i]));
-    for (const line of body.items) {
-      const orderItem = byOrderItem.get(line.orderItemId);
-      if (!orderItem) throw badRequest('One of the lines is not on that order');
-      const outstanding = num(orderItem.quantity) - num(orderItem.receivedQty);
-      if (line.quantity > outstanding + 0.0005) {
-        throw badRequest(
-          `${orderItem.description}: ${outstanding} outstanding on the order, ${line.quantity} being received. ` +
-            `Amend the order if the delivery is genuinely larger.`,
-        );
-      }
-    }
+    const value = cents(body.items.reduce((s, l) => s + l.quantity * (l.unitCost ?? num(byOrderItem.get(l.orderItemId)!.unitPrice)), 0));
+    // With the Incoming route active the report waits for its approval;
+    // without one it posts now, as it always did.
+    const routed = !!(await pickWorkflow(RECEIVING_DOC, value, { requesterId: me.id }));
 
     const receiving = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('receiving', tx);
@@ -434,6 +639,7 @@ receivingRoutes.post(
           deliveryRefNo: body.deliveryRefNo || null,
           invoiceRefNo: body.invoiceRefNo || null,
           notes: body.notes || null,
+          status: routed ? 'DRAFT' : 'RECEIVED',
           items: {
             create: body.items.map((l) => {
               const orderItem = byOrderItem.get(l.orderItemId)!;
@@ -450,83 +656,7 @@ receivingRoutes.post(
           },
         },
       });
-
-      const byCategory = new Map<string, number>();
-
-      for (const line of body.items) {
-        const orderItem = byOrderItem.get(line.orderItemId)!;
-        const unitCost = line.unitCost ?? num(orderItem.unitPrice);
-        const amount = cents(line.quantity * unitCost);
-
-        await tx.purchaseOrderItem.update({
-          where: { id: orderItem.id },
-          data: { receivedQty: D(num(orderItem.receivedQty) + line.quantity) },
-        });
-
-        // ONLY a stock replenishment builds inventory.
-        //
-        // Direct-to-job material is charged to the project the moment it
-        // arrives. If it also entered stock, issuing it to that same project
-        // later would charge it a second time at average cost — the exact
-        // double-count the two purchase kinds exist to prevent. It may still
-        // physically pass through the store; that is a storage detail, not a
-        // stock balance.
-        if (order.kind === 'STOCK_REPLENISHMENT' && warehouseId && orderItem.itemId) {
-          await receiveStock(tx, {
-            itemId: orderItem.itemId,
-            warehouseId,
-            quantity: line.quantity,
-            unitCost,
-            sourceType: 'receiving',
-            sourceId: created.id,
-            sourceNumber: created.number,
-            createdById: me.id,
-          });
-        }
-
-        if (order.kind === 'DIRECT_TO_JOB' && orderItem.costCategoryId) {
-          byCategory.set(
-            orderItem.costCategoryId,
-            (byCategory.get(orderItem.costCategoryId) ?? 0) + amount,
-          );
-        }
-      }
-
-      // Direct-to-job: the cost is now real. Release the commitment in the same
-      // amount and record it as incurred.
-      if (order.kind === 'DIRECT_TO_JOB' && order.jobId) {
-        for (const [costCategoryId, amount] of byCategory) {
-          await releaseCommitment(tx, {
-            jobId: order.jobId,
-            sourceType: 'purchase_order',
-            sourceId: order.id,
-            costCategoryId,
-            amount,
-            reason: `Received on ${created.number}`,
-            createdById: me.id,
-          });
-          await postJobCost(tx, {
-            jobId: order.jobId,
-            costCategoryId,
-            state: 'INCURRED',
-            amount,
-            sourceType: 'receiving',
-            sourceId: created.id,
-            sourceNumber: created.number,
-            description: `Goods received from ${order.supplier.name}`,
-            createdById: me.id,
-          });
-        }
-      }
-
-      // Order status follows what is outstanding.
-      const refreshed = await tx.purchaseOrderItem.findMany({ where: { orderId: order.id } });
-      const fully = refreshed.every((i) => num(i.receivedQty) >= num(i.quantity) - 0.0005);
-      await tx.purchaseOrder.update({
-        where: { id: order.id },
-        data: { status: fully ? 'RECEIVED' : 'PARTIALLY_RECEIVED' },
-      });
-
+      if (!routed) await postReceiving(tx, created.id, me.id);
       return created;
     });
 
@@ -535,24 +665,273 @@ receivingRoutes.post(
         entityType: 'receiving',
         entityId: receiving.id,
         action: 'CREATED',
-        summary: `${receiving.number} received against ${order.number}`,
+        summary: routed ? `${receiving.number} saved against ${order.number}, to submit for approval` : `${receiving.number} received against ${order.number}`,
       },
       req,
     );
+    if (!routed) await tellReceived(receiving.id, me.id);
+    res.status(201).json({ ...receiving, needsApproval: routed });
+  }),
+);
 
-    if (order.jobId && order.job) {
+/**
+ * Submit for approval: claims the DRAFT on the `updatedAt` it carries,
+ * checks the order can still take its quantities (other pending reports
+ * counted), and files the request in the RECEIVER's name whoever presses it
+ * — so the receiver's own supervisor decides, never the receiver. A refused
+ * submit puts it back to a draft.
+ */
+receivingRoutes.post(
+  '/:id/submit',
+  require_('gchain.receiving.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const receiving = await prisma.receiving.findUnique({
+      where: { id: req.params.id },
+      include: { items: true, order: { include: { items: true, supplier: { select: { name: true } }, job: { select: { number: true } } } } },
+    });
+    if (!receiving) throw notFound('Receiving report not found');
+    if (!mayHandleReceiving(me, receiving)) throw forbidden('This report is someone else’s — they, or the warehouse lead, submit it');
+    if (receiving.status !== 'DRAFT') throw badRequest(`${receiving.number} is ${statusLabel(receiving.status).toLowerCase()}`);
+    if (['DRAFT', 'PENDING_APPROVAL', 'CANCELLED'].includes(receiving.order.status)) {
+      throw badRequest(`${receiving.order.number} is ${statusLabel(receiving.order.status).toLowerCase()} — goods are received against an issued order`);
+    }
+    await checkOutstanding(
+      prisma,
+      receiving.order.items,
+      receiving.items.map((i) => ({ orderItemId: i.orderItemId, quantity: num(i.quantity) })),
+      receiving.id,
+    );
+    const value = receivingValue(receiving.items);
+    const claimed = await prisma.receiving.updateMany({
+      where: { id: receiving.id, status: 'DRAFT', updatedAt: receiving.updatedAt },
+      data: { status: 'PENDING_APPROVAL' },
+    });
+    if (!claimed.count) throw badRequest(`${receiving.number} changed a moment ago — reload to see where it stands`);
+    try {
+      await submitForApproval({
+        documentType: RECEIVING_DOC,
+        documentId: receiving.id,
+        documentNumber: receiving.number,
+        subject: `${receiving.order.supplier.name} — ${receiving.order.number}${receiving.order.job ? ` · ${receiving.order.job.number}` : ''}`,
+        amount: value,
+        link: `/g-chain/incoming/${receiving.id}`,
+        requesterId: receiving.receivedById,
+      });
+    } catch (err) {
+      await prisma.receiving.updateMany({ where: { id: receiving.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      throw err;
+    }
+    await audit({ entityType: 'receiving', entityId: receiving.id, action: 'SUBMITTED', summary: `${receiving.number} submitted for approval` }, req);
+    res.json(await presentReceiving((await loadReceiving(receiving.id))!, me));
+  }),
+);
+
+/** Pulls a pending report back to a draft — the request withdrawn in the same transaction; a decision that landed first wins. */
+receivingRoutes.post(
+  '/:id/withdraw',
+  require_('gchain.receiving.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const receiving = await prisma.receiving.findUnique({ where: { id: req.params.id } });
+    if (!receiving) throw notFound('Receiving report not found');
+    if (!mayHandleReceiving(me, receiving)) throw forbidden('This report is someone else’s');
+    if (receiving.status !== 'PENDING_APPROVAL') throw badRequest(`${receiving.number} is not waiting for approval`);
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.receiving.updateMany({ where: { id: receiving.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      if (!claimed.count) throw badRequest(`${receiving.number} was decided a moment ago — reload to see where it stands`);
+      const withdrawn = await cancelOpenRequest(RECEIVING_DOC, receiving.id, tx, `pulled back by ${me.name}`, me.id);
+      if (!withdrawn.length) throw badRequest(`${receiving.number} was decided a moment ago — reload to see where it stands`);
+    });
+    await audit({ entityType: 'receiving', entityId: receiving.id, action: 'UPDATED', summary: `${receiving.number} pulled back to a draft` }, req);
+    res.json(await presentReceiving((await loadReceiving(receiving.id))!, me));
+  }),
+);
+
+/** Cancels a draft or a pending report, the reason kept — nothing had moved, and its open request is withdrawn. */
+receivingRoutes.post(
+  '/:id/cancel',
+  require_('gchain.receiving.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled').max(2000) }), req.body);
+    const receiving = await prisma.receiving.findUnique({ where: { id: req.params.id } });
+    if (!receiving) throw notFound('Receiving report not found');
+    if (!mayHandleReceiving(me, receiving)) throw forbidden('This report is someone else’s');
+    if (receiving.status !== 'DRAFT' && receiving.status !== 'PENDING_APPROVAL') {
+      throw badRequest(`${receiving.number} is ${statusLabel(receiving.status).toLowerCase()} — ${receiving.status === 'RECEIVED' ? 'the goods are in, so it stays on record' : 'nothing to cancel'}`);
+    }
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.receiving.updateMany({
+        where: { id: receiving.id, status: receiving.status },
+        data: { status: 'CANCELLED', cancelReason: body.reason },
+      });
+      if (!claimed.count) throw badRequest(`${receiving.number} changed a moment ago — reload to see where it stands`);
+      if (receiving.status === 'PENDING_APPROVAL') {
+        await cancelOpenRequest(RECEIVING_DOC, receiving.id, tx, `cancelled by ${me.name}: ${body.reason}`, me.id);
+      }
+    });
+    await audit({ entityType: 'receiving', entityId: receiving.id, action: 'CANCELLED', summary: `${receiving.number} cancelled — ${body.reason}` }, req);
+    res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
+/**
+ * The route's decision. Approved: claims PENDING_APPROVAL → RECEIVED and
+ * posts in the same transaction — once, whatever calls it twice. Returned or
+ * rejected: back to a draft for the receiver to put right. A decision that
+ * finds the report no longer pending changes nothing, and says so.
+ */
+export async function settleReceiving(documentId: string, outcome: ApprovalOutcome) {
+  const receiving = await prisma.receiving.findUnique({ where: { id: documentId } });
+  if (!receiving) return;
+  if (outcome !== 'APPROVED') {
+    const back = await prisma.receiving.updateMany({ where: { id: receiving.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+    if (!back.count) await warehouseNotApplied('receiving', receiving.id, receiving.number, receiving.status, outcome);
+    return;
+  }
+  let posted = false;
+  try {
+    posted = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.receiving.updateMany({ where: { id: receiving.id, status: 'PENDING_APPROVAL' }, data: { status: 'RECEIVED' } });
+      if (!claimed.count) return false;
+      await postReceiving(tx, receiving.id, receiving.receivedById);
+      return true;
+    });
+  } catch (err) {
+    // Approved, but its order can no longer take it: back to a draft, said
+    // on its trail and to the receiver, never half posted.
+    const reason = err instanceof Error ? err.message : 'it could not be posted';
+    const back = await prisma.receiving.updateMany({ where: { id: receiving.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+    if (back.count) {
+      await audit({ entityType: 'receiving', entityId: receiving.id, action: 'UPDATED', summary: `${receiving.number} approved, but not received — ${reason}; back to a draft`, actorName: 'system' });
       await notify({
-        userId: me.id,
-        type: 'po.received',
-        title: `Goods received — ${order.number}`,
-        body: `${order.job.number} · ${receiving.number}`,
+        userId: receiving.receivedById,
+        type: 'warehouse.not_posted',
+        title: `${receiving.number} approved but not received`,
+        body: `${reason}. It is a draft again.`,
         link: `/g-chain/incoming/${receiving.id}`,
       });
     }
+    return;
+  }
+  if (!posted) {
+    const now = await prisma.receiving.findUnique({ where: { id: receiving.id }, select: { status: true } });
+    await warehouseNotApplied('receiving', receiving.id, receiving.number, now?.status ?? receiving.status, outcome);
+    return;
+  }
+  await audit({ entityType: 'receiving', entityId: receiving.id, action: 'EXECUTED', summary: `${receiving.number} received — approved`, actorName: 'system' });
+  await tellReceived(receiving.id, receiving.receivedById);
+}
 
-    res.status(201).json(receiving);
+onApprovalSettled(RECEIVING_DOC, async (request, outcome) => {
+  await settleReceiving(request.documentId, outcome);
+});
+
+/**
+ * The receiving report on paper: what arrived against which order, into
+ * where, valued at the order's price; RECEIVED BY (whoever saved it, dated)
+ * and one slot per step of its route (a draft prints the route submitting
+ * would take; "Pending" until signed). The packing list, the DR and the
+ * photos attached to it follow it (`withAttachments`) unless `?attachments=0`.
+ */
+receivingRoutes.get(
+  '/:id/pdf',
+  requireAnyOrDecider(RECEIVING_VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const receiving = await visibleReceiving(me, req.params.id, res.locals.deciderOnly === true);
+    const view = await presentReceiving(receiving, me);
+    const currency = await companyCurrency();
+    const slots =
+      receiving.status === 'DRAFT'
+        ? await approvalSlots(RECEIVING_DOC, receiving.id, { amount: view.value, requesterId: receiving.receivedById })
+        : await approvalSlots(RECEIVING_DOC, receiving.id);
+    const signatories: Signatory[] = [
+      { role: 'Received by', name: receiving.receivedBy.name, ...(await contactOf(receiving.receivedById)), at: preparedAt(slots) ?? receiving.createdAt },
+      ...slotSignatories(slots),
+    ];
+    const sections: PdfSection[] = [
+      {
+        kind: 'fields',
+        columns: 3,
+        fields: [
+          { label: 'Purchase order', value: receiving.order.number },
+          { label: 'Supplier', value: receiving.order.supplier.name },
+          { label: 'For', value: receiving.order.job ? `${receiving.order.job.number} — ${receiving.order.job.name}` : 'Stock' },
+          { label: 'Into', value: receiving.warehouse?.name ?? 'Site' },
+          { label: 'DR no.', value: receiving.deliveryRefNo ?? '—' },
+          { label: 'Invoice no.', value: receiving.invoiceRefNo ?? '—' },
+          { label: 'Received', value: formatDate(receiving.receivedDate) },
+          { label: 'Status', value: statusLabel(receiving.status) },
+        ],
+      },
+      {
+        kind: 'table',
+        title: 'Goods received',
+        head: ['No.', 'Code', 'Description', 'Qty', `Unit cost (${currency})`, `Amount (${currency})`],
+        align: ['right', 'left', 'left', 'right', 'right', 'right'],
+        rows: view.items.map((i, n) => [
+          String(n + 1),
+          i.orderItem.item?.code ?? i.orderItem.partNumber ?? '',
+          i.orderItem.name && i.orderItem.description !== i.orderItem.name ? { title: i.orderItem.name, body: i.orderItem.description } : (i.orderItem.name ?? i.orderItem.description),
+          qty(i.quantity),
+          formatAmount(i.unitCost),
+          formatAmount(i.amount),
+        ]),
+      },
+      { kind: 'totals', rows: [{ label: 'Total', value: formatMoney(view.value, currency), bold: true }] },
+    ];
+    if (receiving.notes) sections.push({ kind: 'text', title: 'Notes', body: receiving.notes });
+    if (receiving.cancelReason && receiving.status === 'CANCELLED') sections.push({ kind: 'text', title: 'Cancelled', body: receiving.cancelReason });
+
+    const bare = await renderDocument({
+      title: 'Incoming Report',
+      documentNumber: receiving.number,
+      date: receiving.receivedDate,
+      reference: `${receiving.order.number} — ${receiving.order.supplier.name}`,
+      sections,
+      signatories,
+    });
+    const files = req.query.attachments === '0' ? [] : await attachedFiles('receiving', receiving.id);
+    const { pdf, listed } = await withAttachments(bare, files, { title: 'Incoming Report', number: receiving.number, reference: receiving.order.supplier.name });
+    await audit(
+      { entityType: 'receiving', entityId: receiving.id, action: 'EXPORTED', summary: `Printed ${receiving.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Incoming Report', number: receiving.number, author: receiving.receivedBy.name, date: receiving.receivedDate })));
+    res.send(pdf);
   }),
 );
+
+// The packing list, the delivery receipt, photos of what arrived: read as the
+// report is read, added while it is a draft or waiting for its approval by
+// whoever may move it on — what the supervisor decides on is what was sent.
+registerAttachmentGuard(
+  'receiving',
+  async (user, id) => {
+    if (can(user, RECEIVING_VIEW)) return !!(await prisma.receiving.findUnique({ where: { id }, select: { id: true } }));
+    return mayDecide(user.id, RECEIVING_DOC, [id]);
+  },
+  {
+    write: async (user, id) => {
+      const r = await prisma.receiving.findUnique({ where: { id }, select: { status: true, receivedById: true } });
+      return !!r && (r.status === 'DRAFT' || r.status === 'PENDING_APPROVAL') && mayHandleReceiving(user, r);
+    },
+  },
+);
+
+/** The trail's line for a decision that found its document no longer waiting for one. */
+async function warehouseNotApplied(entityType: string, documentId: string, number: string, status: string, outcome: ApprovalOutcome) {
+  await audit({
+    entityType,
+    entityId: documentId,
+    action: outcome === 'APPROVED' ? 'APPROVED' : 'REJECTED',
+    summary: `${number} ${outcome.toLowerCase()} after it was ${status.toLowerCase().replace(/_/g, ' ')} — not applied`,
+    actorName: 'system',
+  });
+}
 
 // ════════════════════════════════════════════════════════════════════
 //  STOCK ISSUANCE
@@ -657,7 +1036,7 @@ stockIssueRoutes.get(
       prisma.stockIssue.count({ where }),
       prisma.stockIssueItem.aggregate({ where: { issue: { AND: [where, { status: { not: 'CANCELLED' } }] } }, _sum: { amount: true } }),
       prisma.stockIssue.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
-      prisma.stockIssue.count({ where: { AND: [where, { status: 'DRAFT' }] } }),
+      prisma.stockIssue.count({ where: { AND: [where, { status: { in: ['DRAFT', 'PENDING_APPROVAL'] } }] } }),
       companyCurrency(),
       recordNamed('project', f.jobId),
     ]);
@@ -694,7 +1073,7 @@ stockIssueRoutes.get(
     sections.push(
       ...listNotes([
         drafts > 0 &&
-          `The total includes ${counted(drafts, ['draft issue', 'draft issues'])}, not issued yet — nothing leaves the warehouse on ${drafts === 1 ? 'it' : 'them'} until ${drafts === 1 ? 'it is' : 'they are'}.`,
+          `The total includes ${counted(drafts, ['draft or pending issue', 'draft or pending issues'])}, not issued yet — nothing leaves the warehouse on ${drafts === 1 ? 'it' : 'them'} until ${drafts === 1 ? 'it is' : 'they are'}.`,
         bracketNote(cancelled, ['cancelled issue', 'cancelled issues']),
       ]),
     );
@@ -739,21 +1118,51 @@ function presentIssue(issue: NonNullable<Awaited<ReturnType<typeof loadIssue>>>)
 /** Raising, and changing a draft: the create right, or edit_all. */
 const ISSUE_EDIT = ['gchain.stock_issuance.create', 'gchain.stock_issuance.edit_all'] as const;
 
+const ISSUE_DOC = 'stock_issue';
+const ISSUE_VIEW = 'gchain.stock_issuance.view_all';
+
+/**
+ * The slip as its reader may see it: the register's right, or — through
+ * `requireAnyOrDecider` — whoever may decide its open request (the issuer's
+ * supervisor with no warehouse right), only while it waits on them.
+ */
+async function visibleIssue(me: ResolvedUser, id: string, deciderOnly: boolean) {
+  const issue = await loadIssue(id);
+  if (!issue) throw notFound('Stock issue not found');
+  if (deciderOnly && !(await mayDecide(me.id, ISSUE_DOC, [issue.id]))) throw notFound('Stock issue not found');
+  return issue;
+}
+
+/** The record with what its reader may do — the routes' own rules. */
+async function issueView(issue: NonNullable<Awaited<ReturnType<typeof loadIssue>>>, me: ResolvedUser) {
+  const view = presentIssue(issue);
+  const draft = issue.status === 'DRAFT';
+  const raiser = ISSUE_EDIT.some((k) => can(me, k));
+  // OUTGOING goes for approval while its route is active; without one the
+  // slip is issued at once, as it was before (the sales order's rule).
+  const route = draft ? await pickWorkflow(ISSUE_DOC, view.value, { requesterId: issue.issuedById }) : null;
+  return {
+    ...view,
+    // A DRAFT is changed by whoever may raise one (or edit_all) and deleted
+    // by a delete holder; a pending one is pulled back first; issued stock
+    // has moved.
+    canEdit: draft && raiser,
+    canDelete: draft && can(me, 'gchain.stock_issuance.delete'),
+    needsApproval: draft ? !!route : null,
+    canSubmit: draft && !!route && raiser && issue.items.length > 0,
+    canIssue: draft && !route && can(me, 'gchain.stock_issuance.create') && issue.items.length > 0,
+    canWithdraw: issue.status === 'PENDING_APPROVAL' && raiser,
+    approvalRoute: draft && route ? await routeBrief(ISSUE_DOC, view.value, issue.issuedById) : null,
+  };
+}
+
 stockIssueRoutes.get(
   '/:id',
-  require_('gchain.stock_issuance.view_all'),
+  requireAnyOrDecider(ISSUE_VIEW),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const issue = await loadIssue(req.params.id);
-    if (!issue) throw notFound('Stock issue not found');
-    const draft = issue.status === 'DRAFT';
-    res.json({
-      ...presentIssue(issue),
-      // The routes' own rules: a DRAFT is changed by whoever may raise one
-      // (or edit_all) and deleted by a delete holder; issued stock has moved.
-      canEdit: draft && ISSUE_EDIT.some((k) => can(me, k)),
-      canDelete: draft && can(me, 'gchain.stock_issuance.delete'),
-    });
+    const issue = await visibleIssue(me, req.params.id, res.locals.deciderOnly === true);
+    res.json(await issueView(issue, me));
   }),
 );
 
@@ -1061,8 +1470,79 @@ stockIssueRoutes.delete(
 );
 
 /**
- * Committing the issue: stock leaves, and if it is for a job, the job is
+ * Posting the issue: stock leaves, and if it is for a job, the job is
  * charged. This is where stock-sourced material first hits a project (§4.3).
+ * Inside the caller's transaction, AFTER its claim — Issue (no route) or the
+ * route's approval — so it runs once whatever presses twice.
+ */
+async function postStockIssue(tx: Prisma.TransactionClient, issueId: string, actorId: string) {
+  const current = await tx.stockIssue.findUniqueOrThrow({
+    where: { id: issueId },
+    include: { items: true, job: { select: { number: true } } },
+  });
+  if (!current.items.length) throw badRequest('Add at least one line before issuing');
+
+  const byCategory = new Map<string, number>();
+
+  for (const line of current.items) {
+    const moved = await issueStock(tx, {
+      itemId: line.itemId,
+      warehouseId: current.warehouseId,
+      quantity: num(line.quantity),
+      sourceType: 'stock_issue',
+      sourceId: current.id,
+      sourceNumber: current.number,
+      createdById: actorId,
+    });
+
+    // Re-price at the average as at the moment of issue, which may have
+    // moved since the line was added.
+    await tx.stockIssueItem.update({
+      where: { id: line.id },
+      data: { unitCost: D(moved.unitCost), amount: D(moved.amount) },
+    });
+
+    if (current.jobId && line.costCategoryId) {
+      byCategory.set(line.costCategoryId, (byCategory.get(line.costCategoryId) ?? 0) + moved.amount);
+    }
+  }
+
+  if (current.jobId) {
+    for (const [costCategoryId, amount] of byCategory) {
+      // INCURRED — this is the first time the job bears this cost.
+      await postJobCost(tx, {
+        jobId: current.jobId,
+        costCategoryId,
+        state: 'INCURRED',
+        amount,
+        sourceType: 'stock_issue',
+        sourceId: current.id,
+        sourceNumber: current.number,
+        description: `Issued from stock — ${current.purpose}`,
+        createdById: actorId,
+      });
+      // CONSUMED — and it is physically in the work. Reported, not
+      // subtracted again; see budgetPosition.
+      await postJobCost(tx, {
+        jobId: current.jobId,
+        costCategoryId,
+        state: 'CONSUMED',
+        amount,
+        sourceType: 'stock_issue',
+        sourceId: current.id,
+        sourceNumber: current.number,
+        description: `Issued from stock — ${current.purpose}`,
+        createdById: actorId,
+      });
+    }
+  }
+  return current;
+}
+
+/**
+ * Issue now — only while no Outgoing route is active (an install that
+ * deactivated it); otherwise the slip goes for approval and its approval
+ * issues it. Claimed first, on the draft as it was read.
  */
 stockIssueRoutes.post(
   '/:id/issue',
@@ -1071,11 +1551,15 @@ stockIssueRoutes.post(
     const me = currentUser(req);
     const issue = await prisma.stockIssue.findUnique({
       where: { id: req.params.id },
-      include: { items: { select: { id: true } } },
+      include: { items: { select: { id: true, amount: true } } },
     });
     if (!issue) throw notFound('Stock issue not found');
     if (issue.status !== 'DRAFT') throw badRequest('This issue has already been made');
     if (!issue.items.length) throw badRequest('Add at least one line before issuing');
+    const value = cents(issue.items.reduce((s, i) => s + num(i.amount), 0));
+    if (await pickWorkflow(ISSUE_DOC, value, { requesterId: issue.issuedById })) {
+      throw badRequest(`${issue.number} goes for approval — Submit for approval, and its approval issues it`);
+    }
 
     const issued = await prisma.$transaction(async (tx) => {
       // Claimed first, on the draft as it was read: a second press, or a
@@ -1088,70 +1572,7 @@ stockIssueRoutes.post(
         data: { status: 'ISSUED', issuedAt: new Date() },
       });
       if (!claimed.count) throw badRequest(`${issue.number} was changed or issued a moment ago — reload to see where it stands`);
-      const current = await tx.stockIssue.findUniqueOrThrow({
-        where: { id: issue.id },
-        include: { items: true, job: { select: { number: true } } },
-      });
-      if (!current.items.length) throw badRequest('Add at least one line before issuing');
-
-      const byCategory = new Map<string, number>();
-
-      for (const line of current.items) {
-        const moved = await issueStock(tx, {
-          itemId: line.itemId,
-          warehouseId: current.warehouseId,
-          quantity: num(line.quantity),
-          sourceType: 'stock_issue',
-          sourceId: current.id,
-          sourceNumber: current.number,
-          createdById: me.id,
-        });
-
-        // Re-price at the average as at the moment of issue, which may have
-        // moved since the line was added.
-        await tx.stockIssueItem.update({
-          where: { id: line.id },
-          data: { unitCost: D(moved.unitCost), amount: D(moved.amount) },
-        });
-
-        if (current.jobId && line.costCategoryId) {
-          byCategory.set(
-            line.costCategoryId,
-            (byCategory.get(line.costCategoryId) ?? 0) + moved.amount,
-          );
-        }
-      }
-
-      if (current.jobId) {
-        for (const [costCategoryId, amount] of byCategory) {
-          // INCURRED — this is the first time the job bears this cost.
-          await postJobCost(tx, {
-            jobId: current.jobId,
-            costCategoryId,
-            state: 'INCURRED',
-            amount,
-            sourceType: 'stock_issue',
-            sourceId: current.id,
-            sourceNumber: current.number,
-            description: `Issued from stock — ${current.purpose}`,
-            createdById: me.id,
-          });
-          // CONSUMED — and it is physically in the work. Reported, not
-          // subtracted again; see budgetPosition.
-          await postJobCost(tx, {
-            jobId: current.jobId,
-            costCategoryId,
-            state: 'CONSUMED',
-            amount,
-            sourceType: 'stock_issue',
-            sourceId: current.id,
-            sourceNumber: current.number,
-            description: `Issued from stock — ${current.purpose}`,
-            createdById: me.id,
-          });
-        }
-      }
-      return current;
+      return postStockIssue(tx, issue.id, me.id);
     });
 
     await audit(
@@ -1164,8 +1585,156 @@ stockIssueRoutes.post(
       req,
     );
 
-    res.json(presentIssue((await loadIssue(issue.id))!));
+    res.json(await issueView((await loadIssue(issue.id))!, me));
   }),
+);
+
+/**
+ * Submit for approval: claims the DRAFT on what it was read as (its lines,
+ * warehouse and project can no longer move under the approver), checks the
+ * warehouse holds every line now, and files the request in the ISSUER's name
+ * whoever presses it — so the issuer's own supervisor decides. A refused
+ * submit puts it back to a draft.
+ */
+stockIssueRoutes.post(
+  '/:id/submit',
+  requireAny(...ISSUE_EDIT),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const issue = await prisma.stockIssue.findUnique({
+      where: { id: req.params.id },
+      include: { items: { include: { item: { select: { name: true } } } }, job: { select: { number: true } }, warehouse: { select: { name: true } } },
+    });
+    if (!issue) throw notFound('Stock issue not found');
+    if (issue.status !== 'DRAFT') throw badRequest(`${issue.number} is ${statusLabel(issue.status).toLowerCase()}`);
+    if (!issue.items.length) throw badRequest('Add at least one line before submitting');
+    // What the warehouse holds now — a slip the shelf cannot fill is not sent up.
+    const balances = await prisma.inventoryBalance.findMany({
+      where: { warehouseId: issue.warehouseId, itemId: { in: issue.items.map((l) => l.itemId) } },
+    });
+    const byItem = new Map(balances.map((b) => [b.itemId, b]));
+    const short = issue.items.filter((l) => {
+      const b = byItem.get(l.itemId);
+      return !b || availableOf(b) < num(l.quantity) - 0.0005;
+    });
+    if (short.length) {
+      throw badRequest(`${issue.warehouse.name} does not have enough of ${short.map((l) => l.item.name).join(', ')} available to issue`);
+    }
+    const value = cents(issue.items.reduce((s, i) => s + num(i.amount), 0));
+    const claimed = await prisma.stockIssue.updateMany({
+      where: { id: issue.id, status: 'DRAFT', updatedAt: issue.updatedAt },
+      data: { status: 'PENDING_APPROVAL' },
+    });
+    if (!claimed.count) throw badRequest(`${issue.number} changed a moment ago — reload to see where it stands`);
+    try {
+      await submitForApproval({
+        documentType: ISSUE_DOC,
+        documentId: issue.id,
+        documentNumber: issue.number,
+        subject: `${issue.job ? `${issue.job.number} — ` : ''}${issue.purpose}`,
+        amount: value,
+        link: `/g-chain/outgoing/${issue.id}`,
+        requesterId: issue.issuedById,
+      });
+    } catch (err) {
+      await prisma.stockIssue.updateMany({ where: { id: issue.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      throw err;
+    }
+    await audit({ entityType: 'stock_issue', entityId: issue.id, action: 'SUBMITTED', summary: `${issue.number} submitted for approval` }, req);
+    res.json(await issueView((await loadIssue(issue.id))!, me));
+  }),
+);
+
+/** Pulls a pending slip back to a draft — the request withdrawn in the same transaction; a decision that landed first wins. */
+stockIssueRoutes.post(
+  '/:id/withdraw',
+  requireAny(...ISSUE_EDIT),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const issue = await prisma.stockIssue.findUnique({ where: { id: req.params.id } });
+    if (!issue) throw notFound('Stock issue not found');
+    if (issue.status !== 'PENDING_APPROVAL') throw badRequest(`${issue.number} is not waiting for approval`);
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.stockIssue.updateMany({ where: { id: issue.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      if (!claimed.count) throw badRequest(`${issue.number} was decided a moment ago — reload to see where it stands`);
+      const withdrawn = await cancelOpenRequest(ISSUE_DOC, issue.id, tx, `pulled back by ${me.name}`, me.id);
+      if (!withdrawn.length) throw badRequest(`${issue.number} was decided a moment ago — reload to see where it stands`);
+    });
+    await audit({ entityType: 'stock_issue', entityId: issue.id, action: 'UPDATED', summary: `${issue.number} pulled back to a draft` }, req);
+    res.json(await issueView((await loadIssue(issue.id))!, me));
+  }),
+);
+
+/**
+ * The route's decision. Approved: claims PENDING_APPROVAL → ISSUED and
+ * posts in the same transaction — once, whatever calls it twice. If the
+ * shelf no longer holds the quantities (something else left meanwhile) the
+ * slip goes back to a draft, said on its trail and to the issuer, rather
+ * than issuing stock that is not there. Returned or rejected: back to a
+ * draft. A decision that finds the slip no longer pending changes nothing.
+ */
+export async function settleStockIssue(documentId: string, outcome: ApprovalOutcome) {
+  const issue = await prisma.stockIssue.findUnique({ where: { id: documentId } });
+  if (!issue) return;
+  if (outcome !== 'APPROVED') {
+    const back = await prisma.stockIssue.updateMany({ where: { id: issue.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+    if (!back.count) await warehouseNotApplied('stock_issue', issue.id, issue.number, issue.status, outcome);
+    return;
+  }
+  let posted: Awaited<ReturnType<typeof postStockIssue>> | null = null;
+  try {
+    posted = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.stockIssue.updateMany({ where: { id: issue.id, status: 'PENDING_APPROVAL' }, data: { status: 'ISSUED', issuedAt: new Date() } });
+      if (!claimed.count) return null;
+      return postStockIssue(tx, issue.id, issue.issuedById);
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'the stock could not be moved';
+    const back = await prisma.stockIssue.updateMany({ where: { id: issue.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+    if (back.count) {
+      await audit({ entityType: 'stock_issue', entityId: issue.id, action: 'UPDATED', summary: `${issue.number} approved, but not issued — ${reason}; back to a draft`, actorName: 'system' });
+      await notify({
+        userId: issue.issuedById,
+        type: 'warehouse.not_posted',
+        title: `${issue.number} approved but not issued`,
+        body: `${reason}. It is a draft again — change it and submit it again.`,
+        link: `/g-chain/outgoing/${issue.id}`,
+      });
+    }
+    return;
+  }
+  if (!posted) {
+    const now = await prisma.stockIssue.findUnique({ where: { id: issue.id }, select: { status: true } });
+    await warehouseNotApplied('stock_issue', issue.id, issue.number, now?.status ?? issue.status, outcome);
+    return;
+  }
+  await audit({
+    entityType: 'stock_issue',
+    entityId: issue.id,
+    action: 'EXECUTED',
+    summary: `${issue.number} issued${posted.job ? ` to ${posted.job.number}` : ''} — approved`,
+    actorName: 'system',
+  });
+}
+
+onApprovalSettled(ISSUE_DOC, async (request, outcome) => {
+  await settleStockIssue(request.documentId, outcome);
+});
+
+// The signed gate pass, photos of what left: read as the slip is read, added
+// while it is a draft or pending by whoever may raise one.
+registerAttachmentGuard(
+  'stock_issue',
+  async (user, id) => {
+    if (can(user, ISSUE_VIEW)) return !!(await prisma.stockIssue.findUnique({ where: { id }, select: { id: true } }));
+    return mayDecide(user.id, ISSUE_DOC, [id]);
+  },
+  {
+    write: async (user, id) => {
+      const r = await prisma.stockIssue.findUnique({ where: { id }, select: { status: true } });
+      return !!r && (r.status === 'DRAFT' || r.status === 'PENDING_APPROVAL') && ISSUE_EDIT.some((k) => can(user, k));
+    },
+  },
 );
 
 // ════════════════════════════════════════════════════════════════════
@@ -1894,24 +2463,30 @@ inventoryRoutes.get(
 
 stockIssueRoutes.get(
   '/:id/pdf',
-  require_('gchain.stock_issuance.view_all'),
+  requireAnyOrDecider(ISSUE_VIEW),
   handler(async (req, res) => {
-    const issue = await loadIssue(req.params.id);
-    if (!issue) throw notFound('Stock issue not found');
+    const me = currentUser(req);
+    const issue = await visibleIssue(me, req.params.id, res.locals.deciderOnly === true);
 
     const view = presentIssue(issue);
     const currency = await companyCurrency();
 
-    // No route, so the people who acted, each dated (rule 6): whoever raised
-    // the slip, whoever pressed Issue — the trail's EXECUTED row, which is the
-    // only record of who moved the stock — and the person it was issued to,
-    // dated by the handover; "Pending" under their name while it is a draft.
-    // Never a slot nobody fills: no "Noted by", and no receiver when the slip
-    // names none. The contact lines are read here for the paper only.
+    // The people who acted, each dated (rule 6): whoever raised the slip;
+    // then its route's steps (the issuer's supervisor — a draft prints the
+    // route submitting would take, "Pending" until signed) when it went for
+    // approval, else whoever pressed Issue (the trail's EXECUTED row, the
+    // only record of who moved the stock); and the person it was issued to,
+    // dated by the handover. Never a slot nobody fills: no "Noted by", and
+    // no receiver when the slip names none.
+    const routed = issue.status === 'DRAFT' && !!(await pickWorkflow(ISSUE_DOC, view.value, { requesterId: issue.issuedById }));
+    const slots = routed
+      ? await approvalSlots(ISSUE_DOC, issue.id, { amount: view.value, requesterId: issue.issuedById })
+      : await approvalSlots(ISSUE_DOC, issue.id);
     const signatories: Signatory[] = [
-      { role: 'Prepared by', name: issue.issuedBy.name, ...(await contactOf(issue.issuedById)), at: issue.createdAt },
+      { role: 'Prepared by', name: issue.issuedBy.name, ...(await contactOf(issue.issuedById)), at: preparedAt(slots) ?? issue.createdAt },
+      ...slotSignatories(slots),
     ];
-    if (issue.status === 'ISSUED') {
+    if (issue.status === 'ISSUED' && !slots.length) {
       const executed = await prisma.auditLog.findFirst({
         where: { entityType: 'stock_issue', entityId: issue.id, action: 'EXECUTED' },
         orderBy: { at: 'desc' },
@@ -1974,15 +2549,17 @@ stockIssueRoutes.get(
       ],
       signatories,
     });
+    const files = req.query.attachments === '0' ? [] : await attachedFiles('stock_issue', issue.id);
+    const { pdf: withFiles, listed } = await withAttachments(pdf, files, { title: 'Outgoing Slip', number: issue.number, reference: issue.purpose });
 
     await audit(
-      { entityType: 'stock_issue', entityId: issue.id, action: 'EXPORTED', summary: `Printed ${issue.number}` },
+      { entityType: 'stock_issue', entityId: issue.id, action: 'EXPORTED', summary: `Printed ${issue.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}` },
       req,
     );
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Outgoing Slip', number: issue.number, author: issue.issuedBy.name, date: issue.issueDate })));
-    res.send(pdf);
+    res.send(withFiles);
   }),
 );
 
