@@ -4373,8 +4373,13 @@ model Payment {
 
   amount Decimal @db.Decimal(18, 2)
 
-  /// Cheque number, transfer reference, OR number.
+  /// Cheque number or transfer reference.
   reference String?
+  /// The official receipt a customer collection is given — G-CORE's
+  /// numbering (`official_receipt`, 2026-10-15), issued on save. Indexed,
+  /// not @unique: a unique constraint on an existing table stops the
+  /// server's unattended db push; the counter keeps it unique.
+  orNumber  String?
   bank      String?
   /// A cheque is not cash until it clears; until then it is a promise.
   clearedAt DateTime? @db.Date
@@ -4390,6 +4395,7 @@ model Payment {
   updatedAt DateTime @updatedAt
 
   @@index([kind, paymentDate])
+  @@index([orNumber])
   @@index([customerId])
   @@index([supplierId])
   @@index([payeeUserId])

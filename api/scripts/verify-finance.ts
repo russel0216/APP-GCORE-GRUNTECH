@@ -3560,6 +3560,65 @@ async function main() {
     const otherCustomer = await prisma.customer.create({ data: { code: `${TAG}-C2`, name: `${TAG} Other` } });
     const soWrong = await fin('POST', '/invoices', { customerId: otherCustomer.id, salesOrderId: so.id, lines: [{ description: 'x', amount: 1 }] });
     check('another customer’s order is refused', soWrong.status === 400, String(soWrong.status));
+
+    // ══ Collections (2026-10-15): the OR, the credit, the register's cards ══
+    console.log('\nCollections — the official receipt, the credit, the cards');
+    const arLeft = (await fin('GET', `/invoices/${arId}`)).body.outstanding as number;
+    const collected = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'CHECK',
+      reference: `${TAG}-CHK-1`,
+      allocations: [{ kind: 'invoice', id: arId, amount: arLeft }],
+    });
+    check(
+      'a collection is given an official receipt number, and the invoices’ customer though the form named none',
+      collected.status === 201 && /OR/.test(String(collected.body.orNumber)) && collected.body.customerId === customer.id,
+      `${collected.status} ${JSON.stringify(collected.body).slice(0, 200)}`,
+    );
+    check(
+      'and it is credited to the invoice’s salesperson and team',
+      collected.body.salespeople?.[0]?.id === engineer.id && collected.body.teams?.[0]?.id === team?.id,
+      JSON.stringify({ s: collected.body.salespeople, t: collected.body.teams }),
+    );
+    const payId = String(collected.body.id ?? '');
+    const byCredit = await fin('GET', `/payments?kind=RECEIPT&salespersonId=${engineer.id}&pageSize=200`);
+    check(
+      'the register filters collections by the salesperson of the invoices they settled',
+      (byCredit.body.rows ?? []).some((r: { id: string }) => r.id === payId),
+    );
+    const paySummary = (await fin('GET', `/payments?search=${encodeURIComponent(customer.name)}&kind=RECEIPT&pageSize=200`)).body.summary;
+    check(
+      'its cards: the collections, the uncleared cheques among them, each team’s share adding up to the collections',
+      paySummary?.collected >= arLeft - 0.005 &&
+        paySummary.uncleared >= arLeft - 0.005 &&
+        money(
+          (paySummary.teams as { value: number }[]).reduce((sum, t) => sum + t.value, 0),
+          paySummary.collected,
+        ),
+      JSON.stringify(paySummary).slice(0, 200),
+    );
+    const receiptPaper = await fin('GET', `/payments/${payId}/pdf`);
+    const receiptText = receiptPaper.bytes ? flat(pdfText(receiptPaper.bytes)) : '';
+    check(
+      'the Collection Receipt prints under its OR number with the invoice it settled, the cheque named uncleared',
+      receiptPaper.status === 200 &&
+        /COLLECTION\s*RECEIPT/i.test(receiptText) &&
+        receiptText.includes(String(collected.body.orNumber)) &&
+        receiptText.includes(String(arNew.body.number)) &&
+        /not yet cleared/i.test(receiptText),
+      receiptText.slice(0, 200),
+    );
+    const otherInv = await fin('POST', '/invoices', { customerId: otherCustomer.id, lines: [{ description: `${TAG} other`, amount: 1_000 }] });
+    await fin('POST', `/invoices/${otherInv.body.id}/issue`);
+    const mixed = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'CASH',
+      allocations: [
+        { kind: 'invoice', id: soInv1.body.id, amount: 100 },
+        { kind: 'invoice', id: otherInv.body.id, amount: 100 },
+      ],
+    });
+    check('one collection is from one customer — two customers’ invoices are refused', mixed.status === 400, `${mixed.status} ${mixed.body.error}`);
   }
 
   await cleanup();

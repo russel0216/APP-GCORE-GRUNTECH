@@ -91,6 +91,9 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   { type: 'supplier_bill', code: 'BILL', label: 'Supplier Bill' },
   { type: 'payment', code: 'RCPT', label: 'Payment Receipt' },
   { type: 'disbursement', code: 'DV', label: 'Disbursement Voucher' },
+  // The official receipt a customer collection is given (2026-10-15, the
+  // owner's call: G-CORE numbers it), GT-OR-2026-0001 on the stock pattern.
+  { type: 'official_receipt', code: 'OR', label: 'Official Receipt' },
   { type: 'expense', code: 'EXP', label: 'Expense Claim' },
   { type: 'cash_advance', code: 'CA', label: 'Cash Advance' },
   { type: 'installed_asset', code: 'AST', label: 'Installed Asset' },

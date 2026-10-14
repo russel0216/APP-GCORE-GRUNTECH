@@ -6,6 +6,7 @@ import {
   BillStatus,
   ExpenseStatus,
   PaymentKind,
+  PaymentMethod,
   type ApprovalRequest,
 } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -3418,7 +3419,16 @@ const paymentInclude = {
   recordedBy: { select: { id: true, name: true } },
   allocations: {
     include: {
-      invoice: { select: { id: true, number: true, netCollectible: true } },
+      invoice: {
+        select: {
+          id: true,
+          number: true,
+          invoiceDate: true,
+          netCollectible: true,
+          salesperson: { select: { id: true, name: true } },
+          team: TEAM_REF_SELECT,
+        },
+      },
       bill: { select: { id: true, number: true, netPayable: true } },
       claim: { select: { id: true, number: true, total: true } },
       advance: { select: { id: true, number: true, amount: true } },
@@ -3429,9 +3439,25 @@ const paymentInclude = {
 
 type PaymentRow = Prisma.PaymentGetPayload<{ include: typeof paymentInclude }>;
 
+/**
+ * Who a collection is credited to (the owner's sample: Sale Personnel and
+ * Team on every collection) — read off the invoices it settles, never kept on
+ * the payment: one name where they agree, every name where they do not.
+ */
+function collectionCredit(row: { allocations: { invoice: { salesperson: { id: string; name: string } | null; team: { id: string; code: string; name: string } | null } | null }[] }) {
+  const people = new Map<string, { id: string; name: string }>();
+  const teams = new Map<string, { id: string; code: string; name: string }>();
+  for (const a of row.allocations) {
+    if (a.invoice?.salesperson) people.set(a.invoice.salesperson.id, a.invoice.salesperson);
+    if (a.invoice?.team) teams.set(a.invoice.team.id, a.invoice.team);
+  }
+  return { salespeople: [...people.values()], teams: [...teams.values()] };
+}
+
 function presentPayment(row: PaymentRow) {
   return {
     ...row,
+    ...collectionCredit(row),
     amount: num(row.amount),
     allocations: row.allocations.map((a) => ({
       ...a,
@@ -3478,10 +3504,20 @@ function paymentListWhere(q: ListQuery): Prisma.PaymentWhereInput {
   const to = filterDay(q.filters.to, 'To');
   if (from || to) where.paymentDate = { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) };
   if (q.filters.uncleared === 'true') where.clearedAt = null;
+  const method = choice(q.filters.method, PaymentMethod, 'Method');
+  if (method) where.method = method;
+  // A collection's salesperson and team are its invoices' (`collectionCredit`).
+  const invoiceCredit: Prisma.InvoiceWhereInput = {};
+  if (q.filters.salespersonId) invoiceCredit.salespersonId = q.filters.salespersonId === 'none' ? null : q.filters.salespersonId;
+  if (q.filters.teamId) invoiceCredit.teamId = q.filters.teamId === 'none' ? null : q.filters.teamId;
+  if (Object.keys(invoiceCredit).length) where.allocations = { some: { invoice: invoiceCredit } };
+  if (q.filters.invoiceId) where.allocations = { some: { invoiceId: q.filters.invoiceId } };
   if (q.search) {
     where.OR = [
       { number: { contains: q.search, mode: 'insensitive' } },
+      { orNumber: { contains: q.search, mode: 'insensitive' } },
       { reference: { contains: q.search, mode: 'insensitive' } },
+      { allocations: { some: { invoice: { number: { contains: q.search, mode: 'insensitive' } } } } },
       { customer: { name: { contains: q.search, mode: 'insensitive' } } },
       { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
       // A person is a party too: reimbursements, releases and refunds.
@@ -3513,9 +3549,38 @@ paymentRoutes.get(
       prisma.payment.count({ where }),
     ]);
 
-    res.json(listResult(rows.map(presentPayment), total, q));
+    res.json({ ...listResult(rows.map(presentPayment), total, q), summary: await paymentListSummary(where) });
   }),
 );
+
+/**
+ * The cards over the register (the owner's "TOTAL COLLECTIONS SUM"), under
+ * the list's own query: what customers paid (collections only — a refund of
+ * unspent cash is money in, never a collection), what of it is still an
+ * uncleared cheque, money out, and the collections split by the team of the
+ * invoices they settled (`teamShares`, by the amount applied to each).
+ */
+async function paymentListSummary(where: Prisma.PaymentWhereInput) {
+  const collectionWhere: Prisma.PaymentWhereInput = { AND: [where, { kind: 'RECEIPT', customerId: { not: null } }] };
+  const [collected, uncleared, out, allocations] = await Promise.all([
+    prisma.payment.aggregate({ where: collectionWhere, _sum: { amount: true }, _count: { _all: true } }),
+    prisma.payment.aggregate({ where: { AND: [collectionWhere, { clearedAt: null }] }, _sum: { amount: true }, _count: { _all: true } }),
+    prisma.payment.aggregate({ where: { AND: [where, { kind: 'DISBURSEMENT' }] }, _sum: { amount: true }, _count: { _all: true } }),
+    prisma.paymentAllocation.findMany({
+      where: { payment: collectionWhere, invoiceId: { not: null } },
+      select: { amount: true, invoice: { select: { team: TEAM_REF_SELECT } } },
+    }),
+  ]);
+  return {
+    collected: num(collected._sum.amount),
+    collections: collected._count._all,
+    uncleared: num(uncleared._sum.amount),
+    unclearedCount: uncleared._count._all,
+    paidOut: num(out._sum.amount),
+    disbursements: out._count._all,
+    teams: await teamShares(allocations.map((a) => ({ team: a.invoice?.team ?? null, cents: Math.round(num(a.amount) * 100) }))),
+  };
+}
 
 /**
  * The payment register on paper — the list as filtered (or the rows ticked),
@@ -3570,6 +3635,9 @@ paymentRoutes.get(
       payee,
       rangeNamed('dated', f.from, f.to),
       f.uncleared === 'true' && 'uncleared only',
+      f.method && statusLabel(f.method),
+      f.salespersonId && (f.salespersonId === 'none' ? 'no salesperson' : await recordNamed('person', f.salespersonId)),
+      f.teamId && (f.teamId === 'none' ? 'no team' : `team ${(await prisma.industry.findUnique({ where: { id: f.teamId }, select: { code: true } }))?.code ?? '?'}`),
       f.ids && 'the rows selected',
     ]);
     const sumOf = (k: PaymentKind) => num(byKind.find((g) => g.kind === k)?._sum.amount);
@@ -3590,7 +3658,7 @@ paymentRoutes.get(
         head: ['Number', 'Date', 'Who', 'Direction', 'Settles', `Amount (${currency})`, 'Cleared'],
         align: ['left', 'left', 'left', 'left', 'left', 'right', 'left'],
         rows: rows.map((r) => [
-          r.number,
+          r.orNumber ? { title: r.number, body: `OR ${r.orNumber}` } : r.number,
           formatShortDate(r.paymentDate),
           {
             title: r.customer?.name ?? r.supplier?.name ?? r.payeeUser?.name ?? '—',
@@ -3645,6 +3713,74 @@ paymentRoutes.get(
     });
     if (!row) throw notFound('Payment not found');
     res.json(presentPayment(row));
+  }),
+);
+
+/**
+ * One payment on paper. Money in from a customer is a **Collection
+ * Receipt** under its OR number (G-CORE's `official_receipt` series): who
+ * paid, how — the cheque or transfer reference and the bank — and the
+ * invoices it settled with the amount applied to each. Money out is a
+ * **Payment Voucher**. Signed by whoever recorded it, dated when they did;
+ * an uncleared cheque says so in the foot.
+ */
+paymentRoutes.get(
+  '/:id/pdf',
+  requireAny('gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all'),
+  handler(async (req, res) => {
+    const row = await prisma.payment.findUnique({ where: { id: req.params.id }, include: paymentInclude });
+    if (!row) throw notFound('Payment not found');
+    const currency = await companyCurrency();
+    const receipt = row.kind === 'RECEIPT';
+    const party = row.customer?.name ?? row.supplier?.name ?? row.payeeUser?.name ?? '—';
+    const credit = collectionCredit(row);
+    const settled = row.allocations.map((a) => {
+      const t = a.invoice ?? a.bill ?? a.claim ?? a.advance ?? a.budgetRequest;
+      const what = a.invoice ? 'Sales invoice' : a.bill ? 'Supplier bill' : a.claim ? 'Expense claim' : a.advance ? 'Cash advance' : 'Budget request';
+      return [t?.number ?? '—', what, a.invoice?.invoiceDate ? formatShortDate(a.invoice.invoiceDate) : '—', formatAmount(num(a.amount))];
+    });
+    const sections: PdfSection[] = [
+      {
+        kind: 'fields',
+        columns: 3,
+        fields: [
+          { label: receipt ? 'Received from' : 'Paid to', value: party },
+          { label: 'Method', value: statusLabel(row.method) },
+          { label: row.method === 'CHECK' ? 'Cheque no.' : 'Reference', value: row.reference ?? '—' },
+          { label: 'Bank', value: row.bank ?? '—' },
+          { label: 'Cleared', value: row.clearedAt ? formatDate(row.clearedAt) : 'Not yet' },
+          ...(row.orNumber ? [{ label: 'Payment no.', value: row.number }] : []),
+          ...(credit.salespeople.length ? [{ label: 'Sales personnel', value: credit.salespeople.map((p) => p.name).join(', ') }] : []),
+          ...(credit.teams.length ? [{ label: 'Team', value: credit.teams.map((t) => t.code).join(', ') }] : []),
+        ],
+      },
+      {
+        kind: 'table',
+        title: receipt ? 'In payment of' : 'Settles',
+        head: ['Number', 'Document', 'Dated', `Applied (${currency})`],
+        align: ['left', 'left', 'left', 'right'],
+        rows: settled,
+      },
+      { kind: 'totals', rows: [{ label: receipt ? 'Amount received' : 'Amount paid', value: formatMoney(num(row.amount), currency), bold: true }] },
+    ];
+    if (row.notes) sections.push({ kind: 'text', title: 'Notes', body: row.notes });
+    const recorder = await contactOf(row.recordedBy.id);
+    const pdf = await renderDocument({
+      title: receipt ? (row.orNumber ? 'Collection Receipt' : 'Receipt') : 'Payment Voucher',
+      documentNumber: row.orNumber ?? row.number,
+      date: row.paymentDate,
+      reference: party,
+      sections,
+      signatories: [{ role: receipt ? 'Received by' : 'Prepared by', name: row.recordedBy.name, ...recorder, at: row.createdAt }],
+      footerNote: row.method === 'CHECK' && !row.clearedAt ? 'Cheque received — not yet cleared.' : undefined,
+    });
+    await audit({ entityType: 'payment', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.orNumber ? `OR ${row.orNumber}` : row.number}` }, req);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      contentDisposition(paperFileName({ kind: receipt ? 'Collection Receipt' : 'Payment Voucher', number: row.orNumber ?? row.number, author: row.recordedBy.name, date: row.paymentDate })),
+    );
+    res.send(pdf);
   }),
 );
 
@@ -3730,11 +3866,25 @@ paymentRoutes.post(
       }
     }
 
+    // A customer's collection is given an official receipt, numbered by
+    // G-CORE in the same transaction (2026-10-15, the owner's call). It is
+    // from ONE customer — the invoices', named on the payment whether or not
+    // the form said so.
+    const collection = body.kind === 'RECEIPT' && body.allocations.some((a) => a.kind === 'invoice');
+    if (collection) {
+      const invoiceIds = body.allocations.filter((a) => a.kind === 'invoice').map((a) => a.id);
+      const owners = await prisma.invoice.findMany({ where: { id: { in: invoiceIds } }, select: { customerId: true }, distinct: ['customerId'] });
+      if (owners.length > 1) throw badRequest('One collection is from one customer — record each customer’s payment on its own');
+      if (owners[0] && body.customerId && body.customerId !== owners[0].customerId) throw badRequest('Those invoices are another customer’s');
+      body.customerId = owners[0]?.customerId ?? body.customerId;
+    }
     const payment = await prisma.$transaction(async (tx) => {
       const number = await nextNumber(body.kind === 'RECEIPT' ? 'payment' : 'disbursement', tx);
+      const orNumber = collection ? await nextNumber('official_receipt', tx) : null;
       const created = await tx.payment.create({
         data: {
           number,
+          orNumber,
           kind: body.kind,
           method: body.method,
           paymentDate: body.paymentDate ? asDate(body.paymentDate, 'Payment date') : dayKey(new Date()),
@@ -3830,7 +3980,7 @@ paymentRoutes.post(
         entityType: 'payment',
         entityId: payment.id,
         action: 'CREATED',
-        summary: `${payment.number} — ${amount} ${body.kind === 'RECEIPT' ? 'received' : 'paid'} across ${body.allocations.length} document(s)`,
+        summary: `${payment.number}${payment.orNumber ? ` (OR ${payment.orNumber})` : ''} — ${amount} ${body.kind === 'RECEIPT' ? 'received' : 'paid'} across ${body.allocations.length} document(s)`,
       },
       req,
     );

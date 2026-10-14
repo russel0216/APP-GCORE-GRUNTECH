@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,223 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,229 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 17 on finance for Accounts Receivable's countering, terms, credit and sales-order invoices):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 23 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices and collections):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 171, chain 329, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 334, aftermarket 259, cad 101,
+115, evaluations 152, academy 120, finance 340, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -4964,6 +4964,36 @@ salesperson, team, customer and terms.
   edit_all), printed behind the Sales Invoice (`withAttachments`,
   `?attachments=0` bare), which now prints the terms, the countered day and
   the sales personnel.
+
+- **Collections are the Payments register, opening on money in** (the
+  owner's "Payments menu to see collected", on his Payment & Collection
+  sample): `defaultFilters` `kind=RECEIPT`; columns Number, SI No. /
+  settles, Company, Amount paid, Date of collection, Cheque no. / ref., OR
+  No., Sales personnel, Team, Cleared (Direction under Columns); Filters
+  direction, cleared, method, salesperson, team, customer, date. **A
+  collection's salesperson and team are its invoices'**
+  (`collectionCredit()`, never stored on the payment — every name where
+  they differ; `?salespersonId=` / `?teamId=` filter through the
+  allocations). **The cards** (`paymentListSummary()`, the list's own
+  query): Total collections (customer receipts only — a refund of unspent
+  cash is money in, never a collection), Uncleared cheques, Money out and
+  one card per team, split by the amount applied to each team's invoices.
+  **"+ Record collection"** opens the one `RecordPaymentModal` with no
+  document: the company first (`CustomerPicker`), then its open invoices.
+- **A collection is given an OFFICIAL RECEIPT number by G-CORE**
+  (`Payment.orNumber`, indexed not unique; numbering type
+  `official_receipt`, GT-OR-2026-0001 — the owner's call), issued in the
+  payment's transaction whenever money in settles an invoice. A collection
+  is from ONE customer: the payment takes the invoices' customer, and two
+  customers' invoices on one payment are a 400. The cheque number is the
+  payment's `reference` ("Cheque no. / reference" on the form).
+  `GET /payments/:id/pdf` is the **Collection Receipt** (under its OR
+  number; "Receipt" for money in with no OR, a **Payment Voucher** for
+  money out): received from, method, cheque no., bank, cleared, payment
+  no., sales personnel and team, the invoices it settled with the amount
+  applied, the amount received, signed by whoever recorded it — "Cheque
+  received — not yet cleared." in the foot until it clears. The payment
+  page has Print and shows the OR.
 
 ## Spreadsheet attachments (2026-10-05)
 

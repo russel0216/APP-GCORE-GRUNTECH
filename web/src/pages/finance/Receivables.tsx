@@ -1574,14 +1574,15 @@ function partyFields(kind: PayTarget['kind'], partyId: string | undefined) {
  */
 export function RecordPaymentModal({
   kind,
-  party,
+  party: givenParty,
   target,
   onClose,
   onSaved,
 }: {
   kind: 'RECEIPT' | 'DISBURSEMENT';
   party?: { id: string; name: string };
-  target: PayTarget;
+  /** The document it was opened on; none — "+ Record collection" — asks the customer first. */
+  target?: PayTarget;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -1589,13 +1590,15 @@ export function RecordPaymentModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [others, setOthers] = useState<PayTarget[]>([]);
-  const [allocations, setAllocations] = useState<Record<string, number>>({
-    [target.id]: target.outstanding,
-  });
-  const person = PERSON_KINDS.includes(target.kind);
-  const release = RELEASE_KINDS.includes(target.kind);
-  const refund = REFUND_KINDS.includes(target.kind);
-  const cashWord = target.kind.startsWith('budget_request') ? 'budget request' : 'advance';
+  const [picked, setPicked] = useState<CustomerRef | null>(null);
+  const party = givenParty ?? (picked ? { id: picked.id, name: picked.name } : undefined);
+  const targetKind: PayTarget['kind'] = target?.kind ?? 'invoice';
+  const [allocations, setAllocations] = useState<Record<string, number>>(target ? { [target.id]: target.outstanding } : {});
+  const person = PERSON_KINDS.includes(targetKind);
+  const release = RELEASE_KINDS.includes(targetKind);
+  const refund = REFUND_KINDS.includes(targetKind);
+  const collection = kind === 'RECEIPT' && targetKind === 'invoice';
+  const cashWord = targetKind.startsWith('budget_request') ? 'budget request' : 'advance';
   const [form, setForm] = useState({
     // Releases and refunds are usually cash across a desk; everything else a transfer.
     method: release || refund ? 'CASH' : 'BANK_TRANSFER',
@@ -1605,22 +1608,26 @@ export function RecordPaymentModal({
     notes: '',
   });
 
+  const partyId = party?.id;
   useEffect(() => {
+    // With no document to start from, nothing is listed until the customer is named.
+    if (!target && !partyId) {
+      setOthers([]);
+      return;
+    }
     api
-      .get<{ id: string; number: string; outstanding: number }[]>(
-        `/payments/open/${target.kind}${party ? `?partyId=${party.id}` : ''}`,
-      )
+      .get<{ id: string; number: string; outstanding: number }[]>(`/payments/open/${targetKind}${partyId ? `?partyId=${partyId}` : ''}`)
       .then((rows) =>
         setOthers(
           rows
-            .filter((r) => r.id !== target.id)
-            .map((r) => ({ kind: target.kind, id: r.id, number: r.number, outstanding: r.outstanding })),
+            .filter((r) => r.id !== target?.id)
+            .map((r) => ({ kind: targetKind, id: r.id, number: r.number, outstanding: r.outstanding })),
         ),
       )
       .catch(() => {});
-  }, [target.kind, target.id, party]);
+  }, [targetKind, target, partyId]);
 
-  const rows = [target, ...others];
+  const rows = target ? [target, ...others] : others;
   const total = Object.values(allocations).reduce((s, v) => s + (v || 0), 0);
   const overApplied = rows.some((t) => (allocations[t.id] ?? 0) > t.outstanding + 0.005);
   // An advance or a budget request goes out in one voucher: all of it, or none of it.
@@ -1639,24 +1646,25 @@ export function RecordPaymentModal({
         kind,
         method: form.method,
         paymentDate: form.paymentDate,
-        ...partyFields(target.kind, party?.id),
+        ...partyFields(targetKind, party?.id),
         reference: form.reference || null,
         bank: form.bank || null,
         notes: form.notes || null,
         allocations: Object.entries(allocations)
           .filter(([, amount]) => amount > 0)
-          .map(([id, amount]) => ({ kind: target.kind, id, amount })),
+          .map(([id, amount]) => ({ kind: targetKind, id, amount })),
+      }).then((p) => {
+        toast(
+          'ok',
+          release
+            ? 'Released — the liquidation clock has started'
+            : refund
+              ? 'Refund recorded'
+              : kind === 'RECEIPT'
+                ? `Collection recorded${(p as { orNumber?: string | null }).orNumber ? ` — OR ${(p as { orNumber?: string }).orNumber}` : ''}`
+                : 'Payment recorded',
+        );
       });
-      toast(
-        'ok',
-        release
-          ? 'Released — the liquidation clock has started'
-          : refund
-            ? 'Refund recorded'
-            : kind === 'RECEIPT'
-              ? 'Collection recorded'
-              : 'Payment recorded',
-      );
       onSaved();
     } catch (err) {
       setError(err);
@@ -1691,10 +1699,24 @@ export function RecordPaymentModal({
     >
       <ErrorBox error={error} />
 
-      {party && (
+      {givenParty ? (
         <p className="muted">
-          {kind === 'RECEIPT' ? 'From' : 'To'} <strong>{party.name}</strong>
+          {kind === 'RECEIPT' ? 'From' : 'To'} <strong>{givenParty.name}</strong>
         </p>
+      ) : !target ? (
+        <Field label="Company" required>
+          <CustomerPicker
+            value={picked}
+            allowCreate={false}
+            onChange={(c) => {
+              setPicked(c);
+              setAllocations({});
+            }}
+          />
+        </Field>
+      ) : null}
+      {collection && (
+        <div className="alert info">An official receipt number is issued when it is saved — G-CORE numbers it.</div>
       )}
       {release && (
         <div className="alert info">
@@ -1730,7 +1752,7 @@ export function RecordPaymentModal({
       </div>
 
       <div className="grid grid-2">
-        <Field label="Reference" hint="Cheque number, transfer reference, OR or voucher number">
+        <Field label={collection ? 'Cheque no. / reference' : 'Reference'} hint="Cheque number, transfer reference or voucher number">
           <input
             value={form.reference}
             onChange={(e) => setForm({ ...form, reference: e.target.value })}
@@ -1803,11 +1825,15 @@ export function RecordPaymentModal({
           or leave it at zero.
         </div>
       )}
-      {rows.length === 1 && (
+      {!target && !party ? (
+        <p className="faint fin-gap-top">Name the company to list its open invoices.</p>
+      ) : rows.length === 0 ? (
+        <p className="faint fin-gap-top">Nothing is open for this customer.</p>
+      ) : rows.length === 1 && target ? (
         <p className="faint fin-gap-top">
           Nothing else is open for this {kind === 'RECEIPT' && !person ? 'customer' : person ? 'person' : 'payee'}.
         </p>
-      )}
+      ) : null}
     </Modal>
   );
 }
@@ -1827,6 +1853,11 @@ interface Allocation {
 interface PaymentRow {
   id: string;
   number: string;
+  /** The official receipt a collection was given (G-CORE's numbering). */
+  orNumber: string | null;
+  /** Read off the invoices it settled. */
+  salespeople: { id: string; name: string }[];
+  teams: { id: string; code: string; name: string }[];
   kind: string;
   method: string;
   paymentDate: string;
@@ -1881,9 +1912,31 @@ function AllocationLinks({ row }: { row: PaymentRow }) {
 
 const partyName = (r: PaymentRow) => r.customer?.name ?? r.supplier?.name ?? r.payeeUser?.name ?? '—';
 
+interface PaymentsSummary {
+  collected: number;
+  collections: number;
+  uncleared: number;
+  unclearedCount: number;
+  paidOut: number;
+  disbursements: number;
+  teams: TeamShare[];
+}
+
+/**
+ * The payments register — every movement of money, opening on what was
+ * COLLECTED (the owner's "Payments menu to see collected", laid out on his
+ * Payment & Collection sample): SI No., company, amount paid, date of
+ * collection, cheque no., OR number, sales personnel and team, cleared.
+ * Money out stays in the same register under Direction.
+ */
 export function Payments() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  const { can } = useAuth();
+  const [recording, setRecording] = useState(false);
+  const [reload, setReload] = useState(0);
+  const { people } = usePeople('gops.quotations.create');
+  const teams = useTeams();
 
   // A payment has a page of its own; links written before it (a notification,
   // a bookmark) said `?payment=<id>` and still land there.
@@ -1895,49 +1948,62 @@ export function Payments() {
       key: 'number',
       label: 'Number',
       sortKey: 'number',
+      width: '170px',
       render: (r) => <span className="mono">{r.number}</span>,
     },
     {
-      key: 'paymentDate',
-      label: 'Date',
-      sortKey: 'paymentDate',
-      render: (r) => formatDate(r.paymentDate),
+      key: 'allocations',
+      label: 'SI No. / settles',
+      render: (r) => <AllocationLinks row={r} />,
     },
     {
       key: 'party',
-      label: 'Who',
+      label: 'Company',
       render: (r) => (
         <div>
           <div>{partyName(r)}</div>
-          <div className="faint">
-            {humanise(r.method)}
-            {r.reference && ` · ${r.reference}`}
-          </div>
+          {r.kind !== 'RECEIPT' && <div className="faint">money out</div>}
         </div>
       ),
     },
     {
-      key: 'kind',
-      label: 'Direction',
+      key: 'amount',
+      label: 'Amount paid',
+      sortKey: 'amount',
+      align: 'right',
+      render: (r) => <span className={`mono ${r.kind === 'RECEIPT' ? '' : 'faint'}`}>{formatMoney(r.amount)}</span>,
+    },
+    {
+      key: 'paymentDate',
+      label: 'Date of collection',
+      sortKey: 'paymentDate',
+      render: (r) => formatDate(r.paymentDate),
+    },
+    {
+      key: 'reference',
+      label: 'Cheque no. / ref.',
       render: (r) => (
-        <StatusBadge
-          status={r.kind}
-          extra={{ RECEIPT: 'ok', DISBURSEMENT: '' }}
-          label={r.kind === 'RECEIPT' ? 'money in' : 'money out'}
-        />
+        <div>
+          <div className="mono">{r.reference ?? '—'}</div>
+          <div className="faint">{humanise(r.method)}</div>
+        </div>
       ),
     },
     {
-      key: 'allocations',
-      label: 'Settles',
-      render: (r) => <AllocationLinks row={r} />,
+      key: 'orNumber',
+      label: 'OR No.',
+      width: '160px',
+      render: (r) => (r.orNumber ? <span className="mono">{r.orNumber}</span> : <span className="faint">—</span>),
     },
     {
-      key: 'amount',
-      label: 'Amount',
-      sortKey: 'amount',
-      align: 'right',
-      render: (r) => <span className="mono">{formatMoney(r.amount)}</span>,
+      key: 'salesperson',
+      label: 'Sales personnel',
+      render: (r) => (r.salespeople.length ? r.salespeople.map((p) => p.name).join(', ') : <span className="faint">—</span>),
+    },
+    {
+      key: 'team',
+      label: 'Team',
+      render: (r) => (r.teams.length ? r.teams.map((t) => t.code).join(', ') : <span className="faint">—</span>),
     },
     {
       key: 'cleared',
@@ -1951,6 +2017,63 @@ export function Payments() {
           <StatusBadge status="UNCLEARED" extra={{ UNCLEARED: 'warn' }} label="uncleared" />
         ),
     },
+    {
+      key: 'kind',
+      label: 'Direction',
+      optional: true,
+      render: (r) => (
+        <StatusBadge status={r.kind} extra={{ RECEIPT: 'ok', DISBURSEMENT: '' }} label={r.kind === 'RECEIPT' ? 'money in' : 'money out'} />
+      ),
+    },
+  ];
+
+  const filters: FilterDef[] = [
+    {
+      key: 'kind',
+      label: 'Direction',
+      options: [
+        { value: 'RECEIPT', label: 'Money in' },
+        { value: 'DISBURSEMENT', label: 'Money out' },
+      ],
+    },
+    { key: 'uncleared', label: 'Cleared', options: [{ value: 'true', label: 'Uncleared only' }] },
+    {
+      key: 'method',
+      label: 'Method',
+      options: [
+        { value: 'BANK_TRANSFER', label: 'Bank transfer' },
+        { value: 'CHECK', label: 'Cheque' },
+        { value: 'CASH', label: 'Cash' },
+        { value: 'ONLINE', label: 'Online' },
+        { value: 'OFFSET', label: 'Offset' },
+      ],
+    },
+    {
+      key: 'salespersonId',
+      label: 'Sales personnel',
+      options: [{ value: 'none', label: 'Nobody named' }, ...people.map((p) => ({ value: p.id, label: p.name }))],
+    },
+    {
+      key: 'teamId',
+      label: 'Team',
+      options: [...teams.map((t) => ({ value: t.id, label: `${t.code} — ${t.name}` })), { value: 'none', label: 'No team' }],
+    },
+    {
+      key: 'customerId',
+      label: 'Customer',
+      type: 'lookup',
+      placeholder: 'Type a customer name or code…',
+      search: async (term: string) =>
+        (await api.get<{ id: string; code: string; name: string }[]>(`/customers/lookup${qs({ q: term })}`)).map((c) => ({
+          value: c.id,
+          label: `${c.name} · ${c.code}`,
+        })),
+      describe: async (id: string) => {
+        const c = await api.get<{ name: string; code: string }>(`/customers/${id}`);
+        return `${c.name} · ${c.code}`;
+      },
+    },
+    { key: 'from', toKey: 'to', label: 'Date of collection', type: 'dateRange' },
   ];
 
   return (
@@ -1965,24 +2088,66 @@ export function Payments() {
         listKey="payments"
         endpoint="/payments"
         printPath="/api/payments/pdf"
+        reportPath="/g-fin/reports?kind=collections"
         columns={columns}
         rowKey={(r) => r.id}
-        searchPlaceholder="Search number, reference, customer, supplier, person…"
+        reloadToken={reload}
+        searchPlaceholder="Search number, OR no., SI no., cheque, customer…"
         emptyTitle="No payments recorded yet"
         emptyHint="An uncleared cheque is recorded but counts as cash only once it clears."
         onRowClick={(r) => navigate(paymentLink(r.id))}
-        filters={[
-          {
-            key: 'kind',
-            label: 'Direction',
-            options: [
-              { value: 'RECEIPT', label: 'Money in' },
-              { value: 'DISBURSEMENT', label: 'Money out' },
-            ],
-          },
-          { key: 'uncleared', label: 'Cleared', options: [{ value: 'true', label: 'Uncleared only' }] },
-        ]}
+        selectable
+        defaultFilters={{ kind: 'RECEIPT' }}
+        filters={filters}
+        summary={(raw) => {
+          const sum = raw as unknown as PaymentsSummary | undefined;
+          if (!sum) return null;
+          return (
+            <>
+              <Stat
+                label="Total collections"
+                value={formatMoney(sum.collected)}
+                figure
+                accent="ok"
+                sub={[`${sum.collections} collection${sum.collections === 1 ? '' : 's'}`, noTeamNote(sum.teams)].filter(Boolean).join(' · ')}
+              />
+              <Stat
+                label="Uncleared cheques"
+                value={formatMoney(sum.uncleared)}
+                figure
+                accent={sum.uncleared > 0 ? 'warn' : undefined}
+                sub={`${sum.unclearedCount} not cash until the bank clears ${sum.unclearedCount === 1 ? 'it' : 'them'}`}
+                to="/g-fin/payments?kind=RECEIPT&uncleared=true"
+              />
+              <Stat
+                label="Money out"
+                value={formatMoney(sum.paidOut)}
+                figure
+                sub={`${sum.disbursements} payment${sum.disbursements === 1 ? '' : 's'}`}
+                to="/g-fin/payments?kind=DISBURSEMENT"
+              />
+              {teamCards(sum.teams, formatMoney, 'collection')}
+            </>
+          );
+        }}
+        actions={
+          can('gfin.ar.create') ? (
+            <button className="btn btn-primary btn-sm" onClick={() => setRecording(true)}>
+              + Record collection
+            </button>
+          ) : null
+        }
       />
+      {recording && (
+        <RecordPaymentModal
+          kind="RECEIPT"
+          onClose={() => setRecording(false)}
+          onSaved={() => {
+            setRecording(false);
+            setReload((n) => n + 1);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -2060,6 +2225,12 @@ export function PaymentDetail() {
         amountLabel={row.kind === 'RECEIPT' ? 'Received' : 'Paid out'}
         meta={
           <>
+            {row.orNumber && (
+              <>
+                <span className="mono">OR {row.orNumber}</span>
+                {' · '}
+              </>
+            )}
             {direction} · {formatDate(row.paymentDate)} · {humanise(row.method)}
             {row.reference && (
               <>
@@ -2069,6 +2240,7 @@ export function PaymentDetail() {
             )}
           </>
         }
+        print={`/api/payments/${row.id}/pdf`}
         actions={
           canClear && (
             <button
@@ -2126,10 +2298,28 @@ export function PaymentDetail() {
             <dd className="mono">
               <strong>{formatMoney(row.amount)}</strong>
             </dd>
+            {row.orNumber && (
+              <>
+                <dt>OR No.</dt>
+                <dd className="mono">{row.orNumber}</dd>
+              </>
+            )}
             <dt>Method</dt>
             <dd>{humanise(row.method)}</dd>
-            <dt>Reference</dt>
+            <dt>{row.method === 'CHECK' ? 'Cheque no.' : 'Reference'}</dt>
             <dd className="mono">{row.reference ?? '—'}</dd>
+            {row.salespeople.length > 0 && (
+              <>
+                <dt>Sales personnel</dt>
+                <dd>{row.salespeople.map((p) => p.name).join(', ')}</dd>
+              </>
+            )}
+            {row.teams.length > 0 && (
+              <>
+                <dt>Team</dt>
+                <dd>{row.teams.map((t) => `${t.code} — ${t.name}`).join(', ')}</dd>
+              </>
+            )}
             <dt>Bank</dt>
             <dd>{row.bank ?? '—'}</dd>
             <dt>Cleared</dt>
