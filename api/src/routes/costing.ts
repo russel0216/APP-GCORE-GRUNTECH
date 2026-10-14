@@ -1992,7 +1992,7 @@ export async function costingPaper(me: ReturnType<typeof currentUser>, id: strin
     buckets.set(l.costCategory.id, b);
   }
   for (const b of [...buckets.values()].sort((a, c) => a.rank - c.rank)) {
-    rows.push({ heading: `${b.rank}   ${b.name}` });
+    rows.push({ heading: b.name });
     let subtotal = 0;
     for (const l of b.lines) {
       if (l.isHeading) {

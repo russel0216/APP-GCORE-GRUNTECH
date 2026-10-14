@@ -1347,8 +1347,8 @@ async function main() {
   // A designed document since 2026-10-13 (Admin › PDF Templates › Costing):
   // the buckets as numbered headings, each with its subtotal, in the layout.
   check(
-    'the designed estimate keeps the bucket headings and their subtotals (Materials subtotal, Equipment subtotal)',
-    runs.some((r) => /^1\s+Materials$/.test(r)) && runs.includes('Materials subtotal') && runs.includes('Equipment subtotal'),
+    'the designed estimate heads each bucket by its name alone ("Materials", never "1 Materials") with its subtotal',
+    runs.includes('Materials') && !runs.some((r) => /^\d+\s+Materials$/.test(r)) && runs.includes('Materials subtotal') && runs.includes('Equipment subtotal'),
     runs.filter((r) => /subtotal|Materials|Equipment/.test(r)).join(' | '),
   );
   {

@@ -4614,7 +4614,7 @@ Cost Estimate" PDF) in G-CORE's own style.
   the seed dates older final costings from `updatedAt`, once. The G-OPS
   funnel no longer has a "Being costed" stage.
 - **The PDF is "Project Costing"** (2026-10-13, the owner's call; it was "Material Cost Estimate", and its file name's kind follows: "Project Costing <number> - …"), a designed document since the same day (see "Quotation PDF template": the layout is Admin › PDF Templates › Costing, the chart joined behind it): details, one table with
-  numbered bucket headings, name-over-description cells, subtotals, the summary
+  bucket headings by name alone ("Materials", never "1 Materials" — the owner's call, 2026-10-14; the line codes 101, 102 … stay), name-over-description cells, subtotals, the summary
   as `totals`, Terms & Conditions — **never the internal notes** — the
   sign-offs, then the Scope of Work as the engine's **`gantt` section** on
   landscape pages of its own. **A trailing landscape `gantt` section is an

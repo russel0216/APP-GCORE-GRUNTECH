@@ -1058,7 +1058,6 @@ export function CostingSheet() {
           </p>
         </div>
         {visibleCategories.map((cat) => {
-          const rank = rankOf.get(cat.id) ?? 0;
           const rows = byCategory.get(cat.id) ?? [];
           const subtotal = costingFigures(
             rows.map((l) => ({ quantity: l.quantity || '0', unitCost: l.unitCost || '0', isHeading: l.isHeading })),
@@ -1086,7 +1085,7 @@ export function CostingSheet() {
                   {open ? '▾' : '▸'}
                 </span>
                 <span className="cs-cat-name">
-                  {rank} {cat.name}
+                  {cat.name}
                 </span>
                 <span className="faint">
                   {count} line{count === 1 ? '' : 's'}

@@ -470,7 +470,7 @@ export function CostingDetailPage() {
                 </tr>
               </thead>
               <tbody>
-                {ordered.map((bucket, bi) => {
+                {ordered.map((bucket) => {
                   const open = !collapsed.has(bucket.category.id);
                   return (
                     <Fragment key={bucket.category.id}>
@@ -489,7 +489,7 @@ export function CostingDetailPage() {
                               })
                             }
                           >
-                            <span aria-hidden="true">{open ? '▾' : '▸'}</span> {bucket.lines[0]?.rank ?? bi + 1} {bucket.category.name}
+                            <span aria-hidden="true">{open ? '▾' : '▸'}</span> {bucket.category.name}
                           </button>
                         </td>
                         <td className="right mono">{formatMoney(bucket.total)}</td>

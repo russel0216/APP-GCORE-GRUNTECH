@@ -104,13 +104,13 @@ export const costingSubtotalRow = (name: string, amount: string) => ({ cells: { 
 export function costingSample(long = false): DesignData {
   const fields = Object.fromEntries(COSTING_FIELDS.map((f) => [f.key, f.sample ?? '']));
   const rows: DesignData['rows'] = [
-    { heading: '1   Materials' },
+    { heading: 'Materials' },
     costingLineRow({ code: '101', name: 'VFD 15 kW', description: 'Variable frequency drive, IP54', unit: 'unit', quantity: 2, unitCost: '45,000.50', amount: '90,001.00', supplier: 'SCHNEIDER ELECTRIC PH', note: 'Quote SE-2210, 8–10 weeks' }),
     costingLineRow({ code: '102', name: 'Consumables', unit: 'lot', quantity: 1, unitCost: '3,000.00', amount: '3,000.00' }),
   ];
   if (long) for (let i = 3; i <= 40; i++) rows.push(costingLineRow({ code: String(100 + i), name: `Cable tray fitting, item ${i}`, description: 'Hot-dip galvanised, 300 mm', unit: 'pcs', quantity: 4, unitCost: '350.00', amount: '1,400.00' }));
   rows.push(costingSubtotalRow('Materials', long ? '146,201.00' : '93,001.00'));
-  rows.push({ heading: '3   Labor' });
+  rows.push({ heading: 'Labor' });
   rows.push(costingLineRow({ code: '301', name: 'Assembly and programming', unit: 'lot', quantity: 1, unitCost: '39,400.00', amount: '39,400.00' }));
   rows.push(costingSubtotalRow('Labor', '39,400.00'));
   return {
