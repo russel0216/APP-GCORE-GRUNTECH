@@ -66,6 +66,9 @@ interface ItemCategory {
   code: string;
   name: string;
   parentId: string | null;
+  /** What it covers — under its name on the inventory's category tile. */
+  description: string | null;
+  sortOrder: number;
   _count: { items: number };
 }
 
@@ -225,17 +228,20 @@ const ITEM_CATEGORIES: CategorySpec<ItemCategory> = {
         <>
           {c.parentId && <span className="faint">↳ </span>}
           {c.name}
+          {c.description && <div className="faint">{c.description}</div>}
         </>
       ),
     },
     { key: 'items', head: 'Items', headClass: 'right', cellClass: 'right', render: (c) => c._count.items },
   ],
   empty: { title: 'No item categories' },
-  blank: { code: '', name: '', parentId: '' },
-  fromRow: (c) => ({ code: c.code, name: c.name, parentId: c.parentId ?? '' }),
+  blank: { code: '', name: '', parentId: '', description: '', sortOrder: '0' },
+  fromRow: (c) => ({ code: c.code, name: c.name, parentId: c.parentId ?? '', description: c.description ?? '', sortOrder: String(c.sortOrder ?? 0) }),
   fields: (row, rows) => [
     { kind: 'text', key: 'name', label: 'Name' },
     { kind: 'text', key: 'code', label: 'Code', mono: true, clean: upper },
+    { kind: 'text', key: 'description', label: 'What it covers', hint: 'Shown under the name on the inventory screen' },
+    { kind: 'count', key: 'sortOrder', label: 'Sort order' },
     {
       kind: 'select',
       key: 'parentId',
@@ -246,7 +252,7 @@ const ITEM_CATEGORIES: CategorySpec<ItemCategory> = {
       ],
     },
   ],
-  payload: (f) => ({ code: f.code, name: f.name, parentId: f.parentId || null }),
+  payload: (f) => ({ code: f.code, name: f.name, parentId: f.parentId || null, description: f.description || null, sortOrder: Number(f.sortOrder) || 0 }),
   deletable: () => true,
 };
 

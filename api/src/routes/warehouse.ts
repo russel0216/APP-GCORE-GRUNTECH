@@ -18,7 +18,7 @@ import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } 
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { registerSearch } from '../shared/search';
-import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES } from '../shared/chain';
+import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES, stockState, itemsOnOrder, STOCK_STATES, type StockState } from '../shared/chain';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import {
@@ -847,6 +847,13 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
         sourceId: receiving.id,
         sourceNumber: receiving.number,
         createdById: actorId,
+      });
+    }
+    if (order.kind === 'STOCK_REPLENISHMENT' && receiving.warehouseId && orderItem.itemId && line.locationId) {
+      // A receipt into a named bin files the stock line there while it has none.
+      await tx.inventoryBalance.updateMany({
+        where: { itemId: orderItem.itemId, warehouseId: receiving.warehouseId, locationId: null },
+        data: { locationId: line.locationId },
       });
     }
 
@@ -3060,13 +3067,14 @@ export const inventoryRoutes = Router();
 inventoryRoutes.use(authenticate);
 
 /**
- * Which balances a stock list query means — one rule for the list and its
- * printed twin. "Below level" compares two columns, which a where-clause
- * cannot, so it is decided by `belowReorder` over the candidates and named by
- * id: the list then pages and counts the reorder set like any other, where it
- * used to filter one page after the database had cut it.
+ * Which balances a stock list query means — one rule for the list, its
+ * board and its printed twin. `base` is the search, the warehouse and the
+ * rows ticked; `where` adds the category, the state (2026-10-15) and "Below
+ * level". A state compares columns and open orders, which a where-clause
+ * cannot, so it is decided over the candidates and named by id: the list then
+ * pages and counts it like any other.
  */
-async function inventoryListWhere(q: ListQuery): Promise<Prisma.InventoryBalanceWhereInput> {
+async function inventoryListWhere(q: ListQuery): Promise<{ base: Prisma.InventoryBalanceWhereInput; where: Prisma.InventoryBalanceWhereInput }> {
   const and: Prisma.InventoryBalanceWhereInput[] = [];
   if (q.filters.warehouseId) and.push({ warehouseId: q.filters.warehouseId });
   if (q.search) {
@@ -3076,12 +3084,17 @@ async function inventoryListWhere(q: ListQuery): Promise<Prisma.InventoryBalance
           { name: { contains: q.search, mode: 'insensitive' } },
           { code: { contains: q.search, mode: 'insensitive' } },
           { partNumber: { contains: q.search, mode: 'insensitive' } },
+          { brand: { contains: q.search, mode: 'insensitive' } },
+          { category: { name: { contains: q.search, mode: 'insensitive' } } },
         ],
       },
     });
   }
   const ids = idsFilter(q.filters.ids);
   if (ids) and.push({ id: { in: ids } });
+  const base: Prisma.InventoryBalanceWhereInput = and.length ? { AND: [...and] } : {};
+
+  if (q.filters.categoryId) and.push({ item: { categoryId: q.filters.categoryId === 'none' ? null : q.filters.categoryId } });
   if (q.filters.needsReorder === 'true') {
     const candidates = await prisma.inventoryBalance.findMany({
       where: { AND: [...and, REORDER_CANDIDATES] },
@@ -3089,30 +3102,16 @@ async function inventoryListWhere(q: ListQuery): Promise<Prisma.InventoryBalance
     });
     and.push({ id: { in: candidates.filter(belowReorder).map((b) => b.id) } });
   }
-  return and.length ? { AND: and } : {};
-}
-
-/**
- * Each row's state, as the owner's inventory screen shows it (2026-10-14):
- * On order (below its level or out, with an issued order still to arrive),
- * Out of stock (nothing available), Low stock (below its reorder level),
- * In stock.
- */
-function stockState(available: number, needsReorder: boolean, onOrder: boolean) {
-  if ((needsReorder || available <= 0) && onOrder) return 'ON_ORDER';
-  if (available <= 0) return 'OUT_OF_STOCK';
-  if (needsReorder) return 'LOW_STOCK';
-  return 'IN_STOCK';
-}
-
-/** Items with an issued purchase order still to arrive, from those asked about. */
-async function itemsOnOrder(itemIds: string[]) {
-  if (!itemIds.length) return new Set<string>();
-  const open = await prisma.purchaseOrderItem.findMany({
-    where: { itemId: { in: itemIds }, order: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } } },
-    select: { itemId: true, quantity: true, receivedQty: true },
-  });
-  return new Set(open.filter((o) => num(o.receivedQty) < num(o.quantity) - 0.0005).map((o) => o.itemId!));
+  const state = choice(q.filters.state, Object.fromEntries(STOCK_STATES.map((k) => [k, k])) as Record<StockState, StockState>, 'Status');
+  if (state) {
+    const candidates = await prisma.inventoryBalance.findMany({
+      where: { AND: and },
+      select: { id: true, itemId: true, quantity: true, borrowedQty: true, item: { select: { reorderLevel: true, minStock: true } } },
+    });
+    const onOrder = await itemsOnOrder([...new Set(candidates.map((c) => c.itemId))]);
+    and.push({ id: { in: candidates.filter((c) => stockState(c, onOrder.has(c.itemId)) === state).map((c) => c.id) } });
+  }
+  return { base, where: and.length ? { AND: and } : {} };
 }
 
 inventoryRoutes.get(
@@ -3120,9 +3119,9 @@ inventoryRoutes.get(
   require_('gchain.inventory.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = await inventoryListWhere(q);
+    const { base, where } = await inventoryListWhere(q);
 
-    const [rows, total, everything, pendingOrders] = await Promise.all([
+    const [rows, total, everything, inBase, categories, pendingOrders] = await Promise.all([
       prisma.inventoryBalance.findMany({
         where,
         include: {
@@ -3131,37 +3130,63 @@ inventoryRoutes.get(
               id: true,
               code: true,
               partNumber: true,
+              brand: true,
               name: true,
+              description: true,
               unit: true,
               minStock: true,
               reorderLevel: true,
-              category: { select: { name: true } },
+              category: { select: { id: true, name: true } },
               preferredSupplier: { select: { id: true, name: true } },
             },
           },
           warehouse: { select: { id: true, name: true } },
+          location: { select: { id: true, code: true, name: true } },
         },
         orderBy: { item: { name: 'asc' } },
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.inventoryBalance.count({ where }),
-      // The cards over the list, under the list's own query.
+      // The cards, under the list's own query.
       prisma.inventoryBalance.findMany({
         where,
-        select: { itemId: true, quantity: true, borrowedQty: true, averageCost: true, item: { select: { reorderLevel: true } } },
+        select: { itemId: true, quantity: true, borrowedQty: true, averageCost: true, item: { select: { reorderLevel: true, minStock: true } } },
       }),
+      // The category tiles, under everything but the category and the state —
+      // so every tile still shows when one is chosen.
+      prisma.inventoryBalance.findMany({
+        where: base,
+        select: { itemId: true, quantity: true, borrowedQty: true, averageCost: true, item: { select: { categoryId: true, reorderLevel: true, minStock: true } } },
+      }),
+      prisma.itemCategory.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, name: true, description: true } }),
       prisma.purchaseOrder.count({ where: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } } }),
     ]);
-    const onOrder = await itemsOnOrder([...new Set(rows.map((r) => r.itemId))]);
+    const onOrder = await itemsOnOrder([...new Set([...everything.map((r) => r.itemId), ...inBase.map((r) => r.itemId)])]);
     const valuation = everything.reduce((s, b) => s.add(b.quantity.mul(b.averageCost)), new Prisma.Decimal(0));
+    const states = everything.map((b) => stockState(b, onOrder.has(b.itemId)));
+
+    // A tile per category: its items, value, and how many need reordering.
+    const tiles = new Map<string, { items: Set<string>; value: Prisma.Decimal; low: number; critical: number }>();
+    for (const b of inBase) {
+      const key = b.item.categoryId ?? 'none';
+      const t = tiles.get(key) ?? { items: new Set<string>(), value: new Prisma.Decimal(0), low: 0, critical: 0 };
+      t.items.add(b.itemId);
+      t.value = t.value.add(b.quantity.mul(b.averageCost));
+      const st = stockState(b, onOrder.has(b.itemId));
+      if (st === 'LOW_STOCK') t.low += 1;
+      if (st === 'CRITICAL') t.critical += 1;
+      tiles.set(key, t);
+    }
+    const tile = (id: string, name: string, description: string | null) => {
+      const t = tiles.get(id);
+      return { id, name, description, items: t?.items.size ?? 0, value: t ? Number(t.value.toFixed(2)) : 0, low: t?.low ?? 0, critical: t?.critical ?? 0 };
+    };
 
     res.json({
       ...listResult(
         rows.map((r) => {
           const quantity = num(r.quantity);
-          const available = availableOf(r);
-          const needsReorder = belowReorder(r);
           return {
             id: r.id,
             item: {
@@ -3170,13 +3195,14 @@ inventoryRoutes.get(
               reorderLevel: r.item.reorderLevel == null ? null : num(r.item.reorderLevel),
             },
             warehouse: r.warehouse,
+            location: r.location,
             quantity,
             borrowedQty: num(r.borrowedQty),
-            available,
+            available: availableOf(r),
             averageCost: num(r.averageCost),
             value: cents(quantity * num(r.averageCost)),
-            needsReorder,
-            state: stockState(available, needsReorder, onOrder.has(r.itemId)),
+            needsReorder: belowReorder(r),
+            state: stockState(r, onOrder.has(r.itemId)),
           };
         }),
         total,
@@ -3185,10 +3211,52 @@ inventoryRoutes.get(
       summary: {
         items: new Set(everything.map((b) => b.itemId)).size,
         valuation: Number(valuation.toFixed(2)),
-        lowStock: everything.filter(belowReorder).length,
+        lowStock: states.filter((st) => st === 'LOW_STOCK').length,
+        critical: states.filter((st) => st === 'CRITICAL').length,
+        onOrder: states.filter((st) => st === 'ON_ORDER').length,
         pendingOrders,
+        // The first eight categories always (the owner's eight lead the
+        // order), and any other that holds stock.
+        categories: [
+          ...categories.filter((c, n) => n < 8 || tiles.has(c.id)).map((c) => tile(c.id, c.name, c.description)),
+          ...(tiles.has('none') ? [tile('none', 'Not categorised', null)] : []),
+        ],
       },
     });
+  }),
+);
+
+/**
+ * Where a stock line sits — its bin or rack (2026-10-15), one of its
+ * warehouse's locations, or none. The inventory's edit right.
+ */
+inventoryRoutes.patch(
+  '/balances/:id',
+  require_('gchain.inventory.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(z.object({ locationId: z.string().nullable() }).strict(), req.body);
+    const balance = await prisma.inventoryBalance.findUnique({
+      where: { id: req.params.id },
+      include: { item: { select: { code: true } }, warehouse: { select: { name: true } }, location: { select: { code: true } } },
+    });
+    if (!balance) throw notFound('Stock line not found');
+    let code: string | null = null;
+    if (body.locationId) {
+      const loc = await prisma.location.findUnique({ where: { id: body.locationId }, select: { warehouseId: true, code: true } });
+      if (!loc || loc.warehouseId !== balance.warehouseId) throw badRequest(`That location is not in ${balance.warehouse.name}`);
+      code = loc.code;
+    }
+    await prisma.inventoryBalance.update({ where: { id: balance.id }, data: { locationId: body.locationId } });
+    await audit(
+      {
+        entityType: 'inventory',
+        entityId: balance.id,
+        action: 'UPDATED',
+        summary: `${balance.item.code} at ${balance.warehouse.name}: bin ${balance.location?.code ?? '—'} → ${code ?? '—'}`,
+      },
+      req,
+    );
+    res.json({ ok: true, locationId: body.locationId });
   }),
 );
 
@@ -3249,7 +3317,7 @@ inventoryRoutes.get(
   require_('gchain.inventory.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = await inventoryListWhere(q);
+    const { where } = await inventoryListWhere(q);
     const [rows, active] = await Promise.all([
       prisma.inventoryBalance.findMany({
         where,
@@ -3312,14 +3380,15 @@ inventoryRoutes.get(
   require_('gchain.inventory.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = await inventoryListWhere(q);
+    const { where } = await inventoryListWhere(q);
     const f = q.filters;
-    const [rows, count, all, currency, warehouse] = await Promise.all([
+    const [rows, count, all, currency, warehouse, category] = await Promise.all([
       prisma.inventoryBalance.findMany({
         where,
         include: {
-          item: { select: { code: true, name: true, unit: true, reorderLevel: true, category: { select: { name: true } } } },
+          item: { select: { code: true, name: true, brand: true, unit: true, reorderLevel: true, minStock: true, category: { select: { name: true } } } },
           warehouse: { select: { name: true } },
+          location: { select: { code: true } },
         },
         orderBy: { item: { name: 'asc' } },
         take: LIST_CAP,
@@ -3328,10 +3397,15 @@ inventoryRoutes.get(
       prisma.inventoryBalance.findMany({ where, select: { quantity: true, averageCost: true } }),
       companyCurrency(),
       f.warehouseId ? prisma.warehouse.findUnique({ where: { id: f.warehouseId }, select: { name: true } }) : null,
+      f.categoryId && f.categoryId !== 'none' ? prisma.itemCategory.findUnique({ where: { id: f.categoryId }, select: { name: true } }) : null,
     ]);
+    const onOrder = await itemsOnOrder([...new Set(rows.map((r) => r.itemId))]);
+    const STATE_WORDS: Record<StockState, string> = { IN_STOCK: 'In stock', LOW_STOCK: 'Low stock', CRITICAL: 'Critical', ON_ORDER: 'On order' };
     const reference = listReference(count, rows.length, ['stock line', 'stock lines'], [
       q.search && `search "${q.search}"`,
       f.warehouseId && `warehouse ${warehouse?.name ?? 'not found'}`,
+      f.categoryId && (f.categoryId === 'none' ? 'not categorised' : `category ${category?.name ?? 'not found'}`),
+      f.state && `status ${STATE_WORDS[f.state as StockState] ?? f.state}`,
       f.needsReorder === 'true' && 'below reorder level',
       f.ids && 'the rows selected',
     ]);
@@ -3346,19 +3420,19 @@ inventoryRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Item', 'Warehouse', 'Unit', 'On hand', 'On loan', 'Available', 'Reorder at', `Avg. cost (${currency})`, `Value (${currency})`, 'Reorder'],
-          align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'right', 'right', 'left'],
+          head: ['Item', 'Category', 'Warehouse', 'Bin', 'Available', 'On loan', 'Reorder at', `Avg. cost (${currency})`, `Value (${currency})`, 'Status'],
+          align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'right', 'right', 'left'],
           rows: rows.map((b) => [
-            { title: b.item.name, body: [b.item.code, b.item.category?.name].filter(Boolean).join(' · ') },
+            { title: b.item.name, body: [b.item.code, b.item.brand].filter(Boolean).join(' · ') },
+            b.item.category?.name ?? '',
             b.warehouse.name,
-            b.item.unit,
-            qty(num(b.quantity)),
+            b.location?.code ?? '',
+            `${qty(availableOf(b))} ${b.item.unit}`,
             num(b.borrowedQty) ? qty(num(b.borrowedQty)) : '',
-            qty(availableOf(b)),
             b.item.reorderLevel == null ? '' : qty(num(b.item.reorderLevel)),
             formatAmount(num(b.averageCost)),
             formatAmount(cents(num(b.quantity) * num(b.averageCost))),
-            belowReorder(b) ? 'Below level' : '',
+            STATE_WORDS[stockState(b, onOrder.has(b.itemId))],
           ]),
         },
         { kind: 'totals', rows: [{ label: totalLabel('Stock value', count, rows.length), value: formatMoney(total, currency), bold: true }] },
@@ -3386,7 +3460,10 @@ inventoryRoutes.get(
       }),
       prisma.inventoryBalance.findMany({
         where: { itemId: req.params.itemId, ...(warehouseId ? { warehouseId } : {}) },
-        include: { warehouse: { select: { id: true, name: true } } },
+        include: {
+          warehouse: { select: { id: true, name: true, locations: { where: { isActive: true }, select: { id: true, code: true, name: true }, orderBy: { code: 'asc' } } } },
+          location: { select: { id: true, code: true, name: true } },
+        },
       }),
       prisma.inventoryTransaction.findMany({
         where: { itemId: req.params.itemId, ...(warehouseId ? { warehouseId } : {}) },

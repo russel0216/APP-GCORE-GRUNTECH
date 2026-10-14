@@ -704,7 +704,9 @@ const ROLES: RoleSeed[] = [
       name: 'Warehouse Supervisor',
       description: 'Approves incoming and outgoing for warehouse staff who report to nobody else; runs the warehouse',
       grants: like('warehouse').grants,
-      only: like('warehouse').only,
+      // The automatic reorder's requisitions are raised in the supervisor's
+      // name (2026-10-15): they check, modify and submit their own.
+      only: [...like('warehouse').only, ...VIEW_OWN_SELF('gchain', 'purchase_requests'), 'gchain.purchase_requests.delete'],
     },
   );
 }
@@ -1623,6 +1625,30 @@ async function main() {
     await prisma.itemCategory.upsert({ where: { code: c.code }, create: c, update: {} });
   }
   console.log('  ✓ Item categories (9)');
+  // The inventory's eight (2026-10-15, the owner's inventory screen), in his
+  // order, each with what it covers — a head start, renamed freely; a
+  // category on file is never overwritten, only a blank description filled.
+  const INVENTORY_CATEGORIES = [
+    { code: 'PMP', name: 'Pumps & Motors', description: 'UL/FM Fire, Booster, Submersible' },
+    { code: 'CTL', name: 'Industrial Controls', description: 'VFDs, HMI, Starters, Switchgear' },
+    { code: 'INS', name: 'Instruments', description: 'Analyzers, Gauges, Flowmeters' },
+    { code: 'PRT', name: 'Parts & Hardware', description: 'Impellers, Seals, Fittings, Kits' },
+    { code: 'CNS', name: 'Consumables', description: 'Lubricants, Desiccants, Oils' },
+    { code: 'FLT', name: 'Filters & Separation', description: 'CO2 Polishing, Water & Air Elements' },
+    { code: 'DRY', name: 'Dryers & Treatment', description: 'Refrigerated, Desiccant Skids' },
+    { code: 'PIP', name: 'Piping & Valves', description: 'Aluminum Air Loops, Check Valves' },
+  ];
+  for (const [n, c] of INVENTORY_CATEGORIES.entries()) {
+    const found = await prisma.itemCategory.findUnique({ where: { code: c.code } });
+    if (!found) await prisma.itemCategory.create({ data: { ...c, sortOrder: n + 1 } });
+    else if (!found.description) await prisma.itemCategory.update({ where: { id: found.id }, data: { description: c.description, ...(found.sortOrder ? {} : { sortOrder: n + 1 }) } });
+  }
+  // The first starting tree goes after them, so the eight lead the screen; an
+  // order an administrator set is kept.
+  for (const [n, code] of ['PIPE', 'VALV', 'ELEC', 'COMP', 'GASE', 'FAB', 'CONS', 'TOOL', 'SAFE'].entries()) {
+    await prisma.itemCategory.updateMany({ where: { code, sortOrder: 0 }, data: { sortOrder: 100 + n } });
+  }
+  console.log('  ✓ Inventory categories (8)');
 
   // ── Teams (the Industry master) ────────────────────────────────────────────
   // The owner's five sales teams (2026-10-08): a person's team is the Industry

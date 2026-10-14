@@ -23,6 +23,8 @@ export type NotificationType =
   | 'borrow.released'
   | 'borrow.cancelled'
   | 'pullout.done'
+  /** The automatic reorder added an item to a draft replenishment (2026-10-15). */
+  | 'reorder.raised'
   | 'invoice.overdue'
   | 'leave.awaiting'
   | 'overtime.awaiting'

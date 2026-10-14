@@ -44,6 +44,40 @@ export function belowReorder(b: { quantity: Qty; borrowedQty: Qty; item: { reord
   return b.item.reorderLevel !== null && availableOf(b) <= num(b.item.reorderLevel);
 }
 
+/**
+ * A stock line's state (2026-10-15, the owner's inventory screen):
+ * CRITICAL — nothing available, or at or under the item's minimum stock
+ * ("immediate PO needed"); LOW_STOCK — at or under the reorder level
+ * ("reorder warning"); ON_ORDER — either of those with an issued purchase
+ * order for the item still to arrive; IN_STOCK otherwise. The one rule for
+ * the list's Status column and filter, the cards and the category tiles.
+ */
+export type StockState = 'IN_STOCK' | 'LOW_STOCK' | 'CRITICAL' | 'ON_ORDER';
+export const STOCK_STATES: StockState[] = ['IN_STOCK', 'LOW_STOCK', 'CRITICAL', 'ON_ORDER'];
+
+export function stockState(
+  b: { quantity: Qty; borrowedQty: Qty; item: { reorderLevel: Qty | null; minStock?: Qty | null } },
+  onOrder: boolean,
+): StockState {
+  const available = availableOf(b);
+  const critical = available <= 0 || (b.item.minStock != null && available <= num(b.item.minStock));
+  const low = belowReorder(b);
+  if ((critical || low) && onOrder) return 'ON_ORDER';
+  if (critical) return 'CRITICAL';
+  if (low) return 'LOW_STOCK';
+  return 'IN_STOCK';
+}
+
+/** Items with an issued purchase order still to arrive, from those asked about. */
+export async function itemsOnOrder(itemIds: string[]): Promise<Set<string>> {
+  if (!itemIds.length) return new Set<string>();
+  const open = await prisma.purchaseOrderItem.findMany({
+    where: { itemId: { in: itemIds }, order: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } } },
+    select: { itemId: true, quantity: true, receivedQty: true },
+  });
+  return new Set(open.filter((o) => num(o.receivedQty) < num(o.quantity) - 0.0005).map((o) => o.itemId!));
+}
+
 /** The balances `belowReorder` can be true of: an item with a level set. Narrow with it, then filter. */
 export const REORDER_CANDIDATES = { item: { reorderLevel: { not: null } } } as const;
 

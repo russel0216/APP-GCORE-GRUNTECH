@@ -40,6 +40,7 @@ import {
 import { settlePurchaseRequest, settlePurchaseOrder } from '../src/routes/procurement';
 import { settleBorrowSlip, settleReceiving, settleStockIssue } from '../src/routes/warehouse';
 import { settlePullout } from '../src/routes/pullouts';
+import { runReorderCheck } from '../src/shared/reorder';
 // The RFQ's search provider registers on import.
 import '../src/routes/rfq';
 import '../src/routes/jobs';
@@ -206,6 +207,11 @@ async function cleanup() {
   });
   await prisma.purchaseOrder.deleteMany({ where: { notes: { startsWith: TAG } } });
   await prisma.purchaseRequest.deleteMany({ where: { purpose: { startsWith: TAG } } });
+  // The automatic reorder's lines for this script's items, and its
+  // requisitions left empty (one for the script's warehouse in full).
+  await prisma.purchaseRequestItem.deleteMany({ where: { request: { autoReorder: true }, OR: [{ name: { startsWith: TAG } }, { item: { name: { startsWith: TAG } } }] } });
+  await prisma.purchaseRequest.deleteMany({ where: { autoReorder: true, OR: [{ items: { none: {} } }, { warehouse: { name: { startsWith: TAG } } }] } });
+  await prisma.notification.deleteMany({ where: { type: 'reorder.raised', title: { contains: TAG } } });
   await prisma.job.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
   await prisma.item.deleteMany({ where: { name: { startsWith: TAG } } });
@@ -4099,7 +4105,7 @@ async function main() {
     const report = await api(printerToken, 'GET', '/inventory/reports/summary');
     const reportCount = ((report.body.reorder ?? []) as { code: string }[]).filter((r) => r.code.startsWith(TAG)).length;
     check(
-      'the Reorder filter counts every line below its level across pages, its paper prints each "Below level", and the reports tile counts the same set',
+      'the Reorder filter counts every line below its level across pages, its paper prints each one\'s state, and the reports tile counts the same set',
       belowCount >= 2 &&
         reorderItems.length === 3 &&
         Number(reorderPage.body.total) === belowCount &&
@@ -4107,10 +4113,71 @@ async function main() {
         reorderPaper.status === 200 &&
         saysCount(reorderText, belowCount, ['stock line', 'stock lines']) &&
         reorderText.includes('below reorder level') &&
-        (reorderText.match(/Below level/g) ?? []).length === belowCount &&
+        // Each prints its state (2026-10-15): low, critical or on order — never "In stock".
+        (reorderText.match(/Low stock|Critical|On order/g) ?? []).length === belowCount &&
+        !reorderText.includes('In stock') &&
         !reorderText.includes(`${TAG}-WSH`) &&
         reportCount === belowCount,
       `expected ${belowCount}; page total ${reorderPage.body.total} (${((reorderPage.body.rows ?? []) as Row[]).length} row), paper ${(reorderText.match(/Below level/g) ?? []).length}, report ${reportCount}`,
+    );
+
+    // The stock states (2026-10-15): the gasket at its minimum is Critical,
+    // the bolt under its level is Low stock, the washer In stock; the cards
+    // count what the Status filter lists.
+    const [gsk, blt, wsh] = reorderItems;
+    await prisma.item.update({ where: { id: gsk.id }, data: { minStock: D(3) } });
+    const stateOf = async (state: string) => {
+      const r = await api(printerToken, 'GET', `/inventory?search=${TAG}&state=${state}&pageSize=100`);
+      return { total: Number(r.body.total), codes: ((r.body.rows ?? []) as { item: { code: string } }[]).map((x) => x.item.code), summary: r.body.summary as Record<string, number> };
+    };
+    const critical = await stateOf('CRITICAL');
+    const low = await stateOf('LOW_STOCK');
+    const fine = await stateOf('IN_STOCK');
+    const allTag = await api(printerToken, 'GET', `/inventory?search=${TAG}&pageSize=100`);
+    const tagSummary = allTag.body.summary as { critical: number; lowStock: number };
+    const badState = await api(printerToken, 'GET', `/inventory?state=SOMETIMES`);
+    check(
+      'a line at its minimum is Critical, one under its reorder level Low stock, one over it In stock; the cards count what the Status filter lists, and an unknown state is a 400',
+      critical.codes.includes(gsk.code) &&
+        low.codes.includes(blt.code) &&
+        fine.codes.includes(wsh.code) &&
+        !low.codes.includes(gsk.code) &&
+        tagSummary.critical === critical.total &&
+        tagSummary.lowStock === low.total &&
+        badState.status === 400,
+      `critical ${critical.codes.join(',')}; low ${low.codes.join(',')}; in ${fine.codes.join(',')}; cards ${tagSummary.critical}/${tagSummary.lowStock}; ${badState.status}`,
+    );
+
+    // The automatic reorder (2026-10-15): an item under its level is added
+    // to its warehouse's one DRAFT replenishment, quantity up to twice the
+    // level; a second check adds nothing; a covered item is left alone; the
+    // system never submits it.
+    const supervisorRole = await prisma.role.findUniqueOrThrow({ where: { key: 'warehouse_supervisor' } });
+    await prisma.userRole.upsert({ where: { userId_roleId: { userId: boss.id, roleId: supervisorRole.id } }, create: { userId: boss.id, roleId: supervisorRole.id }, update: {} });
+    const firstAdd = await runReorderCheck([{ itemId: blt.id, warehouseId: warehouse.id }, { itemId: wsh.id, warehouseId: warehouse.id }]);
+    const secondAdd = await runReorderCheck([{ itemId: blt.id, warehouseId: warehouse.id }]);
+    const gskAdd = await runReorderCheck([{ itemId: gsk.id, warehouseId: warehouse.id }]);
+    const autoPrs = await prisma.purchaseRequest.findMany({
+      where: { warehouseId: warehouse.id, autoReorder: true },
+      include: { items: { select: { itemId: true, quantity: true } } },
+    });
+    const bltLine = autoPrs.flatMap((pr) => pr.items).find((i) => i.itemId === blt.id);
+    const bltBalance = await prisma.inventoryBalance.findUniqueOrThrow({ where: { itemId_warehouseId: { itemId: blt.id, warehouseId: warehouse.id } } });
+    const expectedQty = Math.ceil(2 * 5 - (num(bltBalance.quantity) - num(bltBalance.borrowedQty)));
+    check(
+      'the automatic reorder adds a fallen item to its warehouse\'s one draft replenishment (twice the level less what is there), never twice, never an item over its level, and never submits it',
+      firstAdd.length === 1 &&
+        firstAdd[0].itemId === blt.id &&
+        secondAdd.length === 0 &&
+        gskAdd.length === 1 &&
+        autoPrs.length === 1 &&
+        autoPrs[0].status === 'DRAFT' &&
+        autoPrs[0].kind === 'STOCK_REPLENISHMENT' &&
+        autoPrs[0].items.length === 2 &&
+        !!bltLine &&
+        num(bltLine.quantity) === expectedQty &&
+        (await prisma.approvalRequest.count({ where: { documentType: 'purchase_request', documentId: autoPrs[0].id } })) === 0,
+      `${firstAdd.length}/${secondAdd.length}/${gskAdd.length}; ${autoPrs.length} PR(s) ${autoPrs[0]?.status} ${autoPrs[0]?.items.length} line(s); bolt ${bltLine ? num(bltLine.quantity) : 'none'} (expected ${expectedQty})`,
     );
   }
 

@@ -16,7 +16,7 @@ import {
   formatMoney,
   useToast,
 } from '../../components/ui';
-import { Stat } from '../../components/charts';
+import { BarList, Panel, Stat } from '../../components/charts';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { ApprovalStepper, DocumentApproval, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
@@ -1187,24 +1187,51 @@ interface StockRow {
   averageCost: number;
   value: number;
   needsReorder: boolean;
-  /** In stock, low, out, or on order (an issued order still to arrive). */
-  state: 'IN_STOCK' | 'LOW_STOCK' | 'OUT_OF_STOCK' | 'ON_ORDER';
+  /** In stock, low (reorder warning), critical (nothing, or under the minimum) or on order (an issued order still to arrive). */
+  state: StockState;
   item: {
     id: string;
     code: string;
     partNumber: string | null;
+    /** The manufacturer / OEM. */
+    brand: string | null;
     name: string;
+    description: string | null;
     unit: string;
     minStock: number | null;
     reorderLevel: number | null;
-    category: { name: string } | null;
+    category: { id: string; name: string } | null;
     preferredSupplier: { id: string; name: string } | null;
   };
   warehouse: { id: string; name: string };
+  /** Its bin or rack. */
+  location: { id: string; code: string; name: string | null } | null;
 }
 
-const STOCK_STATE_LABEL = { IN_STOCK: 'In stock', LOW_STOCK: 'Low stock', OUT_OF_STOCK: 'Out of stock', ON_ORDER: 'On order' } as const;
-const STOCK_STATE_TONES = { IN_STOCK: 'ok', LOW_STOCK: 'warn', OUT_OF_STOCK: 'danger', ON_ORDER: 'info' } as const;
+type StockState = 'IN_STOCK' | 'LOW_STOCK' | 'CRITICAL' | 'ON_ORDER';
+const STOCK_STATE_LABEL: Record<StockState, string> = { IN_STOCK: 'In stock', LOW_STOCK: 'Low stock', CRITICAL: 'Critical', ON_ORDER: 'On order' };
+const STOCK_STATE_TONES = { IN_STOCK: 'ok', LOW_STOCK: 'warn', CRITICAL: 'danger', ON_ORDER: 'info' } as const;
+
+/** A category tile (2026-10-15, the owner's inventory screen): its items, their value, how many need reordering. */
+interface CategoryTile {
+  id: string;
+  name: string;
+  description: string | null;
+  items: number;
+  value: number;
+  low: number;
+  critical: number;
+}
+
+interface InventorySummary {
+  items?: number;
+  valuation?: number;
+  lowStock?: number;
+  critical?: number;
+  onOrder?: number;
+  pendingOrders?: number;
+  categories?: CategoryTile[];
+}
 
 interface Movement {
   id: string;
@@ -1315,25 +1342,46 @@ export function Inventory() {
   useEffect(() => {
     api.get<typeof warehouses>('/warehouses').then(setWarehouses).catch(() => {});
   }, []);
+  // The category tiles and the chart come with the list's summary.
+  const [categories, setCategories] = useState<CategoryTile[]>([]);
+  const chosenCategory = params.get('categoryId') ?? '';
+  /** The list's own URL with the category set (or cleared, when it is the one chosen). */
+  const categoryLink = (id: string) => {
+    const p = new URLSearchParams(params);
+    if (chosenCategory === id) p.delete('categoryId');
+    else p.set('categoryId', id);
+    p.delete('page');
+    return `/g-chain/inventory?${p.toString()}`;
+  };
 
   const columns: Column<StockRow>[] = [
-    { key: 'code', label: 'Item code', render: (s) => <span className="mono">{s.item.code}</span> },
+    {
+      key: 'code',
+      label: 'Part number',
+      render: (s) => (
+        <div>
+          <div className="mono">{s.item.partNumber ?? s.item.code}</div>
+          {s.item.partNumber && <div className="faint mono">{s.item.code}</div>}
+        </div>
+      ),
+    },
     {
       key: 'item',
-      label: 'Description',
+      label: 'Item description',
       render: (s) => (
         <div>
           <div>{s.item.name}</div>
-          {s.item.partNumber && <div className="faint mono">{s.item.partNumber}</div>}
+          {s.item.description && s.item.description !== s.item.name && <div className="faint">{s.item.description}</div>}
         </div>
       ),
     },
     { key: 'category', label: 'Category', render: (s) => s.item.category?.name ?? <span className="faint">—</span> },
-    { key: 'supplier', label: 'Brand / Partner', render: (s) => s.item.preferredSupplier?.name ?? <span className="faint">—</span> },
+    { key: 'brand', label: 'Brand / OEM', render: (s) => s.item.brand ?? <span className="faint">—</span> },
     { key: 'warehouse', label: 'Warehouse', render: (s) => s.warehouse.name, optional: true },
+    { key: 'bin', label: 'Bin / Rack', render: (s) => (s.location ? <span className="mono">{s.location.code}</span> : <span className="faint">—</span>) },
     {
       key: 'available',
-      label: 'Qty',
+      label: 'Stock qty',
       align: 'right',
       render: (s) => (
         <span className={`mono${s.needsReorder ? ' proc-short' : ''}`}>
@@ -1346,21 +1394,21 @@ export function Inventory() {
     { key: 'value', label: 'Value', align: 'right', render: (s) => <span className="mono">{formatMoney(s.value)}</span>, optional: true },
     {
       key: 'reorder',
-      label: 'Reorder at',
+      label: 'Reorder pt',
       align: 'right',
-      render: (s) => (s.item.reorderLevel ?? <span className="faint">—</span>),
-      optional: true,
+      render: (s) =>
+        s.item.reorderLevel != null ? (
+          <span className="mono">
+            {s.item.reorderLevel} {s.item.unit}
+          </span>
+        ) : (
+          <span className="faint">—</span>
+        ),
     },
     {
       key: 'status',
       label: 'Status',
-      render: (s) => (
-        <StatusBadge
-          status={s.state}
-          extra={STOCK_STATE_TONES}
-          label={s.state === 'LOW_STOCK' ? `Low stock (${s.available})` : STOCK_STATE_LABEL[s.state]}
-        />
-      ),
+      render: (s) => <StatusBadge status={s.state} extra={STOCK_STATE_TONES} label={STOCK_STATE_LABEL[s.state]} />,
     },
   ];
 
@@ -1394,18 +1442,54 @@ export function Inventory() {
           onRowClick={(s) => navigate(`/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}`)}
           emptyTitle="No stock yet"
           emptyHint="Stock appears once goods are received into a warehouse."
+          onSummary={(raw) => setCategories(((raw as InventorySummary).categories ?? []) as CategoryTile[])}
           summary={(raw) => {
-            const sum = raw as { items?: number; valuation?: number; lowStock?: number; pendingOrders?: number };
+            const sum = raw as InventorySummary;
+            const tiles = sum.categories ?? [];
             return (
               <>
                 <Stat label="Total items" value={sum.items ?? 0} sub="Stocked items" />
-                <Stat label="Total valuation" value={formatMoney(sum.valuation ?? 0)} sub="Valued stock" />
-                <Stat label="Low stock alerts" value={sum.lowStock ?? 0} sub="Action required" to="/g-chain/inventory?needsReorder=true" />
-                <Stat label="Pending POs" value={sum.pendingOrders ?? 0} sub="In transit" to="/g-chain/purchase-orders?awaiting=true" />
+                <Stat label="Total valuation" value={formatMoney(sum.valuation ?? 0)} sub="Commercial stock" />
+                <Stat label="Reorder warning" value={sum.lowStock ?? 0} sub="Below reorder level" accent="warn" to="/g-chain/inventory?state=LOW_STOCK" />
+                <Stat label="Critical" value={sum.critical ?? 0} sub="Nothing left, or under the minimum" accent="danger" to="/g-chain/inventory?state=CRITICAL" />
+                <Stat label="Pending POs" value={sum.pendingOrders ?? 0} sub={`In transit${sum.onOrder ? ` · ${sum.onOrder} low items on order` : ''}`} to="/g-chain/purchase-orders?awaiting=true" />
+                {tiles.length > 0 && (
+                  <div className="inv-cats">
+                    <div className="inv-cats-head">
+                      <span>Inventory categories</span>
+                      <span className="faint">{tiles.length} categor{tiles.length === 1 ? 'y' : 'ies'}</span>
+                    </div>
+                    <div className="inv-cats-grid">
+                      {tiles.map((t) => (
+                        <Link key={t.id} to={categoryLink(t.id)} className={`inv-cat${chosenCategory === t.id ? ' is-on' : ''}`} aria-pressed={chosenCategory === t.id}>
+                          <span className="inv-cat-name">{t.name}</span>
+                          <span className="inv-cat-count">{t.items}</span>
+                          {t.description && <span className="inv-cat-desc">{t.description}</span>}
+                          {(t.low > 0 || t.critical > 0) && (
+                            <span className="inv-cat-flags">
+                              {t.critical > 0 && <span className="badge danger">{t.critical} critical</span>}
+                              {t.low > 0 && <span className="badge warn">{t.low} low</span>}
+                            </span>
+                          )}
+                        </Link>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </>
             );
           }}
           filters={[
+            {
+              key: 'categoryId',
+              label: 'Category',
+              options: [...categories.filter((c) => c.id !== 'none').map((c) => ({ value: c.id, label: c.name })), { value: 'none', label: 'Not categorised' }],
+            },
+            {
+              key: 'state',
+              label: 'Stock status',
+              options: (Object.keys(STOCK_STATE_LABEL) as StockState[]).map((k) => ({ value: k, label: STOCK_STATE_LABEL[k] })),
+            },
             {
               key: 'warehouseId',
               label: 'Warehouse',
@@ -1414,6 +1498,19 @@ export function Inventory() {
             { key: 'needsReorder', label: 'Reorder', options: [{ value: 'true', label: 'Below level' }] },
           ]}
         />
+      )}
+      {view === 'list' && categories.some((c) => c.value > 0) && (
+        <Panel title="Stock value by category" blurb="What each category holds, at moving average cost — and how many of its lines need reordering.">
+          <BarList
+            slices={categories.map((c) => ({
+              label: `${c.name}${c.critical || c.low ? ` · ${[c.critical && `${c.critical} critical`, c.low && `${c.low} low`].filter(Boolean).join(', ')}` : ''}`,
+              value: c.value,
+              display: formatMoney(c.value),
+              tone: c.critical ? 'danger' : c.low ? 'warn' : 'neon',
+              to: categoryLink(c.id),
+            }))}
+          />
+        </Panel>
       )}
       <InventoryFoot />
     </div>
@@ -1579,6 +1676,8 @@ function InventoryBoard({ warehouses }: { warehouses: { id: string; name: string
 
 export function StockCard() {
   const { itemId } = useParams<{ itemId: string }>();
+  const { can } = useAuth();
+  const toast = useToast();
   const [params] = useSearchParams();
   const warehouseId = params.get('warehouseId');
   const [data, setData] = useState<Record<string, unknown> | null>(null);
@@ -1604,8 +1703,20 @@ export function StockCard() {
     borrowedQty: number;
     averageCost: number;
     value: number;
-    warehouse: { name: string };
+    warehouse: { name: string; locations: { id: string; code: string; name: string | null }[] };
+    location: { id: string; code: string } | null;
   }[];
+  const mayPlace = can('gchain.inventory.edit_all');
+  /** Files the stock line in a bin (2026-10-15). */
+  async function placeIn(balanceId: string, locationId: string) {
+    try {
+      await api.patch(`/inventory/balances/${balanceId}`, { locationId: locationId || null });
+      toast('ok', locationId ? 'Bin saved' : 'Bin cleared');
+      setData(await api.get<Record<string, unknown>>(`/inventory/${itemId}/card${qs({ warehouseId })}`));
+    } catch (err) {
+      setError(err);
+    }
+  }
   const movements = data.movements as {
     id: string;
     type: string;
@@ -1648,9 +1759,27 @@ export function StockCard() {
                 {b.quantity} <span className="faint proc-balance-unit">{item.unit}</span>
               </>
             }
-            sub={`${formatMoney(b.averageCost)} average · ${formatMoney(b.value)} value${
-              b.borrowedQty > 0 ? ` · ${b.borrowedQty} on loan` : ''
-            }`}
+            sub={
+              <>
+                {`${formatMoney(b.averageCost)} average · ${formatMoney(b.value)} value${b.borrowedQty > 0 ? ` · ${b.borrowedQty} on loan` : ''}`}
+                <span className="inv-bin">
+                  Bin / Rack:{' '}
+                  {mayPlace && b.warehouse.locations.length ? (
+                    <select aria-label={`Bin at ${b.warehouse.name}`} value={b.location?.id ?? ''} onChange={(e) => void placeIn(b.id, e.target.value)}>
+                      <option value="">— none —</option>
+                      {b.warehouse.locations.map((l) => (
+                        <option key={l.id} value={l.id}>
+                          {l.code}
+                          {l.name ? ` — ${l.name}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="mono">{b.location?.code ?? '—'}</span>
+                  )}
+                </span>
+              </>
+            }
           />
         ))}
       </div>

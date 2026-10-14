@@ -587,3 +587,77 @@ a.inv-move:hover .inv-move-what {
   font-size: var(--fs-sm);
   text-align: right;
 }
+
+/*
+  The inventory's category tiles (2026-10-15, the owner's inventory screen):
+  a tile per item category — its name, how many items, what it covers, and
+  what needs reordering — under the cards, each filtering the list to its
+  category (the chosen one marked). A full row of the summary grid.
+*/
+.inv-cats {
+  grid-column: 1 / -1;
+}
+.inv-cats-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: var(--s-2);
+}
+.inv-cats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  gap: var(--s-3);
+}
+.inv-cat {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s-1) var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+}
+.inv-cat:hover {
+  border-color: var(--magenta);
+}
+.inv-cat.is-on {
+  border-color: var(--magenta);
+  background: var(--surface-2);
+}
+.inv-cat-name {
+  font-weight: 700;
+  font-size: var(--fs-sm);
+}
+.inv-cat-count {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  padding: 0 var(--s-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  align-self: start;
+}
+.inv-cat-desc {
+  grid-column: 1 / -1;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.inv-cat-flags {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: var(--s-1);
+}
+.inv-bin {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+.inv-bin select {
+  max-width: 12rem;
+}

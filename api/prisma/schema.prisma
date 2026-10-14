@@ -948,12 +948,16 @@ model CostCategory {
 }
 
 model ItemCategory {
-  id       String         @id @default(cuid())
-  code     String         @unique
-  name     String
-  parentId String?
-  parent   ItemCategory?  @relation("ItemCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
-  children ItemCategory[] @relation("ItemCategoryTree")
+  id          String         @id @default(cuid())
+  code        String         @unique
+  name        String
+  /// What it covers — the inventory's category tile says it under the name
+  /// (2026-10-15: "UL/FM Fire, Booster, Submersible").
+  description String?
+  sortOrder   Int            @default(0)
+  parentId    String?
+  parent      ItemCategory?  @relation("ItemCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children    ItemCategory[] @relation("ItemCategoryTree")
 
   items Item[]
 
@@ -975,6 +979,9 @@ model Item {
   id          String   @id @default(cuid())
   code        String   @unique
   partNumber  String?
+  /// The manufacturer / OEM (2026-10-15, the owner's call: Pentair, Nidec,
+  /// SUTO) — not who we buy from, which is `preferredSupplier`.
+  brand       String?
   name        String
   description String?
   itemType    ItemType @default(MATERIAL)
@@ -1060,6 +1067,7 @@ model Location {
 
   receivingItems ReceivingItem[]
   issueItems     StockIssueItem[]
+  balances       InventoryBalance[]
 
   createdAt DateTime @default(now())
 
@@ -2376,6 +2384,12 @@ model PurchaseRequest {
   /// procurement, kept as typed; the canvass and the order name the real one.
   preferredSupplier String?
 
+  /// Raised by the system when stock fell below its reorder level
+  /// (2026-10-15, the owner's call: "automatic"): a DRAFT stock replenishment
+  /// per warehouse that collects the items as they fall, for a person to
+  /// check and submit. Never submitted by the system.
+  autoReorder Boolean @default(false)
+
   approvedAt DateTime?
 
   items        PurchaseRequestItem[]
@@ -3033,6 +3047,12 @@ model InventoryBalance {
   /// Moving weighted average. Recomputed on every receipt; issues take it as
   /// given, which is what stops an issue changing the cost of what remains.
   averageCost Decimal @default(0) @db.Decimal(18, 4)
+
+  /// Where it sits in the warehouse — the bin or rack (2026-10-15, the
+  /// owner's inventory screen). Set from the stock card; a receipt into a
+  /// named location fills it while it is empty.
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
   updatedAt DateTime @updatedAt
 

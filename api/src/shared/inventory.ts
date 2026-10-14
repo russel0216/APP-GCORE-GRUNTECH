@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
+import { queueReorderCheck } from './reorder';
 
 /**
  * Stock movement and job-cost posting.
@@ -151,6 +152,8 @@ export async function issueStock(tx: Tx, input: Omit<MoveInput, 'unitCost'> & { 
     },
   });
 
+  // Stock went out: the automatic reorder looks at it once this commits.
+  queueReorderCheck(input.itemId, input.warehouseId);
   return { balance: updated, unitCost, amount: cents(input.quantity * unitCost) };
 }
 
@@ -191,6 +194,7 @@ export async function borrowStock(tx: Tx, input: Omit<MoveInput, 'unitCost'>) {
       createdById: input.createdById ?? null,
     },
   });
+  queueReorderCheck(input.itemId, input.warehouseId);
 }
 
 export async function returnBorrowedStock(tx: Tx, input: Omit<MoveInput, 'unitCost'>) {

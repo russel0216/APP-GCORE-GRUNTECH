@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,185 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,187 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,10 +574,10 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 308, hr 468, plantilla 123, meetings
+79, partners 120, delivery 171, chain 310, hr 468, plantilla 123, meetings
 115, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4636,16 +4636,41 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   ORDER DETAILS, Received from / Received at, the lines, Prepared by and
   the steps. The record page has no web Guard (the API decides — the
   approvers may hold no warehouse right). verify-chain pins both kinds.
-- **The inventory screen** (2026-10-14, the owner's design): cards (Total
-  items, Total valuation, Low stock alerts, Pending POs) from the list's
-  `summary` under its own query; columns Item code, Description,
-  Category, Brand / Partner (the item's preferred supplier — the item
-  master has no brand), Qty, Unit cost, Status (`stockState()`: On order
-  when low or out with an issued order still to arrive, Out of stock, Low
-  stock, In stock); under it the Recent stock movement log
-  (`GET /inventory/movements`, linked to each document) and Quick
-  operations (+ Receive new stock, Generate stock report). No category
-  filter yet — the owner will decide.
+- **The inventory screen** (2026-10-14, then the owner's PPTX of
+  2026-10-15): cards (Total items, Total valuation, Reorder warning,
+  Critical, Pending POs) from the list's `summary` under its own query; a
+  **category tile** per item category (its items, value, low/critical
+  flags, what it covers — `ItemCategory.description`, `sortOrder`; the
+  first eight always, any other holding stock), each a link that sets
+  `?categoryId=`; Filters Category, **Stock status** (`?state=`), Warehouse,
+  Reorder; columns Part number, Item description, Category, **Brand / OEM**
+  (`Item.brand` — the manufacturer, not the supplier; the item form, the
+  import's `Brand` column, the item paper), Bin / Rack
+  (`InventoryBalance.locationId`, set on the stock card by
+  `gchain.inventory.edit_all` through `PATCH /inventory/balances/:id`, or
+  by a receipt into a named bin while empty), Stock qty, Unit cost, Reorder
+  pt, Status; a "Stock value by category" bar chart; the movement log and
+  Quick operations under it. **`stockState()` in `shared/chain.ts` is the
+  one rule**: CRITICAL (nothing available, or at/under `minStock`),
+  LOW_STOCK (at/under the reorder level), ON_ORDER (either, with an issued
+  PO still to arrive), IN_STOCK — the column, the filter, the cards, the
+  tiles and the paper. The seed adds the owner's eight categories (PMP,
+  CTL, INS, PRT, CNS, FLT, DRY, PIP) and moves the first nine after them.
+- **The automatic reorder** (2026-10-15, the owner's call: "Automatic").
+  `shared/reorder.ts`: `issueStock` and `borrowStock` queue the item and
+  warehouse (`queueReorderCheck`, run ~1 s after, outside the caller's
+  transaction; an item master save that touches the level queues it too);
+  `runReorderCheck()` adds an item at or under its reorder level, with
+  nothing already on the way (open request lines left to order, issued POs
+  left to receive), to its warehouse's ONE `PurchaseRequest.autoReorder`
+  DRAFT stock replenishment — under an advisory lock, never twice —
+  quantity 2 × level − available − on the way, the estimate the item's
+  standard cost (else last, else average), the line's description saying
+  why. **The system never submits it** (rule 2): the requester — the first
+  active Warehouse Supervisor, else the Purchasing Manager (the seed gives
+  the supervisor own-scope purchase-request rights and delete) — is told
+  (`reorder.raised`) and checks and submits it. With neither role held,
+  nothing is raised and the trail says why. verify-chain pins it.
 - **An email prints on ONE line** (2026-10-14, the owner's call): in the
   `blocks` sections and `renderDocument`'s sign-offs an address too wide
   for its column is drawn smaller (`fitSize()`, 6pt the floor), never

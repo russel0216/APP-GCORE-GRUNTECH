@@ -36,6 +36,8 @@ interface ItemRow {
   id: string;
   code: string;
   partNumber: string | null;
+  /** The manufacturer / OEM — not who we buy from. */
+  brand: string | null;
   name: string;
   description: string | null;
   itemType: string;
@@ -100,7 +102,7 @@ export function Items() {
       render: (i) => (
         <div>
           <div>{i.name}</div>
-          {i.partNumber && <div className="faint mono">{i.partNumber}</div>}
+          {(i.brand || i.partNumber) && <div className="faint">{[i.brand, i.partNumber].filter(Boolean).join(' · ')}</div>}
         </div>
       ),
     },
@@ -282,6 +284,7 @@ function ItemForm({
   const [form, setForm] = useState({
     code: item?.code ?? '',
     partNumber: item?.partNumber ?? '',
+    brand: item?.brand ?? '',
     name: item?.name ?? '',
     description: item?.description ?? '',
     itemType: item?.itemType ?? 'MATERIAL',
@@ -306,6 +309,7 @@ function ItemForm({
       const payload = {
         code: form.code || undefined,
         partNumber: form.partNumber || null,
+        brand: form.brand.trim() || null,
         name: form.name,
         description: form.description || null,
         itemType: form.itemType,
@@ -378,6 +382,9 @@ function ItemForm({
             value={form.partNumber}
             onChange={(e) => setForm({ ...form, partNumber: e.target.value })}
           />
+        </Field>
+        <Field label="Brand / OEM" hint="Who makes it — Pentair, Nidec, SUTO-iTEC — not who we buy from">
+          <input value={form.brand} maxLength={120} onChange={(e) => setForm({ ...form, brand: e.target.value })} />
         </Field>
         <Field label="Unit">
           <input
