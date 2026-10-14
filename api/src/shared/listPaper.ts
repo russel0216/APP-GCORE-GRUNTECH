@@ -122,7 +122,7 @@ export function choice<T extends string>(
   return value as T;
 }
 
-type Named = 'customer' | 'supplier' | 'person' | 'project' | 'site' | 'advance' | 'budget request';
+type Named = 'customer' | 'supplier' | 'person' | 'project' | 'site' | 'advance' | 'budget request' | 'purchase request' | 'RFQ';
 
 /** What a filter line calls the record an id names: a name, or a document's number. */
 async function nameOf(kind: Named, id: string): Promise<string | undefined> {
@@ -141,6 +141,10 @@ async function nameOf(kind: Named, id: string): Promise<string | undefined> {
       return (await prisma.cashAdvance.findUnique({ where: { id }, select: { number: true } }))?.number;
     case 'budget request':
       return (await prisma.budgetRequest.findUnique({ where: { id }, select: { number: true } }))?.number;
+    case 'purchase request':
+      return (await prisma.purchaseRequest.findUnique({ where: { id }, select: { number: true } }))?.number;
+    case 'RFQ':
+      return (await prisma.rfq.findUnique({ where: { id }, select: { number: true } }))?.number;
   }
 }
 

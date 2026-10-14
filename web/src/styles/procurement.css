@@ -364,3 +364,19 @@
   display: block;
   font-size: var(--fs-xs);
 }
+
+/* ── Request for Quotation (2026-10-14) ───────────────────────────────── */
+/* The tick column of the lines asked: as narrow as its box. */
+.rfq-tick {
+  width: 2.75rem;
+}
+/* The supplier column takes the room; the contact boxes share the rest. */
+.rfq-sup th:first-child {
+  width: 34%;
+}
+.rfq-sup td input {
+  width: 100%;
+}
+.rfq-quote-terms {
+  margin-top: var(--s-4);
+}

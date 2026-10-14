@@ -21,6 +21,7 @@ import { stockOnHand } from '../src/shared/chain';
 import { manilaDayKey } from '../src/shared/day';
 import { statusLabel } from '../src/shared/pdf';
 import { nextNumber } from '../src/shared/numbering';
+import { CANVASS_CODE_MOVED, moveCanvassCode } from '../src/shared/canvassCode';
 import { submitForApproval, act, pickWorkflow } from '../src/shared/approvals';
 import { budgetPosition } from '../src/routes/jobs';
 import {
@@ -35,6 +36,8 @@ import {
 // called directly to land a decision on a document no longer waiting.
 import { settlePurchaseRequest, settlePurchaseOrder } from '../src/routes/procurement';
 import '../src/routes/warehouse';
+// The RFQ's search provider registers on import.
+import '../src/routes/rfq';
 import '../src/routes/jobs';
 import {
   flat,
@@ -2068,6 +2071,275 @@ async function main() {
     );
     const cancelAudit = await prisma.auditLog.count({ where: { entityType: 'canvass', entityId: toCancel.id, action: { in: ['CANCELLED', 'DELETED'] } } });
     check('the cancel and the delete are audited', cancelAudit === 2, String(cancelAudit));
+
+    {
+      // ── Requests for Quotation (2026-10-14) ──────────────────────────────
+      // PR › RFQ › Canvass › PO: an RFQ is raised from an APPROVED request,
+      // asks some or all of its lines, is printed one paper per supplier, and
+      // takes the quotes that come back. No approval route.
+      console.log('\nRequests for Quotation (over HTTP)');
+      const started = new Date();
+      const rfqOwnRole = await makeRole('zzchain_rfq_own', 'ZZ RFQ buyer', [
+        'gchain.rfq.view_own',
+        'gchain.rfq.create',
+        'gchain.rfq.edit_own',
+        'gchain.rfq.delete',
+      ]);
+      const rfqAllRole = await makeRole('zzchain_rfq_all', 'ZZ RFQ lead', ['gchain.rfq.view_all', 'gchain.rfq.edit_all']);
+      const rfqBuyer = await mkUser('Verify RFQ Buyer', 'rfqbuyer@verifyc.local', rfqOwnRole.id);
+      const rfqOther = await mkUser('Verify RFQ Other', 'rfqother@verifyc.local', rfqOwnRole.id);
+      const rfqLead = await mkUser('Verify RFQ Lead', 'rfqlead@verifyc.local', rfqAllRole.id);
+      const rfqBuyerToken = signToken(rfqBuyer.id, rfqBuyer.email);
+      const rfqOtherToken = signToken(rfqOther.id, rfqOther.email);
+      const rfqLeadToken = signToken(rfqLead.id, rfqLead.email);
+      const rfqPr = await prisma.purchaseRequest.create({
+        data: {
+          number: await nextNumber('purchase_request'),
+          kind: 'DIRECT_TO_JOB',
+          jobId: job.id,
+          requestedById: engineer.id,
+          status: 'APPROVED',
+          approvedAt: new Date(),
+          purpose: `${TAG} cable tray for the RFQ`,
+          items: {
+            create: [
+              { sortOrder: 0, costCategoryId: materials.id, partNumber: 'CT-300', name: `${TAG} CABLE TRAY`, description: '300 mm ladder type', quantity: D(40), unit: 'pcs', estimatedCost: D(1_200), estimatedAmount: D(48_000) },
+              { sortOrder: 1, costCategoryId: materials.id, name: `${TAG} SUPPORT BRACKET`, description: `${TAG} SUPPORT BRACKET`, quantity: D(80), unit: 'pcs', estimatedCost: D(150), estimatedAmount: D(12_000) },
+            ],
+          },
+        },
+        include: { items: { orderBy: { sortOrder: 'asc' } } },
+      });
+      const [trayLine, bracketLine] = rfqPr.items;
+      const draftPr = await prisma.purchaseRequest.create({
+        data: { number: await nextNumber('purchase_request'), kind: 'DIRECT_TO_JOB', jobId: job.id, requestedById: engineer.id, purpose: `${TAG} still a draft` },
+      });
+
+      const fromDraft = await api(rfqBuyerToken, 'POST', '/rfqs', { requestId: draftPr.id });
+      const source = await api(rfqBuyerToken, 'GET', `/rfqs/source?requestId=${rfqPr.id}`);
+      const sourceLines = (source.body.lines as { id: string }[] | undefined) ?? [];
+      check(
+        'an RFQ is raised only from an approved request, and its source offers every line of it with where it is delivered',
+        fromDraft.status === 400 && /only an approved request/.test(String(fromDraft.body.error)) &&
+          source.status === 200 && sourceLines.length === 2 && String(source.body.deliverTo).includes(job.name),
+        `${fromDraft.status} ${String(fromDraft.body.error)} · ${source.status} ${sourceLines.length} "${String(source.body.deliverTo)}"`,
+      );
+
+      const foreignLine = await api(rfqBuyerToken, 'POST', '/rfqs', { requestId: rfqPr.id, itemIds: [pr.items[0].id] });
+      const twice = await api(rfqBuyerToken, 'POST', '/rfqs', {
+        requestId: rfqPr.id,
+        suppliers: [{ supplierId: supplier.id }, { supplierId: supplier.id }],
+      });
+      const noLine = await api(rfqBuyerToken, 'POST', '/rfqs', { requestId: rfqPr.id, itemIds: [] });
+      check(
+        'a line of another request, a supplier named twice and no line at all are refused before a number is issued',
+        foreignLine.status === 400 && twice.status === 400 && noLine.status === 400,
+        `${foreignLine.status} ${twice.status} ${noLine.status}`,
+      );
+
+      const created = await api(rfqBuyerToken, 'POST', '/rfqs', {
+        requestId: rfqPr.id,
+        itemIds: [trayLine.id],
+        suppliers: [{ supplierId: supplier.id, contactName: 'Ana Reyes' }, { supplierId: otherSupplier.id }],
+        dueDate: '2026-10-30',
+      });
+      const rfqId = String(created.body.id);
+      const rfqNumber = String(created.body.number);
+      const fresh = await api(rfqBuyerToken, 'GET', `/rfqs/${rfqId}`);
+      check(
+        'the buyer prepares an RFQ for one line and two suppliers, numbered as an RFQ, a draft that may be sent',
+        created.status === 201 && /RFQ/.test(rfqNumber) && fresh.body.status === 'DRAFT' &&
+          (fresh.body.lines as unknown[]).length === 1 && (fresh.body.suppliers as unknown[]).length === 2 &&
+          fresh.body.canSend === true && fresh.body.canRecordQuotes === false && fresh.body.canEditLines === true,
+        `${created.status} ${rfqNumber} ${String(fresh.body.status)} ${fresh.body.canSend}`,
+      );
+      const asked = await api(rfqBuyerToken, 'GET', `/rfqs/source?requestId=${rfqPr.id}`);
+      const askedOn = (asked.body.lines as { id: string; askedOn: string[] }[]).find((l) => l.id === trayLine.id)?.askedOn ?? [];
+      check('the request\'s source marks the line already asked on that RFQ', askedOn.includes(rfqNumber), askedOn.join());
+
+      const otherList = await api(rfqOtherToken, 'GET', `/rfqs?requestId=${rfqPr.id}`);
+      const otherRead = await api(rfqOtherToken, 'GET', `/rfqs/${rfqId}`);
+      const otherSheet = await api(rfqOtherToken, 'PUT', `/rfqs/${rfqId}/sheet`, { version: fresh.body.version, suppliers: [] });
+      const leadList = await api(rfqLeadToken, 'GET', `/rfqs?requestId=${rfqPr.id}`);
+      check(
+        'a view-own colleague neither lists nor opens nor changes it; the lead with view_all lists it',
+        (otherList.body.total as number) === 0 && otherRead.status === 404 && otherSheet.status === 403 && (leadList.body.total as number) === 1,
+        `${otherList.body.total} ${otherRead.status} ${otherSheet.status} ${leadList.body.total}`,
+      );
+
+      const rows0 = fresh.body.suppliers as { id: string; supplierId: string }[];
+      const keepRow = rows0.find((r) => r.supplierId === supplier.id)!;
+      const stale = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/sheet`, { version: '2000-01-01T00:00:00.000Z', suppliers: [] });
+      const sheet = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/sheet`, {
+        version: fresh.body.version,
+        itemIds: [trayLine.id, bracketLine.id],
+        suppliers: [{ id: keepRow.id, supplierId: supplier.id, contactName: 'Ana Reyes', contactPhone: '0917 000 0000' }],
+        deliverTo: 'Plant gate 2',
+        terms: 'Quote VAT inclusive; 30 days.',
+      });
+      check(
+        'one save changes the header, asks the second line and drops a supplier; a stale version is refused',
+        stale.status === 400 && /changed a moment ago/.test(String(stale.body.error)) && sheet.status === 200 &&
+          (sheet.body.lines as unknown[]).length === 2 && (sheet.body.suppliers as unknown[]).length === 1 &&
+          sheet.body.deliverTo === 'Plant gate 2',
+        `${stale.status} ${sheet.status} ${(sheet.body.lines as unknown[] | undefined)?.length} ${(sheet.body.suppliers as unknown[] | undefined)?.length}`,
+      );
+
+      const earlyQuote = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/suppliers/${keepRow.id}/quote`, { quotes: [] });
+      const sent = await api(rfqBuyerToken, 'POST', `/rfqs/${rfqId}/send`);
+      const sentAgain = await api(rfqBuyerToken, 'POST', `/rfqs/${rfqId}/send`);
+      const sentRows = await prisma.rfqSupplier.findMany({ where: { rfqId } });
+      check(
+        'a quote waits until it is sent; Mark sent dates the RFQ and each supplier asked, once',
+        earlyQuote.status === 400 && sent.status === 200 && sent.body.status === 'SENT' && !!sent.body.sentAt &&
+          sentRows.every((r) => r.sentAt) && sentAgain.status === 400,
+        `${earlyQuote.status} ${sent.status} ${String(sent.body.status)} ${sentAgain.status}`,
+      );
+
+      const linesAfterSend = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/sheet`, {
+        version: sent.body.version,
+        itemIds: [trayLine.id],
+        suppliers: [{ id: keepRow.id, supplierId: supplier.id }],
+      });
+      const lateSupplier = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/sheet`, {
+        version: sent.body.version,
+        suppliers: [{ id: keepRow.id, supplierId: supplier.id, contactName: 'Ana Reyes' }, { supplierId: otherSupplier.id }],
+      });
+      const lateRow = await prisma.rfqSupplier.findFirst({ where: { rfqId, supplierId: otherSupplier.id } });
+      check(
+        'once sent its lines are fixed, and a supplier added late is asked on the day it is added',
+        linesAfterSend.status === 400 && /was sent/.test(String(linesAfterSend.body.error)) && lateSupplier.status === 200 && !!lateRow?.sentAt,
+        `${linesAfterSend.status} ${lateSupplier.status} ${lateRow?.sentAt?.toISOString()}`,
+      );
+
+      const notAsked = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/suppliers/${keepRow.id}/quote`, {
+        quotes: [{ requestItemId: pr.items[0].id, unitPrice: 1 }],
+      });
+      const quote = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/suppliers/${keepRow.id}/quote`, {
+        quotes: [
+          { requestItemId: trayLine.id, unitPrice: 1_150.5 },
+          { requestItemId: bracketLine.id, unitPrice: 140 },
+        ],
+        quoteRef: 'Q-7781',
+        leadTimeDays: 14,
+        terms: '30 days',
+        validUntil: '2026-11-30',
+      });
+      const quotedRow = (quote.body.suppliers as { id: string; total: number; complete: boolean; quotedCount: number }[] | undefined)?.find((r) => r.id === keepRow.id);
+      check(
+        'a supplier\'s quote is recorded per line asked (a line not asked is refused); the RFQ is QUOTED and the total is quantity × price',
+        notAsked.status === 400 && quote.status === 200 && quote.body.status === 'QUOTED' &&
+          quotedRow?.total === 40 * 1_150.5 + 80 * 140 && quotedRow.complete === true && quotedRow.quotedCount === 2,
+        `${notAsked.status} ${quote.status} ${String(quote.body.status)} ${quotedRow?.total}`,
+      );
+      const dropQuoted = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/sheet`, {
+        version: quote.body.version,
+        suppliers: [{ supplierId: otherSupplier.id, id: lateRow!.id }],
+      });
+      check('a supplier who quoted stays on the RFQ', dropQuoted.status === 400 && /quoted/.test(String(dropQuoted.body.error)), `${dropQuoted.status} ${String(dropQuoted.body.error)}`);
+
+      const theirPaper = await printed(rfqBuyerToken, `/rfqs/${rfqId}/pdf?supplier=${keepRow.id}`);
+      const theirText = flat(theirPaper.text);
+      const wholePaper = await printed(rfqBuyerToken, `/rfqs/${rfqId}/pdf`);
+      const wholeText = flat(wholePaper.text);
+      check(
+        'each supplier\'s paper is addressed to them alone, asks every line with the price left blank, and prints Prepared by with its timestamp',
+        theirPaper.status === 200 && /REQUEST FOR QUOTATION/.test(theirText) && theirText.includes(`${TAG} Steel Supply`) &&
+          !theirText.includes(`${TAG} Other Supply`) && theirText.includes(`${TAG} CABLE TRAY`) && theirText.includes(`${TAG} SUPPORT BRACKET`) &&
+          !theirText.includes('1,150.50') && /PREPARED BY Verify RFQ Buyer .*?\w{3} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/.test(theirText) &&
+          theirText.includes('Quote VAT inclusive'),
+        `${theirPaper.status} — ${theirText.slice(0, 500)}`,
+      );
+      check(
+        'the RFQ\'s own paper lists every supplier asked and what each quoted',
+        wholePaper.status === 200 && wholeText.includes(`${TAG} Steel Supply`) && wholeText.includes(`${TAG} Other Supply`) &&
+          wholeText.includes('57,220.00') && /Prepared by|PREPARED BY/.test(wholeText),
+        `${wholePaper.status} — ${wholeText.slice(0, 400)}`,
+      );
+      const listPaper = await printed(rfqLeadToken, `/rfqs/pdf?requestId=${rfqPr.id}`);
+      check(
+        'the RFQ list prints, naming the request that narrowed it',
+        listPaper.status === 200 && flat(listPaper.text).includes(rfqNumber) && flat(listPaper.text).includes(rfqPr.number),
+        `${listPaper.status} ${flat(listPaper.text).slice(0, 300)}`,
+      );
+
+      const guardOwn = await api(rfqBuyerToken, 'GET', `/attachments/rfq_supplier/${keepRow.id}`);
+      const guardOther = await api(rfqOtherToken, 'GET', `/attachments/rfq_supplier/${keepRow.id}`);
+      check('a supplier\'s quotation files are read as the RFQ is read', guardOwn.status === 200 && guardOther.status === 404, `${guardOwn.status} ${guardOther.status}`);
+
+      const hits = await globalSearch(rfqNumber, (await resolveUser(rfqLead.id))!);
+      const otherHits = await globalSearch(rfqNumber, (await resolveUser(rfqOther.id))!);
+      check(
+        'Ctrl+K finds the RFQ for whoever may read it, and not for a view-own colleague',
+        hits.some((h) => h.kind === 'rfq' && h.id === rfqId) && !otherHits.some((h) => h.kind === 'rfq' && h.id === rfqId),
+        JSON.stringify(hits.map((h) => h.kind)),
+      );
+
+      // The request cannot be cancelled while it is out for quotation.
+      await prisma.user.update({ where: { id: rfqBuyer.id }, data: { isSuperAdmin: true } });
+      const prCancel = await api(rfqBuyerToken, 'POST', `/purchase-requests/${rfqPr.id}/cancel`, { reason: 'not needed any more' });
+      await prisma.user.update({ where: { id: rfqBuyer.id }, data: { isSuperAdmin: false } });
+      check(
+        'a purchase request out for quotation is not cancelled — its open RFQ goes first',
+        prCancel.status === 400 && String(prCancel.body.error).includes(rfqNumber),
+        `${prCancel.status} ${String(prCancel.body.error)}`,
+      );
+
+      const delOpenRfq = await api(rfqBuyerToken, 'DELETE', `/rfqs/${rfqId}`);
+      const cancelNoReason = await api(rfqBuyerToken, 'POST', `/rfqs/${rfqId}/cancel`, {});
+      const cancelOther = await api(rfqOtherToken, 'POST', `/rfqs/${rfqId}/cancel`, { reason: 'not mine' });
+      const cancelled = await api(rfqBuyerToken, 'POST', `/rfqs/${rfqId}/cancel`, { reason: 'the scope changed' });
+      const lateQuote = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/suppliers/${keepRow.id}/quote`, { quotes: [] });
+      check(
+        'an open RFQ is not deleted; its preparer cancels it with a reason, nobody else; a cancelled one takes no quote',
+        delOpenRfq.status === 400 && cancelNoReason.status === 400 && cancelOther.status === 403 && cancelled.status === 200 && lateQuote.status === 400,
+        `${delOpenRfq.status} ${cancelNoReason.status} ${cancelOther.status} ${cancelled.status} ${lateQuote.status}`,
+      );
+      const deleted = await api(rfqBuyerToken, 'DELETE', `/rfqs/${rfqId}`);
+      check(
+        'a cancelled RFQ is deleted with its suppliers and their quotes',
+        deleted.status === 200 && !(await prisma.rfq.findUnique({ where: { id: rfqId } })) &&
+          (await prisma.rfqQuote.count({ where: { rfqSupplierId: keepRow.id } })) === 0,
+        String(deleted.status),
+      );
+      const rfqAudits = await prisma.auditLog.groupBy({ by: ['action'], where: { entityType: 'rfq', entityId: rfqId }, _count: true });
+      const auditOf = (a: string) => rfqAudits.find((r) => r.action === a)?._count ?? 0;
+      check(
+        'prepared, every change, each print, the cancel and the delete are audited',
+        auditOf('CREATED') === 1 && auditOf('UPDATED') >= 4 && auditOf('EXPORTED') >= 2 && auditOf('CANCELLED') === 1 && auditOf('DELETED') === 1,
+        JSON.stringify(rfqAudits),
+      );
+      await prisma.auditLog.deleteMany({ where: { entityType: 'rfq', entityId: { in: [rfqId, 'list'] } } });
+
+      // The canvass gave its numbering code to the RFQ: a template still on
+      // 'RFQ' moves to 'CVS' once, and a code set afterwards is kept.
+      {
+        const template = await prisma.numberSequence.findFirst({ where: { documentType: 'canvass', periodKey: '' } });
+        const mark = await prisma.setting.findUnique({ where: { key: CANVASS_CODE_MOVED } });
+        try {
+          if (template) {
+            await prisma.setting.deleteMany({ where: { key: CANVASS_CODE_MOVED } });
+            await prisma.numberSequence.update({ where: { id: template.id }, data: { typeCode: 'RFQ' } });
+            const first = await moveCanvassCode();
+            const afterFirst = (await prisma.numberSequence.findUniqueOrThrow({ where: { id: template.id } })).typeCode;
+            await prisma.numberSequence.update({ where: { id: template.id }, data: { typeCode: 'RFQ' } });
+            const second = await moveCanvassCode();
+            const afterSecond = (await prisma.numberSequence.findUniqueOrThrow({ where: { id: template.id } })).typeCode;
+            const rfqTemplate = await prisma.numberSequence.findFirst({ where: { documentType: 'rfq', periodKey: '' } });
+            check(
+              'the canvass\'s numbering code moves from RFQ to CVS once, never again over a code set afterwards, and RFQ numbers the RFQ',
+              first.moved && afterFirst === 'CVS' && !second.moved && afterSecond === 'RFQ' && rfqTemplate?.typeCode === 'RFQ',
+              `${first.moved} ${afterFirst} ${second.moved} ${afterSecond} ${rfqTemplate?.typeCode}`,
+            );
+          }
+        } finally {
+          if (template) await prisma.numberSequence.update({ where: { id: template.id }, data: { typeCode: template.typeCode } });
+          await prisma.setting.deleteMany({ where: { key: CANVASS_CODE_MOVED } });
+          if (mark) await prisma.setting.create({ data: { key: mark.key, value: mark.value as Prisma.InputJsonValue, description: mark.description } });
+          await prisma.auditLog.deleteMany({ where: { entityType: 'number_sequence', entityId: 'canvass', summary: { contains: 'moved from RFQ to CVS' }, at: { gte: started } } });
+        }
+      }
+    }
 
     // ── Manila's day ──────────────────────────────────────────────────────
     // A DATE the server fills in or compares with is Manila's date; the UTC

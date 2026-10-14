@@ -32,6 +32,7 @@ const DETAIL: Record<string, string> = {
   progress_billing: '/g-ops/billings',
   // Procurement and warehouse
   purchase_request: '/g-chain/purchase-requests',
+  rfq: '/g-chain/rfq',
   canvass: '/g-chain/canvass',
   purchase_order: '/g-chain/purchase-orders',
   receiving: '/g-chain/incoming',

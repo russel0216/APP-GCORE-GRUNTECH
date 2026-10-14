@@ -162,6 +162,10 @@ export const REGISTRY: ModuleDef[] = [
     submodules: [
       { key: 'dashboard', group: 'Overview', label: 'Dashboard', path: '/g-chain', actions: REPORT, phase: 5 },
       { key: 'purchase_requests', group: 'Procurement', label: 'Purchase Requests', path: '/g-chain/purchase-requests', actions: OWNED, phase: 5 },
+      // The Request for Quotation (2026-10-14, the owner's call: "separate the
+      // RFQ and Canvass"): raised from an approved request, printed one paper
+      // per supplier, its quotes recorded; the canvass compares them.
+      { key: 'rfq', group: 'Procurement', label: 'RFQ', path: '/g-chain/rfq', actions: OWNED, phase: 5 },
       { key: 'canvass', group: 'Procurement', label: 'Canvass', path: '/g-chain/canvass', actions: OWNED, phase: 5 },
       { key: 'purchase_orders', group: 'Procurement', label: 'Purchase Orders', path: '/g-chain/purchase-orders', actions: OWNED, phase: 5 },
       // The warehouse flow (2026-10-14, the owner's call): Incoming › Inventory

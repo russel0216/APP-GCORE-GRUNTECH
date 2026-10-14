@@ -75,7 +75,11 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   // A project's drawing or document sent for internal approval (2026-10-13).
   { type: 'plan_approval', code: 'RFA', label: 'Request for Approval' },
   { type: 'purchase_request', code: 'PR', label: 'Purchase Request' },
-  { type: 'canvass', code: 'RFQ', label: 'Canvass' },
+  // RFQ and Canvass became two documents on 2026-10-14: the RFQ takes the
+  // code, the canvass moves to CVS (`moveCanvassCode()` moved a stored RFQ
+  // once, in `shared/canvassCode.ts`).
+  { type: 'rfq', code: 'RFQ', label: 'Request for Quotation' },
+  { type: 'canvass', code: 'CVS', label: 'Canvass' },
   { type: 'purchase_order', code: 'PO', label: 'Purchase Order' },
   { type: 'receiving', code: 'RR', label: 'Incoming Report' },
   { type: 'stock_issue', code: 'SI', label: 'Outgoing Slip' },

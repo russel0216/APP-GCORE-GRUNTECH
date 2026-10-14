@@ -49,6 +49,7 @@ import { PlanApprovalsRegister, PlanApprovalPage } from './pages/delivery/PlanAp
 import { PurchaseRequests, PurchaseRequestDetail } from './pages/chain/PurchaseRequests';
 import { PurchaseRequisitionEditor } from './pages/chain/PurchaseRequisitionEditor';
 import { PurchaseOrderEditor } from './pages/chain/PurchaseOrderEditor';
+import { RfqDetail, RfqEditor, Rfqs } from './pages/chain/Rfq';
 import {
   Canvasses,
   CanvassDetail,
@@ -747,6 +748,39 @@ function Routed() {
               ]}
             >
               <PurchaseRequestDetail />
+            </GuardAny>
+          }
+        />
+        {/* The Request for Quotation (2026-10-14): list, the form as a page, the record. */}
+        <Route
+          path="/g-chain/rfq"
+          element={
+            <GuardAny permissions={['gchain.rfq.view_all', 'gchain.rfq.view_own']}>
+              <Rfqs />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/rfq/new"
+          element={
+            <Guard permission="gchain.rfq.create">
+              <RfqEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/rfq/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.rfq.edit_own', 'gchain.rfq.edit_all']}>
+              <RfqEditor />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/rfq/:id"
+          element={
+            <GuardAny permissions={['gchain.rfq.view_all', 'gchain.rfq.view_own']}>
+              <RfqDetail />
             </GuardAny>
           }
         />

@@ -54,6 +54,7 @@ import {
   canvassRoutes,
   purchaseOrderRoutes,
 } from './routes/procurement';
+import { rfqRoutes } from './routes/rfq';
 import {
   receivingRoutes,
   stockIssueRoutes,
@@ -180,6 +181,7 @@ app.use('/api/billings', billingRoutes);
 
 // G-CHAIN (Phase 5)
 app.use('/api/purchase-requests', purchaseRequestRoutes);
+app.use('/api/rfqs', rfqRoutes);
 app.use('/api/canvasses', canvassRoutes);
 app.use('/api/purchase-orders', purchaseOrderRoutes);
 app.use('/api/receivings', receivingRoutes);

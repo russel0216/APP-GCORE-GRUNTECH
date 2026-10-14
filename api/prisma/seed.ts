@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { allPermissions, permissionsFor } from '../src/permissions/registry';
 import { DOCUMENT_TYPES } from '../src/shared/numbering';
+import { moveCanvassCode } from '../src/shared/canvassCode';
 import { backfillPositions } from '../src/shared/plantilla';
 import { markUnchangedScoroImports, withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
@@ -148,6 +149,7 @@ const ROLES: RoleSeed[] = [
       // requests, and is the second signature on every budget request.
       ...VIEW_OWN_SELF('gchain', 'purchase_orders'),
       'gchain.purchase_requests.view_all',
+      'gchain.rfq.view_all',
       'gchain.canvass.view_all',
       'gchain.suppliers.view_all',
       ...VIEW_OWN_SELF('gops', 'budget_requests'),
@@ -403,6 +405,7 @@ const ROLES: RoleSeed[] = [
     name: 'Procurement',
     description: 'Canvasses suppliers and issues purchase orders — does not receive and does not pay',
     grants: [
+      ['gchain', 'rfq'],
       ['gchain', 'canvass'],
       ['gchain', 'purchase_orders'],
       ['gchain', 'suppliers'],
@@ -1203,6 +1206,9 @@ async function main() {
       ownDefault.length ? `; own default on ${ownDefault.join(', ')}` : ''
     })`,
   );
+  // The RFQ took the canvass's code on 2026-10-14; a stored canvass template
+  // still on it moves to CVS, once.
+  if ((await moveCanvassCode()).moved) console.log('  · Canvass numbering code moved from RFQ to CVS');
 
   // Quotation.expectedClosing arrived after quotations existed. Copy the lead's
   // date onto any quotation still without one — nulls only, so a date a

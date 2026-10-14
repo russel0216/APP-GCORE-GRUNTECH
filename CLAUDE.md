@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,097 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,117 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -570,10 +570,11 @@ purchase requisition page, and one on foundation and 9 on chain for the
 purchase order page, and one on foundation and 5 on costing for a line's
 supplier and note, and one on chain for an approved request not counted
 twice against its budget, and 2 on foundation for the owner's order of the
-divisions and G-CHAIN's strips):
+divisions and G-CHAIN's strips, and 20 on chain for the Request for
+Quotation):
 foundation
 372, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 225, hr 468, plantilla 123, meetings
+79, partners 120, delivery 171, chain 245, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4441,6 +4442,45 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   Slip"; the numbering labels "Incoming Report" and "Outgoing Slip" (the
   seed updates labels only, so RR and SI stay unless an administrator
   changes them).
+- **The Request for Quotation is its own document** (push 2;
+  `routes/rfq.ts` at `/api/rfqs`, `pages/chain/Rfq.tsx`, `gchain.rfq.*`
+  OWNED, numbering type `rfq` — GT-RFQ-2026-0001). It is raised FROM an
+  APPROVED (or partially ordered) purchase request — the request page's
+  "Request quotations", its one next step, or "+ New RFQ", which asks which
+  approved request first (`GET /rfqs/requests`) — and asks some or all of
+  its lines (`RfqItem`; a line already on another open RFQ starts unticked
+  and says so, `GET /rfqs/source`). **No approval route**: an enquiry
+  decides nothing. DRAFT → SENT ("Mark sent", which dates it and each
+  supplier row) → QUOTED (the first quote) → CLOSED (its canvass awarded,
+  push 3); CANCELLED with a reason from any open state, refused while a
+  canvass compares it. **One save** (`POST /rfqs`, `PUT /rfqs/:id/sheet`,
+  claimed on `version`; a field left out is kept): the header (Quote by,
+  Deliver to — the project's site, else the warehouse — the terms printed
+  for every supplier, internal notes), the lines while a draft, and the
+  suppliers asked (`RfqSupplier`, a row's own Attention / Tel / Email,
+  filled from the supplier's primary contact by `GET /rfqs/contacts`).
+  Once sent its lines are fixed; a supplier added later is asked that day;
+  a supplier who quoted is never removed. **Quotes** are recorded per line
+  asked (`RfqQuote`, `PUT /rfqs/:id/suppliers/:rowId/quote`; a line left
+  blank is not quoted) with their quotation no., received date, lead time,
+  terms and validity, in a panel under the suppliers (never a dialog), the
+  supplier's own paper attached to the row (`rfq_supplier`, guarded as the
+  RFQ is read; written while open by whoever may edit it). **Printed
+  only** (the owner's call — no email): `GET /rfqs/:id/pdf?supplier=` is
+  ONE supplier's paper, addressed to them, every line with blank Unit
+  price, Amount and Lead time columns for them to fill, never another
+  supplier's name or price; without it the RFQ whole, with each supplier's
+  totals. Both print **Prepared by** with its timestamp and nothing else to
+  sign (rule 6: the people who acted). The list (`rfqListWhere`, its paper
+  `GET /rfqs/pdf`, `?ids=`), Ctrl+K and the audit trail as every register.
+  A purchase request is not cancelled while an RFQ is open on it, and its
+  delete takes its cancelled RFQs' files. **The canvass gave the RFQ its
+  code**: `moveCanvassCode()` (`shared/canvassCode.ts`, the seed, once,
+  marked `seed.canvassCodeMoved`, audited) moves a stored canvass template
+  still on 'RFQ' to 'CVS'; numbers already issued keep their print.
+  `Canvass.rfqId` (nullable, SetNull) links a canvass to the RFQ it
+  compares, for push 3. Procurement holds `gchain.rfq.*`, Back Support
+  reads them.
 
 ## Spreadsheet attachments (2026-10-05)
 

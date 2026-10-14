@@ -127,6 +127,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     job: 'Projects',
     progress: 'Progress reports',
     purchase_request: 'Purchase requests',
+    rfq: 'RFQs',
     canvass: 'Canvass',
     purchase_order: 'Purchase orders',
     receiving: 'Incoming',

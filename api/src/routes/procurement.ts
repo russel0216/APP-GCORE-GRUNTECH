@@ -486,6 +486,10 @@ async function loadPr(id: string) {
         orderBy: { createdAt: 'desc' },
         select: { id: true, number: true, status: true, createdAt: true },
       },
+      rfqs: {
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, number: true, status: true, createdAt: true, _count: { select: { suppliers: true, items: true } } },
+      },
       orders: {
         orderBy: { createdAt: 'desc' },
         select: {
@@ -1217,7 +1221,11 @@ purchaseRequestRoutes.post(
     const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled').max(2000) }), req.body);
     const pr = await prisma.purchaseRequest.findUnique({
       where: { id: req.params.id },
-      include: { _count: { select: { orders: true } }, canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } } },
+      include: {
+        _count: { select: { orders: true } },
+        canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        rfqs: { where: { status: { in: ['DRAFT', 'SENT', 'QUOTED'] } }, select: { number: true } },
+      },
     });
     if (!pr) throw notFound('Purchase request not found');
     if (!mayEditPr(me, pr)) throw forbidden('This request belongs to someone else');
@@ -1226,6 +1234,7 @@ purchaseRequestRoutes.post(
     }
     if (pr._count.orders > 0) throw badRequest('Purchase orders were raised from this request — cancel those first');
     if (pr.canvasses.length) throw badRequest(`Canvass ${pr.canvasses.map((c) => c.number).join(', ')} is still on this request — cancel it first`);
+    if (pr.rfqs.length) throw badRequest(`RFQ ${pr.rfqs.map((r) => r.number).join(', ')} is still open on this request — cancel it first`);
 
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.purchaseRequest.updateMany({
@@ -1366,7 +1375,7 @@ purchaseRequestRoutes.delete(
   handler(async (req, res) => {
     const pr = await prisma.purchaseRequest.findUnique({
       where: { id: req.params.id },
-      include: { _count: { select: { orders: true } } },
+      include: { _count: { select: { orders: true } }, rfqs: { select: { suppliers: { select: { id: true } } } } },
     });
     if (!pr) throw notFound('Purchase request not found');
     if (pr.status !== 'DRAFT' && pr.status !== 'REJECTED' && pr.status !== 'CANCELLED') {
@@ -1376,6 +1385,8 @@ purchaseRequestRoutes.delete(
 
     await deleteOrRefuse(pr.number, () => prisma.purchaseRequest.delete({ where: { id: req.params.id } }));
     await deleteAttachmentsOf('purchase_request', [pr.id]);
+    // Its cancelled RFQs cascade with it; their suppliers' quotation files go too.
+    await deleteAttachmentsOf('rfq_supplier', pr.rfqs.flatMap((r) => r.suppliers.map((s) => s.id)));
     await audit(
       { entityType: 'purchase_request', entityId: req.params.id, action: 'DELETED', summary: `Deleted ${pr.number}` },
       req,

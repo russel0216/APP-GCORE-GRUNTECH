@@ -103,6 +103,7 @@ model User {
 
   prsRequested     PurchaseRequest[]      @relation("PrRequester")
   canvassesCreated Canvass[]              @relation("CanvassCreator")
+  rfqsPrepared     Rfq[]                  @relation("RfqPreparer")
   posCreated       PurchaseOrder[]        @relation("PoCreator")
   receivings       Receiving[]            @relation("Receiver")
   stockIssued      StockIssue[]           @relation("Issuer")
@@ -748,6 +749,7 @@ model Supplier {
   contacts       SupplierContact[]
   preferredItems Item[]            @relation("PreferredSupplier")
   canvassEntries CanvassSupplier[]
+  rfqEntries     RfqSupplier[]
   purchaseOrders PurchaseOrder[]
   bills          SupplierBill[]
   payments       Payment[]
@@ -2363,6 +2365,7 @@ model PurchaseRequest {
 
   items     PurchaseRequestItem[]
   canvasses Canvass[]
+  rfqs      Rfq[]
   orders    PurchaseOrder[]
 
   createdAt DateTime @default(now())
@@ -2399,6 +2402,8 @@ model PurchaseRequestItem {
   sortOrder       Int     @default(0)
 
   quotes     CanvassQuote[]
+  rfqItems   RfqItem[]
+  rfqQuotes  RfqQuote[]
   orderItems PurchaseOrderItem[]
 
   @@index([requestId])
@@ -2408,6 +2413,106 @@ enum CanvassStatus {
   OPEN
   AWARDED
   CANCELLED
+}
+
+/// A Request for Quotation (2026-10-14, the owner's call: "Purchase Request,
+/// RFQ, Canvass, Purchase Order"): the enquiry sent to suppliers for an
+/// approved purchase request's lines. Printed one paper per supplier and
+/// sent by hand; the quotes that come back are recorded on it, and the
+/// canvass sheet compares them. No approval route — an enquiry decides
+/// nothing (the request was approved; the order will be).
+enum RfqStatus {
+  DRAFT
+  SENT
+  QUOTED
+  CLOSED
+  CANCELLED
+}
+
+model Rfq {
+  id     String    @id @default(cuid())
+  number String    @unique
+  status RfqStatus @default(DRAFT)
+
+  requestId String
+  request   PurchaseRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  preparedById String
+  preparedBy   User   @relation("RfqPreparer", fields: [preparedById], references: [id], onDelete: Restrict)
+
+  /// Quote by — the date the suppliers are asked to answer by.
+  dueDate      DateTime? @db.Date
+  deliverTo    String?
+  /// What is asked of the supplier: VAT status, validity, payment terms, lead time.
+  terms        String?
+  notes        String?
+  sentAt       DateTime?
+  cancelReason String?
+
+  items     RfqItem[]
+  suppliers RfqSupplier[]
+  canvasses Canvass[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([requestId])
+  @@index([status])
+}
+
+/// The request lines an RFQ asks about — a subset, so one request may be
+/// split across RFQs (by category, or a second round).
+model RfqItem {
+  id    String @id @default(cuid())
+  rfqId String
+  rfq   Rfq    @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+
+  requestItemId String
+  requestItem   PurchaseRequestItem @relation(fields: [requestItemId], references: [id], onDelete: Cascade)
+
+  sortOrder Int @default(0)
+
+  @@unique([rfqId, requestItemId])
+}
+
+model RfqSupplier {
+  id    String @id @default(cuid())
+  rfqId String
+  rfq   Rfq    @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  /// Whom the paper is addressed to — the supplier's own, kept on the row.
+  contactName  String?
+  contactPhone String?
+  email        String?
+
+  sentAt          DateTime?
+  quoteRef        String?
+  quoteReceivedAt DateTime? @db.Date
+  leadTimeDays    Int?
+  terms           String?
+  validUntil      DateTime? @db.Date
+  remarks         String?
+
+  quotes RfqQuote[]
+
+  @@unique([rfqId, supplierId])
+}
+
+model RfqQuote {
+  id            String      @id @default(cuid())
+  rfqSupplierId String
+  rfqSupplier   RfqSupplier @relation(fields: [rfqSupplierId], references: [id], onDelete: Cascade)
+
+  requestItemId String
+  requestItem   PurchaseRequestItem @relation(fields: [requestItemId], references: [id], onDelete: Cascade)
+
+  unitPrice Decimal @db.Decimal(18, 2)
+  remarks   String?
+
+  @@unique([rfqSupplierId, requestItemId])
 }
 
 /// "Canvass/RFQ — supplier selection." Three quotes is the convention; the
@@ -2423,6 +2528,11 @@ model Canvass {
   createdById String
   createdBy   User   @relation("CanvassCreator", fields: [createdById], references: [id], onDelete: Restrict)
 
+  /// The RFQ whose quotes it compares (2026-10-14); null on a canvass opened
+  /// before RFQs were their own document.
+  rfqId String?
+  rfq   Rfq?    @relation(fields: [rfqId], references: [id], onDelete: SetNull)
+
   notes     String?
   awardedAt DateTime?
 
@@ -2432,6 +2542,7 @@ model Canvass {
   updatedAt DateTime @updatedAt
 
   @@index([requestId])
+  @@index([rfqId])
 }
 
 model CanvassSupplier {

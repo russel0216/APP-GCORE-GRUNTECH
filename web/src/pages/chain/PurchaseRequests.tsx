@@ -18,6 +18,7 @@ import { DocumentApproval } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
+import { RFQ_TONES } from './Rfq';
 
 export const PR_STATUSES = [
   { value: 'DRAFT', label: 'Draft' },
@@ -212,6 +213,7 @@ interface PrDetail {
   requestedBy: { id: string; name: string };
   items: PrItem[];
   canvasses: { id: string; number: string; status: string; createdAt: string }[];
+  rfqs: { id: string; number: string; status: string; createdAt: string; _count: { suppliers: number; items: number } }[];
   orders: { id: string; number: string; status: string; total: number; supplier: { id: string; name: string } }[];
   budget: Record<string, { budgeted: number; committed: number; incurred: number; available: number }>;
 }
@@ -384,13 +386,19 @@ export function PurchaseRequestDetail() {
                 Submit for approval
               </button>
             )}
+            {/* PR › RFQ › Canvass › PO (2026-10-14): asking suppliers is the next step. */}
+            {sourcing && can('gchain.rfq.create') && (
+              <button className="btn btn-primary" onClick={() => navigate(`/g-chain/rfq/new?fromRequest=${pr.id}`)}>
+                Request quotations
+              </button>
+            )}
             {sourcing && can('gchain.canvass.create') && (
               <button className="btn" onClick={startCanvass}>
                 Start canvass
               </button>
             )}
             {sourcing && can('gchain.purchase_orders.create') && (
-              <button className="btn btn-primary" onClick={raiseOrder}>
+              <button className={`btn${can('gchain.rfq.create') ? '' : ' btn-primary'}`} onClick={raiseOrder}>
                 Raise order
               </button>
             )}
@@ -576,8 +584,25 @@ export function PurchaseRequestDetail() {
         </div>
       )}
 
-      {(pr.canvasses.length > 0 || pr.orders.length > 0) && (
+      {(pr.rfqs.length > 0 || pr.canvasses.length > 0 || pr.orders.length > 0) && (
         <div className="grid grid-2">
+          {pr.rfqs.length > 0 && (
+            <div className="card">
+              <h3 className="card-title">Requests for quotation</h3>
+              <div className="stack">
+                {pr.rfqs.map((r) => (
+                  <Link key={r.id} to={`/g-chain/rfq/${r.id}`} className="row">
+                    <span className="mono">{r.number}</span>
+                    <StatusBadge status={r.status} extra={RFQ_TONES} />
+                    <span>
+                      {r._count.suppliers} supplier{r._count.suppliers === 1 ? '' : 's'} · {r._count.items} line{r._count.items === 1 ? '' : 's'}
+                    </span>
+                    <span className="faint">{formatDate(r.createdAt)}</span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          )}
           {pr.canvasses.length > 0 && (
             <div className="card">
               <h3 className="card-title">Canvasses</h3>
