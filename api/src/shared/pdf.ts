@@ -107,6 +107,12 @@ export type PdfSection =
     }
   | { kind: 'text'; title?: string; body: string }
   /**
+   * Blocks side by side, each under its own section title, its lines bold
+   * with no labels — the purchase order's Supplier and Delivery and terms
+   * (2026-10-14, the owner's layout). A line may run onto several.
+   */
+  | { kind: 'blocks'; blocks: { title: string; lines: string[] }[] }
+  /**
    * The money block: label and figure on ruled rows in a box at the right,
    * the bold row the total — larger, in the accent colour, over a heavier
    * rule. The ONE way a document prints its money; never a two-column table.
@@ -163,6 +169,12 @@ export interface PdfDocumentSpec {
   signatories?: Signatory[];
   /** Small print above the footer rule. */
   footerNote?: string;
+  /**
+   * An italic line over the sign-offs, under the rule that sets them off —
+   * the purchase order's "The name, date and time are considered a digital
+   * signature of approval." (the sales order's words).
+   */
+  signoffNote?: string;
   /**
    * The whole document on landscape pages — a list with more columns than
    * portrait can carry without breaking its heads mid-word (the sales
@@ -417,6 +429,11 @@ function safeSection(section: PdfSection): PdfSection {
           tasks: g.tasks.map((task) => ({ ...task, name: pdfSafe(task.name ?? '') })),
         })),
       };
+    case 'blocks':
+      return {
+        ...section,
+        blocks: section.blocks.map((b) => ({ title: pdfSafe(b.title), lines: b.lines.map((l) => pdfSafe(l)) })),
+      };
     case 'fields':
       return {
         ...section,
@@ -451,6 +468,7 @@ function safeSpec(spec: PdfDocumentSpec): PdfDocumentSpec {
     revision: t(spec.revision),
     reference: t(spec.reference),
     footerNote: t(spec.footerNote),
+    signoffNote: t(spec.signoffNote),
     sections: spec.sections.map(safeSection),
     signatories: spec.signatories?.map((p) => ({
       ...p,
@@ -617,15 +635,32 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
     : [['Date', formatShortDate(spec.date ?? new Date())]];
   if (!spec.details && spec.reference) meta.push(['Reference', spec.reference]);
   doc.font('Helvetica-Bold').fontSize(DETAIL_SIZE).fillColor(INK);
-  for (const [label, value] of meta) {
-    doc.text(`${label}: ${value}`, left, doc.y, { width: right - left, lineGap: DETAIL_GAP });
+  if (spec.details) {
+    // A document's own details sit two to a line (the purchase order's
+    // quotation reference beside its delivery date).
+    const half = (right - left) / 2;
+    for (let i = 0; i < meta.length; i += 2) {
+      const rowTop = doc.y;
+      let rowBottom = rowTop;
+      meta.slice(i, i + 2).forEach(([label, value], j) => {
+        doc.text(`${label}: ${value}`, left + j * half, rowTop, { width: half - 10, lineGap: DETAIL_GAP });
+        rowBottom = Math.max(rowBottom, doc.y);
+      });
+      doc.y = rowBottom;
+    }
+  } else {
+    for (const [label, value] of meta) {
+      doc.text(`${label}: ${value}`, left, doc.y, { width: right - left, lineGap: DETAIL_GAP });
+    }
   }
   // The template's details box is 41pt, taller when its lines are, and the
   // line table hangs 23 under it: an untitled table starts exactly there.
   doc.x = left;
   // The template's DETAILS box is 41pt whatever it holds, so every document's
   // first table starts where the quotation's does.
-  doc.y = detailsTop + Math.max(41, doc.y - detailsTop) + 23;
+  // A document laying out its own details (the purchase order) runs
+  // straight on into its first section, as the owner's layout places it.
+  doc.y = spec.details ? doc.y + 4 : detailsTop + Math.max(41, doc.y - detailsTop) + 23;
 }
 
 /**
@@ -715,6 +750,32 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
     case 'gantt':
       drawGantt(doc, section);
       return;
+
+    case 'blocks': {
+      const n = Math.max(1, section.blocks.length);
+      const colWidth = usableWidth(doc) / n;
+      const line = DETAIL_SIZE * LINE + 2;
+      const tallest = Math.max(...section.blocks.map((b) => b.lines.length), 1);
+      ensureSpace(doc, 10 + 22 + Math.min(tallest, 4) * line);
+      doc.y += 10;
+      const top = doc.y;
+      let bottom = top;
+      section.blocks.forEach((block, i) => {
+        const x = T.left + i * colWidth;
+        doc.font('Helvetica-Bold').fontSize(8.5).fillColor(PURPLE).text(caps(block.title), x, top, { lineBreak: false });
+        let y = top + 22;
+        for (const text of block.lines) {
+          for (const part of wrapText(doc, text, colWidth - 12, true, DETAIL_SIZE)) {
+            drawLine(doc, part, x, y, colWidth - 12, 'left', true, DETAIL_SIZE, INK);
+            y += line;
+          }
+        }
+        bottom = Math.max(bottom, y);
+      });
+      doc.x = T.left;
+      doc.y = bottom + 4;
+      return;
+    }
 
     case 'fields': {
       // Each field is a DETAILS line — "Label: value" in bold 9.5 on 4pt of
@@ -1391,10 +1452,15 @@ function drawSignoffs(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec) {
   // makes room for it rather than sit on it.
   const bottom = doc.page.height - T.signoffBottomUp - (spec.footerNote ? 11 : 0);
   const top = bottom - blockHeight;
-  if (doc.y + 12 > top) doc.addPage();
+  const noteRoom = spec.signoffNote ? 18 : 0;
+  if (doc.y + 12 + noteRoom > top) doc.addPage();
   // A light rule over the block, as the template rules off its text before
   // the sign-offs — only where the content left room for it.
-  if (doc.y + 14 <= top) hairline(doc, top - 10, usable);
+  if (doc.y + 14 + noteRoom <= top) hairline(doc, top - 10 - noteRoom, usable);
+  if (spec.signoffNote) {
+    doc.font('Helvetica-Oblique').fontSize(9).fillColor(INK);
+    doc.text(spec.signoffNote, T.left, top - noteRoom - 1, { width: usable, lineBreak: false, ellipsis: true });
+  }
 
   // The block sits below the content's bottom margin; PDFKit would start a
   // page for a line past it, so the margin is dropped while it draws.

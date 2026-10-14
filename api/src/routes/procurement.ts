@@ -3527,33 +3527,33 @@ purchaseOrderRoutes.get(
     });
     const tel = contact?.mobile ?? contact?.phone ?? po.supplier.phone;
     const mail = contact?.email ?? po.supplier.email;
-    const reach = [tel ? `Tel: ${tel}` : null, mail ? `Email: ${mail}` : null].filter(Boolean).join(' | ');
 
-    // No "For" (the project is internal) and no TIN — the paper goes to the
-    // supplier (2026-10-14, the owner's call).
+    // The owner's layout of 2026-10-14 (docs/mockups/purchase-order-
+    // layout.pptx): Supplier and Delivery and terms side by side, each an
+    // address block with no labels. No "For" (internal), no supplier TIN,
+    // no purchase request or status.
+    const company = await prisma.company.findUnique({ where: { id: 'company' } });
+    const place = (...parts: (string | null | undefined)[]) => parts.filter((p) => p?.trim()).join(', ');
+    const supplierLines = [
+      po.supplier.name,
+      place(po.supplier.address, po.supplier.city),
+      tel ?? '',
+      contact ? [contact.name, contact.position].filter(Boolean).join(', ') : '',
+      mail ?? '',
+    ].filter((l) => l.trim());
+    const deliveryLines = [
+      company?.legalName || company?.name || '',
+      po.deliverTo?.trim() || place(company?.address, company?.city) || po.warehouse?.name || '',
+      company?.phone ?? '',
+      company?.email ?? '',
+      `Terms: ${po.terms ?? po.supplier.paymentTerms ?? '—'}`,
+    ].filter((l) => l.trim());
     const sections: PdfSection[] = [
       {
-        kind: 'fields',
-        title: 'Supplier',
-        columns: 2,
-        fields: [
-          { label: 'Supplier', value: po.supplier.name },
-          { label: 'Address', value: [po.supplier.address, po.supplier.city].filter(Boolean).join(', ') || '—' },
-          { label: 'Contact person', value: contact ? [contact.name, contact.position].filter(Boolean).join(', ') : '—' },
-          { label: 'Contact details', value: reach || '—' },
-        ],
-      },
-      {
-        kind: 'fields',
-        title: 'Delivery and terms',
-        columns: 2,
-        fields: [
-          { label: 'Deliver to', value: po.deliverTo ?? po.warehouse?.name ?? '—' },
-          { label: 'Terms', value: po.terms ?? po.supplier.paymentTerms ?? '—' },
-          // The request it fills, named for what it is.
-          { label: 'Purchase request', value: po.request?.number ?? '—' },
-          // So a draft never leaves the building looking like an order.
-          { label: 'Status', value: statusLabel(po.status) },
+        kind: 'blocks',
+        blocks: [
+          { title: 'Supplier', lines: supplierLines },
+          { title: 'Delivery and terms', lines: deliveryLines },
         ],
       },
       {
@@ -3615,13 +3615,17 @@ purchaseOrderRoutes.get(
       date: po.orderDate,
       // The P.O. date under the number, and DETAILS the supplier's
       // quotation it answers and when it is due (2026-10-14, the owner's call).
-      numberNote: `P.O. Date: ${formatDate(po.orderDate)}`,
+      numberNote: `Date: ${formatDate(po.orderDate)}`,
       details: [
         ['Quotation reference', po.quoteRef ?? '—'],
         ['Delivery date', po.deliveryDate ? formatDate(po.deliveryDate) : '—'],
       ],
       sections,
       signatories,
+      signoffNote: 'The name, date and time are considered a digital signature of approval.',
+      // The status line went with the owner's layout; a draft still never
+      // leaves the building looking like an order.
+      footerNote: po.status === 'DRAFT' || po.status === 'PENDING_APPROVAL' ? 'DRAFT — NOT YET ISSUED.' : po.status === 'CANCELLED' ? 'CANCELLED.' : undefined,
     });
 
     await audit(

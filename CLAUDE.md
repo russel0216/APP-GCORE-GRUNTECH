@@ -4423,16 +4423,25 @@ page's dress (`prq-*`) and reusing its `ItemCell` and `lib/prLines.ts`.
   `GET /purchase-orders/suggest` (`lineSuggestions()`, the requisition's
   rule behind the order's rights); the route is `GET /purchase-orders/route
   ?amount=&orderId=` at the order's total, in its buyer's name.
-- **The order's paper goes to the supplier** (2026-10-14, the owner's
-  five): "P.O. Date: …" under the number (`renderDocument`'s
-  `numberNote`); DETAILS is the quotation reference and the delivery date
-  (`details`, in place of Date and Reference); a Supplier block — name,
-  address, the contact person (the supplier's primary contact, else its
-  first) and contact details (their mobile or phone and email, else the
-  supplier's own); then Delivery and terms. Never "For" (the project is
-  internal) nor the supplier's TIN. `PurchaseOrder.quoteRef` (nullable) is
-  the supplier's quotation no. — "Quotation ref." on the order page,
-  filled from the awarded canvass row's `quoteRef`, editable while a draft.
+- **The order's paper goes to the supplier, in the owner's layout**
+  (2026-10-14, `docs/mockups/purchase-order-layout.pptx`, his slide):
+  "Date: …" under the number (`renderDocument`'s `numberNote`); DETAILS
+  is the quotation reference beside the delivery date (`details`, two to
+  a line, and the section after it follows straight on rather than at the
+  fixed DETAILS height); then **Supplier** and **Delivery and terms** side
+  by side as unlabelled address blocks (the engine's `blocks` section) —
+  the supplier's name, address, the contact's mobile (else the supplier's
+  phone), the contact person (primary, else first) and email; our
+  registered name, the order's Deliver to (else the company's address),
+  the company's phone and email, and "Terms: …". Then the lines, totals
+  and notes, and over the sign-offs the italic "The name, date and time
+  are considered a digital signature of approval." (`signoffNote`). Never
+  "For" (internal), the supplier's TIN, the purchase request or a Status
+  line — a draft or pending order says "DRAFT — NOT YET ISSUED." in the
+  footer note, a cancelled one "CANCELLED.". `PurchaseOrder.quoteRef`
+  (nullable) is the supplier's quotation no. — "Quotation ref." on the
+  order page, filled from the awarded canvass row's `quoteRef`, editable
+  while a draft.
 
 ## G-CHAIN's flows (2026-10-14)
 

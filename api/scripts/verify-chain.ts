@@ -1358,8 +1358,8 @@ async function main() {
     const poPaper2 = flat((await printed(buyerToken, `/purchase-orders/${pageOrderId}/pdf`)).text);
     await prisma.supplierContact.delete({ where: { id: contactRow.id } });
     check(
-      'the order\'s paper prints the P.O. date, the quotation reference, the delivery date and the supplier\'s contact — no "For", no TIN',
-      poPaper2.includes('P.O. Date:') && poPaper2.includes('SQ-77881') && poPaper2.includes('November 20, 2026') &&
+      'the order\'s paper (the owner\'s layout) prints the date, the quotation reference, the delivery date and the supplier\'s contact — no "For", no TIN',
+      poPaper2.includes('Date: ') && poPaper2.includes('digital signature of approval') && !poPaper2.includes('Purchase request:') && !poPaper2.includes('Status:') && poPaper2.includes('SQ-77881') && poPaper2.includes('November 20, 2026') &&
         poPaper2.includes('Rosa Lim') && poPaper2.includes('0917 555 0101') && poPaper2.includes('rosa@example.test') &&
         !/\bTIN\b/.test(poPaper2.replace(/TIN: [^|]*\|/, '')) && !poPaper2.includes('For:') && !poPaper2.includes('FOR '),
       poPaper2.slice(0, 400),
@@ -1899,7 +1899,7 @@ async function main() {
         pendingCount(poDraftText) === 1 &&
         signedCount(poDraftText) === 1 &&
         flat(poDraftText).includes('Verify Purchasing Manager') &&
-        flat(poDraftText).includes('Status: Draft'),
+        flat(poDraftText).includes('DRAFT — NOT YET ISSUED.'),
       `${poDraftPdf.status} ${signedCount(poDraftText)} signed, ${pendingCount(poDraftText)} pending`,
     );
 
