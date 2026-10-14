@@ -17,6 +17,7 @@ import { IconBadge } from '../../components/Icon';
 import { NumberInput } from '../../components/NumberInput';
 import { ReportPage, type ReportKind } from '../../components/ReportPage';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
+import { SupplierPicker, type SupplierRef } from '../../components/SupplierPicker';
 import { PersonSelect, usePeople } from '../../components/People';
 import { useTeams } from './Receivables';
 
@@ -444,10 +445,34 @@ export const FIN_REPORT_KINDS: readonly ReportKind[] = [
   { key: 'aging', label: 'Receivables aging', list: '/g-fin/ar?outstanding=true', mode: 'asOf' },
   { key: 'collection-forecast', label: 'Collection forecast', list: '/g-fin/ar?outstanding=true', mode: 'ahead' },
   { key: 'collections', label: 'Collections', list: '/g-fin/payments' },
+  { key: 'payables', label: 'Accounts payable (by due date)', list: '/g-fin/ap', mode: 'span' },
   { key: 'payables-aging', label: 'Payables aging', list: '/g-fin/ap', mode: 'asOf' },
   { key: 'payments', label: 'Payments out', list: '/g-fin/payments?kind=DISBURSEMENT' },
 ];
 const AR_KINDS = ['receivables', 'aging', 'collection-forecast', 'collections'];
+
+/** The supplier named in the URL, as the picker shows it. */
+function ReportSupplier({ id, onChange }: { id: string | null; onChange: (id: string) => void }) {
+  const [value, setValue] = useState<SupplierRef | null>(null);
+  useEffect(() => {
+    if (!id) return setValue(null);
+    if (value?.id === id) return;
+    api
+      .get<SupplierRef>(`/suppliers/${id}`)
+      .then(setValue)
+      .catch(() => setValue(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+  return (
+    <SupplierPicker
+      value={value}
+      onChange={(c) => {
+        setValue(c);
+        onChange(c?.id ?? '');
+      }}
+    />
+  );
+}
 
 /** The customer named in the URL, as the picker shows it. */
 function ReportCustomer({ id, onChange }: { id: string | null; onChange: (id: string) => void }) {
@@ -476,6 +501,7 @@ function ReportCustomer({ id, onChange }: { id: string | null; onChange: (id: st
 export function FinanceReports() {
   const { can } = useAuth();
   const { people } = usePeople('gops.quotations.create');
+  const { people: buyers } = usePeople('gchain.purchase_orders.create');
   const teams = useTeams();
   const kinds = FIN_REPORT_KINDS.filter((k) => (AR_KINDS.includes(k.key) ? can('gfin.ar.view_all') : can('gfin.ap.view_all')));
   return (
@@ -483,9 +509,26 @@ export function FinanceReports() {
       title="Finance Reports"
       endpoint="/fin-reports"
       kinds={kinds.length ? kinds : FIN_REPORT_KINDS}
-      extraKeys={['salespersonId', 'teamId', 'customerId', 'by']}
+      extraKeys={['salespersonId', 'teamId', 'customerId', 'by', 'purchaserId', 'supplierId']}
       controls={({ kind, params, set }) =>
-        AR_KINDS.includes(kind) ? (
+        kind === 'payables' ? (
+          <>
+            <span className="rep-label">Narrow to</span>
+            <label className="rep-date">
+              <span className="faint">Purchaser</span>
+              <PersonSelect
+                value={params.get('purchaserId') ?? ''}
+                onChange={(id) => set({ purchaserId: id })}
+                people={buyers}
+                placeholder="— all purchasers —"
+              />
+            </label>
+            <div className="rep-date rep-customer">
+              <span className="faint">Supplier / Vendor</span>
+              <ReportSupplier id={params.get('supplierId')} onChange={(id) => set({ supplierId: id })} />
+            </div>
+          </>
+        ) : AR_KINDS.includes(kind) ? (
           <>
             <span className="rep-label">Narrow to</span>
             <label className="rep-date">

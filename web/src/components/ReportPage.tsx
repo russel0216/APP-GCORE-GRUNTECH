@@ -20,8 +20,12 @@ export interface ReportKind {
   label: string;
   /** The list it reports on — "Open the list". */
   list?: string;
-  /** `range` (the default): from–to. `asOf`: one day. `ahead`: a window from today forward. */
-  mode?: 'range' | 'asOf' | 'ahead';
+  /**
+   * `range` (the default): from–to. `asOf`: one day. `ahead`: a window from
+   * today forward. `span`: either way — the past and the ahead presets, this
+   * month and the next to start (a due-date report).
+   */
+  mode?: 'range' | 'asOf' | 'ahead' | 'span';
 }
 
 interface ReportColumn {
@@ -70,6 +74,13 @@ const AHEAD: { key: string; label: string; range: () => [string, string] }[] = [
   { key: '90d', label: 'Next 90 days', range: () => [todayLocal(), shift(todayLocal(), 89)] },
   { key: '6m', label: 'Next 6 months', range: () => [todayLocal(), shift(monthStart(6), -1)] },
 ];
+const SPAN: { key: string; label: string; range: () => [string, string] }[] = [
+  { key: 'two-months', label: 'This & next month', range: () => [monthStart(0), shift(monthStart(2), -1)] },
+  { key: 'month', label: 'This month', range: () => [monthStart(0), shift(monthStart(1), -1)] },
+  { key: 'next-month', label: 'Next month', range: () => [monthStart(1), shift(monthStart(2), -1)] },
+  { key: 'last-month', label: 'Last month', range: () => [monthStart(-1), shift(monthStart(0), -1)] },
+  { key: '90d', label: 'Next 90 days', range: () => [todayLocal(), shift(todayLocal(), 89)] },
+];
 const qtyText = (n: number) => new Intl.NumberFormat('en-PH', { maximumFractionDigits: 3 }).format(n);
 const cell = (v: string | number | null, money?: boolean) => (v === null || v === undefined ? '—' : typeof v === 'number' ? (money ? formatMoney(v) : qtyText(v)) : v);
 
@@ -93,8 +104,8 @@ export function ReportPage({
   const current = kinds.find((k) => k.key === params.get('kind')) ?? kinds[0];
   const kind = current.key;
   const mode = current.mode ?? 'range';
-  const presets = mode === 'ahead' ? AHEAD : PAST;
-  const [defFrom, defTo] = mode === 'ahead' ? AHEAD[1].range() : PAST[3].range();
+  const presets = mode === 'ahead' ? AHEAD : mode === 'span' ? SPAN : PAST;
+  const [defFrom, defTo] = mode === 'ahead' ? AHEAD[1].range() : mode === 'span' ? SPAN[0].range() : PAST[3].range();
   const to = params.get('to') || (mode === 'asOf' ? todayLocal() : defTo);
   const from = mode === 'asOf' ? to : params.get('from') || defFrom;
   const extra = Object.fromEntries(extraKeys.map((k) => [k, params.get(k) || undefined]));

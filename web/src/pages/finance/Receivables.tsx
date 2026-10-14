@@ -452,6 +452,10 @@ export function Receivables() {
         endpoint="/invoices"
         printPath="/api/invoices/pdf"
         reportPath="/g-fin/reports?kind=receivables"
+        menuItems={[
+          { label: 'Forecast collection', onSelect: () => navigate('/g-fin/reports?kind=collection-forecast') },
+          { label: 'Aging report', onSelect: () => navigate('/g-fin/reports?kind=aging') },
+        ]}
         columns={columns}
         rowKey={(r) => r.id}
         reloadToken={reload}
@@ -1919,6 +1923,9 @@ interface PaymentsSummary {
   unclearedCount: number;
   paidOut: number;
   disbursements: number;
+  cheques: number;
+  chequesCleared: number;
+  chequesClearedPct: number | null;
   teams: TeamShare[];
 }
 
@@ -2118,6 +2125,12 @@ export function Payments() {
                 accent={sum.uncleared > 0 ? 'warn' : undefined}
                 sub={`${sum.unclearedCount} not cash until the bank clears ${sum.unclearedCount === 1 ? 'it' : 'them'}`}
                 to="/g-fin/payments?kind=RECEIPT&uncleared=true"
+              />
+              <Stat
+                label="Cleared cheques"
+                value={sum.chequesClearedPct === null ? '—' : `${sum.chequesClearedPct.toFixed(1)}%`}
+                sub={sum.cheques ? `${sum.chequesCleared} of ${sum.cheques} cheque${sum.cheques === 1 ? '' : 's'}, by value` : 'no cheques received'}
+                to="/g-fin/payments?kind=RECEIPT&method=CHECK"
               />
               <Stat
                 label="Money out"

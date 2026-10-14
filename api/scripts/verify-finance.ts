@@ -3676,6 +3676,87 @@ async function main() {
       noAr.status === 403 && noRight.status === 403,
       `${noAr.status} ${noRight.status}`,
     );
+
+    // ══ Accounts Payable per the owner's sample (2026-10-15) ═════════════════
+    console.log('\nAccounts Payable — delivery, terms, purchaser, the cards and the AP report');
+    const apDelivered = ymd(addDays(dayKey(new Date()), -3));
+    const apTyped = await fin('POST', '/supplier-bills', {
+      supplierId: supplier.id,
+      supplierInvoiceNo: `${TAG}-AP-1`,
+      deliveryDate: apDelivered,
+      termsDays: 30,
+      lines: [{ description: 'Service call', quantity: 1, unitPrice: 5_000 }],
+    });
+    check(
+      'a bill runs its terms from the delivery — due = delivery + 30 days, printed "30 Days"',
+      apTyped.status === 201 &&
+        String(apTyped.body.deliveryDate).slice(0, 10) === apDelivered &&
+        String(apTyped.body.dueDate).slice(0, 10) === ymd(addDays(new Date(`${apDelivered}T00:00:00Z`), 30)) &&
+        apTyped.body.termsLabel === '30 Days',
+      `${apTyped.status} ${apTyped.body.deliveryDate} ${apTyped.body.dueDate} ${apTyped.body.termsLabel}`,
+    );
+    const apOrder = await fin('POST', '/supplier-bills', {
+      supplierId: supplier.id,
+      orderId: order.id,
+      supplierInvoiceNo: `${TAG}-AP-2`,
+      termsDays: 15,
+      lines: [{ description: 'Pipe', quantity: 1, unitPrice: 1_000 }],
+    });
+    const lastReceived = await prisma.receiving.findFirst({ where: { orderId: order.id, status: 'RECEIVED' }, orderBy: { receivedDate: 'desc' }, select: { receivedDate: true } });
+    check(
+      "a bill against an order takes the receiving's date as its delivery and the order's author as its purchaser",
+      apOrder.status === 201 &&
+        apOrder.body.purchaser?.id === order.createdById &&
+        String(apOrder.body.deliveryDate).slice(0, 10) === ymd(lastReceived!.receivedDate),
+      `${apOrder.status} ${JSON.stringify(apOrder.body.purchaser)} ${apOrder.body.deliveryDate}`,
+    );
+    const apBadBuyer = await fin('POST', '/supplier-bills', {
+      supplierId: supplier.id,
+      purchaserId: 'no-such-user',
+      lines: [{ description: 'x', quantity: 1, unitPrice: 1 }],
+    });
+    check('a purchaser who is not an active login is refused', apBadBuyer.status === 400, `${apBadBuyer.status} ${apBadBuyer.body.error}`);
+    const [apAll, apSoon, apPending, apOwed, apBuyer] = await Promise.all([
+      fin('GET', '/supplier-bills?pageSize=1'),
+      fin('GET', '/supplier-bills?pageSize=1&dueSoon=true'),
+      fin('GET', '/supplier-bills?pageSize=1&pending=true'),
+      fin('GET', '/supplier-bills?pageSize=1&outstanding=true'),
+      fin('GET', `/supplier-bills?pageSize=50&purchaserId=${order.createdById}`),
+    ]);
+    const apSum = apAll.body.summary ?? {};
+    check(
+      'each A/P card equals the list it opens: payables, pending bills, due in 7 days',
+      apAll.status === 200 &&
+        apSum.payableCount === apOwed.body.total &&
+        apSum.pendingCount === apPending.body.total &&
+        apSum.dueSoonCount === apSoon.body.total &&
+        money(apSum.payable, apOwed.body.summary?.payable),
+      `${JSON.stringify(apSum)} vs owed ${apOwed.body.total} pending ${apPending.body.total} soon ${apSoon.body.total}`,
+    );
+    check(
+      'the list narrows to one purchaser',
+      apBuyer.status === 200 && (apBuyer.body.rows ?? apBuyer.body.data ?? []).every((r: { purchaser: { id: string } | null }) => r.purchaser?.id === order.createdById),
+      `${apBuyer.status} ${apBuyer.body.total}`,
+    );
+    const apFrom = ymd(addDays(dayKey(new Date()), -60));
+    const apTo = ymd(addDays(dayKey(new Date()), 90));
+    const apRep = await fin('GET', `/fin-reports/payables?from=${apFrom}&to=${apTo}&supplierId=${supplier.id}`);
+    const apDb = await prisma.supplierBill.aggregate({
+      where: {
+        supplierId: supplier.id,
+        status: { in: ['PENDING_APPROVAL', 'APPROVED', 'PARTIALLY_PAID', 'PAID'] },
+        dueDate: { gte: new Date(`${apFrom}T00:00:00Z`), lte: new Date(`${apTo}T23:59:59.999Z`) },
+      },
+      _sum: { netPayable: true },
+    });
+    const apCard = (apRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === 'Falling due')?.value;
+    check(
+      'the AP report sums the bills falling due in the range for the supplier asked, and names it',
+      apRep.status === 200 && money(apCard ?? -1, Number(apDb._sum.netPayable ?? 0)) && String(apRep.body.filterLine).includes(supplier.name),
+      `${apCard} vs ${apDb._sum.netPayable} · ${apRep.body.filterLine}`,
+    );
+    const apNoRight = await as(await makeUser('ZZ AP Reports Only', 'apreports@verifyf.local', ['zzfin_reports']))('GET', '/fin-reports/payables');
+    check('the AP report needs A/P’s right beside the Reports right', apNoRight.status === 403, String(apNoRight.status));
   }
 
   await cleanup();

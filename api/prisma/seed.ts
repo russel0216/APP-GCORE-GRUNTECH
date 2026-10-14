@@ -17,6 +17,7 @@ import { migrateFaceThreshold } from '../src/shared/faceSamples';
 import { removeScoroArchive } from '../src/shared/scoroArchive';
 import { backfillCustomerAddresses } from '../src/shared/customerAddress';
 import { backfillInvoiceCountering, fillInvoiceCredit } from '../src/shared/receivables';
+import { fillBillTerms } from '../src/shared/payables';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -1543,6 +1544,9 @@ async function main() {
     if (countered) console.log(`  · Took ${countered} older invoice(s) as countered on their invoice date`);
     const credited = await fillInvoiceCredit();
     if (credited) console.log(`  · Credited ${credited} invoice(s) to their salesperson and team`);
+    // Accounts Payable: delivery, terms and purchaser from what is on file.
+    const bills = await fillBillTerms();
+    if (bills) console.log(`  · Gave ${bills} supplier bill(s) their delivery date, terms and purchaser`);
   }
 
   // Activity types as data (2026-10-08): the six built-ins under the enum's

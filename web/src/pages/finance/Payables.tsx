@@ -19,7 +19,11 @@ import {
   humanise,
   useToast,
 } from '../../components/ui';
-import { RecordPaymentModal, CellLink, paymentLink } from './Receivables';
+import { RecordPaymentModal, CellLink, paymentLink, TermsPicker } from './Receivables';
+import { Stat } from '../../components/charts';
+import { PersonSelect, usePeople } from '../../components/People';
+import type { FilterDef } from '../../components/DataList';
+import { qs } from '../../lib/api';
 import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
 import { SupplierPicker, type SupplierRef } from '../../components/SupplierPicker';
@@ -51,6 +55,10 @@ interface Bill {
   billDate: string;
   dueDate: string;
   terms: string | null;
+  deliveryDate: string | null;
+  termsDays: number | null;
+  termsLabel: string;
+  purchaser: { id: string; name: string } | null;
   subtotal: number;
   vatRate: number;
   vatAmount: number;
@@ -76,6 +84,22 @@ interface Bill {
     payment: { id: string; number: string; paymentDate: string; method: string; reference: string | null };
   }[];
 }
+
+interface PayablesSummary {
+  payable: number;
+  payableCount: number;
+  pendingCount: number;
+  pending: number;
+  dueSoon: number;
+  dueSoonCount: number;
+  dueSoonDays: number;
+  overdue: number;
+  overdueCount: number;
+}
+
+/** The terms the A/P form offers as chips, and the filter's choices. */
+const BILL_TERMS = [7, 15, 30, 45, 60];
+const termsWords = (d: number) => (d === 0 ? 'On delivery' : `${d} Day${d === 1 ? '' : 's'}`);
 
 interface UnbilledReceiving {
   id: string;
@@ -143,11 +167,14 @@ export function Payables() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fromReceiving, queue]);
 
+  const { people: buyers } = usePeople('gchain.purchase_orders.create');
+
   const columns: Column<Bill>[] = [
     {
       key: 'number',
-      label: 'Number',
+      label: 'Bill No.',
       sortKey: 'number',
+      width: '160px',
       render: (r) => (
         <div>
           <span className="mono">{r.number}</span>
@@ -157,14 +184,14 @@ export function Payables() {
     },
     {
       key: 'supplier',
-      label: 'Supplier',
+      label: 'Company / Vendor',
       render: (r) => (
         <div>
           <div>
             <CellLink to={`/g-chain/suppliers/${r.supplier.id}`}>{r.supplier.name}</CellLink>
           </div>
           <div className="faint">
-            {r.job ? `${r.job.number} — ${r.job.name}` : 'No project'}
+            {r.job ? `${r.job.number} — ${r.job.name}` : r.order ? `Order ${r.order.number}` : 'No project'}
             {r.receiving && (
               <>
                 {' · '}
@@ -178,44 +205,63 @@ export function Payables() {
       ),
     },
     {
+      key: 'netPayable',
+      label: 'Amount',
+      align: 'right',
+      render: (r) => (
+        <div>
+          <div className="mono">{formatMoney(r.netPayable)}</div>
+          {r.status === 'PAID' ? (
+            <div className="faint">paid</div>
+          ) : r.outstanding > 0 && (r.status === 'APPROVED' || r.status === 'PARTIALLY_PAID') && r.outstanding < r.netPayable ? (
+            <div className="faint">{formatMoney(r.outstanding)} left</div>
+          ) : r.ewtAmount > 0 ? (
+            <div className="faint">less {formatMoney(r.ewtAmount)} withheld</div>
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      key: 'deliveryDate',
+      label: 'Date of delivery',
+      sortKey: 'deliveryDate',
+      render: (r) => (r.deliveryDate ? formatDate(r.deliveryDate) : <span className="faint">—</span>),
+    },
+    {
+      key: 'terms',
+      label: 'Payment terms',
+      render: (r) => <span className="badge">{r.termsLabel}</span>,
+    },
+    {
       key: 'dueDate',
-      label: 'Due',
+      label: 'Due date',
       sortKey: 'dueDate',
       render: (r) => (
         <div>
           <div>{formatDate(r.dueDate)}</div>
-          {r.outstanding > 0 && r.daysOverdue > 0 && (
+          {r.outstanding > 0 && r.daysOverdue > 0 && (r.status === 'APPROVED' || r.status === 'PARTIALLY_PAID') && (
             <div className="faint warn">{r.daysOverdue} days late</div>
           )}
         </div>
       ),
     },
     {
+      key: 'purchaser',
+      label: 'Purchaser / Buyer',
+      render: (r) => r.purchaser?.name ?? <span className="faint">—</span>,
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (r) => <StatusBadge status={r.status} />,
+    },
+    { key: 'billDate', label: 'Bill date', sortKey: 'billDate', optional: true, render: (r) => formatDate(r.billDate) },
+    {
       key: 'total',
       label: 'Billed',
       align: 'right',
+      optional: true,
       render: (r) => <span className="mono faint">{formatMoney(r.total)}</span>,
-    },
-    {
-      key: 'netPayable',
-      label: 'Payable',
-      align: 'right',
-      render: (r) => (
-        <div>
-          <div className="mono">{formatMoney(r.netPayable)}</div>
-          {r.ewtAmount > 0 && <div className="faint">less {formatMoney(r.ewtAmount)} withheld</div>}
-        </div>
-      ),
-    },
-    {
-      key: 'outstanding',
-      label: 'Outstanding',
-      align: 'right',
-      render: (r) => (
-        <span className={`mono ${r.outstanding > 0 && r.daysOverdue > 0 ? 'warn' : ''}`}>
-          {formatMoney(r.outstanding)}
-        </span>
-      ),
     },
     {
       key: 'posted',
@@ -234,11 +280,37 @@ export function Payables() {
           <span className="faint">—</span>
         ),
     },
+  ];
+
+  const filters: FilterDef[] = [
+    { key: 'status', label: 'Status', options: BILL_STATUSES },
+    { key: 'outstanding', label: 'Balance', options: [{ value: 'true', label: 'Outstanding only' }] },
+    { key: 'overdue', label: 'Overdue', options: [{ value: 'true', label: 'Overdue only' }] },
+    { key: 'dueSoon', label: 'Due soon', options: [{ value: 'true', label: 'Due in the next 7 days' }] },
+    { key: 'pending', label: 'Pending', options: [{ value: 'true', label: 'Draft or pending approval' }] },
     {
-      key: 'status',
-      label: 'Status',
-      render: (r) => <StatusBadge status={r.status} />,
+      key: 'purchaserId',
+      label: 'Purchaser / Buyer',
+      options: [{ value: 'none', label: 'Nobody named' }, ...buyers.map((p) => ({ value: p.id, label: p.name }))],
     },
+    {
+      key: 'supplierId',
+      label: 'Supplier / Vendor',
+      type: 'lookup',
+      placeholder: 'Type a supplier name…',
+      search: async (term: string) =>
+        (await api.get<{ id: string; code: string; name: string }[]>(`/suppliers/lookup${qs({ q: term })}`)).map((c) => ({
+          value: c.id,
+          label: `${c.name} · ${c.code}`,
+        })),
+      describe: async (id: string) => {
+        const c = await api.get<{ name: string; code: string }>(`/suppliers/${id}`);
+        return `${c.name} · ${c.code}`;
+      },
+    },
+    { key: 'termsDays', label: 'Payment terms', options: [0, ...BILL_TERMS].map((d) => ({ value: String(d), label: termsWords(d) })) },
+    { key: 'dueFrom', toKey: 'dueTo', label: 'Due date', type: 'dateRange' },
+    { key: 'deliveredFrom', toKey: 'deliveredTo', label: 'Date of delivery', type: 'dateRange' },
   ];
 
   return (
@@ -308,19 +380,54 @@ export function Payables() {
         listKey="supplier-bills"
         endpoint="/supplier-bills"
         printPath="/api/supplier-bills/pdf"
-        reportPath="/g-fin/reports?kind=payables-aging"
+        reportPath="/g-fin/reports?kind=payables"
+        menuItems={[{ label: 'Payables aging', onSelect: () => navigate('/g-fin/reports?kind=payables-aging') }]}
         columns={columns}
         rowKey={(r) => r.id}
         reloadToken={reload}
-        searchPlaceholder="Search number, supplier, their invoice number…"
+        selectable
+        summary={(raw) => {
+          const sum = raw as unknown as PayablesSummary | undefined;
+          if (!sum) return null;
+          return (
+            <>
+              <Stat
+                label="Sum of all payables"
+                value={formatMoney(sum.payable)}
+                figure
+                sub={`${sum.payableCount} approved bill${sum.payableCount === 1 ? '' : 's'} to pay`}
+                to="/g-fin/ap?outstanding=true"
+              />
+              <Stat
+                label="Pending bills"
+                value={String(sum.pendingCount)}
+                sub={`${formatMoney(sum.pending)} draft or awaiting approval`}
+                to="/g-fin/ap?pending=true"
+              />
+              <Stat
+                label={`Due in ${sum.dueSoonDays} days`}
+                value={formatMoney(sum.dueSoon)}
+                figure
+                accent={sum.dueSoon > 0 ? 'warn' : undefined}
+                sub={`${sum.dueSoonCount} bill${sum.dueSoonCount === 1 ? '' : 's'}`}
+                to="/g-fin/ap?dueSoon=true"
+              />
+              <Stat
+                label="Overdue"
+                value={formatMoney(sum.overdue)}
+                figure
+                accent={sum.overdue > 0 ? 'warn' : undefined}
+                sub={`${sum.overdueCount} past the due date`}
+                to="/g-fin/ap?overdue=true"
+              />
+            </>
+          );
+        }}
+        searchPlaceholder="Search bill no., supplier, their invoice, purchaser, PO…"
         emptyTitle="No supplier bills yet"
         emptyHint="A bill matched to a receiving charges the project nothing further; one with nothing received behind it is charged when approved."
         onRowClick={(r) => navigate(`/g-fin/ap/${r.id}`)}
-        filters={[
-          { key: 'status', label: 'Status', options: BILL_STATUSES },
-          { key: 'outstanding', label: 'Balance', options: [{ value: 'true', label: 'Outstanding only' }] },
-          { key: 'overdue', label: 'Overdue', options: [{ value: 'true', label: 'Overdue only' }] },
-        ]}
+        filters={filters}
         actions={
           can('gfin.ap.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setCreating('blank')}>
@@ -398,7 +505,10 @@ function NewBillModal({
     costCategoryId: existing?.costCategory?.id ?? '',
     supplierInvoiceNo: existing?.supplierInvoiceNo ?? from?.invoiceRefNo ?? '',
     billDate: existing?.billDate.slice(0, 10) ?? today,
-    terms: existing ? daysFrom(existing.billDate, existing.dueDate) : 30,
+    // The receiving's date, else typed: the terms run from it.
+    deliveryDate: existing?.deliveryDate?.slice(0, 10) ?? from?.receivedDate.slice(0, 10) ?? '',
+    terms: existing ? existing.termsDays ?? daysFrom(existing.billDate, existing.dueDate) : 30,
+    purchaserId: existing?.purchaser?.id ?? '',
     vatInclusive: existing ? Math.abs(existing.subtotal - existingLineTotal) > 0.005 : false,
     ewtRate: existing?.ewtRate ?? 0,
     notes: existing?.notes ?? '',
@@ -447,8 +557,9 @@ function NewBillModal({
   const ewtAmount = subtotal * form.ewtRate;
   const netPayable = total - ewtAmount;
 
+  const { people: buyers } = usePeople('gchain.purchase_orders.create');
   const dueDate = (() => {
-    const d = new Date(`${form.billDate}T00:00:00Z`);
+    const d = new Date(`${form.deliveryDate || form.billDate}T00:00:00Z`);
     d.setUTCDate(d.getUTCDate() + form.terms);
     return d.toISOString().slice(0, 10);
   })();
@@ -466,8 +577,10 @@ function NewBillModal({
         costCategoryId: form.costCategoryId || null,
         supplierInvoiceNo: form.supplierInvoiceNo || null,
         billDate: form.billDate,
-        dueDate,
-        terms: `${form.terms} days`,
+        deliveryDate: form.deliveryDate || null,
+        termsDays: form.terms,
+        // Left empty on a bill against an order, the order's author is the purchaser.
+        purchaserId: form.purchaserId || null,
         ...(existing ? { vatRate: existing.vatRate } : {}),
         vatInclusive: form.vatInclusive,
         ewtRate: form.ewtRate,
@@ -551,13 +664,29 @@ function NewBillModal({
             onChange={(e) => setForm({ ...form, billDate: e.target.value })}
           />
         </Field>
-        <Field label="Terms (days)" hint={`Due ${formatDate(dueDate)}`}>
-          <NumberInput
-            kind="count"
-            min={0}
-            max={365}
-            value={form.terms}
-            onChange={(e) => setForm({ ...form, terms: Number(e.target.value) })}
+        <Field
+          label="Date of delivery"
+          hint={matchedTo ? `Received on ${matchedTo}` : 'When the goods or the work were delivered — the terms run from it'}
+        >
+          <input
+            type="date"
+            value={form.deliveryDate}
+            onChange={(e) => setForm({ ...form, deliveryDate: e.target.value })}
+          />
+        </Field>
+      </div>
+
+      <div className="grid grid-2">
+        <Field label="Payment terms" hint={`Due ${formatDate(dueDate)} — the ${form.deliveryDate ? 'delivery' : 'bill date'} plus the terms`}>
+          <TermsPicker value={form.terms} onChange={(d) => setForm({ ...form, terms: d })} />
+        </Field>
+        <Field label="Purchaser / Buyer" hint={onOrder && !form.purchaserId ? "Left empty, the order's author" : undefined}>
+          <PersonSelect
+            value={form.purchaserId}
+            onChange={(id) => setForm({ ...form, purchaserId: id })}
+            people={buyers}
+            current={existing?.purchaser ?? null}
+            placeholder={onOrder ? "— the order's author —" : '— none —'}
           />
         </Field>
       </div>
@@ -908,6 +1037,12 @@ export function BillDetail() {
             <dl className="kv">
               <dt>Bill date</dt>
               <dd>{formatDate(row.billDate)}</dd>
+              <dt>Date of delivery</dt>
+              <dd>{row.deliveryDate ? formatDate(row.deliveryDate) : '—'}</dd>
+              <dt>Payment terms</dt>
+              <dd>{row.termsLabel}</dd>
+              <dt>Purchaser / Buyer</dt>
+              <dd>{row.purchaser?.name ?? '—'}</dd>
               <dt>Due</dt>
               <dd>
                 {formatDate(row.dueDate)}

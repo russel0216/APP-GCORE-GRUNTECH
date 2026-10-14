@@ -8,6 +8,7 @@ import { addDays, dayKey, daysBetween } from '../shared/day';
 import { statusLabel, formatShortDate } from '../shared/pdf';
 import { bucketFor, bucketLabels, claimPayable, financeSettings } from '../shared/finance';
 import { termsLabel } from '../shared/receivables';
+import { billTermsLabel } from '../shared/payables';
 import { Series, byValue, cents, dayOf, mountReports, monthsOf, num, table, tally, type Col, type Report, type ReportContext } from '../shared/reportKit';
 
 /**
@@ -330,6 +331,106 @@ async function collections(range: Range, ctx: ReportContext): Promise<Report> {
 
 // ── Accounts Payable ─────────────────────────────────────────────────────────
 
+/**
+ * The AP Report Generator of the owner's sample: supplier bills falling due
+ * in the range (by due date), narrowed by purchaser and supplier — what is
+ * owed, what is paid, by month of the due date, by supplier, by purchaser and
+ * by terms, then the bills one by one. Drafts and cancelled bills are left
+ * out; a bill pending approval is listed but owes nothing yet.
+ */
+async function payables(range: Range, ctx: ReportContext): Promise<Report> {
+  const q = ctx.query;
+  const where: Prisma.SupplierBillWhereInput = {
+    status: { in: ['PENDING_APPROVAL', 'APPROVED', 'PARTIALLY_PAID', 'PAID'] },
+    dueDate: { gte: range.from, lte: range.to },
+  };
+  const words: string[] = [];
+  if (q.purchaserId) {
+    where.purchaserId = q.purchaserId === 'none' ? null : q.purchaserId;
+    words.push(
+      q.purchaserId === 'none'
+        ? 'no purchaser'
+        : `bought by ${(await prisma.user.findUnique({ where: { id: q.purchaserId }, select: { name: true } }))?.name ?? 'someone not on file'}`,
+    );
+  }
+  if (q.supplierId) {
+    where.supplierId = q.supplierId;
+    words.push((await prisma.supplier.findUnique({ where: { id: q.supplierId }, select: { name: true } }))?.name ?? 'a supplier not on file');
+  }
+  const today = dayKey(new Date());
+  const rows = await prisma.supplierBill.findMany({
+    where,
+    select: {
+      number: true,
+      status: true,
+      deliveryDate: true,
+      billDate: true,
+      dueDate: true,
+      termsDays: true,
+      terms: true,
+      netPayable: true,
+      amountPaid: true,
+      supplier: { select: { name: true } },
+      purchaser: { select: { name: true } },
+    },
+    orderBy: { dueDate: 'asc' },
+  });
+  type Row = (typeof rows)[number];
+  const isOwed = (r: Row) => r.status === 'APPROVED' || r.status === 'PARTIALLY_PAID';
+  const left = (r: Row) => (isOwed(r) ? cents(num(r.netPayable) - num(r.amountPaid)) : 0);
+  const series = new Series('Falling due by month', [count('Bills'), money('Payable'), money('Paid'), money('Outstanding')], monthsOf(range));
+  for (const r of rows) {
+    series.add(r.dueDate, 0, 1);
+    series.add(r.dueDate, 1, num(r.netPayable));
+    series.add(r.dueDate, 2, num(r.amountPaid));
+    series.add(r.dueDate, 3, left(r));
+  }
+  const figures = (r: Row) => [1, num(r.netPayable), left(r)];
+  const cols = [count('Bills'), money('Payable'), money('Outstanding')];
+  const sum = (fn: (r: Row) => number) => cents(rows.reduce((s, r) => s + fn(r), 0));
+  const overdue = rows.filter((r) => isOwed(r) && left(r) > 0 && r.dueDate < today);
+  const pending = rows.filter((r) => r.status === 'PENDING_APPROVAL');
+  return {
+    kind: 'payables',
+    title: 'Accounts Payable Summary',
+    from: dayOf(range.from),
+    to: dayOf(range.to),
+    filterLine: words.length ? words.join(' · ') : undefined,
+    cards: [
+      { label: 'Falling due', value: sum((r) => num(r.netPayable)), money: true, sub: `${rows.length} bill${rows.length === 1 ? '' : 's'} due in the range` },
+      { label: 'Outstanding', value: sum(left), money: true },
+      { label: 'Paid', value: sum((r) => num(r.amountPaid)), money: true },
+      { label: 'Overdue now', value: cents(overdue.reduce((s, r) => s + left(r), 0)), money: true, sub: `${overdue.length} past due` },
+      { label: 'Pending approval', value: cents(pending.reduce((s, r) => s + num(r.netPayable), 0)), money: true, sub: `${pending.length} not payable yet` },
+    ],
+    series: series.done(),
+    tables: [
+      table('By supplier', [{ label: 'Supplier' }, ...cols], rowsOf(tally(rows, (r) => r.supplier.name, figures), 1)),
+      table('By purchaser', [{ label: 'Purchaser / buyer' }, ...cols], rowsOf(tally(rows, (r) => r.purchaser?.name ?? NOBODY, figures), 1)),
+      table('By terms', [{ label: 'Terms' }, ...cols], rowsOf(tally(rows, (r) => billTermsLabel(r.termsDays, r.terms), figures), 1)),
+      table(
+        'The bills',
+        [{ label: 'Bill' }, { label: 'Supplier' }, { label: 'Delivered' }, { label: 'Terms' }, { label: 'Due' }, { label: 'Purchaser' }, money('Outstanding')],
+        rows
+          .slice(0, 100)
+          .map((r) => [
+            r.number,
+            r.supplier.name,
+            r.deliveryDate ? formatShortDate(r.deliveryDate) : '—',
+            billTermsLabel(r.termsDays, r.terms),
+            formatShortDate(r.dueDate),
+            r.purchaser?.name ?? '—',
+            isOwed(r) ? left(r) : null,
+          ]),
+      ),
+    ],
+    notes: [
+      'Payable is net of the EWT Gruntech withholds. The terms run from the delivery — the due date is the date of delivery plus the terms. A bill pending approval is listed but owes nothing until approved.',
+      ...(rows.length > 100 ? [`The first 100 of ${rows.length} bills are listed one by one; every figure above counts them all.`] : []),
+    ],
+  };
+}
+
 async function payablesAging(range: Range): Promise<Report> {
   const asOf = range.to;
   const settings = await financeSettings();
@@ -452,6 +553,7 @@ const KINDS = {
   aging,
   'collection-forecast': collectionForecast,
   collections,
+  payables,
   'payables-aging': payablesAging,
   payments: paymentsOut,
 };
@@ -466,6 +568,7 @@ mountReports(finReportRoutes, {
     aging: 'gfin.ar.view_all',
     'collection-forecast': 'gfin.ar.view_all',
     collections: 'gfin.ar.view_all',
+    payables: 'gfin.ap.view_all',
     'payables-aging': 'gfin.ap.view_all',
     payments: 'gfin.ap.view_all',
   },

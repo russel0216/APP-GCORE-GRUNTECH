@@ -95,6 +95,7 @@ import {
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
 import { teamShares, TEAM_REF_SELECT } from '../shared/team';
+import { BILL_PAYABLE, DUE_SOON_DAYS, billDueDate, billTermsLabel, dueSoonWhere } from '../shared/payables';
 import {
   TERMS_CHOICES,
   AWAITING_COUNTER_WHERE,
@@ -1564,6 +1565,7 @@ const billInclude = {
   receiving: { select: { id: true, number: true, receivedDate: true } },
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
+  purchaser: { select: { id: true, name: true } },
   lines: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.SupplierBillInclude;
 
@@ -1584,6 +1586,7 @@ function presentBill(row: BillRow) {
     amountPaid: paid,
     outstanding: cents(netPayable - paid),
     daysOverdue: daysBetween(row.dueDate, new Date()),
+    termsLabel: billTermsLabel(row.termsDays, row.terms),
     lines: row.lines.map((l) => ({
       ...l,
       quantity: num(l.quantity),
@@ -1603,18 +1606,39 @@ function billListWhere(q: ListQuery): Prisma.SupplierBillWhereInput {
 
   const status = choice(q.filters.status, BillStatus, 'Status');
   if (status) where.status = status;
-  if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
-  if (q.filters.jobId) where.jobId = q.filters.jobId;
-  if (q.filters.outstanding === 'true') where.status = { in: ['APPROVED', 'PARTIALLY_PAID'] };
-  if (q.filters.overdue === 'true') {
-    where.status = { in: ['APPROVED', 'PARTIALLY_PAID'] };
-    where.dueDate = { lt: dayKey(new Date()) };
+  const f = q.filters;
+  if (f.supplierId) where.supplierId = f.supplierId;
+  if (f.jobId) where.jobId = f.jobId;
+  if (f.purchaserId) where.purchaserId = f.purchaserId === 'none' ? null : f.purchaserId;
+  const and: Prisma.SupplierBillWhereInput[] = [];
+  if (f.outstanding === 'true') and.push({ status: { in: [...BILL_PAYABLE] } });
+  if (f.overdue === 'true') and.push({ status: { in: [...BILL_PAYABLE] }, dueDate: { lt: dayKey(new Date()) } });
+  if (f.dueSoon === 'true') and.push(dueSoonWhere());
+  if (f.pending === 'true') and.push({ status: { in: ['DRAFT', 'PENDING_APPROVAL'] } });
+  if (f.dueFrom || f.dueTo) {
+    and.push({ dueDate: { ...(f.dueFrom ? { gte: asDate(f.dueFrom, 'Due from') } : {}), ...(f.dueTo ? { lte: asDate(f.dueTo, 'Due to') } : {}) } });
   }
+  if (f.deliveredFrom || f.deliveredTo) {
+    and.push({
+      deliveryDate: {
+        ...(f.deliveredFrom ? { gte: asDate(f.deliveredFrom, 'Delivered from') } : {}),
+        ...(f.deliveredTo ? { lte: asDate(f.deliveredTo, 'Delivered to') } : {}),
+      },
+    });
+  }
+  if (f.termsDays) {
+    const days = Number(f.termsDays);
+    if (!Number.isInteger(days) || days < 0) throw badRequest('Terms must be a whole number of days');
+    and.push({ termsDays: days });
+  }
+  if (and.length) where.AND = and;
   if (q.search) {
     where.OR = [
       { number: { contains: q.search, mode: 'insensitive' } },
       { supplierInvoiceNo: { contains: q.search, mode: 'insensitive' } },
       { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
+      { purchaser: { name: { contains: q.search, mode: 'insensitive' } } },
+      { order: { number: { contains: q.search, mode: 'insensitive' } } },
     ];
   }
   const ids = idsFilter(q.filters.ids);
@@ -1622,7 +1646,56 @@ function billListWhere(q: ListQuery): Prisma.SupplierBillWhereInput {
   return where;
 }
 
-const BILL_SORTS = ['number', 'billDate', 'dueDate', 'createdAt'];
+const BILL_SORTS = ['number', 'billDate', 'dueDate', 'deliveryDate', 'createdAt'];
+
+/**
+ * The A/P list's cards, under the list's own query (the owner's sample): the
+ * sum of all payables (approved and partly paid, what is left of each), the
+ * bills pending approval, what falls due in the next seven days, and what is
+ * overdue — each a filter of the same list, so a card equals the list it opens.
+ */
+async function billListSummary(where: Prisma.SupplierBillWhereInput) {
+  const today = dayKey(new Date());
+  const [owed, pending, soon] = await Promise.all([
+    prisma.supplierBill.findMany({
+      where: { AND: [where, { status: { in: [...BILL_PAYABLE] } }] },
+      select: { dueDate: true, netPayable: true, amountPaid: true },
+    }),
+    prisma.supplierBill.aggregate({
+      where: { AND: [where, { status: { in: ['DRAFT', 'PENDING_APPROVAL'] } }] },
+      _count: { _all: true },
+      _sum: { netPayable: true },
+    }),
+    prisma.supplierBill.findMany({ where: { AND: [where, dueSoonWhere(today)] }, select: { netPayable: true, amountPaid: true } }),
+  ]);
+  const left = (r: { netPayable: Prisma.Decimal; amountPaid: Prisma.Decimal }) => Math.round((num(r.netPayable) - num(r.amountPaid)) * 100);
+  let payable = 0;
+  let count = 0;
+  let overdue = 0;
+  let overdueCount = 0;
+  for (const r of owed) {
+    const c = left(r);
+    if (c <= 0) continue;
+    payable += c;
+    count++;
+    if (r.dueDate < today) {
+      overdue += c;
+      overdueCount++;
+    }
+  }
+  const dueSoon = soon.map(left).filter((c) => c > 0);
+  return {
+    payable: payable / 100,
+    payableCount: count,
+    pendingCount: pending._count._all,
+    pending: num(pending._sum.netPayable),
+    dueSoon: dueSoon.reduce((s, c) => s + c, 0) / 100,
+    dueSoonCount: dueSoon.length,
+    dueSoonDays: DUE_SOON_DAYS,
+    overdue: overdue / 100,
+    overdueCount,
+  };
+}
 
 billRoutes.get(
   '/',
@@ -1642,7 +1715,7 @@ billRoutes.get(
       prisma.supplierBill.count({ where }),
     ]);
 
-    res.json(listResult(rows.map(presentBill), total, q));
+    res.json({ ...listResult(rows.map(presentBill), total, q), summary: await billListSummary(where) });
   }),
 );
 
@@ -1665,13 +1738,14 @@ billRoutes.get(
     const countedWhere: Prisma.SupplierBillWhereInput = { AND: [where, { status: { not: 'CANCELLED' } }] };
     // What is payable: an approved bill, paid in part or not at all.
     const owedWhere: Prisma.SupplierBillWhereInput = { AND: [where, { status: { in: BILL_OWED } }] };
-    const [rows, count, sums, owed, byStatus, currency, supplier, project] = await Promise.all([
+    const [rows, count, sums, owed, byStatus, currency, supplier, project, purchaser] = await Promise.all([
       prisma.supplierBill.findMany({
         where,
         include: {
           supplier: { select: { name: true } },
           job: { select: { number: true, name: true } },
           receiving: { select: { number: true } },
+          purchaser: { select: { name: true } },
         },
         orderBy: orderBy(q, BILL_SORTS, { billDate: 'desc' }),
         take: LIST_CAP,
@@ -1683,6 +1757,11 @@ billRoutes.get(
       companyCurrency(),
       recordNamed('supplier', q.filters.supplierId),
       recordNamed('project', q.filters.jobId),
+      q.filters.purchaserId === 'none'
+        ? 'no purchaser'
+        : q.filters.purchaserId
+          ? prisma.user.findUnique({ where: { id: q.filters.purchaserId }, select: { name: true } }).then((u) => `bought by ${u?.name ?? 'someone not on file'}`)
+          : undefined,
     ]);
 
     const f = q.filters;
@@ -1690,8 +1769,14 @@ billRoutes.get(
     const reference = listReference(count, rows.length, ['supplier bill', 'supplier bills'], [
       q.search && `search "${q.search}"`,
       f.overdue === 'true' ? 'overdue' : f.outstanding === 'true' ? 'outstanding' : status && `status ${statusLabel(status)}`,
+      f.dueSoon === 'true' && `due in ${DUE_SOON_DAYS} days`,
+      f.pending === 'true' && 'pending approval',
+      (f.dueFrom || f.dueTo) && `due ${f.dueFrom ?? '…'} to ${f.dueTo ?? '…'}`,
+      (f.deliveredFrom || f.deliveredTo) && `delivered ${f.deliveredFrom ?? '…'} to ${f.deliveredTo ?? '…'}`,
+      f.termsDays && billTermsLabel(Number(f.termsDays)),
       supplier,
       project,
+      purchaser,
       f.ids && 'the rows selected',
     ]);
     const today = dayKey(new Date());
@@ -1704,8 +1789,8 @@ billRoutes.get(
     const sections: PdfSection[] = [
       {
         kind: 'table',
-        head: ['Number', 'Supplier and project', 'Dated', 'Due', `Billed (${currency})`, `Payable (${currency})`, `Outstanding (${currency})`, 'Status'],
-        align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'left'],
+        head: ['Number', 'Supplier and project', 'Delivered', 'Terms', 'Due', `Payable (${currency})`, `Outstanding (${currency})`, 'Purchaser', 'Status'],
+        align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left', 'left'],
         rows: rows.map((r) => {
           const inSum = r.status !== 'CANCELLED';
           const outstanding = cents(num(r.netPayable) - num(r.amountPaid));
@@ -1722,12 +1807,13 @@ billRoutes.get(
                 .filter(Boolean)
                 .join(' · '),
             },
-            formatShortDate(r.billDate),
+            r.deliveryDate ? formatShortDate(r.deliveryDate) : { title: '—', body: `billed ${formatShortDate(r.billDate)}` },
+            billTermsLabel(r.termsDays, r.terms),
             late > 0 ? { title: formatShortDate(r.dueDate), body: `${late} day${late === 1 ? '' : 's'} late` } : formatShortDate(r.dueDate),
-            bracketed(formatAmount(num(r.total)), inSum),
             bracketed(formatAmount(num(r.netPayable)), inSum),
             // Nothing is payable on a bill until it is approved.
             r.status === 'DRAFT' || r.status === 'PENDING_APPROVAL' ? '—' : bracketed(formatAmount(outstanding), inSum),
+            r.purchaser?.name ?? '—',
             statusLabel(r.status),
           ];
         }),
@@ -1802,6 +1888,11 @@ const billSchema = z.object({
   billDate: z.string().optional(),
   dueDate: z.string().optional(),
   terms: z.string().optional().nullable(),
+  /** When the goods or the work were delivered — the receiving's date where one is matched. */
+  deliveryDate: z.string().optional().nullable(),
+  termsDays: z.number().int().min(0).max(365).optional(),
+  /** The purchaser / buyer — the order's author when the bill is against one. */
+  purchaserId: z.string().optional().nullable(),
   vatRate: z.number().min(0).max(1).optional(),
   vatInclusive: z.boolean().default(false),
   ewtRate: z.number().min(0).max(1).default(0),
@@ -1881,6 +1972,8 @@ async function billLinks(input: {
 
   let jobId = input.jobId;
   let receivingId = input.receivingId;
+  let buyerId: string | null = null;
+  let receivedDate: Date | null = null;
   if (input.orderId) {
     const order = await prisma.purchaseOrder.findUnique({
       where: { id: input.orderId },
@@ -1892,6 +1985,7 @@ async function billLinks(input: {
       throw badRequest('That order belongs to a different supplier');
     }
     if (!jobId) jobId = order.jobId;
+    buyerId = order.createdById;
     // If the goods have been received and nobody said which receiving, take
     // the latest: what matters is that a receiving EXISTS, because that is
     // what stops the bill posting cost a second time.
@@ -1900,9 +1994,11 @@ async function billLinks(input: {
   if (receivingId) {
     const receiving = await prisma.receiving.findUnique({
       where: { id: receivingId },
-      select: { orderId: true, status: true, number: true, order: { select: { supplierId: true } } },
+      select: { orderId: true, status: true, number: true, receivedDate: true, order: { select: { supplierId: true, createdById: true } } },
     });
     if (!receiving) throw notFound('Receiving not found');
+    receivedDate = receiving.receivedDate;
+    if (!buyerId && receiving.order) buyerId = receiving.order.createdById;
     // A bill matched to a report that posted nothing would post no cost
     // either — the cost the receiving was to carry would be charged nowhere.
     if (receiving.status !== 'RECEIVED') throw badRequest(`${receiving.number} is ${receiving.status.toLowerCase().replace(/_/g, ' ')} — a bill is matched to goods received`);
@@ -1915,7 +2011,14 @@ async function billLinks(input: {
       throw badRequest('Those goods came from a different supplier');
     }
   }
-  return { orderId: input.orderId, receivingId, jobId };
+  return { links: { orderId: input.orderId, receivingId, jobId }, buyerId, receivedDate };
+}
+
+/** A purchaser named on a bill must be an active login. */
+async function checkPurchaser(id: string | null | undefined): Promise<void> {
+  if (!id) return;
+  const user = await prisma.user.findUnique({ where: { id }, select: { isActive: true } });
+  if (!user?.isActive) throw badRequest('Purchaser: no such active login');
 }
 
 billRoutes.post(
@@ -1930,17 +2033,19 @@ billRoutes.post(
     const money = billMoney(body, body.vatRate ?? rates.vatRate);
 
     const billDate = body.billDate ? asDate(body.billDate, 'Bill date') : dayKey(new Date());
-    const dueDate = body.dueDate
-      ? asDate(body.dueDate, 'Due date')
-      : addDays(billDate, settings.defaultTermsDays);
-    if (dueDate < billDate) throw badRequest('The due date is before the bill date');
-
-    const links = await billLinks({
+    const { links, buyerId, receivedDate } = await billLinks({
       supplierId: body.supplierId,
       orderId: body.orderId || null,
       receivingId: body.receivingId || null,
       jobId: body.jobId || null,
     });
+    // The receiving's date, else typed; the terms run from it.
+    const deliveryDate = body.deliveryDate ? asDate(body.deliveryDate, 'Date of delivery') : receivedDate;
+    const termsDays = body.termsDays ?? parseTermsDays(body.terms) ?? settings.defaultTermsDays;
+    const dueDate = body.dueDate ? asDate(body.dueDate, 'Due date') : billDueDate(billDate, deliveryDate, termsDays);
+    if (dueDate < (deliveryDate ?? billDate)) throw badRequest(deliveryDate ? 'The due date is before the delivery' : 'The due date is before the bill date');
+    const purchaserId = body.purchaserId || buyerId;
+    await checkPurchaser(purchaserId);
 
     const bill = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('supplier_bill', tx);
@@ -1953,7 +2058,10 @@ billRoutes.post(
           supplierInvoiceNo: body.supplierInvoiceNo || null,
           billDate,
           dueDate,
-          terms: body.terms ?? `${settings.defaultTermsDays} days`,
+          deliveryDate,
+          termsDays,
+          purchaserId: purchaserId ?? null,
+          terms: body.terms ?? `${termsDays} days`,
           ...money.figures,
           notes: body.notes || null,
           createdById: me.id,
@@ -2038,15 +2146,27 @@ billRoutes.put(
       body.vatRate ?? num(existing.vatRate),
     );
     const billDate = body.billDate ? asDate(body.billDate, 'Bill date') : existing.billDate;
-    const dueDate = body.dueDate ? asDate(body.dueDate, 'Due date') : existing.dueDate;
-    if (dueDate < billDate) throw badRequest('The due date is before the bill date');
-
-    const links = await billLinks({
+    const { links, buyerId, receivedDate } = await billLinks({
       supplierId,
       orderId: keep(body.orderId, existing.orderId),
       receivingId: keep(body.receivingId, existing.receivingId),
       jobId: keep(body.jobId, existing.jobId),
     });
+    const deliveryDate =
+      body.deliveryDate === undefined
+        ? existing.deliveryDate ?? receivedDate
+        : body.deliveryDate
+          ? asDate(body.deliveryDate, 'Date of delivery')
+          : receivedDate;
+    const termsDays = body.termsDays ?? existing.termsDays ?? parseTermsDays(existing.terms) ?? 0;
+    const dueDate = body.dueDate
+      ? asDate(body.dueDate, 'Due date')
+      : body.termsDays !== undefined || body.deliveryDate !== undefined || body.billDate
+        ? billDueDate(billDate, deliveryDate, termsDays)
+        : existing.dueDate;
+    if (dueDate < (deliveryDate ?? billDate)) throw badRequest(deliveryDate ? 'The due date is before the delivery' : 'The due date is before the bill date');
+    const purchaserId = body.purchaserId === undefined ? existing.purchaserId ?? buyerId : body.purchaserId || buyerId;
+    await checkPurchaser(purchaserId);
 
     const updated = await prisma.$transaction(async (tx) => {
       const claimed = await tx.supplierBill.updateMany({
@@ -2058,7 +2178,10 @@ billRoutes.put(
           supplierInvoiceNo: keep(body.supplierInvoiceNo, existing.supplierInvoiceNo),
           billDate,
           dueDate,
-          terms: keep(body.terms, existing.terms),
+          deliveryDate,
+          termsDays,
+          purchaserId: purchaserId ?? null,
+          terms: body.termsDays !== undefined ? `${termsDays} days` : keep(body.terms, existing.terms),
           ...money.figures,
           notes: keep(body.notes, existing.notes),
         },
@@ -3562,7 +3685,8 @@ paymentRoutes.get(
  */
 async function paymentListSummary(where: Prisma.PaymentWhereInput) {
   const collectionWhere: Prisma.PaymentWhereInput = { AND: [where, { kind: 'RECEIPT', customerId: { not: null } }] };
-  const [collected, uncleared, out, allocations] = await Promise.all([
+  const chequeWhere: Prisma.PaymentWhereInput = { AND: [collectionWhere, { method: 'CHECK' }] };
+  const [collected, uncleared, out, allocations, cheques, chequesCleared] = await Promise.all([
     prisma.payment.aggregate({ where: collectionWhere, _sum: { amount: true }, _count: { _all: true } }),
     prisma.payment.aggregate({ where: { AND: [collectionWhere, { clearedAt: null }] }, _sum: { amount: true }, _count: { _all: true } }),
     prisma.payment.aggregate({ where: { AND: [where, { kind: 'DISBURSEMENT' }] }, _sum: { amount: true }, _count: { _all: true } }),
@@ -3570,8 +3694,15 @@ async function paymentListSummary(where: Prisma.PaymentWhereInput) {
       where: { payment: collectionWhere, invoiceId: { not: null } },
       select: { amount: true, invoice: { select: { team: TEAM_REF_SELECT } } },
     }),
+    prisma.payment.aggregate({ where: chequeWhere, _sum: { amount: true }, _count: { _all: true } }),
+    prisma.payment.aggregate({ where: { AND: [chequeWhere, { clearedAt: { not: null } }] }, _sum: { amount: true }, _count: { _all: true } }),
   ]);
+  const chequeTotal = num(cheques._sum.amount);
   return {
+    // Cheques received from customers, and the share of their value the bank has cleared.
+    cheques: cheques._count._all,
+    chequesCleared: chequesCleared._count._all,
+    chequesClearedPct: chequeTotal > 0 ? Math.round((num(chequesCleared._sum.amount) / chequeTotal) * 1000) / 10 : null,
     collected: num(collected._sum.amount),
     collections: collected._count._all,
     uncleared: num(uncleared._sum.amount),

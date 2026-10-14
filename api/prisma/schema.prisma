@@ -125,6 +125,7 @@ model User {
   invoicesCreated  Invoice[]      @relation("InvoiceCreator")
   invoicesSold     Invoice[]      @relation("InvoiceSalesperson")
   billsCreated     SupplierBill[] @relation("BillCreator")
+  billsPurchased   SupplierBill[] @relation("BillPurchaser")
   expenseClaims    ExpenseClaim[] @relation("Claimant")
   paymentsRecorded Payment[]      @relation("PaymentRecorder")
   reimbursements   Payment[]      @relation("Payee")
@@ -4129,6 +4130,16 @@ model SupplierBill {
   dueDate           DateTime @db.Date
   terms             String?
 
+  /// When the goods or the work were delivered (2026-10-15, the owner's A/P
+  /// sample): the receiving's date where one is matched, else typed. The
+  /// terms run from it — due = delivery (else the bill date) + termsDays.
+  deliveryDate DateTime? @db.Date
+  /// Net days — "30 Days". `terms` stays for what printed before.
+  termsDays    Int?
+  /// The purchaser / buyer: the purchase order's author, else picked.
+  purchaserId  String?
+  purchaser    User?     @relation("BillPurchaser", fields: [purchaserId], references: [id], onDelete: SetNull)
+
   subtotal  Decimal @db.Decimal(18, 2)
   vatRate   Decimal @default(0.12) @db.Decimal(6, 4)
   vatAmount Decimal @db.Decimal(18, 2)
@@ -4164,6 +4175,7 @@ model SupplierBill {
   @@index([supplierId, status])
   @@index([dueDate])
   @@index([jobId])
+  @@index([purchaserId])
 }
 
 model SupplierBillLine {

@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,236 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,243 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 171, chain 329, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 347, aftermarket 259, cad 101,
+115, evaluations 152, academy 120, finance 354, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -5032,6 +5032,52 @@ salesperson, team, customer and terms.
   receivables kinds, A/P's for the two payables kinds (`rights` in
   `mountReports`). Report buttons: A/R → receivables, Payments →
   collections, A/P → payables aging.
+
+## Accounts Payable (2026-10-15)
+
+The owner's `Financial_Management_UI_Specification_Money_In-Money_out.pdf`,
+module 3, on the supplier bill G-FIN already had.
+
+- **A bill carries its DATE OF DELIVERY, its TERMS and its PURCHASER /
+  BUYER** (`SupplierBill.deliveryDate` a DATE, `termsDays`, `purchaserId`
+  → User "BillPurchaser", SetNull; `terms` stays for what printed before).
+  `shared/payables.ts` is the rule: **due = delivery (else the bill date) +
+  terms** (`billDueDate`, the sample's Oct 2 + 30 days = Nov 1), printed
+  "30 Days" (`billTermsLabel`). The delivery is the matched receiving's
+  date unless typed; the purchaser is the purchase order's author unless
+  picked (`billLinks()` returns both; an unknown or inactive login is a
+  400). A due date before the delivery (else the bill date) is refused.
+  `fillBillTerms()` (the seed, every deploy, only where none is set,
+  claimed on null) gives older bills the receiving's date, the terms their
+  own dates say and the order's author — never moving a stored due date.
+- **The list is the sample's**: Bill No. (their invoice under it),
+  Company / Vendor, Amount (net payable; what is left or the EWT withheld
+  under it), Date of delivery, Payment terms (a chip), Due date (days
+  late), Purchaser / Buyer, Status; Bill date, Billed and Job cost under
+  Columns; tick boxes. Filters status, balance, overdue, **due soon**
+  (`dueSoonWhere`, the next `DUE_SOON_DAYS` = 7, both ends), **pending**
+  (draft or pending approval), purchaser (`none` too), supplier
+  (`SupplierPicker`'s lookup), terms, due-date and delivery ranges.
+  **The cards** (`billListSummary()`, the list's own query): Sum of all
+  payables (approved and partly paid, what is left), Pending bills, Due in
+  7 days, Overdue — each linking to the filter that lists it
+  (verify-finance asserts the counts equal). The printed list prints
+  Delivered, Terms and Purchaser. The bill page's "Where it stands" names
+  all three. The form (`NewBillModal`) asks Date of delivery, the terms as
+  chips (`TermsPicker`) and the purchaser (`PersonSelect` over
+  `gchain.purchase_orders.create`, "— the order's author —" on a bill
+  against an order), the due date said under the terms.
+- **The AP Report Generator** is the `payables` kind of G-FIN › Reports
+  (the A/P list's Report button; Payables aging in its ⋯): bills falling
+  DUE in the range (pending approval and later, never a draft or
+  cancelled), by month of the due date, by supplier, by purchaser, by
+  terms and one by one (100 at most, said), narrowed by `?purchaserId=` and
+  `?supplierId=`, A/P's right needed. Its period is `mode: 'span'` on
+  `ReportPage` — the past and the ahead presets, "This & next month" first.
+- **A/R's ⋯ opens the Forecast collection and the Aging report**; the
+  Payments register's **Cleared cheques** card is the share, by value, of
+  customer cheques (`method` CHECK) the bank has cleared
+  (`chequesClearedPct`, null with none), linking to `?method=CHECK`.
 
 ## Spreadsheet attachments (2026-10-05)
 
