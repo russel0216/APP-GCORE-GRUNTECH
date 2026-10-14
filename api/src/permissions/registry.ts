@@ -197,6 +197,9 @@ export const REGISTRY: ModuleDef[] = [
       // finance's window on every one of them — awaiting release, out with a
       // team, overdue, done.
       { key: 'budget_requests', group: 'Money out', label: 'Budget Requests', path: '/g-fin/budget-requests', actions: READ, phase: 7, note: 'Every project’s budget requests: approved ones to release, released ones awaiting liquidation. Releasing is the A/P create right.' },
+      // The owner's module 5 (2026-10-15): the requests whose cash went out —
+      // released, spent, returned — with the actual entry and the refund.
+      { key: 'budget_liquidations', group: 'Money out', label: 'Budget Liquidations', path: '/g-fin/budget-liquidations', actions: READ, phase: 7 },
       // Every movement of money, in or out. Recording one is gated by the A/R
       // or A/P create permission depending on direction — seeing the register
       // is its own, lesser right.

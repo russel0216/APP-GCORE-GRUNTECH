@@ -182,3 +182,31 @@ export async function fillQuotationTeams(): Promise<number> {
   }
   return filled;
 }
+
+/**
+ * A person's TEAM, else their DEPARTMENT (2026-10-15, the owner's call for
+ * the money-out registers: budget requests, reimbursements and cash advances
+ * name a Team column, and someone outside the five selling teams — finance,
+ * HR, the warehouse — shows their department there instead). Select it on a
+ * User relation, read it with `teamOrDepartment()`.
+ */
+export const TEAM_OR_DEPT_SELECT = {
+  select: {
+    department: { select: { name: true } },
+    employee: { select: { industry: { select: { id: true, code: true, name: true } }, department: { select: { name: true } } } },
+  },
+} as const;
+
+export function teamOrDepartment(
+  user: { department: { name: string } | null; employee: { industry: { id: string; code: string; name: string } | null; department: { name: string } | null } | null } | null | undefined,
+): { label: string; title: string; teamId: string | null } | null {
+  const team = user?.employee?.industry;
+  if (team) return { label: team.code, title: team.name, teamId: team.id };
+  const dept = user?.employee?.department?.name ?? user?.department?.name;
+  return dept ? { label: dept, title: dept, teamId: null } : null;
+}
+
+/** "This person is on that team" as a where-clause on a User relation; `none` is nobody's team. */
+export function userTeamWhere(teamId: string): Prisma.UserWhereInput {
+  return teamId === 'none' ? { OR: [{ employee: null }, { employee: { industryId: null } }] } : { employee: { industryId: teamId } };
+}

@@ -42,7 +42,7 @@ import {
   saveFinanceSettings,
   type AgedRow,
 } from '../src/shared/finance';
-import { manilaDayKey } from '../src/shared/day';
+import { manilaDayKey, manilaDayStart, manilaDayEnd } from '../src/shared/day';
 import { statusLabel } from '../src/shared/pdf';
 // Side-effect imports: register the bill, expense and cash-advance approval
 // subscribers, and the procurement ones the receiving path depends on. The
@@ -3757,6 +3757,76 @@ async function main() {
     );
     const apNoRight = await as(await makeUser('ZZ AP Reports Only', 'apreports@verifyf.local', ['zzfin_reports']))('GET', '/fin-reports/payables');
     check('the AP report needs A/P’s right beside the Reports right', apNoRight.status === 403, String(apNoRight.status));
+
+    // ══ Budget requests and liquidations per the owner's modules 4 and 5 ════
+    console.log('\nBudget requests and liquidations — the team column, the cards, the reports');
+    const [brAll, brPending, brApproved, brReleased, brProjects] = await Promise.all([
+      fin('GET', '/budget-requests?pageSize=200'),
+      fin('GET', '/budget-requests?pageSize=1&pending=true'),
+      fin('GET', '/budget-requests?pageSize=1&approved=true'),
+      fin('GET', '/budget-requests?pageSize=200&released=true'),
+      eng('GET', '/budget-requests/projects'),
+    ]);
+    const brSum = brAll.body.summary ?? {};
+    check(
+      'the register’s cards equal the lists they open: pending approval and approved funds',
+      brAll.status === 200 && brSum.pendingCount === brPending.body.total && brSum.approvedCount === brApproved.body.total,
+      `${JSON.stringify(brSum).slice(0, 200)} vs ${brPending.body.total} ${brApproved.body.total}`,
+    );
+    const engRow = (brAll.body.rows ?? []).find((r: { requestedBy: { id: string } }) => r.requestedBy.id === engineer.id);
+    const engUnit = await prisma.user.findUnique({
+      where: { id: engineer.id },
+      select: { department: { select: { name: true } }, employee: { select: { industry: { select: { code: true } }, department: { select: { name: true } } } } },
+    });
+    const expectUnit = engUnit?.employee?.industry?.code ?? engUnit?.employee?.department?.name ?? engUnit?.department?.name ?? null;
+    check(
+      'each request names its requester’s team, else their department, and never the person’s whole record',
+      !!engRow && (engRow.team?.label ?? null) === expectUnit && !('employee' in engRow.requestedBy),
+      JSON.stringify(engRow?.team) + ' vs ' + expectUnit,
+    );
+    check(
+      'the liquidation register lists only requests whose cash went out',
+      brReleased.status === 200 && (brReleased.body.rows ?? []).every((r: { status: string }) => ['RELEASED', 'REFUND_DUE', 'LIQUIDATED'].includes(r.status)),
+      JSON.stringify((brReleased.body.rows ?? []).map((r: { status: string }) => r.status)),
+    );
+    check(
+      'G-FIN’s "+ Add budget request" picks from the running projects, behind the create right',
+      brProjects.status === 200 && (brProjects.body as unknown as { id: string }[]).some?.((j) => j.id === job.id),
+      `${brProjects.status}`,
+    );
+    const brFrom = ymd(addDays(dayKey(new Date()), -90));
+    const brTo = ymd(addDays(dayKey(new Date()), 90));
+    const [brRep, liqRep] = await Promise.all([
+      fin('GET', `/fin-reports/budget-requests?from=${brFrom}&to=${brTo}&requestedById=${engineer.id}`),
+      fin('GET', `/fin-reports/liquidations?from=${brFrom}&to=${brTo}`),
+    ]);
+    const brDb = await prisma.budgetRequest.aggregate({
+      where: {
+        requestedById: engineer.id,
+        status: { notIn: ['DRAFT', 'REJECTED', 'CANCELLED'] },
+        OR: [
+          { neededBy: { gte: new Date(`${brFrom}T00:00:00Z`), lte: new Date(`${brTo}T23:59:59.999Z`) } },
+          { neededBy: null, createdAt: { gte: manilaDayStart(brFrom), lte: manilaDayEnd(brTo) } },
+        ],
+      },
+      _sum: { amount: true },
+    });
+    const brCard = (brRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === 'Sum of all budget requests')?.value;
+    check(
+      'the budget request report sums the requester’s requests needed in the range, and says whose',
+      brRep.status === 200 && money(brCard ?? -1, Number(brDb._sum.amount ?? 0)) && String(brRep.body.filterLine).includes(engineer.name),
+      `${brCard} vs ${brDb._sum.amount} · ${brRep.body.filterLine}`,
+    );
+    const liqDb = await prisma.budgetRequest.aggregate({
+      where: { status: { in: ['RELEASED', 'REFUND_DUE', 'LIQUIDATED'] }, releasedAt: { gte: new Date(`${brFrom}T00:00:00Z`), lte: new Date(`${brTo}T00:00:00Z`) } },
+      _sum: { amountReleased: true, amountRefunded: true },
+    });
+    const liqCard = (label: string) => (liqRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === label)?.value ?? -1;
+    check(
+      'the liquidation report’s released and returned are the requests released in the range',
+      liqRep.status === 200 && money(liqCard('Released'), Number(liqDb._sum.amountReleased ?? 0)) && money(liqCard('Total excess returned'), Number(liqDb._sum.amountRefunded ?? 0)),
+      `${liqCard('Released')} / ${liqCard('Total excess returned')} vs ${JSON.stringify(liqDb._sum)}`,
+    );
   }
 
   await cleanup();

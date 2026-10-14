@@ -342,6 +342,10 @@ export function NewClaimModal({
       .catch(() => {});
   }, [liquidating]);
 
+  // Receipts and supporting papers, picked here and filed with the save — so
+  // the checker sees them from the first step (the owner's call: "at the
+  // bottom can have an attachment for early approval or checking").
+  const [files, setFiles] = useState<File[]>([]);
   const total = lines.reduce((s, l) => s + (l.amount || 0), 0);
   const missingReceipts = lines.filter((l) => l.description.trim() && !l.receiptNo.trim()).length;
   const difference = advance ? Math.round((total - advance.amountReleased) * 100) / 100 : 0;
@@ -370,6 +374,15 @@ export function NewClaimModal({
       const saved = existing
         ? await api.put<{ id: string }>(`/expense-claims/${existing.id}`, body)
         : await api.post<{ id: string }>('/expense-claims', body);
+      if (files.length) {
+        const form = new FormData();
+        for (const f of files) form.append('files', f);
+        try {
+          await api.post(`/attachments/expense_claim/${saved.id}`, form);
+        } catch {
+          toast('error', 'Saved, but the attachments could not be filed — add them on the claim');
+        }
+      }
       if (submitNow) await api.post(`/expense-claims/${saved.id}/submit`);
       toast('ok', submitNow ? 'Submitted for approval' : existing ? 'Saved' : 'Saved as a draft');
       onCreated(saved.id);
@@ -585,6 +598,36 @@ export function NewClaimModal({
               ? `${formatMoney(-difference)} of the ${cashWord} was not spent — once approved, return it to finance.`
               : `The receipts match the ${cashWord} exactly — nothing will be owed either way.`}
         </p>
+      )}
+
+      <h4 className="fin-section-title">Attachments</h4>
+      <p className="faint fin-flush">
+        The receipts and anything that supports them — photos or scans, PDF or images. They go with the{' '}
+        {liquidating ? 'liquidation' : 'claim'}, so whoever checks it sees them from the first step.
+        {existing ? ' Files already on it stay; add more here or on its page.' : ''}
+      </p>
+      <input
+        type="file"
+        multiple
+        accept="image/*,application/pdf"
+        aria-label="Attach receipts"
+        onChange={(e) => {
+          const picked = Array.from(e.target.files ?? []);
+          setFiles((cur) => [...cur, ...picked]);
+          e.target.value = '';
+        }}
+      />
+      {files.length > 0 && (
+        <ul className="fin-files">
+          {files.map((f, i) => (
+            <li key={`${f.name}-${i}`}>
+              <span>{f.name}</span>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setFiles(files.filter((_, j) => j !== i))}>
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
 
       {missingReceipts > 0 && (

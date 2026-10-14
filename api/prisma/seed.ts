@@ -467,6 +467,7 @@ const ROLES: RoleSeed[] = [
       ['gfin', 'cash_advances'],
       // Project cash: every project's budget requests, to release and to chase.
       ['gfin', 'budget_requests'],
+      ['gfin', 'budget_liquidations'],
     ],
     only: [
       'insights.dashboard.view_all',

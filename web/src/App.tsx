@@ -87,7 +87,7 @@ import { Receivables, InvoiceDetail, Payments, PaymentDetail } from './pages/fin
 import { Payables, BillDetail } from './pages/finance/Payables';
 import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
 import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
-import { BudgetRequests, BudgetRequestDetail, FinanceBudgetRequests } from './pages/delivery/BudgetRequests';
+import { BudgetRequests, BudgetRequestDetail, FinanceBudgetRequests, FinanceLiquidations } from './pages/delivery/BudgetRequests';
 import {
   FinanceDashboard,
   FinanceReports,
@@ -1246,6 +1246,14 @@ function Routed() {
           element={
             <Guard permission="gfin.budget_requests.view_all">
               <FinanceBudgetRequests />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/budget-liquidations"
+          element={
+            <Guard permission="gfin.budget_liquidations.view_all">
+              <FinanceLiquidations />
             </Guard>
           }
         />

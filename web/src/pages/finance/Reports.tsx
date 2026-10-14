@@ -448,8 +448,21 @@ export const FIN_REPORT_KINDS: readonly ReportKind[] = [
   { key: 'payables', label: 'Accounts payable (by due date)', list: '/g-fin/ap', mode: 'span' },
   { key: 'payables-aging', label: 'Payables aging', list: '/g-fin/ap', mode: 'asOf' },
   { key: 'payments', label: 'Payments out', list: '/g-fin/payments?kind=DISBURSEMENT' },
+  { key: 'budget-requests', label: 'Budget requests (by date needed)', list: '/g-fin/budget-requests' },
+  { key: 'liquidations', label: 'Budget liquidations', list: '/g-fin/budget-liquidations' },
 ];
 const AR_KINDS = ['receivables', 'aging', 'collection-forecast', 'collections'];
+const REQUEST_KINDS = ['budget-requests', 'liquidations'];
+/** The right each kind needs beside Reports' — the API's `rights`. */
+const KIND_RIGHT = (key: string) =>
+  AR_KINDS.includes(key)
+    ? 'gfin.ar.view_all'
+    : key === 'budget-requests'
+      ? 'gfin.budget_requests.view_all'
+      : key === 'liquidations'
+        ? 'gfin.budget_liquidations.view_all'
+        : 'gfin.ap.view_all';
+const REQUEST_STATUSES = ['PENDING_APPROVAL', 'APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED', 'REJECTED', 'CANCELLED'];
 
 /** The supplier named in the URL, as the picker shows it. */
 function ReportSupplier({ id, onChange }: { id: string | null; onChange: (id: string) => void }) {
@@ -502,16 +515,55 @@ export function FinanceReports() {
   const { can } = useAuth();
   const { people } = usePeople('gops.quotations.create');
   const { people: buyers } = usePeople('gchain.purchase_orders.create');
+  const { people: requesters } = usePeople('gops.budget_requests.create');
   const teams = useTeams();
-  const kinds = FIN_REPORT_KINDS.filter((k) => (AR_KINDS.includes(k.key) ? can('gfin.ar.view_all') : can('gfin.ap.view_all')));
+  const kinds = FIN_REPORT_KINDS.filter((k) => can(KIND_RIGHT(k.key)));
   return (
     <ReportPage
       title="Finance Reports"
       endpoint="/fin-reports"
       kinds={kinds.length ? kinds : FIN_REPORT_KINDS}
-      extraKeys={['salespersonId', 'teamId', 'customerId', 'by', 'purchaserId', 'supplierId']}
+      extraKeys={['salespersonId', 'teamId', 'customerId', 'by', 'purchaserId', 'supplierId', 'requestedById', 'status']}
       controls={({ kind, params, set }) =>
-        kind === 'payables' ? (
+        REQUEST_KINDS.includes(kind) ? (
+          <>
+            <span className="rep-label">Narrow to</span>
+            <label className="rep-date">
+              <span className="faint">Requester</span>
+              <PersonSelect
+                value={params.get('requestedById') ?? ''}
+                onChange={(id) => set({ requestedById: id })}
+                people={requesters}
+                placeholder="— all requesters —"
+              />
+            </label>
+            <label className="rep-date">
+              <span className="faint">Team</span>
+              <select value={params.get('teamId') ?? ''} onChange={(e) => set({ teamId: e.target.value })}>
+                <option value="">— every team —</option>
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.code} — {t.name}
+                  </option>
+                ))}
+                <option value="none">No team</option>
+              </select>
+            </label>
+            {kind === 'budget-requests' && (
+              <label className="rep-date">
+                <span className="faint">Status</span>
+                <select value={params.get('status') ?? ''} onChange={(e) => set({ status: e.target.value })}>
+                  <option value="">— all statuses —</option>
+                  {REQUEST_STATUSES.map((st) => (
+                    <option key={st} value={st}>
+                      {humanise(st)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </>
+        ) : kind === 'payables' ? (
           <>
             <span className="rep-label">Narrow to</span>
             <label className="rep-date">

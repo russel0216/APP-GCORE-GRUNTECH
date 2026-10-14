@@ -92,3 +92,19 @@
 .ar-terms input {
   max-width: 7rem;
 }
+
+/* Files picked on a claim or liquidation form, filed with the save. */
+.fin-files {
+  list-style: none;
+  margin: var(--s-2) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s-1);
+}
+.fin-files li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  font-size: var(--fs-sm);
+}

@@ -23,6 +23,7 @@ import { cents, D, num, dayKey, daysBetween } from '../shared/finance';
 import { cashRequestSections, cashRequestSignatories } from './finance';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
 
 /**
  * BUDGET REQUESTS — project cash (model §5.2, 2026-10-07, the owner's call).
@@ -50,7 +51,7 @@ budgetRequestRoutes.use(authenticate);
 const requestInclude = {
   job: { select: { id: true, number: true, name: true, projectManager: { select: { id: true, name: true } } } },
   costCategory: { select: { id: true, name: true } },
-  requestedBy: { select: { id: true, name: true, email: true, position: true } },
+  requestedBy: { select: { id: true, name: true, email: true, position: true, ...TEAM_OR_DEPT_SELECT.select } },
   liquidations: {
     select: { id: true, number: true, status: true, total: true, amountPaid: true, claimDate: true, approvedAt: true },
     orderBy: { createdAt: 'desc' },
@@ -70,8 +71,12 @@ export function presentBudgetRequest(row: RequestRow, today = dayKey(new Date())
   const liquidated = !!row.liquidatedAt;
   const refundDue = liquidated ? cents(Math.max(0, released - spent)) : 0;
   const liquidation = row.liquidations.find((l) => (LIVE_LIQUIDATION as readonly string[]).includes(l.status)) ?? null;
+  const { department: _d, employee: _e, ...requester } = row.requestedBy;
   return {
     ...row,
+    requestedBy: requester,
+    /** The requester's team, else their department — the Team column. */
+    team: teamOrDepartment(row.requestedBy),
     amount,
     amountReleased: released,
     amountSpent: spent,
@@ -98,7 +103,12 @@ type Me = ReturnType<typeof currentUser>;
 
 /** Everyone's requests: the project side's view_all, or finance's. */
 function seesAll(me: Me): boolean {
-  return me.isSuperAdmin || me.permissions.has('gops.budget_requests.view_all') || me.permissions.has('gfin.budget_requests.view_all');
+  return (
+    me.isSuperAdmin ||
+    me.permissions.has('gops.budget_requests.view_all') ||
+    me.permissions.has('gfin.budget_requests.view_all') ||
+    me.permissions.has('gfin.budget_liquidations.view_all')
+  );
 }
 
 /**
@@ -126,6 +136,18 @@ export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, 
   if (asked) people.push({ requestedById: asked });
   if (people.length) where.AND = people;
   if (q.filters.jobId) where.jobId = q.filters.jobId;
+  const f = q.filters;
+  const and: Prisma.BudgetRequestWhereInput[] = [];
+  if (f.teamId) and.push({ requestedBy: userTeamWhere(f.teamId) });
+  if (f.neededFrom || f.neededTo) {
+    and.push({ neededBy: { ...(f.neededFrom ? { gte: asDate(f.neededFrom, 'Needed from') } : {}), ...(f.neededTo ? { lte: asDate(f.neededTo, 'Needed to') } : {}) } });
+  }
+  // The liquidation register: the requests whose cash went out — released,
+  // owed back or liquidated (the owner's module 5).
+  if (f.released === 'true') and.push({ status: { in: [...RELEASED_STATES] } });
+  if (f.pending === 'true') and.push({ status: 'PENDING_APPROVAL' });
+  if (f.approved === 'true') and.push({ status: { in: [...APPROVED_STATES] } });
+  if (and.length) where.AND = [...((where.AND as Prisma.BudgetRequestWhereInput[] | undefined) ?? []), ...and];
   const status = choice(q.filters.status, RequestStatus, 'Status');
   if (status) where.status = status;
   // Overdue is not a status: released, past the deadline, no approved liquidation.
@@ -152,7 +174,58 @@ export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, 
   return { where, mine, status, person };
 }
 
-const LIST_PERMISSIONS = ['gops.budget_requests.view_all', 'gops.budget_requests.view_own', 'gfin.budget_requests.view_all'];
+/** Approved funds: approved, and every state after it. */
+const APPROVED_STATES = ['APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED'] as const;
+/** The cash went out. */
+const RELEASED_STATES = ['RELEASED', 'REFUND_DUE', 'LIQUIDATED'] as const;
+
+/**
+ * The cards over both registers (the owner's modules 4 and 5), under the
+ * list's own query: the sum of every request still standing (rejected and
+ * cancelled left out), the approved funds, what waits on approval and what
+ * finance has still to release; and for the liquidation view, released,
+ * spent, returned and still owed back. Each a filter of the same list.
+ */
+async function budgetRequestListSummary(where: Prisma.BudgetRequestWhereInput) {
+  const sum = (extra: Prisma.BudgetRequestWhereInput) =>
+    prisma.budgetRequest.aggregate({
+      where: { AND: [where, extra] },
+      _count: { _all: true },
+      _sum: { amount: true, amountReleased: true, amountSpent: true, amountRefunded: true },
+    });
+  const [all, approved, pending, toRelease, released, refundDue] = await Promise.all([
+    sum({ status: { notIn: ['REJECTED', 'CANCELLED'] } }),
+    sum({ status: { in: [...APPROVED_STATES] } }),
+    sum({ status: 'PENDING_APPROVAL' }),
+    sum({ status: 'APPROVED' }),
+    sum({ status: { in: [...RELEASED_STATES] } }),
+    sum({ status: 'REFUND_DUE' }),
+  ]);
+  const liquidated = await prisma.budgetRequest.aggregate({
+    where: { AND: [where, { status: { in: [...RELEASED_STATES] }, liquidatedAt: { not: null } }] },
+    _sum: { amountReleased: true, amountSpent: true },
+  });
+  // Unspent cash on a liquidated request: what was released and not spent.
+  const unspent = Math.max(0, cents(num(liquidated._sum.amountReleased) - num(liquidated._sum.amountSpent)));
+  return {
+    total: num(all._sum.amount),
+    count: all._count._all,
+    approved: num(approved._sum.amount),
+    approvedCount: approved._count._all,
+    pending: num(pending._sum.amount),
+    pendingCount: pending._count._all,
+    toRelease: cents(num(toRelease._sum.amount) - num(toRelease._sum.amountReleased)),
+    toReleaseCount: toRelease._count._all,
+    released: num(released._sum.amountReleased),
+    releasedCount: released._count._all,
+    spent: num(liquidated._sum.amountSpent),
+    returned: num(released._sum.amountRefunded),
+    owedBack: cents(unspent - num(released._sum.amountRefunded)),
+    refundDueCount: refundDue._count._all,
+  };
+}
+
+const LIST_PERMISSIONS = ['gops.budget_requests.view_all', 'gops.budget_requests.view_own', 'gfin.budget_requests.view_all', 'gfin.budget_liquidations.view_all'];
 
 const REQUEST_SORTS = ['number', 'amount', 'createdAt', 'neededBy', 'liquidationDueDate'];
 
@@ -174,7 +247,7 @@ budgetRequestRoutes.get(
       }),
       prisma.budgetRequest.count({ where }),
     ]);
-    res.json(listResult(rows.map((r) => presentBudgetRequest(r, today)), total, q));
+    res.json({ ...listResult(rows.map((r) => presentBudgetRequest(r, today)), total, q), summary: await budgetRequestListSummary(where) });
   }),
 );
 
@@ -288,6 +361,27 @@ budgetRequestRoutes.get(
       req,
     );
     sendListPdf(res, pdf, 'budget-requests.pdf');
+  }),
+);
+
+/**
+ * The projects a budget request may be raised against — G-FIN's "+ Add
+ * budget request" (the owner's call: a request always names a project; an
+ * operations budget is a project of its own). Running ones, numbers and
+ * names only, behind the create right. Above `/:id`.
+ */
+budgetRequestRoutes.get(
+  '/projects',
+  require_('gops.budget_requests.create'),
+  handler(async (_req, res) => {
+    res.json(
+      await prisma.job.findMany({
+        where: { status: { notIn: ['CANCELLED', 'COMPLETED', 'TURNED_OVER'] } },
+        select: { id: true, number: true, name: true },
+        orderBy: { number: 'desc' },
+        take: 500,
+      }),
+    );
   }),
 );
 

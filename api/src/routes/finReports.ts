@@ -9,6 +9,8 @@ import { statusLabel, formatShortDate } from '../shared/pdf';
 import { bucketFor, bucketLabels, claimPayable, financeSettings } from '../shared/finance';
 import { termsLabel } from '../shared/receivables';
 import { billTermsLabel } from '../shared/payables';
+import { TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
+import { RequestStatus } from '@prisma/client';
 import { Series, byValue, cents, dayOf, mountReports, monthsOf, num, table, tally, type Col, type Report, type ReportContext } from '../shared/reportKit';
 
 /**
@@ -431,6 +433,165 @@ async function payables(range: Range, ctx: ReportContext): Promise<Report> {
   };
 }
 
+// ── Budget requests and their liquidation (the owner's modules 4 and 5) ─────
+
+/** Requester / team / status filters on budget requests, and their words. */
+async function requestFilter(q: Record<string, string | undefined>): Promise<{ where: Prisma.BudgetRequestWhereInput; line: string | undefined }> {
+  const and: Prisma.BudgetRequestWhereInput[] = [];
+  const words: string[] = [];
+  if (q.requestedById) {
+    and.push({ requestedById: q.requestedById });
+    words.push(`requested by ${(await prisma.user.findUnique({ where: { id: q.requestedById }, select: { name: true } }))?.name ?? 'someone not on file'}`);
+  }
+  if (q.teamId) {
+    and.push({ requestedBy: userTeamWhere(q.teamId) });
+    words.push(q.teamId === 'none' ? 'no team' : `team ${(await prisma.industry.findUnique({ where: { id: q.teamId }, select: { code: true } }))?.code ?? '?'}`);
+  }
+  if (q.status) {
+    if (!(q.status in RequestStatus)) throw badRequest(`Status — one of ${Object.keys(RequestStatus).join(', ')}`);
+    and.push({ status: q.status as RequestStatus });
+    words.push(statusLabel(q.status));
+  }
+  return { where: and.length ? { AND: and } : {}, line: words.length ? words.join(' · ') : undefined };
+}
+
+const REQUEST_REPORT_SELECT = {
+  number: true,
+  status: true,
+  reason: true,
+  amount: true,
+  amountReleased: true,
+  amountSpent: true,
+  amountRefunded: true,
+  neededBy: true,
+  createdAt: true,
+  releasedAt: true,
+  liquidatedAt: true,
+  liquidationDueDate: true,
+  job: { select: { number: true, name: true } },
+  requestedBy: { select: { name: true, ...TEAM_OR_DEPT_SELECT.select } },
+} satisfies Prisma.BudgetRequestSelect;
+type RequestRow = Prisma.BudgetRequestGetPayload<{ select: typeof REQUEST_REPORT_SELECT }>;
+const APPROVED_ON = ['APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED'];
+const unitOf = (r: RequestRow) => teamOrDepartment(r.requestedBy)?.label ?? NO_TEAM;
+
+/**
+ * The Budget Request Report Generator: the requests NEEDED in the range (a
+ * request with no date needed counts on the day it was raised), narrowed by
+ * requester, team and status — asked, approved, pending, released — by month,
+ * by requester, by team (else department), by project and by status.
+ */
+async function budgetRequests(range: Range, ctx: ReportContext): Promise<Report> {
+  const f = await requestFilter(ctx.query);
+  const rows = await prisma.budgetRequest.findMany({
+    where: {
+      AND: [
+        f.where,
+        { status: { notIn: ['DRAFT'] } },
+        { OR: [{ neededBy: { gte: range.from, lte: range.to } }, { neededBy: null, createdAt: { gte: range.fromAt, lte: range.toAt } }] },
+      ],
+    },
+    select: REQUEST_REPORT_SELECT,
+  });
+  const when = (r: RequestRow) => r.neededBy ?? r.createdAt;
+  const standing = (r: RequestRow) => r.status !== 'REJECTED' && r.status !== 'CANCELLED';
+  const series = new Series('Needed by month', [count('Requests'), money('Requested'), money('Approved'), money('Released')], monthsOf(range));
+  for (const r of rows.filter(standing)) {
+    series.add(when(r), 0, 1);
+    series.add(when(r), 1, num(r.amount));
+    series.add(when(r), 2, APPROVED_ON.includes(r.status) ? num(r.amount) : 0);
+    series.add(when(r), 3, num(r.amountReleased));
+  }
+  const live = rows.filter(standing);
+  const figures = (r: RequestRow) => [1, num(r.amount), num(r.amountReleased)];
+  const cols = [count('Requests'), money('Requested'), money('Released')];
+  const sum = (xs: RequestRow[], fn: (r: RequestRow) => number) => cents(xs.reduce((s, r) => s + fn(r), 0));
+  const pending = live.filter((r) => r.status === 'PENDING_APPROVAL');
+  const approved = live.filter((r) => APPROVED_ON.includes(r.status));
+  return {
+    kind: 'budget-requests',
+    title: 'Budget Request Report',
+    from: dayOf(range.from),
+    to: dayOf(range.to),
+    filterLine: f.line,
+    cards: [
+      { label: 'Sum of all budget requests', value: sum(live, (r) => num(r.amount)), money: true, sub: `${live.length} needed in the range` },
+      { label: 'Approved funds', value: sum(approved, (r) => num(r.amount)), money: true, sub: `${approved.length} approved` },
+      { label: 'Pending approval', value: sum(pending, (r) => num(r.amount)), money: true, sub: `${pending.length} waiting` },
+      { label: 'Released', value: sum(live, (r) => num(r.amountReleased)), money: true },
+    ],
+    series: series.done(),
+    tables: [
+      table('By requester', [{ label: 'Requester' }, ...cols], rowsOf(tally(live, (r) => r.requestedBy.name, figures), 1)),
+      table('By team', [{ label: 'Team / department' }, ...cols], rowsOf(tally(live, unitOf, figures), 1)),
+      table('By project', [{ label: 'Project' }, ...cols], rowsOf(tally(live, (r) => `${r.job.number} — ${r.job.name}`, figures), 1)),
+      table('By status', [{ label: 'Status' }, ...cols], rowsOf(tally(rows, (r) => statusLabel(r.status), figures), 1)),
+    ],
+    notes: ['Drafts are left out; a rejected or cancelled request is counted only under By status. A request with no date needed counts on the day it was raised.'],
+  };
+}
+
+/**
+ * The Liquidation Report Generator: the requests whose cash was RELEASED in
+ * the range — released, spent, returned and still owed back — by month of the
+ * release, by requester, by team and by project, and the liquidations
+ * overdue as of today.
+ */
+async function liquidations(range: Range, ctx: ReportContext): Promise<Report> {
+  const f = await requestFilter(ctx.query);
+  const today = dayKey(new Date());
+  const rows = await prisma.budgetRequest.findMany({
+    where: { AND: [f.where, { status: { in: ['RELEASED', 'REFUND_DUE', 'LIQUIDATED'] }, releasedAt: { gte: range.from, lte: range.to } }] },
+    select: REQUEST_REPORT_SELECT,
+  });
+  const returned = (r: RequestRow) => num(r.amountRefunded);
+  const owedBack = (r: RequestRow) => (r.liquidatedAt ? Math.max(0, cents(num(r.amountReleased) - num(r.amountSpent) - num(r.amountRefunded))) : 0);
+  const spent = (r: RequestRow) => (r.liquidatedAt ? num(r.amountSpent) : 0);
+  const series = new Series('Released by month', [count('Requests'), money('Released'), money('Spent'), money('Returned'), money('Owed back')], monthsOf(range));
+  for (const r of rows) {
+    const at = r.releasedAt!;
+    series.add(at, 0, 1);
+    series.add(at, 1, num(r.amountReleased));
+    series.add(at, 2, spent(r));
+    series.add(at, 3, returned(r));
+    series.add(at, 4, owedBack(r));
+  }
+  const figures = (r: RequestRow) => [1, num(r.amountReleased), spent(r), returned(r)];
+  const cols = [count('Requests'), money('Released'), money('Spent'), money('Returned')];
+  const sum = (fn: (r: RequestRow) => number) => cents(rows.reduce((s, r) => s + fn(r), 0));
+  const overdue = rows.filter((r) => r.status === 'RELEASED' && r.liquidationDueDate && r.liquidationDueDate < today);
+  return {
+    kind: 'liquidations',
+    title: 'Budget Liquidation Report',
+    from: dayOf(range.from),
+    to: dayOf(range.to),
+    filterLine: f.line,
+    cards: [
+      { label: 'Released', value: sum((r) => num(r.amountReleased)), money: true, sub: `${rows.length} request${rows.length === 1 ? '' : 's'} released in the range` },
+      { label: 'Spent', value: sum(spent), money: true, sub: `${rows.filter((r) => r.liquidatedAt).length} liquidated` },
+      { label: 'Total excess returned', value: sum(returned), money: true },
+      { label: 'Still owed back', value: sum(owedBack), money: true },
+      { label: 'Liquidation overdue', value: cents(overdue.reduce((s, r) => s + num(r.amountReleased), 0)), money: true, sub: `${overdue.length} past the deadline` },
+    ],
+    series: series.done(),
+    tables: [
+      table('By requester', [{ label: 'Requester' }, ...cols], rowsOf(tally(rows, (r) => r.requestedBy.name, figures), 1)),
+      table('By team', [{ label: 'Team / department' }, ...cols], rowsOf(tally(rows, unitOf, figures), 1)),
+      table('By project', [{ label: 'Project' }, ...cols], rowsOf(tally(rows, (r) => `${r.job.number} — ${r.job.name}`, figures), 1)),
+      table(
+        'Liquidations overdue',
+        [{ label: 'Request' }, { label: 'Requester' }, { label: 'Liquidate by' }, count('Days late'), money('Released')],
+        overdue
+          .map((r) => ({ r, late: daysBetween(r.liquidationDueDate!, today) }))
+          .sort((a, b) => b.late - a.late)
+          .slice(0, 20)
+          .map(({ r, late }) => [r.number, r.requestedBy.name, formatShortDate(r.liquidationDueDate!), late, num(r.amountReleased)]),
+      ),
+    ],
+    notes: ['Spent is counted once a liquidation is approved; what was released and not spent comes back as a refund, never as a collection.'],
+  };
+}
+
 async function payablesAging(range: Range): Promise<Report> {
   const asOf = range.to;
   const settings = await financeSettings();
@@ -555,6 +716,8 @@ const KINDS = {
   collections,
   payables,
   'payables-aging': payablesAging,
+  'budget-requests': budgetRequests,
+  liquidations,
   payments: paymentsOut,
 };
 export const FIN_REPORT_KINDS = Object.keys(KINDS);
@@ -569,6 +732,8 @@ mountReports(finReportRoutes, {
     'collection-forecast': 'gfin.ar.view_all',
     collections: 'gfin.ar.view_all',
     payables: 'gfin.ap.view_all',
+    'budget-requests': 'gfin.budget_requests.view_all',
+    liquidations: 'gfin.budget_liquidations.view_all',
     'payables-aging': 'gfin.ap.view_all',
     payments: 'gfin.ap.view_all',
   },
