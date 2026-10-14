@@ -529,7 +529,7 @@ export function PurchaseRequestDetail() {
         </div>
       )}
 
-      {pr.job && Object.keys(pr.budget).length > 0 && (
+      {pr.job && ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'].includes(pr.status) && Object.keys(pr.budget).length > 0 && (
         <div className="card proc-card">
           <h3 className="card-title">Against the project budget</h3>
           <div className="table-wrap">
@@ -566,7 +566,8 @@ export function PurchaseRequestDetail() {
               </tbody>
             </table>
           </div>
-          {Object.entries(pr.budget).some(([id, b]) => (strained[id] ?? 0) > b.available) && (
+          {(pr.status === 'DRAFT' || pr.status === 'PENDING_APPROVAL') &&
+            Object.entries(pr.budget).some(([id, b]) => (strained[id] ?? 0) > b.available) && (
             <div className="alert error proc-card-note">
               This request exceeds what is left on at least one budget line. Submitting it will be
               blocked — raise a budget request first, or reduce the quantities.

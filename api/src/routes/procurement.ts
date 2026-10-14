@@ -510,11 +510,23 @@ purchaseRequestRoutes.get(
 
     // Budget position per category, so the requester sees what is left before
     // they ask for more.
+    // The request's OWN net commitment (an approved one committed its
+    // estimate) is left out, so "This request" is never counted twice — once
+    // in "Already committed" and again against what is left.
     const budget: Record<string, Awaited<ReturnType<typeof availableBudget>>> = {};
     if (pr.jobId) {
-      const categoryIds = [...new Set(pr.items.map((i) => i.costCategoryId).filter(Boolean))];
-      for (const categoryId of categoryIds as string[]) {
-        budget[categoryId] = await availableBudget(prisma, pr.jobId, categoryId);
+      const categoryIds = [...new Set(pr.items.map((i) => i.costCategoryId).filter(Boolean))] as string[];
+      const own = await prisma.jobCostEntry.groupBy({
+        by: ['costCategoryId'],
+        where: { jobId: pr.jobId, state: 'COMMITTED', sourceType: 'purchase_request', sourceId: pr.id },
+        _sum: { amount: true },
+      });
+      for (const categoryId of categoryIds) {
+        const b = await availableBudget(prisma, pr.jobId, categoryId);
+        const mine = num(own.find((o) => o.costCategoryId === categoryId)?._sum.amount);
+        budget[categoryId] = mine
+          ? { ...b, committed: Math.round((b.committed - mine) * 100) / 100, available: Math.round((b.available + mine) * 100) / 100 }
+          : b;
       }
     }
 

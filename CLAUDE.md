@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,094 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,095 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -568,10 +568,11 @@ for the Technical Manager on the preparer's team, and one on foundation
 for Back Support's own team, and 3 on foundation and 13 on chain for the
 purchase requisition page, and one on foundation and 9 on chain for the
 purchase order page, and one on foundation and 5 on costing for a line's
-supplier and note):
+supplier and note, and one on chain for an approved request not counted
+twice against its budget):
 foundation
 370, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 224, hr 468, plantilla 123, meetings
+79, partners 120, delivery 171, chain 225, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4369,6 +4370,13 @@ requisition-page.png`). `pages/chain/PurchaseRequisitionEditor.tsx`,
   Budget Monitoring — verify-chain asserts it) less what the page asks, per
   budget line and overall, red where it goes over and saying whether submit
   will be refused (`procurement.blockOverBudget`). A draft commits nothing.
+- **The record page's "Against the project budget" card** leaves the
+  request's OWN net commitment out (`GET /purchase-requests/:id`'s
+  `budget`): an approved request committed its estimate, and counting it in
+  "Already committed" and again as "This request" read as an overspend
+  (2026-10-14, the owner's report). The card shows only while the request is
+  a draft, pending or approved — once ordered, the order's page holds the
+  budget — and its "Submitting it will be blocked" note only before submit.
 - **Approval** under the lines: `GET /purchase-requests/route?amount=&jobId=
   &requestId=` (`routeBrief`, the requester's name) through `previewSteps` —
   nobody is picked on the form. "Submit for approval" saves, then submits; a

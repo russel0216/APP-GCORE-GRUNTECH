@@ -1505,6 +1505,25 @@ async function main() {
       (await committedRows()).length === firstCommit.length && afterRepeat.status === 'APPROVED',
       `${(await committedRows()).length} vs ${firstCommit.length}, ${afterRepeat.status}`,
     );
+    {
+      // Its page sets it against the budget WITHOUT its own commitment, so the
+      // approved request is never counted twice (the owner's report, 2026-10-14:
+      // "Already committed" equal to the request, "After" its negative).
+      const page = await api(requesterToken, 'GET', `/purchase-requests/${prId}`);
+      const shown = Object.entries(page.body.budget as Record<string, { committed: number; available: number }>);
+      const ok = await Promise.all(
+        shown.map(async ([categoryId, b]) => {
+          const raw = await availableBudget(prisma, job.id, categoryId);
+          const mine = firstCommit.filter((r) => r.costCategoryId === categoryId).reduce((t, r) => t + num(r.amount), 0);
+          return money(b.committed, raw.committed - mine) && money(b.available, raw.available + mine);
+        }),
+      );
+      check(
+        'an approved request\'s page leaves its own commitment out of "Already committed" and "Available"',
+        page.status === 200 && shown.length > 0 && ok.every(Boolean),
+        JSON.stringify(page.body.budget),
+      );
+    }
 
     // ── A pull-back meeting a decision that has not reached the request ──
     // act() commits the final decision before its subscriber runs. A pull-back
