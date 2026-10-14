@@ -4427,14 +4427,16 @@ page's dress (`prq-*`) and reusing its `ItemCell` and `lib/prLines.ts`.
   (2026-10-14, `docs/mockups/purchase-order-layout.pptx`, his slide):
   the title in bold (`titleBold`, this document only), "Date: …" under
   the number (`renderDocument`'s `numberNote`); DETAILS
-  is the quotation reference beside the delivery date (`details`, two to
-  a line, and the section after it follows straight on rather than at the
-  fixed DETAILS height); then **Supplier** and **Delivery and terms** side
-  by side as unlabelled address blocks (the engine's `blocks` section) —
-  the supplier's name, address, the contact's mobile (else the supplier's
-  phone), the contact person (primary, else first) and email; our
-  registered name, the order's Deliver to (else the company's address),
-  the company's phone and email, and "Terms: …". Then the lines, totals
+  is columns (`details`, an array of columns: the quotation reference
+  over the delivery date, the terms beside them), and the section after
+  it follows straight on rather than at the fixed DETAILS height; then
+  **Supplier** and **Ship to** side by side as unlabelled 8.5pt address
+  blocks (the engine's `blocks` section) — the supplier's name, address,
+  the contact's mobile (else the supplier's phone), the contact person
+  (primary, else first) and email; our registered name, the order's
+  Deliver to (else the company's address), the company's phone and
+  email, and the buyer who prepared it with their position (the owner's
+  second slide, 2026-10-14). Then the lines, totals
   and notes, and over the sign-offs the italic "The name, date and time
   are considered a digital signature of approval." (`signoffNote`). Never
   "For" (internal), the supplier's TIN, the purchase request or a Status

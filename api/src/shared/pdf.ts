@@ -163,10 +163,11 @@ export interface PdfDocumentSpec {
   /** The document's name in bold — the purchase order's (2026-10-14, the owner's call); every other document keeps it regular. */
   titleBold?: boolean;
   /**
-   * The DETAILS block's lines in place of Date and Reference, label and
-   * value — the purchase order's quotation reference and delivery date.
+   * The DETAILS block in place of Date and Reference: columns side by side,
+   * each a stack of label and value — the purchase order's quotation
+   * reference over its delivery date, its terms beside them.
    */
-  details?: [string, string][];
+  details?: [string, string][][];
   sections: PdfSection[];
   signatories?: Signatory[];
   /** Small print above the footer rule. */
@@ -633,25 +634,22 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
   doc.y = ruleY + 22.75 - 10;
   sectionTitle(doc, 'Details', DETAIL_LINE);
   const detailsTop = doc.y;
-  const meta: [string, string][] = spec.details
-    ? spec.details.map(([l, v]) => [pdfSafe(l), pdfSafe(v)])
-    : [['Date', formatShortDate(spec.date ?? new Date())]];
-  if (!spec.details && spec.reference) meta.push(['Reference', spec.reference]);
   doc.font('Helvetica-Bold').fontSize(DETAIL_SIZE).fillColor(INK);
   if (spec.details) {
-    // A document's own details sit two to a line (the purchase order's
-    // quotation reference beside its delivery date).
-    const half = (right - left) / 2;
-    for (let i = 0; i < meta.length; i += 2) {
-      const rowTop = doc.y;
-      let rowBottom = rowTop;
-      meta.slice(i, i + 2).forEach(([label, value], j) => {
-        doc.text(`${label}: ${value}`, left + j * half, rowTop, { width: half - 10, lineGap: DETAIL_GAP });
-        rowBottom = Math.max(rowBottom, doc.y);
-      });
-      doc.y = rowBottom;
-    }
+    const cols = spec.details.filter((c) => c.length);
+    const colW = (right - left) / Math.max(1, cols.length);
+    let bottom = doc.y;
+    cols.forEach((col, j) => {
+      doc.y = detailsTop;
+      for (const [label, value] of col) {
+        doc.text(`${pdfSafe(label)}: ${pdfSafe(value)}`, left + j * colW, doc.y, { width: colW - 10, lineGap: DETAIL_GAP });
+      }
+      bottom = Math.max(bottom, doc.y);
+    });
+    doc.y = bottom;
   } else {
+    const meta: [string, string][] = [['Date', formatShortDate(spec.date ?? new Date())]];
+    if (spec.reference) meta.push(['Reference', spec.reference]);
     for (const [label, value] of meta) {
       doc.text(`${label}: ${value}`, left, doc.y, { width: right - left, lineGap: DETAIL_GAP });
     }
@@ -663,7 +661,7 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
   // first table starts where the quotation's does.
   // A document laying out its own details (the purchase order) runs
   // straight on into its first section, as the owner's layout places it.
-  doc.y = spec.details ? doc.y + 4 : detailsTop + Math.max(41, doc.y - detailsTop) + 23;
+  doc.y = spec.details ? doc.y - 2 : detailsTop + Math.max(41, doc.y - detailsTop) + 23;
 }
 
 /**
@@ -757,7 +755,8 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
     case 'blocks': {
       const n = Math.max(1, section.blocks.length);
       const colWidth = usableWidth(doc) / n;
-      const line = DETAIL_SIZE * LINE + 2;
+      const BLOCK_SIZE = 8.5;
+      const line = BLOCK_SIZE * LINE + 0.5;
       const tallest = Math.max(...section.blocks.map((b) => b.lines.length), 1);
       ensureSpace(doc, 10 + 22 + Math.min(tallest, 4) * line);
       doc.y += 10;
@@ -766,10 +765,10 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       section.blocks.forEach((block, i) => {
         const x = T.left + i * colWidth;
         doc.font('Helvetica-Bold').fontSize(8.5).fillColor(PURPLE).text(caps(block.title), x, top, { lineBreak: false });
-        let y = top + 22;
+        let y = top + 17;
         for (const text of block.lines) {
-          for (const part of wrapText(doc, text, colWidth - 12, true, DETAIL_SIZE)) {
-            drawLine(doc, part, x, y, colWidth - 12, 'left', true, DETAIL_SIZE, INK);
+          for (const part of wrapText(doc, text, colWidth - 12, true, BLOCK_SIZE)) {
+            drawLine(doc, part, x, y, colWidth - 12, 'left', true, BLOCK_SIZE, INK);
             y += line;
           }
         }

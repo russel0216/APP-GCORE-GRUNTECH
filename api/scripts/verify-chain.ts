@@ -1359,7 +1359,7 @@ async function main() {
     await prisma.supplierContact.delete({ where: { id: contactRow.id } });
     check(
       'the order\'s paper (the owner\'s layout) prints the date, the quotation reference, the delivery date and the supplier\'s contact — no "For", no TIN',
-      poPaper2.includes('Date: ') && poPaper2.includes('digital signature of approval') && !poPaper2.includes('Purchase request:') && !poPaper2.includes('Status:') && poPaper2.includes('SQ-77881') && poPaper2.includes('November 20, 2026') &&
+      poPaper2.includes('Date: ') && poPaper2.includes('digital signature of approval') && poPaper2.includes('SHIP TO') && !poPaper2.includes('DELIVERY AND TERMS') && !poPaper2.includes('Purchase request:') && !poPaper2.includes('Status:') && poPaper2.includes('SQ-77881') && poPaper2.includes('November 20, 2026') &&
         poPaper2.includes('Rosa Lim') && poPaper2.includes('0917 555 0101') && poPaper2.includes('rosa@example.test') &&
         !/\bTIN\b/.test(poPaper2.replace(/TIN: [^|]*\|/, '')) && !poPaper2.includes('For:') && !poPaper2.includes('FOR '),
       poPaper2.slice(0, 400),

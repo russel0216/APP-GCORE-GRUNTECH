@@ -3533,6 +3533,7 @@ purchaseOrderRoutes.get(
     // address block with no labels. No "For" (internal), no supplier TIN,
     // no purchase request or status.
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
+    const buyer = await prisma.user.findUnique({ where: { id: po.createdById }, select: { position: true } });
     const place = (...parts: (string | null | undefined)[]) => parts.filter((p) => p?.trim()).join(', ');
     const supplierLines = [
       po.supplier.name,
@@ -3546,14 +3547,15 @@ purchaseOrderRoutes.get(
       po.deliverTo?.trim() || place(company?.address, company?.city) || po.warehouse?.name || '',
       company?.phone ?? '',
       company?.email ?? '',
-      `Terms: ${po.terms ?? po.supplier.paymentTerms ?? '—'}`,
+      // Whom the supplier asks for at delivery: the buyer who prepared it.
+      [po.createdBy.name, buyer?.position].filter(Boolean).join(', '),
     ].filter((l) => l.trim());
     const sections: PdfSection[] = [
       {
         kind: 'blocks',
         blocks: [
           { title: 'Supplier', lines: supplierLines },
-          { title: 'Delivery and terms', lines: deliveryLines },
+          { title: 'Ship to', lines: deliveryLines },
         ],
       },
       {
@@ -3618,8 +3620,11 @@ purchaseOrderRoutes.get(
       numberNote: `Date: ${formatDate(po.orderDate)}`,
       titleBold: true,
       details: [
-        ['Quotation reference', po.quoteRef ?? '—'],
-        ['Delivery date', po.deliveryDate ? formatDate(po.deliveryDate) : '—'],
+        [
+          ['Quotation reference', po.quoteRef ?? '—'],
+          ['Delivery date', po.deliveryDate ? formatDate(po.deliveryDate) : '—'],
+        ],
+        [['Terms', po.terms ?? po.supplier.paymentTerms ?? '—']],
       ],
       sections,
       signatories,
