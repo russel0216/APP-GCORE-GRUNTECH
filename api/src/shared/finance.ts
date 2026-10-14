@@ -548,7 +548,7 @@ export async function financePosition(today: Date): Promise<FinancePosition> {
   const [openInvoices, openBills, openClaims, openAdvances, openRequests] = await Promise.all([
     prisma.invoice.findMany({
       where: { status: { in: ['ISSUED', 'PARTIALLY_PAID'] } },
-      select: { dueDate: true, netCollectible: true, amountCollected: true, ewtAmount: true, ewtCertificateNo: true },
+      select: { dueDate: true, counteredDate: true, netCollectible: true, amountCollected: true, ewtAmount: true, ewtCertificateNo: true },
     }),
     prisma.supplierBill.findMany({
       where: { status: { in: ['APPROVED', 'PARTIALLY_PAID'] } },
@@ -573,7 +573,8 @@ export async function financePosition(today: Date): Promise<FinancePosition> {
   );
   const receivableOverdue = cents(
     openInvoices
-      .filter((i) => i.dueDate < today)
+      // Overdue only once countered — the A/R list's own rule (shared/receivables.ts).
+      .filter((i) => i.counteredDate !== null && i.dueDate < today)
       .reduce((s, i) => s + (num(i.netCollectible) - num(i.amountCollected)), 0),
   );
   const payable = cents(openBills.reduce((s, b) => s + (num(b.netPayable) - num(b.amountPaid)), 0));
@@ -670,6 +671,8 @@ export interface AgedRow {
   jobNumber?: string | null;
   /** Withheld at source — reported, never counted as outstanding. */
   withheld?: number;
+  /** Issued and not yet countered — never overdue (shared/receivables.ts). */
+  awaitingCounter?: boolean;
 }
 
 export function bucketFor(daysOverdue: number, buckets: number[]): string {

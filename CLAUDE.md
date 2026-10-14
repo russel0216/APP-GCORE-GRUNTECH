@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,206 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,223 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 17 on finance for Accounts Receivable's countering, terms, credit and sales-order invoices):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 171, chain 329, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
+115, evaluations 152, academy 120, finance 334, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -4892,6 +4892,78 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   the stock card. The board's toolbar writes the list's own URL keys (`q`,
   `warehouseId`, `needsReorder`), so switching views keeps the filter. The
   styles are the `inv-*` rules in `styles/procurement.css`.
+
+## Accounts Receivable and collections (2026-10-15)
+
+The owner's `Accounts_Receivable_UI_Specification_Final.pdf` as the guide,
+on the invoice and payment records G-FIN already had; his answers: an
+invoice not yet countered is awaiting countering, never overdue; G-CORE's
+own invoice numbers; the teams are KAT, HIT, UIT, GIB, SIT; one Payments
+register; OR numbers from G-CORE's numbering; the collection forecast by
+salesperson, team, customer and terms.
+
+- **An invoice is COUNTERED when the customer receives it**
+  (`Invoice.counteredDate`, a DATE), and its **terms** (`termsDays`, net
+  days — "Net 30"; the old text `terms` stays for what printed before) run
+  from that day: `dueDate` — the expected collection — is
+  `expectedCollection(invoiceDate, counteredDate, termsDays)`.
+  `shared/receivables.ts` holds the one rule: `isOverdue()` / `daysLate()` /
+  `overdueWhere()` — owed, COUNTERED and past due — read by the list, its
+  `?overdue=true`, the aging (an uncountered row ages as Current and is
+  totalled apart, `awaitingCountering`) and `financePosition`'s
+  `receivableOverdue`. Until countered an issued invoice is **awaiting
+  countering** (`AWAITING_COUNTER_WHERE`, `?countered=no`) whatever its
+  date. `POST /invoices/:id/counter { counteredDate, termsDays }`
+  (`gfin.ar.edit_all`; issued, partly paid or paid; never before the
+  invoice date nor after today; claimed on what was read) moves the due
+  date with it; a wrong day is corrected by saying it again. The seed's
+  `backfillInvoiceCountering()` took every invoice issued before as
+  countered on its invoice date, once (`seed.invoiceCounteringBackfilled`),
+  so every overdue figure reads as it did.
+- **Each invoice is credited to a salesperson and a team**
+  (`salespersonId`, `teamId` — the Industry/team master), filled at raising
+  from its source by `invoiceCredit()`: a sales order's author and its
+  quotation's team, a project's quotation's owner and team, a job order's
+  quotation or sales order, else whoever raised the job order; the team
+  falls back to the salesperson's own. The form may name them;
+  `PATCH /invoices/:id/credit` changes them at any stage but cancelled.
+  Kept as raised (the quotation's rule). `fillInvoiceCredit()` (the seed,
+  every deploy) fills only invoices with none, claimed on null.
+- **"+ New invoice" on the list** (`gfin.ar.create`; the owner's "Add New
+  Sale Invoice"): the company (`CustomerPicker`), **Bills** — nothing else,
+  or one of the customer's ISSUED sales orders (`GET
+  /invoices/sales-orders?customerId=`, above `/:id`: each with its net —
+  total less VAT — what live invoices bill of it and what is left) —
+  invoice date, the terms as chips (Net 15/30/45/60, Other: `TermsPicker`),
+  PO, salesperson, team, lines and the invoice copy (a PDF attached once it
+  is saved). `Invoice.salesOrderId` (not unique: an order is invoiced as it
+  is delivered); the order lends its PO, terms and VAT rate, and
+  `assertOrderLeft()` refuses an invoice past what is left of its net,
+  under a lock on the order's row (on Modify too). A sales order is not
+  reopened or cancelled while a live invoice bills it
+  (`refuseWhileInvoiced`).
+- **The list is the sample's**: SI No., Company (project or sales order
+  under it), Amount (what is left to collect under it), Countered (or
+  "awaiting"), Terms (a chip), Expected collection (days late; "once
+  countered" while not), Sales personnel, Team, Invoice copy (the first
+  attached file, `PDF +n`) and Status; Filters status, balance, overdue,
+  countered, salesperson, team, terms, customer, Dated, Expected
+  collection. **The cards** (`invoiceListSummary()`, under the list's own
+  query): Total receivables ("N active invoices pending collection"),
+  Overdue, Awaiting countering, Collected, then one card per team of the
+  receivable (`teamShares`, `teamCards`) — each card linking to the list it
+  counts. Its paper prints Countered and Expected, the salesperson and
+  team under the customer.
+- **The invoice page**: "Mark countered" is the primary next step while it
+  waits (a panel in the page: the day and the terms, the expected
+  collection worked out live), then Record collection; ⋯ Change countered
+  date, Change salesperson or team, Print without attachments. Where it
+  stands shows Countered, Payment terms, Expected collection, Sales
+  personnel and Team; **Invoice copy and files** is the `Attachments` card
+  on `invoice` (read with `gfin.ar.view_all`, written with create or
+  edit_all), printed behind the Sales Invoice (`withAttachments`,
+  `?attachments=0` bare), which now prints the terms, the countered day and
+  the sales personnel.
 
 ## Spreadsheet attachments (2026-10-05)
 

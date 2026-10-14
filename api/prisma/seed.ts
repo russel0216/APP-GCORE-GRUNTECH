@@ -16,6 +16,7 @@ import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawing
 import { migrateFaceThreshold } from '../src/shared/faceSamples';
 import { removeScoroArchive } from '../src/shared/scoroArchive';
 import { backfillCustomerAddresses } from '../src/shared/customerAddress';
+import { backfillInvoiceCountering, fillInvoiceCredit } from '../src/shared/receivables';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -1532,6 +1533,16 @@ async function main() {
   {
     const filled = await fillQuotationTeams();
     if (filled) console.log(`  · Set the team of ${filled} older quotation(s) to their author's team`);
+  }
+
+  // Accounts Receivable per the owner's sample (2026-10-15): invoices issued
+  // before countering existed are taken as countered on their invoice date
+  // (once), and every invoice with no salesperson takes its source's.
+  {
+    const countered = await backfillInvoiceCountering();
+    if (countered) console.log(`  · Took ${countered} older invoice(s) as countered on their invoice date`);
+    const credited = await fillInvoiceCredit();
+    if (credited) console.log(`  · Credited ${credited} invoice(s) to their salesperson and team`);
   }
 
   // Activity types as data (2026-10-08): the six built-ins under the enum's

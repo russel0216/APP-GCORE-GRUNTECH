@@ -92,6 +92,19 @@ import {
   type SettleableKind,
 } from '../shared/finance';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
+import { teamShares, TEAM_REF_SELECT } from '../shared/team';
+import {
+  TERMS_CHOICES,
+  AWAITING_COUNTER_WHERE,
+  daysLate,
+  expectedCollection,
+  invoiceCredit,
+  isOverdue,
+  overdueWhere,
+  parseTermsDays,
+  termsLabel,
+} from '../shared/receivables';
 
 function asDate(value: string, label: string): Date {
   const date = new Date(value);
@@ -250,14 +263,19 @@ const invoiceInclude = {
   job: { select: { id: true, number: true, name: true } },
   progressBilling: { select: { id: true, number: true, billingNo: true } },
   jobOrder: { select: { id: true, number: true } },
+  salesOrder: { select: { id: true, number: true, poNumber: true } },
+  salesperson: { select: { id: true, name: true } },
+  team: TEAM_REF_SELECT,
   lines: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.InvoiceInclude;
 
 type InvoiceRow = Prisma.InvoiceGetPayload<{ include: typeof invoiceInclude }>;
 
-function presentInvoice(row: InvoiceRow) {
+function presentInvoice(row: InvoiceRow, attachments?: number) {
   const netCollectible = num(row.netCollectible);
   const collected = num(row.amountCollected);
+  const outstanding = cents(netCollectible - collected);
+  const owed = row.status === 'ISSUED' || row.status === 'PARTIALLY_PAID';
   return {
     ...row,
     grossAmount: num(row.grossAmount),
@@ -270,11 +288,34 @@ function presentInvoice(row: InvoiceRow) {
     amountCollected: collected,
     // The number every A/R screen actually needs. Measured against net
     // collectible, because the withheld EWT is never going to arrive as cash.
-    outstanding: cents(netCollectible - collected),
-    daysOverdue: daysBetween(row.dueDate, new Date()),
+    outstanding,
+    // Late only once countered (2026-10-15): until the customer has the
+    // invoice in hand its terms have not started.
+    daysOverdue: daysLate({ ...row, outstanding }),
+    awaitingCounter: owed && !row.counteredDate,
+    termsLabel: termsLabel(row.termsDays, row.terms),
+    ...(attachments === undefined ? {} : { attachments }),
     lines: row.lines.map((l) => ({ ...l, amount: num(l.amount) })),
   };
 }
+
+/** How many files each invoice carries — the list's "Invoice copy" column. */
+async function attachmentCounts(ids: string[]): Promise<Map<string, number>> {
+  if (!ids.length) return new Map();
+  const rows = await prisma.attachment.groupBy({ by: ['entityId'], where: { entityType: 'invoice', entityId: { in: ids } }, _count: { _all: true } });
+  return new Map(rows.map((r) => [r.entityId, r._count._all]));
+}
+
+/**
+ * The invoice's files — the customer's countered copy, the signed delivery,
+ * whatever finance keeps with it: read with A/R, written by whoever raises or
+ * edits invoices; printed behind the invoice's paper.
+ */
+registerAttachmentGuard(
+  'invoice',
+  async (user) => can(user, 'gfin.ar.view_all'),
+  { write: async (user) => can(user, 'gfin.ar.create') || can(user, 'gfin.ar.edit_all') },
+);
 
 /** An invoice something is owed on — the receivable, as `financePosition` reads it. */
 const INVOICE_OWED: InvoiceStatus[] = ['ISSUED', 'PARTIALLY_PAID'];
@@ -289,33 +330,99 @@ const BILL_OWED: BillStatus[] = ['APPROVED', 'PARTIALLY_PAID'];
 function invoiceListWhere(q: ListQuery): Prisma.InvoiceWhereInput {
   const where: Prisma.InvoiceWhereInput = {};
 
-  const status = choice(q.filters.status, InvoiceStatus, 'Status');
+  const and: Prisma.InvoiceWhereInput[] = [];
+  const f = q.filters;
+  const status = choice(f.status, InvoiceStatus, 'Status');
   if (status) where.status = status;
-  if (q.filters.customerId) where.customerId = q.filters.customerId;
-  if (q.filters.jobId) where.jobId = q.filters.jobId;
-  const from = filterDay(q.filters.from, 'From');
-  const to = filterDay(q.filters.to, 'To');
+  if (f.customerId) where.customerId = f.customerId;
+  if (f.jobId) where.jobId = f.jobId;
+  if (f.salesOrderId) where.salesOrderId = f.salesOrderId;
+  if (f.salespersonId) where.salespersonId = f.salespersonId === 'none' ? null : f.salespersonId;
+  if (f.teamId) where.teamId = f.teamId === 'none' ? null : f.teamId;
+  if (f.termsDays) {
+    const days = Number(f.termsDays);
+    if (!Number.isInteger(days) || days < 0 || days > 365) throw badRequest('Terms is a number of days');
+    where.termsDays = days;
+  }
+  const from = filterDay(f.from, 'From');
+  const to = filterDay(f.to, 'To');
   if (from || to) where.invoiceDate = { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) };
+  // The expected collection — the due date, counted from the countered day.
+  const dueFrom = filterDay(f.dueFrom, 'Expected from');
+  const dueTo = filterDay(f.dueTo, 'Expected to');
+  if (dueFrom || dueTo) where.dueDate = { ...(dueFrom ? { gte: dayOf(dueFrom) } : {}), ...(dueTo ? { lte: dayOf(dueTo) } : {}) };
+  const countered = choice(f.countered, { yes: 'yes', no: 'no' }, 'Countered', (v) => (v === 'yes' ? 'Countered' : 'Awaiting countering'));
+  if (countered === 'yes') where.counteredDate = { not: null };
+  if (countered === 'no') and.push(AWAITING_COUNTER_WHERE);
   // "Outstanding" is not a status — a partially paid invoice and an issued
   // one are both outstanding, and a paid one never is.
-  if (q.filters.outstanding === 'true') {
+  if (f.outstanding === 'true') {
     where.status = { in: ['ISSUED', 'PARTIALLY_PAID'] };
   }
-  if (q.filters.overdue === 'true') {
-    where.status = { in: ['ISSUED', 'PARTIALLY_PAID'] };
-    where.dueDate = { lt: dayKey(new Date()) };
-  }
+  // Overdue only once countered: an invoice the customer has not received
+  // has not started its terms.
+  if (f.overdue === 'true') and.push(overdueWhere());
   if (q.search) {
     where.OR = [
       { number: { contains: q.search, mode: 'insensitive' } },
       { poReference: { contains: q.search, mode: 'insensitive' } },
       { customer: { name: { contains: q.search, mode: 'insensitive' } } },
       { job: { number: { contains: q.search, mode: 'insensitive' } } },
+      { salesOrder: { number: { contains: q.search, mode: 'insensitive' } } },
+      { salesperson: { name: { contains: q.search, mode: 'insensitive' } } },
     ];
   }
-  const ids = idsFilter(q.filters.ids);
+  const ids = idsFilter(f.ids);
   if (ids) where.id = { in: ids };
-  return where;
+  return and.length ? { AND: [where, ...and] } : where;
+}
+
+/**
+ * The cards over the list (the owner's sample: "TOTAL RECEIVABLES SUM — N
+ * active invoices pending collection"), under the list's own query: the
+ * receivable (issued and partly paid, against net collectible), what of it is
+ * overdue and what is awaiting countering, what has been collected on the
+ * invoices listed, and the receivable split by the team credited — the same
+ * cards as the sales lists (`teamShares`).
+ */
+async function invoiceListSummary(where: Prisma.InvoiceWhereInput) {
+  const today = dayKey(new Date());
+  const [owed, collected] = await Promise.all([
+    prisma.invoice.findMany({
+      where: { AND: [where, { status: { in: INVOICE_OWED } }] },
+      select: { status: true, counteredDate: true, dueDate: true, netCollectible: true, amountCollected: true, team: TEAM_REF_SELECT },
+    }),
+    prisma.invoice.aggregate({ where: { AND: [where, { status: { not: 'CANCELLED' } }] }, _sum: { amountCollected: true } }),
+  ]);
+  let receivable = 0;
+  let overdue = 0;
+  let overdueCount = 0;
+  let awaiting = 0;
+  let awaitingCount = 0;
+  const shares: { team: { id: string; code: string; name: string } | null; cents: number }[] = [];
+  for (const r of owed) {
+    const outstanding = Math.round((num(r.netCollectible) - num(r.amountCollected)) * 100);
+    if (outstanding <= 0) continue;
+    receivable += outstanding;
+    shares.push({ team: r.team, cents: outstanding });
+    if (!r.counteredDate) {
+      awaiting += outstanding;
+      awaitingCount++;
+    } else if (isOverdue({ ...r, outstanding: outstanding / 100 }, today)) {
+      overdue += outstanding;
+      overdueCount++;
+    }
+  }
+  return {
+    receivable: receivable / 100,
+    active: shares.length,
+    overdue: overdue / 100,
+    overdueCount,
+    awaiting: awaiting / 100,
+    awaitingCount,
+    collected: num(collected._sum.amountCollected),
+    teams: await teamShares(shares),
+  };
 }
 
 const INVOICE_SORTS = ['number', 'invoiceDate', 'dueDate', 'createdAt'];
@@ -337,8 +444,60 @@ invoiceRoutes.get(
       }),
       prisma.invoice.count({ where }),
     ]);
+    const [files, summary] = await Promise.all([attachmentCounts(rows.map((r) => r.id)), invoiceListSummary(where)]);
 
-    res.json(listResult(rows.map(presentInvoice), total, q));
+    res.json({ ...listResult(rows.map((r) => presentInvoice(r, files.get(r.id) ?? 0)), total, q), summary });
+  }),
+);
+
+/**
+ * The issued sales orders a new invoice may bill — the form's "From a sales
+ * order" choices, for one customer: each with its net (the order's total
+ * before VAT), what live invoices already bill of it, what is left, its PO,
+ * its terms and who sold it. Above `/:id`.
+ */
+invoiceRoutes.get(
+  '/sales-orders',
+  require_('gfin.ar.create'),
+  handler(async (req, res) => {
+    const customerId = typeof req.query.customerId === 'string' ? req.query.customerId : '';
+    if (!customerId) throw badRequest('Which customer?');
+    const orders = await prisma.salesOrder.findMany({
+      where: { customerId, status: 'ISSUED' },
+      orderBy: { orderDate: 'desc' },
+      select: {
+        id: true,
+        number: true,
+        orderDate: true,
+        poNumber: true,
+        termsDays: true,
+        total: true,
+        vatAmount: true,
+        vatRate: true,
+        owner: { select: { id: true, name: true } },
+        quotation: { select: { subject: true } },
+        invoices: { where: { status: { not: 'CANCELLED' } }, select: { grossAmount: true } },
+      },
+    });
+    res.json(
+      orders.map((o) => {
+        const net = cents(num(o.total) - num(o.vatAmount));
+        const invoiced = cents(o.invoices.reduce((s, i) => s + num(i.grossAmount), 0));
+        return {
+          id: o.id,
+          number: o.number,
+          orderDate: o.orderDate,
+          poNumber: o.poNumber,
+          termsDays: o.termsDays,
+          vatRate: num(o.vatRate),
+          subject: o.quotation.subject,
+          owner: o.owner,
+          net,
+          invoiced,
+          left: cents(Math.max(0, net - invoiced)),
+        };
+      }),
+    );
   }),
 );
 
@@ -371,6 +530,9 @@ invoiceRoutes.get(
           customer: { select: { name: true } },
           job: { select: { number: true, name: true } },
           jobOrder: { select: { number: true } },
+          salesOrder: { select: { number: true } },
+          salesperson: { select: { name: true } },
+          team: { select: { code: true } },
         },
         orderBy: orderBy(q, INVOICE_SORTS, { invoiceDate: 'desc' }),
         take: LIST_CAP,
@@ -383,15 +545,30 @@ invoiceRoutes.get(
       recordNamed('customer', q.filters.customerId),
       recordNamed('project', q.filters.jobId),
     ]);
+    const [salespersonNamed, teamNamed, orderNamed] = await Promise.all([
+      q.filters.salespersonId === 'none' ? 'no salesperson' : recordNamed('person', q.filters.salespersonId),
+      q.filters.teamId === 'none'
+        ? 'no team'
+        : q.filters.teamId
+          ? prisma.industry.findUnique({ where: { id: q.filters.teamId }, select: { code: true } }).then((t) => (t ? `team ${t.code}` : undefined))
+          : undefined,
+      recordNamed('sales order', q.filters.salesOrderId),
+    ]);
 
     const f = q.filters;
     const status = choice(f.status, InvoiceStatus, 'Status');
     const reference = listReference(count, rows.length, ['invoice', 'invoices'], [
       q.search && `search "${q.search}"`,
       f.overdue === 'true' ? 'overdue' : f.outstanding === 'true' ? 'outstanding' : status && `status ${statusLabel(status)}`,
+      f.countered === 'yes' ? 'countered' : f.countered === 'no' ? 'awaiting countering' : undefined,
       customer,
       project,
+      orderNamed,
+      salespersonNamed,
+      teamNamed,
+      f.termsDays && termsLabel(Number(f.termsDays)),
       rangeNamed('dated', f.from, f.to),
+      rangeNamed('expected', f.dueFrom, f.dueTo),
       f.ids && 'the rows selected',
     ]);
     const today = dayKey(new Date());
@@ -404,20 +581,33 @@ invoiceRoutes.get(
     const sections: PdfSection[] = [
       {
         kind: 'table',
-        head: ['Number', 'Customer and project', 'Dated', 'Due', `Invoiced (${currency})`, `Collectible (${currency})`, `Outstanding (${currency})`, 'Status'],
+        head: ['Number', 'Customer and project', 'Countered', 'Expected', `Invoiced (${currency})`, `Collectible (${currency})`, `Outstanding (${currency})`, 'Status'],
         align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'left'],
         rows: rows.map((r) => {
           const inSum = r.status !== 'CANCELLED';
           const outstanding = cents(num(r.netCollectible) - num(r.amountCollected));
-          const late = (r.status === 'ISSUED' || r.status === 'PARTIALLY_PAID') && outstanding > 0 ? daysBetween(r.dueDate, today) : 0;
+          const late = daysLate({ ...r, outstanding }, today);
+          const owed = r.status === 'ISSUED' || r.status === 'PARTIALLY_PAID';
+          const credit = [r.salesperson?.name, r.team?.code].filter(Boolean).join(' · ');
           return [
             r.number,
             {
               title: r.customer.name,
-              body: r.job ? `${r.job.number} — ${r.job.name}` : r.jobOrder ? `Job order ${r.jobOrder.number}` : 'No project',
+              body: [
+                r.job ? `${r.job.number} — ${r.job.name}` : r.salesOrder ? `Sales order ${r.salesOrder.number}` : r.jobOrder ? `Job order ${r.jobOrder.number}` : 'No project',
+                credit,
+              ]
+                .filter(Boolean)
+                .join(' · '),
             },
-            formatShortDate(r.invoiceDate),
-            late > 0 ? { title: formatShortDate(r.dueDate), body: `${late} day${late === 1 ? '' : 's'} late` } : formatShortDate(r.dueDate),
+            r.counteredDate
+              ? { title: formatShortDate(r.counteredDate), body: termsLabel(r.termsDays, r.terms) }
+              : { title: owed ? 'Awaiting' : '—', body: termsLabel(r.termsDays, r.terms) },
+            late > 0
+              ? { title: formatShortDate(r.dueDate), body: `${late} day${late === 1 ? '' : 's'} late` }
+              : owed && !r.counteredDate
+                ? { title: formatShortDate(r.dueDate), body: 'not yet countered' }
+                : formatShortDate(r.dueDate),
             bracketed(formatAmount(num(r.invoiceTotal)), inSum),
             bracketed(formatAmount(num(r.netCollectible)), inSum),
             // Nothing is owed on a draft until it is issued.
@@ -524,12 +714,16 @@ invoiceRoutes.get(
           { label: 'Customer', value: inv.customer.name },
           { label: 'TIN', value: inv.customer.tin ?? '—' },
           { label: 'Project', value: inv.job ? `${inv.job.number} — ${inv.job.name}` : '—' },
-          { label: 'Customer P.O.', value: inv.poReference ?? '—' },
-          { label: 'Terms', value: inv.terms ?? '—' },
-          { label: 'Due date', value: formatDate(inv.dueDate) },
-          inv.jobOrder
-            ? { label: 'Job order', value: inv.jobOrder.number }
-            : { label: 'Billing no.', value: inv.progressBilling ? `${inv.progressBilling.number} (#${inv.progressBilling.billingNo})` : '—' },
+          { label: 'Customer P.O.', value: inv.poReference ?? inv.salesOrder?.poNumber ?? '—' },
+          { label: 'Payment terms', value: termsLabel(inv.termsDays, inv.terms) },
+          { label: 'Countered', value: inv.counteredDate ? formatDate(inv.counteredDate) : 'Not yet' },
+          { label: inv.counteredDate ? 'Due date' : 'Due (if countered on the invoice date)', value: formatDate(inv.dueDate) },
+          inv.salesOrder
+            ? { label: 'Sales order', value: inv.salesOrder.number }
+            : inv.jobOrder
+              ? { label: 'Job order', value: inv.jobOrder.number }
+              : { label: 'Billing no.', value: inv.progressBilling ? `${inv.progressBilling.number} (#${inv.progressBilling.billingNo})` : '—' },
+          { label: 'Sales personnel', value: [inv.salesperson?.name, inv.team?.code].filter(Boolean).join(' · ') || '—' },
           { label: 'Status', value: statusLabel(inv.status) },
         ],
       },
@@ -593,7 +787,7 @@ invoiceRoutes.get(
       });
     }
 
-    const pdf = await renderDocument({
+    const bare = await renderDocument({
       title: 'Sales Invoice',
       documentNumber: inv.number,
       date: inv.invoiceDate,
@@ -601,9 +795,18 @@ invoiceRoutes.get(
       sections,
       signatories,
     });
+    // The invoice's files (the countered copy, the signed delivery) print
+    // behind it unless `?attachments=0`.
+    const files = req.query.attachments === '0' ? [] : await attachedFiles('invoice', inv.id);
+    const { pdf, listed } = await withAttachments(bare, files, { title: 'Sales invoice', number: inv.number, reference: inv.customer.name });
 
     await audit(
-      { entityType: 'invoice', entityId: inv.id, action: 'EXPORTED', summary: `Printed ${inv.number}` },
+      {
+        entityType: 'invoice',
+        entityId: inv.id,
+        action: 'EXPORTED',
+        summary: `Printed ${inv.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}`,
+      },
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
@@ -616,10 +819,57 @@ invoiceRoutes.get(
 const invoiceHeaderSchema = z.object({
   invoiceDate: z.string().optional(),
   dueDate: z.string().optional(),
+  /** Net days — the due date follows from it unless a due date is typed. */
+  termsDays: z.number().int().min(0).max(365).optional().nullable(),
   terms: z.string().optional().nullable(),
   poReference: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
 });
+
+/** Who is credited with an invoice — named on the form, else its source's. */
+const creditSchema = z.object({
+  salespersonId: z.string().optional().nullable(),
+  teamId: z.string().optional().nullable(),
+});
+
+/**
+ * The salesperson and team an invoice is credited to: those the form names
+ * (checked to exist — a team must be active), else the ones its source
+ * names (`invoiceCredit`), the team falling back to the salesperson's own.
+ * `undefined` in the body means "from the source"; null means nobody.
+ */
+async function resolveCredit(
+  body: { salespersonId?: string | null; teamId?: string | null },
+  source: { salesOrderId?: string | null; jobId?: string | null; jobOrderId?: string | null },
+): Promise<{ salespersonId: string | null; teamId: string | null }> {
+  const fromSource = body.salespersonId === undefined || body.teamId === undefined ? await invoiceCredit(source) : null;
+  const salespersonId = body.salespersonId === undefined ? fromSource!.salespersonId : body.salespersonId || null;
+  if (salespersonId && body.salespersonId) {
+    const known = await prisma.user.findUnique({ where: { id: salespersonId }, select: { id: true } });
+    if (!known) throw badRequest('That salesperson is not on file');
+  }
+  let teamId: string | null;
+  if (body.teamId === undefined) {
+    teamId = fromSource!.teamId;
+    if (!teamId && salespersonId && body.salespersonId) {
+      teamId = (await prisma.employee.findUnique({ where: { userId: salespersonId }, select: { industryId: true } }))?.industryId ?? null;
+    }
+  } else {
+    teamId = body.teamId || null;
+    if (teamId) {
+      const team = await prisma.industry.findUnique({ where: { id: teamId }, select: { isActive: true } });
+      if (!team?.isActive) throw badRequest('That team is not on the list');
+    }
+  }
+  return { salespersonId, teamId };
+}
+
+/** The due date: typed, else the countered day (else the invoice date) plus the terms. */
+function dueFrom(body: { dueDate?: string; termsDays?: number | null }, invoiceDate: Date, counteredDate: Date | null, termsDays: number): Date {
+  const dueDate = body.dueDate ? asDate(body.dueDate, 'Due date') : expectedCollection(invoiceDate, counteredDate, termsDays);
+  if (dueDate < invoiceDate) throw badRequest('The due date is before the invoice date');
+  return dueDate;
+}
 
 /**
  * Raising an invoice from an approved progress billing.
@@ -635,7 +885,7 @@ invoiceRoutes.post(
   require_('gfin.ar.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(invoiceHeaderSchema, req.body);
+    const body = parseBody(invoiceHeaderSchema.merge(creditSchema), req.body);
 
     const billing = await prisma.progressBilling.findUnique({
       where: { id: req.params.billingId },
@@ -659,10 +909,9 @@ invoiceRoutes.post(
 
     const settings = await financeSettings();
     const invoiceDate = body.invoiceDate ? asDate(body.invoiceDate, 'Invoice date') : dayKey(new Date());
-    const dueDate = body.dueDate
-      ? asDate(body.dueDate, 'Due date')
-      : addDays(invoiceDate, settings.defaultTermsDays);
-    if (dueDate < invoiceDate) throw badRequest('The due date is before the invoice date');
+    const termsDays = body.termsDays ?? parseTermsDays(body.terms) ?? settings.defaultTermsDays;
+    const dueDate = dueFrom(body, invoiceDate, null, termsDays);
+    const credit = await resolveCredit(body, { jobId: billing.jobId });
 
     const invoice = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('invoice', tx);
@@ -674,7 +923,9 @@ invoiceRoutes.post(
           progressBillingId: billing.id,
           invoiceDate,
           dueDate,
-          terms: body.terms ?? `${settings.defaultTermsDays} days`,
+          termsDays,
+          ...credit,
+          terms: body.terms ?? termsLabel(termsDays),
           poReference: body.poReference || null,
           // Carried, not recomputed.
           grossAmount: billing.grossAmount,
@@ -715,10 +966,35 @@ invoiceRoutes.post(
   }),
 );
 
+/**
+ * A sales order is never invoiced past its net (its total before VAT): the
+ * live invoices on it plus this one, checked under a lock on the order's row
+ * so two invoices raised at once cannot both take the last of it.
+ */
+async function assertOrderLeft(
+  tx: Prisma.TransactionClient,
+  order: { id: string; number: string; net: number },
+  gross: number,
+  exceptInvoiceId?: string,
+) {
+  await tx.$queryRaw`SELECT id FROM "SalesOrder" WHERE id = ${order.id} FOR UPDATE`;
+  const billed = await tx.invoice.aggregate({
+    where: { salesOrderId: order.id, status: { not: 'CANCELLED' }, ...(exceptInvoiceId ? { id: { not: exceptInvoiceId } } : {}) },
+    _sum: { grossAmount: true },
+  });
+  const left = cents(order.net - num(billed._sum.grossAmount));
+  if (gross > left + 0.005) {
+    throw badRequest(`Only ${formatMoney(Math.max(0, left), await companyCurrency())} of ${order.number} is left to invoice (before VAT)`);
+  }
+}
+
 /** A standalone invoice, for work with no progress billing behind it. */
-const manualInvoiceSchema = z.object({
+const manualInvoiceSchema = creditSchema.extend({
   customerId: z.string().optional().nullable(),
   jobId: z.string().optional().nullable(),
+  /** An issued sales order this invoice bills — never past what is left of its net. */
+  salesOrderId: z.string().optional().nullable(),
+  termsDays: z.number().int().min(0).max(365).optional().nullable(),
   /** A completed, chargeable job order — billed once, like a billing. */
   jobOrderId: z.string().optional().nullable(),
   invoiceDate: z.string().optional(),
@@ -813,17 +1089,36 @@ invoiceRoutes.post(
       body.poReference ??= jo.customerPoNumber;
       jobOrder = { id: jo.id, number: jo.number };
     }
+    // An issued sales order (2026-10-15, the owner's "+ Add Invoice"): its
+    // customer, PO, terms and VAT rate unless the body says otherwise, and
+    // never more than is left of its net — checked again under a lock below.
+    let salesOrder: { id: string; number: string; net: number } | null = null;
+    if (body.salesOrderId) {
+      if (jobOrder) throw badRequest('An invoice bills a job order or a sales order, not both');
+      const so = await prisma.salesOrder.findUnique({
+        where: { id: body.salesOrderId },
+        select: { id: true, number: true, status: true, customerId: true, poNumber: true, termsDays: true, vatRate: true, total: true, vatAmount: true },
+      });
+      if (!so) throw notFound('Sales order not found');
+      if (so.status !== 'ISSUED') throw badRequest(`${so.number} is ${statusLabel(so.status).toLowerCase()} — only an issued sales order is invoiced`);
+      if (body.customerId && body.customerId !== so.customerId) throw badRequest(`${so.number} is another customer's order`);
+      body.customerId ??= so.customerId;
+      body.poReference ??= so.poNumber;
+      body.termsDays ??= so.termsDays;
+      body.vatRate ??= num(so.vatRate);
+      salesOrder = { id: so.id, number: so.number, net: cents(num(so.total) - num(so.vatAmount)) };
+    }
     if (!body.customerId) throw badRequest('Which customer?');
     const customerId = body.customerId;
 
     const money = manualInvoiceMoney(body.lines, body.vatRate ?? rates.vatRate, body.ewtRate ?? rates.ewtRate);
     const invoiceDate = body.invoiceDate ? asDate(body.invoiceDate, 'Invoice date') : dayKey(new Date());
-    const dueDate = body.dueDate
-      ? asDate(body.dueDate, 'Due date')
-      : addDays(invoiceDate, settings.defaultTermsDays);
-    if (dueDate < invoiceDate) throw badRequest('The due date is before the invoice date');
+    const termsDays = body.termsDays ?? parseTermsDays(body.terms) ?? settings.defaultTermsDays;
+    const dueDate = dueFrom(body, invoiceDate, null, termsDays);
+    const credit = await resolveCredit(body, { salesOrderId: salesOrder?.id, jobId: body.jobId, jobOrderId: jobOrder?.id });
 
     const invoice = await prisma.$transaction(async (tx) => {
+      if (salesOrder) await assertOrderLeft(tx, salesOrder, money.tax.grossAmount);
       const number = await nextNumber('invoice', tx);
       return tx.invoice.create({
         data: {
@@ -831,9 +1126,12 @@ invoiceRoutes.post(
           customerId,
           jobId: body.jobId || null,
           jobOrderId: jobOrder?.id ?? null,
+          salesOrderId: salesOrder?.id ?? null,
           invoiceDate,
           dueDate,
-          terms: body.terms ?? `${settings.defaultTermsDays} days`,
+          termsDays,
+          ...credit,
+          terms: body.terms ?? termsLabel(termsDays),
           poReference: body.poReference || null,
           ...money.figures,
           notes: body.notes || null,
@@ -849,7 +1147,11 @@ invoiceRoutes.post(
         entityType: 'invoice',
         entityId: invoice.id,
         action: 'CREATED',
-        summary: jobOrder ? `${invoice.number} raised from job order ${jobOrder.number}` : `${invoice.number} raised`,
+        summary: jobOrder
+          ? `${invoice.number} raised from job order ${jobOrder.number}`
+          : salesOrder
+            ? `${invoice.number} raised from sales order ${salesOrder.number} — ${num(invoice.grossAmount)} of its ${salesOrder.net} net`
+            : `${invoice.number} raised`,
       },
       req,
     );
@@ -883,6 +1185,7 @@ invoiceRoutes.put(
       include: {
         progressBilling: { select: { number: true } },
         jobOrder: { select: { number: true } },
+        salesOrder: { select: { id: true, number: true, total: true, vatAmount: true } },
       },
     });
     if (!existing) throw notFound('Invoice not found');
@@ -900,15 +1203,25 @@ invoiceRoutes.put(
       }
     } else if (raw.jobOrderId !== undefined && raw.jobOrderId !== existing.jobOrderId) {
       throw badRequest('The job order an invoice bills does not change — cancel this one and raise another');
+    } else if (raw.salesOrderId !== undefined && (raw.salesOrderId || null) !== existing.salesOrderId) {
+      throw badRequest('The sales order an invoice bills does not change — cancel this one and raise another');
     }
 
     const header = parseBody(invoiceHeaderSchema, raw);
     const invoiceDate = header.invoiceDate ? asDate(header.invoiceDate, 'Invoice date') : existing.invoiceDate;
-    const dueDate = header.dueDate ? asDate(header.dueDate, 'Due date') : existing.dueDate;
+    const termsDays = header.termsDays ?? existing.termsDays;
+    // The due date follows the terms unless one is typed; an invoice from
+    // before the terms were kept keeps the one it was given.
+    const dueDate = header.dueDate
+      ? asDate(header.dueDate, 'Due date')
+      : termsDays !== null && (header.termsDays !== undefined || header.invoiceDate)
+        ? expectedCollection(invoiceDate, null, termsDays)
+        : existing.dueDate;
     if (dueDate < invoiceDate) throw badRequest('The due date is before the invoice date');
     const headerData = {
       invoiceDate,
       dueDate,
+      termsDays,
       terms: header.terms === undefined ? existing.terms : header.terms || null,
       poReference: header.poReference === undefined ? existing.poReference : header.poReference || null,
       notes: header.notes === undefined ? existing.notes : header.notes || null,
@@ -936,6 +1249,10 @@ invoiceRoutes.put(
     }
 
     const updated = await prisma.$transaction(async (tx) => {
+      if (manual && existing.salesOrder) {
+        const order = existing.salesOrder;
+        await assertOrderLeft(tx, { id: order.id, number: order.number, net: cents(num(order.total) - num(order.vatAmount)) }, manual.tax.grossAmount, existing.id);
+      }
       const claimed = await tx.invoice.updateMany({
         where: { id: existing.id, status: 'DRAFT' },
         data: { ...headerData, ...(manual ? { customerId, jobId, ...manual.figures } : {}) },
@@ -995,6 +1312,95 @@ invoiceRoutes.post(
         entityId: invoice.id,
         action: 'SUBMITTED',
         summary: `${invoice.number} issued — ${num(invoice.netCollectible)} collectible, due ${invoice.dueDate.toISOString().slice(0, 10)}`,
+      },
+      req,
+    );
+    res.json(presentInvoice(updated));
+  }),
+);
+
+/**
+ * Countered (2026-10-15, the owner's sample): the customer received the
+ * issued invoice on this day. The terms run from it, so the due date — the
+ * expected collection — moves with it; until it is recorded the invoice is
+ * awaiting countering and never overdue. A wrong day is corrected by saying
+ * it again; never a day before the invoice or after today.
+ */
+invoiceRoutes.post(
+  '/:id/counter',
+  require_('gfin.ar.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(
+      z.object({
+        counteredDate: z.string().optional(),
+        termsDays: z.number().int().min(0).max(365).optional(),
+      }),
+      req.body,
+    );
+    const invoice = await prisma.invoice.findUnique({ where: { id: req.params.id } });
+    if (!invoice) throw notFound('Invoice not found');
+    if (!['ISSUED', 'PARTIALLY_PAID', 'PAID'].includes(invoice.status)) {
+      throw badRequest(invoice.status === 'DRAFT' ? 'Issue it first — a draft has not gone to the customer' : 'A cancelled invoice is not countered');
+    }
+    const today = dayKey(new Date());
+    const counteredDate = body.counteredDate ? asDate(body.counteredDate, 'Countered date') : today;
+    if (counteredDate < invoice.invoiceDate) throw badRequest('It cannot be countered before its invoice date');
+    if (counteredDate > today) throw badRequest('It cannot be countered on a day still to come');
+    const termsDays = body.termsDays ?? invoice.termsDays ?? Math.max(0, daysBetween(invoice.invoiceDate, invoice.dueDate));
+    const dueDate = expectedCollection(invoice.invoiceDate, counteredDate, termsDays);
+
+    // Claimed on what was read, so two people countering at once do not
+    // both write a trail row over the other's day.
+    const claimed = await prisma.invoice.updateMany({
+      where: { id: invoice.id, status: invoice.status, counteredDate: invoice.counteredDate },
+      data: { counteredDate, termsDays, dueDate },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+    const updated = await prisma.invoice.findUniqueOrThrow({ where: { id: invoice.id }, include: invoiceInclude });
+
+    await audit(
+      {
+        entityType: 'invoice',
+        entityId: invoice.id,
+        action: 'UPDATED',
+        summary: `${invoice.number} countered on ${formatDate(counteredDate)} — ${termsLabel(termsDays)}, expected ${formatDate(dueDate)}`,
+        before: { counteredDate: invoice.counteredDate, dueDate: invoice.dueDate, termsDays: invoice.termsDays },
+        after: { counteredDate, dueDate, termsDays },
+      },
+      req,
+    );
+    res.json(presentInvoice(updated));
+  }),
+);
+
+/**
+ * Who is credited with the invoice — the salesperson and the team. A
+ * category, not a figure, so it changes at any stage but a cancelled one's.
+ */
+invoiceRoutes.patch(
+  '/:id/credit',
+  require_('gfin.ar.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(creditSchema, req.body);
+    const invoice = await prisma.invoice.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, number: true, status: true, salespersonId: true, teamId: true, salesOrderId: true, jobId: true, jobOrderId: true },
+    });
+    if (!invoice) throw notFound('Invoice not found');
+    if (invoice.status === 'CANCELLED') throw badRequest('A cancelled invoice keeps the credit it had');
+    const credit = await resolveCredit(
+      { salespersonId: body.salespersonId === undefined ? invoice.salespersonId : body.salespersonId, teamId: body.teamId },
+      invoice,
+    );
+    const updated = await prisma.invoice.update({ where: { id: invoice.id }, data: credit, include: invoiceInclude });
+    await audit(
+      {
+        entityType: 'invoice',
+        entityId: invoice.id,
+        action: 'UPDATED',
+        summary: `${invoice.number} credited to ${updated.salesperson?.name ?? 'nobody'}${updated.team ? ` (${updated.team.code})` : ''}`,
+        before: { salespersonId: invoice.salespersonId, teamId: invoice.teamId },
+        after: credit,
       },
       req,
     );
@@ -3653,10 +4059,13 @@ financeReportRoutes.get(
         const payable = num(inv.netCollectible);
         const paid = num(inv.amountCollected);
         const outstanding = cents(payable - paid);
-        const daysOverdue = daysBetween(inv.dueDate, asOf);
+        // Not countered: the terms have not started, so it is never late
+        // (it ages as Current and is counted apart below).
+        const daysOverdue = inv.counteredDate ? daysBetween(inv.dueDate, asOf) : Math.min(0, daysBetween(inv.dueDate, asOf));
         return {
           id: inv.id,
           number: inv.number,
+          awaitingCounter: !inv.counteredDate,
           party: inv.customer.name,
           partyId: inv.customerId,
           date: inv.invoiceDate,
@@ -3695,6 +4104,8 @@ financeReportRoutes.get(
       customers: [...byCustomer.values()].sort((a, b) => b.outstanding - a.outstanding),
       totalOutstanding: cents(rows.reduce((s, r) => s + r.outstanding, 0)),
       totalOverdue: cents(rows.filter((r) => r.daysOverdue > 0).reduce((s, r) => s + r.outstanding, 0)),
+      // Issued and not yet received by the customer — not overdue, whatever its date.
+      awaitingCountering: cents(rows.filter((r) => r.awaitingCounter).reduce((s, r) => s + r.outstanding, 0)),
       // Withheld at source and not yet certificated. Real money, but it comes
       // back as a tax credit — never chase it as an unpaid invoice.
       withheldAwaitingCertificate: cents(rows.reduce((s, r) => s + (r.withheld ?? 0), 0)),

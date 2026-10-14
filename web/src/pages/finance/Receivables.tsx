@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type Column } from '../../components/DataList';
+import { DataList, type Column, type FilterDef } from '../../components/DataList';
+import { Stat, teamCards, noTeamNote, type TeamShare } from '../../components/charts';
+import { Attachments, openAttachment } from '../../components/Attachments';
+import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
+import { PersonSelect, usePeople } from '../../components/People';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import {
@@ -61,10 +65,20 @@ export interface Invoice {
   notes: string | null;
   voidedAt: string | null;
   voidReason: string | null;
+  /** The day the customer received it; null while awaiting countering. */
+  counteredDate: string | null;
+  termsDays: number | null;
+  termsLabel: string;
+  awaitingCounter: boolean;
+  /** Files on the invoice — the list's "Invoice copy" column. */
+  attachments?: number;
   customer: { id: string; code: string; name: string };
   job: { id: string; number: string; name: string } | null;
   progressBilling: { id: string; number: string; billingNo: number } | null;
   jobOrder: { id: string; number: string } | null;
+  salesOrder: { id: string; number: string; poNumber: string | null } | null;
+  salesperson: { id: string; name: string } | null;
+  team: { id: string; code: string; name: string } | null;
   lines: { id: string; description: string; detail: string | null; amount: number }[];
   allocations?: {
     id: string;
@@ -109,14 +123,75 @@ export function CellLink({ to, children, className }: { to: string; children: Re
 /** Where a payment's number opens: the register, with that payment's sheet up. */
 export const paymentLink = (id: string) => `/g-fin/payments/${id}`;
 
+interface ReceivablesSummary {
+  receivable: number;
+  active: number;
+  overdue: number;
+  overdueCount: number;
+  awaiting: number;
+  awaitingCount: number;
+  collected: number;
+  teams: TeamShare[];
+}
+
+/** The terms the form offers as chips (`TERMS_CHOICES` on the server); any other is typed. */
+export const TERMS_CHOICES = [15, 30, 45, 60];
+
+/** The active teams — the Industry master, KAT, HIT, UIT, GIB, SIT. */
+export function useTeams() {
+  const [teams, setTeams] = useState<{ id: string; code: string; name: string }[]>([]);
+  useEffect(() => {
+    api
+      .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
+      .then((rows) => setTeams(rows.filter((t) => t.isActive)))
+      .catch(() => setTeams([]));
+  }, []);
+  return teams;
+}
+
+/** The first file on an invoice, opened from its row — the sample's PDF column. */
+function InvoiceCopy({ row }: { row: Invoice }) {
+  const toast = useToast();
+  if (!row.attachments) return <span className="faint">—</span>;
+  return (
+    <button
+      type="button"
+      className="btn btn-sm"
+      aria-label={`Open the invoice copy of ${row.number}`}
+      onClick={async (e) => {
+        e.stopPropagation();
+        try {
+          const files = await api.get<{ id: string; fileName: string; mimeType: string }[]>(`/attachments/invoice/${row.id}`);
+          if (!files.length || !(await openAttachment(files[0]))) toast('error', 'The file could not be opened');
+        } catch {
+          toast('error', 'The file could not be opened');
+        }
+      }}
+      onKeyDown={(e) => e.stopPropagation()}
+    >
+      PDF{row.attachments > 1 ? ` +${row.attachments - 1}` : ''}
+    </button>
+  );
+}
+
+/**
+ * Accounts Receivable, laid out on the owner's sample (2026-10-15): SI No.,
+ * company, amount, countered date, payment terms, expected collection, sales
+ * personnel, team and the invoice copy; cards for the receivable, what is
+ * overdue, what is awaiting countering, what was collected and each team's
+ * share. Approved billings waiting to be invoiced stay a queue over the list.
+ */
 export function Receivables() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const [queue, setQueue] = useState<UninvoicedBilling[] | null>(null);
   const [raising, setRaising] = useState<UninvoicedBilling | null>(null);
+  const [creating, setCreating] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
+  const { people } = usePeople('gops.quotations.create');
+  const teams = useTeams();
 
   const loadQueue = useCallback(async () => {
     try {
@@ -148,52 +223,102 @@ export function Receivables() {
   const columns: Column<Invoice>[] = [
     {
       key: 'number',
-      label: 'Number',
+      label: 'SI No.',
       sortKey: 'number',
+      width: '170px',
       render: (r) => <span className="mono">{r.number}</span>,
     },
     {
       key: 'customer',
-      label: 'Customer',
+      label: 'Company',
       render: (r) => (
         <div>
           <div>{r.customer.name}</div>
           <div className="faint">
-            {r.job ? `${r.job.number} — ${r.job.name}` : r.jobOrder ? `Job order ${r.jobOrder.number}` : 'No project'}
+            {r.job
+              ? `${r.job.number} — ${r.job.name}`
+              : r.salesOrder
+                ? `Sales order ${r.salesOrder.number}`
+                : r.jobOrder
+                  ? `Job order ${r.jobOrder.number}`
+                  : 'No project'}
           </div>
         </div>
       ),
     },
     {
-      key: 'invoiceDate',
-      label: 'Dated',
-      sortKey: 'invoiceDate',
-      render: (r) => formatDate(r.invoiceDate),
-      optional: true,
-    },
-    {
-      key: 'dueDate',
-      label: 'Due',
-      sortKey: 'dueDate',
+      key: 'invoiceTotal',
+      label: 'Amount',
+      align: 'right',
       render: (r) => (
         <div>
-          <div>{formatDate(r.dueDate)}</div>
-          {r.outstanding > 0 && r.daysOverdue > 0 && (
-            <div className="faint warn">{r.daysOverdue} days late</div>
-          )}
+          <div className="mono">{formatMoney(r.invoiceTotal)}</div>
+          {r.status === 'PAID' ? (
+            <div className="faint">paid</div>
+          ) : r.outstanding > 0 && r.status !== 'DRAFT' && r.status !== 'CANCELLED' ? (
+            <div className={r.daysOverdue > 0 ? 'faint warn' : 'faint'}>{formatMoney(r.outstanding)} to collect</div>
+          ) : null}
         </div>
       ),
     },
     {
-      key: 'invoiceTotal',
-      label: 'Invoiced',
-      align: 'right',
-      render: (r) => <span className="mono faint">{formatMoney(r.invoiceTotal)}</span>,
+      key: 'counteredDate',
+      label: 'Countered',
+      render: (r) =>
+        r.counteredDate ? (
+          formatDate(r.counteredDate)
+        ) : r.awaitingCounter ? (
+          <StatusBadge status="AWAITING" extra={{ AWAITING: 'warn' }} label="awaiting" />
+        ) : (
+          <span className="faint">—</span>
+        ),
     },
+    {
+      key: 'terms',
+      label: 'Terms',
+      render: (r) => <span className="badge">{r.termsLabel}</span>,
+    },
+    {
+      key: 'dueDate',
+      label: 'Expected collection',
+      sortKey: 'dueDate',
+      render: (r) =>
+        r.awaitingCounter || r.status === 'DRAFT' ? (
+          <span className="faint">once countered</span>
+        ) : (
+          <div>
+            <div>{formatDate(r.dueDate)}</div>
+            {r.daysOverdue > 0 && <div className="faint warn">{r.daysOverdue} days late</div>}
+          </div>
+        ),
+    },
+    {
+      key: 'salesperson',
+      label: 'Sales personnel',
+      render: (r) => r.salesperson?.name ?? <span className="faint">—</span>,
+    },
+    {
+      key: 'team',
+      label: 'Team',
+      render: (r) => (r.team ? <span title={r.team.name}>{r.team.code}</span> : <span className="faint">—</span>),
+    },
+    {
+      key: 'copy',
+      label: 'Invoice copy',
+      align: 'center',
+      render: (r) => <InvoiceCopy row={r} />,
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (r) => <StatusBadge status={r.status} />,
+    },
+    { key: 'invoiceDate', label: 'Dated', sortKey: 'invoiceDate', render: (r) => formatDate(r.invoiceDate), optional: true },
     {
       key: 'netCollectible',
       label: 'Collectible',
       align: 'right',
+      optional: true,
       render: (r) => (
         <div>
           <div className="mono">{formatMoney(r.netCollectible)}</div>
@@ -205,21 +330,52 @@ export function Receivables() {
         </div>
       ),
     },
+  ];
+
+  const filters: FilterDef[] = [
+    { key: 'status', label: 'Status', options: INVOICE_STATUSES },
+    { key: 'outstanding', label: 'Balance', options: [{ value: 'true', label: 'Outstanding only' }] },
+    { key: 'overdue', label: 'Overdue', options: [{ value: 'true', label: 'Overdue only' }] },
     {
-      key: 'outstanding',
-      label: 'Outstanding',
-      align: 'right',
-      render: (r) => (
-        <span className={`mono ${r.outstanding > 0 && r.daysOverdue > 0 ? 'warn' : ''}`}>
-          {formatMoney(r.outstanding)}
-        </span>
-      ),
+      key: 'countered',
+      label: 'Countered',
+      options: [
+        { value: 'yes', label: 'Countered' },
+        { value: 'no', label: 'Awaiting countering' },
+      ],
     },
     {
-      key: 'status',
-      label: 'Status',
-      render: (r) => <StatusBadge status={r.status} />,
+      key: 'salespersonId',
+      label: 'Sales personnel',
+      options: [{ value: 'none', label: 'Nobody named' }, ...people.map((p) => ({ value: p.id, label: p.name }))],
     },
+    {
+      key: 'teamId',
+      label: 'Team',
+      options: [...teams.map((t) => ({ value: t.id, label: `${t.code} — ${t.name}` })), { value: 'none', label: 'No team' }],
+    },
+    {
+      key: 'termsDays',
+      label: 'Payment terms',
+      options: [0, ...TERMS_CHOICES].map((d) => ({ value: String(d), label: d === 0 ? 'Due on receipt' : `Net ${d}` })),
+    },
+    {
+      key: 'customerId',
+      label: 'Customer',
+      type: 'lookup',
+      placeholder: 'Type a customer name or code…',
+      search: async (term: string) =>
+        (await api.get<{ id: string; code: string; name: string }[]>(`/customers/lookup${qs({ q: term })}`)).map((c) => ({
+          value: c.id,
+          label: `${c.name} · ${c.code}`,
+        })),
+      describe: async (id: string) => {
+        const c = await api.get<{ name: string; code: string }>(`/customers/${id}`);
+        return `${c.name} · ${c.code}`;
+      },
+    },
+    { key: 'from', toKey: 'to', label: 'Dated', type: 'dateRange' },
+    { key: 'dueFrom', toKey: 'dueTo', label: 'Expected collection', type: 'dateRange' },
   ];
 
   return (
@@ -295,21 +451,54 @@ export function Receivables() {
         listKey="invoices"
         endpoint="/invoices"
         printPath="/api/invoices/pdf"
+        reportPath="/g-fin/reports?kind=receivables"
         columns={columns}
         rowKey={(r) => r.id}
         reloadToken={reload}
-        searchPlaceholder="Search number, customer, PO reference…"
+        searchPlaceholder="Search SI no., customer, PO, sales order, salesperson…"
         emptyTitle="No invoices yet"
         onRowClick={(r) => navigate(`/g-fin/ar/${r.id}`)}
-        filters={[
-          { key: 'status', label: 'Status', options: INVOICE_STATUSES },
-          {
-            key: 'outstanding',
-            label: 'Balance',
-            options: [{ value: 'true', label: 'Outstanding only' }],
-          },
-          { key: 'overdue', label: 'Overdue', options: [{ value: 'true', label: 'Overdue only' }] },
-        ]}
+        selectable
+        filters={filters}
+        summary={(raw) => {
+          const sum = raw as unknown as ReceivablesSummary | undefined;
+          if (!sum) return null;
+          return (
+            <>
+              <Stat
+                label="Total receivables"
+                value={formatMoney(sum.receivable)}
+                figure
+                sub={[`${sum.active} active invoice${sum.active === 1 ? '' : 's'} pending collection`, noTeamNote(sum.teams)].filter(Boolean).join(' · ')}
+                to="/g-fin/ar?outstanding=true"
+              />
+              <Stat
+                label="Overdue"
+                value={formatMoney(sum.overdue)}
+                figure
+                accent={sum.overdue > 0 ? 'warn' : undefined}
+                sub={`${sum.overdueCount} invoice${sum.overdueCount === 1 ? '' : 's'}, countered and past due`}
+                to="/g-fin/ar?overdue=true"
+              />
+              <Stat
+                label="Awaiting countering"
+                value={formatMoney(sum.awaiting)}
+                figure
+                sub={`${sum.awaitingCount} not yet received by the customer`}
+                to="/g-fin/ar?countered=no"
+              />
+              <Stat label="Collected" value={formatMoney(sum.collected)} figure accent="ok" sub="on the invoices listed" />
+              {teamCards(sum.teams, formatMoney, 'invoice')}
+            </>
+          );
+        }}
+        actions={
+          can('gfin.ar.create') ? (
+            <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+              + New invoice
+            </button>
+          ) : null
+        }
       />
 
       {raising && (
@@ -318,6 +507,16 @@ export function Receivables() {
           onClose={() => setRaising(null)}
           onSaved={(id) => {
             setRaising(null);
+            setReload((r) => r + 1);
+            navigate(`/g-fin/ar/${id}`);
+          }}
+        />
+      )}
+      {creating && (
+        <InvoiceModal
+          onClose={() => setCreating(false)}
+          onSaved={(id) => {
+            setCreating(false);
             setReload((r) => r + 1);
             navigate(`/g-fin/ar/${id}`);
           }}
@@ -336,12 +535,64 @@ function daysFrom(from: string, to: string): number {
 const toCents = (n: number) => Math.round(n * 100) / 100;
 
 /**
- * Raising an invoice from an approved billing or — with `existing` —
- * modifying a draft invoice (`PUT /invoices/:id`). A billing's invoice
- * carries the billing's figures, so only its dates, terms, PO reference and
- * notes are offered. A manual one (a job order's) is re-entered whole: its
- * lines here, its tax recomputed by the server at the rates it was raised
- * with — the figures shown are the same arithmetic, for reading.
+ * The payment terms as the owner's sample offers them: Net 15, 30, 45 or 60
+ * as chips, or any number of days typed. The terms run from the day the
+ * customer counters the invoice.
+ */
+export function TermsPicker({ value, onChange }: { value: number; onChange: (days: number) => void }) {
+  const [custom, setCustom] = useState(!TERMS_CHOICES.includes(value));
+  return (
+    <div className="ar-terms">
+      <div className="scope-switch" role="group" aria-label="Payment terms">
+        {TERMS_CHOICES.map((d) => (
+          <button
+            key={d}
+            type="button"
+            className={!custom && value === d ? 'active' : ''}
+            aria-pressed={!custom && value === d}
+            onClick={() => {
+              setCustom(false);
+              onChange(d);
+            }}
+          >
+            Net {d}
+          </button>
+        ))}
+        <button type="button" className={custom ? 'active' : ''} aria-pressed={custom} onClick={() => setCustom(true)}>
+          Other
+        </button>
+      </div>
+      {custom && (
+        <NumberInput kind="count" min={0} max={365} aria-label="Payment terms in days" value={value} onChange={(e) => onChange(Number(e.target.value))} />
+      )}
+    </div>
+  );
+}
+
+interface OrderOption {
+  id: string;
+  number: string;
+  orderDate: string;
+  poNumber: string | null;
+  termsDays: number;
+  vatRate: number;
+  subject: string | null;
+  owner: { id: string; name: string };
+  net: number;
+  invoiced: number;
+  left: number;
+}
+
+/**
+ * The invoice form — the owner's "Add New Sale Invoice": a new invoice
+ * (standalone, or billing an issued sales order), one raised from an
+ * approved billing, or — with `existing` — a draft modified
+ * (`PUT /invoices/:id`). A billing's invoice carries the billing's figures,
+ * so only its dates, terms, PO reference and notes are offered. A manual one
+ * is entered whole: its lines here, its tax worked out by the server at the
+ * company's rates (the sales order's VAT rate when it bills one). The
+ * salesperson and team are its source's unless picked; the invoice copy, a
+ * PDF, is attached once it is saved.
  */
 function InvoiceModal({
   billing,
@@ -358,24 +609,58 @@ function InvoiceModal({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [terms, setTerms] = useState(existing ? daysFrom(existing.invoiceDate, existing.dueDate) : 30);
+  const isNew = !billing && !existing;
+  const [terms, setTerms] = useState(existing ? existing.termsDays ?? daysFrom(existing.invoiceDate, existing.dueDate) : 30);
   const today = todayLocal();
   const [form, setForm] = useState({
     invoiceDate: existing?.invoiceDate.slice(0, 10) ?? today,
     poReference: existing?.poReference ?? '',
     notes: existing?.notes ?? '',
   });
+  const [customer, setCustomer] = useState<CustomerRef | null>(null);
+  const [orders, setOrders] = useState<OrderOption[] | null>(null);
+  const [orderId, setOrderId] = useState('');
+  // '' = from the document behind it; the server fills those.
+  const [salespersonId, setSalespersonId] = useState('');
+  const [teamId, setTeamId] = useState('');
+  const [copy, setCopy] = useState<File | null>(null);
+  const { people } = usePeople('gops.quotations.create');
+  const teams = useTeams();
   // A manual invoice's lines are its figures; a billing's are the billing's.
-  const manual = !!existing && !existing.progressBilling;
+  const manual = isNew || (!!existing && !existing.progressBilling);
   const [lines, setLines] = useState(
-    existing ? existing.lines.map((l) => ({ description: l.description, detail: l.detail ?? '', amount: l.amount })) : [],
+    existing
+      ? existing.lines.map((l) => ({ description: l.description, detail: l.detail ?? '', amount: l.amount }))
+      : isNew
+        ? [{ description: '', detail: '', amount: 0 }]
+        : [],
   );
 
-  const dueDate = (() => {
-    const d = new Date(`${form.invoiceDate}T00:00:00Z`);
-    d.setUTCDate(d.getUTCDate() + terms);
-    return d.toISOString().slice(0, 10);
-  })();
+  // The customer's issued sales orders, for "Bills".
+  useEffect(() => {
+    if (!isNew || !customer) {
+      setOrders(null);
+      return;
+    }
+    let live = true;
+    api
+      .get<OrderOption[]>(`/invoices/sales-orders${qs({ customerId: customer.id })}`)
+      .then((rows) => live && setOrders(rows))
+      .catch(() => live && setOrders([]));
+    return () => {
+      live = false;
+    };
+  }, [isNew, customer]);
+  const order = orders?.find((o) => o.id === orderId) ?? null;
+
+  function pickOrder(id: string) {
+    setOrderId(id);
+    const o = orders?.find((x) => x.id === id);
+    if (!o) return;
+    setTerms(o.termsDays);
+    setForm((f) => ({ ...f, poReference: o.poNumber ?? f.poReference }));
+    setLines([{ description: `Sales order ${o.number}${o.subject ? ` — ${o.subject}` : ''}`, detail: o.poNumber ? `PO ${o.poNumber}` : '', amount: o.left }]);
+  }
 
   const gross = toCents(lines.reduce((s, l) => s + (l.amount || 0), 0));
   const figures = existing
@@ -386,39 +671,58 @@ function InvoiceModal({
           return { invoiceTotal: toCents(gross + vat), netCollectible: toCents(gross + vat - ewt) };
         })()
       : { invoiceTotal: existing.invoiceTotal, netCollectible: existing.netCollectible }
-    : { invoiceTotal: billing?.invoiceTotal ?? 0, netCollectible: billing?.netCollectible ?? 0 };
-  const valid = !manual || (gross > 0 && lines.every((l) => !l.amount || l.description.trim()));
+    : billing
+      ? { invoiceTotal: billing.invoiceTotal, netCollectible: billing.netCollectible }
+      : null;
+  const overOrder = !!order && gross > order.left + 0.005;
+  const valid =
+    (!isNew || !!customer) && !overOrder && (!manual || (gross > 0 && lines.every((l) => !l.amount || l.description.trim())));
 
   async function save() {
     setBusy(true);
     setError(null);
     const header = {
       invoiceDate: form.invoiceDate,
-      dueDate,
-      terms: `${terms} days`,
+      termsDays: terms,
       poReference: form.poReference || null,
       notes: form.notes || null,
     };
+    const credit = {
+      ...(salespersonId ? { salespersonId } : {}),
+      ...(teamId ? { teamId } : {}),
+    };
+    const payloadLines = lines
+      .filter((l) => l.description.trim() && l.amount)
+      .map((l) => ({ description: l.description, detail: l.detail || null, amount: l.amount }));
     try {
+      let id: string;
       if (existing) {
-        await api.put(
-          `/invoices/${existing.id}`,
-          manual
-            ? {
-                ...header,
-                lines: lines
-                  .filter((l) => l.description.trim() && l.amount)
-                  .map((l) => ({ description: l.description, detail: l.detail || null, amount: l.amount })),
-              }
-            : header,
-        );
-        toast('ok', 'Saved');
-        onSaved(existing.id);
+        await api.put(`/invoices/${existing.id}`, manual ? { ...header, lines: payloadLines } : header);
+        id = existing.id;
       } else if (billing) {
-        const created = await api.post<{ id: string }>(`/invoices/from-billing/${billing.id}`, header);
-        toast('ok', 'Invoice raised — issue it when it goes to the customer');
-        onSaved(created.id);
+        id = (await api.post<{ id: string }>(`/invoices/from-billing/${billing.id}`, { ...header, ...credit })).id;
+      } else {
+        id = (
+          await api.post<{ id: string }>('/invoices', {
+            ...header,
+            ...credit,
+            customerId: customer!.id,
+            salesOrderId: orderId || null,
+            lines: payloadLines,
+          })
+        ).id;
       }
+      if (copy) {
+        const form = new FormData();
+        form.append('files', copy);
+        try {
+          await api.post(`/attachments/invoice/${id}`, form);
+        } catch {
+          toast('error', 'Saved, but the invoice copy could not be attached — add it on the invoice');
+        }
+      }
+      toast('ok', existing ? 'Saved' : 'Invoice raised — issue it when it goes to the customer');
+      onSaved(id);
     } catch (err) {
       setError(err);
       setBusy(false);
@@ -430,7 +734,7 @@ function InvoiceModal({
 
   return (
     <Modal
-      title={existing ? `Modify invoice ${existing.number}` : `New invoice from ${billing?.number ?? 'billing'}`}
+      title={existing ? `Modify invoice ${existing.number}` : billing ? `New invoice from ${billing.number}` : 'New invoice'}
       onClose={onClose}
       wide={manual}
       footer={
@@ -442,11 +746,18 @@ function InvoiceModal({
       }
     >
       <ErrorBox error={error} />
-      {manual ? (
+      {isNew ? (
+        <div className="alert info">
+          VAT and EWT are added at the company's rates when it is saved
+          {order ? <> — {(order.vatRate * 100).toFixed(0)}% VAT, the sales order's rate</> : null}. It stays a draft until
+          you issue it; its terms start when the customer counters it.
+        </div>
+      ) : manual && existing ? (
         <div className="alert info">
           VAT and EWT are recomputed from the lines at the rates this invoice was raised with —{' '}
           {(existing.vatRate * 100).toFixed(0)}% and {(existing.ewtRate * 100).toFixed(0)}%.
           {existing.jobOrder && <> It bills job order {existing.jobOrder.number}, which does not change.</>}
+          {existing.salesOrder && <> It bills sales order {existing.salesOrder.number}, which does not change.</>}
         </div>
       ) : existing ? (
         <div className="alert info">
@@ -461,50 +772,100 @@ function InvoiceModal({
         </div>
       )}
 
-      <dl className="kv">
-        <dt>Customer</dt>
-        <dd>{customerName}</dd>
-        <dt>Project</dt>
-        <dd>
-          {project ? (
+      {isNew ? (
+        <div className="grid grid-2">
+          <Field label="Company" required>
+            <CustomerPicker
+              value={customer}
+              allowCreate={false}
+              onChange={(c) => {
+                setCustomer(c);
+                setOrderId('');
+              }}
+            />
+          </Field>
+          <Field
+            label="Bills"
+            hint={
+              order
+                ? `${formatMoney(order.left)} of ${formatMoney(order.net)} is left to invoice (before VAT)`
+                : customer && orders && !orders.length
+                  ? 'No issued sales order for this customer — a standalone invoice'
+                  : undefined
+            }
+          >
+            <select value={orderId} onChange={(e) => pickOrder(e.target.value)} disabled={!customer}>
+              <option value="">Nothing else — a standalone invoice</option>
+              {(orders ?? []).map((o) => (
+                <option key={o.id} value={o.id} disabled={o.left <= 0}>
+                  {o.number} · {formatMoney(o.left)} left{o.subject ? ` · ${o.subject}` : ''}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+      ) : (
+        <dl className="kv">
+          <dt>Customer</dt>
+          <dd>{customerName}</dd>
+          <dt>Project</dt>
+          <dd>
+            {project ? (
+              <>
+                <span className="mono">{project.number}</span> — {project.name}
+              </>
+            ) : (
+              <span className="faint">none</span>
+            )}
+          </dd>
+          {figures && (
             <>
-              <span className="mono">{project.number}</span> — {project.name}
+              <dt>Invoice total</dt>
+              <dd className="mono">{formatMoney(figures.invoiceTotal)}</dd>
+              <dt>Collectible</dt>
+              <dd className="mono">{formatMoney(figures.netCollectible)}</dd>
             </>
-          ) : (
-            <span className="faint">none</span>
           )}
-        </dd>
-        <dt>Invoice total</dt>
-        <dd className="mono">{formatMoney(figures.invoiceTotal)}</dd>
-        <dt>Collectible</dt>
-        <dd className="mono">{formatMoney(figures.netCollectible)}</dd>
-      </dl>
+        </dl>
+      )}
 
       <div className="grid grid-2 fin-gap-top">
         <Field label="Invoice date">
-          <input
-            type="date"
-            value={form.invoiceDate}
-            onChange={(e) => setForm({ ...form, invoiceDate: e.target.value })}
-          />
+          <input type="date" value={form.invoiceDate} onChange={(e) => setForm({ ...form, invoiceDate: e.target.value })} />
         </Field>
-        <Field label="Terms (days)" hint={`Due ${formatDate(dueDate)}`}>
-          <NumberInput
-            kind="count"
-            min={0}
-            max={365}
-            value={terms}
-            onChange={(e) => setTerms(Number(e.target.value))}
-          />
+        <Field label="Payment terms" hint={terms === 0 ? 'Due when the customer counters it' : `Due ${terms} days after the customer counters it`}>
+          <TermsPicker value={terms} onChange={setTerms} />
         </Field>
       </div>
 
-      <Field label="Customer PO reference" hint="Optional — what they will match it against">
-        <input
-          value={form.poReference}
-          onChange={(e) => setForm({ ...form, poReference: e.target.value })}
-        />
-      </Field>
+      <div className="grid grid-2">
+        <Field label="Customer PO reference" hint="Optional — what they will match it against">
+          <input value={form.poReference} onChange={(e) => setForm({ ...form, poReference: e.target.value })} />
+        </Field>
+        {!existing && (
+          <Field label="Attach invoice copy (PDF)" hint="Optional — the paper the customer receives">
+            <input type="file" accept="application/pdf,image/*" onChange={(e) => setCopy(e.target.files?.[0] ?? null)} />
+          </Field>
+        )}
+      </div>
+
+      {!existing && (
+        <div className="grid grid-2">
+          <Field label="Sales personnel" hint="Blank: whoever sold the order or quotation behind it">
+            <PersonSelect value={salespersonId} onChange={setSalespersonId} people={people} placeholder="— from the source —" />
+          </Field>
+          <Field label="Team" hint="Blank: the quotation's team, else the salesperson's">
+            <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
+              <option value="">— from the source —</option>
+              {teams.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.code} — {t.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+      )}
 
       {manual && (
         <>
@@ -529,18 +890,10 @@ function InvoiceModal({
                   return (
                     <tr key={i}>
                       <td>
-                        <input
-                          aria-label={`Line ${i + 1} description`}
-                          value={l.description}
-                          onChange={(e) => update({ description: e.target.value })}
-                        />
+                        <input aria-label={`Line ${i + 1} description`} value={l.description} onChange={(e) => update({ description: e.target.value })} />
                       </td>
                       <td>
-                        <input
-                          aria-label={`Line ${i + 1} detail`}
-                          value={l.detail}
-                          onChange={(e) => update({ detail: e.target.value })}
-                        />
+                        <input aria-label={`Line ${i + 1} detail`} value={l.detail} onChange={(e) => update({ detail: e.target.value })} />
                       </td>
                       <td>
                         <NumberInput
@@ -578,10 +931,12 @@ function InvoiceModal({
               </tfoot>
             </table>
           </div>
-          <button
-            className="btn btn-sm fin-gap-top-sm"
-            onClick={() => setLines([...lines, { description: '', detail: '', amount: 0 }])}
-          >
+          {overOrder && order && (
+            <div className="alert error fin-gap-top fin-flush">
+              Only {formatMoney(order.left)} of {order.number} is left to invoice — {formatMoney(gross)} is more than that.
+            </div>
+          )}
+          <button className="btn btn-sm fin-gap-top-sm" onClick={() => setLines([...lines, { description: '', detail: '', amount: 0 }])}>
             + Add line
           </button>
         </>
@@ -605,6 +960,7 @@ export function InvoiceDetail() {
   const [paying, setPaying] = useState(false);
   const [certificate, setCertificate] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [panel, setPanel] = useState<'counter' | 'credit' | null>(null);
   const confirm = useConfirm();
 
   const load = useCallback(async () => {
@@ -638,6 +994,9 @@ export function InvoiceDetail() {
   // Mirror the routes: Modify a draft; cancel anything not cancelled with no
   // money applied to it — both for whoever may edit every invoice.
   const canModify = row.status === 'DRAFT' && can('gfin.ar.edit_all');
+  const owed = row.status === 'ISSUED' || row.status === 'PARTIALLY_PAID';
+  const canCounter = (owed || row.status === 'PAID') && can('gfin.ar.edit_all');
+  const canCollect = owed && can('gfin.ar.create');
   const canCancel = row.status !== 'CANCELLED' && !row.allocations?.length && can('gfin.ar.edit_all');
   const releases = row.progressBilling
     ? ` ${row.progressBilling.number} goes back to be invoiced again.`
@@ -684,6 +1043,14 @@ export function InvoiceDetail() {
                 </Link>
               </>
             )}
+            {row.salesOrder && (
+              <>
+                {' · bills sales order '}
+                <Link to={`/g-ops/sales-orders/${row.salesOrder.id}`} className="mono">
+                  {row.salesOrder.number}
+                </Link>
+              </>
+            )}
           </>
         }
         actions={
@@ -704,8 +1071,15 @@ export function InvoiceDetail() {
                 Issue to customer
               </button>
             )}
-            {(row.status === 'ISSUED' || row.status === 'PARTIALLY_PAID') && can('gfin.ar.create') && (
-              <button className="btn btn-primary" onClick={() => setPaying(true)}>
+            {/* One primary: until the customer has it, countering is the
+                next step; after that, collecting is. */}
+            {row.awaitingCounter && canCounter && (
+              <button className="btn btn-primary" onClick={() => setPanel('counter')}>
+                Mark countered
+              </button>
+            )}
+            {canCollect && (
+              <button className={`btn ${row.awaitingCounter && canCounter ? '' : 'btn-primary'}`} onClick={() => setPaying(true)}>
                 Record collection
               </button>
             )}
@@ -713,6 +1087,22 @@ export function InvoiceDetail() {
         }
         print={`/api/invoices/${row.id}/pdf`}
         more={[
+          !row.awaitingCounter &&
+            !!row.counteredDate &&
+            canCounter && {
+              label: 'Change countered date',
+              hint: 'The expected collection moves with it',
+              onSelect: () => setPanel('counter'),
+            },
+          row.status !== 'CANCELLED' &&
+            can('gfin.ar.edit_all') && {
+              label: 'Change salesperson or team',
+              onSelect: () => setPanel('credit'),
+            },
+          {
+            label: 'Print without attachments',
+            onSelect: () => openPdf(`/api/invoices/${row.id}/pdf?attachments=0`, () => toast('error', 'The invoice could not be printed')),
+          },
           row.ewtAmount > 0 &&
             can('gfin.ar.edit_all') && {
               label: row.ewtCertificateNo ? 'Modify BIR 2307' : 'Record BIR 2307',
@@ -738,6 +1128,33 @@ export function InvoiceDetail() {
       />
 
       <ErrorBox error={error} />
+
+      {panel === 'counter' && (
+        <CounterPanel
+          invoice={row}
+          onClose={() => setPanel(null)}
+          onSaved={() => {
+            setPanel(null);
+            load();
+          }}
+        />
+      )}
+      {panel === 'credit' && (
+        <CreditPanel
+          invoice={row}
+          onClose={() => setPanel(null)}
+          onSaved={() => {
+            setPanel(null);
+            load();
+          }}
+        />
+      )}
+      {row.awaitingCounter && panel !== 'counter' && (
+        <div className="alert info">
+          Issued and awaiting countering — its {row.termsLabel.toLowerCase()} terms start when the customer receives it, so it
+          is not overdue whatever its date.
+        </div>
+      )}
 
       {row.status === 'CANCELLED' && (
         <div className="alert warn">
@@ -816,11 +1233,27 @@ export function InvoiceDetail() {
             <dl className="kv">
               <dt>Dated</dt>
               <dd>{formatDate(row.invoiceDate)}</dd>
-              <dt>Due</dt>
+              <dt>Countered</dt>
+              <dd>{row.counteredDate ? formatDate(row.counteredDate) : row.awaitingCounter ? <span className="warn">Awaiting countering</span> : '—'}</dd>
+              <dt>Payment terms</dt>
               <dd>
-                {formatDate(row.dueDate)}
-                {row.terms && <span className="faint"> · {row.terms}</span>}
+                <span className="badge">{row.termsLabel}</span>
               </dd>
+              <dt>Expected collection</dt>
+              <dd>
+                {row.awaitingCounter ? (
+                  <span className="faint">{row.termsDays ?? 0} days after it is countered</span>
+                ) : (
+                  <>
+                    {formatDate(row.dueDate)}
+                    {row.daysOverdue > 0 && <span className="warn"> · {row.daysOverdue} days late</span>}
+                  </>
+                )}
+              </dd>
+              <dt>Sales personnel</dt>
+              <dd>{row.salesperson?.name ?? <span className="faint">—</span>}</dd>
+              <dt>Team</dt>
+              <dd>{row.team ? `${row.team.code} — ${row.team.name}` : <span className="faint">—</span>}</dd>
               <dt>Collected</dt>
               <dd className="mono">{formatMoney(row.amountCollected)}</dd>
               <dt>Outstanding</dt>
@@ -873,6 +1306,14 @@ export function InvoiceDetail() {
         </div>
       </div>
 
+      <Attachments
+        entityType="invoice"
+        entityId={row.id}
+        title="Invoice copy and files"
+        hint="The customer's countered copy, the signed delivery — printed behind the invoice"
+        canEdit={can('gfin.ar.create') || can('gfin.ar.edit_all')}
+      />
+
       {paying && (
         <RecordPaymentModal
           kind="RECEIPT"
@@ -908,6 +1349,114 @@ export function InvoiceDetail() {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * "Mark countered" — the day the customer received the invoice, in the page
+ * (never a dialog). The expected collection is that day plus the terms,
+ * which may be changed here too.
+ */
+function CounterPanel({ invoice, onClose, onSaved }: { invoice: Invoice; onClose: () => void; onSaved: () => void }) {
+  const toast = useToast();
+  const [day, setDay] = useState(invoice.counteredDate?.slice(0, 10) ?? todayLocal());
+  const [terms, setTerms] = useState(invoice.termsDays ?? daysFrom(invoice.invoiceDate, invoice.dueDate));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const expected = (() => {
+    const d = new Date(`${day}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + terms);
+    return d.toISOString().slice(0, 10);
+  })();
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post(`/invoices/${invoice.id}/counter`, { counteredDate: day, termsDays: terms });
+      toast('ok', `Countered — expected ${formatDate(expected)}`);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="card" aria-labelledby="ar-counter">
+      <h3 id="ar-counter" className="card-title">
+        {invoice.counteredDate ? 'Change the countered date' : 'Mark countered'}
+      </h3>
+      <ErrorBox error={error} />
+      <div className="grid grid-2">
+        <Field label="Received by the customer on">
+          <input type="date" value={day} min={invoice.invoiceDate.slice(0, 10)} max={todayLocal()} onChange={(e) => setDay(e.target.value)} />
+        </Field>
+        <Field label="Payment terms" hint={`Expected collection: ${formatDate(expected)}`}>
+          <TermsPicker value={terms} onChange={setTerms} />
+        </Field>
+      </div>
+      <div className="card-foot">
+        <button className="btn btn-sm" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button className="btn btn-sm btn-primary" onClick={save} disabled={busy || !day}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/** Who is credited with the invoice — in the page, like countering. */
+function CreditPanel({ invoice, onClose, onSaved }: { invoice: Invoice; onClose: () => void; onSaved: () => void }) {
+  const toast = useToast();
+  const { people } = usePeople('gops.quotations.create');
+  const teams = useTeams();
+  const [salespersonId, setSalespersonId] = useState(invoice.salesperson?.id ?? '');
+  const [teamId, setTeamId] = useState(invoice.team?.id ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.patch(`/invoices/${invoice.id}/credit`, { salespersonId: salespersonId || null, teamId: teamId || null });
+      toast('ok', 'Saved');
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="card" aria-labelledby="ar-credit">
+      <h3 id="ar-credit" className="card-title">
+        Salesperson and team
+      </h3>
+      <ErrorBox error={error} />
+      <div className="grid grid-2">
+        <Field label="Sales personnel">
+          <PersonSelect value={salespersonId} onChange={setSalespersonId} people={people} current={invoice.salesperson} />
+        </Field>
+        <Field label="Team">
+          <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
+            <option value="">— none —</option>
+            {teams.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.code} — {t.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+      <div className="card-foot">
+        <button className="btn btn-sm" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button className="btn btn-sm btn-primary" onClick={save} disabled={busy}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </section>
   );
 }
 

@@ -80,3 +80,15 @@
     width: auto;
   }
 }
+
+/* The payment terms (Accounts Receivable, 2026-10-15): Net 15 / 30 / 45 / 60
+   as chips, and a box for any other number of days beside them. */
+.ar-terms {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+.ar-terms input {
+  max-width: 7rem;
+}

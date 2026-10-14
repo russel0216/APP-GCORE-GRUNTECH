@@ -163,6 +163,9 @@ async function cleanup() {
     });
   }
   await prisma.invoice.deleteMany({ where: { id: { in: invoices.map((i) => i.id) } } });
+  // The A/R checks' sales order and its quotation, after their invoices.
+  await prisma.salesOrder.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
+  await prisma.quotation.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.supplierBill.deleteMany({ where: { id: { in: bills.map((b) => b.id) } } });
   // Job orders after their invoices (Restrict), before the customer and users.
   await prisma.jobOrder.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
@@ -3418,6 +3421,145 @@ async function main() {
     }
     const badDay = await fin('GET', '/invoices/pdf?from=not-a-date');
     check('a filter date that is not a date is a 400, never a 500', badDay.status === 400, String(badDay.status));
+
+    // ══ Accounts Receivable per the owner's sample (2026-10-15) ═══════════
+    console.log('\nAccounts Receivable — countering, terms, credit, sales orders');
+    const sixtyAgo = ymd(addDays(dayKey(new Date()), -60));
+    const arNew = await fin('POST', '/invoices', {
+      customerId: customer.id,
+      invoiceDate: sixtyAgo,
+      termsDays: 30,
+      lines: [{ description: `${TAG} countering`, amount: 10_000 }],
+    });
+    check(
+      'a new invoice keeps its terms; its due date is the invoice date plus them until it is countered',
+      arNew.status === 201 &&
+        arNew.body.termsDays === 30 &&
+        arNew.body.termsLabel === 'Net 30' &&
+        arNew.body.counteredDate === null &&
+        String(arNew.body.dueDate).slice(0, 10) === ymd(addDays(dayKey(new Date()), -30)),
+      `${arNew.status} ${JSON.stringify(arNew.body).slice(0, 200)}`,
+    );
+    const arId = String(arNew.body.id ?? '');
+    const draftCounter = await fin('POST', `/invoices/${arId}/counter`, {});
+    check('a draft is not countered — it has not gone to the customer', draftCounter.status === 400, String(draftCounter.status));
+    await fin('POST', `/invoices/${arId}/issue`);
+    const arIssued = await fin('GET', `/invoices/${arId}`);
+    check(
+      'issued and not countered, it is awaiting countering and never late, whatever its date',
+      arIssued.body.awaitingCounter === true && arIssued.body.daysOverdue === 0,
+      JSON.stringify({ a: arIssued.body.awaitingCounter, d: arIssued.body.daysOverdue }),
+    );
+    const listed = async (query: string) =>
+      ((await fin('GET', `/invoices?search=${encodeURIComponent(String(arNew.body.number))}&${query}`)).body.rows ?? []).map((r: { id: string }) => r.id);
+    check(
+      'the list’s Overdue leaves it out, its Awaiting countering holds it',
+      !(await listed('overdue=true')).includes(arId) && (await listed('countered=no')).includes(arId),
+    );
+    const agingNow = await fin('GET', '/finance-reports/ar-aging');
+    const agedRow = (agingNow.body.rows ?? []).find((r: { id: string }) => r.id === arId);
+    check(
+      'and the aging counts it Current, apart as awaiting countering',
+      !!agedRow && agedRow.awaitingCounter === true && agedRow.bucket === 'Current' && agingNow.body.awaitingCountering >= 11_200 - 0.005 - 200,
+      JSON.stringify(agedRow ?? agingNow.body).slice(0, 160),
+    );
+    const tomorrow = ymd(addDays(dayKey(new Date()), 1));
+    const futureCounter = await fin('POST', `/invoices/${arId}/counter`, { counteredDate: tomorrow });
+    const earlyCounter = await fin('POST', `/invoices/${arId}/counter`, { counteredDate: ymd(addDays(dayKey(new Date()), -61)) });
+    check(
+      'it is never countered on a day still to come, nor before its invoice date',
+      futureCounter.status === 400 && earlyCounter.status === 400,
+      `${futureCounter.status} ${earlyCounter.status}`,
+    );
+    const fortyAgo = ymd(addDays(dayKey(new Date()), -40));
+    const countered = await fin('POST', `/invoices/${arId}/counter`, { counteredDate: fortyAgo });
+    check(
+      'countered forty days ago on Net 30: expected ten days ago, ten days late',
+      countered.status === 200 &&
+        String(countered.body.counteredDate).slice(0, 10) === fortyAgo &&
+        String(countered.body.dueDate).slice(0, 10) === ymd(addDays(dayKey(new Date()), -10)) &&
+        countered.body.daysOverdue === 10 &&
+        countered.body.awaitingCounter === false,
+      `${countered.status} ${JSON.stringify(countered.body).slice(0, 200)}`,
+    );
+    check(
+      'and now the list’s Overdue and Countered both hold it',
+      (await listed('overdue=true')).includes(arId) && (await listed('countered=yes')).includes(arId),
+    );
+    const arSummary = (await fin('GET', `/invoices?search=${TAG}&pageSize=200`)).body.summary;
+    check(
+      'the list carries its cards: the receivable, overdue, awaiting countering and each team’s share',
+      typeof arSummary?.receivable === 'number' &&
+        arSummary.overdue >= 11_000 &&
+        Array.isArray(arSummary.teams) &&
+        money(
+          arSummary.teams.reduce((sum: number, t: { value: number }) => sum + t.value, 0),
+          arSummary.receivable,
+        ),
+      JSON.stringify(arSummary).slice(0, 200),
+    );
+    const badTerms = await fin('GET', '/invoices?termsDays=abc');
+    const badCountered = await fin('GET', '/invoices?countered=maybe');
+    check('an unknown terms or countered filter is a 400', badTerms.status === 400 && badCountered.status === 400, `${badTerms.status} ${badCountered.status}`);
+
+    const team = await prisma.industry.findFirst({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } });
+    const credited = await fin('PATCH', `/invoices/${arId}/credit`, { salespersonId: engineer.id, teamId: team?.id ?? null });
+    const badTeam = await fin('PATCH', `/invoices/${arId}/credit`, { teamId: 'no-such-team' });
+    check(
+      'the salesperson and team are changed on an issued invoice; an unknown team is refused',
+      credited.status === 200 && credited.body.salesperson?.id === engineer.id && credited.body.team?.id === team?.id && badTeam.status === 400,
+      `${credited.status} ${badTeam.status}`,
+    );
+    const arPaper = await fin('GET', `/invoices/${arId}/pdf`);
+    const arText = arPaper.bytes ? flat(pdfText(arPaper.bytes)).toLowerCase() : '';
+    check(
+      'the invoice paper prints the terms, the countered day and the sales personnel',
+      arPaper.status === 200 && arText.includes('net 30') && arText.includes('countered') && arText.includes(engineer.name.toLowerCase()),
+      arText.slice(0, 200),
+    );
+
+    // An issued sales order, billed in parts, never past its net.
+    const soQuote = await prisma.quotation.create({
+      data: { number: `${TAG}-Q-AR1`, customerId: customer.id, ownerId: engineer.id, subject: `${TAG} AR ORDER`, teamId: team?.id ?? null },
+    });
+    const so = await prisma.salesOrder.create({
+      data: {
+        number: `${TAG}-SO-AR1`,
+        status: 'ISSUED',
+        quotationId: soQuote.id,
+        customerId: customer.id,
+        ownerId: engineer.id,
+        orderDate: dayKey(new Date()),
+        termsDays: 45,
+        poNumber: `${TAG}-PO-SO`,
+        vatRate: D(0.12),
+        subtotal: D(100_000),
+        vatAmount: D(12_000),
+        total: D(112_000),
+      },
+    });
+    const soOptions = await fin('GET', `/invoices/sales-orders?customerId=${customer.id}`);
+    const soOption = (soOptions.body as { id: string; net: number; left: number }[]).find?.((o) => o.id === so.id);
+    check('the form offers the customer’s issued order with its net left to invoice', !!soOption && money(soOption.net, 100_000) && money(soOption.left, 100_000), JSON.stringify(soOption));
+    const soInv1 = await fin('POST', '/invoices', { customerId: customer.id, salesOrderId: so.id, lines: [{ description: 'First delivery', amount: 60_000 }] });
+    check(
+      'an invoice bills part of it: its PO, its terms, its salesperson and its quotation’s team',
+      soInv1.status === 201 &&
+        soInv1.body.salesOrder?.id === so.id &&
+        soInv1.body.poReference === `${TAG}-PO-SO` &&
+        soInv1.body.termsDays === 45 &&
+        soInv1.body.salesperson?.id === engineer.id &&
+        soInv1.body.team?.id === (team?.id ?? undefined),
+      `${soInv1.status} ${JSON.stringify(soInv1.body).slice(0, 220)}`,
+    );
+    const soOver = await fin('POST', '/invoices', { customerId: customer.id, salesOrderId: so.id, lines: [{ description: 'Too much', amount: 50_000 }] });
+    check('never past what is left of its net', soOver.status === 400 && String(soOver.body.error).includes('left to invoice'), `${soOver.status} ${soOver.body.error}`);
+    const soRest = await fin('POST', '/invoices', { customerId: customer.id, salesOrderId: so.id, lines: [{ description: 'The rest', amount: 40_000 }] });
+    const soLeft = ((await fin('GET', `/invoices/sales-orders?customerId=${customer.id}`)).body as { id: string; left: number }[]).find((o) => o.id === so.id);
+    check('the rest goes on a second invoice, and nothing is left', soRest.status === 201 && !!soLeft && money(soLeft.left, 0), `${soRest.status} ${JSON.stringify(soLeft)}`);
+    const otherCustomer = await prisma.customer.create({ data: { code: `${TAG}-C2`, name: `${TAG} Other` } });
+    const soWrong = await fin('POST', '/invoices', { customerId: otherCustomer.id, salesOrderId: so.id, lines: [{ description: 'x', amount: 1 }] });
+    check('another customer’s order is refused', soWrong.status === 400, String(soWrong.status));
   }
 
   await cleanup();

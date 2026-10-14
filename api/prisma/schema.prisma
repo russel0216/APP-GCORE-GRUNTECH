@@ -123,6 +123,7 @@ model User {
   leaveDecided       LeaveRequest[]   @relation("LeaveDecider")
 
   invoicesCreated  Invoice[]      @relation("InvoiceCreator")
+  invoicesSold     Invoice[]      @relation("InvoiceSalesperson")
   billsCreated     SupplierBill[] @relation("BillCreator")
   expenseClaims    ExpenseClaim[] @relation("Claimant")
   paymentsRecorded Payment[]      @relation("PaymentRecorder")
@@ -710,6 +711,7 @@ model Industry {
   employees        Employee[]
   /// Quotations tagged with this team (the SCORO import, 2026-10-12).
   quotationsTagged Quotation[]       @relation("QuotationTeam")
+  invoicesCredited Invoice[]         @relation("InvoiceTeam")
   supporters       UserSupportTeam[]
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
@@ -1576,6 +1578,7 @@ model SalesOrder {
   lines        SalesOrderLine[]
   jobOrders    JobOrder[]
   pulloutSlips PulloutSlip[]
+  invoices     Invoice[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3997,10 +4000,32 @@ model Invoice {
   jobOrderId String?   @unique
   jobOrder   JobOrder? @relation(fields: [jobOrderId], references: [id], onDelete: Restrict)
 
-  invoiceDate DateTime @db.Date
-  dueDate     DateTime @db.Date
-  terms       String?
-  poReference String?
+  /// An issued sales order this invoice bills (in part or whole). Not
+  /// unique: an order is invoiced as it is delivered, never past its net.
+  salesOrderId String?
+  salesOrder   SalesOrder? @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+
+  invoiceDate   DateTime  @db.Date
+  /// The day the customer received ("countered") the issued invoice. The
+  /// expected collection counts from it; until it is recorded the invoice
+  /// is awaiting countering and never overdue (2026-10-15, the owner's call).
+  counteredDate DateTime? @db.Date
+  /// Net days. dueDate = (counteredDate ?? invoiceDate) + termsDays — the
+  /// expected collection. Null on an invoice raised before, which keeps the
+  /// due date it was given.
+  termsDays     Int?
+  dueDate       DateTime  @db.Date
+  terms         String?
+  poReference   String?
+
+  /// Who sold it — credited with the collection. Filled from the document
+  /// behind the invoice (the sales order's or quotation's owner), editable.
+  salespersonId String?
+  salesperson   User?     @relation("InvoiceSalesperson", fields: [salespersonId], references: [id], onDelete: SetNull)
+  /// The team credited — the quotation's team, else the salesperson's, kept
+  /// as raised (a quotation keeps the team it was raised under).
+  teamId        String?
+  team          Industry? @relation("InvoiceTeam", fields: [teamId], references: [id], onDelete: SetNull)
 
   /// Snapshotted from the billing, or entered on a standalone invoice. Never
   /// recomputed from Settings afterwards.
@@ -4040,6 +4065,9 @@ model Invoice {
   @@index([customerId, status])
   @@index([dueDate])
   @@index([jobId])
+  @@index([salesOrderId])
+  @@index([salespersonId])
+  @@index([teamId])
 }
 
 model InvoiceLine {
