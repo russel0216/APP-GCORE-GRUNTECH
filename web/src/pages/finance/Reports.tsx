@@ -450,9 +450,10 @@ export const FIN_REPORT_KINDS: readonly ReportKind[] = [
   { key: 'payments', label: 'Payments out', list: '/g-fin/payments?kind=DISBURSEMENT' },
   { key: 'budget-requests', label: 'Budget requests (by date needed)', list: '/g-fin/budget-requests' },
   { key: 'liquidations', label: 'Budget liquidations', list: '/g-fin/budget-liquidations' },
+  { key: 'reimbursements', label: 'Reimbursements', list: '/g-fin/expenses' },
 ];
 const AR_KINDS = ['receivables', 'aging', 'collection-forecast', 'collections'];
-const REQUEST_KINDS = ['budget-requests', 'liquidations'];
+const REQUEST_KINDS = ['budget-requests', 'liquidations', 'reimbursements'];
 /** The right each kind needs beside Reports' — the API's `rights`. */
 const KIND_RIGHT = (key: string) =>
   AR_KINDS.includes(key)
@@ -461,7 +462,10 @@ const KIND_RIGHT = (key: string) =>
       ? 'gfin.budget_requests.view_all'
       : key === 'liquidations'
         ? 'gfin.budget_liquidations.view_all'
-        : 'gfin.ap.view_all';
+        : key === 'reimbursements'
+          ? 'gfin.expenses.view_all'
+          : 'gfin.ap.view_all';
+const CLAIM_STATUSES = ['PENDING_APPROVAL', 'APPROVED', 'REIMBURSED', 'SETTLED', 'REJECTED', 'CANCELLED'];
 const REQUEST_STATUSES = ['PENDING_APPROVAL', 'APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED', 'REJECTED', 'CANCELLED'];
 
 /** The supplier named in the URL, as the picker shows it. */
@@ -516,6 +520,7 @@ export function FinanceReports() {
   const { people } = usePeople('gops.quotations.create');
   const { people: buyers } = usePeople('gchain.purchase_orders.create');
   const { people: requesters } = usePeople('gops.budget_requests.create');
+  const { people: claimants } = usePeople('gfin.expenses.create');
   const teams = useTeams();
   const kinds = FIN_REPORT_KINDS.filter((k) => can(KIND_RIGHT(k.key)));
   return (
@@ -533,7 +538,7 @@ export function FinanceReports() {
               <PersonSelect
                 value={params.get('requestedById') ?? ''}
                 onChange={(id) => set({ requestedById: id })}
-                people={requesters}
+                people={kind === 'reimbursements' ? claimants : requesters}
                 placeholder="— all requesters —"
               />
             </label>
@@ -549,12 +554,12 @@ export function FinanceReports() {
                 <option value="none">No team</option>
               </select>
             </label>
-            {kind === 'budget-requests' && (
+            {kind !== 'liquidations' && (
               <label className="rep-date">
                 <span className="faint">Status</span>
                 <select value={params.get('status') ?? ''} onChange={(e) => set({ status: e.target.value })}>
                   <option value="">— all statuses —</option>
-                  {REQUEST_STATUSES.map((st) => (
+                  {(kind === 'reimbursements' ? CLAIM_STATUSES : REQUEST_STATUSES).map((st) => (
                     <option key={st} value={st}>
                       {humanise(st)}
                     </option>

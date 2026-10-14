@@ -1044,21 +1044,35 @@ const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
+    // REIMBURSEMENT (the owner's money-out sheet, 2026-10-15: "Back Support >
+    // Finance Staff > Finance Manager > CEO", after the requester's Team
+    // Leader): every expense claim and liquidation. "Checking" is Finance
+    // staff. The supervisor-then-finance route is RETIRED.
     documentType: 'expense',
-    name: 'Expense claim — supervisor then finance',
+    name: 'Reimbursement — team leader, back support, checking, finance manager, CEO / President',
+    preparerSigns: true,
+    standIns: true,
     steps: [
-      { sequence: 1, name: 'Supervisor approval', approverType: 'SUPERVISOR' },
-      { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 3, name: 'Checking (Finance Staff)', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+      { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   {
+    // CASH ADVANCE, money lent to an employee (the same sheet): the same five
+    // signatures; finance releases it, the employee repays it.
     documentType: 'cash_advance',
-    // Finance approves because finance releases the cash and must have said
-    // yes before the voucher exists. Not routed to the requester's own role.
-    name: 'Cash advance — supervisor then finance',
+    name: 'Cash advance — team leader, back support, checking, finance manager, CEO / President',
+    preparerSigns: true,
+    standIns: true,
     steps: [
-      { sequence: 1, name: 'Supervisor approval', approverType: 'SUPERVISOR' },
-      { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 3, name: 'Checking (Finance Staff)', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+      { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   {
@@ -1296,6 +1310,11 @@ async function main() {
   // but deactivated, so they stop matching new documents while any history
   // routed through them stays readable. Deleting them would orphan that.
   const RETIRED = [
+    // The money-out routes of 2026-10-15: reimbursements and cash advances
+    // take five signatures; a claim or advance pending on the old two-step
+    // route finishes on it.
+    'Expense claim — supervisor then finance',
+    'Cash advance — supervisor then finance',
     // Incoming routes to Back Support, then the Purchasing Manager
     // (2026-10-14); a report pending on the supervisor's route finishes on it.
     "Incoming — the receiver's supervisor",

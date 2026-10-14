@@ -1302,3 +1302,50 @@ export async function contactsOf(ids: (string | null | undefined)[]): Promise<Ma
   const users = wanted.length ? await prisma.user.findMany({ where: { id: { in: wanted } }, select: CONTACT_SELECT }) : [];
   return new Map(users.map((u) => [u.id, { name: u.name, phone: contactPhone(u), email: u.email }]));
 }
+
+/**
+ * The step each document's OPEN request waits on, by document id — the
+ * money-out registers' status words (2026-10-15, the owner's sample:
+ * "TL Approval / Back Support / Checking / FM Approved / For Release /
+ * Paid"). One query for a page of rows; a document with no open request is
+ * absent from the map.
+ */
+export async function openSteps(documentType: string, documentIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!documentIds.length) return out;
+  const open = await prisma.approvalRequest.findMany({
+    where: { documentType, documentId: { in: documentIds }, status: 'PENDING' },
+    select: { documentId: true, currentSequence: true, workflow: { select: { steps: { select: { sequence: true, name: true } } } } },
+    orderBy: { createdAt: 'desc' },
+  });
+  for (const r of open) {
+    if (out.has(r.documentId)) continue;
+    const step = r.workflow?.steps.find((s) => s.sequence === r.currentSequence);
+    if (step) out.set(r.documentId, step.name);
+  }
+  return out;
+}
+
+/**
+ * A money-out document's stage in the owner's words: the open step's short
+ * name while it is with an approver ("TL Approval", "Back Support",
+ * "Checking", "FM Approval", "CEO Approval"), "For Release" once approved
+ * and nothing paid, then the document's own status.
+ */
+export function stageWords(status: string, openStep: string | undefined, owed: boolean): string {
+  if (status === 'PENDING_APPROVAL' && openStep) {
+    // A document still on a retired route reads in the same words.
+    if (/team leader|supervisor/i.test(openStep)) return 'TL Approval';
+    if (/checking|finance staff|^finance approval/i.test(openStep)) return 'Checking';
+    if (/finance manager/i.test(openStep)) return 'FM Approval';
+    if (/ceo|president/i.test(openStep)) return 'CEO Approval';
+    if (/back support/i.test(openStep)) return 'Back Support';
+    return openStep;
+  }
+  if (status === 'APPROVED') return owed ? 'For Release' : 'Approved';
+  if (status === 'REIMBURSED') return 'Paid';
+  return status
+    .toLowerCase()
+    .replace(/_/g, ' ')
+    .replace(/^\w/, (c) => c.toUpperCase());
+}

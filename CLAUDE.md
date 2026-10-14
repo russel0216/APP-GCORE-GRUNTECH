@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,249 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,253 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 171, chain 329, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 360, aftermarket 259, cad 101,
+115, evaluations 152, academy 120, finance 364, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -5124,6 +5124,46 @@ operations project), and the liquidation stays itemised with attachments
   owed back; by requester, team, project; the overdue ones;
   `gfin.budget_liquidations.view_all`). The registers' Report buttons open
   them.
+
+## Reimbursements (2026-10-15)
+
+The owner's module 6, on the expense claim (`gfin.expenses`, the menu now
+labelled **Reimbursements**, the path and keys unchanged); his route: "Back
+Support > Finance Staff > Finance Manager > CEO", after the requester's
+Team Leader.
+
+- **The route** is seeded "Reimbursement — team leader, back support,
+  checking, finance manager, CEO / President" (`expense`, `preparerSigns`,
+  `standIns`): Team Leader (SUPERVISOR, falling back to `team_leader` on the
+  team), Back Support (team-scoped), **Checking (Finance Staff)** (ROLE
+  `finance`), Finance Manager, CEO / President — every claim and every
+  liquidation. "Expense claim — supervisor then finance" is RETIRED; a claim
+  pending on it finishes on it. The cash advance takes the same five
+  ("Cash advance — team leader, back support, checking, finance manager,
+  CEO / President"; "Cash advance — supervisor then finance" RETIRED).
+  **Assign Finance Manager and CEO / President in Admin › Users** — until
+  then claims and advances stall at step 4, and `audit-workflows.ts` says
+  so. A verify script that settles a claim needs a holder of each
+  (verify-finance and verify-delivery make a `ceo`).
+- **The status in the owner's words**: `openSteps(documentType, ids)` in
+  `shared/approvals.ts` reads the step each open request waits on (one
+  query a page) and `stageWords(status, step, owed)` says it — TL Approval,
+  Back Support, Checking, FM Approval, CEO Approval (an old route's
+  "Supervisor approval" / "Finance approval" read the same), For Release
+  (approved, something still to pay), Paid (REIMBURSED), else the status.
+  The list's rows carry `stage`; cash advances use the same two.
+- **The list is the sample's**: Reimbursement No., Date of reimburse,
+  Requester, Team (else department — `teamOrDepartment()`), Project /
+  Purpose (a liquidation names what it accounts for), Amount, Status; Kind
+  and Lines under Columns; tick boxes. Filters status, pending (in
+  approval), for release, kind, requester (`claimedById`), team, date
+  range. **Cards** (`claimListSummary()`, the list's own query): Sum of all
+  reimbursements, Pending process, For release, Total paid out — the counts
+  equal their filters (verify-finance). "+ Add reimbursement" opens the
+  one claim form, Attachments at its foot.
+- **The report** is the `reimbursements` kind (claims dated in the range,
+  drafts out; by month, requester, team, kind, status; narrowed by
+  `requestedById`, `teamId`, `status`; `gfin.expenses.view_all`).
 
 ## Spreadsheet attachments (2026-10-05)
 

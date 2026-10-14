@@ -37,6 +37,8 @@ import {
   contactOf,
   contactsOf,
   cancelOpenRequest,
+  openSteps,
+  stageWords,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { postJobCost } from '../shared/inventory';
@@ -94,7 +96,7 @@ import {
 } from '../shared/finance';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
-import { teamShares, TEAM_REF_SELECT } from '../shared/team';
+import { teamShares, TEAM_REF_SELECT, TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
 import { BILL_PAYABLE, DUE_SOON_DAYS, billDueDate, billTermsLabel, dueSoonWhere } from '../shared/payables';
 import {
   TERMS_CHOICES,
@@ -2484,7 +2486,7 @@ registerAttachmentGuard('expense_claim', async (user, id, mode: 'read' | 'write'
 });
 
 export const claimInclude = {
-  claimedBy: { select: { id: true, name: true, email: true } },
+  claimedBy: { select: { id: true, name: true, email: true, ...TEAM_OR_DEPT_SELECT.select } },
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
   // `amountRefunded`: unspent cash already handed back — the liquidation
@@ -2515,8 +2517,12 @@ export function presentClaim(row: ClaimRow) {
   const payable = claimPayable(row);
   const released = liquidatedReleased(row);
   const liquidates = !!(row.advance || row.budgetRequest);
+  const { department: _d, employee: _e, ...claimant } = row.claimedBy;
   return {
     ...row,
+    claimedBy: claimant,
+    /** The claimant's team, else their department — the register's Team column. */
+    team: teamOrDepartment(row.claimedBy),
     total,
     amountPaid: paid,
     payable,
@@ -2580,6 +2586,15 @@ function claimListWhere(me: ReturnType<typeof currentUser>, q: ListQuery) {
   if (q.filters.jobId) where.jobId = q.filters.jobId;
   if (q.filters.advanceId) where.advanceId = q.filters.advanceId;
   if (q.filters.budgetRequestId) where.budgetRequestId = q.filters.budgetRequestId;
+  const f = q.filters;
+  const and: Prisma.ExpenseClaimWhereInput[] = [];
+  if (f.claimedById) and.push({ claimedById: f.claimedById });
+  if (f.teamId) and.push({ claimedBy: userTeamWhere(f.teamId) });
+  if (f.from || f.to) and.push({ claimDate: { ...(f.from ? { gte: asDate(f.from, 'From') } : {}), ...(f.to ? { lte: asDate(f.to, 'To') } : {}) } });
+  // In approval, approved and still to pay — the cards' filters.
+  if (f.pending === 'true') and.push({ status: 'PENDING_APPROVAL' });
+  if (f.forRelease === 'true') and.push({ status: 'APPROVED' });
+  if (and.length) where.AND = and;
   // A liquidation is a claim that names an advance or a budget request; a
   // reimbursement is one that names neither. Same table, a column apart.
   if (q.filters.kind === 'liquidation') where.OR = [{ advanceId: { not: null } }, { budgetRequestId: { not: null } }];
@@ -2597,7 +2612,7 @@ function claimListWhere(me: ReturnType<typeof currentUser>, q: ListQuery) {
     ];
     // The kind filter already uses OR: the two conditions AND together.
     if (where.OR) {
-      where.AND = [{ OR: where.OR }, { OR: terms }];
+      where.AND = [...((where.AND as Prisma.ExpenseClaimWhereInput[] | undefined) ?? []), { OR: where.OR }, { OR: terms }];
       delete where.OR;
     } else {
       where.OR = terms;
@@ -2628,10 +2643,50 @@ expenseRoutes.get(
       }),
       prisma.expenseClaim.count({ where }),
     ]);
+    const [steps, summary] = await Promise.all([openSteps('expense', rows.map((r) => r.id)), claimListSummary(where)]);
 
-    res.json(listResult(rows.map(presentClaim), total, q));
+    res.json({
+      ...listResult(
+        rows.map((r) => {
+          const row = presentClaim(r);
+          // The owner's words for where it stands: TL Approval … For Release, Paid.
+          return { ...row, stage: stageWords(r.status, steps.get(r.id), row.outstanding > 0.005) };
+        }),
+        total,
+        q,
+      ),
+      summary,
+    });
   }),
 );
+
+/**
+ * The reimbursement register's cards (the owner's module 6), under the
+ * list's own query: the sum of every claim still standing, what waits in
+ * approval ("pending process"), what is approved and still to pay ("for
+ * release"), and what was paid out.
+ */
+async function claimListSummary(where: Prisma.ExpenseClaimWhereInput) {
+  const agg = (extra: Prisma.ExpenseClaimWhereInput) =>
+    prisma.expenseClaim.aggregate({ where: { AND: [where, extra] }, _count: { _all: true }, _sum: { total: true, amountPaid: true } });
+  const [all, pending, approved, paid] = await Promise.all([
+    agg({ status: { notIn: ['REJECTED', 'CANCELLED'] } }),
+    agg({ status: 'PENDING_APPROVAL' }),
+    prisma.expenseClaim.findMany({ where: { AND: [where, { status: 'APPROVED' }] }, include: { advance: true, budgetRequest: true } }),
+    agg({ amountPaid: { gt: 0 } }),
+  ]);
+  const owed = approved.map((c) => cents(claimPayable(c as Parameters<typeof claimPayable>[0]) - num(c.amountPaid))).filter((x) => x > 0.005);
+  return {
+    total: num(all._sum.total),
+    count: all._count._all,
+    pending: num(pending._sum.total),
+    pendingCount: pending._count._all,
+    forRelease: cents(owed.reduce((s, x) => s + x, 0)),
+    forReleaseCount: owed.length,
+    paidOut: num(paid._sum.amountPaid),
+    paidCount: paid._count._all,
+  };
+}
 
 /** A claim that will never be paid — listed, never summed. */
 const CLAIM_CLOSED: ExpenseStatus[] = ['REJECTED', 'CANCELLED'];

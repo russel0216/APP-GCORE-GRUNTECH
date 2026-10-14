@@ -10,7 +10,7 @@ import { bucketFor, bucketLabels, claimPayable, financeSettings } from '../share
 import { termsLabel } from '../shared/receivables';
 import { billTermsLabel } from '../shared/payables';
 import { TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
-import { RequestStatus } from '@prisma/client';
+import { ExpenseStatus, RequestStatus } from '@prisma/client';
 import { Series, byValue, cents, dayOf, mountReports, monthsOf, num, table, tally, type Col, type Report, type ReportContext } from '../shared/reportKit';
 
 /**
@@ -592,6 +592,85 @@ async function liquidations(range: Range, ctx: ReportContext): Promise<Report> {
   };
 }
 
+// ── Reimbursements (the owner's module 6) ────────────────────────────────────
+
+/**
+ * The Reimbursement Report Generator: expense claims dated in the range
+ * (drafts left out), narrowed by requester, team and status — claimed, still
+ * to pay, paid — by month, requester, team (else department), kind and
+ * status.
+ */
+async function reimbursements(range: Range, ctx: ReportContext): Promise<Report> {
+  const q = ctx.query;
+  const and: Prisma.ExpenseClaimWhereInput[] = [{ status: { not: 'DRAFT' } }, { claimDate: { gte: range.from, lte: range.to } }];
+  const words: string[] = [];
+  if (q.requestedById) {
+    and.push({ claimedById: q.requestedById });
+    words.push(`claimed by ${(await prisma.user.findUnique({ where: { id: q.requestedById }, select: { name: true } }))?.name ?? 'someone not on file'}`);
+  }
+  if (q.teamId) {
+    and.push({ claimedBy: userTeamWhere(q.teamId) });
+    words.push(q.teamId === 'none' ? 'no team' : `team ${(await prisma.industry.findUnique({ where: { id: q.teamId }, select: { code: true } }))?.code ?? '?'}`);
+  }
+  if (q.status) {
+    if (!(q.status in ExpenseStatus)) throw badRequest(`Status — one of ${Object.keys(ExpenseStatus).join(', ')}`);
+    and.push({ status: q.status as ExpenseStatus });
+    words.push(statusLabel(q.status));
+  }
+  const rows = await prisma.expenseClaim.findMany({
+    where: { AND: and },
+    select: {
+      number: true,
+      status: true,
+      claimDate: true,
+      total: true,
+      amountPaid: true,
+      advanceId: true,
+      budgetRequestId: true,
+      claimedBy: { select: { name: true, ...TEAM_OR_DEPT_SELECT.select } },
+      advance: { select: { amountReleased: true } },
+      budgetRequest: { select: { amountReleased: true } },
+    },
+  });
+  type Row = (typeof rows)[number];
+  const standing = (r: Row) => r.status !== 'REJECTED' && r.status !== 'CANCELLED';
+  const toPay = (r: Row) => (r.status === 'APPROVED' ? Math.max(0, cents(claimPayable(r as Parameters<typeof claimPayable>[0]) - num(r.amountPaid))) : 0);
+  const live = rows.filter(standing);
+  const series = new Series('Claimed by month', [count('Claims'), money('Claimed'), money('To pay'), money('Paid')], monthsOf(range));
+  for (const r of live) {
+    series.add(r.claimDate, 0, 1);
+    series.add(r.claimDate, 1, num(r.total));
+    series.add(r.claimDate, 2, toPay(r));
+    series.add(r.claimDate, 3, num(r.amountPaid));
+  }
+  const figures = (r: Row) => [1, num(r.total), num(r.amountPaid)];
+  const cols = [count('Claims'), money('Claimed'), money('Paid')];
+  const sum = (xs: Row[], fn: (r: Row) => number) => cents(xs.reduce((s, r) => s + fn(r), 0));
+  const pending = live.filter((r) => r.status === 'PENDING_APPROVAL');
+  const unit = (r: Row) => teamOrDepartment(r.claimedBy)?.label ?? NO_TEAM;
+  return {
+    kind: 'reimbursements',
+    title: 'Reimbursement Report',
+    from: dayOf(range.from),
+    to: dayOf(range.to),
+    filterLine: words.length ? words.join(' · ') : undefined,
+    cards: [
+      { label: 'Sum of all reimbursements', value: sum(live, (r) => num(r.total)), money: true, sub: `${live.length} claim${live.length === 1 ? '' : 's'} dated in the range` },
+      { label: 'Pending process', value: sum(pending, (r) => num(r.total)), money: true, sub: `${pending.length} in approval` },
+      { label: 'For release', value: sum(live, toPay), money: true, sub: 'approved, not yet paid' },
+      { label: 'Total paid out', value: sum(live, (r) => num(r.amountPaid)), money: true },
+    ],
+    series: series.done(),
+    tables: [
+      table('By requester', [{ label: 'Requester' }, ...cols], rowsOf(tally(live, (r) => r.claimedBy.name, figures), 1)),
+      table('By team', [{ label: 'Team / department' }, ...cols], rowsOf(tally(live, unit, figures), 1)),
+      table('By kind', [{ label: 'Kind' }, ...cols], rowsOf(tally(live, (r) => (r.advanceId || r.budgetRequestId ? 'Liquidation' : 'Reimbursement'), figures), 1)),
+      table('By status', [{ label: 'Status' }, ...cols], rowsOf(tally(rows, (r) => statusLabel(r.status), figures), 1)),
+    ],
+    notes: ['Drafts are left out; a rejected or cancelled claim is counted only under By status. To pay on a liquidation is what was spent beyond the cash released.'],
+  };
+}
+
 async function payablesAging(range: Range): Promise<Report> {
   const asOf = range.to;
   const settings = await financeSettings();
@@ -718,6 +797,7 @@ const KINDS = {
   'payables-aging': payablesAging,
   'budget-requests': budgetRequests,
   liquidations,
+  reimbursements,
   payments: paymentsOut,
 };
 export const FIN_REPORT_KINDS = Object.keys(KINDS);
@@ -734,6 +814,7 @@ mountReports(finReportRoutes, {
     payables: 'gfin.ap.view_all',
     'budget-requests': 'gfin.budget_requests.view_all',
     liquidations: 'gfin.budget_liquidations.view_all',
+    reimbursements: 'gfin.expenses.view_all',
     'payables-aging': 'gfin.ap.view_all',
     payments: 'gfin.ap.view_all',
   },

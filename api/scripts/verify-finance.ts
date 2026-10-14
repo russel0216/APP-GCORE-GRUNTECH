@@ -394,6 +394,8 @@ async function main() {
   const finMgr = await makeUser('ZZ Finance Manager', 'finmgr@verifyf.local', ['finance_manager']);
   const teamLeader = await makeUser('ZZ Team Leader', 'teamleader@verifyf.local', ['team_leader']);
   await makeUser('ZZ Director', 'exec@verifyf.local', ['executive']);
+  // Reimbursements and cash advances (2026-10-15) end with the CEO / President.
+  await makeUser('ZZ CEO', 'ceo@verifyf.local', ['ceo']);
   // Throwaway roles for the route guards: nothing at all, project access
   // without budget monitoring, and the right to file a claim and nothing else.
   const throwaway = async (key: string, permissionKeys: string[]) => {
@@ -3826,6 +3828,67 @@ async function main() {
       'the liquidation report’s released and returned are the requests released in the range',
       liqRep.status === 200 && money(liqCard('Released'), Number(liqDb._sum.amountReleased ?? 0)) && money(liqCard('Total excess returned'), Number(liqDb._sum.amountRefunded ?? 0)),
       `${liqCard('Released')} / ${liqCard('Total excess returned')} vs ${JSON.stringify(liqDb._sum)}`,
+    );
+
+    // ══ Reimbursements per the owner's module 6 ══════════════════════════════
+    console.log('\nReimbursements — the five-signature route, the stage words, the cards and the report');
+    const rmb = await eng('POST', '/expense-claims', {
+      purpose: `${TAG} client dinner`,
+      lines: [{ spentOn: todayIso, description: 'Dinner', receiptNo: 'OR-1', amount: 345.5 }],
+    });
+    const rmbSubmit = await eng('POST', `/expense-claims/${rmb.body.id}/submit`);
+    const rmbReq = await prisma.approvalRequest.findFirst({
+      where: { documentType: 'expense', documentId: String(rmb.body.id), status: 'PENDING' },
+      include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } } },
+    });
+    check(
+      'a reimbursement goes Team Leader › Back Support › Checking (Finance Staff) › Finance Manager › CEO / President',
+      rmbSubmit.status === 200 &&
+        JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)) ===
+          JSON.stringify(['Team Leader', 'Back Support', 'Checking (Finance Staff)', 'Finance Manager', 'CEO / President']),
+      JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)),
+    );
+    const stageOf = async () =>
+      ((await fin('GET', `/expense-claims?pageSize=5&search=${encodeURIComponent(String(rmb.body.number))}`)).body.rows?.[0] as { stage?: string } | undefined)?.stage;
+    const stageFirst = await stageOf();
+    const ordered: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const r = await prisma.approvalRequest.findUnique({ where: { id: rmbReq!.id }, include: { workflow: { include: { steps: true } } } });
+      if (r?.status !== 'PENDING') break;
+      const st = r.workflow!.steps.find((x) => x.sequence === r.currentSequence)!;
+      const who = (await approversForStep(st, r.requesterId, prisma, {})).filter((id) => id !== r.requesterId)[0];
+      await act({ requestId: r.id, userId: who, action: 'APPROVED' });
+      ordered.push((await stageOf()) ?? '?');
+    }
+    check(
+      'the register says where it stands in the owner’s words: TL Approval, then Back Support, Checking, FM Approval, CEO Approval',
+      stageFirst === 'TL Approval' && JSON.stringify(ordered) === JSON.stringify(['Back Support', 'Checking', 'FM Approval', 'CEO Approval']),
+      `${stageFirst} → ${JSON.stringify(ordered)}`,
+    );
+    await settle(rmbReq!.id);
+    const rmbStage = await stageOf();
+    const [rmbAll, rmbPending, rmbRelease] = await Promise.all([
+      fin('GET', '/expense-claims?pageSize=1'),
+      fin('GET', '/expense-claims?pageSize=1&pending=true'),
+      fin('GET', '/expense-claims?pageSize=1&forRelease=true'),
+    ]);
+    check(
+      'approved by all five it is For Release, and the cards equal the lists they open',
+      rmbStage === 'For Release' &&
+        rmbAll.body.summary?.pendingCount === rmbPending.body.total &&
+        rmbAll.body.summary?.forReleaseCount === rmbRelease.body.total,
+      `${rmbStage} · ${JSON.stringify(rmbAll.body.summary)} vs ${rmbPending.body.total} ${rmbRelease.body.total}`,
+    );
+    const rmbRep = await fin('GET', `/fin-reports/reimbursements?from=${todayIso}&to=${todayIso}&requestedById=${engineer.id}`);
+    const rmbDb = await prisma.expenseClaim.aggregate({
+      where: { claimedById: engineer.id, status: { notIn: ['DRAFT', 'REJECTED', 'CANCELLED'] }, claimDate: dayKey(new Date()) },
+      _sum: { total: true },
+    });
+    const rmbCard = (rmbRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === 'Sum of all reimbursements')?.value;
+    check(
+      'the reimbursement report sums the requester’s claims dated in the range',
+      rmbRep.status === 200 && money(rmbCard ?? -1, Number(rmbDb._sum.total ?? 0)) && String(rmbRep.body.filterLine).includes(engineer.name),
+      `${rmbCard} vs ${rmbDb._sum.total}`,
     );
   }
 

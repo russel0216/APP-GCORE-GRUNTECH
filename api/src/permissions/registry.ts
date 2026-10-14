@@ -190,7 +190,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'dashboard', group: 'Overview', label: 'Executive Dashboard', path: '/g-fin', actions: REPORT, phase: 7 },
       { key: 'ar', group: 'Money in', label: 'Accounts Receivable', path: '/g-fin/ar', actions: SHARED, phase: 7 },
       { key: 'ap', group: 'Money out', label: 'Accounts Payable', path: '/g-fin/ap', actions: SHARED, phase: 7 },
-      { key: 'expenses', group: 'Money out', label: 'Expenses', path: '/g-fin/expenses', actions: OWNED, phase: 7 },
+      { key: 'expenses', group: 'Money out', label: 'Reimbursements', path: '/g-fin/expenses', actions: OWNED, phase: 7 },
       { key: 'cash_advances', group: 'Money out', label: 'Cash Advances', path: '/g-fin/cash-advances', actions: OWNED_KEPT, phase: 7 },
       // Project cash: the budget requests finance releases and the teams
       // liquidate. Raised on the project (gops.budget_requests); this is

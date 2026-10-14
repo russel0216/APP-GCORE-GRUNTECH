@@ -205,10 +205,12 @@ async function main() {
   // Budget requests route (the sheet of 2026-10-13) to the requester's Team
   // Leader — who they report to, here the PM — then Admin Back Support, then
   // the Finance Manager, and the CEO / President above ₱100,000; the
-  // liquidation (an expense claim) to the filer's supervisor, then Finance.
+  // liquidation (an expense claim, 2026-10-15) to the filer's Team Leader,
+  // Back Support, Finance (checking), the Finance Manager and the CEO.
   const finance = await makeUser('Verify Finance', 'fin@verifyd.local', ['finance']);
   const backSupport = await makeUser('Verify Back Support', 'backsupport@verifyd.local', ['back_support']);
   const finMgr = await makeUser('Verify Finance Manager', 'finmgr@verifyd.local', ['finance_manager']);
+  const ceo = await makeUser('Verify CEO', 'ceo@verifyd.local', ['ceo']);
   await prisma.user.update({ where: { id: engineer.id }, data: { supervisorId: pm.id } });
 
   const customer = await prisma.customer.create({
@@ -562,8 +564,9 @@ async function main() {
     amount: 42_000,
     requesterId: engineer.id,
   });
-  await act({ requestId: liqRequest.id, userId: pm.id, action: 'APPROVED' });
-  await act({ requestId: liqRequest.id, userId: finance.id, action: 'APPROVED' });
+  for (const signer of [pm, backSupport, finance, finMgr, ceo]) {
+    await act({ requestId: liqRequest.id, userId: signer.id, action: 'APPROVED' });
+  }
   position = await budgetPosition(job.id);
   check('the approved liquidation charges the project what was spent, as incurred', money(mat().incurred, incurredBefore + 42_000), String(mat().incurred));
   check('and the budget is still what the costing set', money(mat().budgeted, 400_000));
