@@ -4425,7 +4425,8 @@ page's dress (`prq-*`) and reusing its `ItemCell` and `lib/prLines.ts`.
   ?amount=&orderId=` at the order's total, in its buyer's name.
 - **The order's paper goes to the supplier, in the owner's layout**
   (2026-10-14, `docs/mockups/purchase-order-layout.pptx`, his slide):
-  "Date: …" under the number (`renderDocument`'s `numberNote`); DETAILS
+  the title in bold (`titleBold`, this document only), "Date: …" under
+  the number (`renderDocument`'s `numberNote`); DETAILS
   is the quotation reference beside the delivery date (`details`, two to
   a line, and the section after it follows straight on rather than at the
   fixed DETAILS height); then **Supplier** and **Delivery and terms** side

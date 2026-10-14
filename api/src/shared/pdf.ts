@@ -160,6 +160,8 @@ export interface PdfDocumentSpec {
    * …" (2026-10-14, the owner's call). Printed in the number's green, regular.
    */
   numberNote?: string;
+  /** The document's name in bold — the purchase order's (2026-10-14, the owner's call); every other document keeps it regular. */
+  titleBold?: boolean;
   /**
    * The DETAILS block's lines in place of Date and Reference, label and
    * value — the purchase order's quotation reference and delivery date.
@@ -601,12 +603,13 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
   // single word wider than the box, or a name that would run to a third line.
   const title = caps(spec.title);
   let size = 24;
-  let titleLines = wrapText(doc, title, titleW, false, size);
+  const bold = !!spec.titleBold;
+  let titleLines = wrapText(doc, title, titleW, bold, size);
   while (size > 13 && (titleLines.length > 2 || titleLines.some((l) => doc.widthOfString(l) > titleW))) {
     size -= 1;
-    titleLines = wrapText(doc, title, titleW, false, size);
+    titleLines = wrapText(doc, title, titleW, bold, size);
   }
-  titleLines.forEach((line, n) => drawLine(doc, line, titleX, titleTop + (24 - size) / 2 + n * size * LINE, titleW, 'right', false, size, PURPLE));
+  titleLines.forEach((line, n) => drawLine(doc, line, titleX, titleTop + (24 - size) / 2 + n * size * LINE, titleW, 'right', bold, size, PURPLE));
   // What the title grew by pushes the number and the rule down with it, the
   // designed engine's rule for a box under a box that grew.
   const titleExtra = Math.max(0, titleLines.length * size * LINE - titleBoxH);

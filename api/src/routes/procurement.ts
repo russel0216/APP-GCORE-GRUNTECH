@@ -3616,6 +3616,7 @@ purchaseOrderRoutes.get(
       // The P.O. date under the number, and DETAILS the supplier's
       // quotation it answers and when it is due (2026-10-14, the owner's call).
       numberNote: `Date: ${formatDate(po.orderDate)}`,
+      titleBold: true,
       details: [
         ['Quotation reference', po.quoteRef ?? '—'],
         ['Delivery date', po.deliveryDate ? formatDate(po.deliveryDate) : '—'],
