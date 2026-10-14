@@ -1871,16 +1871,14 @@ async function main() {
       `${poPdf.status} ${poSteps.length} steps, ${signedCount(poText)} signed, ${pendingCount(poText)} pending`,
     );
     check(
-      'its money is the quotation\'s block — Subtotal, VAT (12%), Total — figures without the code under a head that names it, never a TOTAL row in the lines',
+      'its money is the quotation\'s block — Subtotal, VAT (12%), Total — bare figures, the currency named under Order details, never a TOTAL row in the lines',
       poText.includes('Subtotal') &&
         poText.includes('VAT (12%)') &&
         poText.includes('Total') &&
-        poText.includes(`${currency} 14,560.00`) &&
-        flat(poText).includes(`AMOUNT (${currency})`) &&
-        // The one line's amount in the table, bare; the same figure once
-        // more, with the code, as the Subtotal — and nowhere else.
-        /^13,000\.00$/m.test(poText) &&
-        (poText.match(new RegExp(`^${currency} 13,000\\.00$`, 'gm')) ?? []).length === 1 &&
+        /^14,560\.00$/m.test(poText) &&
+        flat(poText).includes(`Currency: ${currency}`) &&
+        // The one line's amount in the table and again as the Subtotal, bare.
+        (poText.match(/^13,000\.00$/gm) ?? []).length === 2 &&
         !poText.includes('TOTAL') &&
         poText.includes('NO.'),
       poText.split('\n').filter((l) => /Subtotal|VAT|Total|TOTAL|AMOUNT|13,000/.test(l)).join(' | ').slice(0, 200),

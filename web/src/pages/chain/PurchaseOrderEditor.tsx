@@ -59,6 +59,7 @@ interface Draft {
   supplier: { id: string; name: string; paymentTerms: string | null } | null;
   neededBy: string | null;
   quoteRef?: string | null;
+  currency?: string;
   lines: SourceLine[];
 }
 
@@ -70,7 +71,9 @@ interface ExistingPo {
   orderDate: string;
   deliveryDate: string | null;
   deliverTo: string | null;
+  deliverAddress?: string | null;
   quoteRef?: string | null;
+  currency?: string;
   terms: string | null;
   notes: string | null;
   vatRate: number;
@@ -116,7 +119,9 @@ interface Header {
   deliveryDate: string;
   terms: string;
   deliverTo: string;
+  deliverAddress: string;
   quoteRef: string;
+  currency: string;
   notes: string;
   vatInclusive: boolean;
 }
@@ -157,6 +162,9 @@ const isBlank = (l: Line) => !l.id && !l.requestItemId && !l.name.trim() && !l.d
 const snapshot = (h: Header, lines: Line[]) =>
   JSON.stringify([{ ...h, supplier: h.supplier?.id ?? null }, lines.filter((l) => !isBlank(l)).map(({ key: _key, ...rest }) => rest)]);
 
+/** The quotation's currencies (shared/quotation.ts QUOTATION_CURRENCIES). */
+const PO_CURRENCIES = ['PHP', 'USD', 'EUR', 'JPY', 'SGD', 'CNY', 'GBP', 'AUD', 'HKD'];
+
 export function PurchaseOrderEditor() {
   const { id } = useParams<{ id: string }>();
   const [params] = useSearchParams();
@@ -179,12 +187,19 @@ export function PurchaseOrderEditor() {
   const [skipped, setSkipped] = useState<string[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // What Deliver to and its address suggest: the company's name and address.
+  const [shipTo, setShipTo] = useState({ name: '', address: '' });
+  useEffect(() => {
+    api.get<{ name: string; address: string }>('/purchase-orders/ship-to').then(setShipTo, () => undefined);
+  }, []);
   const [header, setHeader] = useState<Header>({
     supplier: null,
     deliveryDate: '',
     terms: '',
     deliverTo: '',
+    deliverAddress: '',
     quoteRef: '',
+    currency: 'PHP',
     notes: '',
     vatInclusive: false,
   });
@@ -211,7 +226,9 @@ export function PurchaseOrderEditor() {
             deliveryDate: po.deliveryDate ? po.deliveryDate.slice(0, 10) : '',
             terms: po.terms ?? '',
             deliverTo: po.deliverTo ?? '',
+            deliverAddress: po.deliverAddress ?? '',
             quoteRef: po.quoteRef ?? '',
+            currency: po.currency ?? 'PHP',
             notes: po.notes ?? '',
             vatInclusive: po.vatInclusive,
           };
@@ -229,6 +246,7 @@ export function PurchaseOrderEditor() {
             unitPrice: String(i.unitPrice),
           }));
         } else {
+          const ship = await api.get<{ name: string; address: string }>('/purchase-orders/ship-to').catch(() => ({ name: '', address: '' }));
           const d = await api.get<Draft>(
             `/purchase-orders/draft${qs({ requestId: fromRequest ?? '', canvassId: fromCanvass ?? '' })}`,
           );
@@ -239,6 +257,10 @@ export function PurchaseOrderEditor() {
             supplier: d.supplier ? { id: d.supplier.id, name: d.supplier.name } : null,
             terms: d.supplier?.paymentTerms ?? '',
             quoteRef: d.quoteRef ?? '',
+            currency: 'PHP',
+            // The company receives by default (2026-10-14, the owner's call).
+            deliverTo: ship.name,
+            deliverAddress: ship.address,
             deliveryDate: d.neededBy ? d.neededBy.slice(0, 10) : '',
           };
           ls = d.lines.map(fromSource);
@@ -378,7 +400,9 @@ export function PurchaseOrderEditor() {
       deliveryDate: header.deliveryDate || null,
       terms: header.terms.trim() || null,
       deliverTo: header.deliverTo.trim() || null,
+      deliverAddress: header.deliverAddress.trim() || null,
       quoteRef: header.quoteRef.trim() || null,
+      currency: header.currency,
       notes: header.notes.trim() || null,
       vatInclusive: header.vatInclusive,
       lines: sent.map((l) => ({
@@ -545,11 +569,11 @@ export function PurchaseOrderEditor() {
                   )}
                 </div>
               </Field>
-              <Field label="Required by">
+              <Field label="Delivery date">
                 <input type="date" value={header.deliveryDate} onChange={(e) => setHeader((h) => ({ ...h, deliveryDate: e.target.value }))} />
               </Field>
               <Field
-                label="Terms"
+                label="Payment terms"
                 hint={existing?.supplier.paymentTerms ? `Supplier default: ${existing.supplier.paymentTerms}` : undefined}
               >
                 <input value={header.terms} maxLength={300} placeholder="e.g. 30 days" onChange={(e) => setHeader((h) => ({ ...h, terms: e.target.value }))} />
@@ -557,8 +581,20 @@ export function PurchaseOrderEditor() {
               <Field label="Quotation ref." hint="The supplier's quotation no. — printed on the order">
                 <input value={header.quoteRef} maxLength={120} onChange={(e) => setHeader((h) => ({ ...h, quoteRef: e.target.value }))} />
               </Field>
-              <Field label="Deliver to" hint={warehouse ? `Blank prints ${warehouse.name}` : 'Site address, or blank'}>
-                <input value={header.deliverTo} maxLength={300} onChange={(e) => setHeader((h) => ({ ...h, deliverTo: e.target.value }))} />
+              <Field label="Currency" hint="Printed under Order details — nothing is converted">
+                <select value={header.currency} onChange={(e) => setHeader((h) => ({ ...h, currency: e.target.value }))}>
+                  {PO_CURRENCIES.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Deliver to" hint="Who receives it — the company by default">
+                <input list="po-ship-name" value={header.deliverTo} maxLength={300} onChange={(e) => setHeader((h) => ({ ...h, deliverTo: e.target.value }))} />
+                <datalist id="po-ship-name">{shipTo.name && <option value={shipTo.name} />}</datalist>
+              </Field>
+              <Field label="Delivery address" hint={warehouse ? `Blank prints the company's address` : 'Site address, or blank for the company\'s'}>
+                <input list="po-ship-address" value={header.deliverAddress} maxLength={500} onChange={(e) => setHeader((h) => ({ ...h, deliverAddress: e.target.value }))} />
+                <datalist id="po-ship-address">{shipTo.address && <option value={shipTo.address} />}</datalist>
               </Field>
               <Field label="VAT">
                 {/* Wrapped, so the row's label rule does not take the tick box's own label for the field's. */}

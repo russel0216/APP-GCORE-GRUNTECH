@@ -111,7 +111,8 @@ export type PdfSection =
    * with no labels — the purchase order's Supplier and Delivery and terms
    * (2026-10-14, the owner's layout). A line may run onto several.
    */
-  | { kind: 'blocks'; blocks: { title: string; lines: string[] }[] }
+  /** Side-by-side address blocks: the first line bold, the rest regular, an email underlined. */
+  | { kind: 'blocks'; titleSize?: number; blocks: { title: string; lines: string[] }[] }
   /**
    * The money block: label and figure on ruled rows in a box at the right,
    * the bold row the total — larger, in the accent colour, over a heavier
@@ -168,6 +169,9 @@ export interface PdfDocumentSpec {
    * reference over its delivery date, its terms beside them.
    */
   details?: [string, string][][];
+  /** The heading over `details` (DETAILS by default) and its size (8.5 by default). */
+  detailsTitle?: string;
+  detailsTitleSize?: number;
   sections: PdfSection[];
   signatories?: Signatory[];
   /** Small print above the footer rule. */
@@ -632,7 +636,7 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
   // DETAILS: the heading 22.75 under the rule (137 on the template), its
   // lines 22 under that (159) — the date, then the reference.
   doc.y = ruleY + 22.75 - 10;
-  sectionTitle(doc, 'Details', DETAIL_LINE);
+  sectionTitle(doc, spec.detailsTitle ?? 'Details', DETAIL_LINE, spec.detailsTitleSize);
   const detailsTop = doc.y;
   doc.font('Helvetica-Bold').fontSize(DETAIL_SIZE).fillColor(INK);
   if (spec.details) {
@@ -642,7 +646,9 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
     cols.forEach((col, j) => {
       doc.y = detailsTop;
       for (const [label, value] of col) {
-        doc.text(`${pdfSafe(label)}: ${pdfSafe(value)}`, left + j * colW, doc.y, { width: colW - 10, lineGap: DETAIL_GAP });
+        // The label bold, its value regular — the owner's layout.
+        doc.font('Helvetica-Bold').text(`${pdfSafe(label)}: `, left + j * colW, doc.y, { width: colW - 10, lineGap: DETAIL_GAP, continued: true });
+        doc.font('Helvetica').text(pdfSafe(value));
       }
       bottom = Math.max(bottom, doc.y);
     });
@@ -671,11 +677,11 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
  * follows it (a table's head and first row, a line of text), so the title
  * goes over to the next page WITH its content rather than ending a page alone.
  */
-function sectionTitle(doc: PDFKit.PDFDocument, title?: string, needed = 0) {
+function sectionTitle(doc: PDFKit.PDFDocument, title?: string, needed = 0, size = 8.5) {
   if (!title) return;
   ensureSpace(doc, 10 + 22 + needed);
   doc.y += 10;
-  doc.font('Helvetica-Bold').fontSize(8.5).fillColor(PURPLE).text(caps(title), T.left, doc.y, { lineBreak: false });
+  doc.font('Helvetica-Bold').fontSize(size).fillColor(PURPLE).text(caps(title), T.left, doc.y, { lineBreak: false });
   doc.y += 22;
 }
 
@@ -764,14 +770,22 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       let bottom = top;
       section.blocks.forEach((block, i) => {
         const x = T.left + i * colWidth;
-        doc.font('Helvetica-Bold').fontSize(8.5).fillColor(PURPLE).text(caps(block.title), x, top, { lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(section.titleSize ?? 8.5).fillColor(PURPLE).text(caps(block.title), x, top, { lineBreak: false });
         let y = top + 17;
-        for (const text of block.lines) {
-          for (const part of wrapText(doc, text, colWidth - 12, true, BLOCK_SIZE)) {
-            drawLine(doc, part, x, y, colWidth - 12, 'left', true, BLOCK_SIZE, INK);
+        block.lines.forEach((text, k) => {
+          const bold = k === 0;
+          const email = /^\S+@\S+\.\S+$/.test(text.trim());
+          if (email) {
+            // An email is one line, shrunk to fit rather than broken.
+            drawLine(doc, text.trim(), x, y, colWidth - 12, 'left', bold, fitSize(doc, text.trim(), colWidth - 12, BLOCK_SIZE), INK);
+            y += line;
+            return;
+          }
+          for (const part of wrapText(doc, text, colWidth - 12, bold, BLOCK_SIZE)) {
+            drawLine(doc, part, x, y, colWidth - 12, 'left', bold, BLOCK_SIZE, INK);
             y += line;
           }
-        }
+        });
         bottom = Math.max(bottom, y);
       });
       doc.x = T.left;
@@ -1173,6 +1187,13 @@ function wrapText(doc: PDFKit.PDFDocument, text: string, width: number, bold: bo
 }
 
 /** One line at (x, y), aligned inside `width`, never wrapped and never breaking a page. */
+/** The size, at most `size`, at which `text` fits `width` on one line (6pt the floor). */
+function fitSize(doc: PDFKit.PDFDocument, text: string, width: number, size: number): number {
+  doc.font('Helvetica').fontSize(size);
+  const w = doc.widthOfString(text);
+  return w <= width ? size : Math.max(6, Math.floor((size * width) / w * 10) / 10);
+}
+
 function drawLine(doc: PDFKit.PDFDocument, text: string, x: number, y: number, width: number, align: Align, bold: boolean, size: number, color: string) {
   if (!text.trim()) return;
   doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size).fillColor(color);
@@ -1436,7 +1457,7 @@ function drawSignoffs(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec) {
       person.name
         ? [person.phone, person.email].filter((v): v is string => !!v?.trim()).concat(person.at ? formatDateTime(person.at) : 'Pending')
         : ['Pending']
-    ).flatMap((t) => wrapText(doc, t, width, false, textSize));
+    ).flatMap((t) => (/^\S+@\S+\.\S+$/.test(t.trim()) ? [t.trim()] : wrapText(doc, t, width, false, textSize)));
     return { role, name, details };
   };
   const heightOf = (person: Signatory, width: number) => {
@@ -1485,7 +1506,7 @@ function drawSignoffs(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec) {
         y += nameLine;
       }
       for (const line of details) {
-        drawLine(doc, line, x, y, width, 'left', false, textSize, INK);
+        drawLine(doc, line, x, y, width, 'left', false, /^\S+@\S+\.\S+$/.test(line) ? fitSize(doc, line, width, textSize) : textSize, INK);
         y += textLine;
       }
     });

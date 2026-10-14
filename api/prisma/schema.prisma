@@ -2648,6 +2648,10 @@ model PurchaseOrder {
   deliverTo    String?
   /// The supplier's quotation the order answers (2026-10-14) — printed in DETAILS.
   quoteRef     String?
+  /// The currency the supplier is paid in (2026-10-14, the owner's layout): printed under ORDER DETAILS; nothing is converted.
+  /// The delivery address under Deliver to (2026-10-14): blank prints the company's.
+  deliverAddress String?
+  currency      String    @default("PHP")
   terms        String?
   notes        String?
 

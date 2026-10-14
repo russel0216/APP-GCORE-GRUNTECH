@@ -1,3 +1,4 @@
+import { QUOTATION_CURRENCY_CODES } from '../shared/quotation';
 import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, PrStatus, PurchaseKind, PoStatus, CanvassStatus } from '@prisma/client';
@@ -2743,6 +2744,19 @@ const PO_WRITERS = [
   'gchain.purchase_orders.edit_all',
 ] as const;
 
+/** What Deliver to and its address suggest: the company's registered name and address. */
+purchaseOrderRoutes.get(
+  '/ship-to',
+  requireAny('gchain.purchase_orders.create', 'gchain.purchase_orders.edit_own', 'gchain.purchase_orders.edit_all'),
+  handler(async (_req, res) => {
+    const c = await prisma.company.findUnique({ where: { id: 'company' } });
+    res.json({
+      name: c?.legalName || c?.name || '',
+      address: [c?.address, c?.city].filter((p) => p?.trim()).join(', '),
+    });
+  }),
+);
+
 purchaseOrderRoutes.get(
   '/draft',
   require_('gchain.purchase_orders.create'),
@@ -2845,7 +2859,9 @@ const poSchema = z.object({
   canvassId: z.string().optional().nullable(),
   deliveryDate: z.string().optional().nullable(),
   deliverTo: z.string().optional().nullable(),
+  deliverAddress: z.string().max(500).optional().nullable(),
   quoteRef: z.string().max(120).optional().nullable(),
+  currency: z.enum(QUOTATION_CURRENCY_CODES).optional(),
   terms: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   vatInclusive: z.boolean().default(false),
@@ -3055,8 +3071,10 @@ purchaseOrderRoutes.post(
           orderDate: manilaDate(new Date()),
           deliveryDate: asDate(body.deliveryDate),
           deliverTo: body.deliverTo || null,
+          deliverAddress: body.deliverAddress || null,
           // The awarded supplier's quotation no. unless the buyer typed one.
           quoteRef: (body.quoteRef ?? source.quoteRef) || null,
+          currency: body.currency ?? (await companyCurrency()),
           terms: body.terms || null,
           notes: body.notes || null,
           vatRate: company?.vatRate ?? D(0.12),
@@ -3235,7 +3253,9 @@ purchaseOrderRoutes.patch(
         ...(body.supplierId !== undefined ? { supplierId: body.supplierId } : {}),
         ...(body.deliveryDate !== undefined ? { deliveryDate: asDate(body.deliveryDate) } : {}),
         ...(body.deliverTo !== undefined ? { deliverTo: body.deliverTo || null } : {}),
+        ...(body.deliverAddress !== undefined ? { deliverAddress: body.deliverAddress || null } : {}),
         ...(body.quoteRef !== undefined ? { quoteRef: body.quoteRef || null } : {}),
+        ...(body.currency ? { currency: body.currency } : {}),
         ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
         ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
@@ -3294,7 +3314,10 @@ purchaseOrderRoutes.put(
           supplierId: body.supplierId,
           deliveryDate: asDate(body.deliveryDate),
           deliverTo: body.deliverTo || null,
+          deliverAddress: body.deliverAddress || null,
           ...(body.quoteRef !== undefined ? { quoteRef: body.quoteRef || null } : {}),
+          ...(body.currency ? { currency: body.currency } : {}),
+        ...(body.currency ? { currency: body.currency } : {}),
           terms: body.terms || null,
           notes: body.notes || null,
           vatInclusive: body.vatInclusive,
@@ -3533,26 +3556,35 @@ purchaseOrderRoutes.get(
     // address block with no labels. No "For" (internal), no supplier TIN,
     // no purchase request or status.
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
-    const buyer = await prisma.user.findUnique({ where: { id: po.createdById }, select: { position: true } });
+    const buyer = await prisma.user.findUnique({ where: { id: po.createdById }, select: { position: true, email: true } });
+    const stripName = (text: string, names: (string | null | undefined)[]) => {
+      let out = text;
+      for (const n of names) if (n && out.toLowerCase().startsWith(n.toLowerCase())) out = out.slice(n.length).replace(/^[\s,\n-]+/, '');
+      return out.trim();
+    };
     const place = (...parts: (string | null | undefined)[]) => parts.filter((p) => p?.trim()).join(', ');
     const supplierLines = [
       po.supplier.name,
       place(po.supplier.address, po.supplier.city),
       tel ?? '',
+      po.supplier.email ?? '',
       contact ? [contact.name, contact.position].filter(Boolean).join(', ') : '',
-      mail ?? '',
+      contact?.email && contact.email !== po.supplier.email ? contact.email : '',
     ].filter((l) => l.trim());
     const deliveryLines = [
       company?.legalName || company?.name || '',
-      po.deliverTo?.trim() || place(company?.address, company?.city) || po.warehouse?.name || '',
+      // Deliver to without the company's own name typed in front of it again.
+      stripName(po.deliverTo?.trim() ?? '', [company?.legalName, company?.name]) || place(company?.address, company?.city) || po.warehouse?.name || '',
       company?.phone ?? '',
       company?.email ?? '',
       // Whom the supplier asks for at delivery: the buyer who prepared it.
-      [po.createdBy.name, buyer?.position].filter(Boolean).join(', '),
+      [po.createdBy.name, buyer?.position?.toUpperCase()].filter(Boolean).join(', '),
+      buyer?.email ?? '',
     ].filter((l) => l.trim());
     const sections: PdfSection[] = [
       {
         kind: 'blocks',
+        titleSize: 11,
         blocks: [
           { title: 'Supplier', lines: supplierLines },
           { title: 'Ship to', lines: deliveryLines },
@@ -3560,9 +3592,8 @@ purchaseOrderRoutes.get(
       },
       {
         kind: 'table',
-        title: 'Order',
         // No widths: each column from its content, the description taking what is left (rule 6).
-        head: ['No.', 'Part No.', 'Description', 'Qty', 'Unit', `Unit price (${currency})`, `Amount (${currency})`],
+        head: ['No.', 'Part No.', 'Description', 'Qty', 'Unit', 'Unit price', 'Amount'],
         align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
         rows: view.items.map((i, n) => [
           String(n + 1),
@@ -3580,9 +3611,9 @@ purchaseOrderRoutes.get(
       {
         kind: 'totals',
         rows: [
-          { label: 'Subtotal', value: formatMoney(view.subtotal, currency) },
-          { label: po.vatInclusive ? `VAT included (${rate})` : `VAT (${rate})`, value: formatMoney(view.vatAmount, currency) },
-          { label: 'Total', value: formatMoney(view.total, currency), bold: true },
+          { label: 'Subtotal', value: formatAmount(view.subtotal) },
+          { label: po.vatInclusive ? `VAT included (${rate})` : `VAT (${rate})`, value: formatAmount(view.vatAmount) },
+          { label: 'Total', value: formatAmount(view.total), bold: true },
         ],
       },
     ];
@@ -3619,12 +3650,17 @@ purchaseOrderRoutes.get(
       // quotation it answers and when it is due (2026-10-14, the owner's call).
       numberNote: `Date: ${formatDate(po.orderDate)}`,
       titleBold: true,
+      detailsTitle: 'Order details',
+      detailsTitleSize: 11,
       details: [
         [
           ['Quotation reference', po.quoteRef ?? '—'],
           ['Delivery date', po.deliveryDate ? formatDate(po.deliveryDate) : '—'],
         ],
-        [['Terms', po.terms ?? po.supplier.paymentTerms ?? '—']],
+        [
+          ['Payment Terms', po.terms ?? po.supplier.paymentTerms ?? '—'],
+          ['Currency', po.currency],
+        ],
       ],
       sections,
       signatories,
