@@ -4055,7 +4055,7 @@ import for the wrong document is refused.
   and the registry's `columnLabels` names them as the costing prints them
   (Line code, Line with its description, Unit cost). `costingPaper(me, id,
   deciderOnly)` in `routes/costing.ts` is the ONE data builder for the
-  route and the editor's "a costing…" preview: the buckets as numbered
+  route and the editor's "a costing…" preview: the buckets as
   heading rows with a subtotal row each (`costingLineRow`,
   `costingSubtotalRow`), the summary as `totals`, the route's sign-offs.
   **The Gantt chart is not a box**: `costingAppendix()` draws it through
