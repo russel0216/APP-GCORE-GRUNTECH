@@ -2773,11 +2773,13 @@ async function main() {
     const draftIssuePdf = await printed(bossToken, `/stock-issues/${draftIssueId}/pdf`);
     const draftIssueText = draftIssuePdf.text;
     check(
-      'a draft outgoing slip prints who raised it, dated, then the supervisor and the receiver over Pending — no "Issued by", no "Noted by"',
+      'a draft outgoing slip is a Delivery Receipt: who prepared it, dated, then the supervisor and the receiver over Pending — no "Issued by", no "Noted by", and DRAFT in its foot',
       draftIssuePdf.status === 200 &&
-        flat(draftIssueText).includes('PREPARED BY') &&
+        // The title, in capitals, wraps in its box: DELIVERY over RECEIPT.
+        /DELIVERY\s+RECEIPT/.test(draftIssueText) &&
+        flat(draftIssueText).includes('PREPARED & DISPATCHED BY') &&
         flat(draftIssueText).includes('SUPERVISOR') &&
-        flat(draftIssueText).includes('RECEIVED BY') &&
+        flat(draftIssueText).includes('RECEIVED IN GOOD ORDER BY') &&
         !flat(draftIssueText).includes('ISSUED BY') &&
         !flat(draftIssueText).includes('NOTED BY') &&
         flat(draftIssueText).includes('Verify Keeper') &&
@@ -2785,9 +2787,10 @@ async function main() {
         flat(draftIssueText).includes('Verify Rigger') &&
         signedCount(draftIssueText) === 1 &&
         pendingCount(draftIssueText) === 2 &&
-        flat(draftIssueText).includes('Status: Draft') &&
-        !draftIssueText.includes('DRAFT'),
-      `${draftIssuePdf.status} ${signedCount(draftIssueText)} signed, ${pendingCount(draftIssueText)} pending`,
+        flat(draftIssueText).includes('DRAFT — NOT YET ISSUED.'),
+      `${draftIssuePdf.status} ${signedCount(draftIssueText)} signed, ${pendingCount(draftIssueText)} pending; ${JSON.stringify(
+        ['PREPARED & DISPATCHED BY', 'RECEIVED IN GOOD ORDER BY', 'DRAFT — NOT YET ISSUED.'].filter((w) => !flat(draftIssueText).includes(w)),
+      )}`,
     );
 
     const onHand = async (w = warehouse.id) =>
@@ -2865,36 +2868,152 @@ async function main() {
       issuedEdit.status === 400 && issuedDelete.status === 400 && issuedFlags.body.canEdit === false && issuedFlags.body.canDelete === false,
       `${issuedEdit.status} ${issuedDelete.status}`,
     );
-    // Issued, the paper dates all three: raised, approved by the supervisor,
-    // received on the handover. Its money is the quotation's block — the
-    // figures bare under a head naming the currency, the total once, with
-    // the code — and every print is on the trail.
+    // Issued, the paper dates who prepared it and the supervisor who approved
+    // it; "Received in good order by" waits for the receiver to confirm it
+    // (2026-10-15, the owner's call: Outgoing is the internal receive proof).
+    // A receipt prints no prices.
     const issuedPdf = await printed(bossToken, `/stock-issues/${draftIssueId}/pdf`);
     const issuedText = issuedPdf.text;
     const issuePrintsAfter = await prisma.auditLog.count({ where: { entityType: 'stock_issue', entityId: draftIssueId, action: 'EXPORTED' } });
     check(
-      'an issued outgoing slip prints who raised it, the supervisor who approved it and who received it, each dated, and nothing Pending',
+      'an issued outgoing slip dates who prepared it and the supervisor who approved it; the receiver is Pending until they confirm',
       issuedPdf.status === 200 &&
-        ['PREPARED BY', 'SUPERVISOR', 'RECEIVED BY'].every((r) => flat(issuedText).includes(r)) &&
+        ['PREPARED & DISPATCHED BY', 'SUPERVISOR', 'RECEIVED IN GOOD ORDER BY'].every((r) => flat(issuedText).includes(r)) &&
         !flat(issuedText).includes('NOTED BY') &&
         !flat(issuedText).includes('ISSUED BY') &&
-        signedCount(issuedText) === 3 &&
-        pendingCount(issuedText) === 0 &&
-        flat(issuedText).includes('Status: Issued'),
+        signedCount(issuedText) === 2 &&
+        pendingCount(issuedText) === 1 &&
+        !flat(issuedText).includes('DRAFT — NOT YET ISSUED.'),
       `${issuedPdf.status} ${signedCount(issuedText)} signed, ${pendingCount(issuedText)} pending`,
     );
     check(
-      'its money is a totals block — "Total", the code once — never a TOTAL row in the lines',
-      flat(issuedText).includes(`AMOUNT (${currency})`) &&
-        flat(issuedText).includes(`UNIT COST (${currency})`) &&
-        /^400\.00$/m.test(issuedText) &&
-        /^Total$/m.test(issuedText) &&
-        issuedText.includes(`${currency} 400.00`) &&
-        !issuedText.includes('TOTAL') &&
-        issuedText.includes('NO.'),
-      issuedText.split('\n').filter((l) => /Total|TOTAL|AMOUNT|400/.test(l)).join(' | ').slice(0, 200),
+      'the receipt lists serial and condition and prints no price, cost or total',
+      flat(issuedText).includes('SERIAL / BATCH') &&
+        flat(issuedText).includes('CONDITION') &&
+        flat(issuedText).includes('DELIVERY DETAILS') &&
+        !flat(issuedText).includes('UNIT COST') &&
+        !issuedText.includes(`${currency} 400.00`) &&
+        !/^Total$/m.test(issuedText),
+      issuedText.split('\n').filter((l) => /Total|COST|SERIAL|400/.test(l)).join(' | ').slice(0, 200),
     );
     check('both prints of the stock issue are on its trail as EXPORTED', issuePrintsAfter === issuePrintsBefore + 2, `${issuePrintsBefore} → ${issuePrintsAfter}`);
+
+    // The receive proof for a receiver with no login (a name on the slip):
+    // the warehouse lead records the signed paper copy for them, once; a
+    // stranger cannot.
+    const strangerReceipt = await api(buyerToken, 'POST', `/stock-issues/${draftIssueId}/receive`, {});
+    const recorded = await api(bossToken, 'POST', `/stock-issues/${draftIssueId}/receive`, { note: 'paper copy signed at the gate' });
+    const recordedTwice = await api(bossToken, 'POST', `/stock-issues/${draftIssueId}/receive`, {});
+    const recordedRow = await prisma.stockIssue.findUniqueOrThrow({ where: { id: draftIssueId } });
+    check(
+      'the warehouse lead records the receipt for a receiver with no login — once, saying who entered it; a stranger cannot',
+      strangerReceipt.status === 403 &&
+        recorded.status === 200 &&
+        recorded.body.canConfirmReceipt === false &&
+        recordedRow.receivedAt !== null &&
+        recordedRow.receivedById === boss.id &&
+        String(recordedRow.receivedNote ?? '').includes('Recorded by Verify Store Supervisor for Verify Rigger') &&
+        String(recordedRow.receivedNote ?? '').includes('paper copy signed at the gate') &&
+        recordedTwice.status === 400,
+      `${strangerReceipt.status} ${recorded.status} ${recordedTwice.status} ${recordedRow.receivedNote}`,
+    );
+    const receivedText = (await printed(bossToken, `/stock-issues/${draftIssueId}/pdf`)).text;
+    check(
+      'confirmed, the receipt dates all three — nothing Pending — and says what was noted on receipt',
+      signedCount(receivedText) === 3 && pendingCount(receivedText) === 0 && flat(receivedText).includes('paper copy signed at the gate'),
+      `${signedCount(receivedText)} signed, ${pendingCount(receivedText)} pending`,
+    );
+
+    // The Outgoing page saves header and lines at once (2026-10-15): issued
+    // to a person with a login, who reads their own slip with no warehouse
+    // right, is told when it is issued, finds it in My Work and confirms it.
+    const plainRole = await makeRole('zzchain_plain', 'ZZ No warehouse right', ['gchain.dashboard.view_all']);
+    const plain = await mkUser('Verify Plain', 'plain@verifyc.local', plainRole.id);
+    const plainToken = signToken(plain.id, plain.email);
+    const outSheetBody = {
+      warehouseId: siteStore.id,
+      purpose: `${TAG} for the requestor`,
+      issuedToId: buyer.id,
+      deliverTo: 'Plant 2, compressor room',
+      referenceNo: 'JO-REQ-77',
+      carrier: 'Company van ABC 1234',
+      driverName: 'Verify Driver',
+      lines: [{ itemId: item.id, quantity: 1, serialNo: 'SN-0001', condition: 'New' }],
+    };
+    const outTooMuch = await api(keeperToken, 'POST', '/stock-issues', { ...outSheetBody, purpose: `${TAG} too much`, lines: [{ itemId: item.id, quantity: 999 }] });
+    const outTooMuchRows = await prisma.stockIssue.count({ where: { purpose: `${TAG} too much` } });
+    const outSheet = await api(keeperToken, 'POST', '/stock-issues', outSheetBody);
+    const outSheetId = String(outSheet.body.id);
+    const outSheetRow = await prisma.stockIssue.findUniqueOrThrow({ where: { id: outSheetId }, include: { items: true } });
+    check(
+      'the page saves the slip with its lines at once — priced at the average, the standard terms of receipt filled in — and refuses more than is available before writing anything',
+      outTooMuch.status === 400 &&
+        String(outTooMuch.body.error ?? '').includes('available') &&
+        outTooMuchRows === 0 &&
+        outSheet.status === 201 &&
+        outSheetRow.items.length === 1 &&
+        outSheetRow.items[0].serialNo === 'SN-0001' &&
+        money(num(outSheetRow.items[0].amount), 200) &&
+        String(outSheetRow.instructions ?? '').startsWith('Please check') &&
+        outSheetRow.issuedToId === buyer.id,
+      `${outTooMuch.status} ${outTooMuchRows}; ${outSheet.status} ${outSheetRow.items.length} ${outSheetRow.instructions?.slice(0, 20)}`,
+    );
+    const outStale = await api(keeperToken, 'PUT', `/stock-issues/${outSheetId}/sheet`, { ...outSheetBody, version: new Date(Date.now() - 60_000).toISOString() });
+    const outResheet = await api(keeperToken, 'PUT', `/stock-issues/${outSheetId}/sheet`, {
+      ...outSheetBody,
+      version: outSheetRow.updatedAt.toISOString(),
+      lines: [{ itemId: item.id, quantity: 2, serialNo: 'SN-0001, SN-0002', condition: 'New' }],
+    });
+    check(
+      'a modify read before somebody else’s save is refused; the current one replaces the lines and re-prices them',
+      outStale.status === 400 && outResheet.status === 200 && money(Number(outResheet.body.value), 400) && (outResheet.body.items as unknown[]).length === 1,
+      `${outStale.status} ${outResheet.status} ${outResheet.body.value}`,
+    );
+    const outReadsOwn = await api(buyerToken, 'GET', `/stock-issues/${outSheetId}`);
+    const outStrangerReads = await api(plainToken, 'GET', `/stock-issues/${outSheetId}`);
+    const outEarlyConfirm = await api(buyerToken, 'POST', `/stock-issues/${outSheetId}/receive`, {});
+    check(
+      'the person it is issued to reads their own slip with no warehouse right; someone else gets a 404; nothing to confirm before it is issued',
+      outReadsOwn.status === 200 && outStrangerReads.status === 404 && outEarlyConfirm.status === 400,
+      `${outReadsOwn.status} ${outStrangerReads.status} ${outEarlyConfirm.status}`,
+    );
+    await api(keeperToken, 'POST', `/stock-issues/${outSheetId}/submit`);
+    const outSheetRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'stock_issue', documentId: outSheetId, status: 'PENDING' } });
+    const outSheetApproved = outSheetRequest ? await api(bossToken, 'POST', `/approvals/${outSheetRequest.id}/act`, { action: 'APPROVED' }) : { status: 0, body: {} };
+    const outToldIssued = await prisma.notification.count({ where: { userId: buyer.id, type: 'warehouse.issued_to_you', link: `/g-chain/outgoing/${outSheetId}` } });
+    const outBuyerWork = await api(buyerToken, 'GET', '/my-work');
+    const outInWork = ((outBuyerWork.body.assignedToMe ?? []) as { kind: string; link: string }[]).some((r) => r.kind === 'stock_issue' && r.link === `/g-chain/outgoing/${outSheetId}`);
+    const outNotYet = await api(bossToken, 'GET', `/stock-issues?received=no&search=${encodeURIComponent(`${TAG} for the requestor`)}`);
+    check(
+      'approved, it is issued and its receiver is told, and My Work asks them to confirm it; the list counts it as not yet confirmed',
+      outSheetApproved.status === 200 &&
+        outToldIssued === 1 &&
+        outInWork &&
+        outNotYet.status === 200 &&
+        Number((outNotYet.body as { total?: number }).total) === 1 &&
+        Number((outNotYet.body.summary as { toConfirm?: number } | undefined)?.toConfirm) === 1,
+      `${outSheetApproved.status} bell ${outToldIssued} work ${outInWork} list ${outNotYet.status} ${JSON.stringify(outNotYet.body.summary)}`,
+    );
+    const outConfirmed = await api(buyerToken, 'POST', `/stock-issues/${outSheetId}/receive`, { note: 'complete' });
+    const outKeeperTold = await prisma.notification.count({ where: { userId: keeper.id, type: 'warehouse.received', link: `/g-chain/outgoing/${outSheetId}` } });
+    const outConfirmedRow = await prisma.stockIssue.findUniqueOrThrow({ where: { id: outSheetId } });
+    const outNowConfirmed = await api(bossToken, 'GET', `/stock-issues?received=yes&search=${encodeURIComponent(`${TAG} for the requestor`)}`);
+    const outPaper = await printed(buyerToken, `/stock-issues/${outSheetId}/pdf`);
+    check(
+      'the receiver confirms it themself — dated, in their own name — the warehouse is told, and their paper signs "Received in good order by" with nothing Pending',
+      outConfirmed.status === 200 &&
+        outConfirmedRow.receivedById === buyer.id &&
+        outConfirmedRow.receivedNote === 'complete' &&
+        outKeeperTold === 1 &&
+        Number((outNowConfirmed.body as { total?: number }).total) === 1 &&
+        outPaper.status === 200 &&
+        flat(outPaper.text).includes('RECEIVED IN GOOD ORDER BY') &&
+        flat(outPaper.text).includes(buyer.name) &&
+        flat(outPaper.text).includes('Plant 2, compressor room') &&
+        flat(outPaper.text).includes('SN-0001, SN-0002') &&
+        pendingCount(outPaper.text) === 0,
+      `${outConfirmed.status} ${outConfirmedRow.receivedNote} told ${outKeeperTold} list ${outNowConfirmed.body.total} paper ${outPaper.status} ${pendingCount(outPaper.text)}`,
+    );
 
     // Submit claims the draft before anything is sent: two presses at once
     // send it once, and the second is told. A decision that lands after the
@@ -3880,7 +3999,7 @@ async function main() {
       {
         path: 'stock-issues',
         entity: 'stock_issue',
-        noun: ['stock issue', 'stock issues'],
+        noun: ['outgoing slip', 'outgoing slips'],
         page: LANDSCAPE,
         key: (r) => String(r.number),
         filter: ['status=ISSUED', 'status Issued'],

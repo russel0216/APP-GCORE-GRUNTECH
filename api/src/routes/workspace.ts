@@ -537,6 +537,9 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
     // Borrow slips (2026-10-14): the warehouse's approved requests waiting
     // for their release, and what I hold that is due back within three days.
     ...(await borrowWork(me, dayStart)),
+    // Outgoing (2026-10-15): what was issued to me and is waiting for me to
+    // confirm I received it — the slip is my receive proof.
+    ...(await outgoingToConfirm(me)),
   ];
   return rows.sort(byUrgency);
 }
@@ -585,6 +588,24 @@ async function borrowWork(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
       link: `/g-chain/borrow-slips/${r.id}`,
     })),
   ];
+}
+
+/** Outgoing slips issued to me that I have not yet confirmed receiving. */
+async function outgoingToConfirm(me: ResolvedUser): Promise<WorkRow[]> {
+  const rows = await prisma.stockIssue.findMany({
+    where: { issuedToId: me.id, status: 'ISSUED', receivedAt: null },
+    select: { id: true, number: true, purpose: true, issuedAt: true, issueDate: true, warehouse: { select: { name: true } } },
+    orderBy: { issueDate: 'asc' },
+    take: 10,
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    kind: 'stock_issue',
+    title: r.purpose,
+    subtitle: `${r.number} · issued to you from ${r.warehouse.name} — confirm you received it`,
+    when: r.issuedAt ?? r.issueDate,
+    link: `/g-chain/outgoing/${r.id}`,
+  }));
 }
 
 /**

@@ -1288,24 +1288,40 @@ stockIssueRoutes.use(authenticate);
 
 const ISSUE_SORTS = ['number', 'issueDate'];
 
-/** Which stock issues a list query means — one rule for the list and its printed twin. */
-function issueListWhere(q: ListQuery): Prisma.StockIssueWhereInput {
+/**
+ * Which stock issues a list query means — one rule for the list, its summary
+ * cards and its printed twin. `base` is everything but the status and
+ * received filters (the cards count under it, so each card equals the list it
+ * opens); `where` adds them.
+ */
+function issueListWhere(q: ListQuery): { base: Prisma.StockIssueWhereInput; where: Prisma.StockIssueWhereInput } {
   const and: Prisma.StockIssueWhereInput[] = [];
-  const status = choice(q.filters.status, IssueStatus, 'Status');
-  if (status) and.push({ status });
   if (q.filters.jobId) and.push({ jobId: q.filters.jobId });
+  if (q.filters.issuedToId) and.push({ issuedToId: q.filters.issuedToId });
+  if (q.filters.warehouseId) and.push({ warehouseId: q.filters.warehouseId });
   if (q.search) {
     and.push({
       OR: [
         { number: { contains: q.search, mode: 'insensitive' } },
         { purpose: { contains: q.search, mode: 'insensitive' } },
+        { issuedToName: { contains: q.search, mode: 'insensitive' } },
+        { issuedTo: { name: { contains: q.search, mode: 'insensitive' } } },
+        { referenceNo: { contains: q.search, mode: 'insensitive' } },
         { job: { name: { contains: q.search, mode: 'insensitive' } } },
+        { job: { number: { contains: q.search, mode: 'insensitive' } } },
       ],
     });
   }
   const ids = idsFilter(q.filters.ids);
   if (ids) and.push({ id: { in: ids } });
-  return and.length ? { AND: and } : {};
+  const base: Prisma.StockIssueWhereInput = and.length ? { AND: [...and] } : {};
+  const status = choice(q.filters.status, IssueStatus, 'Status');
+  if (status) and.push({ status });
+  // The receive proof (2026-10-15): issued and confirmed, or issued and not yet.
+  const received = choice(q.filters.received, { yes: 'yes', no: 'no' }, 'Received');
+  if (received === 'yes') and.push({ receivedAt: { not: null } });
+  if (received === 'no') and.push({ status: 'ISSUED', receivedAt: null });
+  return { base, where: and.length ? { AND: and } : {} };
 }
 
 stockIssueRoutes.get(
@@ -1313,15 +1329,16 @@ stockIssueRoutes.get(
   require_('gchain.stock_issuance.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = issueListWhere(q);
+    const { base, where } = issueListWhere(q);
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, waiting, drafts, issued, toConfirm] = await Promise.all([
       prisma.stockIssue.findMany({
         where,
         include: {
           job: { select: { id: true, number: true, name: true } },
           warehouse: { select: { id: true, name: true } },
           issuedBy: { select: { id: true, name: true } },
+          issuedTo: { select: { id: true, name: true } },
           items: { select: { amount: true } },
         },
         orderBy: orderBy(q, ISSUE_SORTS, { issueDate: 'desc' }),
@@ -1329,17 +1346,24 @@ stockIssueRoutes.get(
         take: q.pageSize,
       }),
       prisma.stockIssue.count({ where }),
+      prisma.stockIssue.count({ where: { AND: [base, { status: 'PENDING_APPROVAL' }] } }),
+      prisma.stockIssue.count({ where: { AND: [base, { status: 'DRAFT' }] } }),
+      prisma.stockIssue.count({ where: { AND: [base, { status: 'ISSUED' }] } }),
+      prisma.stockIssue.count({ where: { AND: [base, { status: 'ISSUED', receivedAt: null }] } }),
     ]);
 
-    res.json(
-      listResult(
+    res.json({
+      ...listResult(
         rows.map((r) => ({
           id: r.id,
           number: r.number,
           status: r.status,
           issueDate: r.issueDate,
           purpose: r.purpose,
-          issuedToName: r.issuedToName,
+          issuedToName: r.issuedTo?.name ?? r.issuedToName,
+          issuedTo: r.issuedTo,
+          deliverTo: r.deliverTo,
+          receivedAt: r.receivedAt,
           job: r.job,
           warehouse: r.warehouse,
           issuedBy: r.issuedBy,
@@ -1349,7 +1373,8 @@ stockIssueRoutes.get(
         total,
         q,
       ),
-    );
+      summary: { waiting, drafts, issued, toConfirm },
+    });
   }),
 );
 
@@ -1366,7 +1391,7 @@ stockIssueRoutes.get(
   require_('gchain.stock_issuance.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = issueListWhere(q);
+    const { where } = issueListWhere(q);
     const f = q.filters;
     const [rows, count, live, cancelled, drafts, currency, project] = await Promise.all([
       prisma.stockIssue.findMany({
@@ -1374,6 +1399,7 @@ stockIssueRoutes.get(
         include: {
           job: { select: { number: true, name: true } },
           warehouse: { select: { name: true } },
+          issuedTo: { select: { name: true } },
           items: { select: { amount: true } },
         },
         orderBy: orderBy(q, ISSUE_SORTS, { issueDate: 'desc' }),
@@ -1386,29 +1412,34 @@ stockIssueRoutes.get(
       companyCurrency(),
       recordNamed('project', f.jobId),
     ]);
-    const reference = listReference(count, rows.length, ['stock issue', 'stock issues'], [
+    const warehouseName = f.warehouseId ? (await prisma.warehouse.findUnique({ where: { id: f.warehouseId }, select: { name: true } }))?.name : null;
+    const reference = listReference(count, rows.length, ['outgoing slip', 'outgoing slips'], [
       q.search && `search "${q.search}"`,
       f.status && `status ${statusLabel(f.status)}`,
+      f.received === 'yes' && 'confirmed received',
+      f.received === 'no' && 'issued, not yet confirmed received',
+      warehouseName && `from ${warehouseName}`,
       project,
       f.ids && 'the rows selected',
     ]);
     const valueOf = (r: (typeof rows)[number]) => r.items.reduce((s, i) => s.add(i.amount), new Prisma.Decimal(0));
 
-    // Eight columns: landscape, each sized from what it holds (rule 6).
+    // Nine columns: landscape, each sized from what it holds (rule 6).
     const sections: PdfSection[] = [
       {
         kind: 'table',
-        head: ['Number', 'Issue', 'From', 'To', 'Date', 'Lines', `Value (${currency})`, 'Status'],
-        align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left'],
+        head: ['Number', 'Outgoing', 'Requested by', 'From', 'Date', 'Lines', `Value (${currency})`, 'Status', 'Received'],
+        align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left', 'left'],
         rows: rows.map((i) => [
           i.number,
-          { title: i.purpose, body: i.job ? `${i.job.number} — ${i.job.name}` : 'No project' },
+          { title: i.purpose, body: i.job ? `${i.job.number} — ${i.job.name}` : (i.deliverTo ?? 'No project') },
+          i.issuedTo?.name ?? i.issuedToName ?? '',
           i.warehouse.name,
-          i.issuedToName ?? '',
           formatShortDate(i.issueDate),
           String(i.items.length),
           bracketed(formatAmount(valueOf(i).toFixed(2)), i.status !== 'CANCELLED'),
           statusLabel(i.status),
+          i.receivedAt ? formatShortDate(i.receivedAt) : i.status === 'ISSUED' ? 'Not yet' : '',
         ]),
       },
       {
@@ -1426,7 +1457,7 @@ stockIssueRoutes.get(
 
     const pdf = await renderDocument({ title: 'Outgoing', date: new Date(), reference, landscape: true, sections });
     await audit(
-      { entityType: 'stock_issue', entityId: 'list', action: 'EXPORTED', summary: `Exported the stock issue list as PDF (${rows.length} issue(s))` },
+      { entityType: 'stock_issue', entityId: 'list', action: 'EXPORTED', summary: `Exported the outgoing list as PDF (${rows.length} slip(s))` },
       req,
     );
     sendListPdf(res, pdf, 'outgoing.pdf');
@@ -1438,18 +1469,28 @@ async function loadIssue(id: string) {
     where: { id },
     include: {
       job: { select: { id: true, number: true, name: true } },
-      warehouse: { select: { id: true, name: true } },
+      warehouse: { select: { id: true, name: true, address: true, city: true } },
       issuedBy: { select: { id: true, name: true, position: true } },
+      issuedTo: { select: { id: true, name: true, position: true, email: true } },
+      receivedBy: { select: { id: true, name: true } },
       items: {
         include: {
-          item: { select: { id: true, code: true, name: true, unit: true } },
+          item: { select: { id: true, code: true, partNumber: true, brand: true, name: true, unit: true } },
           costCategory: { select: { id: true, name: true } },
           location: { select: { id: true, code: true } },
         },
+        orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
       },
     },
   });
 }
+
+/**
+ * The terms of receipt a new slip starts with (2026-10-15, the owner's
+ * delivery receipt) — editable per slip, printed over the sign-offs.
+ */
+export const OUTGOING_TERMS =
+  'Please check that every item listed was received complete and in good condition. Report any discrepancy or damage to the warehouse in writing within 24 hours of receipt. The person receiving confirms receipt in G-CORE, or signs and returns this copy to the warehouse.';
 
 function presentIssue(issue: NonNullable<Awaited<ReturnType<typeof loadIssue>>>) {
   const items = issue.items.map((i) => ({
@@ -1475,7 +1516,9 @@ const ISSUE_VIEW = 'gchain.stock_issuance.view_all';
 async function visibleIssue(me: ResolvedUser, id: string, deciderOnly: boolean) {
   const issue = await loadIssue(id);
   if (!issue) throw notFound('Stock issue not found');
-  if (deciderOnly && !(await mayDecide(me.id, ISSUE_DOC, [issue.id]))) throw notFound('Stock issue not found');
+  // The person it was issued to reads their own slip — it is their receive
+  // proof (2026-10-15) — whatever rights they hold.
+  if (deciderOnly && issue.issuedToId !== me.id && !(await mayDecide(me.id, ISSUE_DOC, [issue.id]))) throw notFound('Stock issue not found');
   return issue;
 }
 
@@ -1499,8 +1542,50 @@ async function issueView(issue: NonNullable<Awaited<ReturnType<typeof loadIssue>
     canIssue: draft && !route && can(me, 'gchain.stock_issuance.create') && issue.items.length > 0,
     canWithdraw: issue.status === 'PENDING_APPROVAL' && raiser,
     approvalRoute: draft && route ? await routeBrief(ISSUE_DOC, view.value, issue.issuedById) : null,
+    // The receive proof: the person it went to confirms it arrived; the
+    // warehouse lead may record a paper signature for them.
+    canConfirmReceipt:
+      issue.status === 'ISSUED' && !issue.receivedAt && (issue.issuedToId === me.id || can(me, 'gchain.stock_issuance.edit_all')),
   };
 }
+
+/** The route a slip of this value would take, raised by the caller — the Outgoing page's preview. */
+stockIssueRoutes.get(
+  '/route',
+  requireAny(...ISSUE_EDIT),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const amount = Number(req.query.amount ?? 0) || 0;
+    const route = (await pickWorkflow(ISSUE_DOC, amount, { requesterId: me.id })) ? await routeBrief(ISSUE_DOC, amount, me.id) : null;
+    res.json({ route });
+  }),
+);
+
+/** What the Outgoing page offers (above `/:id`, the route-order trap): the warehouses, and what one of them holds available. */
+stockIssueRoutes.get(
+  '/options',
+  requireAny(...(['gchain.stock_issuance.create', 'gchain.stock_issuance.edit_all'] as const)),
+  handler(async (req, res) => {
+    const warehouseId = req.query.warehouseId ? String(req.query.warehouseId) : null;
+    const [warehouses, stock] = await Promise.all([
+      prisma.warehouse.findMany({ where: { isActive: true }, orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+      warehouseId
+        ? prisma.inventoryBalance.findMany({
+            where: { warehouseId },
+            include: { item: { select: { id: true, code: true, partNumber: true, brand: true, name: true, unit: true, costCategoryId: true, isActive: true } } },
+            orderBy: { item: { name: 'asc' } },
+          })
+        : [],
+    ]);
+    res.json({
+      warehouses,
+      stock: stock
+        .filter((b) => b.item.isActive)
+        .map((b) => ({ itemId: b.itemId, code: b.item.code, partNumber: b.item.partNumber, brand: b.item.brand, name: b.item.name, unit: b.item.unit, available: availableOf(b), averageCost: num(b.averageCost) })),
+      terms: OUTGOING_TERMS,
+    });
+  }),
+);
 
 stockIssueRoutes.get(
   '/:id',
@@ -1512,6 +1597,16 @@ stockIssueRoutes.get(
   }),
 );
 
+const issueLineSchema = z.object({
+  itemId: z.string().min(1),
+  quantity: z.number().positive(),
+  costCategoryId: z.string().optional().nullable(),
+  locationId: z.string().optional().nullable(),
+  serialNo: z.string().trim().max(120).optional().nullable(),
+  condition: z.string().trim().max(80).optional().nullable(),
+  remarks: z.string().trim().max(500).optional().nullable(),
+});
+
 const issueSchema = z.object({
   jobId: z.string().optional().nullable(),
   warehouseId: z.string().min(1, 'Which warehouse?'),
@@ -1520,14 +1615,79 @@ const issueSchema = z.object({
   issueDate: z.string().optional().nullable(),
   purpose: z.string().trim().min(3, 'Say what this is for'),
   notes: z.string().optional().nullable(),
+  deliverTo: z.string().trim().max(300).optional().nullable(),
+  referenceNo: z.string().trim().max(120).optional().nullable(),
+  carrier: z.string().trim().max(200).optional().nullable(),
+  driverName: z.string().trim().max(120).optional().nullable(),
+  instructions: z.string().trim().max(2000).optional().nullable(),
 });
+
+/**
+ * Checks a slip's lines as the Outgoing page sends them, before anything is
+ * written or a number issued: each item is held at the warehouse with that
+ * much available, priced at its average now (the price a draft shows is the
+ * one it would issue at), and — charged to a project — carries its budget
+ * line, the item's own filling in.
+ */
+async function checkIssueLines(lines: z.infer<typeof issueLineSchema>[], warehouseId: string, jobId: string | null) {
+  const ids = [...new Set(lines.map((l) => l.itemId))];
+  const [items, balances] = await Promise.all([
+    prisma.item.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, costCategoryId: true } }),
+    prisma.inventoryBalance.findMany({ where: { warehouseId, itemId: { in: ids } } }),
+  ]);
+  const byItem = new Map(items.map((i) => [i.id, i]));
+  const byBalance = new Map(balances.map((b) => [b.itemId, b]));
+  const asked = new Map<string, number>();
+  for (const l of lines) asked.set(l.itemId, (asked.get(l.itemId) ?? 0) + l.quantity);
+  return lines.map((l, n) => {
+    const item = byItem.get(l.itemId);
+    if (!item) throw badRequest(`Line ${n + 1}: that item does not exist`);
+    const balance = byBalance.get(l.itemId);
+    if (!balance) throw badRequest(`Line ${n + 1}: the warehouse does not hold ${item.name}`);
+    const available = availableOf(balance);
+    if ((asked.get(l.itemId) ?? 0) > available + 0.0005) throw badRequest(`Line ${n + 1}: only ${qty(available)} of ${item.name} available`);
+    let costCategoryId = l.costCategoryId || null;
+    if (jobId && !costCategoryId) {
+      costCategoryId = item.costCategoryId ?? null;
+      if (!costCategoryId) throw badRequest(`Line ${n + 1}: ${item.name} has no cost bucket, so it cannot be charged to a budget line — set one on the item first`);
+    }
+    const unitCost = num(balance.averageCost);
+    return {
+      itemId: l.itemId,
+      costCategoryId,
+      locationId: l.locationId || balance.locationId || null,
+      quantity: D(l.quantity),
+      unitCost: D(unitCost),
+      amount: D(cents(l.quantity * unitCost)),
+      serialNo: l.serialNo || null,
+      condition: l.condition || null,
+      remarks: l.remarks || null,
+      sortOrder: n,
+    };
+  });
+}
+
+/** Checks the header's references: the warehouse, the project, the person it goes to. */
+async function checkIssueHeader(body: Partial<z.infer<typeof issueSchema>>) {
+  if (body.warehouseId && !(await prisma.warehouse.findUnique({ where: { id: body.warehouseId }, select: { id: true } }))) {
+    throw badRequest('That warehouse does not exist');
+  }
+  if (body.jobId && !(await prisma.job.findUnique({ where: { id: body.jobId }, select: { id: true } }))) {
+    throw badRequest('That project does not exist');
+  }
+  if (body.issuedToId && !(await prisma.user.findUnique({ where: { id: body.issuedToId }, select: { id: true } }))) {
+    throw badRequest('That person is not on file');
+  }
+}
 
 stockIssueRoutes.post(
   '/',
   require_('gchain.stock_issuance.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(issueSchema, req.body);
+    const body = parseBody(issueSchema.extend({ lines: z.array(issueLineSchema).max(300).optional() }), req.body);
+    await checkIssueHeader(body);
+    const rows = body.lines?.length ? await checkIssueLines(body.lines, body.warehouseId, body.jobId || null) : [];
 
     const issue = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('stock_issue', tx);
@@ -1542,17 +1702,124 @@ stockIssueRoutes.post(
           issueDate: asDate(body.issueDate) ?? today(),
           purpose: body.purpose,
           notes: body.notes || null,
+          deliverTo: body.deliverTo || null,
+          referenceNo: body.referenceNo || null,
+          carrier: body.carrier || null,
+          driverName: body.driverName || null,
+          instructions: body.instructions === undefined ? OUTGOING_TERMS : body.instructions || null,
+          items: { create: rows },
         },
       });
     });
 
     await audit(
-      { entityType: 'stock_issue', entityId: issue.id, action: 'CREATED', summary: `Raised ${issue.number} — ${issue.purpose}` },
+      { entityType: 'stock_issue', entityId: issue.id, action: 'CREATED', summary: `Raised ${issue.number} — ${issue.purpose}${rows.length ? ` (${rows.length} line${rows.length === 1 ? '' : 's'})` : ''}` },
       req,
     );
     res.status(201).json(issue);
   }),
 );
+
+/**
+ * The Outgoing page's save on a DRAFT: header and lines at once, claimed on
+ * the `version` (`updatedAt`) the page read. The lines are replaced — nothing
+ * points at a draft's lines — and re-priced at the warehouse's average.
+ */
+stockIssueRoutes.put(
+  '/:id/sheet',
+  requireAny(...(['gchain.stock_issuance.create', 'gchain.stock_issuance.edit_all'] as const)),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(issueSchema.extend({ lines: z.array(issueLineSchema).max(300), version: z.string().optional() }), req.body);
+    const issue = await prisma.stockIssue.findUnique({ where: { id: req.params.id } });
+    if (!issue) throw notFound('Stock issue not found');
+    if (issue.status !== 'DRAFT') throw badRequest(`${issue.number} is ${statusLabel(issue.status).toLowerCase()} — only a draft is modified`);
+    await checkIssueHeader(body);
+    const rows = await checkIssueLines(body.lines, body.warehouseId, body.jobId || null);
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.stockIssue.updateMany({
+        where: { id: issue.id, status: 'DRAFT', ...(body.version ? { updatedAt: new Date(body.version) } : {}) },
+        data: {
+          jobId: body.jobId || null,
+          warehouseId: body.warehouseId,
+          issuedToId: body.issuedToId || null,
+          issuedToName: body.issuedToName || null,
+          issueDate: asDate(body.issueDate) ?? issue.issueDate,
+          purpose: body.purpose,
+          notes: body.notes || null,
+          deliverTo: body.deliverTo || null,
+          referenceNo: body.referenceNo || null,
+          carrier: body.carrier || null,
+          driverName: body.driverName || null,
+          instructions: body.instructions || null,
+        },
+      });
+      if (!claimed.count) throw badRequest(`${issue.number} was changed or issued a moment ago — reload to see where it stands`);
+      await tx.stockIssueItem.deleteMany({ where: { issueId: issue.id } });
+      if (rows.length) await tx.stockIssueItem.createMany({ data: rows.map((r) => ({ ...r, issueId: issue.id })) });
+    });
+    await audit(
+      { entityType: 'stock_issue', entityId: issue.id, action: 'UPDATED', summary: `Modified ${issue.number} (${rows.length} line${rows.length === 1 ? '' : 's'})` },
+      req,
+    );
+    res.json(await issueView((await loadIssue(issue.id))!, me));
+  }),
+);
+
+/**
+ * The receive proof (2026-10-15, the owner's call: "Outgoing = internal
+ * receive proof to the requestor"): the person it went to confirms it
+ * arrived in good order — or notes what did not. The warehouse lead
+ * (`edit_all`) may record it for them from a signed paper copy, and the
+ * record says who did. Once, claimed on `receivedAt` being empty.
+ */
+stockIssueRoutes.post(
+  '/:id/receive',
+  // Signed in is enough to ask: the person it went to may hold no warehouse right.
+  requireAnyOrDecider(ISSUE_VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ note: z.string().trim().max(1000).optional().nullable() }), req.body ?? {});
+    const issue = await prisma.stockIssue.findUnique({ where: { id: req.params.id }, include: { issuedTo: { select: { name: true } } } });
+    if (!issue) throw notFound('Stock issue not found');
+    const forThem = issue.issuedToId !== me.id;
+    if (forThem && !can(me, 'gchain.stock_issuance.edit_all')) throw forbidden('Only the person it was issued to confirms receiving it');
+    if (issue.status !== 'ISSUED') throw badRequest(`${issue.number} has not been issued yet`);
+    const note = [forThem ? `Recorded by ${me.name} for ${issue.issuedTo?.name ?? issue.issuedToName ?? 'the receiver'}` : null, body.note || null].filter(Boolean).join(' — ') || null;
+    const claimed = await prisma.stockIssue.updateMany({
+      where: { id: issue.id, status: 'ISSUED', receivedAt: null },
+      data: { receivedAt: new Date(), receivedById: me.id, receivedNote: note },
+    });
+    if (!claimed.count) throw badRequest(`${issue.number} was confirmed received a moment ago`);
+    await audit(
+      { entityType: 'stock_issue', entityId: issue.id, action: 'APPROVED', summary: `${issue.number} confirmed received${forThem ? ` (recorded by ${me.name})` : ''}${body.note ? ` — ${body.note}` : ''}` },
+      req,
+    );
+    if (issue.issuedById !== me.id) {
+      await notify({
+        userId: issue.issuedById,
+        type: 'warehouse.received',
+        title: `Received: ${issue.number}`,
+        body: `${issue.issuedTo?.name ?? issue.issuedToName ?? 'The receiver'} confirmed it arrived${body.note ? ` — ${body.note}` : ''}`,
+        link: `/g-chain/outgoing/${issue.id}`,
+      });
+    }
+    res.json(await issueView((await loadIssue(issue.id))!, me));
+  }),
+);
+
+/** Tells the person a slip went to that it is on its way, for them to confirm. */
+async function tellIssuedTo(issueId: string) {
+  const issue = await prisma.stockIssue.findUnique({ where: { id: issueId }, select: { id: true, number: true, purpose: true, issuedToId: true, warehouse: { select: { name: true } } } });
+  if (!issue?.issuedToId) return;
+  await notify({
+    userId: issue.issuedToId,
+    type: 'warehouse.issued_to_you',
+    title: `Issued to you: ${issue.number}`,
+    body: `${issue.purpose} — from ${issue.warehouse.name}. Confirm when you have received it.`,
+    link: `/g-chain/outgoing/${issue.id}`,
+  });
+}
 
 async function issueForEdit(id: string) {
   const issue = await prisma.stockIssue.findUnique({ where: { id } });
@@ -1930,6 +2197,7 @@ stockIssueRoutes.post(
       },
       req,
     );
+    await tellIssuedTo(issue.id);
 
     res.json(await issueView((await loadIssue(issue.id))!, me));
   }),
@@ -2061,6 +2329,7 @@ export async function settleStockIssue(documentId: string, outcome: ApprovalOutc
     summary: `${issue.number} issued${posted.job ? ` to ${posted.job.number}` : ''} — approved`,
     actorName: 'system',
   });
+  await tellIssuedTo(issue.id);
 }
 
 onApprovalSettled(ISSUE_DOC, async (request, outcome) => {
@@ -2073,6 +2342,7 @@ registerAttachmentGuard(
   'stock_issue',
   async (user, id) => {
     if (can(user, ISSUE_VIEW)) return !!(await prisma.stockIssue.findUnique({ where: { id }, select: { id: true } }));
+    if ((await prisma.stockIssue.count({ where: { id, issuedToId: user.id } })) > 0) return true;
     return mayDecide(user.id, ISSUE_DOC, [id]);
   },
   {
@@ -3565,29 +3835,32 @@ inventoryRoutes.get(
 
 // ── Stock issue PDF ──────────────────────────────────────────────────────────
 
+/**
+ * The Outgoing slip on paper — the internal DELIVERY RECEIPT (2026-10-15,
+ * the owner's reference, "internal receive proof to the requestor"; no
+ * customer): DELIVERY DETAILS (the reference, the project, the dispatch
+ * warehouse, the carrier), "Received by" (the requestor) and "Deliver to"
+ * side by side, the items with their serial and condition — no prices, it is
+ * a receipt — the terms of receipt, then the people who acted: Prepared &
+ * dispatched by, the route's steps, Delivered by (the driver) and Received
+ * in good order by — dated when the requestor confirms it in G-CORE,
+ * "Pending" until then.
+ */
 stockIssueRoutes.get(
   '/:id/pdf',
   requireAnyOrDecider(ISSUE_VIEW),
   handler(async (req, res) => {
     const me = currentUser(req);
     const issue = await visibleIssue(me, req.params.id, res.locals.deciderOnly === true);
-
     const view = presentIssue(issue);
-    const currency = await companyCurrency();
 
-    // The people who acted, each dated (rule 6): whoever raised the slip;
-    // then its route's steps (the issuer's supervisor — a draft prints the
-    // route submitting would take, "Pending" until signed) when it went for
-    // approval, else whoever pressed Issue (the trail's EXECUTED row, the
-    // only record of who moved the stock); and the person it was issued to,
-    // dated by the handover. Never a slot nobody fills: no "Noted by", and
-    // no receiver when the slip names none.
     const routed = issue.status === 'DRAFT' && !!(await pickWorkflow(ISSUE_DOC, view.value, { requesterId: issue.issuedById }));
     const slots = routed
       ? await approvalSlots(ISSUE_DOC, issue.id, { amount: view.value, requesterId: issue.issuedById })
       : await approvalSlots(ISSUE_DOC, issue.id);
+    const receiverName = issue.issuedTo?.name ?? issue.issuedToName;
     const signatories: Signatory[] = [
-      { role: 'Prepared by', name: issue.issuedBy.name, ...(await contactOf(issue.issuedById)), at: preparedAt(slots) ?? issue.createdAt },
+      { role: 'Prepared & dispatched by', name: issue.issuedBy.name, ...(await contactOf(issue.issuedById)), at: preparedAt(slots) ?? issue.createdAt },
       ...slotSignatories(slots),
     ];
     if (issue.status === 'ISSUED' && !slots.length) {
@@ -3596,65 +3869,89 @@ stockIssueRoutes.get(
         orderBy: { at: 'desc' },
         select: { actorId: true, actorName: true, at: true },
       });
-      const issuerId = executed?.actorId ?? issue.issuedById;
       signatories.push({
         role: 'Issued by',
         name: executed?.actorName ?? issue.issuedBy.name,
-        ...(await contactOf(issuerId)),
+        ...(await contactOf(executed?.actorId ?? issue.issuedById)),
         at: issue.issuedAt ?? executed?.at ?? null,
       });
     }
+    if (issue.driverName && issue.status !== 'CANCELLED') {
+      signatories.push({ role: 'Delivered by', name: issue.driverName, at: issue.status === 'ISSUED' ? issue.issuedAt : null });
+    }
     // A cancelled slip is handed to nobody, so it names no receiver.
-    if (issue.issuedToName && issue.status !== 'CANCELLED') {
+    if (receiverName && issue.status !== 'CANCELLED') {
       signatories.push({
-        role: 'Received by',
-        name: issue.issuedToName,
+        role: 'Received in good order by',
+        name: receiverName,
         ...(await contactOf(issue.issuedToId)),
-        at: issue.status === 'ISSUED' ? issue.issuedAt : null,
+        at: issue.receivedAt,
       });
     }
 
+    const company = await prisma.company.findUnique({ where: { id: 'company' } });
+    const place = (...parts: (string | null | undefined)[]) => parts.filter((p) => p?.trim()).join(', ');
+    const receiver = issue.issuedToId ? await contactOf(issue.issuedToId) : {};
+    const receiverLines = [
+      receiverName ?? '—',
+      issue.issuedTo?.position ?? '',
+      'phone' in receiver && receiver.phone ? String(receiver.phone) : '',
+      issue.issuedTo?.email ?? '',
+    ].filter((l) => l.trim());
+    const deliverLines = [
+      company?.legalName || company?.name || '',
+      issue.deliverTo?.trim() || (issue.job ? `${issue.job.number} — ${issue.job.name}` : place(issue.warehouse.name, issue.warehouse.address, issue.warehouse.city)),
+    ].filter((l) => l.trim());
+
+    const sections: PdfSection[] = [
+      { kind: 'blocks', titleSize: 11, blocks: [{ title: 'Received by', lines: receiverLines }, { title: 'Deliver to', lines: deliverLines }] },
+      {
+        kind: 'table',
+        title: 'Outgoing items',
+        head: ['No.', 'Item / Part no.', 'Description', 'Serial / batch', 'Qty', 'Unit', 'Condition'],
+        align: ['right', 'left', 'left', 'left', 'right', 'left', 'left'],
+        rows: view.items.map((i, n) => [
+          String(n + 1),
+          i.item.partNumber ?? i.item.code,
+          { title: i.item.name, body: [i.item.brand, i.remarks].filter(Boolean).join(' · ') || undefined },
+          i.serialNo ?? '',
+          qty(i.quantity),
+          i.item.unit,
+          i.condition ?? '',
+        ]),
+      },
+    ];
+    if (issue.purpose) sections.push({ kind: 'text', title: 'Purpose', body: issue.purpose });
+    if (issue.notes) sections.push({ kind: 'text', title: 'Notes', body: issue.notes });
+    if (issue.instructions) sections.push({ kind: 'text', title: 'Instructions & terms of receipt', body: issue.instructions });
+    if (issue.receivedNote) sections.push({ kind: 'text', title: 'On receipt', body: issue.receivedNote });
+
     const pdf = await renderDocument({
-      title: 'Outgoing Slip',
+      title: 'Delivery Receipt',
+      titleBold: true,
       documentNumber: issue.number,
       date: issue.issueDate,
-      reference: issue.job ? `${issue.job.number} — ${issue.job.name}` : issue.purpose,
-      sections: [
-        {
-          kind: 'fields',
-          columns: 3,
-          fields: [
-            { label: 'Warehouse', value: issue.warehouse.name },
-            { label: 'Project', value: issue.job ? `${issue.job.number}` : '—' },
-            { label: 'Issued to', value: issue.issuedToName ?? '—' },
-            { label: 'Purpose', value: issue.purpose },
-            // Who raised the slip — `issuedById` is its author, set on
-            // create. Who pressed Issue is the sign-off's "Issued by".
-            { label: 'Prepared by', value: issue.issuedBy.name },
-            { label: 'Status', value: statusLabel(issue.status) },
-          ],
-        },
-        {
-          kind: 'table',
-          title: 'Items issued',
-          head: ['No.', 'Code', 'Description', 'Qty', 'Unit', `Unit cost (${currency})`, `Amount (${currency})`],
-          align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
-          rows: view.items.map((i, n) => [
-            String(n + 1),
-            i.item.code,
-            i.item.name,
-            String(i.quantity),
-            i.item.unit,
-            formatAmount(i.unitCost),
-            formatAmount(i.amount),
-          ]),
-        },
-        { kind: 'totals', rows: [{ label: 'Total', value: formatMoney(view.value, currency), bold: true }] },
+      numberNote: `Date: ${formatDate(issue.issueDate)}`,
+      detailsTitle: 'Delivery details',
+      detailsTitleSize: 11,
+      details: [
+        [
+          ['Ref / request no.', issue.referenceNo ?? '—'],
+          ['Project', issue.job ? `${issue.job.number} — ${issue.job.name}` : '—'],
+        ],
+        [
+          ['Dispatch warehouse', issue.warehouse.name],
+          ['Carrier / vehicle', issue.carrier ?? '—'],
+        ],
       ],
+      sections,
       signatories,
+      signoffNote: 'The name, date and time are considered a digital signature.',
+      footerNote:
+        issue.status === 'DRAFT' || issue.status === 'PENDING_APPROVAL' ? 'DRAFT — NOT YET ISSUED.' : issue.status === 'CANCELLED' ? 'CANCELLED.' : undefined,
     });
     const files = req.query.attachments === '0' ? [] : await attachedFiles('stock_issue', issue.id);
-    const { pdf: withFiles, listed } = await withAttachments(pdf, files, { title: 'Outgoing Slip', number: issue.number, reference: issue.purpose });
+    const { pdf: withFiles, listed } = await withAttachments(pdf, files, { title: 'Delivery Receipt', number: issue.number, reference: issue.purpose });
 
     await audit(
       { entityType: 'stock_issue', entityId: issue.id, action: 'EXPORTED', summary: `Printed ${issue.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}` },
@@ -3662,7 +3959,7 @@ stockIssueRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Outgoing Slip', number: issue.number, author: issue.issuedBy.name, date: issue.issueDate })));
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Delivery Receipt', number: issue.number, author: issue.issuedBy.name, date: issue.issueDate })));
     res.send(withFiles);
   }),
 );

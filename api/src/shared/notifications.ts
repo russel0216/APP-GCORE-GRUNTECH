@@ -25,6 +25,9 @@ export type NotificationType =
   | 'pullout.done'
   /** The automatic reorder added an item to a draft replenishment (2026-10-15). */
   | 'reorder.raised'
+  /** Outgoing as the receive proof (2026-10-15): issued to you, and confirmed received. */
+  | 'warehouse.issued_to_you'
+  | 'warehouse.received'
   | 'invoice.overdue'
   | 'leave.awaiting'
   | 'overtime.awaiting'

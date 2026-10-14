@@ -541,6 +541,14 @@
   width: 8rem;
 }
 
+/* The Outgoing page (2026-10-15): a line's remarks under its item. */
+.out-remarks {
+  margin-top: var(--s-2);
+}
+.out-terms {
+  white-space: pre-wrap;
+}
+
 /* Under the stock (2026-10-14, the owner's inventory screen): the movement log beside the quick operations. */
 .inv-foot {
   display: grid;

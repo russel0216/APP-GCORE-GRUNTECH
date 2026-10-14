@@ -50,6 +50,7 @@ import { PurchaseRequests, PurchaseRequestDetail } from './pages/chain/PurchaseR
 import { PurchaseRequisitionEditor } from './pages/chain/PurchaseRequisitionEditor';
 import { PurchaseOrderEditor } from './pages/chain/PurchaseOrderEditor';
 import { IncomingEditor } from './pages/chain/IncomingEditor';
+import { OutgoingEditor, StockIssueDetail, StockIssues } from './pages/chain/Outgoing';
 import { RfqDetail, RfqEditor, Rfqs } from './pages/chain/Rfq';
 import {
   PurchaseOrders,
@@ -59,8 +60,6 @@ import { CanvassDetail, Canvasses } from './pages/chain/Canvass';
 import {
   Receivings,
   ReceivingDetail,
-  StockIssues,
-  StockIssueDetail,
   Inventory,
   StockCard,
   ChainReports,
@@ -872,12 +871,27 @@ function Routed() {
           }
         />
         <Route
-          path="/g-chain/outgoing/:id"
+          path="/g-chain/outgoing/new"
           element={
-            <Guard permission="gchain.stock_issuance.view_all">
-              <StockIssueDetail />
+            <Guard permission="gchain.stock_issuance.create">
+              <OutgoingEditor />
             </Guard>
           }
+        />
+        <Route
+          path="/g-chain/outgoing/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.stock_issuance.create', 'gchain.stock_issuance.edit_all']}>
+              <OutgoingEditor />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/outgoing/:id"
+          // No Guard: the API decides — the register's readers, the issuer's
+          // supervisor while it waits on them, and the person it was issued
+          // to (it is their receive proof).
+          element={<StockIssueDetail />}
         />
         <Route
           path="/g-chain/borrow-slips"

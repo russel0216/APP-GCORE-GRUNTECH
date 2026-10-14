@@ -157,6 +157,7 @@ model User {
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
   minutesAgreements MinutesAgreement[] @relation("MinutesAgreement")
+  issuesReceived    StockIssue[]       @relation("IssueReceivedBy")
 
   @@index([isActive])
   @@index([supervisorId])
@@ -2840,6 +2841,21 @@ model StockIssue {
   notes     String?
   issuedAt  DateTime?
 
+  /// The internal receive proof (2026-10-15, the owner's call: "Outgoing =
+  /// internal receive proof to the requestor"): where it goes, how, and the
+  /// requestor's confirmation that it arrived in good order.
+  deliverTo    String?
+  referenceNo  String?
+  carrier      String?
+  driverName   String?
+  /// The terms of receipt printed over the sign-offs — filled with the
+  /// standard text on a new slip, editable per slip.
+  instructions String?
+  receivedAt   DateTime?
+  receivedById String?
+  receivedBy   User?     @relation("IssueReceivedBy", fields: [receivedById], references: [id], onDelete: SetNull)
+  receivedNote String?
+
   items StockIssueItem[]
 
   createdAt DateTime @default(now())
@@ -2863,11 +2879,15 @@ model StockIssueItem {
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
-  quantity Decimal @db.Decimal(18, 3)
+  quantity  Decimal @db.Decimal(18, 3)
   /// Moving-average cost at the moment of issue, snapshotted.
-  unitCost Decimal @default(0) @db.Decimal(18, 2)
-  amount   Decimal @default(0) @db.Decimal(18, 2)
-  remarks  String?
+  unitCost  Decimal @default(0) @db.Decimal(18, 2)
+  amount    Decimal @default(0) @db.Decimal(18, 2)
+  remarks   String?
+  /// Serial or batch, and its condition as it left (2026-10-15).
+  serialNo  String?
+  condition String?
+  sortOrder Int     @default(0)
 
   @@index([issueId])
 }

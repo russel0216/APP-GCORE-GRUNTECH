@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,187 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,194 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,10 +574,10 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 310, hr 468, plantilla 123, meetings
+79, partners 120, delivery 171, chain 317, hr 468, plantilla 123, meetings
 115, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4482,8 +4482,8 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   `/g-chain/incoming` and `/g-chain/outgoing`, and the old
   `/g-chain/receiving[/:id]` and `/g-chain/stock-issuance[/:id]` land there
   (`MovedTo` in `App.tsx`, the query kept) — notifications already sent
-  carry the old links. The papers are "Incoming", "Outgoing" and "Outgoing
-  Slip"; the numbering labels "Incoming Report" and "Outgoing Slip" (the
+  carry the old links. The papers are "Incoming", "Outgoing" and the slip's
+  "Delivery Receipt" (since 2026-10-15); the numbering labels "Incoming Report" and "Outgoing Slip" (the
   seed updates labels only, so RR and SI stay unless an administrator
   changes them).
 - **The Request for Quotation is its own document** (push 2;
@@ -4609,8 +4609,9 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   the document is (a decider through `mayDecide`), written while DRAFT or
   pending by whoever may move it on — and both papers print them behind
   (`withAttachments`, `?attachments=0` bare). The papers sign RECEIVED BY /
-  PREPARED BY, then the route's step ("Pending" until signed), then the
-  receiver on an Outgoing Slip; an unrouted slip still prints "Issued by".
+  PREPARED BY, then the route's step ("Pending" until signed), then on
+  the Delivery Receipt the driver and the receiver (see "Outgoing is the
+  requestor's RECEIVE PROOF"); an unrouted slip still prints "Issued by".
   The record pages show "Submit for approval sends it to …", the Approval
   panel once sent, and Pull back / Cancel in ⋯; the supervisor's door is
   `requireAnyOrDecider` on the record and its paper.
@@ -4671,6 +4672,41 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   the supervisor own-scope purchase-request rights and delete) — is told
   (`reorder.raised`) and checks and submits it. With neither role held,
   nothing is raised and the trail says why. verify-chain pins it.
+- **Outgoing is the requestor's RECEIVE PROOF** (2026-10-15, the owner's
+  call: "Outgoing = internal receive proof to the requestor … no customer
+  involved"; his "Outgoing Delivery Receipt Slip" as the guide).
+  `pages/chain/Outgoing.tsx` holds the list, the PAGE editor
+  (`/g-chain/outgoing/new`, `/:id/edit` on a draft — the modals and the
+  per-line routes' UI are gone) and the record page, which has no web
+  Guard: the API lets in the register's readers, the supervisor while it
+  waits on them, and **the person it was issued to** (`issuedToId`,
+  `visibleIssue`, the attachment guard), who may hold no warehouse right.
+  The slip names who asked (`issuedToId`, else a name for someone with no
+  login), `referenceNo`, `deliverTo`, `carrier`, `driverName`, the
+  `instructions` (terms of receipt — `OUTGOING_TERMS` on a new slip,
+  editable) and per line `serialNo`, `condition`, `remarks`, `sortOrder`.
+  One save: `POST /stock-issues { lines }` and `PUT /:id/sheet` (DRAFT,
+  claimed on `version`, lines replaced and re-priced) through
+  `checkIssueLines()` — each item held at the warehouse with that much
+  AVAILABLE, a project line's budget line from the item — before a number
+  is issued; `GET /stock-issues/options` (warehouses, what one holds, the
+  terms) and `/route` sit above `/:id`. **Issued, the receiver confirms
+  it**: `POST /:id/receive { note }` — the person it went to, or
+  `edit_all` recording a signed paper copy (the note says who entered it
+  for whom) — once, claimed on `receivedAt` being empty; the issuer is
+  told (`warehouse.received`). Issue and approval tell the receiver
+  (`warehouse.issued_to_you`) and My Work lists their unconfirmed slips.
+  The list: Requested by and Received columns, `?received=yes|no` and
+  `?warehouseId=`, cards Waiting for approval / Drafts / Issued / Not yet
+  confirmed received, counted under everything but those two filters
+  (`issueListWhere` → `{ base, where }`). **The paper is a "Delivery
+  Receipt" with no prices**: DELIVERY DETAILS (reference, project, dispatch
+  warehouse, carrier), "Received by" beside "Deliver to", the items with
+  serial and condition, the purpose, notes, terms and what was noted on
+  receipt, then Prepared & dispatched by → the route's step → Delivered by
+  (the driver, dated at issue) → Received in good order by (dated when
+  confirmed, "Pending" until). A list paper is "Outgoing", its rows
+  "outgoing slips".
 - **An email prints on ONE line** (2026-10-14, the owner's call): in the
   `blocks` sections and `renderDocument`'s sign-offs an address too wide
   for its column is drawn smaller (`fitSize()`, 6pt the floor), never
