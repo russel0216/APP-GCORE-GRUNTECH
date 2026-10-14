@@ -2761,6 +2761,7 @@ purchaseOrderRoutes.get(
       warehouse: pr?.warehouse ?? null,
       canvass: source.canvass,
       supplier: source.supplier,
+      quoteRef: source.quoteRef,
       neededBy: pr?.neededBy ?? null,
       lines: source.lines,
     });
@@ -2844,6 +2845,7 @@ const poSchema = z.object({
   canvassId: z.string().optional().nullable(),
   deliveryDate: z.string().optional().nullable(),
   deliverTo: z.string().optional().nullable(),
+  quoteRef: z.string().max(120).optional().nullable(),
   terms: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   vatInclusive: z.boolean().default(false),
@@ -2903,7 +2905,7 @@ async function orderSource(requestId: string | null | undefined, canvassId: stri
       .filter((i) => priced.has(i.id))
       .map((i) => fromRequestItem(i, priced.get(i.id) ?? 0))
       .filter((l) => l.quantity > 0);
-    return { pr, canvass: { id: canvass.id, number: canvass.number }, supplier: winner.supplier, lines };
+    return { pr, canvass: { id: canvass.id, number: canvass.number }, supplier: winner.supplier, quoteRef: winner.quoteRef ?? null, lines };
   }
   if (requestId) {
     const pr = await prisma.purchaseRequest.findUnique({
@@ -2915,9 +2917,9 @@ async function orderSource(requestId: string | null | undefined, canvassId: stri
       throw badRequest('Only an approved request can be ordered');
     }
     const lines = pr.items.map((i) => fromRequestItem(i, num(i.estimatedCost))).filter((l) => l.quantity > 0);
-    return { pr, canvass: null, supplier: null, lines };
+    return { pr, canvass: null, supplier: null, quoteRef: null, lines };
   }
-  return { pr: null, canvass: null, supplier: null, lines: [] as OrderLine[] };
+  return { pr: null, canvass: null, supplier: null, quoteRef: null as string | null, lines: [] as OrderLine[] };
 }
 
 function fromRequestItem(
@@ -3053,6 +3055,8 @@ purchaseOrderRoutes.post(
           orderDate: manilaDate(new Date()),
           deliveryDate: asDate(body.deliveryDate),
           deliverTo: body.deliverTo || null,
+          // The awarded supplier's quotation no. unless the buyer typed one.
+          quoteRef: (body.quoteRef ?? source.quoteRef) || null,
           terms: body.terms || null,
           notes: body.notes || null,
           vatRate: company?.vatRate ?? D(0.12),
@@ -3231,6 +3235,7 @@ purchaseOrderRoutes.patch(
         ...(body.supplierId !== undefined ? { supplierId: body.supplierId } : {}),
         ...(body.deliveryDate !== undefined ? { deliveryDate: asDate(body.deliveryDate) } : {}),
         ...(body.deliverTo !== undefined ? { deliverTo: body.deliverTo || null } : {}),
+        ...(body.quoteRef !== undefined ? { quoteRef: body.quoteRef || null } : {}),
         ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
         ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
@@ -3289,6 +3294,7 @@ purchaseOrderRoutes.put(
           supplierId: body.supplierId,
           deliveryDate: asDate(body.deliveryDate),
           deliverTo: body.deliverTo || null,
+          ...(body.quoteRef !== undefined ? { quoteRef: body.quoteRef || null } : {}),
           terms: body.terms || null,
           notes: body.notes || null,
           vatInclusive: body.vatInclusive,
@@ -3511,20 +3517,41 @@ purchaseOrderRoutes.get(
     // The stored rate as stored — 12.5% prints 12.5%, never a rounded 13%.
     const rate = ratePct(po.vatRate);
 
+    // Whom the supplier's side is reached through (2026-10-14, the owner's
+    // call): the supplier's primary contact, else its first, else the
+    // supplier's own telephone and email.
+    const contact = await prisma.supplierContact.findFirst({
+      where: { supplierId: po.supplierId },
+      orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }],
+      select: { name: true, position: true, phone: true, mobile: true, email: true },
+    });
+    const tel = contact?.mobile ?? contact?.phone ?? po.supplier.phone;
+    const mail = contact?.email ?? po.supplier.email;
+    const reach = [tel ? `Tel: ${tel}` : null, mail ? `Email: ${mail}` : null].filter(Boolean).join(' | ');
+
+    // No "For" (the project is internal) and no TIN — the paper goes to the
+    // supplier (2026-10-14, the owner's call).
     const sections: PdfSection[] = [
       {
         kind: 'fields',
+        title: 'Supplier',
         columns: 2,
         fields: [
           { label: 'Supplier', value: po.supplier.name },
-          { label: 'Deliver to', value: po.deliverTo ?? po.warehouse?.name ?? '—' },
           { label: 'Address', value: [po.supplier.address, po.supplier.city].filter(Boolean).join(', ') || '—' },
-          { label: 'Required by', value: po.deliveryDate ? formatDate(po.deliveryDate) : '—' },
+          { label: 'Contact person', value: contact ? [contact.name, contact.position].filter(Boolean).join(', ') : '—' },
+          { label: 'Contact details', value: reach || '—' },
+        ],
+      },
+      {
+        kind: 'fields',
+        title: 'Delivery and terms',
+        columns: 2,
+        fields: [
+          { label: 'Deliver to', value: po.deliverTo ?? po.warehouse?.name ?? '—' },
           { label: 'Terms', value: po.terms ?? po.supplier.paymentTerms ?? '—' },
           // The request it fills, named for what it is.
           { label: 'Purchase request', value: po.request?.number ?? '—' },
-          { label: 'For', value: po.job ? `${po.job.number} — ${po.job.name}` : 'Stock replenishment' },
-          { label: 'TIN', value: po.supplier.tin ?? '—' },
           // So a draft never leaves the building looking like an order.
           { label: 'Status', value: statusLabel(po.status) },
         ],
@@ -3586,8 +3613,13 @@ purchaseOrderRoutes.get(
       title: 'Purchase Order',
       documentNumber: po.number,
       date: po.orderDate,
-      // The supplier is named once, in the fields with its address and TIN —
-      // never again as the reference.
+      // The P.O. date under the number, and DETAILS the supplier's
+      // quotation it answers and when it is due (2026-10-14, the owner's call).
+      numberNote: `P.O. Date: ${formatDate(po.orderDate)}`,
+      details: [
+        ['Quotation reference', po.quoteRef ?? '—'],
+        ['Delivery date', po.deliveryDate ? formatDate(po.deliveryDate) : '—'],
+      ],
       sections,
       signatories,
     });

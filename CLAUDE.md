@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,179 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,180 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,10 +574,10 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board):
+inventory board, and one on chain for the purchase order's paper):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 306, hr 468, plantilla 123, meetings
+79, partners 120, delivery 171, chain 307, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4423,6 +4423,16 @@ page's dress (`prq-*`) and reusing its `ItemCell` and `lib/prLines.ts`.
   `GET /purchase-orders/suggest` (`lineSuggestions()`, the requisition's
   rule behind the order's rights); the route is `GET /purchase-orders/route
   ?amount=&orderId=` at the order's total, in its buyer's name.
+- **The order's paper goes to the supplier** (2026-10-14, the owner's
+  five): "P.O. Date: …" under the number (`renderDocument`'s
+  `numberNote`); DETAILS is the quotation reference and the delivery date
+  (`details`, in place of Date and Reference); a Supplier block — name,
+  address, the contact person (the supplier's primary contact, else its
+  first) and contact details (their mobile or phone and email, else the
+  supplier's own); then Delivery and terms. Never "For" (the project is
+  internal) nor the supplier's TIN. `PurchaseOrder.quoteRef` (nullable) is
+  the supplier's quotation no. — "Quotation ref." on the order page,
+  filled from the awarded canvass row's `quoteRef`, editable while a draft.
 
 ## G-CHAIN's flows (2026-10-14)
 

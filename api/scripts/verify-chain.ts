@@ -1350,6 +1350,20 @@ async function main() {
     );
     const poPaper = flat((await printed(buyerToken, `/purchase-orders/${pageOrderId}/pdf`)).text);
     check('the order\'s paper prints the part number and the name', poPaper.includes('GK-16B') && poPaper.includes('Gasket set'), poPaper.slice(0, 200));
+    // The owner's five of 2026-10-14: P.O. Date under the number, the
+    // quotation reference and delivery date in DETAILS, the supplier's
+    // contact, and neither "For" (internal) nor the TIN.
+    await api(buyerToken, 'PATCH', `/purchase-orders/${pageOrderId}`, { quoteRef: 'SQ-77881', deliveryDate: '2026-11-20' });
+    const contactRow = await prisma.supplierContact.create({ data: { supplierId: supplier.id, name: `${TAG} Rosa Lim`, mobile: '0917 555 0101', email: 'rosa@example.test', isPrimary: true } });
+    const poPaper2 = flat((await printed(buyerToken, `/purchase-orders/${pageOrderId}/pdf`)).text);
+    await prisma.supplierContact.delete({ where: { id: contactRow.id } });
+    check(
+      'the order\'s paper prints the P.O. date, the quotation reference, the delivery date and the supplier\'s contact — no "For", no TIN',
+      poPaper2.includes('P.O. Date:') && poPaper2.includes('SQ-77881') && poPaper2.includes('November 20, 2026') &&
+        poPaper2.includes('Rosa Lim') && poPaper2.includes('0917 555 0101') && poPaper2.includes('rosa@example.test') &&
+        !/\bTIN\b/.test(poPaper2.replace(/TIN: [^|]*\|/, '')) && !poPaper2.includes('For:') && !poPaper2.includes('FOR '),
+      poPaper2.slice(0, 400),
+    );
 
     const prCreated = await api(requesterToken, 'POST', '/purchase-requests', {
       kind: 'DIRECT_TO_JOB',

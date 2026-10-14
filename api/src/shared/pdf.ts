@@ -149,6 +149,16 @@ export interface PdfDocumentSpec {
   date?: Date;
   /** Customer / project reference, printed in the details under the letterhead and in the running header. */
   reference?: string;
+  /**
+   * A line under "# number" top-right — the purchase order's "P.O. Date:
+   * …" (2026-10-14, the owner's call). Printed in the number's green, regular.
+   */
+  numberNote?: string;
+  /**
+   * The DETAILS block's lines in place of Date and Reference, label and
+   * value — the purchase order's quotation reference and delivery date.
+   */
+  details?: [string, string][];
   sections: PdfSection[];
   signatories?: Signatory[];
   /** Small print above the footer rule. */
@@ -586,6 +596,10 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
     const rev = spec.revision ? ` ${/^\d+$/.test(spec.revision) ? `R${spec.revision}` : spec.revision}` : '';
     doc.font('Helvetica-Bold').fontSize(10).fillColor(GREEN);
     doc.text(`# ${spec.documentNumber}${rev}`, titleX, top + 32 + titleExtra, { width: titleW, align: 'right', lineBreak: false });
+    if (spec.numberNote) {
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK);
+      doc.text(pdfSafe(spec.numberNote), titleX, top + 46 + titleExtra, { width: titleW, align: 'right', lineBreak: false });
+    }
   }
 
   // The rule under the letterhead: 14.75 under the company's details and
@@ -598,8 +612,10 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
   doc.y = ruleY + 22.75 - 10;
   sectionTitle(doc, 'Details', DETAIL_LINE);
   const detailsTop = doc.y;
-  const meta: [string, string][] = [['Date', formatShortDate(spec.date ?? new Date())]];
-  if (spec.reference) meta.push(['Reference', spec.reference]);
+  const meta: [string, string][] = spec.details
+    ? spec.details.map(([l, v]) => [pdfSafe(l), pdfSafe(v)])
+    : [['Date', formatShortDate(spec.date ?? new Date())]];
+  if (!spec.details && spec.reference) meta.push(['Reference', spec.reference]);
   doc.font('Helvetica-Bold').fontSize(DETAIL_SIZE).fillColor(INK);
   for (const [label, value] of meta) {
     doc.text(`${label}: ${value}`, left, doc.y, { width: right - left, lineGap: DETAIL_GAP });

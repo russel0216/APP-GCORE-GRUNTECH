@@ -2646,6 +2646,8 @@ model PurchaseOrder {
   orderDate    DateTime  @default(now()) @db.Date
   deliveryDate DateTime? @db.Date
   deliverTo    String?
+  /// The supplier's quotation the order answers (2026-10-14) — printed in DETAILS.
+  quoteRef     String?
   terms        String?
   notes        String?
 

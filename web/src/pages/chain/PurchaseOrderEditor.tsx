@@ -58,6 +58,7 @@ interface Draft {
   canvass: { id: string; number: string } | null;
   supplier: { id: string; name: string; paymentTerms: string | null } | null;
   neededBy: string | null;
+  quoteRef?: string | null;
   lines: SourceLine[];
 }
 
@@ -69,6 +70,7 @@ interface ExistingPo {
   orderDate: string;
   deliveryDate: string | null;
   deliverTo: string | null;
+  quoteRef?: string | null;
   terms: string | null;
   notes: string | null;
   vatRate: number;
@@ -114,6 +116,7 @@ interface Header {
   deliveryDate: string;
   terms: string;
   deliverTo: string;
+  quoteRef: string;
   notes: string;
   vatInclusive: boolean;
 }
@@ -181,6 +184,7 @@ export function PurchaseOrderEditor() {
     deliveryDate: '',
     terms: '',
     deliverTo: '',
+    quoteRef: '',
     notes: '',
     vatInclusive: false,
   });
@@ -207,6 +211,7 @@ export function PurchaseOrderEditor() {
             deliveryDate: po.deliveryDate ? po.deliveryDate.slice(0, 10) : '',
             terms: po.terms ?? '',
             deliverTo: po.deliverTo ?? '',
+            quoteRef: po.quoteRef ?? '',
             notes: po.notes ?? '',
             vatInclusive: po.vatInclusive,
           };
@@ -233,6 +238,7 @@ export function PurchaseOrderEditor() {
             ...h,
             supplier: d.supplier ? { id: d.supplier.id, name: d.supplier.name } : null,
             terms: d.supplier?.paymentTerms ?? '',
+            quoteRef: d.quoteRef ?? '',
             deliveryDate: d.neededBy ? d.neededBy.slice(0, 10) : '',
           };
           ls = d.lines.map(fromSource);
@@ -372,6 +378,7 @@ export function PurchaseOrderEditor() {
       deliveryDate: header.deliveryDate || null,
       terms: header.terms.trim() || null,
       deliverTo: header.deliverTo.trim() || null,
+      quoteRef: header.quoteRef.trim() || null,
       notes: header.notes.trim() || null,
       vatInclusive: header.vatInclusive,
       lines: sent.map((l) => ({
@@ -546,6 +553,9 @@ export function PurchaseOrderEditor() {
                 hint={existing?.supplier.paymentTerms ? `Supplier default: ${existing.supplier.paymentTerms}` : undefined}
               >
                 <input value={header.terms} maxLength={300} placeholder="e.g. 30 days" onChange={(e) => setHeader((h) => ({ ...h, terms: e.target.value }))} />
+              </Field>
+              <Field label="Quotation ref." hint="The supplier's quotation no. — printed on the order">
+                <input value={header.quoteRef} maxLength={120} onChange={(e) => setHeader((h) => ({ ...h, quoteRef: e.target.value }))} />
               </Field>
               <Field label="Deliver to" hint={warehouse ? `Blank prints ${warehouse.name}` : 'Site address, or blank'}>
                 <input value={header.deliverTo} maxLength={300} onChange={(e) => setHeader((h) => ({ ...h, deliverTo: e.target.value }))} />

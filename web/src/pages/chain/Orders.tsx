@@ -136,6 +136,7 @@ interface PoDetailData {
   status: string;
   orderDate: string;
   deliveryDate: string | null;
+  quoteRef: string | null;
   deliverTo: string | null;
   terms: string | null;
   notes: string | null;
@@ -269,6 +270,7 @@ export function PurchaseOrderDetail() {
             )}{' '}
             · ordered {formatDate(po.orderDate)}
             {po.deliveryDate ? ` · required by ${formatDate(po.deliveryDate)}` : ''}
+            {po.quoteRef ? ` · quotation ${po.quoteRef}` : ''}
             {po.fromCanvass && (
               <>
                 {' '}
