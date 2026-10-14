@@ -38,7 +38,7 @@ import {
 // (and the warehouse one its search providers); the settle functions are
 // called directly to land a decision on a document no longer waiting.
 import { settlePurchaseRequest, settlePurchaseOrder } from '../src/routes/procurement';
-import { settleReceiving, settleStockIssue } from '../src/routes/warehouse';
+import { settleBorrowSlip, settleReceiving, settleStockIssue } from '../src/routes/warehouse';
 // The RFQ's search provider registers on import.
 import '../src/routes/rfq';
 import '../src/routes/jobs';
@@ -159,6 +159,12 @@ async function cleanup() {
     await prisma.auditLog.deleteMany({ where: { entityId: { in: recordIds } } });
     await prisma.approvalRequest.deleteMany({ where: { documentId: { in: recordIds } } });
   }
+  // The warehouse's bells about this script's borrow slips name the slip,
+  // not the TAG, so they are found by the link.
+  const taggedSlips = await prisma.borrowSlip.findMany({ where: { purpose: { startsWith: TAG } }, select: { id: true } });
+  if (taggedSlips.length) {
+    await prisma.notification.deleteMany({ where: { link: { in: taggedSlips.map((t) => `/g-chain/borrow-slips/${t.id}`) } } });
+  }
   // The files the warehouse checks attached — rows AND bytes: the rows
   // would cascade with their uploader, the files on disk would not.
   for (const f of await prisma.attachment.findMany({ where: { uploadedBy: { email: { endsWith: '@verifyc.local' } } }, select: { id: true } })) {
@@ -169,6 +175,7 @@ async function cleanup() {
   const warehouseDocs = [
     ...(await prisma.stockIssue.findMany({ where: { purpose: { startsWith: TAG } }, select: { id: true } })),
     ...(await prisma.receiving.findMany({ where: { order: { notes: { startsWith: TAG } } }, select: { id: true } })),
+    ...taggedSlips,
   ].map((r) => r.id);
   if (warehouseDocs.length) {
     await prisma.auditLog.deleteMany({ where: { entityId: { in: warehouseDocs } } });
@@ -191,6 +198,7 @@ async function cleanup() {
   await prisma.warehouse.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.supplier.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
+  await prisma.employee.deleteMany({ where: { employeeNo: { startsWith: TAG } } });
   const users = await prisma.user.findMany({
     where: { email: { endsWith: '@verifyc.local' } },
     select: { id: true },
@@ -2549,16 +2557,37 @@ async function main() {
     );
 
     // One slip due back yesterday and one due back today, by Manila's calendar.
+    // A slip goes out the way every slip does since 2026-10-14: requested,
+    // approved by a Team Leader and the Warehouse Supervisor, released by
+    // the warehouse. A request cannot be due back before today, so the late
+    // one is moved back a day once it is out — the state a slip is in a day
+    // after its due date.
     const todayKey = manilaDayKey(new Date());
     const yesterdayKey = manilaDayKey(new Date(Date.now() - 86_400_000));
-    const lend = (dueAt: string, label: string) =>
-      api(keeperToken, 'POST', '/borrow-slips', {
+    const whSup = await makeUser('Verify Warehouse Supervisor', 'whsup@verifyc.local', ['warehouse_supervisor']);
+    const lend = async (dueAt: string, label: string): Promise<HttpResult> => {
+      const made = await api(keeperToken, 'POST', '/borrow-slips', {
         warehouseId: warehouse.id,
         borrowerName: 'Verify Rigger',
-        dueAt,
+        dueAt: dueAt < todayKey ? todayKey : dueAt,
         purpose: `${TAG} ${label}`,
         items: [{ itemId: item.id, quantity: 1 }],
       });
+      if (made.status !== 201) return made;
+      const slipId = String(made.body.id);
+      const sent = await api(keeperToken, 'POST', `/borrow-slips/${slipId}/submit`);
+      const pending = await prisma.approvalRequest.findFirst({ where: { documentType: 'borrow_slip', documentId: slipId, status: 'PENDING' } });
+      if (pending) {
+        // Step 1 is the keeper's "Reports to" once they have one (the store
+        // supervisor, further down), else a Team Leader.
+        const reportsTo = (await prisma.user.findUniqueOrThrow({ where: { id: keeper.id }, select: { supervisorId: true } })).supervisorId;
+        await act({ requestId: pending.id, userId: reportsTo ?? leader.id, action: 'APPROVED' });
+        await act({ requestId: pending.id, userId: whSup.id, action: 'APPROVED' });
+      }
+      const released = await api(keeperToken, 'POST', `/borrow-slips/${slipId}/release`, {});
+      if (dueAt < todayKey) await prisma.borrowSlip.update({ where: { id: slipId }, data: { dueAt: new Date(`${dueAt}T00:00:00Z`) } });
+      return sent.status === 200 && released.status === 200 ? made : { ...released, body: { ...released.body, id: slipId } };
+    };
     day = manilaDayKey(new Date());
     const lateSlip = await lend(yesterdayKey, 'due back yesterday');
     const dueSlip = await lend(todayKey, 'due back today');
@@ -2939,6 +2968,233 @@ async function main() {
       recDate.status === 400 && recStranger.status === 403 && recBuyerRead.body.canEdit === false && recModified.body.canEdit === true,
       `${recDate.status} ${recStranger.status} ${recBuyerRead.body.canEdit}`,
     );
+
+    // ── Borrow requests (2026-10-14) ─────────────────────────────────────
+    // Anyone asks to borrow; the Team Leader they report to — or a Technical
+    // Manager on their team — then the Warehouse Supervisor approve; the
+    // warehouse releases it. Nothing leaves the shelf before the release.
+    console.log('\nBorrow requests (over HTTP)');
+    {
+      const [kat, hit] = await Promise.all([
+        prisma.industry.findFirstOrThrow({ where: { code: 'KAT' } }),
+        prisma.industry.findFirstOrThrow({ where: { code: 'HIT' } }),
+      ]);
+      const borrower = await makeUser('Verify Borrower', 'borrower@verifyc.local', ['employee']);
+      const tmKat = await makeUser('Verify Borrow TM', 'btm@verifyc.local', ['technical_manager', 'employee']);
+      const tmHit = await makeUser('Verify Other TM', 'btm2@verifyc.local', ['technical_manager']);
+      const bystander = await makeUser('Verify Bystander', 'bystander@verifyc.local', ['employee']);
+      await prisma.user.update({ where: { id: borrower.id }, data: { supervisorId: leader.id } });
+      for (const [u, team, no] of [
+        [borrower, kat, 1],
+        [tmKat, kat, 2],
+        [tmHit, hit, 3],
+      ] as const) {
+        await prisma.employee.create({
+          data: { employeeNo: `${TAG}-E${no}`, firstName: u.name.split(' ')[1], lastName: u.name.split(' ').slice(2).join(' ') || 'Verify', userId: u.id, industryId: team.id },
+        });
+      }
+      const borrowerToken = signToken(borrower.id, borrower.email);
+      const tmKatToken = signToken(tmKat.id, tmKat.email);
+      const tmHitToken = signToken(tmHit.id, tmHit.email);
+      const bystanderToken = signToken(bystander.id, bystander.email);
+      const available = async () => {
+        const b = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+        return num(b?.quantity) - num(b?.borrowedQty);
+      };
+      const inDays = (n: number) => manilaDayKey(new Date(Date.now() + n * 86_400_000));
+      const ask = (token: string, extra: Record<string, unknown> = {}) =>
+        api(token, 'POST', '/borrow-slips', {
+          warehouseId: warehouse.id,
+          dueAt: inDays(3),
+          neededOn: inDays(1),
+          purpose: `${TAG} borrow request`,
+          items: [{ itemId: item.id, quantity: 2 }],
+          ...extra,
+        });
+
+      const forSomeoneElse = await ask(borrowerToken, { borrowerId: keeper.id });
+      const tooMany = await ask(borrowerToken, { items: [{ itemId: item.id, quantity: 999_999 }] });
+      const backdated = await ask(borrowerToken, { dueAt: yesterdayKey });
+      check(
+        'anyone asks for themselves only, for what the shelf holds available, and never due back before today',
+        forSomeoneElse.status === 403 && tooMany.status === 400 && String(tooMany.body.error ?? '').startsWith('Only') && backdated.status === 400,
+        `${forSomeoneElse.status} ${tooMany.status} ${JSON.stringify(tooMany.body).slice(0, 100)} ${backdated.status}`,
+      );
+
+      const freeBefore = await available();
+      const asked = await ask(borrowerToken, { borrowerName: 'Somebody Else' });
+      const askedId = String(asked.body.id);
+      const askedRow = await prisma.borrowSlip.findUniqueOrThrow({ where: { id: askedId } });
+      check(
+        'an employee’s request is a DRAFT in their own name — the name typed is ignored — and nothing leaves the shelf',
+        asked.status === 201 &&
+          asked.body.needsApproval === true &&
+          askedRow.status === 'DRAFT' &&
+          askedRow.borrowerId === borrower.id &&
+          askedRow.borrowerName === 'Verify Borrower' &&
+          askedRow.requestedById === borrower.id &&
+          askedRow.issuedById === null &&
+          money(await available(), freeBefore),
+        `${asked.status} ${askedRow.status} ${askedRow.borrowerName} ${askedRow.issuedById}; ${freeBefore} → ${await available()}`,
+      );
+
+      const mineRead = await api(borrowerToken, 'GET', `/borrow-slips/${askedId}`);
+      const stepNames = (r: HttpResult, n: number) =>
+        ((r.body.approvalRoute as { steps: { approvers: { name: string }[] }[] } | null)?.steps[n]?.approvers ?? []).map((p) => p.name);
+      check(
+        'the route names the Team Leader they report to AND the Technical Manager on their team — not one on another team — then the Warehouse Supervisor',
+        mineRead.status === 200 &&
+          mineRead.body.canSubmit === true &&
+          mineRead.body.canRelease === false &&
+          stepNames(mineRead, 0).includes('Verify Team Leader') &&
+          stepNames(mineRead, 0).includes('Verify Borrow TM') &&
+          !stepNames(mineRead, 0).includes('Verify Other TM') &&
+          stepNames(mineRead, 1).includes('Verify Warehouse Supervisor'),
+        JSON.stringify(mineRead.body.approvalRoute).slice(0, 260),
+      );
+      const strangerRead = await api(bystanderToken, 'GET', `/borrow-slips/${askedId}`);
+      const strangerList = (await api(bystanderToken, 'GET', `/borrow-slips?search=${TAG}&pageSize=200`)).body.rows as { id: string }[];
+      const mineList = await api(borrowerToken, 'GET', `/borrow-slips?search=${TAG}&pageSize=200`);
+      check(
+        'a colleague cannot open it nor find it on the list; the requester’s own list holds it, with the summary cards',
+        strangerRead.status === 404 &&
+          !strangerList.some((r) => r.id === askedId) &&
+          (mineList.body.rows as { id: string }[]).every((r) => r.id !== lateId) &&
+          (mineList.body.rows as { id: string }[]).some((r) => r.id === askedId) &&
+          typeof (mineList.body.summary as { awaitingApproval?: number } | undefined)?.awaitingApproval === 'number',
+        `${strangerRead.status} ${strangerList.length} ${JSON.stringify(mineList.body.summary)}`,
+      );
+
+      const sentUp = await api(borrowerToken, 'POST', `/borrow-slips/${askedId}/submit`);
+      const borrowRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'borrow_slip', documentId: askedId, status: 'PENDING' } });
+      const tmKatRead = await api(tmKatToken, 'GET', `/borrow-slips/${askedId}`);
+      const tmHitRead = await api(tmHitToken, 'GET', `/borrow-slips/${askedId}`);
+      check(
+        'submitted, the Technical Manager on the team may open it to decide; one on another team may not',
+        sentUp.status === 200 && sentUp.body.status === 'PENDING_APPROVAL' && !!borrowRequest && tmKatRead.status === 200 && tmHitRead.status === 404,
+        `${sentUp.status} ${sentUp.body.status} ${tmKatRead.status} ${tmHitRead.status}`,
+      );
+
+      if (borrowRequest) await act({ requestId: borrowRequest.id, userId: tmKat.id, action: 'APPROVED' });
+      const afterStep1 = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: borrowRequest!.id } });
+      const earlyRelease = await api(borrowerToken, 'POST', `/borrow-slips/${askedId}/release`, {});
+      const keeperEarly = await api(keeperToken, 'POST', `/borrow-slips/${askedId}/release`, {});
+      check(
+        'the Technical Manager signs step 1; it waits on the Warehouse Supervisor, and nobody releases it before',
+        afterStep1.status === 'PENDING' && afterStep1.currentSequence === 2 && earlyRelease.status === 403 && keeperEarly.status === 400,
+        `${afterStep1.status} step ${afterStep1.currentSequence}; ${earlyRelease.status} ${keeperEarly.status}`,
+      );
+
+      await act({ requestId: borrowRequest!.id, userId: whSup.id, action: 'APPROVED' });
+      const approvedRow = await prisma.borrowSlip.findUniqueOrThrow({ where: { id: askedId } });
+      const toRelease = await prisma.notification.count({ where: { userId: whSup.id, type: 'borrow.to_release', link: `/g-chain/borrow-slips/${askedId}` } });
+      check(
+        'the Warehouse Supervisor’s signature approves it — the warehouse is told it waits for release — and still nothing has left the shelf',
+        approvedRow.status === 'APPROVED' && toRelease === 1 && money(await available(), freeBefore),
+        `${approvedRow.status} ${toRelease} bell(s); ${freeBefore} → ${await available()}`,
+      );
+      const keeperWork = await api(keeperToken, 'GET', '/my-work');
+      check(
+        'My Work lists the approved request for the warehouse to release',
+        ((keeperWork.body.assignedToMe ?? []) as { kind: string; link: string }[]).some((r) => r.kind === 'borrow_slip' && r.link === `/g-chain/borrow-slips/${askedId}`),
+        String(keeperWork.status),
+      );
+
+      const released = await api(keeperToken, 'POST', `/borrow-slips/${askedId}/release`, {});
+      const releasedRow = await prisma.borrowSlip.findUniqueOrThrow({ where: { id: askedId } });
+      const releasedBell = await prisma.notification.count({ where: { userId: borrower.id, type: 'borrow.released' } });
+      const twiceReleased = await api(keeperToken, 'POST', `/borrow-slips/${askedId}/release`, {});
+      check(
+        'the warehouse releases it: OUT, released by the storekeeper, two lent out of available — once — and the requester is told',
+        released.status === 200 &&
+          releasedRow.status === 'OUT' &&
+          releasedRow.issuedById === keeper.id &&
+          releasedRow.releasedAt !== null &&
+          money(freeBefore - (await available()), 2) &&
+          releasedBell === 1 &&
+          twiceReleased.status === 400,
+        `${released.status} ${releasedRow.status} ${releasedRow.issuedById === keeper.id}; ${freeBefore} → ${await available()}; ${releasedBell} ${twiceReleased.status}`,
+      );
+      const slipPaper = await printed(borrowerToken, `/borrow-slips/${askedId}/pdf`);
+      check(
+        'its paper signs REQUESTED BY, the Team Leader / Technical Manager, the Warehouse Supervisor and RELEASED BY — each dated',
+        slipPaper.status === 200 &&
+          ['REQUESTED BY', 'TEAM LEADER / TECHNICAL MANAGER', 'WAREHOUSE SUPERVISOR', 'RELEASED BY'].every((r) => flat(slipPaper.text).includes(r)) &&
+          flat(slipPaper.text).includes('Verify Borrow TM') &&
+          signedCount(slipPaper.text) === 4 &&
+          pendingCount(slipPaper.text) === 0,
+        `${slipPaper.status} ${signedCount(slipPaper.text)} signed, ${pendingCount(slipPaper.text)} pending`,
+      );
+      const askedLines = await prisma.borrowSlipItem.findMany({ where: { slipId: askedId } });
+      const broughtBack = await api(keeperToken, 'POST', `/borrow-slips/${askedId}/return`, {
+        items: askedLines.map((l) => ({ itemId: l.id, quantity: Number(l.quantity) })),
+      });
+      check(
+        'taken back whole, it is RETURNED and the stock is available again',
+        broughtBack.status === 200 && (await prisma.borrowSlip.findUniqueOrThrow({ where: { id: askedId } })).status === 'RETURNED' && money(await available(), freeBefore),
+        `${broughtBack.status} ${await available()}`,
+      );
+
+      // A Technical Manager's own request: they hold step 1, so it is signed
+      // when they submit it (the preparer signs) and goes to the warehouse.
+      const tmAsk = await ask(tmKatToken);
+      const tmSent = await api(tmKatToken, 'POST', `/borrow-slips/${String(tmAsk.body.id)}/submit`);
+      const tmRequest = await prisma.approvalRequest.findFirst({
+        where: { documentType: 'borrow_slip', documentId: String(tmAsk.body.id) },
+        include: { actions: true },
+      });
+      check(
+        'a Technical Manager’s own request is signed at step 1 when submitted, and waits on the Warehouse Supervisor',
+        tmAsk.status === 201 &&
+          tmSent.status === 200 &&
+          tmRequest?.status === 'PENDING' &&
+          tmRequest.currentSequence === 2 &&
+          tmRequest.actions.some((a) => a.selfSigned && a.action === 'APPROVED'),
+        `${tmAsk.status} ${tmSent.status} ${tmRequest?.status} step ${tmRequest?.currentSequence}`,
+      );
+
+      // Pulled back, sent again, then cancelled while waiting: the request is
+      // withdrawn, and an approval that lands afterwards changes nothing.
+      const second = await ask(borrowerToken);
+      const secondId = String(second.body.id);
+      await api(borrowerToken, 'POST', `/borrow-slips/${secondId}/submit`);
+      const pulled = await api(borrowerToken, 'POST', `/borrow-slips/${secondId}/withdraw`);
+      const resent = await api(borrowerToken, 'POST', `/borrow-slips/${secondId}/submit`);
+      const resentRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'borrow_slip', documentId: secondId, status: 'PENDING' } });
+      const cancelled = await api(borrowerToken, 'POST', `/borrow-slips/${secondId}/cancel`, { reason: `${TAG} not needed after all` });
+      await settleBorrowSlip(secondId, 'APPROVED');
+      const secondRow = await prisma.borrowSlip.findUniqueOrThrow({ where: { id: secondId } });
+      const lateApproval = await prisma.auditLog.findFirst({ where: { entityType: 'borrow_slip', entityId: secondId, summary: { contains: 'not applied' } } });
+      check(
+        'pulled back, sent again and cancelled with its reason: the request is withdrawn, and a late approval is not applied',
+        pulled.status === 200 &&
+          pulled.body.status === 'DRAFT' &&
+          resent.status === 200 &&
+          cancelled.status === 200 &&
+          secondRow.status === 'CANCELLED' &&
+          secondRow.cancelReason === `${TAG} not needed after all` &&
+          (await prisma.approvalRequest.findUnique({ where: { id: resentRequest!.id } }))?.status === 'CANCELLED' &&
+          !!lateApproval,
+        `${pulled.status}/${pulled.body.status} ${resent.status} ${cancelled.status} ${secondRow.status} ${lateApproval?.summary ?? 'no trail'}`,
+      );
+
+      // The warehouse cancels an approved request it will not release.
+      const third = await ask(borrowerToken);
+      const thirdId = String(third.body.id);
+      await api(borrowerToken, 'POST', `/borrow-slips/${thirdId}/submit`);
+      const thirdRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'borrow_slip', documentId: thirdId, status: 'PENDING' } });
+      await act({ requestId: thirdRequest!.id, userId: leader.id, action: 'APPROVED' });
+      await act({ requestId: thirdRequest!.id, userId: whSup.id, action: 'APPROVED' });
+      const notOnShelf = await api(keeperToken, 'POST', `/borrow-slips/${thirdId}/cancel`, { reason: `${TAG} not on the shelf` });
+      const cancelBell = await prisma.notification.count({ where: { userId: borrower.id, type: 'borrow.cancelled', link: `/g-chain/borrow-slips/${thirdId}` } });
+      check(
+        'the warehouse cancels an approved request it will not release, and the requester is told why',
+        notOnShelf.status === 200 && (await prisma.borrowSlip.findUniqueOrThrow({ where: { id: thirdId } })).status === 'CANCELLED' && cancelBell === 1,
+        `${notOnShelf.status} ${cancelBell}`,
+      );
+      const outCancel = await api(keeperToken, 'POST', `/borrow-slips/${dueId}/cancel`, { reason: `${TAG} too late` });
+      check('a slip already out is not cancelled — its items are taken back instead', outCancel.status === 400, String(outCancel.status));
+    }
 
     // ── Incoming goes for approval (2026-10-14) ──────────────────────────
     // A receiving report is saved as a draft and posts NOTHING until the

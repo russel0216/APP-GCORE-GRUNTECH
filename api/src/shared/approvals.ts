@@ -226,15 +226,19 @@ export async function approversForStep(
         where: { id: requesterId },
         select: { supervisorId: true },
       });
-      if (requester?.supervisorId) return [requester.supervisorId];
-      if (step.roleId) {
+      let base: string[];
+      if (requester?.supervisorId) base = [requester.supervisorId];
+      else if (step.roleId) {
         const rows = await tx.userRole.findMany({
           where: { roleId: step.roleId, user: { isActive: true } },
           select: { userId: true },
         });
-        return leadersFor(rows.map((r) => r.userId), requesterId, tx);
-      }
-      return usersInRole('hr', tx);
+        base = await leadersFor(rows.map((r) => r.userId), requesterId, tx);
+      } else base = await usersInRole('hr', tx);
+      // The step's other roles, on the requester's own team only — beside
+      // the "Reports to" or the fallback, never instead of them.
+      const also = await teamHoldersOf(step.alsoRoleIds ?? [], requesterId, tx);
+      return also.length ? [...new Set([...base, ...also])] : base;
     }
 
     case 'HR':
@@ -316,6 +320,27 @@ export async function leadersFor(holders: string[], requesterId: string, tx: Pri
 }
 
 /**
+ * The active holders of `roleIds` on the requester's own team
+ * (`Employee.industryId`) — never every holder, never the requester. The
+ * borrow slip's first step (2026-10-14): a Technical Manager on the
+ * requester's team decides it beside their "Reports to".
+ */
+export async function teamHoldersOf(roleIds: string[], requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<string[]> {
+  if (!roleIds.length) return [];
+  const requester = await tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } });
+  if (!requester?.industryId) return [];
+  const rows = await tx.userRole.findMany({
+    where: {
+      roleId: { in: roleIds },
+      userId: { not: requesterId },
+      user: { isActive: true, employee: { industryId: requester.industryId } },
+    },
+    select: { userId: true },
+  });
+  return [...new Set(rows.map((r) => r.userId))];
+}
+
+/**
  * Whether the requester HOLDS a step — the role it names (a ROLE step's, or a
  * SUPERVISOR step's fallback: "Team Leader" on the quotation is the
  * `team_leader` role), or the person a USER step names. On a route that lets
@@ -327,9 +352,13 @@ export async function leadersFor(holders: string[], requesterId: string, tx: Pri
  */
 export async function holdsStep(step: ApprovalStep, requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<boolean> {
   if (step.approverType === 'USER') return step.userId === requesterId;
-  if ((step.approverType === 'ROLE' || step.approverType === 'SUPERVISOR') && step.roleId) {
+  if (step.approverType === 'ROLE' || step.approverType === 'SUPERVISOR') {
+    // A SUPERVISOR step's other roles count too: a Technical Manager's own
+    // borrow request is signed at submit as a Team Leader's is.
+    const roleIds = [step.roleId, ...(step.approverType === 'SUPERVISOR' ? (step.alsoRoleIds ?? []) : [])].filter((r): r is string => !!r);
+    if (!roleIds.length) return false;
     return !!(await tx.userRole.findFirst({
-      where: { userId: requesterId, roleId: step.roleId, user: { isActive: true } },
+      where: { userId: requesterId, roleId: { in: roleIds }, user: { isActive: true } },
       select: { userId: true },
     }));
   }

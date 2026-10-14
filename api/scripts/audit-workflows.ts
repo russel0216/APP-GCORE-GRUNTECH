@@ -40,6 +40,8 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   purchase_order: ['back_support', 'purchasing_manager', 'procurement'],
   receiving: ['warehouse', 'warehouse_supervisor'],
   stock_issue: ['warehouse', 'warehouse_supervisor'],
+  // Anyone may ask to borrow a tool (2026-10-14); the warehouse writes a walk-in's.
+  borrow_slip: ['employee', 'warehouse'],
   expense: ['employee', 'project_engineer', 'sales'],
   // A supplier's invoice arrives in finance, so finance keys it in. Routing a
   // step back to finance is the same fault the budget-request and
@@ -65,10 +67,12 @@ async function main() {
   });
 
   const roleMembers = new Map<string, string[]>();
+  const roleKeyById = new Map<string, string>();
   for (const role of await prisma.role.findMany({
     include: { users: { where: { user: { isActive: true } }, include: { user: true } } },
   })) {
     roleMembers.set(role.key, role.users.map((u) => u.user.name));
+    roleKeyById.set(role.id, role.key);
   }
 
   // SUPERVISOR falls back to HR when the requester has no supervisor set. That
@@ -181,7 +185,9 @@ async function main() {
     const route = wf.steps
       .map((s) =>
         s.approverType === 'SUPERVISOR'
-          ? `${s.sequence}. supervisor, else ${s.role?.key ?? 'hr'}`
+          ? `${s.sequence}. supervisor, else ${s.role?.key ?? 'hr'}${
+              s.alsoRoleIds.length ? ` (also ${s.alsoRoleIds.map((id) => roleKeyById.get(id) ?? '?').join(', ')} on the team)` : ''
+            }`
           : s.approverType === 'PROJECT_MANAGER'
             ? `${s.sequence}. the project's manager, else ${s.role?.key ?? 'executive'}`
             : `${s.sequence}. ${s.role?.key ?? s.user?.name ?? s.approverType.toLowerCase()}`,

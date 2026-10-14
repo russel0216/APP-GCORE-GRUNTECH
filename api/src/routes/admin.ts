@@ -391,6 +391,8 @@ const stepSchema = z.object({
   approverType: z.enum(['ROLE', 'USER', 'SUPERVISOR', 'HR', 'PROJECT_MANAGER']),
   roleId: z.string().optional().nullable(),
   userId: z.string().optional().nullable(),
+  /** SUPERVISOR only: roles whose holders on the requester's team decide it too. Absent on a PUT: kept. */
+  alsoRoleIds: z.array(z.string()).max(10).optional(),
 });
 
 const workflowSchema = z.object({
@@ -423,6 +425,20 @@ async function checkPreparer(body: z.infer<typeof workflowSchema>) {
   }
 }
 
+/** The roles a step's `alsoRoleIds` name must exist — a typo would route to nobody. */
+async function checkAlsoRoles(steps: z.infer<typeof stepSchema>[]) {
+  const ids = [...new Set(steps.flatMap((s) => s.alsoRoleIds ?? []))];
+  if (!ids.length) return;
+  const found = await prisma.role.count({ where: { id: { in: ids } } });
+  if (found !== ids.length) throw badRequest('A step names a role that does not exist');
+}
+
+/** What a step keeps of `alsoRoleIds`: only a SUPERVISOR step has them; a PUT that leaves them out keeps the step's own. */
+function alsoRolesOf(s: z.infer<typeof stepSchema>, before?: Map<number, string[]>) {
+  if (s.approverType !== 'SUPERVISOR') return [];
+  return s.alsoRoleIds ?? before?.get(s.sequence) ?? [];
+}
+
 function validateSteps(steps: z.infer<typeof stepSchema>[]) {
   const seen = new Set<number>();
   for (const step of steps) {
@@ -444,6 +460,7 @@ workflowRoutes.post(
     const body = parseBody(workflowSchema, req.body);
     validateSteps(body.steps);
     await checkPreparer(body);
+    await checkAlsoRoles(body.steps);
 
     const workflow = await prisma.approvalWorkflow.create({
       data: {
@@ -464,6 +481,7 @@ workflowRoutes.post(
             // On a SUPERVISOR step the role is its fallback when the requester has no supervisor.
             roleId: s.approverType === 'ROLE' || s.approverType === 'SUPERVISOR' || s.approverType === 'PROJECT_MANAGER' ? (s.roleId ?? null) : null,
             userId: s.approverType === 'USER' ? s.userId : null,
+            alsoRoleIds: alsoRolesOf(s),
           })),
         },
       },
@@ -491,8 +509,10 @@ workflowRoutes.put(
     validateSteps(body.steps);
     await checkPreparer(body);
 
-    const existing = await prisma.approvalWorkflow.findUnique({ where: { id: req.params.id } });
+    const existing = await prisma.approvalWorkflow.findUnique({ where: { id: req.params.id }, include: { steps: { select: { sequence: true, alsoRoleIds: true } } } });
     if (!existing) throw notFound('Workflow not found');
+    await checkAlsoRoles(body.steps);
+    const alsoBefore = new Map(existing.steps.map((st) => [st.sequence, st.alsoRoleIds]));
 
     const workflow = await prisma.$transaction(async (tx) => {
       // Steps are replaced wholesale. In-flight requests keep their recorded
@@ -524,6 +544,7 @@ workflowRoutes.put(
               // On a SUPERVISOR step the role is its fallback when the requester has no supervisor.
               roleId: s.approverType === 'ROLE' || s.approverType === 'SUPERVISOR' || s.approverType === 'PROJECT_MANAGER' ? (s.roleId ?? null) : null,
               userId: s.approverType === 'USER' ? s.userId : null,
+              alsoRoleIds: alsoRolesOf(s, alsoBefore),
             })),
           },
         },

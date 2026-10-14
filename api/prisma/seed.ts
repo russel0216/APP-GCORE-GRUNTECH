@@ -585,6 +585,8 @@ const ROLES: RoleSeed[] = [
       'ghr.passport.create',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      // Anyone may ask to borrow a tool (2026-10-14); the warehouse releases it.
+      ...VIEW_OWN_SELF('gchain', 'borrow_slips'),
     ],
   },
   {
@@ -748,6 +750,8 @@ interface SeedStep {
    * the project has no manager or the manager raised the document.
    */
   roleKey?: string;
+  /** SUPERVISOR only: roles whose holders on the requester's team decide it too (`ApprovalStep.alsoRoleIds`). */
+  alsoRoleKeys?: string[];
 }
 
 const WORKFLOWS: WorkflowSeed[] = [
@@ -964,6 +968,19 @@ const WORKFLOWS: WorkflowSeed[] = [
     documentType: 'stock_issue',
     name: "Outgoing — the issuer's supervisor",
     steps: [{ sequence: 1, name: 'Supervisor', approverType: 'SUPERVISOR', roleKey: 'warehouse_supervisor' }],
+  },
+  {
+    // Anyone may ask to borrow (2026-10-14, the owner's call): the Team
+    // Leader / Technical Manager they report to or on their team, then the
+    // warehouse's own sign-off before it releases. A person holding both
+    // signs once.
+    documentType: 'borrow_slip',
+    name: 'Borrow slip — team leader, warehouse',
+    preparerSigns: true,
+    steps: [
+      { sequence: 1, name: 'Team Leader / Technical Manager', approverType: 'SUPERVISOR', roleKey: 'team_leader', alsoRoleKeys: ['technical_manager'] },
+      { sequence: 2, name: 'Warehouse Supervisor', approverType: 'ROLE', roleKey: 'warehouse_supervisor' },
+    ],
   },
   {
     // A service report is written on site by the engineer who did the work, so
@@ -1252,6 +1269,7 @@ async function main() {
   const roleByKey = new Map(
     (await prisma.role.findMany({ select: { id: true, key: true } })).map((r) => [r.key, r.id]),
   );
+  const alsoRoles = (st: SeedStep) => (st.alsoRoleKeys ?? []).map((k) => roleByKey.get(k)).filter((id): id is string => !!id);
 
   // Seeded workflows that were superseded by a corrected version. Left in place
   // but deactivated, so they stop matching new documents while any history
@@ -1361,6 +1379,7 @@ async function main() {
               name: s.name,
               approverType: s.approverType,
               roleId: s.roleKey ? (roleByKey.get(s.roleKey) ?? null) : null,
+              alsoRoleIds: alsoRoles(s),
             })),
           });
         });
@@ -1384,6 +1403,7 @@ async function main() {
             name: s.name,
             approverType: s.approverType,
             roleId: s.roleKey ? (roleByKey.get(s.roleKey) ?? null) : null,
+            alsoRoleIds: alsoRoles(s),
           })),
         },
       },

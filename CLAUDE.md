@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,145 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,160 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -572,10 +572,11 @@ supplier and note, and one on chain for an approved request not counted
 twice against its budget, and 2 on foundation for the owner's order of the
 divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
-and 19 on chain for Incoming and Outgoing on approval):
+and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
+borrow requests):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 272, hr 468, plantilla 123, meetings
+79, partners 120, delivery 171, chain 287, hr 468, plantilla 123, meetings
 111, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4571,6 +4572,48 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   The record pages show "Submit for approval sends it to …", the Approval
   panel once sent, and Pull back / Cancel in ⋯; the supervisor's door is
   `requireAnyOrDecider` on the record and its paper.
+- **Anyone asks to borrow** (push 4b; the owner's call: "anyone can request
+  to borrow; approval by the Team Leader / Technical Manager they report to
+  or within the team; the warehouse processes it, with its reports-to's
+  approval"). `gchain.borrow_slips` is OWNED_KEPT now and the `employee`
+  role holds its own scope, so everyone has Borrow Slips. `BorrowStatus`
+  gains DRAFT → PENDING_APPROVAL → APPROVED before OUT, and CANCELLED with
+  `cancelReason`; `requestedById`, `neededOn` and `releasedAt` are new and
+  `issuedById` (who RELEASED it) is null until the release. **Nothing leaves
+  the shelf before the release**: `POST /borrow-slips` saves a DRAFT request
+  in the caller's own name (a borrower or `borrowerId` for somebody else is
+  the warehouse's alone — `edit_all` writes a walk-in's slip), checked
+  against what the warehouse holds AVAILABLE and never due back before
+  today (`checkBorrowSheet`); `PUT /:id/sheet` modifies a draft whole;
+  `/submit` (in the REQUESTER's name), `/withdraw` and `/cancel { reason }`
+  (draft, pending or approved — the warehouse's "not on the shelf" tells
+  the requester) as every routed document; `POST /:id/release` (`edit_all`)
+  claims APPROVED and moves every line out of available in the same
+  transaction (`lendItems`), dated that day; `/return` takes only a slip
+  on loan. Route switched off: the warehouse's own slip goes OUT at once,
+  anyone else's is saved APPROVED for the release. Seeded **"Borrow slip —
+  team leader, warehouse"** (`preparerSigns`): step 1 SUPERVISOR named Team
+  Leader / Technical Manager — the "Reports to", else Team Leaders on the
+  requester's team — **plus every Technical Manager on the requester's own
+  team**: the engine's new **`ApprovalStep.alsoRoleIds`** (SUPERVISOR only;
+  `teamHoldersOf()` in `shared/approvals.ts`, strictly the team, never
+  every holder; `holdsStep` counts them, so a Technical Manager's own
+  request is signed at submit; Admin › Approval Workflows edits it as "Also
+  decides it, on the requester's team" and a PUT that leaves it out keeps
+  it), then step 2 ROLE `warehouse_supervisor`. Approval tells the warehouse
+  (`borrow.to_release`, the warehouse and Warehouse Supervisor roles); the
+  release tells the requester and borrower. Reading: `view_all`, or the
+  requester / borrower (`view_own`), or a decider through
+  `requireAnyOrDecider` — the record page has no web Guard. The list
+  (`borrowListWhere` → `{ base, where }`, Mine · All for the warehouse,
+  Mine only otherwise) carries summary cards — Waiting for approval, To
+  release, On loan, Overdue — and prints; the slip's own paper `GET
+  /:id/pdf` signs REQUESTED BY, the two steps and RELEASED BY (ISSUED BY on
+  a slip from before requests). My Work lists the warehouse's approved
+  requests to release and what a person holds due back within three days.
+  The clearance scan counts only slips on loan. `pages/chain/
+  BorrowSlips.tsx` holds the list, the request page (`/new`, `/:id/edit`)
+  and the slip, moved out of `Warehouse.tsx`.
 
 ## Spreadsheet attachments (2026-10-05)
 

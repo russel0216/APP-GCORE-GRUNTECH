@@ -117,7 +117,8 @@ export async function scanAccountabilities(employee: {
   // borrowerId is reliable, and the screen says "searched by name" on those.
   const slips = await prisma.borrowSlip.findMany({
     where: {
-      status: { not: 'RETURNED' },
+      // Only what has gone out: a request not yet released holds nothing.
+      status: { in: ['OUT', 'PARTIALLY_RETURNED', 'OVERDUE'] },
       ...(userId
         ? { borrowerId: userId }
         : { borrowerId: null, borrowerName: { equals: fullName, mode: 'insensitive' } }),

@@ -111,6 +111,7 @@ model User {
   stockReceivedBy  StockIssue[]           @relation("IssuedTo")
   borrowsTaken     BorrowSlip[]           @relation("Borrower")
   borrowsIssued    BorrowSlip[]           @relation("BorrowIssuer")
+  borrowsRequested BorrowSlip[]           @relation("BorrowRequester")
   stockMoves       InventoryTransaction[]
 
   facesEnrolled      FaceEnrollment[] @relation("FaceEnroller")
@@ -427,10 +428,14 @@ model ApprovalStep {
   name         String
   approverType ApproverType
 
-  roleId String?
-  role   Role?   @relation("StepRole", fields: [roleId], references: [id], onDelete: SetNull)
-  userId String?
-  user   User?   @relation("StepUser", fields: [userId], references: [id], onDelete: SetNull)
+  roleId      String?
+  role        Role?    @relation("StepRole", fields: [roleId], references: [id], onDelete: SetNull)
+  userId      String?
+  user        User?    @relation("StepUser", fields: [userId], references: [id], onDelete: SetNull)
+  /// On a SUPERVISOR step: holders of these roles on the requester's own team
+  /// decide it too, beside the "Reports to" (2026-10-14, the borrow slip's
+  /// "Team Leader / Technical Manager they report to or within the team").
+  alsoRoleIds String[] @default([])
 
   actions ApprovalAction[]
 
@@ -2816,10 +2821,17 @@ model StockIssueItem {
 }
 
 enum BorrowStatus {
+  /// A request (2026-10-14): saved, not sent for approval.
+  DRAFT
+  PENDING_APPROVAL
+  /// Approved, waiting for the warehouse to release it.
+  APPROVED
   OUT
   PARTIALLY_RETURNED
   RETURNED
   OVERDUE
+  /// Withdrawn or refused before anything left the shelf; the reason kept.
+  CANCELLED
 }
 
 /// Tools and equipment lent out and expected back.
@@ -2841,9 +2853,21 @@ model BorrowSlip {
   borrower     User?   @relation("Borrower", fields: [borrowerId], references: [id], onDelete: SetNull)
   borrowerName String
 
-  issuedById String
-  issuedBy   User   @relation("BorrowIssuer", fields: [issuedById], references: [id], onDelete: Restrict)
+  /// Who released it from the shelf — null until the warehouse does.
+  issuedById String?
+  issuedBy   User?   @relation("BorrowIssuer", fields: [issuedById], references: [id], onDelete: Restrict)
 
+  /// Who asked for it (2026-10-14: anyone may). Null on a slip the warehouse
+  /// wrote before requests existed.
+  requestedById String?
+  requestedBy   User?     @relation("BorrowRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  /// The day the requester needs it from.
+  neededOn      DateTime? @db.Date
+  /// When the warehouse released it (the instant; `borrowedAt` is the day).
+  releasedAt    DateTime?
+  cancelReason  String?
+
+  /// The day it went out — for a request, the day it was asked for until released.
   borrowedAt DateTime  @default(now()) @db.Date
   dueAt      DateTime  @db.Date
   returnedAt DateTime? @db.Date
@@ -2857,6 +2881,7 @@ model BorrowSlip {
 
   @@index([status])
   @@index([dueAt])
+  @@index([requestedById])
 }
 
 model BorrowSlipItem {

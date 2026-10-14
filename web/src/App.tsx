@@ -60,13 +60,12 @@ import {
   ReceivingDetail,
   StockIssues,
   StockIssueDetail,
-  BorrowSlips,
-  BorrowSlipDetail,
   Inventory,
   StockCard,
   ChainReports,
   ChainDashboard,
 } from './pages/chain/Warehouse';
+import { BorrowSlips, BorrowSlipDetail, BorrowRequestEditor } from './pages/chain/BorrowSlips';
 import { Clock } from './pages/hr/Clock';
 import { HrDashboard, AttendanceRegister } from './pages/hr/Dashboard';
 import { Leave } from './pages/hr/Leave';
@@ -867,19 +866,29 @@ function Routed() {
         <Route
           path="/g-chain/borrow-slips"
           element={
-            <Guard permission="gchain.borrow_slips.view_all">
+            <GuardAny permissions={['gchain.borrow_slips.view_all', 'gchain.borrow_slips.view_own']}>
               <BorrowSlips />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/borrow-slips/new"
+          element={
+            <Guard permission="gchain.borrow_slips.create">
+              <BorrowRequestEditor />
             </Guard>
           }
         />
         <Route
-          path="/g-chain/borrow-slips/:id"
+          path="/g-chain/borrow-slips/:id/edit"
           element={
-            <Guard permission="gchain.borrow_slips.view_all">
-              <BorrowSlipDetail />
-            </Guard>
+            <GuardAny permissions={['gchain.borrow_slips.edit_own', 'gchain.borrow_slips.edit_all']}>
+              <BorrowRequestEditor />
+            </GuardAny>
           }
         />
+        {/* No Guard: the API decides — a Team Leader deciding the request may hold no warehouse right. */}
+        <Route path="/g-chain/borrow-slips/:id" element={<BorrowSlipDetail />} />
         <Route
           path="/g-chain/inventory"
           element={

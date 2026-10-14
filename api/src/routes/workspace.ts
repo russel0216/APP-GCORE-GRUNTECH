@@ -534,8 +534,57 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
     // People Flow (2026-10-13): HR's items due this week, or the person's
     // own onboarding while they stand in it — shared/peopleFlow.ts.
     ...(await peopleFlowWork(me)),
+    // Borrow slips (2026-10-14): the warehouse's approved requests waiting
+    // for their release, and what I hold that is due back within three days.
+    ...(await borrowWork(me, dayStart)),
   ];
   return rows.sort(byUrgency);
+}
+
+/**
+ * The borrow slips that are somebody's next move: for the warehouse
+ * (`gchain.borrow_slips.edit_all`), every approved request not yet released;
+ * for anyone, what they hold that is due back within three days or late. A
+ * Team Leader's requests to decide are in the approvals queue already.
+ */
+async function borrowWork(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> {
+  const soon = new Date(dayStart.getTime() + 3 * 86_400_000);
+  const [toRelease, dueBack] = await Promise.all([
+    can(me, 'gchain.borrow_slips.edit_all')
+      ? prisma.borrowSlip.findMany({
+          where: { status: 'APPROVED' },
+          select: { id: true, number: true, borrowerName: true, neededOn: true, warehouse: { select: { name: true } } },
+          orderBy: [{ neededOn: 'asc' }, { createdAt: 'asc' }],
+          take: 10,
+        })
+      : [],
+    prisma.borrowSlip.findMany({
+      where: { borrowerId: me.id, status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lte: soon } },
+      select: { id: true, number: true, purpose: true, dueAt: true, warehouse: { select: { name: true } } },
+      orderBy: { dueAt: 'asc' },
+      take: 10,
+    }),
+  ]);
+  return [
+    ...toRelease.map((r) => ({
+      id: r.id,
+      kind: 'borrow_slip',
+      title: r.borrowerName,
+      subtitle: `${r.number} · approved — to release from ${r.warehouse.name}`,
+      when: r.neededOn,
+      overdue: isOverdue(r.neededOn, dayStart),
+      link: `/g-chain/borrow-slips/${r.id}`,
+    })),
+    ...dueBack.map((r) => ({
+      id: r.id,
+      kind: 'borrow_slip',
+      title: r.purpose,
+      subtitle: `${r.number} · due back to ${r.warehouse.name}`,
+      when: r.dueAt,
+      overdue: isOverdue(r.dueAt, dayStart),
+      link: `/g-chain/borrow-slips/${r.id}`,
+    })),
+  ];
 }
 
 /**

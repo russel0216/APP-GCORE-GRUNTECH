@@ -32,6 +32,7 @@ import {
   slotSignatories,
   preparedAt,
   mayDecide,
+  usersInRole,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { registerAttachmentGuard } from '../shared/attachments';
@@ -1744,75 +1745,118 @@ registerAttachmentGuard(
 export const borrowRoutes = Router();
 borrowRoutes.use(authenticate);
 
-const BORROW_SORTS = ['number', 'dueAt', 'borrowedAt'];
+/**
+ * Borrow slips (2026-10-14, the owner's call: "anyone can request to borrow;
+ * approval by the Team Leader / Technical Manager they report to or within
+ * the team; the warehouse processes it, with its reports-to's approval").
+ *
+ * A REQUEST is DRAFT → PENDING_APPROVAL → APPROVED, and nothing leaves the
+ * shelf until the warehouse RELEASES it (OUT): only then is the stock moved
+ * out of available. With the route switched off, a request from anyone but
+ * the warehouse is saved APPROVED (waiting for the release), and the
+ * warehouse's own slip for a walk-in goes OUT at once, as it always did.
+ * A borrow slip never charges job cost — the tool is on loan, not consumed.
+ */
+const BORROW_DOC = 'borrow_slip';
+const BORROW_VIEW_ALL = 'gchain.borrow_slips.view_all';
+/** The warehouse: releases, takes returns, modifies a slip on loan, names any borrower. */
+const BORROW_WAREHOUSE = 'gchain.borrow_slips.edit_all';
+const BORROW_SORTS = ['number', 'dueAt', 'borrowedAt', 'neededOn'];
+/** A slip with something still out on it. */
+const ON_LOAN: BorrowStatus[] = ['OUT', 'PARTIALLY_RETURNED', 'OVERDUE'];
+
+/** What a reader without the register's right sees: what they asked for and what they hold. */
+const mineWhere = (me: ResolvedUser): Prisma.BorrowSlipWhereInput => ({ OR: [{ requestedById: me.id }, { borrowerId: me.id }] });
+const partyTo = (me: ResolvedUser, slip: { requestedById: string | null; borrowerId: string | null }) =>
+  slip.requestedById === me.id || slip.borrowerId === me.id;
 
 /**
- * Which borrow slips a list query means — one rule for the list and its
- * printed twin. `day` is the one "today" for the filter, each row's flag and
- * both dashboard tiles, so a slip the list flags as overdue is one the Overdue
- * filter finds. Overdue, when asked, decides the status by itself.
+ * Which borrow slips a list query means — one rule for the list, its summary
+ * cards and its printed twin. `base` is everything but the status (the cards
+ * count under it); `day` is the one "today" for the Overdue filter, each
+ * row's flag and both dashboard tiles. Overdue, when asked, decides the
+ * status by itself.
  */
-function borrowListWhere(q: ListQuery, day: Date): Prisma.BorrowSlipWhereInput {
-  const and: Prisma.BorrowSlipWhereInput[] = [];
+function borrowListWhere(me: ResolvedUser, q: ListQuery, day: Date) {
+  const base: Prisma.BorrowSlipWhereInput[] = [];
+  if (!can(me, BORROW_VIEW_ALL) || q.scope === 'mine') base.push(mineWhere(me));
+  if (q.filters.jobId) base.push({ jobId: q.filters.jobId });
+  if (q.search) {
+    base.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { borrowerName: { contains: q.search, mode: 'insensitive' } },
+        { purpose: { contains: q.search, mode: 'insensitive' } },
+        { requestedBy: { name: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) base.push({ id: { in: ids } });
+  const and = [...base];
   if (q.filters.overdue === 'true') and.push({ status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lt: day } });
   else {
     const status = choice(q.filters.status, BorrowStatus, 'Status');
     if (status) and.push({ status });
   }
-  if (q.filters.jobId) and.push({ jobId: q.filters.jobId });
-  if (q.search) {
-    and.push({
-      OR: [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { borrowerName: { contains: q.search, mode: 'insensitive' } },
-        { purpose: { contains: q.search, mode: 'insensitive' } },
-      ],
-    });
-  }
-  const ids = idsFilter(q.filters.ids);
-  if (ids) and.push({ id: { in: ids } });
-  return and.length ? { AND: and } : {};
+  const join = (parts: Prisma.BorrowSlipWhereInput[]): Prisma.BorrowSlipWhereInput => (parts.length ? { AND: parts } : {});
+  return { base: join(base), where: join(and) };
 }
 
 /**
  * How late a slip is, against the DAY, not the instant: dueAt is a date, held
  * as UTC midnight, so `dueAt < new Date()` flagged a slip from 08:00 on the
- * day it was due back. 0 for a slip that is back or not yet due.
+ * day it was due back. 0 for a slip that is back, not yet out or not yet due.
  */
 function daysOverdue(slip: { status: string; dueAt: Date }, day: Date): number {
   const out = slip.status === 'OUT' || slip.status === 'PARTIALLY_RETURNED';
   return out && slip.dueAt < day ? Math.floor((day.getTime() - slip.dueAt.getTime()) / 86400000) : 0;
 }
 
-/** What is still out on a slip, across its lines. */
-const stillOut = (items: { quantity: Prisma.Decimal; returnedQty: Prisma.Decimal }[]) =>
-  cents(items.reduce((s, i) => s + num(i.quantity) - num(i.returnedQty), 0));
+/** What is still out on a slip, across its lines — nothing before it is released. */
+const stillOut = (slip: { status: BorrowStatus; items: { quantity: Prisma.Decimal; returnedQty: Prisma.Decimal }[] }) =>
+  ON_LOAN.includes(slip.status) ? cents(slip.items.reduce((s, i) => s + num(i.quantity) - num(i.returnedQty), 0)) : 0;
+
+/** The summary cards: what waits on an approver, what waits on the warehouse, what is out and late. */
+async function borrowSummary(base: Prisma.BorrowSlipWhereInput, day: Date) {
+  const count = (extra: Prisma.BorrowSlipWhereInput) => prisma.borrowSlip.count({ where: { AND: [base, extra] } });
+  const [awaitingApproval, toRelease, onLoan, overdue] = await Promise.all([
+    count({ status: 'PENDING_APPROVAL' }),
+    count({ status: 'APPROVED' }),
+    count({ status: { in: ['OUT', 'PARTIALLY_RETURNED'] } }),
+    count({ status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lt: day } }),
+  ]);
+  return { awaitingApproval, toRelease, onLoan, overdue };
+}
 
 borrowRoutes.get(
   '/',
-  require_('gchain.borrow_slips.view_all'),
+  requireAny(BORROW_VIEW_ALL, 'gchain.borrow_slips.view_own'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
     const day = today();
-    const where = borrowListWhere(q, day);
+    const { base, where } = borrowListWhere(me, q, day);
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       prisma.borrowSlip.findMany({
         where,
         include: {
           job: { select: { id: true, number: true, name: true } },
           warehouse: { select: { id: true, name: true } },
+          requestedBy: { select: { id: true, name: true } },
           items: { include: { item: { select: { id: true, code: true, name: true } } } },
         },
-        orderBy: orderBy(q, BORROW_SORTS, { borrowedAt: 'desc' }),
+        orderBy: orderBy(q, BORROW_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.borrowSlip.count({ where }),
+      borrowSummary(base, day),
     ]);
 
-    res.json(
-      listResult(
+    res.json({
+      ...listResult(
         rows.map((r) => {
           const late = daysOverdue(r, day);
           return {
@@ -1820,14 +1864,17 @@ borrowRoutes.get(
             number: r.number,
             status: r.status,
             borrowerName: r.borrowerName,
+            requestedBy: r.requestedBy,
             purpose: r.purpose,
+            neededOn: r.neededOn,
             borrowedAt: r.borrowedAt,
             dueAt: r.dueAt,
             returnedAt: r.returnedAt,
+            released: ON_LOAN.includes(r.status) || r.status === 'RETURNED',
             job: r.job,
             warehouse: r.warehouse,
             itemCount: r.items.length,
-            outstandingQty: stillOut(r.items),
+            outstandingQty: stillOut(r),
             isOverdue: late > 0,
             daysOverdue: late,
           };
@@ -1835,7 +1882,8 @@ borrowRoutes.get(
         total,
         q,
       ),
-    );
+      summary,
+    });
   }),
 );
 
@@ -1847,20 +1895,22 @@ borrowRoutes.get(
  */
 borrowRoutes.get(
   '/pdf',
-  require_('gchain.borrow_slips.view_all'),
+  requireAny(BORROW_VIEW_ALL, 'gchain.borrow_slips.view_own'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
     const day = today();
-    const where = borrowListWhere(q, day);
+    const { where } = borrowListWhere(me, q, day);
     const f = q.filters;
     const [rows, count, project] = await Promise.all([
       prisma.borrowSlip.findMany({
         where,
         include: {
           job: { select: { number: true } },
+          requestedBy: { select: { name: true } },
           items: { select: { quantity: true, returnedQty: true } },
         },
-        orderBy: orderBy(q, BORROW_SORTS, { borrowedAt: 'desc' }),
+        orderBy: orderBy(q, BORROW_SORTS, { createdAt: 'desc' }),
         take: LIST_CAP,
       }),
       prisma.borrowSlip.count({ where }),
@@ -1870,6 +1920,7 @@ borrowRoutes.get(
       q.search && `search "${q.search}"`,
       f.overdue === 'true' ? 'overdue' : f.status && `status ${statusLabel(f.status)}`,
       project,
+      !can(me, BORROW_VIEW_ALL) || q.scope === 'mine' ? 'mine' : null,
       f.ids && 'the rows selected',
     ]);
 
@@ -1886,12 +1937,13 @@ borrowRoutes.get(
           align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left'],
           rows: rows.map((b) => {
             const late = daysOverdue(b, day);
-            const out = stillOut(b.items);
+            const out = stillOut(b);
+            const released = ON_LOAN.includes(b.status) || b.status === 'RETURNED';
             return [
               b.number,
-              { title: b.borrowerName, body: b.purpose },
+              { title: b.borrowerName, body: b.requestedBy && b.requestedBy.name !== b.borrowerName ? `${b.purpose} — asked by ${b.requestedBy.name}` : b.purpose },
               b.job?.number ?? '',
-              formatShortDate(b.borrowedAt),
+              released ? formatShortDate(b.borrowedAt) : '',
               formatShortDate(b.dueAt),
               String(b.items.length),
               out ? qty(out) : '',
@@ -1909,6 +1961,45 @@ borrowRoutes.get(
   }),
 );
 
+/**
+ * What the request form offers (above `/:id`): the active warehouses; with
+ * `?warehouseId=`, that warehouse's items with what is AVAILABLE now (on hand
+ * less what is already lent) — names, codes and units, never a cost; the open
+ * projects by number and name (naming the project you borrow for is not the
+ * right to read it); and whether the caller may name somebody else as the
+ * borrower (the warehouse's walk-in slip).
+ */
+borrowRoutes.get(
+  '/options',
+  require_('gchain.borrow_slips.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const warehouseId = typeof req.query.warehouseId === 'string' ? req.query.warehouseId : '';
+    const [warehouses, jobs, stock] = await Promise.all([
+      prisma.warehouse.findMany({ where: { isActive: true }, select: { id: true, code: true, name: true }, orderBy: { name: 'asc' } }),
+      prisma.job.findMany({
+        where: { status: { in: ['PLANNING', 'IN_PROGRESS', 'ON_HOLD'] } },
+        select: { id: true, number: true, name: true },
+        orderBy: { number: 'desc' },
+        take: 300,
+      }),
+      warehouseId
+        ? prisma.inventoryBalance.findMany({
+            where: { warehouseId, item: { isActive: true } },
+            include: { item: { select: { id: true, code: true, name: true, unit: true } } },
+            orderBy: { item: { name: 'asc' } },
+          })
+        : [],
+    ]);
+    res.json({
+      warehouses,
+      jobs,
+      items: stock.map((b) => ({ ...b.item, available: availableOf(b) })).filter((i) => i.available > 0),
+      mayNameBorrower: can(me, BORROW_WAREHOUSE),
+    });
+  }),
+);
+
 async function loadSlip(id: string) {
   return prisma.borrowSlip.findUnique({
     where: { id },
@@ -1916,46 +2007,176 @@ async function loadSlip(id: string) {
       job: { select: { id: true, number: true, name: true } },
       warehouse: { select: { id: true, name: true } },
       issuedBy: { select: { id: true, name: true } },
+      requestedBy: { select: { id: true, name: true } },
       items: { include: { item: { select: { id: true, code: true, name: true, unit: true } } } },
     },
   });
 }
+type LoadedSlip = NonNullable<Awaited<ReturnType<typeof loadSlip>>>;
 
-function presentSlip(slip: NonNullable<Awaited<ReturnType<typeof loadSlip>>>, me: ResolvedUser) {
+/**
+ * The slip as its reader may see it: the register's right; its requester or
+ * borrower (view_own); or — through `requireAnyOrDecider` — whoever may
+ * decide its open request, only while it waits on them. Anyone else: 404.
+ */
+async function visibleSlip(me: ResolvedUser, id: string, deciderOnly: boolean): Promise<LoadedSlip> {
+  const slip = await loadSlip(id);
+  if (!slip) throw notFound('Borrow slip not found');
+  if (can(me, BORROW_VIEW_ALL) && !deciderOnly) return slip;
+  if (!deciderOnly && can(me, 'gchain.borrow_slips.view_own') && partyTo(me, slip)) return slip;
+  if (await mayDecide(me.id, BORROW_DOC, [slip.id])) return slip;
+  throw notFound('Borrow slip not found');
+}
+
+/** Whoever may move a request on — modify, submit, pull back, cancel: who asked for it, or the warehouse. */
+const mayHandleRequest = (me: ResolvedUser, slip: { requestedById: string | null; borrowerId: string | null }) =>
+  can(me, BORROW_WAREHOUSE) || (can(me, 'gchain.borrow_slips.edit_own') && slip.requestedById === me.id);
+
+async function presentSlip(slip: LoadedSlip, me: ResolvedUser) {
+  const draft = slip.status === 'DRAFT';
+  const handles = mayHandleRequest(me, slip);
+  const warehouse = can(me, BORROW_WAREHOUSE);
+  const route = draft ? await pickWorkflow(BORROW_DOC, null, { requesterId: slip.requestedById ?? me.id }) : null;
+  const day = today();
   return {
     ...slip,
-    // The route's own rule (PATCH /:id): while anything is still out.
-    canEdit: slip.status !== 'RETURNED' && can(me, 'gchain.borrow_slips.edit_all'),
+    // A draft request is changed on its page by who asked for it or the
+    // warehouse; a slip on loan only by the warehouse, and only who, when due
+    // back, what for and the notes (PATCH /:id) — the stock has moved.
+    canEdit: (draft && handles) || (warehouse && [...ON_LOAN, 'APPROVED'].includes(slip.status)),
+    canEditSheet: draft && handles,
+    needsApproval: draft ? !!route : null,
+    canSubmit: draft && handles && !!route && slip.items.length > 0,
+    canWithdraw: slip.status === 'PENDING_APPROVAL' && handles,
+    canCancel: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'].includes(slip.status) && handles,
+    canRelease: slip.status === 'APPROVED' && warehouse,
+    canReturn: ON_LOAN.includes(slip.status) && warehouse,
+    approvalRoute: draft && route ? await routeBrief(BORROW_DOC, null, slip.requestedById ?? me.id) : null,
+    isOverdue: daysOverdue(slip, day) > 0,
+    daysOverdue: daysOverdue(slip, day),
     items: slip.items.map((i) => ({
       ...i,
       quantity: num(i.quantity),
       returnedQty: num(i.returnedQty),
-      outstandingQty: cents(num(i.quantity) - num(i.returnedQty)),
+      outstandingQty: ON_LOAN.includes(slip.status) ? cents(num(i.quantity) - num(i.returnedQty)) : 0,
     })),
   };
 }
 
 borrowRoutes.get(
   '/:id',
-  require_('gchain.borrow_slips.view_all'),
+  requireAnyOrDecider(BORROW_VIEW_ALL, 'gchain.borrow_slips.view_own'),
   handler(async (req, res) => {
-    const slip = await loadSlip(req.params.id);
-    if (!slip) throw notFound('Borrow slip not found');
-    res.json(presentSlip(slip, currentUser(req)));
+    const me = currentUser(req);
+    const slip = await visibleSlip(me, req.params.id, res.locals.deciderOnly === true);
+    res.json(await presentSlip(slip, me));
   }),
 );
 
 /**
- * Modifying a slip while anything on it is still out: who has it, when it is
- * due back, what it is for, the notes. The warehouse and the items are fixed —
- * the stock has moved out of available against them — so a key for either is
- * refused rather than ignored. A borrower renamed without a login named loses
- * the old login link, so the clearance scan matches the new name and never
- * charges the tools to the person the slip no longer names.
+ * The slip on paper (2026-10-14): what was asked for and what went out, then
+ * the people who acted, each dated — REQUESTED BY (who asked for it, its
+ * first slot's timestamp), the route's two steps ("Pending" until signed; a
+ * draft prints the route submitting would take), RELEASED BY (whoever
+ * released it, when) — and the day everything came back. A slip the
+ * warehouse wrote before requests prints ISSUED BY in their place.
+ */
+borrowRoutes.get(
+  '/:id/pdf',
+  requireAnyOrDecider(BORROW_VIEW_ALL, 'gchain.borrow_slips.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const slip = await visibleSlip(me, req.params.id, res.locals.deciderOnly === true);
+    const requester = slip.requestedById ?? slip.issuedById;
+    const slots =
+      slip.status === 'DRAFT' && requester
+        ? await approvalSlots(BORROW_DOC, slip.id, { amount: null, requesterId: requester })
+        : await approvalSlots(BORROW_DOC, slip.id);
+    const signatories: Signatory[] = [];
+    if (slip.requestedBy) {
+      signatories.push({
+        role: 'Requested by',
+        name: slip.requestedBy.name,
+        ...(await contactOf(slip.requestedBy.id)),
+        at: preparedAt(slots) ?? slip.createdAt,
+      });
+    }
+    signatories.push(...slotSignatories(slots));
+    const released = ON_LOAN.includes(slip.status) || slip.status === 'RETURNED';
+    if (slip.issuedBy && released) {
+      signatories.push({
+        role: slip.requestedBy ? 'Released by' : 'Issued by',
+        name: slip.issuedBy.name,
+        ...(await contactOf(slip.issuedBy.id)),
+        at: slip.releasedAt ?? slip.createdAt,
+      });
+    } else if (slip.status === 'APPROVED') {
+      signatories.push({ role: 'Released by', name: '', at: null });
+    }
+
+    const pdf = await renderDocument({
+      title: 'Borrow Slip',
+      documentNumber: slip.number,
+      date: slip.createdAt,
+      reference: slip.job ? `${slip.job.number} — ${slip.job.name}` : slip.purpose,
+      sections: [
+        {
+          kind: 'fields',
+          columns: 3,
+          fields: [
+            { label: 'Borrower', value: slip.borrowerName },
+            { label: 'Warehouse', value: slip.warehouse.name },
+            { label: 'Project', value: slip.job ? slip.job.number : '—' },
+            { label: 'Purpose', value: slip.purpose },
+            { label: 'Needed on', value: slip.neededOn ? formatDate(slip.neededOn) : '—' },
+            { label: 'Due back', value: formatDate(slip.dueAt) },
+            { label: 'Out', value: released ? formatDate(slip.borrowedAt) : '—' },
+            { label: 'Returned', value: slip.returnedAt ? formatDate(slip.returnedAt) : '—' },
+            { label: 'Status', value: statusLabel(slip.status) },
+          ],
+        },
+        {
+          kind: 'table',
+          title: 'Items',
+          head: ['No.', 'Code', 'Item', 'Qty', 'Unit', 'Returned', 'Serial no.'],
+          align: ['right', 'left', 'left', 'right', 'left', 'right', 'left'],
+          rows: slip.items.map((i, n) => [
+            String(n + 1),
+            i.item.code,
+            i.item.name,
+            qty(num(i.quantity)),
+            i.item.unit,
+            num(i.returnedQty) ? qty(num(i.returnedQty)) : '',
+            i.serialNo ?? '',
+          ]),
+        },
+        ...(slip.notes ? [{ kind: 'text' as const, title: 'Notes', body: slip.notes }] : []),
+        ...(slip.status === 'CANCELLED' && slip.cancelReason ? [{ kind: 'text' as const, title: 'Cancelled', body: slip.cancelReason }] : []),
+      ],
+      signatories,
+    });
+    await audit({ entityType: 'borrow_slip', entityId: slip.id, action: 'EXPORTED', summary: `Printed ${slip.number}` }, req);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      contentDisposition(paperFileName({ kind: 'Borrow Slip', number: slip.number, author: slip.requestedBy?.name ?? slip.issuedBy?.name ?? '', date: slip.createdAt })),
+    );
+    res.send(pdf);
+  }),
+);
+
+/**
+ * Modifying a slip the warehouse holds — approved and waiting for release,
+ * or with anything still out: who has it, when it is due back, what it is
+ * for, the notes. The warehouse and the items are fixed (a draft request is
+ * changed whole on its page, `PUT /:id/sheet`), so a key for either is
+ * refused rather than ignored. A borrower renamed without a login named
+ * loses the old login link, so the clearance scan matches the new name and
+ * never charges the tools to the person the slip no longer names.
  */
 borrowRoutes.patch(
   '/:id',
-  require_('gchain.borrow_slips.edit_all'),
+  require_(BORROW_WAREHOUSE),
   handler(async (req, res) => {
     const body = parseBody(
       z
@@ -1974,10 +2195,15 @@ borrowRoutes.patch(
     if (slip.status === 'RETURNED') {
       throw badRequest(`Everything on ${slip.number} is back — the slip is a record now`);
     }
+    if (slip.status === 'CANCELLED') throw badRequest(`${slip.number} was cancelled — the slip is a record now`);
+    if (slip.status === 'DRAFT' || slip.status === 'PENDING_APPROVAL') {
+      throw badRequest(`${slip.number} is a request ${slip.status === 'DRAFT' ? 'still in draft — modify it on its page' : 'waiting for approval — pull it back first'}`);
+    }
 
     const dueAt = body.dueAt !== undefined ? asDate(body.dueAt)! : slip.dueAt;
-    if (dueAt.getTime() < slip.borrowedAt.getTime()) {
-      throw badRequest(`It cannot be due back before it went out on ${formatDate(slip.borrowedAt)}`);
+    const from = ON_LOAN.includes(slip.status) ? slip.borrowedAt : today();
+    if (dueAt.getTime() < from.getTime()) {
+      throw badRequest(ON_LOAN.includes(slip.status) ? `It cannot be due back before it went out on ${formatDate(slip.borrowedAt)}` : 'It cannot be due back before today');
     }
     if (body.borrowerId) {
       const user = await prisma.user.findUnique({ where: { id: body.borrowerId }, select: { id: true } });
@@ -1993,9 +2219,9 @@ borrowRoutes.patch(
     if (body.purpose !== undefined && body.purpose !== slip.purpose) changed.push('purpose');
     if (body.notes !== undefined && (body.notes?.trim() || null) !== slip.notes) changed.push('notes');
 
-    // Claimed on something still being out: the last return wins.
+    // Claimed on the state it was read in: the last return, or a release, wins.
     const claimed = await prisma.borrowSlip.updateMany({
-      where: { id: slip.id, status: { not: 'RETURNED' } },
+      where: { id: slip.id, status: { in: [...ON_LOAN, 'APPROVED'] } },
       data: {
         borrowerId,
         dueAt,
@@ -2014,80 +2240,126 @@ borrowRoutes.patch(
       },
       req,
     );
-    res.json(presentSlip((await loadSlip(slip.id))!, currentUser(req)));
+    res.json(await presentSlip((await loadSlip(slip.id))!, currentUser(req)));
   }),
 );
 
+const borrowLineSchema = z.object({
+  itemId: z.string().min(1),
+  quantity: z.number().positive(),
+  serialNo: z.string().trim().optional().nullable(),
+});
+
+const borrowSheetSchema = z.object({
+  jobId: z.string().optional().nullable(),
+  warehouseId: z.string().min(1, 'Which warehouse?'),
+  borrowerId: z.string().optional().nullable(),
+  borrowerName: z.string().trim().optional().nullable(),
+  neededOn: z.string().optional().nullable(),
+  dueAt: z.string().min(1, 'When is it due back?'),
+  purpose: z.string().trim().min(3, 'What is it for?'),
+  notes: z.string().optional().nullable(),
+  items: z.array(borrowLineSchema).min(1, 'Add at least one item'),
+});
+
 /**
- * Lending tools out.
- *
- * A borrow slip does NOT charge job cost (model §4.3) — the asset is on loan,
- * not consumed. Stock stays owned; only availability moves.
+ * One rule for what a request may say, on create and on modify: the
+ * warehouse exists and is active, the project is open, each item is in that
+ * warehouse with enough AVAILABLE now (a request for what the shelf does not
+ * hold is refused naming it — the release checks again), the dates hold, and
+ * the borrower is the caller unless the caller is the warehouse.
+ */
+async function checkBorrowSheet(me: ResolvedUser, body: z.infer<typeof borrowSheetSchema>) {
+  const warehouse = await prisma.warehouse.findUnique({ where: { id: body.warehouseId }, select: { isActive: true, name: true } });
+  if (!warehouse || !warehouse.isActive) throw badRequest('That warehouse is not available');
+  if (body.jobId) {
+    const job = await prisma.job.findUnique({ where: { id: body.jobId }, select: { status: true } });
+    if (!job || !['PLANNING', 'IN_PROGRESS', 'ON_HOLD'].includes(job.status)) throw badRequest('That project is not open');
+  }
+  const day = today();
+  const dueAt = asDate(body.dueAt)!;
+  const neededOn = asDate(body.neededOn);
+  if (dueAt.getTime() < day.getTime()) throw badRequest('It cannot be due back before today');
+  if (neededOn && neededOn.getTime() > dueAt.getTime()) throw badRequest('It cannot be due back before the day it is needed');
+  const wanted = new Map<string, number>();
+  for (const l of body.items) wanted.set(l.itemId, (wanted.get(l.itemId) ?? 0) + l.quantity);
+  const balances = await prisma.inventoryBalance.findMany({
+    where: { warehouseId: body.warehouseId, itemId: { in: [...wanted.keys()] } },
+    include: { item: { select: { name: true } } },
+  });
+  const byItem = new Map(balances.map((b) => [b.itemId, b]));
+  for (const [itemId, quantity] of wanted) {
+    const b = byItem.get(itemId);
+    if (!b) throw badRequest(`${warehouse.name} holds none of one of the items asked for`);
+    if (availableOf(b) < quantity - 0.0005) {
+      throw badRequest(`Only ${qty(availableOf(b))} of ${b.item.name} is available in ${warehouse.name} now`);
+    }
+  }
+  // The borrower: the caller, unless the warehouse writes it for someone.
+  const warehouseWrites = can(me, BORROW_WAREHOUSE);
+  if (!warehouseWrites && body.borrowerId && body.borrowerId !== me.id) {
+    throw forbidden('You ask to borrow for yourself — the warehouse writes a slip for someone else');
+  }
+  let borrowerId: string | null = warehouseWrites ? (body.borrowerId ?? null) : me.id;
+  let borrowerName = warehouseWrites ? body.borrowerName?.trim() || '' : me.name;
+  if (warehouseWrites && borrowerId) {
+    const user = await prisma.user.findUnique({ where: { id: borrowerId }, select: { name: true } });
+    if (!user) throw badRequest('That borrower has no login');
+    borrowerName = borrowerName || user.name;
+  }
+  if (warehouseWrites && !borrowerId && !borrowerName) {
+    borrowerId = me.id;
+    borrowerName = me.name;
+  }
+  if (borrowerName.length < 2) throw badRequest('Who is borrowing?');
+  return { dueAt, neededOn, borrowerId, borrowerName };
+}
+
+/**
+ * A new borrow slip. Anyone may ask (2026-10-14): with the route active it
+ * is saved as a DRAFT REQUEST — nothing moves — to submit for approval. With
+ * the route switched off, the warehouse's own slip goes OUT at once (the
+ * walk-in borrower, as before) and anyone else's is saved APPROVED, waiting
+ * for the warehouse to release it.
  */
 borrowRoutes.post(
   '/',
   require_('gchain.borrow_slips.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(
-      z.object({
-        jobId: z.string().optional().nullable(),
-        warehouseId: z.string().min(1, 'Which warehouse?'),
-        borrowerId: z.string().optional().nullable(),
-        borrowerName: z.string().trim().min(2, 'Who is borrowing?'),
-        dueAt: z.string().min(1, 'When is it due back?'),
-        purpose: z.string().trim().min(3, 'What is it for?'),
-        notes: z.string().optional().nullable(),
-        items: z
-          .array(
-            z.object({
-              itemId: z.string().min(1),
-              quantity: z.number().positive(),
-              serialNo: z.string().trim().optional().nullable(),
-            }),
-          )
-          .min(1, 'Add at least one item'),
-      }),
-      req.body,
-    );
+    const body = parseBody(borrowSheetSchema, req.body);
+    const checked = await checkBorrowSheet(me, body);
+    const routed = !!(await pickWorkflow(BORROW_DOC, null, { requesterId: me.id }));
+    const lendsNow = !routed && can(me, BORROW_WAREHOUSE);
+    const status: BorrowStatus = routed ? 'DRAFT' : lendsNow ? 'OUT' : 'APPROVED';
 
     const slip = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('borrow_slip', tx);
       const created = await tx.borrowSlip.create({
         data: {
           number,
+          status,
           jobId: body.jobId || null,
           warehouseId: body.warehouseId,
-          borrowerId: body.borrowerId || null,
-          borrowerName: body.borrowerName,
-          issuedById: me.id,
+          borrowerId: checked.borrowerId,
+          borrowerName: checked.borrowerName,
+          requestedById: me.id,
+          issuedById: lendsNow ? me.id : null,
+          releasedAt: lendsNow ? new Date() : null,
           // Set here rather than left to the column's now(): the database
-          // takes its date in UTC.
+          // takes its date in UTC. For a request it is the day asked; the
+          // release moves it to the day it went out.
           borrowedAt: today(),
-          dueAt: new Date(body.dueAt),
+          neededOn: checked.neededOn,
+          dueAt: checked.dueAt,
           purpose: body.purpose,
-          notes: body.notes || null,
+          notes: body.notes?.trim() || null,
           items: {
-            create: body.items.map((i) => ({
-              itemId: i.itemId,
-              quantity: D(i.quantity),
-              serialNo: i.serialNo || null,
-            })),
+            create: body.items.map((i) => ({ itemId: i.itemId, quantity: D(i.quantity), serialNo: i.serialNo || null })),
           },
         },
       });
-
-      for (const line of body.items) {
-        await borrowStock(tx, {
-          itemId: line.itemId,
-          warehouseId: body.warehouseId,
-          quantity: line.quantity,
-          sourceType: 'borrow_slip',
-          sourceId: created.id,
-          sourceNumber: created.number,
-          createdById: me.id,
-        });
-      }
+      if (lendsNow) await lendItems(tx, created.id, me.id);
       return created;
     });
 
@@ -2096,17 +2368,283 @@ borrowRoutes.post(
         entityType: 'borrow_slip',
         entityId: slip.id,
         action: 'CREATED',
-        summary: `${slip.number} lent to ${slip.borrowerName}, due ${formatDate(slip.dueAt)}`,
+        summary: lendsNow
+          ? `${slip.number} lent to ${slip.borrowerName}, due ${formatDate(slip.dueAt)}`
+          : `${slip.number} requested for ${slip.borrowerName}, due back ${formatDate(slip.dueAt)}${routed ? ', to submit for approval' : ', for the warehouse to release'}`,
       },
       req,
     );
-    res.status(201).json(slip);
+    if (status === 'APPROVED') await tellWarehouse(slip.id);
+    res.status(201).json({ ...slip, needsApproval: routed });
+  }),
+);
+
+/** Moves every line of a slip out of available — the release (or the warehouse's walk-in slip). */
+async function lendItems(tx: Prisma.TransactionClient, slipId: string, actorId: string) {
+  const slip = await tx.borrowSlip.findUniqueOrThrow({ where: { id: slipId }, include: { items: true } });
+  for (const line of slip.items) {
+    await borrowStock(tx, {
+      itemId: line.itemId,
+      warehouseId: slip.warehouseId,
+      quantity: num(line.quantity),
+      sourceType: 'borrow_slip',
+      sourceId: slip.id,
+      sourceNumber: slip.number,
+      createdById: actorId,
+    });
+  }
+}
+
+/** The warehouse is told an approved request waits for its release. */
+async function tellWarehouse(slipId: string) {
+  const slip = await prisma.borrowSlip.findUnique({ where: { id: slipId }, select: { id: true, number: true, borrowerName: true, warehouse: { select: { name: true } } } });
+  if (!slip) return;
+  const people = new Set([...(await usersInRole('warehouse')), ...(await usersInRole('warehouse_supervisor'))]);
+  for (const userId of people) {
+    await notify({
+      userId,
+      type: 'borrow.to_release',
+      title: `${slip.number} approved — to release`,
+      body: `${slip.borrowerName} · ${slip.warehouse.name}`,
+      link: `/g-chain/borrow-slips/${slip.id}`,
+    });
+  }
+}
+
+/**
+ * Modify a DRAFT request whole — the header and the items in one save,
+ * claimed on DRAFT and the `version` (updatedAt) the page read.
+ */
+borrowRoutes.put(
+  '/:id/sheet',
+  requireAny('gchain.borrow_slips.edit_own', BORROW_WAREHOUSE),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(borrowSheetSchema.extend({ version: z.string().optional() }), req.body);
+    const slip = await prisma.borrowSlip.findUnique({ where: { id: req.params.id } });
+    if (!slip) throw notFound('Borrow slip not found');
+    if (!mayHandleRequest(me, slip)) throw forbidden('This request is someone else’s');
+    if (slip.status !== 'DRAFT') {
+      throw badRequest(`${slip.number} is ${statusLabel(slip.status).toLowerCase()}${slip.status === 'PENDING_APPROVAL' ? ' — pull it back first' : ''}`);
+    }
+    if (body.version && new Date(body.version).getTime() !== slip.updatedAt.getTime()) {
+      throw badRequest(`${slip.number} changed a moment ago — reload to see it`);
+    }
+    const checked = await checkBorrowSheet(me, body);
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.borrowSlip.updateMany({
+        where: { id: slip.id, status: 'DRAFT', updatedAt: slip.updatedAt },
+        data: {
+          jobId: body.jobId || null,
+          warehouseId: body.warehouseId,
+          borrowerId: checked.borrowerId,
+          borrowerName: checked.borrowerName,
+          neededOn: checked.neededOn,
+          dueAt: checked.dueAt,
+          purpose: body.purpose,
+          notes: body.notes?.trim() || null,
+        },
+      });
+      if (!claimed.count) throw badRequest(`${slip.number} changed a moment ago — reload to see it`);
+      await tx.borrowSlipItem.deleteMany({ where: { slipId: slip.id } });
+      await tx.borrowSlipItem.createMany({
+        data: body.items.map((i) => ({ slipId: slip.id, itemId: i.itemId, quantity: D(i.quantity), serialNo: i.serialNo || null })),
+      });
+    });
+    await audit({ entityType: 'borrow_slip', entityId: slip.id, action: 'UPDATED', summary: `Modified the request ${slip.number}` }, req);
+    res.json(await presentSlip((await loadSlip(slip.id))!, me));
+  }),
+);
+
+/**
+ * Submit for approval: claims the DRAFT on what it was read as, checks the
+ * warehouse can still lend every line, and files the request in the
+ * REQUESTER's name whoever presses it — so it is their Team Leader who
+ * decides. A refused submit puts it back to a draft.
+ */
+borrowRoutes.post(
+  '/:id/submit',
+  requireAny('gchain.borrow_slips.edit_own', BORROW_WAREHOUSE),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const slip = await prisma.borrowSlip.findUnique({ where: { id: req.params.id }, include: { items: true, warehouse: { select: { name: true } } } });
+    if (!slip) throw notFound('Borrow slip not found');
+    if (!mayHandleRequest(me, slip)) throw forbidden('This request is someone else’s');
+    if (slip.status !== 'DRAFT') throw badRequest(`${slip.number} is ${statusLabel(slip.status).toLowerCase()}`);
+    if (!slip.items.length) throw badRequest('Add at least one item before submitting');
+    const balances = await prisma.inventoryBalance.findMany({
+      where: { warehouseId: slip.warehouseId, itemId: { in: slip.items.map((i) => i.itemId) } },
+      include: { item: { select: { name: true } } },
+    });
+    const byItem = new Map(balances.map((b) => [b.itemId, b]));
+    const short = slip.items.filter((l) => {
+      const b = byItem.get(l.itemId);
+      return !b || availableOf(b) < num(l.quantity) - 0.0005;
+    });
+    if (short.length) {
+      const names = short.map((l) => byItem.get(l.itemId)?.item.name ?? 'an item').join(', ');
+      throw badRequest(`${slip.warehouse.name} does not have enough of ${names} available to lend now`);
+    }
+    const requesterId = slip.requestedById ?? me.id;
+    const claimed = await prisma.borrowSlip.updateMany({
+      where: { id: slip.id, status: 'DRAFT', updatedAt: slip.updatedAt },
+      data: { status: 'PENDING_APPROVAL', requestedById: requesterId },
+    });
+    if (!claimed.count) throw badRequest(`${slip.number} changed a moment ago — reload to see where it stands`);
+    try {
+      await submitForApproval({
+        documentType: BORROW_DOC,
+        documentId: slip.id,
+        documentNumber: slip.number,
+        subject: `${slip.borrowerName} — ${slip.purpose}`,
+        amount: null,
+        link: `/g-chain/borrow-slips/${slip.id}`,
+        requesterId,
+      });
+    } catch (err) {
+      await prisma.borrowSlip.updateMany({ where: { id: slip.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      throw err;
+    }
+    await audit({ entityType: 'borrow_slip', entityId: slip.id, action: 'SUBMITTED', summary: `${slip.number} submitted for approval` }, req);
+    res.json(await presentSlip((await loadSlip(slip.id))!, me));
+  }),
+);
+
+/** Pulls a pending request back to a draft — its request withdrawn in the same transaction; a decision that landed first wins. */
+borrowRoutes.post(
+  '/:id/withdraw',
+  requireAny('gchain.borrow_slips.edit_own', BORROW_WAREHOUSE),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const slip = await prisma.borrowSlip.findUnique({ where: { id: req.params.id } });
+    if (!slip) throw notFound('Borrow slip not found');
+    if (!mayHandleRequest(me, slip)) throw forbidden('This request is someone else’s');
+    if (slip.status !== 'PENDING_APPROVAL') throw badRequest(`${slip.number} is not waiting for approval`);
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.borrowSlip.updateMany({ where: { id: slip.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      if (!claimed.count) throw badRequest(`${slip.number} was decided a moment ago — reload to see where it stands`);
+      const withdrawn = await cancelOpenRequest(BORROW_DOC, slip.id, tx, `pulled back by ${me.name}`, me.id);
+      if (!withdrawn.length) throw badRequest(`${slip.number} was decided a moment ago — reload to see where it stands`);
+    });
+    await audit({ entityType: 'borrow_slip', entityId: slip.id, action: 'UPDATED', summary: `${slip.number} pulled back to a draft` }, req);
+    res.json(await presentSlip((await loadSlip(slip.id))!, me));
+  }),
+);
+
+/**
+ * Cancels a request before anything left the shelf — a draft, a pending one
+ * (its request withdrawn) or an approved one the warehouse will not release
+ * ("not on the shelf"), the reason kept. Who asked for it is told when the
+ * warehouse cancels it.
+ */
+borrowRoutes.post(
+  '/:id/cancel',
+  requireAny('gchain.borrow_slips.edit_own', BORROW_WAREHOUSE),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled').max(2000) }), req.body);
+    const slip = await prisma.borrowSlip.findUnique({ where: { id: req.params.id } });
+    if (!slip) throw notFound('Borrow slip not found');
+    if (!mayHandleRequest(me, slip)) throw forbidden('This request is someone else’s');
+    if (!['DRAFT', 'PENDING_APPROVAL', 'APPROVED'].includes(slip.status)) {
+      throw badRequest(`${slip.number} is ${statusLabel(slip.status).toLowerCase()} — ${ON_LOAN.includes(slip.status) ? 'the items are out; take them back instead' : 'nothing to cancel'}`);
+    }
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.borrowSlip.updateMany({ where: { id: slip.id, status: slip.status }, data: { status: 'CANCELLED', cancelReason: body.reason } });
+      if (!claimed.count) throw badRequest(`${slip.number} changed a moment ago — reload to see where it stands`);
+      if (slip.status === 'PENDING_APPROVAL') {
+        await cancelOpenRequest(BORROW_DOC, slip.id, tx, `cancelled by ${me.name}: ${body.reason}`, me.id);
+      }
+    });
+    await audit({ entityType: 'borrow_slip', entityId: slip.id, action: 'CANCELLED', summary: `${slip.number} cancelled — ${body.reason}` }, req);
+    if (slip.requestedById && slip.requestedById !== me.id) {
+      await notify({
+        userId: slip.requestedById,
+        type: 'borrow.cancelled',
+        title: `${slip.number} cancelled by ${me.name}`,
+        body: body.reason,
+        link: `/g-chain/borrow-slips/${slip.id}`,
+      });
+    }
+    res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
+/**
+ * The route's decision. Approved: claims PENDING_APPROVAL → APPROVED — the
+ * warehouse is told it waits for its release; nothing moves until then.
+ * Returned or rejected: back to a draft for who asked for it. A decision
+ * that finds the request no longer pending changes nothing, and says so.
+ */
+export async function settleBorrowSlip(documentId: string, outcome: ApprovalOutcome) {
+  const slip = await prisma.borrowSlip.findUnique({ where: { id: documentId } });
+  if (!slip) return;
+  const next: BorrowStatus = outcome === 'APPROVED' ? 'APPROVED' : 'DRAFT';
+  const claimed = await prisma.borrowSlip.updateMany({ where: { id: slip.id, status: 'PENDING_APPROVAL' }, data: { status: next } });
+  if (!claimed.count) {
+    const now = await prisma.borrowSlip.findUnique({ where: { id: slip.id }, select: { status: true } });
+    await warehouseNotApplied('borrow_slip', slip.id, slip.number, now?.status ?? slip.status, outcome);
+    return;
+  }
+  if (outcome === 'APPROVED') {
+    await audit({ entityType: 'borrow_slip', entityId: slip.id, action: 'APPROVED', summary: `${slip.number} approved — for the warehouse to release`, actorName: 'system' });
+    await tellWarehouse(slip.id);
+  }
+}
+
+onApprovalSettled(BORROW_DOC, async (request, outcome) => {
+  await settleBorrowSlip(request.documentId, outcome);
+});
+
+/**
+ * The warehouse releases an approved request: claimed on APPROVED, every
+ * line moved out of available in the same transaction (a line the shelf can
+ * no longer fill refuses the whole release, naming it — cancel the request
+ * with that reason instead), dated the day it went out, released by whoever
+ * pressed it. A new due date may be given, never before today.
+ */
+borrowRoutes.post(
+  '/:id/release',
+  require_(BORROW_WAREHOUSE),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ dueAt: z.string().optional().nullable(), serials: z.record(z.string(), z.string()).optional() }), req.body ?? {});
+    const slip = await prisma.borrowSlip.findUnique({ where: { id: req.params.id } });
+    if (!slip) throw notFound('Borrow slip not found');
+    if (slip.status !== 'APPROVED') {
+      throw badRequest(`${slip.number} is ${statusLabel(slip.status).toLowerCase()} — only an approved request is released`);
+    }
+    const dueAt = body.dueAt ? asDate(body.dueAt)! : slip.dueAt;
+    if (dueAt.getTime() < today().getTime()) throw badRequest('It cannot be due back before today');
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.borrowSlip.updateMany({
+        where: { id: slip.id, status: 'APPROVED' },
+        data: { status: 'OUT', issuedById: me.id, releasedAt: new Date(), borrowedAt: today(), dueAt },
+      });
+      if (!claimed.count) throw badRequest(`${slip.number} was released or cancelled a moment ago — reload to see where it stands`);
+      for (const [lineId, serialNo] of Object.entries(body.serials ?? {})) {
+        await tx.borrowSlipItem.updateMany({ where: { id: lineId, slipId: slip.id }, data: { serialNo: serialNo.trim() || null } });
+      }
+      await lendItems(tx, slip.id, me.id);
+    });
+    await audit({ entityType: 'borrow_slip', entityId: slip.id, action: 'EXECUTED', summary: `${slip.number} released to ${slip.borrowerName}, due back ${formatDate(dueAt)}` }, req);
+    const tell = new Set([slip.requestedById, slip.borrowerId].filter((u): u is string => !!u && u !== me.id));
+    for (const userId of tell) {
+      await notify({
+        userId,
+        type: 'borrow.released',
+        title: `${slip.number} released — collect it from the warehouse`,
+        body: `Due back ${formatDate(dueAt)}`,
+        link: `/g-chain/borrow-slips/${slip.id}`,
+      });
+    }
+    res.json(await presentSlip((await loadSlip(slip.id))!, me));
   }),
 );
 
 borrowRoutes.post(
   '/:id/return',
-  require_('gchain.borrow_slips.edit_all'),
+  require_(BORROW_WAREHOUSE),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(
@@ -2122,6 +2660,7 @@ borrowRoutes.post(
     });
     if (!slip) throw notFound('Borrow slip not found');
     if (slip.status === 'RETURNED') throw badRequest('Everything on this slip is already back');
+    if (!ON_LOAN.includes(slip.status)) throw badRequest(`${slip.number} is ${statusLabel(slip.status).toLowerCase()} — nothing has gone out on it`);
 
     await prisma.$transaction(async (tx) => {
       for (const line of body.items) {

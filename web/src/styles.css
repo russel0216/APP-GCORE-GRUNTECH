@@ -2293,6 +2293,13 @@ table.data .mono {
   border-bottom: 1px solid var(--line-soft);
 }
 
+/* A SUPERVISOR step: the fallback role over the team's other deciders. */
+.step-supervisor {
+  display: grid;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
 .step-num {
   width: 30px;
   height: 30px;
