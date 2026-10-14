@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma, IssueStatus, BorrowStatus, ReceivingStatus } from '@prisma/client';
+import { Prisma, IssueStatus, BorrowStatus, BorrowType, ReturnCondition, ReceivingStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import {
   handler,
@@ -2380,6 +2380,19 @@ const BORROW_SORTS = ['number', 'dueAt', 'borrowedAt', 'neededOn'];
 /** A slip with something still out on it. */
 const ON_LOAN: BorrowStatus[] = ['OUT', 'PARTIALLY_RETURNED', 'OVERDUE'];
 
+/** The borrower's slip (2026-10-15, the owner's form): why it is borrowed, and what came back. */
+export const BORROW_TYPES: Record<BorrowType, string> = {
+  INTERNAL_OFFICE: 'Internal / office use',
+  ON_SITE_PROJECT: 'On-site project / customer site',
+  PERSONAL: 'Personal request',
+  RND_TESTING: 'R&D / testing',
+};
+export const RETURN_CONDITIONS: Record<ReturnCondition, string> = {
+  COMPLETE_GOOD: 'Complete / good',
+  DAMAGED: 'Damaged',
+  MISSING_PARTS: 'Missing parts',
+};
+
 /** What a reader without the register's right sees: what they asked for and what they hold. */
 const mineWhere = (me: ResolvedUser): Prisma.BorrowSlipWhereInput => ({ OR: [{ requestedById: me.id }, { borrowerId: me.id }] });
 const partyTo = (me: ResolvedUser, slip: { requestedById: string | null; borrowerId: string | null }) =>
@@ -2402,12 +2415,15 @@ function borrowListWhere(me: ResolvedUser, q: ListQuery, day: Date) {
         { number: { contains: q.search, mode: 'insensitive' } },
         { borrowerName: { contains: q.search, mode: 'insensitive' } },
         { purpose: { contains: q.search, mode: 'insensitive' } },
+        { siteLocation: { contains: q.search, mode: 'insensitive' } },
         { requestedBy: { name: { contains: q.search, mode: 'insensitive' } } },
       ],
     });
   }
   const ids = idsFilter(q.filters.ids);
   if (ids) base.push({ id: { in: ids } });
+  const borrowType = choice(q.filters.borrowType, BorrowType, 'Borrowing type');
+  if (borrowType) base.push({ borrowType });
   const and = [...base];
   if (q.filters.overdue === 'true') and.push({ status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lt: day } });
   else {
@@ -2481,6 +2497,9 @@ borrowRoutes.get(
             borrowerName: r.borrowerName,
             requestedBy: r.requestedBy,
             purpose: r.purpose,
+            borrowType: r.borrowType,
+            borrowTypeLabel: r.borrowType ? BORROW_TYPES[r.borrowType] : null,
+            siteLocation: r.siteLocation,
             neededOn: r.neededOn,
             borrowedAt: r.borrowedAt,
             dueAt: r.dueAt,
@@ -2623,7 +2642,9 @@ async function loadSlip(id: string) {
       warehouse: { select: { id: true, name: true } },
       issuedBy: { select: { id: true, name: true } },
       requestedBy: { select: { id: true, name: true } },
-      items: { include: { item: { select: { id: true, code: true, name: true, unit: true } } } },
+      inspectedBy: { select: { id: true, name: true } },
+      borrower: { select: { id: true, name: true, employeeNo: true, position: true, department: { select: { name: true } } } },
+      items: { include: { item: { select: { id: true, code: true, partNumber: true, brand: true, name: true, unit: true } } } },
     },
   });
 }
@@ -2669,6 +2690,8 @@ async function presentSlip(slip: LoadedSlip, me: ResolvedUser) {
     approvalRoute: draft && route ? await routeBrief(BORROW_DOC, null, slip.requestedById ?? me.id) : null,
     isOverdue: daysOverdue(slip, day) > 0,
     daysOverdue: daysOverdue(slip, day),
+    borrowTypeLabel: slip.borrowType ? BORROW_TYPES[slip.borrowType] : null,
+    returnedConditionLabel: slip.returnedCondition ? RETURN_CONDITIONS[slip.returnedCondition] : null,
     items: slip.items.map((i) => ({
       ...i,
       quantity: num(i.quantity),
@@ -2689,12 +2712,17 @@ borrowRoutes.get(
 );
 
 /**
- * The slip on paper (2026-10-14): what was asked for and what went out, then
- * the people who acted, each dated — REQUESTED BY (who asked for it, its
- * first slot's timestamp), the route's two steps ("Pending" until signed; a
- * draft prints the route submitting would take), RELEASED BY (whoever
- * released it, when) — and the day everything came back. A slip the
- * warehouse wrote before requests prints ISSUED BY in their place.
+ * The slip on paper — the EQUIPMENT & TOOL BORROWER'S SLIP (2026-10-15, the
+ * owner's form as the guide), in its five sections: the borrower's details
+ * (name, employee no., department, contact, the borrowing type), the
+ * equipment and tools (each line's serial, condition out and what came
+ * back), the reason and destination (project, site, purpose), the people who
+ * acted — REQUESTED BY (who asked for it, its first slot's timestamp), the
+ * route's two steps ("Pending" until signed; a draft prints the route
+ * submitting would take), RELEASED BY (whoever released it, when; a slip the
+ * warehouse wrote before requests prints ISSUED BY) — and the return
+ * clearance: what the custodian recorded, or the lines left blank for them
+ * while anything is still out.
  */
 borrowRoutes.get(
   '/:id/pdf',
@@ -2729,52 +2757,97 @@ borrowRoutes.get(
       signatories.push({ role: 'Released by', name: '', at: null });
     }
 
+    // The borrower's details: a login's own record, else the name and number on the slip.
+    const borrowerContact = slip.borrower ? await contactOf(slip.borrower.id) : {};
+    const contact = slip.contactNo ?? ('phone' in borrowerContact && borrowerContact.phone ? String(borrowerContact.phone) : null);
+    const anyBack = slip.items.some((i) => num(i.returnedQty) > 0);
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        title: 'Equipment & tool details',
+        head: ['No.', 'Item description / model', 'Asset / serial no.', 'Qty', 'Unit', 'Condition out', 'Returned'],
+        align: ['right', 'left', 'left', 'right', 'left', 'left', 'left'],
+        rows: slip.items.map((i, n) => [
+          String(n + 1),
+          { title: i.item.name, body: [i.item.partNumber ?? i.item.code, i.item.brand, i.remarks].filter(Boolean).join(' · ') || undefined },
+          i.serialNo ?? '',
+          qty(num(i.quantity)),
+          i.item.unit,
+          i.conditionOut ?? '',
+          num(i.returnedQty) ? [qty(num(i.returnedQty)), i.conditionBack].filter(Boolean).join(' · ') : '',
+        ]),
+      },
+      {
+        kind: 'text',
+        title: 'Reason for borrowing / project destination',
+        body: [
+          `Project / customer: ${slip.job ? `${slip.job.number} — ${slip.job.name}` : '—'}`,
+          `Site location: ${slip.siteLocation ?? '—'}`,
+          `Purpose: ${slip.purpose}`,
+          slip.notes ? `Notes: ${slip.notes}` : null,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      },
+    ];
+    if (slip.status === 'CANCELLED' && slip.cancelReason) sections.push({ kind: 'text', title: 'Cancelled', body: slip.cancelReason });
+    // The return clearance: what the custodian recorded, else their lines to fill.
+    if (anyBack || slip.status === 'RETURNED') {
+      sections.push({
+        kind: 'text',
+        title: 'Return clearance (warehouse / custodian)',
+        body: [
+          `Actual return date: ${slip.returnedAt ? formatDate(slip.returnedAt) : slip.status === 'PARTIALLY_RETURNED' ? 'part returned — the rest still out' : '—'}`,
+          `Returned condition: ${slip.returnedCondition ? RETURN_CONDITIONS[slip.returnedCondition] : '—'}`,
+          `Inspected by: ${slip.inspectedBy ? `${slip.inspectedBy.name}${slip.inspectedAt ? `, ${formatDate(slip.inspectedAt)}` : ''}` : '—'}`,
+          slip.returnNote ? `Note: ${slip.returnNote}` : null,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      });
+    } else if (released || slip.status === 'APPROVED') {
+      sections.push({
+        kind: 'text',
+        title: 'Return clearance (warehouse / custodian use only)',
+        body: 'Actual return date: ______________    Returned condition:  [ ] Complete / good   [ ] Damaged   [ ] Missing parts\n\nInspected by: ______________________________    Custodian signature: ______________________',
+      });
+    }
+
     const pdf = await renderDocument({
-      title: 'Borrow Slip',
+      title: "Borrower's Slip",
+      titleBold: true,
       documentNumber: slip.number,
       date: slip.createdAt,
-      reference: slip.job ? `${slip.job.number} — ${slip.job.name}` : slip.purpose,
-      sections: [
-        {
-          kind: 'fields',
-          columns: 3,
-          fields: [
-            { label: 'Borrower', value: slip.borrowerName },
-            { label: 'Warehouse', value: slip.warehouse.name },
-            { label: 'Project', value: slip.job ? slip.job.number : '—' },
-            { label: 'Purpose', value: slip.purpose },
-            { label: 'Needed on', value: slip.neededOn ? formatDate(slip.neededOn) : '—' },
-            { label: 'Due back', value: formatDate(slip.dueAt) },
-            { label: 'Out', value: released ? formatDate(slip.borrowedAt) : '—' },
-            { label: 'Returned', value: slip.returnedAt ? formatDate(slip.returnedAt) : '—' },
-            { label: 'Status', value: statusLabel(slip.status) },
-          ],
-        },
-        {
-          kind: 'table',
-          title: 'Items',
-          head: ['No.', 'Code', 'Item', 'Qty', 'Unit', 'Returned', 'Serial no.'],
-          align: ['right', 'left', 'left', 'right', 'left', 'right', 'left'],
-          rows: slip.items.map((i, n) => [
-            String(n + 1),
-            i.item.code,
-            i.item.name,
-            qty(num(i.quantity)),
-            i.item.unit,
-            num(i.returnedQty) ? qty(num(i.returnedQty)) : '',
-            i.serialNo ?? '',
-          ]),
-        },
-        ...(slip.notes ? [{ kind: 'text' as const, title: 'Notes', body: slip.notes }] : []),
-        ...(slip.status === 'CANCELLED' && slip.cancelReason ? [{ kind: 'text' as const, title: 'Cancelled', body: slip.cancelReason }] : []),
+      numberNote: `Date: ${formatDate(slip.createdAt)}`,
+      detailsTitle: "Borrower's details",
+      detailsTitleSize: 11,
+      details: [
+        [
+          ["Borrower's name", slip.borrowerName],
+          ['Employee no.', slip.borrower?.employeeNo ?? '—'],
+          ['Borrowing type', slip.borrowType ? BORROW_TYPES[slip.borrowType] : '—'],
+        ],
+        [
+          ['Department / team', slip.borrower?.department?.name ?? '—'],
+          ['Contact no.', contact ?? '—'],
+          ['Warehouse', slip.warehouse.name],
+        ],
+        [
+          ['Needed on', slip.neededOn ? formatDate(slip.neededOn) : '—'],
+          ['Expected return', formatDate(slip.dueAt)],
+          ['Status', statusLabel(slip.status) + (released && slip.borrowedAt ? ` — out ${formatDate(slip.borrowedAt)}` : '')],
+        ],
       ],
+      sections,
       signatories,
+      signoffNote: 'The name, date and time are considered a digital signature.',
+      footerNote: slip.status === 'DRAFT' || slip.status === 'PENDING_APPROVAL' ? 'REQUEST — NOT YET RELEASED.' : slip.status === 'CANCELLED' ? 'CANCELLED.' : undefined,
     });
     await audit({ entityType: 'borrow_slip', entityId: slip.id, action: 'EXPORTED', summary: `Printed ${slip.number}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',
-      contentDisposition(paperFileName({ kind: 'Borrow Slip', number: slip.number, author: slip.requestedBy?.name ?? slip.issuedBy?.name ?? '', date: slip.createdAt })),
+      contentDisposition(paperFileName({ kind: "Borrower's Slip", number: slip.number, author: slip.requestedBy?.name ?? slip.issuedBy?.name ?? '', date: slip.createdAt })),
     );
     res.send(pdf);
   }),
@@ -2801,6 +2874,9 @@ borrowRoutes.patch(
           dueAt: z.string().min(1, 'When is it due back?').optional(),
           purpose: z.string().trim().min(3, 'What is it for?').optional(),
           notes: z.string().optional().nullable(),
+          borrowType: z.nativeEnum(BorrowType).optional().nullable(),
+          siteLocation: z.string().trim().max(300).optional().nullable(),
+          contactNo: z.string().trim().max(80).optional().nullable(),
         })
         .strict(),
       req.body,
@@ -2843,6 +2919,9 @@ borrowRoutes.patch(
         ...(body.borrowerName !== undefined ? { borrowerName: body.borrowerName } : {}),
         ...(body.purpose !== undefined ? { purpose: body.purpose } : {}),
         ...(body.notes !== undefined ? { notes: body.notes?.trim() || null } : {}),
+        ...(body.borrowType !== undefined ? { borrowType: body.borrowType } : {}),
+        ...(body.siteLocation !== undefined ? { siteLocation: body.siteLocation?.trim() || null } : {}),
+        ...(body.contactNo !== undefined ? { contactNo: body.contactNo?.trim() || null } : {}),
       },
     });
     if (!claimed.count) throw badRequest(`Everything on ${slip.number} came back a moment ago — reload to see it`);
@@ -2863,6 +2942,7 @@ const borrowLineSchema = z.object({
   itemId: z.string().min(1),
   quantity: z.number().positive(),
   serialNo: z.string().trim().optional().nullable(),
+  conditionOut: z.string().trim().max(80).optional().nullable(),
 });
 
 const borrowSheetSchema = z.object({
@@ -2870,6 +2950,9 @@ const borrowSheetSchema = z.object({
   warehouseId: z.string().min(1, 'Which warehouse?'),
   borrowerId: z.string().optional().nullable(),
   borrowerName: z.string().trim().optional().nullable(),
+  borrowType: z.nativeEnum(BorrowType).optional().nullable(),
+  siteLocation: z.string().trim().max(300).optional().nullable(),
+  contactNo: z.string().trim().max(80).optional().nullable(),
   neededOn: z.string().optional().nullable(),
   dueAt: z.string().min(1, 'When is it due back?'),
   purpose: z.string().trim().min(3, 'What is it for?'),
@@ -2969,8 +3052,11 @@ borrowRoutes.post(
           dueAt: checked.dueAt,
           purpose: body.purpose,
           notes: body.notes?.trim() || null,
+          borrowType: body.borrowType ?? null,
+          siteLocation: body.siteLocation?.trim() || null,
+          contactNo: body.contactNo?.trim() || null,
           items: {
-            create: body.items.map((i) => ({ itemId: i.itemId, quantity: D(i.quantity), serialNo: i.serialNo || null })),
+            create: body.items.map((i) => ({ itemId: i.itemId, quantity: D(i.quantity), serialNo: i.serialNo || null, conditionOut: i.conditionOut?.trim() || null })),
           },
         },
       });
@@ -3058,12 +3144,15 @@ borrowRoutes.put(
           dueAt: checked.dueAt,
           purpose: body.purpose,
           notes: body.notes?.trim() || null,
+          borrowType: body.borrowType ?? null,
+          siteLocation: body.siteLocation?.trim() || null,
+          contactNo: body.contactNo?.trim() || null,
         },
       });
       if (!claimed.count) throw badRequest(`${slip.number} changed a moment ago — reload to see it`);
       await tx.borrowSlipItem.deleteMany({ where: { slipId: slip.id } });
       await tx.borrowSlipItem.createMany({
-        data: body.items.map((i) => ({ slipId: slip.id, itemId: i.itemId, quantity: D(i.quantity), serialNo: i.serialNo || null })),
+        data: body.items.map((i) => ({ slipId: slip.id, itemId: i.itemId, quantity: D(i.quantity), serialNo: i.serialNo || null, conditionOut: i.conditionOut?.trim() || null })),
       });
     });
     await audit({ entityType: 'borrow_slip', entityId: slip.id, action: 'UPDATED', summary: `Modified the request ${slip.number}` }, req);
@@ -3262,9 +3351,14 @@ borrowRoutes.post(
   require_(BORROW_WAREHOUSE),
   handler(async (req, res) => {
     const me = currentUser(req);
+    // The return clearance (2026-10-15, the owner's form): what came back on
+    // each line and in what condition, the custodian's verdict and note —
+    // recorded by whoever receives it, dated; the last return's word stands.
     const body = parseBody(
       z.object({
-        items: z.array(z.object({ itemId: z.string(), quantity: z.number().positive() })).min(1),
+        items: z.array(z.object({ itemId: z.string(), quantity: z.number().positive(), conditionBack: z.string().trim().max(80).optional().nullable() })).min(1),
+        returnedCondition: z.nativeEnum(ReturnCondition).optional().nullable(),
+        note: z.string().trim().max(2000).optional().nullable(),
       }),
       req.body,
     );
@@ -3289,7 +3383,7 @@ borrowRoutes.post(
 
         await tx.borrowSlipItem.update({
           where: { id: slipItem.id },
-          data: { returnedQty: D(num(slipItem.returnedQty) + line.quantity) },
+          data: { returnedQty: D(num(slipItem.returnedQty) + line.quantity), ...(line.conditionBack !== undefined ? { conditionBack: line.conditionBack?.trim() || null } : {}) },
         });
 
         await returnBorrowedStock(tx, {
@@ -3312,16 +3406,21 @@ borrowRoutes.post(
         data: {
           status: allBack ? 'RETURNED' : 'PARTIALLY_RETURNED',
           returnedAt: allBack ? today() : null,
+          returnedCondition: body.returnedCondition ?? (allBack ? 'COMPLETE_GOOD' : slip.returnedCondition),
+          returnNote: body.note?.trim() || slip.returnNote,
+          inspectedById: me.id,
+          inspectedAt: new Date(),
         },
       });
     });
 
+    const verdict = body.returnedCondition ? ` — ${RETURN_CONDITIONS[body.returnedCondition].toLowerCase()}` : '';
     await audit(
       {
         entityType: 'borrow_slip',
         entityId: slip.id,
         action: 'UPDATED',
-        summary: `Items returned on ${slip.number}`,
+        summary: `Items returned on ${slip.number}${verdict}${body.note ? `: ${body.note.trim()}` : ''}`,
       },
       req,
     );

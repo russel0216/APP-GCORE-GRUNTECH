@@ -115,6 +115,7 @@ model User {
   pulloutsPrepared  PulloutSlip[]          @relation("PulloutPreparer")
   pulloutsReleased  PulloutSlip[]          @relation("PulloutReleaser")
   pulloutsRequested PulloutSlip[]          @relation("PulloutRequester")
+  borrowsInspected  BorrowSlip[]           @relation("BorrowInspector")
   stockMoves        InventoryTransaction[]
 
   facesEnrolled      FaceEnrollment[] @relation("FaceEnroller")
@@ -3009,6 +3010,21 @@ model PulloutItem {
   @@index([sourceLineId])
 }
 
+/// Why a borrow is made (2026-10-15, the owner's borrower's slip: its "Borrowing type" boxes).
+enum BorrowType {
+  INTERNAL_OFFICE
+  ON_SITE_PROJECT
+  PERSONAL
+  RND_TESTING
+}
+
+/// What came back, as the custodian found it (the form's return clearance).
+enum ReturnCondition {
+  COMPLETE_GOOD
+  DAMAGED
+  MISSING_PARTS
+}
+
 enum BorrowStatus {
   /// A request (2026-10-14): saved, not sent for approval.
   DRAFT
@@ -3063,6 +3079,18 @@ model BorrowSlip {
   purpose    String
   notes      String?
 
+  /// The borrower's slip (2026-10-15, the owner's form): why, where, how to
+  /// reach a borrower with no login — and the return clearance the custodian
+  /// records when it comes back (the last return's word stands).
+  borrowType        BorrowType?
+  siteLocation      String?
+  contactNo         String?
+  returnedCondition ReturnCondition?
+  returnNote        String?
+  inspectedById     String?
+  inspectedBy       User?            @relation("BorrowInspector", fields: [inspectedById], references: [id], onDelete: SetNull)
+  inspectedAt       DateTime?
+
   items BorrowSlipItem[]
 
   createdAt DateTime @default(now())
@@ -3081,10 +3109,13 @@ model BorrowSlipItem {
   itemId String
   item   Item   @relation(fields: [itemId], references: [id], onDelete: Restrict)
 
-  quantity    Decimal @db.Decimal(18, 3)
-  returnedQty Decimal @default(0) @db.Decimal(18, 3)
-  serialNo    String?
-  remarks     String?
+  quantity      Decimal @db.Decimal(18, 3)
+  returnedQty   Decimal @default(0) @db.Decimal(18, 3)
+  serialNo      String?
+  remarks       String?
+  /// As it left, and as it came back (2026-10-15).
+  conditionOut  String?
+  conditionBack String?
 
   @@index([slipId])
 }

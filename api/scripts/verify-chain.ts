@@ -3283,14 +3283,66 @@ async function main() {
           pendingCount(slipPaper.text) === 0,
         `${slipPaper.status} ${signedCount(slipPaper.text)} signed, ${pendingCount(slipPaper.text)} pending`,
       );
+      // The borrower's slip (2026-10-15, the owner's form): the paper's five
+      // sections, the clearance lines blank while anything is out; the
+      // custodian records what came back and in what condition.
+      const SLIP_WORDS = ["BORROWER'S DETAILS", 'EQUIPMENT & TOOL DETAILS', 'CONDITION OUT', 'REASON FOR BORROWING', 'RETURN CLEARANCE'];
+      check(
+        "its paper is the Borrower's Slip: the borrower's details, the equipment with its condition out, the reason and site, and the return clearance left blank for the custodian",
+        /BORROWER'?S\s+SLIP/i.test(slipPaper.text) &&
+          SLIP_WORDS.every((w) => flat(slipPaper.text).toUpperCase().includes(w)) &&
+          flat(slipPaper.text).includes('Actual return date: ______') &&
+          flat(slipPaper.text).includes('Site location:'),
+        SLIP_WORDS.filter((w) => !flat(slipPaper.text).toUpperCase().includes(w)).join(','),
+      );
       const askedLines = await prisma.borrowSlipItem.findMany({ where: { slipId: askedId } });
       const broughtBack = await api(keeperToken, 'POST', `/borrow-slips/${askedId}/return`, {
-        items: askedLines.map((l) => ({ itemId: l.id, quantity: Number(l.quantity) })),
+        items: askedLines.map((l) => ({ itemId: l.id, quantity: Number(l.quantity), conditionBack: 'Fair' })),
+        returnedCondition: 'DAMAGED',
+        note: `${TAG} handle cracked`,
       });
+      const backRow = await prisma.borrowSlip.findUniqueOrThrow({ where: { id: askedId }, include: { items: true } });
       check(
         'taken back whole, it is RETURNED and the stock is available again',
-        broughtBack.status === 200 && (await prisma.borrowSlip.findUniqueOrThrow({ where: { id: askedId } })).status === 'RETURNED' && money(await available(), freeBefore),
+        broughtBack.status === 200 && backRow.status === 'RETURNED' && money(await available(), freeBefore),
         `${broughtBack.status} ${await available()}`,
+      );
+      const backPaper = await printed(borrowerToken, `/borrow-slips/${askedId}/pdf`);
+      check(
+        'the return clearance records each line’s condition back, the custodian’s verdict and note, who inspected it and when — on the record and the paper',
+        backRow.returnedCondition === 'DAMAGED' &&
+          backRow.inspectedById === keeper.id &&
+          backRow.inspectedAt !== null &&
+          backRow.returnNote === `${TAG} handle cracked` &&
+          backRow.items.every((i) => i.conditionBack === 'Fair') &&
+          flat(backPaper.text).includes('Returned condition: Damaged') &&
+          flat(backPaper.text).includes('Inspected by: Verify Keeper') &&
+          flat(backPaper.text).includes('handle cracked') &&
+          !flat(backPaper.text).includes('Actual return date: ______'),
+        `${backRow.returnedCondition} ${backRow.inspectedById === keeper.id} ${backRow.items.map((i) => i.conditionBack)} ${backPaper.status}`,
+      );
+      const typed = await api(borrowerToken, 'POST', '/borrow-slips', {
+        warehouseId: warehouse.id,
+        borrowType: 'ON_SITE_PROJECT',
+        siteLocation: `${TAG} customer plant, Pasig`,
+        contactNo: '0917 000 0000',
+        dueAt: todayKey,
+        purpose: `${TAG} typed borrow`,
+        items: [{ itemId: item.id, quantity: 1, conditionOut: 'Fair' }],
+      });
+      const typedRow = await prisma.borrowSlip.findUniqueOrThrow({ where: { id: String(typed.body.id) }, include: { items: true } });
+      const byType = await api(keeperToken, 'GET', `/borrow-slips?borrowType=ON_SITE_PROJECT&search=${encodeURIComponent(`${TAG} customer plant`)}`);
+      const badType = await api(keeperToken, 'GET', `/borrow-slips?borrowType=LENDING`);
+      check(
+        'a request carries its borrowing type, site and contact, each line its condition out; the list filters by type and refuses one it does not know',
+        typed.status === 201 &&
+          typedRow.borrowType === 'ON_SITE_PROJECT' &&
+          typedRow.siteLocation === `${TAG} customer plant, Pasig` &&
+          typedRow.items[0]?.conditionOut === 'Fair' &&
+          byType.body.total === 1 &&
+          (byType.body.rows as { borrowTypeLabel: string }[])[0]?.borrowTypeLabel === 'On-site project / customer site' &&
+          badType.status === 400,
+        `${typed.status} ${typedRow.borrowType} ${byType.body.total} ${badType.status}`,
       );
 
       // A Technical Manager's own request: they hold step 1, so it is signed

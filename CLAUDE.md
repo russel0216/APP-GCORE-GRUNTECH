@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,199 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,202 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,10 +574,10 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 171, chain 322, hr 468, plantilla 123, meetings
+79, partners 120, delivery 171, chain 325, hr 468, plantilla 123, meetings
 115, evaluations 152, academy 120, finance 317, aftermarket 259, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -4753,6 +4753,28 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   The clearance scan counts only slips on loan. `pages/chain/
   BorrowSlips.tsx` holds the list, the request page (`/new`, `/:id/edit`)
   and the slip, moved out of `Warehouse.tsx`.
+- **The borrow slip is the EQUIPMENT & TOOL BORROWER'S SLIP** (2026-10-15,
+  the owner's form as the guide). `BorrowSlip.borrowType` (`BorrowType`:
+  Internal / office use, On-site project / customer site, Personal request,
+  R&D / testing — `BORROW_TYPES`; the editor requires it, the API and a slip
+  from before leave it null), `siteLocation`, `contactNo` (for a borrower
+  with no login; a login's own number prints otherwise), and per line
+  `conditionOut` and `conditionBack`. **The return clearance** is recorded
+  by the return (`POST /:id/return { items[{itemId, quantity,
+  conditionBack}], returnedCondition, note }`): `returnedCondition`
+  (`ReturnCondition`: Complete / good, Damaged, Missing parts —
+  `RETURN_CONDITIONS`; a return that says nothing and brings everything
+  back is Complete / good), `returnNote`, `inspectedById` and `inspectedAt`
+  — whoever received it, dated; the last return's word stands. The list
+  filters by `?borrowType=` (an unknown one is a 400) and searches the site.
+  The paper "Borrower's Slip" prints the form's five sections: BORROWER'S
+  DETAILS (name, employee no., department, contact, borrowing type,
+  warehouse, needed on, expected return), EQUIPMENT & TOOL DETAILS (part
+  no., serial, condition out, what came back and how), REASON FOR BORROWING
+  (project, site, purpose, notes), the sign-offs (Requested by, the two
+  steps, Released by), and RETURN CLEARANCE — the custodian's record once
+  anything is back, else the lines left blank for them while it is out;
+  "REQUEST — NOT YET RELEASED" in the foot until then.
 - **Pull-out slips** (push 4c; the owner's call: "Pull-out Slip — approved
   Sales Order, or from Purchase Request"; "if no project was created, the
   sales order is enough"). `PulloutSlip` + `PulloutItem` (new tables;

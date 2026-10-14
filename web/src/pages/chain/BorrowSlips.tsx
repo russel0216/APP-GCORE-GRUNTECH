@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
-import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, useToast } from '../../components/ui';
+import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatDateTime, useToast } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
@@ -33,6 +33,21 @@ export const BORROW_TONES = {
   OVERDUE: 'danger',
 } as const;
 
+/** The borrowing types and return verdicts, as the API prints them (the owner's form). */
+const BORROW_TYPE_OPTIONS = [
+  { value: 'INTERNAL_OFFICE', label: 'Internal / office use' },
+  { value: 'ON_SITE_PROJECT', label: 'On-site project / customer site' },
+  { value: 'PERSONAL', label: 'Personal request' },
+  { value: 'RND_TESTING', label: 'R&D / testing' },
+];
+const RETURN_CONDITION_OPTIONS = [
+  { value: 'COMPLETE_GOOD', label: 'Complete / good' },
+  { value: 'DAMAGED', label: 'Damaged' },
+  { value: 'MISSING_PARTS', label: 'Missing parts' },
+];
+/** The conditions a tool usually leaves and comes back in; anything else may be typed. */
+const CONDITIONS = ['Good', 'Fair', 'Damaged', 'Missing parts'];
+
 const STATUS_OPTIONS = [
   { value: 'DRAFT', label: 'Draft' },
   { value: 'PENDING_APPROVAL', label: 'Pending approval' },
@@ -47,6 +62,9 @@ interface BorrowRow {
   id: string;
   number: string;
   status: string;
+  borrowType: string | null;
+  borrowTypeLabel: string | null;
+  siteLocation: string | null;
   borrowerName: string;
   requestedBy: { id: string; name: string } | null;
   purpose: string;
@@ -92,6 +110,7 @@ export function BorrowSlips() {
     },
     { key: 'warehouse', label: 'Warehouse', render: (b) => b.warehouse.name },
     { key: 'job', label: 'Project', render: (b) => b.job?.number ?? <span className="faint">—</span> },
+    { key: 'borrowType', label: 'Type', render: (b) => b.borrowTypeLabel ?? <span className="faint">—</span>, optional: true },
     {
       key: 'neededOn',
       label: 'Needed / out',
@@ -141,6 +160,8 @@ export function BorrowSlips() {
         defaultScope={warehouse ? 'all' : 'mine'}
         selectable
         filters={[
+          { key: 'borrowType', label: 'Borrowing type', options: BORROW_TYPE_OPTIONS },
+
           { key: 'status', label: 'Status', options: STATUS_OPTIONS },
           { key: 'overdue', label: 'Overdue', options: [{ value: 'true', label: 'Overdue only' }] },
         ]}
@@ -194,9 +215,10 @@ interface Line {
   itemId: string;
   quantity: string;
   serialNo: string;
+  conditionOut: string;
 }
 
-const blank = (): Line => ({ itemId: '', quantity: '1', serialNo: '' });
+const blank = (): Line => ({ itemId: '', quantity: '1', serialNo: '', conditionOut: 'Good' });
 
 /**
  * One page for a new borrow request and a draft one being modified: the
@@ -223,6 +245,9 @@ export function BorrowRequestEditor() {
     jobId: '',
     borrowerId: '',
     borrowerName: '',
+    borrowType: '',
+    siteLocation: '',
+    contactNo: '',
     neededOn: '',
     dueAt: '',
     purpose: '',
@@ -251,13 +276,20 @@ export function BorrowRequestEditor() {
             jobId: (slip.job as { id: string } | null)?.id ?? '',
             borrowerId: typeof slip.borrowerId === 'string' ? slip.borrowerId : '',
             borrowerName: String(slip.borrowerName ?? ''),
+            borrowType: typeof slip.borrowType === 'string' ? slip.borrowType : '',
+            siteLocation: typeof slip.siteLocation === 'string' ? slip.siteLocation : '',
+            contactNo: typeof slip.contactNo === 'string' ? slip.contactNo : '',
             neededOn: typeof slip.neededOn === 'string' ? slip.neededOn.slice(0, 10) : '',
             dueAt: String(slip.dueAt ?? '').slice(0, 10),
             purpose: String(slip.purpose ?? ''),
             notes: typeof slip.notes === 'string' ? slip.notes : '',
           });
-          const items = slip.items as { item: { id: string }; quantity: number; serialNo: string | null }[];
-          setLines(items.length ? items.map((i) => ({ itemId: i.item.id, quantity: String(i.quantity), serialNo: i.serialNo ?? '' })) : [blank()]);
+          const items = slip.items as { item: { id: string }; quantity: number; serialNo: string | null; conditionOut: string | null }[];
+          setLines(
+            items.length
+              ? items.map((i) => ({ itemId: i.item.id, quantity: String(i.quantity), serialNo: i.serialNo ?? '', conditionOut: i.conditionOut ?? '' }))
+              : [blank()],
+          );
         } else if (opts.warehouses.length === 1) {
           setForm((f) => ({ ...f, warehouseId: opts.warehouses[0].id }));
         }
@@ -301,6 +333,7 @@ export function BorrowRequestEditor() {
   const sent = lines.filter((l) => l.itemId && Number(l.quantity) > 0);
   const problems: string[] = [];
   if (!form.warehouseId) problems.push('choose the warehouse');
+  if (!form.borrowType) problems.push('say what kind of borrowing it is');
   if (!form.dueAt) problems.push('say when it comes back');
   if (form.purpose.trim().length < 3) problems.push('say what it is for');
   if (!sent.length) problems.push('add at least one item');
@@ -322,11 +355,14 @@ export function BorrowRequestEditor() {
       jobId: form.jobId || null,
       borrowerId: options?.mayNameBorrower ? form.borrowerId || null : null,
       borrowerName: options?.mayNameBorrower ? form.borrowerName.trim() || null : null,
+      borrowType: form.borrowType || null,
+      siteLocation: form.siteLocation.trim() || null,
+      contactNo: form.contactNo.trim() || null,
       neededOn: form.neededOn || null,
       dueAt: form.dueAt,
       purpose: form.purpose.trim(),
       notes: form.notes.trim() || null,
-      items: sent.map((l) => ({ itemId: l.itemId, quantity: Number(l.quantity), serialNo: l.serialNo.trim() || null })),
+      items: sent.map((l) => ({ itemId: l.itemId, quantity: Number(l.quantity), serialNo: l.serialNo.trim() || null, conditionOut: l.conditionOut.trim() || null })),
     };
     try {
       if (editing && existing) {
@@ -448,6 +484,22 @@ export function BorrowRequestEditor() {
               <div className="qe-static">{me?.user.name ?? 'You'}</div>
             </Field>
           )}
+          <Field label="Borrowing type" required error={attempted && !form.borrowType ? 'What kind of borrowing is it?' : null}>
+            <select value={form.borrowType} required onChange={(e) => set({ borrowType: e.target.value })}>
+              <option value="">— choose —</option>
+              {BORROW_TYPE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Contact no." hint={options.mayNameBorrower ? 'For a borrower with no login; a login’s own number prints otherwise' : 'Leave blank to print the number on your account'}>
+            <input value={form.contactNo} maxLength={80} onChange={(e) => set({ contactNo: e.target.value })} />
+          </Field>
+          <Field label="Site location" hint="Where it goes — the customer site, the office, the lab">
+            <input value={form.siteLocation} maxLength={300} onChange={(e) => set({ siteLocation: e.target.value })} />
+          </Field>
           <Field label="Needed on">
             <input type="date" value={form.neededOn} onChange={(e) => set({ neededOn: e.target.value })} />
           </Field>
@@ -493,7 +545,8 @@ export function BorrowRequestEditor() {
                   <th>Item</th>
                   <th className="right">Available</th>
                   <th className="right proc-col-input">Quantity</th>
-                  <th>Serial no.</th>
+                  <th>Asset / serial no.</th>
+                  <th>Condition out</th>
                   <th className="proc-col-actions" aria-label="Actions" />
                 </tr>
               </thead>
@@ -527,6 +580,15 @@ export function BorrowRequestEditor() {
                       <td>
                         <input aria-label={`Serial number of item ${i + 1}`} value={l.serialNo} maxLength={120} onChange={(e) => setLine(i, { serialNo: e.target.value })} />
                       </td>
+                      <td className="inc-unit-cell">
+                        <input
+                          aria-label={`Condition of item ${i + 1} as it leaves`}
+                          list="borrow-conditions"
+                          value={l.conditionOut}
+                          maxLength={80}
+                          onChange={(e) => setLine(i, { conditionOut: e.target.value })}
+                        />
+                      </td>
                       <td>
                         <div className="proc-row-actions">
                           {/* An unsaved row of this form: nothing on record is lost, so no question. */}
@@ -552,6 +614,12 @@ export function BorrowRequestEditor() {
         )}
       </section>
 
+      <datalist id="borrow-conditions">
+        {CONDITIONS.map((c) => (
+          <option key={c} value={c} />
+        ))}
+      </datalist>
+
       <div className="page-foot">{saveButton}</div>
     </div>
   );
@@ -567,7 +635,9 @@ interface SlipItem {
   returnedQty: number;
   outstandingQty: number;
   serialNo: string | null;
-  item: { id: string; code: string; name: string; unit: string };
+  conditionOut: string | null;
+  conditionBack: string | null;
+  item: { id: string; code: string; partNumber: string | null; brand: string | null; name: string; unit: string };
 }
 
 export function BorrowSlipDetail() {
@@ -578,6 +648,9 @@ export function BorrowSlipDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [returns, setReturns] = useState<Record<string, string>>({});
+  const [backConditions, setBackConditions] = useState<Record<string, string>>({});
+  const [verdict, setVerdict] = useState('COMPLETE_GOOD');
+  const [returnNote, setReturnNote] = useState('');
   const [modifying, setModifying] = useState(false);
   const [reload, setReload] = useState(0);
 
@@ -588,6 +661,7 @@ export function BorrowSlipDetail() {
       setSlip(s);
       const items = s.items as SlipItem[];
       setReturns(Object.fromEntries(items.map((i) => [i.id, i.outstandingQty ? String(i.outstandingQty) : ''])));
+      setBackConditions(Object.fromEntries(items.map((i) => [i.id, i.conditionBack ?? (i.outstandingQty ? 'Good' : '')])));
       setError(null);
     } catch (err) {
       setError(err);
@@ -615,6 +689,8 @@ export function BorrowSlipDetail() {
   const notes = typeof slip.notes === 'string' && slip.notes ? slip.notes : null;
   const canReturn = slip.canReturn === true;
   const neededOn = typeof slip.neededOn === 'string' ? slip.neededOn : null;
+  const text = (k: string) => (typeof slip[k] === 'string' && slip[k] ? (slip[k] as string) : null);
+  const inspectedBy = slip.inspectedBy as { id: string; name: string } | null;
 
   /** Asked in the confirm bar, which shows a refusal — so these throw rather than catching. */
   async function submit() {
@@ -640,8 +716,13 @@ export function BorrowSlipDetail() {
   async function receiveBack() {
     try {
       await api.post(`/borrow-slips/${id}/return`, {
-        items: items.filter((i) => Number(returns[i.id]) > 0).map((i) => ({ itemId: i.id, quantity: Number(returns[i.id]) })),
+        items: items
+          .filter((i) => Number(returns[i.id]) > 0)
+          .map((i) => ({ itemId: i.id, quantity: Number(returns[i.id]), conditionBack: backConditions[i.id]?.trim() || null })),
+        returnedCondition: verdict || null,
+        note: returnNote.trim() || null,
       });
+      setReturnNote('');
       toast('ok', 'Returned to stock');
       await load();
     } catch (err) {
@@ -764,12 +845,32 @@ export function BorrowSlipDetail() {
         <div className="alert warn">Cancelled — {slip.cancelReason}</div>
       )}
 
-      {notes && (
-        <div className="card proc-card">
-          <h3 className="card-title">Notes</h3>
-          <p className="activity-notes">{notes}</p>
-        </div>
-      )}
+      <div className="card">
+        <h3 className="card-title">Borrower's details</h3>
+        <dl className="kv">
+          <dt>Borrower</dt>
+          <dd>
+            {String(slip.borrowerName)}
+            {requestedBy && requestedBy.name !== slip.borrowerName ? <span className="muted"> · asked by {requestedBy.name}</span> : null}
+          </dd>
+          <dt>Borrowing type</dt>
+          <dd>{text('borrowTypeLabel') ?? '—'}</dd>
+          <dt>Contact no.</dt>
+          <dd>{text('contactNo') ?? <span className="muted">on their account</span>}</dd>
+          <dt>Project / customer</dt>
+          <dd>{job ? <Link to={`/g-ops/projects/${job.id}`}>{job.number}</Link> : '—'}</dd>
+          <dt>Site location</dt>
+          <dd>{text('siteLocation') ?? '—'}</dd>
+          <dt>Purpose</dt>
+          <dd>{String(slip.purpose)}</dd>
+          {notes && (
+            <>
+              <dt>Notes</dt>
+              <dd className="activity-notes">{notes}</dd>
+            </>
+          )}
+        </dl>
+      </div>
 
       <div className="card">
         <h3 className="card-title">{issuedBy ? 'Items on loan' : 'Items asked for'}</h3>
@@ -778,10 +879,13 @@ export function BorrowSlipDetail() {
             <thead>
               <tr>
                 <th>Item</th>
+                <th>Condition out</th>
                 <th className="right">{issuedBy ? 'Lent' : 'Asked'}</th>
                 {issuedBy && <th className="right">Back</th>}
+                {issuedBy && <th>Condition back</th>}
                 {issuedBy && <th className="right">Still out</th>}
                 {canReturn && <th className="right proc-col-input">Returning now</th>}
+                {canReturn && <th>As it comes back</th>}
               </tr>
             </thead>
             <tbody>
@@ -790,14 +894,17 @@ export function BorrowSlipDetail() {
                   <td>
                     <div>{i.item.name}</div>
                     <div className="faint mono">
-                      {i.item.code}
+                      {i.item.partNumber ?? i.item.code}
+                      {i.item.brand ? ` · ${i.item.brand}` : ''}
                       {i.serialNo ? ` · ${i.serialNo}` : ''}
                     </div>
                   </td>
+                  <td>{i.conditionOut ?? <span className="faint">—</span>}</td>
                   <td className="right mono">
                     {i.quantity} {i.item.unit}
                   </td>
                   {issuedBy && <td className="right mono faint">{i.returnedQty || '—'}</td>}
+                  {issuedBy && <td>{i.conditionBack ?? <span className="faint">—</span>}</td>}
                   {issuedBy && <td className="right mono">{i.outstandingQty || '—'}</td>}
                   {canReturn && (
                     <td>
@@ -812,13 +919,45 @@ export function BorrowSlipDetail() {
                       />
                     </td>
                   )}
+                  {canReturn && (
+                    <td className="inc-unit-cell">
+                      <input
+                        aria-label={`Condition of ${i.item.name} as it comes back`}
+                        list="borrow-conditions"
+                        value={backConditions[i.id] ?? ''}
+                        maxLength={80}
+                        onChange={(e) => setBackConditions({ ...backConditions, [i.id]: e.target.value })}
+                      />
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
 
-        {/* The card's own act, at its foot under the quantities it takes. */}
+        {/* The return clearance (the owner's form): the custodian's verdict and note, then the card's own act at its foot. */}
+        {canReturn && (
+          <div className="qe-rows proc-card-note">
+            <Field label="Returned condition" hint="The custodian's verdict on what is coming back now">
+              <select value={verdict} onChange={(e) => setVerdict(e.target.value)}>
+                {RETURN_CONDITION_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Inspection note" hint="What was damaged or missing, if anything">
+              <input value={returnNote} maxLength={2000} onChange={(e) => setReturnNote(e.target.value)} />
+            </Field>
+            <datalist id="borrow-conditions">
+              {CONDITIONS.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
+          </div>
+        )}
         {canReturn && (
           <div className="proc-row-actions proc-card-note">
             <button className="btn btn-sm btn-primary" onClick={receiveBack}>
@@ -835,6 +974,29 @@ export function BorrowSlipDetail() {
         )}
       </div>
 
+      {inspectedBy && (
+        <div className="card">
+          <h3 className="card-title">Return clearance</h3>
+          <dl className="kv">
+            <dt>Actual return date</dt>
+            <dd>{typeof slip.returnedAt === 'string' ? formatDate(slip.returnedAt) : <span className="muted">part returned — the rest still out</span>}</dd>
+            <dt>Returned condition</dt>
+            <dd>{text('returnedConditionLabel') ?? '—'}</dd>
+            <dt>Inspected by</dt>
+            <dd>
+              {inspectedBy.name}
+              {typeof slip.inspectedAt === 'string' ? <span className="muted"> · {formatDateTime(slip.inspectedAt)}</span> : null}
+            </dd>
+            {text('returnNote') && (
+              <>
+                <dt>Note</dt>
+                <dd>{text('returnNote')}</dd>
+              </>
+            )}
+          </dl>
+        </div>
+      )}
+
       {modifying && (
         <ModifySlipModal
           slip={{
@@ -844,6 +1006,9 @@ export function BorrowSlipDetail() {
             dueAt: String(slip.dueAt),
             purpose: String(slip.purpose),
             notes,
+            borrowType: text('borrowType') ?? '',
+            siteLocation: text('siteLocation') ?? '',
+            contactNo: text('contactNo') ?? '',
           }}
           onClose={() => setModifying(false)}
           onSaved={() => {
@@ -867,7 +1032,7 @@ function ModifySlipModal({
   onClose,
   onSaved,
 }: {
-  slip: { id: string; number: string; borrowerName: string; dueAt: string; purpose: string; notes: string | null };
+  slip: { id: string; number: string; borrowerName: string; dueAt: string; purpose: string; notes: string | null; borrowType: string; siteLocation: string; contactNo: string };
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -879,6 +1044,9 @@ function ModifySlipModal({
     dueAt: slip.dueAt.slice(0, 10),
     purpose: slip.purpose,
     notes: slip.notes ?? '',
+    borrowType: slip.borrowType,
+    siteLocation: slip.siteLocation,
+    contactNo: slip.contactNo,
   });
 
   async function save() {
@@ -890,6 +1058,9 @@ function ModifySlipModal({
         dueAt: form.dueAt,
         purpose: form.purpose.trim(),
         notes: form.notes.trim() || null,
+        borrowType: form.borrowType || null,
+        siteLocation: form.siteLocation.trim() || null,
+        contactNo: form.contactNo.trim() || null,
       });
       toast('ok', `${slip.number} updated`);
       onSaved();
@@ -925,6 +1096,24 @@ function ModifySlipModal({
           <input type="date" value={form.dueAt} onChange={(e) => setForm({ ...form, dueAt: e.target.value })} />
         </Field>
       </div>
+      <div className="grid grid-2">
+        <Field label="Borrowing type">
+          <select value={form.borrowType} onChange={(e) => setForm({ ...form, borrowType: e.target.value })}>
+            <option value="">— not said —</option>
+            {BORROW_TYPE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Contact no.">
+          <input value={form.contactNo} maxLength={80} onChange={(e) => setForm({ ...form, contactNo: e.target.value })} />
+        </Field>
+      </div>
+      <Field label="Site location">
+        <input value={form.siteLocation} maxLength={300} onChange={(e) => setForm({ ...form, siteLocation: e.target.value })} />
+      </Field>
       <Field label="Purpose">
         <input value={form.purpose} onChange={(e) => setForm({ ...form, purpose: e.target.value })} />
       </Field>
