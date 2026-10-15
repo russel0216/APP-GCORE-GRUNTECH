@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { CommissionsCard } from '../finance/Commissions';
 import { api, type ListResult } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import {
@@ -766,6 +767,7 @@ export function ProjectWorkspace() {
           )}
         </div>
         <ProgressBillingsCard job={job} totalBilled={s.billed} onChanged={() => void load()} />
+        <CommissionsCard jobId={job.id} />
         </div>
       )}
 

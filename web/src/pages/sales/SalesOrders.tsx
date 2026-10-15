@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import { CommissionsCard } from '../finance/Commissions';
 import { ContactPicker, type ContactRef } from '../../components/ContactPicker';
 import { MemoryInput, ORDER_MEMORY } from '../../components/MemoryInput';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -760,6 +761,8 @@ export function SalesOrderDetail() {
       {order.status === 'ISSUED' && order.invoicing && <InvoicingCard order={order} invoicing={order.invoicing} />}
 
       <PulloutCard salesOrderId={order.id} />
+
+      <CommissionsCard salesOrderId={order.id} />
 
       {requesting && (
         <InvoiceRequestModal

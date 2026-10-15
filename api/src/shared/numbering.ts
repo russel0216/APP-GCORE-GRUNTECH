@@ -98,6 +98,8 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   { type: 'official_receipt', code: 'OR', label: 'Official Receipt' },
   { type: 'expense', code: 'EXP', label: 'Expense Claim' },
   { type: 'cash_advance', code: 'CA', label: 'Cash Advance' },
+  // A sales order's commission, raised once it is fully collected (2026-10-16).
+  { type: 'commission_request', code: 'RFC', label: 'Commission Request' },
   { type: 'installed_asset', code: 'AST', label: 'Installed Asset' },
   { type: 'service_contract', code: 'SC', label: 'Service Contract' },
   { type: 'service_visit', code: 'SV', label: 'Service Visit' },

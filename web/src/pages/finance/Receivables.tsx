@@ -1992,6 +1992,8 @@ interface Allocation {
   claim: { id: string; number: string } | null;
   advance: { id: string; number: string } | null;
   budgetRequest: { id: string; number: string } | null;
+  /** A commission's payout (2026-10-16). */
+  commission?: { id: string; number: string } | null;
 }
 
 interface PaymentRow {
@@ -2038,6 +2040,7 @@ function allocationTarget(a: Allocation, paymentKind: string): { to: string; num
       what: paymentKind === 'RECEIPT' ? 'Budget request refund' : 'Budget request release',
     };
   }
+  if (a.commission) return { to: `/g-fin/commissions/${a.commission.id}`, number: a.commission.number, what: 'Commission payout' };
   return null;
 }
 

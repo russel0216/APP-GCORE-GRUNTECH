@@ -56,6 +56,10 @@ import '../src/routes/budgetRequests';
 import '../src/routes/procurement';
 // Side-effect import: registers the invoice_request approval subscriber.
 import { settleInvoiceRequest } from '../src/routes/invoiceRequests';
+// Side-effect import: registers the commission approval subscriber (2026-10-16).
+import '../src/routes/commissions';
+import { commissionFigures } from '../src/shared/commission';
+import { commissionFigures as webCommissionFigures } from '../../web/src/lib/commission';
 import {
   flat,
   hasLine,
@@ -164,6 +168,14 @@ async function cleanup() {
     await prisma.payment.deleteMany({
       where: { id: { in: [...new Set(allocations.map((a) => a.paymentId))] } },
     });
+  }
+  // Commission payouts hold their shares (Restrict); the requests hold the order.
+  const commissions = await prisma.commissionRequest.findMany({ where: { customer: { name: { startsWith: TAG } } }, select: { id: true } });
+  if (commissions.length) {
+    const payouts = await prisma.paymentAllocation.findMany({ where: { commissionShare: { requestId: { in: commissions.map((c) => c.id) } } }, select: { paymentId: true } });
+    await prisma.payment.deleteMany({ where: { id: { in: [...new Set(payouts.map((p) => p.paymentId))] } } });
+    await prisma.auditLog.deleteMany({ where: { entityType: 'commission', entityId: { in: commissions.map((c) => c.id) } } });
+    await prisma.commissionRequest.deleteMany({ where: { id: { in: commissions.map((c) => c.id) } } });
   }
   // A collection with only lines typed by hand settles nothing, so it is found by its customer.
   await prisma.payment.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
@@ -1543,6 +1555,57 @@ async function main() {
   const a5 = await newAdvance(pm, 1_000, 'somebody else');
 
   // ══ Route guards, over HTTP ══════════════════════════════════════════════
+  // ══ Commission arithmetic (2026-10-16) ══════════════════════════════════
+  console.log('\nCommissions — the owner’s sample, worked through shared/commission.ts and its web copy');
+  const sampleInput = {
+    totalAmount: 1_120_000,
+    vatAmount: 120_000,
+    totalCost: 650_000,
+    collectedAmount: 1_120_000,
+    ratePct: 0.1,
+    shares: [
+      { sharePct: 0.6, taxPct: 0.1, caDeduction: 3_000 },
+      { sharePct: 0.4, taxPct: 0.1, caDeduction: 0 },
+    ],
+  };
+  const sample = commissionFigures(sampleInput);
+  check(
+    'actual margin = collected − VAT − cost = 350,000; 10% of it is 35,000 gross',
+    money(sample.netOfVat, 1_000_000) && money(sample.margin, 350_000) && money(sample.grossCommission, 35_000),
+    JSON.stringify(sample).slice(0, 200),
+  );
+  check(
+    'Brian 60%: 21,000 less 2,100 tax and 3,000 CA = 15,900; Sarah 40%: 14,000 less 1,400 = 12,600',
+    money(sample.shares[0].share, 21_000) && money(sample.shares[0].tax, 2_100) && money(sample.shares[0].net, 15_900) &&
+      money(sample.shares[1].share, 14_000) && money(sample.shares[1].tax, 1_400) && money(sample.shares[1].net, 12_600),
+    JSON.stringify(sample.shares),
+  );
+  check(
+    'the totals are 35,000 / 3,500 / 3,000 / 28,500',
+    money(sample.totalShare, 35_000) && money(sample.totalTax, 3_500) && money(sample.totalCa, 3_000) && money(sample.totalNet, 28_500) && sample.sharesComplete,
+  );
+  const thirds = commissionFigures({ ...sampleInput, totalCost: 650_000.01, ratePct: 0.0733, shares: [1, 2, 3].map(() => ({ sharePct: 0.333333, taxPct: 0.1, caDeduction: 0 })).map((x, i) => (i === 2 ? { ...x, sharePct: 0.333334 } : x)) });
+  check('three awkward thirds still add up to the gross to the centavo', money(thirds.totalShare, thirds.grossCommission), `${thirds.totalShare} vs ${thirds.grossCommission}`);
+  let mirrorSame = true;
+  for (let i = 0; i < 300; i++) {
+    const r = (n: number) => Math.round(Math.random() * n * 100) / 100;
+    const k = 1 + Math.floor(Math.random() * 4);
+    const raw = Array.from({ length: k }, () => 1 + Math.floor(Math.random() * 100));
+    const sumRaw = raw.reduce((a, b) => a + b, 0);
+    const pcts = raw.map((x) => Math.round((x / sumRaw) * 1_000_000) / 1_000_000);
+    pcts[k - 1] = Math.round((1 - pcts.slice(0, -1).reduce((a, b) => a + b, 0)) * 1_000_000) / 1_000_000;
+    const input = {
+      totalAmount: r(5_000_000),
+      vatAmount: r(500_000),
+      totalCost: r(3_000_000),
+      collectedAmount: r(5_000_000),
+      ratePct: Math.round(Math.random() * 200_000) / 1_000_000,
+      shares: pcts.map((p) => ({ sharePct: p, taxPct: [0.1, 0.05, 0.15][i % 3], caDeduction: r(1_000) })),
+    };
+    if (JSON.stringify(commissionFigures(input)) !== JSON.stringify(webCommissionFigures(input))) mirrorSame = false;
+  }
+  check('the web copy (lib/commission.ts) gives the same figures on 300 random requests', mirrorSame);
+
   console.log('\nRoute guards (over HTTP)');
 
   const reachable = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(3000) })
@@ -4481,6 +4544,118 @@ async function main() {
     } else {
       check('the issued invoice could be cancelled for the next case', false, cancelledInv.status);
     }
+    // ══ Commissions (2026-10-16) ══════════════════════════════════════════
+    console.log('\nCommissions — fully collected first, Finance Manager then CEO, paid with the CA deduction repaid');
+    const cmSeller = await makeUser('ZZ CM Seller', 'cmseller@verifyf.local', ['sales']);
+    const cmQuote = await prisma.quotation.create({ data: { number: `${TAG}-Q-CM1`, customerId: customer.id, ownerId: cmSeller.id, subject: `${TAG} CM DEAL` } });
+    const cmOrder = await prisma.salesOrder.create({
+      data: {
+        number: `${TAG}-SO-CM1`,
+        status: 'ISSUED',
+        quotationId: cmQuote.id,
+        customerId: customer.id,
+        ownerId: cmSeller.id,
+        orderDate: dayKey(new Date()),
+        vatRate: D(0.12),
+        subtotal: D(1_000_000),
+        vatAmount: D(120_000),
+        total: D(1_120_000),
+        lines: { create: [{ title: 'COMPRESSOR PACKAGE', quantity: D(1), unitPrice: D(1_000_000), amount: D(1_000_000), unitCost: D(650_000), costAmount: D(650_000) }] },
+      },
+    });
+    const cmInvoice = await prisma.invoice.create({
+      data: {
+        number: await nextNumber('invoice'),
+        customerId: customer.id,
+        salesOrderId: cmOrder.id,
+        invoiceDate: dayKey(new Date()),
+        counteredDate: dayKey(new Date()),
+        dueDate: addDays(dayKey(new Date()), 30),
+        grossAmount: D(1_000_000),
+        vatRate: D(0.12),
+        vatAmount: D(120_000),
+        ewtRate: D(0),
+        ewtAmount: D(0),
+        invoiceTotal: D(1_120_000),
+        netCollectible: D(1_120_000),
+        status: 'ISSUED',
+        issuedAt: new Date(),
+        createdById: finance.id,
+      },
+    });
+    const cmAs = as(cmSeller);
+    const cmBody = (caDeduction: number) => ({
+      salesOrderId: cmOrder.id,
+      commissionType: 'GROUP',
+      ratePct: 0.1,
+      shares: [
+        { userId: cmSeller.id, sharePct: 0.6, taxPct: 0.1, caDeduction: 0 },
+        { userId: engineer.id, sharePct: 0.4, taxPct: 0.1, caDeduction },
+      ],
+    });
+    const cmEarly = await cmAs('POST', '/commissions', cmBody(0));
+    const earlySrc = await cmAs('GET', `/commissions/source?salesOrderId=${cmOrder.id}`);
+    check(
+      'a commission is refused while the order is not fully collected, and the source says why',
+      cmEarly.status === 400 && /not fully collected/.test(String(cmEarly.body.error)) && earlySrc.body.fullyCollected === false,
+      `${cmEarly.status} ${cmEarly.body.error}`,
+    );
+    const collect = await fin('POST', '/payments', { kind: 'RECEIPT', method: 'CHECK', reference: `${TAG}-CHK`, allocations: [{ kind: 'invoice', id: cmInvoice.id, amount: 1_120_000 }] });
+    const src = await cmAs('GET', `/commissions/source?salesOrderId=${cmOrder.id}`);
+    check(
+      'collected in full: the source reads margin 350,000, the OR number, and offers the order’s author',
+      collect.status === 201 && src.body.fullyCollected === true && money(src.body.margin, 350_000) &&
+        (src.body.orNumbers as string[]).includes(String(collect.body.orNumber)) &&
+        (src.body.people as { id: string; roles: string[] }[]).some((p) => p.id === cmSeller.id && p.roles.includes('Sales order')),
+      `${collect.status} ${src.body.fullyCollected} ${src.body.margin} ${JSON.stringify(src.body.orNumbers)}`,
+    );
+    const engLoan = await prisma.cashAdvance.findFirst({ where: { requestedById: engineer.id, repayable: true, status: 'RELEASED' } });
+    const engOwed = engLoan ? cents(num(engLoan.amountReleased) - num(engLoan.amountRefunded)) : 0;
+    const tooBig = await cmAs('POST', '/commissions', cmBody(cents(engOwed + 100)));
+    check('a CA deduction past the person’s open advance balance is refused', !!engLoan && tooBig.status === 400 && /left to repay/.test(String(tooBig.body.error)), `${engOwed} ${tooBig.status} ${tooBig.body.error}`);
+    const caTake = Math.min(2_000, engOwed);
+    const rfc = await cmAs('POST', '/commissions', cmBody(caTake));
+    const twice = await cmAs('POST', '/commissions', cmBody(0));
+    check(
+      'raised: 35,000 gross; 21,000 − 2,100 and 14,000 − 1,400 − the CA; one standing request per order',
+      rfc.status === 201 && /RFC/.test(String(rfc.body.number)) && money(rfc.body.grossCommission, 35_000) &&
+        money(rfc.body.shares?.[0]?.net, 18_900) && money(rfc.body.shares?.[1]?.net, cents(12_600 - caTake)) && twice.status === 400,
+      `${rfc.status} ${rfc.body.error ?? ''} ${rfc.body.number} ${rfc.body.grossCommission} · ${twice.status}`,
+    );
+    await cmAs('POST', `/commissions/${rfc.body.id}/submit`);
+    const cmReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'commission', documentId: String(rfc.body.id), status: 'PENDING' } });
+    const cmRoute = await stepNames(cmReq?.workflowId ?? null);
+    check('the route is the Finance Manager, then the CEO / President', JSON.stringify(cmRoute) === JSON.stringify(['FINANCE MANAGER', 'CEO / PRESIDENT']), JSON.stringify(cmRoute));
+    const earlyPay = await fin('POST', `/commissions/${rfc.body.id}/pay`, {});
+    await settle(cmReq!.id);
+    const approvedCm = await prisma.commissionRequest.findUniqueOrThrow({ where: { id: String(rfc.body.id) } });
+    check('a pending commission is not paid; both signatures make it APPROVED', earlyPay.status === 400 && approvedCm.status === 'APPROVED', `${earlyPay.status} ${approvedCm.status}`);
+    const paid = await fin('POST', `/commissions/${rfc.body.id}/pay`, { method: 'BANK_TRANSFER' });
+    const vouchers = await prisma.paymentAllocation.findMany({ where: { commissionShare: { requestId: String(rfc.body.id) } }, include: { payment: true } });
+    const loanAfter = await prisma.cashAdvance.findUniqueOrThrow({ where: { id: engLoan!.id } });
+    const deductionPay = await prisma.payment.findFirst({ where: { method: 'COMMISSION_DEDUCTION', allocations: { some: { advanceId: engLoan!.id } } }, orderBy: { createdAt: 'desc' } });
+    check(
+      'paid: a voucher per person for their net, the CA deduction recorded as a repayment of the advance',
+      paid.status === 200 && paid.body.status === 'PAID' && vouchers.length === 2 &&
+        vouchers.every((v) => v.payment.kind === 'DISBURSEMENT') &&
+        money(vouchers.reduce((t, v) => t + num(v.amount), 0), cents(28_500 + 3_000 - caTake)) &&
+        !!deductionPay && money(num(deductionPay.amount), caTake) &&
+        money(cents(num(loanAfter.amountRefunded) - num(engLoan!.amountRefunded)), caTake),
+      `${paid.status} ${paid.body.error ?? paid.body.status} ${vouchers.length} ${loanAfter.amountRefunded}`,
+    );
+    const undoDeduction = deductionPay ? await fin('DELETE', `/payments/${deductionPay.id}`) : { status: 0, body: {} };
+    const paidTwice = await fin('POST', `/commissions/${rfc.body.id}/pay`, {});
+    check('a commission is paid once, and its deduction is not reversed on its own', paidTwice.status === 400 && undoDeduction.status === 400, `${paidTwice.status} ${undoDeduction.status}`);
+    const cmList = await fin('GET', '/commissions?pageSize=200');
+    const cmPaper = await fin('GET', `/commissions/${rfc.body.id}/pdf`);
+    const cmRep = await fin('GET', `/fin-reports/commissions?from=${todayIso}&to=${todayIso}`);
+    check(
+      'the register lists it with its cards; it prints; the report counts it',
+      cmList.status === 200 && (cmList.body.rows as { id: string }[]).some((r) => r.id === rfc.body.id) && cmList.body.summary?.paid >= 35_000 - 0.005 &&
+        cmPaper.status === 200 && !!cmPaper.bytes && cmRep.status === 200,
+      `${cmList.status} ${JSON.stringify(cmList.body.summary)} ${cmPaper.status} ${cmRep.status}`,
+    );
+
     await saveFinanceSettings({ blockAdvanceWhileUnliquidated: true });
   }
 

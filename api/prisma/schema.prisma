@@ -158,13 +158,16 @@ model User {
   accountTokens AccountToken[]
 
   lastLoginAt             DateTime?
-  createdAt               DateTime           @default(now())
-  updatedAt               DateTime           @updatedAt
-  minutesAgreements       MinutesAgreement[] @relation("MinutesAgreement")
-  issuesReceived          StockIssue[]       @relation("IssueReceivedBy")
-  billingsPrepared        ProgressBilling[]  @relation("BillingPreparer")
-  invoiceRequestsRaised   InvoiceRequest[]   @relation("InvoiceRequestRequester")
-  invoiceRequestsCredited InvoiceRequest[]   @relation("InvoiceRequestSalesperson")
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+  minutesAgreements       MinutesAgreement[]  @relation("MinutesAgreement")
+  issuesReceived          StockIssue[]        @relation("IssueReceivedBy")
+  billingsPrepared        ProgressBilling[]   @relation("BillingPreparer")
+  invoiceRequestsRaised   InvoiceRequest[]    @relation("InvoiceRequestRequester")
+  invoiceRequestsCredited InvoiceRequest[]    @relation("InvoiceRequestSalesperson")
+  commissionsRaised       CommissionRequest[] @relation("CommissionRequester")
+  commissionsCredited     CommissionRequest[] @relation("CommissionSalesperson")
+  commissionShares        CommissionShare[]   @relation("CommissionBeneficiary")
 
   @@index([isActive])
   @@index([supervisorId])
@@ -639,9 +642,10 @@ model Customer {
   jobOrders      JobOrder[]
   cadJobOrders   CadJobOrder[]
 
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-  salesOrders SalesOrder[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  salesOrders        SalesOrder[]
+  commissionRequests CommissionRequest[]
 
   @@index([isActive])
   @@index([name])
@@ -710,24 +714,25 @@ model CustomerSite {
 /// until the teams took them over; a customer is now classified by
 /// SubIndustry, and `customers` only names the rows that still carry one.
 model Industry {
-  id               String            @id @default(cuid())
-  code             String            @unique // KAT, HIT, UIT, GIB, SIT — 2–4 uppercase letters
-  name             String
-  sortOrder        Int               @default(0)
-  isSystem         Boolean           @default(false)
-  isActive         Boolean           @default(true)
-  customers        Customer[]
+  id                 String              @id @default(cuid())
+  code               String              @unique // KAT, HIT, UIT, GIB, SIT — 2–4 uppercase letters
+  name               String
+  sortOrder          Int                 @default(0)
+  isSystem           Boolean             @default(false)
+  isActive           Boolean             @default(true)
+  customers          Customer[]
   /// The people on this team (Employee.industryId).
-  employees        Employee[]
+  employees          Employee[]
   /// Quotations tagged with this team (the SCORO import, 2026-10-12).
-  quotationsTagged Quotation[]       @relation("QuotationTeam")
-  invoicesCredited Invoice[]         @relation("InvoiceTeam")
-  supporters       UserSupportTeam[]
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-  invoiceRequests  InvoiceRequest[]
-  jobOrders        JobOrder[]        @relation("JobOrderTeam")
-  cadJobOrders     CadJobOrder[]     @relation("CadJobOrderTeam")
+  quotationsTagged   Quotation[]         @relation("QuotationTeam")
+  invoicesCredited   Invoice[]           @relation("InvoiceTeam")
+  supporters         UserSupportTeam[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  commissionRequests CommissionRequest[]
+  invoiceRequests    InvoiceRequest[]
+  jobOrders          JobOrder[]          @relation("JobOrderTeam")
+  cadJobOrders       CadJobOrder[]       @relation("CadJobOrderTeam")
 }
 
 /// A customer's sub-industry (2026-10-08, the owner's eleven): Enterprise,
@@ -1593,9 +1598,10 @@ model SalesOrder {
   pulloutSlips PulloutSlip[]
   invoices     Invoice[]
 
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  invoiceRequests InvoiceRequest[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  commissionRequests CommissionRequest[]
+  invoiceRequests    InvoiceRequest[]
 
   @@index([quotationId])
   @@index([customerId])
@@ -1962,9 +1968,10 @@ model Job {
   salesActivities  SalesActivity[]
   cadJobOrders     CadJobOrder[]
 
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  invoiceRequests InvoiceRequest[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  commissionRequests CommissionRequest[]
+  invoiceRequests    InvoiceRequest[]
 
   @@index([status])
   @@index([customerId])
@@ -4206,12 +4213,12 @@ model SupplierBill {
   /// When the goods or the work were delivered (2026-10-15, the owner's A/P
   /// sample): the receiving's date where one is matched, else typed. The
   /// terms run from it — due = delivery (else the bill date) + termsDays.
-  deliveryDate DateTime? @db.Date
+  deliveryDate  DateTime? @db.Date
   /// Net days — "30 Days". `terms` stays for what printed before.
-  termsDays    Int?
+  termsDays     Int?
   /// The purchaser / buyer: the purchase order's author, else picked.
-  purchaserId  String?
-  purchaser    User?     @relation("BillPurchaser", fields: [purchaserId], references: [id], onDelete: SetNull)
+  purchaserId   String?
+  purchaser     User?     @relation("BillPurchaser", fields: [purchaserId], references: [id], onDelete: SetNull)
   /// A purchaser with no login, typed by name (2026-10-16, the owner's
   /// call); null when `purchaserId` names one.
   purchaserName String?
@@ -4423,8 +4430,9 @@ model CashAdvance {
   liquidatedAt DateTime?
   notes        String?
 
-  liquidations ExpenseClaim[]
-  allocations  PaymentAllocation[]
+  liquidations         ExpenseClaim[]
+  commissionDeductions CommissionShare[]
+  allocations          PaymentAllocation[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4451,6 +4459,9 @@ enum PaymentMethod {
   /// A cash advance repaid out of the employee's pay (2026-10-15) — entered
   /// by finance, cleared as recorded.
   SALARY_DEDUCTION
+  /// A cash advance repaid out of a commission payout (2026-10-16) —
+  /// written only by the commission's payout, cleared as recorded.
+  COMMISSION_DEDUCTION
 }
 
 /// One movement of money, allocated across one or more documents.
@@ -4494,10 +4505,11 @@ model Payment {
   recordedById String
   recordedBy   User   @relation("PaymentRecorder", fields: [recordedById], references: [id], onDelete: Restrict)
 
-  allocations PaymentAllocation[]
+  allocations       PaymentAllocation[]
   /// Lines typed by hand on a collection (2026-10-16, the owner's call): money
   /// received on account, against no invoice on file — applied to one later.
-  lines       PaymentLine[]
+  commissionPayouts CommissionShare[]   @relation("CommissionPayout")
+  lines             PaymentLine[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4550,6 +4562,11 @@ model PaymentAllocation {
   /// advance: direction comes from Payment.kind.
   budgetRequestId String?
   budgetRequest   BudgetRequest? @relation(fields: [budgetRequestId], references: [id], onDelete: Cascade)
+
+  /// A commission beneficiary's payout (2026-10-16): a DISBURSEMENT
+  /// allocation to the share, written only by POST /commissions/:id/pay.
+  commissionShareId String?
+  commissionShare   CommissionShare? @relation("CommissionAllocation", fields: [commissionShareId], references: [id], onDelete: Restrict)
 
   amount Decimal @db.Decimal(18, 2)
 
@@ -4820,17 +4837,17 @@ enum ChargeBasis {
 /// completes it. It carries no cost of its own; cost reaches its jobId through
 /// PRs, stock issues, overtime and expense claims that quote that job.
 model JobOrder {
-  id     String         @id @default(cuid())
+  id                 String         @id @default(cuid())
   /// The costing's Labor cost when the Technical Manager approved an Amount
   /// that differs from it — approval is the agreement (2026-10-16). Null when
   /// the two tallied or no costing stood behind it.
-  laborCostingAmount Decimal?  @db.Decimal(18, 2)
+  laborCostingAmount Decimal?       @db.Decimal(18, 2)
   laborAgreedById    String?
   laborAgreedAt      DateTime?
-  number String         @unique
-  status JobOrderStatus @default(DRAFT)
-  kind   ServiceKind    @default(CORRECTIVE)
-  urgent Boolean        @default(false)
+  number             String         @unique
+  status             JobOrderStatus @default(DRAFT)
+  kind               ServiceKind    @default(CORRECTIVE)
+  urgent             Boolean        @default(false)
 
   customerId String
   customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)
@@ -5285,12 +5302,12 @@ enum InvoiceRequestStatus {
 /// and the approval raises the DRAFT invoice in Accounts Receivable. The
 /// money is the billing's, never re-keyed; the order lends its PO and terms.
 model InvoiceRequest {
-  id     String               @id @default(cuid())
-  number String
+  id      String               @id @default(cuid())
+  number  String
   /// The withholding rate the invoice will carry (2026-10-16: editable, e.g.
   /// 1% or 2%); null takes the billing's, else the company's.
-  ewtRate Decimal? @db.Decimal(5, 4)
-  status InvoiceRequestStatus @default(DRAFT)
+  ewtRate Decimal?             @db.Decimal(5, 4)
+  status  InvoiceRequestStatus @default(DRAFT)
 
   /// The progress billing it asks to be invoiced — or none, when the request
   /// is raised straight from an issued sales order (2026-10-16, the owner's
@@ -5334,4 +5351,105 @@ model InvoiceRequest {
   @@index([progressBillingId, status])
   @@index([salesOrderId, status])
   @@index([status, createdAt])
+}
+
+/// COMMISSION REQUESTS (2026-10-16, the owner's "Commission Request System"):
+/// a sales order's commission, raised once the order is fully collected,
+/// split among the people who earned it, approved by the Finance Manager
+/// then the CEO / President, and paid by finance — each beneficiary's cash
+/// advance deduction recorded as a repayment of that advance.
+enum CommissionStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  PAID
+  CANCELLED
+}
+
+enum CommissionType {
+  INDIVIDUAL
+  GROUP
+}
+
+model CommissionRequest {
+  id     String           @id @default(cuid())
+  number String
+  status CommissionStatus @default(DRAFT)
+
+  salesOrderId  String
+  salesOrder    SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  customerId    String
+  customer      Customer   @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  jobId         String?
+  job           Job?       @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  requestedById String
+  requestedBy   User       @relation("CommissionRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  salespersonId String?
+  salesperson   User?      @relation("CommissionSalesperson", fields: [salespersonId], references: [id], onDelete: SetNull)
+  teamId        String?
+  team          Industry?  @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  commissionType CommissionType @default(INDIVIDUAL)
+  /// The total commission rate, a fraction (0.10 = 10%).
+  ratePct        Decimal        @default(0) @db.Decimal(9, 6)
+
+  /// The sales order's figures, snapshotted when saved (shared/commission.ts).
+  totalAmount     Decimal @default(0) @db.Decimal(18, 2)
+  netOfVat        Decimal @default(0) @db.Decimal(18, 2)
+  vatAmount       Decimal @default(0) @db.Decimal(18, 2)
+  totalCost       Decimal @default(0) @db.Decimal(18, 2)
+  margin          Decimal @default(0) @db.Decimal(18, 2)
+  collectedAmount Decimal @default(0) @db.Decimal(18, 2)
+  grossCommission Decimal @default(0) @db.Decimal(18, 2)
+  totalTax        Decimal @default(0) @db.Decimal(18, 2)
+  totalCa         Decimal @default(0) @db.Decimal(18, 2)
+  totalNet        Decimal @default(0) @db.Decimal(18, 2)
+
+  /// The collections' official receipt numbers and the latest collection's day.
+  orNumbers   String?
+  collectedOn DateTime? @db.Date
+
+  notes        String?
+  cancelReason String?
+  submittedAt  DateTime?
+  approvedAt   DateTime?
+  paidAt       DateTime?
+
+  shares CommissionShare[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([number])
+  @@index([salesOrderId])
+  @@index([requestedById])
+  @@index([status])
+}
+
+model CommissionShare {
+  id        String            @id @default(cuid())
+  requestId String
+  request   CommissionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User              @relation("CommissionBeneficiary", fields: [userId], references: [id], onDelete: Restrict)
+  position  String?
+
+  sharePct      Decimal      @default(1) @db.Decimal(9, 6)
+  share         Decimal      @default(0) @db.Decimal(18, 2)
+  taxPct        Decimal      @default(0.1) @db.Decimal(9, 6)
+  tax           Decimal      @default(0) @db.Decimal(18, 2)
+  caDeduction   Decimal      @default(0) @db.Decimal(18, 2)
+  /// The repayable cash advance the deduction repays.
+  cashAdvanceId String?
+  cashAdvance   CashAdvance? @relation(fields: [cashAdvanceId], references: [id], onDelete: SetNull)
+  net           Decimal      @default(0) @db.Decimal(18, 2)
+  sortOrder     Int          @default(0)
+
+  /// The payout voucher, once paid.
+  paymentId   String?
+  payment     Payment?            @relation("CommissionPayout", fields: [paymentId], references: [id], onDelete: SetNull)
+  allocations PaymentAllocation[] @relation("CommissionAllocation")
+
+  @@index([requestId])
+  @@index([userId])
 }

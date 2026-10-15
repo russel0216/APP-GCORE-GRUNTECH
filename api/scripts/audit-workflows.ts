@@ -18,6 +18,8 @@ import { prisma } from '../src/prisma';
  * just the realistic case, which is what a routing check has to consider.
  */
 const TYPICAL_REQUESTER: Record<string, string[]> = {
+  // A sales order's commission (2026-10-16): the salesperson or their Team Leader.
+  commission: ['sales', 'industry_specialist', 'team_leader'],
   leave_request: ['employee', 'supervisor', 'project_engineer', 'service_engineer'],
   overtime_request: ['employee', 'project_engineer', 'service_engineer'],
   // The routing sheet of 2026-10-13: Project Engineers, Industry

@@ -146,6 +146,8 @@ const ROLES: RoleSeed[] = [
       // sales order (2026-10-15) — Back Support approves it.
       ...VIEW_OWN_SELF('gfin', 'invoice_requests'),
       'gfin.invoice_requests.delete',
+      // Raises the commission on a fully collected sales order (2026-10-16).
+      ...VIEW_OWN_SELF('gfin', 'commissions'),
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       ...VIEW_OWN_SELF('ghr', 'meetings'),
@@ -505,6 +507,8 @@ const ROLES: RoleSeed[] = [
       'gops.progress_billing.view_all',
       // The invoice requests whose approval lands a draft invoice in A/R (2026-10-15).
       'gfin.invoice_requests.view_all',
+      // Pays the approved commissions (2026-10-16) — the payout is A/P's right.
+      'gfin.commissions.view_all',
       // Finance raises the supplier bill (Phase 7 notes), so it must find the
       // supplier on the bill form (SupplierPicker reads /suppliers/lookup).
       'gchain.suppliers.view_all',
@@ -692,6 +696,8 @@ const ROLES: RoleSeed[] = [
         ...VIEW_OWN_SELF('gfin', 'invoice_requests'),
         'gfin.invoice_requests.view_all',
         'gfin.invoice_requests.delete',
+        // Raises the team's commissions (2026-10-16).
+        ...VIEW_OWN_SELF('gfin', 'commissions'),
       ],
     },
     {
@@ -731,7 +737,8 @@ const ROLES: RoleSeed[] = [
       name: 'Finance Manager',
       description: 'Approves budget requests after the team leader and back support; the CEO / President follows above ₱100,000',
       grants: like('finance').grants,
-      only: [...(like('finance').only ?? []), ...VIEW_OWN_SELF('gops', 'budget_requests')],
+      // The first signature on a commission, and its keeper (2026-10-16).
+      only: [...(like('finance').only ?? []), ...VIEW_OWN_SELF('gops', 'budget_requests'), 'gfin.commissions.edit_all', 'gfin.commissions.delete'],
     },
     // The warehouse flow (2026-10-14): Incoming and Outgoing go to the
     // warehouse person's "Reports to", else a Warehouse Supervisor — who
@@ -1148,6 +1155,18 @@ const WORKFLOWS: WorkflowSeed[] = [
       { sequence: 3, name: 'Checking (Finance Staff)', approverType: 'ROLE', roleKey: 'finance' },
       { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
       { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+  },
+  {
+    // COMMISSION (2026-10-16, the owner's "Commission Request System":
+    // "Workflow Target: Finance Manager / Admin Approval"): the Finance
+    // Manager, then the CEO / President; a manager may stand in.
+    documentType: 'commission',
+    name: 'Commission — finance manager, CEO / President',
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+      { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   {

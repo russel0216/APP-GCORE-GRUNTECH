@@ -526,7 +526,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,387 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,401 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -590,11 +590,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction):
 foundation
 373, masters 92, sales 617, costing 200, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 183, chain 338, hr 480, plantilla 123, meetings
-115, evaluations 154, academy 123, finance 416, aftermarket 270, cad 122,
+115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -5540,6 +5540,85 @@ by finance; an advance already released keeps its liquidation.
 - **The report** is the `cash-advances` kind (requested in the range: granted,
   released, repaid, outstanding; by requester, team, status; repayments in
   the range by method; `gfin.cash_advances.view_all`).
+
+## Commissions (2026-10-16)
+
+The owner's "Commission Request System" spec: G-FIN › Money out ›
+**Commissions** (`gfin.commissions`, OWNED; `/g-fin/commissions`,
+`routes/commissions.ts`, `pages/finance/Commissions.tsx`, numbering type
+`commission_request`, GT-RFC-2026-0001; tables `CommissionRequest` +
+`CommissionShare`).
+
+- **Raised only on a FULLY COLLECTED sales order**: ISSUED, its live
+  (not cancelled) invoices together cover the order's net, and every one is
+  PAID. `orderSource()` is the one reading — the order's money (total, VAT,
+  net, the lines' cost through `quotationTotals`), each invoice and the
+  collections applied to it (their OR numbers and the latest day), the
+  project built from its quotation — and says in words why an order is not
+  yet eligible. `collected` is what was settled on each invoice plus the EWT
+  it withheld at source (withheld is paid to the government on our account,
+  never short-paid). One STANDING request per order (anything but
+  CANCELLED, PAID included), decided under a lock on the order's row.
+- **One arithmetic: `shared/commission.ts`** (exact in BigInt centavos,
+  half away from zero; `web/src/lib/commission.ts` its copy, pinned equal on
+  300 random requests by verify-finance): actual margin = collected − VAT −
+  total cost (the owner's banner); gross = max(0, margin) × rate; a share =
+  gross × share % with the remainder on the largest share, so the shares add
+  up to the gross; tax = share × tax % (**10% by default**, editable per
+  line); net = share − tax − CA deduction. The shares must add up to 100%;
+  INDIVIDUAL is one person at 100%. Every figure is SNAPSHOTTED on the
+  request when saved.
+- **Who raises it is `mayRaiseCommission()`** — `mayRequestInvoice`'s rule:
+  the create right AND the order's author, the quotation's owner, their
+  Team Leader ("Reports to", or a `team_leader` on the quotation's team), or
+  `edit_all`. Who reads it: `view_all`, the requester, a BENEFICIARY, or —
+  through `requireAnyOrDecider` — whoever may decide its open request.
+  Sales (and so Industry Specialists) and Team Leaders hold own-scope;
+  Finance reads all; the Finance Manager holds `edit_all` and `delete`;
+  the executive and the CEO read all.
+- **"+ Add person" offers the deal's people first** (`dealPeople()`): the
+  sales order's author, the quotation's owner, their Team Leader, the
+  project's Technical Manager, and the job orders' Technical Manager,
+  engineer, lead, support and assigned personnel — each with what they did;
+  anyone else through `PersonSelect`.
+- **A CA deduction repays the beneficiary's cash advance**: it must name one
+  of the person's open REPAYABLE advances (RELEASED) and stay within what is
+  FREE on it — the balance less the deductions other unpaid commission
+  requests already reserve (`openAdvances()`).
+- **The route is the engine's `commission`**: seeded "Commission — finance
+  manager, CEO / President" (ROLE `finance_manager`, ROLE `ceo`,
+  `standIns`). Submit / withdraw / cancel / DELETE (draft or cancelled) as
+  every routed document; `settleCommission()` claims PENDING_APPROVAL →
+  APPROVED and tells whoever may pay; a return or rejection is DRAFT again;
+  `onApprovalReopened` takes an approved one back to draft and is refused
+  once PAID.
+- **Paying is `POST /:id/pay`**, `gfin.ap.create` + `gfin.commissions.
+  view_all` (money out is A/P's right): claimed on APPROVED → PAID, and in
+  the same transaction one DISBURSEMENT voucher per beneficiary for their
+  net (a `PaymentAllocation.commissionShareId`, the share's `paymentId`),
+  and each CA deduction recorded as a repayment of the advance — a RECEIPT
+  of the new method **`COMMISSION_DEDUCTION`** allocated to it, checked
+  against what it still owes, `refreshAdvance()` deciding its status. POST
+  /payments never takes that method, and `DELETE /payments/:id` refuses a
+  commission payout or its deduction — the two are one decision.
+- **The register** (`commissionListWhere()` → `{ base, where }`): RFC No.,
+  Requester, Team, SO No. (a link), Date requested, Amount (gross, net under
+  it), Status in the stage words; the owner's five cards — Total
+  commissions paid, Pending approval, Active requests, Sales teams eligible,
+  Avg. margin rate (margin over the net of VAT, weighted by value); the
+  paper `GET /commissions/pdf`; "+ New Commission Request" and Report (the
+  `commissions` kind of G-FIN › Reports: by month, by team, by person, by
+  status, `gfin.commissions.view_all`).
+- **The editor is a page** (`/new?salesOrder=`, `/:id/edit`): the eligible
+  orders (`GET /commissions/eligible-orders`), the breakdown read-only with
+  the banner, type, rate, the beneficiaries table with its TOTALS row, Save
+  at both ends. **The record page** links the sales order, quotation,
+  project, each invoice and each collection (OR No.), shows the payout
+  vouchers, Pay as the next step when APPROVED, and Print ("Commission
+  Request" through `renderDocument`, Requested by + `approvalSlots`). A
+  **Commissions** card (`CommissionsCard`) sits on the sales order page and
+  the project's Progress & Billing tab — the register's own list, hidden
+  without its right.
 
 ## Spreadsheet attachments (2026-10-05)
 

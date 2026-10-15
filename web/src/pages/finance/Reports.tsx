@@ -452,6 +452,7 @@ export const FIN_REPORT_KINDS: readonly ReportKind[] = [
   { key: 'liquidations', label: 'Budget liquidations', list: '/g-fin/budget-liquidations' },
   { key: 'reimbursements', label: 'Reimbursements', list: '/g-fin/expenses' },
   { key: 'cash-advances', label: 'Cash advances (money lent)', list: '/g-fin/cash-advances' },
+  { key: 'commissions', label: 'Commissions', list: '/g-fin/commissions' },
 ];
 const AR_KINDS = ['receivables', 'aging', 'collection-forecast', 'collections'];
 const REQUEST_KINDS = ['budget-requests', 'liquidations', 'reimbursements', 'cash-advances'];
@@ -467,7 +468,9 @@ const KIND_RIGHT = (key: string) =>
           ? 'gfin.expenses.view_all'
           : key === 'cash-advances'
             ? 'gfin.cash_advances.view_all'
-            : 'gfin.ap.view_all';
+            : key === 'commissions'
+              ? 'gfin.commissions.view_all'
+              : 'gfin.ap.view_all';
 const ADVANCE_STATUSES = ['PENDING_APPROVAL', 'APPROVED', 'RELEASED', 'PAID', 'REFUND_DUE', 'LIQUIDATED', 'REJECTED', 'CANCELLED'];
 const CLAIM_STATUSES = ['PENDING_APPROVAL', 'APPROVED', 'REIMBURSED', 'SETTLED', 'REJECTED', 'CANCELLED'];
 const REQUEST_STATUSES = ['PENDING_APPROVAL', 'APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED', 'REJECTED', 'CANCELLED'];

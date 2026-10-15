@@ -873,6 +873,62 @@ async function paymentsOut(range: Range): Promise<Report> {
   };
 }
 
+// ── Commissions (2026-10-16) ─────────────────────────────────────────────────
+
+/**
+ * Commission requests raised in the range (drafts out): requested, approved
+ * and paid by month — paid on the day it was paid — then by team and by
+ * beneficiary (their share, tax, cash advance deduction and net), by status.
+ */
+async function commissions(range: Range): Promise<Report> {
+  const [rows, paidRows, shares] = await Promise.all([
+    prisma.commissionRequest.findMany({
+      where: { status: { not: 'DRAFT' }, createdAt: { gte: range.fromAt, lte: range.toAt } },
+      select: { status: true, createdAt: true, grossCommission: true, totalNet: true, margin: true, team: { select: { code: true } } },
+    }),
+    prisma.commissionRequest.findMany({
+      where: { status: 'PAID', paidAt: { gte: range.fromAt, lte: range.toAt } },
+      select: { paidAt: true, grossCommission: true, totalNet: true },
+    }),
+    prisma.commissionShare.findMany({
+      where: { request: { status: { in: ['PENDING_APPROVAL', 'APPROVED', 'PAID'] }, createdAt: { gte: range.fromAt, lte: range.toAt } } },
+      select: { share: true, tax: true, caDeduction: true, net: true, user: { select: { name: true } }, request: { select: { status: true } } },
+    }),
+  ]);
+  const live = rows.filter((r) => r.status !== 'CANCELLED');
+  const series = new Series('By month', [count('Requests'), money('Requested'), money('Pending'), money('Paid out (net)')], monthsOf(range));
+  for (const r of live) {
+    series.add(r.createdAt, 0, 1);
+    series.add(r.createdAt, 1, num(r.grossCommission));
+    if (r.status === 'PENDING_APPROVAL') series.add(r.createdAt, 2, num(r.grossCommission));
+  }
+  for (const r of paidRows) series.add(r.paidAt, 3, num(r.totalNet));
+  const sum = (list: { grossCommission: unknown }[]) => cents(list.reduce((s, r) => s + num(r.grossCommission as never), 0));
+  const figures = (r: (typeof live)[number]) => [1, num(r.grossCommission), num(r.totalNet)];
+  const cols = [count('Requests'), money('Gross'), money('Net')];
+  return {
+    kind: 'commissions',
+    title: 'Commission Report',
+    from: dayOf(range.from),
+    to: dayOf(range.to),
+    cards: [
+      { label: 'Commissions requested', value: sum(live), money: true, sub: `${live.length} request${live.length === 1 ? '' : 's'} in the range` },
+      { label: 'Pending approval', value: sum(live.filter((r) => r.status === 'PENDING_APPROVAL')), money: true },
+      { label: 'Paid in the range', value: cents(paidRows.reduce((s, r) => s + num(r.totalNet), 0)), money: true, sub: 'net, after tax and cash advance deductions' },
+    ],
+    series: series.done(),
+    tables: [
+      table('By team', [{ label: 'Team' }, ...cols], rowsOf(tally(live, (r) => r.team?.code ?? NO_TEAM, figures), 1)),
+      table(
+        'By person',
+        [{ label: 'Beneficiary' }, money('Share'), money('Tax'), money('CA deduction'), money('Net')],
+        rowsOf(tally(shares, (s) => s.user.name, (s) => [num(s.share), num(s.tax), num(s.caDeduction), num(s.net)]), 0),
+      ),
+      table('By status', [{ label: 'Status' }, ...cols], rowsOf(tally(rows, (r) => statusLabel(r.status), figures), 1)),
+    ],
+  };
+}
+
 const KINDS = {
   receivables,
   aging,
@@ -885,6 +941,7 @@ const KINDS = {
   reimbursements,
   'cash-advances': cashAdvances,
   payments: paymentsOut,
+  commissions,
 };
 export const FIN_REPORT_KINDS = Object.keys(KINDS);
 
@@ -904,5 +961,6 @@ mountReports(finReportRoutes, {
     'cash-advances': 'gfin.cash_advances.view_all',
     'payables-aging': 'gfin.ap.view_all',
     payments: 'gfin.ap.view_all',
+    commissions: 'gfin.commissions.view_all',
   },
 });

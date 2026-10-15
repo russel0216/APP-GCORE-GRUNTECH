@@ -88,6 +88,7 @@ import { Receivables, InvoiceDetail, Payments, PaymentDetail } from './pages/fin
 import { Payables, BillDetail } from './pages/finance/Payables';
 import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
 import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
+import { Commissions, CommissionEditor, CommissionPage } from './pages/finance/Commissions';
 import { BudgetRequests, BudgetRequestDetail, FinanceBudgetRequests, FinanceLiquidations } from './pages/delivery/BudgetRequests';
 import {
   FinanceDashboard,
@@ -1253,6 +1254,32 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* A sales order's commission, raised once fully collected (2026-10-16). */}
+        <Route
+          path="/g-fin/commissions"
+          element={
+            <GuardAny permissions={['gfin.commissions.view_all', 'gfin.commissions.view_own']}>
+              <Commissions />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-fin/commissions/new"
+          element={
+            <Guard permission="gfin.commissions.create">
+              <CommissionEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/commissions/:id/edit"
+          element={
+            <GuardAny permissions={['gfin.commissions.edit_own', 'gfin.commissions.edit_all']}>
+              <CommissionEditor />
+            </GuardAny>
+          }
+        />
+        <Route path="/g-fin/commissions/:id" element={<CommissionPage />} />
         {/* Project cash: finance's window on every project's budget requests. */}
         <Route
           path="/g-fin/budget-requests"

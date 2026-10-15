@@ -196,6 +196,10 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'ap', group: 'Money out', label: 'Accounts Payable', path: '/g-fin/ap', actions: SHARED, phase: 7 },
       { key: 'expenses', group: 'Money out', label: 'Reimbursements', path: '/g-fin/expenses', actions: OWNED, phase: 7 },
       { key: 'cash_advances', group: 'Money out', label: 'Cash Advances', path: '/g-fin/cash-advances', actions: OWNED_KEPT, phase: 7 },
+      // A sales order's commission, raised once it is fully collected, split
+      // among the people who earned it; Finance Manager then CEO / President
+      // approve it, finance pays it (2026-10-16).
+      { key: 'commissions', group: 'Money out', label: 'Commissions', path: '/g-fin/commissions', actions: OWNED, phase: 7 },
       // Project cash: the budget requests finance releases and the teams
       // liquidate. Raised on the project (gops.budget_requests); this is
       // finance's window on every one of them — awaiting release, out with a

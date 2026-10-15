@@ -3808,6 +3808,7 @@ const paymentInclude = {
       claim: { select: { id: true, number: true, total: true } },
       advance: { select: { id: true, number: true, amount: true } },
       budgetRequest: { select: { id: true, number: true, amount: true } },
+      commissionShare: { select: { id: true, request: { select: { id: true, number: true } } } },
     },
   },
   lines: { orderBy: { sortOrder: 'asc' } },
@@ -3843,6 +3844,7 @@ function presentPayment(row: PaymentRow) {
       claim: a.claim ? { ...a.claim, total: num(a.claim.total) } : null,
       advance: a.advance ? { ...a.advance, amount: num(a.advance.amount) } : null,
       budgetRequest: a.budgetRequest ? { ...a.budgetRequest, amount: num(a.budgetRequest.amount) } : null,
+      commission: a.commissionShare ? a.commissionShare.request : null,
     })),
     lines: row.lines.map((l) => ({ ...l, amount: num(l.amount) })),
     /** Received on account — typed lines settling no invoice yet. */
@@ -3997,6 +3999,7 @@ paymentRoutes.get(
               claim: { select: { number: true } },
               advance: { select: { number: true } },
               budgetRequest: { select: { number: true } },
+              commissionShare: { select: { request: { select: { number: true } } } },
             },
           },
         },
@@ -4035,7 +4038,7 @@ paymentRoutes.get(
     const only: PaymentKind | null = kind ?? (kinds.size === 1 ? [...kinds][0] : null);
     const settles = (r: (typeof rows)[number]) =>
       r.allocations
-        .map((a) => a.invoice?.number ?? a.bill?.number ?? a.claim?.number ?? a.advance?.number ?? a.budgetRequest?.number)
+        .map((a) => a.invoice?.number ?? a.bill?.number ?? a.claim?.number ?? a.advance?.number ?? a.budgetRequest?.number ?? a.commissionShare?.request.number)
         .filter(Boolean)
         .join('\n');
 
@@ -4122,8 +4125,8 @@ paymentRoutes.get(
     const party = row.customer?.name ?? row.supplier?.name ?? row.payeeUser?.name ?? '—';
     const credit = collectionCredit(row);
     const settled = row.allocations.map((a) => {
-      const t = a.invoice ?? a.bill ?? a.claim ?? a.advance ?? a.budgetRequest;
-      const what = a.invoice ? 'Sales invoice' : a.bill ? 'Supplier bill' : a.claim ? 'Expense claim' : a.advance ? 'Cash advance' : 'Budget request';
+      const t = a.invoice ?? a.bill ?? a.claim ?? a.advance ?? a.budgetRequest ?? a.commissionShare?.request;
+      const what = a.invoice ? 'Sales invoice' : a.bill ? 'Supplier bill' : a.claim ? 'Expense claim' : a.advance ? 'Cash advance' : a.budgetRequest ? 'Budget request' : 'Commission';
       return [t?.number ?? '—', what, a.invoice?.invoiceDate ? formatShortDate(a.invoice.invoiceDate) : '—', formatAmount(num(a.amount))];
     });
     // Lines typed by hand: received on account, settling no invoice yet.
@@ -4491,6 +4494,12 @@ paymentRoutes.delete(
       include: { allocations: true },
     });
     if (!payment) throw notFound('Payment not found');
+    // A commission's payout and the advance repayment it deducted are one
+    // decision, written together by POST /commissions/:id/pay (2026-10-16);
+    // reversing half of it would pay a beneficiary twice or forgive a loan.
+    if (payment.method === 'COMMISSION_DEDUCTION' || payment.allocations.some((a) => a.commissionShareId)) {
+      throw badRequest('This payment is a commission payout or its cash advance deduction — it is not reversed on its own');
+    }
 
     const touched = payment.allocations.map((a) => ({
       kind: allocationKind(a, payment.kind),
