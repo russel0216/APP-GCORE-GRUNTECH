@@ -164,6 +164,8 @@ async function cleanup() {
       where: { id: { in: [...new Set(allocations.map((a) => a.paymentId))] } },
     });
   }
+  // A collection with only lines typed by hand settles nothing, so it is found by its customer.
+  await prisma.payment.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   // Invoice requests hold their sales order (Restrict); their invoices go next.
   await prisma.invoiceRequest.deleteMany({
     where: { OR: [{ job: { customer: { name: { startsWith: TAG } } } }, { salesOrder: { customer: { name: { startsWith: TAG } } } }] },
@@ -4283,6 +4285,66 @@ async function main() {
     check('a countered date still to come is refused', future.status === 400, String(future.status));
     const siSearch = await fin('GET', `/invoices?search=${encodeURIComponent(`${TAG}SI-2`)}`);
     check('the A/R list finds an invoice by its printed number', siSearch.status === 200 && siSearch.body.total === 1, String(siSearch.body.total));
+
+    // ── A purchaser by name, and money on account (2026-10-16) ──
+    console.log('\nA purchaser typed by name; a collection line added by hand, applied later');
+    const namedBill = await fin('POST', '/supplier-bills', {
+      supplierId: supplier.id,
+      purchaserName: `${TAG} Walk-in Buyer`,
+      lines: [{ description: `${TAG} named buyer`, quantity: 1, unitPrice: 500 }],
+    });
+    const namedSearch = await fin('GET', `/supplier-bills?search=${encodeURIComponent(`${TAG} Walk-in`)}`);
+    const switched = await fin('PUT', `/supplier-bills/${namedBill.body.id}`, { purchaserId: finance.id, lines: [{ description: `${TAG} named buyer`, quantity: 1, unitPrice: 500 }] });
+    check(
+      'a bill keeps a purchaser with no login by name, is found by it, and picking a login clears the name',
+      namedBill.status === 201 &&
+        namedBill.body.purchaserName === `${TAG} Walk-in Buyer` &&
+        namedBill.body.purchaserId === null &&
+        namedSearch.body.total === 1 &&
+        switched.status === 200 &&
+        switched.body.purchaserId === finance.id &&
+        switched.body.purchaserName === null,
+      `${namedBill.status} ${namedBill.body.purchaserName} · ${namedSearch.body.total} · ${switched.status} ${switched.body.purchaserName}`,
+    );
+    const onAccount = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'CHECK',
+      customerId: customer.id,
+      reference: `${TAG}-CHQ-OA`,
+      lines: [{ reference: `${TAG} SI 7781 not yet on file`, amount: 1_500 }],
+    });
+    check(
+      'a collection with only a line typed by hand is money on account: it gets an OR, the amount, and settles nothing',
+      onAccount.status === 201 &&
+        !!onAccount.body.orNumber &&
+        money(onAccount.body.amount, 1_500) &&
+        money(onAccount.body.onAccount, 1_500) &&
+        (onAccount.body.allocations as unknown[]).length === 0 &&
+        (onAccount.body.lines as unknown[]).length === 1,
+      `${onAccount.status} ${JSON.stringify(onAccount.body).slice(0, 240)}`,
+    );
+    const outLines = await fin('POST', '/payments', { kind: 'DISBURSEMENT', supplierId: supplier.id, lines: [{ reference: 'x', amount: 1 }] });
+    const noParty = await fin('POST', '/payments', { kind: 'RECEIPT', lines: [{ reference: 'x', amount: 1 }] });
+    const nothing = await fin('POST', '/payments', { kind: 'RECEIPT', customerId: customer.id });
+    check('lines by hand are money in from a named customer only, and a payment with nothing is refused', outLines.status === 400 && noParty.status === 400 && nothing.status === 400, `${outLines.status} ${noParty.status} ${nothing.status}`);
+    const oaPaper = await fin('GET', `/payments/${onAccount.body.id}/pdf`);
+    const oaText = (oaPaper.bytes ? pdfText(oaPaper.bytes) : '').replace(/\s+/g, ' ');
+    check('the collection receipt lists the line as on account', oaPaper.status === 200 && oaText.includes('SI 7781') && oaText.includes('On account'), oaText.slice(0, 300));
+    // The invoice it was for, now on file and issued.
+    const later = await fin('POST', '/invoices', { customerId: customer.id, lines: [{ description: `${TAG} SI 7781`, amount: 1_000 }] });
+    await fin('POST', `/invoices/${later.body.id}/issue`);
+    const laterOwed = Number((await fin('GET', `/invoices/${later.body.id}`)).body.outstanding);
+    const lineId = (onAccount.body.lines as { id: string }[])[0].id;
+    const applied = await fin('POST', `/payments/${onAccount.body.id}/lines/${lineId}/apply`, { invoiceId: later.body.id });
+    const laterAfter = await fin('GET', `/invoices/${later.body.id}`);
+    check(
+      'applied to the invoice once it is on file: the invoice is paid, the line keeps only what was over',
+      applied.status === 200 &&
+        laterAfter.body.status === 'PAID' &&
+        money(applied.body.onAccount, Math.round((1_500 - laterOwed) * 100) / 100) &&
+        (applied.body.allocations as { invoiceId: string }[]).some((a) => a.invoiceId === later.body.id),
+      `${applied.status} ${laterAfter.body.status} ${applied.body.onAccount} owed ${laterOwed}`,
+    );
     await saveFinanceSettings({ blockAdvanceWhileUnliquidated: true });
   }
 

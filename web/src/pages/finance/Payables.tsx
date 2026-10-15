@@ -59,6 +59,8 @@ interface Bill {
   termsDays: number | null;
   termsLabel: string;
   purchaser: { id: string; name: string } | null;
+  /** A purchaser with no login, typed by name. */
+  purchaserName?: string | null;
   subtotal: number;
   vatRate: number;
   vatAmount: number;
@@ -248,7 +250,7 @@ export function Payables() {
     {
       key: 'purchaser',
       label: 'Purchaser / Buyer',
-      render: (r) => r.purchaser?.name ?? <span className="faint">—</span>,
+      render: (r) => r.purchaser?.name ?? r.purchaserName ?? <span className="faint">—</span>,
     },
     {
       key: 'status',
@@ -509,6 +511,9 @@ function NewBillModal({
     deliveryDate: existing?.deliveryDate?.slice(0, 10) ?? from?.receivedDate.slice(0, 10) ?? '',
     terms: existing ? existing.termsDays ?? daysFrom(existing.billDate, existing.dueDate) : 30,
     purchaserId: existing?.purchaser?.id ?? '',
+    // A purchaser with no login is typed (2026-10-16, the owner's call).
+    purchaserName: existing?.purchaserName ?? '',
+    typingPurchaser: !!existing?.purchaserName,
     vatInclusive: existing ? Math.abs(existing.subtotal - existingLineTotal) > 0.005 : false,
     ewtRate: existing?.ewtRate ?? 0,
     notes: existing?.notes ?? '',
@@ -580,7 +585,8 @@ function NewBillModal({
         deliveryDate: form.deliveryDate || null,
         termsDays: form.terms,
         // Left empty on a bill against an order, the order's author is the purchaser.
-        purchaserId: form.purchaserId || null,
+        purchaserId: form.typingPurchaser ? null : form.purchaserId || null,
+        purchaserName: form.typingPurchaser ? form.purchaserName.trim() || null : null,
         ...(existing ? { vatRate: existing.vatRate } : {}),
         vatInclusive: form.vatInclusive,
         ewtRate: form.ewtRate,
@@ -680,14 +686,41 @@ function NewBillModal({
         <Field label="Payment terms" hint={`Due ${formatDate(dueDate)} — the ${form.deliveryDate ? 'delivery' : 'bill date'} plus the terms`}>
           <TermsPicker value={form.terms} onChange={(d) => setForm({ ...form, terms: d })} />
         </Field>
-        <Field label="Purchaser / Buyer" hint={onOrder && !form.purchaserId ? "Left empty, the order's author" : undefined}>
-          <PersonSelect
-            value={form.purchaserId}
-            onChange={(id) => setForm({ ...form, purchaserId: id })}
-            people={buyers}
-            current={existing?.purchaser ?? null}
-            placeholder={onOrder ? "— the order's author —" : '— none —'}
-          />
+        <Field
+          label="Purchaser / Buyer"
+          hint={
+            <>
+              {form.typingPurchaser
+                ? 'Someone with no login, by name. '
+                : onOrder && !form.purchaserId
+                  ? "Left empty, the order's author. "
+                  : ''}
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setForm({ ...form, typingPurchaser: !form.typingPurchaser })}
+              >
+                {form.typingPurchaser ? 'Pick from the list' : 'Not on the list? Type a name'}
+              </button>
+            </>
+          }
+        >
+          {form.typingPurchaser ? (
+            <input
+              value={form.purchaserName}
+              maxLength={120}
+              placeholder="The purchaser's name"
+              onChange={(e) => setForm({ ...form, purchaserName: e.target.value })}
+            />
+          ) : (
+            <PersonSelect
+              value={form.purchaserId}
+              onChange={(id) => setForm({ ...form, purchaserId: id })}
+              people={buyers}
+              current={existing?.purchaser ?? null}
+              placeholder={onOrder ? "— the order's author —" : '— none —'}
+            />
+          )}
         </Field>
       </div>
 
@@ -726,6 +759,8 @@ function NewBillModal({
               <th className="right">Qty</th>
               <th className="right">Unit price</th>
               <th className="right">Amount</th>
+              <th className="right">VAT ({(vatRate * 100).toFixed(0)}%)</th>
+              <th className="right">Amount incl. VAT</th>
               <th className="fin-col-tight" />
             </tr>
           </thead>
@@ -769,6 +804,19 @@ function NewBillModal({
                   />
                 </td>
                 <td className="right mono">{formatMoney(l.quantity * l.unitPrice)}</td>
+                {/* Each line's VAT and amount with VAT (2026-10-16): backed out
+                    of the line when their prices include it, added otherwise. */}
+                {(() => {
+                  const amount = l.quantity * l.unitPrice;
+                  const incl = form.vatInclusive ? amount : amount * (1 + vatRate);
+                  const vat = form.vatInclusive ? amount - amount / (1 + vatRate) : amount * vatRate;
+                  return (
+                    <>
+                      <td className="right mono">{formatMoney(vat)}</td>
+                      <td className="right mono">{formatMoney(incl)}</td>
+                    </>
+                  );
+                })()}
                 <td className="right">
                   {lines.length > 1 && (
                     <button
@@ -1042,7 +1090,7 @@ export function BillDetail() {
               <dt>Payment terms</dt>
               <dd>{row.termsLabel}</dd>
               <dt>Purchaser / Buyer</dt>
-              <dd>{row.purchaser?.name ?? '—'}</dd>
+              <dd>{row.purchaser?.name ?? row.purchaserName ?? '—'}</dd>
               <dt>Due</dt>
               <dd>
                 {formatDate(row.dueDate)}

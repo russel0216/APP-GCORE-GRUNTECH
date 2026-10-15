@@ -1636,7 +1636,7 @@ function billListWhere(q: ListQuery): Prisma.SupplierBillWhereInput {
   const f = q.filters;
   if (f.supplierId) where.supplierId = f.supplierId;
   if (f.jobId) where.jobId = f.jobId;
-  if (f.purchaserId) where.purchaserId = f.purchaserId === 'none' ? null : f.purchaserId;
+  if (f.purchaserId) Object.assign(where, f.purchaserId === 'none' ? { purchaserId: null, purchaserName: null } : { purchaserId: f.purchaserId });
   const and: Prisma.SupplierBillWhereInput[] = [];
   if (f.outstanding === 'true') and.push({ status: { in: [...BILL_PAYABLE] } });
   if (f.overdue === 'true') and.push({ status: { in: [...BILL_PAYABLE] }, dueDate: { lt: dayKey(new Date()) } });
@@ -1665,6 +1665,7 @@ function billListWhere(q: ListQuery): Prisma.SupplierBillWhereInput {
       { supplierInvoiceNo: { contains: q.search, mode: 'insensitive' } },
       { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
       { purchaser: { name: { contains: q.search, mode: 'insensitive' } } },
+      { purchaserName: { contains: q.search, mode: 'insensitive' } },
       { order: { number: { contains: q.search, mode: 'insensitive' } } },
     ];
   }
@@ -1840,7 +1841,7 @@ billRoutes.get(
             bracketed(formatAmount(num(r.netPayable)), inSum),
             // Nothing is payable on a bill until it is approved.
             r.status === 'DRAFT' || r.status === 'PENDING_APPROVAL' ? '—' : bracketed(formatAmount(outstanding), inSum),
-            r.purchaser?.name ?? '—',
+            r.purchaser?.name ?? r.purchaserName ?? '—',
             statusLabel(r.status),
           ];
         }),
@@ -1920,6 +1921,8 @@ const billSchema = z.object({
   termsDays: z.number().int().min(0).max(365).optional(),
   /** The purchaser / buyer — the order's author when the bill is against one. */
   purchaserId: z.string().optional().nullable(),
+  /** A purchaser with no login, by name — used when no `purchaserId` is sent. */
+  purchaserName: z.string().trim().max(120).optional().nullable(),
   vatRate: z.number().min(0).max(1).optional(),
   vatInclusive: z.boolean().default(false),
   ewtRate: z.number().min(0).max(1).default(0),
@@ -2071,7 +2074,9 @@ billRoutes.post(
     const termsDays = body.termsDays ?? parseTermsDays(body.terms) ?? settings.defaultTermsDays;
     const dueDate = body.dueDate ? asDate(body.dueDate, 'Due date') : billDueDate(billDate, deliveryDate, termsDays);
     if (dueDate < (deliveryDate ?? billDate)) throw badRequest(deliveryDate ? 'The due date is before the delivery' : 'The due date is before the bill date');
-    const purchaserId = body.purchaserId || buyerId;
+    // A name typed for someone with no login stands in place of a login.
+    const purchaserName = !body.purchaserId && body.purchaserName ? body.purchaserName : null;
+    const purchaserId = purchaserName ? null : body.purchaserId || buyerId;
     await checkPurchaser(purchaserId);
 
     const bill = await prisma.$transaction(async (tx) => {
@@ -2088,6 +2093,7 @@ billRoutes.post(
           deliveryDate,
           termsDays,
           purchaserId: purchaserId ?? null,
+          purchaserName,
           terms: body.terms ?? `${termsDays} days`,
           ...money.figures,
           notes: body.notes || null,
@@ -2192,7 +2198,19 @@ billRoutes.put(
         ? billDueDate(billDate, deliveryDate, termsDays)
         : existing.dueDate;
     if (dueDate < (deliveryDate ?? billDate)) throw badRequest(deliveryDate ? 'The due date is before the delivery' : 'The due date is before the bill date');
-    const purchaserId = body.purchaserId === undefined ? existing.purchaserId ?? buyerId : body.purchaserId || buyerId;
+    const purchaserName =
+      body.purchaserId
+        ? null
+        : body.purchaserName === undefined
+          ? body.purchaserId === undefined
+            ? existing.purchaserName
+            : null
+          : body.purchaserName || null;
+    const purchaserId = purchaserName
+      ? null
+      : body.purchaserId === undefined
+        ? existing.purchaserId ?? buyerId
+        : body.purchaserId || buyerId;
     await checkPurchaser(purchaserId);
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -2208,6 +2226,7 @@ billRoutes.put(
           deliveryDate,
           termsDays,
           purchaserId: purchaserId ?? null,
+          purchaserName,
           terms: body.termsDays !== undefined ? `${termsDays} days` : keep(body.terms, existing.terms),
           ...money.figures,
           notes: keep(body.notes, existing.notes),
@@ -3641,6 +3660,7 @@ const paymentInclude = {
       budgetRequest: { select: { id: true, number: true, amount: true } },
     },
   },
+  lines: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.PaymentInclude;
 
 type PaymentRow = Prisma.PaymentGetPayload<{ include: typeof paymentInclude }>;
@@ -3674,6 +3694,9 @@ function presentPayment(row: PaymentRow) {
       advance: a.advance ? { ...a.advance, amount: num(a.advance.amount) } : null,
       budgetRequest: a.budgetRequest ? { ...a.budgetRequest, amount: num(a.budgetRequest.amount) } : null,
     })),
+    lines: row.lines.map((l) => ({ ...l, amount: num(l.amount) })),
+    /** Received on account — typed lines settling no invoice yet. */
+    onAccount: cents(row.lines.reduce((t, l) => t + num(l.amount), 0)),
   };
 }
 
@@ -3953,6 +3976,8 @@ paymentRoutes.get(
       const what = a.invoice ? 'Sales invoice' : a.bill ? 'Supplier bill' : a.claim ? 'Expense claim' : a.advance ? 'Cash advance' : 'Budget request';
       return [t?.number ?? '—', what, a.invoice?.invoiceDate ? formatShortDate(a.invoice.invoiceDate) : '—', formatAmount(num(a.amount))];
     });
+    // Lines typed by hand: received on account, settling no invoice yet.
+    for (const l of row.lines) settled.push([l.reference, 'On account', '—', formatAmount(num(l.amount))]);
     const sections: PdfSection[] = [
       {
         kind: 'fields',
@@ -4017,7 +4042,21 @@ const paymentSchema = z.object({
         amount: z.number().positive('An allocation must be more than zero'),
       }),
     )
-    .min(1, 'Say which documents this payment settles'),
+    .default([]),
+  /**
+   * Lines typed by hand on a customer's collection (2026-10-16, the owner's
+   * call): a reference and an amount received on account, against no invoice
+   * on file — applied to one later.
+   */
+  lines: z
+    .array(
+      z.object({
+        reference: z.string().trim().min(1, 'Every line needs a reference — an SI no. or what it is for').max(200),
+        amount: z.number().positive('A line must be more than zero'),
+      }),
+    )
+    .max(50)
+    .default([]),
 });
 
 /**
@@ -4033,6 +4072,10 @@ paymentRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(paymentSchema, req.body);
+    if (!body.allocations.length && !body.lines.length) throw badRequest('Say which documents this payment settles, or add a line by hand');
+    if (body.lines.length && (body.kind !== 'RECEIPT' || body.method === 'SALARY_DEDUCTION')) {
+      throw badRequest('Lines typed by hand are a customer’s money received on account — record a disbursement against its documents');
+    }
 
     // Recording money in and recording money out are different rights.
     const needed = body.kind === 'RECEIPT' ? 'gfin.ar.create' : 'gfin.ap.create';
@@ -4056,7 +4099,7 @@ paymentRoutes.post(
       throw badRequest('A disbursement settles supplier bills, expense claims, cash advances or budget requests, not money coming in.');
     }
 
-    const amount = cents(body.allocations.reduce((s, a) => s + a.amount, 0));
+    const amount = cents(body.allocations.reduce((s, a) => s + a.amount, 0) + body.lines.reduce((s, l) => s + cents(l.amount), 0));
     if (amount <= 0) throw badRequest('The payment must be more than zero');
 
     // Every allocation is checked against what is actually still owed, before
@@ -4091,7 +4134,13 @@ paymentRoutes.post(
     // G-CORE in the same transaction (2026-10-15, the owner's call). It is
     // from ONE customer — the invoices', named on the payment whether or not
     // the form said so.
-    const collection = body.kind === 'RECEIPT' && body.allocations.some((a) => a.kind === 'invoice');
+    const collection = body.kind === 'RECEIPT' && (body.allocations.some((a) => a.kind === 'invoice') || body.lines.length > 0);
+    if (body.lines.length && !body.customerId && !body.allocations.some((a) => a.kind === 'invoice')) {
+      throw badRequest('Money received on account is a customer’s — say which company paid');
+    }
+    if (body.lines.length && body.customerId && !(await prisma.customer.findUnique({ where: { id: body.customerId }, select: { id: true } }))) {
+      throw badRequest('That customer does not exist');
+    }
     if (collection) {
       const invoiceIds = body.allocations.filter((a) => a.kind === 'invoice').map((a) => a.id);
       const owners = await prisma.invoice.findMany({ where: { id: { in: invoiceIds } }, select: { customerId: true }, distinct: ['customerId'] });
@@ -4135,6 +4184,7 @@ paymentRoutes.post(
               amount: D(a.amount),
             })),
           },
+          lines: { create: body.lines.map((l, i) => ({ sortOrder: i, reference: l.reference, amount: D(cents(l.amount)) })) },
         },
         include: paymentInclude,
       });
@@ -4201,11 +4251,54 @@ paymentRoutes.post(
         entityType: 'payment',
         entityId: payment.id,
         action: 'CREATED',
-        summary: `${payment.number}${payment.orNumber ? ` (OR ${payment.orNumber})` : ''} — ${amount} ${body.kind === 'RECEIPT' ? 'received' : 'paid'} across ${body.allocations.length} document(s)`,
+        summary: `${payment.number}${payment.orNumber ? ` (OR ${payment.orNumber})` : ''} — ${amount} ${body.kind === 'RECEIPT' ? 'received' : 'paid'} across ${body.allocations.length} document(s)${body.lines.length ? `, ${body.lines.length} line(s) on account` : ''}`,
       },
       req,
     );
     res.status(201).json(presentPayment(payment));
+  }),
+);
+
+/**
+ * Applying money received on account to an invoice once it is on file
+ * (2026-10-16): the line's amount — or part of it — becomes an allocation on
+ * the same payment, never past the invoice's outstanding, the same customer's
+ * invoice only; the line shrinks or goes. Settled totals re-derive as ever.
+ */
+paymentRoutes.post(
+  '/:id/lines/:lineId/apply',
+  require_('gfin.ar.create'),
+  handler(async (req, res) => {
+    const body = parseBody(z.object({ invoiceId: z.string().min(1, 'Which invoice?'), amount: z.number().positive().optional() }), req.body);
+    const payment = await prisma.payment.findUnique({ where: { id: req.params.id }, include: { lines: true } });
+    if (!payment) throw notFound('Payment not found');
+    const line = payment.lines.find((l) => l.id === req.params.lineId);
+    if (!line) throw notFound('That line is not on this payment');
+    const invoice = await prisma.invoice.findUnique({ where: { id: body.invoiceId }, select: { id: true, number: true, customerId: true } });
+    if (!invoice) throw notFound('Invoice not found');
+    if (payment.customerId && invoice.customerId !== payment.customerId) throw badRequest(`${invoice.number} is another customer’s invoice`);
+    const lineAmount = num(line.amount);
+    const applying = cents(body.amount ?? lineAmount);
+    if (applying > lineAmount + 0.005) throw badRequest(`Only ${lineAmount} is on that line`);
+    const target = await settleable('invoice', invoice.id);
+    if (!target) throw notFound('Invoice not found');
+    const amount = cents(Math.min(applying, target.outstanding));
+    if (amount <= 0.005) throw badRequest(`${invoice.number} has nothing outstanding`);
+    await prisma.$transaction(async (tx) => {
+      const left = cents(lineAmount - amount);
+      const moved = left > 0.005
+        ? await tx.paymentLine.updateMany({ where: { id: line.id, amount: line.amount }, data: { amount: D(left) } })
+        : await tx.paymentLine.deleteMany({ where: { id: line.id, amount: line.amount } });
+      if (!moved.count) throw badRequest('That line changed a moment ago — reload');
+      await tx.paymentAllocation.create({ data: { paymentId: payment.id, invoiceId: invoice.id, amount: D(amount) } });
+      await refreshSettlement(tx, 'invoice', invoice.id);
+    });
+    await audit(
+      { entityType: 'payment', entityId: payment.id, action: 'UPDATED', summary: `${payment.number}: ${amount} on account (${line.reference}) applied to ${invoice.number}` },
+      req,
+    );
+    const fresh = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id }, include: paymentInclude });
+    res.json(presentPayment(fresh));
   }),
 );
 

@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,316 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,321 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 178, chain 329, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 397, aftermarket 265, cad 118,
+115, evaluations 152, academy 120, finance 402, aftermarket 265, cad 118,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -5253,6 +5253,32 @@ approved it goes to Accounts Receivable", the paper in the standard dress.
   invoice date too unless one is sent, never a day to come, and the terms
   run from it (`datesFrom()`). The PO still comes from the order. A draft's
   PUT without `lines` changes the header alone.
+- **Lines show their VAT** (2026-10-16, the owner's call): the New / Modify
+  invoice lines carry VAT and "Amount incl. VAT" beside the amount before VAT
+  — either amount may be typed, the other follows, at the order's rate, the
+  draft's own, else the company's — and the supplier bill's lines show their
+  VAT and amount with VAT (backed out when "Their prices already include
+  VAT"). Only the before-VAT amounts are sent; the server's arithmetic is
+  unchanged.
+- **A bill's purchaser may be typed by name** (`SupplierBill.purchaserName`,
+  for someone with no login; "Not on the list? Type a name" on the form).
+  A name sent with no `purchaserId` stands in place of a login; picking a
+  login clears it. The list, its search and paper, the bill page and the
+  payables report print `purchaser?.name ?? purchaserName`; the purchaser
+  filter's `none` means neither.
+- **A collection may carry lines typed by hand** (`PaymentLine`: reference,
+  amount; the owner's call "can manually add"): money RECEIVED ON ACCOUNT
+  from a named customer, settling no invoice. `POST /payments { lines }` —
+  a receipt only, never a salary deduction, a customer named; a payment
+  with no allocation and no line is a 400. It takes an OR number, counts in
+  the payment's amount (so in Total collections) and prints on the
+  Collection Receipt as "On account"; the payment's JSON carries `lines`
+  and `onAccount`. `POST /payments/:id/lines/:lineId/apply { invoiceId,
+  amount? }` (`gfin.ar.create`) moves it — never past the invoice's
+  outstanding, the payment's customer's invoice only — into an allocation
+  on the same payment, the line shrinking or going (claimed on its amount),
+  the invoice re-derived as ever; the payment page's "Apply to an
+  invoice…" does it.
 - **Assign Back Support with "Supports teams"** for every selling team —
   until then requests stall and `audit-workflows.ts` says so.
 

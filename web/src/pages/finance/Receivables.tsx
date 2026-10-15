@@ -695,6 +695,19 @@ function InvoiceModal({
   }
 
   const gross = toCents(lines.reduce((s, l) => s + (l.amount || 0), 0));
+  // Each line shows its VAT and its amount with VAT (2026-10-16, the owner's
+  // call), at the rate the invoice will carry: the order's, the draft's own,
+  // else the company's. Either amount may be typed; the other follows.
+  const [companyVat, setCompanyVat] = useState(0.12);
+  useEffect(() => {
+    api
+      .get<{ vatRate: number }>('/finance-settings')
+      .then((s) => typeof s.vatRate === 'number' && setCompanyVat(s.vatRate))
+      .catch(() => {});
+  }, []);
+  const lineVatRate = existing?.vatRate ?? order?.vatRate ?? companyVat;
+  const withVat = (before: number) => toCents(before + toCents(before * lineVatRate));
+  const beforeVat = (incl: number) => toCents(incl / (1 + lineVatRate));
   const figures = existing
     ? manual
       ? (() => {
@@ -908,6 +921,8 @@ function InvoiceModal({
                   <th>Description</th>
                   <th>Detail</th>
                   <th className="right">Amount (before VAT)</th>
+                  <th className="right">VAT ({(lineVatRate * 100).toFixed(0)}%)</th>
+                  <th className="right">Amount incl. VAT</th>
                   <th className="fin-col-tight" />
                 </tr>
               </thead>
@@ -936,6 +951,17 @@ function InvoiceModal({
                           onChange={(e) => update({ amount: Number(e.target.value) })}
                         />
                       </td>
+                      <td className="right mono">{formatMoney(toCents((l.amount || 0) * lineVatRate))}</td>
+                      <td>
+                        <NumberInput
+                          kind="money"
+                          step="0.01"
+                          aria-label={`Line ${i + 1} amount including VAT`}
+                          className="fin-amount-input"
+                          value={withVat(l.amount || 0)}
+                          onChange={(e) => update({ amount: beforeVat(Number(e.target.value)) })}
+                        />
+                      </td>
                       <td className="right">
                         {lines.length > 1 && (
                           <button
@@ -954,9 +980,11 @@ function InvoiceModal({
               <tfoot>
                 <tr>
                   <th colSpan={2} className="right">
-                    Gross
+                    Gross · VAT · Total
                   </th>
                   <th className="right mono">{formatMoney(gross)}</th>
+                  <th className="right mono">{formatMoney(toCents(gross * lineVatRate))}</th>
+                  <th className="right mono">{formatMoney(withVat(gross))}</th>
                   <th />
                 </tr>
               </tfoot>
@@ -1661,7 +1689,12 @@ export function RecordPaymentModal({
   }, [targetKind, target, partyId]);
 
   const rows = target ? [target, ...others] : others;
-  const total = Object.values(allocations).reduce((s, v) => s + (v || 0), 0);
+  // A collection may carry lines typed by hand (2026-10-16, the owner's call):
+  // money received on account, against no invoice on file yet.
+  const [manual, setManual] = useState<{ reference: string; amount: number }[]>([]);
+  const manualTotal = manual.reduce((s, l) => s + (l.amount || 0), 0);
+  const manualIncomplete = manual.some((l) => (l.amount > 0) !== !!l.reference.trim());
+  const total = Object.values(allocations).reduce((s, v) => s + (v || 0), 0) + manualTotal;
   const overApplied = rows.some((t) => (allocations[t.id] ?? 0) > t.outstanding + 0.005);
   // An advance or a budget request goes out in one voucher: all of it, or none of it.
   const partialRelease =
@@ -1686,6 +1719,7 @@ export function RecordPaymentModal({
         allocations: Object.entries(allocations)
           .filter(([, amount]) => amount > 0)
           .map(([id, amount]) => ({ kind: targetKind, id, amount })),
+        lines: manual.filter((l) => l.amount > 0 && l.reference.trim()).map((l) => ({ reference: l.reference.trim(), amount: l.amount })),
       }).then((p) => {
         toast(
           'ok',
@@ -1723,7 +1757,7 @@ export function RecordPaymentModal({
           <button
             className="btn btn-primary"
             onClick={save}
-            disabled={busy || total <= 0 || overApplied || partialRelease}
+            disabled={busy || total <= 0 || overApplied || partialRelease || manualIncomplete}
           >
             {busy ? 'Recording…' : `Record ${formatMoney(total)}`}
           </button>
@@ -1837,6 +1871,34 @@ export function RecordPaymentModal({
                 </td>
               </tr>
             ))}
+            {manual.map((l, i) => (
+              <tr key={`manual-${i}`}>
+                <td>
+                  <input
+                    aria-label={`Line ${i + 1} reference`}
+                    value={l.reference}
+                    placeholder="SI no. or what it is for"
+                    onChange={(e) => setManual(manual.map((m, j) => (j === i ? { ...m, reference: e.target.value } : m)))}
+                  />
+                </td>
+                <td className="right faint">
+                  On account{' '}
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => setManual(manual.filter((_, j) => j !== i))}>
+                    Remove
+                  </button>
+                </td>
+                <td className="right">
+                  <NumberInput
+                    kind="money"
+                    min={0}
+                    aria-label={`Line ${i + 1} amount`}
+                    className="fin-amount-input"
+                    value={l.amount || ''}
+                    onChange={(e) => setManual(manual.map((m, j) => (j === i ? { ...m, amount: Number(e.target.value) } : m)))}
+                  />
+                </td>
+              </tr>
+            ))}
           </tbody>
           <tfoot>
             <tr>
@@ -1848,6 +1910,16 @@ export function RecordPaymentModal({
           </tfoot>
         </table>
       </div>
+      {collection && party && (
+        <button type="button" className="btn btn-sm fin-gap-top-sm" onClick={() => setManual([...manual, { reference: '', amount: 0 }])}>
+          + Add line
+        </button>
+      )}
+      {manual.length > 0 && (
+        <p className="faint fin-gap-top">
+          A line added by hand is received on account — it settles no invoice yet, and is applied to one from the payment once the invoice is on file.
+        </p>
+      )}
 
       {overApplied && (
         <div className="alert error fin-gap-top fin-flush">
@@ -1862,8 +1934,8 @@ export function RecordPaymentModal({
       )}
       {!target && !party ? (
         <p className="faint fin-gap-top">Name the company to list its open invoices.</p>
-      ) : rows.length === 0 ? (
-        <p className="faint fin-gap-top">Nothing is open for this customer.</p>
+      ) : rows.length === 0 && !manual.length ? (
+        <p className="faint fin-gap-top">Nothing is open for this customer{collection ? ' — add a line by hand to record it on account' : ''}.</p>
       ) : rows.length === 1 && target ? (
         <p className="faint fin-gap-top">
           Nothing else is open for this {kind === 'RECEIPT' && !person ? 'customer' : person ? 'person' : 'payee'}.
@@ -1888,6 +1960,8 @@ interface Allocation {
 interface PaymentRow {
   id: string;
   number: string;
+  /** Lines typed by hand: received on account, settling no invoice yet. */
+  lines?: { id: string; reference: string; amount: number }[];
   /** The official receipt a collection was given (G-CORE's numbering). */
   orNumber: string | null;
   /** Read off the invoices it settled. */
@@ -2409,11 +2483,109 @@ export function PaymentDetail() {
                     </tr>
                   );
                 })}
+                {(row.lines ?? []).map((l) => (
+                  <OnAccountRow key={l.id} payment={row} line={l} canApply={can('gfin.ar.create')} onApplied={load} />
+                ))}
               </tbody>
             </table>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * A line typed by hand on a collection — money received on account — and,
+ * for whoever records collections, applying it to one of the customer's open
+ * invoices once that invoice is on file (`POST /payments/:id/lines/:lineId/apply`).
+ */
+function OnAccountRow({
+  payment,
+  line,
+  canApply,
+  onApplied,
+}: {
+  payment: PaymentRow;
+  line: { id: string; reference: string; amount: number };
+  canApply: boolean;
+  onApplied: () => void;
+}) {
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [invoices, setInvoices] = useState<{ id: string; number: string; outstanding: number }[] | null>(null);
+  const [invoiceId, setInvoiceId] = useState('');
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!open || !payment.customer) return;
+    api
+      .get<{ id: string; number: string; outstanding: number }[]>(`/payments/open/invoice?partyId=${payment.customer.id}`)
+      .then(setInvoices)
+      .catch(setError);
+  }, [open, payment.customer]);
+  async function apply() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post(`/payments/${payment.id}/lines/${line.id}/apply`, { invoiceId });
+      toast('ok', 'Applied to the invoice');
+      setOpen(false);
+      onApplied();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      <tr>
+        <td>{line.reference}</td>
+        <td className="faint">
+          On account
+          {canApply && payment.customer && !open && (
+            <>
+              {' '}
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setOpen(true)}>
+                Apply to an invoice…
+              </button>
+            </>
+          )}
+        </td>
+        <td className="right mono">{formatMoney(line.amount)}</td>
+      </tr>
+      {open && (
+        <tr>
+          <td colSpan={3}>
+            <ErrorBox error={error} />
+            {invoices === null ? (
+              <Loading />
+            ) : invoices.length === 0 ? (
+              <p className="faint">{payment.customer?.name} has no open invoice yet.</p>
+            ) : (
+              <div className="fin-line-stack">
+                <select value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)} aria-label="Invoice to apply it to">
+                  <option value="">— choose the invoice —</option>
+                  {invoices.map((i) => (
+                    <option key={i.id} value={i.id}>
+                      {i.number} — {formatMoney(i.outstanding)} outstanding
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div className="card-foot">
+              <button type="button" className="btn btn-sm" onClick={() => setOpen(false)}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-sm btn-primary" disabled={!invoiceId || busy} onClick={apply}>
+                Apply {formatMoney(line.amount)}
+              </button>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }

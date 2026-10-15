@@ -4204,6 +4204,9 @@ model SupplierBill {
   /// The purchaser / buyer: the purchase order's author, else picked.
   purchaserId  String?
   purchaser    User?     @relation("BillPurchaser", fields: [purchaserId], references: [id], onDelete: SetNull)
+  /// A purchaser with no login, typed by name (2026-10-16, the owner's
+  /// call); null when `purchaserId` names one.
+  purchaserName String?
 
   subtotal  Decimal @db.Decimal(18, 2)
   vatRate   Decimal @default(0.12) @db.Decimal(6, 4)
@@ -4484,6 +4487,9 @@ model Payment {
   recordedBy   User   @relation("PaymentRecorder", fields: [recordedById], references: [id], onDelete: Restrict)
 
   allocations PaymentAllocation[]
+  /// Lines typed by hand on a collection (2026-10-16, the owner's call): money
+  /// received on account, against no invoice on file — applied to one later.
+  lines       PaymentLine[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4497,6 +4503,20 @@ model Payment {
 
 /// A slice of a payment applied to one document. Exactly one of the four
 /// document references is set.
+/// A collection line typed by hand: a reference (an SI no., what it is for)
+/// and an amount received ON ACCOUNT — part of the payment, settling no
+/// invoice, until it is applied to one (`POST /payments/:id/lines/:lineId/apply`).
+model PaymentLine {
+  id        String  @id @default(cuid())
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  sortOrder Int     @default(0)
+  reference String
+  amount    Decimal @db.Decimal(18, 2)
+
+  @@index([paymentId])
+}
+
 model PaymentAllocation {
   id        String  @id @default(cuid())
   paymentId String

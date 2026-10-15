@@ -374,6 +374,7 @@ async function payables(range: Range, ctx: ReportContext): Promise<Report> {
       amountPaid: true,
       supplier: { select: { name: true } },
       purchaser: { select: { name: true } },
+      purchaserName: true,
     },
     orderBy: { dueDate: 'asc' },
   });
@@ -408,7 +409,7 @@ async function payables(range: Range, ctx: ReportContext): Promise<Report> {
     series: series.done(),
     tables: [
       table('By supplier', [{ label: 'Supplier' }, ...cols], rowsOf(tally(rows, (r) => r.supplier.name, figures), 1)),
-      table('By purchaser', [{ label: 'Purchaser / buyer' }, ...cols], rowsOf(tally(rows, (r) => r.purchaser?.name ?? NOBODY, figures), 1)),
+      table('By purchaser', [{ label: 'Purchaser / buyer' }, ...cols], rowsOf(tally(rows, (r) => r.purchaser?.name ?? r.purchaserName ?? NOBODY, figures), 1)),
       table('By terms', [{ label: 'Terms' }, ...cols], rowsOf(tally(rows, (r) => billTermsLabel(r.termsDays, r.terms), figures), 1)),
       table(
         'The bills',
@@ -421,7 +422,7 @@ async function payables(range: Range, ctx: ReportContext): Promise<Report> {
             r.deliveryDate ? formatShortDate(r.deliveryDate) : '—',
             billTermsLabel(r.termsDays, r.terms),
             formatShortDate(r.dueDate),
-            r.purchaser?.name ?? '—',
+            r.purchaser?.name ?? r.purchaserName ?? '—',
             isOwed(r) ? left(r) : null,
           ]),
       ),
