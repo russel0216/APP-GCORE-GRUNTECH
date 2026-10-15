@@ -20,6 +20,7 @@ import { backfillInvoiceCountering, fillInvoiceCredit } from '../src/shared/rece
 import { fillBillTerms } from '../src/shared/payables';
 import { renumberProgressDocs } from '../src/shared/progressReport';
 import { repairTypedStockReceipts } from '../src/shared/typedItems';
+import { backfillLoginMirrors, linkAdminEmployees } from '../src/shared/personMirror';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -1627,6 +1628,14 @@ async function main() {
     // 2026-10-07) are closed, so they do not read as cash finance still owes.
     // Stock order lines typed without an item built no stock when received
     // (until 2026-10-16); each now takes its item and its stock, once.
+    // The employee owns identity (2026-10-16): every super admin is a person on
+    // the register, and every linked login is brought in step with its record.
+    const admins = await linkAdminEmployees();
+    if (admins) console.log(`  · Gave ${admins} administrator login(s) an employee record`);
+    const mirrors = await backfillLoginMirrors();
+    if (mirrors.changed || mirrors.refused.length) {
+      console.log(`  · Brought ${mirrors.changed} login(s) in step with their employee records${mirrors.refused.length ? `; ${mirrors.refused.length} left (number clash)` : ''}`);
+    }
     const typedReceipts = await repairTypedStockReceipts();
     if (typedReceipts) console.log(`  · Posted the stock of ${typedReceipts} received line(s) typed without an item`);
     const closedIncreases = await closeLegacyBudgetIncreases();

@@ -23,6 +23,15 @@ import { mailConfig, sendMail } from '../shared/mail';
 import { renderDocument, formatShortDate } from '../shared/pdf';
 import { LIST_CAP, listReference, sendListPdf } from '../shared/listPaper';
 
+/** How a mirrored login field is named when a change to it is refused. */
+const MIRROR_LABELS: Record<string, string> = {
+  name: 'The name',
+  employeeNo: 'the employee number',
+  position: 'the position',
+  phone: 'the phone',
+  departmentId: 'the department',
+};
+
 export const userRoutes = Router();
 userRoutes.use(authenticate);
 
@@ -67,6 +76,10 @@ function userListWhere(q: ListQuery): Prisma.UserWhereInput {
   if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
   if (q.filters.role) where.roles = { some: { role: { key: q.filters.role } } };
   if (q.filters.departmentId) where.departmentId = q.filters.departmentId;
+  // `?linked=no`: a login with no employee record (2026-10-16) — the clean-up
+  // the "one person" rule asks for; `yes` the rest.
+  if (q.filters.linked === 'no') where.employee = { is: null };
+  else if (q.filters.linked === 'yes') where.employee = { isNot: null };
   const ids = idsFilter(q.filters.ids);
   if (ids) where.id = { in: ids };
   return where;
@@ -87,7 +100,7 @@ userRoutes.get(
           department: { select: { id: true, name: true } },
           supervisor: { select: { id: true, name: true } },
           roles: { select: { role: { select: { key: true, name: true } } } },
-          employee: { select: { industry: { select: { code: true, name: true } } } },
+          employee: { select: { id: true, industry: { select: { code: true, name: true } } } },
         },
         orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
@@ -95,14 +108,26 @@ userRoutes.get(
       }),
       prisma.user.count({ where }),
     ]);
+    // The halves of a person still apart: logins with no employee record, and
+    // active employees with no login (HR › Employees `?login=none`).
+    const [loginsAlone, employeesAlone] = await Promise.all([
+      prisma.user.count({ where: { employee: { is: null }, isActive: true } }),
+      prisma.employee.count({ where: { userId: null, isActive: true } }),
+    ]);
 
-    res.json(
-      listResult(
-        rows.map(({ employee, ...r }) => ({ ...r, roles: r.roles.map((x) => x.role), team: employee?.industry ?? null })),
+    res.json({
+      summary: { loginsAlone, employeesAlone },
+      ...listResult(
+        rows.map(({ employee, ...r }) => ({
+          ...r,
+          roles: r.roles.map((x) => x.role),
+          team: employee?.industry ?? null,
+          employeeId: employee?.id ?? null,
+        })),
         total,
         q,
       ),
-    );
+    });
   }),
 );
 
@@ -490,6 +515,34 @@ userRoutes.patch(
       }
     }
     const teamChanged = !!linked && body.teamId !== undefined && (body.teamId || null) !== linked.industryId;
+
+    // The employee owns identity (2026-10-16): a login linked to an employee
+    // record takes its name, number, phone, department and position from it
+    // (`syncLoginFromEmployee`), so a CHANGE to one of them here is refused —
+    // the form sends them back unchanged, which is fine.
+    const owner = await prisma.employee.findUnique({ where: { userId: req.params.id }, select: { id: true } });
+    if (owner) {
+      const current = await prisma.user.findUnique({
+        where: { id: req.params.id },
+        select: { name: true, employeeNo: true, position: true, phone: true, departmentId: true },
+      });
+      const asked: Record<string, unknown> = {
+        name: body.name,
+        employeeNo: body.employeeNo,
+        position: body.position,
+        phone: body.phone,
+        departmentId: body.departmentId,
+      };
+      const moved = Object.entries(asked).filter(
+        ([k, v]) => v !== undefined && (v || null) !== ((current as Record<string, unknown> | null)?.[k] ?? null),
+      );
+      if (moved.length) {
+        throw badRequest(
+          `${moved.map(([k]) => MIRROR_LABELS[k]).join(', ')} come${moved.length === 1 ? 's' : ''} from the employee record — change ${moved.length === 1 ? 'it' : 'them'} there (HR › Employees)`,
+          moved.map(([k]) => ({ field: k, message: 'Kept on the employee record' })),
+        );
+      }
+    }
 
     const data: Prisma.UserUpdateInput = {};
     if (body.name !== undefined) data.name = body.name;

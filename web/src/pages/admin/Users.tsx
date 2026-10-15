@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'reac
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
+import { Stat } from '../../components/charts';
 import {
   Checkbox,
   ErrorBox,
@@ -17,6 +18,7 @@ import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { OrgChart } from './OrgChart';
 import { NewPersonModal } from '../masters/Employees';
+import { PersonSelect, usePeople } from '../../components/People';
 
 /** Roles whose approval step goes by the teams a holder supports — `TEAM_SCOPED_ROLES` in shared/approvals.ts. */
 const TEAM_SCOPED_ROLES = ['back_support'];
@@ -47,6 +49,14 @@ interface UserRow {
   supervisor: { id: string; name: string } | null;
   /** The team on their employee record (`Employee.industryId`). */
   team?: { code: string; name: string } | null;
+  /** Their employee record, when the login has one — the person (2026-10-16). */
+  employeeId?: string | null;
+}
+
+/** The halves of a person still apart (GET /users summary, 2026-10-16). */
+interface UsersSummary {
+  loginsAlone: number;
+  employeesAlone: number;
 }
 
 /** The single-user endpoint returns role ids (the list only needs key + name). */
@@ -234,7 +244,37 @@ export function Users() {
             ],
           },
           { key: 'role', label: 'Role', options: roles.map((r) => ({ value: r.key, label: r.name })) },
+          {
+            key: 'linked',
+            label: 'Employee record',
+            options: [
+              { value: 'no', label: 'No employee record' },
+              { value: 'yes', label: 'Linked to an employee' },
+            ],
+          },
         ]}
+        summary={(raw) => {
+          const sum = raw as unknown as UsersSummary | undefined;
+          if (!sum) return null;
+          return (
+            <>
+              <Stat
+                label="Logins with no employee"
+                value={sum.loginsAlone}
+                accent={sum.loginsAlone > 0 ? 'warn' : undefined}
+                sub="open one and link it, or add the person in HR › Employees"
+                to={`${BASE}?linked=no`}
+              />
+              <Stat
+                label="Employees with no login"
+                value={sum.employeesAlone}
+                accent={sum.employeesAlone > 0 ? 'warn' : undefined}
+                sub="active people who cannot sign in yet"
+                to="/g-hr/employees?login=none&isActive=true"
+              />
+            </>
+          );
+        }}
         actions={
           mayAdd ? (
             <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
@@ -295,7 +335,8 @@ function UserEditor({
   const [tab, setTab] = useState<'details' | 'access'>('details');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [people, setPeople] = useState<UserRow[]>([]);
+  // The one people fetch (components/People.tsx, rule 20).
+  const { people } = usePeople();
   const [catalog, setCatalog] = useState<PermissionCatalog | null>(null);
   const [overrides, setOverrides] = useState<Record<string, 'ALLOW' | 'DENY'>>({});
 
@@ -315,14 +356,12 @@ function UserEditor({
   });
   const [teams, setTeams] = useState<{ id: string; code: string; name: string; isActive: boolean }[]>([]);
   const [detail, setDetail] = useState<UserDetail | null>(null);
+  /** A login with an employee record mirrors it: those fields are the record's (2026-10-16). */
+  const kept = !!detail?.employee;
   /** The link just issued — shown until the administrator is done with it. */
   const [issued, setIssued] = useState<{ delivery: Delivery; kind: 'invite' | 'reset' } | null>(null);
 
   useEffect(() => {
-    api
-      .get<{ rows: UserRow[] }>('/users?pageSize=200')
-      .then((r) => setPeople(r.rows))
-      .catch(() => setPeople([]));
     api
       .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
       .then(setTeams)
@@ -362,12 +401,17 @@ function UserEditor({
     setError(null);
     try {
       const payload = {
-        name: form.name,
-        employeeNo: form.employeeNo || null,
-        position: form.position || null,
-        phone: form.phone || null,
+        // Kept on the employee record when there is one — not sent at all.
+        ...(kept
+          ? {}
+          : {
+              name: form.name,
+              employeeNo: form.employeeNo || null,
+              position: form.position || null,
+              phone: form.phone || null,
+              departmentId: form.departmentId || null,
+            }),
         supervisorId: form.supervisorId || null,
-        departmentId: form.departmentId || null,
         roleIds: form.roleIds,
         supportTeamIds: form.supportTeamIds,
         ...(detail?.employee ? { teamId: form.teamId || null } : {}),
@@ -449,9 +493,16 @@ function UserEditor({
 
       {tab === 'details' ? (
         <>
+          {detail?.employee && (
+            <div className="alert info">
+              This login is {detail.employee.firstName} {detail.employee.lastName}'s — their name, employee number,
+              position, mobile and department are kept on the{' '}
+              <Link to={`/g-hr/employees/${detail.employee.id}`}>employee record ↗</Link> and follow it here.
+            </div>
+          )}
           <div className="grid grid-2">
             <Field label="Full name">
-              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              <input value={form.name} disabled={kept} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </Field>
             <Field label="Email" hint="The address they sign in with — it stays">
               <input type="email" value={form.email} disabled />
@@ -459,12 +510,14 @@ function UserEditor({
             <Field label="Employee number">
               <input
                 value={form.employeeNo}
+                disabled={kept}
                 onChange={(e) => setForm({ ...form, employeeNo: e.target.value })}
               />
             </Field>
             <Field label="Position">
               <input
                 value={form.position}
+                disabled={kept}
                 onChange={(e) => setForm({ ...form, position: e.target.value })}
               />
             </Field>
@@ -473,6 +526,7 @@ function UserEditor({
                 type="tel"
                 autoComplete="off"
                 value={form.phone}
+                disabled={kept}
                 onChange={(e) => setForm({ ...form, phone: e.target.value })}
               />
             </Field>
@@ -480,23 +534,17 @@ function UserEditor({
               label="Reports to"
               hint="Used by every approval step that routes to the supervisor. With none set, those steps fall through to HR."
             >
-              <select
+              <PersonSelect
                 value={form.supervisorId}
-                onChange={(e) => setForm({ ...form, supervisorId: e.target.value })}
-              >
-                <option value="">— none —</option>
-                {people
-                  .filter((p) => p.id !== id)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-              </select>
+                onChange={(pid) => setForm({ ...form, supervisorId: pid })}
+                people={people.filter((p) => p.id !== id)}
+                current={detail?.supervisor ?? null}
+              />
             </Field>
             <Field label="Department">
               <select
                 value={form.departmentId}
+                disabled={kept}
                 onChange={(e) => setForm({ ...form, departmentId: e.target.value })}
               >
                 <option value="">— none —</option>

@@ -4,6 +4,9 @@ import { required, optional, bool, date, oneOf, type ImportSpec } from '../../sh
 import { nextNumber } from '../../shared/numbering';
 import { positionFields, setEmployeePosition } from '../../shared/plantilla';
 import type { Registered } from '../imports';
+import { createLogin, defaultRoleIds, deliverLink, syncLoginFromEmployee } from '../../shared/accounts';
+import { can, resolveUser } from '../../permissions/resolve';
+import { audit } from '../../shared/audit';
 
 /**
  * CSV import for employees — the spec, the duplicate key and the writer,
@@ -29,6 +32,12 @@ const EMPLOYMENT_TYPES = [
 interface EmployeeImportRecord {
   data: Prisma.EmployeeUncheckedCreateInput;
   position: { positionId: string | null; newTitle: string | null; departmentId: string | null };
+  /**
+   * The person's login from the Email column (2026-10-16): an existing login
+   * with no employee is LINKED (`linkUserId`), an address nobody uses is a new
+   * invited login (`newLoginEmail`) — made in `write`, never on a dry run.
+   */
+  login: { linkUserId: string | null; newLoginEmail: string | null };
 }
 
 const employeeSpec: ImportSpec<EmployeeImportRecord> = {
@@ -68,6 +77,11 @@ const employeeSpec: ImportSpec<EmployeeImportRecord> = {
     { header: 'Emergency Contact', example: 'Ana Santos' },
     { header: 'Emergency Phone', example: '+63 917 111 1111' },
     { header: 'Active', example: 'Yes' },
+    {
+      header: 'Email',
+      example: 'juan.santos@gruntechnology.com',
+      hint: 'Their G-CORE login: a login already on file with no employee is linked; a new address is invited (needs admin.users.create). Blank leaves the login as it is',
+    },
   ],
   existing: async (row) => {
     const found = await prisma.employee.findUnique({ where: { employeeNo: row['Employee No'] } });
@@ -113,7 +127,25 @@ const employeeSpec: ImportSpec<EmployeeImportRecord> = {
       else newTitle = title;
     }
 
+    // The login: resolved only, as the position is.
+    const email = optional(row, 'Email')?.toLowerCase() ?? null;
+    const login: EmployeeImportRecord['login'] = { linkUserId: null, newLoginEmail: null };
+    if (email) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error(`Email "${email}" is not an email address`);
+      const user = await prisma.user.findUnique({
+        where: { email },
+        select: { id: true, employee: { select: { employeeNo: true } } },
+      });
+      const employeeNo = row['Employee No'];
+      if (user?.employee && user.employee.employeeNo !== employeeNo) {
+        throw new Error(`Email "${email}" is the login of employee ${user.employee.employeeNo}`);
+      }
+      if (user && !user.employee) login.linkUserId = user.id;
+      if (!user) login.newLoginEmail = email;
+    }
+
     return {
+      login,
       data: {
         employeeNo: required(row, 'Employee No'),
         lastName: required(row, 'Last Name'),
@@ -140,11 +172,17 @@ const employeeSpec: ImportSpec<EmployeeImportRecord> = {
 export const employeesImport: Registered = {
   spec: employeeSpec as unknown as ImportSpec<never>,
   permission: 'ghr.employees.create',
-  write: async (records) => {
-    for (const { record, existingId } of records as unknown as {
-      record: EmployeeImportRecord;
-      existingId: string | null;
-    }[]) {
+  write: async (records, actor) => {
+    const rows = records as unknown as { record: EmployeeImportRecord; existingId: string | null }[];
+    // New logins need the account right, checked before any row is written.
+    if (rows.some((r) => r.record.login.newLoginEmail)) {
+      const who = actor ? await resolveUser(actor.id) : null;
+      if (!who || !can(who, 'admin.users.create')) {
+        throw new Error('The Email column invites new logins, which needs admin.users.create — clear the column, or ask an administrator to import');
+      }
+    }
+    const invites: Parameters<typeof deliverLink>[] = [];
+    for (const { record, existingId } of rows) {
       await prisma.$transaction(async (tx) => {
         let positionId = record.position.positionId;
         if (!positionId && record.position.newTitle) {
@@ -166,16 +204,51 @@ export const employeesImport: Registered = {
               })
             ).id;
         }
+        let employeeId: string;
         if (existingId) {
           const { employeeNo, ...rest } = record.data;
           void employeeNo;
           await tx.employee.update({ where: { id: existingId }, data: rest });
           // Through the one writer of the mirror, whether linked or not.
           await setEmployeePosition(tx, existingId, positionId, null);
+          employeeId = existingId;
         } else {
-          await tx.employee.create({ data: { ...record.data, ...(await positionFields(tx, positionId, null)) } });
+          employeeId = (await tx.employee.create({ data: { ...record.data, ...(await positionFields(tx, positionId, null)) } })).id;
         }
+        const current = await tx.employee.findUnique({ where: { id: employeeId }, select: { userId: true, employeeNo: true } });
+        if (!current?.userId && record.login.linkUserId) {
+          await tx.employee.update({ where: { id: employeeId }, data: { userId: record.login.linkUserId } });
+        } else if (!current?.userId && record.login.newLoginEmail && actor) {
+          const e = await tx.employee.findUniqueOrThrow({ where: { id: employeeId } });
+          const made = await createLogin(
+            tx,
+            {
+              email: record.login.newLoginEmail,
+              name: [e.firstName, e.lastName, e.suffix].filter(Boolean).join(' '),
+              roleIds: await defaultRoleIds(tx),
+              departmentId: e.departmentId,
+              position: e.position,
+              phone: e.mobile,
+              employeeNo: e.employeeNo,
+              isActive: e.isActive,
+            },
+            actor.id,
+          );
+          await tx.employee.update({ where: { id: employeeId }, data: { userId: made.user.id } });
+          if (made.invite) invites.push(['INVITE', made.user, made.invite, actor.name]);
+          await audit({
+            entityType: 'user',
+            entityId: made.user.id,
+            action: 'CREATED',
+            actorId: actor.id,
+            summary: `Created user ${made.user.email} with employee ${e.employeeNo} from the employee import — invited`,
+          });
+        }
+        // The login, linked or made, mirrors the record (shared/accounts.ts).
+        await syncLoginFromEmployee(tx, employeeId);
       });
     }
+    // The invitations go once every row stands; a mail that fails fails none.
+    for (const args of invites) await deliverLink(...args).catch(() => undefined);
   },
 };

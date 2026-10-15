@@ -75,6 +75,9 @@ export async function mirrorPositionTitle(tx: Tx, positionId: string, title: str
     where: { positionId },
     data: { position: title },
   });
+  // And their logins, which mirror the employee (shared/accounts.ts,
+  // `syncLoginFromEmployee` — 2026-10-16).
+  await tx.user.updateMany({ where: { employee: { positionId } }, data: { position: title } });
   return count;
 }
 

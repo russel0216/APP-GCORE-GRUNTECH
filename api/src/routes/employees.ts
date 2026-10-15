@@ -23,7 +23,7 @@ import { nextNumber } from '../shared/numbering';
 import { can } from '../permissions/resolve';
 import { positionFields, setEmployeePosition } from '../shared/plantilla';
 import { sweepSeparations } from '../shared/clearance';
-import { createLogin, defaultRoleIds, deliverLink } from '../shared/accounts';
+import { createLogin, defaultRoleIds, deliverLink, personName, syncLoginFromEmployee } from '../shared/accounts';
 import { celebrationsBetween } from '../shared/celebrations';
 import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
 import { LIST_CAP, choice, listReference, sendListPdf } from '../shared/listPaper';
@@ -92,6 +92,11 @@ function employeeListWhere(q: ListQuery): Prisma.EmployeeWhereInput {
   // `none` = unclassified: an active employee with no plantilla position.
   if (f.positionId === 'none') where.positionId = null;
   else if (f.positionId) where.positionId = f.positionId;
+  // `?login=none`: an active employee with no G-CORE login yet (2026-10-16,
+  // Admin › Users' Unlinked card links here); `yes` the rest.
+  const login = choice(f.login, { none: 'none', yes: 'yes' }, 'Login');
+  if (login === 'none') where.userId = null;
+  if (login === 'yes') where.userId = { not: null };
   const ids = idsFilter(f.ids);
   if (ids) where.id = { in: ids };
   return where;
@@ -193,6 +198,7 @@ employeeRoutes.get(
       f.industryId && (f.industryId === 'none' ? 'no team yet' : `team ${team?.name ?? 'not found'}`),
       f.employmentType && `type ${statusLabel(f.employmentType)}`,
       f.positionId && (f.positionId === 'none' ? 'no plantilla position' : `position ${position?.title ?? 'not found'}`),
+      f.login && (f.login === 'none' ? 'no login yet' : 'with a login'),
       f.ids && 'the rows selected',
     ]);
 
@@ -406,8 +412,7 @@ const loginSchema = z.object({
 
 const createEmployeeSchema = employeeSchema.extend({ login: loginSchema.optional().nullable() });
 
-const fullName = (e: { firstName: string; lastName: string; suffix?: string | null }) =>
-  [e.firstName, e.lastName, e.suffix].filter(Boolean).join(' ');
+const fullName = personName;
 
 function asDate(value: string | null | undefined): Date | null {
   if (!value) return null;
@@ -502,12 +507,19 @@ async function checkDepartmentId(tx: Prisma.TransactionClient, id: string | null
 /**
  * The login mirrors its employee's number (`User.employeeNo` — the `{EMP}`
  * in their quotation numbers, and what the face clock reads). The column is
- * unique on User too, so a number an older login still carries is left on
- * that login and this one goes without, rather than the save failing.
+ * unique on User too. Until 2026-10-16 a number an older login still carried
+ * was silently left off the new login; now it is a 409 naming that login, so
+ * somebody links or fixes it — a login without its number reads `000` in
+ * every quotation number it raises.
  */
-async function mirrorEmployeeNo(tx: Prisma.TransactionClient, employeeNo: string): Promise<string | null> {
-  const taken = await tx.user.findUnique({ where: { employeeNo }, select: { id: true } });
-  return taken ? null : employeeNo;
+async function mirrorEmployeeNo(tx: Prisma.TransactionClient, employeeNo: string): Promise<string> {
+  const taken = await tx.user.findUnique({ where: { employeeNo }, select: { email: true } });
+  if (taken) {
+    throw conflict(
+      `Employee number "${employeeNo}" is already on the login ${taken.email} — link that login to this person instead, or change its number first`,
+    );
+  }
+  return employeeNo;
 }
 
 employeeRoutes.post(
@@ -574,7 +586,11 @@ employeeRoutes.post(
           ...rateData(body, maySetRates),
         },
       });
-      if (!body.login) return { employee: created, login: null };
+      // An existing login linked here takes the record's identity (2026-10-16).
+      if (!body.login) {
+        if (created.userId) await syncLoginFromEmployee(tx, created.id);
+        return { employee: created, login: null };
+      }
 
       // The login, in the same transaction: a refused email leaves no person behind.
       const login = await createLogin(
@@ -752,6 +768,12 @@ employeeRoutes.patch(
         throw conflict('That user account is already linked to another employee');
       }
     }
+    // Linking or unlinking a login is an account decision as well as HR's
+    // (2026-10-16): an unlinked login keeps no employee, and a linked one
+    // takes the record's identity.
+    if (body.userId !== undefined && (body.userId || null) !== before.userId && !can(me, 'admin.users.edit_all')) {
+      throw forbidden('Linking or unlinking a login needs admin.users.edit_all');
+    }
 
     const data: Record<string, unknown> = { ...rateData(body, maySetRates) };
     for (const f of [
@@ -786,18 +808,21 @@ employeeRoutes.patch(
       if (body[f] !== undefined) data[f] = asDate(body[f]);
     }
 
+    let loginSynced: string[] = [];
     const employee = await prisma.$transaction(async (tx) => {
       const updated = await tx.employee.update({ where: { id: req.params.id }, data });
       // The position goes through the one writer of the mirror. A free-text
       // title on an employee who holds a plantilla position is ignored: the
       // title belongs to the position, and is changed there.
+      let result = updated;
       if (body.positionId !== undefined) {
-        return setEmployeePosition(tx, updated.id, body.positionId || null, body.position ?? before.position);
+        result = await setEmployeePosition(tx, updated.id, body.positionId || null, body.position ?? before.position);
+      } else if (body.position !== undefined && !before.positionId) {
+        result = await setEmployeePosition(tx, updated.id, null, body.position);
       }
-      if (body.position !== undefined && !before.positionId) {
-        return setEmployeePosition(tx, updated.id, null, body.position);
-      }
-      return updated;
+      // The login mirrors what was just written (`syncLoginFromEmployee`).
+      loginSynced = await syncLoginFromEmployee(tx, updated.id);
+      return result;
     });
     await audit(
       {
@@ -808,7 +833,7 @@ employeeRoutes.patch(
         // `redact()` in the audit service strips costRate/salary; the explicit
         // field list here keeps the statutory numbers out too.
         before: stripRates(before as Record<string, unknown>, false),
-        after: stripRates(employee as Record<string, unknown>, false),
+        after: { ...stripRates(employee as Record<string, unknown>, false), ...(loginSynced.length ? { loginSynced } : {}) },
       },
       req,
     );

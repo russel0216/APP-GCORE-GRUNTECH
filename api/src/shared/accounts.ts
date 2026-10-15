@@ -281,3 +281,82 @@ export async function deliverLink(
     return { ...base, emailed: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
+
+// ── The employee owns identity (2026-10-16) ──────────────────────────────────
+
+/** A person's name as their login shows it: first, last, suffix. */
+export const personName = (e: { firstName: string; lastName: string; suffix?: string | null }) =>
+  [e.firstName, e.lastName, e.suffix].filter(Boolean).join(' ');
+
+/**
+ * The login fields that MIRROR the employee record (2026-10-16, the owner's
+ * call: "employee creation and user login should be one only"). The employee
+ * is where they are kept; Admin › Users shows them and never writes them for
+ * a linked login (`PATCH /users/:id` refuses).
+ */
+export const MIRRORED_LOGIN_FIELDS = ['name', 'employeeNo', 'phone', 'departmentId', 'position'] as const;
+
+/**
+ * Copies the employee's identity onto their login, in the caller's
+ * transaction — the ONE writer of the mirrored fields once a login is linked:
+ * the name (first, last, suffix), the employee number, the mobile as the
+ * login's phone, the department and the position. Deactivating the employee
+ * deactivates the login; re-activating never re-opens a login by itself (an
+ * administrator decides that on Admin › Users).
+ *
+ * An employee number another login already carries is a 409 naming it — the
+ * mirror used to drop it silently, leaving `{EMP}` and the face clock's link
+ * hint to read nothing. Returns the fields that changed (empty when none, or
+ * when the employee has no login).
+ */
+export async function syncLoginFromEmployee(tx: Prisma.TransactionClient, employeeId: string): Promise<string[]> {
+  const e = await tx.employee.findUnique({
+    where: { id: employeeId },
+    select: {
+      userId: true,
+      firstName: true,
+      lastName: true,
+      suffix: true,
+      employeeNo: true,
+      mobile: true,
+      departmentId: true,
+      position: true,
+      isActive: true,
+    },
+  });
+  if (!e?.userId) return [];
+  const u = await tx.user.findUnique({
+    where: { id: e.userId },
+    select: { name: true, employeeNo: true, phone: true, departmentId: true, position: true, isActive: true },
+  });
+  if (!u) return [];
+  const want = {
+    name: personName(e),
+    employeeNo: e.employeeNo || null,
+    phone: e.mobile || null,
+    departmentId: e.departmentId,
+    position: e.position || null,
+  };
+  const data: Prisma.UserUncheckedUpdateInput = {};
+  const changed: string[] = [];
+  for (const key of MIRRORED_LOGIN_FIELDS) {
+    if ((u[key] ?? null) !== (want[key] ?? null)) {
+      (data as Record<string, unknown>)[key] = want[key];
+      changed.push(key);
+    }
+  }
+  if (!e.isActive && u.isActive) {
+    data.isActive = false;
+    changed.push('isActive');
+  }
+  if (!changed.length) return [];
+  if (data.employeeNo) {
+    const holder = await tx.user.findFirst({
+      where: { employeeNo: want.employeeNo, id: { not: e.userId } },
+      select: { email: true },
+    });
+    if (holder) throw conflict(`Employee number "${want.employeeNo}" is on another login (${holder.email}) — change it there first`);
+  }
+  await tx.user.update({ where: { id: e.userId }, data });
+  return changed;
+}

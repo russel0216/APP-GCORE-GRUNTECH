@@ -294,6 +294,14 @@ export function Employees() {
               })),
             ],
           },
+          {
+            key: 'login',
+            label: 'Login',
+            options: [
+              { value: 'none', label: 'No login yet' },
+              { value: 'yes', label: 'Has a login' },
+            ],
+          },
         ]}
         menuItems={
           can('ghr.employees.create')
@@ -1261,10 +1269,15 @@ function EmployeeForm({
             <Field
               label={linked ? 'Login account' : 'Or link a login that already exists'}
               htmlFor={loginField}
-              hint="Who they sign in as. Reporting line is set on the user account, since that is what approvals route by."
+              hint={
+                can('admin.users.edit_all')
+                  ? "Who they sign in as — the login takes this record's name, number, mobile, department and position. Reporting line is set on the user account, since that is what approvals route by."
+                  : "Who they sign in as. Linking or unlinking a login is an administrator's (admin.users.edit_all)."
+              }
             >
               <PersonSelect
                 id={loginField}
+                disabled={!can('admin.users.edit_all')}
                 value={form.userId}
                 onChange={(id) => setForm({ ...form, userId: id })}
                 people={loginOptions}

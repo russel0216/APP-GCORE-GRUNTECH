@@ -595,7 +595,7 @@ foundation
 373, masters 92, sales 617, costing 200, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 183, chain 340, hr 485, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
-insights 98, insights-brief 50, workspace 82, accounts 133. The
+insights 98, insights-brief 50, workspace 82, accounts 140. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -2911,6 +2911,36 @@ receive the tickets".
   new record's Save follows the branch — `create` for a new person,
   `edit_all` for one on the register); `UserEditor` in
   `pages/admin/Users.tsx` only modifies.
+- **The employee owns identity; the login mirrors it** (2026-10-16, the
+  owner's call: "employee creation and user login should be one only").
+  `syncLoginFromEmployee(tx, employeeId)` in `shared/accounts.ts` is the ONE
+  writer of the login's name (first, last, suffix — `personName()`),
+  employee number, phone (the employee's mobile), department and position
+  (`MIRRORED_LOGIN_FIELDS`), called in the same transaction by `PATCH
+  /employees/:id` (its audit row's `after.loginSynced` says what moved),
+  linking an existing login (`POST /employees { userId }`), the employee
+  import, `/auth/profile` and `/auth/welcome` (a phone typed there is the
+  record's mobile) and `mirrorPositionTitle()` (a position's new title
+  reaches its holders' logins). Deactivating the employee deactivates the
+  login; re-activating never re-opens a login by itself. **An employee
+  number another login carries is a 409 naming it** — at creation
+  (`mirrorEmployeeNo()`) and on every sync — where it used to be dropped
+  silently. `PATCH /users/:id` refuses a CHANGE to a mirrored field on a
+  linked login ("… comes from the employee record", 400; sent back unchanged
+  is fine); `UserEditor` shows them read-only with a link to the record and
+  does not send them. Linking or unlinking a login on the employee record
+  needs `admin.users.edit_all`. **The halves still apart**: `GET /users`
+  takes `?linked=no|yes` and sends `summary.loginsAlone` / `employeesAlone`
+  (Admin › Users' two cards, the second linking to HR › Employees
+  `?login=none`, a declared filter). The employee import takes an optional
+  **Email** column: a login with no employee is linked, a new address is an
+  invited login (`createLogin`, the `employee` role; needs
+  `admin.users.create`, checked before any row) — resolved in `build`,
+  made in `write`, never on a dry run. The seed, once each
+  (`shared/personMirror.ts`): `linkAdminEmployees()` gives a super admin
+  with no employee record one (`seed.adminEmployeeLinked`) and
+  `backfillLoginMirrors()` brings every linked login in step
+  (`seed.loginMirrorBackfilled`, a number clash left and named).
 - **A login email already in use says whose it is** (2026-10-13, the
   owner's report: "i can't add employee in the user" — Karen's login had
   been made before her employee record, and the form only said "Someone
