@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,269 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,283 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 178, chain 329, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 371, aftermarket 261, cad 101,
+115, evaluations 152, academy 120, finance 385, aftermarket 261, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -5144,6 +5144,50 @@ salesperson, team, customer and terms.
   receivables kinds, A/P's for the two payables kinds (`rights` in
   `mountReports`). Report buttons: A/R → receivables, Payments →
   collections, A/P → payables aging.
+
+## Invoice Requests: from progress billing to A/R (2026-10-15)
+
+The owner's call: "below the progress report build the Progress billing;
+the Sales or Team Leader holding the project raises an invoice request from
+the billing, processed by Back Support, routed on the sales order; once
+approved it goes to Accounts Receivable", the paper in the standard dress.
+
+- **The project's Progress & Billing tab** has the Progress reports card
+  and, under it, **Progress billings** (`ProgressBillingsCard` in
+  `ProjectWorkspace.tsx`): "+ New progress billing" (an approved, unbilled
+  report, the ordinary `POST /billings`), and per billing its Invoice
+  request and Invoice, and "Request invoice" where it may be raised. The
+  billing keeps its own Technical Manager › Team Leader route; only an
+  APPROVED billing is requested.
+- **`InvoiceRequest`** (`routes/invoiceRequests.ts`, `/api/invoice-requests`,
+  numbering `invoice_request` GT-IR-2026-0001, `gfin.invoice_requests`
+  OWNED, G-FIN › Money in › **Invoice Requests**,
+  `pages/finance/InvoiceRequests.tsx`): the billing, its project and a
+  REQUIRED ISSUED sales order of the project's customer, which lends the PO
+  and terms; the billing's gross may not pass what is left of the order's
+  net (`assertOrderLeft`, `shared/billingInvoice.ts`). One live request per
+  billing, under a lock on the billing. **Who raises it is
+  `mayRequestInvoice(me, jobId)`**: the create right AND the owner of the
+  project's quotation, their Team Leader ("Reports to", or a `team_leader`
+  on the quotation's team), or `edit_all`. DRAFT → PENDING_APPROVAL →
+  APPROVED, or CANCELLED with a reason; `/submit`, `/withdraw`, `/cancel`,
+  DELETE (draft or cancelled) as every routed document.
+- **The route is "Invoice request — back support"**: one ROLE step
+  `back_support`, team-scoped, `standIns`. **`settleInvoiceRequest()`**
+  claims PENDING_APPROVAL → APPROVED and, in the same transaction, raises a
+  **DRAFT invoice** through `createInvoiceFromBilling()` — the one way, also
+  finance's direct door `POST /invoices/from-billing/:billingId` (now ⋯
+  "Raise invoice directly" on the billing page, refused while a request is
+  live) — carrying the billing's figures, the order, PO, terms and credit;
+  the billing goes INVOICED. If the invoice cannot be raised the request
+  goes back to DRAFT with a bell (`invoice_request.not_invoiced`); finance
+  (`gfin.ar.edit_all`) is told a draft invoice is ready to issue.
+- **The paper** `GET /invoice-requests/:id/pdf` is "Invoice Request" in the
+  standard dress: details, Particulars (the billing lines), the totals,
+  notes, Requested by and the Back Support slot ("Pending" until signed),
+  the files behind it. The list prints (`GET /invoice-requests/pdf`).
+- **Assign Back Support with "Supports teams"** for every selling team —
+  until then requests stall and `audit-workflows.ts` says so.
 
 ## Accounts Payable (2026-10-15)
 

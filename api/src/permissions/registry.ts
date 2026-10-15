@@ -188,6 +188,10 @@ export const REGISTRY: ModuleDef[] = [
     blurb: 'Finance — receivables, payables, cash',
     submodules: [
       { key: 'dashboard', group: 'Overview', label: 'Executive Dashboard', path: '/g-fin', actions: REPORT, phase: 7 },
+      // A progress billing asked to be invoiced: the project's salesperson or
+      // their Team Leader raises it, Back Support approves it, and the approval
+      // raises the draft invoice (2026-10-15).
+      { key: 'invoice_requests', group: 'Money in', label: 'Invoice Requests', path: '/g-fin/invoice-requests', actions: OWNED, phase: 7 },
       { key: 'ar', group: 'Money in', label: 'Accounts Receivable', path: '/g-fin/ar', actions: SHARED, phase: 7 },
       { key: 'ap', group: 'Money out', label: 'Accounts Payable', path: '/g-fin/ap', actions: SHARED, phase: 7 },
       { key: 'expenses', group: 'Money out', label: 'Reimbursements', path: '/g-fin/expenses', actions: OWNED, phase: 7 },

@@ -986,6 +986,8 @@ async function loadJob(id: string) {
           status: true,
           periodFrom: true,
           periodTo: true,
+          // Which approved reports are still to bill (the tab's "+ New progress billing").
+          billing: { select: { id: true } },
         },
       },
       billings: {
@@ -998,6 +1000,10 @@ async function loadJob(id: string) {
           billingDate: true,
           grossAmount: true,
           netCollectible: true,
+          // Beside each billing, its invoice and its latest invoice request
+          // (2026-10-15 — the invoices moved here from the Finance tab).
+          invoice: { select: { id: true, number: true, status: true } },
+          invoiceRequests: { orderBy: { createdAt: 'desc' }, take: 1, select: { id: true, number: true, status: true } },
         },
       },
       plans: { orderBy: { createdAt: 'desc' }, include: { uploadedBy: { select: { id: true, name: true } } } },

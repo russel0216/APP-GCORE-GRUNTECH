@@ -23,6 +23,9 @@ export type NotificationType =
   | 'borrow.released'
   | 'borrow.cancelled'
   | 'pullout.done'
+  // An approved invoice request raised a draft invoice, or could not (2026-10-15).
+  | 'invoice_request.invoiced'
+  | 'invoice_request.not_invoiced'
   /** The automatic reorder added an item to a draft replenishment (2026-10-15). */
   | 'reorder.raised'
   /** Outgoing as the receive proof (2026-10-15): issued to you, and confirmed received. */

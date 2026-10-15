@@ -30,6 +30,7 @@ const DETAIL: Record<string, string> = {
   project: '/g-ops/projects',
   progress_report: '/g-ops/progress',
   progress_billing: '/g-ops/billings',
+  invoice_request: '/g-fin/invoice-requests',
   // Procurement and warehouse
   purchase_request: '/g-chain/purchase-requests',
   rfq: '/g-chain/rfq',

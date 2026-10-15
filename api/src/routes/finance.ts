@@ -42,6 +42,7 @@ import {
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { postJobCost } from '../shared/inventory';
+import { assertOrderLeft, billingForInvoiceInclude, createInvoiceFromBilling } from '../shared/billingInvoice';
 import {
   LIST_CAP,
   listReference,
@@ -893,11 +894,7 @@ invoiceRoutes.post(
 
     const billing = await prisma.progressBilling.findUnique({
       where: { id: req.params.billingId },
-      include: {
-        job: { select: { id: true, number: true, name: true, customerId: true } },
-        lines: { include: { scopeItem: true } },
-        invoice: { select: { id: true, number: true } },
-      },
+      include: billingForInvoiceInclude,
     });
     if (!billing) throw notFound('Progress billing not found');
     if (billing.status !== 'APPROVED' && billing.status !== 'INVOICED') {
@@ -910,6 +907,13 @@ invoiceRoutes.post(
         `${billing.number} has already been invoiced as ${billing.invoice.number}. Raise a credit note against that instead of a second invoice.`,
       );
     }
+    // The other door: an invoice request on its way to Back Support raises this
+    // billing's invoice when approved, so this one waits for it (2026-10-15).
+    const live = await prisma.invoiceRequest.findFirst({
+      where: { progressBillingId: billing.id, status: { in: ['DRAFT', 'PENDING_APPROVAL'] } },
+      select: { number: true },
+    });
+    if (live) throw badRequest(`${billing.number} has invoice request ${live.number} open — its approval raises the invoice`);
 
     const settings = await financeSettings();
     const invoiceDate = body.invoiceDate ? asDate(body.invoiceDate, 'Invoice date') : dayKey(new Date());
@@ -917,45 +921,15 @@ invoiceRoutes.post(
     const dueDate = dueFrom(body, invoiceDate, null, termsDays);
     const credit = await resolveCredit(body, { jobId: billing.jobId });
 
-    const invoice = await prisma.$transaction(async (tx) => {
-      const number = await nextNumber('invoice', tx);
-      const created = await tx.invoice.create({
-        data: {
-          number,
-          customerId: billing.job.customerId,
-          jobId: billing.jobId,
-          progressBillingId: billing.id,
-          invoiceDate,
-          dueDate,
-          termsDays,
-          ...credit,
-          terms: body.terms ?? termsLabel(termsDays),
-          poReference: body.poReference || null,
-          // Carried, not recomputed.
-          grossAmount: billing.grossAmount,
-          vatRate: billing.vatRate,
-          vatAmount: billing.vatAmount,
-          ewtRate: billing.ewtRate,
-          ewtAmount: billing.ewtAmount,
-          invoiceTotal: billing.invoiceTotal,
-          netCollectible: billing.netCollectible,
-          notes: body.notes || null,
-          createdById: me.id,
-          lines: {
-            create: billing.lines.map((line, i) => ({
-              sortOrder: i,
-              description: line.scopeItem?.name ?? 'Progress billing',
-              detail: `${num(line.toDatePct)}% complete to date (${num(line.previousPct)}% already billed)`,
-              amount: line.thisPeriodAmount,
-            })),
-          },
-        },
-        include: invoiceInclude,
-      });
-
-      await tx.progressBilling.update({ where: { id: billing.id }, data: { status: 'INVOICED' } });
-      return created;
-    });
+    const made = await prisma.$transaction((tx) =>
+      createInvoiceFromBilling(
+        tx,
+        billing,
+        { invoiceDate, dueDate, termsDays, terms: body.terms, poReference: body.poReference, notes: body.notes, ...credit },
+        me.id,
+      ),
+    );
+    const invoice = await prisma.invoice.findUniqueOrThrow({ where: { id: made.id }, include: invoiceInclude });
 
     await audit(
       {
@@ -969,28 +943,6 @@ invoiceRoutes.post(
     res.status(201).json(presentInvoice(invoice));
   }),
 );
-
-/**
- * A sales order is never invoiced past its net (its total before VAT): the
- * live invoices on it plus this one, checked under a lock on the order's row
- * so two invoices raised at once cannot both take the last of it.
- */
-async function assertOrderLeft(
-  tx: Prisma.TransactionClient,
-  order: { id: string; number: string; net: number },
-  gross: number,
-  exceptInvoiceId?: string,
-) {
-  await tx.$queryRaw`SELECT id FROM "SalesOrder" WHERE id = ${order.id} FOR UPDATE`;
-  const billed = await tx.invoice.aggregate({
-    where: { salesOrderId: order.id, status: { not: 'CANCELLED' }, ...(exceptInvoiceId ? { id: { not: exceptInvoiceId } } : {}) },
-    _sum: { grossAmount: true },
-  });
-  const left = cents(order.net - num(billed._sum.grossAmount));
-  if (gross > left + 0.005) {
-    throw badRequest(`Only ${formatMoney(Math.max(0, left), await companyCurrency())} of ${order.number} is left to invoice (before VAT)`);
-  }
-}
 
 /** A standalone invoice, for work with no progress billing behind it. */
 const manualInvoiceSchema = creditSchema.extend({

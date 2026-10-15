@@ -157,12 +157,14 @@ model User {
 
   accountTokens AccountToken[]
 
-  lastLoginAt       DateTime?
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
-  minutesAgreements MinutesAgreement[] @relation("MinutesAgreement")
-  issuesReceived    StockIssue[]       @relation("IssueReceivedBy")
-  billingsPrepared  ProgressBilling[]  @relation("BillingPreparer")
+  lastLoginAt             DateTime?
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+  minutesAgreements       MinutesAgreement[] @relation("MinutesAgreement")
+  issuesReceived          StockIssue[]       @relation("IssueReceivedBy")
+  billingsPrepared        ProgressBilling[]  @relation("BillingPreparer")
+  invoiceRequestsRaised   InvoiceRequest[]   @relation("InvoiceRequestRequester")
+  invoiceRequestsCredited InvoiceRequest[]   @relation("InvoiceRequestSalesperson")
 
   @@index([isActive])
   @@index([supervisorId])
@@ -717,6 +719,7 @@ model Industry {
   supporters       UserSupportTeam[]
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
+  invoiceRequests  InvoiceRequest[]
 }
 
 /// A customer's sub-industry (2026-10-08, the owner's eleven): Enterprise,
@@ -1582,8 +1585,9 @@ model SalesOrder {
   pulloutSlips PulloutSlip[]
   invoices     Invoice[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  invoiceRequests InvoiceRequest[]
 
   @@index([quotationId])
   @@index([customerId])
@@ -1950,8 +1954,9 @@ model Job {
   salesActivities  SalesActivity[]
   cadJobOrders     CadJobOrder[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  invoiceRequests InvoiceRequest[]
 
   @@index([status])
   @@index([customerId])
@@ -2262,8 +2267,10 @@ model ProgressBilling {
   lines   ProgressBillingLine[]
   invoice Invoice?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  /// The invoice requests raised on it (2026-10-15) — at most one live.
+  invoiceRequests InvoiceRequest[]
 
   @@unique([jobId, billingNo])
   @@index([jobId, status])
@@ -4109,8 +4116,10 @@ model Invoice {
   lines       InvoiceLine[]
   allocations PaymentAllocation[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  /// The invoice request whose approval raised it (2026-10-15).
+  invoiceRequest InvoiceRequest?
 
   @@index([status])
   @@index([customerId, status])
@@ -5200,4 +5209,56 @@ model UserSupportTeam {
 
   @@id([userId, industryId])
   @@index([industryId])
+}
+
+enum InvoiceRequestStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  CANCELLED
+}
+
+/// An INVOICE REQUEST (2026-10-15, the owner's call): the project's
+/// salesperson or their Team Leader asks for an approved progress billing to
+/// be invoiced against the project's sales order; Back Support approves it,
+/// and the approval raises the DRAFT invoice in Accounts Receivable. The
+/// money is the billing's, never re-keyed; the order lends its PO and terms.
+model InvoiceRequest {
+  id     String               @id @default(cuid())
+  number String
+  status InvoiceRequestStatus @default(DRAFT)
+
+  progressBillingId String
+  progressBilling   ProgressBilling @relation(fields: [progressBillingId], references: [id], onDelete: Cascade)
+  jobId             String
+  job               Job             @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  salesOrderId      String
+  salesOrder        SalesOrder      @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+
+  /// What the invoice will carry.
+  invoiceDate   DateTime? @db.Date
+  termsDays     Int?
+  poReference   String?
+  salespersonId String?
+  salesperson   User?     @relation("InvoiceRequestSalesperson", fields: [salespersonId], references: [id], onDelete: SetNull)
+  teamId        String?
+  team          Industry? @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  notes         String?
+
+  requestedById String
+  requestedBy   User      @relation("InvoiceRequestRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  submittedAt   DateTime?
+  approvedAt    DateTime?
+  cancelReason  String?
+
+  /// The DRAFT invoice its approval raised.
+  invoiceId String?  @unique
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([number])
+  @@index([progressBillingId, status])
+  @@index([status, createdAt])
 }

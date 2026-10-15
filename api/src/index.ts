@@ -48,6 +48,7 @@ import { jobRoutes } from './routes/jobs';
 import { budgetRequestRoutes } from './routes/budgetRequests';
 import { progressRoutes, billingRoutes, planRoutes } from './routes/progress';
 import { planApprovalRoutes } from './routes/planApprovals';
+import { invoiceRequestRoutes } from './routes/invoiceRequests';
 import { peopleFlowRoutes } from './routes/peopleFlow';
 import {
   purchaseRequestRoutes,
@@ -181,6 +182,7 @@ app.use('/api/plans', planApprovalRoutes);
 app.use('/api/budget-requests', budgetRequestRoutes);
 app.use('/api/progress-reports', progressRoutes);
 app.use('/api/billings', billingRoutes);
+app.use('/api/invoice-requests', invoiceRequestRoutes);
 
 // G-CHAIN (Phase 5)
 app.use('/api/purchase-requests', purchaseRequestRoutes);

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { mayRequestInvoice } from './invoiceRequests';
 import { z } from 'zod';
 import { Prisma, ProgressStatus, BillingStatus } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -1386,8 +1387,18 @@ billingRoutes.get(
     if (res.locals.deciderOnly === true && !(await mayDecide(me.id, BILL_DOC, [billing.id]))) throw notFound('Billing not found');
     const preparer = await billingPreparer(billing);
     const editor = mayEditBilling(me, preparer);
+    const invoiceRequests = await prisma.invoiceRequest.findMany({
+      where: { progressBillingId: billing.id },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, number: true, status: true, createdAt: true, requestedBy: { select: { name: true } } },
+    });
+    const live = invoiceRequests.find((r) => r.status === 'DRAFT' || r.status === 'PENDING_APPROVAL');
     res.json({
       ...presentBilling(billing),
+      invoiceRequests,
+      // The salesperson or Team Leader holding the project asks for the
+      // invoice (2026-10-15); one live request at a time.
+      canRequestInvoice: billing.status === 'APPROVED' && !billing.invoice && !live && (await mayRequestInvoice(me, billing.jobId)),
       canSubmit: billing.status === 'DRAFT' && editor,
       canWithdraw: billing.status === 'PENDING_APPROVAL' && editor,
       approvalRoute:

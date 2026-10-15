@@ -30,6 +30,7 @@ import { ProjectBudgetRequestsCard, BudgetRequestModal } from './BudgetRequests'
 import { ProjectPlanApprovalsCard } from './PlanApprovals';
 import { ProjectCostingCard } from './ProjectCosting';
 import { ProjectJobOrders } from '../service/JobOrders';
+import { REQUEST_TONES } from '../finance/InvoiceRequests';
 
 /**
  * The project workspace (model §8.1).
@@ -106,6 +107,7 @@ interface Job {
     status: string;
     periodFrom: string;
     periodTo: string;
+    billing: { id: string } | null;
   }[];
   billings: {
     id: string;
@@ -115,6 +117,9 @@ interface Job {
     billingDate: string;
     grossAmount: number;
     netCollectible: number;
+    /** Beside each billing, its invoice and its latest invoice request (2026-10-15). */
+    invoice: { id: string; number: string; status: string } | null;
+    invoiceRequests: { id: string; number: string; status: string }[];
   }[];
   /** The project's Requests for Approval (2026-10-13). */
   plans: {
@@ -760,58 +765,7 @@ export function ProjectWorkspace() {
             </div>
           )}
         </div>
-        <div className="card">
-          <h3 className="card-title">Progress billings</h3>
-          <p className="muted del-lede">
-            Raised from an approved progress report, never keyed by hand. Each billing covers only
-            what has not already been billed.
-          </p>
-          {job.billings.length === 0 ? (
-            <Empty title="Nothing billed yet" hint="Approve a progress report, then bill it." />
-          ) : (
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Number</th>
-                    <th>Date</th>
-                    <th className="right">Gross</th>
-                    <th className="right">Net collectible</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {job.billings.map((b) => (
-                    <tr key={b.id}>
-                      <td className="mono">{b.billingNo}</td>
-                      <td>
-                        <Link className="mono" to={`/g-ops/billings/${b.id}`}>
-                          {b.number}
-                        </Link>
-                      </td>
-                      <td>{formatDate(b.billingDate)}</td>
-                      <td className="right mono">{formatMoney(b.grossAmount)}</td>
-                      <td className="right mono">{formatMoney(b.netCollectible)}</td>
-                      <td>
-                        <StatusBadge status={b.status} />
-                      </td>
-                    </tr>
-                  ))}
-                  <tr>
-                    <td colSpan={3} className="right">
-                      <strong>TOTAL BILLED</strong>
-                    </td>
-                    <td className="right mono">
-                      <strong>{formatMoney(s.billed)}</strong>
-                    </td>
-                    <td colSpan={2} />
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+        <ProgressBillingsCard job={job} totalBilled={s.billed} onChanged={() => void load()} />
         </div>
       )}
 
@@ -908,6 +862,158 @@ export function ProjectWorkspace() {
 }
 
 /** One label / value pair inside a `.kv` list. */
+/**
+ * Under the progress reports, the project's billings (2026-10-15, the owner's
+ * call): "+ New progress billing" bills an approved report not yet billed (the
+ * same `POST /billings` as the report page's Raise billing), and each billing
+ * shows its invoice request and its invoice — the invoices live here since the
+ * Finance tab went. "Request invoice" opens the billing, where the salesperson
+ * or Team Leader holding the project asks for it.
+ */
+function ProgressBillingsCard({ job, totalBilled, onChanged }: { job: Job; totalBilled: number; onChanged: () => void }) {
+  const { can } = useAuth();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [picking, setPicking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const unbilled = job.progressReports.filter((r) => r.status === 'APPROVED' && !r.billing);
+
+  async function bill(reportId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const made = await api.post<{ id: string; number: string }>('/billings', { progressReportId: reportId });
+      toast('ok', `${made.number} raised — submit it for approval`);
+      onChanged();
+      navigate(`/g-ops/billings/${made.id}`);
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="del-card-head">
+        <h3 className="card-title">Progress billings</h3>
+        {can('gops.progress_billing.create') && (
+          <button
+            className="btn btn-primary btn-sm"
+            disabled={unbilled.length === 0 || busy}
+            title={unbilled.length === 0 ? 'Every approved report is billed — approve the next report first' : undefined}
+            onClick={() => (unbilled.length === 1 ? bill(unbilled[0].id) : setPicking((p) => !p))}
+          >
+            + New progress billing
+          </button>
+        )}
+      </div>
+      <p className="muted del-lede">
+        Raised from an approved progress report, never keyed by hand, and approved by the Technical Manager and the Team
+        Leader. Then the salesperson or Team Leader requests the invoice: Back Support approves it, and the draft invoice
+        lands in Accounts Receivable.
+      </p>
+      <ErrorBox error={error} />
+      {picking && unbilled.length > 1 && (
+        <div className="alert info">
+          Which approved report?{' '}
+          {unbilled.map((r) => (
+            <button key={r.id} className="btn btn-sm" disabled={busy} onClick={() => bill(r.id)}>
+              {r.number} · {formatDate(r.periodFrom)} — {formatDate(r.periodTo)}
+            </button>
+          ))}
+        </div>
+      )}
+      {job.billings.length === 0 ? (
+        <Empty title="Nothing billed yet" hint="Approve a progress report, then bill it." />
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Number</th>
+                <th>Date</th>
+                <th className="right">Gross</th>
+                <th className="right">Net collectible</th>
+                <th>Status</th>
+                <th>Invoice request</th>
+                <th>Invoice</th>
+              </tr>
+            </thead>
+            <tbody>
+              {job.billings.map((b) => {
+                const req = b.invoiceRequests[0];
+                return (
+                  <tr key={b.id}>
+                    <td className="mono">{b.billingNo}</td>
+                    <td>
+                      <Link className="mono" to={`/g-ops/billings/${b.id}`}>
+                        {b.number}
+                      </Link>
+                    </td>
+                    <td>{formatDate(b.billingDate)}</td>
+                    <td className="right mono">{formatMoney(b.grossAmount)}</td>
+                    <td className="right mono">{formatMoney(b.netCollectible)}</td>
+                    <td>
+                      <StatusBadge status={b.status} />
+                    </td>
+                    <td>
+                      {req ? (
+                        <>
+                          <Link className="mono" to={`/g-fin/invoice-requests/${req.id}`}>
+                            {req.number}
+                          </Link>
+                          <div>
+                            <StatusBadge status={req.status} extra={REQUEST_TONES} />
+                          </div>
+                        </>
+                      ) : b.status === 'APPROVED' && !b.invoice && can('gfin.invoice_requests.create') ? (
+                        <Link className="btn btn-sm" to={`/g-ops/billings/${b.id}`}>
+                          Request invoice
+                        </Link>
+                      ) : (
+                        <span className="faint">—</span>
+                      )}
+                    </td>
+                    <td>
+                      {b.invoice ? (
+                        can('gfin.ar.view_all') ? (
+                          <>
+                            <Link className="mono" to={`/g-fin/ar/${b.invoice.id}`}>
+                              {b.invoice.number}
+                            </Link>
+                            <div>
+                              <StatusBadge status={b.invoice.status} />
+                            </div>
+                          </>
+                        ) : (
+                          <span className="mono">{b.invoice.number}</span>
+                        )
+                      ) : (
+                        <span className="faint">—</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              <tr>
+                <td colSpan={3} className="right">
+                  <strong>TOTAL BILLED</strong>
+                </td>
+                <td className="right mono">
+                  <strong>{formatMoney(totalBilled)}</strong>
+                </td>
+                <td colSpan={4} />
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Row({ label, value }: { label: string; value: ReactNode }) {
   return (
     <>

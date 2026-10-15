@@ -142,6 +142,10 @@ const ROLES: RoleSeed[] = [
       // Writes the project's Accomplishment Report and raises its billing
       // (2026-10-15, the owner's call: "creator (Project Engineer) or Sales").
       ...VIEW_OWN_SELF('gops', 'progress_billing'),
+      // Asks for an approved billing to be invoiced against the project's
+      // sales order (2026-10-15) — Back Support approves it.
+      ...VIEW_OWN_SELF('gfin', 'invoice_requests'),
+      'gfin.invoice_requests.delete',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       ...VIEW_OWN_SELF('ghr', 'meetings'),
@@ -193,6 +197,8 @@ const ROLES: RoleSeed[] = [
     only: [
       'gops.dashboard.view_all',
       'gops.sales_orders.view_all',
+      // Approves a billing's invoice request (2026-10-15), so reads them all.
+      'gfin.invoice_requests.view_all',
       // The routing sheet of 2026-10-13: Back Support prepares purchase
       // orders (from the requisitions and canvasses it reads) and budget
       // requests, and is the second signature on every budget request.
@@ -497,6 +503,8 @@ const ROLES: RoleSeed[] = [
       'insights.cash.export',
       'gops.projects.view_all',
       'gops.progress_billing.view_all',
+      // The invoice requests whose approval lands a draft invoice in A/R (2026-10-15).
+      'gfin.invoice_requests.view_all',
       // Finance raises the supplier bill (Phase 7 notes), so it must find the
       // supplier on the bill form (SupplierPicker reads /suppliers/lookup).
       'gchain.suppliers.view_all',
@@ -521,6 +529,7 @@ const ROLES: RoleSeed[] = [
       'gfin.ar.view_all',
       'gfin.ar.create',
       'gfin.ar.edit_all',
+      'gfin.invoice_requests.view_all',
       'gfin.ap.view_all',
       'gfin.ap.create',
       'gfin.ap.edit_all',
@@ -678,6 +687,11 @@ const ROLES: RoleSeed[] = [
         'gops.budget_requests.view_all',
         // The second signature on every progress report and billing (2026-10-15).
         'gops.progress_billing.view_all',
+        // Raises a billing's invoice request for the team's projects, and
+        // reads every one (2026-10-15).
+        ...VIEW_OWN_SELF('gfin', 'invoice_requests'),
+        'gfin.invoice_requests.view_all',
+        'gfin.invoice_requests.delete',
       ],
     },
     {
@@ -892,6 +906,17 @@ const WORKFLOWS: WorkflowSeed[] = [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
     ],
+  },
+  {
+    // INVOICE REQUEST (2026-10-15, the owner's call): the project's
+    // salesperson or their Team Leader asks for an approved billing to be
+    // invoiced against the sales order; Back Support processes it — the one
+    // on the requester's team (TEAM_SCOPED_ROLES) — and its approval raises
+    // the draft invoice in Accounts Receivable.
+    documentType: 'invoice_request',
+    name: 'Invoice request — back support',
+    standIns: true,
+    steps: [{ sequence: 1, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' }],
   },
   // REQUEST FOR APPROVAL (2026-10-13, the owner's call: "Internal Approval
   // (Technical Manager, Team Leader and CEO more than 1 million Project

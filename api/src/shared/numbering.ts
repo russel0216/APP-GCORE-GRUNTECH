@@ -88,6 +88,8 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   { type: 'progress_report', code: 'PGR', label: 'Progress Report' },
   { type: 'progress_billing', code: 'PB', label: 'Progress Billing' },
   { type: 'invoice', code: 'INV', label: 'Invoice' },
+  // A progress billing's request to be invoiced, approved by Back Support (2026-10-15).
+  { type: 'invoice_request', code: 'IR', label: 'Invoice Request' },
   { type: 'supplier_bill', code: 'BILL', label: 'Supplier Bill' },
   { type: 'payment', code: 'RCPT', label: 'Payment Receipt' },
   { type: 'disbursement', code: 'DV', label: 'Disbursement Voucher' },

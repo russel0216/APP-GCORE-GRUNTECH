@@ -50,6 +50,7 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   // step back to finance is the same fault the budget-request and
   // purchase-order workflows both shipped with.
   supplier_bill: ['finance', 'procurement'],
+  invoice_request: ['sales', 'industry_specialist', 'team_leader'],
   cash_advance: ['employee', 'project_engineer', 'service_engineer', 'sales', 'project_manager', 'finance'],
   job_order: ['sales', 'sales_manager', 'service_engineer'],
   // HR raises a clearance for an employee with no login, and an evaluation

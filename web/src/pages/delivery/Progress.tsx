@@ -22,6 +22,7 @@ import { useConfirm } from '../../components/Confirm';
 import { ApprovalStepper, DocumentApproval, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { useBackLink } from '../../components/Navigation';
 import { NumberInput } from '../../components/NumberInput';
+import { InvoiceRequestModal, REQUEST_TONES } from '../finance/InvoiceRequests';
 
 // ════════════════════════════════════════════════════════════════════
 //  LIST
@@ -1007,6 +1008,9 @@ interface BillingDetail {
   }[];
   /** The invoice raised from this billing — at most one, by a unique key. */
   invoice: { id: string; number: string; status: string } | null;
+  /** Its invoice requests, newest first (2026-10-15). */
+  invoiceRequests: { id: string; number: string; status: string; createdAt: string; requestedBy: { name: string } }[];
+  canRequestInvoice: boolean;
   canSubmit: boolean;
   canWithdraw: boolean;
   approvalRoute: PreviewRoute | null;
@@ -1022,6 +1026,8 @@ export function BillingDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [reload, setReload] = useState(0);
+  const [requesting, setRequesting] = useState(false);
+  const navigate = useNavigate();
 
   // A billing has no menu entry of its own: back goes to its project's
   // Progress & Billing tab, else to the Progress & Billing register.
@@ -1095,17 +1101,23 @@ export function BillingDetailPage() {
                 Submit for approval
               </button>
             )}
-            {/* The hand-off to Finance. The invoice copies this billing's figures,
-                so it is raised from here rather than keyed again in A/R. */}
-            {!billing.invoice && billing.status === 'APPROVED' && can('gfin.ar.create') && (
-              <Link className="btn btn-primary" to={`/g-fin/ar?raise=${billing.id}`}>
-                Raise invoice
-              </Link>
+            {/* The hand-off (2026-10-15): the salesperson or Team Leader holding
+                the project asks for the invoice; Back Support approves it, and
+                the approval raises the draft invoice in A/R. */}
+            {billing.canRequestInvoice && (
+              <button className="btn btn-primary" onClick={() => setRequesting(true)}>
+                Request invoice
+              </button>
             )}
           </>
         }
         print={`/api/billings/${billing.id}/pdf`}
         more={[
+          // Finance's direct door stays, for a billing nobody asked about.
+          !billing.invoice &&
+            billing.status === 'APPROVED' &&
+            !billing.invoiceRequests.some((r) => r.status === 'DRAFT' || r.status === 'PENDING_APPROVAL') &&
+            can('gfin.ar.create') && { label: 'Raise invoice directly (finance)', to: `/g-fin/ar?raise=${billing.id}` },
           billing.canWithdraw && {
             label: 'Pull back to draft',
             confirm: {
@@ -1145,8 +1157,53 @@ export function BillingDetailPage() {
       {!billing.invoice && billing.status === 'APPROVED' && (
         <div className="alert info">
           Approved and not yet invoiced — this is work you are owed and have not asked for.
-          {!can('gfin.ar.create') && ' Finance raises the invoice from this billing.'}
+          {billing.canRequestInvoice
+            ? ' Request the invoice: Back Support approves it, and finance gets the draft invoice.'
+            : ' The salesperson holding the project, or their Team Leader, requests the invoice.'}
         </div>
+      )}
+      {billing.invoiceRequests.length > 0 && (
+        <section className="card">
+          <h3 className="card-title">Invoice requests</h3>
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Number</th>
+                  <th>Requested by</th>
+                  <th>Raised</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {billing.invoiceRequests.map((r) => (
+                  <tr key={r.id}>
+                    <td>
+                      <Link className="mono" to={`/g-fin/invoice-requests/${r.id}`}>
+                        {r.number}
+                      </Link>
+                    </td>
+                    <td>{r.requestedBy.name}</td>
+                    <td>{formatDate(r.createdAt)}</td>
+                    <td>
+                      <StatusBadge status={r.status} extra={REQUEST_TONES} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+      {requesting && (
+        <InvoiceRequestModal
+          billingId={billing.id}
+          onClose={() => setRequesting(false)}
+          onSaved={(saved) => {
+            setRequesting(false);
+            navigate(`/g-fin/invoice-requests/${saved.id}`);
+          }}
+        />
       )}
 
       <div className="kpi-grid">

@@ -53,6 +53,8 @@ import { settleAdvance } from '../src/routes/advances';
 // Side-effect import: registers the budget_request approval subscriber.
 import '../src/routes/budgetRequests';
 import '../src/routes/procurement';
+// Side-effect import: registers the invoice_request approval subscriber.
+import { settleInvoiceRequest } from '../src/routes/invoiceRequests';
 import {
   flat,
   hasLine,
@@ -162,6 +164,8 @@ async function cleanup() {
       where: { id: { in: [...new Set(allocations.map((a) => a.paymentId))] } },
     });
   }
+  // Invoice requests hold their sales order (Restrict); their invoices go next.
+  await prisma.invoiceRequest.deleteMany({ where: { job: { customer: { name: { startsWith: TAG } } } } });
   await prisma.invoice.deleteMany({ where: { id: { in: invoices.map((i) => i.id) } } });
   // The A/R checks' sales order and its quotation, after their invoices.
   await prisma.salesOrder.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
@@ -3992,6 +3996,190 @@ async function main() {
       caRep.status === 200 && caCard('Payments made') >= 1_000 - 0.005 && caCard('Net outstanding balance') >= 2_500 - 0.005,
       JSON.stringify(caRep.body.cards),
     );
+
+    // ══ Invoice requests (2026-10-15) ═══════════════════════════════════════
+    console.log('\nInvoice requests — the salesperson asks, Back Support approves, A/R gets the draft invoice');
+    const irSeller = await makeUser('ZZ IR Seller', 'irseller@verifyf.local', ['sales']);
+    const irStranger = await makeUser('ZZ IR Other Seller', 'irother@verifyf.local', ['sales']);
+    const irSupport = await makeUser('ZZ IR Back Support', 'irsupport@verifyf.local', ['back_support']);
+    const irQuote = await prisma.quotation.create({
+      data: { number: `${TAG}-Q-IR1`, customerId: customer.id, ownerId: irSeller.id, subject: `${TAG} IR PROJECT` },
+    });
+    const irRev = await prisma.quotationRevision.create({ data: { quotationId: irQuote.id, revision: 0, status: 'APPROVED' } });
+    const irOrder = await prisma.salesOrder.create({
+      data: {
+        number: `${TAG}-SO-IR1`,
+        status: 'ISSUED',
+        quotationId: irQuote.id,
+        customerId: customer.id,
+        ownerId: irSeller.id,
+        orderDate: dayKey(new Date()),
+        termsDays: 60,
+        poNumber: `${TAG}-PO-IR`,
+        vatRate: D(0.12),
+        subtotal: D(150_000),
+        vatAmount: D(18_000),
+        total: D(168_000),
+      },
+    });
+    const irJob = await prisma.job.create({
+      data: {
+        number: `${TAG}-PRJ-IR`,
+        name: `${TAG} Invoice request project`,
+        customerId: customer.id,
+        costingId: costing.id,
+        quotationRevisionId: irRev.id,
+        contractValue: D(150_000),
+        createdById: finance.id,
+      },
+    });
+    const irBilling = async (n: number, gross: number, status: 'APPROVED' | 'DRAFT' = 'APPROVED') => {
+      const report = await prisma.progressReport.create({
+        data: {
+          number: `${TAG}-IR-PR-${n}`,
+          reportNo: n,
+          jobId: irJob.id,
+          status: 'APPROVED',
+          periodFrom: dayKey(new Date()),
+          periodTo: dayKey(new Date()),
+          preparedById: irSeller.id,
+          accomplishment: `${TAG} report ${n}`,
+        },
+      });
+      const tax = taxBreakdown(gross, 0.12, 0.02);
+      return prisma.progressBilling.create({
+        data: {
+          number: `${TAG}-IR-PB-${n}`,
+          jobId: irJob.id,
+          billingNo: n,
+          status,
+          progressReportId: report.id,
+          billingDate: dayKey(new Date()),
+          grossAmount: D(tax.grossAmount),
+          vatRate: D(0.12),
+          vatAmount: D(tax.vatAmount),
+          ewtRate: D(0.02),
+          ewtAmount: D(tax.ewtAmount),
+          invoiceTotal: D(tax.invoiceTotal),
+          netCollectible: D(tax.netCollectible),
+          approvedAt: status === 'APPROVED' ? new Date() : null,
+        },
+      });
+    };
+    const irB1 = await irBilling(1, 100_000);
+    const irDraftBilling = await irBilling(2, 10_000, 'DRAFT');
+    const seller = as(irSeller);
+    const source = await seller('GET', `/invoice-requests/source?billingId=${irB1.id}`);
+    check(
+      'the request form offers the project’s issued sales order with what is left of its net, and says the seller may ask',
+      source.status === 200 &&
+        source.body.mayRequest === true &&
+        source.body.problem === null &&
+        (source.body.salesOrders as { id: string; left: number }[]).some((o) => o.id === irOrder.id && money(o.left, 150_000)),
+      JSON.stringify(source.body).slice(0, 240),
+    );
+    const notMine = await as(irStranger)('POST', '/invoice-requests', { progressBillingId: irB1.id, salesOrderId: irOrder.id });
+    const notApproved = await seller('POST', '/invoice-requests', { progressBillingId: irDraftBilling.id, salesOrderId: irOrder.id });
+    check(
+      'another salesperson may not ask for this project’s invoice, and a billing not yet approved cannot be asked',
+      notMine.status === 403 && notApproved.status === 400,
+      `${notMine.status} / ${notApproved.status} ${JSON.stringify(notApproved.body).slice(0, 120)}`,
+    );
+    const ir = await seller('POST', '/invoice-requests', { progressBillingId: irB1.id, salesOrderId: irOrder.id });
+    const irSecond = await seller('POST', '/invoice-requests', { progressBillingId: irB1.id, salesOrderId: irOrder.id });
+    check(
+      'the seller raises one, numbered GT-IR, taking the order’s PO and terms — and a second while it is live is refused',
+      ir.status === 201 &&
+        /-IR-\d{4}-\d{4}$/.test(String(ir.body.number)) &&
+        ir.body.poReference === `${TAG}-PO-IR` &&
+        ir.body.termsDays === 60 &&
+        ir.body.salesperson?.id === irSeller.id &&
+        irSecond.status === 400,
+      `${ir.status} ${ir.body.number} ${ir.body.poReference} ${ir.body.termsDays} · ${irSecond.status}`,
+    );
+    const irId = String(ir.body.id);
+    const directWhileLive = await fin('POST', `/invoices/from-billing/${irB1.id}`, {});
+    check('finance’s direct door waits while the request is open', directWhileLive.status === 400 && String(directWhileLive.body.error).includes(String(ir.body.number)), JSON.stringify(directWhileLive.body));
+    const irDraftPdf = await seller('GET', `/invoice-requests/${irId}/pdf`);
+    const irDraftText = (irDraftPdf.bytes ? pdfText(irDraftPdf.bytes) : '').replace(/\s+/g, ' ');
+    check(
+      'its paper, in the standard dress: the order, the PO, the particulars, the totals, and Back Support Pending',
+      irDraftPdf.status === 200 &&
+        irDraftText.includes('INVOICE REQUEST') &&
+        irDraftText.includes(`${TAG}-SO-IR1`) &&
+        irDraftText.includes(`${TAG}-PO-IR`) &&
+        irDraftText.includes('Net collectible') &&
+        irDraftText.includes('BACK SUPPORT') &&
+        irDraftText.includes('Pending'),
+      irDraftText.slice(0, 600),
+    );
+    const irSubmit = await seller('POST', `/invoice-requests/${irId}/submit`);
+    const irReq = await prisma.approvalRequest.findFirst({
+      where: { documentType: 'invoice_request', documentId: irId, status: 'PENDING' },
+      include: { workflow: { include: { steps: true } } },
+    });
+    const supportApprovers = irReq ? await approversForStep(irReq.workflow!.steps[0], irSeller.id, prisma, {}) : [];
+    check(
+      'submitted, it goes to Back Support',
+      irSubmit.status === 200 && irSubmit.body.status === 'PENDING_APPROVAL' && irReq?.workflow?.steps.map((st) => st.name).join(',') === 'Back Support' && supportApprovers.includes(irSupport.id),
+      `${irSubmit.status} ${irSubmit.body.status} ${irReq?.workflow?.steps.map((st) => st.name)}`,
+    );
+    const irWithdraw = await seller('POST', `/invoice-requests/${irId}/withdraw`);
+    const irResubmit = await seller('POST', `/invoice-requests/${irId}/submit`);
+    check('pulled back it is a draft, and it is sent again', irWithdraw.body.status === 'DRAFT' && irResubmit.body.status === 'PENDING_APPROVAL', `${irWithdraw.status} ${irResubmit.status}`);
+    const irOpen = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'invoice_request', documentId: irId, status: 'PENDING' } });
+    await act({ requestId: irOpen.id, userId: irSupport.id, action: 'APPROVED' });
+    const irDone = await prisma.invoiceRequest.findUniqueOrThrow({ where: { id: irId }, include: { invoice: true } });
+    const irB1After = await prisma.progressBilling.findUniqueOrThrow({ where: { id: irB1.id } });
+    check(
+      'Back Support’s approval raises ONE draft invoice on the order, with its PO, terms and the billing’s money, and the billing is invoiced',
+      irDone.status === 'APPROVED' &&
+        irDone.invoice?.status === 'DRAFT' &&
+        irDone.invoice.salesOrderId === irOrder.id &&
+        irDone.invoice.poReference === `${TAG}-PO-IR` &&
+        irDone.invoice.termsDays === 60 &&
+        irDone.invoice.salespersonId === irSeller.id &&
+        money(Number(irDone.invoice.netCollectible), Number(irB1.netCollectible)) &&
+        irB1After.status === 'INVOICED' &&
+        (await prisma.invoice.count({ where: { progressBillingId: irB1.id } })) === 1,
+      `${irDone.status} ${irDone.invoice?.status} ${irDone.invoice?.poReference} ${irB1After.status}`,
+    );
+    await settleInvoiceRequest(irOpen, 'APPROVED');
+    check('a settlement that arrives twice raises nothing more', (await prisma.invoice.count({ where: { progressBillingId: irB1.id } })) === 1);
+    const financeTold = await prisma.notification.findFirst({ where: { userId: finance.id, type: 'invoice_request.invoiced', link: `/g-fin/ar/${irDone.invoiceId}` } });
+    check('finance is told the draft invoice is ready to issue', !!financeTold);
+    // What is left of the order now refuses a billing bigger than it.
+    const irB3 = await irBilling(3, 60_000);
+    const over = await seller('POST', '/invoice-requests', { progressBillingId: irB3.id, salesOrderId: irOrder.id });
+    check(
+      'a billing past what is left of the order’s net is refused, naming what is left',
+      over.status === 400 && String(over.body.error).includes('left to invoice'),
+      `${over.status} ${JSON.stringify(over.body).slice(0, 160)}`,
+    );
+    // Cancel and delete: a draft request is cancelled with a reason, then deleted.
+    const irB4 = await irBilling(4, 20_000);
+    const ir4 = await seller('POST', '/invoice-requests', { progressBillingId: irB4.id, salesOrderId: irOrder.id });
+    const ir4Cancel = await seller('POST', `/invoice-requests/${ir4.body.id}/cancel`, { reason: 'raised on the wrong order' });
+    const ir4Again = await seller('POST', '/invoice-requests', { progressBillingId: irB4.id, salesOrderId: irOrder.id });
+    const ir4Delete = await seller('DELETE', `/invoice-requests/${ir4.body.id}`);
+    check(
+      'a cancelled request frees its billing for a new one, and is deleted',
+      ir4Cancel.body.status === 'CANCELLED' && ir4Again.status === 201 && ir4Delete.status === 200,
+      `${ir4Cancel.status} ${ir4Again.status} ${ir4Delete.status}`,
+    );
+    const irList = await fin('GET', `/invoice-requests?pageSize=50&jobId=${irJob.id}`);
+    const irListPdf = await fin('GET', `/invoice-requests/pdf?jobId=${irJob.id}`);
+    check(
+      'the register lists the project’s requests with their cards, and prints',
+      irList.status === 200 &&
+        irList.body.total === 2 &&
+        typeof irList.body.summary?.drafts === 'number' &&
+        irListPdf.status === 200 &&
+        (irListPdf.bytes ? pdfText(irListPdf.bytes) : '').replace(/\s+/g, ' ').includes('INVOICE REQUESTS'),
+      `${irList.status} ${irList.body.total} ${JSON.stringify(irList.body.summary)} · ${irListPdf.status}`,
+    );
+    const irStrangerRead = await as(irStranger)('GET', `/invoice-requests/${irId}`);
+    check('someone else’s request is not theirs to read', irStrangerRead.status === 404, String(irStrangerRead.status));
     await saveFinanceSettings({ blockAdvanceWhileUnliquidated: true });
   }
 

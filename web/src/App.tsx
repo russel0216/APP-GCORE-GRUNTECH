@@ -83,6 +83,7 @@ import { TrainingCalendar } from './pages/hr/academy/TrainingCalendar';
 import { Sessions, SessionDetail } from './pages/hr/academy/Sessions';
 import { Passport } from './pages/hr/academy/Passport';
 import { Passports } from './pages/hr/academy/Passports';
+import { InvoiceRequests, InvoiceRequestPage } from './pages/finance/InvoiceRequests';
 import { Receivables, InvoiceDetail, Payments, PaymentDetail } from './pages/finance/Receivables';
 import { Payables, BillDetail } from './pages/finance/Payables';
 import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
@@ -1175,6 +1176,18 @@ function Routed() {
             </Guard>
           }
         />
+        {/* Invoice requests (2026-10-15): the register for those who read it;
+            the record page has no Guard — Back Support may hold no other right,
+            and the API decides. */}
+        <Route
+          path="/g-fin/invoice-requests"
+          element={
+            <GuardAny permissions={['gfin.invoice_requests.view_all', 'gfin.invoice_requests.view_own']}>
+              <InvoiceRequests />
+            </GuardAny>
+          }
+        />
+        <Route path="/g-fin/invoice-requests/:id" element={<InvoiceRequestPage />} />
         <Route
           path="/g-fin/ar"
           element={
