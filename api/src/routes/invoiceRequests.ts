@@ -14,6 +14,7 @@ import {
   contactOf,
   mayDecide,
   onApprovalSettled,
+  onApprovalReopened,
   openSteps,
   preparedAt,
   routeBrief,
@@ -918,6 +919,81 @@ export async function settleInvoiceRequest(approval: ApprovalRequest, outcome: A
   ]);
 }
 onApprovalSettled(DOC, settleInvoiceRequest);
+
+/**
+ * Pulled back after approval (2026-10-16): the DRAFT invoice its approval
+ * raised is deleted (one finance cancelled is left as it is, unlinked), a
+ * billing's request puts its progress billing back to APPROVED so it can be
+ * requested again, and the request is a DRAFT. Refused once that invoice has
+ * left draft — issued, part paid or paid — naming it: the customer has it.
+ */
+onApprovalReopened(DOC, {
+  may: async (actor, id) => {
+    const row = await prisma.invoiceRequest.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+    return !!row && row.status === 'APPROVED' && mayEdit(actor, row);
+  },
+  reopen: async ({ documentId, tx, actor }) => {
+    const row = await tx.invoiceRequest.findUnique({ where: { id: documentId }, include: { invoice: { select: { id: true, number: true, status: true } } } });
+    if (!row) throw notFound('Invoice request not found');
+    if (row.status !== 'APPROVED') throw badRequest(`${row.number} is ${statusLabel(row.status).toLowerCase()} — only an approved request can be pulled back`);
+    const invoice = row.invoice;
+    if (invoice && invoice.status !== 'DRAFT' && invoice.status !== 'CANCELLED') {
+      throw badRequest(`Invoice ${invoice.number} raised from it is ${statusLabel(invoice.status).toLowerCase()} — cancel that invoice in Accounts Receivable before pulling the request back`);
+    }
+    const claimed = await tx.invoiceRequest.updateMany({ where: { id: row.id, status: 'APPROVED' }, data: { status: 'DRAFT', approvedAt: null, invoiceId: null } });
+    if (!claimed.count) throw badRequest(`${row.number} changed a moment ago — reload to see where it stands`);
+    let deleted: string | null = null;
+    if (invoice?.status === 'DRAFT') {
+      // A draft has no payment behind it; its lines cascade. Anything else
+      // still pointing at it is a 400 and the whole pull-back rolls back.
+      const gone = await tx.invoice.deleteMany({ where: { id: invoice.id, status: 'DRAFT' } }).catch((err: unknown) => {
+        if ((err as { code?: string })?.code === 'P2003') throw badRequest(`Invoice ${invoice.number} still has records filed against it — nothing was pulled back`);
+        throw err;
+      });
+      if (!gone.count) throw badRequest(`Invoice ${invoice.number} changed a moment ago — reload to see where it stands`);
+      deleted = invoice.number;
+      // Its files go once the pull-back has committed — and only if it has.
+      setTimeout(() => {
+        void prisma.invoice
+          .findUnique({ where: { id: invoice.id }, select: { id: true } })
+          .then((still) => (still ? undefined : deleteAttachmentsOf('invoice', [invoice.id])))
+          .catch((err) => console.error('[invoice-request] could not remove the deleted invoice files', err));
+      }, 2_000);
+    }
+    let billingBack: string | null = null;
+    if (row.progressBillingId) {
+      const live = await tx.invoice.findFirst({ where: { progressBillingId: row.progressBillingId, status: { not: 'CANCELLED' } }, select: { id: true } });
+      if (!live) {
+        const billing = await tx.progressBilling.updateMany({ where: { id: row.progressBillingId, status: 'INVOICED' }, data: { status: 'APPROVED' } });
+        if (billing.count) {
+          const b = await tx.progressBilling.findUnique({ where: { id: row.progressBillingId }, select: { number: true } });
+          billingBack = b?.number ?? null;
+        }
+      }
+    }
+    await audit(
+      {
+        entityType: DOC,
+        entityId: row.id,
+        action: 'UPDATED',
+        summary: [
+          `${row.number} back to draft after approval`,
+          deleted ? `draft invoice ${deleted} deleted` : invoice ? `invoice ${invoice.number} (cancelled) unlinked` : null,
+          billingBack ? `${billingBack} approved again, to be requested afresh` : null,
+        ]
+          .filter(Boolean)
+          .join(' — '),
+        actorId: actor.id,
+        actorName: actor.name,
+      },
+      undefined,
+      tx,
+    );
+    if (deleted) {
+      await audit({ entityType: 'invoice', entityId: invoice!.id, action: 'DELETED', summary: `Draft invoice ${deleted} deleted — ${row.number} was pulled back`, actorId: actor.id, actorName: actor.name }, undefined, tx);
+    }
+  },
+});
 
 // ── The paper ────────────────────────────────────────────────────────────────
 

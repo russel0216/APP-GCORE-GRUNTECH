@@ -33,6 +33,7 @@ import { notify } from '../shared/notifications';
 import {
   submitForApproval,
   onApprovalSettled,
+  onApprovalReopened,
   approvalSlots, preparedAt,
   slotSignatories,
   contactOf,
@@ -2483,6 +2484,81 @@ onApprovalSettled('supplier_bill', async (approval, outcome) => {
   });
 });
 
+/**
+ * Takes back the INCURRED cost a document's approval posted, by posting its
+ * negative per project and budget line (never deleting — the ledger is a
+ * history). Reads what the ledger still holds for the source, so a document
+ * approved, pulled back and approved again nets out exactly.
+ */
+async function reverseIncurred(
+  tx: Prisma.TransactionClient,
+  source: { sourceType: string; sourceId: string; sourceNumber: string },
+  why: string,
+  actorId: string,
+): Promise<number> {
+  const rows = await tx.jobCostEntry.groupBy({
+    by: ['jobId', 'costCategoryId'],
+    where: { sourceType: source.sourceType, sourceId: source.sourceId, state: 'INCURRED' },
+    _sum: { amount: true },
+  });
+  let reversed = 0;
+  for (const r of rows) {
+    const net = num(r._sum.amount);
+    if (Math.abs(net) < 0.005) continue;
+    await postJobCost(tx, {
+      jobId: r.jobId,
+      costCategoryId: r.costCategoryId,
+      state: 'INCURRED',
+      amount: -net,
+      sourceType: source.sourceType,
+      sourceId: source.sourceId,
+      sourceNumber: source.sourceNumber,
+      description: `Reversed — ${source.sourceNumber} pulled back to draft: ${why}`,
+      createdById: actorId,
+    });
+    reversed = cents(reversed + net);
+  }
+  return reversed;
+}
+
+/**
+ * Pulled back after approval (2026-10-16): the bill goes back to DRAFT and the
+ * cost its approval charged the project is reversed. Refused once anything
+ * has been paid on it — the payment would be left settling a draft.
+ */
+onApprovalReopened('supplier_bill', {
+  may: async (actor, id) => {
+    const bill = await prisma.supplierBill.findUnique({ where: { id }, select: { status: true, createdById: true } });
+    return !!bill && !['DRAFT', 'PENDING_APPROVAL', 'CANCELLED'].includes(bill.status) && canEditRecord(actor, 'gfin', 'ap', bill.createdById);
+  },
+  reopen: async ({ documentId, tx, actor, reason }) => {
+    const bill = await tx.supplierBill.findUnique({ where: { id: documentId } });
+    if (!bill) throw badRequest('Bill not found');
+    const paid = await tx.paymentAllocation.findFirst({ where: { billId: bill.id }, include: { payment: { select: { number: true } } } });
+    if (paid || bill.status !== 'APPROVED') {
+      throw badRequest(`${bill.number} has been paid${paid ? ` (${paid.payment.number})` : ''} — remove the payment before pulling it back`);
+    }
+    const claimed = await tx.supplierBill.updateMany({
+      where: { id: bill.id, status: 'APPROVED' },
+      data: { status: 'DRAFT', approvedAt: null, postedToJob: false, postedAt: null },
+    });
+    if (!claimed.count) throw badRequest(`${bill.number} changed a moment ago — reload to see where it stands`);
+    const reversed = await reverseIncurred(tx, { sourceType: 'supplier_bill', sourceId: bill.id, sourceNumber: bill.number }, reason, actor.id);
+    await audit(
+      {
+        entityType: 'supplier_bill',
+        entityId: bill.id,
+        action: 'UPDATED',
+        summary: `${bill.number} back to draft after approval${reversed ? ` — ${reversed} taken back off the project` : ''}`,
+        actorId: actor.id,
+        actorName: actor.name,
+      },
+      undefined,
+      tx,
+    );
+  },
+});
+
 /** Purchase orders with goods received and no bill yet — the A/P work queue. */
 billRoutes.get(
   '/queue/unbilled',
@@ -3438,6 +3514,60 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
   });
 };
 onApprovalSettled('expense', settleExpense);
+
+/**
+ * Pulled back after approval (2026-10-16): the claim — a reimbursement or a
+ * liquidation — goes back to DRAFT, the cost its approval charged the project
+ * is reversed, and a liquidation's advance or budget request is re-derived so
+ * its status follows (back to RELEASED). Refused once anything was paid on the
+ * claim, or once unspent cash came back on the source the liquidation settled.
+ */
+onApprovalReopened('expense', {
+  may: async (actor, id) => {
+    const claim = await prisma.expenseClaim.findUnique({ where: { id }, select: { status: true, claimedById: true } });
+    return !!claim && !['DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED'].includes(claim.status) && canEditRecord(actor, 'gfin', 'expenses', claim.claimedById);
+  },
+  reopen: async ({ documentId, tx, actor, reason }) => {
+    const claim = await tx.expenseClaim.findUnique({
+      where: { id: documentId },
+      include: { advance: { select: { id: true, number: true } }, budgetRequest: { select: { id: true, number: true } } },
+    });
+    if (!claim) throw badRequest('Claim not found');
+    const paid = await tx.paymentAllocation.findFirst({ where: { claimId: claim.id }, include: { payment: { select: { number: true } } } });
+    if (paid) throw badRequest(`${claim.number} has been paid (${paid.payment.number}) — remove the payment before pulling it back`);
+    if (claim.status !== 'APPROVED' && claim.status !== 'SETTLED') {
+      throw badRequest(`${claim.number} is ${claim.status.toLowerCase().replace(/_/g, ' ')} — only an approved claim nobody has paid can be pulled back`);
+    }
+    const source = claim.advance ?? claim.budgetRequest;
+    if (source) {
+      const refund = await tx.paymentAllocation.findFirst({
+        where: { ...(claim.advanceId ? { advanceId: claim.advanceId } : { budgetRequestId: claim.budgetRequestId }), payment: { kind: 'RECEIPT' } },
+        include: { payment: { select: { number: true } } },
+      });
+      if (refund) throw badRequest(`Unspent cash has come back on ${source.number} (${refund.payment.number}) — remove that refund before pulling the liquidation back`);
+    }
+    const claimed = await tx.expenseClaim.updateMany({
+      where: { id: claim.id, status: { in: ['APPROVED', 'SETTLED'] } },
+      data: { status: 'DRAFT', approvedAt: null, postedToJob: false, postedAt: null },
+    });
+    if (!claimed.count) throw badRequest(`${claim.number} changed a moment ago — reload to see where it stands`);
+    const reversed = await reverseIncurred(tx, { sourceType: 'expense_claim', sourceId: claim.id, sourceNumber: claim.number }, reason, actor.id);
+    if (claim.advanceId) await refreshAdvance(tx, claim.advanceId);
+    if (claim.budgetRequestId) await refreshBudgetRequest(tx, claim.budgetRequestId);
+    await audit(
+      {
+        entityType: 'expense_claim',
+        entityId: claim.id,
+        action: 'UPDATED',
+        summary: `${claim.number} back to draft after approval${reversed ? ` — ${reversed} taken back off the project` : ''}${source ? `; ${source.number} awaits its liquidation again` : ''}`,
+        actorId: actor.id,
+        actorName: actor.name,
+      },
+      undefined,
+      tx,
+    );
+  },
+});
 
 expenseRoutes.post(
   '/:id/cancel',

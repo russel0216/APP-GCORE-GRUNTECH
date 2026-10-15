@@ -25,7 +25,8 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, approversForStep, pendingFor } from '../src/shared/approvals';
+import { submitForApproval, act, approversForStep, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
+import { resolveUser } from '../src/permissions/resolve';
 import { postJobCost, availableBudget } from '../src/shared/inventory';
 import {
   taxBreakdown,
@@ -1458,6 +1459,81 @@ async function main() {
     money(positionWithRequest.workingPosition, cents(positionWithRequest.receivable - positionWithRequest.payable - positionWithRequest.reimbursable - positionWithRequest.advancesToRelease - positionWithRequest.budgetRequestsToRelease)),
   );
   await restoreRules();
+
+  // ══ Pulled back after approval (2026-10-16) ═══════════════════════════════
+  console.log('\nPulled back to draft after approval — advances, budget requests, liquidations');
+  const reopenAs = async (userId: string) => (await resolveUser(userId))!;
+  const engUser = await reopenAs(engineer.id);
+  const refusal = async (type: string, id: string) => {
+    try {
+      await reopenApproved(type, id, engUser, `${TAG} pulled back`);
+      return 'pulled back';
+    } catch (err) {
+      return `${(err as { status?: number }).status ?? '?'} ${(err as Error).message}`;
+    }
+  };
+  // An advance approved and not released goes back to a draft.
+  const ra = await newAdvance(engineer, 1_250, 'approved then pulled back');
+  const raRequest = await submitAdvance(ra);
+  await settle(raRequest.id);
+  const raMay = await mayReopen('cash_advance', ra.id, engUser);
+  await reopenApproved('cash_advance', ra.id, engUser, `${TAG} wrong amount`);
+  const raAfter = await prisma.cashAdvance.findUniqueOrThrow({ where: { id: ra.id } });
+  const raReq = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: raRequest.id } });
+  check(
+    'the requester pulls back an approved advance nothing was released on: a draft again, the request closed',
+    raMay && raAfter.status === 'DRAFT' && raAfter.approvedAt === null && raReq.status === 'CANCELLED' && !!raReq.reopenedAt,
+    `${raMay} ${raAfter.status} ${raReq.status}`,
+  );
+  const a4Refused = await refusal('cash_advance', a2.id);
+  check('a released advance is refused, naming the release', a4Refused.startsWith('400') && a4Refused.includes('released'), a4Refused);
+  // A budget request the same way.
+  const rb = await newRequest(engineer, 2_000, 'approved then pulled back');
+  await settle((await submitRequest(rb)).id);
+  await reopenApproved('budget_request', rb.id, engUser, `${TAG} not needed yet`);
+  check('an approved budget request nothing was released on goes back to a draft', (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: rb.id } })).status === 'DRAFT');
+  const b3Refused = await refusal('budget_request', b3.id);
+  check('a released budget request is refused, naming the release', b3Refused.startsWith('400') && b3Refused.includes('released'), b3Refused);
+  // A liquidation: the cost comes back off the project, the advance awaits it again.
+  const rl = await newAdvance(engineer, 4_000, 'liquidated then pulled back');
+  await settle((await submitAdvance(rl)).id);
+  await release(rl.id, 4_000, dayKey(new Date()));
+  const rlIncurredBefore = (await availableBudget(prisma, job.id, subcontract.id)).incurred;
+  const { claim: rlClaim, request: rlLiq } = await liquidate(await prisma.cashAdvance.findUniqueOrThrow({ where: { id: rl.id } }), [3_000]);
+  await settle(rlLiq.id);
+  const rlLiquidated = await prisma.cashAdvance.findUniqueOrThrow({ where: { id: rl.id } });
+  await reopenApproved('expense', rlClaim.id, engUser, `${TAG} a receipt was missing`);
+  const rlClaimAfter = await prisma.expenseClaim.findUniqueOrThrow({ where: { id: rlClaim.id } });
+  const rlAfter = await prisma.cashAdvance.findUniqueOrThrow({ where: { id: rl.id } });
+  const rlIncurredAfter = (await availableBudget(prisma, job.id, subcontract.id)).incurred;
+  const rlRows = await prisma.jobCostEntry.findMany({ where: { sourceType: 'expense_claim', sourceId: rlClaim.id } });
+  check(
+    'a settled liquidation pulled back: a draft, its 3,000 reversed by a negative row, and the advance RELEASED again',
+    rlLiquidated.status === 'REFUND_DUE' &&
+      rlClaimAfter.status === 'DRAFT' &&
+      !rlClaimAfter.postedToJob &&
+      rlRows.length === 2 &&
+      money(rlRows.reduce((t, r) => t + num(r.amount), 0), 0) &&
+      money(rlIncurredAfter, rlIncurredBefore) &&
+      rlAfter.status === 'RELEASED' &&
+      money(num(rlAfter.amountSpent), 0),
+    `${rlLiquidated.status} → ${rlClaimAfter.status}, ${rlRows.length} rows, ${rlIncurredBefore} → ${rlIncurredAfter}, advance ${rlAfter.status}`,
+  );
+  // Approved again, it charges once more — and only once.
+  await prisma.expenseClaim.update({ where: { id: rlClaim.id }, data: { status: 'PENDING_APPROVAL' } });
+  const rlAgain = await submitForApproval({ documentType: 'expense', documentId: rlClaim.id, documentNumber: rlClaim.number, subject: `${TAG} liquidation again`, amount: 3_000, requesterId: engineer.id });
+  await settle(rlAgain.id);
+  check(
+    'sent and approved again, the project carries the 3,000 once',
+    money((await availableBudget(prisma, job.id, subcontract.id)).incurred, rlIncurredBefore + 3_000) &&
+      (await prisma.cashAdvance.findUniqueOrThrow({ where: { id: rl.id } })).status === 'REFUND_DUE',
+  );
+  const l2Refused = await refusal('expense', l2.id);
+  check('a reimbursed claim is refused, naming the payment', l2Refused.startsWith('400') && l2Refused.includes('paid'), l2Refused);
+  const b1ClaimRefused = await refusal('expense', b1Claim.id);
+  check('a liquidation whose unspent cash came back is refused, naming the refund', b1ClaimRefused.startsWith('400') && b1ClaimRefused.includes(b1.number), b1ClaimRefused);
+  const someoneElse = await reopenAs(pm.id);
+  check('someone else’s approved claim is not theirs to pull back', !(await mayReopen('expense', rlClaim.id, someoneElse)));
 
   // Fixtures for the route cases below: one released and not liquidated, and
   // one that belongs to somebody else.
@@ -4368,6 +4444,43 @@ async function main() {
         (applied.body.allocations as { invoiceId: string }[]).some((a) => a.invoiceId === later.body.id),
       `${applied.status} ${laterAfter.body.status} ${applied.body.onAccount} owed ${laterOwed}`,
     );
+
+    // ── Pulled back after approval (2026-10-16) ──
+    console.log('\nAn invoice request pulled back after approval');
+    const sellerUser = (await resolveUser(irSeller.id))!;
+    // The order's request: its draft invoice is deleted and it is a draft again.
+    const soInvoiceId = soDone.invoiceId!;
+    const pulled = await as(irSeller)('POST', `/approvals/reopen/invoice_request/${soIr.body.id}`, { reason: `${TAG} wrong amount` });
+    const soBack = await prisma.invoiceRequest.findUniqueOrThrow({ where: { id: String(soIr.body.id) } });
+    check(
+      'the seller pulls the approved request back: a draft, its draft invoice deleted',
+      pulled.status === 200 && soBack.status === 'DRAFT' && soBack.invoiceId === null && !(await prisma.invoice.findUnique({ where: { id: soInvoiceId } })),
+      `${pulled.status} ${JSON.stringify(pulled.body).slice(0, 160)} ${soBack.status}`,
+    );
+    // The billing's request: its invoice issued, the pull-back is refused naming it.
+    await fin('POST', `/invoices/${irDone.invoiceId}/issue`);
+    let issuedRefusal = '';
+    try {
+      await reopenApproved('invoice_request', irId, sellerUser, `${TAG} try`);
+    } catch (err) {
+      issuedRefusal = (err as Error).message;
+    }
+    check(
+      'once its invoice is issued the request is refused, naming the invoice',
+      issuedRefusal.includes(String(irDone.invoice?.number)) && (await prisma.invoiceRequest.findUniqueOrThrow({ where: { id: irId } })).status === 'APPROVED',
+      issuedRefusal,
+    );
+    // Cancel it, and the billing comes back to be requested again.
+    await fin('POST', `/invoices/${irDone.invoiceId}/cancel`, { reason: `${TAG} reissue` });
+    const cancelledInv = await prisma.invoice.findUniqueOrThrow({ where: { id: irDone.invoiceId! } });
+    if (cancelledInv.status === 'CANCELLED') {
+      await reopenApproved('invoice_request', irId, sellerUser, `${TAG} reissue`);
+      const irBack = await prisma.invoiceRequest.findUniqueOrThrow({ where: { id: irId } });
+      const b1Back = await prisma.progressBilling.findUniqueOrThrow({ where: { id: irB1.id } });
+      check('with its invoice cancelled, the request is a draft again and the billing approved to be asked afresh', irBack.status === 'DRAFT' && b1Back.status === 'APPROVED', `${irBack.status} ${b1Back.status}`);
+    } else {
+      check('the issued invoice could be cancelled for the next case', false, cancelledInv.status);
+    }
     await saveFinanceSettings({ blockAdvanceWhileUnliquidated: true });
   }
 

@@ -21,6 +21,7 @@ import { nextNumber } from '../shared/numbering';
 import {
   submitForApproval,
   onApprovalSettled,
+  onApprovalReopened,
   cancelOpenRequest,
   openSteps,
   stageWords,
@@ -624,6 +625,33 @@ export const settleAdvance = async (approval: ApprovalRequest, outcome: Approval
   });
 };
 onApprovalSettled('cash_advance', settleAdvance);
+
+/**
+ * Pulled back after approval (2026-10-16): back to DRAFT while finance has
+ * released nothing. Approval moved no money and charged nothing, so there is
+ * nothing to undo — only refused once cash has gone out on it.
+ */
+onApprovalReopened('cash_advance', {
+  may: async (actor, id) => {
+    const row = await prisma.cashAdvance.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+    return !!row && !['DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED'].includes(row.status) && canEditRecord(actor, 'gfin', 'cash_advances', row.requestedById);
+  },
+  reopen: async ({ documentId, tx, actor }) => {
+    const row = await tx.cashAdvance.findUnique({ where: { id: documentId } });
+    if (!row) throw badRequest('Not found');
+    const paid = await tx.paymentAllocation.findFirst({ where: { advanceId: row.id }, include: { payment: { select: { number: true } } } });
+    if (paid || row.status !== 'APPROVED') {
+      throw badRequest(`${row.number} has been released${paid ? ` (${paid.payment.number})` : ''} — remove the release before pulling it back`);
+    }
+    const claimed = await tx.cashAdvance.updateMany({ where: { id: row.id, status: 'APPROVED' }, data: { status: 'DRAFT', approvedAt: null } });
+    if (!claimed.count) throw badRequest(`${row.number} changed a moment ago — reload to see where it stands`);
+    await audit(
+      { entityType: 'cash_advance', entityId: row.id, action: 'UPDATED', summary: `${row.number} back to draft after approval — nothing had been released`, actorId: actor.id, actorName: actor.name },
+      undefined,
+      tx,
+    );
+  },
+});
 
 advanceRoutes.post(
   '/:id/cancel',

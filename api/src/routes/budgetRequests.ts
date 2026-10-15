@@ -12,6 +12,7 @@ import { notify } from '../shared/notifications';
 import {
   cancelOpenRequest,
   onApprovalSettled,
+  onApprovalReopened,
   routeBrief,
   submitForApproval,
   usersInRole,
@@ -621,6 +622,33 @@ export const settleBudgetRequest = async (approval: ApprovalRequest, outcome: Ap
   });
 };
 onApprovalSettled('budget_request', settleBudgetRequest);
+
+/**
+ * Pulled back after approval (2026-10-16): back to DRAFT while finance has
+ * released nothing. Approval moved no money and charged nothing, so there is
+ * nothing to undo — only refused once cash has gone out on it.
+ */
+onApprovalReopened('budget_request', {
+  may: async (actor, id) => {
+    const row = await prisma.budgetRequest.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+    return !!row && !['DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED'].includes(row.status) && canEditRecord(actor, 'gops', 'budget_requests', row.requestedById);
+  },
+  reopen: async ({ documentId, tx, actor }) => {
+    const row = await tx.budgetRequest.findUnique({ where: { id: documentId } });
+    if (!row) throw badRequest('Not found');
+    const paid = await tx.paymentAllocation.findFirst({ where: { budgetRequestId: row.id }, include: { payment: { select: { number: true } } } });
+    if (paid || row.status !== 'APPROVED') {
+      throw badRequest(`${row.number} has been released${paid ? ` (${paid.payment.number})` : ''} — remove the release before pulling it back`);
+    }
+    const claimed = await tx.budgetRequest.updateMany({ where: { id: row.id, status: 'APPROVED' }, data: { status: 'DRAFT', approvedAt: null } });
+    if (!claimed.count) throw badRequest(`${row.number} changed a moment ago — reload to see where it stands`);
+    await audit(
+      { entityType: 'budget_request', entityId: row.id, action: 'UPDATED', summary: `${row.number} back to draft after approval — nothing had been released`, actorId: actor.id, actorName: actor.name },
+      undefined,
+      tx,
+    );
+  },
+});
 
 budgetRequestRoutes.post(
   '/:id/cancel',
