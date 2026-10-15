@@ -18,7 +18,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { nextNumber, previewNext, employeeToken, parseNumber, renderPattern, FREE_NUMBER_TRIES } from '../src/shared/numbering';
-import { submitForApproval, act, pendingFor, pickWorkflow, routePreview } from '../src/shared/approvals';
+import { submitForApproval, act, pendingFor, pickWorkflow, routePreview, reopenApproved } from '../src/shared/approvals';
 import { formatDateTime, renderDocument } from '../src/shared/pdf';
 import { resolveUser, canEditRecord, type ResolvedUser } from '../src/permissions/resolve';
 import { signToken } from '../src/auth/middleware';
@@ -744,6 +744,83 @@ async function main() {
     'and a second run withdraws nothing',
     (await withdrawStaleQuotationApprovals([staleR3.rev.id, waitingR4.rev.id])).length === 0,
   );
+
+  // ── 6c. Pulled back after approval (2026-10-16) ───────────────────────────
+  // "Every approval request can be pulled back and return to draft, even if
+  // it's fully approved" — refused while something stands on it.
+  console.log('\nPulled back after approval');
+  {
+    const refusedWith = async (fn: () => Promise<unknown>) => {
+      try {
+        await fn();
+        return '';
+      } catch (e) {
+        return (e as Error).message;
+      }
+    };
+    const latestReq = async (type: string, id: string) =>
+      prisma.approvalRequest.findFirstOrThrow({ where: { documentType: type, documentId: id }, orderBy: { createdAt: 'desc' } });
+    const otherResolved = (await resolveUser(other.id))!;
+
+    // A sales order on the approved R1, through its four signatures.
+    const bsR = await makeUser('Verify Reopen Back Support', 'bs-reopen@verifys.local', ['back_support']);
+    const ccR = await makeUser('Verify Reopen Cost Controller', 'cc-reopen@verifys.local', ['cost_controller']);
+    const reopenOrder = await prisma.salesOrder.create({
+      data: { number: `${TAG}-RSO1`, quotationId: staleQuote.id, customerId: customer.id, ownerId: sales.id, orderDate: new Date(), status: 'PENDING_APPROVAL', total: d(1120) },
+    });
+    const soReq = await submitForApproval({
+      documentType: 'sales_order',
+      documentId: reopenOrder.id,
+      documentNumber: reopenOrder.number,
+      subject: `${TAG} Reopen order`,
+      amount: 1_120,
+      requesterId: sales.id,
+    });
+    for (const who of [manager, bsR, ccR, ceo]) await act({ requestId: soReq.id, userId: who.id, action: 'APPROVED' });
+    check('a sales order approved by all four is issued', (await prisma.salesOrder.findUniqueOrThrow({ where: { id: reopenOrder.id } })).status === 'ISSUED');
+
+    // The quotation revision: refused while won, and while the order books it.
+    await prisma.quotation.update({ where: { id: staleQuote.id }, data: { outcome: 'WON' } });
+    const wonMsg = await refusedWith(() => reopenApproved('quotation', liveR1.rev.id, salesUser, 'Customer changed the scope'));
+    check('an approved revision of a won quotation cannot be pulled back', /is won/.test(wonMsg), wonMsg);
+    await prisma.quotation.update({ where: { id: staleQuote.id }, data: { outcome: 'OPEN' } });
+    const bookedMsg = await refusedWith(() => reopenApproved('quotation', liveR1.rev.id, salesUser, 'Customer changed the scope'));
+    check('nor while a live sales order books it — named', bookedMsg.includes(reopenOrder.number), bookedMsg);
+    check(
+      'a refused pull-back leaves the revision and its request approved',
+      (await statusOf(liveR1.rev.id)) === 'APPROVED' && (await latestReq('quotation', liveR1.rev.id)).status === 'APPROVED',
+    );
+
+    // The sales order: refused by a colleague, and while an invoice request stands on it.
+    const notMine = await refusedWith(() => reopenApproved('sales_order', reopenOrder.id, otherResolved, 'Not mine'));
+    check('a colleague cannot pull back the author’s approved order', notMine.length > 0, notMine);
+    const ir = await prisma.invoiceRequest.create({
+      data: { number: `${TAG}-IR1`, salesOrderId: reopenOrder.id, requestedById: sales.id, status: 'DRAFT' },
+    });
+    const irMsg = await refusedWith(() => reopenApproved('sales_order', reopenOrder.id, salesUser, 'Wrong PO'));
+    check('an issued order is not pulled back while an invoice request stands on it — named', irMsg.includes(`${TAG}-IR1`), irMsg);
+    await prisma.invoiceRequest.delete({ where: { id: ir.id } });
+    await reopenApproved('sales_order', reopenOrder.id, salesUser, 'Wrong PO');
+    const soReq2 = await latestReq('sales_order', reopenOrder.id);
+    check(
+      'the author pulls the approved order back to draft; its request is closed, reason kept',
+      (await prisma.salesOrder.findUniqueOrThrow({ where: { id: reopenOrder.id } })).status === 'DRAFT' &&
+        soReq2.status === 'CANCELLED' && soReq2.reopenReason === 'Wrong PO' && soReq2.reopenedById === sales.id,
+      `${soReq2.status} ${soReq2.reopenReason}`,
+    );
+
+    // With the order cancelled, the revision comes back to draft.
+    await prisma.salesOrder.update({ where: { id: reopenOrder.id }, data: { status: 'CANCELLED', cancelReason: 'verify' } });
+    await reopenApproved('quotation', liveR1.rev.id, salesUser, 'Customer changed the scope');
+    const r1Back = await prisma.quotationRevision.findUniqueOrThrow({ where: { id: liveR1.rev.id } });
+    check(
+      'the author pulls the approved revision back to draft, its request closed',
+      r1Back.status === 'DRAFT' && r1Back.approvedAt === null && (await latestReq('quotation', liveR1.rev.id)).status === 'CANCELLED',
+      r1Back.status,
+    );
+    const again = await refusedWith(() => reopenApproved('quotation', liveR1.rev.id, salesUser, 'Twice'));
+    check('and a second pull-back finds nothing approved', again.length > 0, again);
+  }
 
   // ── 7. Lead follows the quotation ──────────────────────────────────────────
   console.log('\nLead and pipeline');

@@ -25,6 +25,7 @@ import { groupKey, rememberGroups } from '../shared/quotationGroups';
 import {
   submitForApproval,
   onApprovalSettled,
+  onApprovalReopened,
   approvalOptions,
   approvalSlots,
   cancelOpenRequest,
@@ -3184,6 +3185,58 @@ onApprovalSettled('quotation', async (request, outcome) => {
     action: outcome === 'APPROVED' ? 'APPROVED' : 'REJECTED',
     summary: `Revision ${revision.revision} of ${revision.quotation.number} ${outcome.toLowerCase()}`,
   });
+});
+
+/**
+ * An APPROVED revision may be pulled back to draft (2026-10-16, the owner's
+ * call: "every approval request can be pulled back"), by the quotation's
+ * author or `edit_all`. Approval only made the revision APPROVED (and
+ * superseded an earlier approved one, which stays superseded), so the pull
+ * back sets it to DRAFT again — refused while the quotation is won, a live
+ * sales order books it, or a job order or project stands on it.
+ */
+onApprovalReopened('quotation', {
+  may: async (actor, revisionId) => {
+    const revision = await prisma.quotationRevision.findUnique({
+      where: { id: revisionId },
+      select: { status: true, quotation: { select: { ownerId: true } } },
+    });
+    return !!revision && revision.status === 'APPROVED' && canEditRecord(actor, 'gops', 'quotations', revision.quotation.ownerId);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const revision = await tx.quotationRevision.findUnique({
+      where: { id: documentId },
+      select: { id: true, revision: true, quotationId: true, quotation: { select: { number: true, outcome: true } } },
+    });
+    if (!revision) throw notFound('Revision not found');
+    const label = `Revision ${revision.revision} of ${revision.quotation.number}`;
+    if (revision.quotation.outcome === 'WON') {
+      throw badRequest(`${label} cannot be pulled back — the quotation is won. Move it off Won first.`);
+    }
+    const orders = await tx.salesOrder.findMany({
+      where: { quotationId: revision.quotationId, status: { not: 'CANCELLED' } },
+      select: { number: true },
+    });
+    if (orders.length) {
+      throw badRequest(`${label} cannot be pulled back — sales order ${orders.map((o) => o.number).join(', ')} books it`);
+    }
+    const jobs = await tx.job.findMany({ where: { quotationRevisionId: revision.id, status: { not: 'CANCELLED' } }, select: { number: true } });
+    if (jobs.length) {
+      throw badRequest(`${label} cannot be pulled back — project ${jobs.map((j) => j.number).join(', ')} is built on it`);
+    }
+    const jobOrders = await tx.jobOrder.findMany({
+      where: { quotationId: revision.quotationId, status: { notIn: ['CANCELLED', 'REJECTED'] } },
+      select: { number: true },
+    });
+    if (jobOrders.length) {
+      throw badRequest(`${label} cannot be pulled back — job order ${jobOrders.map((j) => j.number).join(', ')} stands on it`);
+    }
+    const claimed = await tx.quotationRevision.updateMany({
+      where: { id: revision.id, status: 'APPROVED' },
+      data: { status: 'DRAFT', approvedAt: null },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+  },
 });
 
 // ── Quotation PDF ────────────────────────────────────────────────────────────

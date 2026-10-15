@@ -59,6 +59,7 @@ import {
   contactOf,
   contactsOf,
   onApprovalSettled,
+  onApprovalReopened,
   pickWorkflow,
   routeBrief,
   submitForApproval,
@@ -1212,6 +1213,33 @@ async function refuseWhileInvoiced(orderId: string, number: string, verb: string
   const invoices = await prisma.invoice.findMany({ where: { salesOrderId: orderId, status: { not: 'CANCELLED' } }, select: { number: true } });
   if (invoices.length) throw badRequest(`${number} cannot be ${verb} — invoice ${invoices.map((i) => i.number).join(', ')} bills it`);
 }
+
+/**
+ * An ISSUED order may be pulled back to draft after approval (2026-10-16),
+ * by its author or `edit_all` — approval only booked it (ISSUED). Refused
+ * while a pull-out slip, a live invoice or a live invoice request stands on it.
+ */
+onApprovalReopened('sales_order', {
+  may: async (actor, orderId) => {
+    const order = await prisma.salesOrder.findUnique({ where: { id: orderId }, select: { status: true, ownerId: true } });
+    return !!order && order.status === 'ISSUED' && canEditRecord(actor, 'gops', 'sales_orders', order.ownerId);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const order = await tx.salesOrder.findUnique({ where: { id: documentId }, select: { id: true, number: true } });
+    if (!order) throw notFound('Sales order not found');
+    await refuseWhilePulledOut(order.id, order.number, 'pulled back');
+    await refuseWhileInvoiced(order.id, order.number, 'pulled back');
+    const requests = await tx.invoiceRequest.findMany({
+      where: { salesOrderId: order.id, status: { in: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'] } },
+      select: { number: true },
+    });
+    if (requests.length) {
+      throw badRequest(`${order.number} cannot be pulled back — invoice request ${requests.map((r) => r.number).join(', ')} stands on it`);
+    }
+    const claimed = await tx.salesOrder.updateMany({ where: { id: order.id, status: 'ISSUED' }, data: { status: 'DRAFT' } });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+  },
+});
 
 salesOrderRoutes.post(
   '/:id/reopen',

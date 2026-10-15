@@ -33,7 +33,8 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
-import { act } from '../src/shared/approvals';
+import { act, reopenApproved } from '../src/shared/approvals';
+import { resolveUser } from '../src/permissions/resolve';
 import * as serverMath from '../src/shared/costingMath';
 import * as webMath from '../../web/src/lib/costingMath';
 import { workingDayDate, workingDaysBetween } from '../src/shared/day';
@@ -1526,6 +1527,39 @@ async function main() {
     twoStepPaper.includes(`TECHNICAL MANAGER ${tmLeader.name} `) && twoStepPaper.includes(`TEAM LEADER ${tmLeader.name} `) && !twoStepPaper.includes('Pending'),
     twoStepPaper,
   );
+
+  // Pulled back after approval (2026-10-16): the author (or edit_all) takes
+  // an approved, FINAL costing back to draft — never while a project stands on it.
+  const twoId = twoSteps.body.id as string;
+  const refusedWith = async (fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+      return '';
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  const notAuthor = await refusedWith(async () => reopenApproved('costing', twoId, (await resolveUser(estimator.id))!, 'Not mine'));
+  check('a colleague cannot pull back the author’s approved costing', notAuthor.length > 0, notAuthor);
+  const builtOn = await prisma.job.create({
+    data: { number: await nextNumber('project'), name: `${TAG} Pull-back project`, customerId: customer.id, costingId: twoId, createdById: manager.id, contractValue: D(1000) },
+  });
+  const jobMsg = await refusedWith(async () => reopenApproved('costing', twoId, (await resolveUser(estimator2.id))!, 'Prices moved'));
+  check(
+    'an approved costing is not pulled back while a project is built on it — the project named, nothing changed',
+    jobMsg.includes(builtOn.number) && (await prisma.costing.findUnique({ where: { id: twoId } }))?.status === 'FINAL',
+    jobMsg,
+  );
+  await prisma.job.update({ where: { id: builtOn.id }, data: { status: 'CANCELLED' } });
+  const pulled = await api(tEstimator2, 'POST', `/approvals/reopen/costing/${twoId}`, { reason: 'Prices moved' });
+  const pulledCosting = await prisma.costing.findUnique({ where: { id: twoId } });
+  const pulledReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: twoId }, orderBy: { createdAt: 'desc' } });
+  check(
+    'with the project cancelled, the author pulls it back: DRAFT, no final date, its request closed with the reason',
+    pulled.status === 200 && pulledCosting?.status === 'DRAFT' && pulledCosting.finalAt === null && pulledReq?.status === 'CANCELLED' && pulledReq.reopenReason === 'Prices moved',
+    `${pulled.status} ${pulledCosting?.status} ${pulledReq?.status}`,
+  );
+  await prisma.job.delete({ where: { id: builtOn.id } });
 
   // ══ The margin rule, the sixth bucket and the carry-over ═══════════════════
   console.log('Margin, Contingency and the carry-over from the markup rule');

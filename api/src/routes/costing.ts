@@ -25,6 +25,7 @@ import {
   approvalStands,
   contactOf,
   onApprovalSettled,
+  onApprovalReopened,
   pickWorkflow,
   mayDecide,
   preparedAt,
@@ -1768,6 +1769,28 @@ export async function settleCosting(documentId: string, outcome: 'APPROVED' | 'R
 
 onApprovalSettled('costing', async (request, outcome) => {
   await settleCosting(request.documentId, outcome);
+});
+
+/**
+ * A FINAL costing may be pulled back to draft after approval (2026-10-16),
+ * by its author or `edit_all` — approval only made it FINAL. Refused while a
+ * project (not cancelled) is built on it.
+ */
+onApprovalReopened('costing', {
+  may: async (actor, costingId) => {
+    const costing = await prisma.costing.findUnique({ where: { id: costingId }, select: { status: true, ownerId: true } });
+    return !!costing && costing.status === 'FINAL' && canEditRecord(actor, 'gops', 'costing', costing.ownerId);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const costing = await tx.costing.findUnique({ where: { id: documentId }, select: { number: true } });
+    if (!costing) throw notFound('Costing not found');
+    const jobs = await tx.job.findMany({ where: { costingId: documentId, status: { not: 'CANCELLED' } }, select: { number: true } });
+    if (jobs.length) {
+      throw badRequest(`${costing.number} cannot be pulled back — project ${jobs.map((j) => j.number).join(', ')} is built on it`);
+    }
+    const claimed = await tx.costing.updateMany({ where: { id: documentId, status: 'FINAL' }, data: { status: 'DRAFT', finalAt: null } });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+  },
 });
 
 // ── Duplicate ────────────────────────────────────────────────────────────────
