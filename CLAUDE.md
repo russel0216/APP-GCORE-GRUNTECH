@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,326 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,328 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -578,7 +578,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 178, chain 332, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 402, aftermarket 265, cad 120,
+115, evaluations 152, academy 120, finance 402, aftermarket 267, cad 120,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -2235,9 +2235,16 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   sends it in one click ("Save as draft" beside it). **Generate Report** is
   the shared dialog over `GET /job-orders/pdf` and `GET /job-orders/csv`.
   The customer stays required (approval builds a project for it).
-- **The amount is the linked document's NET** (the sales order's, else the
-  quotation's value revision's: subtotal less discount, before VAT — the
-  invoice adds VAT) unless somebody typed one.
+- **The amount is the LABOR CHARGE to Project Management** (2026-10-16,
+  the owner's call): by default the Labor bucket (`LAB`) of the costing
+  behind the linked quotation (`costingLabor()` in `routes/jobOrders.ts`;
+  `/job-orders/options` sends each quotation's `labor`), else the linked
+  document's net as before. **It must tally with the costing before a
+  project is built** (`laborProblem()`, to the centavo): submit refuses an
+  order that would build a project with a mismatch, and `settleJobOrder`
+  checks again, building nothing and saying why if it no longer tallies.
+  The form, list, page and paper say "Labor charge"; the form's hint names
+  the costing's Labor figure and whether it tallies.
 - **`/job-orders/options` feeds the form's pickers** behind the form's own
   permission; the people come from `/users/lookup`. The PDF prints the
   project, the links and amount, the scope, the personnel, and the route's
