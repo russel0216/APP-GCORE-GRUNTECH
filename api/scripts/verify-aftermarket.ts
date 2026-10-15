@@ -901,14 +901,14 @@ async function main() {
     projectManagerId: director.id,
     customerPoNumber: 'PO-77',
   });
-  // The job order's amount is the labor charge (2026-10-16): 500,000 is not the costing's Labor 100,000.
-  const { laborProblem } = await import('../src/routes/jobOrders');
+  // The job order's Amount is the labor charge (2026-10-16): 500,000 against the costing's Labor 100,000.
+  const { laborTally } = await import('../src/routes/jobOrders');
+  const tally = await laborTally({ quotationId: orderQuotation.id, amount: D(500_000) });
   check(
-    'a labor charge that does not tally with the costing’s Labor cost is named before a project is built',
-    /does not tally with the Labor cost/.test((await laborProblem({ jobId: null, quotationId: orderQuotation.id, amount: D(500_000) })) ?? ''),
+    'the Amount is read against the costing’s Labor cost, and a difference is said, not refused',
+    tally?.labor === 100_000 && tally.difference === 400_000 && !tally.tallies,
+    JSON.stringify(tally),
   );
-  check('a labor charge equal to it passes', (await laborProblem({ jobId: null, quotationId: orderQuotation.id, amount: D(100_000) })) === null);
-  await prisma.jobOrder.update({ where: { id: costedOrder.id }, data: { amount: D(100_000) } });
   await settle((await submitJobOrder2(costedOrder.id, sales.id)).id);
   const built = await prisma.jobOrder.findUnique({ where: { id: costedOrder.id }, include: { job: { include: { scopeItems: true } } } });
   check('approval builds the project from the quotation’s costing', built?.status === 'APPROVED' && !!built.job, `job ${built?.jobId}`);
@@ -930,6 +930,14 @@ async function main() {
       (await prisma.jobCostEntry.count({ where: { jobId: built!.job!.id, state: 'BUDGETED' } })) === 2,
   );
   await settleJobOrder({ documentId: costedOrder.id }, 'APPROVED');
+  {
+    const agreed = await prisma.jobOrder.findUniqueOrThrow({ where: { id: costedOrder.id } });
+    check(
+      'the Technical Manager’s approval agrees a different Amount: the project is built and the agreement recorded',
+      !!agreed.jobId && Number(agreed.laborCostingAmount) === 100_000 && agreed.laborAgreedById === director.id && !!agreed.laborAgreedAt,
+      `${agreed.jobId} ${agreed.laborCostingAmount} ${agreed.laborAgreedById}`,
+    );
+  }
   check(
     'a settlement that arrives twice builds nothing twice',
     (await prisma.job.count({ where: { costingId: orderCosting.id } })) === 1,

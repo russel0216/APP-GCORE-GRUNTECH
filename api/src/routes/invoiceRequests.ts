@@ -36,6 +36,7 @@ import {
   type Signatory,
 } from '../shared/pdf';
 import { LIST_CAP, listReference, recordNamed, choice, sendListPdf, rangeNamed, filterDay } from '../shared/listPaper';
+import { ratePct } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { cents, num, financeSettings, taxBreakdown, currentRates } from '../shared/finance';
 import { dayKey, manilaDayStart, manilaDayEnd } from '../shared/day';
@@ -191,9 +192,12 @@ const mayEdit = (me: ResolvedUser, row: { requestedById: string }) => canEditRec
  * the company's — what `createInvoiceFromOrder` will raise.
  */
 async function moneyOf(row: RequestRow) {
-  if (row.progressBilling) return billingMoney(row.progressBilling);
+  if (row.progressBilling) {
+    const carried = billingMoney(row.progressBilling);
+    return row.ewtRate == null ? carried : taxBreakdown(carried.grossAmount, carried.vatRate, num(row.ewtRate));
+  }
   const rates = await currentRates();
-  return taxBreakdown(num(row.grossAmount), num(row.salesOrder.vatRate), rates.ewtRate);
+  return taxBreakdown(num(row.grossAmount), num(row.salesOrder.vatRate), row.ewtRate == null ? rates.ewtRate : num(row.ewtRate));
 }
 
 function billingMoney(b: NonNullable<RequestRow['progressBilling']>) {
@@ -564,6 +568,8 @@ const headerSchema = z.object({
   /** A sales order's request: what to invoice of it, before VAT, and the line's words. */
   grossAmount: z.number().positive('Say how much to invoice').optional().nullable(),
   description: z.string().trim().max(500).optional().nullable(),
+  /** The withholding rate, editable (0–15%); null takes the billing's, else the company's. */
+  ewtRate: z.number().min(0).max(0.15).optional().nullable(),
 });
 
 /**
@@ -614,6 +620,7 @@ async function checkHeader(
     termsDays: body.termsDays ?? order.termsDays ?? null,
     poReference: body.poReference?.trim() || order.poNumber || null,
     notes: body.notes || null,
+    ewtRate: body.ewtRate == null ? null : new Prisma.Decimal(body.ewtRate),
     ...(source.billing ? {} : { grossAmount: new Prisma.Decimal(gross), description: body.description?.trim() || `Sales order ${order.number}` }),
   };
 }
@@ -852,6 +859,7 @@ export async function settleInvoiceRequest(approval: ApprovalRequest, outcome: A
         salespersonId: row.salespersonId,
         teamId: row.teamId,
         salesOrderId: row.salesOrderId,
+        ewtRate: row.ewtRate == null ? null : num(row.ewtRate),
       };
       const actor = last?.approverId ?? row.requestedById;
       if (!row.progressBillingId) {
@@ -989,7 +997,7 @@ invoiceRequestRoutes.get(
           { label: 'Gross', value: formatMoney(money.grossAmount, currency) },
           { label: `VAT (${(money.vatRate * 100).toFixed(0)}%)`, value: formatMoney(money.vatAmount, currency) },
           { label: 'Invoice total', value: formatMoney(money.invoiceTotal, currency) },
-          { label: `Less: EWT (${(money.ewtRate * 100).toFixed(0)}%)`, value: formatMoney(money.ewtAmount, currency) },
+          { label: `Less: EWT (${ratePct(money.ewtRate)})`, value: formatMoney(money.ewtAmount, currency) },
           { label: 'Net collectible', value: formatMoney(money.netCollectible, currency), bold: true },
         ],
       },

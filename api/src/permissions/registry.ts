@@ -207,7 +207,7 @@ export const REGISTRY: ModuleDef[] = [
       // Every movement of money, in or out. Recording one is gated by the A/R
       // or A/P create permission depending on direction — seeing the register
       // is its own, lesser right.
-      { key: 'payments', group: 'Money in', label: 'Payments', path: '/g-fin/payments', actions: READ, phase: 7 },
+      { key: 'payments', group: 'Money in', label: 'Collections', path: '/g-fin/payments', actions: READ, phase: 7 },
       { key: 'cashflow', group: 'Analysis', label: 'Cash Flow', path: '/g-fin/cash-flow', actions: READ, phase: 7 },
       { key: 'budget_vs_actual', group: 'Analysis', label: 'Budget vs Actual', path: '/g-fin/budget-vs-actual', actions: READ, phase: 7 },
       { key: 'reports', group: 'Analysis', label: 'Reports', path: '/g-fin/reports', actions: READ, phase: 7 },

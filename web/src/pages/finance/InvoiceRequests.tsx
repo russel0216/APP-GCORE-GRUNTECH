@@ -9,7 +9,7 @@ import { ApprovalStepper, DocumentApproval, DecisionNote, previewSteps } from '.
 import { Attachments } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
-import { TermsPicker } from './Receivables';
+import { EwtPicker, TermsPicker } from './Receivables';
 import { NumberInput } from '../../components/NumberInput';
 
 /**
@@ -263,6 +263,8 @@ export function InvoiceRequestModal({
     notes: existing?.notes ?? '',
     grossAmount: existing && existing.kind === 'order' ? existing.grossAmount : 0,
     description: existing?.description ?? '',
+    /** The withholding rate picked; null takes the billing's, else the company's. */
+    ewtRate: (existing ? existing.ewtRate : null) as number | null,
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -301,7 +303,15 @@ export function InvoiceRequestModal({
   const gross = source?.kind === 'billing' ? source.billing.grossAmount : form.grossAmount;
   const over = !!order && gross > left + 0.005;
   const vatRate = source?.kind === 'order' ? source.salesOrder.vatRate : 0;
-  const ewtRate = source?.kind === 'order' ? source.ewtRate : 0;
+  // The source's own withholding rate: the order's company rate, or what the
+  // billing carries (its invoice total less its net collectible, over its gross).
+  const sourceEwt =
+    source?.kind === 'order'
+      ? source.ewtRate
+      : source?.kind === 'billing' && source.billing.grossAmount > 0
+        ? Math.round(((source.billing.invoiceTotal - source.billing.netCollectible) / source.billing.grossAmount) * 10000) / 10000
+        : 0;
+  const ewtRate = form.ewtRate ?? sourceEwt;
   const vat = cents(gross * vatRate);
   const ewt = cents(gross * ewtRate);
 
@@ -321,6 +331,7 @@ export function InvoiceRequestModal({
         termsDays: form.termsDays,
         poReference: form.poReference || null,
         notes: form.notes || null,
+        ewtRate: form.ewtRate,
         ...(fromOrder ? { grossAmount: form.grossAmount, description: form.description || null } : {}),
       };
       const saved = existing
@@ -438,6 +449,9 @@ export function InvoiceRequestModal({
           </div>
           <Field label="Payment terms">
             <TermsPicker value={form.termsDays} onChange={(days) => setForm((f) => ({ ...f, termsDays: days }))} />
+          </Field>
+          <Field label="Withholding tax (EWT)" hint={`Withheld by the customer on the amount before VAT — ${formatMoney(cents(gross * ewtRate))}`}>
+            <EwtPicker value={ewtRate} onChange={(rate) => setForm((f) => ({ ...f, ewtRate: rate }))} />
           </Field>
           <Field label="Notes for Back Support and finance">
             <textarea rows={2} value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} />

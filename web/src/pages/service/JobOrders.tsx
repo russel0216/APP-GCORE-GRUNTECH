@@ -132,6 +132,8 @@ interface JobOrderDetailRow extends JobOrderRow {
   canEdit: boolean;
   canCancel: boolean;
   canAcknowledge: boolean;
+  laborTally: { costingNumber: string; labor: number; amount: number | null; difference: number | null; tallies: boolean } | null;
+  laborAgreed: { costingAmount: number | null; at: string; by: string | null } | null;
   route: { step: string; names: string[] }[];
 }
 
@@ -172,7 +174,7 @@ export function jobOrderColumns(): Column<JobOrderRow>[] {
     },
     {
       key: 'amount',
-      label: 'Labor charge',
+      label: 'Amount',
       align: 'right',
       render: (r) => (r.amount != null ? <span className="mono">{formatMoney(r.amount)}</span> : <span className="faint">—</span>),
     },
@@ -810,18 +812,18 @@ export function JobOrderModal({
         />
       </Field>
 
-      <h4 className="svc-subhead">Labor charge</h4>
+      <h4 className="svc-subhead">Amount</h4>
       <div className="grid grid-2">
         <Field label="Customer PO">
           <input value={form.customerPoNumber} onChange={(e) => set('customerPoNumber', e.target.value)} />
         </Field>
         <Field
-          label="Labor charge to Project Management (before VAT)"
+          label="Amount (before VAT)"
           hint={
             linkedLabor != null
               ? Number(form.amount || 0) === linkedLabor
-                ? `Tallies with the costing's Labor cost, ${formatMoney(linkedLabor)}`
-                : `The costing's Labor cost is ${formatMoney(linkedLabor)} — the two must tally before the project is built`
+                ? `The labor charge to Project Management — tallies with the costing's Labor cost, ${formatMoney(linkedLabor)}`
+                : `The labor charge to Project Management. The costing's Labor cost is ${formatMoney(linkedLabor)} — the Technical Manager's approval agrees a different amount`
               : 'Leave empty to bill on completion'
           }
         >
@@ -913,7 +915,7 @@ export function JobOrderDetail() {
         statusExtra={{ ...JOB_ORDER_TONES, ...STAGE_TONE }}
         statusLabel={r.stageLabel}
         amount={r.amount != null ? formatMoney(r.amount) : undefined}
-        amountLabel="Labor charge (before VAT)"
+        amountLabel="Amount (before VAT)"
         meta={
           <>
             {r.customer.name} · {r.title} · raised by {r.requestedBy.name} on {formatDate(r.createdAt)}
@@ -1082,8 +1084,35 @@ export function JobOrderDetail() {
             </dd>
             <dt>Customer PO</dt>
             <dd>{r.customerPoNumber ?? '—'}</dd>
-            <dt>Labor charge</dt>
+            <dt>Amount</dt>
             <dd className="mono">{r.amount != null ? formatMoney(r.amount) : 'to be billed on completion'}</dd>
+            {r.laborTally && (
+              <>
+                <dt>Costing Labor</dt>
+                <dd>
+                  <span className="mono">{formatMoney(r.laborTally.labor)}</span>{' '}
+                  <span className="faint">
+                    {r.laborTally.costingNumber}
+                    {r.laborTally.tallies
+                      ? ' · tallies'
+                      : r.laborTally.difference != null
+                        ? ` · difference ${r.laborTally.difference > 0 ? '+' : ''}${formatMoney(r.laborTally.difference)}${
+                            r.laborAgreed ? '' : r.status === 'PENDING_APPROVAL' ? ' — the Technical Manager’s approval agrees the Amount' : ''
+                          }`
+                        : ''}
+                  </span>
+                </dd>
+              </>
+            )}
+            {r.laborAgreed && (
+              <>
+                <dt>Amount agreed</dt>
+                <dd>
+                  {r.laborAgreed.by ?? 'The Technical Manager'}, {formatDate(r.laborAgreed.at)}{' '}
+                  <span className="faint">(costing Labor was {formatMoney(r.laborAgreed.costingAmount ?? 0)})</span>
+                </dd>
+              </>
+            )}
             {r.invoice && (
               <>
                 <dt>Invoice</dt>

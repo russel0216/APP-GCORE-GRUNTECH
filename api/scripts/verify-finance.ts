@@ -3451,8 +3451,31 @@ async function main() {
       `${arNew.status} ${JSON.stringify(arNew.body).slice(0, 200)}`,
     );
     const arId = String(arNew.body.id ?? '');
-    const draftCounter = await fin('POST', `/invoices/${arId}/counter`, {});
-    check('a draft is not countered — it has not gone to the customer', draftCounter.status === 400, String(draftCounter.status));
+    // Mark as received (2026-10-16): on a draft it issues and counters in one step;
+    // the withholding rate is the invoice's own (1% here).
+    const received = await fin('POST', '/invoices', {
+      customerId: customer.id,
+      termsDays: 30,
+      ewtRate: 0.01,
+      lines: [{ description: `${TAG} received`, amount: 10_000 }],
+    });
+    check(
+      'an invoice withholds at the rate picked: 1% of 10,000 is 100, net collectible 11,100',
+      received.status === 201 && received.body.ewtRate === 0.01 && received.body.ewtAmount === 100 && received.body.netCollectible === 11_100,
+      `${received.status} ${received.body.ewtRate} ${received.body.ewtAmount} ${received.body.netCollectible}`,
+    );
+    const rewithheld = await fin('PUT', `/invoices/${received.body.id}`, { ewtRate: 0.02 });
+    check(
+      'a draft takes a new withholding rate alone, the gross kept',
+      rewithheld.status === 200 && rewithheld.body.ewtAmount === 200 && rewithheld.body.netCollectible === 11_000,
+      `${rewithheld.status} ${rewithheld.body.ewtAmount} ${rewithheld.body.netCollectible}`,
+    );
+    const markReceived = await fin('POST', `/invoices/${received.body.id}/counter`, {});
+    check(
+      'Mark as received issues a draft and records the day the customer received it',
+      markReceived.status === 200 && markReceived.body.status === 'ISSUED' && !!markReceived.body.counteredDate && markReceived.body.awaitingCounter === false,
+      `${markReceived.status} ${markReceived.body.status} ${markReceived.body.counteredDate}`,
+    );
     await fin('POST', `/invoices/${arId}/issue`);
     const arIssued = await fin('GET', `/invoices/${arId}`);
     check(

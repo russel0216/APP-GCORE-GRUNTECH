@@ -697,19 +697,22 @@ async function quotationCostingId(quotationId: string | null | undefined): Promi
 }
 
 /**
- * Why a job order's labor charge does not tally with its costing, or null.
- * Only an order that would build a project is asked (no project linked yet,
- * a costing behind its quotation).
+ * How a job order's Amount (the labor charge to Project Management) stands
+ * against the Labor cost of the costing behind its quotation — null when no
+ * costing stands behind it. A difference no longer stops anything: the
+ * Technical Manager's approval is the agreement (2026-10-16), recorded on
+ * the order when the project is built.
  */
-export async function laborProblem(row: { jobId: string | null; quotationId: string | null; amount: Prisma.Decimal | number | null }): Promise<string | null> {
-  if (row.jobId) return null;
+export async function laborTally(row: { quotationId: string | null; amount: Prisma.Decimal | number | null }): Promise<
+  { costingNumber: string; labor: number; amount: number | null; difference: number | null; tallies: boolean } | null
+> {
   const costingId = await quotationCostingId(row.quotationId);
   if (!costingId) return null;
   const labor = await costingLabor(costingId);
-  const amount = row.amount == null ? null : Math.round(Number(row.amount) * 100) / 100;
-  if (amount !== null && Math.abs(amount - labor) <= 0.005) return null;
   const costing = await prisma.costing.findUnique({ where: { id: costingId }, select: { number: true } });
-  return `The labor charge ${amount == null ? '(none given)' : formatMoney(amount)} does not tally with the Labor cost on costing ${costing?.number ?? ''} (${formatMoney(labor)}) — correct one of them before the project is built`;
+  const amount = row.amount == null ? null : Math.round(Number(row.amount) * 100) / 100;
+  const difference = amount == null ? null : Math.round((amount - labor) * 100) / 100;
+  return { costingNumber: costing?.number ?? '', labor, amount, difference, tallies: difference !== null && Math.abs(difference) < 0.005 };
 }
 
 /**
@@ -810,6 +813,14 @@ jobOrderRoutes.get(
       canCancel: owner && ['DRAFT', 'REJECTED', 'APPROVED'].includes(row.status),
       canAcknowledge: (owner || onIt(me, row)) && row.status !== 'DRAFT' && row.status !== 'CANCELLED',
       route: route.map((s) => ({ step: s.step, names: (s.assigned ?? []).map((p) => p.name) })),
+      laborTally: await laborTally(row),
+      laborAgreed: row.laborAgreedAt
+        ? {
+            costingAmount: num(row.laborCostingAmount),
+            at: row.laborAgreedAt,
+            by: row.laborAgreedById ? (await prisma.user.findUnique({ where: { id: row.laborAgreedById }, select: { name: true } }))?.name ?? null : null,
+          }
+        : null,
     });
   }),
 );
@@ -911,9 +922,6 @@ jobOrderRoutes.post(
     if (row.status !== 'DRAFT' && row.status !== 'REJECTED') {
       throw badRequest('Only a draft or a returned job order can be submitted');
     }
-    // Approval builds the project; refuse now rather than after the signatures.
-    const mismatch = await laborProblem(row);
-    if (mismatch) throw badRequest(mismatch);
 
     // Claimed on the order exactly as read — still a draft or returned, and
     // not modified since (`updatedAt`, which every write to an order moves).
@@ -1125,7 +1133,7 @@ jobOrderRoutes.get(
           { label: 'Sales order', value: row.salesOrder?.number ?? '—' },
           { label: 'Project', value: row.job ? `${row.job.number} — ${row.job.name}` : '—' },
           { label: 'Customer PO', value: row.customerPoNumber ?? '—' },
-          { label: 'Labor charge (before VAT)', value: row.amount != null ? formatMoney(Number(row.amount), currency) : 'To be billed on completion' },
+          { label: 'Amount (before VAT)', value: row.amount != null ? formatMoney(Number(row.amount), currency) : 'To be billed on completion' },
         ],
       },
       { kind: 'text', title: 'Scope of work', body: row.scope ?? row.description },
@@ -1198,6 +1206,16 @@ jobOrderRoutes.get(
  * whoever raised it, for the project to be built by hand once the costing
  * is ready.
  */
+/** Who signed the job order's Technical Manager step (sequence 1) on its latest request. */
+async function technicalManagerOf(jobOrderId: string): Promise<string | null> {
+  const action = await prisma.approvalAction.findFirst({
+    where: { sequence: 1, action: 'APPROVED', request: { documentType: 'job_order', documentId: jobOrderId } },
+    orderBy: { actedAt: 'desc' },
+    select: { approverId: true },
+  });
+  return action?.approverId ?? null;
+}
+
 export async function settleJobOrder(
   approval: { documentId: string },
   outcome: ApprovalOutcome,
@@ -1219,6 +1237,7 @@ export async function settleJobOrder(
 
   let built: { id: string; number: string; name: string } | null = null;
   let notBuilt: string | null = null;
+  let laborNote: string | null = null;
   if (jo.jobId) {
     notBuilt = null;
   } else if (!jo.quotationId) {
@@ -1232,8 +1251,7 @@ export async function settleJobOrder(
       const rev = valueRevision(revisions);
       if (!rev?.costingId) throw badRequest(`${jo.quotation?.number ?? 'the quotation'} has no costing behind it`);
       const costing = await costingForJob(rev.costingId, jo.customerId);
-      const mismatch = await laborProblem(jo);
-      if (mismatch) throw badRequest(mismatch);
+      const tally = await laborTally(jo);
       const t = targets(jo);
       built = await prisma.$transaction(async (tx) => {
         const job = await createJobRecord(tx, costing, {
@@ -1252,7 +1270,21 @@ export async function settleJobOrder(
           notes: `Built from job order ${jo.number}`,
           createdById: jo.requestedById,
         });
-        await tx.jobOrder.update({ where: { id: jo.id }, data: { jobId: job.id } });
+        // An Amount that differs from the costing's Labor cost stands by the
+        // Technical Manager's approval: record who agreed it.
+        const agreedBy = tally && !tally.tallies ? await technicalManagerOf(jo.id) : null;
+        await tx.jobOrder.update({
+          where: { id: jo.id },
+          data: {
+            jobId: job.id,
+            ...(tally && !tally.tallies
+              ? { laborCostingAmount: new Prisma.Decimal(tally.labor), laborAgreedById: agreedBy, laborAgreedAt: new Date() }
+              : {}),
+          },
+        });
+        if (tally && !tally.tallies) {
+          laborNote = `Amount ${tally.amount == null ? '(none)' : formatMoney(tally.amount)} agreed by the Technical Manager — costing ${tally.costingNumber} Labor ${formatMoney(tally.labor)}`;
+        }
         return { id: job.id, number: job.number, name: job.name };
       });
     } catch (err) {
@@ -1273,7 +1305,7 @@ export async function settleJobOrder(
     entityId: jo.id,
     action: 'EXECUTED',
     summary: built
-      ? `${jo.number} approved — project ${built.number} built, ${isoDay(targets(jo).targetStart)} to ${isoDay(targets(jo).targetFinish)}`
+      ? `${jo.number} approved — project ${built.number} built, ${isoDay(targets(jo).targetStart)} to ${isoDay(targets(jo).targetFinish)}${laborNote ? `. ${laborNote}` : ''}`
       : jo.job
         ? `${jo.number} approved for project ${jo.job.number}`
         : `${jo.number} approved — no project built: ${notBuilt}`,

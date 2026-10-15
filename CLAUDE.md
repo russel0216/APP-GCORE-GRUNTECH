@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,328 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,330 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -578,7 +578,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 178, chain 332, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 402, aftermarket 267, cad 120,
+115, evaluations 152, academy 120, finance 404, aftermarket 267, cad 120,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -2239,12 +2239,16 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   the owner's call): by default the Labor bucket (`LAB`) of the costing
   behind the linked quotation (`costingLabor()` in `routes/jobOrders.ts`;
   `/job-orders/options` sends each quotation's `labor`), else the linked
-  document's net as before. **It must tally with the costing before a
-  project is built** (`laborProblem()`, to the centavo): submit refuses an
-  order that would build a project with a mismatch, and `settleJobOrder`
-  checks again, building nothing and saying why if it no longer tallies.
-  The form, list, page and paper say "Labor charge"; the form's hint names
-  the costing's Labor figure and whether it tallies.
+  document's net as before. **The Technical Manager's approval agrees a
+  different Amount** (2026-10-16, the owner's call, replacing the hard
+  tally of the day before): `laborTally()` reads the Amount against the
+  costing's Labor cost and nothing refuses a difference; `GET /:id` sends
+  `laborTally` (the page's "Costing Labor" row, the difference said) and,
+  once approved, `settleJobOrder` builds the project and records the
+  agreement — `JobOrder.laborCostingAmount`, `laborAgreedById` (who signed
+  step 1), `laborAgreedAt`, the "Amount agreed" row and the trail. The
+  label stays "Amount" (the owner's call); the form's hint says it is the
+  labor charge and names the costing's Labor figure.
 - **`/job-orders/options` feeds the form's pickers** behind the form's own
   permission; the people come from `/users/lookup`. The PDF prints the
   project, the links and amount, the scope, the personnel, and the route's
@@ -5094,6 +5098,23 @@ salesperson, team, customer and terms.
   `backfillInvoiceCountering()` took every invoice issued before as
   countered on its invoice date, once (`seed.invoiceCounteringBackfilled`),
   so every overdue figure reads as it did.
+- **"Mark as received" replaces "Issue to customer"** (2026-10-16, the
+  owner's call: no customer is involved in G-CORE's side of it). On a
+  draft, `POST /invoices/:id/counter` issues the invoice AND records the
+  day received with the terms, in one step (the panel "Mark as received");
+  on an issued, uncountered one it is the same button. Then the only next
+  step is Record collection. `POST /:id/issue` stays for scripts. The
+  Payments register is labelled **Collections** (the menu, its title and
+  the list paper; the path and keys unchanged).
+- **The withholding rate is the invoice's own** (2026-10-16, the owner's
+  call: "editable withholding tax, e.g. 1% or 2%"): `EwtPicker` (0%, 1%,
+  2% chips, or Other up to 15%) on the invoice form and the invoice request
+  form, the company rate until one is picked. `ewtRate` on `POST
+  /invoices`, `/from-billing/:id`, a draft's `PUT` (alone it re-withholds
+  on the stored gross, even on a billing's draft — `BILLING_CARRIED` no
+  longer holds it) and on an invoice request (`InvoiceRequest.ewtRate`,
+  passed to `createInvoiceFromBilling` / `createInvoiceFromOrder` on
+  approval). EWT is always on the gross.
 - **Each invoice is credited to a salesperson and a team**
   (`salespersonId`, `teamId` — the Industry/team master), filled at raising
   from its source by `invoiceCredit()`: a sales order's author and its

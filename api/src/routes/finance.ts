@@ -944,7 +944,7 @@ invoiceRoutes.post(
   require_('gfin.ar.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(invoiceHeaderSchema.merge(creditSchema), req.body);
+    const body = parseBody(invoiceHeaderSchema.merge(creditSchema).extend({ ewtRate: z.number().min(0).max(0.15).optional().nullable() }), req.body);
 
     const billing = await prisma.progressBilling.findUnique({
       where: { id: req.params.billingId },
@@ -980,7 +980,7 @@ invoiceRoutes.post(
       createInvoiceFromBilling(
         tx,
         billing,
-        { invoiceDate, dueDate, termsDays, terms: body.terms, poReference: body.poReference, siNumber: body.siNumber, notes: body.notes, ...credit },
+        { invoiceDate, dueDate, termsDays, terms: body.terms, poReference: body.poReference, siNumber: body.siNumber, notes: body.notes, ewtRate: body.ewtRate ?? null, ...credit },
         me.id,
       ).then(async (inv) => (counteredDate ? tx.invoice.update({ where: { id: inv.id }, data: { counteredDate } }) : inv)),
     );
@@ -1176,7 +1176,10 @@ invoiceRoutes.post(
 );
 
 /** What a billing's invoice never takes on Modify: its figures and whom they bill. */
-const BILLING_CARRIED = ['customerId', 'jobId', 'jobOrderId', 'vatRate', 'ewtRate', 'lines'] as const;
+// The withholding rate is the one figure a billing's draft takes (2026-10-16,
+// the owner's call: "editable withholding tax, e.g. 1% or 2%") — EWT is the
+// customer's to withhold, and it is withheld on the gross the billing carries.
+const BILLING_CARRIED = ['customerId', 'jobId', 'jobOrderId', 'vatRate', 'lines'] as const;
 
 /**
  * Modifying a draft invoice (2026-10-09, Phase 2 of the button standard).
@@ -1277,6 +1280,17 @@ invoiceRoutes.put(
       manual = manualInvoiceMoney(body.lines, body.vatRate ?? num(existing.vatRate), body.ewtRate ?? num(existing.ewtRate));
     }
 
+    // A new withholding rate with no lines (a billing's draft, or a header
+    // save): EWT again on the stored gross, the rest of the figures kept.
+    const ewtOnly =
+      !manual && raw.ewtRate !== undefined
+        ? (() => {
+            const rate = parseBody(z.object({ ewtRate: z.number().min(0).max(0.15) }), raw).ewtRate;
+            const tax = taxBreakdown(num(existing.grossAmount), num(existing.vatRate), rate);
+            return { ewtRate: D(tax.ewtRate), ewtAmount: D(tax.ewtAmount), netCollectible: D(tax.netCollectible) };
+          })()
+        : null;
+
     const updated = await prisma.$transaction(async (tx) => {
       if (manual && existing.salesOrder) {
         const order = existing.salesOrder;
@@ -1284,7 +1298,7 @@ invoiceRoutes.put(
       }
       const claimed = await tx.invoice.updateMany({
         where: { id: existing.id, status: 'DRAFT' },
-        data: { ...headerData, ...(manual ? { customerId, jobId, ...manual.figures } : {}) },
+        data: { ...headerData, ...(manual ? { customerId, jobId, ...manual.figures } : {}), ...(ewtOnly ?? {}) },
       });
       if (!claimed.count) throw badRequest('It was issued or cancelled a moment ago — reload to see where it stands');
       if (manual) {
@@ -1299,7 +1313,9 @@ invoiceRoutes.put(
         entityType: 'invoice',
         entityId: existing.id,
         action: 'UPDATED',
-        summary: manual
+        summary: ewtOnly
+          ? `${existing.number} modified — EWT ${ratePct(num(ewtOnly.ewtRate))}, ${num(ewtOnly.netCollectible)} collectible (was ${num(existing.netCollectible)})`
+          : manual
           ? `${existing.number} modified — ${num(updated.netCollectible)} collectible (was ${num(existing.netCollectible)})`
           : `${existing.number} modified — dates, terms, PO reference or notes; the figures stay ${existing.progressBilling?.number ?? 'the billing'}'s`,
         before: {
@@ -1368,9 +1384,13 @@ invoiceRoutes.post(
     );
     const invoice = await prisma.invoice.findUnique({ where: { id: req.params.id } });
     if (!invoice) throw notFound('Invoice not found');
-    if (!['ISSUED', 'PARTIALLY_PAID', 'PAID'].includes(invoice.status)) {
-      throw badRequest(invoice.status === 'DRAFT' ? 'Issue it first — a draft has not gone to the customer' : 'A cancelled invoice is not countered');
+    // "Mark as received" (2026-10-16, the owner's call: no customer is
+    // involved in G-CORE's side of it): on a draft it issues the invoice and
+    // records the day the customer received it, in one step.
+    if (!['DRAFT', 'ISSUED', 'PARTIALLY_PAID', 'PAID'].includes(invoice.status)) {
+      throw badRequest('A cancelled invoice is not countered');
     }
+    const issuing = invoice.status === 'DRAFT';
     const today = dayKey(new Date());
     const counteredDate = body.counteredDate ? asDate(body.counteredDate, 'Countered date') : today;
     if (counteredDate < invoice.invoiceDate) throw badRequest('It cannot be countered before its invoice date');
@@ -1382,7 +1402,7 @@ invoiceRoutes.post(
     // both write a trail row over the other's day.
     const claimed = await prisma.invoice.updateMany({
       where: { id: invoice.id, status: invoice.status, counteredDate: invoice.counteredDate },
-      data: { counteredDate, termsDays, dueDate },
+      data: { counteredDate, termsDays, dueDate, ...(issuing ? { status: 'ISSUED' as const, issuedAt: new Date() } : {}) },
     });
     if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
     const updated = await prisma.invoice.findUniqueOrThrow({ where: { id: invoice.id }, include: invoiceInclude });
@@ -1392,7 +1412,7 @@ invoiceRoutes.post(
         entityType: 'invoice',
         entityId: invoice.id,
         action: 'UPDATED',
-        summary: `${invoice.number} countered on ${formatDate(counteredDate)} — ${termsLabel(termsDays)}, expected ${formatDate(dueDate)}`,
+        summary: `${invoice.number} ${issuing ? 'issued and ' : ''}received by the customer on ${formatDate(counteredDate)} — ${termsLabel(termsDays)}, expected ${formatDate(dueDate)}`,
         before: { counteredDate: invoice.counteredDate, dueDate: invoice.dueDate, termsDays: invoice.termsDays },
         after: { counteredDate, dueDate, termsDays },
       },
@@ -3931,7 +3951,7 @@ paymentRoutes.get(
       ]),
     );
 
-    const pdf = await renderDocument({ title: 'Payments', date: new Date(), reference, sections });
+    const pdf = await renderDocument({ title: 'Collections', date: new Date(), reference, sections });
     await audit(
       { entityType: 'payment', entityId: 'list', action: 'EXPORTED', summary: `Exported the payment list as PDF (${rows.length} payment(s))` },
       req,

@@ -544,6 +544,50 @@ function daysFrom(from: string, to: string): number {
 
 const toCents = (n: number) => Math.round(n * 100) / 100;
 
+const EWT_CHOICES = [0, 0.01, 0.02];
+
+/**
+ * The withholding tax an invoice carries (2026-10-16, the owner's call:
+ * "editable withholding tax, e.g. 1% or 2%"): 0%, 1% or 2% as chips, or any
+ * rate up to 15% typed. EWT is withheld on the amount before VAT.
+ */
+export function EwtPicker({ value, onChange }: { value: number; onChange: (rate: number) => void }) {
+  const [custom, setCustom] = useState(!EWT_CHOICES.some((c) => Math.abs(c - value) < 0.00005));
+  return (
+    <div className="ar-terms">
+      <div className="scope-switch" role="group" aria-label="Withholding tax">
+        {EWT_CHOICES.map((c) => (
+          <button
+            key={c}
+            type="button"
+            className={!custom && Math.abs(c - value) < 0.00005 ? 'active' : ''}
+            aria-pressed={!custom && Math.abs(c - value) < 0.00005}
+            onClick={() => {
+              setCustom(false);
+              onChange(c);
+            }}
+          >
+            {c * 100}%
+          </button>
+        ))}
+        <button type="button" className={custom ? 'active' : ''} aria-pressed={custom} onClick={() => setCustom(true)}>
+          Other
+        </button>
+      </div>
+      {custom && (
+        <NumberInput
+          kind="percent"
+          min={0}
+          max={15}
+          aria-label="Withholding tax in percent"
+          value={String(Math.round(value * 10000) / 100)}
+          onChange={(e) => onChange(Math.min(15, Math.max(0, Number(e.target.value) || 0)) / 100)}
+        />
+      )}
+    </div>
+  );
+}
+
 /**
  * The payment terms as the owner's sample offers them: Net 15, 30, 45 or 60
  * as chips, or any number of days typed. The terms run from the day the
@@ -699,12 +743,19 @@ function InvoiceModal({
   // call), at the rate the invoice will carry: the order's, the draft's own,
   // else the company's. Either amount may be typed; the other follows.
   const [companyVat, setCompanyVat] = useState(0.12);
+  const [companyEwt, setCompanyEwt] = useState(0.02);
   useEffect(() => {
     api
-      .get<{ vatRate: number }>('/finance-settings')
-      .then((s) => typeof s.vatRate === 'number' && setCompanyVat(s.vatRate))
+      .get<{ vatRate: number; ewtRate: number }>('/finance-settings')
+      .then((s) => {
+        if (typeof s.vatRate === 'number') setCompanyVat(s.vatRate);
+        if (typeof s.ewtRate === 'number') setCompanyEwt(s.ewtRate);
+      })
       .catch(() => {});
   }, []);
+  // The withholding rate: the draft's own, else the company's until one is picked.
+  const [ewtPicked, setEwtPicked] = useState<number | null>(existing ? existing.ewtRate : null);
+  const ewtRate = ewtPicked ?? companyEwt;
   const lineVatRate = existing?.vatRate ?? order?.vatRate ?? companyVat;
   const withVat = (before: number) => toCents(before + toCents(before * lineVatRate));
   const beforeVat = (incl: number) => toCents(incl / (1 + lineVatRate));
@@ -712,12 +763,15 @@ function InvoiceModal({
     ? manual
       ? (() => {
           const vat = toCents(gross * existing.vatRate);
-          const ewt = toCents(gross * existing.ewtRate);
+          const ewt = toCents(gross * ewtRate);
           return { invoiceTotal: toCents(gross + vat), netCollectible: toCents(gross + vat - ewt) };
         })()
-      : { invoiceTotal: existing.invoiceTotal, netCollectible: existing.netCollectible }
+      : { invoiceTotal: existing.invoiceTotal, netCollectible: toCents(existing.invoiceTotal - toCents(existing.grossAmount * ewtRate)) }
     : billing
-      ? { invoiceTotal: billing.invoiceTotal, netCollectible: billing.netCollectible }
+      ? {
+          invoiceTotal: billing.invoiceTotal,
+          netCollectible: ewtPicked == null ? billing.netCollectible : toCents(billing.invoiceTotal - toCents(billing.grossAmount * ewtPicked)),
+        }
       : null;
   const overOrder = !!order && gross > order.left + 0.005;
   const valid =
@@ -732,6 +786,7 @@ function InvoiceModal({
       termsDays: terms,
       ...(existing ? {} : { poReference: form.poReference || null }),
       notes: form.notes || null,
+      ...(ewtPicked != null ? { ewtRate: ewtPicked } : {}),
     };
     const payloadLines = lines
       .filter((l) => l.description.trim() && l.amount)
@@ -789,26 +844,24 @@ function InvoiceModal({
       <ErrorBox error={error} />
       {isNew ? (
         <div className="alert info">
-          VAT and EWT are added at the company's rates when it is saved
+          VAT is added at the company's rate when it is saved, EWT at the rate picked below
           {order ? <> — {(order.vatRate * 100).toFixed(0)}% VAT, the sales order's rate</> : null}. It stays a draft until
           you issue it; its terms start when the customer counters it.
         </div>
       ) : manual && existing ? (
         <div className="alert info">
-          VAT and EWT are recomputed from the lines at the rates this invoice was raised with —{' '}
-          {(existing.vatRate * 100).toFixed(0)}% and {(existing.ewtRate * 100).toFixed(0)}%.
+          VAT is recomputed from the lines at the rate this invoice was raised with ({(existing.vatRate * 100).toFixed(0)}%), EWT at the rate picked below.
           {existing.jobOrder && <> It bills job order {existing.jobOrder.number}, which does not change.</>}
           {existing.salesOrder && <> It bills sales order {existing.salesOrder.number}, which does not change.</>}
         </div>
       ) : existing ? (
         <div className="alert info">
           The figures are {existing.progressBilling?.number ?? 'the billing'}&rsquo;s and do not change here —
-          only the dates, terms, PO reference and notes do.
+          only the dates, terms, PO reference, notes and the withholding rate do.
         </div>
       ) : (
         <div className="alert info">
-          Every figure is carried from the billing — the gross, both tax rates and the line
-          breakdown. Nothing is recomputed, so an invoice raised months later still prints the tax it
+          Every figure is carried from the billing — the gross, the VAT and the line breakdown; only the withholding rate may be picked again. Nothing is recomputed, so an invoice raised months later still prints the tax it
           was billed under.
         </div>
       )}
@@ -885,6 +938,12 @@ function InvoiceModal({
         </Field>
         <Field label="Payment terms" hint={terms === 0 ? 'Due when the customer counters it' : `Due ${terms} days after the customer counters it`}>
           <TermsPicker value={terms} onChange={setTerms} />
+        </Field>
+        <Field
+          label="Withholding tax (EWT)"
+          hint={`Withheld by the customer on the amount before VAT${manual && gross > 0 ? ` — ${formatMoney(toCents(gross * ewtRate))}` : ''}`}
+        >
+          <EwtPicker value={ewtRate} onChange={setEwtPicked} />
         </Field>
       </div>
 
@@ -1037,13 +1096,6 @@ export function InvoiceDetail() {
   if (error && !row) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
 
-  // Thrown, not caught: the confirm bar shows the refusal and stays open.
-  async function issue() {
-    await api.post(`/invoices/${id}/issue`);
-    toast('ok', 'Issued — it is now a receivable');
-    await load();
-  }
-
   async function cancel(reason: string) {
     await api.post(`/invoices/${id}/cancel`, { reason });
     toast('ok', 'Cancelled');
@@ -1114,27 +1166,12 @@ export function InvoiceDetail() {
         }
         actions={
           <>
-            {row.status === 'DRAFT' && can('gfin.ar.edit_all') && (
-              <button
-                className="btn btn-primary"
-                onClick={() =>
-                  confirm.ask({
-                    title: `Issue ${row.number} to ${row.customer.name}?`,
-                    body: `It becomes a receivable: ${formatMoney(row.netCollectible)} collectible, due ${formatDate(row.dueDate)}.`,
-                    confirmLabel: 'Issue to customer',
-                    tone: 'primary',
-                    onConfirm: issue,
-                  })
-                }
-              >
-                Issue to customer
-              </button>
-            )}
-            {/* One primary: until the customer has it, countering is the
-                next step; after that, collecting is. */}
-            {row.awaitingCounter && canCounter && (
+            {/* One primary: until the customer has it, "Mark as received"
+                (issues a draft and records the day it was received); after
+                that, collecting is. G-CORE sends nothing to the customer. */}
+            {(row.status === 'DRAFT' ? can('gfin.ar.edit_all') : row.awaitingCounter && canCounter) && (
               <button className="btn btn-primary" onClick={() => setPanel('counter')}>
-                Mark countered
+                Mark as received
               </button>
             )}
             {canCollect && (
@@ -1434,7 +1471,7 @@ function CounterPanel({ invoice, onClose, onSaved }: { invoice: Invoice; onClose
     setError(null);
     try {
       await api.post(`/invoices/${invoice.id}/counter`, { counteredDate: day, termsDays: terms });
-      toast('ok', `Countered — expected ${formatDate(expected)}`);
+      toast('ok', invoice.status === 'DRAFT' ? `Received — now a receivable, expected ${formatDate(expected)}` : `Countered — expected ${formatDate(expected)}`);
       onSaved();
     } catch (err) {
       setError(err);
@@ -1444,7 +1481,7 @@ function CounterPanel({ invoice, onClose, onSaved }: { invoice: Invoice; onClose
   return (
     <section className="card" aria-labelledby="ar-counter">
       <h3 id="ar-counter" className="card-title">
-        {invoice.counteredDate ? 'Change the countered date' : 'Mark countered'}
+        {invoice.status === 'DRAFT' || !invoice.counteredDate ? 'Mark as received' : 'Change the countered date'}
       </h3>
       <ErrorBox error={error} />
       <div className="grid grid-2">
@@ -2192,7 +2229,7 @@ export function Payments() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Payments</h1>
+          <h1>Collections</h1>
         </div>
       </div>
 

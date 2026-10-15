@@ -4815,6 +4815,12 @@ enum ChargeBasis {
 /// PRs, stock issues, overtime and expense claims that quote that job.
 model JobOrder {
   id     String         @id @default(cuid())
+  /// The costing's Labor cost when the Technical Manager approved an Amount
+  /// that differs from it — approval is the agreement (2026-10-16). Null when
+  /// the two tallied or no costing stood behind it.
+  laborCostingAmount Decimal?  @db.Decimal(18, 2)
+  laborAgreedById    String?
+  laborAgreedAt      DateTime?
   number String         @unique
   status JobOrderStatus @default(DRAFT)
   kind   ServiceKind    @default(CORRECTIVE)
@@ -5275,6 +5281,9 @@ enum InvoiceRequestStatus {
 model InvoiceRequest {
   id     String               @id @default(cuid())
   number String
+  /// The withholding rate the invoice will carry (2026-10-16: editable, e.g.
+  /// 1% or 2%); null takes the billing's, else the company's.
+  ewtRate Decimal? @db.Decimal(5, 4)
   status InvoiceRequestStatus @default(DRAFT)
 
   /// The progress billing it asks to be invoiced — or none, when the request

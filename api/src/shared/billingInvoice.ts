@@ -31,6 +31,8 @@ export interface BillingInvoiceHeader {
   salesOrderId?: string | null;
   /** The printed sales invoice number, when it is already known. */
   siNumber?: string | null;
+  /** The withholding rate when it differs from the source's (editable, 2026-10-16). */
+  ewtRate?: number | null;
 }
 
 export const billingForInvoiceInclude = {
@@ -48,6 +50,12 @@ export async function createInvoiceFromBilling(
   actorId: string,
 ) {
   const number = await nextNumber('invoice', tx);
+  // The billing's figures are carried; only the withholding rate may differ,
+  // and then EWT is withheld again on the same gross.
+  const ewt =
+    header.ewtRate != null && Math.abs(header.ewtRate - num(billing.ewtRate)) > 0.00005
+      ? taxBreakdown(num(billing.grossAmount), num(billing.vatRate), header.ewtRate)
+      : null;
   const created = await tx.invoice.create({
     data: {
       number,
@@ -67,10 +75,10 @@ export async function createInvoiceFromBilling(
       grossAmount: billing.grossAmount,
       vatRate: billing.vatRate,
       vatAmount: billing.vatAmount,
-      ewtRate: billing.ewtRate,
-      ewtAmount: billing.ewtAmount,
+      ewtRate: ewt ? new Prisma.Decimal(ewt.ewtRate) : billing.ewtRate,
+      ewtAmount: ewt ? new Prisma.Decimal(ewt.ewtAmount) : billing.ewtAmount,
       invoiceTotal: billing.invoiceTotal,
-      netCollectible: billing.netCollectible,
+      netCollectible: ewt ? new Prisma.Decimal(ewt.netCollectible) : billing.netCollectible,
       notes: header.notes || null,
       createdById: actorId,
       lines: {
@@ -135,7 +143,7 @@ export async function createInvoiceFromOrder(
 ) {
   await assertOrderLeft(tx, { id: order.id, number: order.number, net: orderNet(order) }, gross);
   const rates = await currentRates(tx);
-  const tax = taxBreakdown(gross, num(order.vatRate), rates.ewtRate);
+  const tax = taxBreakdown(gross, num(order.vatRate), header.ewtRate ?? rates.ewtRate);
   const D = (n: number) => new Prisma.Decimal(n);
   return tx.invoice.create({
     data: {
