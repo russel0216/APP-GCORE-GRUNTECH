@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { dayKey } from './day';
+import { dayKey, manilaDayKey, manilaMinutesOfDay } from './day';
 import { badRequest } from '../http/kit';
 import { FACE_ENGINE } from './faceEngine';
 
@@ -371,7 +371,7 @@ export interface DayResult {
 }
 
 export function classifyArrival(timeIn: Date, settings: HrSettings): DayResult {
-  const arrived = timeIn.getHours() * 60 + timeIn.getMinutes();
+  const arrived = manilaMinutesOfDay(timeIn);
   const expected = toMinutes(settings.workStart);
   const late = arrived - expected - settings.graceMinutes;
   return late > 0
@@ -385,6 +385,17 @@ export function workedMinutes(timeIn: Date, timeOut: Date, settings: HrSettings)
   if (gross <= 0) return 0;
   // The break is only deducted from a day long enough to have taken one.
   return gross > settings.breakMinutes + 60 ? gross - settings.breakMinutes : gross;
+}
+
+/**
+ * Minutes left before the working day's end (`workEnd`), read in Manila — 0
+ * when the person stayed, and 0 for a clock-out on a later Manila day than
+ * the attendance row's (a shift closed after midnight left late, not early).
+ */
+export function undertimeMinutes(timeOut: Date, dateKey: string, settings: HrSettings): number {
+  if (manilaDayKey(timeOut) !== dateKey) return 0;
+  const early = toMinutes(settings.workEnd) - manilaMinutesOfDay(timeOut);
+  return early > 0 ? early : 0;
 }
 
 // ── One day of attendance ────────────────────────────────────────────────────

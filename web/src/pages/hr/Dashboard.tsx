@@ -37,7 +37,7 @@ import { EvaluationsDuePanel, EvaluationsDueStat } from './dashboard/Evaluations
  */
 
 /** The day's attendance words, as `extra` to the one `statusTone` — none of them is a document status. */
-const ATTENDANCE_TONES: Record<string, Tone> = {
+export const ATTENDANCE_TONES: Record<string, Tone> = {
   PRESENT: 'ok',
   LATE: 'warn',
   ON_LEAVE: 'info',
@@ -345,6 +345,8 @@ interface AttendanceRow {
   timeOut: string | null;
   status: string;
   lateMinutes: number;
+  /** Left before the day's end, at a same-day clock-out. */
+  undertimeMinutes?: number;
   workedHours: number;
   timeInMethod: string | null;
   /** The capture kept as evidence (an attachment id), whatever the method. */
@@ -476,6 +478,19 @@ export function AttendanceRegister() {
       render: (r) => (r.lateMinutes > 0 ? <span className="mono warn">{r.lateMinutes}m</span> : <span className="faint">—</span>),
     },
     {
+      key: 'undertimeMinutes',
+      label: 'Undertime',
+      align: 'right',
+      render: (r) =>
+        r.timeIn && !r.timeOut ? (
+          <span className="faint">open</span>
+        ) : (r.undertimeMinutes ?? 0) > 0 ? (
+          <span className="mono warn">{r.undertimeMinutes}m</span>
+        ) : (
+          <span className="faint">—</span>
+        ),
+    },
+    {
       key: 'workedHours',
       label: 'Hours',
       align: 'right',
@@ -528,7 +543,25 @@ export function AttendanceRegister() {
         searchPlaceholder="Search employee name or number…"
         onRowClick={can('ghr.employees.edit_all') ? (r) => setEditing(r) : undefined}
         emptyTitle="No attendance recorded for this range"
+        summary={(raw) => {
+          const sum = raw as unknown as { missingOut: number } | undefined;
+          if (!sum) return null;
+          return (
+            <Stat
+              label="Missing clock-out"
+              value={sum.missingOut}
+              accent={sum.missingOut > 0 ? 'warn' : undefined}
+              sub="clocked in and never out — modify the row to close it"
+              to="/g-hr/attendance?missingOut=true"
+            />
+          );
+        }}
         filters={[
+          {
+            key: 'missingOut',
+            label: 'Clock-out',
+            options: [{ value: 'true', label: 'Missing clock-out' }],
+          },
           {
             key: 'status',
             label: 'Status',

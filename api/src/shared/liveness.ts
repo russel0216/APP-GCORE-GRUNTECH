@@ -33,10 +33,18 @@ import { faceDistance } from './hr';
 // ── The challenge ────────────────────────────────────────────────────────────
 
 export type ChallengeKind = 'blink' | 'turn';
+/** Every kind a token may name — the verifier still reads a blink token. */
 export const CHALLENGE_KINDS: readonly ChallengeKind[] = ['blink', 'turn'];
+/**
+ * The kinds the clock ISSUES (2026-10-16, the owner's call: "turn only,
+ * relaxed"). A blink closes the eye for 100–150 ms and the browser's frames
+ * came 125 ms apart, so real people were refused "No blink was seen" again
+ * and again; the turn is seen in every burst that performs it.
+ */
+export const ISSUED_KINDS: readonly ChallengeKind[] = ['turn'];
 
-/** How long the ring runs on the Clock page — the burst the browser records. */
-export const CHALLENGE_SECONDS = 2.5;
+/** How long the ring runs on the Clock page — the burst the browser records: left, right and back. */
+export const CHALLENGE_SECONDS = 3.5;
 /** A challenge is good for this long after it is issued. */
 export const CHALLENGE_TTL_MS = 90_000;
 
@@ -57,9 +65,13 @@ export interface Challenge {
   expiresAt: Date;
 }
 
-/** A fresh challenge for this person: the kind is random, the token is theirs alone. */
-export function issueChallenge(userId: string, now = new Date()): Challenge {
-  const kind = CHALLENGE_KINDS[crypto.randomInt(CHALLENGE_KINDS.length)];
+/**
+ * A fresh challenge for this person: the kind is one the clock issues, at
+ * random; the token is theirs alone. `kind` names one for the verify script,
+ * which still proves a blink token is read the way it always was — the route
+ * never passes it.
+ */
+export function issueChallenge(userId: string, now = new Date(), kind: ChallengeKind = ISSUED_KINDS[crypto.randomInt(ISSUED_KINDS.length)]): Challenge {
   const nonce = crypto.randomBytes(12).toString('base64url');
   const payload = `${userId}.${kind}.${now.getTime()}.${nonce}`;
   const encoded = b64(payload);
@@ -149,7 +161,13 @@ export const MIN_FRAMES = 8;
 export const BLINK_RATIO = 0.7;
 /** An eye at or above this share of the median EAR counts as open. */
 export const OPEN_RATIO = 0.85;
-/** A turn: the yaw must swing by at least this much across the burst. */
+/**
+ * A turn: the yaw must swing by at least this much across the burst. Kept at
+ * 0.1 when the check was relaxed on 2026-10-16: at 0.08 a photo sheared about
+ * on an enrolment still read past it and was let through. The relaxing is in
+ * the time to turn (3.5 s), the larger frames and the frontal frame the face
+ * is compared on, not in this figure.
+ */
 export const TURN_RANGE = 0.1;
 /**
  * Too still to be a person: EAR AND yaw both within these across every
@@ -389,7 +407,7 @@ export interface LivenessResult {
   frames: number;
   /** Frames whose landmarks were read. */
   usable: number;
-  /** Distance of the first and last usable frames' faces from the still's; null where none could be read. */
+  /** Distance from the still's face of the first usable frame and the most frontal of the last quarter (`last`); null where none could be read. */
   sameFace: { first: number | null; last: number | null };
   /** How long the engine took, in milliseconds. */
   ms: number;
@@ -397,13 +415,16 @@ export interface LivenessResult {
 
 /**
  * The server's liveness check over a burst: every frame measured
- * (`measureWith`), the first and last usable ones described and compared
+ * (`measureWith`), the first usable one and the most frontal of the last quarter described and compared
  * with the still — a face more than `SAME_FACE_DISTANCE` away at either end
  * is `not_live`: a photo swapped for a face, or a face for a photo, mid-burst
  * — and the readings judged by `livenessVerdict`. Runs in face.ts's
  * one-at-a-time queue, as one job, so a burst never runs beside a capture.
  */
 export async function checkLiveness(frames: Buffer[], kind: ChallengeKind, input: LivenessInput): Promise<LivenessResult> {
+  // A capture whose still was already described has its place in the line:
+  // the burst waits its turn and is never refused "busy" halfway through an
+  // attempt the person was already admitted to (2026-10-16).
   return withFaceEngine(async (api) => {
     const started = performance.now();
     const readings: FrameReading[] = [];
@@ -423,7 +444,18 @@ export async function checkLiveness(frames: Buffer[], kind: ChallengeKind, input
     });
     if (readings.length < MIN_FRAMES) return done({ ok: false, reason: 'too_few_frames' }, { first: null, last: null });
 
-    const ends = [usableFrames[0], usableFrames[usableFrames.length - 1]];
+    // The first frame, and the most FRONTAL frame of the burst's last
+    // quarter (its yaw nearest the first frame's): the prompt ends looking
+    // back at the camera, but a person who ends still a little turned is
+    // judged on the frame that looks like the still — a turned last face read
+    // against a frontal still used to be refused as "not live". A photo
+    // swapped in at the end is still caught: the whole last quarter is it.
+    const tail = Math.max(3, Math.ceil(readings.length / 4));
+    let frontal = readings.length - 1;
+    for (let i = readings.length - tail; i < readings.length; i++) {
+      if (Math.abs(readings[i].yaw - readings[0].yaw) < Math.abs(readings[frontal].yaw - readings[0].yaw)) frontal = i;
+    }
+    const ends = [usableFrames[0], usableFrames[frontal]];
     const sameFace = { first: null as number | null, last: null as number | null };
     for (let i = 0; i < ends.length; i++) {
       const descriptor = await descriptorWith(api, ends[i], input.box, input.stillWidth);
@@ -433,5 +465,5 @@ export async function checkLiveness(frames: Buffer[], kind: ChallengeKind, input
       if (distance == null || distance > SAME_FACE_DISTANCE) return done({ ok: false, reason: 'not_live' }, sameFace);
     }
     return done(livenessVerdict(kind, readings), sameFace);
-  });
+  }, { alwaysWait: true });
 }

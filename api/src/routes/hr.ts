@@ -34,7 +34,7 @@ import { registerSearch } from '../shared/search';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { postJobCost } from '../shared/inventory';
 import { upload, saveAttachment, attachmentPath, deleteAttachment, registerAttachmentGuard } from '../shared/attachments';
-import { throttled } from '../shared/throttle';
+import { retryAfterSeconds, throttled } from '../shared/throttle';
 import { FACE_ENGINE, describeFace, faceEngineReady, faceQualityProblem, type FaceCapture, type FaceQuality } from '../shared/face';
 import {
   MIN_FRAMES,
@@ -82,6 +82,7 @@ import {
   type FaceRefusal,
   classifyArrival,
   workedMinutes,
+  undertimeMinutes,
   overtimeHours,
   overtimeRate,
   leaveDays,
@@ -91,6 +92,7 @@ import {
   toMinutes,
 } from '../shared/hr';
 import { PEOPLE_FLOW_KEY, flowChecklist } from '../shared/peopleFlow';
+import { addDays, manilaTime } from '../shared/day';
 
 const D = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -343,13 +345,11 @@ clockRoutes.get(
       return;
     }
 
+    // Today's row — or yesterday's, still open within the overnight window,
+    // which the next clock-out closes (`rowToClose`); `carriedOver` says so.
     const today = dayKey(new Date());
-    const [attendance, faces] = await Promise.all([
-      prisma.attendance.findUnique({
-        where: { employeeId_date: { employeeId: employee.id, date: today } },
-      }),
-      sampleCounts(employee.id),
-    ]);
+    const [attendance, faces] = await Promise.all([rowToClose(employee.id, new Date()), sampleCounts(employee.id)]);
+    const carriedOver = !!attendance && attendance.date.getTime() !== today.getTime();
 
     res.json({
       employee,
@@ -367,6 +367,7 @@ clockRoutes.get(
             ...attendance,
             timeInScore: attendance.timeInScore ? num(attendance.timeInScore) : null,
             timeOutScore: attendance.timeOutScore ? num(attendance.timeOutScore) : null,
+            carriedOver,
           }
         : null,
       settings,
@@ -432,10 +433,10 @@ function discardCapture(req: Request, options: { keepPhoto?: boolean } = {}) {
 
 const LIVENESS_MESSAGES = {
   missing: 'The liveness check did not run — reload the page and try again.',
-  too_few_frames: 'Hold still a moment longer so the camera can see you move.',
+  too_few_frames: 'The camera could not follow your face — come a little closer, keep your face in the oval, and try again.',
   no_blink: 'No blink was seen — blink once, clearly, while the ring runs.',
-  no_turn: 'No head turn was seen — turn your head slightly left, then right, while the ring runs.',
-  not_live: 'The camera needs to see a live person: hold still only for the photo, then do what the ring asks.',
+  no_turn: 'No head turn was seen — while the ring runs, turn your head slowly left, then right, then back to the camera.',
+  not_live: 'The camera needs to see a live person: keep your face in the oval, turn slowly while the ring runs, and end facing the camera.',
 } as const;
 
 /** What a refused liveness check records in the audit row's `after`. */
@@ -504,34 +505,51 @@ const fourPlaces = (d: number | null | undefined) => (d == null ? null : Math.ro
 
 /**
  * How often one person may knock on the face clock or its enrolment: each
- * attempt costs the server a second of the face engine, on a host it shares
- * with a safety-critical system. Generous for a person at the door (a retry
- * every five seconds), a brake on a loop. Checked before the upload is even
- * written to disk.
+ * face attempt costs the server a second of the face engine, on a host it
+ * shares with a safety-critical system. Generous for a person at the door (a
+ * retry every five seconds), a brake on a loop.
+ *
+ * Since 2026-10-16 only a FACE capture counts against `FACE_ATTEMPTS_PER_MINUTE`
+ * (the challenge it carries used to count too, so six tries locked a person
+ * out) — the challenge has a bucket of its own, and the fallback is never
+ * held back by failed face attempts: it is the way in when the face fails.
+ * A looser brake (`CLOCK_REQUESTS_PER_MINUTE`) still stands before any upload
+ * is written, so a loop cannot fill the disk. A refusal says how long to wait.
  */
 const FACE_ATTEMPTS_PER_MINUTE = 12;
-const faceThrottle = (door: 'clock' | 'enrol') =>
+const CLOCK_REQUESTS_PER_MINUTE = 30;
+const CHALLENGES_PER_MINUTE = 30;
+
+function tooMany(key: string, limit: number): void {
+  if (!throttled(key, limit, 60_000)) return;
+  const wait = retryAfterSeconds(key, 60_000);
+  throw new HttpError(429, `Too many tries in a minute — wait ${wait} second${wait === 1 ? '' : 's'}, then try again.`);
+}
+
+/** The brake before the upload is written: every request to the door, face or fallback. */
+const requestBrake = (door: 'clock' | 'enrol') =>
   handler(async (req, _res, next) => {
     const me = currentUser(req);
-    if (throttled(`face:${door}:${me.id}`, FACE_ATTEMPTS_PER_MINUTE, 60_000)) {
-      throw new HttpError(429, 'Too many tries in a minute — wait a moment, then try again.');
-    }
+    tooMany(`clock:${door}:${me.id}`, CLOCK_REQUESTS_PER_MINUTE);
     next();
   });
+
+/** The face attempt's own brake, checked once the request says it is a face capture. */
+const faceAttempt = (door: 'clock' | 'enrol', userId: string) => tooMany(`face:${door}:${userId}`, FACE_ATTEMPTS_PER_MINUTE);
 
 /**
  * A liveness challenge for the capture about to be sent (2026-10-10): which
  * movement the ring asks for, how long it runs, and the signed token the
  * capture carries back as `challenge`. Random, the caller's alone, good for
- * 90 seconds and once. Shares the clock's own per-person brake — a challenge
- * and the capture it guards are one attempt at the door. Issued whether or
+ * 90 seconds and once. Has a brake of its own (`CHALLENGES_PER_MINUTE`): the
+ * capture it guards is what counts as the attempt at the door. Issued whether or
  * not the setting is on; `GET /clock/me` says whether one is needed.
  */
 clockRoutes.get(
   '/challenge',
-  faceThrottle('clock'),
   handler(async (req, res) => {
     const me = currentUser(req);
+    tooMany(`face:challenge:${me.id}`, CHALLENGES_PER_MINUTE);
     const mine = await myEmployee(me.id);
     if (!mine) throw badRequest('Your account is not linked to an employee record');
     res.json(issueChallenge(me.id));
@@ -604,7 +622,7 @@ type EnrolDecision =
  */
 clockRoutes.post(
   '/enroll',
-  faceThrottle('enrol'),
+  requestBrake('enrol'),
   captureUpload,
   handler(async (req, res) => {
     let kept = false;
@@ -618,6 +636,7 @@ clockRoutes.post(
         }),
         req.body,
       );
+      faceAttempt('enrol', me.id);
       const photo = capturedPhoto(req);
       const photoFile = uploadedCapture(req).photo!;
       const settings = await hrSettings();
@@ -985,12 +1004,44 @@ async function sentBefore(photo: Buffer, employeeId: string): Promise<boolean> {
   return false;
 }
 
-const alreadyIn = (at: Date) => badRequest(`You already clocked in at ${at.toLocaleTimeString('en-PH')}`);
-const alreadyOut = (at: Date) => badRequest(`You already clocked out at ${at.toLocaleTimeString('en-PH')}`);
+const alreadyIn = (at: Date) => badRequest(`You already clocked in at ${manilaTime(at)}`);
+const alreadyOut = (at: Date) => badRequest(`You already clocked out at ${manilaTime(at)}`);
+
+/**
+ * How long after its clock-in an open day may still be closed by an ordinary
+ * clock-out (2026-10-16, the owner's call): a shift past midnight, or a
+ * clock-out forgotten until the morning. Older, the row waits for HR
+ * (`PATCH /attendance/:id/close`) and is listed as a missing clock-out.
+ */
+export const OVERNIGHT_CLOSE_HOURS = 16;
+
+/**
+ * The row a clock-OUT closes: today's (Manila) when it has a time in, else
+ * YESTERDAY's when it was clocked in, never out, within
+ * `OVERNIGHT_CLOSE_HOURS` and today has no time in. Null when there is none —
+ * the "not clocked in" refusal.
+ */
+async function rowToClose(employeeId: string, now: Date) {
+  const today = await prisma.attendance.findUnique({
+    where: { employeeId_date: { employeeId, date: dayKey(now) } },
+  });
+  if (today?.timeIn) return today;
+  const yesterday = await prisma.attendance.findUnique({
+    where: { employeeId_date: { employeeId, date: addDays(dayKey(now), -1) } },
+  });
+  if (
+    yesterday?.timeIn &&
+    !yesterday.timeOut &&
+    now.getTime() - yesterday.timeIn.getTime() <= OVERNIGHT_CLOSE_HOURS * 3_600_000
+  ) {
+    return yesterday;
+  }
+  return today;
+}
 
 clockRoutes.post(
   '/',
-  faceThrottle('clock'),
+  requestBrake('clock'),
   captureUpload,
   handler(async (req, res) => {
     let kept = false;
@@ -1011,9 +1062,13 @@ clockRoutes.post(
 
       // What today already holds is checked before the face, so a second
       // clock-in costs no second of the detector and keeps no photo.
-      const already = await prisma.attendance.findUnique({
-        where: { employeeId_date: { employeeId: mine.id, date: dayKey(new Date()) } },
-      });
+      // A clock-out may close yesterday's open day (`rowToClose`).
+      const already =
+        body.action === 'OUT'
+          ? await rowToClose(mine.id, new Date())
+          : await prisma.attendance.findUnique({
+              where: { employeeId_date: { employeeId: mine.id, date: dayKey(new Date()) } },
+            });
       if (body.action === 'IN' && already?.timeIn) throw alreadyIn(already.timeIn);
       if (body.action === 'OUT' && !already?.timeIn) throw badRequest('You have not clocked in today');
       if (body.action === 'OUT' && already?.timeOut) throw alreadyOut(already.timeOut);
@@ -1021,6 +1076,7 @@ clockRoutes.post(
       let matchedScore: number | null = null;
 
       if (body.method === 'FACE') {
+        faceAttempt('clock', me.id);
         const photo = capturedPhoto(req);
         const samples = await sampleCounts(mine.id);
 
@@ -1166,16 +1222,15 @@ clockRoutes.post(
         entryId = row.id;
         message =
           arrival.lateMinutes > 0
-            ? `Clocked in at ${now.toLocaleTimeString('en-PH')} — ${arrival.lateMinutes} minutes late`
-            : `Clocked in at ${now.toLocaleTimeString('en-PH')}`;
+            ? `Clocked in at ${manilaTime(now)} — ${arrival.lateMinutes} minutes late`
+            : `Clocked in at ${manilaTime(now)}`;
         reply = { ok: true, action: 'IN', at: now, status: arrival.status, lateMinutes: arrival.lateMinutes };
       } else {
-        const existing = await prisma.attendance.findUnique({
-          where: { employeeId_date: { employeeId: mine.id, date: today } },
-        });
+        const existing = await rowToClose(mine.id, now);
         if (!existing?.timeIn) throw badRequest('You have not clocked in today');
         if (existing.timeOut) throw alreadyOut(existing.timeOut);
         const worked = workedMinutes(existing.timeIn, now, settings);
+        const early = undertimeMinutes(now, existing.date.toISOString().slice(0, 10), settings);
         const claimed = await prisma.attendance.updateMany({
           where: { id: existing.id, timeOut: null },
           data: {
@@ -1184,6 +1239,7 @@ clockRoutes.post(
             timeOutScore: matchedScore != null ? D(matchedScore) : null,
             timeOutNotes: fallbackNote,
             workedMinutes: worked,
+            undertimeMinutes: early,
           },
         });
         if (!claimed.count) {
@@ -1191,8 +1247,12 @@ clockRoutes.post(
           throw alreadyOut(row?.timeOut ?? now);
         }
         entryId = existing.id;
-        message = `Clocked out at ${now.toLocaleTimeString('en-PH')} — ${(worked / 60).toFixed(2)} hours worked`;
-        reply = { ok: true, action: 'OUT', at: now, workedMinutes: worked };
+        const overnight = existing.date.getTime() !== today.getTime();
+        message =
+          `Clocked out at ${manilaTime(now)} — ${(worked / 60).toFixed(2)} hours worked` +
+          (overnight ? ' (closing the day you clocked in yesterday)' : '') +
+          (early > 0 ? ` — ${early} minutes before the end of the day` : '');
+        reply = { ok: true, action: 'OUT', at: now, workedMinutes: worked, undertimeMinutes: early, overnight };
       }
 
       // Always kept, on every method: the photo is the evidence, the match is
@@ -1246,6 +1306,8 @@ function attendanceListWhere(q: ListQuery): Prisma.AttendanceWhereInput {
   const status = choice(f.status, AttendanceStatus, 'Status');
   if (status) where.status = status;
   if (f.employeeId) where.employeeId = f.employeeId;
+  if (f.missingOut === 'true') Object.assign(where, missingClockOutWhere(new Date()));
+  else if (f.missingOut !== undefined && f.missingOut !== '') choice(f.missingOut, { true: 'true' }, 'Missing clock-out');
   if (q.search) {
     where.employee = {
       OR: [
@@ -1258,6 +1320,16 @@ function attendanceListWhere(q: ListQuery): Prisma.AttendanceWhereInput {
   const ids = idsFilter(f.ids);
   if (ids) where.id = { in: ids };
   return where;
+}
+
+/**
+ * A day clocked in and never out, past the window an ordinary clock-out may
+ * still close (`OVERNIGHT_CLOSE_HOURS`): HR's to close on the register with
+ * a reason (the correction, `PATCH /attendance/:id`). The register's
+ * `?missingOut=true` and its summary card are this one where.
+ */
+function missingClockOutWhere(now: Date): Prisma.AttendanceWhereInput {
+  return { timeIn: { not: null, lt: new Date(now.getTime() - OVERNIGHT_CLOSE_HOURS * 3_600_000) }, timeOut: null };
 }
 
 const ATTENDANCE_SORTS = ['date', 'timeIn'];
@@ -1294,9 +1366,11 @@ attendanceRoutes.get(
       }),
       prisma.attendance.count({ where }),
     ]);
+    const missingOut = await prisma.attendance.count({ where: missingClockOutWhere(new Date()) });
 
-    res.json(
-      listResult(
+    res.json({
+      summary: { missingOut },
+      ...listResult(
         rows.map((r) => ({
           ...r,
           timeInPhoto: mayOpen(r.employeeId) ? r.timeInPhoto : null,
@@ -1308,7 +1382,7 @@ attendanceRoutes.get(
         total,
         q,
       ),
-    );
+    });
   }),
 );
 
@@ -1356,6 +1430,7 @@ attendanceRoutes.get(
       f.from || f.to ? rangeNamed('dated', f.from, f.to) : f.date && `on ${listDay(f.date)}`,
       status && `status ${statusLabel(status)}`,
       f.employeeId && `employee ${employee ? `${employee.firstName} ${employee.lastName}` : 'not found'}`,
+      f.missingOut === 'true' && 'missing clock-out',
       f.ids && 'the rows selected',
     ]);
 
@@ -1434,7 +1509,7 @@ attendanceRoutes.get(
     });
 
     const time = (d: Date | null) =>
-      d ? d.toLocaleTimeString('en-PH', { hour12: false, hour: '2-digit', minute: '2-digit' }) : '';
+      d ? d.toLocaleTimeString('en-PH', { timeZone: 'Asia/Manila', hour12: false, hour: '2-digit', minute: '2-digit' }) : '';
 
     const header = [
       'Date',
@@ -1510,6 +1585,13 @@ attendanceRoutes.patch(
 
     const existing = await prisma.attendance.findUnique({ where: { id: req.params.id } });
     if (!existing) throw notFound('Attendance record not found');
+    // A changed time always carries why (2026-10-16): closing a forgotten
+    // clock-out is the commonest correction, and the note is all an audit
+    // of it has to go on.
+    const timesChange = body.timeIn !== undefined || body.timeOut !== undefined;
+    if (timesChange && !(body.notes ?? existing.notes)?.trim()) {
+      throw badRequest('Say why the time is corrected — the note is kept on the entry');
+    }
 
     const settings = await hrSettings();
     const timeIn = body.timeIn !== undefined ? asDate(body.timeIn) : existing.timeIn;
@@ -1526,6 +1608,7 @@ attendanceRoutes.patch(
         ...(timeIn ? classifyArrival(timeIn, settings) : {}),
         ...(body.status ? { status: body.status } : {}),
         workedMinutes: timeIn && timeOut ? workedMinutes(timeIn, timeOut, settings) : 0,
+        undertimeMinutes: timeOut ? undertimeMinutes(timeOut, existing.date.toISOString().slice(0, 10), settings) : 0,
         timeInMethod: body.timeIn !== undefined ? 'MANUAL' : existing.timeInMethod,
         timeOutMethod: body.timeOut !== undefined ? 'MANUAL' : existing.timeOutMethod,
         recordedById: me.id,

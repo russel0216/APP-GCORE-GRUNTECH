@@ -593,7 +593,7 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction):
 foundation
 373, masters 92, sales 617, costing 200, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 183, chain 340, hr 480, plantilla 123, meetings
+79, partners 120, delivery 183, chain 340, hr 485, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -1097,6 +1097,40 @@ launcher as the way out) — never a stale phase sentence.
   are not about it (`hr.rules.__verify__`), and its challenges are issued in
   the script with the same secret, since each ask at the route is one of
   the person's twelve knocks.
+- **The clock as relaxed on 2026-10-16** (the owner's review: "clock in/out
+  still have problem"; his call: "turn only, relaxed"). **Only a head turn is
+  issued** (`ISSUED_KINDS` in `shared/liveness.ts`; a blink closes the eye for
+  100–150 ms and the frames came 125 ms apart, so real people were refused
+  "No blink was seen"; a blink token is still READ, and `issueChallenge`
+  takes a `kind` for the verify script alone). The ring runs **3.5 s** —
+  "turn slowly left, then right, then back to the camera" — and the frames
+  go up at **640 px, quality 0.8**, one every 150 ms. The same-face check
+  compares the still with the first frame and the **most frontal frame of
+  the last quarter** (yaw nearest the first frame's), so a person who ends a
+  little turned is not refused as "not live", while a face pasted over the
+  burst's end still is. `TURN_RANGE` STAYS 0.1: at 0.08 the sheared-photo
+  fixture passed on an enrolment still. **The brake counts face captures
+  only**: `POST /clock` and `/clock/enroll` take a 30-a-minute request brake
+  before the upload, a FACE capture then counts against the twelve
+  (`faceAttempt`), the challenge has its own 30, the fallback is never held
+  back by failed face attempts, and the 429 says how many seconds to wait
+  (`retryAfterSeconds`, `shared/throttle.ts`). The liveness burst waits its
+  turn in the face queue (`alwaysWait`) — a capture already admitted is never
+  refused "busy" halfway. **Manila's clock, not the host's**: lateness is
+  `manilaMinutesOfDay()` and the messages `manilaTime()` (`shared/day.ts`) —
+  on a host set to UTC an 08:05 arrival read 00:05 and was never late.
+  **Overnight**: a clock-out closes YESTERDAY's open day when today has no
+  time in and it was clocked in within `OVERNIGHT_CLOSE_HOURS` (16)
+  (`rowToClose()` in `routes/hr.ts`; `/clock/me` sends it as `today` with
+  `carriedOver`, the page saying "Still open from yesterday"); older, it is a
+  **missing clock-out** — the register's `?missingOut=true` and its card —
+  closed by HR's correction (`PATCH /attendance/:id`), which now needs a note
+  whenever a time changes. `Attendance.undertimeMinutes` is set at a
+  same-day clock-out (`undertimeMinutes()`, before `workEnd`; 0 after
+  midnight) and shown on the register. The Clock page restarts a camera whose
+  track ended or that went dark behind a hidden tab, says "in use by another
+  app" and "open G-CORE through https://" in words, and counts "Hours so
+  far" live.
 - **The owner's three decisions of 2026-10-10 on the face clock**: (1) face
   SAMPLES are readable only by the person and HR with
   `ghr.employees.edit_all`, and a supervisor sees their DIRECT REPORTS' clock

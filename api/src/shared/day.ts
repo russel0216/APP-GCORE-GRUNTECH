@@ -41,6 +41,22 @@ export function manilaDate(at: Date): Date {
 }
 
 /**
+ * Minutes since Manila midnight of an instant — what "arrived at 08:05" means
+ * whatever the host clock is set to (Manila keeps UTC+8 all year, so the
+ * offset is fixed). `getHours()` read the HOST's hour: on a server set to UTC
+ * an 08:05 arrival read as 00:05 and was never late.
+ */
+export function manilaMinutesOfDay(at: Date): number {
+  const minutes = Math.floor(at.getTime() / 60_000) + 8 * 60;
+  return ((minutes % 1440) + 1440) % 1440;
+}
+
+/** An instant's time of day in Manila, as people read it ("8:05:12 AM"). */
+export function manilaTime(at: Date): string {
+  return at.toLocaleTimeString('en-PH', { timeZone: 'Asia/Manila' });
+}
+
+/**
  * The first and last instants of a Manila day ('YYYY-MM-DD'): the edges of a
  * range over a TIMESTAMP column (`createdAt`, `decidedAt`). UTC midnight is
  * 08:00 here, and a range that started there left out the night before it.

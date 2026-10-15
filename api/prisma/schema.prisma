@@ -3351,6 +3351,9 @@ model Attendance {
   lateMinutes   Int              @default(0)
   /// Net of the unpaid break, so it is hours actually worked.
   workedMinutes Int              @default(0)
+  /// Left before the working day's end (HR Settings' workEnd), at clock-out
+  /// on the same Manila day; 0 for a day closed after midnight (2026-10-16).
+  undertimeMinutes Int @default(0)
 
   /// The clock-in fallback's written reason (or HR's note on a correction).
   notes        String?
