@@ -1637,8 +1637,11 @@ async function main() {
       targetFinish: '2026-11-13',
       projectManagerId: director.id,
       projectEngineerId: engineer.id,
+      assignedToId: engineer.id,
       supportIds: [manager.id, engineer.id, manager.id],
     });
+    // The owner's Job Orders sample (2026-10-16): assigned personnel, the task, the status in his words.
+    check('a job order names its assigned personnel, and reads Draft', raised.body.assignedTo?.id === engineer.id && raised.body.stageLabel === 'Draft', `${raised.body.assignedTo?.id} ${raised.body.stageLabel}`);
     check(
       'a salesperson can raise a job order on a quotation under negotiation; the working days are counted Mon–Sat',
       raised.status === 201 && raised.body.durationDays === 11 && raised.body.targetFinish?.startsWith('2026-11-13'),
@@ -1700,6 +1703,17 @@ async function main() {
 
     const submitted = await api(salesToken, 'POST', `/job-orders/${raised.body.id}/submit`);
     check('and submit it for approval', submitted.status === 200, `${submitted.status} ${submitted.body.error ?? ''}`);
+    const pendingRead = await api(salesToken, 'GET', `/job-orders/${raised.body.id}`);
+    check('pending, it reads as the step it waits on — TM Approval', pendingRead.body.stageLabel === 'TM Approval', String(pendingRead.body.stageLabel));
+    const listed = await api(salesToken, 'GET', `/job-orders?search=${encodeURIComponent(TAG)}&assignedToId=${engineer.id}`);
+    check(
+      'the list filters by assigned personnel and carries the cards — active, pending approval, total value',
+      (listed.body.rows as { id: string }[]).some((r) => r.id === raised.body.id) && listed.body.summary.pendingApproval >= 1 && listed.body.summary.totalValue >= 500_000,
+      JSON.stringify(listed.body.summary),
+    );
+    const csv = await fetch(`${BASE}/job-orders/csv?search=${encodeURIComponent(TAG)}&status=PENDING_APPROVAL,COMPLETED`, { headers: { Authorization: `Bearer ${salesToken}` } });
+    const csvText = await csv.text();
+    check('the report\'s CSV takes several statuses and names the order in the owner\'s words', csv.status === 200 && csvText.includes(String(raised.body.number)) && csvText.includes('TM Approval'), csvText.slice(0, 200));
     const locked2 = await api(salesToken, 'PATCH', `/job-orders/${raised.body.id}`, { projectName: `${TAG} too late` });
     check('once submitted it cannot be edited', locked2.status === 400, String(locked2.status));
     const withdraw = await api(salesToken, 'POST', `/job-orders/${raised.body.id}/cancel`, { reason: 'changed mind' });

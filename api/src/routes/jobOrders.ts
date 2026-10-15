@@ -28,6 +28,8 @@ import {
   slotSignatories,
   contactOf,
   cancelOpenRequest,
+  openSteps,
+  stageWords,
   type ApprovalOutcome,
   type ApprovalSlot,
 } from '../shared/approvals';
@@ -44,7 +46,9 @@ import {
 } from '../shared/pdf';
 import { registerSearch } from '../shared/search';
 import { dayKey } from '../shared/aftermarket';
-import { workingDaysBetween } from '../shared/day';
+import { workingDaysBetween, manilaDayStart, manilaDayEnd } from '../shared/day';
+import { teamOf } from '../shared/team';
+import { toCsv } from '../shared/csv';
 import { valueRevision } from '../shared/pipeline';
 import { costingForJob, createJobRecord } from './jobs';
 import { LIST_CAP, listReference, totalLabel, rangeNamed, recordNamed, namedInFilter, filterDay, dayOf, choice, bracketed, bracketNote, listNotes, sendListPdf } from '../shared/listPaper';
@@ -97,7 +101,8 @@ const jobOrderInclude = {
   quotation: { select: { id: true, number: true, subject: true, outcome: true } },
   salesOrder: { select: { id: true, number: true, status: true } },
   requestedBy: person,
-  assignedTo: { select: { id: true, name: true } },
+  assignedTo: person,
+  team: { select: { id: true, code: true, name: true } },
   projectManager: person,
   projectEngineer: person,
   projectLead: person,
@@ -123,10 +128,23 @@ function targets(row: { targetStart: Date | null; targetFinish: Date | null; req
   return { targetStart: start, targetFinish: finish, durationDays: workingDaysBetween(start, finish) };
 }
 
-function present(row: JobOrderRow) {
+/**
+ * The status in the owner's words (2026-10-16, his Job Orders sample): Draft,
+ * TM / TL Approval while a step waits, Accepted once approved, In Progress
+ * while the project it built runs, Done, Returned, Cancelled.
+ */
+function stageOf(row: { status: string; job: { status: string } | null }, openStep?: string): string {
+  if (row.status === 'PENDING_APPROVAL') return stageWords(row.status, openStep, false);
+  if (row.status === 'APPROVED') return row.job && !['COMPLETED', 'TURNED_OVER', 'CANCELLED'].includes(row.job.status) ? 'In Progress' : row.job ? 'Done' : 'Accepted';
+  if (row.status === 'COMPLETED') return 'Done';
+  return statusWord(row.status);
+}
+
+function present(row: JobOrderRow, openStep?: string) {
   const { support, ...rest } = row;
   return {
     ...rest,
+    stageLabel: stageOf(row, openStep),
     ...targets(row),
     amount: num(row.amount),
     billable: row.chargeBasis === 'CHARGEABLE',
@@ -232,8 +250,15 @@ async function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma
   const ids = idsFilter(q.filters.ids);
   if (ids) and.push({ id: { in: ids } });
 
-  const status = choice(q.filters.status, JobOrderStatus, 'Status', statusWord);
-  if (status) where.status = status;
+  // One status, or several comma-separated (the report's tick boxes).
+  const statuses = (q.filters.status ?? '').split(',').map((v) => v.trim()).filter(Boolean).map((v) => choice(v, JobOrderStatus, 'Status', statusWord)!);
+  if (statuses.length) where.status = { in: statuses };
+  if (q.filters.teamId) where.teamId = q.filters.teamId === 'none' ? null : q.filters.teamId;
+  const createdFrom = filterDay(q.filters.createdFrom, 'Requested from');
+  const createdTo = filterDay(q.filters.createdTo, 'Requested to');
+  if (createdFrom || createdTo) {
+    where.createdAt = { ...(createdFrom ? { gte: manilaDayStart(createdFrom) } : {}), ...(createdTo ? { lte: manilaDayEnd(createdTo) } : {}) };
+  }
   if (q.filters.open === 'true') where.status = 'APPROVED';
   // The unbilled queue finance works from.
   if (q.filters.unbilled === 'true') {
@@ -241,7 +266,7 @@ async function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma
     where.status = 'COMPLETED';
     where.invoice = { is: null };
   }
-  for (const key of ['customerId', 'jobId', 'quotationId', 'salesOrderId', 'projectManagerId', 'assignedToId'] as const) {
+  for (const key of ['customerId', 'jobId', 'quotationId', 'salesOrderId', 'projectManagerId', 'assignedToId', 'requestedById'] as const) {
     if (q.filters[key]) where[key] = q.filters[key];
   }
   // A project's Job Orders tab (2026-10-15, the owner's call: "so they can
@@ -266,6 +291,8 @@ async function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma
         { number: { contains: q.search, mode: 'insensitive' } },
         { title: { contains: q.search, mode: 'insensitive' } },
         { projectName: { contains: q.search, mode: 'insensitive' } },
+        { requestedBy: { name: { contains: q.search, mode: 'insensitive' } } },
+        { assignedTo: { name: { contains: q.search, mode: 'insensitive' } } },
         { customer: { name: { contains: q.search, mode: 'insensitive' } } },
         { quotation: { number: { contains: q.search, mode: 'insensitive' } } },
       ],
@@ -283,7 +310,10 @@ jobOrderRoutes.get(
     const q = listQuery(req);
     const where = await jobOrderListWhere(me, q);
 
-    const [rows, total] = await Promise.all([
+    // The cards (the owner's sample) stand under the visibility and scope —
+    // the status and the rest narrow the rows, never the cards.
+    const base = await jobOrderListWhere(me, { ...q, filters: { ids: q.filters.ids, forProject: q.filters.forProject } });
+    const [rows, total, byStatus, running, value] = await Promise.all([
       prisma.jobOrder.findMany({
         where,
         include: jobOrderInclude,
@@ -292,9 +322,22 @@ jobOrderRoutes.get(
         take: q.pageSize,
       }),
       prisma.jobOrder.count({ where }),
+      prisma.jobOrder.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
+      prisma.jobOrder.count({ where: { AND: [base, IN_PROGRESS_WHERE] } }),
+      prisma.jobOrder.aggregate({ where: { AND: [base, { status: { notIn: ['CANCELLED', 'REJECTED'] } }] }, _sum: { amount: true } }),
     ]);
-
-    res.json(listResult(rows.map(present), total, q));
+    const counts: Record<string, number> = {};
+    for (const r of byStatus) counts[r.status] = r._count._all;
+    const steps = await openSteps('job_order', rows.filter((r) => r.status === 'PENDING_APPROVAL').map((r) => r.id));
+    res.json({
+      ...listResult(rows.map((r) => present(r, steps.get(r.id))), total, q),
+      summary: {
+        active: Object.entries(counts).filter(([k]) => !['CANCELLED', 'REJECTED'].includes(k)).reduce((t, [, n]) => t + n, 0),
+        pendingApproval: counts.PENDING_APPROVAL ?? 0,
+        inProgress: running,
+        totalValue: Number(value._sum.amount ?? 0),
+      },
+    });
   }),
 );
 
@@ -306,6 +349,47 @@ jobOrderRoutes.get(
  * amount prints in brackets and is not counted, and the note under the
  * totals says how many were left out. Declared above `/:id`.
  */
+/** An approved order whose project is running — the "In Progress" card and filter. */
+const IN_PROGRESS_WHERE: Prisma.JobOrderWhereInput = { status: 'APPROVED', job: { is: { status: { notIn: ['COMPLETED', 'TURNED_OVER', 'CANCELLED'] } } } };
+
+/** The list as a CSV that opens in Excel — the report dialog's "Excel" (above /:id). */
+jobOrderRoutes.get(
+  '/csv',
+  requireAny('gops.job_orders.view_all', 'gops.job_orders.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = await jobOrderListWhere(me, q);
+    const rows = await prisma.jobOrder.findMany({ where, include: jobOrderInclude, orderBy: orderBy(q, JOB_ORDER_SORTS, { requestedFor: 'asc' }), take: 5000 });
+    const steps = await openSteps('job_order', rows.filter((r) => r.status === 'PENDING_APPROVAL').map((r) => r.id));
+    await audit({ entityType: 'job_order', entityId: 'list', action: 'EXPORTED', summary: `Exported ${rows.length} job orders as CSV` }, req);
+    const csv = toCsv([
+      ['JO No.', 'Date requested', 'Requester', 'Assigned personnel', 'Team', 'Task', 'Scope summary', 'Customer', 'Project', 'Target start', 'Target finish', 'Amount', 'Status'],
+      ...rows.map((r) => {
+        const t = targets(r);
+        return [
+          r.number,
+          dayKey(r.createdAt).toISOString().slice(0, 10),
+          r.requestedBy.name,
+          r.assignedTo?.name ?? '',
+          r.team?.code ?? '',
+          r.title,
+          (r.scope ?? r.description).slice(0, 300),
+          r.customer.name,
+          r.projectName ?? '',
+          isoDay(t.targetStart),
+          isoDay(t.targetFinish),
+          r.amount == null ? '' : Number(r.amount),
+          stageOf(r, steps.get(r.id)),
+        ];
+      }),
+    ]);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="job-orders.csv"');
+    res.send(csv);
+  }),
+);
+
 jobOrderRoutes.get(
   '/pdf',
   requireAny('gops.job_orders.view_all', 'gops.job_orders.view_own'),
@@ -325,9 +409,13 @@ jobOrderRoutes.get(
       f.quotationId ? prisma.quotation.findUnique({ where: { id: f.quotationId }, select: { number: true } }) : null,
       f.salesOrderId ? prisma.salesOrder.findUnique({ where: { id: f.salesOrderId }, select: { number: true } }) : null,
     ]);
+    const steps = await openSteps('job_order', rows.filter((r) => r.status === 'PENDING_APPROVAL').map((r) => r.id));
     const reference = listReference(count, rows.length, ['job order', 'job orders'], [
       q.search ? `search "${q.search}"` : null,
-      f.status && f.open !== 'true' && f.unbilled !== 'true' ? `status ${statusWord(f.status)}` : null,
+      f.status && f.open !== 'true' && f.unbilled !== 'true' ? `status ${f.status.split(',').map(statusWord).join(' or ')}` : null,
+      f.teamId ? `team ${f.teamId === 'none' ? 'none' : ((await prisma.industry.findUnique({ where: { id: f.teamId }, select: { code: true } }))?.code ?? 'not found')}` : null,
+      f.requestedById ? `requested by ${(await prisma.user.findUnique({ where: { id: f.requestedById }, select: { name: true } }))?.name ?? 'not found'}` : null,
+      rangeNamed('requested', f.createdFrom, f.createdTo),
       f.open === 'true' ? 'open (approved)' : null,
       f.unbilled === 'true' ? 'completed, chargeable, not yet invoiced' : null,
       named.customer ? `customer ${named.customer}` : null,
@@ -349,22 +437,23 @@ jobOrderRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Project', 'Customer', 'Target', `Amount (${currency})`, 'Technical Manager', 'Links', 'Status'],
-          align: ['left', 'left', 'left', 'left', 'right', 'left', 'left', 'left'],
+          head: ['JO No.', 'Requested', 'Requester', 'Assigned', 'Team', 'Task / project', 'Target', `Amount (${currency})`, 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'left', 'left', 'right', 'left'],
           rows: rows.map((r) => {
             const t = targets(r);
             // No amount yet reads as the record reads it, never a blank.
             const amount = r.amount == null ? 'To be billed on completion' : bracketed(formatAmount(Number(r.amount)), r.status !== 'CANCELLED');
             return [
               r.number,
-              { title: r.projectName ?? r.title, body: r.projectName && r.projectName !== r.title ? r.title : undefined },
-              { title: r.customer.name, body: r.site?.name ?? r.contact?.name ?? undefined },
+              formatShortDate(r.createdAt),
+              r.requestedBy.name,
+              r.assignedTo?.name ?? '—',
+              r.team?.code ?? '—',
+              { title: r.title, body: `${r.projectName ?? ''}${r.projectName ? ' — ' : ''}${r.customer.name}` },
               // Dates are never bold: the window, then the working days in it.
               `${formatShortDate(t.targetStart)} – ${formatShortDate(t.targetFinish)}\n${t.durationDays} working day${t.durationDays === 1 ? '' : 's'}`,
               amount,
-              { title: r.projectManager?.name ?? 'None named', body: `Raised by ${r.requestedBy.name}` },
-              [r.quotation?.number, r.salesOrder?.number, r.job?.number].filter(Boolean).join('\n'),
-              statusWord(r.status),
+              stageOf(r, steps.get(r.id)),
             ];
           }),
         },
@@ -505,6 +594,8 @@ const jobOrderSchema = z.object({
   projectManagerId: z.string().optional().nullable(),
   projectEngineerId: z.string().optional().nullable(),
   projectLeadId: z.string().optional().nullable(),
+  assignedToId: z.string().optional().nullable(),
+  teamId: z.string().optional().nullable(),
   supportIds: z.array(z.string()).max(50).optional(),
   customerPoNumber: z.string().trim().max(120).optional().nullable(),
   amount: z.number().min(0).optional().nullable(),
@@ -531,9 +622,15 @@ async function checkBelongs(
     projectManagerId?: string | null;
     projectEngineerId?: string | null;
     projectLeadId?: string | null;
+    assignedToId?: string | null;
+    teamId?: string | null;
     supportIds?: string[];
   },
 ) {
+  if (body.teamId) {
+    const team = await prisma.industry.findUnique({ where: { id: body.teamId }, select: { isActive: true } });
+    if (!team?.isActive) throw badRequest('That team is not offered');
+  }
   const [site, contact, quotation, salesOrder, job] = await Promise.all([
     body.siteId ? prisma.customerSite.findUnique({ where: { id: body.siteId }, select: { customerId: true } }) : null,
     body.contactId ? prisma.customerContact.findUnique({ where: { id: body.contactId }, select: { customerId: true } }) : null,
@@ -555,7 +652,7 @@ async function checkBelongs(
   if (body.jobId && job?.customerId !== customerId) throw badRequest('That project is for another customer');
 
   const peopleIds = [
-    ...new Set([body.projectManagerId, body.projectEngineerId, body.projectLeadId, ...(body.supportIds ?? [])].filter((id): id is string => !!id)),
+    ...new Set([body.projectManagerId, body.projectEngineerId, body.projectLeadId, body.assignedToId, ...(body.supportIds ?? [])].filter((id): id is string => !!id)),
   ];
   if (peopleIds.length) {
     const found = await prisma.user.count({ where: { id: { in: peopleIds }, isActive: true } });
@@ -594,6 +691,8 @@ jobOrderRoutes.post(
     await checkBelongs(body.customerId, body);
     const { targetStart, targetFinish } = window(body.targetStart, body.targetFinish);
     const amount = body.amount ?? (await agreedAmount(body));
+    // The team asking: the one picked, else the requester's own.
+    const teamId = body.teamId || (await teamOf(me.id))?.id || null;
 
     const row = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('job_order', tx);
@@ -621,6 +720,8 @@ jobOrderRoutes.post(
           projectManagerId: body.projectManagerId || null,
           projectEngineerId: body.projectEngineerId || null,
           projectLeadId: body.projectLeadId || null,
+          assignedToId: body.assignedToId || null,
+          teamId,
           support: { create: [...new Set(body.supportIds ?? [])].map((userId) => ({ userId })) },
           notes: body.notes || null,
         },
@@ -646,8 +747,9 @@ jobOrderRoutes.get(
     const owner = canEditRecord(me, 'gops', 'job_orders', row.requestedById);
     // Who would decide it, so the page can say where Submit sends it.
     const route = row.status === 'DRAFT' || row.status === 'REJECTED' ? await routeSlots(row) : [];
+    const step = row.status === 'PENDING_APPROVAL' ? (await openSteps('job_order', [row.id])).get(row.id) : undefined;
     res.json({
-      ...present(row),
+      ...present(row, step),
       canEdit: owner && (row.status === 'DRAFT' || row.status === 'REJECTED'),
       canCancel: owner && ['DRAFT', 'REJECTED', 'APPROVED'].includes(row.status),
       canAcknowledge: (owner || onIt(me, row)) && row.status !== 'DRAFT' && row.status !== 'CANCELLED',
@@ -705,6 +807,8 @@ jobOrderRoutes.patch(
           ...(body.projectManagerId !== undefined ? { projectManagerId: body.projectManagerId || null } : {}),
           ...(body.projectEngineerId !== undefined ? { projectEngineerId: body.projectEngineerId || null } : {}),
           ...(body.projectLeadId !== undefined ? { projectLeadId: body.projectLeadId || null } : {}),
+          ...(body.assignedToId !== undefined ? { assignedToId: body.assignedToId || null } : {}),
+          ...(body.teamId !== undefined ? { teamId: body.teamId || (await teamOf(existing.requestedById))?.id || null } : {}),
           ...(body.supportIds !== undefined
             ? { support: { create: [...new Set(body.supportIds)].map((userId) => ({ userId })) } }
             : {}),

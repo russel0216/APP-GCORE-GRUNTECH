@@ -26,6 +26,8 @@ import { todayLocal, workingDaysBetween } from '../../lib/day';
 import { NewReportModal, reportPermission } from './Reports';
 import { VisitBadge } from './Schedule';
 import { NumberInput } from '../../components/NumberInput';
+import { Stat } from '../../components/charts';
+import { ListReportModal } from '../../components/ListReport';
 
 /**
  * Job orders — the PROJECT WORK ORDER (2026-10-09, the owner's call; a
@@ -52,16 +54,17 @@ const BASIS_TONES: Record<string, Tone> = {
 
 const STATUSES = [
   { value: 'DRAFT', label: 'Draft' },
-  { value: 'PENDING_APPROVAL', label: 'Pending approval' },
-  { value: 'APPROVED', label: 'Approved' },
-  { value: 'COMPLETED', label: 'Completed' },
+  { value: 'PENDING_APPROVAL', label: 'TM / TL approval' },
+  { value: 'APPROVED', label: 'Accepted / In progress' },
+  { value: 'COMPLETED', label: 'Done' },
   { value: 'REJECTED', label: 'Returned' },
   { value: 'CANCELLED', label: 'Cancelled' },
 ];
 
 /** REJECTED reads "Returned": the order goes back to whoever raised it. */
 const JOB_ORDER_TONES: Record<string, Tone> = { REJECTED: 'warn' };
-const statusLabel = (s: string) => (s === 'REJECTED' ? 'Returned' : undefined);
+/** The owner's words (2026-10-16), toned by the stored status. */
+const STAGE_TONE: Record<string, Tone> = { 'In Progress': 'info', Accepted: 'ok', Done: 'ok' };
 
 /** Orders raised as service calls before 2026-10-09 still carry a charge basis; the installed base shows it. */
 export function BasisBadge({ basis }: { basis: string }) {
@@ -107,7 +110,10 @@ export interface JobOrderRow {
   quotation: { id: string; number: string; subject: string; outcome: string } | null;
   salesOrder: { id: string; number: string; status: string } | null;
   requestedBy: Person;
-  assignedTo: { id: string; name: string } | null;
+  assignedTo: Person | null;
+  team: { id: string; code: string; name: string } | null;
+  /** The status in the owner's words: TL Approval, Accepted, In Progress, Done… */
+  stageLabel: string;
   projectManager: Person | null;
   projectEngineer: Person | null;
   projectLead: Person | null;
@@ -137,38 +143,30 @@ const daysLabel = (n: number) => `${n} working day${n === 1 ? '' : 's'}`;
 // ── The list ────────────────────────────────────────────────────────────────
 
 export function jobOrderColumns(): Column<JobOrderRow>[] {
+  // The owner's sample (2026-10-16): JO No., date, requester, assigned
+  // personnel, team, task / scope summary, amount, status.
   return [
-    { key: 'number', label: 'Number', sortKey: 'number', width: '130px', render: (r) => <span className="mono">{r.number}</span> },
+    { key: 'number', label: 'JO No.', sortKey: 'number', width: '130px', render: (r) => <span className="mono">{r.number}</span> },
+    { key: 'requested', label: 'Date req.', sortKey: 'createdAt', render: (r) => formatDate(r.createdAt) },
+    { key: 'requester', label: 'Requester', render: (r) => r.requestedBy.name },
     {
-      key: 'project',
-      label: 'Project',
-      render: (r) => (
-        <div>
-          <div>{r.projectName ?? r.title}</div>
-          {r.projectName && <div className="faint">{r.title}</div>}
-        </div>
-      ),
+      key: 'assigned',
+      label: 'Assigned personnel',
+      render: (r) => r.assignedTo?.name ?? r.projectManager?.name ?? <span className="faint">—</span>,
     },
+    { key: 'team', label: 'Team', render: (r) => (r.team ? <span title={r.team.name}>{r.team.code}</span> : <span className="faint">—</span>) },
     {
-      key: 'customer',
-      label: 'Customer',
-      render: (r) => (
-        <div>
-          <div>{r.customer.name}</div>
-          <div className="faint">{r.site?.name ?? r.contact?.name ?? '—'}</div>
-        </div>
-      ),
-    },
-    {
-      key: 'targets',
-      label: 'Target',
-      sortKey: 'requestedFor',
+      key: 'task',
+      label: 'Task / scope summary',
       render: (r) => (
         <div>
           <div>
-            {formatDate(r.targetStart)} → {formatDate(r.targetFinish)}
+            <strong>{r.title}</strong>
           </div>
-          <div className="faint">{daysLabel(r.durationDays)}</div>
+          <div className="faint">
+            {r.projectName ? `${r.projectName} — ` : ''}
+            {r.customer.name}
+          </div>
         </div>
       ),
     },
@@ -179,39 +177,28 @@ export function jobOrderColumns(): Column<JobOrderRow>[] {
       render: (r) => (r.amount != null ? <span className="mono">{formatMoney(r.amount)}</span> : <span className="faint">—</span>),
     },
     {
-      key: 'people',
-      label: 'Technical Manager',
+      key: 'targets',
+      label: 'Target',
+      sortKey: 'requestedFor',
+      optional: true,
       render: (r) => (
         <div>
-          <div>{r.projectManager?.name ?? <span className="badge warn">none named</span>}</div>
-          <div className="faint">{r.requestedBy.name}</div>
+          <div>
+            {formatDate(r.targetStart)} → {formatDate(r.targetFinish)}
+          </div>
+          <div className="faint">{daysLabel(r.durationDays)}</div>
         </div>
       ),
     },
     {
-      key: 'links',
-      label: 'Links',
-      render: (r) => (
-        <div className="faint mono">
-          {[r.quotation?.number, r.salesOrder?.number, r.job?.number].filter(Boolean).join(' · ') || '—'}
-        </div>
-      ),
-    },
-    {
-      // Whether approval has built the project yet (2026-10-15, the owner's
-      // call: the list shows the order already converted to a project).
+      // Whether approval has built the project yet (2026-10-15).
       key: 'converted',
       label: 'Project built',
-      // "Converted" once the approved order stands behind its project; an
-      // order merely linked to a project while still open says "Linked".
+      optional: true,
       render: (r) =>
         r.job ? (
           <div>
-            {r.status === 'APPROVED' || r.status === 'COMPLETED' ? (
-              <span className="badge ok">Converted</span>
-            ) : (
-              <span className="badge">Linked</span>
-            )}
+            {r.status === 'APPROVED' || r.status === 'COMPLETED' ? <span className="badge ok">Converted</span> : <span className="badge">Linked</span>}
             <div className="faint mono">{r.job.number}</div>
           </div>
         ) : (
@@ -221,7 +208,7 @@ export function jobOrderColumns(): Column<JobOrderRow>[] {
     {
       key: 'status',
       label: 'Status',
-      render: (r) => <StatusBadge status={r.status} extra={JOB_ORDER_TONES} label={statusLabel(r.status)} />,
+      render: (r) => <StatusBadge status={STAGE_TONE[r.stageLabel] ? r.stageLabel : r.status} extra={{ ...JOB_ORDER_TONES, ...STAGE_TONE }} label={r.stageLabel} />,
     },
   ];
 }
@@ -287,6 +274,8 @@ export function JobOrders() {
   }
 
   const columns = jobOrderColumns();
+  const [reporting, setReporting] = useState(false);
+  const { people } = usePeople();
 
   const canCreate = can('gops.job_orders.create');
 
@@ -305,23 +294,55 @@ export function JobOrders() {
         rowKey={(r) => r.id}
         scoped
         onRowClick={(r) => navigate(`/g-ops/job-orders/${r.id}`)}
-        searchPlaceholder="Search number, project, customer, quotation…"
+        searchPlaceholder="Search JO No., requester, assigned…"
         emptyTitle="No job orders yet"
         emptyHint="Raise one for a customer, linked to its quotation — approval builds the project."
         printPath="/api/job-orders/pdf"
+        summary={(raw) => {
+          const s = raw as { active?: number; pendingApproval?: number; inProgress?: number; totalValue?: number };
+          return (
+            <>
+              <Stat label="Total job orders" value={s.active ?? 0} sub="Active" />
+              <Stat label="Pending approval" value={s.pendingApproval ?? 0} sub="TM / TL approval" accent={s.pendingApproval ? 'warn' : undefined} />
+              <Stat label="In progress" value={s.inProgress ?? 0} sub="Project running" />
+              <Stat label="Total value" value={formatMoney(s.totalValue ?? 0)} sub="Before VAT" />
+            </>
+          );
+        }}
         filters={[
           { key: 'status', label: 'Status', options: STATUSES },
-          { key: 'open', label: 'Open', options: [{ value: 'true', label: 'Approved' }] },
+          { key: 'requestedById', label: 'Requester', options: people.map((p) => ({ value: p.id, label: p.name })) },
+          { key: 'assignedToId', label: 'Assigned personnel', options: people.map((p) => ({ value: p.id, label: p.name })) },
+          { key: 'createdFrom', toKey: 'createdTo', label: 'Date requested', type: 'dateRange' },
           { key: 'from', toKey: 'to', label: 'Target start', type: 'dateRange' },
         ]}
         actions={
-          canCreate ? (
-            <button type="button" className="btn btn-primary btn-sm" onClick={() => setRaising(true)}>
-              + New job order
+          <>
+            <button type="button" className="btn btn-sm" onClick={() => setReporting(true)}>
+              Generate Report
             </button>
-          ) : null
+            {canCreate ? (
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => setRaising(true)}>
+                + New Job Order Request
+              </button>
+            ) : null}
+          </>
         }
       />
+
+      {reporting && (
+        <ListReportModal
+          title="Generate job orders report"
+          pdfPath="/api/job-orders/pdf"
+          csvPath="/job-orders/csv"
+          fileName="job-orders.csv"
+          requesters={people}
+          assignees={people}
+          assigneeLabel="Assigned personnel"
+          statuses={STATUSES}
+          onClose={() => setReporting(false)}
+        />
+      )}
 
       {raising && (
         <JobOrderModal
@@ -411,6 +432,8 @@ export function JobOrderModal({
     projectManagerId: existing?.projectManager?.id ?? '',
     projectEngineerId: existing?.projectEngineer?.id ?? '',
     projectLeadId: existing?.projectLead?.id ?? '',
+    assignedToId: existing?.assignedTo?.id ?? '',
+    teamId: existing?.team?.id ?? '',
     supportIds: existing?.support.map((p) => p.id) ?? [],
     customerPoNumber: existing?.customerPoNumber ?? '',
     amount: existing?.amount != null ? String(existing.amount) : '',
@@ -489,7 +512,7 @@ export function JobOrderModal({
   const salesOrdersOffered = form.quotationId ? options.salesOrders.filter((o) => o.quotationId === form.quotationId) : options.salesOrders;
   const linkedQuotation = options.quotations.find((q) => q.id === form.quotationId);
 
-  async function save() {
+  async function save(andSubmit = false) {
     setBusy(true);
     setError(null);
     const body = {
@@ -507,6 +530,8 @@ export function JobOrderModal({
       projectManagerId: form.projectManagerId || null,
       projectEngineerId: form.projectEngineerId || null,
       projectLeadId: form.projectLeadId || null,
+      assignedToId: form.assignedToId || null,
+      teamId: form.teamId || null,
       supportIds: form.supportIds,
       customerPoNumber: form.customerPoNumber.trim() || null,
       amount: form.amount !== '' ? Number(form.amount) : null,
@@ -518,7 +543,16 @@ export function JobOrderModal({
         onSaved(existing.id);
       } else {
         const created = await api.post<{ id: string; number: string }>('/job-orders', { customerId: form.customerId, ...body });
-        toast('ok', `${created.number} raised — submit it when ready`);
+        if (andSubmit) {
+          try {
+            await api.post(`/job-orders/${created.id}/submit`);
+            toast('ok', `${created.number} sent for approval`);
+          } catch (err) {
+            toast('error', `${created.number} saved as a draft — ${err instanceof Error ? err.message : 'it could not be sent'}`);
+          }
+        } else {
+          toast('ok', `${created.number} saved as a draft`);
+        }
         onSaved(created.id);
       }
     } catch (err) {
@@ -529,10 +563,18 @@ export function JobOrderModal({
 
   /** On the order now, so a person no longer listed still shows by name. */
   const onRecord = {
+    assignedToId: existing?.assignedTo ?? null,
     projectManagerId: existing?.projectManager ?? null,
     projectEngineerId: existing?.projectEngineer ?? null,
     projectLeadId: existing?.projectLead ?? null,
   };
+  const [teams, setTeams] = useState<{ id: string; code: string; name: string }[]>([]);
+  useEffect(() => {
+    api
+      .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
+      .then((rows) => setTeams(rows.filter((t) => t.isActive || t.id === existing?.team?.id)))
+      .catch(() => setTeams([]));
+  }, [existing?.team?.id]);
   const personSelect = (label: string, key: 'projectManagerId' | 'projectEngineerId' | 'projectLeadId', hint?: string) => (
     <Field label={label} hint={hint} htmlFor={`${idBase}-${key}`}>
       <PersonSelect
@@ -552,10 +594,29 @@ export function JobOrderModal({
       wide
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
+          {!existing && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => void save(false)}
+            disabled={
+                busy ||
+                !form.customerId ||
+                form.projectName.trim().length < 2 ||
+                form.title.trim().length < 3 ||
+                form.scope.trim().length < 5 ||
+                !form.targetStart ||
+                !form.targetFinish ||
+                finishBeforeStart
+              }
+            >
+              Save as draft
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-primary"
-            onClick={save}
+            onClick={() => void save(!existing)}
             disabled={
               busy ||
               !form.customerId ||
@@ -567,12 +628,35 @@ export function JobOrderModal({
               finishBeforeStart
             }
           >
-            {busy ? 'Saving…' : 'Save'}
+            {busy ? 'Saving…' : existing ? 'Save' : 'Submit Job Order Request'}
           </button>
         </ModalFoot>
       }
     >
       <ErrorBox error={error} />
+
+      <h4 className="svc-subhead">The request</h4>
+      <div className="grid grid-3">
+        <Field label="Requester">
+          <input value={existing?.requestedBy.name ?? 'You'} disabled />
+        </Field>
+        <Field label="Team / department" hint="Empty takes the requester's own team">
+          <select value={form.teamId} onChange={(e) => set('teamId', e.target.value)}>
+            <option value="">— the requester's team —</option>
+            {teams.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.code} — {t.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Assigned personnel" htmlFor={`${idBase}-assigned`} hint="Who does the work">
+          <PersonSelect id={`${idBase}-assigned`} value={form.assignedToId} onChange={(id) => set('assignedToId', id)} people={people} current={onRecord.assignedToId} />
+        </Field>
+      </div>
+      <Field label="Task / short title">
+        <input value={form.title} placeholder="Supply and install of the compressed air system" onChange={(e) => set('title', e.target.value)} />
+      </Field>
 
       <h4 className="svc-subhead">Links</h4>
       <div className="grid grid-2">
@@ -703,10 +787,7 @@ export function JobOrderModal({
         </Field>
       </div>
 
-      <Field label="In one line">
-        <input value={form.title} placeholder="Supply and install of the compressed air system" onChange={(e) => set('title', e.target.value)} />
-      </Field>
-      <Field label="Scope of work" hint="The complete details — what is supplied, installed, tested and handed over">
+      <Field label="Scope of work & detailed technical specifications" hint="The complete details — what is supplied, installed, tested and handed over">
         <textarea rows={6} value={form.scope} onChange={(e) => set('scope', e.target.value)} />
       </Field>
 
@@ -815,9 +896,9 @@ export function JobOrderDetail() {
         type="Job Order"
         code={r.number}
         title={r.projectName ?? r.title}
-        status={r.status}
-        statusExtra={JOB_ORDER_TONES}
-        statusLabel={statusLabel(r.status)}
+        status={STAGE_TONE[r.stageLabel] ? r.stageLabel : r.status}
+        statusExtra={{ ...JOB_ORDER_TONES, ...STAGE_TONE }}
+        statusLabel={r.stageLabel}
         amount={r.amount != null ? formatMoney(r.amount) : undefined}
         amountLabel="Amount (before VAT)"
         meta={
@@ -915,6 +996,14 @@ export function JobOrderDetail() {
         <section className="card">
           <h3 className="card-title">The project</h3>
           <dl className="kv">
+            <dt>Task</dt>
+            <dd>{r.title}</dd>
+            <dt>Requested</dt>
+            <dd>
+              {formatDate(r.createdAt)} by {r.requestedBy.name}
+            </dd>
+            <dt>Team</dt>
+            <dd>{r.team ? `${r.team.code} — ${r.team.name}` : '—'}</dd>
             <dt>Project name</dt>
             <dd>{r.projectName ?? r.title}</dd>
             <dt>Customer</dt>
@@ -1013,6 +1102,8 @@ export function JobOrderDetail() {
       <section className="card">
         <h3 className="card-title">Personnel to send</h3>
         <dl className="kv">
+          <dt>Assigned personnel</dt>
+          <dd>{personLine(r.assignedTo)}</dd>
           <dt>Technical Manager</dt>
           <dd>{personLine(r.projectManager)}</dd>
           <dt>Project engineer</dt>

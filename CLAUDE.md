@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,283 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,304 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 178, chain 329, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 385, aftermarket 261, cad 101,
+115, evaluations 152, academy 120, finance 385, aftermarket 265, cad 118,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -2220,6 +2220,21 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   posts no cost**; cost reaches its project through overtime, PRs, stock
   issues and claims. Orders raised as service calls before keep their
   visit: the report on it still completes the order in `onReportSettled`.
+- **The list is the owner's sample** (2026-10-16): JO No., Date requested,
+  Requester, Assigned personnel (`assignedToId`, one login — who does the
+  work), Team (`JobOrder.teamId`, the requester's unless picked),
+  Task / scope summary (`title` over project and customer), Amount and
+  Status in his words — `stageLabel`: Draft, TM Approval / TL Approval
+  (the open step, `stageWords`), Accepted (approved, no project), In
+  Progress (its project running), Done, Returned, Cancelled. Cards: Total
+  job orders, Pending approval, In progress, Total value (under the
+  visibility and scope, never the filters). Filters add requester,
+  assigned personnel and date requested; `status` takes several,
+  comma-separated. "+ New Job Order Request" opens the form with Team,
+  Assigned personnel and Task first; **Submit Job Order Request** saves and
+  sends it in one click ("Save as draft" beside it). **Generate Report** is
+  the shared dialog over `GET /job-orders/pdf` and `GET /job-orders/csv`.
+  The customer stays required (approval builds a project for it).
 - **The amount is the linked document's NET** (the sales order's, else the
   quotation's value revision's: subtotal less discount, before VAT — the
   invoice adds VAT) unless somebody typed one.
@@ -2243,8 +2258,29 @@ Orders · **CAD J.O.** since 2026-10-14 — pinned by verify-foundation), `gops.
 `routes/cadJobOrders.ts`, `pages/delivery/CadJobOrders.tsx`,
 `styles/cad.css`, numbering type `cad_job_order` (CJO), verify-cad.
 
-- **It is work, not a decision: no approval route, no money.** Nothing here
-  touches `shared/approvals.ts`. The rights are the registry's eight with
+- **The requester's Team Leader approves it first** (2026-10-16, the
+  owner's sample: "Initial status: TL Approval"; it was "no approval
+  route" before). A new request is DRAFT; "Request for Approval" (`POST
+  /:id/submit`, in the requester's name) sends it through the one engine —
+  seeded "CAD J.O. — team leader" (SUPERVISOR, fallback `team_leader` on
+  the team, `preparerSigns`, `standIns`) — as PENDING_APPROVAL ("TL
+  approval"); `settleCadJobOrder()` puts an approved one into the queue as
+  REQUESTED and only then tells the design team; a return or rejection is
+  DRAFT again; `/withdraw` pulls it back, `/cancel` withdraws an open
+  request in the same transaction; a draft may be deleted. With the route
+  switched off, submit goes straight to REQUESTED. `GET /:id` lets the
+  deciding Team Leader in through `mayDecide`. A request carries `teamId`
+  (the requester's unless picked), an optional `amount` (PHP) and
+  `startedAt` (stamped when first taken or assigned — "Date started"). The
+  list's cards add TL approval and Total value; **the Progress cell is the
+  ASSIGNED designer's slider** (`canProgress` per row; the lead no longer
+  reports progress), and saving 100% moves it to FOR_REVIEW and tells the
+  requestor. **Generate Report** (`components/ListReport.tsx`, shared with
+  Job Orders): requester, team, designer, date requested
+  (`createdFrom`/`createdTo`, Manila days) and several statuses (`status`
+  comma-separated) — the list's own `GET /pdf` or `GET /csv`. Otherwise the
+  rights below hold: still no money posted, and the rest of the lifecycle
+  is the design team's. The rights are the registry's eight with
   two of them given a meaning: **`edit_all` is the design team** (Designer
   Lead and Designer Support, seeded roles `designer_lead` and `designer`;
   assign both in Admin › Users) — progress, revisions and priority on what

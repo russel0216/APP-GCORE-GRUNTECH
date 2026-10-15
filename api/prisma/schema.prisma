@@ -720,6 +720,8 @@ model Industry {
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   invoiceRequests  InvoiceRequest[]
+  jobOrders        JobOrder[]        @relation("JobOrderTeam")
+  cadJobOrders     CadJobOrder[]     @relation("CadJobOrderTeam")
 }
 
 /// A customer's sub-industry (2026-10-08, the owner's eleven): Enterprise,
@@ -4830,6 +4832,10 @@ model JobOrder {
   /// since carry none of them (requestedFor mirrors targetStart).
   projectName   String?
   contactNumber String?
+  /// The team asking for the work (the Industry/team master; 2026-10-16) —
+  /// the requester's own team unless picked.
+  teamId        String?
+  team          Industry? @relation("JobOrderTeam", fields: [teamId], references: [id], onDelete: SetNull)
   targetStart   DateTime? @db.Date
   targetFinish  DateTime? @db.Date
 
@@ -4999,6 +5005,10 @@ model ServiceReport {
 /// requested (back to In progress for the next revision); On hold and
 /// Cancelled from either side. Overdue is derived from `neededBy`, never stored.
 enum CadJobOrderStatus {
+  /// Raised, not yet sent to the requester's Team Leader (2026-10-16).
+  DRAFT
+  /// With the requester's Team Leader ("TL Approval").
+  PENDING_APPROVAL
   REQUESTED
   IN_PROGRESS
   FOR_REVIEW
@@ -5068,6 +5078,14 @@ model CadJobOrder {
   assignedToId String?
   assignedTo   User?     @relation("CadAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
   assignedAt   DateTime?
+  /// When a designer first took it or was given it ("Date started"; 2026-10-16).
+  startedAt    DateTime?
+
+  /// The requester's team (the Industry/team master), set at raising.
+  teamId String?
+  team   Industry? @relation("CadJobOrderTeam", fields: [teamId], references: [id], onDelete: SetNull)
+  /// What the drawing work is worth, when the requester says (PHP).
+  amount Decimal?  @db.Decimal(18, 2)
 
   holdReason       String?
   /// Where it stood when it was put on hold, so Resume puts it back there.

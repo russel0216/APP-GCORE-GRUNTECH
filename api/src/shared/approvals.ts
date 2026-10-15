@@ -1347,6 +1347,7 @@ export function stageWords(status: string, openStep: string | undefined, owed: b
     if (/finance manager/i.test(openStep)) return 'FM Approval';
     if (/ceo|president/i.test(openStep)) return 'CEO Approval';
     if (/back support/i.test(openStep)) return 'Back Support';
+    if (/technical manager/i.test(openStep)) return 'TM Approval';
     return openStep;
   }
   if (status === 'APPROVED') return owed ? 'For Release' : 'Approved';

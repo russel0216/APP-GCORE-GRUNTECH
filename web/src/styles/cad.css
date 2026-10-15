@@ -192,3 +192,54 @@
   color: var(--muted);
   font-size: var(--fs-sm);
 }
+
+/* The assigned designer's progress slider in the list (2026-10-16). */
+.cad-slider-cell {
+  position: relative;
+}
+.cad-slider-trigger {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+.cad-slider-trigger:hover .meter {
+  outline: 1px dashed var(--neon);
+  outline-offset: 2px;
+}
+.cad-slider-pop {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + var(--s-1));
+  right: 0;
+  width: 18rem;
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  display: grid;
+  gap: var(--s-2);
+}
+.cad-slider-pop input[type='range'] {
+  width: 100%;
+  height: auto;
+  padding: 0;
+}
+.cad-slider-head,
+.cad-slider-scale,
+.cad-slider-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-2);
+}
+.cad-slider-scale {
+  font-size: var(--fs-xs);
+}
+.cad-slider-foot {
+  justify-content: flex-end;
+}

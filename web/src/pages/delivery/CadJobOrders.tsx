@@ -12,6 +12,8 @@ import { Icon } from '../../components/Icon';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { PersonSelect, loadPeople, usePeople, type PersonRow } from '../../components/People';
 import { ApiError } from '../../lib/api';
+import { ApprovalStepper, DocumentApproval, previewSteps } from '../../components/ApprovalStepper';
+import { ListReportModal } from '../../components/ListReport';
 import {
   Avatar,
   Empty,
@@ -22,6 +24,7 @@ import {
   ModalFoot,
   StatusBadge,
   formatDate,
+  formatMoney,
   formatDateTime,
   useToast,
   type Tone,
@@ -42,6 +45,8 @@ import {
  */
 
 export const CAD_TONES: Record<string, Tone> = {
+  DRAFT: '',
+  PENDING_APPROVAL: 'warn',
   REQUESTED: 'info',
   IN_PROGRESS: 'info',
   FOR_REVIEW: 'warn',
@@ -54,6 +59,8 @@ export const CAD_TONES: Record<string, Tone> = {
 const PRIORITY_TONES: Record<string, Tone> = { URGENT: 'danger', HIGH: 'warn', NORMAL: 'info', LOW: '' };
 
 const STATUSES = [
+  { value: 'DRAFT', label: 'Draft' },
+  { value: 'PENDING_APPROVAL', label: 'TL approval' },
   { value: 'REQUESTED', label: 'Requested' },
   { value: 'IN_PROGRESS', label: 'In progress' },
   { value: 'FOR_REVIEW', label: 'For review' },
@@ -70,6 +77,7 @@ const PRIORITIES = [
   { value: 'URGENT', label: 'Urgent' },
 ];
 
+const BEFORE_QUEUE = ['DRAFT', 'PENDING_APPROVAL'];
 const priorityLabel = (p: string) => PRIORITIES.find((x) => x.value === p)?.label ?? p;
 const statusLabel = (s: string) => STATUSES.find((x) => x.value === s)?.label ?? s;
 
@@ -102,6 +110,11 @@ export interface CadRow {
   neededBy: string | null;
   overdue: boolean;
   assignedAt: string | null;
+  startedAt: string | null;
+  amount: number | null;
+  team: { id: string; code: string; name: string } | null;
+  /** The list sends it per row: the assigned designer's slider (2026-10-16). */
+  canProgress?: boolean;
   holdReason: string | null;
   cancelReason: string | null;
   cancelledAt: string | null;
@@ -147,6 +160,9 @@ interface Comment {
 
 interface CadDetail extends CadRow {
   canEdit: boolean;
+  canSubmit: boolean;
+  canWithdraw: boolean;
+  approvalRoute: { name: string; steps: { name: string; held?: boolean; approvers: { id: string; name: string }[] }[] } | null;
   canTake: boolean;
   canAssign: boolean;
   canSetPriority: boolean;
@@ -175,6 +191,65 @@ interface CadSummary {
   completed?: number;
   overdue?: number;
   unassigned?: number;
+  pendingApproval?: number;
+  totalValue?: number;
+}
+
+/**
+ * The assigned designer's progress slider (2026-10-16, the owner's sample):
+ * clicking the bar opens it; Save records who and when, and 100% puts the
+ * drawing up for review. Anyone else sees the bar.
+ */
+function ProgressCell({ row, onSaved }: { row: CadRow; onSaved: () => void }) {
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [pct, setPct] = useState(row.progressPct);
+  const [busy, setBusy] = useState(false);
+  const meter = <Meter pct={row.progressPct} tone={row.status === 'COMPLETED' ? 'ok' : undefined} />;
+  if (!row.canProgress) return meter;
+  async function save() {
+    setBusy(true);
+    try {
+      await api.post(`/cad-job-orders/${row.id}/progress`, { progressPct: pct });
+      toast('ok', pct === 100 ? `${row.number} is up for review` : `Progress ${pct}% saved`);
+      setOpen(false);
+      onSaved();
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : 'Progress could not be saved');
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="cad-slider-cell" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+      <button type="button" className="cad-slider-trigger" aria-expanded={open} title="Update progress" onClick={() => setOpen(!open)}>
+        {meter}
+      </button>
+      {open && (
+        <div className="cad-slider-pop" role="dialog" aria-label={`Update progress of ${row.number}`}>
+          <div className="cad-slider-head">
+            <strong>Update progress</strong>
+            <span className="mono">{pct}%</span>
+          </div>
+          <input type="range" min={0} max={100} step={5} value={pct} aria-label="Progress percent" onChange={(e) => setPct(Number(e.target.value))} />
+          <div className="cad-slider-scale faint">
+            <span>0% (not started)</span>
+            <span>50%</span>
+            <span>100% (done)</span>
+          </div>
+          {pct === 100 && <div className="faint">Saving at 100% puts it up for the requestor's review.</div>}
+          <div className="cad-slider-foot">
+            <button type="button" className="btn btn-sm" onClick={() => setOpen(false)} disabled={busy}>
+              Cancel
+            </button>
+            <button type="button" className="btn btn-sm btn-primary" onClick={() => void save()} disabled={busy || pct === row.progressPct}>
+              Save
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 const DESIGN_RIGHT = 'gops.cad_job_orders.edit_all';
@@ -238,6 +313,8 @@ export function CadJobOrders() {
     jobOrderId: params.get('jobOrderId') ?? undefined,
   }));
   const designer = can(DESIGN_RIGHT) || can('gops.cad_job_orders.approve');
+  const [reporting, setReporting] = useState(false);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     loadPeople('gops.cad_job_orders.create')
@@ -297,15 +374,17 @@ export function CadJobOrders() {
     {
       key: 'designer',
       label: 'Designer',
-      render: (r) => (r.assignedTo ? r.assignedTo.name : <span className="badge warn">Open</span>),
+      render: (r) => (r.assignedTo ? r.assignedTo.name : BEFORE_QUEUE.includes(r.status) ? <span className="faint">—</span> : <span className="badge warn">Open</span>),
     },
-    { key: 'priority', label: 'Priority', render: (r) => <PriorityBadge priority={r.priority} /> },
+    { key: 'started', label: 'Date started', render: (r) => (r.startedAt ? formatDate(r.startedAt) : <span className="faint">—</span>) },
+    { key: 'team', label: 'Team', optional: true, render: (r) => r.team?.code ?? '—' },
+    { key: 'priority', label: 'Priority', optional: true, render: (r) => <PriorityBadge priority={r.priority} /> },
     {
       key: 'progress',
       label: 'Progress',
       sortKey: 'progressPct',
-      width: '130px',
-      render: (r) => <Meter pct={r.progressPct} tone={r.status === 'COMPLETED' ? 'ok' : undefined} />,
+      width: '140px',
+      render: (r) => <ProgressCell row={r} onSaved={() => setReloadToken((n) => n + 1)} />,
     },
     {
       key: 'neededBy',
@@ -327,6 +406,7 @@ export function CadJobOrders() {
   const filters: FilterDef[] = [
     { key: 'status', label: 'Status', options: STATUSES },
     { key: 'priority', label: 'Priority', options: PRIORITIES },
+    { key: 'createdFrom', toKey: 'createdTo', label: 'Date requested', type: 'dateRange' },
     {
       key: 'open',
       label: 'Open',
@@ -364,6 +444,7 @@ export function CadJobOrders() {
         scoped
         defaultScope={designer ? 'all' : 'mine'}
         selectable
+        reloadToken={reloadToken}
         printPath="/api/cad-job-orders/pdf"
         onRowClick={(r) => navigate(`/g-ops/cad-job-orders/${r.id}`)}
         searchPlaceholder="Search number, drawing, customer, project…"
@@ -374,24 +455,45 @@ export function CadJobOrders() {
           const s = raw as CadSummary;
           return (
             <>
+              <Stat label="TL approval" value={s.pendingApproval ?? 0} accent={s.pendingApproval ? 'warn' : undefined} sub="Waiting on the Team Leader" />
               <Stat label="Open" value={s.open ?? 0} />
               <Stat label="Waiting for a designer" value={s.unassigned ?? 0} accent={s.unassigned ? 'warn' : undefined} />
               <Stat label="In progress" value={s.inProgress ?? 0} />
               <Stat label="For review" value={s.forReview ?? 0} sub="drawings awaiting the requestor" />
               <Stat label="Overdue" value={s.overdue ?? 0} accent={s.overdue ? 'danger' : undefined} />
               <Stat label="Completed" value={s.completed ?? 0} />
+              <Stat label="Total value" value={formatMoney(s.totalValue ?? 0)} />
             </>
           );
         }}
         bulkActions={lead ? (ctx) => <CadBulkActions ctx={ctx} designers={designers} /> : undefined}
         actions={
-          canCreate ? (
-            <button type="button" className="btn btn-primary btn-sm" onClick={() => setRaising(true)}>
-              + New CAD J.O.
+          <>
+            <button type="button" className="btn btn-sm" onClick={() => setReporting(true)}>
+              Generate Report
             </button>
-          ) : null
+            {canCreate ? (
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => setRaising(true)}>
+                + New CAD J.O.
+              </button>
+            ) : null}
+          </>
         }
       />
+
+      {reporting && (
+        <ListReportModal
+          title="Generate CAD J.O. report"
+          pdfPath="/api/cad-job-orders/pdf"
+          csvPath="/cad-job-orders/csv"
+          fileName="cad-job-orders.csv"
+          requesters={requestors}
+          assignees={designers}
+          assigneeLabel="Designer"
+          statuses={STATUSES}
+          onClose={() => setReporting(false)}
+        />
+      )}
 
       {raising && (
         <CadRequestModal
@@ -563,7 +665,16 @@ export function CadRequestModal({
     title: existing?.title ?? '',
     scope: existing?.scope ?? '',
     neededBy: existing?.neededBy?.slice(0, 10) ?? '',
+    teamId: existing?.team?.id ?? '',
+    amount: existing?.amount != null ? String(existing.amount) : '',
   }));
+  const [teams, setTeams] = useState<{ id: string; code: string; name: string }[]>([]);
+  useEffect(() => {
+    api
+      .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
+      .then((rows) => setTeams(rows.filter((t) => t.isActive || t.id === existing?.team?.id)))
+      .catch(() => setTeams([]));
+  }, [existing?.team?.id]);
   const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   useEffect(() => {
@@ -599,10 +710,12 @@ export function CadRequestModal({
     }));
   }
 
-  async function save() {
+  async function save(andSubmit = false) {
     setBusy(true);
     setError(null);
     const body = {
+      teamId: form.teamId || null,
+      amount: form.amount !== '' ? Number(form.amount) : null,
       jobId: form.jobId || null,
       quotationId: form.quotationId || null,
       jobOrderId: form.jobOrderId || null,
@@ -618,7 +731,16 @@ export function CadRequestModal({
         onSaved(existing.id);
       } else {
         const created = await api.post<{ id: string; number: string }>('/cad-job-orders', { customerId: form.customerId, ...body });
-        toast('ok', `${created.number} raised — the design team has been told`);
+        if (andSubmit) {
+          try {
+            const sent = await api.post<{ status: string }>(`/cad-job-orders/${created.id}/submit`);
+            toast('ok', sent.status === 'REQUESTED' ? `${created.number} sent to the design team` : `${created.number} sent for the Team Leader's approval`);
+          } catch (err) {
+            toast('error', `${created.number} saved as a draft — ${err instanceof Error ? err.message : 'it could not be sent'}`);
+          }
+        } else {
+          toast('ok', `${created.number} saved as a draft`);
+        }
         onSaved(created.id);
       }
     } catch (err) {
@@ -636,13 +758,23 @@ export function CadRequestModal({
       wide
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
+          {!existing && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => void save(false)}
+              disabled={busy || !form.customerId || form.title.trim().length < 3 || form.scope.trim().length < 5}
+            >
+              Save as draft
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-primary"
-            onClick={save}
+            onClick={() => void save(!existing)}
             disabled={busy || !form.customerId || form.title.trim().length < 3 || form.scope.trim().length < 5}
           >
-            {busy ? 'Saving…' : 'Save'}
+            {busy ? 'Saving…' : existing ? 'Save' : 'Request for Approval'}
           </button>
         </ModalFoot>
       }
@@ -733,14 +865,27 @@ export function CadRequestModal({
             ))}
           </select>
         </Field>
-        <Field label="Needed by" hint="The design team sets the priority; the date says when you need it">
+        <Field label="Target date to finish" hint="The design team sets the priority; the date says when you need it">
           <input type="date" value={form.neededBy} onChange={(e) => set('neededBy', e.target.value)} />
         </Field>
+        <Field label="Team / department" hint="Empty takes your own team">
+          <select value={form.teamId} onChange={(e) => set('teamId', e.target.value)}>
+            <option value="">— my team —</option>
+            {teams.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.code} — {t.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Amount (PHP)" hint="Optional — what the drawing work is worth">
+          <NumberInput kind="money" min={0} step="0.01" value={form.amount} onChange={(e) => set('amount', e.target.value)} />
+        </Field>
       </div>
-      <Field label="In one line">
+      <Field label="General task">
         <input value={form.title} placeholder="Compressor room layout, Building B" onChange={(e) => set('title', e.target.value)} />
       </Field>
-      <Field label="What the drawing should show" hint="The complete details: dimensions, equipment, references, the format the customer wants. Attach reference files on the request once it is raised.">
+      <Field label="Scope of work (detailed technical information & deliverables)" hint="The complete details: dimensions, equipment, references, the format the customer wants. Attach reference files on the request once it is raised.">
         <textarea rows={7} value={form.scope} onChange={(e) => set('scope', e.target.value)} />
       </Field>
     </Modal>
@@ -815,7 +960,9 @@ export function CadJobOrderDetail() {
   const latestLabel = latest?.label ?? 'the drawing';
   const nextLabel = latest ? `R${latest.sequence + 1}` : 'R0';
   // The one main next step, when there is one: take it, accept it, file it, resume it, give it a designer, or submit the next revision.
-  const main = r.canTake
+  const main = r.canSubmit
+    ? 'submit'
+    : r.canTake
     ? 'take'
     : r.canAccept
       ? 'accept'
@@ -849,6 +996,16 @@ export function CadJobOrderDetail() {
         }
         actions={
           <>
+            {r.canSubmit && (
+              <button
+                type="button"
+                className={btn('submit')}
+                disabled={busy}
+                onClick={() => run('Sent for approval', () => api.post(`/cad-job-orders/${r.id}/submit`))}
+              >
+                Request for Approval
+              </button>
+            )}
             {r.canTake && (
               <button type="button" className={btn('take')} disabled={busy} onClick={() => run('It is on your board', () => api.post(`/cad-job-orders/${r.id}/take`))}>
                 Take this request
@@ -921,6 +1078,16 @@ export function CadJobOrderDetail() {
         }
         print={`/api/cad-job-orders/${r.id}/pdf`}
         more={[
+          r.canWithdraw && {
+            label: 'Pull back to draft',
+            confirm: {
+              title: `Pull ${r.number} back?`,
+              body: 'The Team Leader no longer has it to decide; it is a draft again, to change and send again.',
+              confirmLabel: 'Pull back',
+              tone: 'primary',
+              onConfirm: () => step('Pulled back to draft', () => api.post(`/cad-job-orders/${r.id}/withdraw`)),
+            },
+          },
           r.canHold && {
             label: 'Put on hold',
             confirm: {
@@ -952,7 +1119,7 @@ export function CadJobOrderDetail() {
             danger: true,
             confirm: {
               title: `Delete ${r.number}?`,
-              body: 'This cancelled request goes for good, with its revisions, comments and files. Its number is not reused.',
+              body: 'This request goes for good, with its revisions, comments and files. Its number is not reused.',
               confirmLabel: 'Delete',
               onConfirm: async () => {
                 await api.del(`/cad-job-orders/${r.id}`);
@@ -966,8 +1133,17 @@ export function CadJobOrderDetail() {
         confirm={confirm}
       />
 
+      {r.status === 'DRAFT' && r.approvalRoute && r.approvalRoute.steps.length > 0 && (
+        <div className="qd-route">
+          <span className="qd-route-label">Request for Approval sends it to</span>
+          <ApprovalStepper steps={previewSteps(r.approvalRoute)} />
+        </div>
+      )}
+      {r.status !== 'DRAFT' && <DocumentApproval documentType="cad_job_order" documentId={r.id} reloadToken={r.status === 'PENDING_APPROVAL' ? 1 : 0} />}
+
       <ErrorBox error={error} />
 
+      {r.status === 'DRAFT' && <div className="alert info">A draft. Request for Approval sends it to your Team Leader; once approved it goes into the designers' queue.</div>}
       {r.overdue && <div className="alert warn">Past the day it was needed by, {formatDate(r.neededBy!)}, and still open.</div>}
       {r.status === 'REQUESTED' && !r.assignedTo && (
         <div className="alert info">Waiting for a designer: the Designer Lead assigns it, or a designer takes it from the queue.</div>

@@ -24,7 +24,11 @@ import { nextNumber } from '../shared/numbering';
 import { notify, type NotificationType } from '../shared/notifications';
 import { mailConfig, sendMail } from '../shared/mail';
 import { renderDocument, formatDate, formatShortDate, formatDateTime, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
-import { contactsOf } from '../shared/approvals';
+import { contactsOf, submitForApproval, cancelOpenRequest, onApprovalSettled, pickWorkflow, mayDecide, routeBrief, type ApprovalOutcome } from '../shared/approvals';
+import type { ApprovalRequest } from '@prisma/client';
+import { teamOf } from '../shared/team';
+import { toCsv } from '../shared/csv';
+import { manilaDayStart, manilaDayEnd } from '../shared/day';
 import { registerSearch } from '../shared/search';
 import { registerAttachmentGuard, cadUpload, saveAttachment, deleteAttachmentsOf } from '../shared/attachments';
 import { dayKey } from '../shared/aftermarket';
@@ -72,6 +76,9 @@ const P = {
 
 const OPEN: CadJobOrderStatus[] = ['REQUESTED', 'IN_PROGRESS', 'FOR_REVIEW', 'CHANGES_REQUESTED', 'ON_HOLD'];
 const CLOSED: CadJobOrderStatus[] = ['COMPLETED', 'CANCELLED'];
+/** Before the queue (2026-10-16): raised, and with the requester's Team Leader. */
+const BEFORE_QUEUE: CadJobOrderStatus[] = ['DRAFT', 'PENDING_APPROVAL'];
+const DOC = 'cad_job_order';
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -90,6 +97,7 @@ const cadInclude = {
   quotation: { select: { id: true, number: true, subject: true, outcome: true } },
   jobOrder: { select: { id: true, number: true, projectName: true, title: true, status: true } },
   drawingType: { select: { id: true, name: true } },
+  team: { select: { id: true, code: true, name: true } },
   requestedBy: person,
   assignedTo: person,
   completedBy: { select: { id: true, name: true } },
@@ -108,6 +116,7 @@ function present(row: CadRow) {
   const latest = revisions[0] ?? null;
   return {
     ...rest,
+    amount: row.amount == null ? null : Number(row.amount),
     overdue: row.neededBy != null && OPEN.includes(row.status) && row.neededBy < today(),
     latestRevision: latest ? { sequence: latest.sequence, label: `R${latest.sequence}`, submittedAt: latest.submittedAt } : null,
     revisionCount: _count.revisions,
@@ -134,19 +143,22 @@ function flags(me: ResolvedUser, row: CadRow) {
   const worker = isWorker(me, row);
   const lead = isLead(me);
   return {
-    canEdit: open && (requestor || lead),
+    canEdit: (open && (requestor || lead)) || (row.status === 'DRAFT' && (requestor || lead)),
+    canSubmit: row.status === 'DRAFT' && (requestor || lead || me.isSuperAdmin),
+    canWithdraw: row.status === 'PENDING_APPROVAL' && (requestor || lead || me.isSuperAdmin),
     canTake: open && row.status !== 'ON_HOLD' && !row.assignedToId && isDesigner(me),
     canAssign: open && lead,
     canSetPriority: open && worker,
-    canProgress: worker && ['REQUESTED', 'IN_PROGRESS', 'CHANGES_REQUESTED'].includes(row.status) && !!row.assignedToId,
+    // The progress slider is the assigned designer's alone (2026-10-16, the owner's sample).
+    canProgress: isAssignee(me, row) && ['REQUESTED', 'IN_PROGRESS', 'CHANGES_REQUESTED'].includes(row.status) && !!row.assignedToId,
     canSubmitRevision: worker && ['REQUESTED', 'IN_PROGRESS', 'CHANGES_REQUESTED', 'FOR_REVIEW'].includes(row.status) && !!row.assignedToId,
     canAccept: row.status === 'FOR_REVIEW' && (requestor || worker),
     canRequestChanges: row.status === 'FOR_REVIEW' && (requestor || lead),
     canHold: open && row.status !== 'ON_HOLD' && (requestor || worker),
     canResume: row.status === 'ON_HOLD' && (requestor || worker),
-    canCancel: open && (requestor || lead),
+    canCancel: (open || BEFORE_QUEUE.includes(row.status)) && (requestor || lead),
     // A cancelled request is the one that may go, by its requestor or the lead, with the delete right.
-    canDelete: row.status === 'CANCELLED' && can(me, P.delete) && (requestor || lead || me.isSuperAdmin),
+    canDelete: (row.status === 'CANCELLED' || row.status === 'DRAFT') && can(me, P.delete) && (requestor || lead || me.isSuperAdmin),
     canComment: !CLOSED.includes(row.status) || requestor || worker,
     canFilePlan: row.status === 'COMPLETED' && !!row.jobId && !row.approvedPlanId && (requestor || worker),
     isDesigner: isDesigner(me),
@@ -292,8 +304,15 @@ export function cadListWhere(me: ResolvedUser, q: ReturnType<typeof listQuery>) 
 
   const f = q.filters;
   const more: Prisma.CadJobOrderWhereInput[] = [];
-  const status = choice(f.status, CadJobOrderStatus, 'Status');
-  if (status) more.push({ status });
+  // One status, or several comma-separated (the report's tick boxes).
+  const statuses = (f.status ?? '').split(',').map((v) => v.trim()).filter(Boolean).map((v) => choice(v, CadJobOrderStatus, 'Status')!);
+  if (statuses.length) more.push({ status: { in: statuses } });
+  if (f.teamId) more.push({ teamId: f.teamId === 'none' ? null : f.teamId });
+  const createdFrom = filterDay(f.createdFrom, 'Requested from');
+  const createdTo = filterDay(f.createdTo, 'Requested to');
+  if (createdFrom || createdTo) {
+    more.push({ createdAt: { ...(createdFrom ? { gte: manilaDayStart(createdFrom) } : {}), ...(createdTo ? { lte: manilaDayEnd(createdTo) } : {}) } });
+  }
   const priority = choice(f.priority, CadPriority, 'Priority');
   if (priority) more.push({ priority });
   if (f.open === 'true') more.push({ status: { in: OPEN } });
@@ -311,10 +330,11 @@ export function cadListWhere(me: ResolvedUser, q: ReturnType<typeof listQuery>) 
 
 /** The cards over the list: how the queue stands, under the viewer's own visibility. */
 export async function cadListSummary(base: Prisma.CadJobOrderWhereInput) {
-  const [byStatus, overdue, unassigned] = await Promise.all([
+  const [byStatus, overdue, unassigned, value] = await Promise.all([
     prisma.cadJobOrder.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
     prisma.cadJobOrder.count({ where: { AND: [base, { status: { in: OPEN }, neededBy: { lt: today() } }] } }),
     prisma.cadJobOrder.count({ where: { AND: [base, { status: { in: OPEN }, assignedToId: null }] } }),
+    prisma.cadJobOrder.aggregate({ where: { AND: [base, { status: { not: 'CANCELLED' } }] }, _sum: { amount: true } }),
   ]);
   const counts: Record<string, number> = {};
   for (const r of byStatus) counts[r.status] = r._count._all;
@@ -327,6 +347,9 @@ export async function cadListSummary(base: Prisma.CadJobOrderWhereInput) {
     forReview: counts.FOR_REVIEW ?? 0,
     onHold: counts.ON_HOLD ?? 0,
     completed: counts.COMPLETED ?? 0,
+    pendingApproval: counts.PENDING_APPROVAL ?? 0,
+    drafts: counts.DRAFT ?? 0,
+    totalValue: Number(value._sum.amount ?? 0),
     overdue,
     unassigned,
     tabCounts: counts,
@@ -351,7 +374,7 @@ cadJobOrderRoutes.get(
       prisma.cadJobOrder.count({ where }),
       cadListSummary(base),
     ]);
-    res.json({ ...listResult(rows.map(present), total, q), summary });
+    res.json({ ...listResult(rows.map((r) => ({ ...present(r), canProgress: flags(me, r).canProgress })), total, q), summary });
   }),
 );
 
@@ -359,6 +382,8 @@ cadJobOrderRoutes.get(
 
 const PRIORITY_LABEL: Record<CadPriority, string> = { LOW: 'Low', NORMAL: 'Normal', HIGH: 'High', URGENT: 'Urgent' };
 const STATUS_LABEL: Record<CadJobOrderStatus, string> = {
+  DRAFT: 'Draft',
+  PENDING_APPROVAL: 'TL approval',
   REQUESTED: 'Requested',
   IN_PROGRESS: 'In progress',
   FOR_REVIEW: 'For review',
@@ -399,7 +424,9 @@ cadJobOrderRoutes.get(
     ]);
     const filters = [
       q.search ? `search "${q.search}"` : null,
-      f.status ? `status ${statusLabel(f.status)}` : null,
+      f.status ? `status ${f.status.split(',').map((v) => STATUS_LABEL[v as CadJobOrderStatus] ?? v).join(' or ')}` : null,
+      f.teamId ? `team ${f.teamId === 'none' ? 'none' : ((await prisma.industry.findUnique({ where: { id: f.teamId }, select: { code: true } }))?.code ?? 'not found')}` : null,
+      rangeNamed('requested', f.createdFrom, f.createdTo),
       f.priority ? `priority ${statusLabel(f.priority)}` : null,
       f.open === 'true' ? 'open' : null,
       f.overdue === 'true' ? 'overdue' : null,
@@ -443,7 +470,7 @@ cadJobOrderRoutes.get(
             statusLabel(r.priority),
             `${r.progressPct}%`,
             r.neededBy ? formatShortDate(r.neededBy) : '—',
-            statusLabel(r.status),
+            STATUS_LABEL[r.status],
           ]),
         },
       ],
@@ -454,6 +481,43 @@ cadJobOrderRoutes.get(
       req,
     );
     sendListPdf(res, pdf, 'cad-job-orders.pdf');
+  }),
+);
+
+/** The list as a CSV that opens in Excel — the report dialog's "Excel" (above /:id). */
+cadJobOrderRoutes.get(
+  '/csv',
+  requireAny(P.viewAll, P.viewOwn),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const { where } = cadListWhere(me, q);
+    const rows = await prisma.cadJobOrder.findMany({ where, include: cadInclude, orderBy: orderBy(q, SORTABLE, { createdAt: 'desc' }), take: 5000 });
+    await audit({ entityType: 'cad_job_order', entityId: 'list', action: 'EXPORTED', summary: `Exported ${rows.length} CAD job orders as CSV` }, req);
+    const day = (d: Date | null) => (d ? dayKey(d).toISOString().slice(0, 10) : '');
+    const csv = toCsv([
+      ['Number', 'Date requested', 'Requested by', 'Team', 'Drawing', 'Drawing type', 'Customer', 'Project', 'Designer', 'Date started', 'Priority', 'Progress %', 'Needed by', 'Amount', 'Status'],
+      ...rows.map((r) => [
+        r.number,
+        day(r.createdAt),
+        r.requestedBy.name,
+        r.team?.code ?? '',
+        r.title,
+        r.drawingType?.name ?? '',
+        r.customer.name,
+        r.job ? `${r.job.number} — ${r.job.name}` : '',
+        r.assignedTo?.name ?? '',
+        day(r.startedAt),
+        PRIORITY_LABEL[r.priority],
+        r.progressPct,
+        r.neededBy ? r.neededBy.toISOString().slice(0, 10) : '',
+        r.amount == null ? '' : Number(r.amount),
+        STATUS_LABEL[r.status],
+      ]),
+    ]);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="cad-job-orders.csv"');
+    res.send(csv);
   }),
 );
 
@@ -515,7 +579,19 @@ const cadSchema = z.object({
   title: z.string().trim().min(3, 'Say in a line what drawing is wanted').max(300),
   scope: z.string().trim().min(5, 'Describe what the drawing should show').max(20000),
   neededBy: z.string().regex(DAY, 'Use a date').optional().nullable(),
+  teamId: z.string().optional().nullable(),
+  amount: z.number().min(0).optional().nullable(),
 });
+
+/** A team the body names must be active; none named is the requester's own. */
+async function teamFor(teamId: string | null | undefined, requesterId: string): Promise<string | null> {
+  if (teamId) {
+    const team = await prisma.industry.findUnique({ where: { id: teamId }, select: { isActive: true } });
+    if (!team?.isActive) throw badRequest('That team is not offered');
+    return teamId;
+  }
+  return (await teamOf(requesterId))?.id ?? null;
+}
 
 /** Everything a body names belongs to the request's customer, and the drawing type is one that is offered. */
 async function checkLinks(customerId: string, body: { jobId?: string | null; quotationId?: string | null; jobOrderId?: string | null; drawingTypeId?: string | null }) {
@@ -542,6 +618,7 @@ cadJobOrderRoutes.post(
     const body = parseBody(cadSchema, req.body);
     await checkLinks(body.customerId, body);
     const neededBy = body.neededBy ? asDate(body.neededBy, 'Needed by') : null;
+    const teamId = await teamFor(body.teamId, me.id);
 
     const row = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('cad_job_order', tx);
@@ -557,34 +634,29 @@ cadJobOrderRoutes.post(
           scope: body.scope,
           neededBy,
           requestedById: me.id,
+          // A new request is a draft until it goes to the Team Leader (2026-10-16).
+          status: 'DRAFT',
+          teamId,
+          amount: body.amount == null ? null : new Prisma.Decimal(body.amount),
         },
         include: cadInclude,
       });
     });
 
     await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'CREATED', summary: `${row.number} — ${row.title} for ${row.customer.name}` }, req);
-    // The whole design team hears of a new request; the lead dispatches it, or a designer takes it.
-    await tell(
-      await designTeam(),
-      {
-        type: 'cad.requested',
-        title: `New CAD job order ${row.number}`,
-        body: `${row.title} — ${row.customer.name}, requested by ${me.name}${neededBy ? `, needed by ${formatDate(neededBy)}` : ''}`,
-        link: linkOf(row.id),
-      },
-      me.id,
-    );
     res.status(201).json(present(row));
   }),
 );
 
 cadJobOrderRoutes.get(
   '/:id',
-  requireAny(P.viewAll, P.viewOwn),
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await load(req.params.id);
-    if (!mayOpen(me, row)) throw forbidden('That is someone else’s CAD job order');
+    // The Team Leader deciding it may hold no CAD right: the decider's door.
+    const reader = can(me, P.viewAll) || can(me, P.viewOwn);
+    if (!(reader && mayOpen(me, row)) && !(await mayDecide(me.id, DOC, [row.id]))) throw forbidden('That is someone else’s CAD job order');
+    const route = row.status === 'DRAFT' ? await routeBrief(DOC, row.amount == null ? null : Number(row.amount), row.requestedById) : null;
 
     const [revisions, comments] = await Promise.all([
       prisma.cadRevision.findMany({
@@ -606,6 +678,7 @@ cadJobOrderRoutes.get(
     res.json({
       ...present(row),
       ...flags(me, row),
+      approvalRoute: route,
       revisions: revisions.map((r) => ({ ...r, label: `R${r.sequence}`, files: revisionFiles.get(r.id) ?? [] })),
       comments: comments.map((c) => ({ ...c, files: commentFiles.get(c.id) ?? [] })),
     });
@@ -639,6 +712,8 @@ cadJobOrderRoutes.patch(
         ...(body.title ? { title: body.title } : {}),
         ...(body.scope ? { scope: body.scope } : {}),
         ...(body.neededBy !== undefined ? { neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null } : {}),
+        ...(body.teamId !== undefined ? { teamId: await teamFor(body.teamId, existing.requestedById) } : {}),
+        ...(body.amount !== undefined ? { amount: body.amount == null ? null : new Prisma.Decimal(body.amount) } : {}),
       },
       include: cadInclude,
     });
@@ -665,7 +740,7 @@ cadJobOrderRoutes.post(
     }
     const claimed = await prisma.cadJobOrder.updateMany({
       where: { id: row.id, assignedToId: null },
-      data: { assignedToId: me.id, assignedAt: new Date(), ...(row.status === 'REQUESTED' ? { status: 'IN_PROGRESS' } : {}) },
+      data: { assignedToId: me.id, assignedAt: new Date(), startedAt: row.startedAt ?? new Date(), ...(row.status === 'REQUESTED' ? { status: 'IN_PROGRESS' } : {}) },
     });
     if (claimed.count === 0) throw badRequest('Somebody took it a moment ago');
     await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'UPDATED', summary: `${row.number} taken by ${me.name}` }, req);
@@ -694,6 +769,7 @@ cadJobOrderRoutes.post(
       data: {
         assignedToId: designer?.id ?? null,
         assignedAt: designer ? new Date() : null,
+        ...(designer && !row.startedAt ? { startedAt: new Date() } : {}),
         ...(designer && row.status === 'REQUESTED' ? { status: 'IN_PROGRESS' } : {}),
         ...(!designer && row.status === 'IN_PROGRESS' && row._count.revisions === 0 ? { status: 'REQUESTED', progressPct: 0 } : {}),
       },
@@ -744,13 +820,18 @@ cadJobOrderRoutes.post(
     const me = currentUser(req);
     const body = parseBody(z.object({ progressPct: z.number().int().min(0).max(100) }), req.body);
     const row = await load(req.params.id);
-    if (!flags(me, row).canProgress) throw badRequest('Progress is reported by the designer on it while the drawing is in progress');
+    if (!flags(me, row).canProgress) throw badRequest('Progress is reported by the designer assigned to it while the drawing is in progress');
+    // Reaching 100% puts it up for review (2026-10-16, the owner's sample).
+    const done = body.progressPct === 100;
     const updated = await prisma.cadJobOrder.update({
       where: { id: row.id },
-      data: { progressPct: body.progressPct, ...(row.status !== 'IN_PROGRESS' ? { status: 'IN_PROGRESS' } : {}) },
+      data: { progressPct: body.progressPct, status: done ? 'FOR_REVIEW' : 'IN_PROGRESS' },
       include: cadInclude,
     });
-    await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'UPDATED', summary: `${row.number} progress ${row.progressPct}% → ${body.progressPct}%` }, req);
+    await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'UPDATED', summary: `${row.number} progress ${row.progressPct}% → ${body.progressPct}% by ${me.name}${done ? ' — for review' : ''}` }, req);
+    if (done) {
+      await tell([row.requestedById], { type: 'cad.revision', title: `${row.number} is ready for your review`, body: `${row.title} — ${me.name} reports it done`, link: linkOf(row.id) }, me.id);
+    }
     res.json(present(updated));
   }),
 );
@@ -918,7 +999,7 @@ cadJobOrderRoutes.delete(
     const me = currentUser(req);
     const row = await load(req.params.id);
     if (!flags(me, row).canDelete) {
-      throw badRequest(row.status !== 'CANCELLED' ? 'Only a cancelled request can be deleted — cancel it first' : 'Only whoever raised this request, or the Designer Lead, deletes it');
+      throw badRequest(row.status !== 'CANCELLED' && row.status !== 'DRAFT' ? 'Only a draft or a cancelled request can be deleted — cancel it first' : 'Only whoever raised this request, or the Designer Lead, deletes it');
     }
     const [revisions, comments] = await Promise.all([
       prisma.cadRevision.findMany({ where: { cadJobOrderId: row.id }, select: { id: true } }),
@@ -943,12 +1024,112 @@ cadJobOrderRoutes.post(
     if (!flags(me, row).canCancel) {
       throw badRequest(CLOSED.includes(row.status) ? 'This request is already closed' : 'Only whoever raised this request, or the Designer Lead, cancels it');
     }
-    await prisma.cadJobOrder.update({ where: { id: row.id }, data: { status: 'CANCELLED', cancelledAt: new Date(), cancelReason: body.reason } });
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.cadJobOrder.updateMany({ where: { id: row.id, status: row.status }, data: { status: 'CANCELLED', cancelledAt: new Date(), cancelReason: body.reason } });
+      if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+      if (row.status === 'PENDING_APPROVAL') await cancelOpenRequest(DOC, row.id, tx, `cancelled by ${me.name}: ${body.reason}`, me.id);
+    });
     await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'CANCELLED', summary: `${row.number} cancelled — ${body.reason}` }, req);
     await tell([row.requestedById, row.assignedToId], { type: 'cad.updated', title: `${row.number} cancelled`, body: `${me.name}: ${body.reason}`, link: linkOf(row.id) }, me.id);
     res.json({ ok: true });
   }),
 );
+
+// ── The Team Leader's approval (2026-10-16) ─────────────────────────────────
+
+/** Into the designers' queue: every designer hears of it. */
+async function intoQueue(row: CadRow, actorId: string | null) {
+  await tell(
+    await designTeam(),
+    {
+      type: 'cad.requested',
+      title: `New CAD job order ${row.number}`,
+      body: `${row.title} — ${row.customer.name}, requested by ${row.requestedBy.name}${row.neededBy ? `, needed by ${formatDate(row.neededBy)}` : ''}`,
+      link: linkOf(row.id),
+    },
+    actorId,
+  );
+}
+
+/**
+ * "Request for Approval": the draft goes to the requester's Team Leader
+ * through the one engine, filed in the REQUESTER's name. With the route
+ * switched off it goes straight into the designers' queue.
+ */
+cadJobOrderRoutes.post(
+  '/:id/submit',
+  requireAny(P.create, P.editOwn, P.approve),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const row = await load(req.params.id);
+    if (!flags(me, row).canSubmit) throw badRequest(row.status === 'DRAFT' ? 'Only whoever raised this request sends it for approval' : 'Only a draft is sent for approval');
+    const amount = row.amount == null ? null : Number(row.amount);
+    if (!(await pickWorkflow(DOC, amount, { requesterId: row.requestedById }))) {
+      const claimed = await prisma.cadJobOrder.updateMany({ where: { id: row.id, status: 'DRAFT', updatedAt: row.updatedAt }, data: { status: 'REQUESTED' } });
+      if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+      await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'SUBMITTED', summary: `${row.number} sent to the design team (no approval route)` }, req);
+      await intoQueue(row, me.id);
+      return res.json({ ok: true, status: 'REQUESTED' });
+    }
+    const claimed = await prisma.cadJobOrder.updateMany({ where: { id: row.id, status: 'DRAFT', updatedAt: row.updatedAt }, data: { status: 'PENDING_APPROVAL' } });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+    try {
+      await submitForApproval({
+        documentType: DOC,
+        documentId: row.id,
+        documentNumber: row.number,
+        subject: subjectOf(row),
+        amount,
+        link: linkOf(row.id),
+        requesterId: row.requestedById,
+        jobId: row.jobId,
+      });
+    } catch (err) {
+      await prisma.cadJobOrder.update({ where: { id: row.id }, data: { status: 'DRAFT' } });
+      throw err;
+    }
+    await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'SUBMITTED', summary: `${row.number} sent for the Team Leader's approval` }, req);
+    res.json({ ok: true, status: 'PENDING_APPROVAL' });
+  }),
+);
+
+/** Pulled back to draft before the Team Leader decides. */
+cadJobOrderRoutes.post(
+  '/:id/withdraw',
+  requireAny(P.create, P.editOwn, P.approve),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const row = await load(req.params.id);
+    if (!flags(me, row).canWithdraw) throw badRequest('Only a request waiting for approval is pulled back');
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.cadJobOrder.updateMany({ where: { id: row.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      if (!claimed.count) throw badRequest('It was decided a moment ago — reload to see where it stands');
+      await cancelOpenRequest(DOC, row.id, tx, `pulled back by ${me.name}`, me.id);
+    });
+    await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'UPDATED', summary: `${row.number} pulled back to draft` }, req);
+    res.json({ ok: true });
+  }),
+);
+
+/** The Team Leader's decision: approved goes into the queue; returned or rejected back to draft. */
+export async function settleCadJobOrder(approval: ApprovalRequest, outcome: ApprovalOutcome) {
+  const row = await prisma.cadJobOrder.findUnique({ where: { id: approval.documentId }, include: cadInclude });
+  if (!row) return;
+  const next = outcome === 'APPROVED' ? 'REQUESTED' : 'DRAFT';
+  const claimed = await prisma.cadJobOrder.updateMany({ where: { id: row.id, status: 'PENDING_APPROVAL' }, data: { status: next } });
+  await audit({
+    entityType: 'cad_job_order',
+    entityId: row.id,
+    action: outcome,
+    summary: claimed.count
+      ? outcome === 'APPROVED'
+        ? `${row.number} approved — into the designers' queue`
+        : `${row.number} ${outcome.toLowerCase()} — back to draft`
+      : `${row.number} ${outcome.toLowerCase()} after it was ${STATUS_LABEL[row.status].toLowerCase()} — not applied`,
+  });
+  if (claimed.count && outcome === 'APPROVED') await intoQueue(row, null);
+}
+onApprovalSettled(DOC, settleCadJobOrder);
 
 // ── The thread ──────────────────────────────────────────────────────────────
 

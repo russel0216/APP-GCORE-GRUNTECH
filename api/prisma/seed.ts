@@ -918,6 +918,17 @@ const WORKFLOWS: WorkflowSeed[] = [
     standIns: true,
     steps: [{ sequence: 1, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' }],
   },
+  {
+    // CAD J.O. (2026-10-16, the owner's sample: "Initial status: TL Approval"):
+    // the requester's Team Leader approves a drawing request before it reaches
+    // the designers' queue — their "Reports to", else a Team Leader on their
+    // team. A Team Leader's own request is signed at submit.
+    documentType: 'cad_job_order',
+    name: 'CAD J.O. — team leader',
+    preparerSigns: true,
+    standIns: true,
+    steps: [{ sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' }],
+  },
   // REQUEST FOR APPROVAL (2026-10-13, the owner's call: "Internal Approval
   // (Technical Manager, Team Leader and CEO more than 1 million Project
   // Costing)"): a project's drawing or document, decided by the Technical
