@@ -543,6 +543,16 @@ jobOrderRoutes.get(
         take: 100,
       }),
     ]);
+    // The Labor bucket of each costing behind a quotation, in one GROUP BY.
+    const costingIds = [...new Set(quotations.map((q) => valueRevision(q.revisions)?.costingId).filter((v): v is string => !!v))];
+    const laborRows = costingIds.length
+      ? await prisma.costingLine.groupBy({
+          by: ['costingId'],
+          where: { costingId: { in: costingIds }, isHeading: false, costCategory: { code: 'LAB' } },
+          _sum: { amount: true },
+        })
+      : [];
+    const laborBy = new Map(laborRows.map((r) => [r.costingId, Math.round(Number(r._sum.amount ?? 0) * 100) / 100]));
     res.json({
       sites,
       contacts,
@@ -556,6 +566,8 @@ jobOrderRoutes.get(
           contactId: q.contactId,
           siteId: q.siteId,
           amount: rev ? netOf(rev) : null,
+          /** The Labor cost on the costing behind it — what the job order's amount must equal. */
+          labor: rev?.costingId ? laborBy.get(rev.costingId) ?? 0 : null,
           /** Whether approval could build the project from it. */
           costed: !!rev?.costingId,
         };
@@ -661,12 +673,56 @@ async function checkBelongs(
 }
 
 /**
- * The agreed amount when nobody typed one: the sales order's net, else the
+ * The labor charge a costing carries: its Labor bucket (`LAB`), the sum of
+ * its cost lines. A job order's amount IS the labor charge to Project
+ * Management (the owner's call, 2026-10-16), so this is what it must tally
+ * with before a project is built from it.
+ */
+export async function costingLabor(costingId: string): Promise<number> {
+  const sum = await prisma.costingLine.aggregate({
+    where: { costingId, isHeading: false, costCategory: { code: 'LAB' } },
+    _sum: { amount: true },
+  });
+  return Math.round(Number(sum._sum.amount ?? 0) * 100) / 100;
+}
+
+/** The costing behind a quotation's value revision, if any. */
+async function quotationCostingId(quotationId: string | null | undefined): Promise<string | null> {
+  if (!quotationId) return null;
+  const revisions = await prisma.quotationRevision.findMany({
+    where: { quotationId },
+    select: { id: true, status: true, revision: true, costingId: true },
+  });
+  return valueRevision(revisions)?.costingId ?? null;
+}
+
+/**
+ * Why a job order's labor charge does not tally with its costing, or null.
+ * Only an order that would build a project is asked (no project linked yet,
+ * a costing behind its quotation).
+ */
+export async function laborProblem(row: { jobId: string | null; quotationId: string | null; amount: Prisma.Decimal | number | null }): Promise<string | null> {
+  if (row.jobId) return null;
+  const costingId = await quotationCostingId(row.quotationId);
+  if (!costingId) return null;
+  const labor = await costingLabor(costingId);
+  const amount = row.amount == null ? null : Math.round(Number(row.amount) * 100) / 100;
+  if (amount !== null && Math.abs(amount - labor) <= 0.005) return null;
+  const costing = await prisma.costing.findUnique({ where: { id: costingId }, select: { number: true } });
+  return `The labor charge ${amount == null ? '(none given)' : formatMoney(amount)} does not tally with the Labor cost on costing ${costing?.number ?? ''} (${formatMoney(labor)}) — correct one of them before the project is built`;
+}
+
+/**
+ * The agreed amount when nobody typed one: the labor charge on the costing
+ * behind the quotation (the job order's amount is the labor charge to
+ * Project Management); without a costing, the sales order's net, else the
  * quotation's value revision's net (approved, else latest) — before VAT,
  * because the invoice adds it, and after the quote-level discount, because
  * that is the price the customer agreed to.
  */
 async function agreedAmount(body: { salesOrderId?: string | null; quotationId?: string | null }): Promise<number | null> {
+  const costingId = await quotationCostingId(body.quotationId);
+  if (costingId) return costingLabor(costingId);
   if (body.salesOrderId) {
     const o = await prisma.salesOrder.findUnique({ where: { id: body.salesOrderId }, select: { subtotal: true, discountAmount: true } });
     if (o) return netOf(o);
@@ -855,6 +911,9 @@ jobOrderRoutes.post(
     if (row.status !== 'DRAFT' && row.status !== 'REJECTED') {
       throw badRequest('Only a draft or a returned job order can be submitted');
     }
+    // Approval builds the project; refuse now rather than after the signatures.
+    const mismatch = await laborProblem(row);
+    if (mismatch) throw badRequest(mismatch);
 
     // Claimed on the order exactly as read — still a draft or returned, and
     // not modified since (`updatedAt`, which every write to an order moves).
@@ -1066,7 +1125,7 @@ jobOrderRoutes.get(
           { label: 'Sales order', value: row.salesOrder?.number ?? '—' },
           { label: 'Project', value: row.job ? `${row.job.number} — ${row.job.name}` : '—' },
           { label: 'Customer PO', value: row.customerPoNumber ?? '—' },
-          { label: 'Amount (before VAT)', value: row.amount != null ? formatMoney(Number(row.amount), currency) : 'To be billed on completion' },
+          { label: 'Labor charge (before VAT)', value: row.amount != null ? formatMoney(Number(row.amount), currency) : 'To be billed on completion' },
         ],
       },
       { kind: 'text', title: 'Scope of work', body: row.scope ?? row.description },
@@ -1173,6 +1232,8 @@ export async function settleJobOrder(
       const rev = valueRevision(revisions);
       if (!rev?.costingId) throw badRequest(`${jo.quotation?.number ?? 'the quotation'} has no costing behind it`);
       const costing = await costingForJob(rev.costingId, jo.customerId);
+      const mismatch = await laborProblem(jo);
+      if (mismatch) throw badRequest(mismatch);
       const t = targets(jo);
       built = await prisma.$transaction(async (tx) => {
         const job = await createJobRecord(tx, costing, {

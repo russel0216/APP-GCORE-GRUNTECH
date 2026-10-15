@@ -172,7 +172,7 @@ export function jobOrderColumns(): Column<JobOrderRow>[] {
     },
     {
       key: 'amount',
-      label: 'Amount',
+      label: 'Labor charge',
       align: 'right',
       render: (r) => (r.amount != null ? <span className="mono">{formatMoney(r.amount)}</span> : <span className="faint">—</span>),
     },
@@ -371,6 +371,8 @@ interface Options {
     contactId: string | null;
     siteId: string | null;
     amount: number | null;
+    /** The Labor cost on its costing — the job order's amount must equal it. */
+    labor: number | null;
     costed: boolean;
   }[];
   salesOrders: { id: string; number: string; status: string; quotationId: string; contactId: string | null; poNumber: string | null; amount: number }[];
@@ -467,6 +469,8 @@ export function JobOrderModal({
   }, [options.quotations]);
 
   /** Linking a quotation fills what it knows: the project's name, the contact, the site, the amount. */
+  const linkedLabor = options.quotations.find((q) => q.id === form.quotationId)?.labor ?? null;
+
   function pickQuotation(q: Options['quotations'][number] | undefined) {
     setForm((f) => {
       if (!q) return { ...f, quotationId: '', salesOrderId: f.salesOrderId && options.salesOrders.find((o) => o.id === f.salesOrderId)?.quotationId === f.quotationId ? '' : f.salesOrderId };
@@ -478,7 +482,7 @@ export function JobOrderModal({
         contactId: f.contactId || q.contactId || '',
         contactNumber: f.contactNumber || contact?.phone || '',
         siteId: f.siteId || q.siteId || '',
-        amount: f.amount || (q.amount != null ? String(q.amount) : ''),
+        amount: q.labor != null ? String(q.labor) : f.amount || (q.amount != null ? String(q.amount) : ''),
         // A sales order on another quotation no longer fits.
         salesOrderId: f.salesOrderId && options.salesOrders.find((o) => o.id === f.salesOrderId)?.quotationId !== q.id ? '' : f.salesOrderId,
       };
@@ -806,12 +810,21 @@ export function JobOrderModal({
         />
       </Field>
 
-      <h4 className="svc-subhead">Amount</h4>
+      <h4 className="svc-subhead">Labor charge</h4>
       <div className="grid grid-2">
         <Field label="Customer PO">
           <input value={form.customerPoNumber} onChange={(e) => set('customerPoNumber', e.target.value)} />
         </Field>
-        <Field label="Amount (before VAT)" hint={form.quotationId || form.salesOrderId ? 'Empty takes the linked document’s price' : 'Leave empty to bill on completion'}>
+        <Field
+          label="Labor charge to Project Management (before VAT)"
+          hint={
+            linkedLabor != null
+              ? Number(form.amount || 0) === linkedLabor
+                ? `Tallies with the costing's Labor cost, ${formatMoney(linkedLabor)}`
+                : `The costing's Labor cost is ${formatMoney(linkedLabor)} — the two must tally before the project is built`
+              : 'Leave empty to bill on completion'
+          }
+        >
           <NumberInput kind="money" min={0} step="0.01" value={form.amount} onChange={(e) => set('amount', e.target.value)} />
         </Field>
       </div>
@@ -900,7 +913,7 @@ export function JobOrderDetail() {
         statusExtra={{ ...JOB_ORDER_TONES, ...STAGE_TONE }}
         statusLabel={r.stageLabel}
         amount={r.amount != null ? formatMoney(r.amount) : undefined}
-        amountLabel="Amount (before VAT)"
+        amountLabel="Labor charge (before VAT)"
         meta={
           <>
             {r.customer.name} · {r.title} · raised by {r.requestedBy.name} on {formatDate(r.createdAt)}
@@ -1069,7 +1082,7 @@ export function JobOrderDetail() {
             </dd>
             <dt>Customer PO</dt>
             <dd>{r.customerPoNumber ?? '—'}</dd>
-            <dt>Amount</dt>
+            <dt>Labor charge</dt>
             <dd className="mono">{r.amount != null ? formatMoney(r.amount) : 'to be billed on completion'}</dd>
             {r.invoice && (
               <>

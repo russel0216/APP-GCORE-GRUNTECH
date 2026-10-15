@@ -856,9 +856,18 @@ async function main() {
             description: `${TAG} chiller`,
             quantity: D(1),
             unit: 'lot',
-            unitCost: D(400_000),
-            amount: D(400_000),
+            unitCost: D(300_000),
+            amount: D(300_000),
             sortOrder: 0,
+          },
+          {
+            costCategoryId: (await prisma.costCategory.findUniqueOrThrow({ where: { code: 'LAB' } })).id,
+            description: `${TAG} installation crew`,
+            quantity: D(1),
+            unit: 'lot',
+            unitCost: D(100_000),
+            amount: D(100_000),
+            sortOrder: 1,
           },
         ],
       },
@@ -892,6 +901,14 @@ async function main() {
     projectManagerId: director.id,
     customerPoNumber: 'PO-77',
   });
+  // The job order's amount is the labor charge (2026-10-16): 500,000 is not the costing's Labor 100,000.
+  const { laborProblem } = await import('../src/routes/jobOrders');
+  check(
+    'a labor charge that does not tally with the costing’s Labor cost is named before a project is built',
+    /does not tally with the Labor cost/.test((await laborProblem({ jobId: null, quotationId: orderQuotation.id, amount: D(500_000) })) ?? ''),
+  );
+  check('a labor charge equal to it passes', (await laborProblem({ jobId: null, quotationId: orderQuotation.id, amount: D(100_000) })) === null);
+  await prisma.jobOrder.update({ where: { id: costedOrder.id }, data: { amount: D(100_000) } });
   await settle((await submitJobOrder2(costedOrder.id, sales.id)).id);
   const built = await prisma.jobOrder.findUnique({ where: { id: costedOrder.id }, include: { job: { include: { scopeItems: true } } } });
   check('approval builds the project from the quotation’s costing', built?.status === 'APPROVED' && !!built.job, `job ${built?.jobId}`);
@@ -910,7 +927,7 @@ async function main() {
     'a revision still under negotiation stands behind no job, and the costing is FINAL once a project is built on it',
     built?.job?.quotationRevisionId === null &&
       (await prisma.costing.findUnique({ where: { id: orderCosting.id } }))?.status === 'FINAL' &&
-      (await prisma.jobCostEntry.count({ where: { jobId: built!.job!.id, state: 'BUDGETED' } })) === 1,
+      (await prisma.jobCostEntry.count({ where: { jobId: built!.job!.id, state: 'BUDGETED' } })) === 2,
   );
   await settleJobOrder({ documentId: costedOrder.id }, 'APPROVED');
   check(
@@ -1648,8 +1665,8 @@ async function main() {
       `${raised.status} ${raised.body.durationDays ?? raised.body.error}`,
     );
     check(
-      'the amount is the quotation’s net when nobody typed one, and support is one row per person',
-      raised.body.amount === 500_000 && (raised.body.support as { id: string }[]).length === 2,
+      'the amount is the costing’s Labor cost when nobody typed one, and support is one row per person',
+      raised.body.amount === 100_000 && (raised.body.support as { id: string }[]).length === 2,
       `${raised.body.amount} / ${raised.body.support?.length}`,
     );
     const finishFirst = await api(salesToken, 'POST', '/job-orders', {
@@ -1708,7 +1725,7 @@ async function main() {
     const listed = await api(salesToken, 'GET', `/job-orders?search=${encodeURIComponent(TAG)}&assignedToId=${engineer.id}`);
     check(
       'the list filters by assigned personnel and carries the cards — active, pending approval, total value',
-      (listed.body.rows as { id: string }[]).some((r) => r.id === raised.body.id) && listed.body.summary.pendingApproval >= 1 && listed.body.summary.totalValue >= 500_000,
+      (listed.body.rows as { id: string }[]).some((r) => r.id === raised.body.id) && listed.body.summary.pendingApproval >= 1 && listed.body.summary.totalValue >= 100_000,
       JSON.stringify(listed.body.summary),
     );
     const csv = await fetch(`${BASE}/job-orders/csv?search=${encodeURIComponent(TAG)}&status=PENDING_APPROVAL,COMPLETED`, { headers: { Authorization: `Bearer ${salesToken}` } });
@@ -1812,8 +1829,8 @@ async function main() {
     );
     check(
       'its amount prints as money in the company currency',
-      /\b[A-Z]{3} 500,000\.00\b/.test(returnedPaper.text),
-      returnedPaper.text.split('\n').filter((l) => /500,000/.test(l)).join(' | '),
+      /\b[A-Z]{3} 100,000\.00\b/.test(returnedPaper.text),
+      returnedPaper.text.split('\n').filter((l) => /100,000/.test(l)).join(' | '),
     );
     const joPrintsAfter = await prisma.auditLog.count({ where: { entityType: 'job_order', entityId: raised.body.id, action: 'EXPORTED' } });
     check('every print of the order is on its trail as EXPORTED', joPrintsAfter === joPrintsBefore + 3, `${joPrintsBefore} → ${joPrintsAfter}`);
