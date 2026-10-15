@@ -158,6 +158,12 @@ interface Request {
   actions: Action[];
   /** The viewer may decide the step this request is at (computed by the API). */
   canAct?: boolean;
+  /** The viewer may pull this APPROVED document back to draft (2026-10-16). */
+  canReopen?: boolean;
+  /** Set when an approved document was pulled back to draft. */
+  reopenedAt?: string | null;
+  reopenReason?: string | null;
+  reopenedBy?: string | null;
 }
 
 type Decision = 'APPROVED' | 'RETURNED' | 'REJECTED';
@@ -194,6 +200,8 @@ export function DocumentApproval({
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
   const [decideError, setDecideError] = useState<string | null>(null);
+  const [reopening, setReopening] = useState(false);
+  const [reopenReason, setReopenReason] = useState('');
 
   useEffect(() => {
     let live = true;
@@ -401,6 +409,51 @@ export function DocumentApproval({
         </div>
       )}
 
+      {/* Pull back to draft after approval (2026-10-16, the owner's call):
+          the engine's one path, the module's own refusals shown here. */}
+      {request.status === 'APPROVED' && request.canReopen && (
+        <div className="approval-decide" role="group" aria-label="Pull back to draft">
+          {!reopening ? (
+            <div className="row approval-decide-buttons">
+              <button type="button" className="btn btn-sm btn-danger" onClick={() => setReopening(true)}>
+                Pull back to draft
+              </button>
+            </div>
+          ) : (
+            <>
+              <label className="approval-decide-label" htmlFor={`reopen-${request.id}`}>
+                Pull it back to draft — what the approval did is undone, and it goes through approval again. Why?
+              </label>
+              <textarea id={`reopen-${request.id}`} value={reopenReason} autoFocus onChange={(e) => setReopenReason(e.target.value)} />
+              {decideError && <div className="alert error">{decideError}</div>}
+              <div className="panel-foot approval-decide-buttons">
+                <button type="button" className="btn btn-sm" disabled={busy} onClick={() => { setReopening(false); setDecideError(null); }}>
+                  Keep it
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-danger"
+                  disabled={busy || !reopenReason.trim()}
+                  onClick={async () => {
+                    setBusy(true);
+                    setDecideError(null);
+                    try {
+                      await api.post(`/approvals/reopen/${documentType}/${documentId}`, { reason: reopenReason.trim() });
+                      window.location.reload();
+                    } catch (err) {
+                      setDecideError(err instanceof Error ? err.message : 'It was not pulled back');
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  {busy ? 'Working…' : 'Pull back to draft'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {/* A comment is usually why something was sent back, so it is not hidden
           behind a hover. */}
       {request.actions
@@ -438,6 +491,15 @@ export function DecisionNote({ documentType, documentId, reloadToken = 0 }: { do
     };
   }, [documentType, documentId, reloadToken]);
   if (!request) return null;
+  if (request.status === 'CANCELLED' && request.reopenedAt) {
+    return (
+      <div className="alert warn" role="status">
+        <strong>Pulled back to draft after approval</strong>
+        {request.reopenedBy ? ` by ${request.reopenedBy}` : ''} on {formatDateTime(new Date(request.reopenedAt))}
+        {request.reopenReason ? <> — “{request.reopenReason}”</> : null}
+      </div>
+    );
+  }
   const last = request.actions[request.actions.length - 1];
   if (!last) return null;
   const returned = request.status === 'CANCELLED' && last.action === 'RETURNED';

@@ -4,6 +4,7 @@ import { badRequest, forbidden, notFound } from '../http/kit';
 import { notify } from './notifications';
 import { audit } from './audit';
 import type { Signatory } from './pdf';
+import type { ResolvedUser } from '../permissions/resolve';
 
 /**
  * The approval engine (model §6.1).
@@ -989,6 +990,99 @@ export async function cancelOpenRequest(
     withdrawn.push(request);
   }
   return withdrawn;
+}
+
+// ── Pulling back an approved document ────────────────────────────────────────
+
+/**
+ * Every approved document can be pulled back to draft (2026-10-16, the
+ * owner's call) — by whoever prepared it, or whoever may edit them all. The
+ * module that owns the document registers how: `may` says whether this user
+ * may (the button), `reopen` undoes what the approval did and puts the
+ * document back to its draft state inside the engine's transaction — or
+ * throws a 400 naming what stands on it (an order with goods received, an
+ * invoice with a collection), and then nothing changes. The engine closes
+ * the approved request CANCELLED with `reopenedAt`, `reopenedById` and the
+ * reason (its signatures stay in the history), audits it and tells whoever
+ * signed and whoever raised it. Not an outcome: no onApprovalSettled
+ * subscriber hears of it. One path, like every other decision (rule 2).
+ */
+export interface ReopenContext {
+  documentId: string;
+  tx: Prisma.TransactionClient;
+  actor: ResolvedUser;
+  reason: string;
+}
+interface Reopener {
+  may: (actor: ResolvedUser, documentId: string) => Promise<boolean>;
+  reopen: (ctx: ReopenContext) => Promise<void>;
+}
+const reopeners = new Map<string, Reopener>();
+
+export function onApprovalReopened(documentType: string, reopener: Reopener): void {
+  reopeners.set(documentType, reopener);
+}
+
+/** The latest request of a document, when it stands APPROVED. */
+async function standingApproval(documentType: string, documentId: string, tx: Prisma.TransactionClient = prisma) {
+  const latest = await tx.approvalRequest.findFirst({ where: { documentType, documentId }, orderBy: { createdAt: 'desc' } });
+  return latest?.status === 'APPROVED' ? latest : null;
+}
+
+/** Whether the viewer may pull this approved document back (the button). */
+export async function mayReopen(documentType: string, documentId: string, actor: ResolvedUser): Promise<boolean> {
+  const reopener = reopeners.get(documentType);
+  if (!reopener) return false;
+  if (!(await standingApproval(documentType, documentId))) return false;
+  return reopener.may(actor, documentId);
+}
+
+export async function reopenApproved(documentType: string, documentId: string, actor: ResolvedUser, reason: string): Promise<ApprovalRequest> {
+  const reopener = reopeners.get(documentType);
+  if (!reopener) throw badRequest('This document cannot be pulled back once approved');
+  const approved = await standingApproval(documentType, documentId);
+  if (!approved) throw badRequest('It is not approved — nothing to pull back');
+  if (!(await reopener.may(actor, documentId))) throw forbidden('Only whoever prepared it, or whoever may edit them all, can pull it back');
+  const why = reason.trim();
+  if (!why) throw badRequest('Say why it is being pulled back');
+
+  const request = await prisma.$transaction(
+    async (tx) => {
+      const claimed = await tx.approvalRequest.updateMany({
+        where: { id: approved.id, status: 'APPROVED' },
+        data: { status: 'CANCELLED', reopenedAt: new Date(), reopenedById: actor.id, reopenReason: why },
+      });
+      if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+      await reopener.reopen({ documentId, tx, actor, reason: why });
+      await audit(
+        {
+          entityType: documentType,
+          entityId: documentId,
+          action: 'CANCELLED',
+          summary: `Pulled back to draft after approval by ${actor.name} — ${why}`,
+          actorId: actor.id,
+        },
+        undefined,
+        tx,
+      );
+      const signers = await tx.approvalAction.findMany({ where: { requestId: approved.id }, select: { approverId: true } });
+      const told = new Set([...signers.map((a) => a.approverId), approved.requesterId]);
+      told.delete(actor.id);
+      await notify(
+        [...told].map((userId) => ({
+          userId,
+          type: 'approval.withdrawn' as const,
+          title: `Pulled back after approval: ${approved.subject}`,
+          body: [approved.documentNumber, `${actor.name}: ${why}`].filter(Boolean).join(' — '),
+          link: approved.link ?? undefined,
+        })),
+        tx,
+      );
+      return tx.approvalRequest.findUniqueOrThrow({ where: { id: approved.id } });
+    },
+    { maxWait: 15_000, timeout: 60_000 },
+  );
+  return request;
 }
 
 // ── Reading ──────────────────────────────────────────────────────────────────

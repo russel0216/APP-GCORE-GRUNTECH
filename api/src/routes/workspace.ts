@@ -8,7 +8,7 @@ import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, notFound, badRequest, forbidden } from '../http/kit';
 import { authenticate, currentUser } from '../auth/middleware';
 import { globalSearch, searchProviders, canSearch } from '../shared/search';
-import { act, contactOf, deciderFor, historyFor, pendingFor } from '../shared/approvals';
+import { act, contactOf, deciderFor, historyFor, mayReopen, pendingFor, reopenApproved } from '../shared/approvals';
 import { audit } from '../shared/audit';
 import {
   upload,
@@ -160,7 +160,17 @@ approvalRoutes.get(
     // /approvals/:id/act, the one path.
     res.json(
       await Promise.all(
-        rows.map(async (r) => {
+        rows.map(async (r, i) => {
+          // `canReopen`: the latest request stands APPROVED and the viewer may
+          // pull the document back to draft (the module's own rule).
+          if (r.status === 'APPROVED') {
+            const canReopen = i === 0 && (await mayReopen(req.params.documentType, req.params.documentId, me));
+            return { ...r, canAct: false, canReopen };
+          }
+          if (r.reopenedById) {
+            const by = await prisma.user.findUnique({ where: { id: r.reopenedById }, select: { name: true } });
+            return { ...r, canAct: false, reopenedBy: by?.name ?? null };
+          }
           if (r.status !== 'PENDING' || r.requesterId === me.id) return { ...r, canAct: false };
           const step = await prisma.approvalStep.findFirst({
             where: { workflowId: r.workflowId ?? '', sequence: r.currentSequence },
@@ -173,6 +183,20 @@ approvalRoutes.get(
         }),
       ),
     );
+  }),
+);
+
+/**
+ * Pulling an APPROVED document back to draft (2026-10-16): the engine's
+ * `reopenApproved`, the module's own undo and refusals behind it.
+ */
+approvalRoutes.post(
+  '/reopen/:documentType/:documentId',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ reason: z.string().trim().min(1, 'Say why it is being pulled back').max(1000) }), req.body);
+    const request = await reopenApproved(req.params.documentType, req.params.documentId, me, body.reason);
+    res.json({ ok: true, requestId: request.id });
   }),
 );
 

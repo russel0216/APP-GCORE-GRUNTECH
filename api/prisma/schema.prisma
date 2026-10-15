@@ -481,6 +481,12 @@ model ApprovalRequest {
 
   currentSequence Int            @default(1)
   status          ApprovalStatus @default(PENDING)
+  /// Pulled back to draft after it was APPROVED (2026-10-16, the owner's
+  /// call: "every approval request can be pulled back, even fully approved"):
+  /// the request closes CANCELLED with these set; its signatures are kept.
+  reopenedAt      DateTime?
+  reopenedById    String?
+  reopenReason    String?
 
   actions   ApprovalAction[]
   createdAt DateTime         @default(now())
