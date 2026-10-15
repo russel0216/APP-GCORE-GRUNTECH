@@ -30,6 +30,7 @@ import {
   slotSignatories,
   contactOf,
   cancelOpenRequest,
+  onApprovalReopened,
 } from '../shared/approvals';
 import { renderDocument, formatDate, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { toCsv } from '../shared/csv';
@@ -1036,6 +1037,55 @@ onApprovalSettled('clearance', async (approval, outcome) => {
       link: `/g-hr/clearances/${head.id}`,
     })),
   );
+});
+
+/**
+ * A cleared clearance may be pulled back to OPEN (2026-10-16, the owner's
+ * call) — by whoever raised it (`edit_own`) or `edit_all` — while the
+ * separation it recorded has not yet taken effect: the employee record and
+ * the login still open (the last working day still ahead). The separation
+ * date the approval wrote is taken off again, so `sweepSeparations()` closes
+ * nothing behind it. Once the record or the login has been closed the
+ * separation is a fact: refused, naming it.
+ */
+onApprovalReopened('clearance', {
+  may: async (actor, id) => {
+    const head = await prisma.employeeClearance.findUnique({ where: { id }, select: { status: true, raisedById: true } });
+    return !!head && head.status === 'CLEARED' && mayEdit(actor, head);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const head = await tx.employeeClearance.findUnique({
+      where: { id: documentId },
+      include: { employee: { include: { user: { select: { id: true, isActive: true } } } } },
+    });
+    if (!head) throw notFound('Clearance not found');
+    const e = head.employee;
+    if (!e.isActive || (e.user && !e.user.isActive)) {
+      throw badRequest(
+        `${head.number} cannot be pulled back — ${fullName(e)} was separated${
+          e.dateSeparated ? ` on ${formatDate(e.dateSeparated)}` : ''
+        } and the ${!e.isActive ? 'employee record' : 'login'} is closed`,
+      );
+    }
+    const claimed = await tx.employeeClearance.updateMany({
+      where: { id: documentId, status: 'CLEARED' },
+      data: { status: 'OPEN', clearedAt: null },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+    // The approval wrote the last working day as the separation; take it off.
+    const separationUndone = !!e.dateSeparated && e.dateSeparated.getTime() === head.lastWorkingDay.getTime();
+    if (separationUndone) await tx.employee.update({ where: { id: e.id }, data: { dateSeparated: null } });
+    await audit(
+      {
+        entityType: 'clearance',
+        entityId: head.id,
+        action: 'UPDATED',
+        summary: `${head.number} pulled back to open after approval${separationUndone ? ` — ${fullName(e)}'s separation date taken off` : ''}`,
+      },
+      undefined,
+      tx,
+    );
+  },
 });
 
 // ════════════════════════════════════════════════════════════════════

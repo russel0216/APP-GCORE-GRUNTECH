@@ -35,7 +35,8 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, pendingFor } from '../src/shared/approvals';
+import { submitForApproval, act, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
+import { resolveUser } from '../src/permissions/resolve';
 import {
   hrSettings,
   classifyArrival,
@@ -1660,6 +1661,130 @@ async function main() {
     rejectedLedger.count === 1,
     `${rejectedLedger.count} entries — the rejected one should not have added a second`,
   );
+
+  // ══ Pulling an approved filing back (2026-10-16) ══════════════════════════
+  // Every approved document can be pulled back to draft, its approval's
+  // effects undone — or refused, naming what stands on it.
+  console.log('\nPulling an approved filing back');
+  {
+    const asWorker = (await resolveUser(worker.id))!;
+    const asHr = (await resolveUser(hrOfficer.id))!;
+
+    // Leave: approved → DRAFT, and the days it drew come back.
+    const back = await fileLeave('2026-11-02', '2026-11-03', 2);
+    await act({ requestId: back.approval.id, userId: supervisor.id, action: 'APPROVED' });
+    const usedApproved = (await leaveBalance(employee.id, leaveType.id, 2026)).used;
+    check(
+      'a worker without edit_own is not offered the pull-back',
+      !(await mayReopen('leave_request', back.request.id, asWorker)) && (await mayReopen('leave_request', back.request.id, asHr)),
+    );
+    await expectRejection(
+      'and is refused it',
+      () => reopenApproved('leave_request', back.request.id, asWorker, `${TAG} change of plan`),
+      'whoever prepared it',
+    );
+    await reopenApproved('leave_request', back.request.id, asHr, `${TAG} change of plan`);
+    const backAfter = await prisma.leaveRequest.findUnique({ where: { id: back.request.id } });
+    const usedAfterBack = (await leaveBalance(employee.id, leaveType.id, 2026)).used;
+    const closed = await prisma.approvalRequest.findUnique({ where: { id: back.approval.id } });
+    check('an approved leave pulled back is a DRAFT again', backAfter?.status === 'DRAFT' && backAfter.decidedAt === null);
+    check('and gives back the days its approval drew', usedAfterBack === usedApproved - 2, `used ${usedApproved} → ${usedAfterBack}`);
+    check('its approval closes CANCELLED with the reason kept', closed?.status === 'CANCELLED' && closed.reopenReason === `${TAG} change of plan`);
+    await expectRejection(
+      'a second pull-back finds nothing approved',
+      () => reopenApproved('leave_request', back.request.id, asHr, `${TAG} again`),
+      'not approved',
+    );
+
+    // Overtime prior approval: refused once actual hours stand on it.
+    await expectRejection(
+      'a prior approval with actual hours filed against it is refused, naming them',
+      () => reopenApproved('overtime_prior', ot.id, asHr, `${TAG} wrong day`),
+      'actual hours were filed',
+    );
+    check('and the filing is untouched', (await prisma.overtimeRequest.findUnique({ where: { id: ot.id } }))?.stage === 'APPROVED');
+
+    // …and goes back to PRIOR (no request open, Modify sends it again) when none do.
+    const otBack = await prisma.overtimeRequest.create({
+      data: {
+        number: await nextNumber('overtime_request'),
+        employeeId: employee.id,
+        date: day('2026-09-24'),
+        plannedStart: '17:00',
+        plannedEnd: '20:00',
+        estimatedHours: D(2),
+        reason: `${TAG} pulled-back authorisation`,
+        jobId: job.id,
+        costCategoryId: labour.id,
+      },
+    });
+    const otBackPrior = await submitForApproval({
+      documentType: 'overtime_prior',
+      documentId: otBack.id,
+      documentNumber: otBack.number,
+      subject: `${TAG} prior to pull back`,
+      requesterId: worker.id,
+    });
+    await act({ requestId: otBackPrior.id, userId: supervisor.id, action: 'APPROVED' });
+    await reopenApproved('overtime_prior', otBack.id, asHr, `${TAG} wrong day`);
+    const otBackAfter = await prisma.overtimeRequest.findUnique({ where: { id: otBack.id } });
+    check(
+      'a prior approval with no hours filed is pulled back to PRIOR, its timestamp gone',
+      otBackAfter?.stage === 'PRIOR' && otBackAfter.priorApprovedAt === null,
+      `stage ${otBackAfter?.stage}`,
+    );
+
+    // Overtime actual: the cost it charged is reversed by a negative row.
+    const otCost = await prisma.overtimeRequest.create({
+      data: {
+        number: await nextNumber('overtime_request'),
+        employeeId: employee.id,
+        date: day('2026-09-25'),
+        plannedStart: '17:00',
+        plannedEnd: '20:00',
+        estimatedHours: D(2),
+        stage: 'ACTUAL_FILED',
+        priorApprovedAt: new Date(),
+        actualStart: '17:00',
+        actualEnd: '20:00',
+        actualHours: D(2),
+        reason: `${TAG} pulled-back hours`,
+        jobId: job.id,
+        costCategoryId: labour.id,
+      },
+    });
+    const otCostRequest = await submitForApproval({
+      documentType: 'overtime_request',
+      documentId: otCost.id,
+      documentNumber: otCost.number,
+      subject: `${TAG} actual to pull back`,
+      requesterId: worker.id,
+    });
+    await act({ requestId: otCostRequest.id, userId: supervisor.id, action: 'APPROVED' });
+    await act({ requestId: otCostRequest.id, userId: hrOfficer.id, action: 'APPROVED' });
+    const costRows = () => prisma.jobCostEntry.findMany({ where: { sourceType: 'overtime_request', sourceId: otCost.id } });
+    const postedRows = await costRows();
+    check('the approved hours charged the project once', postedRows.length === 1 && num(postedRows[0].amount) > 0);
+    await reopenApproved('overtime_request', otCost.id, asHr, `${TAG} wrong hours`);
+    const otCostAfter = await prisma.overtimeRequest.findUnique({ where: { id: otCost.id } });
+    const reversedRows = await costRows();
+    check(
+      'approved hours pulled back return the filing to authorised-not-filed, the hours and amount cleared',
+      otCostAfter?.stage === 'PRIOR_APPROVED' && otCostAfter.actualHours === null && otCostAfter.amount === null && otCostAfter.postedAt === null,
+      `stage ${otCostAfter?.stage}`,
+    );
+    check(
+      'the cost is reversed by a negative INCURRED row, never deleted',
+      reversedRows.length === 2 &&
+        reversedRows.every((r) => r.state === 'INCURRED') &&
+        money(reversedRows.reduce((sum, r) => sum + num(r.amount), 0), 0),
+      `${reversedRows.length} rows, net ${reversedRows.reduce((sum, r) => sum + num(r.amount), 0)}`,
+    );
+
+    // Out of the way of the search checks further down, which page TAG's hits.
+    await prisma.jobCostEntry.deleteMany({ where: { sourceType: 'overtime_request', sourceId: { in: [otBack.id, otCost.id] } } });
+    await prisma.overtimeRequest.deleteMany({ where: { id: { in: [otBack.id, otCost.id] } } });
+  }
 
   // ══ A decision that lands after a cancel ═════════════════════════════════
   // The cancel route ran between the last approver's decision and the

@@ -27,6 +27,7 @@ import {
   approversForStep,
   cancelOpenRequest,
   pickWorkflow,
+  onApprovalReopened,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
@@ -2263,6 +2264,47 @@ onApprovalSettled('leave_request', async (approval, outcome) => {
   });
 });
 
+/**
+ * An approved leave may be pulled back to draft (2026-10-16, the owner's
+ * call) — by the employee's own login (`edit_own`) or `edit_all`. Approval
+ * drew the days, so pulling it back gives them back, exactly as cancelling
+ * an approved leave does; the draft is then changed and submitted again,
+ * drawing them again only on the next approval.
+ */
+onApprovalReopened('leave_request', {
+  may: async (actor, id) => {
+    const request = await prisma.leaveRequest.findUnique({
+      where: { id },
+      select: { status: true, employee: { select: { userId: true } } },
+    });
+    return !!request && request.status === 'APPROVED' && canEditRecord(actor, 'ghr', 'leave', request.employee.userId);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const request = await tx.leaveRequest.findUnique({ where: { id: documentId } });
+    if (!request) throw notFound('Leave request not found');
+    const claimed = await tx.leaveRequest.updateMany({
+      where: { id: documentId, status: 'APPROVED' },
+      data: { status: 'DRAFT', decidedAt: null },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+    // The days come back to the year they were drawn from (the settle's year).
+    await tx.leaveBalance.updateMany({
+      where: { employeeId: request.employeeId, leaveTypeId: request.leaveTypeId, year: request.startDate.getFullYear() },
+      data: { used: { decrement: request.days } },
+    });
+    await audit(
+      {
+        entityType: 'leave_request',
+        entityId: request.id,
+        action: 'UPDATED',
+        summary: `${request.number} pulled back to draft after approval — ${num(request.days)} day(s) given back`,
+      },
+      undefined,
+      tx,
+    );
+  },
+});
+
 leaveRoutes.post(
   '/:id/cancel',
   handler(async (req, res) => {
@@ -2939,6 +2981,54 @@ onApprovalSettled('overtime_prior', async (approval, outcome) => {
 });
 
 /**
+ * Pulling an authorisation back (2026-10-16): the filing returns to PRIOR —
+ * its state before it was sent, which has no draft of its own — with nobody
+ * asked, so Modify (PUT /:id) changes it and sends it again. Prior approval
+ * moved no money, so nothing else is undone. Refused once actual hours were
+ * filed against it: those hours stand on the authorisation (pull them back,
+ * or pull back their approval, first).
+ */
+onApprovalReopened('overtime_prior', {
+  may: async (actor, id) => {
+    const ot = await prisma.overtimeRequest.findUnique({
+      where: { id },
+      select: { stage: true, employee: { select: { userId: true } } },
+    });
+    return (
+      !!ot &&
+      ['PRIOR_APPROVED', 'ACTUAL_FILED', 'APPROVED', 'REJECTED'].includes(ot.stage) &&
+      canEditRecord(actor, 'ghr', 'overtime', ot.employee.userId)
+    );
+  },
+  reopen: async ({ documentId, tx }) => {
+    const ot = await tx.overtimeRequest.findUnique({ where: { id: documentId } });
+    if (!ot) throw notFound('Overtime request not found');
+    if (ot.stage !== 'PRIOR_APPROVED') {
+      throw badRequest(
+        ot.stage === 'ACTUAL_FILED' || ot.stage === 'APPROVED' || ot.stage === 'REJECTED'
+          ? `${ot.number} cannot be pulled back — its actual hours were filed against this authorisation`
+          : `${ot.number} is ${ot.stage.toLowerCase().replace(/_/g, ' ')} — nothing to pull back`,
+      );
+    }
+    const claimed = await tx.overtimeRequest.updateMany({
+      where: { id: documentId, stage: 'PRIOR_APPROVED' },
+      data: { stage: 'PRIOR', priorApprovedAt: null },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+    await audit(
+      {
+        entityType: 'overtime_request',
+        entityId: ot.id,
+        action: 'UPDATED',
+        summary: `${ot.number} authorisation pulled back — modify it to send it again`,
+      },
+      undefined,
+      tx,
+    );
+  },
+});
+
+/**
  * Filing the actual hours after the work.
  *
  * Any variance against the estimate is recorded and shown to the approver —
@@ -3230,6 +3320,79 @@ onApprovalSettled('overtime_request', async (approval, outcome) => {
       });
     }
   }
+});
+
+/**
+ * Pulling approved actual hours back (2026-10-16): the filing returns to
+ * PRIOR_APPROVED — authorised, hours not yet filed, as POST /:id/withdraw
+ * leaves it — and the cost the approval charged the project is reversed by a
+ * negative INCURRED row per budget line (the ledger is a history: never a
+ * deletion). Filing the hours again is the change, and they post again only
+ * when both approvers have said yes.
+ */
+onApprovalReopened('overtime_request', {
+  may: async (actor, id) => {
+    const ot = await prisma.overtimeRequest.findUnique({
+      where: { id },
+      select: { stage: true, employee: { select: { userId: true } } },
+    });
+    return !!ot && ot.stage === 'APPROVED' && canEditRecord(actor, 'ghr', 'overtime', ot.employee.userId);
+  },
+  reopen: async ({ documentId, tx, actor }) => {
+    const ot = await tx.overtimeRequest.findUnique({ where: { id: documentId } });
+    if (!ot) throw notFound('Overtime request not found');
+    const claimed = await tx.overtimeRequest.updateMany({
+      where: { id: documentId, stage: 'APPROVED' },
+      data: {
+        stage: 'PRIOR_APPROVED',
+        actualStart: null,
+        actualEnd: null,
+        actualHours: null,
+        varianceNote: null,
+        hourlyRate: null,
+        multiplier: null,
+        amount: null,
+        postedAt: null,
+      },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+
+    // What this filing still stands charged with, per project and budget line.
+    const posted = await tx.jobCostEntry.groupBy({
+      by: ['jobId', 'costCategoryId'],
+      where: { sourceType: 'overtime_request', sourceId: ot.id, state: 'INCURRED' },
+      _sum: { amount: true },
+    });
+    let reversed = 0;
+    for (const row of posted) {
+      const net = row._sum.amount == null ? 0 : num(row._sum.amount);
+      if (Math.abs(net) < 0.005) continue;
+      await postJobCost(tx, {
+        jobId: row.jobId,
+        costCategoryId: row.costCategoryId,
+        state: 'INCURRED',
+        amount: -net,
+        sourceType: 'overtime_request',
+        sourceId: ot.id,
+        sourceNumber: ot.number,
+        description: `${ot.number} pulled back after approval — overtime cost reversed`,
+        createdById: actor.id,
+      });
+      reversed += net;
+    }
+    await audit(
+      {
+        entityType: 'overtime_request',
+        entityId: ot.id,
+        action: 'UPDATED',
+        summary: `${ot.number} actual hours pulled back after approval (${num(ot.actualHours)}h, ${ot.actualStart}–${ot.actualEnd}) — to be filed again${
+          reversed ? `; ${formatMoney(cents(reversed))} reversed from the project` : ''
+        }`,
+      },
+      undefined,
+      tx,
+    );
+  },
 });
 
 overtimeRoutes.post(

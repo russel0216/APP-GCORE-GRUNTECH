@@ -515,6 +515,27 @@ async function run(rules: AcademySettings) {
   });
   check('a certificate completed in the future is refused', future.status === 400, `${future.status}`);
 
+  // Pulling a verified certificate back (2026-10-16): it stands where a
+  // returned one does — REJECTED, unverified, counting for nothing.
+  const ext3 = await api(tok.worker2, 'POST', '/passports/me/records', {
+    courseId: deptOnly.id, completedAt: '2026-02-01', provider: `${TAG} Somewhere`,
+  });
+  const ext3Rec = (ext3.body as unknown as Passport).records?.find((r) => r.courseId === deptOnly.id);
+  const req3 = await prisma.approvalRequest.findFirst({ where: { documentType: 'training_certification', documentId: ext3Rec?.id ?? '' } });
+  await act({ requestId: req3!.id, userId: hr.id, action: 'APPROVED' });
+  const otherReopen = await api(tok.worker, 'POST', `/approvals/reopen/training_certification/${ext3Rec!.id}`, { reason: `${TAG} wrong scan` });
+  check('a colleague cannot pull someone else\'s certificate back (403)', otherReopen.status === 403, `${otherReopen.status}`);
+  const reopen3 = await api(tok.worker2, 'POST', `/approvals/reopen/training_certification/${ext3Rec!.id}`, { reason: `${TAG} wrong scan` });
+  const pulled = await prisma.trainingRecord.findUnique({ where: { id: ext3Rec!.id } });
+  check(
+    'the employee pulls their verified certificate back — REJECTED, unverified, counting for nothing',
+    reopen3.status === 200 && pulled?.status === 'REJECTED' && pulled.verifiedById === null &&
+      (await passportFor(empWelder2.id))?.lines.find((l) => l.course.id === deptOnly.id)?.state === 'MISSING',
+    `${reopen3.status} ${reopen3.text.slice(0, 120)} ${pulled?.status}`,
+  );
+  const remove3 = await api(tok.worker2, 'DELETE', `/passports/records/${ext3Rec!.id}`);
+  check('and may remove it to file it again', remove3.status === 204, `${remove3.status}`);
+
   // ══ 11. HR records directly — never for themselves ════════════════════════
   console.log('\n11. HR records training directly');
   const selfRecord = await api(tok.hr, 'POST', `/passports/${empHr.id}/records`, {

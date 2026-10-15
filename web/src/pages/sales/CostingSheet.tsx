@@ -330,6 +330,8 @@ export function CostingSheet() {
   const [lines, setLines] = useState<SheetLine[]>([]);
   const [sections, setSections] = useState<SheetSection[]>([]);
   const [spread, setSpread] = useState(true);
+  /** A phase value being typed WITH VAT, shown as typed until the box loses focus. */
+  const [vatTyped, setVatTyped] = useState<Record<string, string>>({});
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [leadNote, setLeadNote] = useState<{ id: string; number: string; companyName: string } | null>(null);
   const [templateId, setTemplateId] = useState(params.get('template') ?? '');
@@ -592,6 +594,23 @@ export function CostingSheet() {
   /** What a phase's value box shows: the value it will be saved with. */
   const shownValue = (i: number) => sov.values[i] ?? 0;
   const scopeTotal = sections.reduce((sum, _s, i) => sum + shownValue(i), 0);
+  // The phases are SHOWN with VAT (2026-10-16, the owner's call: "make the value
+  // VAT included to tally the Grand Total to the Scope of Work value"); they
+  // are stored and billed before VAT, as ever. Each phase is its value plus
+  // its VAT; when the phases make up the whole contract, the last one takes
+  // the centavos VAT's rounding leaves, so they add up to the Grand Total.
+  const toCentsUi = (n: number) => Math.round(n * 100) / 100;
+  const withVatValues = (() => {
+    const vals = sections.map((_s, i) => toCentsUi(shownValue(i) * (1 + vatRate)));
+    if (vals.length && Math.abs(scopeTotal - totals.contractValue) < 0.005) {
+      const gap = toCentsUi(totals.grandTotal - vals.reduce((t, v) => t + v, 0));
+      if (gap) vals[vals.length - 1] = toCentsUi(vals[vals.length - 1] + gap);
+    }
+    return vals;
+  })();
+  const scopeTotalWithVat = toCentsUi(withVatValues.reduce((t, v) => t + v, 0));
+  /** A figure typed with VAT, as the phase stores it (before VAT). */
+  const netOfVat = (typed: string) => (typed.trim() === '' ? '' : String(toCentsUi((Number(typed) || 0) / (1 + vatRate))));
   const bucketChoices = visibleCategories.map((c) => ({ value: c.id, label: c.name }));
 
   // ── Editing the rows ───────────────────────────────────────────────────────
@@ -1422,10 +1441,8 @@ export function CostingSheet() {
                   <NumberInput
                     kind="money"
                     className="qe-num"
-                    aria-label={`${phaseLabel} value (schedule of values)`}
-                    value={
-                      s.valueSource === 'CATEGORY' || (spread && s.valueSource === 'SPREAD') ? String(shownValue(si)) : s.value
-                    }
+                    aria-label={`${phaseLabel} value with VAT (schedule of values)`}
+                    value={vatTyped[s.key] ?? String(withVatValues[si] ?? 0)}
                     disabled={s.valueSource === 'CATEGORY'}
                     title={
                       s.valueSource === 'CATEGORY'
@@ -1435,7 +1452,12 @@ export function CostingSheet() {
                           : undefined
                     }
                     // Typing a figure declares it: kept as typed, the others spread around it.
-                    onChange={(e) => updateSection(s.key, { value: e.target.value, valueSource: s.valueSource === 'SPREAD' && spread ? 'DECLARED' : s.valueSource })}
+                    onChange={(e) => {
+                      const typed = e.target.value;
+                      setVatTyped((t) => ({ ...t, [s.key]: typed }));
+                      updateSection(s.key, { value: netOfVat(typed), valueSource: s.valueSource === 'SPREAD' && spread ? 'DECLARED' : s.valueSource });
+                    }}
+                    onBlur={() => setVatTyped(({ [s.key]: _gone, ...rest }) => rest)}
                   />
                 </div>
                 <span className="faint cs-phase-span">
@@ -1557,9 +1579,13 @@ export function CostingSheet() {
               label="Keep the schedule of values equal to the contract value (what the declared and cost-priced phases leave is spread across the others on save)"
             />
             {sovProblem && <div className="alert error">{sovProblem} — {formatMoney(-sov.remaining)} over. Lower a declared figure, or let one spread.</div>}
+            <p className="faint">
+              Phase values are shown with VAT{vatRate > 0 ? ` (${Math.round(vatRate * 10000) / 100}%)` : ''}: together{' '}
+              {formatMoney(scopeTotalWithVat)} against a Grand Total of {formatMoney(totals.grandTotal)}. They are billed before VAT.
+            </p>
             {!spread && Math.abs(scopeTotal - totals.contractValue) > 0.009 && (
               <div className="alert warn">
-                The phases add up to {formatMoney(scopeTotal)} against a contract value of {formatMoney(totals.contractValue)}. A
+                The phases add up to {formatMoney(scopeTotalWithVat)} with VAT against a Grand Total of {formatMoney(totals.grandTotal)}. A
                 project cannot be built until they agree.
               </div>
             )}

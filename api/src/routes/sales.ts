@@ -3488,9 +3488,8 @@ quotationRoutes.get(
     const { design } = await quotationDesign();
     const optionId = typeof req.query.option === 'string' && req.query.option ? req.query.option : null;
     const bare = await renderDesigned(design, await quotationPrintData(quotation, revision, { optionId }));
-    // The quotation's attachments print behind it (2026-10-12) unless
-    // `?attachments=0` asks for the bare document.
-    const files = req.query.attachments === '0' ? [] : await attachedFiles('quotation', quotation.id);
+    // The bare document by default (2026-10-16, the owner's call); `?attachments=1` puts the files behind it.
+    const files = req.query.attachments !== '1' ? [] : await attachedFiles('quotation', quotation.id);
     const { pdf, listed } = await withAttachments(bare, files, {
       title: 'Quotation',
       number: quotation.number,

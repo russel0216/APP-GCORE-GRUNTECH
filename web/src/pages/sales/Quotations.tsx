@@ -1069,12 +1069,12 @@ export function QuotationDetail() {
         }
         print={revision ? `/api/quotations/${quotation.id}/revisions/${revision.id}/pdf${qs({ option: chosenOption })}` : undefined}
         more={[
-          // Print carries the attached files behind the quotation (2026-10-12); this is the bare paper.
+          // Print is the bare quotation (2026-10-16, the owner's call); this one carries the attached files behind it.
           revision && {
-            label: 'Print without attachments',
-            hint: 'The quotation alone, without the files attached to it',
+            label: 'Print with attachments',
+            hint: 'The quotation with the files attached to it behind it',
             onSelect: () =>
-              openPdf(`/api/quotations/${quotation.id}/revisions/${revision.id}/pdf${qs({ option: chosenOption, attachments: 0 })}`, (e) => setError(e)),
+              openPdf(`/api/quotations/${quotation.id}/revisions/${revision.id}/pdf${qs({ option: chosenOption, attachments: 1 })}`, (e) => setError(e)),
           },
           can('gops.quotations.create') &&
             revision && {

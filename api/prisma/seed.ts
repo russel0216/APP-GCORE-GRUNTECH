@@ -1178,12 +1178,19 @@ const WORKFLOWS: WorkflowSeed[] = [
     // call): step 1 reads the Technical Manager named on the order, falling
     // back to the Technical Managers on the requester's team.
     name: 'Job order — project manager then team leader',
+    // The Technical Manager and the Team Leader of the preparer's team, never
+    // the CEO (2026-10-16, the owner's call): the Team Leader step falls back
+    // to the team's `team_leader`, and a preparer who holds a step signs it
+    // at submit (Brian Jay, UIT's Technical Manager and a Team Leader, signs
+    // both of his own); a manager may stand in.
+    preparerSigns: true,
+    standIns: true,
     steps: [
       { sequence: 1, name: 'Technical Manager', approverType: 'PROJECT_MANAGER', roleKey: 'technical_manager' },
-      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
     ],
     previously: [
-      { sequence: 1, name: 'Project Manager', approverType: 'PROJECT_MANAGER', roleKey: 'project_manager' },
+      { sequence: 1, name: 'Technical Manager', approverType: 'PROJECT_MANAGER', roleKey: 'technical_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
     ],
   },
@@ -1569,6 +1576,21 @@ async function main() {
         data: { key: MARK, value: { at: new Date().toISOString(), flagged }, description: 'seed: the preparer signs / stand-ins were applied to the seeded routes once' },
       });
       if (flagged) console.log(`  · The preparer signs the steps they hold on ${flagged} route(s); managers may stand in`);
+    }
+  }
+
+  // The job order's route takes the preparer's signature and stand-ins once
+  // (2026-10-16), after the general mark above had already run on live.
+  {
+    const MARK = 'seed.jobOrderPreparerSigns';
+    if (!(await prisma.setting.findUnique({ where: { key: MARK } }))) {
+      const { count } = await prisma.approvalWorkflow.updateMany({
+        where: { documentType: 'job_order', name: 'Job order — project manager then team leader' },
+        data: { preparerSigns: true, standIns: true },
+      });
+      await prisma.setting.create({
+        data: { key: MARK, value: { at: new Date().toISOString(), flagged: count }, description: 'seed: the job order route lets the preparer sign and managers stand in, once' },
+      });
     }
   }
 

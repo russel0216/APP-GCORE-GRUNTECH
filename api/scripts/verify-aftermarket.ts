@@ -901,6 +901,21 @@ async function main() {
     projectManagerId: director.id,
     customerPoNumber: 'PO-77',
   });
+  // A Technical Manager raising a job order signs its Technical Manager step (2026-10-16, Brian Jay's report).
+  {
+    const { heldSequences } = await import('../src/shared/approvals');
+    const route = await prisma.approvalWorkflow.findFirstOrThrow({
+      where: { documentType: 'job_order', isActive: true },
+      include: { steps: true },
+    });
+    const self = await heldSequences(route, director.id, prisma, { projectManagerId: director.id });
+    const other = await heldSequences(route, sales.id, prisma, { projectManagerId: director.id });
+    check(
+      'a job order naming its preparer as Technical Manager is signed at that step on submit; one naming somebody else is not',
+      route.preparerSigns && self.has(1) && !other.has(1),
+      `${route.preparerSigns} ${[...self]} ${[...other]}`,
+    );
+  }
   // The job order's Amount is the labor charge (2026-10-16): 500,000 against the costing's Labor 100,000.
   const { laborTally } = await import('../src/routes/jobOrders');
   const tally = await laborTally({ quotationId: orderQuotation.id, amount: D(500_000) });

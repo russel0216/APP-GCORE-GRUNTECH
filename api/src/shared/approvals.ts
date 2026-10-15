@@ -355,11 +355,32 @@ export async function teamHoldersOf(roleIds: string[], requesterId: string, tx: 
  * the preparer sign (`ApprovalWorkflow.preparerSigns`) such a step is signed
  * at submit, dated the submit instant (the owner's call, 2026-10-12: a Team
  * Leader's own quotation, the CEO's own sales order, a Technical Manager's
- * own costing). A PROJECT_MANAGER or HR step is never held: a PM's own
- * request goes up (2026-10-07), and HR never signs its own filing.
+ * own costing). An HR step is never held: HR never signs its own filing. A
+ * PROJECT_MANAGER step is held when the document names the preparer as its
+ * Technical Manager, or names none and the preparer holds its role (the job
+ * order, 2026-10-16).
  */
-export async function holdsStep(step: ApprovalStep, requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<boolean> {
+export async function holdsStep(
+  step: ApprovalStep,
+  requesterId: string,
+  tx: Prisma.TransactionClient = prisma,
+  ctx: ApprovalContext = {},
+): Promise<boolean> {
   if (step.approverType === 'USER') return step.userId === requesterId;
+  // A job order's Technical Manager step (2026-10-16, the owner's report:
+  // Brian Jay, UIT's Technical Manager, raised one and was not on it): held
+  // when the order names the preparer as its Technical Manager, or names
+  // nobody and the preparer holds the step's role — never when it names
+  // somebody else, who must sign it.
+  if (step.approverType === 'PROJECT_MANAGER') {
+    if (ctx.projectManagerId) return ctx.projectManagerId === requesterId;
+    if (ctx.jobId) return false;
+    if (!step.roleId) return false;
+    return !!(await tx.userRole.findFirst({
+      where: { userId: requesterId, roleId: step.roleId, user: { isActive: true } },
+      select: { userId: true },
+    }));
+  }
   if (step.approverType === 'ROLE' || step.approverType === 'SUPERVISOR') {
     // A SUPERVISOR step's other roles count too: a Technical Manager's own
     // borrow request is signed at submit as a Team Leader's is.
@@ -378,10 +399,11 @@ export async function heldSequences(
   workflow: { preparerSigns: boolean; steps: ApprovalStep[] },
   requesterId: string,
   tx: Prisma.TransactionClient = prisma,
+  ctx: ApprovalContext = {},
 ): Promise<Set<number>> {
   const held = new Set<number>();
   if (!workflow.preparerSigns) return held;
-  for (const step of workflow.steps) if (await holdsStep(step, requesterId, tx)) held.add(step.sequence);
+  for (const step of workflow.steps) if (await holdsStep(step, requesterId, tx, ctx)) held.add(step.sequence);
   return held;
 }
 
@@ -497,7 +519,7 @@ export async function routePreview(
   if (!workflow) return null;
   // A step the preparer holds on a route that lets them sign is THEIRS: it is
   // signed at submit, so it names them alone (`held`).
-  const held = await heldSequences(workflow, requesterId);
+  const held = await heldSequences(workflow, requesterId, prisma, ctx);
   const self = held.size
     ? await prisma.user.findUnique({
         where: { id: requesterId },
@@ -634,7 +656,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
   // (`preparerSigns`): signed at submit, dated the request's own instant, so
   // "Prepared by" and those steps print one timestamp. The document waits
   // only on the steps other people hold.
-  const held = await heldSequences(workflow, input.requesterId);
+  const held = await heldSequences(workflow, input.requesterId, prisma, { jobId: input.jobId ?? null, projectManagerId: input.projectManagerId ?? null });
   const open = workflow.steps.filter((st) => !held.has(st.sequence));
 
   // A step whose only eligible approver is the requester can never be acted on:

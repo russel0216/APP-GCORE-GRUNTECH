@@ -4177,11 +4177,11 @@ async function main() {
     );
     const pagesOf = async (buf: Buffer) => (await PDFDocument.load(buf)).getPageCount();
     const bytesOf = async (url: string, token = salesToken) => Buffer.from(await (await fetch(`${BASE}${url}`, { headers: { Authorization: `Bearer ${token}` } })).arrayBuffer());
-    const qBare = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf?attachments=0`);
-    const qFull = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf`);
+    const qBare = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf`);
+    const qFull = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf?attachments=1`);
     const qFullText = pdfText(qFull);
     check(
-      'printed, the quotation carries its files: an Attachments page, the photo on a page, the PO’s two pages',
+      'printed with its attachments, the quotation carries its files: an Attachments page, the photo on a page, the PO’s two pages',
       (await pagesOf(qFull)) === (await pagesOf(qBare)) + 1 + 1 + 2,
       `${await pagesOf(qBare)} → ${await pagesOf(qFull)}`,
     );
@@ -4190,7 +4190,7 @@ async function main() {
       qFullText.includes('ATTACHMENTS') && [`${TAG}-site-photo.png`, `${TAG}-customer-PO.pdf`, `${TAG}-specs.docx`, `${TAG}-broken.pdf`].every((n) => qFullText.includes(n)) &&
         qFullText.includes('Not printable') && qFullText.includes('Could not be read') && qFullText.includes('3 pages follow'),
     );
-    check('“Print without attachments” is the bare quotation', !pdfText(qBare).includes(`${TAG}-site-photo.png`));
+    check('Print is the bare quotation (2026-10-16)', !pdfText(qBare).includes(`${TAG}-site-photo.png`));
     // SCORO's Create invoice: what is left to book, then bookings against it.
     const booking0 = await http(salesToken, 'GET', `/sales-orders/booking?quotationId=${soQuoteId}`);
     const bk0 = booking0.body as unknown as { net: number; availableNet: number; lines: { id: string; available: number; booked: number; isHeading: boolean }[] };

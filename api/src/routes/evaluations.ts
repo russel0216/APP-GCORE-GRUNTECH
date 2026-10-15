@@ -31,6 +31,7 @@ import {
   contactOf,
   usersInRole,
   cancelOpenRequest,
+  onApprovalReopened,
 } from '../shared/approvals';
 import { renderDocument, formatDate, formatDateTime, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { hrSettings } from '../shared/hr';
@@ -884,6 +885,61 @@ onApprovalSettled('evaluation', async (approval, outcome) => {
     }
   }
   await notify(recipients);
+});
+
+/**
+ * An approved evaluation may be pulled back to draft (2026-10-16, the
+ * owner's call) — by its evaluator (`edit_own`) or `edit_all` — only while
+ * nothing on the employee record stands on it: a regularisation, an
+ * absorption or an extension it applied is refused, naming it (the record
+ * moved on the approval; a field edit must not move it back). END changed
+ * nothing, so it reopens. The employee's acknowledgement goes with the
+ * approval it acknowledged. The trail carries a summary only — never a rating.
+ */
+onApprovalReopened('evaluation', {
+  may: async (actor, id) => {
+    const ev = await prisma.employeeEvaluation.findUnique({ where: { id }, select: { status: true, evaluatorId: true } });
+    return !!ev && ev.status === 'APPROVED' && canEditRecord(actor, 'ghr', 'evaluations', ev.evaluatorId);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const ev = await tx.employeeEvaluation.findUnique({ where: { id: documentId }, include: { employee: true } });
+    if (!ev) throw notFound('Evaluation not found');
+    const rec = ev.recommendation;
+    const applied =
+      rec === 'REGULARIZE' && ev.kind === 'PROBATIONARY'
+        ? 'the regularisation it applied'
+        : rec === 'EXTEND' && ev.extendedTo
+          ? 'the extended period it applied'
+          : rec === 'ABSORB' && ev.kind === 'TRAINEE'
+            ? 'the absorption into probation it applied'
+            : null;
+    if (applied) {
+      throw badRequest(
+        `${ev.number} cannot be pulled back — ${fullName(ev.employee)}'s employee record carries ${applied}. Raise a new evaluation instead.`,
+      );
+    }
+    const claimed = await tx.employeeEvaluation.updateMany({
+      where: { id: documentId, status: 'APPROVED' },
+      data: {
+        status: 'DRAFT',
+        submittedAt: null,
+        approvedAt: null,
+        employeeAcknowledgedAt: null,
+        employeeAcknowledgementNote: null,
+      },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+    await audit(
+      {
+        entityType: 'evaluation',
+        entityId: ev.id,
+        action: 'UPDATED',
+        summary: `${ev.number} pulled back to draft after approval — nothing had changed on the employee record`,
+      },
+      undefined,
+      tx,
+    );
+  },
 });
 
 // ── Cancel ───────────────────────────────────────────────────────────────────

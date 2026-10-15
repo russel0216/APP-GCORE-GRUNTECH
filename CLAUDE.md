@@ -69,7 +69,23 @@ four databases and four copies of "customer".
    offers Approve / Return / Reject only when `GET /approvals/history/…` says
    `canAct` (computed with `approversForStep`, never the requester), and posts
    to the same `POST /approvals/:id/act`. Never add a module's own approve
-   route.
+   route. **An APPROVED document can be pulled back to draft** (2026-10-16,
+   the owner's call: "every approval request can be pulled back, even fully
+   approved"): `reopenApproved()` in `shared/approvals.ts`, reached by `POST
+   /approvals/reopen/:documentType/:documentId { reason }` and the Approval
+   panel's "Pull back to draft" (offered when `GET /approvals/history` says
+   `canReopen`). Each module registers `onApprovalReopened(type, { may,
+   reopen })` beside its settle code: `may` is the preparer or edit_all;
+   `reopen` runs in the engine's transaction, refuses with a 400 naming what
+   stands on it (an order with goods received, an invoice issued, a
+   payment allocated, a project with work on it) or undoes what approval
+   did — ledger rows reversed by negative rows, stock returned, the draft
+   invoice an invoice request raised deleted, the project a job order built
+   deleted while empty — and puts the document back to draft. The request
+   closes CANCELLED with `reopenedAt`, `reopenedById`, `reopenReason`
+   (its signatures kept), audited, its signers and requester told;
+   `DecisionNote` says "Pulled back to draft after approval by …". Every
+   routed document type has a handler.
 3. **A requester can never approve their own document.** Enforced in `act()`,
    before the eligibility check, and for super admins too. The one thing
    that looks like an exception is not a decision: on a route with
@@ -510,7 +526,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,330 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,387 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +590,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass"):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route):
 foundation
-373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 178, chain 332, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 404, aftermarket 267, cad 120,
+373, masters 92, sales 617, costing 200, pipeline 121, calendar 98, numbering
+79, partners 120, delivery 183, chain 338, hr 480, plantilla 123, meetings
+115, evaluations 154, academy 123, finance 416, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -2193,6 +2209,15 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   costing stands behind it, and the customer's live sales orders); a sales
   order must book the quotation the order keeps. "Mine" is what you raised
   OR are sent on (`mineWhere`).
+- **A job order's route stays inside the preparer's team, never the CEO**
+  (2026-10-16, the owner's report: Brian Jay, UIT's Technical Manager, was
+  not on his own order and it went to the CEO): the route has
+  `preparerSigns` and `standIns` (once, `seed.jobOrderPreparerSigns`), its
+  Team Leader step falls back to `team_leader` (was `sales_manager`), and
+  `holdsStep` counts a PROJECT_MANAGER step as the preparer's when the order
+  names them as its Technical Manager, or names none and they hold the role
+  — so a Technical Manager / Team Leader signs his own order's steps at
+  submit.
 - **The route is the Technical Manager named ON THE ORDER, then the
   salesperson's team leader**: seeded "Job order — project manager then
   team leader" (the name kept, so the seed finds it) — step 1 "Technical
@@ -3906,8 +3931,10 @@ the attachment card at the bottom of the sales order"
   the paper still prints. **`pdf-lib` (1.17.1)** is the merger — pdfkit
   cannot read a PDF; added to the lockfile by merging only its entries (the
   sandbox's npm strips `libc` fields from every other entry). `?attachments=0`
-  prints the bare document — "Print without attachments" in the ⋯ of both
-  pages; the list's PDF column stays the bare paper. The EXPORTED row says
+  prints the bare document — "Print without attachments" in the order's ⋯;
+  the list's PDF column stays the bare paper. **The quotation's Print is
+  the bare quotation** (2026-10-16, the owner's call): its files go behind
+  it only with `?attachments=1`, "Print with attachments" in its ⋯. The EXPORTED row says
   how many went with it.
 - **The order takes the quotation's files**: `POST /sales-orders` copies
   them after the commit through `copyAttachments()` (bytes copied, rows of
@@ -5628,6 +5655,12 @@ Cost Estimate" PDF) in G-CORE's own style.
   (`sectionsSignature()`), and appends otherwise; "Start from the standard
   scope" brings it back to a sheet with no phases. A change to the list
   is a commit to that file.
+- **The sheet shows each phase's value WITH VAT** (2026-10-16, the owner's
+  call: "make the value VAT included to tally the Grand Total"): each phase
+  is its stored value plus its VAT, the last taking VAT's rounding when the
+  phases make up the contract, so they add up to the Grand Total; a figure
+  typed is taken with VAT and stored before it. Stored, distributed and
+  billed values stay net of VAT, as ever.
 - **The plan is working days, not dates** (`planTasks()`): a task with a
   `startDay` keeps it; one without starts the day after the previous task ends.
   **A phase with no tasks but a typed duration takes its place in the same

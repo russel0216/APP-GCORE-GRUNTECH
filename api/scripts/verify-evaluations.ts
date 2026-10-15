@@ -754,6 +754,18 @@ async function main() {
   );
   check('both prints are audited', (await prisma.auditLog.count({ where: { entityType: 'evaluation', entityId: ev1.id, action: 'EXPORTED' } })) === 2);
 
+  // Pulling an approved evaluation back (2026-10-16): refused once the
+  // employee record moved on it, naming what moved; never the subject's to ask.
+  const subjReopen = await api(tok.subject, 'POST', `/approvals/reopen/evaluation/${ev1.id}`, { reason: 'ZZEVAL try' });
+  check('the person evaluated cannot pull it back (403)', subjReopen.status === 403, String(subjReopen.status));
+  const regReopen = await api(tok.supervisor, 'POST', `/approvals/reopen/evaluation/${ev1.id}`, { reason: 'ZZEVAL try' });
+  const evStill = await prisma.employeeEvaluation.findUniqueOrThrow({ where: { id: ev1.id } });
+  check(
+    'a regularisation applied refuses the pull-back, naming it, and nothing moves',
+    regReopen.status === 400 && String(regReopen.body.error ?? '').includes('regularisation') && evStill.status === 'APPROVED',
+    `${regReopen.status} ${regReopen.body.error ?? ''}`,
+  );
+
   const hits = await globalSearch(ev1.number, hrUser);
   const hitsName = await globalSearch('Probationer', hrUser);
   check('no evaluation surfaces in global search', !hits.some((h) => h.id === ev1.id) && !hitsName.some((h) => h.id === ev1.id), JSON.stringify(hits.map((h) => h.kind)));
