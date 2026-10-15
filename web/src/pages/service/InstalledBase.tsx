@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -190,6 +190,22 @@ export function InstalledBase() {
             key: 'uncovered',
             label: 'Cover',
             options: [{ value: 'true', label: 'No active contract' }],
+          },
+          // The project that installed it — a project's overview links here
+          // (2026-10-15, when the project's Service tab went).
+          {
+            key: 'jobId',
+            label: 'Project',
+            type: 'lookup' as const,
+            placeholder: 'Type a project number or name…',
+            search: async (term: string) =>
+              (await api.get<{ id: string; number: string; name: string }[]>(`/jobs/lookup${qs({ q: term, includeClosed: 'true' })}`)).map(
+                (j) => ({ value: j.id, label: `${j.number} — ${j.name}` }),
+              ),
+            describe: async (id: string) => {
+              const j = await api.get<{ number: string; name: string }>(`/jobs/${id}`);
+              return `${j.number} — ${j.name}`;
+            },
           },
           {
             key: 'status',

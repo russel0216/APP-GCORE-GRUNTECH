@@ -1260,7 +1260,8 @@ const REPORT_KEY: Record<string, string> = {
  * contract that covers it (a service job's own terms), the reports written
  * against either, and job orders charged to it.
  *
- * One read for the workspace's Service tab. Each section is `null` when the
+ * Written for the workspace's Service tab, which went on 2026-10-15 (the
+ * owner's call); kept as the one read of a job's field record. Each section is `null` when the
  * caller does not hold that register's `view_all` — the tab then hides the card
  * rather than showing an empty one, which would read as "nothing installed".
  * Numbers, names, dates and statuses only; no money.

@@ -4218,10 +4218,15 @@ tab inside a project, and the Projects page keeps them one click away
 - **A project's tabs are, in order**: Overview, Costing, Job Orders (both
   2026-10-15 — see "The Accomplishment Report"), Meetings & Records, Request
   for Approval (the `plans` key), Budget Monitoring, Purchase Requisition, Budget Requests, Scope of
-  Work (Gantt), Progress & Billing — then Finance and Service, which hold the
-  invoices and the turnover register and belong nowhere else. `TAB_ALIASES`
-  in `ProjectWorkspace.tsx` keeps every old `?tab=` landing: `billing` →
-  progress, `tasks` → scope, `documents` and `activity` → meetings. A new
+  Work (Gantt), Progress & Billing. **Finance and Service are gone**
+  (2026-10-15, the owner's call): the invoices show beside their billings on
+  Progress & Billing, the overview's "Equipment installed" row opens
+  Installed Base filtered to the project (`?jobId=`, a declared lookup
+  filter), and "Add equipment" after turnover is in the header's ⋯.
+  `GET /jobs/:id/service` and `/cash-advances/for-job/:jobId` stay as reads.
+  `TAB_ALIASES` in `ProjectWorkspace.tsx` keeps every old `?tab=` landing:
+  `billing` and `finance` → progress, `tasks` → scope, `documents` and
+  `activity` → meetings, `service` → overview. A new
   link to a tab uses the new key. (A budget request's notifications link to
   the request's own page, `/g-ops/budget-requests/:id`, not to the tab.)
 - **Meetings & Records** is the meetings held for the project
