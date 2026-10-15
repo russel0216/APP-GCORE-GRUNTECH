@@ -2795,6 +2795,7 @@ const claimSchema = z.object({
         description: z.string().trim().min(1, 'Every line needs a description'),
         category: z.string().optional().nullable(),
         receiptNo: z.string().optional().nullable(),
+        vendor: z.string().trim().max(200).optional().nullable(),
         amount: z.number().positive('Every line must be more than zero'),
       }),
     )
@@ -2813,6 +2814,7 @@ function claimLines(input: z.infer<typeof claimSchema>['lines']) {
     description: l.description,
     category: l.category || null,
     receiptNo: l.receiptNo || null,
+    vendor: l.vendor || null,
     amount: cents(l.amount),
   }));
   return {
@@ -3492,14 +3494,14 @@ expenseRoutes.get(
       {
         kind: 'table',
         title: 'Receipts',
-        head: ['No.', 'Date', 'Description', 'Receipt no.', `Amount (${currency})`],
-        widths: [7, 14, 43, 18, 18],
+        head: ['No.', 'Date', 'Company / receipt', 'Item / purpose', `Amount (${currency})`],
+        widths: [7, 14, 28, 33, 18],
         align: ['right', 'left', 'left', 'left', 'right'],
         rows: claim.lines.map((l, n) => [
           String(n + 1),
           formatShortDate(l.spentOn),
-          l.category ? `${l.description} (${l.category})` : l.description,
-          l.receiptNo ?? '—',
+          { title: l.vendor ?? '—', body: l.receiptNo ? `Receipt ${l.receiptNo}` : 'No receipt no.' },
+          { title: l.description, body: l.category ?? undefined },
           formatAmount(num(l.amount)),
         ]),
       },

@@ -108,3 +108,11 @@
   gap: var(--s-3);
   font-size: var(--fs-sm);
 }
+
+/* A reimbursement line: company over receipt no., item over kind. */
+.fin-line-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 12rem;
+}

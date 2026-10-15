@@ -4333,6 +4333,9 @@ model ExpenseClaimLine {
   category    String?
   /// The OR or receipt number, because a claim without one is not claimable.
   receiptNo   String?
+  /// The company the receipt is from (2026-10-15, the owner's line pattern:
+  /// Date — Company / receipt — Item / purpose).
+  vendor      String?
   amount      Decimal  @db.Decimal(18, 2)
 
   @@index([claimId])

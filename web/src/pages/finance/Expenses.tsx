@@ -112,6 +112,7 @@ interface Claim {
     description: string;
     category: string | null;
     receiptNo: string | null;
+    vendor: string | null;
     amount: number;
   }[];
   allocations?: {
@@ -370,9 +371,10 @@ export function NewClaimModal({
           description: l.description,
           category: l.category ?? '',
           receiptNo: l.receiptNo ?? '',
+          vendor: l.vendor ?? '',
           amount: l.amount,
         }))
-      : [{ spentOn: today, description: '', category: '', receiptNo: '', amount: 0 }],
+      : [{ spentOn: today, description: '', category: '', receiptNo: '', vendor: '', amount: 0 }],
   );
 
   useEffect(() => {
@@ -413,6 +415,7 @@ export function NewClaimModal({
           description: l.description,
           category: l.category || null,
           receiptNo: l.receiptNo || null,
+          vendor: l.vendor.trim() || null,
           amount: l.amount,
         })),
     };
@@ -543,9 +546,8 @@ export function NewClaimModal({
           <thead>
             <tr>
               <th>Date</th>
-              <th>Description</th>
-              <th>Kind</th>
-              <th>Receipt no.</th>
+              <th>Company / receipt</th>
+              <th>Item / purpose</th>
               <th className="right">Amount</th>
               <th className="fin-col-tight" />
             </tr>
@@ -568,27 +570,36 @@ export function NewClaimModal({
                     />
                   </td>
                   <td>
-                    <input
-                      aria-label={`Line ${i + 1} description`}
-                      value={l.description}
-                      onChange={(e) => update({ description: e.target.value })}
-                      placeholder="Fare, meals, accommodation…"
-                    />
+                    <div className="fin-line-stack">
+                      <input
+                        aria-label={`Line ${i + 1} company`}
+                        value={l.vendor}
+                        onChange={(e) => update({ vendor: e.target.value })}
+                        placeholder="Company / store"
+                      />
+                      <input
+                        aria-label={`Line ${i + 1} receipt number`}
+                        value={l.receiptNo}
+                        onChange={(e) => update({ receiptNo: e.target.value })}
+                        placeholder="OR / SI no."
+                      />
+                    </div>
                   </td>
                   <td>
-                    <input
-                      aria-label={`Line ${i + 1} kind`}
-                      value={l.category}
-                      onChange={(e) => update({ category: e.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      aria-label={`Line ${i + 1} receipt number`}
-                      value={l.receiptNo}
-                      onChange={(e) => update({ receiptNo: e.target.value })}
-                      placeholder="OR / SI no."
-                    />
+                    <div className="fin-line-stack">
+                      <input
+                        aria-label={`Line ${i + 1} item or purpose`}
+                        value={l.description}
+                        onChange={(e) => update({ description: e.target.value })}
+                        placeholder="Item bought, or what it was for"
+                      />
+                      <input
+                        aria-label={`Line ${i + 1} kind`}
+                        value={l.category}
+                        onChange={(e) => update({ category: e.target.value })}
+                        placeholder="Kind: fare, meals, materials…"
+                      />
+                    </div>
                   </td>
                   <td>
                     <NumberInput
@@ -618,7 +629,7 @@ export function NewClaimModal({
           </tbody>
           <tfoot>
             <tr>
-              <th colSpan={4} className="right">
+              <th colSpan={3} className="right">
                 Total
               </th>
               <th className="right mono">{formatMoney(total)}</th>
@@ -630,7 +641,7 @@ export function NewClaimModal({
       <button
         className="btn btn-sm fin-gap-top-sm"
         onClick={() =>
-          setLines([...lines, { spentOn: today, description: '', category: '', receiptNo: '', amount: 0 }])
+          setLines([...lines, { spentOn: today, description: '', category: '', receiptNo: '', vendor: '', amount: 0 }])
         }
       >
         + Add line
@@ -897,8 +908,8 @@ export function ExpenseClaimDetail() {
               <thead>
                 <tr>
                   <th>Date</th>
-                  <th>Description</th>
-                  <th>Receipt</th>
+                  <th>Company / receipt</th>
+                  <th>Item / purpose</th>
                   <th className="right">Amount</th>
                 </tr>
               </thead>
@@ -907,10 +918,13 @@ export function ExpenseClaimDetail() {
                   <tr key={l.id}>
                     <td className="faint">{formatDate(l.spentOn)}</td>
                     <td>
+                      <div>{l.vendor ?? '—'}</div>
+                      <div className="mono faint">{l.receiptNo ?? 'No receipt no.'}</div>
+                    </td>
+                    <td>
                       <div>{l.description}</div>
                       {l.category && <div className="faint">{l.category}</div>}
                     </td>
-                    <td className="mono faint">{l.receiptNo ?? '—'}</td>
                     <td className="right mono">{formatMoney(l.amount)}</td>
                   </tr>
                 ))}
