@@ -10,6 +10,7 @@
  * mostly about.
  */
 
+import { repairTypedStockReceipts } from '../src/shared/typedItems';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -961,6 +962,38 @@ async function main() {
         items: { create: [{ orderItemId: stockPo.items[0].id, quantity: D(5), unitCost: D(100) }] },
       },
     });
+    // A stock line typed without an item (2026-10-16, "received but not in
+    // inventory"): receiving it builds stock under its matched or new item.
+    {
+      const typedPart = `${TAG}-TPO-${Date.now()}`;
+      const typedPo = await prisma.purchaseOrder.create({
+        data: {
+          number: await nextNumber('purchase_order'), kind: 'STOCK_REPLENISHMENT', status: 'ISSUED', supplierId: supplier.id,
+          warehouseId: warehouse.id, createdById: procurement.id, notes: `${TAG} typed stock order`,
+          items: { create: [{ name: `${TAG} typed gasket`, partNumber: typedPart, description: `${TAG} typed gasket`, quantity: D(4), unitPrice: D(25), amount: D(100) }] },
+        },
+        include: { items: true },
+      });
+      const typedRec = await prisma.receiving.create({
+        data: { number: await nextNumber('receiving'), orderId: typedPo.id, warehouseId: warehouse.id, receivedById: procurement.id,
+          items: { create: [{ orderItemId: typedPo.items[0].id, quantity: D(4), unitCost: D(25) }] } },
+      });
+      const first = await repairTypedStockReceipts();
+      const again = await repairTypedStockReceipts();
+      const made = await prisma.item.findMany({ where: { partNumber: typedPart } });
+      const bal = made[0] ? await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: made[0].id, warehouseId: warehouse.id } } }) : null;
+      check(
+        'a stock order line typed without an item builds stock when received, under one item, once',
+        first >= 1 && again === 0 && made.length === 1 && Number(bal?.quantity) === 4,
+        `first ${first} again ${again} items ${made.length} qty ${bal?.quantity}`,
+      );
+      await prisma.inventoryTransaction.deleteMany({ where: { sourceId: typedRec.id } });
+      await prisma.inventoryBalance.deleteMany({ where: { itemId: { in: made.map((m) => m.id) } } });
+      await prisma.receiving.delete({ where: { id: typedRec.id } });
+      await prisma.purchaseOrder.delete({ where: { id: typedPo.id } });
+      await prisma.auditLog.deleteMany({ where: { entityType: 'item', entityId: { in: made.map((m) => m.id) } } });
+      await prisma.item.deleteMany({ where: { id: { in: made.map((m) => m.id) } } });
+    }
     const byJob = await api(buyerToken, 'GET', `/receivings?jobId=${job.id}&pageSize=200`);
     const byJobRows = (byJob.body.rows ?? []) as { id: string; order: { job: { id: string } | null } }[];
     check(

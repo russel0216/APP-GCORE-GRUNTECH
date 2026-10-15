@@ -20,6 +20,7 @@ import { audit } from '../shared/audit';
 import { registerSearch } from '../shared/search';
 import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES, stockState, itemsOnOrder, STOCK_STATES, type StockState } from '../shared/chain';
 import { nextNumber } from '../shared/numbering';
+import { itemForTypedLine } from '../shared/typedItems';
 import { notify } from '../shared/notifications';
 import {
   contactOf,
@@ -888,10 +889,19 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     // ONLY a stock replenishment builds inventory. Direct-to-job material is
     // charged to the project the moment it arrives; entering stock as well
     // would charge it twice at issue.
-    if (order.kind === 'STOCK_REPLENISHMENT' && receiving.warehouseId && orderItem.itemId) {
+    // A stock line typed on the order without picking an item still builds
+    // stock (2026-10-16, the owner's report: received but not in inventory):
+    // the one active item by part number or code, else by name, else a new
+    // one filed now — and the order line is linked to it.
+    const stockWarehouseId = receiving.warehouseId ?? order.warehouseId;
+    if (order.kind === 'STOCK_REPLENISHMENT' && stockWarehouseId && !orderItem.itemId) {
+      orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId);
+      await tx.purchaseOrderItem.update({ where: { id: orderItem.id }, data: { itemId: orderItem.itemId } });
+    }
+    if (order.kind === 'STOCK_REPLENISHMENT' && stockWarehouseId && orderItem.itemId) {
       await receiveStock(tx, {
         itemId: orderItem.itemId,
-        warehouseId: receiving.warehouseId,
+        warehouseId: stockWarehouseId,
         quantity,
         unitCost,
         sourceType: 'receiving',
@@ -900,10 +910,10 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
         createdById: actorId,
       });
     }
-    if (order.kind === 'STOCK_REPLENISHMENT' && receiving.warehouseId && orderItem.itemId && line.locationId) {
+    if (order.kind === 'STOCK_REPLENISHMENT' && stockWarehouseId && orderItem.itemId && line.locationId) {
       // A receipt into a named bin files the stock line there while it has none.
       await tx.inventoryBalance.updateMany({
-        where: { itemId: orderItem.itemId, warehouseId: receiving.warehouseId, locationId: null },
+        where: { itemId: orderItem.itemId, warehouseId: stockWarehouseId, locationId: null },
         data: { locationId: line.locationId },
       });
     }

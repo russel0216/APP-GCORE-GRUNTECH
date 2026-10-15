@@ -19,6 +19,7 @@ import { backfillCustomerAddresses } from '../src/shared/customerAddress';
 import { backfillInvoiceCountering, fillInvoiceCredit } from '../src/shared/receivables';
 import { fillBillTerms } from '../src/shared/payables';
 import { renumberProgressDocs } from '../src/shared/progressReport';
+import { repairTypedStockReceipts } from '../src/shared/typedItems';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -1624,6 +1625,10 @@ async function main() {
     if (legacy.linked || legacy.summarised) console.log(`Linked ${legacy.linked} sales order line(s) and ${legacy.summarised} summarised line(s) to their quotation lines`);
     // Budget requests approved as budget INCREASES (the rule before
     // 2026-10-07) are closed, so they do not read as cash finance still owes.
+    // Stock order lines typed without an item built no stock when received
+    // (until 2026-10-16); each now takes its item and its stock, once.
+    const typedReceipts = await repairTypedStockReceipts();
+    if (typedReceipts) console.log(`  · Posted the stock of ${typedReceipts} received line(s) typed without an item`);
     const closedIncreases = await closeLegacyBudgetIncreases();
     if (closedIncreases) console.log(`  · Closed ${closedIncreases} budget request(s) approved as budget increases under the old rule`);
     // Costings priced with a markup, a contingency % or a discount (the rule
