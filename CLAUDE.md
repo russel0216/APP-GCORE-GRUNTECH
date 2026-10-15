@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,267 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,269 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 178, chain 329, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 371, aftermarket 259, cad 101,
+115, evaluations 152, academy 120, finance 371, aftermarket 261, cad 101,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -2193,14 +2193,16 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   costing stands behind it, and the customer's live sales orders); a sales
   order must book the quotation the order keeps. "Mine" is what you raised
   OR are sent on (`mineWhere`).
-- **The route is the project manager named ON THE ORDER, then the
+- **The route is the Technical Manager named ON THE ORDER, then the
   salesperson's team leader**: seeded "Job order — project manager then
-  team leader" — step 1 the engine's PROJECT_MANAGER type reading the
-  request's own `projectManagerId` (`ApprovalRequest.projectManagerId`,
+  team leader" (the name kept, so the seed finds it) — step 1 "Technical
+  Manager", the engine's PROJECT_MANAGER type reading the request's own
+  `projectManagerId` (`ApprovalRequest.projectManagerId`,
   `ApprovalContext.projectManagerId`, read before the job's; `ctxOf(request)`
-  is what every engine read passes; `project_manager` role when none is
-  named or the PM raised it), step 2 SUPERVISOR falling back to
-  `sales_manager`. "Job order — service manager" is RETIRED.
+  is what every engine read passes; the `technical_manager` role on the
+  requester's team when none is named or they raised it), step 2
+  SUPERVISOR falling back to `sales_manager`. "Job order — service
+  manager" is RETIRED.
 - **Approval BUILDS THE PROJECT** (the owner's choice over booking a visit):
   `settleJobOrder` claims PENDING_APPROVAL → APPROVED with a conditional
   `updateMany`, then — for an order with no project yet — reads the linked
@@ -4160,6 +4162,37 @@ import for the wrong document is refused.
   Company Settings names them (`COMPANY_SETTING_NAMES`) and linked there, and
   the selected box's "Not printing now: …". Hidden, the note stays hidden only
   until a different set of fields is empty (a per-browser convenience).
+
+## The project's manager is its Technical Manager (2026-10-15)
+
+The owner's call: "project manager is the technical manager". The data
+keeps its names (`Job.projectManagerId`, `JobOrder.projectManagerId`,
+`ApprovalRequest.projectManagerId`, the PROJECT_MANAGER approver type);
+what people read and pick changed:
+
+- **Every label says "Technical Manager"**: the job order list, form, page
+  and paper, the project list, form, header and overview, Customer 360,
+  Insights' profitability table, budget request lines, Admin › Approval
+  Workflows' PROJECT_MANAGER wording, the clearance item. The profitability
+  CSV keeps its "Project Manager" header (columns are never renamed under a
+  sheet built on them).
+- **The pickers list Technical Managers only**: `GET /users/lookup?role=`
+  (a role key — its active holders, super admins not added) beside
+  `holding=`; `usePeople('role:technical_manager')` in
+  `components/People.tsx` is the same one cached fetch. `current` keeps a
+  manager named before on the record.
+- **The routes**, corrected in place through `previously`: the job order's
+  step 1 is "Technical Manager" (PROJECT_MANAGER, fallback
+  `technical_manager`), and both supplier-bill bands start with a
+  "Technical Manager" ROLE step in place of "Project Manager". A
+  PROJECT_MANAGER step whose fallback role is in `OWN_TEAM_ROLES` asks the
+  holders on the requester's team (`leadersFor`), as a ROLE step does.
+- **The `technical_manager` role holds the project manager's rights**
+  (`PROJECT_MANAGER_GRANTS` / `PROJECT_MANAGER_ONLY` in the seed, shared
+  with `project_manager`, which stays for whoever already holds it), plus
+  `gfin.ap.view_all` for the supplier bills it signs. The never-offered rule
+  carries them to the live install. **Give Technical Manager, with a Team,
+  to whoever manages projects.**
 
 ## Project Management (2026-10-06)
 

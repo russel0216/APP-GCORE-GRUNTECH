@@ -170,7 +170,7 @@ async function main() {
         const fallback = roleMembers.get(fallbackKey) ?? [];
         if (fallback.length === 0) {
           issues.push(
-            `step ${step.sequence} "${step.name}" routes to the project's manager and falls back to ${step.role?.name ?? 'Executive / Management'}, which nobody holds — a project manager's own request, or one on a project with no manager, routes to nobody`,
+            `step ${step.sequence} "${step.name}" routes to the Technical Manager named on the document or project and falls back to ${step.role?.name ?? 'Executive / Management'}, which nobody holds — their own request, or one with no Technical Manager named, routes to nobody`,
           );
         }
         if (unmanagedJobs > 0 && wf.documentType !== 'job_order') {

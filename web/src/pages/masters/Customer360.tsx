@@ -533,7 +533,7 @@ export function Customer360Page() {
           title="Job orders"
           count={jobOrders.length}
           empty="No service work has been requested for this customer."
-          head={['Number', 'Project', 'Target', 'Amount', 'Project manager', 'Status']}
+          head={['Number', 'Project', 'Target', 'Amount', 'Technical Manager', 'Status']}
         >
           {jobOrders.map((j) => (
             <tr key={j.id}>

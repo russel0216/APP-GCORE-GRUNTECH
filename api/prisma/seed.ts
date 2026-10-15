@@ -49,6 +49,49 @@ const VIEW_OWN_SELF = (mod: string, sub: string) => [
   `${mod}.${sub}.edit_own`,
 ];
 
+/**
+ * What a project's manager does (2026-10-15, the owner's call: "project
+ * manager is the technical manager"): the `project_manager` role keeps these,
+ * and the `technical_manager` role holds them too, since that is who manages
+ * projects now.
+ */
+const PROJECT_MANAGER_GRANTS: [string, string?][] = [
+  ['gops', 'projects'],
+  ['gops', 'plans'],
+  ['gops', 'budget_monitoring'],
+  ['gops', 'purchase_requests'],
+  ['gops', 'budget_requests'],
+  ['gops', 'progress_billing'],
+  ['gops', 'costing'],
+];
+const PROJECT_MANAGER_ONLY: string[] = [
+  'gops.dashboard.view_all',
+  'gops.customers.view_all',
+  // Margin on the projects they run.
+  'insights.profitability.view_all',
+  'insights.profitability.export',
+  'gops.installed_base.view_all',
+  'gops.visits.view_all',
+  'gops.quotations.view_all',
+  'gops.job_orders.view_all',
+  ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
+  'gops.cad_job_orders.view_all',
+  'gchain.purchase_requests.view_all',
+  // A PM raises stock-replenishment requests too, not only direct-to-job
+  // ones from the project workspace.
+  'gchain.purchase_requests.create',
+  'gchain.purchase_requests.edit_own',
+  'gchain.purchase_requests.view_own',
+  'gchain.purchase_orders.view_all',
+  'gchain.inventory.view_all',
+  'gfin.budget_vs_actual.view_all',
+  ...VIEW_OWN_SELF('gfin', 'expenses'),
+  ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+  ...VIEW_OWN_SELF('ghr', 'evaluations'),
+  ...VIEW_OWN_SELF('ghr', 'meetings'),
+];
+
+
 const ROLES: RoleSeed[] = [
   {
     key: 'executive',
@@ -198,8 +241,12 @@ const ROLES: RoleSeed[] = [
     // holds it, costings stall at step 1 and audit-workflows.ts says so.
     key: 'technical_manager',
     name: 'Technical Manager',
-    description: 'Reviews a costing and a purchase requisition before the team leader — the first signature on both routes',
+    description: 'Manages projects (the project manager is the Technical Manager) and is the first signature on costings, requisitions, job orders and supplier bills',
+    grants: PROJECT_MANAGER_GRANTS,
     only: [
+      ...PROJECT_MANAGER_ONLY,
+      // The first signature on a supplier bill (2026-10-15), so reads them.
+      'gfin.ap.view_all',
       'gops.dashboard.view_all',
       'gops.costing.view_all',
       // The routing sheet of 2026-10-13: a Technical Manager prepares
@@ -271,42 +318,9 @@ const ROLES: RoleSeed[] = [
   {
     key: 'project_manager',
     name: 'Project Manager',
-    description: 'Runs projects — budget, procurement requests, progress and billing',
-    grants: [
-      ['gops', 'projects'],
-      ['gops', 'plans'],
-      ['gops', 'budget_monitoring'],
-      ['gops', 'purchase_requests'],
-      ['gops', 'budget_requests'],
-      ['gops', 'progress_billing'],
-      ['gops', 'costing'],
-    ],
-    only: [
-      'gops.dashboard.view_all',
-      'gops.customers.view_all',
-      // Margin on the projects they run.
-      'insights.profitability.view_all',
-      'insights.profitability.export',
-      'gops.installed_base.view_all',
-      'gops.visits.view_all',
-      'gops.quotations.view_all',
-      'gops.job_orders.view_all',
-      ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
-      'gops.cad_job_orders.view_all',
-      'gchain.purchase_requests.view_all',
-      // A PM raises stock-replenishment requests too, not only direct-to-job
-      // ones from the project workspace.
-      'gchain.purchase_requests.create',
-      'gchain.purchase_requests.edit_own',
-      'gchain.purchase_requests.view_own',
-      'gchain.purchase_orders.view_all',
-      'gchain.inventory.view_all',
-      'gfin.budget_vs_actual.view_all',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'evaluations'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
+    description: 'Runs projects — budget, procurement requests, progress and billing. Technical Managers now hold the same rights; this role is kept for those who already have it',
+    grants: PROJECT_MANAGER_GRANTS,
+    only: PROJECT_MANAGER_ONLY,
   },
   {
     key: 'project_engineer',
@@ -1065,13 +1079,20 @@ const WORKFLOWS: WorkflowSeed[] = [
     documentType: 'supplier_bill',
     name: 'Supplier bill — up to P50,000',
     maxAmount: 50_000,
-    steps: [{ sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' }],
+    // The Technical Manager on the preparer's team since 2026-10-15 — the
+    // project's manager is its Technical Manager.
+    steps: [{ sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' }],
+    previously: [{ sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' }],
   },
   {
     documentType: 'supplier_bill',
     name: 'Supplier bill — P50,000 and above',
     minAmount: 50_000,
     steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+    ],
+    previously: [
       { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
       { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
     ],
@@ -1117,8 +1138,15 @@ const WORKFLOWS: WorkflowSeed[] = [
     // PM raised it), then the salesperson's Team Leader — their "Reports to",
     // the sales managers when none is set. "Job order — service manager" is
     // RETIRED below.
+    // The project's manager IS its Technical Manager (2026-10-15, the owner's
+    // call): step 1 reads the Technical Manager named on the order, falling
+    // back to the Technical Managers on the requester's team.
     name: 'Job order — project manager then team leader',
     steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'PROJECT_MANAGER', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
+    ],
+    previously: [
       { sequence: 1, name: 'Project Manager', approverType: 'PROJECT_MANAGER', roleKey: 'project_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
     ],

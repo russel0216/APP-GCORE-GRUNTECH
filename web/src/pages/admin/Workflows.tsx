@@ -45,7 +45,7 @@ interface DocType {
 
 const APPROVER_LABELS: Record<Step['approverType'], string> = {
   SUPERVISOR: 'The requester’s supervisor',
-  PROJECT_MANAGER: 'The project’s manager',
+  PROJECT_MANAGER: 'The Technical Manager on the document or project',
   HR: 'HR',
   ROLE: 'Anyone with a role',
   USER: 'One specific person',
@@ -487,13 +487,13 @@ function WorkflowEditor({
             /* The project's manager decides; when the project has none, or the manager raised it, this role does. */
             <select
               value={step.roleId ?? ''}
-              aria-label="When the project has no manager, or the manager raised it"
+              aria-label="When no Technical Manager is named, or they raised it"
               onChange={(e) => update(i, { roleId: e.target.value || null })}
             >
-              <option value="">No project manager, or their own request: Executive / Management</option>
+              <option value="">No Technical Manager named, or their own request: Executive / Management</option>
               {roles.map((r) => (
                 <option key={r.id} value={r.id}>
-                  No project manager, or their own request: {r.name}
+                  No Technical Manager named, or their own request: {r.name}
                 </option>
               ))}
             </select>

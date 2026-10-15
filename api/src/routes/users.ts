@@ -202,12 +202,18 @@ userRoutes.get(
   right — through a role or an ALLOW override, and not taken away by a DENY
   override — which is what the trainer and evaluator pickers ask. Super
   admins hold everything, as can() says they do.
+
+  `role=<role key>` narrows to the active holders of that ROLE (2026-10-15:
+  the project's Technical Manager is picked from the Technical Managers, not
+  from everybody who can read projects). Super admins are not added — a role
+  is a job, not a right.
 */
 userRoutes.get(
   '/lookup',
   handler(async (req, res) => {
     const q = String(req.query.q ?? '').trim();
     const holding = String(req.query.holding ?? '').trim();
+    const role = String(req.query.role ?? '').trim();
 
     const where: Prisma.UserWhereInput = { isActive: true };
     if (q) {
@@ -236,6 +242,10 @@ userRoutes.get(
           ],
         },
       ];
+    }
+
+    if (role) {
+      where.roles = { some: { role: { key: role } } };
     }
 
     const rows = await prisma.user.findMany({

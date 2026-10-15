@@ -3856,7 +3856,15 @@ async function main() {
       const r = await prisma.approvalRequest.findUnique({ where: { id: rmbReq!.id }, include: { workflow: { include: { steps: true } } } });
       if (r?.status !== 'PENDING') break;
       const st = r.workflow!.steps.find((x) => x.sequence === r.currentSequence)!;
-      const who = (await approversForStep(st, r.requesterId, prisma, {})).filter((id) => id !== r.requesterId)[0];
+      // An approver who decides no later step: one who does would co-sign it
+      // ("one signature per person") and the walk would skip a stage — which
+      // one the database lists first is not this check's business.
+      const eligible = (await approversForStep(st, r.requesterId, prisma, {})).filter((id) => id !== r.requesterId);
+      const later = new Set<string>();
+      for (const ls of r.workflow!.steps.filter((x) => x.sequence > r.currentSequence)) {
+        for (const id of await approversForStep(ls, r.requesterId, prisma, {})) later.add(id);
+      }
+      const who = eligible.find((id) => !later.has(id)) ?? eligible[0];
       await act({ requestId: r.id, userId: who, action: 'APPROVED' });
       ordered.push((await stageOf()) ?? '?');
     }

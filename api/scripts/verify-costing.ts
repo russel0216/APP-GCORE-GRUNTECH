@@ -71,6 +71,18 @@ function check(label: string, condition: boolean, detail?: string) {
 const money = (a: number, b: number) => Math.abs(a - b) < 0.005;
 
 /** The sign-off block's text — from PREPARED BY to the strapline — one line, a wrapped name read whole. */
+/**
+ * The Technical Manager slot of a paper's sign-offs: everything from its role
+ * to the next role. Who else holds the role in the database (and how their
+ * names sort) is not these checks' business — only whether ours is named.
+ */
+function tmSlot(text: string): string {
+  const at = text.indexOf('TECHNICAL MANAGER');
+  if (at < 0) return '';
+  const end = text.indexOf('TEAM LEADER', at);
+  return text.slice(at, end < 0 ? undefined : end);
+}
+
 function signoffs(runs: string[]): string {
   const from = runs.indexOf('PREPARED BY');
   if (from < 0) return '';
@@ -1286,7 +1298,7 @@ async function main() {
   const reopened = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
   check(
     'a reopened costing prints the route anew — both steps Pending, none of the old signatures dated',
-    (reopened.match(/Pending/g) ?? []).length === 2 && reopened.includes(`TECHNICAL MANAGER ${reviewer.name}`),
+    (reopened.match(/Pending/g) ?? []).length === 2 && /TECHNICAL MANAGER [^]*?Pending/.test(reopened) && tmSlot(reopened).includes(reviewer.name),
     reopened,
   );
   await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
@@ -1431,7 +1443,7 @@ async function main() {
   const drafted = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${empty.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
   check(
     'a draft prints the route it would take: each step by name, who is assigned, Pending under them — never the author',
-    drafted.includes(`TECHNICAL MANAGER ${reviewer.name}`) && (drafted.match(/Pending/g) ?? []).length === 2 && !drafted.includes(`TECHNICAL MANAGER ${estimator.name}`),
+    tmSlot(drafted).includes(reviewer.name) && (drafted.match(/Pending/g) ?? []).length === 2 && !tmSlot(drafted).includes(estimator.name),
     drafted,
   );
 

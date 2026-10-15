@@ -330,7 +330,7 @@ export function ProjectWorkspace() {
           <>
             <Link to={`/g-ops/customers/${job.customer.id}`}>{job.customer.name}</Link>
             {job.site ? ` · ${job.site.name}` : ''}
-            {job.projectManager ? ` · project manager ${job.projectManager.name}` : ' · no project manager'}
+            {job.projectManager ? ` · Technical Manager ${job.projectManager.name}` : ' · no Technical Manager'}
             {job.costing && (
               <>
                 {' '}
@@ -603,7 +603,7 @@ export function ProjectWorkspace() {
                 />
               )}
               <Row label="Actual end" value={job.actualEndDate ? formatDate(job.actualEndDate) : null} />
-              <Row label="Project manager" value={job.projectManager?.name} />
+              <Row label="Technical Manager" value={job.projectManager?.name} />
               <Row label="Site" value={job.site ? [job.site.name, job.site.city].filter(Boolean).join(' — ') : null} />
               <Row label="Created by" value={job.createdBy.name} />
             </dl>
@@ -2049,8 +2049,8 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  // Naming a project manager is not the admin right to list users.
-  const { people } = usePeople();
+  // The project's manager is its Technical Manager; naming one is not the admin right to list users.
+  const { people } = usePeople('role:technical_manager');
   const pmId = useId();
   const [form, setForm] = useState({
     name: job.name,
@@ -2121,7 +2121,7 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
             ))}
           </select>
         </Field>
-        <Field label="Project manager" htmlFor={pmId}>
+        <Field label="Technical Manager" htmlFor={pmId}>
           <PersonSelect
             id={pmId}
             value={form.projectManagerId}

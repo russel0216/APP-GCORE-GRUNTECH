@@ -1414,7 +1414,11 @@ async function main() {
       form.set('files', new Blob([png], { type: 'image/png' }), 'pumps.png');
       return (await fetch(`${BASE}/attachments/progress_report_day/${dayId}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form })).status;
     };
-    const strangerUp = await upload(approverToken);
+    // A reader of every report who may edit none (the Technical Manager may
+    // edit them since 2026-10-15 — the project's manager is its Technical Manager).
+    const readerRole = await makeRole('progreader', ['gops.progress_billing.view_all']);
+    const progReader = await makeUser(`${TAG} Reader`, 'progreader@verifyd.local', [readerRole.key]);
+    const strangerUp = await upload(signToken(progReader.id, progReader.email));
     const ownUp = await upload(billerToken);
     check('the day takes a picture from whoever may edit the report, and from nobody else', ownUp === 201 && strangerUp === 403, `${ownUp} / ${strangerUp}`);
     const patched = await http(billerToken, 'PATCH', `/progress-reports/${r3.body.id}`, {

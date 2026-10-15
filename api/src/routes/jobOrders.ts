@@ -334,7 +334,7 @@ jobOrderRoutes.get(
       named.project ? `project ${named.project}` : null,
       f.quotationId ? `quotation ${quotation?.number ?? 'not found'}` : null,
       f.salesOrderId ? `sales order ${salesOrder?.number ?? 'not found'}` : null,
-      named.person ? `project manager ${named.person}` : null,
+      named.person ? `Technical Manager ${named.person}` : null,
       assignee,
       rangeNamed('target start', f.from, f.to),
       q.scope === 'mine' ? 'raised by me or sending me' : null,
@@ -349,7 +349,7 @@ jobOrderRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Project', 'Customer', 'Target', `Amount (${currency})`, 'Project manager', 'Links', 'Status'],
+          head: ['Number', 'Project', 'Customer', 'Target', `Amount (${currency})`, 'Technical Manager', 'Links', 'Status'],
           align: ['left', 'left', 'left', 'left', 'right', 'left', 'left', 'left'],
           rows: rows.map((r) => {
             const t = targets(r);
@@ -971,7 +971,7 @@ jobOrderRoutes.get(
         title: 'Personnel to send',
         columns: 2,
         fields: [
-          { label: 'Project manager', value: nameOf(row.projectManager) },
+          { label: 'Technical Manager', value: nameOf(row.projectManager) },
           { label: 'Project engineer', value: nameOf(row.projectEngineer) },
           { label: 'Project lead', value: nameOf(row.projectLead) },
           { label: 'Project support', value: row.support.length ? row.support.map((s) => s.user.name).join(', ') : '—' },

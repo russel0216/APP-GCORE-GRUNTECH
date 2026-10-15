@@ -180,7 +180,7 @@ export function jobOrderColumns(): Column<JobOrderRow>[] {
     },
     {
       key: 'people',
-      label: 'Project manager',
+      label: 'Technical Manager',
       render: (r) => (
         <div>
           <div>{r.projectManager?.name ?? <span className="badge warn">none named</span>}</div>
@@ -384,6 +384,8 @@ export function JobOrderModal({
   const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
   const [options, setOptions] = useState<Options>(NO_OPTIONS);
   const { people } = usePeople();
+  // The project's manager is its Technical Manager (2026-10-15, the owner's call).
+  const { people: technicalManagers } = usePeople('role:technical_manager');
   const idBase = useId();
   // The customer is fixed once raised, and when the page that opened the form
   // named it; otherwise it is the one customer picker — for those who may read
@@ -537,7 +539,7 @@ export function JobOrderModal({
         id={`${idBase}-${key}`}
         value={form[key]}
         onChange={(id) => set(key, id)}
-        people={people}
+        people={key === 'projectManagerId' ? technicalManagers : people}
         current={onRecord[key]}
       />
     </Field>
@@ -710,7 +712,7 @@ export function JobOrderModal({
 
       <h4 className="svc-subhead">Personnel to send</h4>
       <div className="grid grid-3">
-        {personSelect('Project manager', 'projectManagerId', 'Approves the order first; runs the project')}
+        {personSelect('Technical Manager', 'projectManagerId', 'Approves the order first; runs the project as its manager')}
         {personSelect('Project engineer', 'projectEngineerId')}
         {personSelect('Project lead', 'projectLeadId')}
       </div>
@@ -897,7 +899,7 @@ export function JobOrderDetail() {
         </div>
       )}
       {r.status === 'PENDING_APPROVAL' && (
-        <div className="alert info">With the approvers — the project manager, then the team leader. To change it, ask them to return it.</div>
+        <div className="alert info">With the approvers — the Technical Manager, then the team leader. To change it, ask them to return it.</div>
       )}
       {r.status === 'REJECTED' && <div className="alert warn">Returned. Correct what the approver asked for, then submit it again.</div>}
       {r.status === 'CANCELLED' && (
@@ -1011,7 +1013,7 @@ export function JobOrderDetail() {
       <section className="card">
         <h3 className="card-title">Personnel to send</h3>
         <dl className="kv">
-          <dt>Project manager</dt>
+          <dt>Technical Manager</dt>
           <dd>{personLine(r.projectManager)}</dd>
           <dt>Project engineer</dt>
           <dd>{personLine(r.projectEngineer)}</dd>

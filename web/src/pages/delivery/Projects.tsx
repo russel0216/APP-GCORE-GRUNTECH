@@ -178,7 +178,7 @@ export function Projects() {
         </span>
       ),
     },
-    { key: 'pm', label: 'Manager', render: (j) => j.projectManager?.name ?? <span className="faint">unassigned</span> },
+    { key: 'pm', label: 'Technical Manager', render: (j) => j.projectManager?.name ?? <span className="faint">unassigned</span> },
     { key: 'targetEndDate', label: 'Target end', render: (j) => formatDate(j.targetEndDate), optional: true },
     {
       key: 'status',
@@ -300,7 +300,7 @@ function NewJobModal({
   const [error, setError] = useState<unknown>(null);
   const [costings, setCostings] = useState<CostingOption[]>([]);
   const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
-  const { people } = usePeople();
+  const { people } = usePeople('role:technical_manager');
   const pmId = useId();
   const customerInputId = useId();
   const [chosen, setChosen] = useState<CostingDetail | null>(null);
@@ -563,7 +563,7 @@ function NewJobModal({
             </select>
           </Field>
         )}
-        <Field label="Project manager" htmlFor={pmId}>
+        <Field label="Technical Manager" htmlFor={pmId}>
           <PersonSelect
             id={pmId}
             value={form.projectManagerId}

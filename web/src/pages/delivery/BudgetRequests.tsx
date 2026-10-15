@@ -528,7 +528,7 @@ export function BudgetRequestModal({
         ? await api.put<{ id: string }>(`/budget-requests/${existing.id}`, body)
         : await api.post<{ id: string }>('/budget-requests', body);
       if (submitNow) await api.post(`/budget-requests/${saved.id}/submit`);
-      toast('ok', submitNow ? 'Sent to the project manager' : existing ? 'Saved' : 'Saved as a draft');
+      toast('ok', submitNow ? 'Sent for approval' : existing ? 'Saved' : 'Saved as a draft');
       onSaved(saved.id);
     } catch (err) {
       setError(err);
@@ -662,8 +662,8 @@ export function ProjectBudgetRequestsCard({
         )}
       </div>
       <p className="muted del-lede">
-        Cash for the team to buy what it needs without a purchase requisition. The project manager
-        allows it, finance releases it, and it is liquidated with receipts in Expenses — only what
+        Cash for the team to buy what it needs without a purchase requisition. The team leader, back
+        support and the finance manager allow it, finance releases it, and it is liquidated with receipts in Expenses — only what
         was spent reaches the budget, as incurred.
       </p>
       <ErrorBox error={error} />
@@ -851,7 +851,7 @@ export function BudgetRequestDetail() {
   async function submit() {
     try {
       await api.post(`/budget-requests/${id}/submit`);
-      toast('ok', 'Sent to the project manager');
+      toast('ok', 'Sent for approval');
       done();
     } catch (err) {
       setError(err);
@@ -890,7 +890,7 @@ export function BudgetRequestDetail() {
               {row.job.number}
             </Link>{' '}
             {row.job.name} · {row.costCategory.name}
-            {row.job.projectManager && <> · project manager {row.job.projectManager.name}</>}
+            {row.job.projectManager && <> · Technical Manager {row.job.projectManager.name}</>}
           </>
         }
         actions={

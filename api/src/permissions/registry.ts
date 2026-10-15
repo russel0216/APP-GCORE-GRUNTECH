@@ -128,7 +128,7 @@ export const REGISTRY: ModuleDef[] = [
       // is a tab inside the project, and a link from the Projects page.
       { key: 'costing', group: 'Project Management', label: 'Costing', path: '/g-ops/costing', actions: OWNED, phase: 3 },
       { key: 'projects', group: 'Project Management', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
-      { key: 'job_orders', group: 'Project Management', label: 'Job Orders', path: '/g-ops/job-orders', actions: OWNED, phase: 8, note: 'The project work order: sales raises it on a quotation, the project manager and the team leader approve, and approval builds the project' },
+      { key: 'job_orders', group: 'Project Management', label: 'Job Orders', path: '/g-ops/job-orders', actions: OWNED, phase: 8, note: 'The project work order: sales raises it on a quotation, the Technical Manager and the team leader approve, and approval builds the project' },
       // The design team's queue (2026-10-09, the owner's call): a request for a
       // drawing, with files, revisions and a comment thread. No approval
       // route — "Approve" here is the Designer Lead's right to dispatch:

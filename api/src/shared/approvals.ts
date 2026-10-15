@@ -176,7 +176,9 @@ export const PROJECT_MANAGER_FALLBACK_ROLE = 'executive';
  * request's), and falls back to the step's role — Executive unless the step
  * names another — when the project has no manager, the document names no
  * project, or the manager IS the requester (2026-10-07, the owner's call: a
- * PM's own request goes up to management, never to nobody).
+ * PM's own request goes up to management, never to nobody). The project's
+ * manager is its Technical Manager (2026-10-15); a step falling back to the
+ * `technical_manager` role asks the one on the requester's team.
  */
 export async function approversForStep(
   step: ApprovalStep,
@@ -198,9 +200,14 @@ export async function approversForStep(
       if (step.roleId) {
         const rows = await tx.userRole.findMany({
           where: { roleId: step.roleId, user: { isActive: true } },
-          select: { userId: true },
+          select: { userId: true, role: { select: { key: true } } },
         });
-        return rows.map((r) => r.userId);
+        const holders = rows.map((r) => r.userId);
+        // The Technical Manager fallback (2026-10-15: the project's manager IS
+        // its Technical Manager) is the one on the requester's own team, as a
+        // ROLE step naming that role is — never a Technical Manager of another team.
+        if (rows.length && OWN_TEAM_ROLES.includes(rows[0].role.key)) return leadersFor(holders, requesterId, tx);
+        return holders;
       }
       return usersInRole(PROJECT_MANAGER_FALLBACK_ROLE, tx);
     }

@@ -221,7 +221,7 @@ export async function scanAccountabilities(employee: {
         area: 'SUPERVISOR',
         sourceType: 'job',
         sourceId: j.id,
-        description: `Project ${j.number} ${j.name} — reassign the project manager`,
+        description: `Project ${j.number} ${j.name} — reassign the Technical Manager`,
         link: `/g-ops/projects/${j.id}`,
       });
     }

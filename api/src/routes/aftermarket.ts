@@ -1222,7 +1222,7 @@ contractRoutes.patch(
     });
     if (!contract) throw notFound('Service contract not found');
     if (!canEditRecord(me, 'gops', 'service_contracts', contract.job.projectManagerId)) {
-      throw forbidden("Only the project manager on this contract's job, or whoever manages every contract, can change its cover");
+      throw forbidden("Only the Technical Manager on this contract's job, or whoever manages every contract, can change its cover");
     }
     if (!MODIFIABLE_CONTRACT.has(contract.status)) {
       throw badRequest(CLOSED_CONTRACT[contract.status] ?? 'This contract cannot be changed');

@@ -1008,12 +1008,15 @@ async function main() {
   // ── 5. Amount bands pick the workflow ──────────────────────────────────────
   console.log('\nApproval thresholds');
 
-  // Someone has to hold the project_manager role, or these workflows route to
-  // nobody. The engine warns loudly in that case rather than silently stalling.
-  // The supplier bill's routes: the purchase requisition's became one route
-  // with no band on 2026-10-13, and the bill's still band at ₱50,000 and do
-  // not let the preparer sign — what these checks are about.
-  const pm = await makeUser('Verify PM', 'pm@verify.local', ['project_manager']);
+  // Someone has to hold the technical_manager role (the supplier bill's first
+  // step since 2026-10-15, when the project's manager became its Technical
+  // Manager), or these workflows route to nobody. The engine warns loudly in
+  // that case rather than silently stalling. The supplier bill's routes: the
+  // purchase requisition's became one route with no band on 2026-10-13, and
+  // the bill's still band at ₱50,000 and do not let the preparer sign — what
+  // these checks are about. The requester has no team, so the team-scoped step
+  // falls back to every Technical Manager.
+  const pm = await makeUser('Verify PM', 'pm@verify.local', ['technical_manager', 'project_manager']);
 
   const small = await submitForApproval({
     documentType: 'supplier_bill',
@@ -1064,7 +1067,7 @@ async function main() {
 
   // With a second project manager the same document submits fine — and the
   // self-approval rule is what stops the requester acting on it.
-  const pm2 = await makeUser('Verify PM Two', 'pm2@verify.local', ['project_manager']);
+  const pm2 = await makeUser('Verify PM Two', 'pm2@verify.local', ['technical_manager', 'project_manager']);
   const pmOwnRequest = await submitForApproval({
     documentType: 'supplier_bill',
     documentId: `${TAG}-pr-pm-own`,

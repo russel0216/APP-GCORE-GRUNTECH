@@ -764,13 +764,13 @@ async function main() {
     'raised yourself',
   );
   await expectRejection(
-    'nor can the team leader before the project manager named on the order',
+    'nor can the team leader before the Technical Manager named on the order',
     () => act({ requestId: joApproval.id, userId: manager.id, action: 'APPROVED' }),
     'not',
   );
   await act({ requestId: joApproval.id, userId: director.id, action: 'APPROVED' });
   check(
-    'the project manager named on the order signs first, and the order waits for the team leader',
+    'the Technical Manager named on the order signs first, and the order waits for the team leader',
     (await prisma.jobOrder.findUnique({ where: { id: warrantyOrder.id } }))?.status === 'PENDING_APPROVAL',
   );
   await act({ requestId: joApproval.id, userId: manager.id, action: 'APPROVED' });
@@ -786,6 +786,35 @@ async function main() {
     where: { userId: engineer.id, link: `/g-ops/job-orders/${warrantyOrder.id}`, title: { contains: 'approved' } },
   });
   check('the people sent are told, with a link to the order', !!engineerHeard);
+
+  // The project's manager IS its Technical Manager (2026-10-15, the owner's
+  // call): the first step is named so, and with no one named on the order it
+  // falls back to the Technical Managers — never to the old Project Manager role.
+  const joStep1 = await prisma.approvalStep.findFirstOrThrow({
+    where: { workflowId: joApproval.workflowId!, sequence: 1 },
+    include: { role: { select: { key: true } } },
+  });
+  const tmHolder = await makeUser('ZZ Technical Manager', 'tm@verifya.local', ['technical_manager']);
+  const pmOnly = await makeUser('ZZ Old Project Manager', 'oldpm@verifya.local', ['project_manager']);
+  const fallbackTo = await approversForStep(joStep1, sales.id, prisma, {});
+  check(
+    'the job order’s first step is the Technical Manager, falling back to the Technical Managers when none is named',
+    joStep1.name === 'Technical Manager' &&
+      joStep1.approverType === 'PROJECT_MANAGER' &&
+      joStep1.role?.key === 'technical_manager' &&
+      fallbackTo.includes(tmHolder.id) &&
+      !fallbackTo.includes(pmOnly.id),
+    `${joStep1.name} ${joStep1.role?.key} · ${fallbackTo.length} approvers`,
+  );
+  const tmLookup = await fetch(`${BASE}/users/lookup?role=technical_manager`, {
+    headers: { Authorization: `Bearer ${signToken(sales.id, sales.email)}` },
+  });
+  const tmPeople = (await tmLookup.json()) as { id: string }[];
+  check(
+    'the Technical Manager picker lists the holders of the role, and nobody else',
+    tmLookup.status === 200 && tmPeople.some((p) => p.id === tmHolder.id) && !tmPeople.some((p) => p.id === pmOnly.id || p.id === sales.id),
+    `${tmLookup.status} ${tmPeople.length}`,
+  );
 
   await settleJobOrder({ documentId: warrantyOrder.id }, 'APPROVED');
   check(
