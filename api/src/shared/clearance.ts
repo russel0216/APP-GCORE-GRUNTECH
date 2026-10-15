@@ -117,7 +117,8 @@ export async function scanAccountabilities(employee: {
   // borrowerId is reliable, and the screen says "searched by name" on those.
   const slips = await prisma.borrowSlip.findMany({
     where: {
-      status: { not: 'RETURNED' },
+      // Only what has gone out: a request not yet released holds nothing.
+      status: { in: ['OUT', 'PARTIALLY_RETURNED', 'OVERDUE'] },
       ...(userId
         ? { borrowerId: userId }
         : { borrowerId: null, borrowerName: { equals: fullName, mode: 'insensitive' } }),
@@ -220,7 +221,7 @@ export async function scanAccountabilities(employee: {
         area: 'SUPERVISOR',
         sourceType: 'job',
         sourceId: j.id,
-        description: `Project ${j.number} ${j.name} — reassign the project manager`,
+        description: `Project ${j.number} ${j.name} — reassign the Technical Manager`,
         link: `/g-ops/projects/${j.id}`,
       });
     }
@@ -228,7 +229,7 @@ export async function scanAccountabilities(employee: {
     const [tasks, leads, quotations, visits, activities, sessions, reports, approvals] = await Promise.all([
       prisma.jobTask.count({ where: { assignedToId: userId, status: { notIn: ['DONE'] } } }),
       prisma.lead.count({ where: { assignedToId: userId, status: { notIn: ['WON', 'LOST'] } } }),
-      prisma.quotation.count({ where: { ownerId: userId, outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] } } }),
+      prisma.quotation.count({ where: { ownerId: userId, outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'ON_HOLD'] } } }),
       prisma.serviceVisit.count({ where: { assignedToId: userId, status: 'SCHEDULED' } }),
       prisma.salesActivity.count({ where: { assignedToId: userId, status: 'PLANNED', startsAt: { gte: today } } }),
       prisma.trainingSession.count({ where: { trainerId: userId, status: 'SCHEDULED' } }),

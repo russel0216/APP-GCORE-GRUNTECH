@@ -236,7 +236,8 @@
   border-right: 1px solid var(--line-soft);
 }
 
-.gantt-day.is-weekend {
+/* Sunday — the one day off in a Mon–Sat week (2026-10-13). */
+.gantt-day.is-off {
   background: var(--surface-3);
 }
 
@@ -385,4 +386,59 @@
   margin: 0;
   font-size: var(--fs-md);
   grid-row: 2;
+}
+
+/* The Accomplishment Report (2026-10-15): a card head with its button, each
+   day's entry ruled off from the next, and a link-weight button in a cell. */
+.pr-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.pr-day {
+  border-top: 1px solid var(--line);
+  padding-top: var(--s-4);
+}
+
+.pr-day:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.pr-day-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-2);
+}
+
+.pr-day-head .btn {
+  margin-left: auto;
+}
+
+.pr-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--magenta);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.pr-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+/* The project's Costing tab: a bucket's row and a subheading. */
+.pc-group td {
+  background: rgba(var(--tint-rgb), 0.04);
+}
+
+.pc-subhead {
+  color: var(--ok);
 }

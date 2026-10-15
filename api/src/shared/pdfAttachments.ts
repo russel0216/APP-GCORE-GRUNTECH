@@ -233,3 +233,17 @@ export async function copyAttachments(
   }
   return copied;
 }
+
+/**
+ * One document's pages, then another's — the designed costing, then its Scope
+ * of Work chart (2026-10-13). Each keeps its own pages as drawn, its "Page n
+ * of m" included. Saved without object streams, so a page's dictionary stays
+ * readable to anything that scans the file (the verify scripts do).
+ */
+export async function appendPdf(main: Buffer, extra: Buffer): Promise<Buffer> {
+  const out = await PDFDocument.load(main);
+  const add = await PDFDocument.load(extra);
+  const pages = await out.copyPages(add, add.getPageIndices());
+  for (const page of pages) out.addPage(page);
+  return Buffer.from(await out.save({ useObjectStreams: false }));
+}

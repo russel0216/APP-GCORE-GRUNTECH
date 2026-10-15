@@ -10,6 +10,9 @@ import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES } from '../s
 import { groupShares, quotationValue, valueRevision } from '../shared/pipeline';
 import { groupKey } from '../shared/quotationGroups';
 import { manilaDayStart } from '../shared/day';
+
+/** Lost, not cancelled: a null-safe filter (a Prisma `NOT` on a nullable column would drop the nulls). */
+const NOT_CANCELLED = { OR: [{ lostKind: null }, { lostKind: 'LOST' as const }] };
 import {
   cents,
   num,
@@ -133,7 +136,8 @@ insightRoutes.get(
       }),
       // decidedAt is a timestamp: Manila's days, fromAt..toAt (parseRange).
       prisma.quotation.count({ where: { outcome: 'WON', decidedAt: { gte: range.fromAt, lte: range.toAt } } }),
-      prisma.quotation.count({ where: { outcome: 'LOST', decidedAt: { gte: range.fromAt, lte: range.toAt } } }),
+      // A cancelled quotation (2026-10-13) is neither won nor lost: the customer dropped it.
+      prisma.quotation.count({ where: { outcome: 'LOST', ...NOT_CANCELLED, decidedAt: { gte: range.fromAt, lte: range.toAt } } }),
       prisma.job.count({ where: { status: { in: ['PLANNING', 'IN_PROGRESS'] } } }),
       prisma.job.count({
         where: { status: { in: ['COMPLETED', 'TURNED_OVER'] }, actualEndDate: { gte: range.from, lte: range.to } },
@@ -486,6 +490,7 @@ insightRoutes.get(
           submittedAt: true,
           decidedAt: true,
           lostReason: true,
+          lostKind: true,
           createdAt: true,
           customer: { select: { id: true, name: true, subIndustry: subIndustrySelect } },
           owner: { select: { id: true, name: true } },
@@ -610,7 +615,7 @@ insightRoutes.get(
           industry.won++;
           industry.wonValue = cents(industry.wonValue + value);
         }
-        if (q.outcome === 'LOST') {
+        if (q.outcome === 'LOST' && q.lostKind !== 'CANCELLED') {
           person.lost++;
           industry.lost++;
         }
@@ -683,13 +688,15 @@ insightRoutes.get(
     }
 
     const lostReasons = new Map<string, number>();
-    for (const q of decidedInRange.filter((q) => q.outcome === 'LOST')) {
+    for (const q of decidedInRange.filter((q) => q.outcome === 'LOST' && q.lostKind !== 'CANCELLED')) {
       const key = q.lostReason?.trim() || 'Not recorded';
       lostReasons.set(key, (lostReasons.get(key) ?? 0) + 1);
     }
 
     const won = decidedInRange.filter((q) => q.outcome === 'WON');
-    const lost = decidedInRange.filter((q) => q.outcome === 'LOST');
+    const lost = decidedInRange.filter((q) => q.outcome === 'LOST' && q.lostKind !== 'CANCELLED');
+    // Cancelled by the customer (2026-10-13): neither won nor lost, counted apart.
+    const cancelled = decidedInRange.filter((q) => q.outcome === 'LOST' && q.lostKind === 'CANCELLED');
 
     res.json({
       range,
@@ -703,6 +710,7 @@ insightRoutes.get(
         wonValue: cents(won.reduce((s, q) => s + valueOf(q), 0)),
         lost: lost.length,
         lostValue: cents(lost.reduce((s, q) => s + valueOf(q), 0)),
+        cancelled: cancelled.length,
         winRatePct: pct(won.length, won.length + lost.length),
         medianDaysToDecide: median(
           decidedInRange.map((q) =>

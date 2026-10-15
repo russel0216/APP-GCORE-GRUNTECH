@@ -81,6 +81,8 @@ model User {
   clearancesReceived     EmployeeClearance[]  @relation("ClearanceReceiver")
   clearanceItemsCleared  ClearanceItem[]      @relation("ClearanceClearer")
   meetingsOrganized      Meeting[]            @relation("MeetingOrganizer")
+  meetingMinutesWritten  Meeting[]            @relation("MeetingMinutesBy")
+  flowItemsUpdated       EmployeeFlowItem[]   @relation("FlowItemUpdater")
   meetingInvites         MeetingInvitee[]     @relation("MeetingInvitee")
   evaluationsGiven       EmployeeEvaluation[] @relation("Evaluator")
   evaluationsScheduled   EmployeeEvaluation[] @relation("EvaluationScheduler")
@@ -99,22 +101,31 @@ model User {
   plansUploaded   ApprovedPlan[]   @relation("PlanUploader")
   tasksAssigned   JobTask[]        @relation("TaskAssignee")
 
-  prsRequested     PurchaseRequest[]      @relation("PrRequester")
-  canvassesCreated Canvass[]              @relation("CanvassCreator")
-  posCreated       PurchaseOrder[]        @relation("PoCreator")
-  receivings       Receiving[]            @relation("Receiver")
-  stockIssued      StockIssue[]           @relation("Issuer")
-  stockReceivedBy  StockIssue[]           @relation("IssuedTo")
-  borrowsTaken     BorrowSlip[]           @relation("Borrower")
-  borrowsIssued    BorrowSlip[]           @relation("BorrowIssuer")
-  stockMoves       InventoryTransaction[]
+  prsRequested      PurchaseRequest[]      @relation("PrRequester")
+  canvassesCreated  Canvass[]              @relation("CanvassCreator")
+  canvassesAwarded  Canvass[]              @relation("CanvassAwarder")
+  rfqsPrepared      Rfq[]                  @relation("RfqPreparer")
+  posCreated        PurchaseOrder[]        @relation("PoCreator")
+  receivings        Receiving[]            @relation("Receiver")
+  stockIssued       StockIssue[]           @relation("Issuer")
+  stockReceivedBy   StockIssue[]           @relation("IssuedTo")
+  borrowsTaken      BorrowSlip[]           @relation("Borrower")
+  borrowsIssued     BorrowSlip[]           @relation("BorrowIssuer")
+  borrowsRequested  BorrowSlip[]           @relation("BorrowRequester")
+  pulloutsPrepared  PulloutSlip[]          @relation("PulloutPreparer")
+  pulloutsReleased  PulloutSlip[]          @relation("PulloutReleaser")
+  pulloutsRequested PulloutSlip[]          @relation("PulloutRequester")
+  borrowsInspected  BorrowSlip[]           @relation("BorrowInspector")
+  stockMoves        InventoryTransaction[]
 
   facesEnrolled      FaceEnrollment[] @relation("FaceEnroller")
   attendanceRecorded Attendance[]     @relation("AttendanceRecorder")
   leaveDecided       LeaveRequest[]   @relation("LeaveDecider")
 
   invoicesCreated  Invoice[]      @relation("InvoiceCreator")
+  invoicesSold     Invoice[]      @relation("InvoiceSalesperson")
   billsCreated     SupplierBill[] @relation("BillCreator")
+  billsPurchased   SupplierBill[] @relation("BillPurchaser")
   expenseClaims    ExpenseClaim[] @relation("Claimant")
   paymentsRecorded Payment[]      @relation("PaymentRecorder")
   reimbursements   Payment[]      @relation("Payee")
@@ -146,9 +157,17 @@ model User {
 
   accountTokens AccountToken[]
 
-  lastLoginAt DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  lastLoginAt             DateTime?
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+  minutesAgreements       MinutesAgreement[]  @relation("MinutesAgreement")
+  issuesReceived          StockIssue[]        @relation("IssueReceivedBy")
+  billingsPrepared        ProgressBilling[]   @relation("BillingPreparer")
+  invoiceRequestsRaised   InvoiceRequest[]    @relation("InvoiceRequestRequester")
+  invoiceRequestsCredited InvoiceRequest[]    @relation("InvoiceRequestSalesperson")
+  commissionsRaised       CommissionRequest[] @relation("CommissionRequester")
+  commissionsCredited     CommissionRequest[] @relation("CommissionSalesperson")
+  commissionShares        CommissionShare[]   @relation("CommissionBeneficiary")
 
   @@index([isActive])
   @@index([supervisorId])
@@ -423,10 +442,14 @@ model ApprovalStep {
   name         String
   approverType ApproverType
 
-  roleId String?
-  role   Role?   @relation("StepRole", fields: [roleId], references: [id], onDelete: SetNull)
-  userId String?
-  user   User?   @relation("StepUser", fields: [userId], references: [id], onDelete: SetNull)
+  roleId      String?
+  role        Role?    @relation("StepRole", fields: [roleId], references: [id], onDelete: SetNull)
+  userId      String?
+  user        User?    @relation("StepUser", fields: [userId], references: [id], onDelete: SetNull)
+  /// On a SUPERVISOR step: holders of these roles on the requester's own team
+  /// decide it too, beside the "Reports to" (2026-10-14, the borrow slip's
+  /// "Team Leader / Technical Manager they report to or within the team").
+  alsoRoleIds String[] @default([])
 
   actions ApprovalAction[]
 
@@ -461,6 +484,12 @@ model ApprovalRequest {
 
   currentSequence Int            @default(1)
   status          ApprovalStatus @default(PENDING)
+  /// Pulled back to draft after it was APPROVED (2026-10-16, the owner's
+  /// call: "every approval request can be pulled back, even fully approved"):
+  /// the request closes CANCELLED with these set; its signatures are kept.
+  reopenedAt      DateTime?
+  reopenedById    String?
+  reopenReason    String?
 
   actions   ApprovalAction[]
   createdAt DateTime         @default(now())
@@ -487,6 +516,11 @@ model ApprovalAction {
   /// the route lets the preparer sign (`ApprovalWorkflow.preparerSigns`).
   /// Never pressed by anybody; dated the request's own instant.
   selfSigned   Boolean            @default(false)
+  /// Signed by the engine with an approver's own Approve (2026-10-13, "one
+  /// signature per person"): the approver may decide this later step in
+  /// their own right too, so it is signed at the same instant. The sequence
+  /// of the step whose Approve carried it; null for a step pressed.
+  coSignedWith Int?
   /// A stand-in's decision: the approver of the step they decided in place of
   /// (their direct report). `approverId` is who really acted.
   onBehalfOfId String?
@@ -608,9 +642,10 @@ model Customer {
   jobOrders      JobOrder[]
   cadJobOrders   CadJobOrder[]
 
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-  salesOrders SalesOrder[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  salesOrders        SalesOrder[]
+  commissionRequests CommissionRequest[]
 
   @@index([isActive])
   @@index([name])
@@ -679,20 +714,25 @@ model CustomerSite {
 /// until the teams took them over; a customer is now classified by
 /// SubIndustry, and `customers` only names the rows that still carry one.
 model Industry {
-  id               String            @id @default(cuid())
-  code             String            @unique // KAT, HIT, UIT, GIB, SIT — 2–4 uppercase letters
-  name             String
-  sortOrder        Int               @default(0)
-  isSystem         Boolean           @default(false)
-  isActive         Boolean           @default(true)
-  customers        Customer[]
+  id                 String              @id @default(cuid())
+  code               String              @unique // KAT, HIT, UIT, GIB, SIT — 2–4 uppercase letters
+  name               String
+  sortOrder          Int                 @default(0)
+  isSystem           Boolean             @default(false)
+  isActive           Boolean             @default(true)
+  customers          Customer[]
   /// The people on this team (Employee.industryId).
-  employees        Employee[]
+  employees          Employee[]
   /// Quotations tagged with this team (the SCORO import, 2026-10-12).
-  quotationsTagged Quotation[]       @relation("QuotationTeam")
-  supporters       UserSupportTeam[]
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
+  quotationsTagged   Quotation[]         @relation("QuotationTeam")
+  invoicesCredited   Invoice[]           @relation("InvoiceTeam")
+  supporters         UserSupportTeam[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  commissionRequests CommissionRequest[]
+  invoiceRequests    InvoiceRequest[]
+  jobOrders          JobOrder[]          @relation("JobOrderTeam")
+  cadJobOrders       CadJobOrder[]       @relation("CadJobOrderTeam")
 }
 
 /// A customer's sub-industry (2026-10-08, the owner's eleven): Enterprise,
@@ -741,14 +781,17 @@ model Supplier {
   contacts       SupplierContact[]
   preferredItems Item[]            @relation("PreferredSupplier")
   canvassEntries CanvassSupplier[]
+  rfqEntries     RfqSupplier[]
   purchaseOrders PurchaseOrder[]
   bills          SupplierBill[]
   payments       Payment[]
   quoteLines     QuotationItem[]
 
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  salesOrderLines SalesOrderLine[]
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  salesOrderLines      SalesOrderLine[]
+  costingLines         CostingLine[]
+  receivedWithoutOrder Receiving[]      @relation("ReceivingFrom")
 
   @@index([isActive])
   @@index([name])
@@ -892,6 +935,7 @@ model Employee {
   evaluations         EmployeeEvaluation[]
   trainingAttendances TrainingAttendee[]
   trainingRecords     TrainingRecord[]
+  flowItems           EmployeeFlowItem[]
 
   @@index([isActive])
   @@index([lastName, firstName])
@@ -927,12 +971,16 @@ model CostCategory {
 }
 
 model ItemCategory {
-  id       String         @id @default(cuid())
-  code     String         @unique
-  name     String
-  parentId String?
-  parent   ItemCategory?  @relation("ItemCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
-  children ItemCategory[] @relation("ItemCategoryTree")
+  id          String         @id @default(cuid())
+  code        String         @unique
+  name        String
+  /// What it covers — the inventory's category tile says it under the name
+  /// (2026-10-15: "UL/FM Fire, Booster, Submersible").
+  description String?
+  sortOrder   Int            @default(0)
+  parentId    String?
+  parent      ItemCategory?  @relation("ItemCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children    ItemCategory[] @relation("ItemCategoryTree")
 
   items Item[]
 
@@ -954,6 +1002,9 @@ model Item {
   id          String   @id @default(cuid())
   code        String   @unique
   partNumber  String?
+  /// The manufacturer / OEM (2026-10-15, the owner's call: Pentair, Nidec,
+  /// SUTO) — not who we buy from, which is `preferredSupplier`.
+  brand       String?
   name        String
   description String?
   itemType    ItemType @default(MATERIAL)
@@ -989,14 +1040,16 @@ model Item {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  costingLines    CostingLine[]
-  prItems         PurchaseRequestItem[]
-  poItems         PurchaseOrderItem[]
-  issueItems      StockIssueItem[]
-  borrowItems     BorrowSlipItem[]
-  balances        InventoryBalance[]
-  stockMoves      InventoryTransaction[]
-  installedAssets InstalledAsset[]
+  costingLines         CostingLine[]
+  prItems              PurchaseRequestItem[]
+  poItems              PurchaseOrderItem[]
+  issueItems           StockIssueItem[]
+  borrowItems          BorrowSlipItem[]
+  balances             InventoryBalance[]
+  pulloutItems         PulloutItem[]
+  stockMoves           InventoryTransaction[]
+  installedAssets      InstalledAsset[]
+  receivedWithoutOrder ReceivingItem[]        @relation("ReceivedWithoutOrder")
 
   @@index([isActive])
   @@index([name])
@@ -1018,6 +1071,7 @@ model Warehouse {
   receivings       Receiving[]
   stockIssues      StockIssue[]
   borrowSlips      BorrowSlip[]
+  pulloutSlips     PulloutSlip[]
   balances         InventoryBalance[]
   stockMoves       InventoryTransaction[]
 
@@ -1036,6 +1090,7 @@ model Location {
 
   receivingItems ReceivingItem[]
   issueItems     StockIssueItem[]
+  balances       InventoryBalance[]
 
   createdAt DateTime @default(now())
 
@@ -1107,6 +1162,8 @@ model Lead {
   nextAction     String?
   nextActionDate DateTime? @db.Date
   lostReason     String?
+  /// LOST or CANCELLED while lost (2026-10-13); null otherwise.
+  lostKind       LostKind?
   notes          String?
 
   quotations Quotation[]
@@ -1164,8 +1221,14 @@ model Costing {
 
   /// Stored rather than derived: the contract value is a commercial fact that
   /// must not silently change when someone edits a cost line months later.
-  contractValue Decimal @default(0) @db.Decimal(18, 2)
-  totalCost     Decimal @default(0) @db.Decimal(18, 2)
+  contractValue       Decimal  @default(0) @db.Decimal(18, 2)
+  totalCost           Decimal  @default(0) @db.Decimal(18, 2)
+  /// A FIXED PRICE (2026-10-13, the owner's call): the contract value, net of
+  /// VAT, as typed on the sheet's "Set the grand total". While set, `recalc()`
+  /// writes `contractValue` = this exactly and `marginPct` = what it amounts to
+  /// over the cost, so a line changed afterwards keeps the price and moves the
+  /// margin. Null: priced from `marginPct`.
+  targetContractValue Decimal? @db.Decimal(18, 2)
 
   durationDays Int?
   /// Internal notes — shown on the screen, never printed.
@@ -1182,6 +1245,10 @@ model Costing {
   vatRate        Decimal   @default(0.12) @db.Decimal(6, 4)
   /// The date the prices on the estimate stop holding.
   validUntil     DateTime? @db.Date
+  /// The day the scope of work starts (2026-10-13). With it, the plan's
+  /// finish is derived — `workingDayDate(plannedStart, planDays)`, Mon–Sat —
+  /// and never stored, so a changed plan moves the finish with it.
+  plannedStart   DateTime? @db.Date
   /// "System / Unit" — the plant or equipment the estimate is for.
   systemUnit     String?
 
@@ -1224,15 +1291,22 @@ model CostingLine {
 
   /// The short name, printed bold over the description. Null on a line that
   /// predates the sheet editor; its description then serves as the name.
-  name        String?
-  description String
+  name         String?
+  description  String
   /// A subheading inside its category: printed as a heading row, costs nothing.
-  isHeading   Boolean @default(false)
-  quantity    Decimal @default(1) @db.Decimal(18, 3)
-  unit        String  @default("pcs")
-  unitCost    Decimal @default(0) @db.Decimal(18, 2)
-  amount      Decimal @default(0) @db.Decimal(18, 2)
-  sortOrder   Int     @default(0)
+  isHeading    Boolean   @default(false)
+  quantity     Decimal   @default(1) @db.Decimal(18, 3)
+  unit         String    @default("pcs")
+  unitCost     Decimal   @default(0) @db.Decimal(18, 2)
+  amount       Decimal   @default(0) @db.Decimal(18, 2)
+  sortOrder    Int       @default(0)
+  /// Who supplies it (2026-10-14): a supplier on file, else a name typed.
+  /// Printed under the unit cost; carried to a PR as its preferred supplier.
+  supplierId   String?
+  supplier     Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  supplierName String?
+  /// A short note on the line, printed under the supplier.
+  lineNote     String?
 
   @@index([costingId])
 }
@@ -1242,6 +1316,15 @@ enum ScopeKind {
   TESTING_COMMISSIONING
   TURNOVER
   OTHER
+}
+
+/// Where a scope phase's value comes from (2026-10-13): spread from what the
+/// others leave of the contract value, typed (declared) by hand, or the
+/// named cost buckets' cost priced as the sheet prices it — `scheduleOfValues()`.
+enum ScopeValueSource {
+  SPREAD
+  DECLARED
+  CATEGORY
 }
 
 /// A scope-of-work section AND a Schedule of Values line — the same row.
@@ -1261,7 +1344,14 @@ model ScopeSection {
 
   /// This section's share of the contract value. The sum across sections is
   /// validated against the costing's contract value.
-  value Decimal @default(0) @db.Decimal(18, 2)
+  value           Decimal          @default(0) @db.Decimal(18, 2)
+  /// Where `value` comes from (2026-10-13): SPREAD (the default, as before),
+  /// DECLARED (typed, kept) or CATEGORY (`costCategoryIds`' cost, priced).
+  valueSource     ScopeValueSource @default(SPREAD)
+  /// CATEGORY: the cost buckets (CostCategory ids) this phase carries — the
+  /// owner's "materials cost to purchasing of materials". A bucket on one
+  /// phase at most.
+  costCategoryIds String[]         @default([])
 
   sortOrder Int         @default(0)
   tasks     ScopeTask[]
@@ -1321,6 +1411,17 @@ enum QuotationOutcome {
   NEGOTIATION
   WON
   LOST
+  /// Put on hold (2026-10-13, the owner's call): not open — no forecast, no
+  /// open counts — and resumed by moving it back to an open stage.
+  ON_HOLD
+}
+
+/// What a LOST lead or quotation was (2026-10-13): lost to a competitor or a
+/// no, or CANCELLED — the customer dropped the requirement. Cancelled counts
+/// as neither won nor lost in a win rate. Null unless the record is LOST.
+enum LostKind {
+  LOST
+  CANCELLED
 }
 
 /// The container. Commercial content lives on its revisions, which are never
@@ -1353,6 +1454,8 @@ model Quotation {
   submittedAt     DateTime?
   decidedAt       DateTime?
   lostReason      String?
+  /// LOST or CANCELLED while lost (2026-10-13); null otherwise.
+  lostKind        LostKind?
   /// When the salesperson expects the decision. Copied from the lead when the
   /// quotation is raised from one; editable on the quotation. The board's
   /// forecast column reads this, so a quotation with no lead can still be forecast.
@@ -1490,11 +1593,15 @@ model SalesOrder {
   vatAmount      Decimal @default(0) @db.Decimal(18, 2)
   total          Decimal @default(0) @db.Decimal(18, 2)
 
-  lines     SalesOrderLine[]
-  jobOrders JobOrder[]
+  lines        SalesOrderLine[]
+  jobOrders    JobOrder[]
+  pulloutSlips PulloutSlip[]
+  invoices     Invoice[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  commissionRequests CommissionRequest[]
+  invoiceRequests    InvoiceRequest[]
 
   @@index([quotationId])
   @@index([customerId])
@@ -1708,6 +1815,9 @@ model SalesActivity {
   isPrivate Boolean @default(false)
   /// Conference call link, http(s) only (`safeHttpUrl`).
   callLink  String?
+  /// A Google Maps link for the address (2026-10-13), http(s) only — the
+  /// meeting's rule; with none the page searches Google Maps for the address.
+  mapUrl    String?
 
   /// The customer's contact person it is with — one of the customer's contacts.
   contactId String?
@@ -1844,6 +1954,7 @@ model Job {
   purchaseRequests PurchaseRequest[]
   purchaseOrders   PurchaseOrder[]
   stockIssues      StockIssue[]
+  pulloutSlips     PulloutSlip[]
   borrowSlips      BorrowSlip[]
   overtime         OvertimeRequest[]
   invoices         Invoice[]
@@ -1857,8 +1968,10 @@ model Job {
   salesActivities  SalesActivity[]
   cadJobOrders     CadJobOrder[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  commissionRequests CommissionRequest[]
+  invoiceRequests    InvoiceRequest[]
 
   @@index([status])
   @@index([customerId])
@@ -2011,7 +2124,10 @@ model BudgetRequest {
 
 enum ProgressStatus {
   DRAFT
+  /// Never written since 2026-10-15; the seed moves any left to DRAFT.
   SUBMITTED
+  /// With its approvers on the engine's route (2026-10-15).
+  PENDING_APPROVAL
   APPROVED
 }
 
@@ -2037,9 +2153,26 @@ model ProgressReport {
   weather        String?
   manpower       String?
   equipment      String?
+  /// The Accomplishment Report's SUMMARY (2026-10-15, the owner's sample).
   accomplishment String?
   issues         String?
+  /// The Accomplishment Report's REMAINING WORKS, one per line.
   nextPeriodPlan String?
+
+  /// KEY MILESTONES ACHIEVED, one per line — "Title: what was done".
+  milestones        String?
+  /// One of PROGRESS_OVERALL (shared/progressReport.ts), else free text.
+  overallStatus     String?
+  /// The words after it — "For Corrective Works".
+  overallStatusNote String?
+  /// PERSONNEL PRESENT: the project in charge and the project support, by
+  /// name (an employee may have no login).
+  personnelInCharge String?
+  personnelSupport  String[]            @default([])
+  /// The number the report carried before project-scoped numbering
+  /// (2026-10-15), kept for anyone holding the old paper.
+  legacyNumber      String?
+  days              ProgressReportDay[]
 
   preparedById String
   preparedBy   User      @relation("ReportPreparer", fields: [preparedById], references: [id], onDelete: Restrict)
@@ -2055,6 +2188,27 @@ model ProgressReport {
 
   @@unique([jobId, reportNo])
   @@index([jobId])
+}
+
+/// One day of an Accomplishment Report (2026-10-15, the owner's sample):
+/// the actions done that day, in order, its findings, recommendation and
+/// remarks, and its pictures (attachments on `progress_report_day`).
+model ProgressReportDay {
+  id       String         @id @default(cuid())
+  reportId String
+  report   ProgressReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  workDate       DateTime @db.Date
+  /// The actions, one per line, printed numbered.
+  actions        String
+  findings       String?
+  recommendation String?
+  remarks        String?
+  /// How many people were on site that day.
+  headcount      Int?
+  sortOrder      Int      @default(0)
+
+  @@index([reportId])
 }
 
 model ProgressReportLine {
@@ -2086,10 +2240,15 @@ enum BillingStatus {
 /// Generated from a progress report against the Schedule of Values — never
 /// keyed independently (model §4.2).
 model ProgressBilling {
-  id        String        @id @default(cuid())
-  number    String        @unique
-  billingNo Int
-  status    BillingStatus @default(DRAFT)
+  id           String        @id @default(cuid())
+  number       String        @unique
+  billingNo    Int
+  /// The number before project-scoped numbering (2026-10-15).
+  legacyNumber String?
+  /// Who raised it — the requester on its approval route (2026-10-15).
+  preparedById String?
+  preparedBy   User?         @relation("BillingPreparer", fields: [preparedById], references: [id], onDelete: SetNull)
+  status       BillingStatus @default(DRAFT)
 
   jobId String
   job   Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
@@ -2123,8 +2282,10 @@ model ProgressBilling {
   lines   ProgressBillingLine[]
   invoice Invoice?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  /// The invoice requests raised on it (2026-10-15) — at most one live.
+  invoiceRequests InvoiceRequest[]
 
   @@unique([jobId, billingNo])
   @@index([jobId, status])
@@ -2148,23 +2309,48 @@ model ProgressBillingLine {
 }
 
 enum PlanStatus {
-  FOR_APPROVAL
+  /// Being prepared; Submit for approval routes it (2026-10-13).
+  DRAFT
+  PENDING_APPROVAL
   APPROVED
+  /// A later request on the same drawing reference was approved.
   SUPERSEDED
+  /// Before 2026-10-13 only (a plan registered and approved by hand); the
+  /// seed moves any left to DRAFT.
+  FOR_APPROVAL
   REJECTED
+  CANCELLED
 }
 
-/// "Approved Plan — documents, approved plan required attachments or time
-/// stamp." Work should not start on an unapproved plan (model §4.2).
+/// The REQUEST FOR APPROVAL (2026-10-13, the owner's call: "replace the
+/// Approved Plans with Request for Approval … Internal Approval (Technical
+/// Manager, Team Leader and CEO more than 1 million) … Drawing Reference
+/// Number (it could come from a CAD J.O.)"). The table keeps its old name and
+/// keys (`gops.plans.*`); it is a routed document now — submitted through
+/// `shared/approvals.ts` as `plan_approval`, never approved by hand.
+/// "Work should not start on an unapproved plan" (model §4.2).
 model ApprovedPlan {
-  id         String     @id @default(cuid())
-  jobId      String
-  job        Job        @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  title      String
-  drawingNo  String?
-  revision   String     @default("0")
-  discipline String?
-  status     PlanStatus @default(FOR_APPROVAL)
+  id           String     @id @default(cuid())
+  /// RFA number (`nextNumber('plan_approval')`); null on a plan registered
+  /// before 2026-10-13 until it is submitted. Indexed, not @unique: adding a
+  /// unique constraint to an existing table makes `prisma db push` stop for
+  /// confirmation, and the server's deploy runs it unattended — nextNumber
+  /// never issues a number twice.
+  number       String?
+  jobId        String
+  job          Job        @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  title        String
+  /// What is asked to be approved.
+  description  String?
+  /// The drawing reference number — typed, or a CAD J.O.'s number and revision.
+  drawingNo    String?
+  revision     String     @default("0")
+  discipline   String?
+  status       PlanStatus @default(DRAFT)
+  /// The project's contract value, snapshotted at submit — the amount band
+  /// that adds the CEO / President above ₱1,000,000.
+  amount       Decimal?   @db.Decimal(18, 2)
+  cancelReason String?
 
   submittedAt DateTime?
   approvedAt  DateTime?
@@ -2181,6 +2367,7 @@ model ApprovedPlan {
   updatedAt DateTime @updatedAt
 
   @@index([jobId])
+  @@index([number])
 }
 
 enum TaskStatus {
@@ -2202,6 +2389,9 @@ model JobTask {
   description String?
   status      TaskStatus @default(NOT_STARTED)
   progressPct Int        @default(0)
+  /// The task's share of its phase when a report works the phase's % out
+  /// from its tasks (2026-10-15). Null counts as 1 — equal shares.
+  weight      Decimal?   @db.Decimal(9, 3)
 
   assignedToId String?
   assignedTo   User?   @relation("TaskAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
@@ -2266,15 +2456,26 @@ model PurchaseRequest {
   requestedById String
   requestedBy   User   @relation("PrRequester", fields: [requestedById], references: [id], onDelete: Restrict)
 
-  purpose  String
-  neededBy DateTime? @db.Date
-  notes    String?
+  purpose           String
+  neededBy          DateTime? @db.Date
+  notes             String?
+  /// The supplier the requester would like asked first — a hint for
+  /// procurement, kept as typed; the canvass and the order name the real one.
+  preferredSupplier String?
+
+  /// Raised by the system when stock fell below its reorder level
+  /// (2026-10-15, the owner's call: "automatic"): a DRAFT stock replenishment
+  /// per warehouse that collects the items as they fall, for a person to
+  /// check and submit. Never submitted by the system.
+  autoReorder Boolean @default(false)
 
   approvedAt DateTime?
 
-  items     PurchaseRequestItem[]
-  canvasses Canvass[]
-  orders    PurchaseOrder[]
+  items        PurchaseRequestItem[]
+  pulloutSlips PulloutSlip[]
+  canvasses    Canvass[]
+  rfqs         Rfq[]
+  orders       PurchaseOrder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2295,6 +2496,11 @@ model PurchaseRequestItem {
   costCategoryId String?
   costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
 
+  /// The short name, printed bold over the description (the costing line's
+  /// rule). Null on a line typed before the page editor: its description
+  /// then serves as the name.
+  name            String?
+  partNumber      String?
   description     String
   quantity        Decimal @db.Decimal(18, 3)
   unit            String  @default("pcs")
@@ -2302,9 +2508,14 @@ model PurchaseRequestItem {
   /// quantity × estimatedCost, stored so the commitment is a recorded fact.
   estimatedAmount Decimal @default(0) @db.Decimal(18, 2)
   orderedQty      Decimal @default(0) @db.Decimal(18, 3)
+  /// Taken from the shelf by a pull-out slip instead of bought (2026-10-14):
+  /// what is left to order is quantity − orderedQty − pulledQty.
+  pulledQty       Decimal @default(0) @db.Decimal(18, 3)
   sortOrder       Int     @default(0)
 
   quotes     CanvassQuote[]
+  rfqItems   RfqItem[]
+  rfqQuotes  RfqQuote[]
   orderItems PurchaseOrderItem[]
 
   @@index([requestId])
@@ -2314,6 +2525,106 @@ enum CanvassStatus {
   OPEN
   AWARDED
   CANCELLED
+}
+
+/// A Request for Quotation (2026-10-14, the owner's call: "Purchase Request,
+/// RFQ, Canvass, Purchase Order"): the enquiry sent to suppliers for an
+/// approved purchase request's lines. Printed one paper per supplier and
+/// sent by hand; the quotes that come back are recorded on it, and the
+/// canvass sheet compares them. No approval route — an enquiry decides
+/// nothing (the request was approved; the order will be).
+enum RfqStatus {
+  DRAFT
+  SENT
+  QUOTED
+  CLOSED
+  CANCELLED
+}
+
+model Rfq {
+  id     String    @id @default(cuid())
+  number String    @unique
+  status RfqStatus @default(DRAFT)
+
+  requestId String
+  request   PurchaseRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  preparedById String
+  preparedBy   User   @relation("RfqPreparer", fields: [preparedById], references: [id], onDelete: Restrict)
+
+  /// Quote by — the date the suppliers are asked to answer by.
+  dueDate      DateTime? @db.Date
+  deliverTo    String?
+  /// What is asked of the supplier: VAT status, validity, payment terms, lead time.
+  terms        String?
+  notes        String?
+  sentAt       DateTime?
+  cancelReason String?
+
+  items     RfqItem[]
+  suppliers RfqSupplier[]
+  canvasses Canvass[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([requestId])
+  @@index([status])
+}
+
+/// The request lines an RFQ asks about — a subset, so one request may be
+/// split across RFQs (by category, or a second round).
+model RfqItem {
+  id    String @id @default(cuid())
+  rfqId String
+  rfq   Rfq    @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+
+  requestItemId String
+  requestItem   PurchaseRequestItem @relation(fields: [requestItemId], references: [id], onDelete: Cascade)
+
+  sortOrder Int @default(0)
+
+  @@unique([rfqId, requestItemId])
+}
+
+model RfqSupplier {
+  id    String @id @default(cuid())
+  rfqId String
+  rfq   Rfq    @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  /// Whom the paper is addressed to — the supplier's own, kept on the row.
+  contactName  String?
+  contactPhone String?
+  email        String?
+
+  sentAt          DateTime?
+  quoteRef        String?
+  quoteReceivedAt DateTime? @db.Date
+  leadTimeDays    Int?
+  terms           String?
+  validUntil      DateTime? @db.Date
+  remarks         String?
+
+  quotes RfqQuote[]
+
+  @@unique([rfqId, supplierId])
+}
+
+model RfqQuote {
+  id            String      @id @default(cuid())
+  rfqSupplierId String
+  rfqSupplier   RfqSupplier @relation(fields: [rfqSupplierId], references: [id], onDelete: Cascade)
+
+  requestItemId String
+  requestItem   PurchaseRequestItem @relation(fields: [requestItemId], references: [id], onDelete: Cascade)
+
+  unitPrice Decimal @db.Decimal(18, 2)
+  remarks   String?
+
+  @@unique([rfqSupplierId, requestItemId])
 }
 
 /// "Canvass/RFQ — supplier selection." Three quotes is the convention; the
@@ -2329,8 +2640,24 @@ model Canvass {
   createdById String
   createdBy   User   @relation("CanvassCreator", fields: [createdById], references: [id], onDelete: Restrict)
 
-  notes     String?
-  awardedAt DateTime?
+  /// The RFQ whose quotes it compares (2026-10-14); null on a canvass opened
+  /// before RFQs were their own document.
+  rfqId String?
+  rfq   Rfq?    @relation(fields: [rfqId], references: [id], onDelete: SetNull)
+
+  /// The request lines the sheet compares (2026-10-14): the RFQ's lines,
+  /// snapshotted when the sheet is raised. Empty on a canvass opened before
+  /// — it compares every line of its request, as it always did.
+  lineIds String[] @default([])
+
+  /// Printed on the sheet as its Remarks; a cancel appends its reason.
+  notes            String?
+  awardedAt        DateTime?
+  /// Who awarded it — AWARDED BY on the sheet, with `awardedAt`.
+  awardedById      String?
+  awardedBy        User?     @relation("CanvassAwarder", fields: [awardedById], references: [id], onDelete: SetNull)
+  /// The buyer's recommendation before the award (a CanvassSupplier id).
+  recommendedRowId String?
 
   suppliers CanvassSupplier[]
 
@@ -2338,6 +2665,7 @@ model Canvass {
   updatedAt DateTime @updatedAt
 
   @@index([requestId])
+  @@index([rfqId])
 }
 
 model CanvassSupplier {
@@ -2353,6 +2681,13 @@ model CanvassSupplier {
   leadTimeDays Int?
   terms        String?
   remarks      String?
+
+  /// Snapshotted from the RFQ (2026-10-14): whom the sheet names under the
+  /// supplier, their quotation no., and the RFQ row it was copied from.
+  contactName   String?
+  contactPhone  String?
+  quoteRef      String?
+  rfqSupplierId String?
 
   quotes CanvassQuote[]
 
@@ -2404,11 +2739,17 @@ model PurchaseOrder {
   createdById String
   createdBy   User   @relation("PoCreator", fields: [createdById], references: [id], onDelete: Restrict)
 
-  orderDate    DateTime  @default(now()) @db.Date
-  deliveryDate DateTime? @db.Date
-  deliverTo    String?
-  terms        String?
-  notes        String?
+  orderDate      DateTime  @default(now()) @db.Date
+  deliveryDate   DateTime? @db.Date
+  deliverTo      String?
+  /// The supplier's quotation the order answers (2026-10-14) — printed in DETAILS.
+  quoteRef       String?
+  /// The currency the supplier is paid in (2026-10-14, the owner's layout): printed under ORDER DETAILS; nothing is converted.
+  /// The delivery address under Deliver to (2026-10-14): blank prints the company's.
+  deliverAddress String?
+  currency       String    @default("PHP")
+  terms          String?
+  notes          String?
 
   /// Snapshotted so an old order still prints the tax it was issued with.
   vatRate      Decimal @default(0.12) @db.Decimal(6, 4)
@@ -2446,6 +2787,11 @@ model PurchaseOrderItem {
   costCategoryId String?
   costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
 
+  /// The bold name over the description and the part number — the
+  /// requisition line's, carried over (2026-10-13). Null on a line typed
+  /// before the order page: its description then serves as the name.
+  name        String?
+  partNumber  String?
   description String
   quantity    Decimal @db.Decimal(18, 3)
   unit        String  @default("pcs")
@@ -2463,8 +2809,20 @@ model Receiving {
   id     String @id @default(cuid())
   number String @unique
 
-  orderId String
-  order   PurchaseOrder @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  /// The purchase order it receives against — or none (2026-10-14, the
+  /// owner's call: "possible receive without a purchase order, approve it
+  /// too"): a return, a free replacement, a customer-supplied item. Such a
+  /// report names where the goods came from and why there is no order, and
+  /// builds stock at the cost typed on each line.
+  orderId String?
+  order   PurchaseOrder? @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// Without an order: the supplier it came from, when one is on file, else
+  /// the name typed (a customer, a site), and why there is no order.
+  supplierId String?
+  supplier   Supplier? @relation("ReceivingFrom", fields: [supplierId], references: [id], onDelete: SetNull)
+  sourceName String?
+  reason     String?
 
   warehouseId String?
   warehouse   Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
@@ -2477,12 +2835,29 @@ model Receiving {
   invoiceRefNo  String?
   notes         String?
 
+  /// Incoming goes for approval (2026-10-14, the owner's call: "the warehouse
+  /// receives this, approval of his/her report to"): a DRAFT moves nothing;
+  /// the stock, the job cost and the order's received quantities post when
+  /// the route approves it (RECEIVED). A report saved before the route
+  /// existed posted when it was saved, so the default is RECEIVED.
+  status       ReceivingStatus @default(RECEIVED)
+  cancelReason String?
+
   items ReceivingItem[]
   bills SupplierBill[]
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 
   @@index([orderId])
+  @@index([status])
+}
+
+enum ReceivingStatus {
+  DRAFT
+  PENDING_APPROVAL
+  RECEIVED
+  CANCELLED
 }
 
 model ReceivingItem {
@@ -2490,8 +2865,17 @@ model ReceivingItem {
   receivingId String
   receiving   Receiving @relation(fields: [receivingId], references: [id], onDelete: Cascade)
 
-  orderItemId String
-  orderItem   PurchaseOrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  /// The order line it receives — null on a report with no order, whose
+  /// line names its item from the item master instead.
+  orderItemId String?
+  orderItem   PurchaseOrderItem? @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  itemId      String?
+  item        Item?   @relation("ReceivedWithoutOrder", fields: [itemId], references: [id], onDelete: Restrict)
+  /// The part number on the delivery (a report with no order); filled from the item master.
+  partNumber  String?
+  description String?
+  unit        String?
 
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
@@ -2507,6 +2891,8 @@ model ReceivingItem {
 
 enum IssueStatus {
   DRAFT
+  /// Outgoing goes for approval (2026-10-14): nothing leaves until it is approved.
+  PENDING_APPROVAL
   ISSUED
   CANCELLED
 }
@@ -2535,6 +2921,21 @@ model StockIssue {
   notes     String?
   issuedAt  DateTime?
 
+  /// The internal receive proof (2026-10-15, the owner's call: "Outgoing =
+  /// internal receive proof to the requestor"): where it goes, how, and the
+  /// requestor's confirmation that it arrived in good order.
+  deliverTo    String?
+  referenceNo  String?
+  carrier      String?
+  driverName   String?
+  /// The terms of receipt printed over the sign-offs — filled with the
+  /// standard text on a new slip, editable per slip.
+  instructions String?
+  receivedAt   DateTime?
+  receivedById String?
+  receivedBy   User?     @relation("IssueReceivedBy", fields: [receivedById], references: [id], onDelete: SetNull)
+  receivedNote String?
+
   items StockIssueItem[]
 
   createdAt DateTime @default(now())
@@ -2558,20 +2959,162 @@ model StockIssueItem {
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
-  quantity Decimal @db.Decimal(18, 3)
+  quantity  Decimal @db.Decimal(18, 3)
   /// Moving-average cost at the moment of issue, snapshotted.
-  unitCost Decimal @default(0) @db.Decimal(18, 2)
-  amount   Decimal @default(0) @db.Decimal(18, 2)
-  remarks  String?
+  unitCost  Decimal @default(0) @db.Decimal(18, 2)
+  amount    Decimal @default(0) @db.Decimal(18, 2)
+  remarks   String?
+  /// Serial or batch, and its condition as it left (2026-10-15).
+  serialNo  String?
+  condition String?
+  sortOrder Int     @default(0)
 
   @@index([issueId])
 }
 
+enum PulloutKind {
+  /// Stock leaving for a customer's delivery against an issued sales order.
+  SALES_ORDER
+  /// Stock a project takes from the shelf instead of buying it, against an approved request.
+  PURCHASE_REQUEST
+  /// No source document (2026-10-15, the owner's call): a supplier return,
+  /// testing, a repair — the reason is kept on the slip.
+  OTHER
+}
+
+/// What a pull-out is for (2026-10-15, the owner's pull-out slip: the
+/// "purpose / transaction type" boxes — internal, no customer delivery).
+enum PulloutPurpose {
+  SALES_ORDER
+  PROJECT_USE
+  SITE_INSTALLATION
+  TESTING_AUDIT
+  REPAIR_SERVICE
+  SUPPLIER_RETURN
+  OTHER
+}
+
+enum PulloutStatus {
+  DRAFT
+  PENDING_APPROVAL
+  PULLED_OUT
+  CANCELLED
+}
+
+/// A pull-out slip (2026-10-14, the owner's call: "Pull-out Slip — approved
+/// Sales Order, or from Purchase Request"; "if no project was created, the
+/// sales order is enough"). Stock out of a warehouse at its average cost,
+/// against the document that asked for it; a project behind it is charged as
+/// a stock issue charges it.
+model PulloutSlip {
+  id     String        @id @default(cuid())
+  number String        @unique
+  kind   PulloutKind
+  status PulloutStatus @default(DRAFT)
+
+  salesOrderId String?
+  salesOrder   SalesOrder?      @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  requestId    String?
+  request      PurchaseRequest? @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  /// The project charged: the request's, or the project built from the sales
+  /// order's quotation. Null when there is none.
+  jobId        String?
+  job          Job?             @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  preparedById String
+  preparedBy   User      @relation("PulloutPreparer", fields: [preparedById], references: [id], onDelete: Restrict)
+  releasedById String?
+  releasedBy   User?     @relation("PulloutReleaser", fields: [releasedById], references: [id], onDelete: Restrict)
+  releasedAt   DateTime?
+
+  pulloutDate    DateTime @db.Date
+  /// Who takes it out: the authorized person or courier.
+  receivedByName String?
+  /// Special instructions, remarks, accessories included.
+  notes          String?
+  cancelReason   String?
+
+  /// The internal release slip (2026-10-15, the owner's pull-out slip): what
+  /// it is for (null on a slip from before: read from its kind), who asked
+  /// for it (their manager approves; null = the preparer), the references
+  /// written on it, the courier, where it goes, when it is expected back, and
+  /// — with no source document — why.
+  purpose        PulloutPurpose?
+  requestedById  String?
+  requestedBy    User?           @relation("PulloutRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  poReference    String?
+  drReference    String?
+  courierCompany String?
+  courierContact String?
+  vehicle        String?
+  destination    String?
+  returnBy       DateTime?       @db.Date
+  reason         String?
+
+  items PulloutItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([salesOrderId])
+  @@index([requestId])
+  @@index([jobId])
+}
+
+model PulloutItem {
+  id     String      @id @default(cuid())
+  slipId String
+  slip   PulloutSlip @relation(fields: [slipId], references: [id], onDelete: Cascade)
+
+  itemId String
+  item   Item   @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  /// The sales order line or the request line it answers (one of two tables, so no foreign key).
+  sourceLineId String?
+  quantity     Decimal @db.Decimal(18, 3)
+  /// At the warehouse's average when it went out; an estimate until then.
+  unitCost     Decimal @default(0) @db.Decimal(18, 2)
+  amount       Decimal @default(0) @db.Decimal(18, 2)
+  sortOrder    Int     @default(0)
+  /// Serial or batch, and its condition as it left (2026-10-15).
+  serialNo     String?
+  condition    String?
+
+  @@index([slipId])
+  @@index([sourceLineId])
+}
+
+/// Why a borrow is made (2026-10-15, the owner's borrower's slip: its "Borrowing type" boxes).
+enum BorrowType {
+  INTERNAL_OFFICE
+  ON_SITE_PROJECT
+  PERSONAL
+  RND_TESTING
+}
+
+/// What came back, as the custodian found it (the form's return clearance).
+enum ReturnCondition {
+  COMPLETE_GOOD
+  DAMAGED
+  MISSING_PARTS
+}
+
 enum BorrowStatus {
+  /// A request (2026-10-14): saved, not sent for approval.
+  DRAFT
+  PENDING_APPROVAL
+  /// Approved, waiting for the warehouse to release it.
+  APPROVED
   OUT
   PARTIALLY_RETURNED
   RETURNED
   OVERDUE
+  /// Withdrawn or refused before anything left the shelf; the reason kept.
+  CANCELLED
 }
 
 /// Tools and equipment lent out and expected back.
@@ -2593,14 +3136,38 @@ model BorrowSlip {
   borrower     User?   @relation("Borrower", fields: [borrowerId], references: [id], onDelete: SetNull)
   borrowerName String
 
-  issuedById String
-  issuedBy   User   @relation("BorrowIssuer", fields: [issuedById], references: [id], onDelete: Restrict)
+  /// Who released it from the shelf — null until the warehouse does.
+  issuedById String?
+  issuedBy   User?   @relation("BorrowIssuer", fields: [issuedById], references: [id], onDelete: Restrict)
 
+  /// Who asked for it (2026-10-14: anyone may). Null on a slip the warehouse
+  /// wrote before requests existed.
+  requestedById String?
+  requestedBy   User?     @relation("BorrowRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  /// The day the requester needs it from.
+  neededOn      DateTime? @db.Date
+  /// When the warehouse released it (the instant; `borrowedAt` is the day).
+  releasedAt    DateTime?
+  cancelReason  String?
+
+  /// The day it went out — for a request, the day it was asked for until released.
   borrowedAt DateTime  @default(now()) @db.Date
   dueAt      DateTime  @db.Date
   returnedAt DateTime? @db.Date
   purpose    String
   notes      String?
+
+  /// The borrower's slip (2026-10-15, the owner's form): why, where, how to
+  /// reach a borrower with no login — and the return clearance the custodian
+  /// records when it comes back (the last return's word stands).
+  borrowType        BorrowType?
+  siteLocation      String?
+  contactNo         String?
+  returnedCondition ReturnCondition?
+  returnNote        String?
+  inspectedById     String?
+  inspectedBy       User?            @relation("BorrowInspector", fields: [inspectedById], references: [id], onDelete: SetNull)
+  inspectedAt       DateTime?
 
   items BorrowSlipItem[]
 
@@ -2609,6 +3176,7 @@ model BorrowSlip {
 
   @@index([status])
   @@index([dueAt])
+  @@index([requestedById])
 }
 
 model BorrowSlipItem {
@@ -2619,10 +3187,13 @@ model BorrowSlipItem {
   itemId String
   item   Item   @relation(fields: [itemId], references: [id], onDelete: Restrict)
 
-  quantity    Decimal @db.Decimal(18, 3)
-  returnedQty Decimal @default(0) @db.Decimal(18, 3)
-  serialNo    String?
-  remarks     String?
+  quantity      Decimal @db.Decimal(18, 3)
+  returnedQty   Decimal @default(0) @db.Decimal(18, 3)
+  serialNo      String?
+  remarks       String?
+  /// As it left, and as it came back (2026-10-15).
+  conditionOut  String?
+  conditionBack String?
 
   @@index([slipId])
 }
@@ -2642,6 +3213,12 @@ model InventoryBalance {
   /// Moving weighted average. Recomputed on every receipt; issues take it as
   /// given, which is what stops an issue changing the cost of what remains.
   averageCost Decimal @default(0) @db.Decimal(18, 4)
+
+  /// Where it sits in the warehouse — the bin or rack (2026-10-15, the
+  /// owner's inventory screen). Set from the stock card; a receipt into a
+  /// named location fills it while it is empty.
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
   updatedAt DateTime @updatedAt
 
@@ -3065,21 +3642,42 @@ enum InviteeResponse {
 }
 
 model Meeting {
-  id               String           @id @default(cuid())
-  number           String           @unique
+  id               String             @id @default(cuid())
+  number           String             @unique
   title            String
   agenda           String?
   location         String?
+  /// A Google Maps link for the place (2026-10-13), http(s) only — G-CORE
+  /// holds no Google credentials, so a place is tagged by a pasted link.
+  mapUrl           String?
+  /// Minutes of meeting (2026-10-13): what was said and decided, written by
+  /// the organiser or anyone invited once it has started; who last wrote
+  /// them, and when.
+  minutes          String?
+  minutesAt        DateTime?
+  minutesById      String?
+  minutesBy        User?              @relation("MeetingMinutesBy", fields: [minutesById], references: [id], onDelete: SetNull)
+  /// The attendees agree the minutes (2026-10-14, the owner's call: "approval
+  /// of attendees agreeing the minutes" — those who said Going). DRAFT while
+  /// they are written; FOR_AGREEMENT once the organiser sends them (round
+  /// `minutesRound`, one `MinutesAgreement` row per attendee); AGREED once
+  /// every one has agreed. A change to the minutes after sending sets that
+  /// round aside (its rows are kept) and they go out again.
+  minutesStatus    MinutesStatus      @default(DRAFT)
+  minutesRound     Int                @default(0)
+  minutesSentAt    DateTime?
+  minutesAgreedAt  DateTime?
+  agreements       MinutesAgreement[]
   startsAt         DateTime
   endsAt           DateTime
-  status           ActivityStatus   @default(PLANNED)
+  status           ActivityStatus     @default(PLANNED)
   organizerId      String
-  organizer        User             @relation("MeetingOrganizer", fields: [organizerId], references: [id], onDelete: Restrict)
+  organizer        User               @relation("MeetingOrganizer", fields: [organizerId], references: [id], onDelete: Restrict)
   /// The project it is held for — a kick-off, a site meeting, a turnover —
   /// so the project's Meetings & Records tab lists it. Optional: most
   /// meetings are nobody's project.
   jobId            String?
-  job              Job?             @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  job              Job?               @relation(fields: [jobId], references: [id], onDelete: SetNull)
   /// https://meet.google.com/abc-defg-hij — pasted back, never derived.
   meetLink         String?
   calendarEventUrl String?
@@ -3087,16 +3685,46 @@ model Meeting {
   googleEventId    String?
   /// RFC 5545 SEQUENCE — bumped on every time change so a re-downloaded .ics
   /// replaces the event instead of duplicating it.
-  icsSequence      Int              @default(0)
+  icsSequence      Int                @default(0)
   cancelReason     String?
   invitees         MeetingInvitee[]
-  createdAt        DateTime         @default(now())
-  updatedAt        DateTime         @updatedAt
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
 
   @@index([startsAt])
   @@index([organizerId, startsAt])
   @@index([status, startsAt])
   @@index([jobId, startsAt])
+}
+
+enum MinutesStatus {
+  DRAFT
+  FOR_AGREEMENT
+  AGREED
+}
+
+enum MinutesResponse {
+  PENDING
+  AGREED
+  CHANGE_ASKED
+}
+
+/// One attendee's answer to one round of the minutes (2026-10-14). Rows are
+/// never deleted: an earlier round is the record of what was agreed then.
+model MinutesAgreement {
+  id          String          @id @default(cuid())
+  meetingId   String
+  meeting     Meeting         @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  round       Int
+  userId      String
+  user        User            @relation("MinutesAgreement", fields: [userId], references: [id], onDelete: Cascade)
+  response    MinutesResponse @default(PENDING)
+  comment     String?
+  respondedAt DateTime?
+  createdAt   DateTime        @default(now())
+
+  @@unique([meetingId, round, userId])
+  @@index([userId, response])
 }
 
 model MeetingInvitee {
@@ -3345,6 +3973,43 @@ model TrainingRecord {
   @@index([status])
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  PEOPLE FLOW — one person's path from start to separation (2026-10-13)
+// ════════════════════════════════════════════════════════════════════
+
+enum FlowItemStatus {
+  PENDING
+  DONE
+  WAIVED
+  NA
+}
+
+/// What HR recorded against one item of the People Flow checklist
+/// (`hr.peopleFlow` in Settings, `shared/peopleFlow.ts`) for one person. A
+/// row exists only once HR has said something about the item — the path is
+/// the checklist merged with these rows and with the records that answer
+/// for the derived items (an evaluation, training, the clearance), read
+/// every time. A derived item is only ever WAIVED here, with a reason; its
+/// DONE comes from its record. `itemKey` is the checklist's permanent key, so
+/// an item dropped from the checklist leaves its rows as history.
+model EmployeeFlowItem {
+  id          String         @id @default(cuid())
+  employeeId  String
+  employee    Employee       @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  itemKey     String
+  status      FlowItemStatus @default(PENDING)
+  /// The day it was done (a DATE, the Manila day) — typed by HR, today by default.
+  doneOn      DateTime?      @db.Date
+  /// The 30-60-90 goals, the exit interview's feedback, a waiver's reason.
+  notes       String?
+  updatedById String?
+  updatedBy   User?          @relation("FlowItemUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@unique([employeeId, itemKey])
+}
+
 /// Saved filters for the shared list pattern (model §8.4).
 model SavedFilter {
   id            String   @id @default(cuid())
@@ -3410,10 +4075,35 @@ model Invoice {
   jobOrderId String?   @unique
   jobOrder   JobOrder? @relation(fields: [jobOrderId], references: [id], onDelete: Restrict)
 
-  invoiceDate DateTime @db.Date
-  dueDate     DateTime @db.Date
-  terms       String?
-  poReference String?
+  /// An issued sales order this invoice bills (in part or whole). Not
+  /// unique: an order is invoiced as it is delivered, never past its net.
+  salesOrderId String?
+  salesOrder   SalesOrder? @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+
+  invoiceDate   DateTime  @db.Date
+  /// The day the customer received ("countered") the issued invoice. The
+  /// expected collection counts from it; until it is recorded the invoice
+  /// is awaiting countering and never overdue (2026-10-15, the owner's call).
+  counteredDate DateTime? @db.Date
+  /// Net days. dueDate = (counteredDate ?? invoiceDate) + termsDays — the
+  /// expected collection. Null on an invoice raised before, which keeps the
+  /// due date it was given.
+  termsDays     Int?
+  dueDate       DateTime  @db.Date
+  terms         String?
+  poReference   String?
+  /// The number printed on the sales invoice booklet (BIR), typed by hand
+  /// (2026-10-16, the owner's call); `number` stays G-CORE's own record.
+  siNumber      String?
+
+  /// Who sold it — credited with the collection. Filled from the document
+  /// behind the invoice (the sales order's or quotation's owner), editable.
+  salespersonId String?
+  salesperson   User?     @relation("InvoiceSalesperson", fields: [salespersonId], references: [id], onDelete: SetNull)
+  /// The team credited — the quotation's team, else the salesperson's, kept
+  /// as raised (a quotation keeps the team it was raised under).
+  teamId        String?
+  team          Industry? @relation("InvoiceTeam", fields: [teamId], references: [id], onDelete: SetNull)
 
   /// Snapshotted from the billing, or entered on a standalone invoice. Never
   /// recomputed from Settings afterwards.
@@ -3446,13 +4136,19 @@ model Invoice {
   lines       InvoiceLine[]
   allocations PaymentAllocation[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  /// The invoice request whose approval raised it (2026-10-15).
+  invoiceRequest InvoiceRequest?
 
   @@index([status])
   @@index([customerId, status])
   @@index([dueDate])
   @@index([jobId])
+  @@index([siNumber])
+  @@index([salesOrderId])
+  @@index([salespersonId])
+  @@index([teamId])
 }
 
 model InvoiceLine {
@@ -3514,6 +4210,19 @@ model SupplierBill {
   dueDate           DateTime @db.Date
   terms             String?
 
+  /// When the goods or the work were delivered (2026-10-15, the owner's A/P
+  /// sample): the receiving's date where one is matched, else typed. The
+  /// terms run from it — due = delivery (else the bill date) + termsDays.
+  deliveryDate  DateTime? @db.Date
+  /// Net days — "30 Days". `terms` stays for what printed before.
+  termsDays     Int?
+  /// The purchaser / buyer: the purchase order's author, else picked.
+  purchaserId   String?
+  purchaser     User?     @relation("BillPurchaser", fields: [purchaserId], references: [id], onDelete: SetNull)
+  /// A purchaser with no login, typed by name (2026-10-16, the owner's
+  /// call); null when `purchaserId` names one.
+  purchaserName String?
+
   subtotal  Decimal @db.Decimal(18, 2)
   vatRate   Decimal @default(0.12) @db.Decimal(6, 4)
   vatAmount Decimal @db.Decimal(18, 2)
@@ -3549,6 +4258,7 @@ model SupplierBill {
   @@index([supplierId, status])
   @@index([dueDate])
   @@index([jobId])
+  @@index([purchaserId])
 }
 
 model SupplierBillLine {
@@ -3645,6 +4355,9 @@ model ExpenseClaimLine {
   category    String?
   /// The OR or receipt number, because a claim without one is not claimable.
   receiptNo   String?
+  /// The company the receipt is from (2026-10-15, the owner's line pattern:
+  /// Date — Company / receipt — Item / purpose).
+  vendor      String?
   amount      Decimal  @db.Decimal(18, 2)
 
   @@index([claimId])
@@ -3665,6 +4378,8 @@ enum CashAdvanceStatus {
   REFUND_DUE
   /// Liquidation approved and nothing is owed either way.
   LIQUIDATED
+  /// A loan (`repayable`) repaid in full — the owner's "Paid" (2026-10-15).
+  PAID
   REJECTED
   CANCELLED
 }
@@ -3695,8 +4410,17 @@ model CashAdvance {
   amountReleased Decimal @default(0) @db.Decimal(18, 2)
   /// Re-derived by refreshAdvance(): the approved liquidation's total, else 0.
   amountSpent    Decimal @default(0) @db.Decimal(18, 2)
-  /// Re-derived by refreshAdvance(): Σ RECEIPT allocations (unspent cash returned).
+  /// Re-derived by refreshAdvance(): Σ RECEIPT allocations (unspent cash
+  /// returned; on a loan, the repayments made — salary deductions included).
   amountRefunded Decimal @default(0) @db.Decimal(18, 2)
+
+  /// MONEY LENT (2026-10-15, the owner's module 7): true on every advance
+  /// raised from then on. Released, it is repaid in instalments (receipts,
+  /// salary deductions) until PAID — never liquidated with receipts. An
+  /// advance raised before keeps false and its liquidation.
+  repayable Boolean   @default(false)
+  /// When the last repayment cleared the balance.
+  repaidAt  DateTime? @db.Date
 
   /// releasedAt + finance.rules.advanceLiquidationDays, snapshotted at release.
   liquidationDueDate DateTime? @db.Date
@@ -3706,8 +4430,9 @@ model CashAdvance {
   liquidatedAt DateTime?
   notes        String?
 
-  liquidations ExpenseClaim[]
-  allocations  PaymentAllocation[]
+  liquidations         ExpenseClaim[]
+  commissionDeductions CommissionShare[]
+  allocations          PaymentAllocation[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3731,6 +4456,12 @@ enum PaymentMethod {
   BANK_TRANSFER
   ONLINE
   OFFSET
+  /// A cash advance repaid out of the employee's pay (2026-10-15) — entered
+  /// by finance, cleared as recorded.
+  SALARY_DEDUCTION
+  /// A cash advance repaid out of a commission payout (2026-10-16) —
+  /// written only by the commission's payout, cleared as recorded.
+  COMMISSION_DEDUCTION
 }
 
 /// One movement of money, allocated across one or more documents.
@@ -3758,8 +4489,13 @@ model Payment {
 
   amount Decimal @db.Decimal(18, 2)
 
-  /// Cheque number, transfer reference, OR number.
+  /// Cheque number or transfer reference.
   reference String?
+  /// The official receipt a customer collection is given — G-CORE's
+  /// numbering (`official_receipt`, 2026-10-15), issued on save. Indexed,
+  /// not @unique: a unique constraint on an existing table stops the
+  /// server's unattended db push; the counter keeps it unique.
+  orNumber  String?
   bank      String?
   /// A cheque is not cash until it clears; until then it is a promise.
   clearedAt DateTime? @db.Date
@@ -3769,12 +4505,17 @@ model Payment {
   recordedById String
   recordedBy   User   @relation("PaymentRecorder", fields: [recordedById], references: [id], onDelete: Restrict)
 
-  allocations PaymentAllocation[]
+  allocations       PaymentAllocation[]
+  /// Lines typed by hand on a collection (2026-10-16, the owner's call): money
+  /// received on account, against no invoice on file — applied to one later.
+  commissionPayouts CommissionShare[]   @relation("CommissionPayout")
+  lines             PaymentLine[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([kind, paymentDate])
+  @@index([orNumber])
   @@index([customerId])
   @@index([supplierId])
   @@index([payeeUserId])
@@ -3782,6 +4523,20 @@ model Payment {
 
 /// A slice of a payment applied to one document. Exactly one of the four
 /// document references is set.
+/// A collection line typed by hand: a reference (an SI no., what it is for)
+/// and an amount received ON ACCOUNT — part of the payment, settling no
+/// invoice, until it is applied to one (`POST /payments/:id/lines/:lineId/apply`).
+model PaymentLine {
+  id        String  @id @default(cuid())
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  sortOrder Int     @default(0)
+  reference String
+  amount    Decimal @db.Decimal(18, 2)
+
+  @@index([paymentId])
+}
+
 model PaymentAllocation {
   id        String  @id @default(cuid())
   paymentId String
@@ -3807,6 +4562,11 @@ model PaymentAllocation {
   /// advance: direction comes from Payment.kind.
   budgetRequestId String?
   budgetRequest   BudgetRequest? @relation(fields: [budgetRequestId], references: [id], onDelete: Cascade)
+
+  /// A commission beneficiary's payout (2026-10-16): a DISBURSEMENT
+  /// allocation to the share, written only by POST /commissions/:id/pay.
+  commissionShareId String?
+  commissionShare   CommissionShare? @relation("CommissionAllocation", fields: [commissionShareId], references: [id], onDelete: Restrict)
 
   amount Decimal @db.Decimal(18, 2)
 
@@ -4077,11 +4837,17 @@ enum ChargeBasis {
 /// completes it. It carries no cost of its own; cost reaches its jobId through
 /// PRs, stock issues, overtime and expense claims that quote that job.
 model JobOrder {
-  id     String         @id @default(cuid())
-  number String         @unique
-  status JobOrderStatus @default(DRAFT)
-  kind   ServiceKind    @default(CORRECTIVE)
-  urgent Boolean        @default(false)
+  id                 String         @id @default(cuid())
+  /// The costing's Labor cost when the Technical Manager approved an Amount
+  /// that differs from it — approval is the agreement (2026-10-16). Null when
+  /// the two tallied or no costing stood behind it.
+  laborCostingAmount Decimal?       @db.Decimal(18, 2)
+  laborAgreedById    String?
+  laborAgreedAt      DateTime?
+  number             String         @unique
+  status             JobOrderStatus @default(DRAFT)
+  kind               ServiceKind    @default(CORRECTIVE)
+  urgent             Boolean        @default(false)
 
   customerId String
   customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)
@@ -4124,6 +4890,10 @@ model JobOrder {
   /// since carry none of them (requestedFor mirrors targetStart).
   projectName   String?
   contactNumber String?
+  /// The team asking for the work (the Industry/team master; 2026-10-16) —
+  /// the requester's own team unless picked.
+  teamId        String?
+  team          Industry? @relation("JobOrderTeam", fields: [teamId], references: [id], onDelete: SetNull)
   targetStart   DateTime? @db.Date
   targetFinish  DateTime? @db.Date
 
@@ -4293,6 +5063,10 @@ model ServiceReport {
 /// requested (back to In progress for the next revision); On hold and
 /// Cancelled from either side. Overdue is derived from `neededBy`, never stored.
 enum CadJobOrderStatus {
+  /// Raised, not yet sent to the requester's Team Leader (2026-10-16).
+  DRAFT
+  /// With the requester's Team Leader ("TL Approval").
+  PENDING_APPROVAL
   REQUESTED
   IN_PROGRESS
   FOR_REVIEW
@@ -4356,12 +5130,22 @@ model CadJobOrder {
 
   requestedById String
   requestedBy   User      @relation("CadRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  /// When the design work is planned to start (the requestor's form).
+  plannedStart  DateTime? @db.Date
   /// When the requestor needs the drawing. A DATE; overdue is derived from it.
   neededBy      DateTime? @db.Date
 
   assignedToId String?
   assignedTo   User?     @relation("CadAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
   assignedAt   DateTime?
+  /// When a designer first took it or was given it ("Date started"; 2026-10-16).
+  startedAt    DateTime?
+
+  /// The requester's team (the Industry/team master), set at raising.
+  teamId String?
+  team   Industry? @relation("CadJobOrderTeam", fields: [teamId], references: [id], onDelete: SetNull)
+  /// What the drawing work is worth, when the requester says (PHP).
+  amount Decimal?  @db.Decimal(18, 2)
 
   holdReason       String?
   /// Where it stood when it was put on hold, so Resume puts it back there.
@@ -4503,4 +5287,169 @@ model UserSupportTeam {
 
   @@id([userId, industryId])
   @@index([industryId])
+}
+
+enum InvoiceRequestStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  CANCELLED
+}
+
+/// An INVOICE REQUEST (2026-10-15, the owner's call): the project's
+/// salesperson or their Team Leader asks for an approved progress billing to
+/// be invoiced against the project's sales order; Back Support approves it,
+/// and the approval raises the DRAFT invoice in Accounts Receivable. The
+/// money is the billing's, never re-keyed; the order lends its PO and terms.
+model InvoiceRequest {
+  id      String               @id @default(cuid())
+  number  String
+  /// The withholding rate the invoice will carry (2026-10-16: editable, e.g.
+  /// 1% or 2%); null takes the billing's, else the company's.
+  ewtRate Decimal?             @db.Decimal(5, 4)
+  status  InvoiceRequestStatus @default(DRAFT)
+
+  /// The progress billing it asks to be invoiced — or none, when the request
+  /// is raised straight from an issued sales order (2026-10-16, the owner's
+  /// call: "after Sales Order, route to invoice request").
+  progressBillingId String?
+  progressBilling   ProgressBilling? @relation(fields: [progressBillingId], references: [id], onDelete: Cascade)
+  jobId             String?
+  job               Job?             @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  salesOrderId      String
+  salesOrder        SalesOrder       @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  /// A request from a sales order: what to invoice of it, before VAT, and
+  /// the invoice line's words. Null on a billing's request (its gross is the
+  /// billing's).
+  grossAmount       Decimal?         @db.Decimal(18, 2)
+  description       String?
+
+  /// What the invoice will carry.
+  invoiceDate   DateTime? @db.Date
+  termsDays     Int?
+  poReference   String?
+  salespersonId String?
+  salesperson   User?     @relation("InvoiceRequestSalesperson", fields: [salespersonId], references: [id], onDelete: SetNull)
+  teamId        String?
+  team          Industry? @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  notes         String?
+
+  requestedById String
+  requestedBy   User      @relation("InvoiceRequestRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  submittedAt   DateTime?
+  approvedAt    DateTime?
+  cancelReason  String?
+
+  /// The DRAFT invoice its approval raised.
+  invoiceId String?  @unique
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([number])
+  @@index([progressBillingId, status])
+  @@index([salesOrderId, status])
+  @@index([status, createdAt])
+}
+
+/// COMMISSION REQUESTS (2026-10-16, the owner's "Commission Request System"):
+/// a sales order's commission, raised once the order is fully collected,
+/// split among the people who earned it, approved by the Finance Manager
+/// then the CEO / President, and paid by finance — each beneficiary's cash
+/// advance deduction recorded as a repayment of that advance.
+enum CommissionStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  PAID
+  CANCELLED
+}
+
+enum CommissionType {
+  INDIVIDUAL
+  GROUP
+}
+
+model CommissionRequest {
+  id     String           @id @default(cuid())
+  number String
+  status CommissionStatus @default(DRAFT)
+
+  salesOrderId  String
+  salesOrder    SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  customerId    String
+  customer      Customer   @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  jobId         String?
+  job           Job?       @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  requestedById String
+  requestedBy   User       @relation("CommissionRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  salespersonId String?
+  salesperson   User?      @relation("CommissionSalesperson", fields: [salespersonId], references: [id], onDelete: SetNull)
+  teamId        String?
+  team          Industry?  @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  commissionType CommissionType @default(INDIVIDUAL)
+  /// The total commission rate, a fraction (0.10 = 10%).
+  ratePct        Decimal        @default(0) @db.Decimal(9, 6)
+
+  /// The sales order's figures, snapshotted when saved (shared/commission.ts).
+  totalAmount     Decimal @default(0) @db.Decimal(18, 2)
+  netOfVat        Decimal @default(0) @db.Decimal(18, 2)
+  vatAmount       Decimal @default(0) @db.Decimal(18, 2)
+  totalCost       Decimal @default(0) @db.Decimal(18, 2)
+  margin          Decimal @default(0) @db.Decimal(18, 2)
+  collectedAmount Decimal @default(0) @db.Decimal(18, 2)
+  grossCommission Decimal @default(0) @db.Decimal(18, 2)
+  totalTax        Decimal @default(0) @db.Decimal(18, 2)
+  totalCa         Decimal @default(0) @db.Decimal(18, 2)
+  totalNet        Decimal @default(0) @db.Decimal(18, 2)
+
+  /// The collections' official receipt numbers and the latest collection's day.
+  orNumbers   String?
+  collectedOn DateTime? @db.Date
+
+  notes        String?
+  cancelReason String?
+  submittedAt  DateTime?
+  approvedAt   DateTime?
+  paidAt       DateTime?
+
+  shares CommissionShare[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([number])
+  @@index([salesOrderId])
+  @@index([requestedById])
+  @@index([status])
+}
+
+model CommissionShare {
+  id        String            @id @default(cuid())
+  requestId String
+  request   CommissionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User              @relation("CommissionBeneficiary", fields: [userId], references: [id], onDelete: Restrict)
+  position  String?
+
+  sharePct      Decimal      @default(1) @db.Decimal(9, 6)
+  share         Decimal      @default(0) @db.Decimal(18, 2)
+  taxPct        Decimal      @default(0.1) @db.Decimal(9, 6)
+  tax           Decimal      @default(0) @db.Decimal(18, 2)
+  caDeduction   Decimal      @default(0) @db.Decimal(18, 2)
+  /// The repayable cash advance the deduction repays.
+  cashAdvanceId String?
+  cashAdvance   CashAdvance? @relation(fields: [cashAdvanceId], references: [id], onDelete: SetNull)
+  net           Decimal      @default(0) @db.Decimal(18, 2)
+  sortOrder     Int          @default(0)
+
+  /// The payout voucher, once paid.
+  paymentId   String?
+  payment     Payment?            @relation("CommissionPayout", fields: [paymentId], references: [id], onDelete: SetNull)
+  allocations PaymentAllocation[] @relation("CommissionAllocation")
+
+  @@index([requestId])
+  @@index([userId])
 }

@@ -27,17 +27,22 @@
  */
 
 import bcrypt from 'bcryptjs';
+import { PDFDocument } from 'pdf-lib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
-import { act } from '../src/shared/approvals';
+import { act, reopenApproved } from '../src/shared/approvals';
+import { resolveUser } from '../src/permissions/resolve';
 import * as serverMath from '../src/shared/costingMath';
 import * as webMath from '../../web/src/lib/costingMath';
+import { workingDayDate, workingDaysBetween } from '../src/shared/day';
+import { workingDayKey, workingDaysBetween as webWorkingDaysBetween } from '../../web/src/lib/day';
 import { migrateCostingMargins } from '../src/shared/costingLegacy';
 // Registers the costing's onApprovalSettled subscriber in this process.
 import '../src/routes/costing';
+import { COSTING_TEMPLATE_KEY, STANDARD_COSTING_DESIGN } from '../src/shared/costingTemplate';
 import {
   flat,
   LANDSCAPE,
@@ -67,6 +72,18 @@ function check(label: string, condition: boolean, detail?: string) {
 const money = (a: number, b: number) => Math.abs(a - b) < 0.005;
 
 /** The sign-off block's text — from PREPARED BY to the strapline — one line, a wrapped name read whole. */
+/**
+ * The Technical Manager slot of a paper's sign-offs: everything from its role
+ * to the next role. Who else holds the role in the database (and how their
+ * names sort) is not these checks' business — only whether ours is named.
+ */
+function tmSlot(text: string): string {
+  const at = text.indexOf('TECHNICAL MANAGER');
+  if (at < 0) return '';
+  const end = text.indexOf('TEAM LEADER', at);
+  return text.slice(at, end < 0 ? undefined : end);
+}
+
 function signoffs(runs: string[]): string {
   const from = runs.indexOf('PREPARED BY');
   if (from < 0) return '';
@@ -83,7 +100,28 @@ const BASE = `http://localhost:${env.port}/api`;
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
+const LAYOUT_STASH = `${COSTING_TEMPLATE_KEY}.__verify__`;
+
+/** Sets the install's own costing layout aside for the run (absent is remembered as absent). */
+async function stashCostingLayout() {
+  if (await prisma.setting.findUnique({ where: { key: LAYOUT_STASH } })) return;
+  const own = await prisma.setting.findUnique({ where: { key: COSTING_TEMPLATE_KEY } });
+  await prisma.setting.create({ data: { key: LAYOUT_STASH, value: own ? { layout: own.value as object } : { absent: true } } });
+  if (own) await prisma.setting.delete({ where: { key: COSTING_TEMPLATE_KEY } });
+}
+
+/** Puts it back — also run first, so a run that died leaves nothing behind. */
+async function restoreCostingLayout() {
+  const stash = await prisma.setting.findUnique({ where: { key: LAYOUT_STASH } });
+  if (!stash) return;
+  const v = stash.value as { layout?: object; absent?: boolean };
+  await prisma.setting.deleteMany({ where: { key: COSTING_TEMPLATE_KEY } });
+  if (v.layout) await prisma.setting.create({ data: { key: COSTING_TEMPLATE_KEY, value: v.layout } });
+  await prisma.setting.delete({ where: { key: LAYOUT_STASH } });
+}
+
 async function cleanup() {
+  await restoreCostingLayout();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
@@ -93,6 +131,7 @@ async function cleanup() {
   await prisma.costingTemplate.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.item.deleteMany({ where: { code: { startsWith: TAG } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
+  await prisma.supplier.deleteMany({ where: { code: { startsWith: TAG } } });
   await prisma.lead.deleteMany({ where: { companyName: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
 
@@ -202,18 +241,17 @@ async function main() {
     'gops.costing.edit_own',
   ]);
   const readRole = await makeRole('zzcost_read', `${TAG} read-only costing`, ['gops.costing.view_all']);
-  // The seeded costing route (2026-10-09, the owner's call): the Technical
-  // Manager reviews, the author's Team Leader ("Reports to") approves, CTG
-  // gives the second approval. The signers hold the seeded roles; the team
-  // leader is whoever the estimator reports to.
+  // The seeded costing route (the owner's routing sheet of 2026-10-13): the
+  // Technical Manager reviews, the author's Team Leader ("Reports to")
+  // approves — two signatures, the CEO (CTG) step of 2026-10-09 retired. The
+  // signers hold the seeded roles; the team leader is whoever the estimator
+  // reports to.
   const roleByKey = async (key: string) => {
     const role = await prisma.role.findUnique({ where: { key } });
     if (!role) throw new Error(`Expected the seeded ${key} role`);
     return role;
   };
   const technicalManagerRole = await roleByKey('technical_manager');
-  // CTG is the CEO (Carter T. Gasiong): the executive role, as on every CEO step.
-  const ctgRole = await roleByKey('executive');
 
   const estimator = await makeUser(`${TAG} Estimator`, `estimator${MAIL}`, [ownRole.id]);
   const colleague = await makeUser(`${TAG} Colleague`, `colleague${MAIL}`, [ownRole.id]);
@@ -221,7 +259,11 @@ async function main() {
   const reader = await makeUser(`${TAG} Reader`, `reader${MAIL}`, [readRole.id]);
   const reviewer = await makeUser(`${TAG} Technical Manager`, `techmgr${MAIL}`, [technicalManagerRole.id]);
   const teamLeader = await makeUser(`${TAG} Team Leader`, `teamleader${MAIL}`, [allRole.id]);
-  const ctg = await makeUser(`${TAG} CEO`, `ctg${MAIL}`, [ctgRole.id]);
+  // One person holding both steps (2026-10-13): a Technical Manager who is
+  // also their author's Team Leader signs both with one Approve.
+  const tmLeader = await makeUser(`${TAG} Two-hat Lead`, `techlead${MAIL}`, [technicalManagerRole.id]);
+  const estimator2 = await makeUser(`${TAG} Second Estimator`, `estimator2${MAIL}`, [ownRole.id]);
+  await prisma.user.update({ where: { id: estimator2.id }, data: { supervisorId: tmLeader.id } });
   await prisma.user.update({ where: { id: estimator.id }, data: { supervisorId: teamLeader.id } });
 
   /** The route's signatures, in the order given — each on the request still open. */
@@ -439,24 +481,24 @@ async function main() {
   check('the approval request is raised in the author\'s name', request?.requesterId === estimator.id);
   let outOfTurn = false;
   try {
-    await act({ requestId: request!.id, userId: ctg.id, action: 'APPROVED' });
+    await act({ requestId: request!.id, userId: teamLeader.id, action: 'APPROVED' });
   } catch {
     outOfTurn = true;
   }
-  check('CTG cannot sign before the technical manager — the route runs in order', outOfTurn);
-  await signCosting(sourceId, [reviewer, teamLeader]);
+  check('the team leader cannot sign before the technical manager — the route runs in order', outOfTurn);
+  await signCosting(sourceId, [reviewer]);
   check(
-    'after the technical manager and the team leader it is still pending — FINAL takes every signature',
+    'after the technical manager alone it is still pending — FINAL takes both signatures',
     (await prisma.costing.findUnique({ where: { id: sourceId } }))?.status === 'PENDING_APPROVAL',
   );
   const history = await api(tEstimator, 'GET', `/approvals/history/costing/${sourceId}`);
   const historyText = JSON.stringify(history.body);
   check(
-    "the route is Technical Manager › Team Leader (the author's supervisor) › CTG, and the open step waits on CTG by name",
-    history.status === 200 && historyText.includes('Technical Manager') && historyText.includes('Team Leader') && historyText.includes('CTG') && historyText.includes(ctg.name),
+    "the route is Technical Manager › Team Leader (the author's supervisor) and no CEO step, the open step waiting on the team leader by name",
+    history.status === 200 && historyText.includes('Technical Manager') && historyText.includes('Team Leader') && !historyText.includes('CTG') && historyText.includes(teamLeader.name),
     historyText.slice(0, 400),
   );
-  await signCosting(sourceId, [ctg]);
+  await signCosting(sourceId, [teamLeader]);
   const finalised = await api(tEstimator, 'GET', `/costings/${sourceId}`);
   check('the source costing is FINAL once approved', finalised.status === 200 && finalised.body.status === 'FINAL', String(finalised.body.status));
   // 2×150,000 + 12×2,500 = 330,000 cost; ÷ (1 − 0.2) = 412,500 contract.
@@ -721,6 +763,8 @@ async function main() {
       // A margin anywhere the API allows, −95% to 95%, to six decimals.
       marginPct: ((Math.floor(rand() * 1_900_000) - 950_000) / 1_000_000).toString(),
       vatRate: rand() < 0.3 ? '0' : '0.12',
+      // A fixed price on a quarter of the sheets (2026-10-13).
+      targetContractValue: rand() < 0.25 ? (Math.floor(rand() * 100_000_000_00) / 100 + 0.01).toString() : null,
     };
     const a = JSON.stringify(serverMath.costingFigures(lines, rates));
     const b = JSON.stringify(webMath.costingFigures(lines, rates));
@@ -740,6 +784,34 @@ async function main() {
   const serverPlan = serverMath.planTasks(planSample);
   const plansAgree = JSON.stringify(serverPlan) === JSON.stringify(webMath.planTasks(planSample));
   check('and its plan is the server\'s plan', plansAgree);
+  // The work week (2026-10-13, the owner's call): Mon–Sat on the server and in
+  // the page alike — every start in October 2026 against every length to 40.
+  {
+    let weekAgrees = true;
+    let weekDetail = '';
+    for (let dom = 1; dom <= 31 && weekAgrees; dom++) {
+      const key = `2026-10-${String(dom).padStart(2, '0')}`;
+      const start = new Date(`${key}T00:00:00Z`);
+      for (let n = 1; n <= 40; n++) {
+        const server = workingDayDate(start, n).toISOString().slice(0, 10);
+        const web = workingDayKey(key, n);
+        const back = workingDaysBetween(start, workingDayDate(start, n));
+        const webBack = webWorkingDaysBetween(workingDayKey(key, 1), web);
+        if (server !== web || back !== webBack || new Date(`${server}T00:00:00Z`).getUTCDay() === 0) {
+          weekAgrees = false;
+          weekDetail = `${key} day ${n}: server ${server} (${back}) web ${web} (${webBack})`;
+          break;
+        }
+      }
+    }
+    check('the work week is Mon–Sat on the server and in the page alike — no working day falls on a Sunday', weekAgrees, weekDetail);
+    check(
+      'a week of working days is six: Monday 12 October to Saturday 17 October, and Sunday adds nothing',
+      workingDaysBetween(new Date('2026-10-12T00:00:00Z'), new Date('2026-10-17T00:00:00Z')) === 6 &&
+        workingDaysBetween(new Date('2026-10-12T00:00:00Z'), new Date('2026-10-18T00:00:00Z')) === 6 &&
+        webWorkingDaysBetween('2026-10-12', '2026-10-18') === 6,
+    );
+  }
   check(
     'a phase with no tasks but a duration takes its place in the sequence; one with neither is unplanned and moves nothing',
     serverPlan.sections[1].start === 13 &&
@@ -764,6 +836,53 @@ async function main() {
     serverMath.costingFigures([{ quantity: 1, unitCost: 75000 }], { marginPct: 0.25 }).contractValue === 100000 &&
       serverMath.costingFigures([{ quantity: 1, unitCost: 100 }], { marginPct: -0.25 }).contractValue === 80 &&
       serverMath.costingFigures([{ quantity: 1, unitCost: 100 }], { marginPct: 1 }).contractValue === 100,
+  );
+  const fixedA = serverMath.costingFigures([{ quantity: 1, unitCost: 75000 }], { marginPct: 0.1, targetContractValue: '116071.43', vatRate: 0.12 });
+  check(
+    'a fixed price IS the contract value, to the centavo — 116,071.43 before VAT lands the grand total on 130,000.00 — and the margin is what it amounts to',
+    fixedA.fixedPrice && fixedA.contractValue === 116071.43 && fixedA.grandTotal === 130000 && fixedA.marginPct === 0.353846,
+    JSON.stringify(fixedA),
+  );
+  const fixedB = serverMath.costingFigures([{ quantity: 1, unitCost: 75000 }, { quantity: 1, unitCost: 5000 }], { marginPct: 0.353846, targetContractValue: '116071.43' });
+  check(
+    'a line added under a fixed price keeps the price and moves the margin',
+    fixedB.contractValue === 116071.43 && fixedB.marginPct === 0.310769 && !serverMath.costingFigures([{ quantity: 1, unitCost: 1 }], { marginPct: 0.2, targetContractValue: null }).fixedPrice,
+    JSON.stringify(fixedB),
+  );
+  const sovA = serverMath.scheduleOfValues(
+    [
+      { valueSource: 'CATEGORY', value: 0, costCategoryIds: ['M', 'E'] },
+      { valueSource: 'DECLARED', value: 10000 },
+      { valueSource: 'SPREAD', value: 0 },
+      { valueSource: 'SPREAD', value: 0 },
+    ],
+    { M: 60000, E: 15000, L: 25000 },
+    125000,
+    100000,
+    true,
+  );
+  check(
+    'schedule of values: a cost-priced phase is its buckets priced like the sheet (75,000 × 1.25), a declared one stays, the rest spread what is left — exactly the contract value',
+    JSON.stringify(sovA.values) === JSON.stringify([93750, 10000, 10625, 10625]) && sovA.remaining === 0 && sovA.problem === null,
+    JSON.stringify(sovA),
+  );
+  const sovOver = serverMath.scheduleOfValues([{ valueSource: 'DECLARED', value: 200000 }, { valueSource: 'SPREAD', value: 0 }], {}, 125000, 100000, true);
+  check('more declared than the contract holds is "over"', sovOver.problem === 'over', JSON.stringify(sovOver));
+  const sovOdd = serverMath.scheduleOfValues(
+    [{ valueSource: 'CATEGORY', value: 0, costCategoryIds: ['M'] }, { valueSource: 'CATEGORY', value: 0, costCategoryIds: ['E'] }],
+    { M: 33333.33, E: 33333.34 },
+    100000.01,
+    66666.67,
+    true,
+  );
+  check(
+    'with every phase cost-priced, the centavo of rounding lands on the last of them, so the sum is still exact',
+    sovOdd.problem === null && Math.round((sovOdd.values[0] + sovOdd.values[1]) * 100) === 10000001,
+    JSON.stringify(sovOdd),
+  );
+  check(
+    'the web’s copy of the schedule of values agrees',
+    JSON.stringify(webMath.scheduleOfValues([{ valueSource: 'CATEGORY', value: 0, costCategoryIds: ['M', 'E'] }, { valueSource: 'DECLARED', value: 10000 }, { valueSource: 'SPREAD', value: 0 }, { valueSource: 'SPREAD', value: 0 }], { M: 60000, E: 15000, L: 25000 }, 125000, 100000, true)) === JSON.stringify(sovA),
   );
   check('vatOn() is VAT on a stored amount, rounded once', serverMath.vatOn('116049.02', '0.12') === 13925.88 && webMath.vatOn('116049.02', '0.12') === 13925.88);
   check('a 25% markup on cost is a 20% margin on the price', serverMath.marginOfMarkup(0.25) === 0.2 && webMath.marginOfMarkup(0.25) === 0.2);
@@ -792,23 +911,127 @@ async function main() {
     lines: [{ costCategoryId: mat.id, quantity: 1, unitCost: 1 }],
   });
   check('a line with neither name nor description is refused', unnamed.status === 400, `status ${unnamed.status}`);
+  // A fixed price through the API (2026-10-13).
+  const fixedLines = [{ costCategoryId: mat.id, name: `${TAG} Fixed-price pump`, quantity: 1, unit: 'unit', unitCost: 75000 }];
+  const fixedSheet = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} fixed price`,
+    marginPct: 0.1,
+    targetContractValue: 116071.43,
+    lines: fixedLines,
+  });
+  const fixedBack = fixedSheet.status === 201 ? (await api(tEstimator, 'GET', `/costings/${fixedSheet.body.id}`)).body : {};
+  check(
+    'POST with targetContractValue stores the price exactly and the margin it amounts to; the grand total is the 130,000.00 typed',
+    fixedSheet.status === 201 && fixedBack.contractValue === 116071.43 && fixedBack.targetContractValue === 116071.43 &&
+      fixedBack.marginPct === 0.353846 && fixedBack.grandTotal === 130000,
+    `status ${fixedSheet.status} ${JSON.stringify({ c: fixedBack.contractValue, t: fixedBack.targetContractValue, m: fixedBack.marginPct, g: fixedBack.grandTotal })}`,
+  );
+  if (fixedSheet.status === 201) {
+    const morePut = await api(tEstimator, 'PUT', `/costings/${fixedSheet.body.id}/sheet`, {
+      title: `${TAG} fixed price`,
+      marginPct: 0.353846,
+      targetContractValue: 116071.43,
+      lines: [...fixedLines, { costCategoryId: eqp.id, name: `${TAG} Crane`, quantity: 1, unit: 'day', unitCost: 5000 }],
+    });
+    check(
+      'a line added on the sheet keeps the fixed price and moves the margin',
+      morePut.status === 200 && morePut.body.contractValue === 116071.43 && morePut.body.marginPct === 0.310769 && morePut.body.totalCost === 80000,
+      `status ${morePut.status} ${JSON.stringify({ c: morePut.body.contractValue, m: morePut.body.marginPct })}`,
+    );
+    const fixedPaper = pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${fixedSheet.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer()));
+    check('the paper says the margin stands on a fixed price', /Margin \(31\.08% of the price, fixed\s+price\)/.test(fixedPaper.join(' ')), fixedPaper.filter((r) => /Margin|price/.test(r)).join(' | '));
+    const loss = await api(tEstimator, 'PATCH', `/costings/${fixedSheet.body.id}`, { targetContractValue: 1000 });
+    check('a fixed price past a ±95% margin of the cost is refused, and nothing changes', loss.status === 400 &&
+      Number((await prisma.costing.findUnique({ where: { id: fixedSheet.body.id } }))!.targetContractValue) === 116071.43, `status ${loss.status}`);
+    const released = await api(tEstimator, 'PATCH', `/costings/${fixedSheet.body.id}`, { targetContractValue: null });
+    const releasedBack = (await api(tEstimator, 'GET', `/costings/${fixedSheet.body.id}`)).body;
+    check(
+      'released, it prices from the margin it stood on (six decimals) — the contract value within ten centavos of the fixed price',
+      released.status === 200 && releasedBack.targetContractValue === null && Math.abs(releasedBack.contractValue - 116071.43) <= 0.1,
+      JSON.stringify({ status: released.status, t: releasedBack.targetContractValue, c: releasedBack.contractValue }),
+    );
+  }
+  const noCost = await api(tEstimator, 'POST', '/costings', { title: `${TAG} fixed price, no cost`, targetContractValue: 1000 });
+  check('a fixed price with no cost lines is refused', noCost.status === 400, `status ${noCost.status}`);
+
+  // Declared and cost-priced scope values through the API (2026-10-13).
+  const sovLines = [
+    { costCategoryId: mat.id, name: `${TAG} SOV materials`, quantity: 1, unit: 'lot', unitCost: 60000 },
+    { costCategoryId: eqp.id, name: `${TAG} SOV equipment`, quantity: 1, unit: 'unit', unitCost: 15000 },
+    { costCategoryId: lab.id, name: `${TAG} SOV labour`, quantity: 1, unit: 'lot', unitCost: 25000 },
+  ];
+  const sovSections = (over: Record<string, unknown>[] = []) => [
+    { name: 'PLANNING & ENGINEERING', valueSource: 'CATEGORY', costCategoryIds: [mat.id, eqp.id], ...over[0] },
+    { name: 'SITE PREPARATION', valueSource: 'DECLARED', value: 10000, ...over[1] },
+    { name: 'INSTALLATION', valueSource: 'SPREAD', ...over[2] },
+    { name: 'HAND OVER', valueSource: 'SPREAD', ...over[3] },
+  ];
+  const sovSheet = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} schedule of values`,
+    marginPct: 0.2,
+    lines: sovLines,
+    sections: sovSections(),
+    spread: true,
+  });
+  const sovBack = sovSheet.status === 201 ? (await api(tEstimator, 'GET', `/costings/${sovSheet.body.id}`)).body : { scopeSections: [] };
+  const sovValues = (sovBack.scopeSections as { value: number; valueSource: string }[]).map((x) => x.value);
+  check(
+    'saved: Planning & Engineering carries Materials + Equipment priced (93,750), Site preparation its declared 10,000, the rest spread 10,625 each — 125,000 in all',
+    sovSheet.status === 201 && JSON.stringify(sovValues) === JSON.stringify([93750, 10000, 10625, 10625]) &&
+      (sovBack.scopeSections as { valueSource: string }[]).map((x) => x.valueSource).join() === 'CATEGORY,DECLARED,SPREAD,SPREAD',
+    `status ${sovSheet.status} ${JSON.stringify(sovValues)}`,
+  );
+  if (sovSheet.status === 201) {
+    const repriced = await api(tEstimator, 'PATCH', `/costings/${sovSheet.body.id}`, { marginPct: 0.5 });
+    const repricedValues = ((await api(tEstimator, 'GET', `/costings/${sovSheet.body.id}`)).body.scopeSections as { value: number }[]).map((x) => x.value);
+    check('a cost-priced phase follows the price (margin 50%: 75,000 × 2 = 150,000); a declared one stays', repriced.status === 200 && repricedValues[0] === 150000 && repricedValues[1] === 10000, JSON.stringify(repricedValues));
+  }
+  const bucketTwice = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} bucket twice`,
+    lines: sovLines,
+    sections: sovSections([{}, {}, { valueSource: 'CATEGORY', costCategoryIds: [mat.id] }]),
+    spread: true,
+  });
+  check('a cost bucket on two phases is refused — its money would count twice', bucketTwice.status === 400 && /count twice/.test(String(bucketTwice.body.error)), `status ${bucketTwice.status} ${bucketTwice.body.error}`);
+  const overDeclared = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} declared over`,
+    marginPct: 0.2,
+    lines: sovLines,
+    sections: sovSections([{}, { value: 200000 }]),
+    spread: true,
+  });
+  check('declared and cost-priced phases over the contract value are refused while the spread is on', overDeclared.status === 400, `status ${overDeclared.status}`);
+  const unspread = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} schedule typed`,
+    marginPct: 0.2,
+    lines: sovLines,
+    sections: sovSections([{}, {}, { value: 1 }, { value: 2 }]),
+    spread: false,
+  });
+  const unspreadValues = unspread.status === 201 ? ((await api(tEstimator, 'GET', `/costings/${unspread.body.id}`)).body.scopeSections as { value: number }[]).map((x) => x.value) : [];
+  check('with the spread off, the cost-priced phase is still worked out and the others keep what was typed', JSON.stringify(unspreadValues) === JSON.stringify([93750, 10000, 1, 2]), JSON.stringify(unspreadValues));
+
   const oddVat = await api(tEstimator, 'POST', '/costings', { title: `${TAG} odd VAT`, vatRate: 0.05 });
   check('a VAT rate that is neither the company rate nor 0% is refused', oddVat.status === 400, `status ${oddVat.status}`);
 
+  // A line's supplier (2026-10-14): a name on file is linked, anything else kept as typed.
+  const onFile = await prisma.supplier.create({ data: { code: `${TAG}-SUP`, name: `${TAG} Power Supply` } });
   const sheet = {
     title: `${TAG} Booster VFD controller`,
     customerId: customer.id,
     siteId: site.id,
     systemUnit: `${TAG} Booster pump controller`,
     validUntil: '2026-10-30',
+    // A Wednesday: the plan's 20 working days (Mon–Sat) run to Thursday 5 November.
+    plannedStart: '2026-10-14',
     marginPct: 0.35,
     vatRate: 0,
     terms: `${TAG} terms: 50% down payment`,
     notes: 'Internal only',
     lines: [
       { costCategoryId: mat.id, isHeading: true, name: 'Panel' },
-      { costCategoryId: mat.id, name: `${TAG} VFD 15KW`, description: 'Variable frequency drive', quantity: 2, unit: 'unit', unitCost: 45000.5 },
-      { costCategoryId: mat.id, name: `${TAG} Consumables`, quantity: 1, unit: 'lot', unitCost: 3000 },
+      { costCategoryId: mat.id, name: `${TAG} VFD 15KW`, description: 'Variable frequency drive', quantity: 2, unit: 'unit', unitCost: 45000.5, supplierName: `${TAG} Drives   Trading`, lineNote: `${TAG} quote 2210, 8 weeks` },
+      { costCategoryId: mat.id, name: `${TAG} Consumables`, quantity: 1, unit: 'lot', unitCost: 3000, supplierName: ` ${TAG.toLowerCase()} power  supply ` },
       { costCategoryId: lab.id, name: `${TAG} Assembly and programming`, quantity: 1, unit: 'lot', unitCost: 39400 },
     ],
     sections: [
@@ -828,6 +1051,22 @@ async function main() {
   const created = await api(tEstimator, 'POST', '/costings', sheet);
   check('POST /costings writes the header, lines and scope in one save', created.status === 201, `status ${created.status}: ${JSON.stringify(created.body).slice(0, 300)}`);
   const sheetId = created.body.id as string;
+  {
+    const ls = await prisma.costingLine.findMany({ where: { costingId: sheetId, isHeading: false }, orderBy: { sortOrder: 'asc' } });
+    check(
+      'a line’s supplier: a name on file is linked (case- and space-blind), one not on file kept as typed, with the line’s note',
+      ls[0].supplierId === null && ls[0].supplierName === `${TAG} Drives Trading` && ls[0].lineNote === `${TAG} quote 2210, 8 weeks` &&
+        ls[1].supplierId === onFile.id && ls[1].supplierName === null && ls[2].supplierId === null && ls[2].supplierName === null,
+      JSON.stringify(ls.map((l) => [l.supplierId, l.supplierName, l.lineNote])),
+    );
+    const offered = await api(tEstimator, 'GET', `/costings/suggest/suppliers?q=${TAG}%20power`);
+    const ghost = await api(tEstimator, 'POST', '/costings', { title: `${TAG} ghost supplier`, lines: [{ costCategoryId: mat.id, name: 'x', quantity: 1, unitCost: 1, supplierId: 'nope' }] });
+    check(
+      'the Supplier box offers suppliers on file to whoever costs (names only), and an unknown supplier id is refused',
+      offered.status === 200 && Array.isArray(offered.body) && offered.body.length === 1 && Object.keys(offered.body[0]).sort().join() === 'id,name' && ghost.status === 400,
+      `${offered.status} ${JSON.stringify(offered.body)} ${ghost.status}`,
+    );
+  }
   const stored = await prisma.costing.findUnique({
     where: { id: sheetId },
     include: { lines: { orderBy: { sortOrder: 'asc' } }, scopeSections: { orderBy: { sortOrder: 'asc' }, include: { tasks: { orderBy: { sortOrder: 'asc' } } } } },
@@ -876,6 +1115,23 @@ async function main() {
   );
   check('the costing lasts as long as its plan (20 working days, the taskless phase included)', stored?.durationDays === 20, String(stored?.durationDays));
   check(
+    'a start date gives a finish date: 20 working days (Mon–Sat) from Wednesday 14 October end on Thursday 5 November, two Sundays skipped',
+    stored?.plannedStart?.toISOString().slice(0, 10) === '2026-10-14' &&
+      created.body.plannedStart === '2026-10-14' &&
+      created.body.plannedFinish === '2026-11-05',
+    `${created.body.plannedStart} → ${created.body.plannedFinish}`,
+  );
+  check(
+    'each phase and task takes its dates: Day 16 is Saturday 31 October, Day 18 Tuesday 3 November, Day 19–20 4–5 November',
+    planned[0]?.startDate === '2026-10-14' &&
+      rows(planned[0]?.tasks)[1]?.endDate === '2026-10-30' &&
+      planned[1]?.startDate === '2026-10-31' &&
+      planned[1]?.endDate === '2026-11-03' &&
+      planned[2]?.startDate === '2026-11-04' &&
+      planned[2]?.endDate === '2026-11-05',
+    planned.map((x) => `${x.startDate}–${x.endDate}`).join(' | '),
+  );
+  check(
     'spread: the schedule of values adds up to the contract value exactly',
     money(stored!.scopeSections.reduce((n, x) => n + num(x.value), 0), num(stored?.contractValue)),
   );
@@ -888,8 +1144,8 @@ async function main() {
     title: `${TAG} Booster VFD controller rev`,
     vatRate: 0.12,
     lines: [
-      { id: keepLine.id, costCategoryId: mat.id, name: keepLine.name, description: 'Variable frequency drive, 15 kW', quantity: 3, unit: 'unit', unitCost: 45000.5 },
-      { costCategoryId: eqp.id, name: `${TAG} Crane hire`, quantity: 1, unit: 'day', unitCost: 8000 },
+      { id: keepLine.id, costCategoryId: mat.id, name: keepLine.name, description: 'Variable frequency drive, 15 kW', quantity: 3, unit: 'unit', unitCost: 45000.5, supplierName: `${TAG} Drives Trading`, lineNote: `${TAG} quote 2210, 8 weeks` },
+      { costCategoryId: eqp.id, name: `${TAG} Crane hire`, quantity: 1, unit: 'day', unitCost: 8000, supplierId: onFile.id },
     ],
     sections: [
       {
@@ -948,6 +1204,51 @@ async function main() {
   );
   check('a search under two characters answers nothing', rows((await api(tEstimator, 'GET', '/costings/suggest?q=Z')).body).length === 0);
 
+  // The owner's scope of work, preloaded on a new sheet (2026-10-13).
+  type Preload = { name: string; kind: string; tasks: { name: string; durationDays: number }[] }[];
+  const preload = (lists.body.scopePreload ?? []) as Preload;
+  check(
+    'the lists send the preloaded scope: six phases, fifteen tasks, in the owner’s order',
+    preload.map((p) => p.name).join(' | ') ===
+      'PLANNING & ENGINEERING | SITE PREPARATION | DELIVERY, UNLOADING & PLACEMENT | INSTALLATION & INTEGRATION | TESTING & COMMISSIONING | HAND OVER & CLOSURE' &&
+      preload.reduce((n, p) => n + p.tasks.length, 0) === 15 &&
+      preload[0].tasks.map((t) => t.name).join(' | ') === 'Review of costing and design | Kick-off meeting (Gruntech) | Purchase of equipment | Purchase of other materials' &&
+      preload[5].tasks[1].name === 'Turn over of all documents and as-built plan',
+    JSON.stringify(preload.map((p) => [p.name, p.tasks.length])),
+  );
+  check(
+    'Planning & Engineering takes its value from the Materials and Equipment cost; the other phases spread',
+    JSON.stringify(preload.map((p) => (p as { valueFrom?: string[] }).valueFrom)) === JSON.stringify([['MAT', 'EQP'], [], [], [], [], []]),
+    JSON.stringify(preload.map((p) => (p as { valueFrom?: string[] }).valueFrom)),
+  );
+  check(
+    'testing & commissioning and hand over keep their kinds, the rest are main work; every task starts at one day',
+    preload.map((p) => p.kind).join() === 'MAIN_WORK,MAIN_WORK,MAIN_WORK,MAIN_WORK,TESTING_COMMISSIONING,TURNOVER' &&
+      preload.every((p) => p.tasks.every((t) => t.durationDays === 1)),
+  );
+  const preloaded = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} preloaded scope`,
+    marginPct: 0.2,
+    sections: preload.map((p) => ({ kind: p.kind, name: p.name, tasks: p.tasks.map((t) => ({ name: t.name, durationDays: t.durationDays })) })),
+    spread: true,
+  });
+  const preloadedBack = preloaded.status === 201 ? await api(tEstimator, 'GET', `/costings/${preloaded.body.id}`) : null;
+  const backSections = (preloadedBack?.body.scopeSections ?? []) as { name: string; tasks: unknown[] }[];
+  check(
+    'a sheet saved with the preload as it came keeps six phases and fifteen tasks, planned one day after another',
+    preloaded.status === 201 && backSections.length === 6 && backSections.reduce((n, x) => n + x.tasks.length, 0) === 15 &&
+      preloadedBack?.body.durationDays === 15,
+    `status ${preloaded.status}, ${backSections.length} phases, ${preloadedBack?.body.durationDays} days`,
+  );
+  const trimmed = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} preloaded scope, one phase removed`,
+    sections: preload.slice(1).map((p) => ({ kind: p.kind, name: p.name, tasks: p.tasks.map((t) => ({ name: t.name, durationDays: t.durationDays })) })),
+  });
+  check(
+    'a phase removed from the preload stays removed',
+    trimmed.status === 201 && ((await api(tEstimator, 'GET', `/costings/${trimmed.body.id}`)).body.scopeSections as unknown[]).length === 5,
+  );
+
   // ══ Templates ═══════════════════════════════════════════════════════════════
   console.log('Templates');
 
@@ -989,20 +1290,20 @@ async function main() {
   await act({ requestId: rejectReq!.id, userId: reviewer.id, action: 'REJECTED', comment: 'Recheck the crane' });
   check('a costing the technical manager rejects comes back to draft to rework', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'DRAFT');
   await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
-  await signCosting(sheetId, [reviewer, teamLeader, ctg]);
-  check('resubmitted and signed by all three, it is FINAL', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'FINAL');
+  await signCosting(sheetId, [reviewer, teamLeader]);
+  check('resubmitted and signed by both, it is FINAL', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'FINAL');
   const reopen = await api(tEstimator, 'PATCH', `/costings/${sheetId}`, { status: 'DRAFT' });
   check('the author can still reopen a final costing', reopen.status === 200 && reopen.body.status === 'DRAFT');
   // Reopened, its last request (approved) is no longer its approval: the
   // paper prints the route submitting it now would take, every step open.
   const reopened = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
   check(
-    'a reopened costing prints the route anew — all three steps Pending, none of the old signatures dated',
-    (reopened.match(/Pending/g) ?? []).length === 3 && reopened.includes(`TECHNICAL MANAGER ${reviewer.name}`),
+    'a reopened costing prints the route anew — both steps Pending, none of the old signatures dated',
+    (reopened.match(/Pending/g) ?? []).length === 2 && /TECHNICAL MANAGER [^]*?Pending/.test(reopened) && tmSlot(reopened).includes(reviewer.name),
     reopened,
   );
   await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
-  await signCosting(sheetId, [reviewer, teamLeader, ctg]);
+  await signCosting(sheetId, [reviewer, teamLeader]);
 
   // The estimate: a PDF with the landscape Scope of Work page after it.
   await prisma.scopeTask.create({ data: { scopeSectionId: afterPut!.scopeSections[0].id, name: `${TAG} Long task`, startDay: 3, durationDays: 20, sortOrder: 5 } });
@@ -1012,7 +1313,21 @@ async function main() {
   check('GET /costings/:id/pdf renders a PDF', pdfRes.status === 200 && pdfRes.headers.get('content-type') === 'application/pdf' && pdfRaw.startsWith('%PDF'));
   const pages = (pdfRaw.match(/\/Type \/Page\b/g) ?? []).length;
   check('the estimate is followed by the Scope of Work on its own page', pages >= 2, `${pages} page(s)`);
-  check('that page is landscape', /\/MediaBox \[0 0 841\.89 595\.28\]/.test(pdfRaw));
+  // The designed estimate and the chart are joined by pdf-lib (2026-10-13), so
+  // the pages are read through it: the estimate portrait, the chart landscape and last.
+  const joined = await PDFDocument.load(pdf);
+  const sizes = joined.getPages().map((pg) => `${Math.round(pg.getWidth())}x${Math.round(pg.getHeight())}`);
+  check(
+    'that page is landscape, and last — the designed estimate before it is portrait',
+    sizes.length >= 2 && sizes[sizes.length - 1] === '842x595' && sizes[0] === '595x842',
+    sizes.join(' '),
+  );
+  check(
+    'the paper is called Project Costing (2026-10-13, the owner\'s call) — its title and its file name',
+    /Project\s+Costing/i.test(pdfPieces(pdf).slice(0, 40).join(' ')) && !/Material Cost Estimate/i.test(pdfPieces(pdf).join(' ')) &&
+      /filename\*=UTF-8''Project%20Costing%20/.test(pdfRes.headers.get('content-disposition') ?? ''),
+    `${pdfPieces(pdf).slice(0, 40).join(' | ')} ; ${pdfRes.headers.get('content-disposition')}`,
+  );
   const colleaguePdf = await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tColleague}` } });
   check("own scope: a colleague cannot print somebody else's estimate", colleaguePdf.status === 403, `status ${colleaguePdf.status}`);
 
@@ -1022,18 +1337,18 @@ async function main() {
   const runs = pdfPieces(pdf);
   const signed = signoffs(runs);
   check(
-    'the estimate signs off PREPARED BY the author, then TECHNICAL MANAGER, TEAM LEADER and CEO (CTG) by their steps’ names',
+    'the estimate signs off PREPARED BY the author, then TECHNICAL MANAGER and TEAM LEADER by their steps’ names, and no CEO (CTG)',
     signed.startsWith(`PREPARED BY ${estimator.name} `) &&
       signed.includes(`TECHNICAL MANAGER ${reviewer.name} `) &&
       signed.includes(`TEAM LEADER ${teamLeader.name} `) &&
-      signed.includes(`CEO (CTG) ${ctg.name} `) &&
+      !signed.includes('CEO (CTG)') &&
       !signed.includes('APPROVED BY') &&
       !signed.includes('Pending'),
     signed,
   );
   check(
     'each signer with how to reach them, the author too',
-    runs.includes(estimator.email) && runs.includes(reviewer.email) && runs.includes(ctg.email),
+    runs.includes(estimator.email) && runs.includes(reviewer.email) && runs.includes(teamLeader.email),
   );
   check(
     'its money block reads as the quotation’s — Subtotal, VAT (12%), Total, the bold row last — and no GRAND TOTAL',
@@ -1042,7 +1357,85 @@ async function main() {
     runs.filter((r) => /total|VAT|Margin|cost/i.test(r)).join(' | '),
   );
   check('its money columns name the code in the head', runs.includes('AMOUNT (PHP)') || runs.join(' ').includes('AMOUNT (PHP)'));
+  // A designed document since 2026-10-13 (Admin › PDF Templates › Costing):
+  // the buckets as numbered headings, each with its subtotal, in the layout.
+  check(
+    'the designed estimate heads each bucket by its name alone ("Materials", never "1 Materials") with its subtotal',
+    runs.includes('Materials') && !runs.some((r) => /^\d+\s+Materials$/.test(r)) && runs.includes('Materials subtotal') && runs.includes('Equipment subtotal'),
+    runs.filter((r) => /subtotal|Materials|Equipment/.test(r)).join(' | '),
+  );
+  {
+    // A layout saved in Admin › PDF Templates prints in place of the standard;
+    // the install's own is set aside for the run (`pdfTemplate.costing.__verify__`).
+    await stashCostingLayout();
+    const custom = structuredClone(STANDARD_COSTING_DESIGN);
+    const title = custom.blocks.find((bl) => bl.id === 'title');
+    if (title && title.type === 'text') title.text = 'ZZ COST ESTIMATE';
+    await prisma.setting.create({ data: { key: COSTING_TEMPLATE_KEY, value: custom as unknown as object } });
+    const customPdf = Buffer.from(await (await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer());
+    check('a layout saved for the costing prints in place of the standard one', pdfPieces(customPdf).join(' ').includes('ZZ COST ESTIMATE'));
+    await restoreCostingLayout();
+    const admin = await prisma.user.findFirst({ where: { isSuperAdmin: true, isActive: true }, select: { id: true, email: true } });
+    if (admin) {
+      const tAdmin = signToken(admin.id, admin.email);
+      const shown = await api(tAdmin, 'GET', '/pdf-templates/costing');
+      const columns = (shown.body.columns ?? []) as { key: string; label: string }[];
+      check(
+        'Admin › PDF Templates offers the costing: its standard layout, its fields, and the unit COST as its column',
+        shown.status === 200 && shown.body.label === 'Costing' && columns.some((c) => c.key === 'unitPrice' && c.label === 'Unit cost') && !columns.some((c) => c.key === 'cost'),
+        `${shown.status} ${JSON.stringify(columns)}`,
+      );
+      const badField = structuredClone(STANDARD_COSTING_DESIGN);
+      const bt = badField.blocks.find((bl) => bl.id === 'title');
+      if (bt && bt.type === 'text') bt.text = '{{costing.nonsense}}';
+      const refusedField = await api(tAdmin, 'POST', '/pdf-templates/costing/check', badField);
+      const marginCol = structuredClone(STANDARD_COSTING_DESIGN);
+      const items = marginCol.blocks.find((bl) => bl.type === 'items');
+      if (items && items.type === 'items') items.columns.push({ key: 'margin', label: 'Margin', width: 40, align: 'right' });
+      const refusedColumn = await api(tAdmin, 'POST', '/pdf-templates/costing/check', marginCol);
+      check(
+        'a costing layout naming a field it does not have, or a column it cannot print, is refused (400)',
+        refusedField.status === 400 && refusedColumn.status === 400,
+        `${refusedField.status} ${refusedColumn.status}`,
+      );
+    }
+  }
+  {
+    const text = runs.join(' ');
+    check(
+      'the paper prints each line’s supplier and note under its unit cost, the unit cost itself not bold',
+      // The cost column is narrow, so each wraps onto lines of its own.
+      text.includes(`${TAG} Drives Trading`) && text.includes(`${TAG} quote 2210, 8 weeks`) && text.includes(`${TAG} Power Supply`) && runs.includes('45,000.50'),
+      runs.filter((r) => /ZZCOST|45,000/.test(r)).join(' | '),
+    );
+    await stashCostingLayout();
+    const quiet = structuredClone(STANDARD_COSTING_DESIGN);
+    const items = quiet.blocks.find((bl) => bl.type === 'items');
+    if (items && items.type === 'items') items.lineNotes = false;
+    await prisma.setting.create({ data: { key: COSTING_TEMPLATE_KEY, value: quiet as unknown as object } });
+    const quietRuns = pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer()));
+    await restoreCostingLayout();
+    check(
+      'a layout with the switch off prints neither the supplier nor the note',
+      !quietRuns.join(' ').includes(`${TAG} Drives`) && !quietRuns.join(' ').includes(`${TAG} quote`) && quietRuns.includes('45,000.50'),
+    );
+  }
   check('the validity prints as a record’s date (October 30, 2026)', runs.some((r) => r.includes('Valid until: October 30, 2026')), runs.filter((r) => r.includes('Valid')).join(' | '));
+  {
+    const shown = await api(tEstimator, 'GET', `/costings/${sheetId}`);
+    const finish = new Date(`${shown.body.plannedFinish}T00:00:00Z`).toLocaleDateString('en-PH', { timeZone: 'Asia/Manila', year: 'numeric', month: 'long', day: 'numeric' });
+    const text = runs.join(' ');
+    check(
+      'the paper prints the start and the finish date, and the chart’s legend says Mon–Sat with both dates',
+      runs.some((r) => r.includes('Start date: October 14, 2026')) &&
+        runs.some((r) => r.includes(`Finish date: ${finish}`)) &&
+        text.includes('(Mon–Sat)') &&
+        text.includes(`October 14, 2026 to ${finish}`) &&
+        !text.includes('Mon–Fri'),
+      `${finish} ; ${runs.filter((r) => /date|Mon/.test(r)).join(' | ')}`,
+    );
+    check('the Gantt chart dates its columns from the start ("Oct 14", never "Day 1")', runs.includes('Oct 14') && !runs.includes('Day 1'), runs.filter((r) => /^(Day \d+|Oct \d+)$/.test(r)).slice(0, 8).join(' | '));
+  }
   check(
     'printing the estimate is audited as an export',
     !!(await prisma.auditLog.findFirst({ where: { entityType: 'costing', entityId: sheetId, action: 'EXPORTED', actorId: estimator.id } })),
@@ -1051,7 +1444,7 @@ async function main() {
   const drafted = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${empty.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
   check(
     'a draft prints the route it would take: each step by name, who is assigned, Pending under them — never the author',
-    drafted.includes(`TECHNICAL MANAGER ${reviewer.name}`) && (drafted.match(/Pending/g) ?? []).length === 3 && !drafted.includes(`TECHNICAL MANAGER ${estimator.name}`),
+    tmSlot(drafted).includes(reviewer.name) && (drafted.match(/Pending/g) ?? []).length === 2 && !tmSlot(drafted).includes(estimator.name),
     drafted,
   );
 
@@ -1066,6 +1459,10 @@ async function main() {
       dupStored?.systemUnit === sheet.systemUnit &&
       dupStored?.scopeSections[0].tasks.some((t) => t.startDay === 3) === true &&
       dupStored?.validUntil === null,
+  );
+  check(
+    'a duplicate keeps each line’s supplier and note',
+    dupStored?.lines.some((l) => l.supplierId === onFile.id) === true && dupStored?.lines.some((l) => l.lineNote === `${TAG} quote 2210, 8 weeks`) === true,
   );
 
   // A FINAL costing prints the approval that made it final — and none when
@@ -1099,6 +1496,70 @@ async function main() {
     returned.status === 201 && !!returnReq && noRoute(returnedFinal),
     returnedFinal,
   );
+
+  // One signature per person (the routing sheet of 2026-10-13): a Technical
+  // Manager who is also the author's Team Leader approves once, and both
+  // steps carry that one instant — on the record and on the paper.
+  const tEstimator2 = signToken(estimator2.id, estimator2.email);
+  const twoSteps = await api(tEstimator2, 'POST', '/costings', {
+    title: `${TAG} one signature for two steps`,
+    lines: [{ costCategoryId: mat.id, name: `${TAG} Both steps line`, quantity: 1, unit: 'lot', unitCost: 2000 }],
+  });
+  await api(tEstimator2, 'POST', `/costings/${twoSteps.body.id}/submit`);
+  await signCosting(twoSteps.body.id as string, [tmLeader]);
+  const twoStepActions = await prisma.approvalAction.findMany({
+    where: { request: { documentType: 'costing', documentId: twoSteps.body.id as string } },
+    orderBy: { sequence: 'asc' },
+  });
+  check(
+    'a technical manager who is also the author’s team leader approves once: both steps signed at one instant, the costing FINAL',
+    twoSteps.status === 201 &&
+      (await prisma.costing.findUnique({ where: { id: twoSteps.body.id as string } }))?.status === 'FINAL' &&
+      twoStepActions.length === 2 &&
+      twoStepActions.every((a) => a.approverId === tmLeader.id) &&
+      twoStepActions[1].coSignedWith === 1 &&
+      twoStepActions[0].actedAt.getTime() === twoStepActions[1].actedAt.getTime(),
+    JSON.stringify(twoStepActions.map((a) => [a.sequence, a.coSignedWith, a.actedAt])),
+  );
+  const twoStepPaper = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${twoSteps.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator2}` } })).arrayBuffer())));
+  check(
+    'and the estimate prints the one name under both steps, with no Pending',
+    twoStepPaper.includes(`TECHNICAL MANAGER ${tmLeader.name} `) && twoStepPaper.includes(`TEAM LEADER ${tmLeader.name} `) && !twoStepPaper.includes('Pending'),
+    twoStepPaper,
+  );
+
+  // Pulled back after approval (2026-10-16): the author (or edit_all) takes
+  // an approved, FINAL costing back to draft — never while a project stands on it.
+  const twoId = twoSteps.body.id as string;
+  const refusedWith = async (fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+      return '';
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  const notAuthor = await refusedWith(async () => reopenApproved('costing', twoId, (await resolveUser(estimator.id))!, 'Not mine'));
+  check('a colleague cannot pull back the author’s approved costing', notAuthor.length > 0, notAuthor);
+  const builtOn = await prisma.job.create({
+    data: { number: await nextNumber('project'), name: `${TAG} Pull-back project`, customerId: customer.id, costingId: twoId, createdById: manager.id, contractValue: D(1000) },
+  });
+  const jobMsg = await refusedWith(async () => reopenApproved('costing', twoId, (await resolveUser(estimator2.id))!, 'Prices moved'));
+  check(
+    'an approved costing is not pulled back while a project is built on it — the project named, nothing changed',
+    jobMsg.includes(builtOn.number) && (await prisma.costing.findUnique({ where: { id: twoId } }))?.status === 'FINAL',
+    jobMsg,
+  );
+  await prisma.job.update({ where: { id: builtOn.id }, data: { status: 'CANCELLED' } });
+  const pulled = await api(tEstimator2, 'POST', `/approvals/reopen/costing/${twoId}`, { reason: 'Prices moved' });
+  const pulledCosting = await prisma.costing.findUnique({ where: { id: twoId } });
+  const pulledReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: twoId }, orderBy: { createdAt: 'desc' } });
+  check(
+    'with the project cancelled, the author pulls it back: DRAFT, no final date, its request closed with the reason',
+    pulled.status === 200 && pulledCosting?.status === 'DRAFT' && pulledCosting.finalAt === null && pulledReq?.status === 'CANCELLED' && pulledReq.reopenReason === 'Prices moved',
+    `${pulled.status} ${pulledCosting?.status} ${pulledReq?.status}`,
+  );
+  await prisma.job.delete({ where: { id: builtOn.id } });
 
   // ══ The margin rule, the sixth bucket and the carry-over ═══════════════════
   console.log('Margin, Contingency and the carry-over from the markup rule');

@@ -191,6 +191,19 @@ export interface ParsedGoogleLink {
 const MEET_CODE = /^[a-z]{3}-[a-z]{4}-[a-z]{3}$/i;
 
 /**
+ * Where a place opens on Google Maps (2026-10-13): the link somebody pasted
+ * (already checked http(s) by `safeHttpUrl` on the way in), else Google Maps'
+ * own search for the address typed, else nothing. The web's `MapLink` draws
+ * the same rule; this is the one the .ics, the Google hand-off and an email
+ * carry.
+ */
+export function mapLinkFor(place: string | null | undefined, mapUrl: string | null | undefined): string | null {
+  if (mapUrl && /^https?:\/\//i.test(mapUrl.trim())) return mapUrl.trim();
+  const text = place?.trim();
+  return text ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(text)}` : null;
+}
+
+/**
  * Sorts a pasted link into a Meet link or a Calendar event link, and refuses
  * anything else with a message that says what to paste. An empty paste
  * clears both — the caller decides whether that is allowed.

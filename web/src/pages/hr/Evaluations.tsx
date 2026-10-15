@@ -6,7 +6,7 @@ import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useUnsavedChanges } from '../../components/Navigation';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { Panel } from '../../components/charts';
 import { PersonSelect, loadPeople, type PersonRow } from '../../components/People';
@@ -1120,6 +1120,7 @@ export function EvaluationDetail() {
         </div>
       </div>
 
+      <DecisionNote documentType="evaluation" documentId={ev.id} reloadToken={approvalToken} />
       <DocumentApproval documentType="evaluation" documentId={ev.id} reloadToken={approvalToken} />
 
       <div className="eval-attachments">

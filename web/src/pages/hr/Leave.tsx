@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
@@ -728,6 +728,7 @@ function LeaveRecord({ id }: { id: string }) {
         </dl>
       </div>
 
+      <DecisionNote documentType="leave_request" documentId={row.id} reloadToken={reload} />
       <DocumentApproval documentType="leave_request" documentId={row.id} reloadToken={reload} />
 
       {modifying && (

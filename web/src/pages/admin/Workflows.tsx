@@ -3,6 +3,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, formatMoney, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
+import { TickPicker } from '../../components/TickPicker';
 
 interface Step {
   id?: string;
@@ -11,6 +12,8 @@ interface Step {
   approverType: 'ROLE' | 'USER' | 'SUPERVISOR' | 'HR' | 'PROJECT_MANAGER';
   roleId: string | null;
   userId: string | null;
+  /** SUPERVISOR only: roles whose holders on the requester's team decide it too. */
+  alsoRoleIds?: string[];
   role?: { id: string; name: string } | null;
   user?: { id: string; name: string } | null;
   /** Active people who would receive this step; null when it depends on the requester. */
@@ -42,7 +45,7 @@ interface DocType {
 
 const APPROVER_LABELS: Record<Step['approverType'], string> = {
   SUPERVISOR: 'The requester’s supervisor',
-  PROJECT_MANAGER: 'The project’s manager',
+  PROJECT_MANAGER: 'The Technical Manager on the document or project',
   HR: 'HR',
   ROLE: 'Anyone with a role',
   USER: 'One specific person',
@@ -137,7 +140,7 @@ export function Workflows() {
                 {w.optionLabel && <div className="faint">Offered as “{w.optionLabel}”</div>}
                 {(w.preparerSigns || w.standIns) && (
                   <div className="faint">
-                    {[w.preparerSigns && 'The preparer signs the steps they hold', w.standIns && 'managers may stand in']
+                    {[w.preparerSigns && 'One signature per person', w.standIns && 'managers may stand in']
                       .filter(Boolean)
                       .join(' · ')}
                   </div>
@@ -165,7 +168,11 @@ export function Workflows() {
                       <span className="faint">
                         →{' '}
                         {s.approverType === 'SUPERVISOR'
-                          ? `${APPROVER_LABELS.SUPERVISOR}, else ${s.role?.name ?? 'HR'}`
+                          ? `${APPROVER_LABELS.SUPERVISOR}, else ${s.role?.name ?? 'HR'}${
+                              s.alsoRoleIds?.length
+                                ? ` · also ${s.alsoRoleIds.map((rid) => roles.find((r) => r.id === rid)?.name ?? 'a role').join(', ')} on the team`
+                                : ''
+                            }`
                           : s.approverType === 'PROJECT_MANAGER'
                             ? `${APPROVER_LABELS.PROJECT_MANAGER}, else ${s.role?.name ?? 'Executive / Management'}`
                             : (s.role?.name ?? s.user?.name ?? APPROVER_LABELS[s.approverType])}
@@ -287,6 +294,7 @@ function WorkflowEditor({
           approverType: s.approverType,
           roleId: s.roleId,
           userId: s.userId,
+          ...(s.approverType === 'SUPERVISOR' ? { alsoRoleIds: s.alsoRoleIds ?? [] } : {}),
         })),
       };
       if (workflow) await api.put(`/workflows/${workflow.id}`, payload);
@@ -380,8 +388,12 @@ function WorkflowEditor({
       <label className="checkbox">
         <input type="checkbox" checked={preparerSigns} onChange={(e) => setPreparerSigns(e.target.checked)} />
         <span>
-          The preparer signs the steps they hold
-          <span className="faint"> — a step whose role the preparer holds is signed when they submit, with the same time as Prepared by</span>
+          One signature per person
+          <span className="faint">
+            {' '}
+            — the preparer signs the steps they hold when they submit, with the same time as Prepared by, and an approver
+            signs every later step they hold with their one Approve
+          </span>
         </span>
       </label>
       <label className="checkbox">
@@ -447,30 +459,41 @@ function WorkflowEditor({
               ))}
             </select>
           ) : step.approverType === 'SUPERVISOR' ? (
-            /* Who decides when the requester has no "Reports to" — HR unless a role is named. */
-            <select
-              value={step.roleId ?? ''}
-              aria-label="When no supervisor is set"
-              onChange={(e) => update(i, { roleId: e.target.value || null })}
-            >
-              <option value="">No supervisor set: HR</option>
-              {roles.map((r) => (
-                <option key={r.id} value={r.id}>
-                  No supervisor set: {r.name}
-                </option>
-              ))}
-            </select>
+            <div className="step-supervisor">
+              {/* Who decides when the requester has no "Reports to" — HR unless a role is named. */}
+              <select
+                value={step.roleId ?? ''}
+                aria-label="When no supervisor is set"
+                onChange={(e) => update(i, { roleId: e.target.value || null })}
+              >
+                <option value="">No supervisor set: HR</option>
+                {roles.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    No supervisor set: {r.name}
+                  </option>
+                ))}
+              </select>
+              {/* Beside the "Reports to", holders of these roles on the requester's own team may decide it too. */}
+              <TickPicker
+                choices={roles.map((r) => ({ value: r.id, label: r.name }))}
+                value={step.alsoRoleIds ?? []}
+                onChange={(v) => update(i, { alsoRoleIds: v })}
+                none="Nobody else on the team"
+                noun="roles"
+                label="Also decides it, on the requester's team"
+              />
+            </div>
           ) : step.approverType === 'PROJECT_MANAGER' ? (
             /* The project's manager decides; when the project has none, or the manager raised it, this role does. */
             <select
               value={step.roleId ?? ''}
-              aria-label="When the project has no manager, or the manager raised it"
+              aria-label="When no Technical Manager is named, or they raised it"
               onChange={(e) => update(i, { roleId: e.target.value || null })}
             >
-              <option value="">No project manager, or their own request: Executive / Management</option>
+              <option value="">No Technical Manager named, or their own request: Executive / Management</option>
               {roles.map((r) => (
                 <option key={r.id} value={r.id}>
-                  No project manager, or their own request: {r.name}
+                  No Technical Manager named, or their own request: {r.name}
                 </option>
               ))}
             </select>

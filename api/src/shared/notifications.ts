@@ -18,6 +18,19 @@ export type NotificationType =
   | 'quotation.awaiting'
   | 'project.behind_schedule'
   | 'po.received'
+  | 'warehouse.not_posted'
+  | 'borrow.to_release'
+  | 'borrow.released'
+  | 'borrow.cancelled'
+  | 'pullout.done'
+  // An approved invoice request raised a draft invoice, or could not (2026-10-15).
+  | 'invoice_request.invoiced'
+  | 'invoice_request.not_invoiced'
+  /** The automatic reorder added an item to a draft replenishment (2026-10-15). */
+  | 'reorder.raised'
+  /** Outgoing as the receive proof (2026-10-15): issued to you, and confirmed received. */
+  | 'warehouse.issued_to_you'
+  | 'warehouse.received'
   | 'invoice.overdue'
   | 'leave.awaiting'
   | 'overtime.awaiting'
@@ -28,6 +41,9 @@ export type NotificationType =
   | 'meeting.invited'
   | 'meeting.updated'
   | 'meeting.cancelled'
+  /** The minutes went out for the attendees to agree (2026-10-14), and an attendee answered. */
+  | 'minutes.to_agree'
+  | 'minutes.answered'
   | 'evaluation.due'
   | 'training.enrolled'
   | 'training.assigned'

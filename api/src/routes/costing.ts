@@ -14,7 +14,7 @@ import {
   idsFilter,
   type ListQuery,
 } from '../http/kit';
-import { manilaDayStart, manilaMonthKey } from '../shared/day';
+import { manilaDayStart, manilaMonthKey, workingDayDate } from '../shared/day';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, resolveUser } from '../permissions/resolve';
 import { notify } from '../shared/notifications';
@@ -25,6 +25,7 @@ import {
   approvalStands,
   contactOf,
   onApprovalSettled,
+  onApprovalReopened,
   pickWorkflow,
   mayDecide,
   preparedAt,
@@ -32,7 +33,7 @@ import {
   submitForApproval,
   type ApprovalSlot,
 } from '../shared/approvals';
-import { costingFigures, lineAmount, lineCodes, marginOfMarkup, planTasks, vatOn } from '../shared/costingMath';
+import { scheduleOfValues, costingFigures, lineAmount, lineCodes, marginOfMarkup, planTasks, vatOn } from '../shared/costingMath';
 import {
   companyCurrency,
   formatAmount,
@@ -47,6 +48,11 @@ import {
   type Signatory,
 } from '../shared/pdf';
 import { LIST_CAP, listReference, recordNamed, sendListPdf, totalLabel, choice, ratePct } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
+import { SCOPE_PRELOAD } from '../shared/scopePreload';
+import { renderDesigned, type DesignData } from '../shared/pdfDesign';
+import { costingDesign, costingLineRow, costingSubtotalRow } from '../shared/costingTemplate';
+import { appendPdf } from '../shared/pdfAttachments';
 
 /**
  * Costing (model §5.3).
@@ -79,14 +85,18 @@ function num(v: Prisma.Decimal | null | undefined): number {
 type Tx = Prisma.TransactionClient;
 
 /** The costing's stored rates, as costingMath takes them. */
-function ratesOf(c: { marginPct: Prisma.Decimal; vatRate: Prisma.Decimal }) {
-  return { marginPct: c.marginPct.toString(), vatRate: c.vatRate.toString() };
+function ratesOf(c: { marginPct: Prisma.Decimal; vatRate: Prisma.Decimal; targetContractValue?: Prisma.Decimal | null }) {
+  return {
+    marginPct: c.marginPct.toString(),
+    vatRate: c.vatRate.toString(),
+    targetContractValue: c.targetContractValue ? c.targetContractValue.toString() : null,
+  };
 }
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
 
 /** Recomputes totals from the lines and rewrites the stored figures. */
-async function recalc(costingId: string, tx: Tx = prisma) {
+async function recalc(costingId: string, tx: Tx = prisma, opts: { strict?: boolean } = {}) {
   const costing = await tx.costing.findUnique({
     where: { id: costingId },
     include: { lines: true },
@@ -97,33 +107,66 @@ async function recalc(costingId: string, tx: Tx = prisma) {
     costing.lines.map((l) => ({ quantity: l.quantity.toString(), unitCost: l.unitCost.toString(), isHeading: l.isHeading })),
     ratesOf(costing),
   );
+  // A fixed price stands on the margin it amounts to, within the margin's own
+  // ±95%: refused at a save (the caller's transaction rolls back), never on a
+  // background recalculation.
+  if (opts.strict && f.fixedPrice && (f.marginPct >= 0.95 || f.marginPct <= -0.95)) {
+    throw badRequest(
+      f.totalCost <= 0
+        ? 'Enter the cost lines first — a fixed price is set on top of a cost.'
+        : `A price of ${formatMoney(f.contractValue)} on a cost of ${formatMoney(f.totalCost)} is a ${Math.round(f.marginPct * 1000) / 10}% margin — within ±95% only.`,
+      [{ field: 'targetContractValue', message: 'Outside a ±95% margin of the cost' }],
+    );
+  }
   return tx.costing.update({
     where: { id: costingId },
-    data: { totalCost: d(f.totalCost), contractValue: d(f.contractValue) },
+    data: {
+      totalCost: d(f.totalCost),
+      contractValue: d(f.contractValue),
+      // At a fixed price the margin is what the price amounts to, stored for
+      // every reader of the costing's margin (the budget, the board).
+      ...(f.fixedPrice ? { marginPct: d(f.marginPct) } : {}),
+    },
   });
 }
 
 /**
- * Spreads the contract value across the scope sections in proportion to what
- * is already there, or evenly when nothing has been set. Rounded to centavos,
- * with the rounding remainder on the last section, so the sum is exact.
+ * Writes the schedule of values (`scheduleOfValues()` in costingMath, the
+ * rule the sheet shows live): every cost-priced phase from its buckets' cost,
+ * and — with `spread` — what the declared and cost-priced phases leave of
+ * the contract value over the SPREAD phases, so the sum is exact. Without
+ * `spread` the SPREAD and DECLARED phases keep what was typed. With `strict`
+ * (a save, a distribute) a schedule that cannot add up is refused; the
+ * caller's transaction rolls back.
  */
-async function spreadSections(tx: Tx, costingId: string): Promise<number> {
-  const costing = await tx.costing.findUnique({ where: { id: costingId }, select: { contractValue: true } });
+async function spreadSections(tx: Tx, costingId: string, opts: { spread?: boolean; strict?: boolean } = {}): Promise<number> {
+  const spread = opts.spread ?? true;
+  const costing = await tx.costing.findUnique({ where: { id: costingId }, select: { contractValue: true, totalCost: true } });
   const sections = await tx.scopeSection.findMany({ where: { costingId }, orderBy: { sortOrder: 'asc' } });
   if (!costing || !sections.length) return 0;
 
-  const contractValue = num(costing.contractValue);
-  const currentTotal = sections.reduce((s, x) => s + num(x.value), 0);
-  const raw = sections.map((s) =>
-    currentTotal > 0 ? (num(s.value) / currentTotal) * contractValue : contractValue / sections.length,
+  const buckets = await tx.costingLine.groupBy({
+    by: ['costCategoryId'],
+    where: { costingId, isHeading: false },
+    _sum: { amount: true },
+  });
+  const bucketCost = Object.fromEntries(buckets.map((b) => [b.costCategoryId, (b._sum.amount ?? new Prisma.Decimal(0)).toString()]));
+  const sov = scheduleOfValues(
+    sections.map((s) => ({ valueSource: s.valueSource, value: s.value.toString(), costCategoryIds: s.costCategoryIds })),
+    bucketCost,
+    costing.contractValue.toString(),
+    costing.totalCost.toString(),
+    spread,
   );
-  const rounded = raw.map((v) => Math.round(v * 100) / 100);
-  const drift = Math.round((contractValue - rounded.reduce((a, b) => a + b, 0)) * 100) / 100;
-  rounded[rounded.length - 1] = Math.round((rounded[rounded.length - 1] + drift) * 100) / 100;
-
+  if (opts.strict && sov.problem === 'over') {
+    throw badRequest(
+      `The declared and cost-priced phases come to more than the contract value of ${formatMoney(num(costing.contractValue))} — lower one, or let it spread.`,
+      [{ field: 'sections', message: 'More than the contract value' }],
+    );
+  }
+  // Only what changed is written: a declared phase, or an unspread one, comes back as it went in.
   for (const [i, s] of sections.entries()) {
-    await tx.scopeSection.update({ where: { id: s.id }, data: { value: d(rounded[i]) } });
+    if (sov.values[i] !== num(s.value)) await tx.scopeSection.update({ where: { id: s.id }, data: { value: d(sov.values[i]) } });
   }
   return sections.length;
 }
@@ -149,6 +192,7 @@ function present(costing: Record<string, unknown>, ranks?: Map<string, number>) 
   const rates = {
     marginPct: num(costing.marginPct as Prisma.Decimal),
     vatRate: num(costing.vatRate as Prisma.Decimal),
+    targetContractValue: costing.targetContractValue == null ? null : num(costing.targetContractValue as Prisma.Decimal),
   };
   // The summary's figures come from the STORED cost and contract value — the
   // commercial facts — never re-derived from the rate: a costing carried over
@@ -168,6 +212,10 @@ function present(costing: Record<string, unknown>, ranks?: Map<string, number>) 
   const codeOf = new Map(ordered.map((l, i) => [l.id as string, codes[i]]));
 
   const plan = planTasks(sections.map((s) => ({ durationDays: s.durationDays, tasks: s.tasks ?? [] })));
+  // With a start date the plan's working days become calendar dates (Mon–Sat):
+  // derived on every read, never stored, so a changed plan moves them with it.
+  const plannedStart = (costing.plannedStart as Date | null) ?? null;
+  const on = (day: number | null) => (plannedStart && day ? dayKey(workingDayDate(plannedStart, day)) : null);
 
   return {
     ...costing,
@@ -182,6 +230,9 @@ function present(costing: Record<string, unknown>, ranks?: Map<string, number>) 
     // and only one of them is what the business calls margin (model §5.3).
     grossMarginPct: contractValue > 0 ? (contractValue - totalCost) / contractValue : 0,
     validUntil: dayKey(costing.validUntil as Date | null),
+    plannedStart: dayKey(plannedStart),
+    /** The day the plan's last working day falls on; null without a start date or a plan. */
+    plannedFinish: on(plan.totalDays || null),
     lines: ordered.map((l) => ({
       ...l,
       code: ranks ? codeOf.get(l.id as string) ?? null : null,
@@ -197,11 +248,31 @@ function present(costing: Record<string, unknown>, ranks?: Map<string, number>) 
       startDay: plan.sections[i].start,
       endDay: plan.sections[i].end,
       planDays: plan.sections[i].days,
-      tasks: (s.tasks ?? []).map((t, j) => ({ ...t, start: plan.sections[i].tasks[j].start, end: plan.sections[i].tasks[j].end })),
+      startDate: on(plan.sections[i].start),
+      endDate: on(plan.sections[i].end),
+      tasks: (s.tasks ?? []).map((t, j) => ({
+        ...t,
+        start: plan.sections[i].tasks[j].start,
+        end: plan.sections[i].tasks[j].end,
+        startDate: on(plan.sections[i].tasks[j].start),
+        endDate: on(plan.sections[i].tasks[j].end),
+      })),
     })),
     planDays: plan.totalDays,
     scopeTotal: sections.reduce((sum, s) => sum + num(s.value as Prisma.Decimal), 0),
   };
+}
+
+/**
+ * The paper's line under the Scope of Work chart, and the figure the owner
+ * asked to see: "Planned duration in working days (Mon–Sat) — 85 working
+ * days in all, October 14, 2026 to January 23, 2027."
+ */
+export function planLegend(planDays: number, start: string | null, finish: string | null): string {
+  const days = `${planDays} working day${planDays === 1 ? '' : 's'} in all`;
+  const on = (key: string) => formatDate(new Date(`${key}T00:00:00Z`));
+  const span = start && finish ? `, ${on(start)} to ${on(finish)}` : '';
+  return `Planned duration in working days (Mon–Sat) — ${days}${span}.`;
 }
 
 /** Someone with only view_own never sees another person's costing. */
@@ -281,6 +352,9 @@ costingRoutes.get(
         include: {
           customer: { select: { id: true, name: true } },
           owner: { select: { id: true, name: true } },
+          // The project the costing became (2026-10-15, the owner's call: the
+          // list says when a costing has been converted).
+          jobs: { select: { id: true, number: true, name: true, status: true }, orderBy: { createdAt: 'asc' } },
           _count: { select: { lines: true, scopeSections: true } },
         },
         orderBy: orderBy(q, COSTING_SORTS, { createdAt: 'desc' }),
@@ -600,9 +674,35 @@ costingRoutes.get(
 
 /**
  * The short lists the sheet's inputs offer as you type: units, System / Unit
- * names, phase and task names — the most used first — and the caller's own
- * latest Terms & Conditions, which a new costing starts from.
+ * names, phase and task names — the most used first — the caller's own
+ * latest Terms & Conditions, which a new costing starts from, and the scope
+ * of work it opens on (`SCOPE_PRELOAD`).
  */
+/**
+ * Supplier names for a line's Supplier box (2026-10-14): active suppliers by
+ * name or code, names only, behind the costing's own right — an engineer
+ * costing a job need not read the supplier master to name who supplies a line.
+ */
+costingRoutes.get(
+  '/suggest/suppliers',
+  requireAny('gops.costing.view_all', 'gops.costing.view_own'),
+  handler(async (req, res) => {
+    const term = String(req.query.q ?? '').trim().slice(0, 100);
+    const rows = await prisma.supplier.findMany({
+      where: {
+        isActive: true,
+        ...(term
+          ? { OR: [{ name: { contains: term, mode: 'insensitive' } }, { code: { contains: term, mode: 'insensitive' } }] }
+          : {}),
+      },
+      orderBy: { name: 'asc' },
+      take: 15,
+      select: { id: true, name: true },
+    });
+    res.json(rows);
+  }),
+);
+
 costingRoutes.get(
   '/suggest/lists',
   requireAny('gops.costing.view_all', 'gops.costing.view_own'),
@@ -653,6 +753,8 @@ costingRoutes.get(
       terms: lastTerms?.terms ?? null,
       // What a new sheet's VAT toggle switches on.
       companyVatRate: company ? Number(company.vatRate) : 0.12,
+      // The scope of work a new sheet opens on (2026-10-13, the owner's sheet).
+      scopePreload: SCOPE_PRELOAD,
     });
   }),
 );
@@ -936,6 +1038,7 @@ async function loadFull(id: string, tx: Tx = prisma) {
         include: {
           costCategory: { select: { id: true, code: true, name: true, sortOrder: true } },
           item: { select: { id: true, code: true, name: true } },
+          supplier: { select: { id: true, code: true, name: true } },
         },
       },
       scopeSections: {
@@ -1016,6 +1119,11 @@ const sheetLineSchema = z
     quantity: z.number().min(0).max(1e9).default(0),
     unit: z.string().trim().max(30).optional().nullable(),
     unitCost: z.number().min(0).max(1e12).default(0),
+    /** Who supplies it: a supplier on file, else a name typed (kept as text). */
+    supplierId: z.string().optional().nullable(),
+    supplierName: z.string().trim().max(200).optional().nullable(),
+    /** A short note, printed under the supplier. */
+    lineNote: z.string().trim().max(500).optional().nullable(),
   })
   .refine((l) => !!(l.name?.trim() || l.description?.trim()), { message: 'Name the line', path: ['name'] });
 
@@ -1034,6 +1142,9 @@ const sheetSectionSchema = z.object({
   description: z.string().trim().max(2000).optional().nullable(),
   durationDays: z.number().int().min(0).max(3650).default(0),
   value: z.number().min(0).default(0),
+  /** Where the value comes from (2026-10-13): SPREAD (default), DECLARED, or CATEGORY with its buckets. */
+  valueSource: z.enum(['SPREAD', 'DECLARED', 'CATEGORY']).default('SPREAD'),
+  costCategoryIds: z.array(z.string()).max(10).default([]),
   tasks: z.array(sheetTaskSchema).max(200).default([]),
 });
 
@@ -1045,9 +1156,13 @@ const headerSchema = z.object({
   leadId: z.string().optional().nullable(),
   /** The gross margin on the price, a fraction: ±95% at most — at 100% there is no price. */
   marginPct: z.number().gt(-0.95, 'A margin of −95% or below prices nothing').lt(0.95, 'A margin of 95% or more is no price at all').optional(),
+  /** A fixed price, net of VAT (2026-10-13): the contract value as typed; null prices from the margin again. */
+  targetContractValue: z.number().gt(0, 'A price above zero').max(1e13).nullable().optional(),
   /** The company's VAT rate, or 0 for a zero-rated job — see `checkVatRate`. */
   vatRate: z.number().min(0).max(1).optional(),
   validUntil: z.string().regex(DAY, 'Use a date').optional().nullable(),
+  /** The day the scope of work starts; the finish is derived from the plan. */
+  plannedStart: z.string().regex(DAY, 'Use a date').optional().nullable(),
   systemUnit: z.string().trim().max(200).optional().nullable(),
   durationDays: z.number().int().min(0).optional().nullable(),
   notes: z.string().max(20000).optional().nullable(),
@@ -1091,9 +1206,30 @@ async function checkReferences(body: SheetBody, tx: Tx) {
     const found = await tx.item.count({ where: { id: { in: [...itemIds] } } });
     if (found !== itemIds.size) throw badRequest('A line names an item that does not exist');
   }
+  const supplierIds = new Set((body.lines ?? []).map((l) => l.supplierId).filter((v): v is string => !!v));
+  if (supplierIds.size) {
+    const found = await tx.supplier.count({ where: { id: { in: [...supplierIds] } } });
+    if (found !== supplierIds.size) throw badRequest('A line names a supplier that does not exist');
+  }
   if (body.siteId && body.customerId) {
     const site = await tx.customerSite.findUnique({ where: { id: body.siteId }, select: { customerId: true } });
     if (!site || site.customerId !== body.customerId) throw badRequest('That location is not one of the customer\'s sites');
+  }
+  // A phase priced from cost names its buckets, each real and each on one phase only —
+  // a bucket on two phases would count its money twice.
+  const seen = new Map<string, string>();
+  for (const sec of body.sections ?? []) {
+    if (sec.valueSource !== 'CATEGORY') continue;
+    if (!sec.costCategoryIds.length) throw badRequest(`Choose the cost the phase “${sec.name}” takes its value from`);
+    for (const id of new Set(sec.costCategoryIds)) {
+      const other = seen.get(id);
+      if (other) throw badRequest(`One cost bucket is on both “${other}” and “${sec.name}” — its money would count twice`);
+      seen.set(id, sec.name);
+    }
+  }
+  if (seen.size) {
+    const found = await tx.costCategory.count({ where: { id: { in: [...seen.keys()] } } });
+    if (found !== seen.size) throw badRequest('A phase names a cost category that does not exist');
   }
 }
 
@@ -1105,8 +1241,30 @@ const asDay = (v: string | null | undefined) => (v ? new Date(`${v}T00:00:00Z`) 
  * place, never deleted and recreated), rows left out are removed, and the
  * order on the page is the order stored.
  */
+/**
+ * A supplier typed by name that is ON FILE (one active supplier of that name,
+ * case- and space-blind) is linked; anything else stays the words typed.
+ */
+async function suppliersByName(tx: Tx, lines: SheetBody['lines']) {
+  const key = (n: string) => n.trim().replace(/\s+/g, ' ').toLowerCase();
+  const names = [...new Set((lines ?? []).filter((l) => !l.supplierId && l.supplierName?.trim()).map((l) => key(l.supplierName!)))];
+  const found = new Map<string, string | null>();
+  if (!names.length) return { key, found };
+  const rows = await tx.supplier.findMany({
+    where: { isActive: true, OR: names.map((n) => ({ name: { equals: n, mode: 'insensitive' as const } })) },
+    select: { id: true, name: true },
+  });
+  for (const r of rows) {
+    const k = key(r.name);
+    // Two suppliers of one name: link neither — the words stay as typed.
+    found.set(k, found.has(k) ? null : r.id);
+  }
+  return { key, found };
+}
+
 async function writeSheet(tx: Tx, costingId: string, body: SheetBody) {
   if (body.lines) {
+    const byName = await suppliersByName(tx, body.lines);
     const own = new Set((await tx.costingLine.findMany({ where: { costingId }, select: { id: true } })).map((l) => l.id));
     const kept = body.lines.map((l) => l.id).filter((id): id is string => !!id && own.has(id));
     await tx.costingLine.deleteMany({ where: { costingId, id: { notIn: kept } } });
@@ -1126,6 +1284,13 @@ async function writeSheet(tx: Tx, costingId: string, body: SheetBody) {
         unitCost: d(heading ? 0 : l.unitCost),
         amount: d(heading ? 0 : lineAmount(l.quantity, l.unitCost)),
         sortOrder: i,
+        // A supplier on file wins; a typed name is kept only without one.
+        ...(() => {
+          if (heading) return { supplierId: null, supplierName: null };
+          const linked = l.supplierId || (l.supplierName?.trim() ? byName.found.get(byName.key(l.supplierName)) : null) || null;
+          return { supplierId: linked, supplierName: linked ? null : l.supplierName?.trim().replace(/\s+/g, ' ') || null };
+        })(),
+        lineNote: heading ? null : l.lineNote?.trim() || null,
       };
       if (l.id && own.has(l.id)) await tx.costingLine.update({ where: { id: l.id }, data });
       else await tx.costingLine.create({ data: { ...data, costingId } });
@@ -1146,6 +1311,8 @@ async function writeSheet(tx: Tx, costingId: string, body: SheetBody) {
         // A phase with tasks lasts as long as they do; one without keeps what was typed.
         durationDays: s.tasks.length ? plan.sections[i].days : s.durationDays,
         value: d(s.value),
+        valueSource: s.valueSource,
+        costCategoryIds: s.valueSource === 'CATEGORY' ? [...new Set(s.costCategoryIds)] : [],
         sortOrder: i,
       };
       let sectionId: string;
@@ -1172,8 +1339,9 @@ async function writeSheet(tx: Tx, costingId: string, body: SheetBody) {
     if (plan.totalDays > 0) await tx.costing.update({ where: { id: costingId }, data: { durationDays: plan.totalDays } });
   }
 
-  await recalc(costingId, tx);
-  if (body.spread) await spreadSections(tx, costingId);
+  await recalc(costingId, tx, { strict: true });
+  // Cost-priced phases follow the cost on every save; the rest spread only when asked.
+  await spreadSections(tx, costingId, { spread: !!body.spread, strict: !!body.spread });
 }
 
 costingRoutes.post(
@@ -1212,10 +1380,12 @@ costingRoutes.post(
           leadId: lead?.id ?? null,
           ownerId: me.id,
           marginPct: d(body.marginPct ?? 0),
+          targetContractValue: body.targetContractValue ? d(body.targetContractValue) : null,
           // Snapshotted, like a quotation revision's: a Settings change later
           // does not reprint the tax this estimate was made with.
           vatRate: d(vatRate ?? (company ? Number(company.vatRate) : 0.12)),
           validUntil: asDay(body.validUntil),
+          plannedStart: asDay(body.plannedStart),
           systemUnit: body.systemUnit?.trim() || null,
           durationDays: body.durationDays ?? null,
           notes: body.notes || null,
@@ -1381,8 +1551,10 @@ function headerData(body: Partial<z.infer<typeof headerSchema>>, vatRate: number
   if (body.terms !== undefined) data.terms = body.terms || null;
   if (body.durationDays !== undefined) data.durationDays = body.durationDays ?? null;
   if (body.marginPct !== undefined) data.marginPct = d(body.marginPct);
+  if (body.targetContractValue !== undefined) data.targetContractValue = body.targetContractValue ? d(body.targetContractValue) : null;
   if (vatRate !== undefined) data.vatRate = d(vatRate);
   if (body.validUntil !== undefined) data.validUntil = asDay(body.validUntil);
+  if (body.plannedStart !== undefined) data.plannedStart = asDay(body.plannedStart);
   if (body.systemUnit !== undefined) data.systemUnit = body.systemUnit?.trim() || null;
   if (body.customerId !== undefined) {
     data.customer = body.customerId ? { connect: { id: body.customerId } } : { disconnect: true };
@@ -1461,8 +1633,12 @@ costingRoutes.patch(
     // When it became final, for "Final this month"; reopening clears it.
     if (body.status === 'FINAL' && before.status !== 'FINAL') data.finalAt = new Date();
     if (body.status === 'DRAFT') data.finalAt = null;
-    await prisma.costing.update({ where: { id: req.params.id }, data });
-    await recalc(req.params.id);
+    await prisma.$transaction(async (tx) => {
+      await tx.costing.update({ where: { id: req.params.id }, data });
+      await recalc(req.params.id, tx, { strict: body.targetContractValue !== undefined || body.marginPct !== undefined });
+      // A cost-priced phase follows the price.
+      await spreadSections(tx, req.params.id, { spread: false });
+    });
 
     const costing = await loadFull(req.params.id);
     await audit(
@@ -1595,6 +1771,28 @@ onApprovalSettled('costing', async (request, outcome) => {
   await settleCosting(request.documentId, outcome);
 });
 
+/**
+ * A FINAL costing may be pulled back to draft after approval (2026-10-16),
+ * by its author or `edit_all` — approval only made it FINAL. Refused while a
+ * project (not cancelled) is built on it.
+ */
+onApprovalReopened('costing', {
+  may: async (actor, costingId) => {
+    const costing = await prisma.costing.findUnique({ where: { id: costingId }, select: { status: true, ownerId: true } });
+    return !!costing && costing.status === 'FINAL' && canEditRecord(actor, 'gops', 'costing', costing.ownerId);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const costing = await tx.costing.findUnique({ where: { id: documentId }, select: { number: true } });
+    if (!costing) throw notFound('Costing not found');
+    const jobs = await tx.job.findMany({ where: { costingId: documentId, status: { not: 'CANCELLED' } }, select: { number: true } });
+    if (jobs.length) {
+      throw badRequest(`${costing.number} cannot be pulled back — project ${jobs.map((j) => j.number).join(', ')} is built on it`);
+    }
+    const claimed = await tx.costing.updateMany({ where: { id: documentId, status: 'FINAL' }, data: { status: 'DRAFT', finalAt: null } });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+  },
+});
+
 // ── Duplicate ────────────────────────────────────────────────────────────────
 
 /**
@@ -1649,6 +1847,7 @@ costingRoutes.post(
           siteId: source.siteId,
           ownerId: me.id,
           marginPct: source.marginPct,
+          targetContractValue: source.targetContractValue,
           vatRate: source.vatRate,
           systemUnit: source.systemUnit,
           durationDays: source.durationDays,
@@ -1666,6 +1865,9 @@ costingRoutes.post(
               unitCost: l.unitCost,
               amount: l.amount,
               sortOrder: l.sortOrder,
+              supplierId: l.supplierId,
+              supplierName: l.supplierName,
+              lineNote: l.lineNote,
             })),
           },
           scopeSections: {
@@ -1675,6 +1877,8 @@ costingRoutes.post(
               description: s.description,
               durationDays: s.durationDays,
               value: s.value,
+              valueSource: s.valueSource,
+              costCategoryIds: s.costCategoryIds,
               sortOrder: s.sortOrder,
               tasks: {
                 create: s.tasks.map((t) => ({
@@ -1731,7 +1935,7 @@ costingRoutes.post(
   require_('gops.costing.edit_own'),
   handler(async (req, res) => {
     const costing = await forEdit(req, req.params.id);
-    const count = await prisma.$transaction((tx) => spreadSections(tx, req.params.id));
+    const count = await prisma.$transaction((tx) => spreadSections(tx, req.params.id, { spread: true, strict: true }));
     if (!count) throw badRequest('Add at least one scope section first');
 
     await audit(
@@ -1749,7 +1953,7 @@ costingRoutes.post(
   }),
 );
 
-// ── PDF: the Material Cost Estimate and the Scope of Work ────────────────────
+// ── PDF: the Project Costing and the Scope of Work ────────────────────
 
 /**
  * The costing's route, one slot a step: a DRAFT — returned, or reopened
@@ -1770,171 +1974,177 @@ async function costingRouteSlots(costing: { id: string; status: string; ownerId:
 const pct = (v: number, places = 2) => `${(v * 100).toFixed(places).replace(/\.?0+$/, '')}%`;
 const qty = (v: number) => (Number.isInteger(v) ? String(v) : String(Number(v.toFixed(3))));
 
+/**
+ * The Project Costing on paper, worked out for the designed layout
+ * (2026-10-13, Admin › PDF Templates › Costing): its fields, the cost table —
+ * each bucket a numbered heading, its lines (code, name over description,
+ * unit, quantity, unit cost, amount; a subheading as a heading) and its
+ * subtotal — the summary (cost, the margin as a share of the price, the
+ * subtotal, VAT, the total; only the last bold), and the sign-offs: Prepared
+ * by, then the route as the workflow names its steps, who signed and when,
+ * else who is assigned with "Pending" (a DRAFT prints the route submitting it
+ * now would take; a costing final with no approval behind it prints none).
+ * Internal notes never print. Also the Scope of Work chart, the appendix the
+ * route joins behind the designed pages.
+ */
+export async function costingPaper(me: ReturnType<typeof currentUser>, id: string, deciderOnly = false) {
+  const costing = await loadFull(id);
+  if (!costing) throw notFound('Costing not found');
+  await assertCostingVisible(me, costing, deciderOnly);
+
+  const [ranks, currency] = await Promise.all([categoryRanks(), companyCurrency()]);
+  const view = present(costing as unknown as Record<string, unknown>, ranks);
+  const lines = view.lines as unknown as {
+    code: string | null;
+    name: string | null;
+    description: string;
+    isHeading: boolean;
+    unit: string;
+    quantity: number;
+    unitCost: number;
+    amount: number;
+    costCategory: { id: string; name: string };
+    supplier: { name: string } | null;
+    supplierName: string | null;
+    lineNote: string | null;
+  }[];
+  const day = (key: unknown) => (key ? formatDate(new Date(`${key as string}T00:00:00Z`)) : '');
+
+  const rows: DesignData['rows'] = [];
+  const buckets = new Map<string, { name: string; rank: number; lines: typeof lines }>();
+  for (const l of lines) {
+    const b = buckets.get(l.costCategory.id) ?? { name: l.costCategory.name, rank: ranks.get(l.costCategory.id) ?? 0, lines: [] };
+    b.lines.push(l);
+    buckets.set(l.costCategory.id, b);
+  }
+  for (const b of [...buckets.values()].sort((a, c) => a.rank - c.rank)) {
+    rows.push({ heading: b.name });
+    let subtotal = 0;
+    for (const l of b.lines) {
+      if (l.isHeading) {
+        rows.push({ heading: l.name || l.description });
+        continue;
+      }
+      rows.push(
+        costingLineRow({
+          code: l.code,
+          name: l.name || l.description,
+          description: l.name ? l.description : null,
+          unit: l.unit,
+          quantity: l.quantity,
+          unitCost: formatAmount(l.unitCost),
+          amount: formatAmount(l.amount),
+          supplier: l.supplier?.name ?? l.supplierName,
+          note: l.lineNote,
+        }),
+      );
+      subtotal += Math.round(l.amount * 100);
+    }
+    rows.push(costingSubtotalRow(b.name, formatAmount(subtotal / 100)));
+  }
+
+  const totals = [
+    { label: 'Project budgeted cost', value: formatMoney(view.totalCost, currency) },
+    {
+      label: `Margin (${pct(view.grossMarginPct)} of the price${view.targetContractValue ? ', fixed price' : ''})`,
+      value: formatMoney(view.marginAmount, currency),
+    },
+    { label: 'Subtotal', value: formatMoney(view.contractValue, currency) },
+    ...(view.vatRate > 0 ? [{ label: `VAT (${ratePct(view.vatRate)})`, value: formatMoney(view.vatAmount, currency) }] : []),
+    { label: 'Total', value: formatMoney(view.grandTotal, currency), bold: true },
+  ];
+
+  const [author, slots] = await Promise.all([contactOf(costing.ownerId), costingRouteSlots(costing)]);
+  const signatories: Signatory[] = [
+    { role: 'Prepared by', name: costing.owner.name, ...author, at: preparedAt(slots) ?? costing.createdAt },
+    ...(slots.length ? slotSignatories(slots) : costing.status === 'DRAFT' ? [{ role: 'Approved by' }] : []),
+  ];
+
+  const location = costing.site ? [costing.site.name, costing.site.address, costing.site.city].filter(Boolean).join(', ') : '';
+  const fields: Record<string, string> = {
+    'costing.number': costing.number,
+    'costing.title': costing.title,
+    'costing.date': formatShortDate(costing.createdAt),
+    'costing.dateLong': formatDate(costing.createdAt),
+    'costing.status': statusLabel(costing.status),
+    'costing.systemUnit': costing.systemUnit ?? '',
+    'costing.location': location,
+    'costing.validUntil': costing.validUntil ? formatDate(costing.validUntil) : '',
+    'costing.plannedStart': day(view.plannedStart),
+    'costing.plannedFinish': day(view.plannedFinish),
+    'costing.planDays': view.planDays > 0 ? `${view.planDays} working day${view.planDays === 1 ? '' : 's'} (Mon–Sat)` : '',
+    'costing.terms': costing.terms ?? '',
+    'costing.currency': currency,
+    'costing.totalCost': formatAmount(view.totalCost),
+    'costing.marginPct': pct(view.grossMarginPct),
+    'costing.marginAmount': formatAmount(view.marginAmount),
+    'costing.contractValue': formatAmount(view.contractValue),
+    'costing.vatRate': ratePct(view.vatRate),
+    'costing.vatAmount': formatAmount(view.vatAmount),
+    'costing.grandTotal': formatAmount(view.grandTotal),
+    'customer.name': costing.customer?.name ?? '',
+    'owner.name': costing.owner.name,
+    'owner.position': (costing.owner as { position?: string | null }).position ?? '',
+    'owner.email': author.email ?? '',
+    'owner.phone': author.phone ?? '',
+  };
+
+  // The Scope of Work: always the Gantt chart, on landscape pages of its own
+  // behind the estimate (2026-10-09) — a phase without tasks is a bar over its
+  // own planned days, dated from the start when the costing has one.
+  const scope = view.scopeSections as unknown as {
+    name: string;
+    startDay: number | null;
+    planDays: number;
+    tasks: { name: string; start: number; durationDays: number }[];
+  }[];
+  const groups: PdfGanttGroup[] = scope.map((sec) => ({
+    name: sec.name,
+    start: sec.startDay ?? undefined,
+    days: sec.planDays,
+    tasks: sec.tasks.map((t) => ({ name: t.name, start: t.start, days: t.durationDays })),
+  }));
+  const appendix: PdfSection | null = groups.length
+    ? {
+        kind: 'gantt',
+        title: 'Scope of work',
+        landscape: true,
+        groups,
+        legend: planLegend(view.planDays, view.plannedStart as string | null, view.plannedFinish as string | null),
+        startDate: (view.plannedStart as string | null) ?? undefined,
+      }
+    : null;
+
+  const data: DesignData = { title: `Project Costing ${costing.number}`, fields, rows, totals, signatories };
+  return { costing, data, appendix };
+}
+
+/** The Scope of Work chart on landscape pages of its own, to join behind the designed estimate. */
+export async function costingAppendix(costing: { number: string; title: string; createdAt: Date; customer: { name: string } | null }, appendix: PdfSection) {
+  return renderDocument({
+    title: 'Project Costing',
+    documentNumber: costing.number,
+    date: costing.createdAt,
+    reference: `${costing.title}${costing.customer ? ` — ${costing.customer.name}` : ''}`,
+    sections: [appendix],
+    appendixOnly: true,
+  });
+}
+
 costingRoutes.get(
   '/:id/pdf',
   requireAnyOrDecider('gops.costing.view_all', 'gops.costing.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const costing = await loadFull(req.params.id);
-    if (!costing) throw notFound('Costing not found');
-    await assertCostingVisible(me, costing, res.locals.deciderOnly === true);
+    const { costing, data, appendix } = await costingPaper(me, req.params.id, res.locals.deciderOnly === true);
+    const { design } = await costingDesign();
+    const estimate = await renderDesigned(design, data);
+    const pdf = appendix ? await appendPdf(estimate, await costingAppendix(costing, appendix)) : estimate;
 
-    const [ranks, currency] = await Promise.all([categoryRanks(), companyCurrency()]);
-    const view = present(costing as unknown as Record<string, unknown>, ranks);
-    const lines = view.lines as unknown as {
-      code: string | null;
-      name: string | null;
-      description: string;
-      isHeading: boolean;
-      unit: string;
-      quantity: number;
-      unitCost: number;
-      amount: number;
-      costCategory: { id: string; name: string };
-    }[];
-
-    // Who the estimate is for, then where and on what.
-    const location = costing.site
-      ? [costing.site.name, costing.site.address, costing.site.city].filter(Boolean).join(', ')
-      : '';
-    const sections: PdfSection[] = [
-      {
-        kind: 'fields',
-        columns: 2,
-        fields: [
-          { label: 'Project', value: costing.title },
-          { label: 'Customer', value: costing.customer?.name ?? '' },
-          { label: 'Location', value: location },
-          { label: 'System / Unit', value: costing.systemUnit ?? '' },
-          { label: 'Valid until', value: costing.validUntil ? formatDate(costing.validUntil) : '' },
-          { label: 'Prepared by', value: costing.owner.name },
-        ],
-      },
-    ];
-
-    // One table, the five buckets as numbered headings, each line's name bold
-    // over its description, a subtotal under every bucket that has lines.
-    const rows: PdfRow[] = [];
-    const buckets = new Map<string, { name: string; rank: number; lines: typeof lines }>();
-    for (const l of lines) {
-      const b = buckets.get(l.costCategory.id) ?? { name: l.costCategory.name, rank: ranks.get(l.costCategory.id) ?? 0, lines: [] };
-      b.lines.push(l);
-      buckets.set(l.costCategory.id, b);
-    }
-    for (const b of [...buckets.values()].sort((a, c) => a.rank - c.rank)) {
-      rows.push({ heading: `${b.rank}   ${b.name}` });
-      let subtotal = 0;
-      for (const l of b.lines) {
-        if (l.isHeading) {
-          rows.push({ heading: l.name || l.description });
-          continue;
-        }
-        const title = l.name || l.description;
-        const body = l.name && l.description && l.description !== l.name ? l.description : undefined;
-        rows.push([
-          l.code ?? '',
-          body ? { title, body } : { title },
-          l.unit,
-          qty(l.quantity),
-          formatAmount(l.unitCost),
-          formatAmount(l.amount),
-        ]);
-        subtotal += Math.round(l.amount * 100);
-      }
-      rows.push(['', { title: `${b.name} subtotal` }, '', '', '', { title: formatAmount(subtotal / 100) }]);
-    }
-    if (rows.length) {
-      sections.push({
-        kind: 'table',
-        head: ['No.', 'Description', 'Unit', 'Qty', `Unit cost (${currency})`, `Amount (${currency})`],
-        widths: [7, 47, 8, 8, 14, 16],
-        align: ['left', 'left', 'left', 'right', 'right', 'right'],
-        // A bucket's heading wraps inside No. + Description, the way the
-        // designed table keeps a subheading to its product column.
-        headingSpan: 2,
-        rows,
-      });
-    }
-
-    // The owner's summary (2026-10-09): cost, the margin as a share of the
-    // price, the subtotal, VAT, the total — no contingency line and no
-    // discount in the foot (a contingency is a cost line of its own bucket).
-    // The labels are the quotation's; only the last row is bold.
-    const summary = [
-      { label: 'Project budgeted cost', value: formatMoney(view.totalCost, currency) },
-      { label: `Margin (${pct(view.grossMarginPct)} of the price)`, value: formatMoney(view.marginAmount, currency) },
-      { label: 'Subtotal', value: formatMoney(view.contractValue, currency) },
-    ];
-    if (view.vatRate > 0) summary.push({ label: `VAT (${ratePct(view.vatRate)})`, value: formatMoney(view.vatAmount, currency) });
-    sections.push({
-      kind: 'totals',
-      rows: [...summary, { label: 'Total', value: formatMoney(view.grandTotal, currency), bold: true }],
-    });
-
-    if (costing.terms) sections.push({ kind: 'text', title: 'Terms & Conditions', body: costing.terms });
-    // Internal notes stay on the screen: this is the paper that leaves the office.
-
-    // The Scope of Work: the phases and their tasks on a working-day grid.
-    const scope = view.scopeSections as unknown as {
-      name: string;
-      startDay: number | null;
-      endDay: number | null;
-      planDays: number;
-      tasks: { name: string; start: number; durationDays: number }[];
-    }[];
-    // Always the Gantt chart, on landscape pages of its own after the
-    // sign-offs (2026-10-09, the owner's call: "Gantt chart on PDF have 2nd
-    // page") — a phase without tasks is a bar over its own planned days, the
-    // way the costing page draws it; there is no table fallback any more.
-    const groups: PdfGanttGroup[] = scope.map((s) => ({
-      name: s.name,
-      start: s.startDay ?? undefined,
-      days: s.planDays,
-      tasks: s.tasks.map((t) => ({ name: t.name, start: t.start, days: t.durationDays })),
-    }));
-    if (groups.length) {
-      sections.push({
-        kind: 'gantt',
-        title: 'Scope of work',
-        landscape: true,
-        groups,
-        legend: `Planned duration in working days (Mon–Fri) — ${view.planDays} working day${view.planDays === 1 ? '' : 's'} in all.`,
-      });
-    }
-
-    // Prepared by the author at creation, with how to reach them (read for
-    // the paper only — the costing's JSON carries no mobile); then the route
-    // as the workflow names its steps (rule 6, `slotSignatories`): Technical
-    // Manager, Team Leader, CEO (CTG) — who signed and when, else who is
-    // assigned with "Pending" under them. A DRAFT prints the route
-    // submitting it now WOULD take, whatever an earlier request said (one
-    // returned, or one approved before the costing was reopened, is no
-    // longer the costing's approval); a draft with no route at all prints
-    // one open "Approved by". A costing that went final with no approval
-    // standing behind it (`costingRouteSlots`) prints no approval slot:
-    // nobody will ever sign it.
-    const [author, slots] = await Promise.all([contactOf(costing.ownerId), costingRouteSlots(costing)]);
-    const signatories: Signatory[] = [
-      { role: 'Prepared by', name: costing.owner.name, ...author, at: preparedAt(slots) ?? costing.createdAt },
-      ...(slots.length ? slotSignatories(slots) : costing.status === 'DRAFT' ? [{ role: 'Approved by' }] : []),
-    ];
-
-    const pdf = await renderDocument({
-      title: 'Material Cost Estimate',
-      documentNumber: costing.number,
-      date: costing.createdAt,
-      reference: `${costing.title}${costing.customer ? ` — ${costing.customer.name}` : ''}`,
-      sections,
-      signatories,
-    });
-
-    await audit(
-      { entityType: 'costing', entityId: costing.id, action: 'EXPORTED', summary: 'Printed the material cost estimate' },
-      req,
-    );
+    await audit({ entityType: 'costing', entityId: costing.id, action: 'EXPORTED', summary: `Printed the Project Costing ${costing.number}` }, req);
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${costing.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Project Costing', number: costing.number, author: costing.owner.name, date: costing.createdAt })));
     res.send(pdf);
   }),
 );

@@ -26,6 +26,8 @@ export interface CostingRow {
   owner: { id: string; name: string };
   lineCount?: number;
   sectionCount?: number;
+  /** The project(s) built from it — "converted" on the list. */
+  jobs?: { id: string; number: string; name: string; status: string }[];
 }
 
 export function Costings() {
@@ -91,6 +93,21 @@ export function Costings() {
       key: 'status',
       label: 'Status',
       render: (c) => <StatusBadge status={c.status} extra={COSTING_TONES} />,
+    },
+    {
+      // Kept on the list (2026-10-15, the owner's call), saying when the
+      // costing has become a project — the project's own Costing tab shows it.
+      key: 'project',
+      label: 'Project',
+      render: (c) =>
+        c.jobs?.length ? (
+          <div>
+            <span className="badge ok">Converted</span>
+            <div className="faint mono">{c.jobs.map((j) => j.number).join(', ')}</div>
+          </div>
+        ) : (
+          <span className="faint">Not yet</span>
+        ),
     },
   ];
 

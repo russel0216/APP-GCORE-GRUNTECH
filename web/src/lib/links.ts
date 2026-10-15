@@ -30,13 +30,16 @@ const DETAIL: Record<string, string> = {
   project: '/g-ops/projects',
   progress_report: '/g-ops/progress',
   progress_billing: '/g-ops/billings',
+  invoice_request: '/g-fin/invoice-requests',
   // Procurement and warehouse
   purchase_request: '/g-chain/purchase-requests',
+  rfq: '/g-chain/rfq',
   canvass: '/g-chain/canvass',
   purchase_order: '/g-chain/purchase-orders',
-  receiving: '/g-chain/receiving',
-  stock_issue: '/g-chain/stock-issuance',
+  receiving: '/g-chain/incoming',
+  stock_issue: '/g-chain/outgoing',
   borrow_slip: '/g-chain/borrow-slips',
+  pullout_slip: '/g-chain/pullout-slips',
   // Finance
   invoice: '/g-fin/ar',
   supplier_bill: '/g-fin/ap',
@@ -52,6 +55,9 @@ const DETAIL: Record<string, string> = {
   inspection_report: '/g-ops/service-reports',
   job_order: '/g-ops/job-orders',
   cad_job_order: '/g-ops/cad-job-orders',
+  // A project's drawing sent for approval (2026-10-13); the engine files it as plan_approval.
+  approved_plan: '/g-ops/plans',
+  plan_approval: '/g-ops/plans',
   help_ticket: '/admin/help-tickets',
   // HR
   leave_request: '/g-hr/leave',
@@ -60,6 +66,8 @@ const DETAIL: Record<string, string> = {
   // The enrolment photo is attached to the employee.
   face_enrollment: '/g-hr/employees',
   clearance: '/g-hr/clearances',
+  // One person's path (2026-10-13); the audit files HR's ticks under the employee's id.
+  people_flow: '/g-hr/people-flow',
   meeting: '/g-hr/meetings',
   evaluation: '/g-hr/evaluations',
   training_session: '/g-hr/academy/sessions',

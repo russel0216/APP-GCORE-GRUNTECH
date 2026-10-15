@@ -1,4 +1,4 @@
-import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './lib/auth';
 import { ToastProvider, Loading } from './components/ui';
 import { Shell } from './components/Shell';
@@ -44,27 +44,29 @@ import {
   ProgressReportDetail,
   BillingDetailPage,
   BudgetMonitoring,
-  PlansRegister,
 } from './pages/delivery/Progress';
+import { PlanApprovalsRegister, PlanApprovalPage } from './pages/delivery/PlanApprovals';
 import { PurchaseRequests, PurchaseRequestDetail } from './pages/chain/PurchaseRequests';
+import { PurchaseRequisitionEditor } from './pages/chain/PurchaseRequisitionEditor';
+import { PurchaseOrderEditor } from './pages/chain/PurchaseOrderEditor';
+import { IncomingEditor } from './pages/chain/IncomingEditor';
+import { OutgoingEditor, StockIssueDetail, StockIssues } from './pages/chain/Outgoing';
+import { ChainReports } from './pages/chain/ChainReports';
+import { RfqDetail, RfqEditor, Rfqs } from './pages/chain/Rfq';
 import {
-  Canvasses,
-  CanvassDetail,
   PurchaseOrders,
   PurchaseOrderDetail,
 } from './pages/chain/Orders';
+import { CanvassDetail, Canvasses } from './pages/chain/Canvass';
 import {
   Receivings,
   ReceivingDetail,
-  StockIssues,
-  StockIssueDetail,
-  BorrowSlips,
-  BorrowSlipDetail,
   Inventory,
   StockCard,
-  ChainReports,
   ChainDashboard,
 } from './pages/chain/Warehouse';
+import { BorrowSlips, BorrowSlipDetail, BorrowRequestEditor } from './pages/chain/BorrowSlips';
+import { PulloutSlips, PulloutDetail, PulloutEditor } from './pages/chain/PulloutSlips';
 import { Clock } from './pages/hr/Clock';
 import { HrDashboard, AttendanceRegister } from './pages/hr/Dashboard';
 import { Leave } from './pages/hr/Leave';
@@ -73,6 +75,7 @@ import { HrSettingsPage } from './pages/hr/Settings';
 import { HrReports } from './pages/hr/Reports';
 import { Plantilla } from './pages/hr/Plantilla';
 import { Clearances, ClearanceDetail } from './pages/hr/Clearances';
+import { PeopleFlow, PeopleFlowPage } from './pages/hr/PeopleFlow';
 import { Meetings, MeetingDetail } from './pages/hr/Meetings';
 import { Evaluations, EvaluationDetail } from './pages/hr/Evaluations';
 import { Courses } from './pages/hr/academy/Courses';
@@ -80,11 +83,13 @@ import { TrainingCalendar } from './pages/hr/academy/TrainingCalendar';
 import { Sessions, SessionDetail } from './pages/hr/academy/Sessions';
 import { Passport } from './pages/hr/academy/Passport';
 import { Passports } from './pages/hr/academy/Passports';
+import { InvoiceRequests, InvoiceRequestPage } from './pages/finance/InvoiceRequests';
 import { Receivables, InvoiceDetail, Payments, PaymentDetail } from './pages/finance/Receivables';
 import { Payables, BillDetail } from './pages/finance/Payables';
 import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
 import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
-import { BudgetRequests, BudgetRequestDetail, FinanceBudgetRequests } from './pages/delivery/BudgetRequests';
+import { Commissions, CommissionEditor, CommissionPage } from './pages/finance/Commissions';
+import { BudgetRequests, BudgetRequestDetail, FinanceBudgetRequests, FinanceLiquidations } from './pages/delivery/BudgetRequests';
 import {
   FinanceDashboard,
   FinanceReports,
@@ -621,11 +626,13 @@ function Routed() {
         <Route
           path="/g-ops/plans"
           element={
-            <Guard permission="gops.plans.view_all">
-              <PlansRegister />
-            </Guard>
+            <GuardAny permissions={['gops.plans.view_all', 'gops.plans.view_own']}>
+              <PlanApprovalsRegister />
+            </GuardAny>
           }
         />
+        {/* No Guard: an approver standing in may hold no right to the module — the API decides. */}
+        <Route path="/g-ops/plans/:id" element={<PlanApprovalPage />} />
 
         {/* G-CHAIN (Phase 5) */}
         <Route
@@ -681,6 +688,40 @@ function Routed() {
         {/* The detail page under both modules too, for the same reason: a
             project manager who raised a PR from the Delivery menu opens it
             from the Delivery menu, and either module's permission is enough. */}
+        {/* The requisition page (2026-10-13): New and Modify, header and lines in one save. */}
+        <Route
+          path="/g-ops/purchase-requests/new"
+          element={
+            <Guard permission="gchain.purchase_requests.create">
+              <PurchaseRequisitionEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/purchase-requests/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.purchase_requests.edit_own', 'gchain.purchase_requests.edit_all']}>
+              <PurchaseRequisitionEditor />
+            </GuardAny>
+          }
+        />
+        {/* The requisition page (2026-10-13): New and Modify, header and lines in one save. */}
+        <Route
+          path="/g-chain/purchase-requests/new"
+          element={
+            <Guard permission="gchain.purchase_requests.create">
+              <PurchaseRequisitionEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/purchase-requests/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.purchase_requests.edit_own', 'gchain.purchase_requests.edit_all']}>
+              <PurchaseRequisitionEditor />
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-ops/purchase-requests/:id"
           element={
@@ -711,6 +752,39 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* The Request for Quotation (2026-10-14): list, the form as a page, the record. */}
+        <Route
+          path="/g-chain/rfq"
+          element={
+            <GuardAny permissions={['gchain.rfq.view_all', 'gchain.rfq.view_own']}>
+              <Rfqs />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/rfq/new"
+          element={
+            <Guard permission="gchain.rfq.create">
+              <RfqEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/rfq/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.rfq.edit_own', 'gchain.rfq.edit_all']}>
+              <RfqEditor />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/rfq/:id"
+          element={
+            <GuardAny permissions={['gchain.rfq.view_all', 'gchain.rfq.view_own']}>
+              <RfqDetail />
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-chain/canvass"
           element={
@@ -735,6 +809,23 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* The order page (2026-10-13): New and Modify, header and lines in one save. */}
+        <Route
+          path="/g-chain/purchase-orders/new"
+          element={
+            <Guard permission="gchain.purchase_orders.create">
+              <PurchaseOrderEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/purchase-orders/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.purchase_orders.edit_own', 'gchain.purchase_orders.edit_all']}>
+              <PurchaseOrderEditor />
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-chain/purchase-orders/:id"
           element={
@@ -744,7 +835,7 @@ function Routed() {
           }
         />
         <Route
-          path="/g-chain/receiving"
+          path="/g-chain/incoming"
           element={
             <Guard permission="gchain.receiving.view_all">
               <Receivings />
@@ -752,15 +843,29 @@ function Routed() {
           }
         />
         <Route
-          path="/g-chain/receiving/:id"
+          path="/g-chain/incoming/new"
           element={
-            <Guard permission="gchain.receiving.view_all">
-              <ReceivingDetail />
+            <Guard permission="gchain.receiving.create">
+              <IncomingEditor />
             </Guard>
           }
         />
         <Route
-          path="/g-chain/stock-issuance"
+          path="/g-chain/incoming/:id/edit"
+          element={
+            <Guard permission="gchain.receiving.create">
+              <IncomingEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/incoming/:id"
+          // No Guard: the API decides — the register's readers, and Back
+          // Support or the Purchasing Manager while it waits on them.
+          element={<ReceivingDetail />}
+        />
+        <Route
+          path="/g-chain/outgoing"
           element={
             <Guard permission="gchain.stock_issuance.view_all">
               <StockIssues />
@@ -768,29 +873,80 @@ function Routed() {
           }
         />
         <Route
-          path="/g-chain/stock-issuance/:id"
+          path="/g-chain/outgoing/new"
           element={
-            <Guard permission="gchain.stock_issuance.view_all">
-              <StockIssueDetail />
+            <Guard permission="gchain.stock_issuance.create">
+              <OutgoingEditor />
             </Guard>
           }
+        />
+        <Route
+          path="/g-chain/outgoing/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.stock_issuance.create', 'gchain.stock_issuance.edit_all']}>
+              <OutgoingEditor />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/outgoing/:id"
+          // No Guard: the API decides — the register's readers, the issuer's
+          // supervisor while it waits on them, and the person it was issued
+          // to (it is their receive proof).
+          element={<StockIssueDetail />}
         />
         <Route
           path="/g-chain/borrow-slips"
           element={
-            <Guard permission="gchain.borrow_slips.view_all">
+            <GuardAny permissions={['gchain.borrow_slips.view_all', 'gchain.borrow_slips.view_own']}>
               <BorrowSlips />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/borrow-slips/new"
+          element={
+            <Guard permission="gchain.borrow_slips.create">
+              <BorrowRequestEditor />
             </Guard>
           }
         />
         <Route
-          path="/g-chain/borrow-slips/:id"
+          path="/g-chain/borrow-slips/:id/edit"
           element={
-            <Guard permission="gchain.borrow_slips.view_all">
-              <BorrowSlipDetail />
+            <GuardAny permissions={['gchain.borrow_slips.edit_own', 'gchain.borrow_slips.edit_all']}>
+              <BorrowRequestEditor />
+            </GuardAny>
+          }
+        />
+        {/* No Guard: the API decides — a Team Leader deciding the request may hold no warehouse right. */}
+        <Route path="/g-chain/borrow-slips/:id" element={<BorrowSlipDetail />} />
+        <Route
+          path="/g-chain/pullout-slips"
+          element={
+            <Guard permission="gchain.pullout_slips.view_all">
+              <PulloutSlips />
             </Guard>
           }
         />
+        <Route
+          path="/g-chain/pullout-slips/new"
+          element={
+            <Guard permission="gchain.pullout_slips.create">
+              <PulloutEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/pullout-slips/:id/edit"
+          element={
+            <GuardAny permissions={['gchain.pullout_slips.create', 'gchain.pullout_slips.edit_all']}>
+              <PulloutEditor />
+            </GuardAny>
+          }
+        />
+        {/* No Guard: the API decides — the approver, or who asked for it, may hold no warehouse right. */}
+        <Route path="/g-chain/pullout-slips/:id" element={<PulloutDetail />} />
         <Route
           path="/g-chain/inventory"
           element={
@@ -896,6 +1052,16 @@ function Routed() {
             </Guard>
           }
         />
+        <Route
+          path="/g-hr/people-flow"
+          element={
+            <GuardAny permissions={['ghr.people_flow.view_all', 'ghr.people_flow.view_own']}>
+              <PeopleFlow />
+            </GuardAny>
+          }
+        />
+        {/* No Guard of its own: the API decides — HR, the person, or their supervisor (a 404 otherwise). */}
+        <Route path="/g-hr/people-flow/:employeeId" element={<PeopleFlowPage />} />
         <Route
           path="/g-hr/clearances"
           element={
@@ -1011,6 +1177,18 @@ function Routed() {
             </Guard>
           }
         />
+        {/* Invoice requests (2026-10-15): the register for those who read it;
+            the record page has no Guard — Back Support may hold no other right,
+            and the API decides. */}
+        <Route
+          path="/g-fin/invoice-requests"
+          element={
+            <GuardAny permissions={['gfin.invoice_requests.view_all', 'gfin.invoice_requests.view_own']}>
+              <InvoiceRequests />
+            </GuardAny>
+          }
+        />
+        <Route path="/g-fin/invoice-requests/:id" element={<InvoiceRequestPage />} />
         <Route
           path="/g-fin/ar"
           element={
@@ -1076,12 +1254,46 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* A sales order's commission, raised once fully collected (2026-10-16). */}
+        <Route
+          path="/g-fin/commissions"
+          element={
+            <GuardAny permissions={['gfin.commissions.view_all', 'gfin.commissions.view_own']}>
+              <Commissions />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-fin/commissions/new"
+          element={
+            <Guard permission="gfin.commissions.create">
+              <CommissionEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/commissions/:id/edit"
+          element={
+            <GuardAny permissions={['gfin.commissions.edit_own', 'gfin.commissions.edit_all']}>
+              <CommissionEditor />
+            </GuardAny>
+          }
+        />
+        <Route path="/g-fin/commissions/:id" element={<CommissionPage />} />
         {/* Project cash: finance's window on every project's budget requests. */}
         <Route
           path="/g-fin/budget-requests"
           element={
             <Guard permission="gfin.budget_requests.view_all">
               <FinanceBudgetRequests />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/budget-liquidations"
+          element={
+            <Guard permission="gfin.budget_liquidations.view_all">
+              <FinanceLiquidations />
             </Guard>
           }
         />
@@ -1378,6 +1590,12 @@ function Routed() {
         <Route path="/g-fin/*" element={<NotFound />} />
         <Route path="/g-chain/*" element={<NotFound />} />
 
+        {/* The warehouse's old addresses (Receiving and Stock Issuance, renamed
+            Incoming and Outgoing on 2026-10-14) still land, query and all. */}
+        <Route path="/g-chain/receiving" element={<MovedTo base="/g-chain/incoming" />} />
+        <Route path="/g-chain/receiving/:id" element={<MovedTo base="/g-chain/incoming" />} />
+        <Route path="/g-chain/stock-issuance" element={<MovedTo base="/g-chain/outgoing" />} />
+        <Route path="/g-chain/stock-issuance/:id" element={<MovedTo base="/g-chain/outgoing" />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
@@ -1437,4 +1655,11 @@ export function App() {
       </AuthProvider>
     </BrowserRouter>
   );
+}
+
+/** A renamed screen's old address: the same record and query at the new path. */
+function MovedTo({ base }: { base: string }) {
+  const { id } = useParams();
+  const { search } = useLocation();
+  return <Navigate to={`${base}${id ? `/${id}` : ''}${search}`} replace />;
 }

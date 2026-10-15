@@ -61,10 +61,21 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const res = await fetch(`/api${path}`, { method, headers, body: payload });
 
   if (res.status === 401) {
-    setToken(null);
-    // Let the auth provider notice rather than hard-reloading mid-typing.
-    window.dispatchEvent(new CustomEvent('gcore:signed-out'));
-    throw new ApiError(401, 'Your session has expired — please sign in again');
+    // The server's own words: a refused sign-in says "Email or password is
+    // incorrect", not that a session expired — there was none.
+    let message = token ? 'Your session has expired — please sign in again' : 'Email or password is incorrect';
+    try {
+      const data = await res.json();
+      if (typeof data?.error === 'string' && data.error) message = data.error;
+    } catch {
+      /* non-JSON error body */
+    }
+    if (token) {
+      setToken(null);
+      // Let the auth provider notice rather than hard-reloading mid-typing.
+      window.dispatchEvent(new CustomEvent('gcore:signed-out'));
+    }
+    throw new ApiError(401, message);
   }
 
   if (!res.ok) {
@@ -113,26 +124,33 @@ export const api = {
 };
 
 /**
- * Opens a PDF that needs the bearer token in a new tab.
+ * Opens a paper in a new tab under its REAL address (2026-10-12), so the
+ * browser's Save as offers the server's standard file name ("Quotation
+ * 0062602018 R0 - Carter Gasiong - 2026-10-08.pdf") rather than a blob's
+ * random id. A new tab carries no bearer token, so this first asks for a
+ * one-use print ticket for exactly this address (`POST /api/pdf/tickets`)
+ * and opens `path?ticket=…`; the paper's own route then runs every check
+ * it runs for a bearer, and a refusal there is a page saying why.
  *
- * `path` is the full `/api/...` path — this was lifted from two identical
- * copies in PurchaseRequests.tsx and ProjectWorkspace.tsx whose callers all
- * pass it that way, and changing the convention would have meant touching
- * every print button for nothing.
+ * `path` is the full `/api/...` path — every caller passes it that way. A
+ * refused ticket (signed out, not a paper's address) is reported through
+ * `onError`, as a refused paper was before.
  */
 export function openPdf(path: string, onError: (message: string) => void): void {
-  fetch(path, { headers: { Authorization: `Bearer ${getToken()}` } })
-    .then(async (r) => {
-      // A refusal is JSON, not a PDF. Opening it would show the person a tab
-      // of raw JSON and never tell them why; say the server's reason instead.
-      if (!r.ok) {
-        const body = (await r.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error ?? `The PDF could not be opened (${r.status})`);
-      }
-      return r.blob();
+  // Opened now, inside the click, so no popup blocker stands in the way;
+  // pointed at the paper once the ticket is in hand.
+  const tab = window.open('', '_blank');
+  api
+    .post<{ ticket: string }>('/pdf/tickets', { path })
+    .then(({ ticket }) => {
+      const url = `${path}${path.includes('?') ? '&' : '?'}ticket=${encodeURIComponent(ticket)}`;
+      if (tab) tab.location.href = url;
+      else window.open(url, '_blank');
     })
-    .then((b) => window.open(URL.createObjectURL(b), '_blank'))
-    .catch((err: unknown) => onError(err instanceof Error ? err.message : ''));
+    .catch((err: unknown) => {
+      tab?.close();
+      onError(err instanceof Error ? err.message : '');
+    });
 }
 
 /**

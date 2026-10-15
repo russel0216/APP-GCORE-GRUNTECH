@@ -47,11 +47,19 @@ import {
 import { jobRoutes } from './routes/jobs';
 import { budgetRequestRoutes } from './routes/budgetRequests';
 import { progressRoutes, billingRoutes, planRoutes } from './routes/progress';
+import { planApprovalRoutes } from './routes/planApprovals';
+import { invoiceRequestRoutes } from './routes/invoiceRequests';
+import { commissionRoutes } from './routes/commissions';
+import { peopleFlowRoutes } from './routes/peopleFlow';
 import {
   purchaseRequestRoutes,
   canvassRoutes,
   purchaseOrderRoutes,
 } from './routes/procurement';
+import { rfqRoutes } from './routes/rfq';
+import { pulloutRoutes } from './routes/pullouts';
+import { chainReportRoutes } from './routes/chainReports';
+import { finReportRoutes } from './routes/finReports';
 import {
   receivingRoutes,
   stockIssueRoutes,
@@ -171,17 +179,24 @@ app.use('/api/partners', partnerRoutes);
 // Delivery (Phase 4)
 app.use('/api/jobs', jobRoutes);
 app.use('/api/jobs', planRoutes);
+app.use('/api/plans', planApprovalRoutes);
 app.use('/api/budget-requests', budgetRequestRoutes);
 app.use('/api/progress-reports', progressRoutes);
 app.use('/api/billings', billingRoutes);
+app.use('/api/invoice-requests', invoiceRequestRoutes);
+app.use('/api/commissions', commissionRoutes);
 
 // G-CHAIN (Phase 5)
 app.use('/api/purchase-requests', purchaseRequestRoutes);
+app.use('/api/rfqs', rfqRoutes);
 app.use('/api/canvasses', canvassRoutes);
 app.use('/api/purchase-orders', purchaseOrderRoutes);
 app.use('/api/receivings', receivingRoutes);
 app.use('/api/stock-issues', stockIssueRoutes);
 app.use('/api/borrow-slips', borrowRoutes);
+app.use('/api/pullout-slips', pulloutRoutes);
+app.use('/api/chain-reports', chainReportRoutes);
+app.use('/api/fin-reports', finReportRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/gchain', chainRoutes);
 
@@ -193,6 +208,7 @@ app.use('/api/overtime', overtimeRoutes);
 app.use('/api/hr-settings', hrSettingsRoutes);
 app.use('/api/positions', positionRoutes);
 app.use('/api/clearances', clearanceRoutes);
+app.use('/api/people-flow', peopleFlowRoutes);
 // The turnover report shares the hr-reports prefix; it mounts first so its
 // own paths are matched before hrReportRoutes gets a look.
 app.use('/api/hr-reports', turnoverReportRoutes);

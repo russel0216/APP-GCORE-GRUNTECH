@@ -32,7 +32,7 @@ export async function deleteOrRefuse<T>(what: string, run: () => Promise<T>): Pr
     throw err;
   }
 }
-export const conflict = (m: string) => new HttpError(409, m);
+export const conflict = (m: string, d?: unknown) => new HttpError(409, m, d);
 
 /** Wraps an async handler so a rejected promise reaches the error middleware. */
 export function handler(fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>): RequestHandler {
@@ -134,11 +134,27 @@ export function orderBy(q: ListQuery, sortable: string[], fallback: Record<strin
   return fallback;
 }
 
-export function errorMiddleware(err: unknown, _req: Request, res: Response, _next: NextFunction) {
-  if (err instanceof HttpError) {
-    res.status(err.status).json({ error: err.message, details: err.details });
+export function errorMiddleware(err: unknown, req: Request, res: Response, _next: NextFunction) {
+  const status = err instanceof HttpError ? err.status : 500;
+  const message = err instanceof HttpError ? err.message : 'Something went wrong on our side';
+  if (!(err instanceof HttpError)) console.error(err);
+  // A paper opened in its own tab through a print ticket is read by a
+  // person, not a script: the refusal is a page saying why, never raw JSON.
+  if (req.method === 'GET' && typeof req.query.ticket === 'string' && !res.headersSent) {
+    const text = message.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+    res
+      .status(status)
+      .type('html')
+      .send(
+        `<!doctype html><meta charset="utf-8"><title>Not printed</title>` +
+          `<body style="font:16px system-ui,sans-serif;margin:3rem;color:#222">` +
+          `<h1 style="font-size:20px">This paper could not be opened</h1><p>${text}</p></body>`,
+      );
     return;
   }
-  console.error(err);
-  res.status(500).json({ error: 'Something went wrong on our side' });
+  if (err instanceof HttpError) {
+    res.status(status).json({ error: message, details: err.details });
+    return;
+  }
+  res.status(500).json({ error: message });
 }

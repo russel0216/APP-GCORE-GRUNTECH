@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { mayRequestInvoice } from './invoiceRequests';
 import { z } from 'zod';
 import { Prisma, ProgressStatus, BillingStatus } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -14,10 +15,20 @@ import {
   idsFilter,
   type ListQuery,
 } from '../http/kit';
-import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
-import { can, type ResolvedUser } from '../permissions/resolve';
+import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
+import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
-import { nextNumber } from '../shared/numbering';
+import fs from 'fs';
+import sharp from 'sharp';
+import { registerAttachmentGuard, deleteAttachmentsOf, attachmentPath } from '../shared/attachments';
+import {
+  PROGRESS_OVERALL,
+  billingNumber,
+  overallStatusLabel,
+  phasePctFromTasks,
+  reportNumber,
+  weighOf,
+} from '../shared/progressReport';
 import {
   renderDocument,
   formatMoney,
@@ -30,10 +41,24 @@ import {
   type PdfTotal,
   type Signatory,
 } from '../shared/pdf';
-import { contactsOf } from '../shared/approvals';
+import {
+  approvalSlots,
+  cancelOpenRequest,
+  contactsOf,
+  mayDecide,
+  onApprovalSettled,
+  onApprovalReopened,
+  preparedAt,
+  routeBrief,
+  slotSignatories,
+  submitForApproval,
+  type ApprovalOutcome,
+} from '../shared/approvals';
+import type { ApprovalRequest } from '@prisma/client';
 import { manilaDate, workingDayDate } from '../shared/day';
 import { planTasks } from '../shared/costingMath';
 import { LIST_CAP, listReference, totalLabel, namedInFilter, choice, bracketed, bracketNote, listNotes, sendListPdf, ratePct } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -220,10 +245,15 @@ async function loadReport(id: string) {
           name: true,
           contractValue: true,
           customer: { select: { id: true, name: true } },
-          site: { select: { id: true, name: true } },
+          site: { select: { id: true, name: true, address: true, city: true } },
           projectManager: { select: { id: true, name: true } },
+          startDate: true,
+          targetEndDate: true,
+          actualEndDate: true,
+          status: true,
         },
       },
+      days: { orderBy: [{ workDate: 'asc' }, { sortOrder: 'asc' }] },
       preparedBy: { select: { id: true, name: true, position: true } },
       approvedBy: { select: { id: true, name: true } },
       previousReport: { select: { id: true, number: true, reportNo: true } },
@@ -237,9 +267,21 @@ async function loadReport(id: string) {
   });
 }
 
-function presentReport(report: NonNullable<Awaited<ReturnType<typeof loadReport>>>) {
+function presentReport(
+  report: NonNullable<Awaited<ReturnType<typeof loadReport>>>,
+  tasks: { scopeItemId: string | null; name: string; status: string; progressPct: number; weight: Prisma.Decimal | null }[] = [],
+) {
+  const scheduleTotal = report.lines.reduce((s, l) => s + num(l.scopeItem.value), 0);
   const lines = report.lines.map((l) => ({
     ...l,
+    // The line's share of the schedule, and what it adds to the project's
+    // percentage at its to-date figure — the sum of these IS the headline.
+    weightPct: cents(weighOf(num(l.scopeItem.value), scheduleTotal) * 100),
+    weightedPct: cents(weighOf(num(l.scopeItem.value), scheduleTotal) * num(l.toDatePct)),
+    tasks: tasks
+      .filter((t) => t.scopeItemId === l.scopeItemId)
+      .map((t) => ({ name: t.name, status: t.status, progressPct: t.progressPct, weight: t.weight == null ? null : Number(t.weight) })),
+    fromTasksPct: phasePctFromTasks(tasks.filter((t) => t.scopeItemId === l.scopeItemId)),
     previousPct: num(l.previousPct),
     thisPeriodPct: num(l.thisPeriodPct),
     toDatePct: num(l.toDatePct),
@@ -255,6 +297,7 @@ function presentReport(report: NonNullable<Awaited<ReturnType<typeof loadReport>
 
   return {
     ...report,
+    overallStatusText: overallStatusLabel(report.overallStatus, report.overallStatusNote),
     job: { ...report.job, contractValue: num(report.job.contractValue) },
     billing: report.billing
       ? { ...report.billing, grossAmount: num(report.billing.grossAmount) }
@@ -270,26 +313,68 @@ function presentReport(report: NonNullable<Awaited<ReturnType<typeof loadReport>
   };
 }
 
+const DOC = 'progress_report';
+const BILL_DOC = 'progress_billing';
+const VIEW = ['gops.progress_billing.view_all', 'gops.progress_billing.view_own'];
+export const REPORT_LINK = (id: string) => `/g-ops/progress/${id}`;
+export const BILLING_LINK = (id: string) => `/g-ops/billings/${id}`;
+
+/**
+ * Who reads one report: view_all, the person who prepared it, or — through
+ * `requireAnyOrDecider` — whoever may decide its open request (a Technical
+ * Manager or Team Leader with no right to the module). Anyone else is a 404.
+ */
+async function readableReport(me: ResolvedUser, id: string, deciderOnly: boolean) {
+  const report = await loadReport(id);
+  if (!report) throw notFound('Progress report not found');
+  const reads =
+    !deciderOnly &&
+    (me.isSuperAdmin || can(me, 'gops.progress_billing.view_all') || (report.preparedById === me.id && can(me, 'gops.progress_billing.view_own')));
+  if (!reads && !(await mayDecide(me.id, DOC, [report.id]))) throw notFound('Progress report not found');
+  return report;
+}
+
+const mayEditReport = (me: ResolvedUser, report: { preparedById: string }) => canEditRecord(me, 'gops', 'progress_billing', report.preparedById);
+
+async function reportTasks(jobId: string) {
+  return prisma.jobTask.findMany({
+    where: { jobId, scopeItemId: { not: null } },
+    select: { scopeItemId: true, name: true, status: true, progressPct: true, weight: true },
+    orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+  });
+}
+
+async function reportView(me: ResolvedUser, report: NonNullable<Awaited<ReturnType<typeof loadReport>>>) {
+  const editor = mayEditReport(me, report);
+  const draft = report.status === 'DRAFT';
+  const [tasks, pictures] = await Promise.all([
+    reportTasks(report.jobId),
+    prisma.attachment.groupBy({
+      by: ['entityId'],
+      where: { entityType: 'progress_report_day', entityId: { in: report.days.map((d) => d.id) } },
+      _count: { _all: true },
+    }),
+  ]);
+  const picturesOf = new Map(pictures.map((p) => [p.entityId, p._count._all]));
+  return {
+    ...presentReport(report, tasks),
+    days: report.days.map((d) => ({ ...d, pictures: picturesOf.get(d.id) ?? 0 })),
+    overallChoices: PROGRESS_OVERALL,
+    canEdit: draft && editor,
+    canSubmit: draft && editor,
+    canWithdraw: report.status === 'PENDING_APPROVAL' && editor,
+    canDelete: draft && (me.isSuperAdmin || (can(me, 'gops.progress_billing.delete') && editor)),
+    approvalRoute: draft ? await routeBrief(DOC, num(report.job.contractValue), report.preparedById, null, { jobId: report.jobId }) : null,
+  };
+}
+
 progressRoutes.get(
   '/:id',
-  requireAny('gops.progress_billing.view_all', 'gops.progress_billing.view_own'),
+  requireAnyOrDecider(...VIEW),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const report = await loadReport(req.params.id);
-    if (!report) throw notFound('Progress report not found');
-
-    res.json({
-      ...presentReport(report),
-      canEdit:
-        report.status === 'DRAFT' &&
-        (me.isSuperAdmin ||
-          me.permissions.has('gops.progress_billing.edit_all') ||
-          (report.preparedById === me.id && me.permissions.has('gops.progress_billing.edit_own'))),
-      // The approve route's own checks, so the page never offers a button the
-      // route refuses: still open, the right held, and not the person who
-      // prepared it — a super admin included (rule 3).
-      canApprove: report.status !== 'APPROVED' && can(me, 'gops.progress_billing.approve') && report.preparedById !== me.id,
-    });
+    const report = await readableReport(me, req.params.id, res.locals.deciderOnly === true);
+    res.json(await reportView(me, report));
   }),
 );
 
@@ -320,9 +405,10 @@ progressRoutes.post(
     });
     if (!job) throw notFound('Job not found');
     if (!job.scopeItems.length) throw badRequest('This job has no schedule of values');
+    if (job.status === 'CANCELLED') throw badRequest(`${job.number} is cancelled`);
 
     const open = await prisma.progressReport.findFirst({
-      where: { jobId: body.jobId, status: { in: ['DRAFT', 'SUBMITTED'] } },
+      where: { jobId: body.jobId, status: { in: ['DRAFT', 'SUBMITTED', 'PENDING_APPROVAL'] } },
     });
     if (open) {
       throw badRequest(
@@ -335,20 +421,30 @@ progressRoutes.post(
       orderBy: { reportNo: 'desc' },
       include: { lines: true },
     });
+    // A report started from the project page may be made by sales too — the
+    // owner's call: "creator (Project Engineer) or Sales".
     const carried = new Map(previous?.lines.map((l) => [l.scopeItemId, num(l.toDatePct)]) ?? []);
 
+    // PERSONNEL PRESENT starts from the previous report, else from the job
+    // order the project was built from (its PM or lead in charge, its
+    // engineer and support beside them), else the project's manager.
+    const personnel = await personnelFor(job.id, job.projectManagerId, previous);
+
     const report = await prisma.$transaction(async (tx) => {
-      const number = await nextNumber('progress_report', tx);
       const last = await tx.progressReport.findFirst({
         where: { jobId: body.jobId },
         orderBy: { reportNo: 'desc' },
         select: { reportNo: true },
       });
+      const reportNo = (last?.reportNo ?? 0) + 1;
 
       return tx.progressReport.create({
         data: {
-          number,
-          reportNo: (last?.reportNo ?? 0) + 1,
+          number: reportNumber(job.number, reportNo),
+          reportNo,
+          personnelInCharge: personnel.inCharge,
+          personnelSupport: personnel.support,
+          overallStatus: previous?.overallStatus ?? 'ON_SCHEDULE',
           jobId: body.jobId,
           previousReportId: previous?.id ?? null,
           periodFrom: new Date(body.periodFrom),
@@ -382,6 +478,35 @@ progressRoutes.post(
   }),
 );
 
+async function personnelFor(
+  jobId: string,
+  projectManagerId: string | null,
+  previous: { personnelInCharge: string | null; personnelSupport: string[] } | null,
+): Promise<{ inCharge: string | null; support: string[] }> {
+  if (previous?.personnelInCharge || previous?.personnelSupport.length) {
+    return { inCharge: previous.personnelInCharge, support: previous.personnelSupport };
+  }
+  const order = await prisma.jobOrder.findFirst({
+    where: { jobId, status: { not: 'CANCELLED' } },
+    orderBy: { createdAt: 'asc' },
+    select: {
+      projectManager: { select: { name: true } },
+      projectEngineer: { select: { name: true } },
+      projectLead: { select: { name: true } },
+      support: { select: { user: { select: { name: true } } } },
+    },
+  });
+  if (order) {
+    const inCharge = order.projectLead?.name ?? order.projectEngineer?.name ?? order.projectManager?.name ?? null;
+    const support = [order.projectEngineer?.name, ...order.support.map((s) => s.user.name)].filter(
+      (n): n is string => !!n && n !== inCharge,
+    );
+    return { inCharge, support: [...new Set(support)] };
+  }
+  const pm = projectManagerId ? await prisma.user.findUnique({ where: { id: projectManagerId }, select: { name: true } }) : null;
+  return { inCharge: pm?.name ?? null, support: [] };
+}
+
 async function reportForEdit(req: Parameters<typeof currentUser>[0], id: string) {
   const me = currentUser(req);
   const report = await prisma.progressReport.findUnique({ where: { id } });
@@ -401,7 +526,7 @@ async function reportForEdit(req: Parameters<typeof currentUser>[0], id: string)
 
 progressRoutes.patch(
   '/:id',
-  require_('gops.progress_billing.edit_own'),
+  requireAny('gops.progress_billing.edit_own', 'gops.progress_billing.edit_all'),
   handler(async (req, res) => {
     await reportForEdit(req, req.params.id);
     const body = parseBody(
@@ -414,27 +539,47 @@ progressRoutes.patch(
         accomplishment: z.string().optional().nullable(),
         issues: z.string().optional().nullable(),
         nextPeriodPlan: z.string().optional().nullable(),
+        milestones: z.string().optional().nullable(),
+        overallStatus: z.string().trim().max(80).optional().nullable(),
+        overallStatusNote: z.string().trim().max(200).optional().nullable(),
+        personnelInCharge: z.string().trim().max(120).optional().nullable(),
+        personnelSupport: z.array(z.string().trim().min(1).max(120)).max(40).optional(),
       }),
       req.body,
     );
 
     const data: Prisma.ProgressReportUpdateInput = {};
-    for (const f of ['weather', 'manpower', 'equipment', 'accomplishment', 'issues', 'nextPeriodPlan'] as const) {
+    for (const f of [
+      'weather',
+      'manpower',
+      'equipment',
+      'accomplishment',
+      'issues',
+      'nextPeriodPlan',
+      'milestones',
+      'overallStatus',
+      'overallStatusNote',
+      'personnelInCharge',
+    ] as const) {
       if (body[f] !== undefined) (data as Record<string, unknown>)[f] = body[f] || null;
     }
+    if (body.personnelSupport) data.personnelSupport = [...new Set(body.personnelSupport)];
     if (body.periodFrom) data.periodFrom = new Date(body.periodFrom);
     if (body.periodTo) data.periodTo = new Date(body.periodTo);
+    const from = (data.periodFrom as Date | undefined) ?? undefined;
+    const to = (data.periodTo as Date | undefined) ?? undefined;
+    if (from && to && to < from) throw badRequest('The period ends before it starts');
 
     await prisma.progressReport.update({ where: { id: req.params.id }, data });
     const report = await loadReport(req.params.id);
-    res.json(presentReport(report!));
+    res.json(await reportView(currentUser(req), report!));
   }),
 );
 
 /** Sets this period's percentage on one scope line. */
 progressRoutes.patch(
   '/:id/lines/:lineId',
-  require_('gops.progress_billing.edit_own'),
+  requireAny('gops.progress_billing.edit_own', 'gops.progress_billing.edit_all'),
   handler(async (req, res) => {
     await reportForEdit(req, req.params.id);
     const body = parseBody(
@@ -478,50 +623,258 @@ progressRoutes.patch(
     });
 
     const report = await loadReport(req.params.id);
-    res.json(presentReport(report!));
+    res.json(await reportView(currentUser(req), report!));
+  }),
+);
+
+/**
+ * A phase's percentage worked out from its tasks on the Scope of Work: each
+ * task's weight (equal when none is typed) times its own progress, a DONE
+ * task 100. Sets the line's to-date figure — never below what was already
+ * reported, the line's own rule.
+ */
+progressRoutes.post(
+  '/:id/lines/:lineId/from-tasks',
+  requireAny('gops.progress_billing.edit_own', 'gops.progress_billing.edit_all'),
+  handler(async (req, res) => {
+    const report = await reportForEdit(req, req.params.id);
+    const line = await prisma.progressReportLine.findFirst({ where: { id: req.params.lineId, reportId: report.id } });
+    if (!line) throw notFound('Line not found');
+    const tasks = await prisma.jobTask.findMany({
+      where: { jobId: report.jobId, scopeItemId: line.scopeItemId },
+      select: { status: true, progressPct: true, weight: true },
+    });
+    const pct = phasePctFromTasks(tasks);
+    if (pct === null) throw badRequest('This phase has no tasks on the Scope of Work to go by');
+    const previous = num(line.previousPct);
+    if (pct < previous) {
+      throw badRequest(`Its tasks come to ${pct}%, below the ${previous}% already reported — progress cannot go backwards`);
+    }
+    await prisma.progressReportLine.update({
+      where: { id: line.id },
+      data: { toDatePct: d(pct), thisPeriodPct: d(cents(pct - previous)) },
+    });
+    res.json(await reportView(currentUser(req), (await loadReport(report.id))!));
+  }),
+);
+
+// ── Daily accomplishments ────────────────────────────────────────────────────
+
+const daySchema = z.object({
+  workDate: z.string().min(1, 'Which day?'),
+  actions: z.string().trim().min(1, 'Say what was done'),
+  findings: z.string().trim().max(4000).optional().nullable(),
+  recommendation: z.string().trim().max(4000).optional().nullable(),
+  remarks: z.string().trim().max(4000).optional().nullable(),
+  headcount: z.number().int().min(0).max(999).optional().nullable(),
+});
+
+function dayData(body: z.infer<typeof daySchema>, report: { periodFrom: Date; periodTo: Date }) {
+  const workDate = asDate(body.workDate)!;
+  const day = workDate.toISOString().slice(0, 10);
+  if (day < report.periodFrom.toISOString().slice(0, 10) || day > report.periodTo.toISOString().slice(0, 10)) {
+    throw badRequest('That day is outside the report’s period');
+  }
+  return {
+    workDate: new Date(`${day}T00:00:00Z`),
+    actions: body.actions,
+    findings: body.findings || null,
+    recommendation: body.recommendation || null,
+    remarks: body.remarks || null,
+    headcount: body.headcount ?? null,
+  };
+}
+
+progressRoutes.post(
+  '/:id/days',
+  requireAny('gops.progress_billing.edit_own', 'gops.progress_billing.edit_all'),
+  handler(async (req, res) => {
+    const report = await reportForEdit(req, req.params.id);
+    const body = parseBody(daySchema, req.body);
+    const count = await prisma.progressReportDay.count({ where: { reportId: report.id } });
+    const day = await prisma.progressReportDay.create({ data: { reportId: report.id, sortOrder: count, ...dayData(body, report) } });
+    await audit({ entityType: 'progress_report', entityId: report.id, action: 'UPDATED', summary: `${report.number}: added ${day.workDate.toISOString().slice(0, 10)}` }, req);
+    res.status(201).json(await reportView(currentUser(req), (await loadReport(report.id))!));
+  }),
+);
+
+progressRoutes.put(
+  '/:id/days/:dayId',
+  requireAny('gops.progress_billing.edit_own', 'gops.progress_billing.edit_all'),
+  handler(async (req, res) => {
+    const report = await reportForEdit(req, req.params.id);
+    const body = parseBody(daySchema, req.body);
+    const day = await prisma.progressReportDay.findFirst({ where: { id: req.params.dayId, reportId: report.id } });
+    if (!day) throw notFound('Day not found');
+    await prisma.progressReportDay.update({ where: { id: day.id }, data: dayData(body, report) });
+    res.json(await reportView(currentUser(req), (await loadReport(report.id))!));
+  }),
+);
+
+progressRoutes.delete(
+  '/:id/days/:dayId',
+  requireAny('gops.progress_billing.edit_own', 'gops.progress_billing.edit_all'),
+  handler(async (req, res) => {
+    const report = await reportForEdit(req, req.params.id);
+    const day = await prisma.progressReportDay.findFirst({ where: { id: req.params.dayId, reportId: report.id } });
+    if (!day) throw notFound('Day not found');
+    await prisma.progressReportDay.delete({ where: { id: day.id } });
+    await deleteAttachmentsOf('progress_report_day', [day.id]);
+    await audit({ entityType: 'progress_report', entityId: report.id, action: 'UPDATED', summary: `${report.number}: removed ${day.workDate.toISOString().slice(0, 10)}` }, req);
+    res.json(await reportView(currentUser(req), (await loadReport(report.id))!));
+  }),
+);
+
+/**
+ * A day's pictures are the report's: read by whoever reads the report (its
+ * deciders included), added and removed only while it is a draft, by whoever
+ * may edit it — what the approvers decide on is what they were sent.
+ */
+registerAttachmentGuard(
+  'progress_report_day',
+  async (user, dayId) => {
+    const day = await prisma.progressReportDay.findUnique({ where: { id: dayId }, select: { report: { select: { id: true, preparedById: true } } } });
+    if (!day) return false;
+    if (user.isSuperAdmin || can(user, 'gops.progress_billing.view_all') || day.report.preparedById === user.id) return true;
+    return mayDecide(user.id, DOC, [day.report.id]);
+  },
+  {
+    write: async (user, dayId) => {
+      const day = await prisma.progressReportDay.findUnique({ where: { id: dayId }, select: { report: { select: { status: true, preparedById: true } } } });
+      return !!day && day.report.status === 'DRAFT' && mayEditReport(user, day.report);
+    },
+  },
+);
+registerAttachmentGuard(
+  'progress_report',
+  async (user, id) => {
+    const report = await prisma.progressReport.findUnique({ where: { id }, select: { preparedById: true } });
+    if (!report) return false;
+    if (user.isSuperAdmin || can(user, 'gops.progress_billing.view_all') || report.preparedById === user.id) return true;
+    return mayDecide(user.id, DOC, [id]);
+  },
+  {
+    write: async (user, id) => {
+      const report = await prisma.progressReport.findUnique({ where: { id }, select: { status: true, preparedById: true } });
+      return !!report && report.status === 'DRAFT' && mayEditReport(user, report);
+    },
+  },
+);
+
+// ── The approval route (2026-10-15): Technical Manager › Team Leader ─────────
+
+progressRoutes.post(
+  '/:id/submit',
+  requireAny('gops.progress_billing.create', 'gops.progress_billing.edit_own', 'gops.progress_billing.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const report = await reportForEdit(req, req.params.id);
+    const full = (await loadReport(report.id))!;
+    const view = presentReport(full);
+    if (!full.days.length && !full.accomplishment?.trim()) {
+      throw badRequest('Write the summary or at least one day’s accomplishments before sending it');
+    }
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.progressReport.updateMany({
+        where: { id: report.id, status: 'DRAFT', updatedAt: report.updatedAt },
+        data: { status: 'PENDING_APPROVAL' },
+      });
+      if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+    });
+    try {
+      await submitForApproval({
+        documentType: DOC,
+        documentId: report.id,
+        documentNumber: report.number,
+        subject: `${full.job.number} — Accomplishment Report #${report.reportNo} (${view.totals.toDatePct.toFixed(2)}% to date)`,
+        amount: num(full.job.contractValue),
+        link: REPORT_LINK(report.id),
+        // In the name of whoever prepared it, whoever pressed the button.
+        requesterId: report.preparedById,
+        jobId: report.jobId,
+      });
+    } catch (err) {
+      await prisma.progressReport.updateMany({ where: { id: report.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      throw err;
+    }
+    await audit({ entityType: 'progress_report', entityId: report.id, action: 'SUBMITTED', summary: `${report.number} sent for approval` }, req);
+    res.json(await reportView(me, (await loadReport(report.id))!));
   }),
 );
 
 progressRoutes.post(
-  '/:id/approve',
-  require_('gops.progress_billing.approve'),
+  '/:id/withdraw',
+  requireAny('gops.progress_billing.create', 'gops.progress_billing.edit_own', 'gops.progress_billing.edit_all'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const report = await prisma.progressReport.findUnique({
-      where: { id: req.params.id },
-      include: { job: true },
-    });
+    const report = await prisma.progressReport.findUnique({ where: { id: req.params.id } });
     if (!report) throw notFound('Progress report not found');
-    if (report.status === 'APPROVED') throw badRequest('This report has already been approved');
-
-    // Rule 3: whoever prepared the report never approves it — a super admin
-    // included, as the approval engine refuses one (and as the billing's
-    // route does). Otherwise the paper would print one person as both
-    // Prepared by and Approved by.
-    if (report.preparedById === me.id) {
-      throw forbidden('You cannot approve a report you prepared yourself');
-    }
-
-    // Claimed as read: two approvers pressing at once approve it once, and
-    // the second never writes their name over the first's.
-    const claimed = await prisma.progressReport.updateMany({
-      where: { id: report.id, status: { not: 'APPROVED' } },
-      data: { status: 'APPROVED', approvedById: me.id, approvedAt: new Date() },
+    if (!mayEditReport(me, report)) throw forbidden('Only the person who prepared it can pull it back');
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.progressReport.updateMany({ where: { id: report.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      if (!claimed.count) throw badRequest('It was decided a moment ago — the decision stands');
+      await cancelOpenRequest(DOC, report.id, tx, `pulled back by ${me.name}`, me.id);
     });
-    if (!claimed.count) throw badRequest('This report has already been approved');
-
-    await audit(
-      {
-        entityType: 'progress_report',
-        entityId: report.id,
-        action: 'APPROVED',
-        summary: `Approved ${report.number} for ${report.job.number}`,
-      },
-      req,
-    );
-    res.json({ ok: true });
+    await audit({ entityType: 'progress_report', entityId: report.id, action: 'UPDATED', summary: `${report.number} pulled back to draft` }, req);
+    res.json(await reportView(me, (await loadReport(report.id))!));
   }),
 );
+
+/**
+ * The route's outcome: approved — dated, signed by its last approver — the
+ * report becomes the record and can be billed; returned or rejected, it is a
+ * draft again. A decision that lands after a pull-back changes nothing.
+ */
+export async function settleProgressReport(approval: ApprovalRequest, outcome: ApprovalOutcome) {
+  const report = await prisma.progressReport.findUnique({ where: { id: approval.documentId } });
+  if (!report) return;
+  const last = await prisma.approvalAction.findFirst({ where: { requestId: approval.id, action: 'APPROVED' }, orderBy: { actedAt: 'desc' } });
+  const claimed = await prisma.progressReport.updateMany({
+    where: { id: report.id, status: 'PENDING_APPROVAL' },
+    data: outcome === 'APPROVED' ? { status: 'APPROVED', approvedAt: new Date(), approvedById: last?.approverId ?? null } : { status: 'DRAFT' },
+  });
+  await audit({
+    entityType: 'progress_report',
+    entityId: report.id,
+    action: outcome,
+    summary: claimed.count
+      ? outcome === 'APPROVED'
+        ? `${report.number} approved — it can now be billed`
+        : `${report.number} returned to draft`
+      : `${report.number} ${outcome.toLowerCase()} after it was ${statusLabel(report.status).toLowerCase()} — not applied`,
+  });
+}
+onApprovalSettled(DOC, settleProgressReport);
+
+/**
+ * Pulled back after approval (2026-10-16): the report is a draft again,
+ * undated and unsigned. Refused while a billing (draft or later) is raised
+ * on it — the billing measured its increment against these figures — and
+ * while a later report follows it in the chain, which carried its to-date
+ * percentages forward: only the latest report reopens.
+ */
+onApprovalReopened(DOC, {
+  may: async (actor, id) => {
+    const report = await prisma.progressReport.findUnique({ where: { id }, select: { status: true, preparedById: true } });
+    return !!report && report.status === 'APPROVED' && mayEditReport(actor, report);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const report = await tx.progressReport.findUnique({ where: { id: documentId }, select: { id: true, number: true, status: true } });
+    if (!report) throw notFound('Progress report not found');
+    if (report.status !== 'APPROVED') throw badRequest(`${report.number} is ${statusLabel(report.status).toLowerCase()} — only an approved report goes back to draft`);
+    const billing = await tx.progressBilling.findUnique({ where: { progressReportId: report.id }, select: { number: true, status: true } });
+    if (billing) {
+      throw badRequest(`Progress billing ${billing.number} (${statusLabel(billing.status).toLowerCase()}) is raised on ${report.number} — it cannot go back to draft while the billing stands`);
+    }
+    const next = await tx.progressReport.findFirst({ where: { previousReportId: report.id }, select: { number: true } });
+    if (next) throw badRequest(`${next.number} follows ${report.number} and carried its figures forward — only the latest report goes back to draft`);
+    const claimed = await tx.progressReport.updateMany({
+      where: { id: report.id, status: 'APPROVED' },
+      data: { status: 'DRAFT', approvedAt: null, approvedById: null },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+  },
+});
 
 progressRoutes.delete(
   '/:id',
@@ -535,10 +888,15 @@ progressRoutes.delete(
     if (report.status === 'APPROVED') {
       throw badRequest('An approved report is the record of what was reported and cannot be deleted');
     }
+    if (report.status === 'PENDING_APPROVAL') throw badRequest('Pull it back from its approvers first');
     if (report.billing) throw badRequest('A billing was raised from this report');
     if (report.nextReport) throw badRequest('A later report is chained to this one');
+    if (!mayEditReport(currentUser(req), report)) throw forbidden('This report belongs to someone else');
 
+    const days = await prisma.progressReportDay.findMany({ where: { reportId: report.id }, select: { id: true } });
     await prisma.progressReport.delete({ where: { id: req.params.id } });
+    await deleteAttachmentsOf('progress_report_day', days.map((x) => x.id));
+    await deleteAttachmentsOf('progress_report', [report.id]);
     await audit(
       { entityType: 'progress_report', entityId: req.params.id, action: 'DELETED', summary: `Deleted ${report.number}` },
       req,
@@ -551,136 +909,168 @@ progressRoutes.delete(
 
 progressRoutes.get(
   '/:id/pdf',
-  requireAny('gops.progress_billing.view_all', 'gops.progress_billing.view_own'),
+  requireAnyOrDecider(...VIEW),
   handler(async (req, res) => {
-    const report = await loadReport(req.params.id);
-    if (!report) throw notFound('Progress report not found');
-
-    const view = presentReport(report);
+    const me = currentUser(req);
+    const report = await readableReport(me, req.params.id, res.locals.deciderOnly === true);
+    const view = presentReport(report, await reportTasks(report.jobId));
     const currency = await companyCurrency();
-    const people = await contactsOf([report.preparedById, report.approvedById]);
+    const job = report.job;
+    const site = [job.site?.address, job.site?.city].filter(Boolean).join(', ') || job.site?.name || '—';
 
-    const photos = await prisma.attachment.findMany({
-      where: { entityType: 'progress_report', entityId: report.id },
-      orderBy: { uploadedAt: 'asc' },
-    });
-
+    // The owner's Accomplishment Report (2026-10-15): the project, the
+    // personnel, the schedule of values weighed line by line, the summary,
+    // the milestones and the works remaining, then each day's actions with
+    // their pictures — and the route's sign-offs.
     const sections: PdfSection[] = [
       {
         kind: 'fields',
-        columns: 3,
+        title: 'Project',
+        columns: 2,
         fields: [
-          { label: 'Project', value: `${report.job.number} — ${report.job.name}` },
-          { label: 'Customer', value: report.job.customer.name },
-          { label: 'Site', value: report.job.site?.name ?? '—' },
-          { label: 'Report no.', value: String(report.reportNo) },
-          {
-            label: 'Period covered',
-            value: `${formatDate(report.periodFrom)} to ${formatDate(report.periodTo)}`,
-          },
-          { label: 'Previous report', value: report.previousReport?.number ?? 'None — first report' },
+          { label: 'Project', value: `${job.number} — ${job.name}` },
+          { label: 'Customer', value: job.customer.name },
+          { label: 'Location', value: site },
+          { label: 'Reporting period', value: `${formatDate(report.periodFrom)} to ${formatDate(report.periodTo)}` },
+          { label: 'Project start', value: job.startDate ? formatDate(job.startDate) : '—' },
+          { label: 'Target completion', value: job.targetEndDate ? formatDate(job.targetEndDate) : '—' },
+          { label: 'Overall status', value: view.overallStatusText ?? '—' },
+          { label: 'Overall progress', value: `${view.totals.toDatePct.toFixed(2)}% (this period ${view.totals.thisPeriodPct.toFixed(2)}%)` },
         ],
       },
+    ];
+    if (report.personnelInCharge || report.personnelSupport.length) {
+      sections.push({
+        kind: 'fields',
+        title: 'Personnel present',
+        columns: 2,
+        fields: [
+          { label: 'Project in charge', value: report.personnelInCharge ?? '—' },
+          { label: 'Project support', value: report.personnelSupport.join(', ') || '—' },
+        ],
+      });
+    }
+    sections.push(
       {
         kind: 'table',
         title: 'Accomplishment against the schedule of values',
-        head: ['Scope', `Value (${currency})`, 'Prev %', 'This %', 'To date %', `Earned to date (${currency})`],
-        align: ['left', 'right', 'right', 'right', 'right', 'right'],
+        head: ['Scope of work', `Value (${currency})`, 'Weight', 'Prev %', 'This %', 'To date %', 'Weighted %'],
+        widths: [29, 15, 11, 11, 10, 11, 13],
+        align: ['left', 'right', 'right', 'right', 'right', 'right', 'right'],
         rows: view.lines.map((l) => [
           l.scopeItem.name,
           formatAmount(l.scopeItem.value),
+          `${l.weightPct.toFixed(2)}%`,
           `${l.previousPct.toFixed(2)}%`,
           `${l.thisPeriodPct.toFixed(2)}%`,
           `${l.toDatePct.toFixed(2)}%`,
-          formatAmount(l.toDateAmount),
+          `${l.weightedPct.toFixed(2)}%`,
         ]),
       },
-      // The money block, as every document prints it: the figures the lines
-      // add up to, each percentage in its label as the VAT's rate is, the
-      // bold row the one that matters — never a TOTAL row inside the table.
       {
         kind: 'totals',
         rows: [
           { label: 'Contract value', value: formatMoney(view.totals.contractValue, currency) },
-          {
-            label: `Earned this period (${view.totals.thisPeriodPct.toFixed(2)}%)`,
-            value: formatMoney(view.totals.thisPeriodValue, currency),
-          },
-          {
-            label: `Earned to date (${view.totals.toDatePct.toFixed(2)}%)`,
-            value: formatMoney(view.totals.earnedValue, currency),
-            bold: true,
-          },
+          { label: `Earned this period (${view.totals.thisPeriodPct.toFixed(2)}%)`, value: formatMoney(view.totals.thisPeriodValue, currency) },
+          { label: `Earned to date (${view.totals.toDatePct.toFixed(2)}%)`, value: formatMoney(view.totals.earnedValue, currency), bold: true },
         ],
       },
-    ];
-
-    if (report.accomplishment) {
-      sections.push({ kind: 'text', title: 'Work accomplished this period', body: report.accomplishment });
-    }
-    if (report.manpower || report.equipment) {
+    );
+    if (report.accomplishment) sections.push({ kind: 'text', title: 'Summary', body: report.accomplishment });
+    if (report.milestones) sections.push({ kind: 'text', title: 'Key milestones achieved', body: report.milestones });
+    if (report.nextPeriodPlan) sections.push({ kind: 'text', title: 'Remaining works', body: report.nextPeriodPlan });
+    if (report.issues) sections.push({ kind: 'text', title: 'Issues and concerns', body: report.issues });
+    if (report.manpower || report.equipment || report.weather) {
       sections.push({
         kind: 'fields',
-        title: 'Resources deployed',
-        columns: 2,
+        title: 'Resources and conditions',
+        columns: 3,
         fields: [
           { label: 'Manpower', value: report.manpower ?? '—' },
           { label: 'Equipment', value: report.equipment ?? '—' },
+          { label: 'Weather / delays', value: report.weather ?? '—' },
         ],
       });
     }
-    if (report.weather) sections.push({ kind: 'text', title: 'Weather and delays', body: report.weather });
-    if (report.issues) sections.push({ kind: 'text', title: 'Issues', body: report.issues });
-    if (report.nextPeriodPlan) {
-      sections.push({ kind: 'text', title: 'Plan for next period', body: report.nextPeriodPlan });
-    }
-    if (photos.length) {
-      sections.push({
-        kind: 'table',
-        title: `Photographs (${photos.length})`,
-        head: ['No.', 'Caption', 'Taken'],
-        widths: [8, 62, 30],
-        align: ['right', 'left', 'left'],
-        rows: photos.map((p, i) => [
-          String(i + 1),
-          p.caption ?? p.fileName,
-          // A timestamp: Manila's day of it, as a DATE column holds one, so
-          // a photo taken before 08:00 is not dated the day before.
-          formatDate(manilaDate(p.capturedAt ?? p.uploadedAt)),
-        ]),
-      });
-    }
 
-    // No route: the people who actually acted, each dated. Prepared by the
-    // author; approved on the record by one person (not through the engine),
-    // open — "Pending" — until somebody does. Nobody "checks" a report in
-    // the app, so no such slot is printed.
+    // Each day's entry, its pictures under it — three to a row, captioned.
+    const pictures = report.days.length
+      ? await prisma.attachment.findMany({
+          where: { entityType: 'progress_report_day', entityId: { in: report.days.map((x) => x.id) } },
+          orderBy: { uploadedAt: 'asc' },
+        })
+      : [];
+    for (const day of report.days) {
+      const lines = [day.actions];
+      if (day.findings) lines.push(`Findings: ${day.findings}`);
+      if (day.recommendation) lines.push(`Recommendation: ${day.recommendation}`);
+      if (day.remarks) lines.push(`Remarks: ${day.remarks}`);
+      if (day.headcount != null) lines.push(`Personnel on site: ${day.headcount}`);
+      sections.push({ kind: 'text', title: `Daily accomplishment — ${formatDate(day.workDate)}`, body: lines.join('\n') });
+      const photos = await picturesFor(pictures.filter((p) => p.entityId === day.id));
+      if (photos.length) sections.push({ kind: 'photos', photos });
+    }
+    // Pictures attached to the report itself (before the days existed).
+    const general = await picturesFor(
+      await prisma.attachment.findMany({ where: { entityType: DOC, entityId: report.id }, orderBy: { uploadedAt: 'asc' } }),
+    );
+    if (general.length) sections.push({ kind: 'photos', title: 'Photographs', photos: general });
+
+    const slots =
+      report.status === 'DRAFT'
+        ? await approvalSlots(DOC, report.id, { amount: num(job.contractValue), requesterId: report.preparedById, jobId: report.jobId })
+        : await approvalSlots(DOC, report.id);
+    const people = await contactsOf([report.preparedById, report.approvedById]);
     const preparer = people.get(report.preparedById);
-    const approver = report.approvedById ? people.get(report.approvedById) : undefined;
     const signatories: Signatory[] = [
-      { role: 'Prepared by', name: report.preparedBy.name, phone: preparer?.phone, email: preparer?.email, at: report.createdAt },
-      { role: 'Approved by', name: report.approvedBy?.name, phone: approver?.phone, email: approver?.email, at: report.approvedAt },
+      { role: 'Prepared by', name: report.preparedBy.name, phone: preparer?.phone, email: preparer?.email, at: preparedAt(slots) ?? report.createdAt },
+      ...slotSignatories(slots),
     ];
+    // A report approved by hand before the route (2026-10-15) has no request:
+    // it prints who approved it, from the record.
+    if (!slots.length && report.approvedBy) {
+      const who = people.get(report.approvedBy.id);
+      signatories.push({ role: 'Approved by', name: report.approvedBy.name, phone: who?.phone, email: who?.email, at: report.approvedAt });
+    }
 
     const pdf = await renderDocument({
-      title: 'Progress Report',
+      title: 'Accomplishment Report',
       documentNumber: report.number,
       date: report.periodTo,
-      reference: `${report.job.number} — ${report.job.name}  ·  Report #${report.reportNo}`,
+      reference: `${job.number} — ${job.name}  ·  Report #${report.reportNo}`,
       sections,
       signatories,
+      footerNote: report.status === 'APPROVED' ? undefined : report.status === 'PENDING_APPROVAL' ? 'PENDING APPROVAL.' : 'DRAFT — NOT YET APPROVED.',
     });
 
-    await audit(
-      { entityType: 'progress_report', entityId: report.id, action: 'EXPORTED', summary: `Printed ${report.number}` },
-      req,
-    );
-
+    await audit({ entityType: DOC, entityId: report.id, action: 'EXPORTED', summary: `Printed ${report.number}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${report.number}.pdf"`);
+    res.setHeader(
+      'Content-Disposition',
+      contentDisposition(paperFileName({ kind: 'Accomplishment Report', number: report.number, author: report.preparedBy.name, date: report.periodTo })),
+    );
     res.send(pdf);
   }),
 );
+
+/** Attached pictures as the PDF engine takes them: JPEG, EXIF-turned, at most 1200 px; anything not a picture is skipped. */
+async function picturesFor(files: { storedName: string; mimeType: string; caption: string | null; fileName: string }[]) {
+  const out: { data: Buffer; caption?: string }[] = [];
+  for (const f of files) {
+    if (!f.mimeType.startsWith('image/')) continue;
+    try {
+      const data = await sharp(fs.readFileSync(attachmentPath(f.storedName)))
+        .rotate()
+        .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 78 })
+        .toBuffer();
+      out.push({ data, caption: f.caption ?? undefined });
+    } catch {
+      // A missing or unreadable file is left out; the paper still prints.
+    }
+  }
+  return out;
+}
 
 // ════════════════════════════════════════════════════════════════════
 //  PROGRESS BILLING
@@ -913,16 +1303,18 @@ billingRoutes.post(
     const netCollectible = cents(invoiceTotal - ewtAmount);
 
     const billing = await prisma.$transaction(async (tx) => {
-      const number = await nextNumber('progress_billing', tx);
       const last = await tx.progressBilling.findFirst({
         where: { jobId: report.jobId },
         orderBy: { billingNo: 'desc' },
         select: { billingNo: true },
       });
+      const billingNo = (last?.billingNo ?? 0) + 1;
       return tx.progressBilling.create({
         data: {
-          number,
-          billingNo: (last?.billingNo ?? 0) + 1,
+          // Under its project, as the report is: GT-PRJ-2026-0112-PB-01.
+          number: billingNumber(report.job.number, billingNo),
+          billingNo,
+          preparedById: me.id,
           // Set here rather than left to the column's now(), which the
           // database takes in UTC — yesterday's date until 08:00 Manila.
           billingDate: manilaDate(new Date()),
@@ -972,6 +1364,7 @@ async function loadBilling(id: string) {
         },
       },
       progressReport: { select: { id: true, number: true, reportNo: true, periodFrom: true, periodTo: true } },
+      preparedBy: { select: { id: true, name: true } },
       lines: { include: { scopeItem: true }, orderBy: { scopeItem: { sortOrder: 'asc' } } },
       // The billing's onward link. Numbers and status only — the invoice's
       // money is Finance's to show, and it was copied from this billing anyway.
@@ -1005,22 +1398,44 @@ function presentBilling(b: NonNullable<Awaited<ReturnType<typeof loadBilling>>>)
   };
 }
 
+const mayEditBilling = (me: ResolvedUser, preparerId: string | null | undefined) =>
+  !!preparerId && canEditRecord(me, 'gops', 'progress_billing', preparerId);
+
+/** The billing's preparer: its column, else (raised before 2026-10-15) its trail's CREATED row. */
+async function billingPreparer(billing: { id: string; preparedById: string | null }): Promise<string | null> {
+  if (billing.preparedById) return billing.preparedById;
+  const { raised } = await billingTrail(billing.id);
+  return raised?.actorId ?? null;
+}
+
 billingRoutes.get(
   '/:id',
-  requireAny('gops.progress_billing.view_all', 'gops.progress_billing.view_own'),
+  requireAnyOrDecider(...VIEW),
   handler(async (req, res) => {
     const me = currentUser(req);
     const billing = await loadBilling(req.params.id);
     if (!billing) throw notFound('Billing not found');
-    // The approve route's own checks, so the page never offers a button the
-    // route refuses — the person who raised it never approves it.
-    const { raised } = await billingTrail(billing.id);
+    if (res.locals.deciderOnly === true && !(await mayDecide(me.id, BILL_DOC, [billing.id]))) throw notFound('Billing not found');
+    const preparer = await billingPreparer(billing);
+    const editor = mayEditBilling(me, preparer);
+    const invoiceRequests = await prisma.invoiceRequest.findMany({
+      where: { progressBillingId: billing.id },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, number: true, status: true, createdAt: true, requestedBy: { select: { name: true } } },
+    });
+    const live = invoiceRequests.find((r) => r.status === 'DRAFT' || r.status === 'PENDING_APPROVAL');
     res.json({
       ...presentBilling(billing),
-      canApprove:
-        (billing.status === 'DRAFT' || billing.status === 'PENDING_APPROVAL') &&
-        can(me, 'gops.progress_billing.approve') &&
-        raised?.actorId !== me.id,
+      invoiceRequests,
+      // The salesperson or Team Leader holding the project asks for the
+      // invoice (2026-10-15); one live request at a time.
+      canRequestInvoice: billing.status === 'APPROVED' && !billing.invoice && !live && (await mayRequestInvoice(me, billing.jobId)),
+      canSubmit: billing.status === 'DRAFT' && editor,
+      canWithdraw: billing.status === 'PENDING_APPROVAL' && editor,
+      approvalRoute:
+        billing.status === 'DRAFT' && preparer
+          ? await routeBrief(BILL_DOC, num(billing.grossAmount), preparer, null, { jobId: billing.jobId })
+          : null,
     });
   }),
 );
@@ -1046,42 +1461,99 @@ async function billingTrail(billingId: string) {
 }
 
 billingRoutes.post(
-  '/:id/approve',
-  require_('gops.progress_billing.approve'),
+  '/:id/submit',
+  requireAny('gops.progress_billing.create', 'gops.progress_billing.edit_own', 'gops.progress_billing.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const billing = await prisma.progressBilling.findUnique({ where: { id: req.params.id }, include: { job: { select: { number: true, name: true } } } });
+    if (!billing) throw notFound('Billing not found');
+    const preparer = await billingPreparer(billing);
+    if (!mayEditBilling(me, preparer)) throw forbidden('Only the person who raised this billing can submit it');
+    if (billing.status !== 'DRAFT') throw badRequest('This billing has already been submitted');
+    const claimed = await prisma.progressBilling.updateMany({ where: { id: billing.id, status: 'DRAFT' }, data: { status: 'PENDING_APPROVAL', preparedById: preparer } });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+    try {
+      await submitForApproval({
+        documentType: BILL_DOC,
+        documentId: billing.id,
+        documentNumber: billing.number,
+        subject: `${billing.job.number} — Progress Billing #${billing.billingNo} (${formatMoney(num(billing.grossAmount))})`,
+        amount: num(billing.grossAmount),
+        link: BILLING_LINK(billing.id),
+        requesterId: preparer!,
+        jobId: billing.jobId,
+      });
+    } catch (err) {
+      await prisma.progressBilling.updateMany({ where: { id: billing.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      throw err;
+    }
+    await audit({ entityType: 'progress_billing', entityId: billing.id, action: 'SUBMITTED', summary: `${billing.number} sent for approval` }, req);
+    res.json({ ok: true });
+  }),
+);
+
+billingRoutes.post(
+  '/:id/withdraw',
+  requireAny('gops.progress_billing.create', 'gops.progress_billing.edit_own', 'gops.progress_billing.edit_all'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const billing = await prisma.progressBilling.findUnique({ where: { id: req.params.id } });
     if (!billing) throw notFound('Billing not found');
-    if (billing.status !== 'DRAFT' && billing.status !== 'PENDING_APPROVAL') {
-      throw badRequest('This billing has already been approved');
-    }
-
-    // Rule 3: whoever raised the billing never approves it — a super admin
-    // included, as the approval engine refuses one. Otherwise the paper would
-    // print one person as both Prepared by and Approved by.
-    const { raised } = await billingTrail(billing.id);
-    if (raised?.actorId === me.id) {
-      throw forbidden('You cannot approve a billing you raised yourself');
-    }
-
-    // Claimed as read: two approvers pressing at once approve it once.
-    const claimed = await prisma.progressBilling.updateMany({
-      where: { id: billing.id, status: { in: ['DRAFT', 'PENDING_APPROVAL'] } },
-      data: { status: 'APPROVED', approvedAt: new Date() },
+    if (!mayEditBilling(me, await billingPreparer(billing))) throw forbidden('Only the person who raised this billing can pull it back');
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.progressBilling.updateMany({ where: { id: billing.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      if (!claimed.count) throw badRequest('It was decided a moment ago — the decision stands');
+      await cancelOpenRequest(BILL_DOC, billing.id, tx, `pulled back by ${me.name}`, me.id);
     });
-    if (!claimed.count) throw badRequest('This billing has already been approved');
-    await audit(
-      {
-        entityType: 'progress_billing',
-        entityId: billing.id,
-        action: 'APPROVED',
-        summary: `Approved ${billing.number}`,
-      },
-      req,
-    );
+    await audit({ entityType: 'progress_billing', entityId: billing.id, action: 'UPDATED', summary: `${billing.number} pulled back to draft` }, req);
     res.json({ ok: true });
   }),
 );
+
+/** Approved by every step it can be invoiced; returned or rejected it is a draft again. */
+export async function settleProgressBilling(approval: ApprovalRequest, outcome: ApprovalOutcome) {
+  const billing = await prisma.progressBilling.findUnique({ where: { id: approval.documentId } });
+  if (!billing) return;
+  const claimed = await prisma.progressBilling.updateMany({
+    where: { id: billing.id, status: 'PENDING_APPROVAL' },
+    data: outcome === 'APPROVED' ? { status: 'APPROVED', approvedAt: new Date() } : { status: 'DRAFT' },
+  });
+  await audit({
+    entityType: 'progress_billing',
+    entityId: billing.id,
+    action: outcome,
+    summary: claimed.count
+      ? outcome === 'APPROVED'
+        ? `${billing.number} approved — it can now be invoiced`
+        : `${billing.number} returned to draft`
+      : `${billing.number} ${outcome.toLowerCase()} after it was ${statusLabel(billing.status).toLowerCase()} — not applied`,
+  });
+}
+onApprovalSettled(BILL_DOC, settleProgressBilling);
+
+/**
+ * Pulled back after approval (2026-10-16): the billing is a draft again.
+ * Refused while an invoice or a live invoice request stands on it — cancel
+ * those first (an INVOICED billing always has one).
+ */
+onApprovalReopened(BILL_DOC, {
+  may: async (actor, id) => {
+    const billing = await prisma.progressBilling.findUnique({ where: { id }, select: { id: true, status: true, preparedById: true } });
+    // An INVOICED one is refused by `reopen`, naming the invoice.
+    return !!billing && mayEditBilling(actor, await billingPreparer(billing));
+  },
+  reopen: async ({ documentId, tx }) => {
+    const billing = await tx.progressBilling.findUnique({ where: { id: documentId }, select: { id: true, number: true, status: true } });
+    if (!billing) throw notFound('Billing not found');
+    const invoice = await tx.invoice.findFirst({ where: { progressBillingId: billing.id, status: { not: 'CANCELLED' } }, select: { number: true } });
+    if (invoice) throw badRequest(`Invoice ${invoice.number} is raised on ${billing.number} — cancel the invoice first`);
+    const request = await tx.invoiceRequest.findFirst({ where: { progressBillingId: billing.id, status: { not: 'CANCELLED' } }, select: { number: true } });
+    if (request) throw badRequest(`Invoice request ${request.number} is raised on ${billing.number} — cancel the request first`);
+    if (billing.status !== 'APPROVED') throw badRequest(`${billing.number} is ${statusLabel(billing.status).toLowerCase()} — only an approved billing goes back to draft`);
+    const claimed = await tx.progressBilling.updateMany({ where: { id: billing.id, status: 'APPROVED' }, data: { status: 'DRAFT', approvedAt: null } });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+  },
+});
 
 billingRoutes.delete(
   '/:id',
@@ -1092,6 +1564,7 @@ billingRoutes.delete(
     if (billing.status === 'APPROVED' || billing.status === 'INVOICED') {
       throw badRequest('An approved billing cannot be deleted');
     }
+    if (billing.status === 'PENDING_APPROVAL') throw badRequest('Pull it back from its approvers first');
     await prisma.progressBilling.delete({ where: { id: req.params.id } });
     await audit(
       { entityType: 'progress_billing', entityId: req.params.id, action: 'DELETED', summary: `Deleted ${billing.number}` },
@@ -1103,10 +1576,12 @@ billingRoutes.delete(
 
 billingRoutes.get(
   '/:id/pdf',
-  requireAny('gops.progress_billing.view_all', 'gops.progress_billing.view_own'),
+  requireAnyOrDecider(...VIEW),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const billing = await loadBilling(req.params.id);
     if (!billing) throw notFound('Billing not found');
+    if (res.locals.deciderOnly === true && !(await mayDecide(me.id, BILL_DOC, [billing.id]))) throw notFound('Billing not found');
 
     const view = presentBilling(billing);
     const currency = await companyCurrency();
@@ -1127,31 +1602,26 @@ billingRoutes.get(
       { label: 'Net collectible', value: formatMoney(view.netCollectible, currency), bold: true },
     );
 
-    // No route, and no preparer column on the billing: who raised it and
-    // who approved it are the trail's own CREATED and APPROVED rows, each
-    // dated. "Approved by" stays open — "Pending" — until somebody approves
-    // it; a person the trail cannot name (a billing made outside the routes)
-    // is left out rather than guessed, and nobody signs a Conforme in the
-    // app, so no such slot is printed.
+    // Prepared by, then one slot per step of the route (2026-10-15): a draft
+    // prints the route submitting would take; a billing approved by hand
+    // before the route existed prints who approved it, from its trail.
+    const preparerId = await billingPreparer(billing);
+    const slots =
+      billing.status === 'DRAFT' && preparerId
+        ? await approvalSlots(BILL_DOC, billing.id, { amount: num(billing.grossAmount), requesterId: preparerId, jobId: billing.jobId })
+        : await approvalSlots(BILL_DOC, billing.id);
     const { raised, approved: approvedRow } = await billingTrail(billing.id);
-    const people = await contactsOf([raised?.actorId, approvedRow?.actorId]);
-    const isApproved = billing.status === 'APPROVED' || billing.status === 'INVOICED';
+    const people = await contactsOf([preparerId, approvedRow?.actorId]);
     const signatories: Signatory[] = [];
-    if (raised) {
-      const who = raised.actorId ? people.get(raised.actorId) : undefined;
-      signatories.push({ role: 'Prepared by', name: raised.actorName ?? who?.name, phone: who?.phone, email: who?.email, at: raised.at });
+    if (preparerId) {
+      const who = people.get(preparerId);
+      const name = billing.preparedBy?.name ?? raised?.actorName ?? who?.name;
+      signatories.push({ role: 'Prepared by', name, phone: who?.phone, email: who?.email, at: preparedAt(slots) ?? raised?.at ?? billing.createdAt });
     }
-    if (!isApproved) {
-      signatories.push({ role: 'Approved by' });
-    } else if (approvedRow) {
+    if (slots.length) signatories.push(...slotSignatories(slots));
+    else if (approvedRow && (billing.status === 'APPROVED' || billing.status === 'INVOICED')) {
       const who = approvedRow.actorId ? people.get(approvedRow.actorId) : undefined;
-      signatories.push({
-        role: 'Approved by',
-        name: approvedRow.actorName ?? who?.name,
-        phone: who?.phone,
-        email: who?.email,
-        at: billing.approvedAt ?? approvedRow.at,
-      });
+      signatories.push({ role: 'Approved by', name: approvedRow.actorName ?? who?.name, phone: who?.phone, email: who?.email, at: billing.approvedAt ?? approvedRow.at });
     }
 
     const pdf = await renderDocument({
@@ -1208,112 +1678,21 @@ billingRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${billing.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Progress Billing', number: billing.number, author: raised?.actorName, date: billing.billingDate })));
     res.send(pdf);
   }),
 );
 
 // ════════════════════════════════════════════════════════════════════
-//  APPROVED PLANS  &  TASKS
+//  TASKS (a project's Requests for Approval live in routes/planApprovals.ts)
 // ════════════════════════════════════════════════════════════════════
 
 export const planRoutes = Router();
 planRoutes.use(authenticate);
 
-planRoutes.post(
-  '/:jobId/plans',
-  require_('gops.plans.create'),
-  handler(async (req, res) => {
-    const me = currentUser(req);
-    const body = parseBody(
-      z.object({
-        title: z.string().trim().min(2),
-        drawingNo: z.string().trim().optional().nullable(),
-        revision: z.string().trim().default('0'),
-        discipline: z.string().trim().optional().nullable(),
-        notes: z.string().optional().nullable(),
-      }),
-      req.body,
-    );
-
-    const plan = await prisma.approvedPlan.create({
-      data: {
-        jobId: req.params.jobId,
-        title: body.title,
-        drawingNo: body.drawingNo || null,
-        revision: body.revision,
-        discipline: body.discipline || null,
-        notes: body.notes || null,
-        uploadedById: me.id,
-        submittedAt: new Date(),
-      },
-    });
-    await audit(
-      { entityType: 'job', entityId: req.params.jobId, action: 'UPDATED', summary: `Added plan ${plan.title}` },
-      req,
-    );
-    res.status(201).json(plan);
-  }),
-);
-
-planRoutes.patch(
-  '/:jobId/plans/:planId',
-  require_('gops.plans.edit_all'),
-  handler(async (req, res) => {
-    const me = currentUser(req);
-    const body = parseBody(
-      z.object({
-        status: z.enum(['FOR_APPROVAL', 'APPROVED', 'SUPERSEDED', 'REJECTED']).optional(),
-        notes: z.string().optional().nullable(),
-      }),
-      req.body,
-    );
-    const plan = await prisma.approvedPlan.findFirst({
-      where: { id: req.params.planId, jobId: req.params.jobId },
-    });
-    if (!plan) throw notFound('Plan not found');
-
-    const updated = await prisma.approvedPlan.update({
-      where: { id: plan.id },
-      data: {
-        ...(body.status !== undefined
-          ? {
-              status: body.status,
-              approvedAt: body.status === 'APPROVED' ? new Date() : null,
-              approvedBy: body.status === 'APPROVED' ? me.name : null,
-            }
-          : {}),
-        ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
-      },
-    });
-    await audit(
-      {
-        entityType: 'job',
-        entityId: req.params.jobId,
-        action: body.status === 'APPROVED' ? 'APPROVED' : 'UPDATED',
-        summary: `Plan ${updated.title} — ${updated.status}`,
-      },
-      req,
-    );
-    res.json(updated);
-  }),
-);
-
-planRoutes.delete(
-  '/:jobId/plans/:planId',
-  require_('gops.plans.delete'),
-  handler(async (req, res) => {
-    const plan = await prisma.approvedPlan.findFirst({
-      where: { id: req.params.planId, jobId: req.params.jobId },
-    });
-    if (!plan) throw notFound('Plan not found');
-    if (plan.status === 'APPROVED') {
-      throw badRequest('An approved plan is a record — supersede it instead of deleting it');
-    }
-    await prisma.approvedPlan.delete({ where: { id: plan.id } });
-    res.json({ ok: true });
-  }),
-);
+// The project's drawings are Requests for Approval since 2026-10-13
+// (`routes/planApprovals.ts`, `/api/plans`): raised, submitted and decided
+// through the approval engine — never approved here by hand.
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
 
@@ -1329,6 +1708,7 @@ planRoutes.post(
         assignedToId: z.string().optional().nullable(),
         startDate: z.string().optional().nullable(),
         dueDate: z.string().optional().nullable(),
+        weight: z.number().min(0).max(9999).optional().nullable(),
       }),
       req.body,
     );
@@ -1341,6 +1721,7 @@ planRoutes.post(
         assignedToId: body.assignedToId || null,
         startDate: asDate(body.startDate),
         dueDate: asDate(body.dueDate),
+        weight: body.weight ?? null,
       },
     });
     res.status(201).json(task);
@@ -1360,6 +1741,9 @@ planRoutes.patch(
         scopeItemId: z.string().optional().nullable(),
         startDate: z.string().optional().nullable(),
         dueDate: z.string().optional().nullable(),
+        // A task's weight in its phase (2026-10-15): the phase's % from its
+        // tasks is Σ weight × progress ÷ Σ weight; none counts as 1.
+        weight: z.number().min(0).max(9999).optional().nullable(),
       }),
       req.body,
     );
@@ -1394,6 +1778,7 @@ planRoutes.patch(
           ...(body.scopeItemId !== undefined ? { scopeItemId: body.scopeItemId || null } : {}),
           ...(body.startDate !== undefined ? { startDate: asDate(body.startDate) } : {}),
           ...(body.dueDate !== undefined ? { dueDate: asDate(body.dueDate) } : {}),
+          ...(body.weight !== undefined ? { weight: body.weight } : {}),
         },
       }),
     );
@@ -1403,7 +1788,7 @@ planRoutes.patch(
 /**
  * The costing's scope of work as this project's tasks (2026-10-06).
  *
- * A costing plans each phase's tasks on working days (Mon–Fri, day 1 = the
+ * A costing plans each phase's tasks on working days (Mon–Sat, day 1 = the
  * first); the project's Scope of Work tab draws them as a Gantt chart on real
  * dates. This writes them down once, from the project's start date, for every
  * scope line that still has no task — a line somebody has already planned by

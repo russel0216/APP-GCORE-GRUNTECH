@@ -8,6 +8,7 @@ import { PeoplePicker } from '../../components/PeoplePicker';
 import { PersonSelect, toPerson } from '../../components/People';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { REMINDERS, REPEATS, type Activity, type ActivityTypeDef, type Person } from './activityShared';
+import { mapsSearchUrl } from '../../components/MapLink';
 
 // ════════════════════════════════════════════════════════════════════
 //  THE ACTIVITY FORM  (2026-10-08, SCORO's "New event" dialog)
@@ -70,6 +71,8 @@ interface FormState {
   repeatEvery: string;
   repeatUntil: string;
   location: string;
+  /** A Google Maps link for the address (2026-10-13); '' searches the address itself. */
+  mapUrl: string;
   isPrivate: boolean;
   callLink: string;
   notes: string;
@@ -99,6 +102,7 @@ function initialForm(activity: Activity | null, defaultStart: Date, meId: string
     repeatEvery: '',
     repeatUntil: '',
     location: activity?.location ?? '',
+    mapUrl: activity?.mapUrl ?? '',
     isPrivate: activity?.isPrivate ?? false,
     callLink: activity?.callLink ?? '',
     notes: activity?.notes ?? '',
@@ -156,6 +160,7 @@ export function ActivityModal({
         : `Ends ${formatDateTime(endsAt)}`;
   const repeatBad = !!form.repeatEvery && (!form.repeatUntil || form.repeatUntil < form.date);
   const callLinkBad = !!form.callLink.trim() && !/^https?:\/\//i.test(form.callLink.trim());
+  const mapUrlBad = !!form.mapUrl.trim() && !/^https?:\/\//i.test(form.mapUrl.trim());
 
   // ── Who may be booked, who may be invited ──
   // Someone who has since lost calendar access is still who it was booked for
@@ -192,7 +197,7 @@ export function ActivityModal({
     };
   }, [form.customer, mayCustomers]);
 
-  const canSave = form.subject.trim().length >= 2 && validWhen && !repeatBad && !callLinkBad && !!form.assignedToId;
+  const canSave = form.subject.trim().length >= 2 && validWhen && !repeatBad && !callLinkBad && !mapUrlBad && !!form.assignedToId;
 
   function payload() {
     return {
@@ -211,6 +216,7 @@ export function ActivityModal({
       allDay: form.allDay,
       isPrivate: form.isPrivate,
       callLink: form.callLink.trim() || null,
+      mapUrl: form.mapUrl.trim() || null,
       reminderMinutes: form.reminderMinutes ? Number(form.reminderMinutes) : null,
       inviteeIds: form.inviteeIds.filter((id) => id !== form.assignedToId),
       status: form.status,
@@ -354,6 +360,21 @@ export function ActivityModal({
 
           <Field label="Address">
             <input value={form.location} onChange={(e) => set('location', e.target.value)} placeholder="Where it happens" />
+          </Field>
+          <Field
+            label="Google Maps link"
+            error={mapUrlBad ? 'Starts with http:// or https://' : null}
+            hint={
+              <>
+                Tag the place: find it on{' '}
+                <a href={form.location.trim() ? mapsSearchUrl(form.location) : 'https://www.google.com/maps'} target="_blank" rel="noopener noreferrer">
+                  Google Maps ↗
+                </a>
+                , press Share and paste the link. Left blank, the address is searched.
+              </>
+            }
+          >
+            <input value={form.mapUrl} onChange={(e) => set('mapUrl', e.target.value)} placeholder="https://maps.app.goo.gl/…" inputMode="url" />
           </Field>
           <Field label="Conference call link" error={callLinkBad ? 'Starts with http:// or https://' : null}>
             <input value={form.callLink} onChange={(e) => set('callLink', e.target.value)} placeholder="https://meet.google.com/…" inputMode="url" />

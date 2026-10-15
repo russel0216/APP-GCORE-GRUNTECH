@@ -1,3 +1,4 @@
+import { QUOTATION_CURRENCY_CODES } from '../shared/quotation';
 import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, PrStatus, PurchaseKind, PoStatus, CanvassStatus } from '@prisma/client';
@@ -25,9 +26,12 @@ import {
   submitForApproval,
   onApprovalSettled,
   approvalSlots,
+  preparedAt,
   slotSignatories,
   contactOf,
   cancelOpenRequest,
+  routeBrief,
+  onApprovalReopened,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import {
@@ -36,8 +40,10 @@ import {
   formatAmount,
   formatDate,
   formatShortDate,
+  formatQuantity,
   statusLabel,
   companyCurrency,
+  type PdfCell,
   type PdfSection,
   type Signatory,
 } from '../shared/pdf';
@@ -46,9 +52,12 @@ import { LIST_CAP, listReference, totalLabel, bracketed, counted, bracketNote, l
 import {
   postJobCost,
   releaseCommitment,
+  reverseJobCost,
   availableBudget,
   overBudgetIsBlocked,
 } from '../shared/inventory';
+import { contentDisposition, paperFileName } from '../shared/paperName';
+import { canvassFigures, MAX_SHEET_SUPPLIERS, type SheetLine } from '../shared/canvassMath';
 
 const D = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -87,6 +96,7 @@ function presentPr(pr: Record<string, unknown>) {
       estimatedCost: num(i.estimatedCost as Prisma.Decimal),
       estimatedAmount: num(i.estimatedAmount as Prisma.Decimal),
       orderedQty: num(i.orderedQty as Prisma.Decimal),
+      pulledQty: num(i.pulledQty as Prisma.Decimal),
     })),
     estimatedTotal: items.reduce((s, i) => s + num(i.estimatedAmount as Prisma.Decimal), 0),
   };
@@ -268,6 +278,202 @@ purchaseRequestRoutes.get(
   }),
 );
 
+// ── The requisition page's helpers (2026-10-13) ─────────────────────────────
+//
+// The owner's call: "Purchase request in Project should not be popup window,
+// it should be a full form with line item and budget allocation". The page
+// (`/g-ops/projects/:jobId/purchase-requests/new`, `/…/:id/edit`) reads three
+// things before anything is saved, each declared above `/:id`: the project's
+// budget by budget line, what a line may be filled from (the project's
+// costing and the item master), and the route submitting would take.
+
+/** Whoever may raise or change a request — the page's own readers. */
+const PR_WRITERS = [
+  'gchain.purchase_requests.create',
+  'gchain.purchase_requests.edit_own',
+  'gchain.purchase_requests.edit_all',
+] as const;
+
+/**
+ * The project's budget by budget line: budgeted, committed, incurred and
+ * available (`availableBudget()`'s arithmetic, every category in one query),
+ * one row per ACTIVE cost category in its order, and the project's whole.
+ * A draft commits nothing, so nothing is left out for the request being
+ * edited; the page subtracts its own lines live.
+ */
+export async function projectBudgetByLine(jobId: string) {
+  const [categories, rows] = await Promise.all([
+    prisma.costCategory.findMany({
+      where: { isActive: true },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      select: { id: true, code: true, name: true },
+    }),
+    prisma.jobCostEntry.groupBy({ by: ['costCategoryId', 'state'], where: { jobId }, _sum: { amount: true } }),
+  ]);
+  const sum = (categoryId: string | null, state: string) =>
+    rows
+      .filter((r) => (categoryId === null || r.costCategoryId === categoryId) && r.state === state)
+      .reduce((s, r) => s + num(r._sum.amount), 0);
+  const position = (categoryId: string | null) => {
+    const budgeted = sum(categoryId, 'BUDGETED');
+    const committed = sum(categoryId, 'COMMITTED');
+    const incurred = sum(categoryId, 'INCURRED');
+    return {
+      budgeted: cents(budgeted),
+      committed: cents(committed),
+      incurred: cents(incurred),
+      available: cents(budgeted - committed - incurred),
+    };
+  };
+  return {
+    lines: categories.map((c) => ({ ...c, ...position(c.id) })),
+    total: position(null),
+  };
+}
+
+purchaseRequestRoutes.get(
+  '/budget',
+  requireAny(...PR_WRITERS),
+  handler(async (req, res) => {
+    const jobId = String(req.query.jobId ?? '');
+    if (!jobId) throw badRequest('Name the project');
+    const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, number: true, name: true } });
+    if (!job) throw notFound('Project not found');
+    // The project's number and name come too: the page's header names it for
+    // a requester who cannot list projects.
+    res.json({ job, ...(await projectBudgetByLine(jobId)), blocked: await overBudgetIsBlocked() });
+  }),
+);
+
+/**
+ * What a line may be filled from, as it is typed: the project's costing lines
+ * (its own estimate — name, description, unit, quantity, budget line) and the
+ * item master (code, part number, name, unit, budget line). A COST comes only
+ * where the caller may see it: the costing's to a costing or budget reader or
+ * the project's manager, an item's standard cost to an item or costing
+ * reader — the quotation's suggestion rule. Without `q` the costing's lines
+ * come whole ("Add from costing…"); the items need a word.
+ */
+export async function lineSuggestions(me: ResolvedUser, term: string, jobId: string) {
+  const job = jobId
+    ? await prisma.job.findUnique({ where: { id: jobId }, select: { costingId: true, projectManagerId: true } })
+    : null;
+  const seesCostingCost =
+    can(me, 'gops.costing.view_all') ||
+    can(me, 'gops.budget_monitoring.view_all') ||
+    (job !== null && job.projectManagerId === me.id);
+  const seesItemCost = can(me, 'gchain.items.view_all') || can(me, 'gops.costing.view_all');
+  const words = term
+    ? {
+        OR: [
+          { name: { contains: term, mode: 'insensitive' as const } },
+          { description: { contains: term, mode: 'insensitive' as const } },
+        ],
+      }
+    : {};
+  const [costing, items] = await Promise.all([
+    job
+      ? prisma.costingLine.findMany({
+          where: { costingId: job.costingId, isHeading: false, ...words },
+          orderBy: [{ costCategory: { sortOrder: 'asc' } }, { sortOrder: 'asc' }],
+          take: term ? 25 : 500,
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            quantity: true,
+            unit: true,
+            unitCost: true,
+            itemId: true,
+            item: { select: { partNumber: true } },
+            costCategory: { select: { id: true, code: true, name: true } },
+            supplierName: true,
+            supplier: { select: { name: true } },
+          },
+        })
+      : [],
+    term
+      ? prisma.item.findMany({
+          where: {
+            isActive: true,
+            OR: [
+              { name: { contains: term, mode: 'insensitive' } },
+              { code: { contains: term, mode: 'insensitive' } },
+              { partNumber: { contains: term, mode: 'insensitive' } },
+            ],
+          },
+          orderBy: { name: 'asc' },
+          take: 15,
+          select: {
+            id: true,
+            code: true,
+            partNumber: true,
+            name: true,
+            description: true,
+            unit: true,
+            standardCost: true,
+            costCategory: { select: { id: true, code: true, name: true } },
+          },
+        })
+      : [],
+  ]);
+  return {
+    costing: costing.map((l) => ({
+      id: l.id,
+      itemId: l.itemId,
+      partNumber: l.item?.partNumber ?? null,
+      name: l.name ?? l.description,
+      description: l.name && l.description !== l.name ? l.description : '',
+      quantity: num(l.quantity),
+      unit: l.unit,
+      unitCost: seesCostingCost ? num(l.unitCost) : null,
+      costCategory: l.costCategory,
+      /** Who the costing says supplies it — the request's preferred supplier when it names none. */
+      supplier: l.supplier?.name ?? l.supplierName ?? null,
+    })),
+    items: items.map((i) => ({
+      id: i.id,
+      code: i.code,
+      partNumber: i.partNumber,
+      name: i.name,
+      description: i.description ?? '',
+      unit: i.unit,
+      unitCost: seesItemCost && i.standardCost != null ? num(i.standardCost) : null,
+      costCategory: i.costCategory,
+    })),
+  };
+}
+
+purchaseRequestRoutes.get(
+  '/suggest',
+  requireAny(...PR_WRITERS),
+  handler(async (req, res) => {
+    res.json(await lineSuggestions(currentUser(req), String(req.query.q ?? '').trim(), String(req.query.jobId ?? '')));
+  }),
+);
+
+/**
+ * The route submitting would take — "Submit for approval sends it to …" on
+ * the page, as the request stands (`amount`) and in its requester's name (the
+ * request's own when one is named, else the caller's).
+ */
+purchaseRequestRoutes.get(
+  '/route',
+  requireAny(...PR_WRITERS),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const amount = Number(req.query.amount ?? 0);
+    if (!Number.isFinite(amount) || amount < 0) throw badRequest('The amount is not a number');
+    const requestId = req.query.requestId ? String(req.query.requestId) : null;
+    const pr = requestId
+      ? await prisma.purchaseRequest.findUnique({ where: { id: requestId }, select: { requestedById: true, jobId: true } })
+      : null;
+    if (requestId && !pr) throw notFound('Purchase request not found');
+    const jobId = pr?.jobId ?? (req.query.jobId ? String(req.query.jobId) : null);
+    res.json({ route: await routeBrief('purchase_request', amount, pr?.requestedById ?? me.id, null, { jobId }) });
+  }),
+);
+
 async function loadPr(id: string) {
   return prisma.purchaseRequest.findUnique({
     where: { id },
@@ -285,6 +491,10 @@ async function loadPr(id: string) {
       canvasses: {
         orderBy: { createdAt: 'desc' },
         select: { id: true, number: true, status: true, createdAt: true },
+      },
+      rfqs: {
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, number: true, status: true, createdAt: true, _count: { select: { suppliers: true, items: true } } },
       },
       orders: {
         orderBy: { createdAt: 'desc' },
@@ -310,11 +520,23 @@ purchaseRequestRoutes.get(
 
     // Budget position per category, so the requester sees what is left before
     // they ask for more.
+    // The request's OWN net commitment (an approved one committed its
+    // estimate) is left out, so "This request" is never counted twice — once
+    // in "Already committed" and again against what is left.
     const budget: Record<string, Awaited<ReturnType<typeof availableBudget>>> = {};
     if (pr.jobId) {
-      const categoryIds = [...new Set(pr.items.map((i) => i.costCategoryId).filter(Boolean))];
-      for (const categoryId of categoryIds as string[]) {
-        budget[categoryId] = await availableBudget(prisma, pr.jobId, categoryId);
+      const categoryIds = [...new Set(pr.items.map((i) => i.costCategoryId).filter(Boolean))] as string[];
+      const own = await prisma.jobCostEntry.groupBy({
+        by: ['costCategoryId'],
+        where: { jobId: pr.jobId, state: 'COMMITTED', sourceType: 'purchase_request', sourceId: pr.id },
+        _sum: { amount: true },
+      });
+      for (const categoryId of categoryIds) {
+        const b = await availableBudget(prisma, pr.jobId, categoryId);
+        const mine = num(own.find((o) => o.costCategoryId === categoryId)?._sum.amount);
+        budget[categoryId] = mine
+          ? { ...b, committed: Math.round((b.committed - mine) * 100) / 100, available: Math.round((b.available + mine) * 100) / 100 }
+          : b;
       }
     }
 
@@ -325,12 +547,113 @@ purchaseRequestRoutes.get(
       // The routes' own rules (prForEdit, /withdraw): a draft is changed, and
       // a pending one pulled back, by its requester or an edit_all holder.
       canEdit: pr.status === 'DRAFT' && mayEditPr(me, pr),
+      /** What the page's save claims on (`PUT /:id/sheet`'s `version`). */
+      version: pr.updatedAt.toISOString(),
       canWithdraw: pr.status === 'PENDING_APPROVAL' && mayEditPr(me, pr),
       // POST /:id/cancel's own rule, short of the canvass check it makes itself.
       canCancel: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'].includes(pr.status) && pr.orders.length === 0 && mayEditPr(me, pr),
     });
   }),
 );
+
+/**
+ * One line of the requisition page's save — `POST /` with `lines[]` and
+ * `PUT /:id/sheet`. A line sent with its `id` is updated in place; a line
+ * left out is removed (the costing sheet's rule, never delete-and-recreate).
+ * `name` is the bold title; a line typed as a name alone carries it as its
+ * description too, because every older reader prints `description`.
+ */
+const prLineSchema = z.object({
+  id: z.string().optional().nullable(),
+  itemId: z.string().optional().nullable(),
+  costCategoryId: z.string().optional().nullable(),
+  partNumber: z.string().trim().max(120).optional().nullable(),
+  name: z.string().trim().max(300).optional().nullable(),
+  description: z.string().trim().max(4000).optional().nullable(),
+  quantity: z.number().positive('Quantity must be more than zero'),
+  unit: z.string().trim().max(40).optional().nullable(),
+  estimatedCost: z.number().min(0, 'An estimated cost cannot be negative').default(0),
+});
+type PrLineInput = z.infer<typeof prLineSchema>;
+
+interface CheckedPrLine {
+  id: string | null;
+  itemId: string | null;
+  costCategoryId: string | null;
+  partNumber: string | null;
+  name: string | null;
+  description: string;
+  quantity: number;
+  unit: string;
+  estimatedCost: number;
+}
+
+/**
+ * The lines as they will be written, every reference checked first: the item
+ * and the budget line must exist, a line must say what it is, and on a
+ * direct-to-job request every line names its budget line — the item's own
+ * where it has one, else refused naming the line. `existingIds` are the
+ * request's own lines; an id that is not one of them is a 400.
+ */
+async function checkPrLines(kind: string, lines: PrLineInput[], existingIds: string[]): Promise<CheckedPrLine[]> {
+  const itemIds = [...new Set(lines.map((l) => l.itemId).filter((v): v is string => !!v))];
+  const categoryIds = [...new Set(lines.map((l) => l.costCategoryId).filter((v): v is string => !!v))];
+  const [items, categories] = await Promise.all([
+    itemIds.length
+      ? prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, costCategoryId: true } })
+      : [],
+    categoryIds.length ? prisma.costCategory.findMany({ where: { id: { in: categoryIds } }, select: { id: true } }) : [],
+  ]);
+  const itemById = new Map(items.map((i) => [i.id, i]));
+  const known = new Set(categories.map((c) => c.id));
+  const own = new Set(existingIds);
+  return lines.map((l, index) => {
+    const n = index + 1;
+    if (l.id && !own.has(l.id)) throw badRequest(`Line ${n} is not on this request`);
+    if (l.itemId && !itemById.has(l.itemId)) throw badRequest(`Line ${n}: that item is not in the item master`);
+    if (l.costCategoryId && !known.has(l.costCategoryId)) throw badRequest(`Line ${n}: that budget line does not exist`);
+    const name = l.name?.trim() || null;
+    const description = l.description?.trim() || name;
+    if (!description) throw badRequest(`Line ${n}: say what is needed`);
+    const costCategoryId = l.costCategoryId || (l.itemId ? itemById.get(l.itemId)?.costCategoryId : null) || null;
+    if (kind === 'DIRECT_TO_JOB' && !costCategoryId) {
+      throw badRequest(`Line ${n} (${name ?? description}): choose its budget line — it is how the cost finds the project budget`);
+    }
+    return {
+      id: l.id || null,
+      itemId: l.itemId || null,
+      costCategoryId,
+      partNumber: l.partNumber?.trim() || null,
+      name,
+      description,
+      quantity: l.quantity,
+      unit: l.unit?.trim() || 'pcs',
+      estimatedCost: l.estimatedCost,
+    };
+  });
+}
+
+/** Writes the checked lines in order: updates the ones with an id, creates the rest, removes what was left out. */
+async function writePrLines(tx: Prisma.TransactionClient, requestId: string, lines: CheckedPrLine[]) {
+  const keep = lines.map((l) => l.id).filter((v): v is string => !!v);
+  await tx.purchaseRequestItem.deleteMany({ where: { requestId, id: { notIn: keep } } });
+  for (const [sortOrder, l] of lines.entries()) {
+    const data = {
+      itemId: l.itemId,
+      costCategoryId: l.costCategoryId,
+      partNumber: l.partNumber,
+      name: l.name,
+      description: l.description,
+      quantity: D(l.quantity),
+      unit: l.unit,
+      estimatedCost: D(l.estimatedCost),
+      estimatedAmount: D(cents(l.quantity * l.estimatedCost)),
+      sortOrder,
+    };
+    if (l.id) await tx.purchaseRequestItem.update({ where: { id: l.id }, data });
+    else await tx.purchaseRequestItem.create({ data: { requestId, ...data } });
+  }
+}
 
 const prSchema = z.object({
   kind: z.enum(['DIRECT_TO_JOB', 'STOCK_REPLENISHMENT']).default('DIRECT_TO_JOB'),
@@ -339,6 +662,7 @@ const prSchema = z.object({
   purpose: z.string().trim().min(3, 'Say what this is for'),
   neededBy: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
+  preferredSupplier: z.string().trim().max(200).optional().nullable(),
 });
 
 /** The rights on the request's edit routes: its requester's, or anybody's. */
@@ -368,12 +692,19 @@ purchaseRequestRoutes.post(
   require_('gchain.purchase_requests.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(prSchema, req.body);
+    const body = parseBody(prSchema.extend({ lines: z.array(prLineSchema).max(500).optional() }), req.body);
     checkPrTarget(body.kind, body.jobId, body.warehouseId);
+    if (body.jobId && body.kind === 'DIRECT_TO_JOB') {
+      const job = await prisma.job.findUnique({ where: { id: body.jobId }, select: { id: true } });
+      if (!job) throw badRequest('That project does not exist');
+    }
+    // Every line is checked before the number is issued: a refused line
+    // burns no number (the costing sheet's rule).
+    const lines = body.lines ? await checkPrLines(body.kind, body.lines, []) : [];
 
     const pr = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('purchase_request', tx);
-      return tx.purchaseRequest.create({
+      const created = await tx.purchaseRequest.create({
         data: {
           number,
           kind: body.kind,
@@ -383,19 +714,23 @@ purchaseRequestRoutes.post(
           purpose: body.purpose,
           neededBy: asDate(body.neededBy),
           notes: body.notes || null,
+          preferredSupplier: body.preferredSupplier || null,
         },
       });
+      await writePrLines(tx, created.id, lines);
+      await audit(
+        {
+          entityType: 'purchase_request',
+          entityId: created.id,
+          action: 'CREATED',
+          summary: `Raised ${created.number} — ${created.purpose}${lines.length ? ` (${lines.length} line${lines.length === 1 ? '' : 's'})` : ''}`,
+        },
+        req,
+        tx,
+      );
+      return created;
     });
 
-    await audit(
-      {
-        entityType: 'purchase_request',
-        entityId: pr.id,
-        action: 'CREATED',
-        summary: `Raised ${pr.number} — ${pr.purpose}`,
-      },
-      req,
-    );
     res.status(201).json(pr);
   }),
 );
@@ -437,6 +772,7 @@ purchaseRequestRoutes.patch(
         purpose: z.string().trim().min(3, 'Say what this is for').optional(),
         neededBy: z.string().optional().nullable(),
         notes: z.string().optional().nullable(),
+        preferredSupplier: z.string().trim().max(200).optional().nullable(),
       }),
       req.body,
     );
@@ -485,6 +821,9 @@ purchaseRequestRoutes.patch(
       changed.push('needed by');
     }
     if (body.notes !== undefined && (body.notes || null) !== pr.notes) changed.push('notes');
+    if (body.preferredSupplier !== undefined && (body.preferredSupplier || null) !== pr.preferredSupplier) {
+      changed.push('preferred supplier');
+    }
     if (categoryFills.length) changed.push(`budget line filled on ${categoryFills.length} line${categoryFills.length === 1 ? '' : 's'}`);
 
     await prisma.$transaction(async (tx) => {
@@ -498,6 +837,7 @@ purchaseRequestRoutes.patch(
           ...(body.purpose !== undefined ? { purpose: body.purpose } : {}),
           ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
           ...(body.neededBy !== undefined ? { neededBy: asDate(body.neededBy) } : {}),
+          ...(body.preferredSupplier !== undefined ? { preferredSupplier: body.preferredSupplier || null } : {}),
         },
       });
       if (!claimed.count) throw badRequest(`${pr.number} was submitted a moment ago and cannot be changed`);
@@ -635,6 +975,72 @@ purchaseRequestRoutes.delete(
       req,
     );
     const full = await loadPr(req.params.id);
+    res.json(presentPr(full as unknown as Record<string, unknown>));
+  }),
+);
+
+/**
+ * The requisition page's save: the header AND the lines in one transaction
+ * (`PUT /:id/sheet`). The header follows PATCH's rules — the kind, the
+ * project and the warehouse under `checkPrTarget` — and the lines
+ * `checkPrLines()`, all checked before anything is written. Claimed on DRAFT
+ * and on the `updatedAt` the page read (`version`), so a submit, or another
+ * save, that landed in between wins: "It changed a moment ago — reload".
+ */
+purchaseRequestRoutes.put(
+  '/:id/sheet',
+  requireAny(...PR_EDIT),
+  handler(async (req, res) => {
+    const { pr } = await prForEdit(req, req.params.id);
+    const body = parseBody(
+      prSchema.extend({ lines: z.array(prLineSchema).max(500), version: z.string().optional().nullable() }),
+      req.body,
+    );
+    const kind = body.kind;
+    const jobId = kind === 'STOCK_REPLENISHMENT' ? null : body.jobId || null;
+    const warehouseId = body.warehouseId || null;
+    checkPrTarget(kind, jobId, warehouseId);
+    if (jobId && jobId !== pr.jobId) {
+      const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true } });
+      if (!job) throw badRequest('That project does not exist');
+    }
+    if (warehouseId && warehouseId !== pr.warehouseId) {
+      const warehouse = await prisma.warehouse.findUnique({ where: { id: warehouseId }, select: { id: true } });
+      if (!warehouse) throw badRequest('That warehouse does not exist');
+    }
+    const lines = await checkPrLines(kind, body.lines, pr.items.map((i) => i.id));
+    const version = body.version ? new Date(body.version) : null;
+    if (version && Number.isNaN(version.getTime())) throw badRequest('The version is not a date');
+
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.purchaseRequest.updateMany({
+        where: { id: pr.id, status: 'DRAFT', ...(version ? { updatedAt: version } : {}) },
+        data: {
+          kind,
+          jobId,
+          warehouseId,
+          purpose: body.purpose,
+          neededBy: asDate(body.neededBy),
+          notes: body.notes || null,
+          preferredSupplier: body.preferredSupplier || null,
+        },
+      });
+      if (!claimed.count) throw badRequest(`${pr.number} changed a moment ago — reload it and make the change again`);
+      await writePrLines(tx, pr.id, lines);
+      const total = lines.reduce((sum, l) => sum + cents(l.quantity * l.estimatedCost), 0);
+      await audit(
+        {
+          entityType: 'purchase_request',
+          entityId: pr.id,
+          action: 'UPDATED',
+          summary: `Modified ${pr.number}: ${lines.length} line${lines.length === 1 ? '' : 's'}, ${formatMoney(cents(total))} estimated`,
+        },
+        req,
+        tx,
+      );
+    });
+
+    const full = await loadPr(pr.id);
     res.json(presentPr(full as unknown as Record<string, unknown>));
   }),
 );
@@ -821,7 +1227,12 @@ purchaseRequestRoutes.post(
     const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled').max(2000) }), req.body);
     const pr = await prisma.purchaseRequest.findUnique({
       where: { id: req.params.id },
-      include: { _count: { select: { orders: true } }, canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } } },
+      include: {
+        _count: { select: { orders: true } },
+        canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        rfqs: { where: { status: { in: ['DRAFT', 'SENT', 'QUOTED'] } }, select: { number: true } },
+        pulloutSlips: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+      },
     });
     if (!pr) throw notFound('Purchase request not found');
     if (!mayEditPr(me, pr)) throw forbidden('This request belongs to someone else');
@@ -830,6 +1241,9 @@ purchaseRequestRoutes.post(
     }
     if (pr._count.orders > 0) throw badRequest('Purchase orders were raised from this request — cancel those first');
     if (pr.canvasses.length) throw badRequest(`Canvass ${pr.canvasses.map((c) => c.number).join(', ')} is still on this request — cancel it first`);
+    if (pr.rfqs.length) throw badRequest(`RFQ ${pr.rfqs.map((r) => r.number).join(', ')} is still open on this request — cancel it first`);
+    // Stock pulled from the shelf for it (2026-10-14) is a fact, not an intention.
+    if (pr.pulloutSlips.length) throw badRequest(`Pull-out slip ${pr.pulloutSlips.map((p) => p.number).join(', ')} stands on this request — cancel it first, or keep the request`);
 
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.purchaseRequest.updateMany({
@@ -964,13 +1378,62 @@ onApprovalSettled('purchase_request', async (request, outcome) => {
   await settlePurchaseRequest(request.documentId, outcome);
 });
 
+/**
+ * Pulled back after approval (2026-10-16, the owner's call): APPROVED →
+ * DRAFT, the budget its approval committed released by a row of its own.
+ * Refused while anything stands on it — an order, an RFQ, a canvass or a
+ * pull-out slip not cancelled, or a line already ordered or pulled out.
+ */
+onApprovalReopened('purchase_request', {
+  may: async (actor, id) => {
+    const pr = await prisma.purchaseRequest.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+    return !!pr && mayEditPr(actor, pr);
+  },
+  reopen: async ({ documentId, tx, actor, reason }) => {
+    const pr = await tx.purchaseRequest.findUnique({
+      where: { id: documentId },
+      include: {
+        orders: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        rfqs: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        pulloutSlips: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        items: { select: { orderedQty: true, pulledQty: true } },
+      },
+    });
+    if (!pr) throw notFound('Purchase request not found');
+    const names = (rows: Array<{ number: string }>) => rows.map((r) => r.number).join(', ');
+    if (pr.orders.length) throw badRequest(`Purchase order ${names(pr.orders)} stands on ${pr.number} — cancel it first`);
+    if (pr.rfqs.length) throw badRequest(`RFQ ${names(pr.rfqs)} stands on ${pr.number} — cancel it first`);
+    if (pr.canvasses.length) throw badRequest(`Canvass ${names(pr.canvasses)} stands on ${pr.number} — cancel it first`);
+    if (pr.pulloutSlips.length) throw badRequest(`Pull-out slip ${names(pr.pulloutSlips)} stands on ${pr.number} — cancel it first`);
+    if (pr.items.some((i) => num(i.orderedQty) > 0 || num(i.pulledQty) > 0)) {
+      throw badRequest(`Part of ${pr.number} was already ordered or taken from stock — it cannot be pulled back`);
+    }
+    if (pr.status !== 'APPROVED') throw badRequest(`${pr.number} is ${statusLabel(pr.status).toLowerCase()} — only an approved request is pulled back`);
+    const claimed = await tx.purchaseRequest.updateMany({
+      where: { id: pr.id, status: 'APPROVED' },
+      data: { status: 'DRAFT', approvedAt: null },
+    });
+    if (!claimed.count) throw badRequest(`${pr.number} changed a moment ago — reload to see where it stands`);
+    if (pr.kind === 'DIRECT_TO_JOB' && pr.jobId) {
+      await releaseCommitment(tx, {
+        jobId: pr.jobId,
+        sourceType: 'purchase_request',
+        sourceId: pr.id,
+        reason: `${pr.number} pulled back to draft by ${actor.name}: ${reason}`,
+        createdById: actor.id,
+      });
+    }
+  },
+});
+
 purchaseRequestRoutes.delete(
   '/:id',
   require_('gchain.purchase_requests.delete'),
   handler(async (req, res) => {
     const pr = await prisma.purchaseRequest.findUnique({
       where: { id: req.params.id },
-      include: { _count: { select: { orders: true } } },
+      include: { _count: { select: { orders: true } }, rfqs: { select: { suppliers: { select: { id: true } } } } },
     });
     if (!pr) throw notFound('Purchase request not found');
     if (pr.status !== 'DRAFT' && pr.status !== 'REJECTED' && pr.status !== 'CANCELLED') {
@@ -980,6 +1443,8 @@ purchaseRequestRoutes.delete(
 
     await deleteOrRefuse(pr.number, () => prisma.purchaseRequest.delete({ where: { id: req.params.id } }));
     await deleteAttachmentsOf('purchase_request', [pr.id]);
+    // Its cancelled RFQs cascade with it; their suppliers' quotation files go too.
+    await deleteAttachmentsOf('rfq_supplier', pr.rfqs.flatMap((r) => r.suppliers.map((s) => s.id)));
     await audit(
       { entityType: 'purchase_request', entityId: req.params.id, action: 'DELETED', summary: `Deleted ${pr.number}` },
       req,
@@ -995,113 +1460,202 @@ purchaseRequestRoutes.delete(
 export const canvassRoutes = Router();
 canvassRoutes.use(authenticate);
 
+/*
+ * The canvass is the COMPARISON SHEET (2026-10-14, the owner's call:
+ * "Purchase Request, RFQ, Canvass, Purchase Order"; his sample canvass sheet
+ * with a row for Percentage Savings against the approved request). Raised
+ * from an RFQ, it SNAPSHOTS the RFQ's lines (`lineIds`), the suppliers that
+ * quoted and their quotes — the abstract is a record, so a quote changed on
+ * the RFQ later never moves an awarded sheet ("Refresh from RFQ" copies again
+ * while it is OPEN). Raised from a request with no RFQ (a quote already in
+ * hand) it compares every line of the request, as a canvass always did. The
+ * arithmetic is `canvassFigures()` in `shared/canvassMath.ts`. No approval
+ * route: the award is the buyer's decision on record, and the purchase order
+ * raised from it is approved.
+ */
+
 const CANVASS_SORTS = ['number', 'createdAt'];
 
+/** A reader with view_own alone sees what they opened (the search provider's own rule). */
+function seesAllCanvasses(me: ResolvedUser) {
+  return can(me, 'gchain.canvass.view_all');
+}
+
 /** Which canvasses a list query means — one rule for the list and its printed twin. */
-function canvassListWhere(q: ListQuery): Prisma.CanvassWhereInput {
+function canvassListWhere(me: ResolvedUser, q: ListQuery): Prisma.CanvassWhereInput {
   const and: Prisma.CanvassWhereInput[] = [];
-  const status = choice(q.filters.status, CanvassStatus, 'Status');
+  if (!seesAllCanvasses(me) || q.scope === 'mine') and.push({ createdById: me.id });
+  const f = q.filters;
+  const status = choice(f.status, CanvassStatus, 'Status');
   if (status) and.push({ status });
+  if (f.rfqId) and.push({ rfqId: f.rfqId });
+  if (f.requestId) and.push({ requestId: f.requestId });
+  if (f.supplierId) and.push({ suppliers: { some: { supplierId: f.supplierId } } });
   if (q.search) {
     and.push({
       OR: [
         { number: { contains: q.search, mode: 'insensitive' } },
         { request: { number: { contains: q.search, mode: 'insensitive' } } },
         { request: { purpose: { contains: q.search, mode: 'insensitive' } } },
+        { rfq: { number: { contains: q.search, mode: 'insensitive' } } },
+        { suppliers: { some: { supplier: { name: { contains: q.search, mode: 'insensitive' } } } } },
       ],
     });
   }
-  const ids = idsFilter(q.filters.ids);
+  const ids = idsFilter(f.ids);
   if (ids) and.push({ id: { in: ids } });
   return and.length ? { AND: and } : {};
+}
+
+/** The lines a sheet compares: its snapshot, else (a canvass opened before 2026-10-14) every line of its request. */
+function sheetLinesOf<T extends { id: string }>(canvass: { lineIds: string[] }, items: T[]): T[] {
+  if (!canvass.lineIds.length) return items;
+  const keep = new Set(canvass.lineIds);
+  return items.filter((i) => keep.has(i.id));
+}
+
+type FigureItem = { id: string; quantity: Prisma.Decimal; estimatedCost: Prisma.Decimal; estimatedAmount: Prisma.Decimal };
+type FigureSupplier = { id: string; quotes: { requestItemId: string; unitPrice: Prisma.Decimal }[] };
+
+/** The sheet's figures — the reference budget and each supplier column's total and saving (the G-CHAIN reports read it too). */
+export function figuresOf(canvass: { lineIds: string[] }, items: FigureItem[], suppliers: FigureSupplier[]) {
+  const lines: SheetLine[] = sheetLinesOf(canvass, items).map((i) => ({
+    id: i.id,
+    quantity: num(i.quantity),
+    estimatedCost: num(i.estimatedCost),
+    estimatedAmount: num(i.estimatedAmount),
+  }));
+  return canvassFigures(
+    lines,
+    suppliers.map((s) => ({ id: s.id, prices: Object.fromEntries(s.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)])) })),
+  );
+}
+
+const LIST_INCLUDE = {
+  request: {
+    select: {
+      id: true,
+      number: true,
+      purpose: true,
+      job: { select: { id: true, number: true, name: true } },
+      items: { select: { id: true, quantity: true, estimatedCost: true, estimatedAmount: true } },
+    },
+  },
+  rfq: { select: { id: true, number: true } },
+  createdBy: { select: { id: true, name: true } },
+  suppliers: {
+    orderBy: { id: 'asc' },
+    select: { id: true, isSelected: true, supplier: { select: { name: true } }, quotes: { select: { requestItemId: true, unitPrice: true } } },
+  },
+} satisfies Prisma.CanvassInclude;
+
+type ListedCanvass = Prisma.CanvassGetPayload<{ include: typeof LIST_INCLUDE }>;
+
+/** A list row: the awarded supplier, else the lowest complete quote, with its saving against the request's estimate. */
+function canvassRow(c: ListedCanvass) {
+  const figures = figuresOf(c, c.request.items, c.suppliers);
+  const awarded = c.suppliers.find((s) => s.isSelected);
+  const pickId = awarded?.id ?? figures.lowestCompleteId;
+  const pick = pickId ? figures.columns.find((col) => col.id === pickId) : undefined;
+  const pickName = pickId ? c.suppliers.find((s) => s.id === pickId)?.supplier.name ?? null : null;
+  const { items: _items, ...request } = c.request;
+  return {
+    id: c.id,
+    number: c.number,
+    status: c.status,
+    createdAt: c.createdAt,
+    awardedAt: c.awardedAt,
+    request,
+    rfq: c.rfq,
+    createdBy: c.createdBy,
+    supplierCount: c.suppliers.length,
+    suppliers: c.suppliers.map((s) => s.supplier.name),
+    awarded: awarded?.supplier.name ?? null,
+    budget: figures.budget,
+    /** The awarded supplier, else the lowest complete quote: what the sheet's saving is read off. */
+    pick: pick && pickName ? { name: pickName, total: pick.total, savings: pick.savings, savingsPct: pick.savingsPct, awarded: !!awarded, complete: pick.complete } : null,
+  };
 }
 
 canvassRoutes.get(
   '/',
   requireAny('gchain.canvass.view_all', 'gchain.canvass.view_own'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
-    const where = canvassListWhere(q);
-
-    const [rows, total] = await Promise.all([
+    const where = canvassListWhere(me, q);
+    const [rows, total, byStatus] = await Promise.all([
       prisma.canvass.findMany({
         where,
-        include: {
-          request: {
-            select: { id: true, number: true, purpose: true, job: { select: { id: true, name: true } } },
-          },
-          createdBy: { select: { id: true, name: true } },
-          suppliers: { select: { id: true, isSelected: true, supplier: { select: { name: true } } } },
-        },
+        include: LIST_INCLUDE,
         orderBy: orderBy(q, CANVASS_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.canvass.count({ where }),
+      prisma.canvass.groupBy({ by: ['status'], where, _count: true }),
     ]);
-
-    res.json(
-      listResult(
-        rows.map((r) => ({
-          ...r,
-          supplierCount: r.suppliers.length,
-          awarded: r.suppliers.find((s) => s.isSelected)?.supplier.name ?? null,
-        })),
-        total,
-        q,
-      ),
-    );
+    const counted = (s: CanvassStatus) => byStatus.find((b) => b.status === s)?._count ?? 0;
+    res.json({
+      ...listResult(rows.map(canvassRow), total, q),
+      summary: { count: total, open: counted('OPEN'), awarded: counted('AWARDED') },
+    });
   }),
 );
 
 /**
  * The canvass list on paper, through `canvassListWhere` (or the rows ticked,
- * `?ids=`). No prices: a canvass's figures are per supplier and belong on the
- * canvass itself. Above `/:id`.
+ * `?ids=`): each sheet's reference budget and the saving of its award (else
+ * its lowest complete quote) — never a supplier's line prices, which belong
+ * on the sheet itself. Ten columns, so landscape. Above `/:id`.
  */
 canvassRoutes.get(
   '/pdf',
   requireAny('gchain.canvass.view_all', 'gchain.canvass.view_own'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
-    const where = canvassListWhere(q);
+    const where = canvassListWhere(me, q);
     const [rows, count] = await Promise.all([
-      prisma.canvass.findMany({
-        where,
-        include: {
-          request: { select: { number: true, purpose: true, job: { select: { number: true } } } },
-          createdBy: { select: { name: true } },
-          suppliers: { select: { isSelected: true, supplier: { select: { name: true } } } },
-        },
-        orderBy: orderBy(q, CANVASS_SORTS, { createdAt: 'desc' }),
-        take: LIST_CAP,
-      }),
+      prisma.canvass.findMany({ where, include: LIST_INCLUDE, orderBy: orderBy(q, CANVASS_SORTS, { createdAt: 'desc' }), take: LIST_CAP }),
       prisma.canvass.count({ where }),
     ]);
     const f = q.filters;
+    const [rfqNamed, requestNamed, supplierNamed] = await Promise.all([
+      recordNamed('RFQ', f.rfqId),
+      recordNamed('purchase request', f.requestId),
+      recordNamed('supplier', f.supplierId),
+    ]);
     const reference = listReference(count, rows.length, ['canvass', 'canvasses'], [
       q.search && `search "${q.search}"`,
       f.status && `status ${statusLabel(f.status)}`,
+      rfqNamed,
+      requestNamed,
+      supplierNamed,
+      q.scope === 'mine' && 'opened by me',
       f.ids && 'the rows selected',
     ]);
-
-    // Seven columns: portrait, each sized from what it holds (rule 6).
+    const currency = await companyCurrency();
     const pdf = await renderDocument({
-      title: 'Canvass / RFQ',
+      title: 'Canvass Sheets',
       date: new Date(),
       reference,
+      landscape: true,
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'For', 'Suppliers', 'Awarded to', 'Opened by', 'Opened', 'Status'],
-          align: ['left', 'left', 'right', 'left', 'left', 'left', 'left'],
-          rows: rows.map((c) => [
+          head: ['Number', 'For', 'RFQ', 'Suppliers', 'Awarded / lowest', `Reference budget (${currency})`, `Quoted (${currency})`, 'Savings', 'Canvassed by', 'Status'],
+          align: ['left', 'left', 'left', 'right', 'left', 'right', 'right', 'right', 'left', 'left'],
+          rows: rows.map(canvassRow).map((c) => [
             c.number,
             { title: c.request.purpose, body: [c.request.number, c.request.job?.number].filter(Boolean).join(' · ') },
-            String(c.suppliers.length),
-            c.suppliers.find((s) => s.isSelected)?.supplier.name ?? '',
-            c.createdBy.name,
-            formatShortDate(c.createdAt),
+            c.rfq?.number ?? '',
+            String(c.supplierCount),
+            c.pick ? `${c.pick.name}${c.pick.awarded ? ' (awarded)' : ''}` : '',
+            formatAmount(c.budget),
+            c.pick ? formatAmount(c.pick.total) : '',
+            c.pick?.savingsPct != null ? `${c.pick.savingsPct.toFixed(2)}%` : '',
+            `${c.createdBy.name}, ${formatShortDate(c.createdAt)}`,
             statusLabel(c.status),
           ]),
         },
@@ -1122,16 +1676,20 @@ async function loadCanvass(id: string) {
       request: {
         include: {
           job: { select: { id: true, number: true, name: true } },
+          warehouse: { select: { id: true, name: true } },
           items: {
             orderBy: { sortOrder: 'asc' },
             include: { costCategory: { select: { id: true, name: true } } },
           },
         },
       },
+      rfq: { select: { id: true, number: true, status: true, dueDate: true } },
       createdBy: { select: { id: true, name: true } },
+      awardedBy: { select: { id: true, name: true } },
       suppliers: {
+        orderBy: { id: 'asc' },
         include: {
-          supplier: { select: { id: true, code: true, name: true, paymentTerms: true } },
+          supplier: { select: { id: true, code: true, name: true, paymentTerms: true, phone: true, email: true } },
           quotes: true,
         },
       },
@@ -1141,86 +1699,130 @@ async function loadCanvass(id: string) {
 
 type LoadedCanvass = NonNullable<Awaited<ReturnType<typeof loadCanvass>>>;
 
-/** Who may change a canvass's own notes: edit_all, or whoever opened it holding edit_own (rule 7). */
+/** Who may change a canvass's own notes and recommendation: edit_all, or whoever opened it holding edit_own (rule 7). */
 function mayEditCanvass(me: ResolvedUser, canvass: { createdById: string }): boolean {
   return canEditRecord(me, 'gchain', 'canvass', canvass.createdById);
 }
 
-function presentCanvass(canvass: LoadedCanvass, me: ResolvedUser) {
-  // Total per supplier for the lines they actually quoted, so the comparison
-  // is like for like.
+function assertCanvassVisible(me: ResolvedUser, canvass: { createdById: string }) {
+  if (!seesAllCanvasses(me) && canvass.createdById !== me.id) throw notFound('Canvass not found');
+}
+
+/** The purchase orders placed on an award: the request's live orders with the winner. */
+async function ordersOnAward(canvass: { requestId: string; status: CanvassStatus; suppliers: { supplierId: string; isSelected: boolean }[] }) {
+  const winner = canvass.suppliers.find((s) => s.isSelected);
+  if (canvass.status !== 'AWARDED' || !winner) return [];
+  return prisma.purchaseOrder.findMany({
+    where: { requestId: canvass.requestId, supplierId: winner.supplierId, status: { not: 'CANCELLED' } },
+    select: { id: true, number: true, status: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
+  });
+}
+
+function presentCanvass(canvass: LoadedCanvass, me: ResolvedUser, orders: { id: string; number: string; status: string; createdAt: Date }[] = []) {
+  const figures = figuresOf(canvass, canvass.request.items, canvass.suppliers);
+  const byId = new Map(figures.columns.map((c) => [c.id, c]));
+  const lineIds = new Set(sheetLinesOf(canvass, canvass.request.items).map((i) => i.id));
   const suppliers = canvass.suppliers.map((s) => {
-    const quoted = new Map(s.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)]));
-    const total = canvass.request.items.reduce((sum, item) => {
-      const price = quoted.get(item.id);
-      return price === undefined ? sum : sum + num(item.quantity) * price;
-    }, 0);
+    const f = byId.get(s.id)!;
     return {
       ...s,
-      quotes: s.quotes.map((qq) => ({ ...qq, unitPrice: num(qq.unitPrice) })),
-      quotedCount: s.quotes.length,
-      total: cents(total),
-      complete: s.quotes.length === canvass.request.items.length,
+      quotes: s.quotes.filter((qq) => lineIds.has(qq.requestItemId)).map((qq) => ({ ...qq, unitPrice: num(qq.unitPrice) })),
+      quotedCount: f.quotedCount,
+      total: f.total,
+      complete: f.complete,
+      amounts: f.amounts,
+      budgetOnQuoted: f.budgetOnQuoted,
+      savings: f.savings,
+      savingsPct: f.savingsPct,
     };
   });
-
-  const complete = suppliers.filter((s) => s.complete && s.total > 0);
-  const lowest = complete.length
-    ? complete.reduce((best, s) => (s.total < best.total ? s : best))
-    : null;
-
   const open = canvass.status === 'OPEN';
   return {
     ...canvass,
-    request: presentPr(canvass.request as unknown as Record<string, unknown>),
+    // The request with the SHEET's lines: an RFQ's sheet compares what the RFQ asked.
+    request: presentPr({ ...canvass.request, items: sheetLinesOf(canvass, canvass.request.items) } as unknown as Record<string, unknown>),
     suppliers,
-    lowestSupplierId: lowest?.id ?? null,
-    // The routes' own rules: while OPEN, the notes are the opener's (or
-    // edit_all's), the supplier rows edit_all's. An award is the record.
+    budget: figures.budget,
+    lowestSupplierId: figures.lowestCompleteId,
+    orders,
+    // The routes' own rules: while OPEN, the notes and the recommendation
+    // are the opener's (or edit_all's), the supplier rows and the award
+    // edit_all's. An award is the record.
     canEdit: open && mayEditCanvass(me, canvass),
     canEditSuppliers: open && can(me, 'gchain.canvass.edit_all'),
+    canAward: open && can(me, 'gchain.canvass.edit_all'),
+    canRefresh: open && !!canvass.rfq && can(me, 'gchain.canvass.edit_all'),
     // POST /:id/cancel and DELETE /:id's own rules (the cancel also refuses
     // an award an order was placed on).
-    canCancel: (open || canvass.status === 'AWARDED') && mayEditCanvass(me, canvass),
+    canCancel: (open || canvass.status === 'AWARDED') && mayEditCanvass(me, canvass) && !orders.length,
     canDelete: canvass.status === 'CANCELLED' && can(me, 'gchain.canvass.delete') && mayEditCanvass(me, canvass),
   };
+}
+
+async function canvassView(id: string, me: ResolvedUser) {
+  const canvass = await loadCanvass(id);
+  if (!canvass) throw notFound('Canvass not found');
+  return presentCanvass(canvass, me, await ordersOnAward(canvass));
 }
 
 canvassRoutes.get(
   '/:id',
   requireAny('gchain.canvass.view_all', 'gchain.canvass.view_own'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const canvass = await loadCanvass(req.params.id);
     if (!canvass) throw notFound('Canvass not found');
-    res.json(presentCanvass(canvass, currentUser(req)));
+    assertCanvassVisible(me, canvass);
+    res.json(presentCanvass(canvass, me, await ordersOnAward(canvass)));
   }),
 );
 
 /**
- * Modifying a canvass: its notes, while it is OPEN. Which request it
- * canvasses is what it is, and an award is the decision on record — so the
- * header takes nothing else (a key it cannot change is refused, not ignored).
+ * Modifying a canvass: its notes (printed as the sheet's Remarks) and the
+ * buyer's recommendation, while it is OPEN. Which request it canvasses is
+ * what it is, and an award is the decision on record — so the header takes
+ * nothing else (a key it cannot change is refused, not ignored).
  */
 canvassRoutes.patch(
   '/:id',
   requireAny('gchain.canvass.edit_own', 'gchain.canvass.edit_all'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(z.object({ notes: z.string().nullable() }).strict(), req.body);
-    const canvass = await prisma.canvass.findUnique({ where: { id: req.params.id } });
+    const body = parseBody(
+      z.object({ notes: z.string().max(5000).nullable().optional(), recommendedRowId: z.string().nullable().optional() }).strict(),
+      req.body,
+    );
+    const canvass = await prisma.canvass.findUnique({ where: { id: req.params.id }, include: { suppliers: { include: { quotes: { select: { id: true } }, supplier: { select: { name: true } } } } } });
     if (!canvass) throw notFound('Canvass not found');
     if (!mayEditCanvass(me, canvass)) throw forbidden('This canvass belongs to someone else');
     if (canvass.status !== 'OPEN') {
       throw badRequest(`${canvass.number} is ${canvass.status.toLowerCase()} — it stands as it was decided`);
     }
-    const notes = body.notes?.trim() || null;
-    const claimed = await prisma.canvass.updateMany({ where: { id: canvass.id, status: 'OPEN' }, data: { notes } });
+    let recommended: string | null = null;
+    if (body.recommendedRowId) {
+      const row = canvass.suppliers.find((s) => s.id === body.recommendedRowId);
+      if (!row) throw badRequest('That supplier is not on this canvass');
+      if (!row.quotes.length) throw badRequest(`${row.supplier.name} has not quoted anything — nothing to recommend`);
+      recommended = row.supplier.name;
+    }
+    const claimed = await prisma.canvass.updateMany({
+      where: { id: canvass.id, status: 'OPEN' },
+      data: {
+        ...(body.notes !== undefined ? { notes: body.notes?.trim() || null } : {}),
+        ...(body.recommendedRowId !== undefined ? { recommendedRowId: body.recommendedRowId || null } : {}),
+      },
+    });
     if (!claimed.count) throw badRequest(`${canvass.number} was awarded a moment ago — reload to see it`);
+    const said = [
+      body.notes !== undefined && 'notes',
+      body.recommendedRowId !== undefined && (recommended ? `recommended ${recommended}` : 'recommendation cleared'),
+    ].filter(Boolean);
     await audit(
-      { entityType: 'canvass', entityId: canvass.id, action: 'UPDATED', summary: `Modified ${canvass.number}: notes` },
+      { entityType: 'canvass', entityId: canvass.id, action: 'UPDATED', summary: `Modified ${canvass.number}: ${said.join(', ') || 'nothing'}` },
       req,
     );
-    res.json(presentCanvass((await loadCanvass(canvass.id))!, me));
+    res.json(await canvassView(canvass.id, me));
   }),
 );
 
@@ -1229,7 +1831,9 @@ canvassRoutes.patch(
  * edit_all, with a reason kept on its notes. An OPEN one, or an AWARDED one
  * no live purchase order was placed on (an order's supplier is the award,
  * `awardedCanvass()`): cancel the order first. Claimed on the status it was
- * read in, so an award landing meanwhile refuses the cancel.
+ * read in, so an award landing meanwhile refuses the cancel. An award
+ * withdrawn opens its RFQ again (CLOSED → QUOTED), so it can be canvassed
+ * anew.
  */
 canvassRoutes.post(
   '/:id/cancel',
@@ -1254,11 +1858,14 @@ canvassRoutes.post(
         throw badRequest(`Purchase order ${orders.map((o) => o.number).join(', ')} was placed on this award — cancel it first`);
       }
     }
-    const claimed = await prisma.canvass.updateMany({
-      where: { id: canvass.id, status: canvass.status },
-      data: { status: 'CANCELLED', notes: `${canvass.notes ? `${canvass.notes}\n` : ''}Cancelled: ${body.reason}` },
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.canvass.updateMany({
+        where: { id: canvass.id, status: canvass.status },
+        data: { status: 'CANCELLED', notes: `${canvass.notes ? `${canvass.notes}\n` : ''}Cancelled: ${body.reason}` },
+      });
+      if (!claimed.count) throw badRequest(`${canvass.number} changed a moment ago — reload to see it`);
+      if (canvass.rfqId) await tx.rfq.updateMany({ where: { id: canvass.rfqId, status: 'CLOSED' }, data: { status: 'QUOTED' } });
     });
-    if (!claimed.count) throw badRequest(`${canvass.number} changed a moment ago — reload to see it`);
     await audit({ entityType: 'canvass', entityId: canvass.id, action: 'CANCELLED', summary: `${canvass.number} cancelled — ${body.reason}` }, req);
     res.json({ ok: true, status: 'CANCELLED' });
   }),
@@ -1281,15 +1888,128 @@ canvassRoutes.delete(
   }),
 );
 
+/** What a sheet's supplier row copies from its RFQ row: whom it names, the quote's terms and its prices on the sheet's lines. */
+function snapshotOf(
+  row: {
+    id: string;
+    supplierId: string;
+    contactName: string | null;
+    contactPhone: string | null;
+    quoteRef: string | null;
+    leadTimeDays: number | null;
+    terms: string | null;
+    remarks: string | null;
+    supplier: { phone: string | null; paymentTerms: string | null };
+    quotes: { requestItemId: string; unitPrice: Prisma.Decimal; remarks: string | null }[];
+  },
+  lines: Set<string>,
+) {
+  return {
+    supplierId: row.supplierId,
+    rfqSupplierId: row.id,
+    contactName: row.contactName,
+    contactPhone: row.contactPhone ?? row.supplier.phone,
+    quoteRef: row.quoteRef,
+    leadTimeDays: row.leadTimeDays,
+    terms: row.terms ?? row.supplier.paymentTerms,
+    remarks: row.remarks,
+    quotes: row.quotes
+      .filter((qq) => lines.has(qq.requestItemId))
+      .map((qq) => ({ requestItemId: qq.requestItemId, unitPrice: qq.unitPrice, remarks: qq.remarks })),
+  };
+}
+
+const RFQ_FOR_SHEET = {
+  request: { select: { id: true, number: true, status: true, items: { select: { id: true } } } },
+  items: { orderBy: { sortOrder: 'asc' }, select: { requestItemId: true } },
+  suppliers: {
+    orderBy: { id: 'asc' },
+    include: { supplier: { select: { name: true, phone: true, paymentTerms: true } }, quotes: true },
+  },
+  canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+} satisfies Prisma.RfqInclude;
+
+/**
+ * Opens a canvass. From an RFQ (`rfqId`, the RFQ page's "Start canvass"):
+ * SENT or QUOTED, one live sheet at a time; the sheet takes the RFQ's lines
+ * and the suppliers that quoted (or the rows named, six at most) with their
+ * quotes. From a request with no RFQ (`requestId`, a quote already in hand):
+ * an empty sheet over every line, suppliers added on it — the old way.
+ */
 canvassRoutes.post(
   '/',
   require_('gchain.canvass.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(z.object({ requestId: z.string().min(1), notes: z.string().optional() }), req.body);
+    const body = parseBody(
+      z
+        .object({
+          requestId: z.string().min(1).optional(),
+          rfqId: z.string().min(1).optional(),
+          supplierRowIds: z.array(z.string()).max(30).optional(),
+          notes: z.string().max(5000).optional(),
+        })
+        .refine((b) => !!b.requestId !== !!b.rfqId, { message: 'Name the RFQ or the purchase request, one of them' }),
+      req.body,
+    );
+
+    if (body.rfqId) {
+      const rfq = await prisma.rfq.findUnique({ where: { id: body.rfqId }, include: RFQ_FOR_SHEET });
+      if (!rfq) throw notFound('RFQ not found');
+      if (rfq.status !== 'SENT' && rfq.status !== 'QUOTED') {
+        throw badRequest(`${rfq.number} is ${statusLabel(rfq.status).toLowerCase()} — a sheet compares an RFQ that went out`);
+      }
+      if (rfq.request.status !== 'APPROVED' && rfq.request.status !== 'PARTIALLY_ORDERED') {
+        throw badRequest(`${rfq.request.number} is ${statusLabel(rfq.request.status).toLowerCase()} — only an approved request can be canvassed`);
+      }
+      if (rfq.canvasses.length) throw badRequest(`Canvass ${rfq.canvasses.map((c) => c.number).join(', ')} already compares ${rfq.number}`);
+      const lines = rfq.items.map((i) => i.requestItemId);
+      const lineSet = new Set(lines);
+      const quoted = rfq.suppliers.filter((s) => s.quotes.some((qq) => lineSet.has(qq.requestItemId)));
+      let rows = quoted;
+      if (body.supplierRowIds) {
+        const own = new Map(rfq.suppliers.map((s) => [s.id, s]));
+        if (body.supplierRowIds.some((id) => !own.has(id))) throw badRequest(`A supplier named is not on ${rfq.number}`);
+        rows = [...new Set(body.supplierRowIds)].map((id) => own.get(id)!);
+      }
+      if (!rows.length) throw badRequest(`No quote is recorded on ${rfq.number} yet — record the quotes that came back first`);
+      if (rows.length > MAX_SHEET_SUPPLIERS) {
+        throw badRequest(`${MAX_SHEET_SUPPLIERS} suppliers at most on one sheet — ${rows.length} quoted on ${rfq.number}; choose which ${MAX_SHEET_SUPPLIERS}`);
+      }
+      const canvass = await prisma.$transaction(async (tx) => {
+        const number = await nextNumber('canvass', tx);
+        return tx.canvass.create({
+          data: {
+            number,
+            requestId: rfq.requestId,
+            rfqId: rfq.id,
+            createdById: me.id,
+            lineIds: lines,
+            notes: body.notes?.trim() || null,
+            suppliers: {
+              create: rows.map((r) => {
+                const snap = snapshotOf(r, lineSet);
+                return { ...snap, quotes: { create: snap.quotes } };
+              }),
+            },
+          },
+        });
+      });
+      await audit(
+        {
+          entityType: 'canvass',
+          entityId: canvass.id,
+          action: 'CREATED',
+          summary: `Opened ${canvass.number} from ${rfq.number} (${rfq.request.number}): ${lines.length} line(s), ${rows.length} supplier(s)`,
+        },
+        req,
+      );
+      res.status(201).json(canvass);
+      return;
+    }
 
     const pr = await prisma.purchaseRequest.findUnique({
-      where: { id: body.requestId },
+      where: { id: body.requestId! },
       include: { items: true },
     });
     if (!pr) throw notFound('Purchase request not found');
@@ -1318,6 +2038,59 @@ canvassRoutes.post(
   }),
 );
 
+/**
+ * "Refresh from RFQ": an OPEN sheet copies its RFQ again — each row's
+ * quotes and terms as they stand there now, and any supplier that has quoted
+ * since added, up to six. A row typed on the sheet itself (no RFQ row) is
+ * left as it is.
+ */
+canvassRoutes.post(
+  '/:id/refresh',
+  require_('gchain.canvass.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const canvass = await prisma.canvass.findUnique({ where: { id: req.params.id }, include: { suppliers: true } });
+    if (!canvass) throw notFound('Canvass not found');
+    if (canvass.status !== 'OPEN') throw badRequest(`${canvass.number} is ${canvass.status.toLowerCase()} — it stands as it was decided`);
+    if (!canvass.rfqId) throw badRequest(`${canvass.number} was not raised from an RFQ`);
+    const rfq = await prisma.rfq.findUniqueOrThrow({ where: { id: canvass.rfqId }, include: RFQ_FOR_SHEET });
+    const lineSet = new Set(sheetLinesOf(canvass, rfq.request.items).map((i) => i.id));
+    const byRfqRow = new Map(canvass.suppliers.filter((s) => s.rfqSupplierId).map((s) => [s.rfqSupplierId!, s]));
+    const onSheet = new Set(canvass.suppliers.map((s) => s.supplierId));
+    const added = rfq.suppliers.filter(
+      (r) => !byRfqRow.has(r.id) && !onSheet.has(r.supplierId) && r.quotes.some((qq) => lineSet.has(qq.requestItemId)),
+    );
+    const room = MAX_SHEET_SUPPLIERS - canvass.suppliers.length;
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.canvass.updateMany({ where: { id: canvass.id, status: 'OPEN' }, data: { updatedAt: new Date() } });
+      if (!claimed.count) throw badRequest(`${canvass.number} was awarded a moment ago — reload to see it`);
+      for (const r of rfq.suppliers) {
+        const row = byRfqRow.get(r.id);
+        if (!row) continue;
+        const { quotes, supplierId: _s, ...snap } = snapshotOf(r, lineSet);
+        await tx.canvassSupplier.update({ where: { id: row.id }, data: snap });
+        await tx.canvassQuote.deleteMany({ where: { canvassSupplierId: row.id } });
+        if (quotes.length) await tx.canvassQuote.createMany({ data: quotes.map((qq) => ({ ...qq, canvassSupplierId: row.id })) });
+      }
+      for (const r of added.slice(0, Math.max(0, room))) {
+        const snap = snapshotOf(r, lineSet);
+        await tx.canvassSupplier.create({ data: { ...snap, canvassId: canvass.id, quotes: { create: snap.quotes } } });
+      }
+    });
+    const left = added.length - Math.max(0, room);
+    await audit(
+      {
+        entityType: 'canvass',
+        entityId: canvass.id,
+        action: 'UPDATED',
+        summary: `Refreshed ${canvass.number} from ${rfq.number}${added.length ? ` — ${Math.min(added.length, Math.max(0, room))} supplier(s) added` : ''}${left > 0 ? `, ${left} left off (six at most)` : ''}`,
+      },
+      req,
+    );
+    res.json(await canvassView(canvass.id, me));
+  }),
+);
+
 canvassRoutes.post(
   '/:id/suppliers',
   require_('gchain.canvass.edit_all'),
@@ -1328,13 +2101,16 @@ canvassRoutes.post(
         leadTimeDays: z.number().int().min(0).optional().nullable(),
         terms: z.string().optional().nullable(),
         remarks: z.string().optional().nullable(),
+        contactName: z.string().trim().max(200).optional().nullable(),
+        contactPhone: z.string().trim().max(60).optional().nullable(),
       }),
       req.body,
     );
 
-    const canvass = await prisma.canvass.findUnique({ where: { id: req.params.id } });
+    const canvass = await prisma.canvass.findUnique({ where: { id: req.params.id }, include: { _count: { select: { suppliers: true } } } });
     if (!canvass) throw notFound('Canvass not found');
     if (canvass.status !== 'OPEN') throw badRequest('This canvass has been awarded');
+    if (canvass._count.suppliers >= MAX_SHEET_SUPPLIERS) throw badRequest(`${MAX_SHEET_SUPPLIERS} suppliers at most on one sheet`);
 
     const clash = await prisma.canvassSupplier.findFirst({
       where: { canvassId: canvass.id, supplierId: body.supplierId },
@@ -1348,6 +2124,8 @@ canvassRoutes.post(
         leadTimeDays: body.leadTimeDays ?? null,
         terms: body.terms || null,
         remarks: body.remarks || null,
+        contactName: body.contactName || null,
+        contactPhone: body.contactPhone || null,
       },
       include: { supplier: { select: { name: true } } },
     });
@@ -1360,25 +2138,35 @@ canvassRoutes.post(
   }),
 );
 
+/**
+ * A supplier column's prices on the sheet — a quote received by phone is
+ * typed here too — only on the sheet's own lines, while it is OPEN; audited,
+ * since the sheet is what the award is read off.
+ */
 canvassRoutes.put(
   '/:id/suppliers/:supplierRowId/quotes',
   require_('gchain.canvass.edit_all'),
   handler(async (req, res) => {
     const body = parseBody(
       z.object({
-        quotes: z.array(z.object({ requestItemId: z.string(), unitPrice: z.number().min(0) })),
+        quotes: z.array(z.object({ requestItemId: z.string(), unitPrice: z.number().min(0).max(1e12) })).max(1000),
       }),
       req.body,
     );
 
     const row = await prisma.canvassSupplier.findFirst({
       where: { id: req.params.supplierRowId, canvassId: req.params.id },
-      include: { canvass: true },
+      include: { canvass: { include: { request: { select: { items: { select: { id: true } } } } } }, supplier: { select: { name: true } } },
     });
     if (!row) throw notFound('Supplier not on this canvass');
     if (row.canvass.status !== 'OPEN') throw badRequest('This canvass has been awarded');
+    const onSheet = new Set(sheetLinesOf(row.canvass, row.canvass.request.items).map((i) => i.id));
+    if (body.quotes.some((qq) => !onSheet.has(qq.requestItemId))) throw badRequest('A price is for a line this sheet does not compare');
+    if (new Set(body.quotes.map((qq) => qq.requestItemId)).size !== body.quotes.length) throw badRequest('A line is priced twice');
 
     await prisma.$transaction(async (tx) => {
+      const open = await tx.canvass.updateMany({ where: { id: row.canvassId, status: 'OPEN' }, data: { updatedAt: new Date() } });
+      if (!open.count) throw badRequest('This canvass was awarded a moment ago — reload to see it');
       await tx.canvassQuote.deleteMany({ where: { canvassSupplierId: row.id } });
       if (body.quotes.length) {
         await tx.canvassQuote.createMany({
@@ -1390,6 +2178,15 @@ canvassRoutes.put(
         });
       }
     });
+    await audit(
+      {
+        entityType: 'canvass',
+        entityId: row.canvassId,
+        action: 'UPDATED',
+        summary: `${row.supplier.name}'s prices on ${row.canvass.number}: ${body.quotes.length} of ${onSheet.size} line(s)`,
+      },
+      req,
+    );
 
     const full = await loadCanvass(req.params.id);
     res.json(full);
@@ -1397,9 +2194,9 @@ canvassRoutes.put(
 );
 
 /**
- * A supplier row's own terms — lead time, payment terms, remarks — while the
- * canvass is OPEN. Its prices go through PUT …/quotes; which supplier it is
- * never changes (remove the row and add the other).
+ * A supplier row's own terms — lead time, payment terms, remarks, whom it
+ * names — while the canvass is OPEN. Its prices go through PUT …/quotes;
+ * which supplier it is never changes (remove the row and add the other).
  */
 canvassRoutes.patch(
   '/:id/suppliers/:supplierRowId',
@@ -1411,6 +2208,8 @@ canvassRoutes.patch(
           leadTimeDays: z.number().int().min(0).optional().nullable(),
           terms: z.string().optional().nullable(),
           remarks: z.string().optional().nullable(),
+          contactName: z.string().max(200).optional().nullable(),
+          contactPhone: z.string().max(60).optional().nullable(),
         })
         .strict(),
       req.body,
@@ -1429,6 +2228,8 @@ canvassRoutes.patch(
         ...(body.leadTimeDays !== undefined ? { leadTimeDays: body.leadTimeDays } : {}),
         ...(body.terms !== undefined ? { terms: body.terms?.trim() || null } : {}),
         ...(body.remarks !== undefined ? { remarks: body.remarks?.trim() || null } : {}),
+        ...(body.contactName !== undefined ? { contactName: body.contactName?.trim() || null } : {}),
+        ...(body.contactPhone !== undefined ? { contactPhone: body.contactPhone?.trim() || null } : {}),
       },
     });
     if (!claimed.count) throw badRequest('This canvass was awarded a moment ago — reload to see it');
@@ -1441,7 +2242,7 @@ canvassRoutes.patch(
       },
       req,
     );
-    res.json(presentCanvass((await loadCanvass(row.canvassId))!, currentUser(req)));
+    res.json(await canvassView(row.canvassId, currentUser(req)));
   }),
 );
 
@@ -1458,7 +2259,12 @@ canvassRoutes.delete(
     if (row.canvass.status !== 'OPEN') {
       throw badRequest('This canvass has been awarded — its suppliers stand as they were');
     }
-    const gone = await prisma.canvassSupplier.deleteMany({ where: { id: row.id, canvass: { status: 'OPEN' } } });
+    const gone = await prisma.$transaction(async (tx) => {
+      const n = await tx.canvassSupplier.deleteMany({ where: { id: row.id, canvass: { status: 'OPEN' } } });
+      // A recommendation of the row removed goes with it.
+      if (n.count) await tx.canvass.updateMany({ where: { id: row.canvassId, recommendedRowId: row.id }, data: { recommendedRowId: null } });
+      return n;
+    });
     if (!gone.count) throw badRequest('This canvass was awarded a moment ago — reload to see it');
     await audit(
       {
@@ -1473,29 +2279,37 @@ canvassRoutes.delete(
   }),
 );
 
-/** Awarding the canvass marks the winner; the PO is raised from it after. */
+/**
+ * Awarding the canvass marks the winner, records who awarded it and when
+ * (AWARDED BY on the sheet), and closes the RFQ it compares; the purchase
+ * order is raised from it after, at the awarded prices. A supplier that
+ * quoted none of the sheet's lines cannot win; a partial winner can, and
+ * the order takes only the lines it quoted. Claimed on OPEN, so two awards
+ * cannot both land.
+ */
 canvassRoutes.post(
   '/:id/award/:supplierRowId',
   require_('gchain.canvass.edit_all'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const row = await prisma.canvassSupplier.findFirst({
       where: { id: req.params.supplierRowId, canvassId: req.params.id },
       include: { supplier: true, quotes: true, canvass: { include: { request: { include: { items: true } } } } },
     });
     if (!row) throw notFound('Supplier not on this canvass');
     if (row.canvass.status !== 'OPEN') throw badRequest('This canvass has already been awarded');
-    if (!row.quotes.length) throw badRequest('That supplier has not quoted anything');
+    const onSheet = new Set(sheetLinesOf(row.canvass, row.canvass.request.items).map((i) => i.id));
+    if (!row.quotes.some((qq) => onSheet.has(qq.requestItemId))) throw badRequest('That supplier has not quoted anything');
 
     await prisma.$transaction(async (tx) => {
-      await tx.canvassSupplier.updateMany({
-        where: { canvassId: req.params.id },
-        data: { isSelected: false },
+      const claimed = await tx.canvass.updateMany({
+        where: { id: row.canvassId, status: 'OPEN' },
+        data: { status: 'AWARDED', awardedAt: new Date(), awardedById: me.id },
       });
+      if (!claimed.count) throw badRequest('This canvass was awarded a moment ago — reload to see it');
+      await tx.canvassSupplier.updateMany({ where: { canvassId: row.canvassId }, data: { isSelected: false } });
       await tx.canvassSupplier.update({ where: { id: row.id }, data: { isSelected: true } });
-      await tx.canvass.update({
-        where: { id: req.params.id },
-        data: { status: 'AWARDED', awardedAt: new Date() },
-      });
+      if (row.canvass.rfqId) await tx.rfq.updateMany({ where: { id: row.canvass.rfqId, status: { in: ['SENT', 'QUOTED'] } }, data: { status: 'CLOSED' } });
     });
 
     await audit(
@@ -1508,6 +2322,145 @@ canvassRoutes.post(
       req,
     );
     res.json({ ok: true, supplier: row.supplier.name });
+  }),
+);
+
+/**
+ * The CANVASS SHEET on paper, in landscape — the owner's sample: the lines
+ * with the REFERENCE BUDGET (the approved request's estimate, unit cost and
+ * amount), then a unit cost and amount per supplier under its name, Tel
+ * No. and contact ("not quoted" where it gave none); then the TOTAL row, the
+ * SAVINGS vs reference budget row (pesos and %, on the lines quoted for a
+ * partial quote) and the lead time and terms. Those three rows are the
+ * sheet's structure, as a costing's bucket subtotals are the estimate's.
+ * Three suppliers to a table: four to six run onto a second table with the
+ * same lines. The awarded column's name in green. Signed by the people who
+ * acted: CANVASSED BY (the opener, its timestamp) and AWARDED BY ("Pending"
+ * until awarded); the order raised from it is named under them.
+ */
+canvassRoutes.get(
+  '/:id/pdf',
+  requireAny('gchain.canvass.view_all', 'gchain.canvass.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const canvass = await loadCanvass(req.params.id);
+    if (!canvass) throw notFound('Canvass not found');
+    assertCanvassVisible(me, canvass);
+    const orders = await ordersOnAward(canvass);
+    const view = presentCanvass(canvass, me, orders);
+    const currency = await companyCurrency();
+    const pr = canvass.request;
+    const lines = view.request.items as unknown as { id: string; partNumber: string | null; name: string | null; description: string; unit: string; quantity: number; estimatedCost: number; estimatedAmount: number }[];
+
+    const money = (v: number) => formatAmount(v);
+    const pct = (v: number | null) => (v == null ? '' : `${v.toFixed(2)}%`);
+    // The reference line names the request (and when it was approved), the RFQ and the project — no fields block, so the lines start high on a landscape page.
+    const sections: PdfSection[] = [];
+
+    const chunks: (typeof view.suppliers)[] = [];
+    for (let i = 0; i < view.suppliers.length; i += 3) chunks.push(view.suppliers.slice(i, i + 3));
+    if (!chunks.length) chunks.push([]);
+    chunks.forEach((chunk, n) => {
+      const label = (s: (typeof view.suppliers)[number]) =>
+        [s.isSelected ? 'Awarded' : view.recommendedRowId === s.id ? 'Recommended' : null, s.contactPhone ? `Tel ${s.contactPhone}` : null, s.contactName]
+          .filter(Boolean)
+          .join(' · ');
+      const quoteLines = (s: (typeof view.suppliers)[number]) => (s.complete || !s.quotedCount ? '' : `${s.quotedCount} of ${lines.length} lines`);
+      sections.push({
+        kind: 'table',
+        title: chunks.length > 1 ? `Suppliers ${n * 3 + 1}–${n * 3 + chunk.length} of ${view.suppliers.length}` : undefined,
+        head: ['Item code', 'Description', 'U/M', 'Qty', `Unit cost (${currency})`, 'Amount', ...chunk.flatMap(() => [`Unit cost (${currency})`, 'Amount'])],
+        align: ['left', 'left', 'left', 'right', 'right', 'right', ...chunk.flatMap(() => ['right', 'right'] as const)],
+        widths: [64, 140, 38, 36, 70, 74, ...chunk.flatMap(() => [70, 74])],
+        groups: [
+          { label: '', span: 4 },
+          { label: 'Reference budget', sub: 'approved PR estimate', span: 2 },
+          ...chunk.map((s) => ({ label: s.supplier.name, sub: label(s) || undefined, span: 2, accent: s.isSelected })),
+        ],
+        rows: [
+          ...lines.map((l) => [
+            l.partNumber ?? '',
+            l.name && l.description && l.description !== l.name ? { title: l.name, body: l.description } : (l.name ?? l.description),
+            l.unit,
+            formatQuantity(l.quantity),
+            money(l.estimatedCost),
+            money(l.estimatedAmount),
+            ...chunk.flatMap((s): PdfCell[] => {
+              const q = s.quotes.find((qq) => qq.requestItemId === l.id);
+              return q ? [money(q.unitPrice), money(s.amounts[l.id] ?? 0)] : ['—', 'not quoted'];
+            }),
+          ]),
+          // Each supplier's figures take its two columns: the count of lines
+          // quoted beside the total, the pesos beside the percentage, the lead
+          // time beside the terms — so none wraps inside one narrow cell.
+          ['', { title: 'TOTAL' }, '', '', '', { title: money(view.budget) }, ...chunk.flatMap((s): PdfCell[] => [quoteLines(s), s.quotedCount ? { title: money(s.total) } : '—'])],
+          [
+            '',
+            chunk.some((s) => s.quotedCount && !s.complete)
+              ? { title: 'SAVINGS vs reference budget', body: 'a partial quote: on the lines it quoted' }
+              : { title: 'SAVINGS vs reference budget' },
+            '',
+            '',
+            '',
+            '',
+            ...chunk.flatMap((s): PdfCell[] => (s.quotedCount ? [{ title: money(s.savings) }, { title: pct(s.savingsPct) }] : ['', ''])),
+          ],
+          [
+            '',
+            'Lead time · Terms',
+            '',
+            '',
+            '',
+            '',
+            ...chunk.flatMap((s): PdfCell[] => [s.leadTimeDays != null ? `${s.leadTimeDays} day(s)` : '—', s.terms ?? s.supplier.paymentTerms ?? '—']),
+          ],
+        ],
+      });
+    });
+
+    const recommended = view.suppliers.find((s) => s.id === view.recommendedRowId);
+    const remarks = [
+      recommended && !recommended.isSelected ? `Recommended: ${recommended.supplier.name}.` : null,
+      canvass.notes,
+    ].filter(Boolean);
+    if (remarks.length) sections.push({ kind: 'text', title: 'Remarks', body: remarks.join('\n') });
+    if (orders.length) {
+      sections.push({
+        kind: 'text',
+        title: 'Purchase order',
+        body: orders.map((o) => `${o.number} — raised at the awarded prices (${statusLabel(o.status).toLowerCase()})`).join('\n'),
+      });
+    }
+
+    const signatories: Signatory[] = [
+      { role: 'Canvassed by', name: canvass.createdBy.name, ...(await contactOf(canvass.createdById)), at: canvass.createdAt },
+      canvass.awardedBy
+        ? { role: 'Awarded by', name: canvass.awardedBy.name, ...(await contactOf(canvass.awardedBy.id)), at: canvass.awardedAt }
+        : { role: 'Awarded by' },
+    ];
+
+    const pdf = await renderDocument({
+      title: 'Canvass Sheet',
+      documentNumber: canvass.number,
+      date: canvass.createdAt,
+      reference: [
+        `PR ${pr.number}${pr.approvedAt ? ` (approved ${formatShortDate(pr.approvedAt)})` : ''}`,
+        canvass.rfq ? `RFQ ${canvass.rfq.number}` : null,
+        pr.job ? `${pr.job.number} — ${pr.job.name}` : pr.warehouse ? `Stock for ${pr.warehouse.name}` : pr.purpose,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      landscape: true,
+      sections,
+      signatories,
+    });
+    await audit({ entityType: 'canvass', entityId: canvass.id, action: 'EXPORTED', summary: `Printed ${canvass.number}` }, req);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      contentDisposition(paperFileName({ kind: 'Canvass Sheet', number: canvass.number, author: canvass.createdBy.name, date: canvass.createdAt })),
+    );
+    res.send(pdf);
   }),
 );
 
@@ -1747,6 +2700,7 @@ async function loadPo(id: string) {
         select: {
           id: true,
           number: true,
+          status: true,
           receivedDate: true,
           receivedBy: { select: { name: true } },
         },
@@ -1813,6 +2767,9 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
     bills: seesBills ? bills.map((b) => ({ ...b, total: num(b.total) })) : [],
     billsVisible: seesBills,
     canEdit: !!me && po.status === 'DRAFT' && mayEditPo(me, po),
+    canWithdraw: !!me && po.status === 'PENDING_APPROVAL' && mayEditPo(me, po),
+    /** What the order page's save claims on (`PUT /:id/sheet`'s `version`). */
+    version: po.updatedAt.toISOString(),
     vatRate: num(po.vatRate),
     subtotal: num(po.subtotal),
     vatAmount: num(po.vatAmount),
@@ -1827,6 +2784,106 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
     })),
   };
 }
+
+// ── The order page's helpers (2026-10-13) ─────────────────────────────────
+// Declared above `/:id`: what an order from a request or canvass starts with,
+// the project's budget as the order would leave it, line suggestions and the
+// route submitting would take.
+
+const PO_WRITERS = [
+  'gchain.purchase_orders.create',
+  'gchain.purchase_orders.edit_own',
+  'gchain.purchase_orders.edit_all',
+] as const;
+
+/** What Deliver to and its address suggest: the company's registered name and address. */
+purchaseOrderRoutes.get(
+  '/ship-to',
+  requireAny('gchain.purchase_orders.create', 'gchain.purchase_orders.edit_own', 'gchain.purchase_orders.edit_all'),
+  handler(async (_req, res) => {
+    const c = await prisma.company.findUnique({ where: { id: 'company' } });
+    res.json({
+      name: c?.legalName || c?.name || '',
+      address: [c?.address, c?.city].filter((p) => p?.trim()).join(', '),
+    });
+  }),
+);
+
+purchaseOrderRoutes.get(
+  '/draft',
+  require_('gchain.purchase_orders.create'),
+  handler(async (req, res) => {
+    const requestId = req.query.requestId ? String(req.query.requestId) : null;
+    const canvassId = req.query.canvassId ? String(req.query.canvassId) : null;
+    const source = await orderSource(requestId, canvassId);
+    const pr = source.pr;
+    if (pr && !source.lines.length) throw badRequest('Everything on that request has already been ordered');
+    const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+    res.json({
+      vatRate: company ? num(company.vatRate) : 0.12,
+      kind: pr?.kind ?? 'DIRECT_TO_JOB',
+      request: pr ? { id: pr.id, number: pr.number, purpose: pr.purpose, preferredSupplier: pr.preferredSupplier } : null,
+      job: pr?.job ?? null,
+      warehouse: pr?.warehouse ?? null,
+      canvass: source.canvass,
+      supplier: source.supplier,
+      quoteRef: source.quoteRef,
+      neededBy: pr?.neededBy ?? null,
+      lines: source.lines,
+    });
+  }),
+);
+
+/**
+ * The project's budget by budget line (`projectBudgetByLine()`), and — for an
+ * order from a request — what issuing it releases: the request's net
+ * commitment per budget line, which `settlePurchaseOrder` releases whole
+ * before it commits the order's own figure.
+ */
+purchaseOrderRoutes.get(
+  '/budget',
+  requireAny(...PO_WRITERS),
+  handler(async (req, res) => {
+    const jobId = String(req.query.jobId ?? '');
+    if (!jobId) throw badRequest('Name the project');
+    const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, number: true, name: true } });
+    if (!job) throw notFound('Project not found');
+    const requestId = req.query.requestId ? String(req.query.requestId) : null;
+    const released: Record<string, number> = {};
+    if (requestId) {
+      const rows = await prisma.jobCostEntry.groupBy({
+        by: ['costCategoryId'],
+        where: { jobId, state: 'COMMITTED', sourceType: 'purchase_request', sourceId: requestId },
+        _sum: { amount: true },
+      });
+      for (const r of rows) if (Math.abs(num(r._sum.amount)) >= 0.005) released[r.costCategoryId] = cents(num(r._sum.amount));
+    }
+    res.json({ job, ...(await projectBudgetByLine(jobId)), released, blocked: await overBudgetIsBlocked() });
+  }),
+);
+
+purchaseOrderRoutes.get(
+  '/suggest',
+  requireAny(...PO_WRITERS),
+  handler(async (req, res) => {
+    res.json(await lineSuggestions(currentUser(req), String(req.query.q ?? '').trim(), String(req.query.jobId ?? '')));
+  }),
+);
+
+/** "Submit for approval sends it to …" — at the order's total, in its buyer's name (the order's own, else the caller's). */
+purchaseOrderRoutes.get(
+  '/route',
+  requireAny(...PO_WRITERS),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const amount = Number(req.query.amount ?? 0);
+    if (!Number.isFinite(amount) || amount < 0) throw badRequest('The amount is not a number');
+    const orderId = req.query.orderId ? String(req.query.orderId) : null;
+    const po = orderId ? await prisma.purchaseOrder.findUnique({ where: { id: orderId }, select: { createdById: true } }) : null;
+    if (orderId && !po) throw notFound('Purchase order not found');
+    res.json({ route: await routeBrief('purchase_order', amount, po?.createdById ?? me.id) });
+  }),
+);
 
 purchaseOrderRoutes.get(
   '/:id',
@@ -1854,94 +2911,222 @@ const poSchema = z.object({
   canvassId: z.string().optional().nullable(),
   deliveryDate: z.string().optional().nullable(),
   deliverTo: z.string().optional().nullable(),
+  deliverAddress: z.string().max(500).optional().nullable(),
+  quoteRef: z.string().max(120).optional().nullable(),
+  currency: z.enum(QUOTATION_CURRENCY_CODES).optional(),
   terms: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   vatInclusive: z.boolean().default(false),
+  /**
+   * VAT on or off (2026-10-16, the owner's call: an importation order carries
+   * no VAT). Off stores a 0% rate — no VAT row, the total is the subtotal; on
+   * takes the company's rate. Left out, the order keeps what it has.
+   */
+  applyVat: z.boolean().optional(),
 });
+
+/** The rate an order's VAT switch stands for: the company's, or none. */
+async function poVat(applyVat: boolean | undefined): Promise<{ vatRate?: Prisma.Decimal; vatInclusive?: boolean }> {
+  if (applyVat === undefined) return {};
+  if (!applyVat) return { vatRate: D(0), vatInclusive: false };
+  const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+  return { vatRate: company?.vatRate ?? D(0.12) };
+}
+
+/** One line of the order page's save — `POST /` with `lines[]` and `PUT /:id/sheet`. */
+const poLineSchema = z.object({
+  id: z.string().optional().nullable(),
+  requestItemId: z.string().optional().nullable(),
+  itemId: z.string().optional().nullable(),
+  costCategoryId: z.string().optional().nullable(),
+  partNumber: z.string().trim().max(120).optional().nullable(),
+  name: z.string().trim().max(300).optional().nullable(),
+  description: z.string().trim().max(4000).optional().nullable(),
+  quantity: z.number().positive('Quantity must be more than zero'),
+  unit: z.string().trim().max(40).optional().nullable(),
+  unitPrice: z.number().min(0, 'A unit price cannot be negative'),
+});
+type PoLineInput = z.infer<typeof poLineSchema>;
+
+interface OrderLine {
+  id: string | null;
+  requestItemId: string | null;
+  itemId: string | null;
+  costCategoryId: string | null;
+  partNumber: string | null;
+  name: string | null;
+  description: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+}
+
+/**
+ * What an order raised from a request or an awarded canvass starts with: the
+ * request, the canvass, the supplier the canvass decided and the lines still
+ * to be ordered — at the winner's quoted prices from a canvass, at the
+ * request's estimates otherwise. ONE rule for `POST /` and the page's
+ * `GET /draft`, so the page shows exactly what a save would write.
+ */
+async function orderSource(requestId: string | null | undefined, canvassId: string | null | undefined) {
+  if (canvassId) {
+    const canvass = await prisma.canvass.findUnique({
+      where: { id: canvassId },
+      include: {
+        request: { include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, warehouse: { select: { id: true, name: true } } } },
+        suppliers: { where: { isSelected: true }, include: { quotes: true, supplier: { select: { id: true, name: true, paymentTerms: true } } } },
+      },
+    });
+    if (!canvass) throw notFound('Canvass not found');
+    if (canvass.status !== 'AWARDED') throw badRequest('Award the canvass before raising the order');
+    const winner = canvass.suppliers[0];
+    if (!winner) throw badRequest('That canvass has no awarded supplier');
+    const priced = new Map(winner.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)]));
+    const pr = canvass.request;
+    const lines: OrderLine[] = pr.items
+      .filter((i) => priced.has(i.id))
+      .map((i) => fromRequestItem(i, priced.get(i.id) ?? 0))
+      .filter((l) => l.quantity > 0);
+    return { pr, canvass: { id: canvass.id, number: canvass.number }, supplier: winner.supplier, quoteRef: winner.quoteRef ?? null, lines };
+  }
+  if (requestId) {
+    const pr = await prisma.purchaseRequest.findUnique({
+      where: { id: requestId },
+      include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, warehouse: { select: { id: true, name: true } } },
+    });
+    if (!pr) throw notFound('Purchase request not found');
+    if (pr.status !== 'APPROVED' && pr.status !== 'PARTIALLY_ORDERED') {
+      throw badRequest('Only an approved request can be ordered');
+    }
+    const lines = pr.items.map((i) => fromRequestItem(i, num(i.estimatedCost))).filter((l) => l.quantity > 0);
+    return { pr, canvass: null, supplier: null, quoteRef: null, lines };
+  }
+  return { pr: null, canvass: null, supplier: null, quoteRef: null as string | null, lines: [] as OrderLine[] };
+}
+
+function fromRequestItem(
+  i: { id: string; itemId: string | null; costCategoryId: string | null; partNumber: string | null; name: string | null; description: string; quantity: Prisma.Decimal; orderedQty: Prisma.Decimal; pulledQty: Prisma.Decimal; unit: string },
+  unitPrice: number,
+): OrderLine {
+  return {
+    id: null,
+    requestItemId: i.id,
+    itemId: i.itemId,
+    costCategoryId: i.costCategoryId,
+    partNumber: i.partNumber,
+    name: i.name,
+    description: i.description,
+    // What a pull-out slip took from the shelf is not bought (2026-10-14).
+    quantity: num(i.quantity) - num(i.orderedQty) - num(i.pulledQty),
+    unit: i.unit,
+    unitPrice,
+  };
+}
+
+/**
+ * The order's lines as they will be written, every reference checked first:
+ * a request line must be one of the order's request's, the item and the
+ * budget line must exist, a line says what it is, and a direct-to-job line
+ * names its budget line (else its item's) — refused naming the line.
+ */
+async function checkPoLines(
+  kind: string,
+  lines: PoLineInput[],
+  existingIds: string[],
+  requestItemIds: string[],
+): Promise<OrderLine[]> {
+  const itemIds = [...new Set(lines.map((l) => l.itemId).filter((v): v is string => !!v))];
+  const categoryIds = [...new Set(lines.map((l) => l.costCategoryId).filter((v): v is string => !!v))];
+  const [items, categories] = await Promise.all([
+    itemIds.length ? prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, costCategoryId: true } }) : [],
+    categoryIds.length ? prisma.costCategory.findMany({ where: { id: { in: categoryIds } }, select: { id: true } }) : [],
+  ]);
+  const itemById = new Map(items.map((i) => [i.id, i]));
+  const known = new Set(categories.map((c) => c.id));
+  const own = new Set(existingIds);
+  const fromRequest = new Set(requestItemIds);
+  return lines.map((l, index) => {
+    const n = index + 1;
+    if (l.id && !own.has(l.id)) throw badRequest(`Line ${n} is not on this order`);
+    if (l.requestItemId && !fromRequest.has(l.requestItemId)) throw badRequest(`Line ${n} is not a line of the order's purchase request`);
+    if (l.itemId && !itemById.has(l.itemId)) throw badRequest(`Line ${n}: that item is not in the item master`);
+    if (l.costCategoryId && !known.has(l.costCategoryId)) throw badRequest(`Line ${n}: that budget line does not exist`);
+    const name = l.name?.trim() || null;
+    const description = l.description?.trim() || name;
+    if (!description) throw badRequest(`Line ${n}: say what is ordered`);
+    const costCategoryId = l.costCategoryId || (l.itemId ? itemById.get(l.itemId)?.costCategoryId : null) || null;
+    if (kind === 'DIRECT_TO_JOB' && !costCategoryId) {
+      throw badRequest(`Line ${n} (${name ?? description}): choose its budget line — it is how the committed cost finds the project budget`);
+    }
+    return {
+      id: l.id || null,
+      requestItemId: l.requestItemId || null,
+      itemId: l.itemId || null,
+      costCategoryId,
+      partNumber: l.partNumber?.trim() || null,
+      name,
+      description,
+      quantity: l.quantity,
+      unit: l.unit?.trim() || 'pcs',
+      unitPrice: l.unitPrice,
+    };
+  });
+}
+
+/** Writes the checked lines in order: updates those with an id, creates the rest, removes what was left out. */
+async function writePoLines(tx: Prisma.TransactionClient, orderId: string, lines: OrderLine[]) {
+  const keep = lines.map((l) => l.id).filter((v): v is string => !!v);
+  await tx.purchaseOrderItem.deleteMany({ where: { orderId, id: { notIn: keep } } });
+  for (const [sortOrder, l] of lines.entries()) {
+    const data = {
+      requestItemId: l.requestItemId,
+      itemId: l.itemId,
+      costCategoryId: l.costCategoryId,
+      partNumber: l.partNumber,
+      name: l.name,
+      description: l.description,
+      quantity: D(l.quantity),
+      unit: l.unit,
+      unitPrice: D(l.unitPrice),
+      amount: D(cents(l.quantity * l.unitPrice)),
+      sortOrder,
+    };
+    if (l.id) await tx.purchaseOrderItem.update({ where: { id: l.id }, data });
+    else await tx.purchaseOrderItem.create({ data: { orderId, ...data } });
+  }
+}
 
 purchaseOrderRoutes.post(
   '/',
   require_('gchain.purchase_orders.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(poSchema, req.body);
+    const body = parseBody(poSchema.extend({ lines: z.array(poLineSchema).max(500).optional() }), req.body);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
 
-    let pr: Awaited<ReturnType<typeof prisma.purchaseRequest.findUnique>> = null;
-    let lines: {
-      requestItemId: string | null;
-      itemId: string | null;
-      costCategoryId: string | null;
-      description: string;
-      quantity: number;
-      unit: string;
-      unitPrice: number;
-    }[] = [];
-
-    if (body.canvassId) {
-      const canvass = await prisma.canvass.findUnique({
-        where: { id: body.canvassId },
-        include: {
-          request: { include: { items: true } },
-          suppliers: { where: { isSelected: true }, include: { quotes: true } },
-        },
-      });
-      if (!canvass) throw notFound('Canvass not found');
-      if (canvass.status !== 'AWARDED') throw badRequest('Award the canvass before raising the order');
-
-      const winner = canvass.suppliers[0];
-      if (!winner) throw badRequest('That canvass has no awarded supplier');
-      if (winner.supplierId !== body.supplierId) {
-        throw badRequest('The order supplier does not match the awarded supplier');
-      }
-
-      const priced = new Map(winner.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)]));
-      pr = canvass.request;
-      lines = canvass.request.items
-        .filter((i) => priced.has(i.id))
-        .map((i) => ({
-          requestItemId: i.id,
-          itemId: i.itemId,
-          costCategoryId: i.costCategoryId,
-          description: i.description,
-          quantity: num(i.quantity) - num(i.orderedQty),
-          unit: i.unit,
-          unitPrice: priced.get(i.id) ?? 0,
-        }))
-        .filter((l) => l.quantity > 0);
-    } else if (body.requestId) {
-      const found = await prisma.purchaseRequest.findUnique({
-        where: { id: body.requestId },
-        include: { items: true },
-      });
-      if (!found) throw notFound('Purchase request not found');
-      if (found.status !== 'APPROVED' && found.status !== 'PARTIALLY_ORDERED') {
-        throw badRequest('Only an approved request can be ordered');
-      }
-      pr = found;
-      lines = found.items
-        .map((i) => ({
-          requestItemId: i.id,
-          itemId: i.itemId,
-          costCategoryId: i.costCategoryId,
-          description: i.description,
-          quantity: num(i.quantity) - num(i.orderedQty),
-          unit: i.unit,
-          unitPrice: num(i.estimatedCost),
-        }))
-        .filter((l) => l.quantity > 0);
+    const source = await orderSource(body.requestId, body.canvassId);
+    const pr = source.pr;
+    if (source.supplier && source.supplier.id !== body.supplierId) {
+      throw badRequest('The order supplier does not match the awarded supplier');
     }
-
-    if (pr && !lines.length) {
+    if (pr && !source.lines.length) {
       throw badRequest('Everything on that request has already been ordered');
     }
+    const kind = pr?.kind ?? 'DIRECT_TO_JOB';
+    // The page sends the lines as it shows them; a caller that sends none
+    // gets the source's lines, as before. Every line is checked before the
+    // number is issued.
+    const lines = body.lines
+      ? await checkPoLines(kind, body.lines, [], pr ? pr.items.map((i) => i.id) : [])
+      : source.lines;
+    if (pr && !lines.length) throw badRequest('An order from a request needs at least one of its lines');
 
     const po = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('purchase_order', tx);
       const created = await tx.purchaseOrder.create({
         data: {
           number,
-          kind: pr?.kind ?? 'DIRECT_TO_JOB',
+          kind,
           supplierId: body.supplierId,
           requestId: pr?.id ?? null,
           jobId: pr?.jobId ?? null,
@@ -1952,38 +3137,31 @@ purchaseOrderRoutes.post(
           orderDate: manilaDate(new Date()),
           deliveryDate: asDate(body.deliveryDate),
           deliverTo: body.deliverTo || null,
+          deliverAddress: body.deliverAddress || null,
+          // The awarded supplier's quotation no. unless the buyer typed one.
+          quoteRef: (body.quoteRef ?? source.quoteRef) || null,
+          currency: body.currency ?? (await companyCurrency()),
           terms: body.terms || null,
           notes: body.notes || null,
-          vatRate: company?.vatRate ?? D(0.12),
-          vatInclusive: body.vatInclusive,
-          items: {
-            create: lines.map((l, i) => ({
-              requestItemId: l.requestItemId,
-              itemId: l.itemId,
-              costCategoryId: l.costCategoryId,
-              description: l.description,
-              quantity: D(l.quantity),
-              unit: l.unit,
-              unitPrice: D(l.unitPrice),
-              amount: D(cents(l.quantity * l.unitPrice)),
-              sortOrder: i,
-            })),
-          },
+          vatRate: body.applyVat === false ? D(0) : (company?.vatRate ?? D(0.12)),
+          vatInclusive: body.applyVat === false ? false : body.vatInclusive,
         },
       });
-      await recalcPo(created.id, tx);
-      return created;
+      await writePoLines(tx, created.id, lines);
+      const totals = await recalcPo(created.id, tx);
+      await audit(
+        {
+          entityType: 'purchase_order',
+          entityId: created.id,
+          action: 'CREATED',
+          summary: `Raised ${created.number}${pr ? ` from ${pr.number}` : ''}${body.lines ? ` (${lines.length} line${lines.length === 1 ? '' : 's'})` : ''}`,
+        },
+        req,
+        tx,
+      );
+      return totals ?? created;
     });
 
-    await audit(
-      {
-        entityType: 'purchase_order',
-        entityId: po.id,
-        action: 'CREATED',
-        summary: `Raised ${po.number}${pr ? ` from ${pr.number}` : ''}`,
-      },
-      req,
-    );
     res.status(201).json({ ...po, total: num(po.total) });
   }),
 );
@@ -2141,9 +3319,13 @@ purchaseOrderRoutes.patch(
         ...(body.supplierId !== undefined ? { supplierId: body.supplierId } : {}),
         ...(body.deliveryDate !== undefined ? { deliveryDate: asDate(body.deliveryDate) } : {}),
         ...(body.deliverTo !== undefined ? { deliverTo: body.deliverTo || null } : {}),
+        ...(body.deliverAddress !== undefined ? { deliverAddress: body.deliverAddress || null } : {}),
+        ...(body.quoteRef !== undefined ? { quoteRef: body.quoteRef || null } : {}),
+        ...(body.currency ? { currency: body.currency } : {}),
         ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
         ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
+        ...(await poVat(body.applyVat)),
       },
     });
     await recalcPo(req.params.id);
@@ -2157,6 +3339,73 @@ purchaseOrderRoutes.patch(
       req,
     );
     res.json(presentPo((await loadPo(req.params.id))!, me));
+  }),
+);
+
+/**
+ * The order page's save: header and lines in one transaction (the
+ * requisition's `PUT /:id/sheet`). Claimed on DRAFT and on the `version` the
+ * page read. The supplier an awarded canvass decided cannot be swapped; a
+ * line's request line must be one of the order's request's.
+ */
+purchaseOrderRoutes.put(
+  '/:id/sheet',
+  requireAny(...PO_EDIT),
+  handler(async (req, res) => {
+    const { po, me } = await poForEdit(req, req.params.id);
+    const body = parseBody(
+      poSchema.omit({ requestId: true, canvassId: true }).extend({
+        lines: z.array(poLineSchema).max(500),
+        version: z.string().optional().nullable(),
+      }),
+      req.body,
+    );
+    const loaded = (await loadPo(po.id))!;
+    if (body.supplierId !== po.supplierId) {
+      const canvass = awardedCanvass(loaded);
+      if (canvass) throw badRequest(`The supplier was awarded on ${canvass.number} and cannot be changed on the order`);
+      const supplier = await prisma.supplier.findUnique({ where: { id: body.supplierId }, select: { id: true } });
+      if (!supplier) throw badRequest('That supplier does not exist');
+    }
+    const requestItemIds = po.requestId
+      ? (await prisma.purchaseRequestItem.findMany({ where: { requestId: po.requestId }, select: { id: true } })).map((i) => i.id)
+      : [];
+    const lines = await checkPoLines(po.kind, body.lines, loaded.items.map((i) => i.id), requestItemIds);
+    const version = body.version ? new Date(body.version) : null;
+    if (version && Number.isNaN(version.getTime())) throw badRequest('The version is not a date');
+
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.purchaseOrder.updateMany({
+        where: { id: po.id, status: 'DRAFT', ...(version ? { updatedAt: version } : {}) },
+        data: {
+          supplierId: body.supplierId,
+          deliveryDate: asDate(body.deliveryDate),
+          deliverTo: body.deliverTo || null,
+          deliverAddress: body.deliverAddress || null,
+          ...(body.quoteRef !== undefined ? { quoteRef: body.quoteRef || null } : {}),
+          ...(body.currency ? { currency: body.currency } : {}),
+        ...(body.currency ? { currency: body.currency } : {}),
+          terms: body.terms || null,
+          notes: body.notes || null,
+          vatInclusive: body.vatInclusive,
+          ...(await poVat(body.applyVat)),
+        },
+      });
+      if (!claimed.count) throw badRequest(`${po.number} changed a moment ago — reload it and make the change again`);
+      await writePoLines(tx, po.id, lines);
+      const totals = await recalcPo(po.id, tx);
+      await audit(
+        {
+          entityType: 'purchase_order',
+          entityId: po.id,
+          action: 'UPDATED',
+          summary: `Modified ${po.number}: ${lines.length} line${lines.length === 1 ? '' : 's'}, ${formatMoney(num(totals?.total))} in all`,
+        },
+        req,
+        tx,
+      );
+    });
+    res.json(presentPo((await loadPo(po.id))!, me));
   }),
 );
 
@@ -2212,6 +3461,43 @@ purchaseOrderRoutes.post(
 );
 
 /**
+ * Pulling an order back from its approver to change it (2026-10-16, the
+ * owner's call), the purchase request's rule: the buyer (or edit_all) claims
+ * PENDING_APPROVAL → DRAFT and the open request is withdrawn through the
+ * engine in the same transaction, telling the approvers. A decision that
+ * landed first wins — the claim rolls back and the route says so. The same
+ * order, the same number, comes back to change and send again.
+ */
+purchaseOrderRoutes.post(
+  '/:id/withdraw',
+  requireAny(...PO_EDIT),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const po = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } });
+    if (!po) throw notFound('Purchase order not found');
+    if (!mayEditPo(me, po)) throw forbidden('This order belongs to someone else');
+    if (po.status !== 'PENDING_APPROVAL') throw badRequest('This order is not with the approver — nothing to pull back');
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.purchaseOrder.updateMany({ where: { id: po.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      if (!claimed.count) throw badRequest('It was decided a moment ago — reload to see where it stands');
+      const withdrawn = await cancelOpenRequest('purchase_order', po.id, tx, `pulled back to draft by ${me.name}`, me.id);
+      if (!withdrawn.length) {
+        const last = await tx.approvalRequest.findFirst({
+          where: { documentType: 'purchase_order', documentId: po.id },
+          orderBy: { createdAt: 'desc' },
+          select: { status: true, actions: { where: { action: 'RETURNED' }, select: { id: true }, take: 1 } },
+        });
+        if (last && (last.status === 'APPROVED' || last.status === 'REJECTED' || last.actions.length)) {
+          throw badRequest('It was decided a moment ago — reload to see where it stands');
+        }
+      }
+    });
+    await audit({ entityType: 'purchase_order', entityId: po.id, action: 'UPDATED', summary: `Pulled ${po.number} back to draft` }, req);
+    res.json({ ok: true, status: 'DRAFT' });
+  }),
+);
+
+/**
  * An approved order becomes the FIRM commitment.
  *
  * The request's soft commitment at estimated prices is released and replaced
@@ -2262,7 +3548,7 @@ export async function settlePurchaseOrder(documentId: string, outcome: ApprovalO
 
     if (po.requestId) {
       const reqItems = await tx.purchaseRequestItem.findMany({ where: { requestId: po.requestId } });
-      const fully = reqItems.every((i) => num(i.orderedQty) >= num(i.quantity) - 0.0005);
+      const fully = reqItems.every((i) => num(i.orderedQty) + num(i.pulledQty) >= num(i.quantity) - 0.0005);
       await tx.purchaseRequest.update({
         where: { id: po.requestId },
         data: { status: fully ? 'ORDERED' : 'PARTIALLY_ORDERED' },
@@ -2324,6 +3610,89 @@ onApprovalSettled('purchase_order', async (request, outcome) => {
   await settlePurchaseOrder(request.documentId, outcome);
 });
 
+/**
+ * Pulled back after approval (2026-10-16): ISSUED → DRAFT, everything the
+ * issue did undone in reverse — its firm commitment reversed, the request's
+ * ordered quantities and status put back, and the request's soft commitment
+ * restored by exactly what this order's issue released. Refused once goods
+ * are received against it or a supplier bill names it, and — where its issue
+ * released the request's commitment — while a later order on the same
+ * request still stands (restoring it then would count that order twice).
+ */
+onApprovalReopened('purchase_order', {
+  may: async (actor, id) => {
+    const po = await prisma.purchaseOrder.findUnique({ where: { id }, select: { status: true, createdById: true } });
+    return !!po && mayEditPo(actor, po);
+  },
+  reopen: async ({ documentId, tx, actor, reason }) => {
+    const po = await tx.purchaseOrder.findUnique({
+      where: { id: documentId },
+      include: {
+        items: true,
+        receivings: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        bills: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+      },
+    });
+    if (!po) throw notFound('Purchase order not found');
+    if (po.receivings.length) {
+      throw badRequest(`Goods are received against ${po.number} on ${po.receivings.map((r) => r.number).join(', ')} — pull that back or cancel it first`);
+    }
+    if (po.items.some((i) => num(i.receivedQty) > 0)) throw badRequest(`Goods were received against ${po.number} — it cannot be pulled back`);
+    if (po.bills.length) throw badRequest(`Supplier bill ${po.bills.map((b) => b.number).join(', ')} is matched to ${po.number} — cancel it first`);
+    if (po.status !== 'ISSUED') throw badRequest(`${po.number} is ${statusLabel(po.status).toLowerCase()} — only an issued order is pulled back`);
+
+    const claimed = await tx.purchaseOrder.updateMany({
+      where: { id: po.id, status: 'ISSUED' },
+      data: { status: 'DRAFT', approvedAt: null, issuedAt: null },
+    });
+    if (!claimed.count) throw badRequest(`${po.number} changed a moment ago — reload to see where it stands`);
+
+    const supersededWords = `Superseded by order ${po.number}`;
+    if (po.kind === 'DIRECT_TO_JOB' && po.jobId && po.requestId) {
+      const released = await tx.jobCostEntry.aggregate({
+        where: { sourceType: 'purchase_request', sourceId: po.requestId, description: { in: [supersededWords, supersededWords + ' — pulled back'] } },
+        _sum: { amount: true },
+      });
+      if (released._sum.amount && !released._sum.amount.isZero()) {
+        const others = await tx.purchaseOrder.findMany({
+          where: { requestId: po.requestId, id: { not: po.id }, status: { in: ['PENDING_APPROVAL', 'ISSUED', 'PARTIALLY_RECEIVED', 'RECEIVED'] } },
+          select: { number: true },
+        });
+        if (others.length) {
+          throw badRequest(`${others.map((o) => o.number).join(', ')} was ordered on the same request after ${po.number} — pull that back first`);
+        }
+      }
+    }
+
+    for (const line of po.items) {
+      if (!line.requestItemId) continue;
+      const reqItem = await tx.purchaseRequestItem.findUnique({ where: { id: line.requestItemId } });
+      if (!reqItem) continue;
+      await tx.purchaseRequestItem.update({
+        where: { id: reqItem.id },
+        data: { orderedQty: D(Math.max(0, Math.round((num(reqItem.orderedQty) - num(line.quantity)) * 1000) / 1000)) },
+      });
+    }
+    if (po.requestId) {
+      const reqItems = await tx.purchaseRequestItem.findMany({ where: { requestId: po.requestId } });
+      const none = reqItems.every((i) => num(i.orderedQty) + num(i.pulledQty) < 0.0005);
+      const fully = reqItems.every((i) => num(i.orderedQty) + num(i.pulledQty) >= num(i.quantity) - 0.0005);
+      await tx.purchaseRequest.updateMany({
+        where: { id: po.requestId, status: { in: ['APPROVED', 'PARTIALLY_ORDERED', 'ORDERED'] } },
+        data: { status: none ? 'APPROVED' : fully ? 'ORDERED' : 'PARTIALLY_ORDERED' },
+      });
+    }
+
+    if (po.kind === 'DIRECT_TO_JOB' && po.jobId) {
+      const why = `${po.number} pulled back to draft by ${actor.name}: ${reason}`;
+      await reverseJobCost(tx, { sourceType: 'purchase_order', sourceId: po.id, states: ['COMMITTED'], reason: why, sourceNumber: po.number, createdById: actor.id });
+      if (po.requestId) {
+        await reverseJobCost(tx, { sourceType: 'purchase_request', sourceId: po.requestId, states: ['COMMITTED'], description: supersededWords, reason: why, createdById: actor.id });
+      }
+    }
+  },
+});
+
 purchaseOrderRoutes.delete(
   '/:id',
   require_('gchain.purchase_orders.delete'),
@@ -2359,34 +3728,67 @@ purchaseOrderRoutes.get(
     // The stored rate as stored — 12.5% prints 12.5%, never a rounded 13%.
     const rate = ratePct(po.vatRate);
 
+    // Whom the supplier's side is reached through (2026-10-14, the owner's
+    // call): the supplier's primary contact, else its first, else the
+    // supplier's own telephone and email.
+    const contact = await prisma.supplierContact.findFirst({
+      where: { supplierId: po.supplierId },
+      orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }],
+      select: { name: true, position: true, phone: true, mobile: true, email: true },
+    });
+    const tel = contact?.mobile ?? contact?.phone ?? po.supplier.phone;
+    const mail = contact?.email ?? po.supplier.email;
+
+    // The owner's layout of 2026-10-14 (docs/mockups/purchase-order-
+    // layout.pptx): Supplier and Delivery and terms side by side, each an
+    // address block with no labels. No "For" (internal), no supplier TIN,
+    // no purchase request or status.
+    const company = await prisma.company.findUnique({ where: { id: 'company' } });
+    const buyer = await prisma.user.findUnique({ where: { id: po.createdById }, select: { position: true, email: true } });
+    const stripName = (text: string, names: (string | null | undefined)[]) => {
+      let out = text;
+      for (const n of names) if (n && out.toLowerCase().startsWith(n.toLowerCase())) out = out.slice(n.length).replace(/^[\s,\n-]+/, '');
+      return out.trim();
+    };
+    const place = (...parts: (string | null | undefined)[]) => parts.filter((p) => p?.trim()).join(', ');
+    const supplierLines = [
+      po.supplier.name,
+      place(po.supplier.address, po.supplier.city),
+      tel ?? '',
+      po.supplier.email ?? '',
+      contact ? [contact.name, contact.position].filter(Boolean).join(', ') : '',
+      contact?.email && contact.email !== po.supplier.email ? contact.email : '',
+    ].filter((l) => l.trim());
+    const deliveryLines = [
+      company?.legalName || company?.name || '',
+      // Deliver to without the company's own name typed in front of it again.
+      stripName(po.deliverTo?.trim() ?? '', [company?.legalName, company?.name]) || place(company?.address, company?.city) || po.warehouse?.name || '',
+      company?.phone ?? '',
+      company?.email ?? '',
+      // Whom the supplier asks for at delivery: the buyer who prepared it.
+      [po.createdBy.name, buyer?.position?.toUpperCase()].filter(Boolean).join(', '),
+      buyer?.email ?? '',
+    ].filter((l) => l.trim());
     const sections: PdfSection[] = [
       {
-        kind: 'fields',
-        columns: 2,
-        fields: [
-          { label: 'Supplier', value: po.supplier.name },
-          { label: 'Deliver to', value: po.deliverTo ?? po.warehouse?.name ?? '—' },
-          { label: 'Address', value: [po.supplier.address, po.supplier.city].filter(Boolean).join(', ') || '—' },
-          { label: 'Required by', value: po.deliveryDate ? formatDate(po.deliveryDate) : '—' },
-          { label: 'Terms', value: po.terms ?? po.supplier.paymentTerms ?? '—' },
-          // The request it fills, named for what it is.
-          { label: 'Purchase request', value: po.request?.number ?? '—' },
-          { label: 'For', value: po.job ? `${po.job.number} — ${po.job.name}` : 'Stock replenishment' },
-          { label: 'TIN', value: po.supplier.tin ?? '—' },
-          // So a draft never leaves the building looking like an order.
-          { label: 'Status', value: statusLabel(po.status) },
+        kind: 'blocks',
+        titleSize: 11,
+        blocks: [
+          { title: 'Supplier', lines: supplierLines },
+          { title: 'Ship to', lines: deliveryLines },
         ],
       },
       {
         kind: 'table',
-        title: 'Order',
         // No widths: each column from its content, the description taking what is left (rule 6).
-        head: ['No.', 'Description', 'Qty', 'Unit', `Unit price (${currency})`, `Amount (${currency})`],
-        align: ['right', 'left', 'right', 'left', 'right', 'right'],
+        head: ['No.', 'Part No.', 'Description', 'Qty', 'Unit', `Unit price (${po.currency})`, `Amount (${po.currency})`],
+        align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
         rows: view.items.map((i, n) => [
           String(n + 1),
-          i.description,
-          String(i.quantity),
+          i.partNumber ?? '',
+          // The bold name over its description, or the description alone on a line typed before the order page.
+          i.name && i.description !== i.name ? { title: i.name, body: i.description } : (i.name ?? i.description),
+          formatQuantity(i.quantity),
           i.unit,
           formatAmount(i.unitPrice),
           formatAmount(i.amount),
@@ -2397,9 +3799,11 @@ purchaseOrderRoutes.get(
       {
         kind: 'totals',
         rows: [
-          { label: 'Subtotal', value: formatMoney(view.subtotal, currency) },
-          { label: po.vatInclusive ? `VAT included (${rate})` : `VAT (${rate})`, value: formatMoney(view.vatAmount, currency) },
-          { label: 'Total', value: formatMoney(view.total, currency), bold: true },
+          { label: 'Subtotal', value: formatAmount(view.subtotal) },
+          num(po.vatRate) === 0
+            ? { label: 'VAT — not applied', value: formatAmount(0) }
+            : { label: po.vatInclusive ? `VAT included (${rate})` : `VAT (${rate})`, value: formatAmount(view.vatAmount) },
+          { label: `Total (${po.currency})`, value: formatAmount(view.total), bold: true },
         ],
       },
     ];
@@ -2423,7 +3827,8 @@ purchaseOrderRoutes.get(
       po.status === 'DRAFT' ? { amount: view.total, requesterId: po.createdById } : undefined,
     );
     const signatories: Signatory[] = [
-      { role: 'Prepared by', name: po.createdBy.name, ...(await contactOf(po.createdById)), at: po.createdAt },
+      // A Purchasing Manager's own order: step 1 signed at submit, one timestamp.
+      { role: 'Prepared by', name: po.createdBy.name, ...(await contactOf(po.createdById)), at: preparedAt(slots) ?? po.createdAt },
       ...(slots.length ? slotSignatories(slots) : po.status === 'CANCELLED' ? [] : [{ role: 'Approved by' }]),
     ];
 
@@ -2431,10 +3836,28 @@ purchaseOrderRoutes.get(
       title: 'Purchase Order',
       documentNumber: po.number,
       date: po.orderDate,
-      // The supplier is named once, in the fields with its address and TIN —
-      // never again as the reference.
+      // The P.O. date under the number, and DETAILS the supplier's
+      // quotation it answers and when it is due (2026-10-14, the owner's call).
+      numberNote: `Date: ${formatDate(po.orderDate)}`,
+      titleBold: true,
+      detailsTitle: 'Order details',
+      detailsTitleSize: 11,
+      details: [
+        [
+          ['Quotation reference', po.quoteRef ?? '—'],
+          ['Delivery date', po.deliveryDate ? formatDate(po.deliveryDate) : '—'],
+        ],
+        [
+          ['Payment Terms', po.terms ?? po.supplier.paymentTerms ?? '—'],
+          ['Currency', po.currency],
+        ],
+      ],
       sections,
       signatories,
+      signoffNote: 'The name, date and time are considered a digital signature of approval.',
+      // The status line went with the owner's layout; a draft still never
+      // leaves the building looking like an order.
+      footerNote: po.status === 'DRAFT' || po.status === 'PENDING_APPROVAL' ? 'DRAFT — NOT YET ISSUED.' : po.status === 'CANCELLED' ? 'CANCELLED.' : undefined,
     });
 
     await audit(
@@ -2443,7 +3866,7 @@ purchaseOrderRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${po.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Purchase Order', number: po.number, author: po.createdBy.name, date: po.orderDate })));
     res.send(pdf);
   }),
 );
@@ -2475,7 +3898,7 @@ purchaseRequestRoutes.get(
       pr.status === 'DRAFT' ? { amount: estimatedTotal, requesterId: pr.requestedById } : undefined,
     );
     const signatories: Signatory[] = [
-      { role: 'Requested by', name: pr.requestedBy.name, ...(await contactOf(pr.requestedById)), at: pr.createdAt },
+      { role: 'Requested by', name: pr.requestedBy.name, ...(await contactOf(pr.requestedById)), at: preparedAt(slots) ?? pr.createdAt },
       ...(slots.length ? slotSignatories(slots) : closed ? [] : [{ role: 'Approved by' }]),
     ];
 
@@ -2495,18 +3918,22 @@ purchaseRequestRoutes.get(
             { label: 'Requested by', value: pr.requestedBy.name },
             { label: 'Needed by', value: pr.neededBy ? formatDate(pr.neededBy) : '—' },
             { label: 'Status', value: statusLabel(pr.status) },
+            ...(pr.preferredSupplier ? [{ label: 'Preferred supplier', value: pr.preferredSupplier }] : []),
           ],
         },
         {
           kind: 'table',
           title: 'Items requested',
-          head: ['No.', 'Description', 'Category', 'Qty', 'Unit', `Est. cost (${currency})`, `Est. amount (${currency})`],
-          align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
+          head: ['No.', 'Budget line', 'Part No.', 'Item', 'Qty', 'Unit', `Est. cost (${currency})`, `Est. amount (${currency})`],
+          align: ['right', 'left', 'left', 'left', 'right', 'left', 'right', 'right'],
           rows: pr.items.map((i, n) => [
             String(n + 1),
-            i.description,
             i.costCategory?.name ?? '—',
-            String(num(i.quantity)),
+            i.partNumber ?? '',
+            // The bold name over its description (the costing's cell), or
+            // the description alone on a line typed before the page editor.
+            i.name && i.description !== i.name ? { title: i.name, body: i.description } : (i.name ?? i.description),
+            formatQuantity(num(i.quantity)),
             i.unit,
             formatAmount(num(i.estimatedCost)),
             formatAmount(num(i.estimatedAmount)),
@@ -2524,7 +3951,7 @@ purchaseRequestRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${pr.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Purchase Request', number: pr.number, author: pr.requestedBy.name, date: pr.createdAt })));
     res.send(pdf);
   }),
 );

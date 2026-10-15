@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { conflict, forbidden } from '../http/kit';
 import { manilaDayEnd, manilaDayKey, manilaDayStart } from './day';
-import type { CalendarEventInput } from './calendar-links';
+import { mapLinkFor, type CalendarEventInput } from './calendar-links';
 
 /**
  * Meetings (G-HR › My day, item 11).
@@ -68,6 +68,8 @@ export interface MeetingForCalendar {
   status: string;
   icsSequence: number;
   meetLink: string | null;
+  /** A pasted Google Maps link (2026-10-13); optional — the calendar feed does not read it. */
+  mapUrl?: string | null;
   organizer: { id: string; name: string };
 }
 
@@ -130,7 +132,12 @@ export function meetingCalendarInput(m: MeetingForCalendar): CalendarEventInput 
     // The Meet link rides in the description as well as on the record: an
     // invitee who imports the file should be able to join from their own
     // calendar without coming back to G-Core for the room.
-    description: [m.agenda?.trim() || null, m.meetLink ? `Join with Google Meet: ${m.meetLink}` : null]
+    description: [
+      m.agenda?.trim() || null,
+      m.meetLink ? `Join with Google Meet: ${m.meetLink}` : null,
+      // A tagged place rides along too; an untagged one is only the LOCATION.
+      m.mapUrl ? `Map: ${mapLinkFor(m.location, m.mapUrl)}` : null,
+    ]
       .filter((s): s is string => Boolean(s))
       .join('\n') || null,
     location: m.location,

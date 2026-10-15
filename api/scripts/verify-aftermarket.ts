@@ -35,7 +35,7 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, approversForStep, ctxOf } from '../src/shared/approvals';
+import { submitForApproval, act, approversForStep, ctxOf, reopenApproved } from '../src/shared/approvals';
 import {
   addMonths,
   coverageFor,
@@ -764,13 +764,13 @@ async function main() {
     'raised yourself',
   );
   await expectRejection(
-    'nor can the team leader before the project manager named on the order',
+    'nor can the team leader before the Technical Manager named on the order',
     () => act({ requestId: joApproval.id, userId: manager.id, action: 'APPROVED' }),
     'not',
   );
   await act({ requestId: joApproval.id, userId: director.id, action: 'APPROVED' });
   check(
-    'the project manager named on the order signs first, and the order waits for the team leader',
+    'the Technical Manager named on the order signs first, and the order waits for the team leader',
     (await prisma.jobOrder.findUnique({ where: { id: warrantyOrder.id } }))?.status === 'PENDING_APPROVAL',
   );
   await act({ requestId: joApproval.id, userId: manager.id, action: 'APPROVED' });
@@ -786,6 +786,35 @@ async function main() {
     where: { userId: engineer.id, link: `/g-ops/job-orders/${warrantyOrder.id}`, title: { contains: 'approved' } },
   });
   check('the people sent are told, with a link to the order', !!engineerHeard);
+
+  // The project's manager IS its Technical Manager (2026-10-15, the owner's
+  // call): the first step is named so, and with no one named on the order it
+  // falls back to the Technical Managers — never to the old Project Manager role.
+  const joStep1 = await prisma.approvalStep.findFirstOrThrow({
+    where: { workflowId: joApproval.workflowId!, sequence: 1 },
+    include: { role: { select: { key: true } } },
+  });
+  const tmHolder = await makeUser('ZZ Technical Manager', 'tm@verifya.local', ['technical_manager']);
+  const pmOnly = await makeUser('ZZ Old Project Manager', 'oldpm@verifya.local', ['project_manager']);
+  const fallbackTo = await approversForStep(joStep1, sales.id, prisma, {});
+  check(
+    'the job order’s first step is the Technical Manager, falling back to the Technical Managers when none is named',
+    joStep1.name === 'Technical Manager' &&
+      joStep1.approverType === 'PROJECT_MANAGER' &&
+      joStep1.role?.key === 'technical_manager' &&
+      fallbackTo.includes(tmHolder.id) &&
+      !fallbackTo.includes(pmOnly.id),
+    `${joStep1.name} ${joStep1.role?.key} · ${fallbackTo.length} approvers`,
+  );
+  const tmLookup = await fetch(`${BASE}/users/lookup?role=technical_manager`, {
+    headers: { Authorization: `Bearer ${signToken(sales.id, sales.email)}` },
+  });
+  const tmPeople = (await tmLookup.json()) as { id: string }[];
+  check(
+    'the Technical Manager picker lists the holders of the role, and nobody else',
+    tmLookup.status === 200 && tmPeople.some((p) => p.id === tmHolder.id) && !tmPeople.some((p) => p.id === pmOnly.id || p.id === sales.id),
+    `${tmLookup.status} ${tmPeople.length}`,
+  );
 
   await settleJobOrder({ documentId: warrantyOrder.id }, 'APPROVED');
   check(
@@ -827,9 +856,18 @@ async function main() {
             description: `${TAG} chiller`,
             quantity: D(1),
             unit: 'lot',
-            unitCost: D(400_000),
-            amount: D(400_000),
+            unitCost: D(300_000),
+            amount: D(300_000),
             sortOrder: 0,
+          },
+          {
+            costCategoryId: (await prisma.costCategory.findUniqueOrThrow({ where: { code: 'LAB' } })).id,
+            description: `${TAG} installation crew`,
+            quantity: D(1),
+            unit: 'lot',
+            unitCost: D(100_000),
+            amount: D(100_000),
+            sortOrder: 1,
           },
         ],
       },
@@ -863,6 +901,29 @@ async function main() {
     projectManagerId: director.id,
     customerPoNumber: 'PO-77',
   });
+  // A Technical Manager raising a job order signs its Technical Manager step (2026-10-16, Brian Jay's report).
+  {
+    const { heldSequences } = await import('../src/shared/approvals');
+    const route = await prisma.approvalWorkflow.findFirstOrThrow({
+      where: { documentType: 'job_order', isActive: true },
+      include: { steps: true },
+    });
+    const self = await heldSequences(route, director.id, prisma, { projectManagerId: director.id });
+    const other = await heldSequences(route, sales.id, prisma, { projectManagerId: director.id });
+    check(
+      'a job order naming its preparer as Technical Manager is signed at that step on submit; one naming somebody else is not',
+      route.preparerSigns && self.has(1) && !other.has(1),
+      `${route.preparerSigns} ${[...self]} ${[...other]}`,
+    );
+  }
+  // The job order's Amount is the labor charge (2026-10-16): 500,000 against the costing's Labor 100,000.
+  const { laborTally } = await import('../src/routes/jobOrders');
+  const tally = await laborTally({ quotationId: orderQuotation.id, amount: D(500_000) });
+  check(
+    'the Amount is read against the costing’s Labor cost, and a difference is said, not refused',
+    tally?.labor === 100_000 && tally.difference === 400_000 && !tally.tallies,
+    JSON.stringify(tally),
+  );
   await settle((await submitJobOrder2(costedOrder.id, sales.id)).id);
   const built = await prisma.jobOrder.findUnique({ where: { id: costedOrder.id }, include: { job: { include: { scopeItems: true } } } });
   check('approval builds the project from the quotation’s costing', built?.status === 'APPROVED' && !!built.job, `job ${built?.jobId}`);
@@ -881,13 +942,50 @@ async function main() {
     'a revision still under negotiation stands behind no job, and the costing is FINAL once a project is built on it',
     built?.job?.quotationRevisionId === null &&
       (await prisma.costing.findUnique({ where: { id: orderCosting.id } }))?.status === 'FINAL' &&
-      (await prisma.jobCostEntry.count({ where: { jobId: built!.job!.id, state: 'BUDGETED' } })) === 1,
+      (await prisma.jobCostEntry.count({ where: { jobId: built!.job!.id, state: 'BUDGETED' } })) === 2,
   );
   await settleJobOrder({ documentId: costedOrder.id }, 'APPROVED');
+  {
+    const agreed = await prisma.jobOrder.findUniqueOrThrow({ where: { id: costedOrder.id } });
+    check(
+      'the Technical Manager’s approval agrees a different Amount: the project is built and the agreement recorded',
+      !!agreed.jobId && Number(agreed.laborCostingAmount) === 100_000 && agreed.laborAgreedById === director.id && !!agreed.laborAgreedAt,
+      `${agreed.jobId} ${agreed.laborCostingAmount} ${agreed.laborAgreedById}`,
+    );
+  }
   check(
     'a settlement that arrives twice builds nothing twice',
     (await prisma.job.count({ where: { costingId: orderCosting.id } })) === 1,
   );
+
+  // Pulled back after approval (2026-10-16): the project the approval built
+  // goes with it, but only while nothing stands on it.
+  {
+    const salesResolved = await resolveUser(sales.id);
+    const builtJobId = (await prisma.jobOrder.findUniqueOrThrow({ where: { id: costedOrder.id } })).jobId!;
+    const task = await prisma.jobTask.create({ data: { jobId: builtJobId, name: `${TAG} a planned task` } });
+    const refused = await reopenApproved('job_order', costedOrder.id, salesResolved, 'wrong amount').then(
+      () => null,
+      (e: Error) => e.message,
+    );
+    check(
+      'a job order whose project has something on it is not pulled back — the refusal names it, and nothing moves',
+      !!refused && refused.includes('scheduled task') &&
+        (await prisma.jobOrder.findUniqueOrThrow({ where: { id: costedOrder.id } })).status === 'APPROVED' &&
+        (await prisma.approvalRequest.findFirst({ where: { documentType: 'job_order', documentId: costedOrder.id }, orderBy: { createdAt: 'desc' } }))?.status === 'APPROVED',
+      refused ?? 'reopened',
+    );
+    await prisma.jobTask.delete({ where: { id: task.id } });
+    await reopenApproved('job_order', costedOrder.id, salesResolved, 'wrong amount');
+    const back = await prisma.jobOrder.findUniqueOrThrow({ where: { id: costedOrder.id } });
+    check(
+      'pulled back after approval: a draft again, the labor agreement cleared, the project it built deleted and its costing a draft again',
+      back.status === 'DRAFT' && !back.jobId && back.laborAgreedById === null && back.laborCostingAmount === null &&
+        !(await prisma.job.findUnique({ where: { id: builtJobId } })) &&
+        (await prisma.costing.findUniqueOrThrow({ where: { id: orderCosting.id } })).status === 'DRAFT',
+      `${back.status} job ${back.jobId}`,
+    );
+  }
 
   // A call-out under the contract, as the service schedule books it: the
   // order and its hand-booked visit carrying the contract — and regenerating
@@ -1608,16 +1706,19 @@ async function main() {
       targetFinish: '2026-11-13',
       projectManagerId: director.id,
       projectEngineerId: engineer.id,
+      assignedToId: engineer.id,
       supportIds: [manager.id, engineer.id, manager.id],
     });
+    // The owner's Job Orders sample (2026-10-16): assigned personnel, the task, the status in his words.
+    check('a job order names its assigned personnel, and reads Draft', raised.body.assignedTo?.id === engineer.id && raised.body.stageLabel === 'Draft', `${raised.body.assignedTo?.id} ${raised.body.stageLabel}`);
     check(
-      'a salesperson can raise a job order on a quotation under negotiation; the working days are counted',
-      raised.status === 201 && raised.body.durationDays === 10 && raised.body.targetFinish?.startsWith('2026-11-13'),
+      'a salesperson can raise a job order on a quotation under negotiation; the working days are counted Mon–Sat',
+      raised.status === 201 && raised.body.durationDays === 11 && raised.body.targetFinish?.startsWith('2026-11-13'),
       `${raised.status} ${raised.body.durationDays ?? raised.body.error}`,
     );
     check(
-      'the amount is the quotation’s net when nobody typed one, and support is one row per person',
-      raised.body.amount === 500_000 && (raised.body.support as { id: string }[]).length === 2,
+      'the amount is the costing’s Labor cost when nobody typed one, and support is one row per person',
+      raised.body.amount === 100_000 && (raised.body.support as { id: string }[]).length === 2,
       `${raised.body.amount} / ${raised.body.support?.length}`,
     );
     const finishFirst = await api(salesToken, 'POST', '/job-orders', {
@@ -1671,6 +1772,17 @@ async function main() {
 
     const submitted = await api(salesToken, 'POST', `/job-orders/${raised.body.id}/submit`);
     check('and submit it for approval', submitted.status === 200, `${submitted.status} ${submitted.body.error ?? ''}`);
+    const pendingRead = await api(salesToken, 'GET', `/job-orders/${raised.body.id}`);
+    check('pending, it reads as the step it waits on — TM Approval', pendingRead.body.stageLabel === 'TM Approval', String(pendingRead.body.stageLabel));
+    const listed = await api(salesToken, 'GET', `/job-orders?search=${encodeURIComponent(TAG)}&assignedToId=${engineer.id}`);
+    check(
+      'the list filters by assigned personnel and carries the cards — active, pending approval, total value',
+      (listed.body.rows as { id: string }[]).some((r) => r.id === raised.body.id) && listed.body.summary.pendingApproval >= 1 && listed.body.summary.totalValue >= 100_000,
+      JSON.stringify(listed.body.summary),
+    );
+    const csv = await fetch(`${BASE}/job-orders/csv?search=${encodeURIComponent(TAG)}&status=PENDING_APPROVAL,COMPLETED`, { headers: { Authorization: `Bearer ${salesToken}` } });
+    const csvText = await csv.text();
+    check('the report\'s CSV takes several statuses and names the order in the owner\'s words', csv.status === 200 && csvText.includes(String(raised.body.number)) && csvText.includes('TM Approval'), csvText.slice(0, 200));
     const locked2 = await api(salesToken, 'PATCH', `/job-orders/${raised.body.id}`, { projectName: `${TAG} too late` });
     check('once submitted it cannot be edited', locked2.status === 400, String(locked2.status));
     const withdraw = await api(salesToken, 'POST', `/job-orders/${raised.body.id}/cancel`, { reason: 'changed mind' });
@@ -1769,8 +1881,8 @@ async function main() {
     );
     check(
       'its amount prints as money in the company currency',
-      /\b[A-Z]{3} 500,000\.00\b/.test(returnedPaper.text),
-      returnedPaper.text.split('\n').filter((l) => /500,000/.test(l)).join(' | '),
+      /\b[A-Z]{3} 100,000\.00\b/.test(returnedPaper.text),
+      returnedPaper.text.split('\n').filter((l) => /100,000/.test(l)).join(' | '),
     );
     const joPrintsAfter = await prisma.auditLog.count({ where: { entityType: 'job_order', entityId: raised.body.id, action: 'EXPORTED' } });
     check('every print of the order is on its trail as EXPORTED', joPrintsAfter === joPrintsBefore + 3, `${joPrintsBefore} → ${joPrintsAfter}`);

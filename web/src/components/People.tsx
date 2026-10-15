@@ -30,12 +30,17 @@ export interface PersonRow {
 const cache = new Map<string, { at: number; rows: Promise<PersonRow[]> }>();
 const FRESH_MS = 60_000;
 
-/** The people holding `holding` (a permission key), or every active login. Cached a minute. */
+/**
+ * The people holding `holding` (a permission key), or every active login.
+ * `role:<key>` (e.g. `role:technical_manager`) asks for the holders of a role
+ * instead. Cached a minute.
+ */
 export function loadPeople(holding?: string): Promise<PersonRow[]> {
   const key = holding ?? '';
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < FRESH_MS) return hit.rows;
-  const rows = api.get<PersonRow[]>(`/users/lookup${qs({ holding: holding || undefined })}`).catch((err) => {
+  const query = key.startsWith('role:') ? { role: key.slice(5) } : { holding: holding || undefined };
+  const rows = api.get<PersonRow[]>(`/users/lookup${qs(query)}`).catch((err) => {
     cache.delete(key);
     throw err;
   });

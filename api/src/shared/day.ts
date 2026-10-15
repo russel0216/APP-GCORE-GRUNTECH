@@ -60,30 +60,37 @@ export function manilaDayEnd(key: string): Date {
 }
 
 /**
- * The calendar date of working day `day` (Mon–Fri, day 1 = the first) counted
- * from `start` — a costing's scope of work, planned in working days, put on a
- * project's real dates. A start on a weekend counts from the Monday after it.
- * Returns a DATE (UTC midnight) like every @db.Date value.
+ * The work week (2026-10-13, the owner's call: "Mon–Sat"): every day but
+ * Sunday is a working day — for a costing's plan, a project's dates and a
+ * job order's duration alike. One rule; `web/src/lib/day.ts` mirrors it and
+ * verify-costing pins the two equal. No holidays yet.
  */
-/** Working days (Mon–Fri) from one DATE to another, both days counted; 0 when `to` is before `from`. */
+export const DAY_OFF = 0; // Sunday
+export const isWorkingDow = (dow: number): boolean => dow !== DAY_OFF;
+
+/** Working days (Mon–Sat) from one DATE to another, both days counted; 0 when `to` is before `from`. */
 export function workingDaysBetween(from: Date, to: Date): number {
   const d = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()));
   const end = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
   let days = 0;
   while (d.getTime() <= end) {
-    const dow = d.getUTCDay();
-    if (dow !== 0 && dow !== 6) days++;
+    if (isWorkingDow(d.getUTCDay())) days++;
     d.setUTCDate(d.getUTCDate() + 1);
   }
   return days;
 }
 
+/**
+ * The calendar date of working day `day` (Mon–Sat, day 1 = the first) counted
+ * from `start` — a costing's scope of work, planned in working days, put on a
+ * project's real dates. A start on a Sunday counts from the Monday after it.
+ * Returns a DATE (UTC midnight) like every @db.Date value.
+ */
 export function workingDayDate(start: Date, day: number): Date {
   const d = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
   let left = Math.max(1, Math.floor(day));
   for (;;) {
-    const dow = d.getUTCDay();
-    if (dow !== 0 && dow !== 6) {
+    if (isWorkingDow(d.getUTCDay())) {
       left--;
       if (left === 0) return d;
     }

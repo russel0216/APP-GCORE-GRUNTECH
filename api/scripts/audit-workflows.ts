@@ -18,11 +18,16 @@ import { prisma } from '../src/prisma';
  * just the realistic case, which is what a routing check has to consider.
  */
 const TYPICAL_REQUESTER: Record<string, string[]> = {
+  // A sales order's commission (2026-10-16): the salesperson or their Team Leader.
+  commission: ['sales', 'industry_specialist', 'team_leader'],
   leave_request: ['employee', 'supervisor', 'project_engineer', 'service_engineer'],
   overtime_request: ['employee', 'project_engineer', 'service_engineer'],
-  purchase_request: ['project_engineer', 'project_manager', 'service_engineer', 'procurement'],
-  // Project cash: the team asks, so engineers raise them as often as the PM.
-  budget_request: ['project_manager', 'project_engineer'],
+  // The routing sheet of 2026-10-13: Project Engineers, Industry
+  // Specialists, Technical Managers and Team Leaders prepare requisitions.
+  purchase_request: ['project_engineer', 'industry_specialist', 'technical_manager', 'team_leader', 'project_manager', 'service_engineer', 'procurement'],
+  // Project cash: the team asks — engineers, specialists, Back Support,
+  // Team Leaders and the Finance Manager (the sheet of 2026-10-13).
+  budget_request: ['project_engineer', 'industry_specialist', 'back_support', 'team_leader', 'finance_manager', 'project_manager'],
   // The routing sheet (2026-10-12): Industry Specialists, Team Leaders and
   // the CEO / President all prepare them, on the one route.
   quotation: ['industry_specialist', 'sales', 'team_leader', 'ceo', 'sales_manager'],
@@ -30,12 +35,25 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   // The costing route starts with an engineer (2026-10-09); sales and the
   // project managers still cost work too, and a Technical Manager may.
   costing: ['project_engineer', 'sales', 'sales_manager', 'project_manager', 'technical_manager', 'team_leader'],
-  purchase_order: ['procurement'],
+  progress_report: ['project_engineer', 'sales', 'industry_specialist', 'team_leader', 'project_manager', 'technical_manager'],
+  progress_billing: ['project_engineer', 'sales', 'industry_specialist', 'team_leader', 'project_manager', 'technical_manager'],
+  // A project's drawings sent for internal approval (2026-10-13): the
+  // engineers and managers on the project raise them, a Technical Manager may.
+  plan_approval: ['project_engineer', 'project_manager', 'technical_manager'],
+  // Admin Back Support and the Purchasing Manager prepare them (2026-10-13).
+  purchase_order: ['back_support', 'purchasing_manager', 'procurement'],
+  receiving: ['warehouse', 'warehouse_supervisor'],
+  stock_issue: ['warehouse', 'warehouse_supervisor'],
+  // Anyone may ask to borrow a tool (2026-10-14); the warehouse writes a walk-in's.
+  borrow_slip: ['employee', 'warehouse'],
+  pullout_slip: ['warehouse', 'warehouse_supervisor'],
   expense: ['employee', 'project_engineer', 'sales'],
   // A supplier's invoice arrives in finance, so finance keys it in. Routing a
   // step back to finance is the same fault the budget-request and
   // purchase-order workflows both shipped with.
   supplier_bill: ['finance', 'procurement'],
+  invoice_request: ['sales', 'industry_specialist', 'team_leader'],
+  cad_job_order: ['sales', 'industry_specialist', 'project_engineer', 'technical_manager'],
   cash_advance: ['employee', 'project_engineer', 'service_engineer', 'sales', 'project_manager', 'finance'],
   job_order: ['sales', 'sales_manager', 'service_engineer'],
   // HR raises a clearance for an employee with no login, and an evaluation
@@ -56,10 +74,12 @@ async function main() {
   });
 
   const roleMembers = new Map<string, string[]>();
+  const roleKeyById = new Map<string, string>();
   for (const role of await prisma.role.findMany({
     include: { users: { where: { user: { isActive: true } }, include: { user: true } } },
   })) {
     roleMembers.set(role.key, role.users.map((u) => u.user.name));
+    roleKeyById.set(role.id, role.key);
   }
 
   // SUPERVISOR falls back to HR when the requester has no supervisor set. That
@@ -154,7 +174,7 @@ async function main() {
         const fallback = roleMembers.get(fallbackKey) ?? [];
         if (fallback.length === 0) {
           issues.push(
-            `step ${step.sequence} "${step.name}" routes to the project's manager and falls back to ${step.role?.name ?? 'Executive / Management'}, which nobody holds — a project manager's own request, or one on a project with no manager, routes to nobody`,
+            `step ${step.sequence} "${step.name}" routes to the Technical Manager named on the document or project and falls back to ${step.role?.name ?? 'Executive / Management'}, which nobody holds — their own request, or one with no Technical Manager named, routes to nobody`,
           );
         }
         if (unmanagedJobs > 0 && wf.documentType !== 'job_order') {
@@ -172,7 +192,9 @@ async function main() {
     const route = wf.steps
       .map((s) =>
         s.approverType === 'SUPERVISOR'
-          ? `${s.sequence}. supervisor, else ${s.role?.key ?? 'hr'}`
+          ? `${s.sequence}. supervisor, else ${s.role?.key ?? 'hr'}${
+              s.alsoRoleIds.length ? ` (also ${s.alsoRoleIds.map((id) => roleKeyById.get(id) ?? '?').join(', ')} on the team)` : ''
+            }`
           : s.approverType === 'PROJECT_MANAGER'
             ? `${s.sequence}. the project's manager, else ${s.role?.key ?? 'executive'}`
             : `${s.sequence}. ${s.role?.key ?? s.user?.name ?? s.approverType.toLowerCase()}`,

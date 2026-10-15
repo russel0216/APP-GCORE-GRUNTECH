@@ -7,7 +7,7 @@ import { addDays, dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { yearStartKey } from '../../lib/listUrl';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
-import { allHeld, ApprovalStepper, DocumentApproval, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
+import { allHeld, ApprovalStepper, DocumentApproval, DecisionNote, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
@@ -23,6 +23,7 @@ export const OUTCOMES = [
   { value: 'NEGOTIATION', label: 'Negotiation' },
   { value: 'WON', label: 'Won' },
   { value: 'LOST', label: 'Lost' },
+  { value: 'ON_HOLD', label: 'On hold' },
 ];
 
 /**
@@ -42,9 +43,11 @@ const REVISION_TONES: Record<string, Tone> = { SUPERSEDED: '' };
  * needs an approved revision and LOST a reason, both handled below.
  */
 export const NEXT_OUTCOMES: Record<string, string[]> = {
-  OPEN: ['SUBMITTED', 'NEGOTIATION', 'LOST'],
-  SUBMITTED: ['NEGOTIATION', 'WON', 'LOST'],
-  NEGOTIATION: ['WON', 'LOST'],
+  OPEN: ['SUBMITTED', 'NEGOTIATION', 'ON_HOLD', 'LOST'],
+  SUBMITTED: ['NEGOTIATION', 'WON', 'ON_HOLD', 'LOST'],
+  NEGOTIATION: ['WON', 'ON_HOLD', 'LOST'],
+  // On hold (2026-10-13): resumed by moving back to an open stage, or lost — never straight to Won.
+  ON_HOLD: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'LOST'],
   // Reopening is allowed until a project exists (see the WON block).
   WON: ['NEGOTIATION'],
   LOST: ['NEGOTIATION'],
@@ -95,6 +98,7 @@ export const STAGE_TONES: Record<string, Tone> = {
   CONFIRMED: 'ok',
   COMPLETED: 'ok',
   LOST: 'danger',
+  HOLD: '',
 };
 
 /** SCORO's statuses, for the tabs before the list's first answer names them. */
@@ -105,6 +109,7 @@ const STAGE_TABS = [
   { value: 'CONFIRMED', label: 'Confirmed' },
   { value: 'COMPLETED', label: 'Completed' },
   { value: 'LOST', label: 'Lost' },
+  { value: 'HOLD', label: 'On hold' },
 ];
 
 /**
@@ -122,6 +127,7 @@ export const OUTCOME_STAGE: Record<string, string> = {
   NEGOTIATION: 'CLOSING',
   WON: 'CONFIRMED',
   LOST: 'LOST',
+  ON_HOLD: 'HOLD',
 };
 
 /** A stage as `GET /quotations/:id` sends it: named by Admin › Pipeline Stages, with the outcomes it gathers. */
@@ -459,7 +465,10 @@ export function Quotations() {
 // ── Mass actions: Change status ──────────────────────────────────────────────
 
 /** The statuses a quotation can be moved to — the detail page's Change status, for many. */
-const BULK_TARGETS = ['SUBMITTED', 'NEGOTIATION', 'WON', 'LOST'];
+const BULK_TARGETS = ['SUBMITTED', 'NEGOTIATION', 'ON_HOLD', 'WON', 'LOST', 'CANCELLED'];
+/** CANCELLED is Lost with its kind (2026-10-13): the outcome the PATCH takes, and the words the bar says. */
+const bulkOutcome = (target: string) => (target === 'CANCELLED' ? 'LOST' : target);
+const bulkLabel = (target: string) => (target === 'CANCELLED' ? 'Cancelled' : stageLabelFor(target));
 
 /**
  * Which ticked quotations a move would take, and why the rest stay — the same
@@ -473,12 +482,14 @@ export function planMove(
 ): { go: QuotationRow[]; stay: { row: QuotationRow; why: string }[] } {
   const go: QuotationRow[] = [];
   const stay: { row: QuotationRow; why: string }[] = [];
+  const label = bulkLabel(target);
+  target = bulkOutcome(target);
   for (const r of rows) {
-    if (r.outcome === target) stay.push({ row: r, why: `already in ${stageLabelFor(target)}` });
+    if (r.outcome === target) stay.push({ row: r, why: `already in ${label}` });
     else if (!r.canEdit) stay.push({ row: r, why: 'only its author can move it' });
     else if (r.outcome === 'WON' && r.hasJob) stay.push({ row: r, why: 'a project was built from it' });
     else if (!(NEXT_OUTCOMES[r.outcome] ?? []).includes(target)) {
-      stay.push({ row: r, why: `${r.stageLabel ?? stageLabelFor(r.outcome)} cannot go to ${stageLabelFor(target)}` });
+      stay.push({ row: r, why: `${r.stageLabel ?? stageLabelFor(r.outcome)} cannot go to ${label}` });
     } else if (target === 'WON' && !r.hasApprovedRevision) stay.push({ row: r, why: 'needs an approved revision first' });
     else go.push(r);
   }
@@ -499,7 +510,7 @@ function QuotationBulkStatus({ ctx }: { ctx: BulkContext<QuotationRow> }) {
   const [refused, setRefused] = useState<{ number: string; why: string }[]>([]);
 
   const plan = target ? planMove(ctx.rows, target) : null;
-  const needsReason = target === 'LOST';
+  const needsReason = target === 'LOST' || target === 'CANCELLED';
 
   async function apply() {
     if (!plan || !plan.go.length || (needsReason && !reason.trim())) return;
@@ -510,7 +521,12 @@ function QuotationBulkStatus({ ctx }: { ctx: BulkContext<QuotationRow> }) {
       setProgress({ done: i, of: plan.go.length });
       const row = plan.go[i];
       try {
-        await api.patch(`/quotations/${row.id}`, needsReason ? { outcome: target, lostReason: reason.trim() } : { outcome: target });
+        await api.patch(
+          `/quotations/${row.id}`,
+          needsReason
+            ? { outcome: 'LOST', lostReason: reason.trim(), lostKind: target === 'CANCELLED' ? 'CANCELLED' : 'LOST' }
+            : { outcome: target },
+        );
         moved++;
       } catch (err) {
         failed.push({ row, why: err instanceof ApiError ? err.message : 'could not be moved' });
@@ -520,7 +536,7 @@ function QuotationBulkStatus({ ctx }: { ctx: BulkContext<QuotationRow> }) {
     const left = [...plan.stay, ...failed];
     toast(
       moved > 0 ? 'ok' : 'error',
-      `${moved} quotation${moved === 1 ? '' : 's'} moved to ${stageLabelFor(target)}` +
+      `${moved} quotation${moved === 1 ? '' : 's'} moved to ${bulkLabel(target)}` +
         (left.length ? `; ${left.length} did not move` : ''),
     );
     setRefused(left.map((l) => ({ number: l.row.number, why: l.why })));
@@ -545,8 +561,8 @@ function QuotationBulkStatus({ ctx }: { ctx: BulkContext<QuotationRow> }) {
         <option value="">Change status…</option>
         {BULK_TARGETS.map((o) => (
           <option key={o} value={o}>
-            {stageLabelFor(o)}
-            {o === 'LOST' ? '…' : ''}
+            {bulkLabel(o)}
+            {o === 'LOST' || o === 'CANCELLED' ? '…' : ''}
           </option>
         ))}
       </select>
@@ -554,8 +570,8 @@ function QuotationBulkStatus({ ctx }: { ctx: BulkContext<QuotationRow> }) {
         <input
           type="text"
           className="list-bulk-reason"
-          aria-label="Why were they lost? One reason for all of them"
-          placeholder="Why were they lost? (one reason for all)"
+          aria-label={target === 'CANCELLED' ? 'Why were they cancelled? One reason for all of them' : 'Why were they lost? One reason for all of them'}
+          placeholder={target === 'CANCELLED' ? 'Why were they cancelled? (one reason for all)' : 'Why were they lost? (one reason for all)'}
           value={reason}
           disabled={!!progress}
           onChange={(e) => setReason(e.target.value)}
@@ -564,14 +580,14 @@ function QuotationBulkStatus({ ctx }: { ctx: BulkContext<QuotationRow> }) {
       {plan && (
         <button
           type="button"
-          className={`btn btn-sm ${target === 'LOST' ? 'btn-danger' : 'btn-primary'}`}
+          className={`btn btn-sm ${needsReason ? 'btn-danger' : 'btn-primary'}`}
           disabled={!plan.go.length || !!progress || (needsReason && !reason.trim())}
           onClick={() => void apply()}
         >
           {progress
             ? `Moving ${progress.done + 1} of ${progress.of}…`
             : plan.go.length
-              ? `Move ${plan.go.length} to ${outcomeLabel(target)}`
+              ? `Move ${plan.go.length} to ${bulkLabel(target)}`
               : 'None can move there'}
         </button>
       )}
@@ -706,6 +722,8 @@ export interface QuotationDetail {
   outcome: string;
   probability: number;
   lostReason: string | null;
+  /** LOST or CANCELLED while lost (2026-10-13). */
+  lostKind?: 'LOST' | 'CANCELLED' | null;
   submittedAt: string | null;
   decidedAt?: string | null;
   expectedClosing: string | null;
@@ -864,9 +882,9 @@ export function QuotationDetail() {
     }
   }
 
-  async function markLost(reason: string) {
-    await api.patch(`/quotations/${quotation!.id}`, { outcome: 'LOST', lostReason: reason });
-    toast('ok', `${quotation!.number} marked lost`);
+  async function markLost(reason: string, kind: 'LOST' | 'CANCELLED' = 'LOST') {
+    await api.patch(`/quotations/${quotation!.id}`, { outcome: 'LOST', lostReason: reason, lostKind: kind });
+    toast('ok', `${quotation!.number} ${kind === 'CANCELLED' ? 'cancelled' : 'marked lost'}`);
     await load();
   }
 
@@ -1051,12 +1069,12 @@ export function QuotationDetail() {
         }
         print={revision ? `/api/quotations/${quotation.id}/revisions/${revision.id}/pdf${qs({ option: chosenOption })}` : undefined}
         more={[
-          // Print carries the attached files behind the quotation (2026-10-12); this is the bare paper.
+          // Print is the bare quotation (2026-10-16, the owner's call); this one carries the attached files behind it.
           revision && {
-            label: 'Print without attachments',
-            hint: 'The quotation alone, without the files attached to it',
+            label: 'Print with attachments',
+            hint: 'The quotation with the files attached to it behind it',
             onSelect: () =>
-              openPdf(`/api/quotations/${quotation.id}/revisions/${revision.id}/pdf${qs({ option: chosenOption, attachments: 0 })}`, (e) => setError(e)),
+              openPdf(`/api/quotations/${quotation.id}/revisions/${revision.id}/pdf${qs({ option: chosenOption, attachments: 1 })}`, (e) => setError(e)),
           },
           can('gops.quotations.create') &&
             revision && {
@@ -1123,7 +1141,21 @@ export function QuotationDetail() {
               reasonLabel: 'Why was it lost?',
               // A quotation lost before and reopened offers the reason it was lost with.
               initialReason: quotation.lostReason ?? '',
-              onConfirm: markLost,
+              onConfirm: (reason: string) => markLost(reason, 'LOST'),
+            },
+          },
+          // Cancel (2026-10-13): the customer dropped it — Lost with its kind,
+          // neither won nor lost in a win rate.
+          canMarkLost && {
+            label: 'Cancel quotation',
+            danger: true,
+            confirm: {
+              title: `Cancel ${quotation.number}?`,
+              body: 'The customer dropped it. Its lead moves with it; a win rate counts it as neither won nor lost.',
+              confirmLabel: 'Cancel quotation',
+              reason: 'required' as const,
+              reasonLabel: 'Why was it cancelled?',
+              onConfirm: (reason: string) => markLost(reason, 'CANCELLED'),
             },
           },
           canDelete && {
@@ -1371,10 +1403,10 @@ export function QuotationDetail() {
               )}
               {quotation.outcome === 'LOST' && (
                 <>
-                  <Detail label="Date lost">
+                  <Detail label={quotation.lostKind === 'CANCELLED' ? 'Date cancelled' : 'Date lost'}>
                     <Stamp at={lost?.at ?? quotation.decidedAt} by={lost?.by} />
                   </Detail>
-                  <Detail label="Lost because">{quotation.lostReason}</Detail>
+                  <Detail label={quotation.lostKind === 'CANCELLED' ? 'Cancelled because' : 'Lost because'}>{quotation.lostReason}</Detail>
                 </>
               )}
               <Detail label="Sent">
@@ -1429,6 +1461,7 @@ export function QuotationDetail() {
           )}
 
           {/* Who has this revision, and since when — the one approval rail. */}
+          <DecisionNote documentType="quotation" documentId={revision.id} reloadToken={reload} />
           <DocumentApproval documentType="quotation" documentId={revision.id} reloadToken={reload} />
 
           <div className="card sales-card-gap">

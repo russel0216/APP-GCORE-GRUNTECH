@@ -17,7 +17,7 @@ import {
 import { Meter as ProgressBar } from '../../components/charts';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { PersonSelect, usePeople } from '../../components/People';
-import { todayLocal } from '../../lib/day';
+import { isDayKey, parseDay, todayLocal, workingDayKey } from '../../lib/day';
 
 export const JOB_STATUSES = [
   { value: 'PLANNING', label: 'Planning' },
@@ -178,7 +178,7 @@ export function Projects() {
         </span>
       ),
     },
-    { key: 'pm', label: 'Manager', render: (j) => j.projectManager?.name ?? <span className="faint">unassigned</span> },
+    { key: 'pm', label: 'Technical Manager', render: (j) => j.projectManager?.name ?? <span className="faint">unassigned</span> },
     { key: 'targetEndDate', label: 'Target end', render: (j) => formatDate(j.targetEndDate), optional: true },
     {
       key: 'status',
@@ -198,7 +198,7 @@ export function Projects() {
       {/* The registers across every project (2026-10-06): off the menu — each
           is a tab inside a project — but kept one click away here. */}
       <p className="del-registers">
-        {(can('gops.plans.view_all') || can('gops.plans.view_own')) && <Link to="/g-ops/plans">Approved plans</Link>}
+        {(can('gops.plans.view_all') || can('gops.plans.view_own')) && <Link to="/g-ops/plans">Requests for approval</Link>}
         {can('gops.budget_monitoring.view_all') && <Link to="/g-ops/budget-monitoring">Budget monitoring</Link>}
         {(can('gops.purchase_requests.view_all') || can('gops.purchase_requests.view_own')) && (
           <Link to="/g-ops/purchase-requests">Purchase requests</Link>
@@ -274,6 +274,9 @@ interface CostingDetail {
   contractValue: number;
   customer: { id: string; name: string } | null;
   site: { id: string; name: string } | null;
+  /** The scope of work's start and its working days (Mon–Sat). */
+  plannedStart: string | null;
+  planDays: number;
   quotationRevisions: {
     id: string;
     revision: number;
@@ -297,7 +300,7 @@ function NewJobModal({
   const [error, setError] = useState<unknown>(null);
   const [costings, setCostings] = useState<CostingOption[]>([]);
   const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
-  const { people } = usePeople();
+  const { people } = usePeople('role:technical_manager');
   const pmId = useId();
   const customerInputId = useId();
   const [chosen, setChosen] = useState<CostingDetail | null>(null);
@@ -377,6 +380,8 @@ function NewJobModal({
         name: f.name || c.title,
         customer: c.customer ? { id: c.customer.id, name: c.customer.name } : f.customer,
         siteId: c.site?.id ?? (c.customer ? '' : f.siteId),
+        // The costing's planned start, when it names one (2026-10-13).
+        startDate: c.plannedStart ?? f.startDate,
         quotationRevisionId:
           f.quotationRevisionId || (approved.length === 1 ? approved[0].id : ''),
       }));
@@ -558,7 +563,7 @@ function NewJobModal({
             </select>
           </Field>
         )}
-        <Field label="Project manager" htmlFor={pmId}>
+        <Field label="Technical Manager" htmlFor={pmId}>
           <PersonSelect
             id={pmId}
             value={form.projectManagerId}
@@ -567,7 +572,14 @@ function NewJobModal({
             placeholder="— unassigned —"
           />
         </Field>
-        <Field label="Start date" hint="Scope sections are scheduled back to back from here">
+        <Field
+          label="Start date"
+          hint={
+            chosen && chosen.planDays > 0 && isDayKey(form.startDate)
+              ? `The scope of work's ${chosen.planDays} working days (Mon–Sat) finish on ${formatDate(parseDay(workingDayKey(form.startDate, chosen.planDays)))} — the target end`
+              : 'The scope of work is placed on working days (Mon–Sat) from here'
+          }
+        >
           <input
             type="date"
             value={form.startDate}

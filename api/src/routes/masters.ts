@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, ItemType } from '@prisma/client';
 import { prisma } from '../prisma';
+import { queueReorderCheck } from '../shared/reorder';
 import {
   handler,
   parseBody,
@@ -321,7 +322,8 @@ supplierRoutes.get(
         : [],
       can(me, 'gchain.receiving.view_all')
         ? prisma.receiving.findMany({
-            where: { order: { supplierId } },
+            // What the supplier delivered: received reports, never one still waiting.
+            where: { OR: [{ order: { supplierId } }, { supplierId }], status: 'RECEIVED' },
             orderBy: { receivedDate: 'desc' },
             take: 50,
             select: {
@@ -660,6 +662,7 @@ export function itemListWhere(q: ListQuery): Prisma.ItemWhereInput {
         { name: { contains: q.search, mode: 'insensitive' } },
         { code: { contains: q.search, mode: 'insensitive' } },
         { partNumber: { contains: q.search, mode: 'insensitive' } },
+        { brand: { contains: q.search, mode: 'insensitive' } },
         { description: { contains: q.search, mode: 'insensitive' } },
       ],
     });
@@ -723,6 +726,7 @@ itemRoutes.get(
         select: {
           code: true,
           partNumber: true,
+          brand: true,
           name: true,
           itemType: true,
           unit: true,
@@ -765,7 +769,7 @@ itemRoutes.get(
           align: ['left', 'left', 'left', 'left', 'left', 'left', 'right', 'right', 'right', 'left'],
           rows: rows.map((i) => [
             i.code,
-            { title: i.name, body: i.partNumber ?? undefined },
+            { title: i.name, body: [i.brand, i.partNumber].filter(Boolean).join(' · ') || undefined },
             statusLabel(i.itemType),
             i.category?.name ?? '',
             i.costCategory?.name ?? '',
@@ -835,6 +839,8 @@ const ITEM_TYPES = ['MATERIAL', 'EQUIPMENT', 'CONSUMABLE', 'SERVICE', 'TOOL'] as
 const itemSchema = z.object({
   code: z.string().trim().optional(),
   partNumber: z.string().trim().optional().nullable(),
+  /** The manufacturer / OEM (2026-10-15) — not who we buy from. */
+  brand: z.string().trim().max(120).optional().nullable(),
   name: z.string().trim().min(2, 'Item name is required'),
   description: z.string().optional().nullable(),
   itemType: z.enum(ITEM_TYPES).default('MATERIAL'),
@@ -878,6 +884,7 @@ itemRoutes.post(
         data: {
           code,
           partNumber: body.partNumber || null,
+          brand: body.brand || null,
           name: body.name,
           description: body.description || null,
           itemType: body.itemType,
@@ -926,7 +933,7 @@ itemRoutes.patch(
     }
 
     const data: Record<string, unknown> = {};
-    for (const f of ['code', 'partNumber', 'name', 'description', 'notes'] as const) {
+    for (const f of ['code', 'partNumber', 'brand', 'name', 'description', 'notes'] as const) {
       if (body[f] !== undefined) data[f] = body[f] || null;
     }
     for (const f of ['categoryId', 'costCategoryId', 'preferredSupplierId'] as const) {
@@ -954,6 +961,12 @@ itemRoutes.patch(
       },
       req,
     );
+    // A reorder level raised over what is on the shelf starts the automatic
+    // reorder for it, wherever it is held.
+    if (body.reorderLevel !== undefined || body.isActive !== undefined || body.isStocked !== undefined) {
+      const held = await prisma.inventoryBalance.findMany({ where: { itemId: item.id }, select: { warehouseId: true } });
+      for (const h of held) queueReorderCheck(item.id, h.warehouseId);
+    }
     res.json(itemNumbers(item));
   }),
 );
@@ -1075,7 +1088,7 @@ referenceRoutes.get(
     res.json(
       await prisma.itemCategory.findMany({
         include: { _count: { select: { items: true } } },
-        orderBy: { name: 'asc' },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       }),
     );
   }),
@@ -1085,6 +1098,9 @@ const itemCategorySchema = z.object({
   code: z.string().trim().min(1).max(20),
   name: z.string().trim().min(2),
   parentId: z.string().optional().nullable(),
+  /** What it covers — under its name on the inventory's category tile. */
+  description: z.string().trim().max(200).optional().nullable(),
+  sortOrder: z.number().int().min(0).max(9999).optional(),
 });
 
 referenceRoutes.post(
@@ -1097,7 +1113,7 @@ referenceRoutes.post(
     }
     res.status(201).json(
       await prisma.itemCategory.create({
-        data: { code: body.code, name: body.name, parentId: body.parentId || null },
+        data: { code: body.code, name: body.name, parentId: body.parentId || null, description: body.description || null, sortOrder: body.sortOrder ?? 0 },
       }),
     );
   }),
@@ -1118,6 +1134,8 @@ referenceRoutes.patch(
           ...(body.code !== undefined ? { code: body.code } : {}),
           ...(body.name !== undefined ? { name: body.name } : {}),
           ...(body.parentId !== undefined ? { parentId: body.parentId || null } : {}),
+          ...(body.description !== undefined ? { description: body.description || null } : {}),
+          ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
         },
       }),
     );

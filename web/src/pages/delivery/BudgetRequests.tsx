@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, type ListResult } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type Column } from '../../components/DataList';
+import { DataList, type Column, type FilterDef } from '../../components/DataList';
+import { Stat } from '../../components/charts';
+import { usePeople } from '../../components/People';
+import { useTeams } from '../finance/Receivables';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
-import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, humanise, useToast, type Tone } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { RecordPaymentModal, paymentLink } from '../finance/Receivables';
@@ -73,6 +76,8 @@ export interface BudgetRequest {
   liquidatedAt: string | null;
   createdAt: string;
   requestedBy: { id: string; name: string; email: string; position: string | null };
+  /** The requester's team, else their department. */
+  team: { label: string; title: string; teamId: string | null } | null;
   job: { id: string; number: string; name: string; projectManager: { id: string; name: string } | null };
   costCategory: { id: string; name: string };
   toRelease: number;
@@ -120,56 +125,91 @@ function StatusCell({ row }: { row: BudgetRequest }) {
   );
 }
 
+interface RequestsSummary {
+  total: number;
+  count: number;
+  approved: number;
+  approvedCount: number;
+  pending: number;
+  pendingCount: number;
+  toRelease: number;
+  toReleaseCount: number;
+  released: number;
+  releasedCount: number;
+  spent: number;
+  returned: number;
+  owedBack: number;
+  refundDueCount: number;
+}
+
 /**
  * The register, in two dresses: G-OPS's (every project's requests, as the
- * project side raises them) and G-FIN's (the same rows, read as finance reads
- * them — what to release, what is out, what is overdue). One query, one
- * component, so the two can never list different sets.
+ * project side raises them) and G-FIN's — the owner's module 4: BR No.,
+ * Requester, Team (else department), Project / Purpose, Amount, Date needed,
+ * Status, under the cards Sum of all budget requests, Approved funds, Pending
+ * approval and To release. One query, one component, so the two can never
+ * list different sets.
  */
 export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
   const navigate = useNavigate();
+  const { can } = useAuth();
+  const [adding, setAdding] = useState(false);
+  const [reload, setReload] = useState(0);
+  const { people } = usePeople('gops.budget_requests.create');
+  const teams = useTeams();
 
   const columns: Column<BudgetRequest>[] = [
-    { key: 'number', label: 'Number', sortKey: 'number', render: (r) => <span className="mono">{r.number}</span> },
+    { key: 'number', label: 'BR No.', sortKey: 'number', width: '150px', render: (r) => <span className="mono">{r.number}</span> },
+    { key: 'requestedBy', label: 'Requester', render: (r) => r.requestedBy.name },
+    {
+      key: 'team',
+      label: 'Team',
+      render: (r) => (r.team ? <span title={r.team.title}>{r.team.label}</span> : <span className="faint">—</span>),
+    },
     {
       key: 'job',
-      label: 'Project',
+      label: 'Project / Purpose',
       render: (r) => (
         <div>
-          <div>{r.job.name}</div>
-          <div className="faint mono">{r.job.number}</div>
+          <div>{r.reason}</div>
+          <div className="faint">
+            <span className="mono">{r.job.number}</span> {r.job.name}
+          </div>
         </div>
       ),
     },
+    { key: 'amount', label: 'Amount', sortKey: 'amount', align: 'right', render: (r) => <span className="mono">{formatMoney(r.amount)}</span> },
     {
-      key: 'requestedBy',
-      label: 'Requested by',
-      render: (r) => (
-        <div>
-          <div>{r.requestedBy.name}</div>
-          <div className="faint">{r.reason}</div>
-        </div>
-      ),
+      key: 'neededBy',
+      label: 'Date needed',
+      sortKey: 'neededBy',
+      render: (r) => (r.neededBy ? formatDate(r.neededBy) : <span className="faint">—</span>),
     },
+    { key: 'status', label: 'Status', render: (r) => <StatusCell row={r} /> },
     { key: 'category', label: 'Budget line', render: (r) => r.costCategory.name, optional: true },
     { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', render: (r) => formatDate(r.createdAt), optional: true },
-    { key: 'neededBy', label: 'Needed by', sortKey: 'neededBy', render: (r) => (r.neededBy ? formatDate(r.neededBy) : <span className="faint">—</span>), optional: true },
-    { key: 'amount', label: 'Amount', sortKey: 'amount', align: 'right', render: (r) => <span className="mono">{formatMoney(r.amount)}</span> },
     {
       key: 'amountReleased',
       label: 'Released',
       align: 'right',
+      optional: true,
       render: (r) => (r.amountReleased > 0 ? <span className="mono">{formatMoney(r.amountReleased)}</span> : <span className="faint">—</span>),
     },
+    { key: 'liquidationDueDate', label: 'Liquidate by', sortKey: 'liquidationDueDate', optional: true, render: (r) => <Deadline row={r} /> },
+  ];
+
+  const filters: FilterDef[] = [
+    { key: 'status', label: 'Status', options: STATUSES },
+    { key: 'pending', label: 'Pending', options: [{ value: 'true', label: 'Pending approval' }] },
+    { key: 'approved', label: 'Approved funds', options: [{ value: 'true', label: 'Approved and after' }] },
+    { key: 'overdue', label: 'Liquidation', options: [{ value: 'true', label: 'Overdue only' }] },
+    { key: 'requestedById', label: 'Requester', options: people.map((p) => ({ value: p.id, label: p.name })) },
     {
-      key: 'spent',
-      label: 'Spent',
-      align: 'right',
-      optional: true,
-      render: (r) => (r.liquidatedAt ? <span className="mono">{formatMoney(r.spent)}</span> : <span className="faint">—</span>),
+      key: 'teamId',
+      label: 'Team',
+      options: [...teams.map((t) => ({ value: t.id, label: `${t.code} — ${t.name}` })), { value: 'none', label: 'No team' }],
     },
-    { key: 'liquidationDueDate', label: 'Liquidate by', sortKey: 'liquidationDueDate', render: (r) => <Deadline row={r} /> },
-    { key: 'status', label: 'Status', render: (r) => <StatusCell row={r} /> },
+    { key: 'neededFrom', toKey: 'neededTo', label: 'Date needed', type: 'dateRange' },
   ];
 
   return (
@@ -184,18 +224,61 @@ export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
         listKey={finance ? 'fin-budget-requests' : 'budget-requests'}
         endpoint="/budget-requests"
         printPath="/api/budget-requests/pdf"
+        reportPath={finance ? '/g-fin/reports?kind=budget-requests' : undefined}
         columns={columns}
         rowKey={(r) => r.id}
+        reloadToken={reload}
         scoped={!finance}
-        searchPlaceholder="Search number, purpose, project, person…"
+        selectable
+        searchPlaceholder="Search BR no., purpose, project, requester…"
         onRowClick={(r) => navigate(`/g-ops/budget-requests/${r.id}`)}
         emptyTitle="No budget requests"
-        emptyHint="Raise one from a project's Budget Requests tab when the team needs cash in hand."
-        filters={[
-          { key: 'status', label: 'Status', options: STATUSES },
-          { key: 'overdue', label: 'Liquidation', options: [{ value: 'true', label: 'Overdue only' }] },
-        ]}
+        emptyHint="Every request names a project — for office or operations cash, raise it against the operations budget's project."
+        filters={filters}
+        summary={(raw) => {
+          const sum = raw as unknown as RequestsSummary | undefined;
+          if (!sum) return null;
+          return (
+            <>
+              <Stat label="Sum of all budget requests" value={formatMoney(sum.total)} figure sub={`${sum.count} request${sum.count === 1 ? '' : 's'}, rejected and cancelled left out`} />
+              <Stat label="Approved funds" value={formatMoney(sum.approved)} figure accent="ok" sub={`${sum.approvedCount} approved`} to={`${finance ? '/g-fin' : '/g-ops'}/budget-requests?approved=true`} />
+              <Stat
+                label="Pending approval"
+                value={formatMoney(sum.pending)}
+                figure
+                accent={sum.pending > 0 ? 'warn' : undefined}
+                sub={`${sum.pendingCount} waiting`}
+                to={`${finance ? '/g-fin' : '/g-ops'}/budget-requests?pending=true`}
+              />
+              <Stat
+                label="To release"
+                value={formatMoney(sum.toRelease)}
+                figure
+                sub={`${sum.toReleaseCount} approved, not yet released`}
+                to={`${finance ? '/g-fin' : '/g-ops'}/budget-requests?status=APPROVED`}
+              />
+            </>
+          );
+        }}
+        actions={
+          can('gops.budget_requests.create') ? (
+            <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
+              + Add budget request
+            </button>
+          ) : null
+        }
       />
+
+      {adding && (
+        <BudgetRequestModal
+          onClose={() => setAdding(false)}
+          onSaved={(id) => {
+            setAdding(false);
+            setReload((r) => r + 1);
+            navigate(`/g-ops/budget-requests/${id}`);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -206,6 +289,159 @@ export function BudgetRequests() {
 
 export function FinanceBudgetRequests() {
   return <BudgetRequestsList finance />;
+}
+
+/**
+ * Budget Liquidations — the owner's module 5 (2026-10-15): the requests
+ * whose cash went out, as the liquidation account reads them — released,
+ * spent, the return — with the next step on each row: the requester's
+ * "Actual entry" (the itemised liquidation, its receipts attached) while it
+ * is out, finance's "Process" (the refund) while unspent cash is owed back.
+ * The same rows as the register, narrowed to `released=true`.
+ */
+export function FinanceLiquidations() {
+  const navigate = useNavigate();
+  const { me } = useAuth();
+  const teams = useTeams();
+  const { people } = usePeople('gops.budget_requests.create');
+  const ret = (r: BudgetRequest) => (r.liquidatedAt ? Math.max(0, Math.round((r.amountReleased - r.spent) * 100) / 100) : null);
+
+  const columns: Column<BudgetRequest>[] = [
+    { key: 'number', label: 'BR No.', sortKey: 'number', width: '150px', render: (r) => <span className="mono">{r.number}</span> },
+    {
+      key: 'requestedBy',
+      label: 'Requester / Team',
+      render: (r) => (
+        <div>
+          <div>{r.requestedBy.name}</div>
+          <div className="faint">{r.team?.label ?? '—'}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'job',
+      label: 'Project / Purpose',
+      render: (r) => (
+        <div>
+          <div>{r.reason}</div>
+          <div className="faint mono">{r.job.number}</div>
+        </div>
+      ),
+    },
+    { key: 'amountReleased', label: 'Released', align: 'right', render: (r) => <span className="mono">{formatMoney(r.amountReleased)}</span> },
+    {
+      key: 'spent',
+      label: 'Spent',
+      align: 'right',
+      render: (r) =>
+        r.liquidatedAt ? (
+          <span className="mono">{formatMoney(r.spent)}</span>
+        ) : r.liquidation ? (
+          <span className="faint">{formatMoney(r.liquidation.total)} filed</span>
+        ) : (
+          <span className="faint">—</span>
+        ),
+    },
+    {
+      key: 'return',
+      label: 'Return',
+      align: 'right',
+      render: (r) => {
+        const back = ret(r);
+        return back === null ? <span className="faint">—</span> : <span className="mono">{formatMoney(back)}</span>;
+      },
+    },
+    { key: 'status', label: 'Status', render: (r) => <StatusCell row={r} /> },
+    {
+      key: 'actions',
+      label: 'Actions',
+      render: (r) => {
+        const go = (act: string) => (e: React.MouseEvent) => {
+          e.stopPropagation();
+          navigate(`/g-ops/budget-requests/${r.id}?act=${act}`);
+        };
+        if (r.status === 'RELEASED' && !r.liquidation && r.requestedBy.id === me?.user.id) {
+          return (
+            <button type="button" className="btn btn-sm" onClick={go('liquidate')}>
+              Actual entry
+            </button>
+          );
+        }
+        if (r.status === 'REFUND_DUE' && r.refundOutstanding > 0) {
+          return (
+            <button type="button" className="btn btn-sm" onClick={go('refund')}>
+              Process
+            </button>
+          );
+        }
+        if (r.status === 'RELEASED' && r.liquidation) return <span className="faint">Liquidation {humanise(r.liquidation.status).toLowerCase()}</span>;
+        if (r.status === 'RELEASED') return <Deadline row={r} />;
+        return <span className="faint">—</span>;
+      },
+    },
+  ];
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h1>Budget Liquidations</h1>
+        </div>
+      </div>
+      <DataList<BudgetRequest>
+        listKey="fin-budget-liquidations"
+        endpoint="/budget-requests"
+        printPath="/api/budget-requests/pdf"
+        reportPath="/g-fin/reports?kind=liquidations"
+        initialFilters={{ released: 'true' }}
+        columns={columns}
+        rowKey={(r) => r.id}
+        scoped={false}
+        selectable
+        searchPlaceholder="Search BR no., purpose, project, requester…"
+        onRowClick={(r) => navigate(`/g-ops/budget-requests/${r.id}`)}
+        emptyTitle="No cash out yet"
+        emptyHint="A budget request appears here once finance releases its cash."
+        filters={[
+          {
+            key: 'status',
+            label: 'Status',
+            options: STATUSES.filter((st) => ['RELEASED', 'REFUND_DUE', 'LIQUIDATED'].includes(st.value)),
+          },
+          { key: 'overdue', label: 'Liquidation', options: [{ value: 'true', label: 'Overdue only' }] },
+          { key: 'requestedById', label: 'Requester', options: people.map((p) => ({ value: p.id, label: p.name })) },
+          {
+            key: 'teamId',
+            label: 'Team',
+            options: [...teams.map((t) => ({ value: t.id, label: `${t.code} — ${t.name}` })), { value: 'none', label: 'No team' }],
+          },
+        ]}
+        summary={(raw) => {
+          const sum = raw as unknown as RequestsSummary | undefined;
+          if (!sum) return null;
+          return (
+            <>
+              <Stat
+                label="Sum of all liquidation accounts"
+                value={formatMoney(sum.released)}
+                figure
+                sub={`Released · ${formatMoney(sum.spent)} spent on the liquidated`}
+              />
+              <Stat label="Total excess returned" value={formatMoney(sum.returned)} figure accent="ok" sub="unspent cash handed back" />
+              <Stat
+                label="Still owed back"
+                value={formatMoney(sum.owedBack)}
+                figure
+                accent={sum.owedBack > 0 ? 'warn' : undefined}
+                sub={`${sum.refundDueCount} to process`}
+                to="/g-fin/budget-liquidations?status=REFUND_DUE"
+              />
+            </>
+          );
+        }}
+      />
+    </div>
+  );
 }
 
 // ── Raising one ──────────────────────────────────────────────────────────────
@@ -223,12 +459,13 @@ export interface RequestProject {
  * to ask by then.
  */
 export function BudgetRequestModal({
-  job,
+  job: jobProp,
   existing,
   onClose,
   onSaved,
 }: {
-  job: RequestProject;
+  /** The project it is for; G-FIN's "+ Add budget request" leaves it to be picked. */
+  job?: RequestProject;
   existing?: BudgetRequest;
   onClose: () => void;
   onSaved: (id: string) => void;
@@ -236,8 +473,11 @@ export function BudgetRequestModal({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const [projects, setProjects] = useState<{ id: string; number: string; name: string }[]>([]);
+  const [pickedJob, setPickedJob] = useState('');
+  const job: RequestProject | null = jobProp ?? (pickedJob ? { id: pickedJob, number: projects.find((p) => p.id === pickedJob)?.number ?? '' } : null);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>(
-    (job.position ?? []).map((p) => ({ id: p.costCategoryId, name: p.name })),
+    (jobProp?.position ?? []).map((p) => ({ id: p.costCategoryId, name: p.name })),
   );
   const [form, setForm] = useState({
     costCategoryId: existing?.costCategory.id ?? '',
@@ -248,17 +488,33 @@ export function BudgetRequestModal({
   });
 
   useEffect(() => {
-    if (job.position) return;
-    // The project's own budget lines — the same list its Budget tab shows.
+    if (jobProp) return;
     api
-      .get<{ position: { costCategoryId: string; name: string }[] }>(`/jobs/${job.id}`)
+      .get<typeof projects>('/budget-requests/projects')
+      .then(setProjects)
+      .catch(() => setProjects([]));
+  }, [jobProp]);
+
+  const jobId = job?.id ?? '';
+  useEffect(() => {
+    if (!jobId || jobProp?.position) return;
+    // The project's own budget lines — the same list its Budget tab shows;
+    // a reader who may not open projects is offered every active line.
+    api
+      .get<{ position: { costCategoryId: string; name: string }[] }>(`/jobs/${jobId}`)
       .then((j) => setCategories(j.position.map((p) => ({ id: p.costCategoryId, name: p.name }))))
-      .catch(() => {});
-  }, [job.id, job.position]);
+      .catch(() =>
+        api
+          .get<{ id: string; name: string }[]>('/reference/cost-categories')
+          .then(setCategories)
+          .catch(() => {}),
+      );
+  }, [jobId, jobProp?.position]);
 
   async function save(submitNow: boolean) {
     setBusy(true);
     setError(null);
+    if (!job) return;
     const body = {
       jobId: job.id,
       costCategoryId: form.costCategoryId,
@@ -272,7 +528,7 @@ export function BudgetRequestModal({
         ? await api.put<{ id: string }>(`/budget-requests/${existing.id}`, body)
         : await api.post<{ id: string }>('/budget-requests', body);
       if (submitNow) await api.post(`/budget-requests/${saved.id}/submit`);
-      toast('ok', submitNow ? 'Sent to the project manager' : existing ? 'Saved' : 'Saved as a draft');
+      toast('ok', submitNow ? 'Sent for approval' : existing ? 'Saved' : 'Saved as a draft');
       onSaved(saved.id);
     } catch (err) {
       setError(err);
@@ -280,7 +536,7 @@ export function BudgetRequestModal({
     }
   }
 
-  const valid = form.reason.trim().length >= 3 && form.amount > 0 && !!form.costCategoryId;
+  const valid = !!job && form.reason.trim().length >= 3 && form.amount > 0 && !!form.costCategoryId;
 
   return (
     <Modal
@@ -300,9 +556,29 @@ export function BudgetRequestModal({
       <ErrorBox error={error} />
       <p className="muted del-lede">
         Cash for the project team to buy what it needs without a purchase requisition. It goes to
-        the project manager, then finance, who releases it in one voucher. It is accounted for
+        the team leader, back support and the finance manager (and the CEO / President above
+        ₱100,000), then finance releases it in one voucher. It is accounted for
         afterwards with receipts, in Expenses — and only what was spent reaches the project.
       </p>
+
+      {!jobProp && (
+        <Field label="Project" required hint="Every request names a project — office or operations cash goes against the operations budget's project">
+          <select
+            value={pickedJob}
+            onChange={(e) => {
+              setPickedJob(e.target.value);
+              setForm((f) => ({ ...f, costCategoryId: '' }));
+            }}
+          >
+            <option value="">— choose —</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.number} — {p.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
 
       <Field label="What is the cash for?" required>
         <input
@@ -386,8 +662,8 @@ export function ProjectBudgetRequestsCard({
         )}
       </div>
       <p className="muted del-lede">
-        Cash for the team to buy what it needs without a purchase requisition. The project manager
-        allows it, finance releases it, and it is liquidated with receipts in Expenses — only what
+        Cash for the team to buy what it needs without a purchase requisition. The team leader, back
+        support and the finance manager allow it, finance releases it, and it is liquidated with receipts in Expenses — only what
         was spent reaches the budget, as incurred.
       </p>
       <ErrorBox error={error} />
@@ -513,6 +789,10 @@ export function BudgetRequestDetail() {
   const [error, setError] = useState<unknown>(null);
   const [reload, setReload] = useState(0);
   const [modal, setModal] = useState<null | 'edit' | 'release' | 'refund' | 'liquidate'>(null);
+  // `?act=liquidate|refund` — Budget Liquidations' "Actual entry" and
+  // "Process" land here with the form open, read once and dropped.
+  const [params, setParams] = useSearchParams();
+  const act = params.get('act');
 
   /*
     Back goes to the project's Budget Requests tab for the project side, and
@@ -539,6 +819,14 @@ export function BudgetRequestDetail() {
     load();
   }, [load]);
 
+  useEffect(() => {
+    if (!row || !act) return;
+    if (act === 'liquidate' || act === 'refund') setModal(act);
+    const next = new URLSearchParams(params);
+    next.delete('act');
+    setParams(next, { replace: true });
+  }, [row, act, params, setParams]);
+
   if (error && !row) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
 
@@ -563,7 +851,7 @@ export function BudgetRequestDetail() {
   async function submit() {
     try {
       await api.post(`/budget-requests/${id}/submit`);
-      toast('ok', 'Sent to the project manager');
+      toast('ok', 'Sent for approval');
       done();
     } catch (err) {
       setError(err);
@@ -602,7 +890,7 @@ export function BudgetRequestDetail() {
               {row.job.number}
             </Link>{' '}
             {row.job.name} · {row.costCategory.name}
-            {row.job.projectManager && <> · project manager {row.job.projectManager.name}</>}
+            {row.job.projectManager && <> · Technical Manager {row.job.projectManager.name}</>}
           </>
         }
         actions={
@@ -676,13 +964,14 @@ export function BudgetRequestDetail() {
           />
         </div>
       )}
+      <DecisionNote documentType="budget_request" documentId={row.id} reloadToken={reload} />
       {row.status !== 'DRAFT' && <DocumentApproval documentType="budget_request" documentId={row.id} reloadToken={reload} />}
 
       <ErrorBox error={error} />
 
       {row.status === 'DRAFT' && <div className="alert info">A draft. Nothing happens until it is submitted for approval.</div>}
       {row.status === 'PENDING_APPROVAL' && (
-        <div className="alert info">With the project manager, then finance. Nothing is charged to the project until it is liquidated.</div>
+        <div className="alert info">Waiting for approval — the Approval panel says with whom. Nothing is charged to the project until it is liquidated.</div>
       )}
       {row.status === 'APPROVED' && (
         <div className="alert info">

@@ -1151,7 +1151,7 @@ export function PerformanceReport() {
               <table className="data">
                 <thead>
                   <tr>
-                    <th>Project manager</th>
+                    <th>Technical Manager</th>
                     <th className="right">Active</th>
                     <th className="right">Delivered</th>
                     <th className="right">On time</th>

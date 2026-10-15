@@ -69,7 +69,23 @@ four databases and four copies of "customer".
    offers Approve / Return / Reject only when `GET /approvals/history/…` says
    `canAct` (computed with `approversForStep`, never the requester), and posts
    to the same `POST /approvals/:id/act`. Never add a module's own approve
-   route.
+   route. **An APPROVED document can be pulled back to draft** (2026-10-16,
+   the owner's call: "every approval request can be pulled back, even fully
+   approved"): `reopenApproved()` in `shared/approvals.ts`, reached by `POST
+   /approvals/reopen/:documentType/:documentId { reason }` and the Approval
+   panel's "Pull back to draft" (offered when `GET /approvals/history` says
+   `canReopen`). Each module registers `onApprovalReopened(type, { may,
+   reopen })` beside its settle code: `may` is the preparer or edit_all;
+   `reopen` runs in the engine's transaction, refuses with a 400 naming what
+   stands on it (an order with goods received, an invoice issued, a
+   payment allocated, a project with work on it) or undoes what approval
+   did — ledger rows reversed by negative rows, stock returned, the draft
+   invoice an invoice request raised deleted, the project a job order built
+   deleted while empty — and puts the document back to draft. The request
+   closes CANCELLED with `reopenedAt`, `reopenedById`, `reopenReason`
+   (its signatures kept), audited, its signers and requester told;
+   `DecisionNote` says "Pulled back to draft after approval by …". Every
+   routed document type has a handler.
 3. **A requester can never approve their own document.** Enforced in `act()`,
    before the eligibility check, and for super admins too. The one thing
    that looks like an exception is not a decision: on a route with
@@ -142,12 +158,13 @@ four databases and four copies of "customer".
    route names in a table head or a total; `statusLabel()` is how an enum
    prints ("Pending approval"); `formatDate` is a record's date ("October 9,
    2026"), `formatShortDate` a list's (MM/DD/YYYY); a quantity is `formatQuantity` ("4,704", "0.5" — thousands separators, three decimals at most, no trailing zeros), on the quotation and sales order papers and in both designed samples.
-   **The quotation and the sales order are designed documents.** Each
+   **The quotation, the sales order and the costing are designed
+   documents** (the costing since 2026-10-13). Each
    layout is DATA — boxes on an A4 page that an administrator places in
    Admin › PDF Templates — and prints through `renderDesigned(design, data)`
    in `shared/pdfDesign.ts`, the same engine's other door. The module still
-   draws nothing: `quotationPrintData()` / `salesOrderPrintData()` supply
-   fields, rows, totals and signatories; the engine places every box, keeps
+   draws nothing: `quotationPrintData()` / `salesOrderPrintData()` /
+   `costingPaper()` supply fields, rows, totals and signatories; the engine places every box, keeps
    the dated sign-offs, and puts every string through `pdfSafe`. A layout
    carries its `orientation`: the sales order's standard is LANDSCAPE, in the
    quotation template's dress, because the cost and margin columns do not
@@ -169,7 +186,11 @@ four databases and four copies of "customer".
    (`components/Menu.tsx`, the board's menu moved there) with Columns, Export
    CSV, Print (`printPath`, sent the list's own query), Save view and Refresh
    on the right. Never put a tool button back on the toolbar line. Filters open
-   in a panel and show as removable chips; a filter is a select, a
+   in a panel and show as removable chips ON the toolbar line, after Filters
+   (2026-10-12): the chips are one block that fills what is left of the line
+   and wraps inside itself, the search box keeps its 280px, and the ⋯ menu is
+   pinned to the line's right end (`.list-lead`, `.list-chips-inline`,
+   `.list-toolbar-main`); a filter is a select, a
    `dateRange` (two keys) or a `lookup` (`search` + `describe`).
    **No tab strip and no totals row** (2026-10-08, the owner's call: "remove
    this line in all, not necessary" / "instead it become a summary card at
@@ -505,7 +526,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,897 assertions across twenty-two scripts** (counted 2026-10-12, after
+**4,401 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -542,12 +563,39 @@ foundation and 4 on sales for the sales order paper of the owner's slide, and
 that remember, and 2 on foundation and 9 on sales for the attachments printed
 behind the quotation and the sales order, and 9 on sales and 9 on pipeline
 for the Forecast's breakdowns and its date range, and 7 on sales and 12
-on pipeline for its tick-box filters and the comparison range):
+on pipeline for its tick-box filters and the comparison range, and 6 on
+foundation and 5 on workspace for the paper's file name and the print
+ticket, and 7 on foundation, 2 on costing, 5 on chain and 4 on delivery for
+the routing sheet of 2026-10-13 and one signature per person, and 3 on
+accounts for a login email already in use, and 2 on sales for one name
+per person on the quotation's paper, and 5 on accounts for the admin's
+address moving once, and one on workspace for a print ticket reopened by
+a viewer extension, and 5 on sales for the supplier kept as a note, the
+selling roles' supplier right and Hold and Cancel's rules, 23 on costing for
+the Project Costing paper, the preloaded scope, the fixed price and the
+schedule of values, and 8 on pipeline for the board without its forecast
+column and Hold and Cancel's round trip, and for the owner's six of the
+evening of 2026-10-13: 2 on delivery for the S-curve's ticks, 6 on costing
+and 3 on delivery for Mon–Sat and the start and finish dates, 14 on
+meetings and 2 on calendar for the minutes and the map links, 17 on
+delivery and one on cad for the Request for Approval, 4 on costing for the
+costing's PDF template and 37 on hr for People Flow, and 2 on foundation
+for the Technical Manager on the preparer's team, and one on foundation
+for Back Support's own team, and 3 on foundation and 13 on chain for the
+purchase requisition page, and one on foundation and 9 on chain for the
+purchase order page, and one on foundation and 5 on costing for a line's
+supplier and note, and one on chain for an approved request not counted
+twice against its budget, and 2 on foundation for the owner's order of the
+divisions and G-CHAIN's strips, and 20 on chain for the Request for
+Quotation, and 8 on chain and one on foundation for the canvass sheet,
+and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
+borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction):
 foundation
-349, masters 92, sales 601, costing 157, pipeline 113, calendar 96, numbering
-79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
-97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
-insights 98, insights-brief 50, workspace 76, accounts 125. The
+373, masters 92, sales 617, costing 200, pipeline 121, calendar 98, numbering
+79, partners 120, delivery 183, chain 340, hr 480, plantilla 123, meetings
+115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
+insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -596,7 +644,8 @@ were found one at a time by documents refusing to submit — run this instead.
 `verify-sales.ts` checks the STANDARD designed layouts' wording, so it sets an
 administrator's saved quotation AND sales order layouts aside for the run
 (`pdfTemplate.<type>.__verify__`, Settings of their own) and `cleanup()` —
-which also runs first — puts them back. `verify-finance.ts` does the same
+which also runs first — puts them back; `verify-costing.ts` does the same
+with the costing's (`pdfTemplate.costing.__verify__`). `verify-finance.ts` does the same
 with the finance rules (`finance.rules.__verify__`): it changes the
 liquidation days to prove which rule a deadline read, and a run that dies
 leaves the stash for the next run's `cleanup()` to restore. `verify-hr.ts`
@@ -625,11 +674,18 @@ docker compose up -d
 Postgres is on host port **5433**, not 5432, so it cannot collide with an
 existing local install. Then `cd api && npm run dev` and `cd web && npm run dev`.
 
-Seeded admin: the seed creates `admin@gruntech.com` / `ChangeMe!2026` (or
-`SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`) **only on a fresh database** — when
-the account already exists it is left alone. The local dev database's admin
-password has since been changed, so that pair will not sign in here; use
-`npx tsx scripts/reset-password.ts admin@gruntech.com` if you need in.
+Seeded admin: the seed creates `gcore@gruntechnology.com` / `ChangeMe!2026` (or
+`SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`) **only on a database with no super
+admin at all** — never because the configured address is not on file, which
+would leave a second super admin on the known password. **The admin's address
+moved once** (2026-10-13, the owner's call): `moveAdminEmail()` in
+`shared/adminEmail.ts`, run by the seed on every deploy, gives the super admin
+signing in as `admin@gruntech.com` (or the old `SEED_ADMIN_EMAIL`) the address
+`gcore@gruntechnology.com` — same login, password and history, audited, marked
+in `seed.adminEmailMoved`; it waits, unmarked, while another login holds the
+new address. The local dev database's admin password has since been changed,
+so that pair will not sign in here; use
+`npx tsx scripts/reset-password.ts gcore@gruntechnology.com` if you need in.
 
 Re-running `npm run seed` is safe, and the rule it follows is worth knowing
 before you change it:
@@ -769,6 +825,24 @@ launcher as the way out) — never a stale phase sentence.
 - **The SOV must total the contract value.** `POST /costings/:id/sections/
   distribute` reconciles it, putting the rounding remainder on the last section
   so the sum is exact rather than a centavo out.
+- **A phase's value is spread, declared or priced from cost** (2026-10-13,
+  the owner's call: "the scope of work value editable to declare the value;
+  the materials cost is allocated to purchasing of materials, the equipment
+  cost to purchasing of equipment"). `ScopeSection.valueSource` — SPREAD
+  (the default, as before), DECLARED (typed, kept) or CATEGORY with
+  `costCategoryIds` (those buckets' cost priced as the sheet prices it:
+  cost × contract ÷ total cost, so the buckets together come to the
+  contract value) — and `scheduleOfValues()` in `costingMath.ts` (web
+  mirror, pinned by verify-costing) is the ONE rule: with the spread on,
+  what the declared and cost-priced phases leave is spread over the SPREAD
+  ones, exactly, and more than the contract holds is refused at save;
+  with it off, only cost-priced phases are worked out. `spreadSections()`
+  writes it on every save, the distribute route and a PATCH of the price;
+  a bucket on two phases is a 400. On the sheet each phase has a "Value"
+  select (Spread / Declared / From cost) with a `TickPicker` of buckets,
+  and typing a figure in a spread phase declares it. The preload's
+  PLANNING & ENGINEERING takes Materials and Equipment (`valueFrom` codes
+  in `SCOPE_PRELOAD`), its purchase tasks being where that money goes.
 - **No Opportunity entity.** The requirements treat the opportunity as the lead
   until a quotation exists, so the pipeline is a view over leads + quotations.
   Do not introduce a third record to keep in step.
@@ -832,6 +906,12 @@ launcher as the way out) — never a stale phase sentence.
 - **The S-curve's three lines share a time basis** — billed is plotted against
   the period its progress report covers, not the date the billing was raised.
   Otherwise comparing the lines is meaningless.
+- **The S-curve's date scale is labelled by TIME** (2026-10-13, the owner's
+  report: the labels overlapped): `curveTicks()` in `web/src/lib/sCurve.ts`,
+  DOM-free — the first and last dates always, evenly spaced dates between,
+  a label within 56 chart units of another dropped (the last date wins),
+  the year added when the span crosses one. Never one label per point:
+  progress reports cluster. verify-delivery pins it.
 
 ## Phase 6 notes worth carrying forward
 
@@ -1233,6 +1313,26 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   `manilaMonthKey`). Deep links and forecast columns bucket on these, never on
   the host clock, because the server's clock is not the business's day.
   Numbering keeps its local-getter `{YYYY}`/`{MM}`.
+- **The work week is Mon–Sat** (2026-10-13, the owner's call): Sunday is
+  the one day off (`DAY_OFF`, `isWorkingDow()` in `shared/day.ts`), for the
+  costing's plan, a project's dates, "Plan from costing" and a job order's
+  working days alike — `workingDaysBetween()` and `workingDayDate()` read it,
+  and `web/src/lib/day.ts` mirrors them on day keys (`workingDaysBetween`,
+  `workingDayKey`), pinned equal on every start in a month by verify-costing.
+  No holidays yet. Leave days (`leaveDays()` in `shared/hr.ts`) are HR's
+  own rule and still skip both weekend days. The project Gantt shades
+  Sunday alone (`.gantt-day.is-off`).
+- **A project's dates tally with its scope** (2026-10-13): `createJobRecord()`
+  places each scope item on the costing's own plan (`scopeDates()` in
+  `routes/jobs.ts` — `planTasks` put on working days from the start, both
+  ends inclusive; an unplanned phase sits on the day the phase before it
+  ends; a costing with no plan at all gives each phase one working day) and
+  takes the plan's last day as `targetEndDate` when none is given; POST
+  /jobs starts on the costing's `plannedStart` when the form names none,
+  and the form's hint names the finish. A target typed by hand is kept:
+  `GET /jobs/:id` sends `schedule` (`scheduleTally()`: `planFinish`,
+  `planDays`, `targetDays`, working days from the start) and the overview's
+  Schedule card shows both, saying where they differ.
 - **Today, for a DATE column, is `manilaDate(new Date())`** (`shared/day.ts`).
   Until 08:00 in Manila the UTC date is still yesterday's, and it arrives
   unasked three ways: `getUTC*`; a bare `new Date()` written into, or compared
@@ -1334,6 +1434,37 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **Employee routes live in `routes/employees.ts`, the employee import in
   `routes/imports/employees.ts`.** `imports.ts` exports `Registered`, so a module
   (the Academy's `courseImport`) is wired into `REGISTRY` with one line.
+- **A paper is saved under ONE name** (2026-10-12, the owner's call: "a
+  standard file name — document numbering, author, document's date";
+  `docs/notes/P-paper-names-and-chips-2026-10-12.md`):
+  `<Kind> <Number> R<n> - <Author> - <YYYY-MM-DD>.pdf` ("Quotation
+  0062602018 R0 - Carter Gasiong - 2026-10-08.pdf"), `paperFileName()` in
+  `shared/paperName.ts`, pure — the author is who prepared the document
+  (the owner, requester, filer: the paper's first sign-off), the date the
+  document's own on the Manila day; a list paper (`sendListPdf`) is its
+  kind, who printed it and today. Refused characters become "-", a missing
+  part drops out, `contentDisposition()` sends an ASCII `filename` and the
+  exact name in `filename*`. Every PDF route names its file through them;
+  never write a `Content-Disposition` for a PDF by hand. CSV and `.ics`
+  names are unchanged.
+- **The name reaches the browser through a PRINT TICKET**
+  (`shared/printTickets.ts`): `openPdf()` opened a nameless `blob:` URL,
+  so Save as offered a random id. Now it opens a tab inside the click,
+  asks `POST /api/pdf/tickets { path }` (a paper's address only: a `/pdf`
+  or `.pdf` path under /api) and points the tab at `path?ticket=…`.
+  The ticket is the liveness challenge's design — an HMAC with the JWT
+  secret over `userId.path.issuedAt.nonce`, two minutes, spent at its
+  first use (a map of spent nonces) and reopened only within
+  `TICKET_REUSE_MS` (a minute) after it — 2026-10-13, a user's report: the
+  WPS PDF extension fetches the tab's paper a second time itself and read
+  "Document Loading Failure" off a one-use ticket — the path compared in one spelling (`ticketPath()`, the
+  `ticket` parameter taken out). `authenticate` takes it in place of a
+  bearer on a GET of exactly that path, then every guard and audit row
+  runs as for a bearer; a second router under the same prefix keeps the
+  user the ticket resolved. Reused, expired, another path, another login
+  or a non-GET is a 401, and `errorMiddleware` answers a ticketed GET with
+  a small page saying why, never JSON. Reloading such a tab after the
+  minute is refused (the ticket is spent): print again from G-CORE.
 - **Shared web pieces from Phase 10**: `PeoplePicker` (pure UI over
   `{ id, name, sub?, group? }[]`), `MeetLink`, `SettingListCard` (the
   `/hr-settings/lists/:key` editor), `RecordHeader`'s `statusExtra`,
@@ -1648,10 +1779,14 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   (Total sum)" — mapped by POSITION onto SCORO's ladder (`COLUMN_TONE`:
   lead stages and drafted quotes = Opportunity cream, SUBMITTED =
   Negotiation orange, NEGOTIATION = Closing light green, WON = Confirmed
-  green, forecast yellow), tinted with the tone tokens' rgb values; a card
+  green), tinted with the tone tokens' rgb values; a card
   is the deal's name in bold, the company under it, the owner's face
   top-right (name in the tooltip and aria), and a footer of age against
-  amount. The field toggles still shape it.
+  amount. The field toggles still shape it. **The "This month forecast"
+  column is gone** (2026-10-13, the owner's call): `GET /pipeline` sends
+  no `forecast`, the board draws no such column and its CSV no such rows —
+  the Forecast menu consolidates closing dates. The optional "This month
+  forecast" tile (off by default) still reads `kpis.forecast*`.
 - **"Forecast deal" on the board is manual forecast input** (the owner's
   call): "+ New → Forecast deal" asks company, value, probability and
   expected closing and files a LEAD with `source: "Forecast"` — the
@@ -1712,6 +1847,32 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   the owner's bell says "moved to Closing (negotiation)" — the stage first,
   the step after it where the words differ. verify-pipeline asserts the
   board card, the list row and the page agree after a drop.
+- **Hold and Cancel on the Move menu** (2026-10-13, the owner's call).
+  **A quotation can be put on hold**: `ON_HOLD` is a `QuotationOutcome`,
+  NOT open — the forecast, the open counts and the open filters list
+  OPEN / SUBMITTED / NEGOTIATION and so leave it out; a leaver's clearance
+  counts it. It stands in the board's parked On hold column and the On
+  hold stage (`columnFor`, `quotationStages()` now lists HOLD; the board
+  query fetches held quotations), `allowedTargets` puts an open card on
+  hold and a held one back on an open stage or Lost — never straight to
+  Won — and its lead follows to ON_HOLD and back. SCORO's "Hold" imports
+  as ON_HOLD. **Cancel is Lost with a kind**, not a stage:
+  `Lead.lostKind` / `Quotation.lostKind` (`LostKind` LOST | CANCELLED,
+  null unless lost), set by the PATCH's `lostKind` through
+  `lostKindAfter()` (`shared/pipeline.ts` — LOST by default, cleared on
+  leaving Lost, a 400 without Lost); the lead takes its quotation's kind.
+  A cancelled one reads "Cancelled" wherever its stage is named
+  (`cancelledLabel()` in `routes/sales.ts` — the list rows, the quotation
+  page, the lead rows; "Cancelled because" on the pages, "Cancelled:" on
+  its card) and counts as NEITHER won nor lost: the board's `lostCount`
+  and Insights' lost counts, win rates and lost reasons leave it out
+  (`NOT_CANCELLED` in `routes/insights.ts`, null-safe), `cancelledCount`
+  and Sales Analytics' `cancelled` say how many; SCORO's "Cancelled"
+  imports cancelled. The Move menu offers "Put on hold" and "Cancel…"
+  (the reason asked in the confirm bar) in both views; the quotation page
+  has "Cancel quotation" and the lead page "Cancel lead" in ⋯ beside
+  Mark lost, and the quotation list's Change status gains On hold and
+  Cancelled.
 - **The move rules are `assertLeadStatusChange` / `assertOutcomeChange`** in
   `shared/pipeline.ts`, called from the PATCH routes; the board's drop targets
   come from `allowedTargets()` on the same rules. Do not add a board-only move
@@ -2035,7 +2196,7 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   raises it for a customer with its LINKS — the quotation (any one still on,
   **one under negotiation included**), the sales order and/or the project —
   the project's name, the contact and their number, the **target start and
-  target finish** (the working days between them are `workingDaysBetween()`
+  target finish** (the working days, Mon–Sat, between them are `workingDaysBetween()`
   in `shared/day.ts`, computed and never stored; `requestedFor` mirrors the
   start so one index serves both shapes), the **scope of work in one box**,
   the amount, Customer PO, and the **personnel to send**: project manager,
@@ -2048,14 +2209,25 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   costing stands behind it, and the customer's live sales orders); a sales
   order must book the quotation the order keeps. "Mine" is what you raised
   OR are sent on (`mineWhere`).
-- **The route is the project manager named ON THE ORDER, then the
+- **A job order's route stays inside the preparer's team, never the CEO**
+  (2026-10-16, the owner's report: Brian Jay, UIT's Technical Manager, was
+  not on his own order and it went to the CEO): the route has
+  `preparerSigns` and `standIns` (once, `seed.jobOrderPreparerSigns`), its
+  Team Leader step falls back to `team_leader` (was `sales_manager`), and
+  `holdsStep` counts a PROJECT_MANAGER step as the preparer's when the order
+  names them as its Technical Manager, or names none and they hold the role
+  — so a Technical Manager / Team Leader signs his own order's steps at
+  submit.
+- **The route is the Technical Manager named ON THE ORDER, then the
   salesperson's team leader**: seeded "Job order — project manager then
-  team leader" — step 1 the engine's PROJECT_MANAGER type reading the
-  request's own `projectManagerId` (`ApprovalRequest.projectManagerId`,
+  team leader" (the name kept, so the seed finds it) — step 1 "Technical
+  Manager", the engine's PROJECT_MANAGER type reading the request's own
+  `projectManagerId` (`ApprovalRequest.projectManagerId`,
   `ApprovalContext.projectManagerId`, read before the job's; `ctxOf(request)`
-  is what every engine read passes; `project_manager` role when none is
-  named or the PM raised it), step 2 SUPERVISOR falling back to
-  `sales_manager`. "Job order — service manager" is RETIRED.
+  is what every engine read passes; the `technical_manager` role on the
+  requester's team when none is named or they raised it), step 2
+  SUPERVISOR falling back to `sales_manager`. "Job order — service
+  manager" is RETIRED.
 - **Approval BUILDS THE PROJECT** (the owner's choice over booking a visit):
   `settleJobOrder` claims PENDING_APPROVAL → APPROVED with a conditional
   `updateMany`, then — for an order with no project yet — reads the linked
@@ -2073,9 +2245,35 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   posts no cost**; cost reaches its project through overtime, PRs, stock
   issues and claims. Orders raised as service calls before keep their
   visit: the report on it still completes the order in `onReportSettled`.
-- **The amount is the linked document's NET** (the sales order's, else the
-  quotation's value revision's: subtotal less discount, before VAT — the
-  invoice adds VAT) unless somebody typed one.
+- **The list is the owner's sample** (2026-10-16): JO No., Date requested,
+  Requester, Assigned personnel (`assignedToId`, one login — who does the
+  work), Team (`JobOrder.teamId`, the requester's unless picked),
+  Task / scope summary (`title` over project and customer), Amount and
+  Status in his words — `stageLabel`: Draft, TM Approval / TL Approval
+  (the open step, `stageWords`), Accepted (approved, no project), In
+  Progress (its project running), Done, Returned, Cancelled. Cards: Total
+  job orders, Pending approval, In progress, Total value (under the
+  visibility and scope, never the filters). Filters add requester,
+  assigned personnel and date requested; `status` takes several,
+  comma-separated. "+ New Job Order Request" opens the form with Team,
+  Assigned personnel and Task first; **Submit Job Order Request** saves and
+  sends it in one click ("Save as draft" beside it). **Generate Report** is
+  the shared dialog over `GET /job-orders/pdf` and `GET /job-orders/csv`.
+  The customer stays required (approval builds a project for it).
+- **The amount is the LABOR CHARGE to Project Management** (2026-10-16,
+  the owner's call): by default the Labor bucket (`LAB`) of the costing
+  behind the linked quotation (`costingLabor()` in `routes/jobOrders.ts`;
+  `/job-orders/options` sends each quotation's `labor`), else the linked
+  document's net as before. **The Technical Manager's approval agrees a
+  different Amount** (2026-10-16, the owner's call, replacing the hard
+  tally of the day before): `laborTally()` reads the Amount against the
+  costing's Labor cost and nothing refuses a difference; `GET /:id` sends
+  `laborTally` (the page's "Costing Labor" row, the difference said) and,
+  once approved, `settleJobOrder` builds the project and records the
+  agreement — `JobOrder.laborCostingAmount`, `laborAgreedById` (who signed
+  step 1), `laborAgreedAt`, the "Amount agreed" row and the trail. The
+  label stays "Amount" (the owner's call); the form's hint says it is the
+  labor charge and names the costing's Labor figure.
 - **`/job-orders/options` feeds the form's pickers** behind the form's own
   permission; the people come from `/users/lookup`. The PDF prints the
   project, the links and amount, the scope, the personnel, and the route's
@@ -2091,13 +2289,36 @@ team, consolidating job orders: attach files, revision traceability, the
 designer updates the status by percentage, the requestor comments for
 changes, the designer sets the priority; there is a Designer Lead and a
 Designer Support; the output is always a PDF for the requestor".
-`/g-ops/cad-job-orders` under Project Management (Costing · Job Orders ·
-**CAD J.O.** · Projects — pinned by verify-foundation), `gops.cad_job_orders`,
+`/g-ops/cad-job-orders` under Project Management (Costing · Projects · Job
+Orders · **CAD J.O.** since 2026-10-14 — pinned by verify-foundation), `gops.cad_job_orders`,
 `routes/cadJobOrders.ts`, `pages/delivery/CadJobOrders.tsx`,
 `styles/cad.css`, numbering type `cad_job_order` (CJO), verify-cad.
 
-- **It is work, not a decision: no approval route, no money.** Nothing here
-  touches `shared/approvals.ts`. The rights are the registry's eight with
+- **The requester's Team Leader approves it first** (2026-10-16, the
+  owner's sample: "Initial status: TL Approval"; it was "no approval
+  route" before). A new request is DRAFT; "Request for Approval" (`POST
+  /:id/submit`, in the requester's name) sends it through the one engine —
+  seeded "CAD J.O. — team leader" (SUPERVISOR, fallback `team_leader` on
+  the team, `preparerSigns`, `standIns`) — as PENDING_APPROVAL ("TL
+  approval"); `settleCadJobOrder()` puts an approved one into the queue as
+  REQUESTED and only then tells the design team; a return or rejection is
+  DRAFT again; `/withdraw` pulls it back, `/cancel` withdraws an open
+  request in the same transaction; a draft may be deleted. With the route
+  switched off, submit goes straight to REQUESTED. `GET /:id` lets the
+  deciding Team Leader in through `mayDecide`. A request carries `teamId`
+  (the requester's unless picked), an optional `amount` (PHP), a planned
+  **Start date** on the form (`plannedStart`, never after the target date to
+  finish; the page and the paper show it) and
+  `startedAt` (stamped when first taken or assigned — "Date started"). The
+  list's cards add TL approval and Total value; **the Progress cell is the
+  ASSIGNED designer's slider** (`canProgress` per row; the lead no longer
+  reports progress), and saving 100% moves it to FOR_REVIEW and tells the
+  requestor. **Generate Report** (`components/ListReport.tsx`, shared with
+  Job Orders): requester, team, designer, date requested
+  (`createdFrom`/`createdTo`, Manila days) and several statuses (`status`
+  comma-separated) — the list's own `GET /pdf` or `GET /csv`. Otherwise the
+  rights below hold: still no money posted, and the rest of the lifecycle
+  is the design team's. The rights are the registry's eight with
   two of them given a meaning: **`edit_all` is the design team** (Designer
   Lead and Designer Support, seeded roles `designer_lead` and `designer`;
   assign both in Admin › Users) — progress, revisions and priority on what
@@ -2148,13 +2369,16 @@ Designer Support; the output is always a PDF for the requestor".
   admins are not designers). **Attachment guards** on the three entity
   types apply the request's own visibility (`mayOpen`: view_all, or the
   requestor or the designer on it).
-- **One click files the accepted revision as an Approved Plan** on the
-  linked project (`POST /:id/file-plan`, once, `CadJobOrder.approvedPlanId`
-  unique): a FOR_APPROVAL plan with the request's number as drawing number,
-  `R<n>` as revision, the drawing type as discipline, and the revision's
-  files COPIED onto `approved_plan` — a copy, because deleting an attachment
-  row unlinks its bytes and the revision keeps its own. The plan is then the
-  project's to approve, as any other.
+- **One click raises the accepted revision as a Request for Approval** on
+  the linked project ("Raise request for approval"; `POST /:id/file-plan`,
+  once, `CadJobOrder.approvedPlanId` unique, claimed on null): a numbered
+  DRAFT request with the CAD J.O.'s number as its drawing reference, `R<n>`
+  as revision, the drawing type as discipline, and the revision's files
+  COPIED onto `approved_plan` — a copy, because deleting an attachment row
+  unlinks its bytes and the revision keeps its own. `requestFromCad()` in
+  `routes/planApprovals.ts` is the one way, shared with the request form's
+  "From a CAD J.O."; the page opens the new request for its requester to
+  submit.
 - **Drawing types are data** (`CadDrawingType`, Admin › Categories ›
   Drawing types, `/reference/cad-drawing-types`, `admin.categories.*` to
   change, anyone signed in to read): `CAD_DRAWING_TYPES` in
@@ -2271,8 +2495,14 @@ leave the approver deciding on stale figures).
   under the old rule (released, spent and liquidated at their own amount on
   the day they were approved, a note saying so; their ledger rows stay) so
   they do not sit in finance's "to release" queue for ever.
-- **The route is the project's manager, then finance** — the seeded
-  "Budget Request — project manager then finance". Step 1 is the engine's
+- **The route is the routing sheet's since 2026-10-13**: Team Leader
+  (the requester's "Reports to", else a Team Leader), Admin Back Support
+  (the holders supporting the requester's team), Finance Manager, and the
+  CEO / President above ₱100,000 — see "The routing sheet of 2026-10-13".
+  The project's manager is no longer a step; "Budget Request — project
+  manager then finance" is RETIRED. What follows is how that route worked,
+  and how the engine's PROJECT_MANAGER type still works for the job order:
+  step 1 was the engine's
   new **`PROJECT_MANAGER` approver type**: the manager the document's job
   names (`ApprovalRequest.jobId`, set by `submitForApproval({ jobId })`,
   read by `approversForStep(step, requesterId, tx, { jobId })` everywhere —
@@ -2438,6 +2668,48 @@ leave the approver deciding on stale figures).
   people were told.
 - **Visibility is one function, `visibleWhere(user)`**; a `view_own` holder who is
   not on the list gets a 404. Only the invitee answers for themselves.
+- **The attendees agree the minutes** (2026-10-14, the owner's call:
+  "approval of attendees agreeing the minutes" — only those who said
+  Going). `Meeting.minutesStatus` DRAFT → FOR_AGREEMENT → AGREED,
+  `minutesRound`, `minutesSentAt`, `minutesAgreedAt`; `MinutesAgreement`
+  (meeting × round × user, PENDING / AGREED / CHANGE_ASKED with a
+  comment), never deleted. `POST /meetings/:id/minutes/send` — the
+  organiser or `edit_all` (`mayLeadMinutes`), written minutes, at least one
+  invitee ACCEPTED (the organiser aside) — opens a round, each attendee
+  told (`minutes.to_agree`); `POST …/minutes/respond { response, comment }`
+  is the asked attendee's own (a change needs words), changeable while the
+  round is open; the last agreement closes it AGREED and tells the
+  organiser, as does every change asked (`minutes.answered`). Once sent,
+  only the organiser changes the minutes, and a change sets the round
+  aside (DRAFT, its rows kept) to send again. **Not the approval engine**:
+  the minutes are a record the people who were there sign, not a document
+  a role decides (rule 2 is about documents). `GET …/minutes/pdf` is the
+  Minutes of Meeting paper (the meeting's Print): MEETING DETAILS,
+  agenda, minutes, attendance, Prepared by and one ATTENDEE sign-off each,
+  "Pending" until agreed. verify-meetings pins it.
+- **Minutes of meeting** (2026-10-13, the owner's call: "so anyone can back
+  track what have been talked about"): `Meeting.minutes`, `minutesAt`,
+  `minutesBy` — ONE text, replaced whole by `PUT /meetings/:id/minutes`,
+  in the **Minutes of meeting** card under the Agenda (written in the card,
+  never a dialog). `minutesProblem()` is the one rule for the route and the
+  page's `canWriteMinutes`: the organiser, anyone invited or `edit_all`;
+  never before the start (409), never on a cancelled meeting (409). An
+  empty save clears all three. Each save audits (the length, never the
+  text); everyone on the meeting but the writer is told once per Manila day
+  of edits ("Minutes: …"). The list and Ctrl+K search the minutes, list rows
+  carry `hasMinutes`, and a project's Meetings & Records shows a Minutes
+  column. Files stay on the Documents card. Attendance is still the
+  invitees' answers — no roll call.
+- **A place is tagged by a link** (2026-10-13, "allow Google Map tagging";
+  no Google credentials): `Meeting.mapUrl` and `SalesActivity.mapUrl`,
+  http(s) only (`safeHttpUrl`), pasted in the form's "Google Maps link"
+  beside Where / Address, whose hint opens Google Maps on the place typed.
+  `mapLinkFor(place, mapUrl)` (`shared/calendar-links.ts`) is the one rule —
+  the link, else Google Maps' search for the address, else nothing — and
+  `components/MapLink.tsx` its twin on the page ("Open in Google Maps ↗" /
+  "Find on Google Maps ↗"). A tagged place rides in the meeting's `.ics` and
+  Google hand-off description, the activity's hand-off and its invitation
+  email ("Map: …"); `maskPrivate` hides an activity's map with its address.
 
 ### Academy
 
@@ -2587,6 +2859,18 @@ receive the tickets".
   new record's Save follows the branch — `create` for a new person,
   `edit_all` for one on the register); `UserEditor` in
   `pages/admin/Users.tsx` only modifies.
+- **A login email already in use says whose it is** (2026-10-13, the
+  owner's report: "i can't add employee in the user" — Karen's login had
+  been made before her employee record, and the form only said "Someone
+  already uses that email address"). `assertLoginEmailFree()` in
+  `routes/employees.ts` runs before anything is written on `POST
+  /employees { login }` and `POST /employees/:id/login`: a 409 whose
+  `details[0].existingLogin` names the login and `linkable` — true when
+  it has no employee (the form then offers **Link the existing login**,
+  the same save with `userId` in place of `login`, its roles and
+  "Reports to" kept), false when it is another employee's (the message
+  names their number: open that record instead). `createLogin()` keeps
+  its own check for any other caller.
 - **No password is typed for a new person — they are invited.** `invitePending`
   marks the account; its password hash is of random bytes nobody sees. The
   invitation (7 days), a self-service reset (1 hour) and an admin-issued reset
@@ -3092,6 +3376,17 @@ SCORO.
   total ÷ quantity to the centavo (`CostCell` keeps the typed total while
   the box has focus and shows the derived one after); only the unit cost
   is sent and the server derives the amount, as before.
+  **A supplier not on file** (2026-10-13, the owner's call): once the
+  provider lookup has answered for what is typed, the menu ends with
+  "add “X” as a new supplier" for a `gchain.suppliers.create` holder (the
+  ordinary `POST /suppliers { name }`, then picked — the seed gives the
+  right to sales, sales managers, team leaders and industry specialists),
+  else "keep “X” as a note on this line", which writes `Supplier: X` into
+  the line's cost note (`withSupplierNote()`, `web/src/lib/supplierNote.ts`,
+  the SCORO import's words) and adds nothing to the master; "could not be
+  listed" when the lookup failed — SupplierPicker's rules, in
+  `ProviderLookup` (`editorParts.tsx`), so the sales order editor has it
+  too.
 
 ## Quotation groups (2026-10-06; required since 2026-10-08)
 
@@ -3150,9 +3445,96 @@ SCORO.
   "No group" is last. The pipeline CSV appends a Groups column. Verify
   scripts tag their test groups (`ZZSALES …`) and delete them by `key`.
 
-## Approval by who prepared it (2026-10-11; one route since 2026-10-12)
+## Approval by who prepared it (2026-10-11; one route since 2026-10-12; six documents since 2026-10-13)
 
-The owner's routing sheet ("APPROVAL ROUTER — SALES ORDER AND QUOTATION").
+The owner's routing sheets ("APPROVAL ROUTER — SALES ORDER AND QUOTATION", then
+`APPROVAL_ROUTE.xlsx` for six documents).
+
+### The routing sheet of 2026-10-13 — six documents, one signature per person
+
+The owner's `APPROVAL_ROUTE.xlsx` (`docs/notes/P-approval-routes-2026-10-13.md`):
+every row of a block names the same approvals whoever prepared it, so each
+document is ONE route (two where an amount band adds the CEO / President),
+every one with `preparerSigns` and `standIns`:
+
+| Document | Route | Retired |
+|---|---|---|
+| Quotation | Team Leader; CEO / President above ₱1,000,000 | — (unchanged) |
+| Sales order | Team Leader › Back Support › Cost Controller › CEO / President | — (unchanged) |
+| Costing | Technical Manager › Team Leader | "… team leader, CTG" |
+| Purchase requisition | Technical Manager › Team Leader, no band | the ₱50,000 bands |
+| Purchase order | Purchasing Manager; CEO / President above ₱100,000 | "… project manager then finance" |
+| Budget request | Team Leader › Admin Back Support › Finance Manager; CEO / President above ₱100,000 | "… project manager then finance" |
+
+"More than" is strict: ₱100,000.00 takes the shorter route (`minAmount`
+100,000.01 on the longer one; verify-chain and verify-delivery pin the
+edge). A Team Leader step is the preparer's "Reports to", else a Team
+Leader on their team, else any (`leadersFor`); Back Support is team-scoped
+(`supportersFor`). **A Technical Manager step goes to the Technical Manager
+on the preparer's own team** (2026-10-13, the owner's report: Ivan's HIT
+costing waited on every Technical Manager, where Ricardo alone handles
+HIT): `OWN_TEAM_ROLES` in `shared/approvals.ts` (`technical_manager`) sends
+a ROLE step naming it through `leadersFor` — the holders whose
+`Employee.industryId` (the Team on Admin › Users) is the preparer's, else
+every holder, never nobody. It covers the costing, the purchase requisition
+and the Request for Approval alike, and reads live, so a request already
+pending follows it. A Technical Manager with no Team is only ever the
+fallback. Back Support follows the same rule, its "Supports teams"
+ticks replacing the holder's own team (`supportersFor`).
+
+- **Two new roles**, seeded from the role whose work they manage:
+  `purchasing_manager` **Purchasing Manager** (Procurement's rights) and
+  `finance_manager` **Finance Manager** (Finance's, plus raising budget
+  requests). Procurement and Finance stay for the staff. **Assign both in
+  Admin › Users** — until then purchase orders and budget requests stall
+  at their steps, and `audit-workflows.ts` says so.
+- **The preparers on the sheet can prepare**: Industry Specialist,
+  Technical Manager and Team Leader raise purchase requisitions; Industry
+  Specialist, Team Leader, Back Support and Finance Manager budget
+  requests; Back Support purchase orders (with the requisitions, canvasses
+  and suppliers it reads); a Technical Manager costings. Each approver
+  reads what it signs (`*.view_all` on the Technical Manager, Team Leader
+  and Back Support roles), so the Approval panel on the document is
+  reachable. The never-offered rule carries every pair to the live install.
+  `audit-workflows.ts` knows the new typical requesters.
+- **One signature per person — the approver's turn** (the owner's call:
+  "the time stamp of the same employee with multiple roles … make it
+  uniform, just like on the quotation and sales order"). The preparer's
+  rule of 2026-10-12 signs at submit; this is its other half, in `act()`:
+  on a route with `preparerSigns`, an Approve also signs every LATER
+  unsigned step the decider may decide in their own right
+  (`approversForStep`), in turn or out of it — a Team Leader who is also
+  Finance Manager signs steps 1 and 3 of a budget request while Back
+  Support's step 2 still waits — each an `ApprovalAction` with
+  `coSignedWith` (the sequence pressed) and the SAME `actedAt`, one
+  APPROVED audit row each ("Finance Manager — Maria Santos, signed with
+  Team Leader (holds both)"). `currentSequence` moves to the first step
+  still unsigned; none left settles it through the same subscribers.
+  Never as a stand-in (a stand-in signs only the step they stood in for),
+  never on a return or a rejection, never on a route without
+  `preparerSigns` — a supervisor who is also HR is still asked as HR. A
+  co-signed step is never queued or told. `ApprovalSlot.coSigned` marks
+  it, so every paper prints one name with one timestamp; the Approval
+  panel reads "<name> · signed with <step> · <when>". Admin › Approval
+  Workflows calls the switch **"One signature per person"**. The purchase
+  request's, purchase order's and budget request's (and cash advance's)
+  first slot now prints `preparedAt(slots) ?? createdAt`, as the
+  quotation's, the sales order's and the costing's do.
+- **The quotation's paper prints each person ONCE** (2026-10-13, the
+  owner's call: "if the creator name appears on Team Leader and CEO /
+  President, make it appear in the print out as Prepared by only … one
+  name only; only show the Team Leader"). `onePerPerson(slots,
+  preparerId)` in `shared/approvals.ts` (slots carry the signer's
+  `userId`) drops a slot signed by somebody already on the paper — the
+  author's own steps are their Prepared by, an approver's co-signed steps
+  their first signature — and an open step somebody already on it may
+  sign (they will co-sign it). Only the paper changes: the request keeps
+  every signature and the Approval panel every step. The quotation's
+  `quotationPrintData()` alone applies it; the sales order, costing and
+  the rest still print a slot per step.
+- **Several roles on one person** needed nothing else: every step is
+  judged by every role held, at submit (`heldSequences`), at eligibility
+  (`approversForStep`, `deciderFor`) and in the team fallbacks.
 
 ### The routing sheet of 2026-10-12 — what holds now
 
@@ -3270,11 +3652,13 @@ stand-in's door, queue, bell and trail, and both switches off.
   /users/:id { supportTeamIds }`, an unknown team a 400, audited with the
   user). A ROLE step whose role is in `TEAM_SCOPED_ROLES`
   (`shared/approvals.ts`, `back_support` only) goes through
-  `supportersFor()`: the holders supporting the PREPARER's team
-  (`Employee.industryId`), else the holders naming no team (they support
-  every team), else every holder — a document never stalls for want of a
-  supporter. "Reports to" is untouched by it. Nothing set is the old rule:
-  every holder.
+  `supportersFor()`: the holders handling the PREPARER's team
+  (`Employee.industryId`), else every holder — a document never stalls for
+  want of a supporter. "Reports to" is untouched by it. **Since 2026-10-13
+  (the owner's call: "apply the same team rule to Back Support") a holder
+  with nothing ticked handles their OWN team** (their Team on Admin ›
+  Users), the Technical Manager's rule — no longer every team; ticked
+  teams replace their own.
 - **A person's TEAM is picked on Admin › Users too** (2026-10-12, the
   owner's call: "on users edit allow selection of Team, particularly in
   Team Leader Role and sales to categorize their quotation and sales order
@@ -3547,8 +3931,10 @@ the attachment card at the bottom of the sales order"
   the paper still prints. **`pdf-lib` (1.17.1)** is the merger — pdfkit
   cannot read a PDF; added to the lockfile by merging only its entries (the
   sandbox's npm strips `libc` fields from every other entry). `?attachments=0`
-  prints the bare document — "Print without attachments" in the ⋯ of both
-  pages; the list's PDF column stays the bare paper. The EXPORTED row says
+  prints the bare document — "Print without attachments" in the order's ⋯;
+  the list's PDF column stays the bare paper. **The quotation's Print is
+  the bare quotation** (2026-10-16, the owner's call): its files go behind
+  it only with `?attachments=1`, "Print with attachments" in its ⋯. The EXPORTED row says
   how many went with it.
 - **The order takes the quotation's files**: `POST /sales-orders` copies
   them after the commit through `copyAttachments()` (bytes copied, rows of
@@ -3584,7 +3970,7 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
 - **The stage is a filter** (`?stage=`; the tab strip went on 2026-10-08,
   the owner's call). All quotes, Opportunity, Negotiation, Closing,
   Confirmed, Completed, Lost — `quotationStages()` in `shared/pipeline.ts`,
-  the stages a quotation can stand in (never On hold), named and coloured
+  the stages a quotation can stand in (On hold too since 2026-10-13), named and coloured
   as Admin › Pipeline Stages has them and sent with the list's
   `summary.tabs` (the filter's choices; a reader needs no pipeline right
   to see them) and counted in `summary.tabCounts`. A quotation's stage is
@@ -3737,9 +4123,10 @@ these are what every document and list says in it.
 
 Admin › PDF Templates (`/admin/pdf-templates`, `admin.pdf_templates.*`,
 `PdfTemplates.tsx`) lays out a designed document's PDF: boxes on an A4 page,
-each printing fixed text and `{{fields}}`. Two documents are designed — the
-quotation and, since 2026-10-07, the sales order (`?doc=sales_order`, the
-page's switcher) — and both go through the same editor, routes and engine.
+each printing fixed text and `{{fields}}`. Three documents are designed — the
+quotation, since 2026-10-07 the sales order (`?doc=sales_order`, the
+page's switcher) and since 2026-10-13 the costing (`?doc=costing`) — and
+all go through the same editor, routes and engine.
 Adding another means a field catalogue, a sample, a standard layout and a
 data builder like `quotationTemplate.ts` / `salesOrderTemplate.ts` and
 `quotationPrintData()` / `salesOrderPrintData()`, plus one entry in the
@@ -3756,6 +4143,31 @@ import for the wrong document is refused.
   The registry entry says which columns a document's line table may place;
   the quotation's refuses them on save (`verify-sales` proves it), and the
   sales order strips them server-side for a caller without cost rights.
+- **The costing is the third** (2026-10-13, the owner's call: "add PDF
+  template of costing in Admin Setting to modify";
+  `docs/notes/P-scope-dates-rfa-people-flow-2026-10-13.md` §2).
+  `shared/costingTemplate.ts` holds `COSTING_FIELDS` (`costing.*` — number,
+  title, dates, start and finish, plan days, terms, the summary's figures —
+  `customer.name`, `owner.*`), the sample, `STANDARD_COSTING_DESIGN`
+  (portrait, the quotation's dress: PROJECT COSTING, a PROJECT and a
+  DETAILS box with the start and finish dates, the line table, the summary
+  `after` it, Terms and the schedule note, the sign-offs `last`) and
+  `costingDesign()` on `pdfTemplate.costing`. Its line table places
+  `no`, `product`, `qtyUnit`, `qty`, `unit`, `unitPrice` and `amount` only
+  — never `group`, `cost` or `margin` (a costing's every figure is cost) —
+  and the registry's `columnLabels` names them as the costing prints them
+  (Line code, Line with its description, Unit cost). `costingPaper(me, id,
+  deciderOnly)` in `routes/costing.ts` is the ONE data builder for the
+  route and the editor's "a costing…" preview: the buckets as
+  heading rows with a subtotal row each (`costingLineRow`,
+  `costingSubtotalRow`), the summary as `totals`, the route's sign-offs.
+  **The Gantt chart is not a box**: `costingAppendix()` draws it through
+  `renderDocument({ appendixOnly: true })` — the sections alone on
+  landscape pages with the page furniture, no letterhead, details or
+  sign-offs — and `appendPdf()` (`shared/pdfAttachments.ts`, pdf-lib)
+  joins it behind the designed estimate, so a layout never has to make
+  room for a chart. verify-costing reads such a paper's pages through
+  pdf-lib, never by regex over the file.
 
 - **The layout is one `Setting` row, `pdfTemplate.quotation`**, read by
   `quotationDesign()`; none (or one that no longer parses — it is logged and
@@ -3827,11 +4239,43 @@ import for the wrong document is refused.
   the selected box's "Not printing now: …". Hidden, the note stays hidden only
   until a different set of fields is empty (a per-browser convenience).
 
+## The project's manager is its Technical Manager (2026-10-15)
+
+The owner's call: "project manager is the technical manager". The data
+keeps its names (`Job.projectManagerId`, `JobOrder.projectManagerId`,
+`ApprovalRequest.projectManagerId`, the PROJECT_MANAGER approver type);
+what people read and pick changed:
+
+- **Every label says "Technical Manager"**: the job order list, form, page
+  and paper, the project list, form, header and overview, Customer 360,
+  Insights' profitability table, budget request lines, Admin › Approval
+  Workflows' PROJECT_MANAGER wording, the clearance item. The profitability
+  CSV keeps its "Project Manager" header (columns are never renamed under a
+  sheet built on them).
+- **The pickers list Technical Managers only**: `GET /users/lookup?role=`
+  (a role key — its active holders, super admins not added) beside
+  `holding=`; `usePeople('role:technical_manager')` in
+  `components/People.tsx` is the same one cached fetch. `current` keeps a
+  manager named before on the record.
+- **The routes**, corrected in place through `previously`: the job order's
+  step 1 is "Technical Manager" (PROJECT_MANAGER, fallback
+  `technical_manager`), and both supplier-bill bands start with a
+  "Technical Manager" ROLE step in place of "Project Manager". A
+  PROJECT_MANAGER step whose fallback role is in `OWN_TEAM_ROLES` asks the
+  holders on the requester's team (`leadersFor`), as a ROLE step does.
+- **The `technical_manager` role holds the project manager's rights**
+  (`PROJECT_MANAGER_GRANTS` / `PROJECT_MANAGER_ONLY` in the seed, shared
+  with `project_manager`, which stays for whoever already holds it), plus
+  `gfin.ap.view_all` for the supplier bills it signs. The never-offered rule
+  carries them to the live install. **Give Technical Manager, with a Team,
+  to whoever manages projects.**
+
 ## Project Management (2026-10-06)
 
 The owner's arrangement, after the old gasiontech G-CORE: the G-OPS section
-is **Project Management** and its strip is **Costing, Job Orders, Projects**
-(the registry's order carries it; verify-foundation pins it). The five
+is **Project Management** and its strip is **Costing, Projects, Job Orders,
+CAD J.O.** (the owner's order of 2026-10-14; the registry's order carries it;
+verify-foundation pins it). The five
 registers that used to sit there — Approved Plans, Budget Monitoring, Purchase
 Requests, Budget Requests, Progress & Billing — are `hidden: true`: each is a
 tab inside a project, and the Projects page keeps them one click away
@@ -3847,12 +4291,18 @@ tab inside a project, and the Projects page keeps them one click away
   routes check `gchain.purchase_requests.*`, but the project's Purchase
   Requisition tab and its routes in `App.tsx` are guarded by
   `gops.purchase_requests.*`. verify-foundation lists the hidden entries.
-- **A project's tabs are, in order**: Overview, Meetings & Records, Approved
-  Plans, Budget Monitoring, Purchase Requisition, Budget Requests, Scope of
-  Work (Gantt), Progress & Billing — then Finance and Service, which hold the
-  invoices and the turnover register and belong nowhere else. `TAB_ALIASES`
-  in `ProjectWorkspace.tsx` keeps every old `?tab=` landing: `billing` →
-  progress, `tasks` → scope, `documents` and `activity` → meetings. A new
+- **A project's tabs are, in order**: Overview, Costing, Job Orders (both
+  2026-10-15 — see "The Accomplishment Report"), Meetings & Records, Request
+  for Approval (the `plans` key), Budget Monitoring, Purchase Requisition, Budget Requests, Scope of
+  Work (Gantt), Progress & Billing. **Finance and Service are gone**
+  (2026-10-15, the owner's call): the invoices show beside their billings on
+  Progress & Billing, the overview's "Equipment installed" row opens
+  Installed Base filtered to the project (`?jobId=`, a declared lookup
+  filter), and "Add equipment" after turnover is in the header's ⋯.
+  `GET /jobs/:id/service` and `/cash-advances/for-job/:jobId` stay as reads.
+  `TAB_ALIASES` in `ProjectWorkspace.tsx` keeps every old `?tab=` landing:
+  `billing` and `finance` → progress, `tasks` → scope, `documents` and
+  `activity` → meetings, `service` → overview. A new
   link to a tab uses the new key. (A budget request's notifications link to
   the request's own page, `/g-ops/budget-requests/:id`, not to the tab.)
 - **Meetings & Records** is the meetings held for the project
@@ -3873,11 +4323,1311 @@ tab inside a project, and the Projects page keeps them one click away
 - **"Plan from costing" is `POST /jobs/:id/tasks/from-costing`**: the
   costing's `ScopeTask`s, planned in working days (`planTasks`), written as
   dated tasks from the project's start date through `workingDayDate()` in
-  `shared/day.ts` (Mon–Fri; a weekend start counts from the Monday after).
+  `shared/day.ts` (Mon–Sat since 2026-10-13; a Sunday start counts from the
+  Monday after).
   Only scope lines with NO tasks yet are planned, so a second run overwrites
   nobody's hand work (`{ created, skipped }`); a planned line's dates become
   its tasks' span, which the planned S-curve reads. Audited. Needs a start
   date, and says so.
+
+## The Accomplishment Report (2026-10-15)
+
+The owner's call, with his sample (Accomplishment Report — The Village at
+Lipa): the progress report in his format, numbered under its project,
+weighed by scope value, written day by day with pictures, approved by the
+creator (Project Engineer or Sales) › Technical Manager › Team Leader; and
+the costing and the job orders inside the project.
+
+- **Numbers belong to the project**: `reportNumber()` / `billingNumber()`
+  in `shared/progressReport.ts` — `GT-PRJ-2026-0112-PR-03`,
+  `…-PB-01` — derived from the per-project `reportNo` / `billingNo` (unique
+  per project), never `nextNumber`, so two projects never collide.
+  `renumberProgressDocs()` (the seed, once, `seed.progressRenumbered`)
+  renumbered what was on file, the old number kept as `legacyNumber`, and
+  moved SUBMITTED reports to DRAFT. The `progress_report` / `progress_billing`
+  numbering types stay listed but issue nothing.
+- **Both go through the engine** (rule 2): seeded "Progress report —
+  technical manager, team leader" and "Progress billing — …" (TM ROLE, team-
+  scoped through `OWN_TEAM_ROLES`; Team Leader SUPERVISOR falling back to
+  `team_leader`; `preparerSigns`, `standIns`). `POST /:id/submit` (claimed
+  on DRAFT, in the preparer's name, back to DRAFT if refused; a report needs
+  a summary or a day), `/withdraw`, `settleProgressReport` /
+  `settleProgressBilling` (APPROVED sets `approvedAt` / `approvedById` = the
+  last signer; a return goes back to DRAFT; "not applied" after a pull-back).
+  The old `/approve` routes and `gops.progress_billing.approve` are gone.
+  Record and paper take `requireAnyOrDecider`; a `view_own` holder reads
+  only what they prepared. Sales and Industry Specialists hold own-scope
+  `progress_billing`; Technical Manager and Team Leader hold `view_all`.
+  `ProgressBilling.preparedById` is set at raising (an older billing's
+  preparer is its trail's CREATED row).
+- **The report's content**: `overallStatus` (`PROGRESS_OVERALL`: On
+  schedule, Ahead, Behind, Ongoing – For corrective works, On hold,
+  Completed) with a free `overallStatusNote`; `personnelInCharge` and
+  `personnelSupport[]` (names, filled at creation from the previous report,
+  else the project's first job order, else its PM); Summary
+  (`accomplishment`), Key milestones (`milestones`), Remaining works
+  (`nextPeriodPlan`), issues, manpower, equipment, weather.
+  **`ProgressReportDay`** (date inside the period, actions, findings,
+  recommendation, remarks, headcount) through `POST/PUT/DELETE
+  /:id/days[/:dayId]`, its pictures attachments on `progress_report_day`
+  (read as the report; written on a draft by whoever may edit it).
+- **Weights**: each line carries `weightPct` (its scope value over the
+  schedule) and `weightedPct` (weight × to-date %), which add up to the
+  report's own %. `JobTask.weight` (nullable, 1 when blank; the Gantt task
+  panel's "Weight in its phase") gives `phasePctFromTasks()` — Σ weight ×
+  progress ÷ Σ weight, DONE = 100 — shown under a line, and `POST
+  /:id/lines/:lineId/from-tasks` writes it as the to-date figure (never
+  backwards). The Gantt's phase bar reads the same weighted figure.
+- **The paper** "Accomplishment Report": Project (location, period, start,
+  target, overall status and %), Personnel present, the SOV table with
+  Weight and Weighted %, the totals, Summary, Key milestones, Remaining
+  works, Issues, then each day with its pictures — the engine's new
+  **`photos` section** (JPEG/PNG, three to a row, fitted, captioned; the
+  route makes every picture a ≤1200 px JPEG through sharp) — and Prepared
+  by plus the route's slots (a report approved by hand before prints its
+  approver from the record). The engine shrinks a title word wider than its
+  box instead of breaking it. The billing's paper signs the same way.
+- **The page** (`ProgressReportDetail`): Submit for approval with the route
+  preview, `DocumentApproval` once sent, ⋯ Pull back / Delete, Modify (the
+  narrative modal: status, personnel, summary, milestones, remaining works,
+  resources), the weighted SOV table with "Use it" from the tasks, and
+  Daily accomplishments (+ Add day; each day's Attachments card).
+- **Project tabs Costing and Job Orders** after Overview:
+  `ProjectCostingCard` (`pages/delivery/ProjectCosting.tsx`) reads
+  `/costings/:id` for a costing reader — figures, lines by bucket, the scope
+  with each phase's weight, Print and Open costing — else the two figures
+  the project carries; `ProjectJobOrders` (`pages/service/JobOrders.tsx`) is
+  the register on `?forProject=<jobId>` (orders with that `jobId` OR on the
+  quotation the project was won from). The Costing strip entry stays, its
+  list gaining a **Project** column ("Converted" + the number); the job
+  order list gains **Project built** ("Converted" once approved with its
+  project, "Linked" while an open order names one, else "Not yet").
+
+## Request for Approval (2026-10-13)
+
+The owner's call: "replace the Approved Plans with Request for Approval — a
+form with internal approval (Technical Manager, Team Leader and the CEO more
+than 1 million project costing) and a Drawing Reference Number (it could be
+from a CAD J.O.)". `routes/planApprovals.ts` (`/api/plans`),
+`pages/delivery/PlanApprovals.tsx`.
+
+- **The record is the old `ApprovedPlan`, routed now.** Its table and keys
+  stay (`gops.plans.*` OWNED; the registry label, the project tab and the
+  register say "Request for Approval"; `/g-ops/plans` and `?tab=plans`
+  hold), with `number` (numbering type `plan_approval`, GT-RFA-2026-0001 —
+  indexed, not @unique, because a unique constraint on an existing table
+  stops the server's unattended `db push`), `description`, `amount`,
+  `cancelReason`, and the statuses DRAFT → PENDING_APPROVAL → APPROVED,
+  SUPERSEDED, CANCELLED (FOR_APPROVAL is the old registered-by-hand state:
+  the seed moves any left to DRAFT; REJECTED is history). The requester is
+  `uploadedById`. **Nobody approves one by hand**: the old `PATCH
+  /jobs/:jobId/plans/:planId { status }` and its POST/DELETE are gone.
+- **The route is the engine's `plan_approval`** (rule 2): seeded "Request
+  for Approval — technical manager, team leader" (up to ₱1,000,000) and
+  "… then CEO / President over ₱1,000,000" (`minAmount` 1,000,000.01),
+  both `preparerSigns` and `standIns` as the costing's. The amount is the
+  PROJECT's contract value, snapshotted onto `amount` at submit.
+  `POST /plans/:id/submit` claims DRAFT, numbers a legacy row, refuses with
+  no file attached, files the request in the requester's name and goes back
+  to DRAFT if the engine refuses; `/withdraw` pulls a pending one back
+  (`cancelOpenRequest`, same transaction); `/cancel { reason }` cancels a
+  draft or a pending one; `DELETE` takes a draft or a cancelled one
+  (`gops.plans.delete` + `canEditRecord`), its files and its CAD link with
+  it. `settlePlanApproval()` claims PENDING → APPROVED (dated, `approvedBy`
+  the last signer) and SUPERSEDES an earlier approved request on the same
+  project and drawing reference (case-blind); a return or a rejection goes
+  back to DRAFT; a decision after a cancel is "not applied". The Technical
+  Manager and the project engineer raise them (`VIEW_OWN_SELF('gops',
+  'plans')`); `audit-workflows.ts` knows.
+- **Reading one**: `view_all`, its requester, or — through
+  `requireAnyOrDecider` — whoever may decide its open request (a Team
+  Leader or the CEO with no right to the module). The files are attachments
+  on `approved_plan` with a guard: read as the request, written only on a
+  draft by whoever may edit it — what the approvers decide on is what they
+  were sent. A request takes drawing files (DWG and the rest, the CAD
+  ceiling: `isCadEntity`).
+- **The page** `/g-ops/plans/:id` (no Guard — the API decides): RecordHeader
+  (Submit for approval, Print, ⋯ Pull back / Cancel request / Delete,
+  Modify on a draft), "Submit for approval sends it to …" on a draft
+  (`approvalRoute`, `previewSteps`), the `DocumentApproval` panel once sent,
+  The request card and the Drawings and documents card. **The paper**
+  "Request for Approval" through `renderDocument`: the project, the drawing
+  reference, the request, Requested by and one slot per step
+  (`approvalSlots`, a draft printing the route it would take), and the files
+  behind it (`withAttachments`, `?attachments=0` bare). **The register**
+  `/g-ops/plans` is a DataList over `planListWhere()` with its paper
+  `GET /plans/pdf`; a project's tab lists its own from `GET /jobs/:id`'s
+  `plans`.
+- **The form** ("+ New request for approval" on the tab, Modify on a
+  draft): what is to be approved, description, drawing reference number,
+  revision, discipline, notes — or **From a CAD J.O.**
+  (`GET /plans/cad-options?jobId=`: the project's accepted drawings not yet
+  raised), which takes the reference and copies the files through
+  `requestFromCad()`.
+
+## People Flow (2026-10-13)
+
+The owner's `PEOPLE_FLOW_FROM_START_TO_SEPARATION` file — Onboarding,
+Integration, Development & Growth, Retention & Engagement, Separation — as
+one path per person (`docs/notes/P-scope-dates-rfa-people-flow-2026-10-13.md`
+§6). G-HR › People › **People Flow** (`ghr.people_flow`: `view_all` and
+`edit_all` for HR, `view_own` for everyone through the `employee` and
+`supervisor` roles), `/g-hr/people-flow` and `/g-hr/people-flow/:employeeId`,
+`routes/peopleFlow.ts`, `shared/peopleFlow.ts`, `pages/hr/PeopleFlow.tsx`,
+`styles/people-flow.css`, verify-hr.
+
+- **The checklist is data**: `hr.peopleFlow`, a Settings list on HR
+  Settings' People Flow card (`SETTING_LISTS` in `routes/hr.ts`, a row
+  schema of its own: stage, key, title, description, `dueDays`, `source`).
+  Unstored it reads as `PEOPLE_FLOW_DEFAULTS` — the owner's file, eighteen
+  items. A key is permanent (rename the title freely); one used twice is a
+  400. `dueDays` counts from the hire date for Onboarding and Integration
+  and from the last working day for Separation (negative is before it);
+  Development and Retention are a steady state with no due date.
+- **What HR recorded is `EmployeeFlowItem`** (employee × item key, unique;
+  PENDING / DONE / WAIVED / NA, `doneOn` a DATE, notes, who and when). A row
+  exists only once HR has said something; the path is the checklist merged
+  with the rows and the records on EVERY read (`pathsFor()`: five queries
+  whatever the number of people). `PUT /people-flow/:employeeId/items/:key`
+  (`edit_all`): DONE on a day (today by default, never tomorrow), WAIVED
+  with a reason, NA, or open again; audited as `people_flow` on the
+  employee's id. Files on an item are attachments on `employee_flow_item`
+  with entityId `<employeeId>~<key>` — read by whoever reads the path,
+  written by HR alone; deleting an employee deletes them.
+- **Six items follow a record** (`source`, the clearance's rule): the
+  probation review ← the latest APPROVED evaluation (REGULARIZE / ABSORB /
+  END done; EXTEND still open, saying to when; a regular employee done; a
+  project-based, contractual or part-time one not applicable; due at the
+  period end), skill building ← VERIFIED training records, notice ← a
+  clearance raised, knowledge transfer ← the clearance's handover lines
+  (`HANDOVER_SOURCES`, the SUPERVISOR scan's types), access and property ←
+  the clearance's other lines AND the login closed, the clearance
+  certificate ← the clearance CLEARED. Such an item is never ticked by
+  hand (a 400 naming the record), only waived with a reason or put back to
+  follow its record; a done one offers nothing.
+- **The stage is derived, never stored** — `stageOf()`, pure, on
+  'YYYY-MM-DD' keys: SEPARATION once a clearance stands (OPEN, PENDING or
+  CLEARED, raised since the hire) or a separation date is on file;
+  ONBOARDING for the first `ONBOARDING_DAYS` (30; a future hire is in
+  pre-boarding) and after that while an onboarding item is open within the
+  new-hire window (the typed period end, else `probationMonths` from the
+  hire); INTEGRATION while PROBATIONARY or a TRAINEE, or within the window
+  while an integration item is open; then DEVELOPMENT until the first
+  anniversary and RETENTION after it. **This departs from the plan's
+  "Onboarding while any onboarding item is open"**: on deploy nobody's
+  onboarding is recorded, and that rule would have put every employee in
+  Onboarding — past the window, only the dates decide. An item is overdue
+  only in the stage the person stands in, so nobody is chased for an
+  onboarding left open years ago.
+- **Who reads**: HR everyone; the person their own (`GET /mine`); a
+  supervisor holding `ghr.dashboard.view_all` their DIRECT REPORTS' (the
+  clock capture's rule, `mayReadFlow()`); anyone else a 404. `/:employeeId`
+  carries no Guard on the web — the API decides.
+- **The screens**: for HR, seven tiles (a stage each, With overdue items,
+  Probation reviews due — within a week or overdue) over the shared list
+  (Employee, Department, Hired, Stage, Open, Overdue, Next; filters `stage`,
+  `overdue`, `probation`, `departmentId`), each tile linking to the list it
+  counts (the summary is computed under everything but those three filters,
+  so a tile equals the list it opens — verify-hr asserts it). The list is
+  computed for every visible ACTIVE employee and paged after the stage
+  filter. Everybody else: their own path, and — with the dashboard right —
+  "My direct reports" (`?reports=true`). The path page is a `RecordHeader`
+  (the stage as its pill), a five-step strip and a card per stage; HR's
+  "Record…" / "Waive…" opens a panel under the item, never a dialog. The
+  employee record has a People Flow tab for `view_all`. The list prints
+  (`GET /people-flow/pdf`, above `/:employeeId`, `?ids=`, audited); no
+  paper per person.
+- **My Work** (`peopleFlowWork()`, appended to `assignedTo`): for HR, the
+  open items of each person's current stage that are overdue or due within
+  `DUE_SOON_DAYS` (7), ten at most; for the person, their own open
+  onboarding items while they stand in Onboarding ("HR ticks it off").
+
+## The purchase requisition page (2026-10-13)
+
+The owner's call: "Purchase request in Project should not be popup window, it
+should be a full form with line item and budget allocation, something like in
+gasiontech G-CORE" (the mockup, approved first: `docs/mockups/purchase-
+requisition-page.png`). `pages/chain/PurchaseRequisitionEditor.tsx`,
+`lib/prLines.ts`, the `prq-*` rules in `styles/procurement.css`.
+
+- **One page for New and Modify**, never a dialog: `/g-ops/purchase-requests/
+  new?jobId=` (the project's Purchase Requisition tab — the project fixed,
+  direct to project), `/g-chain/purchase-requests/new` (the register — Kind
+  and Project or Warehouse chosen) and `/…/purchase-requests/:id/edit` on a
+  draft (the record page's Modify). `PrModal` and `PrLineModal` are gone; an
+  old `?new=1&jobId=` link redirects to `/new`. The record page keeps no line
+  buttons of its own — its lines change on the page, with the header.
+- **One save**: `POST /purchase-requests` takes `lines[]`, `PUT /purchase-
+  requests/:id/sheet` the header and the lines (a line sent with its `id` is
+  updated in place, one left out removed — the costing sheet's rule), claimed
+  on DRAFT and on the `version` (`updatedAt`) the page read: "changed a moment
+  ago — reload". `checkPrLines()` checks every line before the number is
+  issued — the item and budget line exist, the line says what it is, a direct-
+  to-job line names its budget line (else the item's) or is refused naming it
+  — and `writePrLines()` writes them. The single-line routes stay for scripts.
+- **A line** is Budget line | Part No. | Item (bold, `PurchaseRequestItem.
+  name`) over its description | Unit | Qty | Est. unit cost | Amount
+  (`prLineAmount`, the server's `cents()`); `partNumber` and `name` are new
+  nullable columns, a name alone is the description too. The request has a
+  `preferredSupplier` (text, a hint for purchasing; printed).
+- **Filled three ways**: typing in Item asks `GET /purchase-requests/suggest
+  ?q=&jobId=` — the project's costing lines, then the item master (a cost only
+  to a costing or budget reader or the project's manager, an item's standard
+  cost to an item or costing reader); **Add from costing…** (a panel of tick
+  boxes, the costing's lines with their quantity); **Import CSV** or a block
+  pasted into an empty Item box — `parseDelimited()` / `rowsToPrLines()`,
+  pinned by verify-foundation: headings read by name, else the page's column
+  order from Part No.; a row that cannot be read is named, never dropped.
+- **Budget — live** beside the lines: `GET /purchase-requests/budget?jobId=`
+  (`projectBudgetByLine()`, every active category in one GROUP BY, equal to
+  Budget Monitoring — verify-chain asserts it) less what the page asks, per
+  budget line and overall, red where it goes over and saying whether submit
+  will be refused (`procurement.blockOverBudget`). A draft commits nothing.
+- **The record page's "Against the project budget" card** leaves the
+  request's OWN net commitment out (`GET /purchase-requests/:id`'s
+  `budget`): an approved request committed its estimate, and counting it in
+  "Already committed" and again as "This request" read as an overspend
+  (2026-10-14, the owner's report). The card shows only while the request is
+  a draft, pending or approved — once ordered, the order's page holds the
+  budget — and its "Submitting it will be blocked" note only before submit.
+- **Approval** under the lines: `GET /purchase-requests/route?amount=&jobId=
+  &requestId=` (`routeBrief`, the requester's name) through `previewSteps` —
+  nobody is picked on the form. "Submit for approval" saves, then submits; a
+  refused submit leaves the saved draft and says why.
+
+## The purchase order page (2026-10-13)
+
+The owner's call, after the requisition page: "do the same full page for
+purchase orders". `pages/chain/PurchaseOrderEditor.tsx`, in the requisition
+page's dress (`prq-*`) and reusing its `ItemCell` and `lib/prLines.ts`.
+
+- **One page for New and Modify**: `/g-chain/purchase-orders/new` — with
+  `?fromRequest=` or `?fromCanvass=` the request's lines are on the page
+  before anything is saved — and `/g-chain/purchase-orders/:id/edit` on a
+  draft. `NewPoModal`, `PoHeaderModal` and `PoLineModal` are gone; the
+  request page's "Raise order" and the canvass's order button open the page,
+  and an old `?fromRequest=` / `?fromCanvass=` link on the list redirects.
+- **What an order starts with is `orderSource()`** — the request, the
+  canvass, the supplier an award decided, the lines still to order (the
+  winner's quoted prices, else the request's estimates), with the request
+  line's part number and name. `GET /purchase-orders/draft` shows it and
+  `POST /purchase-orders` writes it, so the page shows what a save writes.
+- **One save**: `POST /` takes `lines[]` (sent without, the source's lines,
+  as before); `PUT /:id/sheet` the header and the lines, claimed on DRAFT
+  and the `version` read. `checkPoLines()` before the number: a line's
+  `requestItemId` must be one of the order's request's, the item and budget
+  line exist, a direct-to-job line names its budget line; `writePoLines()`
+  keeps a line sent with its id. The awarded supplier still cannot be
+  swapped. `PurchaseOrderItem.name` and `partNumber` are new nullable
+  columns; the order's paper prints both.
+- **The money** is `orderTotals()` in `lib/prLines.ts`, `recalcPo()`'s rule
+  to the centavo (verify-foundation pins it), with the "Supplier prices
+  include VAT" tick on the page.
+- **Budget — on issue**: `GET /purchase-orders/budget?jobId=&requestId=` is
+  `projectBudgetByLine()` plus `released` — the request's net commitment per
+  budget line, which issuing releases whole before it commits the order's
+  lines; the panel shows what is left after issue. Line suggestions are
+  `GET /purchase-orders/suggest` (`lineSuggestions()`, the requisition's
+  rule behind the order's rights); the route is `GET /purchase-orders/route
+  ?amount=&orderId=` at the order's total, in its buyer's name.
+- **An importation order** (2026-10-16, the owner's call): the page's
+  **Apply VAT** tick (`applyVat` on create, the PATCH and `PUT /:id/sheet`;
+  `poVat()`), off → `vatRate` 0 and "prices include VAT" off, the total the
+  subtotal; the page, the record and the paper name the order's own
+  currency (`formatMoney(x, po.currency)`, "Unit price (USD)") — the budget
+  panel stays in the company's.
+- **The order's paper goes to the supplier, in the owner's layout**
+  (2026-10-14, `docs/mockups/purchase-order-layout.pptx`, his slide):
+  the title in bold (`titleBold`, this document only), "Date: …" under
+  the number (`renderDocument`'s `numberNote`); DETAILS
+  is columns (`details`, an array of columns: the quotation reference
+  over the delivery date, the terms beside them), and the section after
+  it follows straight on rather than at the fixed DETAILS height; then
+  **Supplier** and **Ship to** side by side as unlabelled 8.5pt address
+  blocks (the engine's `blocks` section) — the supplier's name, address,
+  the contact's mobile (else the supplier's phone), the contact person
+  (primary, else first) and email; our registered name, the order's
+  Deliver to (else the company's address), the company's phone and
+  email, and the buyer who prepared it with their position (the owner's
+  second slide, 2026-10-14). Then the lines, totals
+  and notes, and over the sign-offs the italic "The name, date and time
+  are considered a digital signature of approval." (`signoffNote`). Never
+  "For" (internal), the supplier's TIN, the purchase request or a Status
+  line — a draft or pending order says "DRAFT — NOT YET ISSUED." in the
+  footer note, a cancelled one "CANCELLED.". `PurchaseOrder.quoteRef`
+  (nullable) is the supplier's quotation no. — "Quotation ref." on the
+  order page, filled from the awarded canvass row's `quoteRef`, editable
+  while a draft.
+
+## G-CHAIN's flows (2026-10-14)
+
+The owner's six of 2026-10-14 (`docs/notes/P-chain-flow-2026-10-14.md`,
+previews `docs/mockups/chain-flow-*.png`), built push by push.
+
+- **The divisions run G-OPS, G-CHAIN, G-FIN, G-HR** — the registry's
+  module order (the launcher's `DIVISIONS` in `pages/Home.tsx`, the top
+  bar and Ctrl+K follow it); verify-foundation pins it with the strips.
+- **Procurement** is Purchase Requests, RFQ, Canvass, Purchase Orders and
+  **Warehouse** is Incoming, Inventory, Outgoing, Borrow Slips, Pull-out
+  Slips (`PROCUREMENT_STRIP` / `WAREHOUSE_STRIP` in verify-foundation, the
+  strips as built so far). **Incoming and Outgoing are Receiving and Stock
+  Issuance renamed**: the registry KEYS (`receiving`, `stock_issuance`) and
+  every permission string stay, so no right moved; the paths are
+  `/g-chain/incoming` and `/g-chain/outgoing`, and the old
+  `/g-chain/receiving[/:id]` and `/g-chain/stock-issuance[/:id]` land there
+  (`MovedTo` in `App.tsx`, the query kept) — notifications already sent
+  carry the old links. The papers are "Incoming", "Outgoing" and the slip's
+  "Delivery Receipt" (since 2026-10-15); the numbering labels "Incoming Report" and "Outgoing Slip" (the
+  seed updates labels only, so RR and SI stay unless an administrator
+  changes them).
+- **The Request for Quotation is its own document** (push 2;
+  `routes/rfq.ts` at `/api/rfqs`, `pages/chain/Rfq.tsx`, `gchain.rfq.*`
+  OWNED, numbering type `rfq` — GT-RFQ-2026-0001). It is raised FROM an
+  APPROVED (or partially ordered) purchase request — the request page's
+  "Request quotations", its one next step, or "+ New RFQ", which asks which
+  approved request first (`GET /rfqs/requests`) — and asks some or all of
+  its lines (`RfqItem`; a line already on another open RFQ starts unticked
+  and says so, `GET /rfqs/source`). **No approval route**: an enquiry
+  decides nothing. DRAFT → SENT ("Mark sent", which dates it and each
+  supplier row) → QUOTED (the first quote) → CLOSED (its canvass awarded,
+  push 3); CANCELLED with a reason from any open state, refused while a
+  canvass compares it. **One save** (`POST /rfqs`, `PUT /rfqs/:id/sheet`,
+  claimed on `version`; a field left out is kept): the header (Quote by,
+  Deliver to — the project's site, else the warehouse — the terms printed
+  for every supplier, internal notes), the lines while a draft, and the
+  suppliers asked (`RfqSupplier`, a row's own Attention / Tel / Email,
+  filled from the supplier's primary contact by `GET /rfqs/contacts`).
+  Once sent its lines are fixed; a supplier added later is asked that day;
+  a supplier who quoted is never removed. **Quotes** are recorded per line
+  asked (`RfqQuote`, `PUT /rfqs/:id/suppliers/:rowId/quote`; a line left
+  blank is not quoted) with their quotation no., received date, lead time,
+  terms and validity, in a panel under the suppliers (never a dialog), the
+  supplier's own paper attached to the row (`rfq_supplier`, guarded as the
+  RFQ is read; written while open by whoever may edit it). **Printed
+  only** (the owner's call — no email): `GET /rfqs/:id/pdf?supplier=` is
+  ONE supplier's paper, addressed to them, every line with blank Unit
+  price, Amount and Lead time columns for them to fill, never another
+  supplier's name or price; without it the RFQ whole, with each supplier's
+  totals. Both print **Prepared by** with its timestamp and nothing else to
+  sign (rule 6: the people who acted). The list (`rfqListWhere`, its paper
+  `GET /rfqs/pdf`, `?ids=`), Ctrl+K and the audit trail as every register.
+  A purchase request is not cancelled while an RFQ is open on it, and its
+  delete takes its cancelled RFQs' files. **The canvass gave the RFQ its
+  code**: `moveCanvassCode()` (`shared/canvassCode.ts`, the seed, once,
+  marked `seed.canvassCountersMoved`, audited) moves the canvass's numbering
+  from 'RFQ' to 'CVS' — the template AND every period counter, because a
+  counter prints with its own copy of the code (Admin › Numbering changes
+  every row for the same reason); the first version moved the template
+  alone under `seed.canvassCodeMoved`, so an install that ran it is put
+  right once. Only while the template carries 'RFQ' or 'CVS' — an
+  administrator's own code stays. Numbers already issued keep their print.
+  Procurement holds `gchain.rfq.*`, Back Support reads them.
+- **The canvass is the COMPARISON SHEET** (push 3; the owner's sample
+  sheet). "Start canvass" on the RFQ page (its next step once a quote is
+  in; `POST /canvasses { rfqId, supplierRowIds? }`) raises it from an RFQ
+  that went out, one live sheet per RFQ, and SNAPSHOTS the RFQ's lines
+  (`Canvass.lineIds`), the suppliers that quoted — six at most
+  (`MAX_SHEET_SUPPLIERS`; more and the page asks which six) — with their
+  quotes, contact, lead time, terms and quotation no. (`CanvassSupplier.
+  rfqSupplierId`); a quote changed on the RFQ later moves nothing until
+  "Refresh from RFQ" (⋯, edit_all, OPEN only) copies again. A canvass from
+  a request with no RFQ (`{ requestId }`, a quote already in hand) still
+  compares every line, suppliers typed on it — `lineIds` empty is "every
+  line", as every canvass before. **The arithmetic is
+  `canvassFigures()`** (`shared/canvassMath.ts`, pure, verify-chain): the
+  REFERENCE BUDGET is the request's estimated amount over the sheet's
+  lines; per supplier `total` = Σ qty × price over the lines it quoted
+  (centavos, half away from zero), `savings` = the estimate over THOSE
+  lines less the total, `savingsPct` to two decimals; a partial quote says
+  "n of m lines" / "on the lines quoted" and is never "lowest complete".
+  The buyer may **Recommend** a column (`PATCH { recommendedRowId }`, the
+  opener or edit_all — the header's primary button becomes "Award to …");
+  **Award** (edit_all) is claimed on OPEN, records `awardedById` /
+  `awardedAt`, refuses a supplier that quoted none of the sheet's lines and
+  CLOSES the RFQ; the order then takes only the lines the winner quoted.
+  Cancelling an award no order was placed on opens the RFQ again (QUOTED);
+  an RFQ is not cancelled while a live sheet compares it. Prices typed on
+  the sheet only for its own lines, audited. **The paper** `GET
+  /canvasses/:id/pdf` is LANDSCAPE "Canvass Sheet": the reference line (PR
+  and its approval date, RFQ, project), the lines with the reference
+  budget's unit cost and amount, then per supplier a unit cost and amount
+  under its name, Tel No. and contact — the table's **`groups`** band, a
+  `renderDocument` table option naming runs of columns over the head,
+  redrawn with it on every page — "not quoted" where it gave none; then
+  TOTAL, SAVINGS vs reference budget (pesos | %) and Lead time · Terms,
+  each figure in its own column (those rows are the sheet's structure, as
+  a costing's subtotals are the estimate's); three suppliers to a table, a
+  second table for four to six; Remarks (`notes`, with the
+  recommendation); the order raised; signed **CANVASSED BY** (the opener,
+  its timestamp) and **AWARDED BY** ("Pending" until awarded). The list
+  (`canvassListWhere`, view_own narrowed to what one opened, filters
+  `status`, `rfqId`, `requestId`, `supplierId`) shows the RFQ, the
+  reference budget and the saving of the award (else the lowest complete
+  quote), with Open and Awarded cards; its paper is landscape. The page is
+  `pages/chain/Canvass.tsx` (moved out of `Orders.tsx`).
+- **Incoming and Outgoing go for approval** (push 4a; the owner's call:
+  "approval of his/her report to"). Seeded "Incoming — the receiver's
+  supervisor" (`receiving`) and "Outgoing — the issuer's supervisor"
+  (`stock_issue`): one SUPERVISOR step each, the warehouse person's
+  "Reports to", falling back to the new **Warehouse Supervisor** role
+  (`warehouse_supervisor`, seeded from the warehouse role's rights) on
+  their team, else any holder. **Assign "Reports to" on every warehouse
+  login, or give somebody Warehouse Supervisor** — until then a submit is
+  refused for want of an approver and `audit-workflows.ts` says so.
+  `ReceivingStatus` DRAFT → PENDING_APPROVAL → RECEIVED, or CANCELLED with
+  `cancelReason` (the column defaults to RECEIVED, so every report on file
+  stays as it was); `IssueStatus` gains PENDING_APPROVAL. **A draft moves
+  nothing**: `POST /receivings` saves a DRAFT while the route is active
+  (`needsApproval` in its answer) and posts at once only when the route is
+  switched off — the sales order's rule; `/submit` claims the draft on
+  `updatedAt`, files the request in the RECEIVER's name, and goes back to
+  DRAFT if the engine refuses; `/withdraw` and `/cancel { reason }`
+  withdraw through `cancelOpenRequest` in the same transaction. A report
+  waiting for approval COUNTS against what its order can still take
+  (`checkOutstanding`), so two cannot both receive the last ten; a
+  cancelled one gives it back. `settleReceiving()` / `settleStockIssue()`
+  (exported, idempotent) claim PENDING_APPROVAL and post in the same
+  transaction — the stock, the order's received quantities and status,
+  the job's commitment and cost (`postReceiving`, `postStockIssue`, the one
+  posting each, shared with the unrouted path); a return or rejection puts
+  it back to a draft; a decision after a cancel or withdrawal is "… — not
+  applied"; an approval the shelf or the order can no longer honour goes
+  back to a draft, said on its trail and by a `warehouse.not_posted` bell,
+  never half posted. **Issue is refused while the Outgoing route is
+  active** ("goes for approval"); a slip is checked against the shelf at
+  submit. Only goods RECEIVED count anywhere money looks: a supplier bill
+  is matched to a RECEIVED report only (`billLinks`), finance's unbilled
+  queue, Supplier 360 and the Incoming list's "Total received" (the rest in
+  brackets) read RECEIVED. **Attachments**: the packing list, the DR and
+  photos on `receiving`, the signed gate pass on `stock_issue` — read as
+  the document is (a decider through `mayDecide`), written while DRAFT or
+  pending by whoever may move it on — and both papers print them behind
+  (`withAttachments`, `?attachments=0` bare). The papers sign RECEIVED BY /
+  PREPARED BY, then the route's step ("Pending" until signed), then on
+  the Delivery Receipt the driver and the receiver (see "Outgoing is the
+  requestor's RECEIVE PROOF"); an unrouted slip still prints "Issued by".
+  The record pages show "Submit for approval sends it to …", the Approval
+  panel once sent, and Pull back / Cancel in ⋯; the supervisor's door is
+  `requireAnyOrDecider` on the record and its paper.
+- **Incoming Reports, with or without a purchase order** (2026-10-14,
+  the owner's call). `Receiving.orderId` and `ReceivingItem.orderItemId`
+  are nullable: a report WITHOUT an order names `supplierId` or
+  `sourceName`, a `reason`, a warehouse (required), and per line an item
+  (`ReceivingItem.itemId`, `partNumber` — filled from the item master,
+  typed over, printed and searched — `description`, `unit`) with the unit cost it is
+  taken into stock at; approved, it builds stock only — no order, no
+  project, no supplier bill (finance's unbilled queue and bill matching
+  skip it). `checkReceivingSheet()` is the one check for create and
+  `PUT /receivings/:id/sheet` (a draft, modified whole, claimed on
+  `version`); `postReceiving()` posts either kind. The page is
+  `pages/chain/IncomingEditor.tsx` (`/g-chain/incoming/new`,
+  `?order=` from the purchase order's "Receive goods" — the pop-up is gone;
+  `/:id/edit` on a draft), fed by `GET /receivings/options`, `/order/:id`
+  (each line's ordered, received, pending and left), `/items` and
+  `/route`, all behind the receiving rights. The list is **Incoming
+  Reports** (+ New incoming, a From column, cards, `?against=order|none`).
+  **The route is "Incoming — back support, purchasing manager"**
+  (`preparerSigns`, `standIns`; Back Support team-scoped), the
+  supervisor's route RETIRED. **A line need not be picked from the item
+  master** (2026-10-16, the owner's report: "Can't save"): typed by part
+  number or description, it takes the one active item whose part number or
+  code (else name) matches, else a new item is filed in the save's
+  transaction (`fileNewItems()`); two matches are a 400 asking to pick. **A stock order's line typed without an item still builds stock**
+  when received (2026-10-16, the owner's report: "received but not in
+  inventory" — `postReceiving` skipped it silently): `itemForTypedLine()`
+  (`shared/typedItems.ts`) matches or files its item and links the order
+  line; `repairTypedStockReceipts()` (the seed, every deploy, idempotent)
+  posted the receipts made before, at their own cost and date. The paper is the purchase order's dress:
+  ORDER DETAILS, Received from / Received at, the lines, Prepared by and
+  the steps. The record page has no web Guard (the API decides — the
+  approvers may hold no warehouse right). verify-chain pins both kinds.
+- **The inventory screen** (2026-10-14, then the owner's PPTX of
+  2026-10-15): cards (Total items, Total valuation, Reorder warning,
+  Critical, Pending POs) from the list's `summary` under its own query; a
+  **category tile** per item category (its items, value, low/critical
+  flags, what it covers — `ItemCategory.description`, `sortOrder`; the
+  first eight always, any other holding stock), each a link that sets
+  `?categoryId=`; Filters Category, **Stock status** (`?state=`), Warehouse,
+  Reorder; columns Part number, Item description, Category, **Brand / OEM**
+  (`Item.brand` — the manufacturer, not the supplier; the item form, the
+  import's `Brand` column, the item paper), Bin / Rack
+  (`InventoryBalance.locationId`, set on the stock card by
+  `gchain.inventory.edit_all` through `PATCH /inventory/balances/:id`, or
+  by a receipt into a named bin while empty), Stock qty, Unit cost, Reorder
+  pt, Status; a "Stock value by category" bar chart; the movement log and
+  Quick operations under it. **`stockState()` in `shared/chain.ts` is the
+  one rule**: CRITICAL (nothing available, or at/under `minStock`),
+  LOW_STOCK (at/under the reorder level), ON_ORDER (either, with an issued
+  PO still to arrive), IN_STOCK — the column, the filter, the cards, the
+  tiles and the paper. The seed adds the owner's eight categories (PMP,
+  CTL, INS, PRT, CNS, FLT, DRY, PIP) and moves the first nine after them.
+- **The automatic reorder** (2026-10-15, the owner's call: "Automatic").
+  `shared/reorder.ts`: `issueStock` and `borrowStock` queue the item and
+  warehouse (`queueReorderCheck`, run ~1 s after, outside the caller's
+  transaction; an item master save that touches the level queues it too);
+  `runReorderCheck()` adds an item at or under its reorder level, with
+  nothing already on the way (open request lines left to order, issued POs
+  left to receive), to its warehouse's ONE `PurchaseRequest.autoReorder`
+  DRAFT stock replenishment — under an advisory lock, never twice —
+  quantity 2 × level − available − on the way, the estimate the item's
+  standard cost (else last, else average), the line's description saying
+  why. **The system never submits it** (rule 2): the requester — the first
+  active Warehouse Supervisor, else the Purchasing Manager (the seed gives
+  the supervisor own-scope purchase-request rights and delete) — is told
+  (`reorder.raised`) and checks and submits it. With neither role held,
+  nothing is raised and the trail says why. verify-chain pins it.
+- **Outgoing is the requestor's RECEIVE PROOF** (2026-10-15, the owner's
+  call: "Outgoing = internal receive proof to the requestor … no customer
+  involved"; his "Outgoing Delivery Receipt Slip" as the guide).
+  `pages/chain/Outgoing.tsx` holds the list, the PAGE editor
+  (`/g-chain/outgoing/new`, `/:id/edit` on a draft — the modals and the
+  per-line routes' UI are gone) and the record page, which has no web
+  Guard: the API lets in the register's readers, the supervisor while it
+  waits on them, and **the person it was issued to** (`issuedToId`,
+  `visibleIssue`, the attachment guard), who may hold no warehouse right.
+  The slip names who asked (`issuedToId`, else a name for someone with no
+  login), `referenceNo`, `deliverTo`, `carrier`, `driverName`, the
+  `instructions` (terms of receipt — `OUTGOING_TERMS` on a new slip,
+  editable) and per line `serialNo`, `condition`, `remarks`, `sortOrder`.
+  One save: `POST /stock-issues { lines }` and `PUT /:id/sheet` (DRAFT,
+  claimed on `version`, lines replaced and re-priced) through
+  `checkIssueLines()` — each item held at the warehouse with that much
+  AVAILABLE, a project line's budget line from the item — before a number
+  is issued; `GET /stock-issues/options` (warehouses, what one holds, the
+  terms) and `/route` sit above `/:id`. **Issued, the receiver confirms
+  it**: `POST /:id/receive { note }` — the person it went to, or
+  `edit_all` recording a signed paper copy (the note says who entered it
+  for whom) — once, claimed on `receivedAt` being empty; the issuer is
+  told (`warehouse.received`). Issue and approval tell the receiver
+  (`warehouse.issued_to_you`) and My Work lists their unconfirmed slips.
+  The list: Requested by and Received columns, `?received=yes|no` and
+  `?warehouseId=`, cards Waiting for approval / Drafts / Issued / Not yet
+  confirmed received, counted under everything but those two filters
+  (`issueListWhere` → `{ base, where }`). **The paper is a "Delivery
+  Receipt" with no prices**: DELIVERY DETAILS (reference, project, dispatch
+  warehouse, carrier), "Received by" beside "Deliver to", the items with
+  serial and condition, the purpose, notes, terms and what was noted on
+  receipt, then Prepared & dispatched by → the route's step → Delivered by
+  (the driver, dated at issue) → Received in good order by (dated when
+  confirmed, "Pending" until). A list paper is "Outgoing", its rows
+  "outgoing slips".
+- **An email prints on ONE line** (2026-10-14, the owner's call): in the
+  `blocks` sections and `renderDocument`'s sign-offs an address too wide
+  for its column is drawn smaller (`fitSize()`, 6pt the floor), never
+  broken; an email in a block is never underlined.
+- **Anyone asks to borrow** (push 4b; the owner's call: "anyone can request
+  to borrow; approval by the Team Leader / Technical Manager they report to
+  or within the team; the warehouse processes it, with its reports-to's
+  approval"). `gchain.borrow_slips` is OWNED_KEPT now and the `employee`
+  role holds its own scope, so everyone has Borrow Slips. `BorrowStatus`
+  gains DRAFT → PENDING_APPROVAL → APPROVED before OUT, and CANCELLED with
+  `cancelReason`; `requestedById`, `neededOn` and `releasedAt` are new and
+  `issuedById` (who RELEASED it) is null until the release. **Nothing leaves
+  the shelf before the release**: `POST /borrow-slips` saves a DRAFT request
+  in the caller's own name (a borrower or `borrowerId` for somebody else is
+  the warehouse's alone — `edit_all` writes a walk-in's slip), checked
+  against what the warehouse holds AVAILABLE and never due back before
+  today (`checkBorrowSheet`); `PUT /:id/sheet` modifies a draft whole;
+  `/submit` (in the REQUESTER's name), `/withdraw` and `/cancel { reason }`
+  (draft, pending or approved — the warehouse's "not on the shelf" tells
+  the requester) as every routed document; `POST /:id/release` (`edit_all`)
+  claims APPROVED and moves every line out of available in the same
+  transaction (`lendItems`), dated that day; `/return` takes only a slip
+  on loan. Route switched off: the warehouse's own slip goes OUT at once,
+  anyone else's is saved APPROVED for the release. Seeded **"Borrow slip —
+  team leader, warehouse"** (`preparerSigns`): step 1 SUPERVISOR named Team
+  Leader / Technical Manager — the "Reports to", else Team Leaders on the
+  requester's team — **plus every Technical Manager on the requester's own
+  team**: the engine's new **`ApprovalStep.alsoRoleIds`** (SUPERVISOR only;
+  `teamHoldersOf()` in `shared/approvals.ts`, strictly the team, never
+  every holder; `holdsStep` counts them, so a Technical Manager's own
+  request is signed at submit; Admin › Approval Workflows edits it as "Also
+  decides it, on the requester's team" and a PUT that leaves it out keeps
+  it), then step 2 ROLE `warehouse_supervisor`. Approval tells the warehouse
+  (`borrow.to_release`, the warehouse and Warehouse Supervisor roles); the
+  release tells the requester and borrower. Reading: `view_all`, or the
+  requester / borrower (`view_own`), or a decider through
+  `requireAnyOrDecider` — the record page has no web Guard. The list
+  (`borrowListWhere` → `{ base, where }`, Mine · All for the warehouse,
+  Mine only otherwise) carries summary cards — Waiting for approval, To
+  release, On loan, Overdue — and prints; the slip's own paper `GET
+  /:id/pdf` signs REQUESTED BY, the two steps and RELEASED BY (ISSUED BY on
+  a slip from before requests). My Work lists the warehouse's approved
+  requests to release and what a person holds due back within three days.
+  The clearance scan counts only slips on loan. `pages/chain/
+  BorrowSlips.tsx` holds the list, the request page (`/new`, `/:id/edit`)
+  and the slip, moved out of `Warehouse.tsx`.
+- **G-CHAIN › Reports is one report per menu over a chosen range**
+  (2026-10-15, the owner's call: "Report button is per menu, any applicable
+  in the list, selectable time range"; his examples: monthly incoming goods
+  by quantity or value, a supplier's monthly total cost).
+  `routes/chainReports.ts` at `/api/chain-reports/:kind` (`?from=&to=`,
+  Manila days through `parseRange`; `.csv` and `.pdf` twins above it, each
+  audited `chain_report` / EXPORTED before the bytes go out) and
+  `pages/chain/ChainReports.tsx` (`/g-chain/reports?kind=&from=&to=`; the
+  presets This month, Last month, This quarter, Year to date, Last 12
+  months, or typed dates; Export CSV and Print). The kinds are the strips'
+  menus — `overview`, `purchase-requests`, `rfq`, `canvass`,
+  `purchase-orders`, `incoming`, `inventory`, `outgoing`, `borrow`,
+  `pullout` (`REPORT_KINDS`, the web's copy names each list) — and every
+  report is one shape: `cards`, a `series` with a row for EVERY month of
+  the range (zero when empty; `Series`, keyed by `manilaMonthKey`) and the
+  menu's `tables` (By supplier / project / status / purpose …, the top ten
+  or fifteen by value). **No table, and none must be acquired**: every
+  figure is read off the documents the menus record, and verify-chain
+  reconciles the outgoing report to the issued slips of its range. The
+  purchase-orders report prints the owner's example as a matrix, "Supplier
+  by month", while the range fits twelve months. `gchain.reports` is READ
+  — `view_all` is the whole right, for the twins too (never an undefined
+  export key). **Every G-CHAIN list carries a Report button**:
+  `reportPath` on `DataList` (beside the screen's actions, rule 9) opens
+  the page with that list's kind preset. The old Supply Chain Reports page
+  (stock by warehouse, needs reordering, overdue borrows) is the `overview`
+  kind. **The engine is shared** (2026-10-15, when G-FIN's
+  reports came): `shared/reportKit.ts` holds the report shape (`Report`,
+  with an optional `series.head` — "Age", "Week" — and a `filterLine`),
+  `Series` (a period per row, the Manila month unless a report gives its
+  own key), `tally`, `byValue`, `monthsOf` and `mountReports()`, which puts
+  `/:kind.csv`, `/:kind.pdf` and `/:kind` on a router with the menu's view
+  right, a per-kind right (`rights`) and the audit type; the paper says "As
+  of" when from and to are one day. The web page is
+  `components/ReportPage.tsx` (a kind's `mode`: `range`, `asOf` or
+  `ahead`, with their presets; `controls` and `extraKeys` for a division's
+  own narrowing, in the URL); `ChainReports` is a wrapper over it.
+- **The borrow slip is the EQUIPMENT & TOOL BORROWER'S SLIP** (2026-10-15,
+  the owner's form as the guide). `BorrowSlip.borrowType` (`BorrowType`:
+  Internal / office use, On-site project / customer site, Personal request,
+  R&D / testing — `BORROW_TYPES`; the editor requires it, the API and a slip
+  from before leave it null), `siteLocation`, `contactNo` (for a borrower
+  with no login; a login's own number prints otherwise), and per line
+  `conditionOut` and `conditionBack`. **The return clearance** is recorded
+  by the return (`POST /:id/return { items[{itemId, quantity,
+  conditionBack}], returnedCondition, note }`): `returnedCondition`
+  (`ReturnCondition`: Complete / good, Damaged, Missing parts —
+  `RETURN_CONDITIONS`; a return that says nothing and brings everything
+  back is Complete / good), `returnNote`, `inspectedById` and `inspectedAt`
+  — whoever received it, dated; the last return's word stands. The list
+  filters by `?borrowType=` (an unknown one is a 400) and searches the site.
+  The paper "Borrower's Slip" prints the form's five sections: BORROWER'S
+  DETAILS (name, employee no., department, contact, borrowing type,
+  warehouse, needed on, expected return), EQUIPMENT & TOOL DETAILS (part
+  no., serial, condition out, what came back and how), REASON FOR BORROWING
+  (project, site, purpose, notes), the sign-offs (Requested by, the two
+  steps, Released by), and RETURN CLEARANCE — the custodian's record once
+  anything is back, else the lines left blank for them while it is out;
+  "REQUEST — NOT YET RELEASED" in the foot until then.
+- **Pull-out slips** (push 4c; the owner's call: "Pull-out Slip — approved
+  Sales Order, or from Purchase Request"; "if no project was created, the
+  sales order is enough"). `PulloutSlip` + `PulloutItem` (new tables;
+  numbering `pullout_slip`, GT-PS-2026-0001; `gchain.pullout_slips`
+  SHARED_KEPT, held by the warehouse roles; Warehouse › **Pull-out Slips**,
+  last on the strip — verify-foundation pins it), `routes/pullouts.ts` at
+  `/api/pullout-slips`, `pages/chain/PulloutSlips.tsx`. `kind` SALES_ORDER
+  (an ISSUED order — the customer's delivery) or PURCHASE_REQUEST (an
+  APPROVED or partly ordered DIRECT_TO_JOB request — the project takes from
+  the shelf instead of buying; a stock-replenishment request is refused).
+  `loadSource()` is the one reading of a source: its lines with what is
+  LEFT (a sales order line less what pending and pulled-out slips took; a
+  request line less `orderedQty`, `pulledQty` and pending slips) and, for a
+  sales order line, the item whose part number or code matches; the project
+  charged is the request's, or the one built from the order's quotation,
+  else none. `checkSheet()` is the one rule for create, modify, submit and
+  posting: each line answers a source line and takes no more than is left,
+  a request line that names its item takes that item, the warehouse holds
+  enough AVAILABLE, and a project charged knows each line's budget line.
+  DRAFT → PENDING_APPROVAL → PULLED_OUT, or CANCELLED with its reason;
+  seeded **"Pull-out slip — the warehouse's supervisor"** (SUPERVISOR,
+  fallback `warehouse_supervisor`); with the route off "Pull out" posts at
+  once (the Outgoing rule). **Posting is `postPullout()`**, in the claim's
+  transaction: the stock out at the warehouse's average (`issueStock`); a
+  request line's new **`PurchaseRequestItem.pulledQty`** grows — what is
+  left to order is quantity − ordered − pulled (`fromRequestItem`, the PO's
+  "fully ordered" test), the request becomes PARTIALLY_ORDERED or ORDERED as
+  it is covered, and its commitment is released by the pulled quantity at
+  its estimate; a project is charged INCURRED + CONSUMED by budget line, the
+  stock issue's rule; a sales order with no project posts no job cost.
+  `settlePullout()` (exported, idempotent; a shelf that can no longer honour
+  it sends the slip back to a draft with a bell; "not applied" after a
+  cancel). The sales order's or request's owner is told (`pullout.done`).
+  The paper "Pull-out Slip" prints NO cost (it travels with the delivery):
+  the lines against the source lines they answer, PREPARED BY, the step,
+  RELEASED BY and RECEIVED BY (the name on the slip), attachments behind
+  (`pullout_slip`). A request is not cancelled, and a sales order not
+  reopened or cancelled (`refuseWhilePulledOut`), while a slip stands on it.
+  The sales order page's ⋯ "Pull out stock…" and the request page's ⋯ "Pull
+  out from stock…" open `/g-chain/pullout-slips/new?salesOrder=` /
+  `?request=`; both pages show a **Pulled out** card (`PulloutCard`, the
+  register's own list, hidden without its right) and the request's lines
+  say what came from stock. The list (`listWhere` → `{ base, where }`,
+  cards Waiting for approval / Pulled out / Drafts) prints; Ctrl+K finds
+  slips.
+- **The pull-out slip is the INTERNAL RELEASE SLIP** (2026-10-15, the
+  owner's form as the guide, and his calls: "internal, allowing the
+  warehouse to release the item; no customer involved" and "yes" to a slip
+  with no source document). `PulloutKind` gains **OTHER** — no sales order
+  or request (a supplier return, testing, a repair): `reason` required, the
+  lines any item the warehouse holds (no `sourceLineId`), no project, no
+  job cost; `loadSource()` answers `NO_SOURCE` and `GET /source?kind=OTHER`
+  the warehouses and stock. Every slip carries `purpose` (`PulloutPurpose`:
+  Sales order fulfilment, Project / site use, Site installation, Testing /
+  audit, Repair / service, Supplier return, Other — `PULLOUT_PURPOSES`;
+  OTHER takes only the last five; null on a slip from before reads from its
+  kind through `purposeOf()`, in the list's `?purpose=` filter too),
+  `requestedById` (who asked — sales or the project; the form starts on the
+  sales order's author or the request's requester, the API on the
+  preparer), `poReference` / `drReference` (a sales order's PO and DR
+  numbers to start with), the courier (`receivedByName` is the authorized
+  person, `courierCompany`, `courierContact`, `vehicle`), `destination`,
+  `returnBy` and per line `serialNo` and `condition`. **The route is the
+  REQUESTER's** (`requesterOf()`: their "Reports to", else a Warehouse
+  Supervisor), and who asked reads the slip and its files with no
+  warehouse right and is told when it goes out. The paper: REFERENCES (SO,
+  PR, PO ref., DR ref., purpose, project), "Authorized person / courier"
+  beside "Destination" (with the warehouse source and Expected back), the
+  items with part no., serial and condition — never a cost — the reason,
+  the special instructions, and the gate clearance the guard signs by hand
+  ("Guard on duty: ____ Time out: ____", printed while not cancelled);
+  signed REQUESTED BY → the step → WAREHOUSE RELEASED BY → PULLED OUT /
+  RECEIVED BY, DRAFT — NOT YET RELEASED in the foot until it goes out. The
+  list adds Purpose, Destination and Requested by, and its paper.
+- **Inventory switches between List and Kanban** (push 4d; the owner's
+  call, like gasiontech's). A List / Kanban switch in the page head;
+  `?view=kanban|list` in the URL (a link's view wins), and the viewer's last
+  CHOICE kept per browser in `gcore_view_inventory` (wrapped in try/catch —
+  a browser that keeps nothing still switches). `GET /inventory/board`
+  reads **the list's own query** (`inventoryListWhere`: search,
+  warehouse, below reorder level) and answers a column per active
+  warehouse (only the one a `warehouseId` narrows to; an inactive one still
+  holding a row is shown too) with what it has AVAILABLE, and **Out of
+  stock** for every row with nothing available (none on hand, or all lent),
+  each card naming its warehouse; `total` is the list's, which
+  verify-chain asserts, and a column draws 200 cards at most and says how
+  many more. No dragging — stock moves by documents; a card is a link to
+  the stock card. The board's toolbar writes the list's own URL keys (`q`,
+  `warehouseId`, `needsReorder`), so switching views keeps the filter. The
+  styles are the `inv-*` rules in `styles/procurement.css`.
+
+## Accounts Receivable and collections (2026-10-15)
+
+The owner's `Accounts_Receivable_UI_Specification_Final.pdf` as the guide,
+on the invoice and payment records G-FIN already had; his answers: an
+invoice not yet countered is awaiting countering, never overdue; G-CORE's
+own invoice numbers; the teams are KAT, HIT, UIT, GIB, SIT; one Payments
+register; OR numbers from G-CORE's numbering; the collection forecast by
+salesperson, team, customer and terms.
+
+- **An invoice is COUNTERED when the customer receives it**
+  (`Invoice.counteredDate`, a DATE), and its **terms** (`termsDays`, net
+  days — "Net 30"; the old text `terms` stays for what printed before) run
+  from that day: `dueDate` — the expected collection — is
+  `expectedCollection(invoiceDate, counteredDate, termsDays)`.
+  `shared/receivables.ts` holds the one rule: `isOverdue()` / `daysLate()` /
+  `overdueWhere()` — owed, COUNTERED and past due — read by the list, its
+  `?overdue=true`, the aging (an uncountered row ages as Current and is
+  totalled apart, `awaitingCountering`) and `financePosition`'s
+  `receivableOverdue`. Until countered an issued invoice is **awaiting
+  countering** (`AWAITING_COUNTER_WHERE`, `?countered=no`) whatever its
+  date. `POST /invoices/:id/counter { counteredDate, termsDays }`
+  (`gfin.ar.edit_all`; issued, partly paid or paid; never before the
+  invoice date nor after today; claimed on what was read) moves the due
+  date with it; a wrong day is corrected by saying it again. The seed's
+  `backfillInvoiceCountering()` took every invoice issued before as
+  countered on its invoice date, once (`seed.invoiceCounteringBackfilled`),
+  so every overdue figure reads as it did.
+- **"Mark as received" replaces "Issue to customer"** (2026-10-16, the
+  owner's call: no customer is involved in G-CORE's side of it). On a
+  draft, `POST /invoices/:id/counter` issues the invoice AND records the
+  day received with the terms, in one step (the panel "Mark as received");
+  on an issued, uncountered one it is the same button. Then the only next
+  step is Record collection. `POST /:id/issue` stays for scripts. The
+  Payments register is labelled **Collections** (the menu, its title and
+  the list paper; the path and keys unchanged).
+- **The withholding rate is the invoice's own** (2026-10-16, the owner's
+  call: "editable withholding tax, e.g. 1% or 2%"): `EwtPicker` (0%, 1%,
+  2% chips, or Other up to 15%) on the invoice form and the invoice request
+  form, the company rate until one is picked. `ewtRate` on `POST
+  /invoices`, `/from-billing/:id`, a draft's `PUT` (alone it re-withholds
+  on the stored gross, even on a billing's draft — `BILLING_CARRIED` no
+  longer holds it) and on an invoice request (`InvoiceRequest.ewtRate`,
+  passed to `createInvoiceFromBilling` / `createInvoiceFromOrder` on
+  approval). EWT is always on the gross.
+- **Each invoice is credited to a salesperson and a team**
+  (`salespersonId`, `teamId` — the Industry/team master), filled at raising
+  from its source by `invoiceCredit()`: a sales order's author and its
+  quotation's team, a project's quotation's owner and team, a job order's
+  quotation or sales order, else whoever raised the job order; the team
+  falls back to the salesperson's own. The form may name them;
+  `PATCH /invoices/:id/credit` changes them at any stage but cancelled.
+  Kept as raised (the quotation's rule). `fillInvoiceCredit()` (the seed,
+  every deploy) fills only invoices with none, claimed on null.
+- **"+ New invoice" on the list** (`gfin.ar.create`; the owner's "Add New
+  Sale Invoice"): the company (`CustomerPicker`), **Bills** — nothing else,
+  or one of the customer's ISSUED sales orders (`GET
+  /invoices/sales-orders?customerId=`, above `/:id`: each with its net —
+  total less VAT — what live invoices bill of it and what is left) —
+  invoice date, the terms as chips (Net 15/30/45/60, Other: `TermsPicker`),
+  PO, salesperson, team, lines and the invoice copy (a PDF attached once it
+  is saved). `Invoice.salesOrderId` (not unique: an order is invoiced as it
+  is delivered); the order lends its PO, terms and VAT rate, and
+  `assertOrderLeft()` refuses an invoice past what is left of its net,
+  under a lock on the order's row (on Modify too). A sales order is not
+  reopened or cancelled while a live invoice bills it
+  (`refuseWhileInvoiced`).
+- **The list is the sample's**: SI No., Company (project or sales order
+  under it), Amount (what is left to collect under it), Countered (or
+  "awaiting"), Terms (a chip), Expected collection (days late; "once
+  countered" while not), Sales personnel, Team, Invoice copy (the first
+  attached file, `PDF +n`) and Status; Filters status, balance, overdue,
+  countered, salesperson, team, terms, customer, Dated, Expected
+  collection. **The cards** (`invoiceListSummary()`, under the list's own
+  query): Total receivables ("N active invoices pending collection"),
+  Overdue, Awaiting countering, Collected, then one card per team of the
+  receivable (`teamShares`, `teamCards`) — each card linking to the list it
+  counts. Its paper prints Countered and Expected, the salesperson and
+  team under the customer.
+- **The invoice page**: "Mark countered" is the primary next step while it
+  waits (a panel in the page: the day and the terms, the expected
+  collection worked out live), then Record collection; ⋯ Change countered
+  date, Change salesperson or team, Print without attachments. Where it
+  stands shows Countered, Payment terms, Expected collection, Sales
+  personnel and Team; **Invoice copy and files** is the `Attachments` card
+  on `invoice` (read with `gfin.ar.view_all`, written with create or
+  edit_all), printed behind the Sales Invoice (`withAttachments`,
+  `?attachments=0` bare), which now prints the terms, the countered day and
+  the sales personnel.
+
+- **Collections are the Payments register, opening on money in** (the
+  owner's "Payments menu to see collected", on his Payment & Collection
+  sample): `defaultFilters` `kind=RECEIPT`; columns Number, SI No. /
+  settles, Company, Amount paid, Date of collection, Cheque no. / ref., OR
+  No., Sales personnel, Team, Cleared (Direction under Columns); Filters
+  direction, cleared, method, salesperson, team, customer, date. **A
+  collection's salesperson and team are its invoices'**
+  (`collectionCredit()`, never stored on the payment — every name where
+  they differ; `?salespersonId=` / `?teamId=` filter through the
+  allocations). **The cards** (`paymentListSummary()`, the list's own
+  query): Total collections (customer receipts only — a refund of unspent
+  cash is money in, never a collection), Uncleared cheques, Money out and
+  one card per team, split by the amount applied to each team's invoices.
+  **"+ Record collection"** opens the one `RecordPaymentModal` with no
+  document: the company first (`CustomerPicker`), then its open invoices.
+- **A collection is given an OFFICIAL RECEIPT number by G-CORE**
+  (`Payment.orNumber`, indexed not unique; numbering type
+  `official_receipt`, GT-OR-2026-0001 — the owner's call), issued in the
+  payment's transaction whenever money in settles an invoice. A collection
+  is from ONE customer: the payment takes the invoices' customer, and two
+  customers' invoices on one payment are a 400. The cheque number is the
+  payment's `reference` ("Cheque no. / reference" on the form).
+  `GET /payments/:id/pdf` is the **Collection Receipt** (under its OR
+  number; "Receipt" for money in with no OR, a **Payment Voucher** for
+  money out): received from, method, cheque no., bank, cleared, payment
+  no., sales personnel and team, the invoices it settled with the amount
+  applied, the amount received, signed by whoever recorded it — "Cheque
+  received — not yet cleared." in the foot until it clears. The payment
+  page has Print and shows the OR.
+
+- **G-FIN › Reports is one report per money menu** (the owner's "Create
+  Report" — the aging, the receivables, the collections — and "Forecast
+  Collection", which he wanted by salesperson, team, customer and terms):
+  `routes/finReports.ts` at `/api/fin-reports/:kind` on the shared engine
+  (audited `finance_report`), `FinanceReports` on `ReportPage` at
+  `/g-fin/reports` (it replaced the old aging tabs; the
+  `/finance-reports/ar-aging` and `ap-aging` routes stay). Kinds:
+  **receivables** (invoices dated in the range, by month; by customer,
+  salesperson, team, terms), **aging** (as of one day: Awaiting countering
+  apart, then the Finance Settings buckets — never overdue until
+  countered; by customer, salesperson and team with a column per bucket,
+  and the most overdue — its Outstanding, Overdue and Awaiting countering
+  are the A/R list's own cards, verify-finance asserts it),
+  **collection-forecast** (looking ahead — the next ninety days unless
+  dated — by month or `?by=week`: the countered day plus the terms, an
+  uncountered invoice placed as if countered today, past-due ones apart
+  as owed already; by salesperson, team, customer and terms),
+  **collections** (customer receipts by month, credited to each settled
+  invoice's salesperson and team by the amount applied; by method; days
+  to collect, weighted by amount), **payables-aging** (bills by bucket and
+  supplier, claims to reimburse, advances to liquidate) and **payments**
+  (money out by month, payee, what it settled, method). The A/R kinds take
+  `?salespersonId=` / `?teamId=` (or `none`) / `?customerId=`. Each kind
+  needs `gfin.reports.view_all` AND its menu's right — A/R's for the four
+  receivables kinds, A/P's for the two payables kinds (`rights` in
+  `mountReports`). Report buttons: A/R → receivables, Payments →
+  collections, A/P → payables aging.
+
+## Invoice Requests: from progress billing to A/R (2026-10-15)
+
+The owner's call: "below the progress report build the Progress billing;
+the Sales or Team Leader holding the project raises an invoice request from
+the billing, processed by Back Support, routed on the sales order; once
+approved it goes to Accounts Receivable", the paper in the standard dress.
+
+- **The project's Progress & Billing tab** has the Progress reports card
+  and, under it, **Progress billings** (`ProgressBillingsCard` in
+  `ProjectWorkspace.tsx`): "+ New progress billing" (an approved, unbilled
+  report, the ordinary `POST /billings`), and per billing its Invoice
+  request and Invoice, and "Request invoice" where it may be raised. The
+  billing keeps its own Technical Manager › Team Leader route; only an
+  APPROVED billing is requested.
+- **`InvoiceRequest`** (`routes/invoiceRequests.ts`, `/api/invoice-requests`,
+  numbering `invoice_request` GT-IR-2026-0001, `gfin.invoice_requests`
+  OWNED, G-FIN › Money in › **Invoice Requests**,
+  `pages/finance/InvoiceRequests.tsx`): the billing, its project and a
+  REQUIRED ISSUED sales order of the project's customer, which lends the PO
+  and terms; the billing's gross may not pass what is left of the order's
+  net (`assertOrderLeft`, `shared/billingInvoice.ts`). One live request per
+  billing, under a lock on the billing. **Who raises it is
+  `mayRequestInvoice(me, jobId)`**: the create right AND the owner of the
+  project's quotation, their Team Leader ("Reports to", or a `team_leader`
+  on the quotation's team), or `edit_all`. DRAFT → PENDING_APPROVAL →
+  APPROVED, or CANCELLED with a reason; `/submit`, `/withdraw`, `/cancel`,
+  DELETE (draft or cancelled) as every routed document.
+- **The route is "Invoice request — back support"**: one ROLE step
+  `back_support`, team-scoped, `standIns`. **`settleInvoiceRequest()`**
+  claims PENDING_APPROVAL → APPROVED and, in the same transaction, raises a
+  **DRAFT invoice** through `createInvoiceFromBilling()` — the one way, also
+  finance's direct door `POST /invoices/from-billing/:billingId` (now ⋯
+  "Raise invoice directly" on the billing page, refused while a request is
+  live) — carrying the billing's figures, the order, PO, terms and credit;
+  the billing goes INVOICED. If the invoice cannot be raised the request
+  goes back to DRAFT with a bell (`invoice_request.not_invoiced`); finance
+  (`gfin.ar.edit_all`) is told a draft invoice is ready to issue.
+- **The paper** `GET /invoice-requests/:id/pdf` is "Invoice Request" in the
+  standard dress: details, Particulars (the billing lines), the totals,
+  notes, Requested by and the Back Support slot ("Pending" until signed),
+  the files behind it. The list prints (`GET /invoice-requests/pdf`).
+- **A request can come straight from the SALES ORDER** (2026-10-16, the
+  owner's call: "after Sales Order, route to invoice request"). An issued
+  order's page has **Request invoice** (its next step, for the holders
+  `mayRequestInvoice(me, { salesOrderId })` names: the order's author, the
+  quotation's owner, their Team Leader, edit_all) and an **Invoicing** card
+  (before VAT, invoiced, left; its requests and invoices). Such a request
+  has no `progressBillingId` (nullable now, and `jobId` too — the project
+  built from the order's quotation where there is one) and carries
+  `grossAmount` (before VAT, what is left by default) and `description` (the
+  invoice line). What is left is the order's net less its live invoices
+  AND the live requests on it (`orderLeft`, `requested`), checked under a
+  lock on the order. Approved, `createInvoiceFromOrder()`
+  (`shared/billingInvoice.ts`) raises the DRAFT invoice: one line, VAT at the
+  ORDER's rate, EWT at the company's, never past what is left. The money on
+  the page and the paper is `taxBreakdown` of the gross the same way.
+- **The invoice is credited to whoever raised the request**, never typed
+  (the owner's call): a request's `salespersonId` is its requester and
+  `teamId` their team, else the order's quotation's team; `invoiceCredit()`
+  takes the latest live request on a sales order first, so a manual invoice
+  on that order follows it too. The New invoice form shows the names
+  (`GET /invoices/credit`, above `/:id`) and has no Sales personnel / Team
+  pickers; the invoice page's "Change salesperson or team" stays.
+- **The New invoice form asks the COUNTERED DATE, not the invoice date,
+  and the printed INVOICE NO., not the PO** (2026-10-16): `Invoice.siNumber`
+  (the BIR booklet number, typed; one live invoice each, case-blind — a 409
+  naming the other, `assertSiNumberFree`; the list shows it over G-CORE's
+  number and searches it; the paper prints "Invoice no."); `counteredDate`
+  on `POST /invoices`, `/from-billing/:id` and a draft's `PUT` is the
+  invoice date too unless one is sent, never a day to come, and the terms
+  run from it (`datesFrom()`). The PO still comes from the order. A draft's
+  PUT without `lines` changes the header alone.
+- **Lines show their VAT** (2026-10-16, the owner's call): the New / Modify
+  invoice lines carry VAT and "Amount incl. VAT" beside the amount before VAT
+  — either amount may be typed, the other follows, at the order's rate, the
+  draft's own, else the company's — and the supplier bill's lines show their
+  VAT and amount with VAT (backed out when "Their prices already include
+  VAT"). Only the before-VAT amounts are sent; the server's arithmetic is
+  unchanged.
+- **A bill's purchaser may be typed by name** (`SupplierBill.purchaserName`,
+  for someone with no login; "Not on the list? Type a name" on the form).
+  A name sent with no `purchaserId` stands in place of a login; picking a
+  login clears it. The list, its search and paper, the bill page and the
+  payables report print `purchaser?.name ?? purchaserName`; the purchaser
+  filter's `none` means neither.
+- **A collection may carry lines typed by hand** (`PaymentLine`: reference,
+  amount; the owner's call "can manually add"): money RECEIVED ON ACCOUNT
+  from a named customer, settling no invoice. `POST /payments { lines }` —
+  a receipt only, never a salary deduction, a customer named; a payment
+  with no allocation and no line is a 400. It takes an OR number, counts in
+  the payment's amount (so in Total collections) and prints on the
+  Collection Receipt as "On account"; the payment's JSON carries `lines`
+  and `onAccount`. `POST /payments/:id/lines/:lineId/apply { invoiceId,
+  amount? }` (`gfin.ar.create`) moves it — never past the invoice's
+  outstanding, the payment's customer's invoice only — into an allocation
+  on the same payment, the line shrinking or going (claimed on its amount),
+  the invoice re-derived as ever; the payment page's "Apply to an
+  invoice…" does it.
+- **The approver's word shows on the document** (2026-10-16, the owner's
+  call: "return and rejected comments in the viewing environment — add in
+  all"). `DecisionNote` (`components/ApprovalStepper.tsx`) sits beside
+  every page's `DocumentApproval` (23 pages; outside its own condition, so
+  a draft sent back shows it): while the latest request stands RETURNED or
+  REJECTED it says "Returned for changes by <name> (<step>) on <when> —
+  “comment”", read from `GET /approvals/history`, never copied onto the
+  document; submitted again, it is gone. The stepper's step lines carry
+  each decision's comment too.
+- **A purchase order is pulled back to draft** (2026-10-16):
+  `POST /purchase-orders/:id/withdraw` (the buyer or edit_all; the
+  purchase request's rule — claimed on PENDING_APPROVAL, the request
+  withdrawn through `cancelOpenRequest` in the same transaction, a decision
+  that landed first wins), `canWithdraw` on `GET /:id`, "Pull back to
+  draft" in the order page's ⋯.
+- **"+ New canvass" on the Canvass list** (2026-10-16): a panel over
+  `GET /rfqs/canvassable` (above `/:id`, `gchain.canvass.create`: SENT or
+  QUOTED, a supplier quoted, no live canvass — the RFQ page's
+  `canStartCanvass`); picking one posts the ordinary `POST /canvasses
+  { rfqId }`, or — past six quoting suppliers — opens the RFQ page with
+  `?canvass=1`, which opens its choose-six panel.
+- **Assign Back Support with "Supports teams"** for every selling team —
+  until then requests stall and `audit-workflows.ts` says so.
+
+## Accounts Payable (2026-10-15)
+
+The owner's `Financial_Management_UI_Specification_Money_In-Money_out.pdf`,
+module 3, on the supplier bill G-FIN already had.
+
+- **A bill carries its DATE OF DELIVERY, its TERMS and its PURCHASER /
+  BUYER** (`SupplierBill.deliveryDate` a DATE, `termsDays`, `purchaserId`
+  → User "BillPurchaser", SetNull; `terms` stays for what printed before).
+  `shared/payables.ts` is the rule: **due = delivery (else the bill date) +
+  terms** (`billDueDate`, the sample's Oct 2 + 30 days = Nov 1), printed
+  "30 Days" (`billTermsLabel`). The delivery is the matched receiving's
+  date unless typed; the purchaser is the purchase order's author unless
+  picked (`billLinks()` returns both; an unknown or inactive login is a
+  400). A due date before the delivery (else the bill date) is refused.
+  `fillBillTerms()` (the seed, every deploy, only where none is set,
+  claimed on null) gives older bills the receiving's date, the terms their
+  own dates say and the order's author — never moving a stored due date.
+- **The list is the sample's**: Bill No. (their invoice under it),
+  Company / Vendor, Amount (net payable; what is left or the EWT withheld
+  under it), Date of delivery, Payment terms (a chip), Due date (days
+  late), Purchaser / Buyer, Status; Bill date, Billed and Job cost under
+  Columns; tick boxes. Filters status, balance, overdue, **due soon**
+  (`dueSoonWhere`, the next `DUE_SOON_DAYS` = 7, both ends), **pending**
+  (draft or pending approval), purchaser (`none` too), supplier
+  (`SupplierPicker`'s lookup), terms, due-date and delivery ranges.
+  **The cards** (`billListSummary()`, the list's own query): Sum of all
+  payables (approved and partly paid, what is left), Pending bills, Due in
+  7 days, Overdue — each linking to the filter that lists it
+  (verify-finance asserts the counts equal). The printed list prints
+  Delivered, Terms and Purchaser. The bill page's "Where it stands" names
+  all three. The form (`NewBillModal`) asks Date of delivery, the terms as
+  chips (`TermsPicker`) and the purchaser (`PersonSelect` over
+  `gchain.purchase_orders.create`, "— the order's author —" on a bill
+  against an order), the due date said under the terms.
+- **The AP Report Generator** is the `payables` kind of G-FIN › Reports
+  (the A/P list's Report button; Payables aging in its ⋯): bills falling
+  DUE in the range (pending approval and later, never a draft or
+  cancelled), by month of the due date, by supplier, by purchaser, by
+  terms and one by one (100 at most, said), narrowed by `?purchaserId=` and
+  `?supplierId=`, A/P's right needed. Its period is `mode: 'span'` on
+  `ReportPage` — the past and the ahead presets, "This & next month" first.
+- **A/R's ⋯ opens the Forecast collection and the Aging report**; the
+  Payments register's **Cleared cheques** card is the share, by value, of
+  customer cheques (`method` CHECK) the bank has cleared
+  (`chequesClearedPct`, null with none), linking to `?method=CHECK`.
+
+## Budget requests and liquidations in G-FIN (2026-10-15)
+
+The owner's modules 4 and 5, on the budget request (project cash) G-FIN
+already had; his answers: a request always names a project ("Need Project,
+Will Create a Operation Budget" — office or operations cash goes against an
+operations project), and the liquidation stays itemised with attachments
+"for early approval or checking".
+
+- **The register is the sample's** (`BudgetRequestsList`, both dresses):
+  BR No., Requester, **Team** (the requester's team, else their department —
+  `TEAM_OR_DEPT_SELECT` / `teamOrDepartment()` in `shared/team.ts`, the one
+  rule for every money-out register, sent as `team` with the person's record
+  stripped), Project / Purpose, Amount, Date needed, Status. Filters status,
+  pending, approved funds, liquidation overdue, requester, team (`teamId`,
+  `none` too, `userTeamWhere()`), date-needed range. **The cards**
+  (`budgetRequestListSummary()`, the list's own query): Sum of all budget
+  requests (rejected and cancelled left out), Approved funds (approved and
+  every state after), Pending approval, To release — each linking to its
+  filter (verify-finance asserts the counts). **"+ Add budget request"** on
+  the list (`gops.budget_requests.create`): `BudgetRequestModal` with no
+  `job` asks the project from `GET /budget-requests/projects` (above `/:id`,
+  running projects, numbers and names only, the create right).
+- **Budget Liquidations** — G-FIN › Money out, `gfin.budget_liquidations`
+  (READ, Finance holds it; it opens the list and every request through
+  `seesAll`), `/g-fin/budget-liquidations`, `FinanceLiquidations`: the same
+  rows narrowed to `released=true` (RELEASED, REFUND_DUE, LIQUIDATED), BR
+  No., Requester / Team, Project / Purpose, Released, Spent (what a pending
+  liquidation filed, until approved), Return, Status and **Actions** —
+  "Actual entry" for the requester while the cash is out and nothing is
+  filed, "Process" while unspent cash is owed back — each opening the
+  request page with its form (`?act=liquidate|refund`, read once and
+  dropped). Cards: Sum of all liquidation accounts (released, spent on the
+  liquidated), Total excess returned, Still owed back.
+- **The liquidation's attachments**: the claim form (`NewClaimModal`, for
+  every claim) ends with an Attachments section; the files picked are filed
+  on `expense_claim` after the save and BEFORE a submit, so the checker sees
+  them from the first step. The itemised lines stay as they were.
+- **Reports**: `budget-requests` (needed in the range — a request with no
+  date counts on the day raised; drafts out, rejected and cancelled only
+  under By status — by month, requester, team, project, status; narrowed by
+  `requestedById`, `teamId`, `status`; `gfin.budget_requests.view_all`) and
+  `liquidations` (released in the range: released, spent, returned, still
+  owed back; by requester, team, project; the overdue ones;
+  `gfin.budget_liquidations.view_all`). The registers' Report buttons open
+  them.
+
+## Reimbursements (2026-10-15)
+
+The owner's module 6, on the expense claim (`gfin.expenses`, the menu now
+labelled **Reimbursements**, the path and keys unchanged); his route: "Back
+Support > Finance Staff > Finance Manager > CEO", after the requester's
+Team Leader.
+
+- **The route** is seeded "Reimbursement — team leader, back support,
+  checking, finance manager, CEO / President" (`expense`, `preparerSigns`,
+  `standIns`): Team Leader (SUPERVISOR, falling back to `team_leader` on the
+  team), Back Support (team-scoped), **Checking (Finance Staff)** (ROLE
+  `finance`), Finance Manager, CEO / President — every claim and every
+  liquidation. "Expense claim — supervisor then finance" is RETIRED; a claim
+  pending on it finishes on it. The cash advance takes the same five
+  ("Cash advance — team leader, back support, checking, finance manager,
+  CEO / President"; "Cash advance — supervisor then finance" RETIRED).
+  **Assign Finance Manager and CEO / President in Admin › Users** — until
+  then claims and advances stall at step 4, and `audit-workflows.ts` says
+  so. A verify script that settles a claim needs a holder of each
+  (verify-finance and verify-delivery make a `ceo`).
+- **The status in the owner's words**: `openSteps(documentType, ids)` in
+  `shared/approvals.ts` reads the step each open request waits on (one
+  query a page) and `stageWords(status, step, owed)` says it — TL Approval,
+  Back Support, Checking, FM Approval, CEO Approval (an old route's
+  "Supervisor approval" / "Finance approval" read the same), For Release
+  (approved, something still to pay), Paid (REIMBURSED), else the status.
+  The list's rows carry `stage`; cash advances use the same two.
+- **The list is the sample's**: Reimbursement No., Date of reimburse,
+  Requester, Team (else department — `teamOrDepartment()`), Project /
+  Purpose (a liquidation names what it accounts for), Amount, Status; Kind
+  and Lines under Columns; tick boxes. Filters status, pending (in
+  approval), for release, kind, requester (`claimedById`), team, date
+  range. **Cards** (`claimListSummary()`, the list's own query): Sum of all
+  reimbursements, Pending process, For release, Total paid out — the counts
+  equal their filters (verify-finance). "+ Add reimbursement" opens the
+  one claim form, Attachments at its foot.
+- **The report** is the `reimbursements` kind (claims dated in the range,
+  drafts out; by month, requester, team, kind, status; narrowed by
+  `requestedById`, `teamId`, `status`; `gfin.expenses.view_all`).
+
+## Cash advances as money lent (2026-10-15)
+
+The owner's module 7 ("Cash Advance (Money Lent to Employee)") and his
+answer: yes, a loan repaid in payments — salary deduction included, entered
+by finance; an advance already released keeps its liquidation.
+
+- **`CashAdvance.repayable`** (default false) is set on every advance
+  raised from now on (`POST /cash-advances`); `repaidAt` dates the last
+  repayment. A **repayable** advance is approved on the five-signature
+  route (see Reimbursements), released in one voucher as before, then
+  **repaid**: RECEIPT allocations of kind `advance_refund` (the same column,
+  `amountRefunded`, holds the repayments) until nothing is left —
+  `refreshAdvance()` gives APPROVED → RELEASED (owing) → **PAID**
+  (`CashAdvanceStatus.PAID`, new), re-derived from the allocations so a
+  deleted repayment puts the balance back; no liquidation deadline. A loan
+  is never liquidated: an expense claim naming it is a 400. An older
+  advance (`repayable` false) keeps everything as it was: liquidation,
+  refund, REFUND_DUE, LIQUIDATED. `settleable('advance_refund')` owes a
+  loan's released less repaid while RELEASED; `GET /payments/open?kind=
+  advance_refund` lists loans being repaid beside refunds due;
+  `financePosition`'s `advancesInHand` counts a loan's unrepaid balance.
+  "One advance at a time" reads "has not been repaid yet" for a loan.
+- **Salary deduction** is a `PaymentMethod` (`SALARY_DEDUCTION`): money in
+  on a cash advance only (anything else is a 400), cleared as recorded; the
+  repayment form offers it only on an advance.
+- **The register is the sample's**: CA No., Date requested, Requester, Team
+  (else department), Project / Purpose, Amount, Status in the owner's words
+  (`advanceStage()`: the open step's TL Approval … CEO Approval, For
+  Release, **Repaying** while a balance is owed, Paid), Total payment made
+  (with what is left; "by liquidation" on an older one), Payment history
+  (the advance's page, `#payments`). Filters status, repayment (`owing`),
+  approval, for release, liquidation overdue, requester, team, date range.
+  **Cards** (`advanceListSummary()`): Total granted CA, Less total payments
+  made, Net outstanding balance (= the balances of the loans still being
+  repaid, asserted), In approval. **Payment entry** (the A/R create right)
+  picks an active CA, then the ordinary repayment form. The page reads
+  "Repaying", shows Repaid and Balance, the Payment history, and **Record
+  repayment**; Liquidate is offered on an older advance only.
+- **The report** is the `cash-advances` kind (requested in the range: granted,
+  released, repaid, outstanding; by requester, team, status; repayments in
+  the range by method; `gfin.cash_advances.view_all`).
+
+## Commissions (2026-10-16)
+
+The owner's "Commission Request System" spec: G-FIN › Money out ›
+**Commissions** (`gfin.commissions`, OWNED; `/g-fin/commissions`,
+`routes/commissions.ts`, `pages/finance/Commissions.tsx`, numbering type
+`commission_request`, GT-RFC-2026-0001; tables `CommissionRequest` +
+`CommissionShare`).
+
+- **Raised only on a FULLY COLLECTED sales order**: ISSUED, its live
+  (not cancelled) invoices together cover the order's net, and every one is
+  PAID. `orderSource()` is the one reading — the order's money (total, VAT,
+  net, the lines' cost through `quotationTotals`), each invoice and the
+  collections applied to it (their OR numbers and the latest day), the
+  project built from its quotation — and says in words why an order is not
+  yet eligible. `collected` is what was settled on each invoice plus the EWT
+  it withheld at source (withheld is paid to the government on our account,
+  never short-paid). One STANDING request per order (anything but
+  CANCELLED, PAID included), decided under a lock on the order's row.
+- **One arithmetic: `shared/commission.ts`** (exact in BigInt centavos,
+  half away from zero; `web/src/lib/commission.ts` its copy, pinned equal on
+  300 random requests by verify-finance): actual margin = collected − VAT −
+  total cost (the owner's banner); gross = max(0, margin) × rate; a share =
+  gross × share % with the remainder on the largest share, so the shares add
+  up to the gross; tax = share × tax % (**10% by default**, editable per
+  line); net = share − tax − CA deduction. The shares must add up to 100%;
+  INDIVIDUAL is one person at 100%. Every figure is SNAPSHOTTED on the
+  request when saved.
+- **Who raises it is `mayRaiseCommission()`** — `mayRequestInvoice`'s rule:
+  the create right AND the order's author, the quotation's owner, their
+  Team Leader ("Reports to", or a `team_leader` on the quotation's team), or
+  `edit_all`. Who reads it: `view_all`, the requester, a BENEFICIARY, or —
+  through `requireAnyOrDecider` — whoever may decide its open request.
+  Sales (and so Industry Specialists) and Team Leaders hold own-scope;
+  Finance reads all; the Finance Manager holds `edit_all` and `delete`;
+  the executive and the CEO read all.
+- **"+ Add person" offers the deal's people first** (`dealPeople()`): the
+  sales order's author, the quotation's owner, their Team Leader, the
+  project's Technical Manager, and the job orders' Technical Manager,
+  engineer, lead, support and assigned personnel — each with what they did;
+  anyone else through `PersonSelect`.
+- **A CA deduction repays the beneficiary's cash advance**: it must name one
+  of the person's open REPAYABLE advances (RELEASED) and stay within what is
+  FREE on it — the balance less the deductions other unpaid commission
+  requests already reserve (`openAdvances()`).
+- **The route is the engine's `commission`**: seeded "Commission — finance
+  manager, CEO / President" (ROLE `finance_manager`, ROLE `ceo`,
+  `standIns`). Submit / withdraw / cancel / DELETE (draft or cancelled) as
+  every routed document; `settleCommission()` claims PENDING_APPROVAL →
+  APPROVED and tells whoever may pay; a return or rejection is DRAFT again;
+  `onApprovalReopened` takes an approved one back to draft and is refused
+  once PAID.
+- **Paying is `POST /:id/pay`**, `gfin.ap.create` + `gfin.commissions.
+  view_all` (money out is A/P's right): claimed on APPROVED → PAID, and in
+  the same transaction one DISBURSEMENT voucher per beneficiary for their
+  net (a `PaymentAllocation.commissionShareId`, the share's `paymentId`),
+  and each CA deduction recorded as a repayment of the advance — a RECEIPT
+  of the new method **`COMMISSION_DEDUCTION`** allocated to it, checked
+  against what it still owes, `refreshAdvance()` deciding its status. POST
+  /payments never takes that method, and `DELETE /payments/:id` refuses a
+  commission payout or its deduction — the two are one decision.
+- **The register** (`commissionListWhere()` → `{ base, where }`): RFC No.,
+  Requester, Team, SO No. (a link), Date requested, Amount (gross, net under
+  it), Status in the stage words; the owner's five cards — Total
+  commissions paid, Pending approval, Active requests, Sales teams eligible,
+  Avg. margin rate (margin over the net of VAT, weighted by value); the
+  paper `GET /commissions/pdf`; "+ New Commission Request" and Report (the
+  `commissions` kind of G-FIN › Reports: by month, by team, by person, by
+  status, `gfin.commissions.view_all`).
+- **The editor is a page** (`/new?salesOrder=`, `/:id/edit`): the eligible
+  orders (`GET /commissions/eligible-orders`), the breakdown read-only with
+  the banner, type, rate, the beneficiaries table with its TOTALS row, Save
+  at both ends. **The record page** links the sales order, quotation,
+  project, each invoice and each collection (OR No.), shows the payout
+  vouchers, Pay as the next step when APPROVED, and Print ("Commission
+  Request" through `renderDocument`, Requested by + `approvalSlots`). A
+  **Commissions** card (`CommissionsCard`) sits on the sales order page and
+  the project's Progress & Billing tab — the register's own list, hidden
+  without its right.
 
 ## Spreadsheet attachments (2026-10-05)
 
@@ -3959,12 +5709,46 @@ Cost Estimate" PDF) in G-CORE's own style.
   value never moves) and zeroes the three; a template saved with a markup
   reads as the margin it amounts to (`marginOfMarkup`). The board's
   "Average discount" is now the valued revision's own `discountPct`.
+  **A fixed price** (2026-10-13, the owner's call: "the percentage is hard
+  to hit the desired value"): `Costing.targetContractValue` (nullable,
+  net of VAT). "Set the grand total" STORES it — typed with VAT by
+  default (the contract value whose VAT lands nearest, `priceTo()`; the
+  toast says when VAT's own rounding cannot land on the figure), or before
+  VAT with the tick — and `costingFigures({ targetContractValue })` /
+  `recalc()` then write `contractValue` = it exactly and `marginPct` = what
+  it amounts to (six decimals; `figures.marginPct`, `fixedPrice`), so a
+  line changed later keeps the price and moves the margin. The Margin box
+  shows the derived margin greyed with **Release**, which prices from that
+  margin again (the price may move by a few centavos — a margin at six
+  decimals cannot always reproduce it). A save whose fixed price lands
+  outside a ±95% margin of the cost is refused (`recalc(…, { strict })`
+  in the save's transaction), as is a fixed price with no cost lines; a
+  background recalculation never refuses. The paper's margin row reads
+  "(x% of the price, fixed price)"; a duplicated costing keeps it.
 - **A line has `name` (bold) and `description`**; a line typed as a name alone
   carries it as its description too, because every older reader prints
   `description`. **`isHeading` is a subheading**: amount 0, no code.
   **Codes are derived, never stored**: `lineCodes()` numbers cost lines 101,
   102… per bucket by the bucket's rank (Materials 1 … Indirect 5,
   Contingency 6).
+- **A new sheet opens on the owner's scope of work** (2026-10-13,
+  `SCOPE_OF_WORK_PRELOADED.xlsx`): `SCOPE_PRELOAD` in
+  `shared/scopePreload.ts` — PLANNING & ENGINEERING, SITE PREPARATION,
+  DELIVERY, UNLOADING & PLACEMENT, INSTALLATION & INTEGRATION (main work),
+  TESTING & COMMISSIONING (`TESTING_COMMISSIONING`), HAND OVER & CLOSURE
+  (`TURNOVER`), fifteen tasks under them, each one working day to start
+  with — sent by `GET /costings/suggest/lists` as `scopePreload` and
+  loaded by `/new` once; every phase and task stays removable. A template
+  chosen on a new sheet REPLACES the preload while nobody has touched it
+  (`sectionsSignature()`), and appends otherwise; "Start from the standard
+  scope" brings it back to a sheet with no phases. A change to the list
+  is a commit to that file.
+- **The sheet shows each phase's value WITH VAT** (2026-10-16, the owner's
+  call: "make the value VAT included to tally the Grand Total"): each phase
+  is its stored value plus its VAT, the last taking VAT's rounding when the
+  phases make up the contract, so they add up to the Grand Total; a figure
+  typed is taken with VAT and stored before it. Stored, distributed and
+  billed values stay net of VAT, as ever.
 - **The plan is working days, not dates** (`planTasks()`): a task with a
   `startDay` keeps it; one without starts the day after the previous task ends.
   **A phase with no tasks but a typed duration takes its place in the same
@@ -3975,12 +5759,49 @@ Cost Estimate" PDF) in G-CORE's own style.
   schedule reads those. "Sequence tasks" only writes the computed starts
   down. `spread: true` on a save runs `spreadSections()` (the same rule as
   `/sections/distribute`) so the SOV equals the contract value.
+- **A start date gives the plan its dates** (2026-10-13, the owner's call:
+  "if there is Start Date there should be Finished Date … Mon–Sat"):
+  `Costing.plannedStart` (DATE, nullable; "Start date" under Valid until on
+  the sheet, never copied by Duplicate). With one, `present()` derives —
+  never stores — `plannedFinish` (`workingDayDate(plannedStart, planDays)`)
+  and each phase's and task's `startDate` / `endDate`; the sheet works the
+  same out live (`workingDayKey`, `web/src/lib/day.ts`) and shows "Duration:
+  85 working days (Mon–Sat) · Oct 14, 2026 – Jan 23, 2027" over the scope,
+  the Finish date under the start and each phase's dates beside its days.
+  The paper prints Start date and Finish date in its DETAILS block, the
+  legend "Planned duration in working days (Mon–Sat) — N working days in
+  all, <start> to <finish>." (`planLegend()`), and the Gantt appendix dates
+  its columns ("Oct 14", the `gantt` section's `startDate`).
+- **A line names its supplier and a note** (2026-10-14, the owner's call:
+  "maximize this space" — the room under the unit cost):
+  `CostingLine.supplierId` (SetNull), `supplierName` (a name not on file,
+  kept as typed) and `lineNote`, all nullable. The sheet's cost cell has a
+  Supplier box (free text, offering active suppliers through `GET
+  /costings/suggest/suppliers`, names only, behind the costing's own right —
+  an engineer need not read the supplier master) and a Note box. At save a
+  typed name equal (case- and space-blind) to ONE active supplier is linked
+  (`suppliersByName()` in `routes/costing.ts`); an unknown `supplierId` is a
+  400; Duplicate keeps both. **The paper prints them under the unit cost** —
+  the supplier in the subheading green, the note in the description grey,
+  the figure regular: `costingLineRow({ supplier, note })` gives that cell
+  `{ title, plain, accent, note }` (`PdfCell`'s optional fields; only the
+  designed engine draws `accent`/`note`), and the line table's **`lineNotes`**
+  switch (default on; "A line's supplier and note, under its unit cost" in
+  Admin › PDF Templates) leaves them off. **They carry to a purchase
+  requisition**: `lineSuggestions()` sends each costing line's `supplier`,
+  and picking lines (typed or "Add from costing…") fills an EMPTY Preferred
+  supplier with their suppliers, each once (`preferredFrom()` in
+  `lib/prLines.ts`, pinned by verify-foundation) — never over one typed.
 - **VAT is the company rate or 0%** (`checkVatRate`, as on the quotation),
   snapshotted at creation; a draft keeps its rate after Settings change.
-- **Approval is the seeded `costing` workflow — the owner's three
-  signatures** (2026-10-09: "creator engineer › reviewer technical manager ›
-  approval team leader › 2nd approval CTG"): "Costing — technical manager,
-  team leader, CTG" — step 1 ROLE `technical_manager` (**Technical
+- **Approval is the seeded `costing` workflow — TWO signatures since the
+  routing sheet of 2026-10-13**: "Costing — technical manager, team leader"
+  (Technical Manager, then the author's Team Leader); the route below with
+  the CEO (CTG) third is RETIRED, and a costing pending on it finishes on
+  it. A Technical Manager who is also the author's Team Leader signs both
+  with one Approve (verify-costing). As built on 2026-10-09 ("creator
+  engineer › reviewer technical manager › approval team leader › 2nd
+  approval CTG"): "Costing — technical manager, team leader, CTG" — step 1 ROLE `technical_manager` (**Technical
   Manager**, a seeded role that reads every costing), step 2 a SUPERVISOR
   step named **Team Leader** (the author's "Reports to", falling back to
   `team_leader` on the author's team since 2026-10-12 — it was
@@ -3997,8 +5818,9 @@ Cost Estimate" PDF) in G-CORE's own style.
   **Assign Technical Manager in Admin › Users** — until somebody holds it,
   costings stall at step 1 and `audit-workflows.ts` says so (it also knows
   engineers raise costings).
-  FINAL takes every signature (verify-costing proves two of three leave it
-  pending, and that CTG cannot sign out of turn). With the route active the
+  FINAL takes every signature (verify-costing proves the technical
+  manager's alone leaves it pending, and that the team leader cannot sign
+  out of turn). With the route active the
   author cannot PATCH to FINAL; `POST /:id/submit` claims DRAFT →
   PENDING_APPROVAL with a conditional update, submits in the AUTHOR's name, and
   reverts to DRAFT if the engine refuses. `settleCosting()` moves APPROVED →
@@ -4016,8 +5838,8 @@ Cost Estimate" PDF) in G-CORE's own style.
   (approval, "Mark final", a job built on a draft) and cleared on reopen;
   the seed dates older final costings from `updatedAt`, once. The G-OPS
   funnel no longer has a "Being costed" stage.
-- **The PDF is "Material Cost Estimate"**: details, one table with
-  numbered bucket headings, name-over-description cells, subtotals, the summary
+- **The PDF is "Project Costing"** (2026-10-13, the owner's call; it was "Material Cost Estimate", and its file name's kind follows: "Project Costing <number> - …"), a designed document since the same day (see "Quotation PDF template": the layout is Admin › PDF Templates › Costing, the chart joined behind it): details, one table with
+  bucket headings by name alone ("Materials", never "1 Materials" — the owner's call, 2026-10-14; the line codes 101, 102 … stay), name-over-description cells, subtotals, the summary
   as `totals`, Terms & Conditions — **never the internal notes** — the
   sign-offs, then the Scope of Work as the engine's **`gantt` section** on
   landscape pages of its own. **A trailing landscape `gantt` section is an

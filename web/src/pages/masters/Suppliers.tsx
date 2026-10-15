@@ -701,7 +701,7 @@ export function SupplierDetail() {
           {(supplier.receivings ?? []).map((r) => (
             <tr key={r.id}>
               <td>
-                <Link className="mono" to={`/g-chain/receiving/${r.id}`}>
+                <Link className="mono" to={`/g-chain/incoming/${r.id}`}>
                   {r.number}
                 </Link>
               </td>

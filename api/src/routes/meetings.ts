@@ -40,8 +40,10 @@ import {
   isLive,
   whenWhere,
 } from '../shared/meetings';
-import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
+import { renderDocument, formatShortDate, formatDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 import { manilaDayKey } from '../shared/day';
+import { safeHttpUrl } from '../shared/partners';
 import { LIST_CAP, listReference, sendListPdf, choice } from '../shared/listPaper';
 
 /**
@@ -74,6 +76,18 @@ const detailSelect = {
   title: true,
   agenda: true,
   location: true,
+  mapUrl: true,
+  minutes: true,
+  minutesAt: true,
+  minutesBy: { select: { id: true, name: true } },
+  minutesStatus: true,
+  minutesRound: true,
+  minutesSentAt: true,
+  minutesAgreedAt: true,
+  agreements: {
+    select: { id: true, round: true, userId: true, response: true, comment: true, respondedAt: true, user: person },
+    orderBy: [{ round: 'desc' }, { user: { name: 'asc' } }],
+  },
   startsAt: true,
   endsAt: true,
   status: true,
@@ -111,14 +125,41 @@ async function loadVisible(id: string, user: Parameters<typeof visibleWhere>[0])
   return meeting;
 }
 
+/**
+ * Who may write the minutes (2026-10-13): the organiser, anyone invited, or
+ * `edit_all` — once the meeting has started, and never on a cancelled one.
+ * `minutesProblem` says why not, in the words the route refuses with.
+ */
+function minutesProblem(m: { status: string; startsAt: Date; organizerId: string; invitees: { userId: string }[] }, user: ReturnType<typeof currentUser>, now = new Date()): { status: 403 | 409; message: string } | null {
+  const onIt = m.organizerId === user.id || m.invitees.some((i) => i.userId === user.id) || can(user, 'ghr.meetings.edit_all');
+  if (!onIt) return { status: 403, message: 'Only the organiser and the people invited write the minutes' };
+  if (m.status === 'CANCELLED') return { status: 409, message: 'The meeting was cancelled — there are no minutes to keep' };
+  if (m.startsAt.getTime() > now.getTime()) return { status: 409, message: 'Minutes are written once the meeting has started' };
+  return null;
+}
+
+/** Who sends the minutes out for agreement: the organiser, or `edit_all`. */
+function mayLeadMinutes(m: { organizerId: string }, user: ReturnType<typeof currentUser>) {
+  return m.organizerId === user.id || can(user, 'ghr.meetings.edit_all');
+}
+
 /** The record as the page reads it: the row plus what the viewer may do. */
-function present(m: MeetingDetail, viewerId: string, canEdit: boolean) {
+function present(m: MeetingDetail, viewer: ReturnType<typeof currentUser>, canEdit: boolean) {
+  const viewerId = viewer.id;
   const mine = m.invitees.find((i) => i.userId === viewerId) ?? null;
   const unsent = m.invitees.filter((i) => !i.notifiedAt).length;
   const guests = m.invitees.map((i) => ({ email: i.user.email }));
+  const round = m.agreements.filter((a) => a.round === m.minutesRound && m.minutesRound > 0);
+  const myAgreement = m.minutesStatus === 'FOR_AGREEMENT' ? (round.find((a) => a.userId === viewerId) ?? null) : null;
   return {
     ...m,
     canEdit,
+    canWriteMinutes: minutesProblem(m, viewer) === null && (m.minutesStatus === 'DRAFT' || mayLeadMinutes(m, viewer)),
+    // The attendees who agree the minutes: the invitees who said Going.
+    attendees: m.invitees.filter((i) => i.response === 'ACCEPTED' && i.userId !== m.organizerId).map((i) => i.user),
+    agreementRound: round,
+    canSendMinutes: !!m.minutes && m.minutesStatus === 'DRAFT' && mayLeadMinutes(m, viewer) && minutesProblem(m, viewer) === null,
+    myAgreement: myAgreement ? { response: myAgreement.response, comment: myAgreement.comment } : null,
     live: isLive(m),
     myResponse: mine?.response ?? null,
     isOrganizer: m.organizerId === viewerId,
@@ -138,6 +179,8 @@ const meetingSchema = z.object({
   title: z.string().trim().min(3, 'Give the meeting a title').max(200),
   agenda: z.string().trim().max(5000).nullable().optional(),
   location: z.string().trim().max(200).nullable().optional(),
+  /** A Google Maps link for the place — http(s) only; '' or null clears it. */
+  mapUrl: z.string().trim().max(2000).nullable().optional(),
   startsAt: z.string().min(1, 'When does it start?'),
   endsAt: z.string().min(1, 'When does it end?'),
   inviteeIds: inviteeIds.optional(),
@@ -237,6 +280,7 @@ function meetingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Pri
         { title: { contains: q.search, mode: 'insensitive' } },
         { number: { contains: q.search, mode: 'insensitive' } },
         { agenda: { contains: q.search, mode: 'insensitive' } },
+        { minutes: { contains: q.search, mode: 'insensitive' } },
         { location: { contains: q.search, mode: 'insensitive' } },
         { organizer: { name: { contains: q.search, mode: 'insensitive' } } },
       ],
@@ -276,6 +320,7 @@ meetingRoutes.get(
           endsAt: true,
           status: true,
           meetLink: true,
+          minutesAt: true,
           organizer: { select: { id: true, name: true } },
           job: { select: { id: true, number: true, name: true } },
           invitees: { select: { userId: true, response: true, notifiedAt: true } },
@@ -286,8 +331,10 @@ meetingRoutes.get(
 
     res.json(
       listResult(
-        rows.map(({ invitees, ...m }) => ({
+        rows.map(({ invitees, minutesAt, ...m }) => ({
           ...m,
+          // Cleared minutes clear the stamp too, so the stamp says whether there are any.
+          hasMinutes: minutesAt !== null,
           inviteeCount: invitees.length,
           acceptedCount: invitees.filter((i) => i.response === 'ACCEPTED').length,
           sent: invitees.some((i) => i.notifiedAt !== null),
@@ -410,7 +457,7 @@ meetingRoutes.get(
     const canEdit =
       m.status !== 'CANCELLED' &&
       (can(me, 'ghr.meetings.edit_all') || (m.organizerId === me.id && can(me, 'ghr.meetings.edit_own')));
-    res.json(present(m, me.id, canEdit));
+    res.json(present(m, me, canEdit));
   }),
 );
 
@@ -467,6 +514,7 @@ meetingRoutes.post(
           title: body.title,
           agenda: body.agenda || null,
           location: body.location || null,
+          mapUrl: body.mapUrl ? safeHttpUrl(body.mapUrl) : null,
           startsAt: slot.startsAt,
           endsAt: slot.endsAt,
           organizerId: me.id,
@@ -494,7 +542,7 @@ meetingRoutes.post(
       },
       req,
     );
-    res.status(201).json(present(meeting, me.id, true));
+    res.status(201).json(present(meeting, me, true));
   }),
 );
 
@@ -527,6 +575,7 @@ meetingRoutes.patch(
     if (body.title !== undefined) data.title = body.title;
     if (body.agenda !== undefined) data.agenda = body.agenda || null;
     if (body.location !== undefined) data.location = body.location || null;
+    if (body.mapUrl !== undefined) data.mapUrl = body.mapUrl ? safeHttpUrl(body.mapUrl) : null;
     if (body.jobId !== undefined) {
       const jobId = await jobFor(body.jobId);
       data.job = jobId ? { connect: { id: jobId } } : { disconnect: true };
@@ -556,7 +605,7 @@ meetingRoutes.patch(
     }
 
     if (!Object.keys(data).length) {
-      res.json(present(before, me.id, true));
+      res.json(present(before, me, true));
       return;
     }
 
@@ -592,7 +641,267 @@ meetingRoutes.patch(
       );
     }
 
-    res.json(present(meeting, me.id, true));
+    res.json(present(meeting, me, true));
+  }),
+);
+
+// ── Minutes ─────────────────────────────────────────────────────────────────
+
+const minutesSchema = z.object({
+  minutes: z.string().max(50000, 'Minutes run to 50,000 characters at most'),
+});
+
+/**
+ * The minutes of meeting (2026-10-13, the owner's call: "so anyone can back
+ * track what have been talked about"). One text, replaced whole by each save,
+ * with who wrote it last and when; an empty save clears them. Everyone on the
+ * meeting but the writer is told — once per Manila day of edits, so a page
+ * of minutes typed in five saves rings one bell. Audited, the text kept out
+ * of the trail (the record holds it).
+ */
+meetingRoutes.put(
+  '/:id/minutes',
+  requireAny(...VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const before = await loadVisible(req.params.id, me);
+    const problem = minutesProblem(before, me);
+    if (problem) throw problem.status === 403 ? forbidden(problem.message) : conflict(problem.message);
+    if (before.minutesStatus !== 'DRAFT' && !mayLeadMinutes(before, me)) {
+      throw forbidden('The minutes went out for agreement — only the organiser changes them now, and they go out again; ask for a change instead');
+    }
+    const body = parseBody(minutesSchema, req.body);
+    const text = body.minutes.trim();
+    const now = new Date();
+    // A change after the minutes went out sets that round aside — its
+    // answers are kept — and the minutes are a draft to send again.
+    const reopened = before.minutesStatus !== 'DRAFT' && text !== (before.minutes ?? '');
+
+    const meeting = await prisma.meeting.update({
+      where: { id: before.id },
+      data: {
+        ...(text ? { minutes: text, minutesAt: now, minutesById: me.id } : { minutes: null, minutesAt: null, minutesById: null }),
+        ...(reopened ? { minutesStatus: 'DRAFT' as const, minutesAgreedAt: null } : {}),
+      },
+      select: detailSelect,
+    });
+    if (reopened) {
+      await audit(
+        { entityType: 'meeting', entityId: meeting.id, action: 'UPDATED', summary: `${meeting.number}: minutes changed after round ${before.minutesRound} went out — to be agreed again` },
+        req,
+      );
+    }
+    await audit(
+      {
+        entityType: 'meeting',
+        entityId: meeting.id,
+        action: 'UPDATED',
+        summary: `${meeting.number}: minutes ${!text ? 'cleared' : before.minutes ? 'changed' : 'written'}`,
+        after: { minutesLength: text.length },
+      },
+      req,
+    );
+
+    const firstToday = !before.minutesAt || manilaDayKey(before.minutesAt) !== manilaDayKey(now);
+    if (text && firstToday) {
+      const everyone = [meeting.organizerId, ...meeting.invitees.map((i) => i.userId)].filter((id) => id !== me.id);
+      await notify(
+        [...new Set(everyone)].map((userId) => ({
+          userId,
+          type: 'meeting.updated' as const,
+          title: `Minutes: ${meeting.title}`,
+          body: `${meeting.number} — ${before.minutes ? 'updated' : 'written'} by ${me.name}`,
+          link: MEETING_LINK(meeting.id),
+        })),
+      );
+    }
+    res.json(present(meeting, me, meeting.status !== 'CANCELLED' && (can(me, 'ghr.meetings.edit_all') || (meeting.organizerId === me.id && can(me, 'ghr.meetings.edit_own')))));
+  }),
+);
+
+/**
+ * Send the minutes for the attendees to agree (2026-10-14, the owner's call:
+ * "approval of attendees agreeing the minutes" — only those who said Going).
+ * The organiser (or `edit_all`) opens a new round: one PENDING row per
+ * attendee, each told. Not the approval engine: the minutes are a record the
+ * people who were there sign, not a document a role decides on.
+ */
+meetingRoutes.post(
+  '/:id/minutes/send',
+  requireAny(...VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const before = await loadVisible(req.params.id, me);
+    if (!mayLeadMinutes(before, me)) throw forbidden('The organiser sends the minutes for agreement');
+    const problem = minutesProblem(before, me);
+    if (problem) throw problem.status === 403 ? forbidden(problem.message) : conflict(problem.message);
+    if (!before.minutes) throw conflict('Write the minutes first');
+    if (before.minutesStatus !== 'DRAFT') throw conflict(before.minutesStatus === 'AGREED' ? 'The attendees already agreed these minutes' : 'The minutes are already out for agreement');
+    const attendees = before.invitees.filter((i) => i.response === 'ACCEPTED' && i.userId !== before.organizerId);
+    if (!attendees.length) throw conflict('Nobody said Going — there is no one to agree the minutes');
+    const round = before.minutesRound + 1;
+    const now = new Date();
+    const meeting = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.meeting.updateMany({
+        where: { id: before.id, minutesStatus: 'DRAFT', minutesRound: before.minutesRound },
+        data: { minutesStatus: 'FOR_AGREEMENT', minutesRound: round, minutesSentAt: now, minutesAgreedAt: null },
+      });
+      if (!claimed.count) throw conflict('The minutes changed a moment ago — reload');
+      await tx.minutesAgreement.createMany({ data: attendees.map((a) => ({ meetingId: before.id, round, userId: a.userId })) });
+      return tx.meeting.findUniqueOrThrow({ where: { id: before.id }, select: detailSelect });
+    });
+    await audit(
+      { entityType: 'meeting', entityId: meeting.id, action: 'SUBMITTED', summary: `${meeting.number}: minutes sent to ${attendees.length} attendee(s) to agree (round ${round})` },
+      req,
+    );
+    await notify(
+      attendees.map((a) => ({
+        userId: a.userId,
+        type: 'minutes.to_agree' as const,
+        title: `Agree the minutes: ${meeting.title}`,
+        body: `${meeting.number} — sent by ${me.name}. Agree, or ask for a change.`,
+        link: MEETING_LINK(meeting.id),
+      })),
+    );
+    res.json(present(meeting, me, meeting.status !== 'CANCELLED' && (can(me, 'ghr.meetings.edit_all') || (meeting.organizerId === me.id && can(me, 'ghr.meetings.edit_own')))));
+  }),
+);
+
+const agreeSchema = z.object({
+  response: z.enum(['AGREED', 'CHANGE_ASKED']),
+  comment: z.string().trim().max(2000).optional().nullable(),
+});
+
+/**
+ * An attendee's answer to the round out now: Agree, or Ask for a change
+ * (which says what). The attendee's own row only; an answer may be changed
+ * while the round is open. The last agreement closes
+ * the round AGREED; the organiser is told of every change asked and of the
+ * close.
+ */
+meetingRoutes.post(
+  '/:id/minutes/respond',
+  requireAny(...VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const before = await loadVisible(req.params.id, me);
+    const body = parseBody(agreeSchema, req.body);
+    if (body.response === 'CHANGE_ASKED' && !body.comment?.trim()) throw badRequest('Say what should change');
+    if (before.minutesStatus !== 'FOR_AGREEMENT') throw conflict('The minutes are not out for agreement');
+    const row = before.agreements.find((a) => a.round === before.minutesRound && a.userId === me.id);
+    if (!row) throw forbidden('Only the attendees asked agree the minutes');
+    const now = new Date();
+    const closed = await prisma.$transaction(async (tx) => {
+      await tx.minutesAgreement.update({
+        where: { id: row.id },
+        data: { response: body.response, comment: body.comment?.trim() || null, respondedAt: now },
+      });
+      const open = await tx.minutesAgreement.count({ where: { meetingId: before.id, round: before.minutesRound, response: { not: 'AGREED' } } });
+      if (open) return false;
+      const done = await tx.meeting.updateMany({
+        where: { id: before.id, minutesStatus: 'FOR_AGREEMENT', minutesRound: before.minutesRound },
+        data: { minutesStatus: 'AGREED', minutesAgreedAt: now },
+      });
+      return done.count > 0;
+    });
+    await audit(
+      {
+        entityType: 'meeting',
+        entityId: before.id,
+        action: body.response === 'AGREED' ? 'APPROVED' : 'RETURNED',
+        summary: `${before.number}: ${me.name} ${body.response === 'AGREED' ? 'agreed the minutes' : 'asked for a change to the minutes'} (round ${before.minutesRound})${closed ? ' — every attendee has agreed' : ''}`,
+      },
+      req,
+    );
+    if (before.organizerId !== me.id && (body.response === 'CHANGE_ASKED' || closed)) {
+      await notify({
+        userId: before.organizerId,
+        type: 'minutes.answered',
+        title: closed ? `Minutes agreed: ${before.title}` : `Change asked to the minutes: ${before.title}`,
+        body: closed ? `${before.number} — every attendee has agreed` : `${me.name}: ${body.comment?.trim()}`,
+        link: MEETING_LINK(before.id),
+      });
+    }
+    const meeting = await loadVisible(before.id, me);
+    res.json(present(meeting, me, meeting.status !== 'CANCELLED' && (can(me, 'ghr.meetings.edit_all') || (meeting.organizerId === me.id && can(me, 'ghr.meetings.edit_own')))));
+  }),
+);
+
+/**
+ * The minutes of meeting on paper (2026-10-14), in the standard dress: the
+ * meeting's details, the agenda, the minutes, who attended, then Prepared by
+ * (who wrote them, when they went out) and one sign-off per attendee — the
+ * time they agreed, else "Pending". Read as the meeting is read.
+ */
+meetingRoutes.get(
+  '/:id/minutes/pdf',
+  requireAny(...VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const m = await loadVisible(req.params.id, me);
+    if (!m.minutes) throw conflict('No minutes have been written for this meeting');
+    const round = m.agreements.filter((a) => a.round === m.minutesRound && m.minutesRound > 0);
+    const going = m.invitees.filter((i) => i.response === 'ACCEPTED');
+    const time = (d: Date) => new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit' }).format(d);
+    const sections: PdfSection[] = [];
+    if (m.agenda) sections.push({ kind: 'text', title: 'Agenda', body: m.agenda });
+    sections.push({ kind: 'text', title: 'Minutes', body: m.minutes });
+    sections.push({
+      kind: 'table',
+      title: 'Attendance',
+      head: ['Name', 'Position', 'Invited as', 'Said', 'The minutes'],
+      rows: [
+        [m.organizer.name, m.organizer.position ?? '', 'Organiser', '—', 'Prepared'],
+        ...m.invitees.map((i) => {
+          const a = round.find((r) => r.userId === i.userId);
+          return [
+            i.user.name,
+            i.user.position ?? '',
+            i.required ? 'Required' : 'Optional',
+            statusLabel(i.response === 'ACCEPTED' ? 'GOING' : i.response === 'TENTATIVE' ? 'MAYBE' : i.response === 'DECLINED' ? 'NOT_GOING' : 'NO_REPLY'),
+            a ? (a.response === 'AGREED' ? 'Agreed' : a.response === 'CHANGE_ASKED' ? 'Change asked' : 'Pending') : '—',
+          ];
+        }),
+      ],
+    });
+    const asked = round.filter((a) => a.response === 'CHANGE_ASKED' && a.comment);
+    if (asked.length) sections.push({ kind: 'text', title: 'Changes asked', body: asked.map((a) => `${a.user.name}: ${a.comment}`).join('\n') });
+
+    const signatories: Signatory[] = [
+      { role: 'Prepared by', name: m.minutesBy?.name ?? m.organizer.name, email: m.organizer.email, at: m.minutesSentAt ?? m.minutesAt ?? undefined },
+      ...(round.length
+        ? round.map((a) => ({ role: 'Attendee', name: a.user.name, email: a.user.email, at: a.response === 'AGREED' ? (a.respondedAt ?? undefined) : undefined }))
+        : going.filter((i) => i.userId !== m.organizerId).map((i) => ({ role: 'Attendee', name: i.user.name, email: i.user.email }))),
+    ];
+    const pdf = await renderDocument({
+      title: 'Minutes of Meeting',
+      titleBold: true,
+      documentNumber: m.number,
+      date: m.startsAt,
+      numberNote: `Date: ${formatDate(m.startsAt)}`,
+      detailsTitle: 'Meeting details',
+      detailsTitleSize: 11,
+      details: [
+        [
+          ['Meeting', m.title],
+          ['Time', `${time(m.startsAt)} – ${time(m.endsAt)}`],
+          ['Place', m.location ?? (m.meetLink ? 'Online' : '—')],
+        ],
+        [
+          ['Organiser', m.organizer.name],
+          ['Project', m.job ? `${m.job.number} — ${m.job.name}` : '—'],
+          ['Minutes', m.minutesStatus === 'AGREED' ? 'Agreed by the attendees' : m.minutesStatus === 'FOR_AGREEMENT' ? 'Out for agreement' : 'Draft'],
+        ],
+      ],
+      sections,
+      signatories,
+      signoffNote: 'The name, date and time are considered a digital signature of agreement.',
+      footerNote: m.minutesStatus === 'AGREED' ? undefined : 'NOT YET AGREED BY EVERY ATTENDEE.',
+    });
+    await audit({ entityType: 'meeting', entityId: m.id, action: 'EXPORTED', summary: `Printed the minutes of ${m.number}` }, req);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Minutes of Meeting', number: m.number, author: m.minutesBy?.name ?? m.organizer.name, date: m.startsAt })));
+    res.send(pdf);
   }),
 );
 
@@ -631,7 +940,7 @@ meetingRoutes.post(
       );
     }
     const meeting = await loadVisible(before.id, me);
-    res.json(present(meeting, me.id, true));
+    res.json(present(meeting, me, true));
   }),
 );
 
@@ -665,7 +974,7 @@ meetingRoutes.delete(
       });
     }
     const meeting = await loadVisible(before.id, me);
-    res.json(present(meeting, me.id, true));
+    res.json(present(meeting, me, true));
   }),
 );
 
@@ -685,7 +994,7 @@ meetingRoutes.post(
     if (before.status !== 'PLANNED') throw conflict('Only a planned meeting can send invitations');
     const pending = before.invitees.filter((i) => !i.notifiedAt);
     if (!pending.length) {
-      res.json({ ...present(before, me.id, true), sent: 0 });
+      res.json({ ...present(before, me, true), sent: 0 });
       return;
     }
     const now = new Date();
@@ -718,7 +1027,7 @@ meetingRoutes.post(
       );
     });
     const meeting = await loadVisible(before.id, me);
-    res.json({ ...present(meeting, me.id, true), sent: pending.length });
+    res.json({ ...present(meeting, me, true), sent: pending.length });
   }),
 );
 
@@ -764,7 +1073,7 @@ meetingRoutes.post(
       });
     }
     const after = await loadVisible(meeting.id, me);
-    res.json(present(after, me.id, false));
+    res.json(present(after, me, false));
   }),
 );
 
@@ -812,7 +1121,7 @@ meetingRoutes.post(
         link: MEETING_LINK(meeting.id),
       })),
     );
-    res.json(present(meeting, me.id, false));
+    res.json(present(meeting, me, false));
   }),
 );
 
@@ -879,6 +1188,7 @@ registerSearch({
               { title: { contains: term, mode: 'insensitive' } },
               { number: { contains: term, mode: 'insensitive' } },
               { location: { contains: term, mode: 'insensitive' } },
+              { minutes: { contains: term, mode: 'insensitive' } },
             ],
           },
         ],

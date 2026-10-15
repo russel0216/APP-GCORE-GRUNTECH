@@ -28,6 +28,8 @@ import fs from 'node:fs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
+import { act } from '../src/shared/approvals';
+import '../src/routes/cadJobOrders';
 import { signToken } from '../src/auth/middleware';
 import { resolveUser } from '../src/permissions/resolve';
 import { globalSearch } from '../src/shared/search';
@@ -92,6 +94,10 @@ async function cleanup() {
     select: { id: true },
   });
   for (const f of files) await deleteAttachment(f.id);
+  if (ids.length) {
+    await prisma.approvalAction.deleteMany({ where: { request: { documentType: 'cad_job_order', documentId: { in: ids } } } });
+    await prisma.approvalRequest.deleteMany({ where: { documentType: 'cad_job_order', documentId: { in: ids } } });
+  }
   await prisma.cadJobOrder.deleteMany({ where: { title: { startsWith: TAG } } });
   await prisma.approvedPlan.deleteMany({ where: { title: { startsWith: TAG } } });
   await prisma.job.deleteMany({ where: { name: { startsWith: TAG } } });
@@ -199,6 +205,16 @@ async function main() {
   const outsider = await makeUser(`${TAG} Other Sales`, 'outsider', ['sales']);
   const lead = await makeUser(`${TAG} Designer Lead`, 'lead', ['designer_lead']);
   const support = await makeUser(`${TAG} Designer Support`, 'support', ['designer']);
+  // The requestor's Team Leader approves a request before the designers see it (2026-10-16).
+  const teamLeader = await makeUser(`${TAG} Team Leader`, 'tl', ['team_leader']);
+  await prisma.user.update({ where: { id: requestor.id }, data: { supervisorId: teamLeader.id } });
+  const teamLeaderT = signToken(teamLeader.id, teamLeader.email);
+  /** Request for Approval, then the Team Leader approves: into the designers' queue. */
+  const toQueue = async (cadId: string) => {
+    await http(requestorT, 'POST', `/cad-job-orders/${cadId}/submit`);
+    const r = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'cad_job_order', documentId: cadId, status: 'PENDING' } });
+    await act({ requestId: r.id, userId: teamLeader.id, action: 'APPROVED' });
+  };
   const requestorT = signToken(requestor.id, requestor.email);
   const outsiderT = signToken(outsider.id, outsider.email);
   const leadT = signToken(lead.id, lead.email);
@@ -230,7 +246,36 @@ async function main() {
   check('the requestor raises a request', created.status === 201, created.text);
   const id = String(created.body.id);
   check('it is numbered from the cad_job_order counter', /CJO/.test(String(created.body.number)), String(created.body.number));
-  check('it starts REQUESTED, normal priority, 0%', created.body.status === 'REQUESTED' && created.body.priority === 'NORMAL' && created.body.progressPct === 0);
+  check('it starts a DRAFT, normal priority, 0%', created.body.status === 'DRAFT' && created.body.priority === 'NORMAL' && created.body.progressPct === 0);
+  check('a draft tells the design team nothing', (await bells(lead.id, 'cad.requested')) === 0);
+  const draftSeen = await http(supportT, 'GET', `/cad-job-orders/${id}`);
+  check('a draft cannot be taken', draftSeen.body.canTake === false);
+  const draftRoute = await http(requestorT, 'GET', `/cad-job-orders/${id}`);
+  const routeSteps = (draftRoute.body.approvalRoute as { steps: { name: string; approvers: { id: string }[] }[] } | null)?.steps ?? [];
+  check("the draft names the requestor's Team Leader as its approver", routeSteps.length === 1 && routeSteps[0].approvers.some((a) => a.id === teamLeader.id), JSON.stringify(routeSteps));
+
+  // ══ The Team Leader's approval ════════════════════════════════════════════
+  console.log("\nThe Team Leader's approval");
+  const strangerSubmit = await http(supportT, 'POST', `/cad-job-orders/${id}/submit`);
+  check('a designer cannot send somebody else\'s draft', strangerSubmit.status === 400 || strangerSubmit.status === 403, String(strangerSubmit.status));
+  const sent = await http(requestorT, 'POST', `/cad-job-orders/${id}/submit`);
+  check('Request for Approval sends it to the Team Leader', sent.status === 200 && sent.body.status === 'PENDING_APPROVAL', sent.text);
+  const tlRead = await http(teamLeaderT, 'GET', `/cad-job-orders/${id}`);
+  check('the Team Leader opens it through the decider door', tlRead.status === 200, String(tlRead.status));
+  const pending = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'cad_job_order', documentId: id, status: 'PENDING' } });
+  let selfRefused = false;
+  try {
+    await act({ requestId: pending.id, userId: requestor.id, action: 'APPROVED' });
+  } catch {
+    selfRefused = true;
+  }
+  check('the requestor cannot approve their own request', selfRefused);
+  const pulled = await http(requestorT, 'POST', `/cad-job-orders/${id}/withdraw`);
+  check('a pending request is pulled back to draft', pulled.status === 200 && (await prisma.cadJobOrder.findUniqueOrThrow({ where: { id } })).status === 'DRAFT', pulled.text);
+  await http(requestorT, 'POST', `/cad-job-orders/${id}/submit`);
+  const again = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'cad_job_order', documentId: id, status: 'PENDING' } });
+  await act({ requestId: again.id, userId: teamLeader.id, action: 'APPROVED' });
+  check("the Team Leader's approval puts it in the designers' queue", (await prisma.cadJobOrder.findUniqueOrThrow({ where: { id } })).status === 'REQUESTED');
   check('the design team was told — the lead and the support designer', (await bells(lead.id, 'cad.requested')) === 1 && (await bells(support.id, 'cad.requested')) === 1);
   check('the requestor was not told of their own request', (await bells(requestor.id, 'cad.requested')) === 0);
 
@@ -249,9 +294,33 @@ async function main() {
   check('the lead cannot assign it to somebody off the design team', badAssign.status === 400, badAssign.text);
   const taken = await http(supportT, 'POST', `/cad-job-orders/${id}/take`);
   check('the support designer takes it from the queue', taken.status === 200 && taken.body.status === 'IN_PROGRESS', taken.text.slice(0, 200));
+  check('taking it stamps the date started', !!taken.body.startedAt);
   check('and the requestor was told who has it', (await bells(requestor.id, 'cad.assigned')) === 1);
   const takenAgain = await http(leadT, 'POST', `/cad-job-orders/${id}/take`);
   check('a taken request cannot be taken again — the lead reassigns', takenAgain.status === 400, takenAgain.text);
+
+  // Pulled back after approval (2026-10-16): only while nobody has started on it.
+  const reopenTaken = await http(requestorT, 'POST', `/approvals/reopen/cad_job_order/${id}`, { reason: 'scope changed' });
+  check(
+    'a request a designer has taken is not pulled back to draft — the refusal says it is with the design team',
+    reopenTaken.status === 400 && reopenTaken.text.includes('design team') &&
+      (await prisma.cadJobOrder.findUniqueOrThrow({ where: { id } })).status === 'IN_PROGRESS',
+    reopenTaken.text,
+  );
+  {
+    const spare = await http(requestorT, 'POST', '/cad-job-orders', { customerId: customer.id, title: `${TAG} Spare layout`, scope: 'A request pulled back after approval' });
+    const spareId = String(spare.body.id);
+    await toQueue(spareId);
+    const reopened = await http(requestorT, 'POST', `/approvals/reopen/cad_job_order/${spareId}`, { reason: 'scope changed' });
+    const after = await prisma.cadJobOrder.findUniqueOrThrow({ where: { id: spareId } });
+    const req = await prisma.approvalRequest.findFirst({ where: { documentType: 'cad_job_order', documentId: spareId }, orderBy: { createdAt: 'desc' } });
+    check(
+      'an approved request nobody has taken is pulled back: a draft again, its approval closed',
+      reopened.status === 200 && after.status === 'DRAFT' && req?.status === 'CANCELLED',
+      `${reopened.status} ${reopened.text.slice(0, 160)} ${after.status} ${req?.status}`,
+    );
+    await prisma.cadJobOrder.delete({ where: { id: spareId } });
+  }
   const requestorPriority = await http(requestorT, 'POST', `/cad-job-orders/${id}/priority`, { priority: 'URGENT' });
   check('the requestor cannot set the priority', requestorPriority.status === 403, String(requestorPriority.status));
   const priority = await http(supportT, 'POST', `/cad-job-orders/${id}/priority`, { priority: 'URGENT' });
@@ -343,8 +412,14 @@ async function main() {
   const editClosed = await http(requestorT, 'PATCH', `/cad-job-orders/${id}`, { title: `${TAG} renamed` });
   check('a completed request is a record — no edits', editClosed.status === 403, String(editClosed.status));
 
+  const final0Number = String((await http(leadT, 'GET', `/cad-job-orders/${id}`)).body.number);
   const filed = await http(requestorT, 'POST', `/cad-job-orders/${id}/file-plan`, { discipline: 'Mechanical' });
   check('the accepted revision files as an Approved Plan on the project', filed.status === 201 && filed.body.revision === 'R1' && filed.body.jobId === job.id, filed.text.slice(0, 300));
+  check(
+    'it is a numbered DRAFT Request for Approval (2026-10-13), its drawing reference the request\'s own number — for its requester to submit',
+    filed.body.status === 'DRAFT' && /RFA/.test(String(filed.body.number)) && filed.body.drawingNo === final0Number,
+    `${filed.body.status} ${filed.body.number} ${filed.body.drawingNo}`,
+  );
   const planFiles = await prisma.attachment.findMany({ where: { entityType: 'approved_plan', entityId: String(filed.body.id) } });
   const r1Files = await prisma.attachment.findMany({ where: { entityType: 'cad_revision', entityId: String(revision1.body.id) } });
   check('its files are COPIES of R1’s — the revision keeps its own', planFiles.length === r1Files.length && planFiles.every((p) => !r1Files.some((r) => r.storedName === p.storedName)) && planFiles.every((p) => fs.existsSync(attachmentPath(p.storedName))));
@@ -357,6 +432,11 @@ async function main() {
   console.log('\nHold, resume, cancel');
   const second = await http(requestorT, 'POST', '/cad-job-orders', { customerId: customer.id, title: `${TAG} Single-line diagram`, scope: 'SLD of the new MCC, 480 V', neededBy: '2026-01-02' });
   const id2 = String(second.body.id);
+  const badStart = await http(requestorT, 'POST', '/cad-job-orders', { customerId: customer.id, title: `${TAG} Late start`, scope: 'x', neededBy: '2026-01-02', plannedStart: '2026-02-01' });
+  check('a start date after the target date to finish is refused', badStart.status === 400);
+  const started = await http(requestorT, 'PATCH', `/cad-job-orders/${id2}`, { plannedStart: '2026-01-01' });
+  check('the requestor sets a start date on the form', started.status === 200 && (await prisma.cadJobOrder.findUnique({ where: { id: id2 } }))?.plannedStart?.toISOString().slice(0, 10) === '2026-01-01', `${started.status}`);
+  await toQueue(id2);
   await http(leadT, 'POST', `/cad-job-orders/${id2}/assign`, { userId: support.id });
   check('the lead assigns the second request to the support designer', (await prisma.cadJobOrder.findUnique({ where: { id: id2 } }))?.assignedToId === support.id);
   check('the designer was told of the assignment', (await bells(support.id, 'cad.assigned')) === 1);
@@ -373,6 +453,7 @@ async function main() {
 
   const third = await http(requestorT, 'POST', '/cad-job-orders', { customerId: customer.id, title: `${TAG} As-built`, scope: 'As-built of the piping after commissioning' });
   const id3 = String(third.body.id);
+  await toQueue(id3);
 
   // ══ The list, the cards, the paper, search, My Work ═══════════════════════
   console.log('\nThe list');
@@ -596,6 +677,27 @@ async function main() {
   );
 
   // ══ Drawing types ═════════════════════════════════════════════════════════
+  // ══ The slider and the report (2026-10-16) ═════════════════════════════
+  console.log('\nThe progress slider and the report');
+  const fourth = await http(requestorT, 'POST', '/cad-job-orders', { customerId: customer.id, title: `${TAG} Elevation`, scope: 'North elevation of the plant room', amount: 12500 });
+  const id4 = String(fourth.body.id);
+  check('a request carries an amount and the requester\'s team', fourth.body.amount === 12500, fourth.text.slice(0, 200));
+  await toQueue(id4);
+  await http(supportT, 'POST', `/cad-job-orders/${id4}/take`);
+  const sliderList = await http(supportT, 'GET', `/cad-job-orders?search=${encodeURIComponent(`${TAG} Elevation`)}`);
+  const listRow = (sliderList.body.rows as { id: string; canProgress: boolean }[]).find((r) => r.id === id4);
+  check('the list offers the slider to the designer assigned', listRow?.canProgress === true);
+  const leadListed = await http(leadT, 'GET', `/cad-job-orders?search=${encodeURIComponent(`${TAG} Elevation`)}`);
+  check('and to nobody else — not even the lead', (leadListed.body.rows as { id: string; canProgress: boolean }[]).find((r) => r.id === id4)?.canProgress === false);
+  const leadSlide = await http(leadT, 'POST', `/cad-job-orders/${id4}/progress`, { progressPct: 50 });
+  check('the lead\'s progress is refused', leadSlide.status === 400, leadSlide.text);
+  const full = await http(supportT, 'POST', `/cad-job-orders/${id4}/progress`, { progressPct: 100 });
+  check('100% puts it up for review', full.status === 200 && full.body.status === 'FOR_REVIEW', full.text.slice(0, 200));
+  const csv = await http(leadT, 'GET', `/cad-job-orders/csv?search=${TAG}&status=FOR_REVIEW,COMPLETED`);
+  check('the report\'s CSV takes several statuses at once', csv.status === 200 && csv.text.includes(`${TAG} Elevation`) && !csv.text.includes('In progress') && !csv.text.includes(`${TAG} Single-line`), csv.text.slice(0, 300));
+  const badStatus = await http(leadT, 'GET', `/cad-job-orders/csv?status=NOPE`);
+  check('an unknown status is refused', badStatus.status === 400);
+
   console.log('\nDrawing types');
   const typesPublic = await http(requestorT, 'GET', '/reference/cad-drawing-types?active=true');
   check('anyone signed in reads the list', typesPublic.status === 200 && (typesPublic.body as unknown as unknown[]).length >= CAD_DRAWING_TYPES.length);

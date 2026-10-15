@@ -24,10 +24,13 @@ import { notify } from '../shared/notifications';
 import {
   submitForApproval,
   onApprovalSettled,
+  onApprovalReopened,
   approvalSlots,
   slotSignatories,
   contactOf,
   cancelOpenRequest,
+  openSteps,
+  stageWords,
   type ApprovalOutcome,
   type ApprovalSlot,
 } from '../shared/approvals';
@@ -44,10 +47,13 @@ import {
 } from '../shared/pdf';
 import { registerSearch } from '../shared/search';
 import { dayKey } from '../shared/aftermarket';
-import { workingDaysBetween } from '../shared/day';
+import { workingDaysBetween, manilaDayStart, manilaDayEnd } from '../shared/day';
+import { teamOf } from '../shared/team';
+import { toCsv } from '../shared/csv';
 import { valueRevision } from '../shared/pipeline';
 import { costingForJob, createJobRecord } from './jobs';
 import { LIST_CAP, listReference, totalLabel, rangeNamed, recordNamed, namedInFilter, filterDay, dayOf, choice, bracketed, bracketNote, listNotes, sendListPdf } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * Job orders — the PROJECT WORK ORDER (2026-10-09, the owner's call; a
@@ -96,7 +102,8 @@ const jobOrderInclude = {
   quotation: { select: { id: true, number: true, subject: true, outcome: true } },
   salesOrder: { select: { id: true, number: true, status: true } },
   requestedBy: person,
-  assignedTo: { select: { id: true, name: true } },
+  assignedTo: person,
+  team: { select: { id: true, code: true, name: true } },
   projectManager: person,
   projectEngineer: person,
   projectLead: person,
@@ -122,10 +129,23 @@ function targets(row: { targetStart: Date | null; targetFinish: Date | null; req
   return { targetStart: start, targetFinish: finish, durationDays: workingDaysBetween(start, finish) };
 }
 
-function present(row: JobOrderRow) {
+/**
+ * The status in the owner's words (2026-10-16, his Job Orders sample): Draft,
+ * TM / TL Approval while a step waits, Accepted once approved, In Progress
+ * while the project it built runs, Done, Returned, Cancelled.
+ */
+function stageOf(row: { status: string; job: { status: string } | null }, openStep?: string): string {
+  if (row.status === 'PENDING_APPROVAL') return stageWords(row.status, openStep, false);
+  if (row.status === 'APPROVED') return row.job && !['COMPLETED', 'TURNED_OVER', 'CANCELLED'].includes(row.job.status) ? 'In Progress' : row.job ? 'Done' : 'Accepted';
+  if (row.status === 'COMPLETED') return 'Done';
+  return statusWord(row.status);
+}
+
+function present(row: JobOrderRow, openStep?: string) {
   const { support, ...rest } = row;
   return {
     ...rest,
+    stageLabel: stageOf(row, openStep),
     ...targets(row),
     amount: num(row.amount),
     billable: row.chargeBasis === 'CHARGEABLE',
@@ -223,7 +243,7 @@ const statusWord = (status: string) => statusLabel(status === 'REJECTED' ? 'RETU
  * printed twin. A `view_own` holder sees what they raised or are sent on;
  * `?ids=` (the rows ticked) is ANDed with that.
  */
-function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobOrderWhereInput {
+async function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma.JobOrderWhereInput> {
   const where: Prisma.JobOrderWhereInput = {};
   const and: Prisma.JobOrderWhereInput[] = [];
 
@@ -231,8 +251,15 @@ function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobOrderWhere
   const ids = idsFilter(q.filters.ids);
   if (ids) and.push({ id: { in: ids } });
 
-  const status = choice(q.filters.status, JobOrderStatus, 'Status', statusWord);
-  if (status) where.status = status;
+  // One status, or several comma-separated (the report's tick boxes).
+  const statuses = (q.filters.status ?? '').split(',').map((v) => v.trim()).filter(Boolean).map((v) => choice(v, JobOrderStatus, 'Status', statusWord)!);
+  if (statuses.length) where.status = { in: statuses };
+  if (q.filters.teamId) where.teamId = q.filters.teamId === 'none' ? null : q.filters.teamId;
+  const createdFrom = filterDay(q.filters.createdFrom, 'Requested from');
+  const createdTo = filterDay(q.filters.createdTo, 'Requested to');
+  if (createdFrom || createdTo) {
+    where.createdAt = { ...(createdFrom ? { gte: manilaDayStart(createdFrom) } : {}), ...(createdTo ? { lte: manilaDayEnd(createdTo) } : {}) };
+  }
   if (q.filters.open === 'true') where.status = 'APPROVED';
   // The unbilled queue finance works from.
   if (q.filters.unbilled === 'true') {
@@ -240,8 +267,20 @@ function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobOrderWhere
     where.status = 'COMPLETED';
     where.invoice = { is: null };
   }
-  for (const key of ['customerId', 'jobId', 'quotationId', 'salesOrderId', 'projectManagerId', 'assignedToId'] as const) {
+  for (const key of ['customerId', 'jobId', 'quotationId', 'salesOrderId', 'projectManagerId', 'assignedToId', 'requestedById'] as const) {
     if (q.filters[key]) where[key] = q.filters[key];
+  }
+  // A project's Job Orders tab (2026-10-15, the owner's call: "so they can
+  // see if the project owner already requested this"): the orders built into
+  // it or linked to it, and those raised on the quotation it was won from —
+  // a request still waiting shows there before it becomes the project.
+  if (q.filters.forProject) {
+    const job = await prisma.job.findUnique({
+      where: { id: q.filters.forProject },
+      select: { id: true, quotationRevision: { select: { quotationId: true } } },
+    });
+    if (!job) throw badRequest('That project does not exist');
+    and.push({ OR: [{ jobId: job.id }, ...(job.quotationRevision ? [{ quotationId: job.quotationRevision.quotationId }] : [])] });
   }
   // requestedFor mirrors the target start, so one index serves both shapes.
   const from = filterDay(q.filters.from, 'From');
@@ -253,6 +292,8 @@ function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobOrderWhere
         { number: { contains: q.search, mode: 'insensitive' } },
         { title: { contains: q.search, mode: 'insensitive' } },
         { projectName: { contains: q.search, mode: 'insensitive' } },
+        { requestedBy: { name: { contains: q.search, mode: 'insensitive' } } },
+        { assignedTo: { name: { contains: q.search, mode: 'insensitive' } } },
         { customer: { name: { contains: q.search, mode: 'insensitive' } } },
         { quotation: { number: { contains: q.search, mode: 'insensitive' } } },
       ],
@@ -268,9 +309,12 @@ jobOrderRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where = jobOrderListWhere(me, q);
+    const where = await jobOrderListWhere(me, q);
 
-    const [rows, total] = await Promise.all([
+    // The cards (the owner's sample) stand under the visibility and scope —
+    // the status and the rest narrow the rows, never the cards.
+    const base = await jobOrderListWhere(me, { ...q, filters: { ids: q.filters.ids, forProject: q.filters.forProject } });
+    const [rows, total, byStatus, running, value] = await Promise.all([
       prisma.jobOrder.findMany({
         where,
         include: jobOrderInclude,
@@ -279,9 +323,22 @@ jobOrderRoutes.get(
         take: q.pageSize,
       }),
       prisma.jobOrder.count({ where }),
+      prisma.jobOrder.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
+      prisma.jobOrder.count({ where: { AND: [base, IN_PROGRESS_WHERE] } }),
+      prisma.jobOrder.aggregate({ where: { AND: [base, { status: { notIn: ['CANCELLED', 'REJECTED'] } }] }, _sum: { amount: true } }),
     ]);
-
-    res.json(listResult(rows.map(present), total, q));
+    const counts: Record<string, number> = {};
+    for (const r of byStatus) counts[r.status] = r._count._all;
+    const steps = await openSteps('job_order', rows.filter((r) => r.status === 'PENDING_APPROVAL').map((r) => r.id));
+    res.json({
+      ...listResult(rows.map((r) => present(r, steps.get(r.id))), total, q),
+      summary: {
+        active: Object.entries(counts).filter(([k]) => !['CANCELLED', 'REJECTED'].includes(k)).reduce((t, [, n]) => t + n, 0),
+        pendingApproval: counts.PENDING_APPROVAL ?? 0,
+        inProgress: running,
+        totalValue: Number(value._sum.amount ?? 0),
+      },
+    });
   }),
 );
 
@@ -293,13 +350,54 @@ jobOrderRoutes.get(
  * amount prints in brackets and is not counted, and the note under the
  * totals says how many were left out. Declared above `/:id`.
  */
+/** An approved order whose project is running — the "In Progress" card and filter. */
+const IN_PROGRESS_WHERE: Prisma.JobOrderWhereInput = { status: 'APPROVED', job: { is: { status: { notIn: ['COMPLETED', 'TURNED_OVER', 'CANCELLED'] } } } };
+
+/** The list as a CSV that opens in Excel — the report dialog's "Excel" (above /:id). */
+jobOrderRoutes.get(
+  '/csv',
+  requireAny('gops.job_orders.view_all', 'gops.job_orders.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = await jobOrderListWhere(me, q);
+    const rows = await prisma.jobOrder.findMany({ where, include: jobOrderInclude, orderBy: orderBy(q, JOB_ORDER_SORTS, { requestedFor: 'asc' }), take: 5000 });
+    const steps = await openSteps('job_order', rows.filter((r) => r.status === 'PENDING_APPROVAL').map((r) => r.id));
+    await audit({ entityType: 'job_order', entityId: 'list', action: 'EXPORTED', summary: `Exported ${rows.length} job orders as CSV` }, req);
+    const csv = toCsv([
+      ['JO No.', 'Date requested', 'Requester', 'Assigned personnel', 'Team', 'Task', 'Scope summary', 'Customer', 'Project', 'Target start', 'Target finish', 'Amount', 'Status'],
+      ...rows.map((r) => {
+        const t = targets(r);
+        return [
+          r.number,
+          dayKey(r.createdAt).toISOString().slice(0, 10),
+          r.requestedBy.name,
+          r.assignedTo?.name ?? '',
+          r.team?.code ?? '',
+          r.title,
+          (r.scope ?? r.description).slice(0, 300),
+          r.customer.name,
+          r.projectName ?? '',
+          isoDay(t.targetStart),
+          isoDay(t.targetFinish),
+          r.amount == null ? '' : Number(r.amount),
+          stageOf(r, steps.get(r.id)),
+        ];
+      }),
+    ]);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="job-orders.csv"');
+    res.send(csv);
+  }),
+);
+
 jobOrderRoutes.get(
   '/pdf',
   requireAny('gops.job_orders.view_all', 'gops.job_orders.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where = jobOrderListWhere(me, q);
+    const where = await jobOrderListWhere(me, q);
     const f = q.filters;
     const [rows, count, live, cancelled, currency, named, assignee, quotation, salesOrder] = await Promise.all([
       prisma.jobOrder.findMany({ where, include: jobOrderInclude, orderBy: orderBy(q, JOB_ORDER_SORTS, { requestedFor: 'asc' }), take: LIST_CAP }),
@@ -312,16 +410,20 @@ jobOrderRoutes.get(
       f.quotationId ? prisma.quotation.findUnique({ where: { id: f.quotationId }, select: { number: true } }) : null,
       f.salesOrderId ? prisma.salesOrder.findUnique({ where: { id: f.salesOrderId }, select: { number: true } }) : null,
     ]);
+    const steps = await openSteps('job_order', rows.filter((r) => r.status === 'PENDING_APPROVAL').map((r) => r.id));
     const reference = listReference(count, rows.length, ['job order', 'job orders'], [
       q.search ? `search "${q.search}"` : null,
-      f.status && f.open !== 'true' && f.unbilled !== 'true' ? `status ${statusWord(f.status)}` : null,
+      f.status && f.open !== 'true' && f.unbilled !== 'true' ? `status ${f.status.split(',').map(statusWord).join(' or ')}` : null,
+      f.teamId ? `team ${f.teamId === 'none' ? 'none' : ((await prisma.industry.findUnique({ where: { id: f.teamId }, select: { code: true } }))?.code ?? 'not found')}` : null,
+      f.requestedById ? `requested by ${(await prisma.user.findUnique({ where: { id: f.requestedById }, select: { name: true } }))?.name ?? 'not found'}` : null,
+      rangeNamed('requested', f.createdFrom, f.createdTo),
       f.open === 'true' ? 'open (approved)' : null,
       f.unbilled === 'true' ? 'completed, chargeable, not yet invoiced' : null,
       named.customer ? `customer ${named.customer}` : null,
       named.project ? `project ${named.project}` : null,
       f.quotationId ? `quotation ${quotation?.number ?? 'not found'}` : null,
       f.salesOrderId ? `sales order ${salesOrder?.number ?? 'not found'}` : null,
-      named.person ? `project manager ${named.person}` : null,
+      named.person ? `Technical Manager ${named.person}` : null,
       assignee,
       rangeNamed('target start', f.from, f.to),
       q.scope === 'mine' ? 'raised by me or sending me' : null,
@@ -336,22 +438,23 @@ jobOrderRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Project', 'Customer', 'Target', `Amount (${currency})`, 'Project manager', 'Links', 'Status'],
-          align: ['left', 'left', 'left', 'left', 'right', 'left', 'left', 'left'],
+          head: ['JO No.', 'Requested', 'Requester', 'Assigned', 'Team', 'Task / project', 'Target', `Amount (${currency})`, 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'left', 'left', 'right', 'left'],
           rows: rows.map((r) => {
             const t = targets(r);
             // No amount yet reads as the record reads it, never a blank.
             const amount = r.amount == null ? 'To be billed on completion' : bracketed(formatAmount(Number(r.amount)), r.status !== 'CANCELLED');
             return [
               r.number,
-              { title: r.projectName ?? r.title, body: r.projectName && r.projectName !== r.title ? r.title : undefined },
-              { title: r.customer.name, body: r.site?.name ?? r.contact?.name ?? undefined },
+              formatShortDate(r.createdAt),
+              r.requestedBy.name,
+              r.assignedTo?.name ?? '—',
+              r.team?.code ?? '—',
+              { title: r.title, body: `${r.projectName ?? ''}${r.projectName ? ' — ' : ''}${r.customer.name}` },
               // Dates are never bold: the window, then the working days in it.
               `${formatShortDate(t.targetStart)} – ${formatShortDate(t.targetFinish)}\n${t.durationDays} working day${t.durationDays === 1 ? '' : 's'}`,
               amount,
-              { title: r.projectManager?.name ?? 'None named', body: `Raised by ${r.requestedBy.name}` },
-              [r.quotation?.number, r.salesOrder?.number, r.job?.number].filter(Boolean).join('\n'),
-              statusWord(r.status),
+              stageOf(r, steps.get(r.id)),
             ];
           }),
         },
@@ -441,6 +544,16 @@ jobOrderRoutes.get(
         take: 100,
       }),
     ]);
+    // The Labor bucket of each costing behind a quotation, in one GROUP BY.
+    const costingIds = [...new Set(quotations.map((q) => valueRevision(q.revisions)?.costingId).filter((v): v is string => !!v))];
+    const laborRows = costingIds.length
+      ? await prisma.costingLine.groupBy({
+          by: ['costingId'],
+          where: { costingId: { in: costingIds }, isHeading: false, costCategory: { code: 'LAB' } },
+          _sum: { amount: true },
+        })
+      : [];
+    const laborBy = new Map(laborRows.map((r) => [r.costingId, Math.round(Number(r._sum.amount ?? 0) * 100) / 100]));
     res.json({
       sites,
       contacts,
@@ -454,6 +567,8 @@ jobOrderRoutes.get(
           contactId: q.contactId,
           siteId: q.siteId,
           amount: rev ? netOf(rev) : null,
+          /** The Labor cost on the costing behind it — what the job order's amount must equal. */
+          labor: rev?.costingId ? laborBy.get(rev.costingId) ?? 0 : null,
           /** Whether approval could build the project from it. */
           costed: !!rev?.costingId,
         };
@@ -492,6 +607,8 @@ const jobOrderSchema = z.object({
   projectManagerId: z.string().optional().nullable(),
   projectEngineerId: z.string().optional().nullable(),
   projectLeadId: z.string().optional().nullable(),
+  assignedToId: z.string().optional().nullable(),
+  teamId: z.string().optional().nullable(),
   supportIds: z.array(z.string()).max(50).optional(),
   customerPoNumber: z.string().trim().max(120).optional().nullable(),
   amount: z.number().min(0).optional().nullable(),
@@ -518,9 +635,15 @@ async function checkBelongs(
     projectManagerId?: string | null;
     projectEngineerId?: string | null;
     projectLeadId?: string | null;
+    assignedToId?: string | null;
+    teamId?: string | null;
     supportIds?: string[];
   },
 ) {
+  if (body.teamId) {
+    const team = await prisma.industry.findUnique({ where: { id: body.teamId }, select: { isActive: true } });
+    if (!team?.isActive) throw badRequest('That team is not offered');
+  }
   const [site, contact, quotation, salesOrder, job] = await Promise.all([
     body.siteId ? prisma.customerSite.findUnique({ where: { id: body.siteId }, select: { customerId: true } }) : null,
     body.contactId ? prisma.customerContact.findUnique({ where: { id: body.contactId }, select: { customerId: true } }) : null,
@@ -542,7 +665,7 @@ async function checkBelongs(
   if (body.jobId && job?.customerId !== customerId) throw badRequest('That project is for another customer');
 
   const peopleIds = [
-    ...new Set([body.projectManagerId, body.projectEngineerId, body.projectLeadId, ...(body.supportIds ?? [])].filter((id): id is string => !!id)),
+    ...new Set([body.projectManagerId, body.projectEngineerId, body.projectLeadId, body.assignedToId, ...(body.supportIds ?? [])].filter((id): id is string => !!id)),
   ];
   if (peopleIds.length) {
     const found = await prisma.user.count({ where: { id: { in: peopleIds }, isActive: true } });
@@ -551,12 +674,59 @@ async function checkBelongs(
 }
 
 /**
- * The agreed amount when nobody typed one: the sales order's net, else the
+ * The labor charge a costing carries: its Labor bucket (`LAB`), the sum of
+ * its cost lines. A job order's amount IS the labor charge to Project
+ * Management (the owner's call, 2026-10-16), so this is what it must tally
+ * with before a project is built from it.
+ */
+export async function costingLabor(costingId: string): Promise<number> {
+  const sum = await prisma.costingLine.aggregate({
+    where: { costingId, isHeading: false, costCategory: { code: 'LAB' } },
+    _sum: { amount: true },
+  });
+  return Math.round(Number(sum._sum.amount ?? 0) * 100) / 100;
+}
+
+/** The costing behind a quotation's value revision, if any. */
+async function quotationCostingId(quotationId: string | null | undefined): Promise<string | null> {
+  if (!quotationId) return null;
+  const revisions = await prisma.quotationRevision.findMany({
+    where: { quotationId },
+    select: { id: true, status: true, revision: true, costingId: true },
+  });
+  return valueRevision(revisions)?.costingId ?? null;
+}
+
+/**
+ * How a job order's Amount (the labor charge to Project Management) stands
+ * against the Labor cost of the costing behind its quotation — null when no
+ * costing stands behind it. A difference no longer stops anything: the
+ * Technical Manager's approval is the agreement (2026-10-16), recorded on
+ * the order when the project is built.
+ */
+export async function laborTally(row: { quotationId: string | null; amount: Prisma.Decimal | number | null }): Promise<
+  { costingNumber: string; labor: number; amount: number | null; difference: number | null; tallies: boolean } | null
+> {
+  const costingId = await quotationCostingId(row.quotationId);
+  if (!costingId) return null;
+  const labor = await costingLabor(costingId);
+  const costing = await prisma.costing.findUnique({ where: { id: costingId }, select: { number: true } });
+  const amount = row.amount == null ? null : Math.round(Number(row.amount) * 100) / 100;
+  const difference = amount == null ? null : Math.round((amount - labor) * 100) / 100;
+  return { costingNumber: costing?.number ?? '', labor, amount, difference, tallies: difference !== null && Math.abs(difference) < 0.005 };
+}
+
+/**
+ * The agreed amount when nobody typed one: the labor charge on the costing
+ * behind the quotation (the job order's amount is the labor charge to
+ * Project Management); without a costing, the sales order's net, else the
  * quotation's value revision's net (approved, else latest) — before VAT,
  * because the invoice adds it, and after the quote-level discount, because
  * that is the price the customer agreed to.
  */
 async function agreedAmount(body: { salesOrderId?: string | null; quotationId?: string | null }): Promise<number | null> {
+  const costingId = await quotationCostingId(body.quotationId);
+  if (costingId) return costingLabor(costingId);
   if (body.salesOrderId) {
     const o = await prisma.salesOrder.findUnique({ where: { id: body.salesOrderId }, select: { subtotal: true, discountAmount: true } });
     if (o) return netOf(o);
@@ -581,6 +751,8 @@ jobOrderRoutes.post(
     await checkBelongs(body.customerId, body);
     const { targetStart, targetFinish } = window(body.targetStart, body.targetFinish);
     const amount = body.amount ?? (await agreedAmount(body));
+    // The team asking: the one picked, else the requester's own.
+    const teamId = body.teamId || (await teamOf(me.id))?.id || null;
 
     const row = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('job_order', tx);
@@ -608,6 +780,8 @@ jobOrderRoutes.post(
           projectManagerId: body.projectManagerId || null,
           projectEngineerId: body.projectEngineerId || null,
           projectLeadId: body.projectLeadId || null,
+          assignedToId: body.assignedToId || null,
+          teamId,
           support: { create: [...new Set(body.supportIds ?? [])].map((userId) => ({ userId })) },
           notes: body.notes || null,
         },
@@ -633,12 +807,21 @@ jobOrderRoutes.get(
     const owner = canEditRecord(me, 'gops', 'job_orders', row.requestedById);
     // Who would decide it, so the page can say where Submit sends it.
     const route = row.status === 'DRAFT' || row.status === 'REJECTED' ? await routeSlots(row) : [];
+    const step = row.status === 'PENDING_APPROVAL' ? (await openSteps('job_order', [row.id])).get(row.id) : undefined;
     res.json({
-      ...present(row),
+      ...present(row, step),
       canEdit: owner && (row.status === 'DRAFT' || row.status === 'REJECTED'),
       canCancel: owner && ['DRAFT', 'REJECTED', 'APPROVED'].includes(row.status),
       canAcknowledge: (owner || onIt(me, row)) && row.status !== 'DRAFT' && row.status !== 'CANCELLED',
       route: route.map((s) => ({ step: s.step, names: (s.assigned ?? []).map((p) => p.name) })),
+      laborTally: await laborTally(row),
+      laborAgreed: row.laborAgreedAt
+        ? {
+            costingAmount: num(row.laborCostingAmount),
+            at: row.laborAgreedAt,
+            by: row.laborAgreedById ? (await prisma.user.findUnique({ where: { id: row.laborAgreedById }, select: { name: true } }))?.name ?? null : null,
+          }
+        : null,
     });
   }),
 );
@@ -692,6 +875,8 @@ jobOrderRoutes.patch(
           ...(body.projectManagerId !== undefined ? { projectManagerId: body.projectManagerId || null } : {}),
           ...(body.projectEngineerId !== undefined ? { projectEngineerId: body.projectEngineerId || null } : {}),
           ...(body.projectLeadId !== undefined ? { projectLeadId: body.projectLeadId || null } : {}),
+          ...(body.assignedToId !== undefined ? { assignedToId: body.assignedToId || null } : {}),
+          ...(body.teamId !== undefined ? { teamId: body.teamId || (await teamOf(existing.requestedById))?.id || null } : {}),
           ...(body.supportIds !== undefined
             ? { support: { create: [...new Set(body.supportIds)].map((userId) => ({ userId })) } }
             : {}),
@@ -958,7 +1143,7 @@ jobOrderRoutes.get(
         title: 'Personnel to send',
         columns: 2,
         fields: [
-          { label: 'Project manager', value: nameOf(row.projectManager) },
+          { label: 'Technical Manager', value: nameOf(row.projectManager) },
           { label: 'Project engineer', value: nameOf(row.projectEngineer) },
           { label: 'Project lead', value: nameOf(row.projectLead) },
           { label: 'Project support', value: row.support.length ? row.support.map((s) => s.user.name).join(', ') : '—' },
@@ -1000,7 +1185,7 @@ jobOrderRoutes.get(
 
     await audit({ entityType: 'job_order', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.number}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${row.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Job Order', number: row.number, author: row.requestedBy.name, date: row.createdAt })));
     res.send(pdf);
   }),
 );
@@ -1022,6 +1207,16 @@ jobOrderRoutes.get(
  * whoever raised it, for the project to be built by hand once the costing
  * is ready.
  */
+/** Who signed the job order's Technical Manager step (sequence 1) on its latest request. */
+async function technicalManagerOf(jobOrderId: string): Promise<string | null> {
+  const action = await prisma.approvalAction.findFirst({
+    where: { sequence: 1, action: 'APPROVED', request: { documentType: 'job_order', documentId: jobOrderId } },
+    orderBy: { actedAt: 'desc' },
+    select: { approverId: true },
+  });
+  return action?.approverId ?? null;
+}
+
 export async function settleJobOrder(
   approval: { documentId: string },
   outcome: ApprovalOutcome,
@@ -1043,6 +1238,7 @@ export async function settleJobOrder(
 
   let built: { id: string; number: string; name: string } | null = null;
   let notBuilt: string | null = null;
+  let laborNote: string | null = null;
   if (jo.jobId) {
     notBuilt = null;
   } else if (!jo.quotationId) {
@@ -1056,6 +1252,7 @@ export async function settleJobOrder(
       const rev = valueRevision(revisions);
       if (!rev?.costingId) throw badRequest(`${jo.quotation?.number ?? 'the quotation'} has no costing behind it`);
       const costing = await costingForJob(rev.costingId, jo.customerId);
+      const tally = await laborTally(jo);
       const t = targets(jo);
       built = await prisma.$transaction(async (tx) => {
         const job = await createJobRecord(tx, costing, {
@@ -1074,7 +1271,21 @@ export async function settleJobOrder(
           notes: `Built from job order ${jo.number}`,
           createdById: jo.requestedById,
         });
-        await tx.jobOrder.update({ where: { id: jo.id }, data: { jobId: job.id } });
+        // An Amount that differs from the costing's Labor cost stands by the
+        // Technical Manager's approval: record who agreed it.
+        const agreedBy = tally && !tally.tallies ? await technicalManagerOf(jo.id) : null;
+        await tx.jobOrder.update({
+          where: { id: jo.id },
+          data: {
+            jobId: job.id,
+            ...(tally && !tally.tallies
+              ? { laborCostingAmount: new Prisma.Decimal(tally.labor), laborAgreedById: agreedBy, laborAgreedAt: new Date() }
+              : {}),
+          },
+        });
+        if (tally && !tally.tallies) {
+          laborNote = `Amount ${tally.amount == null ? '(none)' : formatMoney(tally.amount)} agreed by the Technical Manager — costing ${tally.costingNumber} Labor ${formatMoney(tally.labor)}`;
+        }
         return { id: job.id, number: job.number, name: job.name };
       });
     } catch (err) {
@@ -1095,7 +1306,7 @@ export async function settleJobOrder(
     entityId: jo.id,
     action: 'EXECUTED',
     summary: built
-      ? `${jo.number} approved — project ${built.number} built, ${isoDay(targets(jo).targetStart)} to ${isoDay(targets(jo).targetFinish)}`
+      ? `${jo.number} approved — project ${built.number} built, ${isoDay(targets(jo).targetStart)} to ${isoDay(targets(jo).targetFinish)}${laborNote ? `. ${laborNote}` : ''}`
       : jo.job
         ? `${jo.number} approved for project ${jo.job.number}`
         : `${jo.number} approved — no project built: ${notBuilt}`,
@@ -1125,6 +1336,165 @@ export async function settleJobOrder(
 }
 
 onApprovalSettled('job_order', settleJobOrder);
+
+/**
+ * Pulled back after approval (2026-10-16, the owner's call: "every approval
+ * request can be pulled back and return to draft, even if it's fully
+ * approved"). The order goes back to DRAFT and the Technical Manager's
+ * agreement on its amount is cleared. The project its approval BUILT goes with
+ * it — only while nothing stands on it but its opening budget: any cost,
+ * document, report, meeting, task or file on the project refuses the pull-back
+ * naming it. Its costing goes back to DRAFT only where this build is what made
+ * it FINAL (no costing approval behind it, finalised with the project, no
+ * other project on it); otherwise the costing is left as it is. An order
+ * linked to a project that existed before is simply reopened.
+ */
+onApprovalReopened('job_order', {
+  may: async (actor, id) => {
+    const jo = await prisma.jobOrder.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+    // A COMPLETED one is refused by `reopen`, saying why.
+    return !!jo && (jo.status === 'APPROVED' || jo.status === 'COMPLETED') && canEditRecord(actor, 'gops', 'job_orders', jo.requestedById);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const jo = await tx.jobOrder.findUnique({
+      where: { id: documentId },
+      select: { id: true, number: true, status: true, jobId: true, visit: { select: { id: true } } },
+    });
+    if (!jo) throw notFound('Job order not found');
+    if (jo.status !== 'APPROVED') {
+      throw badRequest(`${jo.number} is ${statusLabel(jo.status).toLowerCase()} — only an approved job order goes back to draft`);
+    }
+    if (jo.visit) throw badRequest(`${jo.number} scheduled a service visit — cancel the visit first`);
+    const invoices = await tx.invoice.count({ where: { jobOrderId: jo.id, status: { not: 'CANCELLED' } } });
+    if (invoices) throw badRequest(`${jo.number} has been invoiced — cancel the invoice first`);
+
+    // The project this approval built, if it built one.
+    const job = jo.jobId
+      ? await tx.job.findUnique({
+          where: { id: jo.jobId },
+          select: {
+            id: true,
+            number: true,
+            status: true,
+            notes: true,
+            createdAt: true,
+            costingId: true,
+            _count: {
+              select: {
+                budgetRequests: true,
+                progressReports: true,
+                billings: true,
+                plans: true,
+                tasks: true,
+                meetings: true,
+                purchaseRequests: true,
+                purchaseOrders: true,
+                stockIssues: true,
+                pulloutSlips: true,
+                borrowSlips: true,
+                overtime: true,
+                invoices: true,
+                supplierBills: true,
+                expenseClaims: true,
+                cashAdvances: true,
+                installedAssets: true,
+                serviceReports: true,
+                jobOrders: true,
+                salesActivities: true,
+                cadJobOrders: true,
+                invoiceRequests: true,
+              },
+            },
+          },
+        })
+      : null;
+    const built = !!job && (job.notes ?? '').startsWith(`Built from job order ${jo.number}`);
+
+    if (job && built) {
+      const c = job._count;
+      const blockers: [string, number][] = [
+        ['budget request', c.budgetRequests],
+        ['progress report', c.progressReports],
+        ['progress billing', c.billings],
+        ['request for approval', c.plans],
+        ['scheduled task', c.tasks],
+        ['meeting', c.meetings],
+        ['purchase request', c.purchaseRequests],
+        ['purchase order', c.purchaseOrders],
+        ['outgoing slip', c.stockIssues],
+        ['pull-out slip', c.pulloutSlips],
+        ['borrow slip', c.borrowSlips],
+        ['overtime filing', c.overtime],
+        ['invoice', c.invoices],
+        ['invoice request', c.invoiceRequests],
+        ['supplier bill', c.supplierBills],
+        ['expense claim', c.expenseClaims],
+        ['cash advance', c.cashAdvances],
+        ['installed machine', c.installedAssets],
+        ['service report', c.serviceReports],
+        ['other job order', c.jobOrders - 1],
+        ['sales activity', c.salesActivities],
+        ['CAD J.O.', c.cadJobOrders],
+        ['cost entry', await tx.jobCostEntry.count({ where: { jobId: job.id, state: { not: 'BUDGETED' } } })],
+        ['attached file', await tx.attachment.count({ where: { entityType: 'job', entityId: job.id } })],
+        ['service contract', (await tx.serviceContract.count({ where: { jobId: job.id } }))],
+      ];
+      const standing = blockers.filter(([, n]) => n > 0);
+      if (standing.length) {
+        throw badRequest(
+          `Project ${job.number}, built when ${jo.number} was approved, has ${standing
+            .map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`)
+            .join(', ')} on it — ${jo.number} cannot go back to draft while the project is in use`,
+        );
+      }
+      if (job.status !== 'PLANNING') {
+        throw badRequest(`Project ${job.number}, built when ${jo.number} was approved, is ${statusLabel(job.status).toLowerCase()} — it is kept`);
+      }
+    }
+
+    const claimed = await tx.jobOrder.updateMany({
+      where: { id: jo.id, status: 'APPROVED' },
+      data: {
+        status: 'DRAFT',
+        approvedAt: null,
+        laborCostingAmount: null,
+        laborAgreedById: null,
+        laborAgreedAt: null,
+        ...(built ? { jobId: null } : {}),
+      },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+
+    if (job && built) {
+      await deleteOrRefuse(`Project ${job.number}`, () => tx.job.delete({ where: { id: job.id } }));
+      // The costing goes back to draft only where this build finalised it.
+      const costing = await tx.costing.findUnique({ where: { id: job.costingId }, select: { id: true, number: true, status: true, finalAt: true } });
+      const otherJobs = await tx.job.count({ where: { costingId: job.costingId } });
+      const costingApproval = await tx.approvalRequest.findFirst({
+        where: { documentType: 'costing', documentId: job.costingId },
+        orderBy: { createdAt: 'desc' },
+        select: { status: true },
+      });
+      const finalisedByBuild =
+        !!costing?.finalAt && Math.abs(costing.finalAt.getTime() - job.createdAt.getTime()) < 10_000;
+      let costingNote = '';
+      if (costing && costing.status === 'FINAL' && !otherJobs && costingApproval?.status !== 'APPROVED' && finalisedByBuild) {
+        await tx.costing.updateMany({ where: { id: costing.id, status: 'FINAL' }, data: { status: 'DRAFT', finalAt: null } });
+        costingNote = `; costing ${costing.number} back to draft`;
+      }
+      await audit(
+        {
+          entityType: 'job',
+          entityId: job.id,
+          action: 'DELETED',
+          summary: `Deleted project ${job.number} — ${jo.number} was pulled back to draft after approval${costingNote}`,
+        },
+        undefined,
+        tx,
+      );
+    }
+  },
+});
 
 // ── Ctrl+K ──────────────────────────────────────────────────────────────────
 

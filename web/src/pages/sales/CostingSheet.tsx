@@ -2,10 +2,11 @@ import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FocusEv
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { addDays, todayLocal } from '../../lib/day';
-import { costingFigures, lineAmount, lineCodes, planTasks } from '../../lib/costingMath';
+import { addDays, isDayKey, parseDay, todayLocal, workingDayKey } from '../../lib/day';
+import { costingFigures, lineAmount, lineCodes, planTasks, scheduleOfValues, type ValueSource } from '../../lib/costingMath';
+import { TickPicker } from '../../components/TickPicker';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
-import { Checkbox, ErrorBox, Field, Loading, formatMoney, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Loading, formatDate, formatMoney, useToast } from '../../components/ui';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import type { CostingDetail } from './CostingDetail';
 import { NumberInput } from '../../components/NumberInput';
@@ -22,7 +23,9 @@ import { NumberInput } from '../../components/NumberInput';
                           straight from Excel
     Cost summary          the margin on the price, VAT, grand total — and
                           "set the grand total" to price to a figure
-    Scope of work         phases and their tasks on working days (Mon–Fri)
+    Scope of work         phases and their tasks on working days (Mon–Sat);
+                          with a start date, each falls on a date and the
+                          plan has a finish date
     Terms & Conditions    printed; Internal notes, never printed
 
   One Save sends it all (POST /costings or PUT /costings/:id/sheet), and the
@@ -55,6 +58,9 @@ interface SheetLine {
   quantity: string;
   unit: string;
   unitCost: string;
+  /** Who supplies it (a name; the server links one on file) and a note — both print under the unit cost. */
+  supplier: string;
+  lineNote: string;
 }
 
 interface SheetTask {
@@ -74,6 +80,9 @@ interface SheetSection {
   name: string;
   description: string;
   value: string;
+  /** Where the value comes from (2026-10-13): spread, typed (declared), or cost buckets priced. */
+  valueSource: ValueSource;
+  costCategoryIds: string[];
   durationDays: string;
   tasks: SheetTask[];
 }
@@ -85,8 +94,12 @@ interface Header {
   leadId: string;
   systemUnit: string;
   validUntil: string;
+  /** The day the scope of work starts ('' = not yet known); the finish date is derived from the plan. */
+  plannedStart: string;
   /** The margin on the price, in percent as typed ("25" = 25%). */
   marginPct: string;
+  /** A fixed price, net of VAT, as a plain number; '' prices from the margin (2026-10-13). */
+  fixedPrice: string;
   vatOn: boolean;
   notes: string;
   terms: string;
@@ -99,6 +112,8 @@ interface Lists {
   tasks: string[];
   terms: string | null;
   companyVatRate: number;
+  /** The scope of work a new sheet opens on (2026-10-13, the owner's sheet). */
+  scopePreload?: { name: string; kind: Kind; valueFrom: string[]; tasks: { name: string; durationDays: number }[] }[];
 }
 
 interface TemplateRow {
@@ -162,6 +177,8 @@ const blankLine = (categoryId: string, isHeading = false): SheetLine => ({
   quantity: isHeading ? '' : '1',
   unit: isHeading ? '' : 'pc',
   unitCost: '',
+  supplier: '',
+  lineNote: '',
 });
 
 const blankTask = (): SheetTask => ({ key: nextKey('t'), name: '', startDay: '', durationDays: '1' });
@@ -172,9 +189,37 @@ const blankSection = (): SheetSection => ({
   name: '',
   description: '',
   value: '0',
+  valueSource: 'SPREAD',
+  costCategoryIds: [],
   durationDays: '0',
   tasks: [blankTask()],
 });
+
+/** The preload as rows to type into — the phases and tasks, nothing priced. */
+function preloadSections(preload: NonNullable<Lists['scopePreload']>, categories: Category[]): SheetSection[] {
+  return preload.map((p) => {
+    // The buckets are named by code in the preload; a bucket not on file is passed over.
+    const ids = (p.valueFrom ?? []).map((code) => categories.find((c) => c.code === code)?.id).filter((v): v is string => !!v);
+    return {
+    key: nextKey('s'),
+    kind: p.kind,
+    name: p.name,
+    description: '',
+    value: '0',
+    valueSource: ids.length ? ('CATEGORY' as const) : ('SPREAD' as const),
+    costCategoryIds: ids,
+    durationDays: '0',
+    tasks: p.tasks.map((t) => ({ key: nextKey('t'), name: t.name, startDay: '', durationDays: String(t.durationDays) })),
+    };
+  });
+}
+
+/** What a set of phases says, keys aside — to tell an untouched preload from one somebody worked on. */
+function sectionsSignature(ss: SheetSection[]): string {
+  return JSON.stringify(
+    ss.map((x) => [x.kind, x.name, x.description, x.value, x.valueSource, x.costCategoryIds, x.durationDays, x.tasks.map((t) => [t.name, t.startDay, t.durationDays])]),
+  );
+}
 
 /** A typed figure as a number: commas, spaces, "PHP" and ₱ are allowed in. */
 function figure(s: string): number {
@@ -210,36 +255,42 @@ function parsePasted(text: string, categoryId: string): SheetLine[] {
 }
 
 /**
- * Prices the sheet to a grand total: the margin (to the 0.0001% it is stored
- * at) that lands the estimate nearest the figure. A margin is a share of the
- * price, so the estimate may miss the target by a centavo or two; the toast
- * says where it landed. (The markup rule used a discount to make up the
- * difference — there is no discount on a costing any more, 2026-10-09.)
+ * Fixes the sheet's price (2026-10-13, the owner's call: a margin cannot
+ * always land on the figure wanted). Typed WITH VAT, the price is the
+ * contract value whose VAT brings it nearest the figure — exact unless VAT's
+ * own rounding makes that impossible, which the toast then says; typed
+ * before VAT, it is the figure itself. The margin is whatever the price
+ * amounts to over the cost, within the margin's ±95%.
  */
 function priceTo(
   target: number,
+  withVat: boolean,
   lines: { quantity: string; unitCost: string; isHeading?: boolean }[],
   vatRate: number,
-): { marginPct: number; grand: number } | null {
+): { contract: number; marginPct: number; grand: number } | { problem: string } {
   const base = costingFigures(lines, { marginPct: 0, vatRate });
-  if (base.totalCost <= 0 || target <= 0) return null;
-  // The contract value whose VAT brings it to the target, to the centavo.
+  if (base.totalCost <= 0) return { problem: 'Enter the cost lines first — a price is set on top of a cost.' };
+  if (target <= 0) return { problem: 'Enter a price above zero.' };
   const targetCents = Math.round(target * 100);
-  const guess = Math.round(targetCents / (1 + vatRate));
-  let contractCents = guess;
-  let best = Infinity;
-  for (const c of [guess - 2, guess - 1, guess, guess + 1, guess + 2]) {
-    const grand = c + Math.round(c * vatRate);
-    if (Math.abs(grand - targetCents) < best) {
-      best = Math.abs(grand - targetCents);
-      contractCents = c;
+  let contractCents = targetCents;
+  if (withVat) {
+    // The contract value whose VAT brings it to the target, to the centavo.
+    const guess = Math.round(targetCents / (1 + vatRate));
+    let best = Infinity;
+    for (const c of [guess - 2, guess - 1, guess, guess + 1, guess + 2]) {
+      const grand = c + Math.round(c * vatRate);
+      if (Math.abs(grand - targetCents) < best) {
+        best = Math.abs(grand - targetCents);
+        contractCents = c;
+      }
     }
   }
   const contract = contractCents / 100;
-  if (contract <= 0) return null;
-  const marginPct = Math.round(((contract - base.totalCost) / contract) * 1_000_000) / 1_000_000;
-  if (marginPct >= 0.95 || marginPct <= -0.95) return null;
-  return { marginPct, grand: costingFigures(lines, { marginPct, vatRate }).grandTotal };
+  const f = costingFigures(lines, { marginPct: 0, vatRate, targetContractValue: contract });
+  if (f.marginPct >= 0.95 || f.marginPct <= -0.95) {
+    return { problem: `That price is a ${(f.marginPct * 100).toFixed(1)}% margin on the cost — within ±95% only.` };
+  }
+  return { contract, marginPct: f.marginPct, grand: f.grandTotal };
 }
 
 export function CostingSheet() {
@@ -267,7 +318,9 @@ export function CostingSheet() {
     leadId: params.get('leadId') ?? '',
     systemUnit: '',
     validUntil: addDays(todayLocal(), 30),
+    plannedStart: '',
     marginPct: '15',
+    fixedPrice: '',
     vatOn: true,
     notes: '',
     terms: '',
@@ -277,10 +330,14 @@ export function CostingSheet() {
   const [lines, setLines] = useState<SheetLine[]>([]);
   const [sections, setSections] = useState<SheetSection[]>([]);
   const [spread, setSpread] = useState(true);
+  /** A phase value being typed WITH VAT, shown as typed until the box loses focus. */
+  const [vatTyped, setVatTyped] = useState<Record<string, string>>({});
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [leadNote, setLeadNote] = useState<{ id: string; number: string; companyName: string } | null>(null);
   const [templateId, setTemplateId] = useState(params.get('template') ?? '');
   const [target, setTarget] = useState('');
+  /** Whether "Set the grand total" is typed with VAT (the grand total) or before it (the contract value). */
+  const [targetWithVat, setTargetWithVat] = useState(true);
   const [templatePanel, setTemplatePanel] = useState(false);
   const focusNext = useRef<string | null>(null);
 
@@ -302,6 +359,24 @@ export function CostingSheet() {
     if (editing || !lists.terms) return;
     setHeader((h) => (h.terms ? h : { ...h, terms: lists.terms ?? '' }));
   }, [editing, lists.terms]);
+  // ...and the owner's scope of work (2026-10-13): the first thing a new
+  // costing shows, every phase and task still removable. A template chosen
+  // on a new sheet replaces it while nobody has touched it.
+  const preloadSignature = useRef<string | null>(null);
+  const preloadApplied = useRef(false);
+  useEffect(() => {
+    if (editing || preloadApplied.current || !lists.scopePreload?.length || !categories.length) return;
+    preloadApplied.current = true;
+    const preload = preloadSections(lists.scopePreload, categories);
+    preloadSignature.current = sectionsSignature(preload);
+    setSections((ss) => (ss.length ? ss : preload));
+  }, [editing, lists.scopePreload, categories]);
+  function startFromPreload() {
+    if (!lists.scopePreload?.length) return;
+    const preload = preloadSections(lists.scopePreload, categories);
+    preloadSignature.current = sectionsSignature(preload);
+    setSections(preload);
+  }
 
   // Editing: the saved draft, as rows to type into.
   useEffect(() => {
@@ -318,7 +393,9 @@ export function CostingSheet() {
           leadId: c.lead?.id ?? '',
           systemUnit: c.systemUnit ?? '',
           validUntil: c.validUntil ?? '',
+          plannedStart: c.plannedStart ?? '',
           marginPct: percentString(c.marginPct),
+          fixedPrice: c.targetContractValue ? String(c.targetContractValue) : '',
           vatOn: c.vatRate > 0,
           notes: c.notes ?? '',
           terms: c.terms ?? '',
@@ -335,6 +412,8 @@ export function CostingSheet() {
             quantity: l.isHeading ? '' : String(l.quantity),
             unit: l.isHeading ? '' : l.unit,
             unitCost: l.isHeading ? '' : String(l.unitCost),
+            supplier: l.supplier?.name ?? l.supplierName ?? '',
+            lineNote: l.lineNote ?? '',
           })),
         );
         setSections(
@@ -345,6 +424,8 @@ export function CostingSheet() {
             name: s.name,
             description: s.description ?? '',
             value: String(s.value),
+            valueSource: s.valueSource ?? 'SPREAD',
+            costCategoryIds: s.costCategoryIds ?? [],
             durationDays: String(s.durationDays),
             tasks: s.tasks.map((t) => ({
               key: nextKey('t'),
@@ -457,6 +538,7 @@ export function CostingSheet() {
     // Typed in percent, stored as a fraction to six decimals; a minus sign is a loss-making bid, said as such.
     marginPct: marginOk(header.marginPct) ? Math.round(Number(header.marginPct.replace(/[,\s%]/g, '')) * 10000) / 1_000_000 : 0,
     vatRate,
+    targetContractValue: header.fixedPrice ? figure(header.fixedPrice) : null,
   };
   const mathLines = lines.map((l) => ({ quantity: l.quantity || '0', unitCost: l.unitCost || '0', isHeading: l.isHeading }));
   const totals = costingFigures(mathLines, rates);
@@ -489,7 +571,47 @@ export function CostingSheet() {
       tasks: s.tasks.map((t) => ({ startDay: t.startDay ? figure(t.startDay) : null, durationDays: figure(t.durationDays) })),
     })),
   );
-  const scopeTotal = sections.reduce((sum, s) => sum + figure(s.value), 0);
+  // The plan on the calendar (2026-10-13): working day n from the start date,
+  // Mon–Sat — the server's `present()` derives the same dates.
+  const startKey = isDayKey(header.plannedStart) ? header.plannedStart : null;
+  const onDay = (day: number | null): string | null => (startKey && day ? workingDayKey(startKey, day) : null);
+  const finishKey = onDay(plan.totalDays || null);
+  const showDay = (key: string) => formatDate(parseDay(key));
+  const shortDay = (key: string) => parseDay(key).toLocaleDateString('en-PH', { month: 'short', day: 'numeric' });
+  // The schedule of values as it will be saved — the server runs the same rule (`scheduleOfValues`).
+  const bucketCost: Record<string, number> = {};
+  for (const l of lines) {
+    if (l.isHeading) continue;
+    bucketCost[l.categoryId] = (bucketCost[l.categoryId] ?? 0) + lineAmount(l.quantity || '0', l.unitCost || '0');
+  }
+  const sov = scheduleOfValues(
+    sections.map((s) => ({ valueSource: s.valueSource, value: figure(s.value), costCategoryIds: s.costCategoryIds })),
+    bucketCost,
+    totals.contractValue,
+    totals.totalCost,
+    spread,
+  );
+  /** What a phase's value box shows: the value it will be saved with. */
+  const shownValue = (i: number) => sov.values[i] ?? 0;
+  const scopeTotal = sections.reduce((sum, _s, i) => sum + shownValue(i), 0);
+  // The phases are SHOWN with VAT (2026-10-16, the owner's call: "make the value
+  // VAT included to tally the Grand Total to the Scope of Work value"); they
+  // are stored and billed before VAT, as ever. Each phase is its value plus
+  // its VAT; when the phases make up the whole contract, the last one takes
+  // the centavos VAT's rounding leaves, so they add up to the Grand Total.
+  const toCentsUi = (n: number) => Math.round(n * 100) / 100;
+  const withVatValues = (() => {
+    const vals = sections.map((_s, i) => toCentsUi(shownValue(i) * (1 + vatRate)));
+    if (vals.length && Math.abs(scopeTotal - totals.contractValue) < 0.005) {
+      const gap = toCentsUi(totals.grandTotal - vals.reduce((t, v) => t + v, 0));
+      if (gap) vals[vals.length - 1] = toCentsUi(vals[vals.length - 1] + gap);
+    }
+    return vals;
+  })();
+  const scopeTotalWithVat = toCentsUi(withVatValues.reduce((t, v) => t + v, 0));
+  /** A figure typed with VAT, as the phase stores it (before VAT). */
+  const netOfVat = (typed: string) => (typed.trim() === '' ? '' : String(toCentsUi((Number(typed) || 0) / (1 + vatRate))));
+  const bucketChoices = visibleCategories.map((c) => ({ value: c.id, label: c.name }));
 
   // ── Editing the rows ───────────────────────────────────────────────────────
 
@@ -616,6 +738,8 @@ export function CostingSheet() {
         quantity: l.isHeading ? '' : String(l.quantity),
         unit: l.isHeading ? '' : l.unit,
         unitCost: l.isHeading || !l.unitCost ? '' : String(l.unitCost),
+        supplier: '',
+        lineNote: '',
       }));
       const newSections: SheetSection[] = t.sections.map((s) => ({
         key: nextKey('s'),
@@ -623,6 +747,8 @@ export function CostingSheet() {
         name: s.name,
         description: s.description ?? '',
         value: '0',
+        valueSource: 'SPREAD' as const,
+        costCategoryIds: [],
         durationDays: String(s.durationDays),
         tasks: s.tasks.map((task) => ({
           key: nextKey('t'),
@@ -631,9 +757,13 @@ export function CostingSheet() {
           durationDays: String(task.durationDays),
         })),
       }));
-      const empty = lines.every(isBlankLine) && sections.every((s) => !s.name.trim());
+      // The preload, untouched, is not anybody's work: a template's own phases replace it.
+      const untouchedPreload = !!preloadSignature.current && sectionsSignature(sections) === preloadSignature.current;
+      const empty = lines.every(isBlankLine) && (untouchedPreload || sections.every((s) => !s.name.trim()));
       setLines((ls) => [...ls.filter((l) => !isBlankLine(l)), ...newLines]);
-      setSections((ss) => [...ss.filter((s) => s.name.trim()), ...newSections]);
+      setSections((ss) =>
+        untouchedPreload && newSections.length ? newSections : [...ss.filter((s) => s.name.trim()), ...newSections],
+      );
       if (empty) {
         setHeader((h) => ({
           ...h,
@@ -649,13 +779,25 @@ export function CostingSheet() {
   }
 
   function applyTarget() {
-    const result = priceTo(figure(target), mathLines, vatRate);
-    if (!result) {
-      toast('error', 'Enter the cost lines first — a price is set on top of a cost, and within a 95% margin of it.');
+    const typed = figure(target);
+    const result = priceTo(typed, targetWithVat, mathLines, vatRate);
+    if ('problem' in result) {
+      toast('error', result.problem);
       return;
     }
-    setHeader((h) => ({ ...h, marginPct: percentString(result.marginPct) }));
-    toast('ok', `A ${percentString(result.marginPct)}% margin lands on ${formatMoney(result.grand)}`);
+    setHeader((h) => ({ ...h, fixedPrice: String(result.contract), marginPct: percentString(result.marginPct) }));
+    const missed = targetWithVat && Math.round(result.grand * 100) !== Math.round(typed * 100);
+    toast(
+      'ok',
+      `Fixed at ${formatMoney(result.contract)} before VAT — grand total ${formatMoney(result.grand)}${
+        missed ? ` (VAT's rounding cannot land on ${formatMoney(typed)} exactly)` : ''
+      }, a ${percentString(result.marginPct)}% margin`,
+    );
+  }
+
+  /** Prices from the margin again, at the margin the fixed price stood on — nothing moves until it is changed. */
+  function releasePrice() {
+    setHeader((h) => ({ ...h, fixedPrice: '', marginPct: percentString(totals.marginPct) }));
   }
 
   // ── Saving ─────────────────────────────────────────────────────────────────
@@ -669,9 +811,29 @@ export function CostingSheet() {
   const keptSections = sections.filter((s) => s.name.trim() || s.tasks.some((t) => !isBlankTask(t)));
   const sectionProblems = new Map<string, string>();
   for (const s of keptSections) if (s.name.trim().length < 2) sectionProblems.set(s.key, 'Name the phase');
+  {
+    const bucketOn = new Map<string, string>();
+    for (const s of keptSections) {
+      if (s.valueSource !== 'CATEGORY' || sectionProblems.has(s.key)) continue;
+      if (!s.costCategoryIds.length) sectionProblems.set(s.key, 'Choose the cost it takes its value from');
+      for (const id of s.costCategoryIds) {
+        const other = bucketOn.get(id);
+        if (other && !sectionProblems.has(s.key)) sectionProblems.set(s.key, `${categories.find((c) => c.id === id)?.name ?? 'A bucket'} is already on “${other}”`);
+        bucketOn.set(id, s.name || 'another phase');
+      }
+    }
+  }
+  const sovProblem = spread && sov.problem === 'over' ? 'The typed and cost-priced phases come to more than the contract value' : null;
   const titleProblem = header.title.trim().length < 2 ? 'Give the costing a title' : null;
-  const rateProblem = !marginOk(header.marginPct) ? 'The margin is a percentage of the price, between −95 and 95' : null;
-  const valid = !titleProblem && !rateProblem && !lineProblems.size && !sectionProblems.size;
+  const fixed = !!header.fixedPrice;
+  const rateProblem = fixed
+    ? totals.marginPct >= 0.95 || totals.marginPct <= -0.95
+      ? `The fixed price is a ${(totals.marginPct * 100).toFixed(1)}% margin on the cost now — within ±95% only. Set the price again or release it.`
+      : null
+    : !marginOk(header.marginPct)
+      ? 'The margin is a percentage of the price, between −95 and 95'
+      : null;
+  const valid = !titleProblem && !rateProblem && !sovProblem && !lineProblems.size && !sectionProblems.size;
 
   function sheetPayload() {
     return {
@@ -680,7 +842,10 @@ export function CostingSheet() {
       siteId: header.siteId || null,
       systemUnit: header.systemUnit.trim() || null,
       validUntil: header.validUntil || null,
-      marginPct: rates.marginPct,
+      plannedStart: header.plannedStart || null,
+      // At a fixed price the margin is what the price amounts to; the server derives it again.
+      marginPct: fixed ? totals.marginPct : rates.marginPct,
+      targetContractValue: fixed ? figure(header.fixedPrice) : null,
       vatRate,
       notes: header.notes,
       terms: header.terms,
@@ -694,6 +859,8 @@ export function CostingSheet() {
         quantity: l.isHeading ? 0 : figure(l.quantity),
         unit: l.unit.trim() || 'pc',
         unitCost: l.isHeading ? 0 : figure(l.unitCost),
+        supplierName: l.isHeading ? null : l.supplier.trim() || null,
+        lineNote: l.isHeading ? null : l.lineNote.trim() || null,
       })),
       sections: keptSections.map((s) => ({
         ...(s.id ? { id: s.id } : {}),
@@ -701,7 +868,9 @@ export function CostingSheet() {
         name: s.name.trim(),
         description: s.description.trim() || null,
         durationDays: figure(s.durationDays),
-        value: figure(s.value),
+        value: shownValue(sections.indexOf(s)),
+        valueSource: s.valueSource,
+        costCategoryIds: s.valueSource === 'CATEGORY' ? s.costCategoryIds : [],
         tasks: s.tasks
           .filter((t) => !isBlankTask(t))
           .map((t) => ({
@@ -882,6 +1051,15 @@ export function CostingSheet() {
             <Field label="Valid until">
               <input type="date" value={header.validUntil} onChange={(e) => setH('validUntil', e.target.value)} />
             </Field>
+            <Field label="Start date" hint="The day the scope of work starts — the finish date follows from its working days (Mon–Sat)">
+              <input type="date" value={header.plannedStart} onChange={(e) => setH('plannedStart', e.target.value)} />
+            </Field>
+            {startKey && (
+              <div className="field qe-static">
+                <span className="qe-static-label">Finish date</span>
+                <div>{finishKey ? showDay(finishKey) : 'No phase is planned yet'}</div>
+              </div>
+            )}
             {editing && costing && (
               <div className="field qe-static">
                 <span className="qe-static-label">Prepared by</span>
@@ -899,7 +1077,6 @@ export function CostingSheet() {
           </p>
         </div>
         {visibleCategories.map((cat) => {
-          const rank = rankOf.get(cat.id) ?? 0;
           const rows = byCategory.get(cat.id) ?? [];
           const subtotal = costingFigures(
             rows.map((l) => ({ quantity: l.quantity || '0', unitCost: l.unitCost || '0', isHeading: l.isHeading })),
@@ -927,7 +1104,7 @@ export function CostingSheet() {
                   {open ? '▾' : '▸'}
                 </span>
                 <span className="cs-cat-name">
-                  {rank} {cat.name}
+                  {cat.name}
                 </span>
                 <span className="faint">
                   {count} line{count === 1 ? '' : 's'}
@@ -1043,6 +1220,19 @@ export function CostingSheet() {
                                       }
                                     }}
                                   />
+                                  <SupplierBox
+                                    value={l.supplier}
+                                    label={`${label} supplier`}
+                                    onChange={(v) => updateLine(l.key, { supplier: v })}
+                                  />
+                                  <input
+                                    className="cs-line-note"
+                                    aria-label={`${label} note`}
+                                    placeholder="Note"
+                                    maxLength={500}
+                                    value={l.lineNote}
+                                    onChange={(e) => updateLine(l.key, { lineNote: e.target.value })}
+                                  />
                                 </td>
                                 <td className="cs-col-amount right mono">
                                   {formatMoney(figureOk(l.quantity) && figureOk(l.unitCost) ? lineAmount(l.quantity || '0', l.unitCost || '0') : 0)}
@@ -1093,15 +1283,31 @@ export function CostingSheet() {
                 <td>
                   <label htmlFor="cs-margin">Margin on the price</label>
                   <div className="faint cs-note">= {markupNote}% markup on cost</div>
+                  {fixed && (
+                    <div className="faint cs-note">
+                      Fixed price — the margin follows it.{' '}
+                      <button type="button" className="btn btn-sm btn-ghost" onClick={releasePrice} title="Price from the margin again">
+                        Release
+                      </button>
+                    </div>
+                  )}
                 </td>
                 <td className="cs-rate">
-                  <NumberInput kind="percent" id="cs-margin" className="qe-num" value={header.marginPct} onChange={(e) => setH('marginPct', e.target.value)} />
+                  <NumberInput
+                    kind="percent"
+                    id="cs-margin"
+                    className="qe-num"
+                    value={fixed ? percentString(totals.marginPct) : header.marginPct}
+                    disabled={fixed}
+                    title={fixed ? 'Worked out from the fixed price' : undefined}
+                    onChange={(e) => setH('marginPct', e.target.value)}
+                  />
                   <span aria-hidden="true">%</span>
                 </td>
                 <td className="right mono">{formatMoney(totals.marginAmount)}</td>
               </tr>
               <tr className="cs-strong">
-                <td>Subtotal (contract value)</td>
+                <td>Subtotal (contract value){fixed && <span className="faint"> — fixed price</span>}</td>
                 <td />
                 <td className="right mono">{formatMoney(totals.contractValue)}</td>
               </tr>
@@ -1119,7 +1325,14 @@ export function CostingSheet() {
           </table>
           <div className="cs-summary-side">
             {rateProblem && attempted && <div className="alert error">{rateProblem}</div>}
-            <Field label="Set the grand total" hint="Works out the margin that lands on this figure — to the centavo where a margin can.">
+            <Field
+              label="Set the grand total"
+              hint={
+                targetWithVat
+                  ? 'Fixes the price at this grand total, VAT included — the margin follows it, and lines changed later keep the price.'
+                  : 'Fixes the contract value, before VAT — the margin follows it, and lines changed later keep the price.'
+              }
+            >
               <div className="row cs-target">
                 <NumberInput
                   kind="money"
@@ -1137,6 +1350,7 @@ export function CostingSheet() {
                   Apply
                 </button>
               </div>
+              <Checkbox checked={!targetWithVat} onChange={(v) => setTargetWithVat(!v)} label="Before VAT (the contract value)" />
             </Field>
             <p className="faint cs-note">
               The project budgeted cost — every line, contingency included, without the margin — becomes the project's
@@ -1150,7 +1364,9 @@ export function CostingSheet() {
         <div className="row cs-block-head">
           <h2 className="cs-section-title">Scope of work</h2>
           <p className="faint cs-paste-hint">
-            {plan.totalDays} working day{plan.totalDays === 1 ? '' : 's'} in all (Mon–Fri). A task with no start day follows the one before it.
+            Duration: {plan.totalDays} working day{plan.totalDays === 1 ? '' : 's'} (Mon–Sat)
+            {startKey && finishKey ? ` · ${showDay(startKey)} – ${showDay(finishKey)}` : ''}. A task with no start day follows the one
+            before it.
           </p>
         </div>
         {sections.length === 0 && (
@@ -1194,20 +1410,59 @@ export function CostingSheet() {
                     </option>
                   ))}
                 </select>
-                <label className="cs-phase-value">
+                <div className="cs-phase-value">
                   <span className="faint">Value</span>
+                  <select
+                    aria-label={`${phaseLabel}: where its value comes from`}
+                    value={s.valueSource}
+                    onChange={(e) => {
+                      const source = e.target.value as ValueSource;
+                      updateSection(s.key, {
+                        valueSource: source,
+                        // Typed from what it shows now, so nothing jumps.
+                        value: source === 'DECLARED' ? String(shownValue(si)) : s.value,
+                      });
+                    }}
+                  >
+                    <option value="SPREAD">{spread ? 'Spread' : 'Typed'}</option>
+                    <option value="DECLARED">Declared</option>
+                    <option value="CATEGORY">From cost</option>
+                  </select>
+                  {s.valueSource === 'CATEGORY' && (
+                    <TickPicker
+                      choices={bucketChoices}
+                      value={s.costCategoryIds}
+                      onChange={(ids) => updateSection(s.key, { costCategoryIds: ids })}
+                      none="Choose the cost"
+                      noun="cost buckets"
+                      label={`${phaseLabel}: the cost it takes its value from`}
+                    />
+                  )}
                   <NumberInput
                     kind="money"
                     className="qe-num"
-                    aria-label={`${phaseLabel} value (schedule of values)`}
-                    value={s.value}
-                    disabled={spread}
-                    title={spread ? 'Spread from the contract value on save' : undefined}
-                    onChange={(e) => updateSection(s.key, { value: e.target.value })}
+                    aria-label={`${phaseLabel} value with VAT (schedule of values)`}
+                    value={vatTyped[s.key] ?? String(withVatValues[si] ?? 0)}
+                    disabled={s.valueSource === 'CATEGORY'}
+                    title={
+                      s.valueSource === 'CATEGORY'
+                        ? 'The chosen cost, priced as the sheet prices it'
+                        : spread && s.valueSource === 'SPREAD'
+                          ? 'Spread from what the other phases leave — type a figure to declare it'
+                          : undefined
+                    }
+                    // Typing a figure declares it: kept as typed, the others spread around it.
+                    onChange={(e) => {
+                      const typed = e.target.value;
+                      setVatTyped((t) => ({ ...t, [s.key]: typed }));
+                      updateSection(s.key, { value: netOfVat(typed), valueSource: s.valueSource === 'SPREAD' && spread ? 'DECLARED' : s.valueSource });
+                    }}
+                    onBlur={() => setVatTyped(({ [s.key]: _gone, ...rest }) => rest)}
                   />
-                </label>
+                </div>
                 <span className="faint cs-phase-span">
                   {planned.start ? `Day ${planned.start}–${planned.end} · ${planned.days} d` : `${planned.days} d`}
+                  {planned.start && planned.end && startKey ? ` · ${shortDay(onDay(planned.start)!)} – ${shortDay(onDay(planned.end)!)}` : ''}
                 </span>
                 <button type="button" className="btn btn-sm btn-ghost" aria-label={`Remove ${phaseLabel}`} onClick={() => setSections((ss) => ss.filter((x) => x.key !== s.key))}>
                   Remove
@@ -1270,7 +1525,9 @@ export function CostingSheet() {
                               }}
                             />
                           </td>
-                          <td className="cs-col-day right mono">Day {pt.end}</td>
+                          <td className="cs-col-day right mono" title={startKey ? showDay(onDay(pt.end)!) : undefined}>
+                            Day {pt.end}
+                          </td>
                           <td className="cs-col-bar">
                             <PlanBar start={pt.start} days={pt.days} total={Math.max(plan.totalDays, 1)} />
                           </td>
@@ -1303,6 +1560,11 @@ export function CostingSheet() {
           <button type="button" className="btn btn-sm" onClick={addSection}>
             + Add phase
           </button>
+          {sections.length === 0 && !!lists.scopePreload?.length && (
+            <button type="button" className="btn btn-sm" onClick={startFromPreload} title="The six standard phases and their tasks">
+              Start from the standard scope
+            </button>
+          )}
           {sections.some((s) => s.tasks.length) && (
             <button type="button" className="btn btn-sm" onClick={sequence} title="Each task starts the working day after the one before it ends">
               Sequence tasks
@@ -1311,10 +1573,19 @@ export function CostingSheet() {
         </div>
         {sections.length > 0 && (
           <div className="cs-sov">
-            <Checkbox checked={spread} onChange={setSpread} label="Keep the schedule of values equal to the contract value (spread it across the phases on save)" />
+            <Checkbox
+              checked={spread}
+              onChange={setSpread}
+              label="Keep the schedule of values equal to the contract value (what the declared and cost-priced phases leave is spread across the others on save)"
+            />
+            {sovProblem && <div className="alert error">{sovProblem} — {formatMoney(-sov.remaining)} over. Lower a declared figure, or let one spread.</div>}
+            <p className="faint">
+              Phase values are shown with VAT{vatRate > 0 ? ` (${Math.round(vatRate * 10000) / 100}%)` : ''}: together{' '}
+              {formatMoney(scopeTotalWithVat)} against a Grand Total of {formatMoney(totals.grandTotal)}. They are billed before VAT.
+            </p>
             {!spread && Math.abs(scopeTotal - totals.contractValue) > 0.009 && (
               <div className="alert warn">
-                The phases add up to {formatMoney(scopeTotal)} against a contract value of {formatMoney(totals.contractValue)}. A
+                The phases add up to {formatMoney(scopeTotalWithVat)} with VAT against a Grand Total of {formatMoney(totals.grandTotal)}. A
                 project cannot be built until they agree.
               </div>
             )}
@@ -1555,3 +1826,48 @@ export function TemplateSavePanel({
   );
 }
 
+
+/**
+ * A line's Supplier box: free text, offering the suppliers on file as it is
+ * typed (`/costings/suggest/suppliers`, names only). A name matching one on
+ * file is linked by the server at save; anything else is kept as typed.
+ */
+function SupplierBox({ value, label, onChange }: { value: string; label: string; onChange: (v: string) => void }) {
+  const [options, setOptions] = useState<{ id: string; name: string }[]>([]);
+  const [focused, setFocused] = useState(false);
+  const listId = useMemo(() => nextKey('sup'), []);
+  useEffect(() => {
+    if (!focused) return;
+    let stale = false;
+    const t = setTimeout(() => {
+      api
+        .get<{ id: string; name: string }[]>(`/costings/suggest/suppliers${qs({ q: value.trim() || undefined })}`)
+        .then((rows) => !stale && setOptions(rows))
+        .catch(() => !stale && setOptions([]));
+    }, 200);
+    return () => {
+      stale = true;
+      clearTimeout(t);
+    };
+  }, [value, focused]);
+  return (
+    <>
+      <input
+        className="cs-line-supplier-input"
+        aria-label={label}
+        placeholder="Supplier"
+        maxLength={200}
+        list={listId}
+        value={value}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <datalist id={listId}>
+        {options.map((o) => (
+          <option key={o.id} value={o.name} />
+        ))}
+      </datalist>
+    </>
+  );
+}

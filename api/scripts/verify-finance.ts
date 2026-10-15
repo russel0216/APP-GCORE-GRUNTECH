@@ -25,7 +25,8 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, approversForStep, pendingFor } from '../src/shared/approvals';
+import { submitForApproval, act, approversForStep, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
+import { resolveUser } from '../src/permissions/resolve';
 import { postJobCost, availableBudget } from '../src/shared/inventory';
 import {
   taxBreakdown,
@@ -42,7 +43,7 @@ import {
   saveFinanceSettings,
   type AgedRow,
 } from '../src/shared/finance';
-import { manilaDayKey } from '../src/shared/day';
+import { manilaDayKey, manilaDayStart, manilaDayEnd } from '../src/shared/day';
 import { statusLabel } from '../src/shared/pdf';
 // Side-effect imports: register the bill, expense and cash-advance approval
 // subscribers, and the procurement ones the receiving path depends on. The
@@ -53,6 +54,12 @@ import { settleAdvance } from '../src/routes/advances';
 // Side-effect import: registers the budget_request approval subscriber.
 import '../src/routes/budgetRequests';
 import '../src/routes/procurement';
+// Side-effect import: registers the invoice_request approval subscriber.
+import { settleInvoiceRequest } from '../src/routes/invoiceRequests';
+// Side-effect import: registers the commission approval subscriber (2026-10-16).
+import '../src/routes/commissions';
+import { commissionFigures } from '../src/shared/commission';
+import { commissionFigures as webCommissionFigures } from '../../web/src/lib/commission';
 import {
   flat,
   hasLine,
@@ -162,7 +169,24 @@ async function cleanup() {
       where: { id: { in: [...new Set(allocations.map((a) => a.paymentId))] } },
     });
   }
+  // Commission payouts hold their shares (Restrict); the requests hold the order.
+  const commissions = await prisma.commissionRequest.findMany({ where: { customer: { name: { startsWith: TAG } } }, select: { id: true } });
+  if (commissions.length) {
+    const payouts = await prisma.paymentAllocation.findMany({ where: { commissionShare: { requestId: { in: commissions.map((c) => c.id) } } }, select: { paymentId: true } });
+    await prisma.payment.deleteMany({ where: { id: { in: [...new Set(payouts.map((p) => p.paymentId))] } } });
+    await prisma.auditLog.deleteMany({ where: { entityType: 'commission', entityId: { in: commissions.map((c) => c.id) } } });
+    await prisma.commissionRequest.deleteMany({ where: { id: { in: commissions.map((c) => c.id) } } });
+  }
+  // A collection with only lines typed by hand settles nothing, so it is found by its customer.
+  await prisma.payment.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
+  // Invoice requests hold their sales order (Restrict); their invoices go next.
+  await prisma.invoiceRequest.deleteMany({
+    where: { OR: [{ job: { customer: { name: { startsWith: TAG } } } }, { salesOrder: { customer: { name: { startsWith: TAG } } } }] },
+  });
   await prisma.invoice.deleteMany({ where: { id: { in: invoices.map((i) => i.id) } } });
+  // The A/R checks' sales order and its quotation, after their invoices.
+  await prisma.salesOrder.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
+  await prisma.quotation.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.supplierBill.deleteMany({ where: { id: { in: bills.map((b) => b.id) } } });
   // Job orders after their invoices (Restrict), before the customer and users.
   await prisma.jobOrder.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
@@ -384,7 +408,15 @@ async function main() {
   const finance = await makeUser('ZZ Finance', 'fin@verifyf.local', ['finance']);
   const engineer = await makeUser('ZZ Engineer', 'eng@verifyf.local', ['project_engineer'], pm.id);
   const procurement = await makeUser('ZZ Procurement', 'proc@verifyf.local', ['procurement']);
+  // A budget request's route (the sheet of 2026-10-13): the requester's Team
+  // Leader (the engineer reports to the PM), Admin Back Support, the Finance
+  // Manager — each needs a holder.
+  const backSup = await makeUser('ZZ Back Support', 'backsupport@verifyf.local', ['back_support']);
+  const finMgr = await makeUser('ZZ Finance Manager', 'finmgr@verifyf.local', ['finance_manager']);
+  const teamLeader = await makeUser('ZZ Team Leader', 'teamleader@verifyf.local', ['team_leader']);
   await makeUser('ZZ Director', 'exec@verifyf.local', ['executive']);
+  // Reimbursements and cash advances (2026-10-15) end with the CEO / President.
+  await makeUser('ZZ CEO', 'ceo@verifyf.local', ['ceo']);
   // Throwaway roles for the route guards: nothing at all, project access
   // without budget monitoring, and the right to file a claim and nothing else.
   const throwaway = async (key: string, permissionKeys: string[]) => {
@@ -1339,31 +1371,33 @@ async function main() {
     return { claim, request };
   };
 
-  // (1) The project's manager, then finance; nothing on the ledger either way.
+  // (1) The requester's team leader, Back Support, the Finance Manager;
+  // nothing on the ledger either way.
   const b1 = await newRequest(engineer, 20_000, 'fittings for the tie-in');
   check('a budget request takes a BR number', /^GT-BR-\d{4}-\d{4}$/.test(b1.number), b1.number);
   const ledgerBeforeRequest = await ledgerCount();
   const b1Request = await submitRequest(b1);
   const b1Step = await prisma.approvalStep.findFirstOrThrow({ where: { workflowId: b1Request.workflowId!, sequence: b1Request.currentSequence } });
   const b1Approvers = await approversForStep(b1Step, engineer.id, prisma, { jobId: job.id });
-  check('step 1 is the project’s manager — the person the job names', b1Approvers.length === 1 && b1Approvers[0] === pm.id, b1Approvers.join(','));
+  check('step 1 is the requester’s team leader — who they report to', b1Approvers.length === 1 && b1Approvers[0] === pm.id, b1Approvers.join(','));
   await act({ requestId: b1Request.id, userId: pm.id, action: 'APPROVED' });
-  check('the manager alone does not approve it — finance is the second step', (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } })).status === 'PENDING_APPROVAL');
+  check('the team leader alone does not approve it — Back Support and the Finance Manager follow', (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } })).status === 'PENDING_APPROVAL');
   await settle(b1Request.id);
   const b1Approved = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } });
   check('approved, it owes a release and nothing else', b1Approved.status === 'APPROVED' && !!b1Approved.approvedAt, b1Approved.status);
   check('approval moves no money and raises no budget — the ledger is untouched', (await ledgerCount()) === ledgerBeforeRequest);
   check('the whole amount is owed to the team', money((await settleable('budget_request', b1.id))!.outstanding, 20_000));
 
-  // (2) The manager's own request goes up to Executive, never to themself.
+  // (2) A requester who reports to nobody goes to the Team Leaders — the
+  // step's fallback — never to nobody and never to themself.
   const b2 = await newRequest(pm, 5_000, 'the manager’s own');
   const b2Request = await submitRequest(b2);
   const b2Step = await prisma.approvalStep.findFirstOrThrow({ where: { workflowId: b2Request.workflowId!, sequence: b2Request.currentSequence } });
   const b2Approvers = await approversForStep(b2Step, pm.id, prisma, { jobId: job.id });
-  const executives = await prisma.userRole.findMany({ where: { role: { key: 'executive' }, user: { isActive: true } }, select: { userId: true } });
+  const leaders = await prisma.userRole.findMany({ where: { role: { key: 'team_leader' }, user: { isActive: true } }, select: { userId: true } });
   check(
-    'the manager’s own request routes to Executive, not to the manager',
-    !b2Approvers.includes(pm.id) && b2Approvers.length > 0 && b2Approvers.every((id) => executives.some((e) => e.userId === id)),
+    'a requester with no "Reports to" goes to the Team Leaders, not to themself',
+    !b2Approvers.includes(pm.id) && b2Approvers.includes(teamLeader.id) && b2Approvers.every((id) => leaders.some((e) => e.userId === id)),
     b2Approvers.join(','),
   );
   await settle(b2Request.id, 'REJECTED');
@@ -1438,6 +1472,81 @@ async function main() {
   );
   await restoreRules();
 
+  // ══ Pulled back after approval (2026-10-16) ═══════════════════════════════
+  console.log('\nPulled back to draft after approval — advances, budget requests, liquidations');
+  const reopenAs = async (userId: string) => (await resolveUser(userId))!;
+  const engUser = await reopenAs(engineer.id);
+  const refusal = async (type: string, id: string) => {
+    try {
+      await reopenApproved(type, id, engUser, `${TAG} pulled back`);
+      return 'pulled back';
+    } catch (err) {
+      return `${(err as { status?: number }).status ?? '?'} ${(err as Error).message}`;
+    }
+  };
+  // An advance approved and not released goes back to a draft.
+  const ra = await newAdvance(engineer, 1_250, 'approved then pulled back');
+  const raRequest = await submitAdvance(ra);
+  await settle(raRequest.id);
+  const raMay = await mayReopen('cash_advance', ra.id, engUser);
+  await reopenApproved('cash_advance', ra.id, engUser, `${TAG} wrong amount`);
+  const raAfter = await prisma.cashAdvance.findUniqueOrThrow({ where: { id: ra.id } });
+  const raReq = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: raRequest.id } });
+  check(
+    'the requester pulls back an approved advance nothing was released on: a draft again, the request closed',
+    raMay && raAfter.status === 'DRAFT' && raAfter.approvedAt === null && raReq.status === 'CANCELLED' && !!raReq.reopenedAt,
+    `${raMay} ${raAfter.status} ${raReq.status}`,
+  );
+  const a4Refused = await refusal('cash_advance', a2.id);
+  check('a released advance is refused, naming the release', a4Refused.startsWith('400') && a4Refused.includes('released'), a4Refused);
+  // A budget request the same way.
+  const rb = await newRequest(engineer, 2_000, 'approved then pulled back');
+  await settle((await submitRequest(rb)).id);
+  await reopenApproved('budget_request', rb.id, engUser, `${TAG} not needed yet`);
+  check('an approved budget request nothing was released on goes back to a draft', (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: rb.id } })).status === 'DRAFT');
+  const b3Refused = await refusal('budget_request', b3.id);
+  check('a released budget request is refused, naming the release', b3Refused.startsWith('400') && b3Refused.includes('released'), b3Refused);
+  // A liquidation: the cost comes back off the project, the advance awaits it again.
+  const rl = await newAdvance(engineer, 4_000, 'liquidated then pulled back');
+  await settle((await submitAdvance(rl)).id);
+  await release(rl.id, 4_000, dayKey(new Date()));
+  const rlIncurredBefore = (await availableBudget(prisma, job.id, subcontract.id)).incurred;
+  const { claim: rlClaim, request: rlLiq } = await liquidate(await prisma.cashAdvance.findUniqueOrThrow({ where: { id: rl.id } }), [3_000]);
+  await settle(rlLiq.id);
+  const rlLiquidated = await prisma.cashAdvance.findUniqueOrThrow({ where: { id: rl.id } });
+  await reopenApproved('expense', rlClaim.id, engUser, `${TAG} a receipt was missing`);
+  const rlClaimAfter = await prisma.expenseClaim.findUniqueOrThrow({ where: { id: rlClaim.id } });
+  const rlAfter = await prisma.cashAdvance.findUniqueOrThrow({ where: { id: rl.id } });
+  const rlIncurredAfter = (await availableBudget(prisma, job.id, subcontract.id)).incurred;
+  const rlRows = await prisma.jobCostEntry.findMany({ where: { sourceType: 'expense_claim', sourceId: rlClaim.id } });
+  check(
+    'a settled liquidation pulled back: a draft, its 3,000 reversed by a negative row, and the advance RELEASED again',
+    rlLiquidated.status === 'REFUND_DUE' &&
+      rlClaimAfter.status === 'DRAFT' &&
+      !rlClaimAfter.postedToJob &&
+      rlRows.length === 2 &&
+      money(rlRows.reduce((t, r) => t + num(r.amount), 0), 0) &&
+      money(rlIncurredAfter, rlIncurredBefore) &&
+      rlAfter.status === 'RELEASED' &&
+      money(num(rlAfter.amountSpent), 0),
+    `${rlLiquidated.status} → ${rlClaimAfter.status}, ${rlRows.length} rows, ${rlIncurredBefore} → ${rlIncurredAfter}, advance ${rlAfter.status}`,
+  );
+  // Approved again, it charges once more — and only once.
+  await prisma.expenseClaim.update({ where: { id: rlClaim.id }, data: { status: 'PENDING_APPROVAL' } });
+  const rlAgain = await submitForApproval({ documentType: 'expense', documentId: rlClaim.id, documentNumber: rlClaim.number, subject: `${TAG} liquidation again`, amount: 3_000, requesterId: engineer.id });
+  await settle(rlAgain.id);
+  check(
+    'sent and approved again, the project carries the 3,000 once',
+    money((await availableBudget(prisma, job.id, subcontract.id)).incurred, rlIncurredBefore + 3_000) &&
+      (await prisma.cashAdvance.findUniqueOrThrow({ where: { id: rl.id } })).status === 'REFUND_DUE',
+  );
+  const l2Refused = await refusal('expense', l2.id);
+  check('a reimbursed claim is refused, naming the payment', l2Refused.startsWith('400') && l2Refused.includes('paid'), l2Refused);
+  const b1ClaimRefused = await refusal('expense', b1Claim.id);
+  check('a liquidation whose unspent cash came back is refused, naming the refund', b1ClaimRefused.startsWith('400') && b1ClaimRefused.includes(b1.number), b1ClaimRefused);
+  const someoneElse = await reopenAs(pm.id);
+  check('someone else’s approved claim is not theirs to pull back', !(await mayReopen('expense', rlClaim.id, someoneElse)));
+
   // Fixtures for the route cases below: one released and not liquidated, and
   // one that belongs to somebody else.
   const a4 = await newAdvance(engineer, 3_000, 'released not liquidated');
@@ -1446,6 +1555,57 @@ async function main() {
   const a5 = await newAdvance(pm, 1_000, 'somebody else');
 
   // ══ Route guards, over HTTP ══════════════════════════════════════════════
+  // ══ Commission arithmetic (2026-10-16) ══════════════════════════════════
+  console.log('\nCommissions — the owner’s sample, worked through shared/commission.ts and its web copy');
+  const sampleInput = {
+    totalAmount: 1_120_000,
+    vatAmount: 120_000,
+    totalCost: 650_000,
+    collectedAmount: 1_120_000,
+    ratePct: 0.1,
+    shares: [
+      { sharePct: 0.6, taxPct: 0.1, caDeduction: 3_000 },
+      { sharePct: 0.4, taxPct: 0.1, caDeduction: 0 },
+    ],
+  };
+  const sample = commissionFigures(sampleInput);
+  check(
+    'actual margin = collected − VAT − cost = 350,000; 10% of it is 35,000 gross',
+    money(sample.netOfVat, 1_000_000) && money(sample.margin, 350_000) && money(sample.grossCommission, 35_000),
+    JSON.stringify(sample).slice(0, 200),
+  );
+  check(
+    'Brian 60%: 21,000 less 2,100 tax and 3,000 CA = 15,900; Sarah 40%: 14,000 less 1,400 = 12,600',
+    money(sample.shares[0].share, 21_000) && money(sample.shares[0].tax, 2_100) && money(sample.shares[0].net, 15_900) &&
+      money(sample.shares[1].share, 14_000) && money(sample.shares[1].tax, 1_400) && money(sample.shares[1].net, 12_600),
+    JSON.stringify(sample.shares),
+  );
+  check(
+    'the totals are 35,000 / 3,500 / 3,000 / 28,500',
+    money(sample.totalShare, 35_000) && money(sample.totalTax, 3_500) && money(sample.totalCa, 3_000) && money(sample.totalNet, 28_500) && sample.sharesComplete,
+  );
+  const thirds = commissionFigures({ ...sampleInput, totalCost: 650_000.01, ratePct: 0.0733, shares: [1, 2, 3].map(() => ({ sharePct: 0.333333, taxPct: 0.1, caDeduction: 0 })).map((x, i) => (i === 2 ? { ...x, sharePct: 0.333334 } : x)) });
+  check('three awkward thirds still add up to the gross to the centavo', money(thirds.totalShare, thirds.grossCommission), `${thirds.totalShare} vs ${thirds.grossCommission}`);
+  let mirrorSame = true;
+  for (let i = 0; i < 300; i++) {
+    const r = (n: number) => Math.round(Math.random() * n * 100) / 100;
+    const k = 1 + Math.floor(Math.random() * 4);
+    const raw = Array.from({ length: k }, () => 1 + Math.floor(Math.random() * 100));
+    const sumRaw = raw.reduce((a, b) => a + b, 0);
+    const pcts = raw.map((x) => Math.round((x / sumRaw) * 1_000_000) / 1_000_000);
+    pcts[k - 1] = Math.round((1 - pcts.slice(0, -1).reduce((a, b) => a + b, 0)) * 1_000_000) / 1_000_000;
+    const input = {
+      totalAmount: r(5_000_000),
+      vatAmount: r(500_000),
+      totalCost: r(3_000_000),
+      collectedAmount: r(5_000_000),
+      ratePct: Math.round(Math.random() * 200_000) / 1_000_000,
+      shares: pcts.map((p) => ({ sharePct: p, taxPct: [0.1, 0.05, 0.15][i % 3], caDeduction: r(1_000) })),
+    };
+    if (JSON.stringify(commissionFigures(input)) !== JSON.stringify(webCommissionFigures(input))) mirrorSame = false;
+  }
+  check('the web copy (lib/commission.ts) gives the same figures on 300 random requests', mirrorSame);
+
   console.log('\nRoute guards (over HTTP)');
 
   const reachable = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(3000) })
@@ -1658,27 +1818,28 @@ async function main() {
     const raisedId = String(raised.body.id);
     const draftPage = await eng('GET', `/budget-requests/${raisedId}`);
     check(
-      'the draft names its route — the project’s manager, then finance — before it is submitted',
+      'the draft names its route — the team leader, back support, the finance manager — before it is submitted',
       draftPage.status === 200 &&
         draftPage.body.approvalRoute?.steps?.[0]?.approvers?.some((p: { id: string }) => p.id === pm.id) &&
-        draftPage.body.approvalRoute?.steps?.[1]?.approvers?.some((p: { id: string }) => p.id === finance.id),
+        draftPage.body.approvalRoute?.steps?.[1]?.approvers?.some((p: { id: string }) => p.id === backSup.id) &&
+        draftPage.body.approvalRoute?.steps?.[2]?.approvers?.some((p: { id: string }) => p.id === finMgr.id),
       String(JSON.stringify(draftPage.body.approvalRoute ?? draftPage.body)).slice(0, 200),
     );
     const brDraftPdf = await eng('GET', `/budget-requests/${raisedId}/pdf`);
     const brDraftText = brDraftPdf.bytes ? pdfText(brDraftPdf.bytes) : '';
     const brSteps = ((draftPage.body.approvalRoute?.steps ?? []) as { name: string }[]).map((st) => st.name.toUpperCase());
     check(
-      'and prints it: each step by its own name — never "Approved by — …" — "Pending" under the manager and finance',
+      'and prints it: each step by its own name — never "Approved by — …" — "Pending" under each',
       brDraftPdf.status === 200 &&
-        brSteps.length === 2 &&
+        brSteps.length === 3 &&
         brSteps.every((st) => flat(brDraftText).includes(st)) &&
         !flat(brDraftText).includes('APPROVED BY') &&
         !flat(brDraftText).includes('RECEIVED BY') &&
         // "A or B" wraps where the names run long: read them across the breaks.
         flat(brDraftText).includes(pm.name) &&
-        flat(brDraftText).includes(finance.name) &&
+        flat(brDraftText).includes(finMgr.name) &&
         signedCount(brDraftText) === 1 &&
-        pendingCount(brDraftText) === 2,
+        pendingCount(brDraftText) === 3,
       `${brDraftPdf.status} ${brSteps.join(' / ')} · ${signedCount(brDraftText)} signed, ${pendingCount(brDraftText)} pending`,
     );
     const bothKinds = await eng('POST', '/expense-claims', { purpose: `${TAG} both`, advanceId: a4.id, budgetRequestId: raisedId, lines: receipt1 });
@@ -1695,7 +1856,7 @@ async function main() {
     check('the manager can — they are asked to decide it', managerRead.status === 200, String(managerRead.status));
     const openReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'budget_request', documentId: raisedId, status: 'PENDING' } });
     await act({ requestId: openReq.id, userId: pm.id, action: 'APPROVED' });
-    await act({ requestId: openReq.id, userId: finance.id, action: 'APPROVED' });
+    await settle(openReq.id);
     const half = await fin('POST', '/payments', { kind: 'DISBURSEMENT', method: 'CASH', payeeUserId: engineer.id, allocations: [{ kind: 'budget_request', id: raisedId, amount: 3_000 }] });
     check('half of it cannot be released — one voucher', half.status === 400 && String(half.body.error).includes('one voucher'), `${half.status} ${JSON.stringify(half.body).slice(0, 120)}`);
     const whole = await fin('POST', '/payments', { kind: 'DISBURSEMENT', method: 'CASH', payeeUserId: engineer.id, allocations: [{ kind: 'budget_request', id: raisedId, amount: 6_000 }] });
@@ -1733,7 +1894,7 @@ async function main() {
         brSteps.every((st) => brText.includes(st)) &&
         brText.includes('RECEIVED BY') &&
         !brText.includes('APPROVED BY') &&
-        signedCount(brRaw) === 4 &&
+        signedCount(brRaw) === 5 &&
         pendingCount(brRaw) === 0,
       `${brPdf.status} ${signedCount(brRaw)} signed, ${pendingCount(brRaw)} pending · ${brText.slice(0, 300)}`,
     );
@@ -3409,6 +3570,1093 @@ async function main() {
     }
     const badDay = await fin('GET', '/invoices/pdf?from=not-a-date');
     check('a filter date that is not a date is a 400, never a 500', badDay.status === 400, String(badDay.status));
+
+    // ══ Accounts Receivable per the owner's sample (2026-10-15) ═══════════
+    console.log('\nAccounts Receivable — countering, terms, credit, sales orders');
+    const sixtyAgo = ymd(addDays(dayKey(new Date()), -60));
+    const arNew = await fin('POST', '/invoices', {
+      customerId: customer.id,
+      invoiceDate: sixtyAgo,
+      termsDays: 30,
+      lines: [{ description: `${TAG} countering`, amount: 10_000 }],
+    });
+    check(
+      'a new invoice keeps its terms; its due date is the invoice date plus them until it is countered',
+      arNew.status === 201 &&
+        arNew.body.termsDays === 30 &&
+        arNew.body.termsLabel === 'Net 30' &&
+        arNew.body.counteredDate === null &&
+        String(arNew.body.dueDate).slice(0, 10) === ymd(addDays(dayKey(new Date()), -30)),
+      `${arNew.status} ${JSON.stringify(arNew.body).slice(0, 200)}`,
+    );
+    const arId = String(arNew.body.id ?? '');
+    // Mark as received (2026-10-16): on a draft it issues and counters in one step;
+    // the withholding rate is the invoice's own (1% here).
+    const received = await fin('POST', '/invoices', {
+      customerId: customer.id,
+      termsDays: 30,
+      ewtRate: 0.01,
+      lines: [{ description: `${TAG} received`, amount: 10_000 }],
+    });
+    check(
+      'an invoice withholds at the rate picked: 1% of 10,000 is 100, net collectible 11,100',
+      received.status === 201 && received.body.ewtRate === 0.01 && received.body.ewtAmount === 100 && received.body.netCollectible === 11_100,
+      `${received.status} ${received.body.ewtRate} ${received.body.ewtAmount} ${received.body.netCollectible}`,
+    );
+    const rewithheld = await fin('PUT', `/invoices/${received.body.id}`, { ewtRate: 0.02 });
+    check(
+      'a draft takes a new withholding rate alone, the gross kept',
+      rewithheld.status === 200 && rewithheld.body.ewtAmount === 200 && rewithheld.body.netCollectible === 11_000,
+      `${rewithheld.status} ${rewithheld.body.ewtAmount} ${rewithheld.body.netCollectible}`,
+    );
+    const markReceived = await fin('POST', `/invoices/${received.body.id}/counter`, {});
+    check(
+      'Mark as received issues a draft and records the day the customer received it',
+      markReceived.status === 200 && markReceived.body.status === 'ISSUED' && !!markReceived.body.counteredDate && markReceived.body.awaitingCounter === false,
+      `${markReceived.status} ${markReceived.body.status} ${markReceived.body.counteredDate}`,
+    );
+    await fin('POST', `/invoices/${arId}/issue`);
+    const arIssued = await fin('GET', `/invoices/${arId}`);
+    check(
+      'issued and not countered, it is awaiting countering and never late, whatever its date',
+      arIssued.body.awaitingCounter === true && arIssued.body.daysOverdue === 0,
+      JSON.stringify({ a: arIssued.body.awaitingCounter, d: arIssued.body.daysOverdue }),
+    );
+    const listed = async (query: string) =>
+      ((await fin('GET', `/invoices?search=${encodeURIComponent(String(arNew.body.number))}&${query}`)).body.rows ?? []).map((r: { id: string }) => r.id);
+    check(
+      'the list’s Overdue leaves it out, its Awaiting countering holds it',
+      !(await listed('overdue=true')).includes(arId) && (await listed('countered=no')).includes(arId),
+    );
+    const agingNow = await fin('GET', '/finance-reports/ar-aging');
+    const agedRow = (agingNow.body.rows ?? []).find((r: { id: string }) => r.id === arId);
+    check(
+      'and the aging counts it Current, apart as awaiting countering',
+      !!agedRow && agedRow.awaitingCounter === true && agedRow.bucket === 'Current' && agingNow.body.awaitingCountering >= 11_200 - 0.005 - 200,
+      JSON.stringify(agedRow ?? agingNow.body).slice(0, 160),
+    );
+    const tomorrow = ymd(addDays(dayKey(new Date()), 1));
+    const futureCounter = await fin('POST', `/invoices/${arId}/counter`, { counteredDate: tomorrow });
+    const earlyCounter = await fin('POST', `/invoices/${arId}/counter`, { counteredDate: ymd(addDays(dayKey(new Date()), -61)) });
+    check(
+      'it is never countered on a day still to come, nor before its invoice date',
+      futureCounter.status === 400 && earlyCounter.status === 400,
+      `${futureCounter.status} ${earlyCounter.status}`,
+    );
+    const fortyAgo = ymd(addDays(dayKey(new Date()), -40));
+    const countered = await fin('POST', `/invoices/${arId}/counter`, { counteredDate: fortyAgo });
+    check(
+      'countered forty days ago on Net 30: expected ten days ago, ten days late',
+      countered.status === 200 &&
+        String(countered.body.counteredDate).slice(0, 10) === fortyAgo &&
+        String(countered.body.dueDate).slice(0, 10) === ymd(addDays(dayKey(new Date()), -10)) &&
+        countered.body.daysOverdue === 10 &&
+        countered.body.awaitingCounter === false,
+      `${countered.status} ${JSON.stringify(countered.body).slice(0, 200)}`,
+    );
+    check(
+      'and now the list’s Overdue and Countered both hold it',
+      (await listed('overdue=true')).includes(arId) && (await listed('countered=yes')).includes(arId),
+    );
+    const arSummary = (await fin('GET', `/invoices?search=${TAG}&pageSize=200`)).body.summary;
+    check(
+      'the list carries its cards: the receivable, overdue, awaiting countering and each team’s share',
+      typeof arSummary?.receivable === 'number' &&
+        arSummary.overdue >= 11_000 &&
+        Array.isArray(arSummary.teams) &&
+        money(
+          arSummary.teams.reduce((sum: number, t: { value: number }) => sum + t.value, 0),
+          arSummary.receivable,
+        ),
+      JSON.stringify(arSummary).slice(0, 200),
+    );
+    const badTerms = await fin('GET', '/invoices?termsDays=abc');
+    const badCountered = await fin('GET', '/invoices?countered=maybe');
+    check('an unknown terms or countered filter is a 400', badTerms.status === 400 && badCountered.status === 400, `${badTerms.status} ${badCountered.status}`);
+
+    const team = await prisma.industry.findFirst({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } });
+    const credited = await fin('PATCH', `/invoices/${arId}/credit`, { salespersonId: engineer.id, teamId: team?.id ?? null });
+    const badTeam = await fin('PATCH', `/invoices/${arId}/credit`, { teamId: 'no-such-team' });
+    check(
+      'the salesperson and team are changed on an issued invoice; an unknown team is refused',
+      credited.status === 200 && credited.body.salesperson?.id === engineer.id && credited.body.team?.id === team?.id && badTeam.status === 400,
+      `${credited.status} ${badTeam.status}`,
+    );
+    const arPaper = await fin('GET', `/invoices/${arId}/pdf`);
+    const arText = arPaper.bytes ? flat(pdfText(arPaper.bytes)).toLowerCase() : '';
+    check(
+      'the invoice paper prints the terms, the countered day and the sales personnel',
+      arPaper.status === 200 && arText.includes('net 30') && arText.includes('countered') && arText.includes(engineer.name.toLowerCase()),
+      arText.slice(0, 200),
+    );
+
+    // An issued sales order, billed in parts, never past its net.
+    const soQuote = await prisma.quotation.create({
+      data: { number: `${TAG}-Q-AR1`, customerId: customer.id, ownerId: engineer.id, subject: `${TAG} AR ORDER`, teamId: team?.id ?? null },
+    });
+    const so = await prisma.salesOrder.create({
+      data: {
+        number: `${TAG}-SO-AR1`,
+        status: 'ISSUED',
+        quotationId: soQuote.id,
+        customerId: customer.id,
+        ownerId: engineer.id,
+        orderDate: dayKey(new Date()),
+        termsDays: 45,
+        poNumber: `${TAG}-PO-SO`,
+        vatRate: D(0.12),
+        subtotal: D(100_000),
+        vatAmount: D(12_000),
+        total: D(112_000),
+      },
+    });
+    const soOptions = await fin('GET', `/invoices/sales-orders?customerId=${customer.id}`);
+    const soOption = (soOptions.body as { id: string; net: number; left: number }[]).find?.((o) => o.id === so.id);
+    check('the form offers the customer’s issued order with its net left to invoice', !!soOption && money(soOption.net, 100_000) && money(soOption.left, 100_000), JSON.stringify(soOption));
+    const soInv1 = await fin('POST', '/invoices', { customerId: customer.id, salesOrderId: so.id, lines: [{ description: 'First delivery', amount: 60_000 }] });
+    check(
+      'an invoice bills part of it: its PO, its terms, its salesperson and its quotation’s team',
+      soInv1.status === 201 &&
+        soInv1.body.salesOrder?.id === so.id &&
+        soInv1.body.poReference === `${TAG}-PO-SO` &&
+        soInv1.body.termsDays === 45 &&
+        soInv1.body.salesperson?.id === engineer.id &&
+        soInv1.body.team?.id === (team?.id ?? undefined),
+      `${soInv1.status} ${JSON.stringify(soInv1.body).slice(0, 220)}`,
+    );
+    const soTooMuch = await fin('POST', '/invoices', { customerId: customer.id, salesOrderId: so.id, lines: [{ description: 'Too much', amount: 50_000 }] });
+    check('never past what is left of its net', soTooMuch.status === 400 && String(soTooMuch.body.error).includes('left to invoice'), `${soTooMuch.status} ${soTooMuch.body.error}`);
+    const soRest = await fin('POST', '/invoices', { customerId: customer.id, salesOrderId: so.id, lines: [{ description: 'The rest', amount: 40_000 }] });
+    const soLeft = ((await fin('GET', `/invoices/sales-orders?customerId=${customer.id}`)).body as { id: string; left: number }[]).find((o) => o.id === so.id);
+    check('the rest goes on a second invoice, and nothing is left', soRest.status === 201 && !!soLeft && money(soLeft.left, 0), `${soRest.status} ${JSON.stringify(soLeft)}`);
+    const otherCustomer = await prisma.customer.create({ data: { code: `${TAG}-C2`, name: `${TAG} Other` } });
+    const soWrong = await fin('POST', '/invoices', { customerId: otherCustomer.id, salesOrderId: so.id, lines: [{ description: 'x', amount: 1 }] });
+    check('another customer’s order is refused', soWrong.status === 400, String(soWrong.status));
+
+    // ══ Collections (2026-10-15): the OR, the credit, the register's cards ══
+    console.log('\nCollections — the official receipt, the credit, the cards');
+    const arLeft = (await fin('GET', `/invoices/${arId}`)).body.outstanding as number;
+    const collected = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'CHECK',
+      reference: `${TAG}-CHK-1`,
+      allocations: [{ kind: 'invoice', id: arId, amount: arLeft }],
+    });
+    check(
+      'a collection is given an official receipt number, and the invoices’ customer though the form named none',
+      collected.status === 201 && /OR/.test(String(collected.body.orNumber)) && collected.body.customerId === customer.id,
+      `${collected.status} ${JSON.stringify(collected.body).slice(0, 200)}`,
+    );
+    check(
+      'and it is credited to the invoice’s salesperson and team',
+      collected.body.salespeople?.[0]?.id === engineer.id && collected.body.teams?.[0]?.id === team?.id,
+      JSON.stringify({ s: collected.body.salespeople, t: collected.body.teams }),
+    );
+    const payId = String(collected.body.id ?? '');
+    const byCredit = await fin('GET', `/payments?kind=RECEIPT&salespersonId=${engineer.id}&pageSize=200`);
+    check(
+      'the register filters collections by the salesperson of the invoices they settled',
+      (byCredit.body.rows ?? []).some((r: { id: string }) => r.id === payId),
+    );
+    const paySummary = (await fin('GET', `/payments?search=${encodeURIComponent(customer.name)}&kind=RECEIPT&pageSize=200`)).body.summary;
+    check(
+      'its cards: the collections, the uncleared cheques among them, each team’s share adding up to the collections',
+      paySummary?.collected >= arLeft - 0.005 &&
+        paySummary.uncleared >= arLeft - 0.005 &&
+        money(
+          (paySummary.teams as { value: number }[]).reduce((sum, t) => sum + t.value, 0),
+          paySummary.collected,
+        ),
+      JSON.stringify(paySummary).slice(0, 200),
+    );
+    const receiptPaper = await fin('GET', `/payments/${payId}/pdf`);
+    const receiptText = receiptPaper.bytes ? flat(pdfText(receiptPaper.bytes)) : '';
+    check(
+      'the Collection Receipt prints under its OR number with the invoice it settled, the cheque named uncleared',
+      receiptPaper.status === 200 &&
+        /COLLECTION\s*RECEIPT/i.test(receiptText) &&
+        receiptText.includes(String(collected.body.orNumber)) &&
+        receiptText.includes(String(arNew.body.number)) &&
+        /not yet cleared/i.test(receiptText),
+      receiptText.slice(0, 200),
+    );
+    const otherInv = await fin('POST', '/invoices', { customerId: otherCustomer.id, lines: [{ description: `${TAG} other`, amount: 1_000 }] });
+    await fin('POST', `/invoices/${otherInv.body.id}/issue`);
+    const mixed = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'CASH',
+      allocations: [
+        { kind: 'invoice', id: soInv1.body.id, amount: 100 },
+        { kind: 'invoice', id: otherInv.body.id, amount: 100 },
+      ],
+    });
+    check('one collection is from one customer — two customers’ invoices are refused', mixed.status === 400, `${mixed.status} ${mixed.body.error}`);
+
+    // ══ Finance reports (2026-10-15): one per menu, the A/R list's own rule ══
+    console.log('\nFinance reports — the aging, the receivables, the forecast, the collections');
+    const [agingRep, arAll] = await Promise.all([fin('GET', '/fin-reports/aging'), fin('GET', '/invoices?pageSize=1')]);
+    const agingCard = (label: string) => (agingRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === label)?.value;
+    check(
+      'the aging’s Outstanding and Overdue are the A/R list’s Total receivables and Overdue cards',
+      agingRep.status === 200 &&
+        money(agingCard('Outstanding') ?? -1, arAll.body.summary?.receivable) &&
+        money(agingCard('Overdue') ?? -1, arAll.body.summary?.overdue) &&
+        money(agingCard('Awaiting countering') ?? -1, arAll.body.summary?.awaiting),
+      `${JSON.stringify(agingRep.body.cards)} vs ${JSON.stringify(arAll.body.summary).slice(0, 160)}`,
+    );
+    check(
+      'it ages as of one day, an Awaiting countering row first',
+      agingRep.body.from === agingRep.body.to && agingRep.body.series?.rows?.[0]?.label === 'Awaiting countering',
+      JSON.stringify(agingRep.body.series?.rows?.map((r: { label: string }) => r.label)),
+    );
+    const recBySeller = await fin('GET', `/fin-reports/receivables?from=${sixtyAgo}&salespersonId=${engineer.id}`);
+    const sellerRows = (recBySeller.body.tables ?? []).find((t: { title: string }) => t.title === 'By sales personnel')?.rows ?? [];
+    check(
+      'the receivables report narrows to one salesperson and says so',
+      recBySeller.status === 200 && sellerRows.length === 1 && sellerRows[0][0] === engineer.name && String(recBySeller.body.filterLine).includes(engineer.name),
+      JSON.stringify(sellerRows) + ' ' + recBySeller.body.filterLine,
+    );
+    const colRep = await fin('GET', `/fin-reports/collections?salespersonId=${engineer.id}`);
+    const colCard = (colRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === 'Total collections')?.value ?? 0;
+    check(
+      'the collections report credits the salesperson of the invoices settled, by team too',
+      colRep.status === 200 &&
+        colCard >= arLeft - 0.005 &&
+        (colRep.body.tables ?? []).find((t: { title: string }) => t.title === 'By team')?.rows?.some((r: unknown[]) => r[0] === team?.code),
+      JSON.stringify(colRep.body.cards),
+    );
+    const weekly = await fin('GET', '/fin-reports/collection-forecast?by=week');
+    const badBy = await fin('GET', '/fin-reports/collection-forecast?by=year');
+    check(
+      'the forecast looks ahead ninety days by default, by week when asked; an unknown "by" is a 400',
+      weekly.status === 200 && weekly.body.from === todayIso && weekly.body.series?.head === 'Week' && weekly.body.series.rows.length >= 13 && badBy.status === 400,
+      `${weekly.status} ${weekly.body.from} ${weekly.body.series?.head} ${weekly.body.series?.rows?.length} · ${badBy.status}`,
+    );
+    const repCsv = await fetch(`${BASE}/fin-reports/aging.csv`, { headers: { Authorization: `Bearer ${signToken(finance.id, finance.email)}` } });
+    const repPdf = await fin('GET', '/fin-reports/collection-forecast.pdf');
+    const repAudit = await prisma.auditLog.count({ where: { entityType: 'finance_report', actorId: finance.id, action: 'EXPORTED' } });
+    check(
+      'each report has a CSV and a PDF twin, each on the trail',
+      repCsv.status === 200 && (repCsv.headers.get('content-type') ?? '').startsWith('text/csv') && repPdf.status === 200 && !!repPdf.bytes && repAudit >= 2,
+      `${repCsv.status} ${repPdf.status} ${repAudit}`,
+    );
+    await throwaway('zzfin_reports', ['gfin.reports.view_all']);
+    const reportsOnly = as(await makeUser('ZZ Reports Only', 'reports@verifyf.local', ['zzfin_reports']));
+    const [noAr, noRight] = await Promise.all([reportsOnly('GET', '/fin-reports/receivables'), eng('GET', '/fin-reports/payments')]);
+    check(
+      'the Reports right opens the page, but a receivables report also needs A/R’s; without Reports it is a 403',
+      noAr.status === 403 && noRight.status === 403,
+      `${noAr.status} ${noRight.status}`,
+    );
+
+    // ══ Accounts Payable per the owner's sample (2026-10-15) ═════════════════
+    console.log('\nAccounts Payable — delivery, terms, purchaser, the cards and the AP report');
+    const apDelivered = ymd(addDays(dayKey(new Date()), -3));
+    const apTyped = await fin('POST', '/supplier-bills', {
+      supplierId: supplier.id,
+      supplierInvoiceNo: `${TAG}-AP-1`,
+      deliveryDate: apDelivered,
+      termsDays: 30,
+      lines: [{ description: 'Service call', quantity: 1, unitPrice: 5_000 }],
+    });
+    check(
+      'a bill runs its terms from the delivery — due = delivery + 30 days, printed "30 Days"',
+      apTyped.status === 201 &&
+        String(apTyped.body.deliveryDate).slice(0, 10) === apDelivered &&
+        String(apTyped.body.dueDate).slice(0, 10) === ymd(addDays(new Date(`${apDelivered}T00:00:00Z`), 30)) &&
+        apTyped.body.termsLabel === '30 Days',
+      `${apTyped.status} ${apTyped.body.deliveryDate} ${apTyped.body.dueDate} ${apTyped.body.termsLabel}`,
+    );
+    const apOrder = await fin('POST', '/supplier-bills', {
+      supplierId: supplier.id,
+      orderId: order.id,
+      supplierInvoiceNo: `${TAG}-AP-2`,
+      termsDays: 15,
+      lines: [{ description: 'Pipe', quantity: 1, unitPrice: 1_000 }],
+    });
+    const lastReceived = await prisma.receiving.findFirst({ where: { orderId: order.id, status: 'RECEIVED' }, orderBy: { receivedDate: 'desc' }, select: { receivedDate: true } });
+    check(
+      "a bill against an order takes the receiving's date as its delivery and the order's author as its purchaser",
+      apOrder.status === 201 &&
+        apOrder.body.purchaser?.id === order.createdById &&
+        String(apOrder.body.deliveryDate).slice(0, 10) === ymd(lastReceived!.receivedDate),
+      `${apOrder.status} ${JSON.stringify(apOrder.body.purchaser)} ${apOrder.body.deliveryDate}`,
+    );
+    const apBadBuyer = await fin('POST', '/supplier-bills', {
+      supplierId: supplier.id,
+      purchaserId: 'no-such-user',
+      lines: [{ description: 'x', quantity: 1, unitPrice: 1 }],
+    });
+    check('a purchaser who is not an active login is refused', apBadBuyer.status === 400, `${apBadBuyer.status} ${apBadBuyer.body.error}`);
+    const [apAll, apSoon, apPending, apOwed, apBuyer] = await Promise.all([
+      fin('GET', '/supplier-bills?pageSize=1'),
+      fin('GET', '/supplier-bills?pageSize=1&dueSoon=true'),
+      fin('GET', '/supplier-bills?pageSize=1&pending=true'),
+      fin('GET', '/supplier-bills?pageSize=1&outstanding=true'),
+      fin('GET', `/supplier-bills?pageSize=50&purchaserId=${order.createdById}`),
+    ]);
+    const apSum = apAll.body.summary ?? {};
+    check(
+      'each A/P card equals the list it opens: payables, pending bills, due in 7 days',
+      apAll.status === 200 &&
+        apSum.payableCount === apOwed.body.total &&
+        apSum.pendingCount === apPending.body.total &&
+        apSum.dueSoonCount === apSoon.body.total &&
+        money(apSum.payable, apOwed.body.summary?.payable),
+      `${JSON.stringify(apSum)} vs owed ${apOwed.body.total} pending ${apPending.body.total} soon ${apSoon.body.total}`,
+    );
+    check(
+      'the list narrows to one purchaser',
+      apBuyer.status === 200 && (apBuyer.body.rows ?? apBuyer.body.data ?? []).every((r: { purchaser: { id: string } | null }) => r.purchaser?.id === order.createdById),
+      `${apBuyer.status} ${apBuyer.body.total}`,
+    );
+    const apFrom = ymd(addDays(dayKey(new Date()), -60));
+    const apTo = ymd(addDays(dayKey(new Date()), 90));
+    const apRep = await fin('GET', `/fin-reports/payables?from=${apFrom}&to=${apTo}&supplierId=${supplier.id}`);
+    const apDb = await prisma.supplierBill.aggregate({
+      where: {
+        supplierId: supplier.id,
+        status: { in: ['PENDING_APPROVAL', 'APPROVED', 'PARTIALLY_PAID', 'PAID'] },
+        dueDate: { gte: new Date(`${apFrom}T00:00:00Z`), lte: new Date(`${apTo}T23:59:59.999Z`) },
+      },
+      _sum: { netPayable: true },
+    });
+    const apCard = (apRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === 'Falling due')?.value;
+    check(
+      'the AP report sums the bills falling due in the range for the supplier asked, and names it',
+      apRep.status === 200 && money(apCard ?? -1, Number(apDb._sum.netPayable ?? 0)) && String(apRep.body.filterLine).includes(supplier.name),
+      `${apCard} vs ${apDb._sum.netPayable} · ${apRep.body.filterLine}`,
+    );
+    const apNoRight = await as(await makeUser('ZZ AP Reports Only', 'apreports@verifyf.local', ['zzfin_reports']))('GET', '/fin-reports/payables');
+    check('the AP report needs A/P’s right beside the Reports right', apNoRight.status === 403, String(apNoRight.status));
+
+    // ══ Budget requests and liquidations per the owner's modules 4 and 5 ════
+    console.log('\nBudget requests and liquidations — the team column, the cards, the reports');
+    const [brAll, brPending, brApproved, brReleased, brProjects] = await Promise.all([
+      fin('GET', '/budget-requests?pageSize=200'),
+      fin('GET', '/budget-requests?pageSize=1&pending=true'),
+      fin('GET', '/budget-requests?pageSize=1&approved=true'),
+      fin('GET', '/budget-requests?pageSize=200&released=true'),
+      eng('GET', '/budget-requests/projects'),
+    ]);
+    const brSum = brAll.body.summary ?? {};
+    check(
+      'the register’s cards equal the lists they open: pending approval and approved funds',
+      brAll.status === 200 && brSum.pendingCount === brPending.body.total && brSum.approvedCount === brApproved.body.total,
+      `${JSON.stringify(brSum).slice(0, 200)} vs ${brPending.body.total} ${brApproved.body.total}`,
+    );
+    const engRow = (brAll.body.rows ?? []).find((r: { requestedBy: { id: string } }) => r.requestedBy.id === engineer.id);
+    const engUnit = await prisma.user.findUnique({
+      where: { id: engineer.id },
+      select: { department: { select: { name: true } }, employee: { select: { industry: { select: { code: true } }, department: { select: { name: true } } } } },
+    });
+    const expectUnit = engUnit?.employee?.industry?.code ?? engUnit?.employee?.department?.name ?? engUnit?.department?.name ?? null;
+    check(
+      'each request names its requester’s team, else their department, and never the person’s whole record',
+      !!engRow && (engRow.team?.label ?? null) === expectUnit && !('employee' in engRow.requestedBy),
+      JSON.stringify(engRow?.team) + ' vs ' + expectUnit,
+    );
+    check(
+      'the liquidation register lists only requests whose cash went out',
+      brReleased.status === 200 && (brReleased.body.rows ?? []).every((r: { status: string }) => ['RELEASED', 'REFUND_DUE', 'LIQUIDATED'].includes(r.status)),
+      JSON.stringify((brReleased.body.rows ?? []).map((r: { status: string }) => r.status)),
+    );
+    check(
+      'G-FIN’s "+ Add budget request" picks from the running projects, behind the create right',
+      brProjects.status === 200 && (brProjects.body as unknown as { id: string }[]).some?.((j) => j.id === job.id),
+      `${brProjects.status}`,
+    );
+    const brFrom = ymd(addDays(dayKey(new Date()), -90));
+    const brTo = ymd(addDays(dayKey(new Date()), 90));
+    const [brRep, liqRep] = await Promise.all([
+      fin('GET', `/fin-reports/budget-requests?from=${brFrom}&to=${brTo}&requestedById=${engineer.id}`),
+      fin('GET', `/fin-reports/liquidations?from=${brFrom}&to=${brTo}`),
+    ]);
+    const brDb = await prisma.budgetRequest.aggregate({
+      where: {
+        requestedById: engineer.id,
+        status: { notIn: ['DRAFT', 'REJECTED', 'CANCELLED'] },
+        OR: [
+          { neededBy: { gte: new Date(`${brFrom}T00:00:00Z`), lte: new Date(`${brTo}T23:59:59.999Z`) } },
+          { neededBy: null, createdAt: { gte: manilaDayStart(brFrom), lte: manilaDayEnd(brTo) } },
+        ],
+      },
+      _sum: { amount: true },
+    });
+    const brCard = (brRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === 'Sum of all budget requests')?.value;
+    check(
+      'the budget request report sums the requester’s requests needed in the range, and says whose',
+      brRep.status === 200 && money(brCard ?? -1, Number(brDb._sum.amount ?? 0)) && String(brRep.body.filterLine).includes(engineer.name),
+      `${brCard} vs ${brDb._sum.amount} · ${brRep.body.filterLine}`,
+    );
+    const liqDb = await prisma.budgetRequest.aggregate({
+      where: { status: { in: ['RELEASED', 'REFUND_DUE', 'LIQUIDATED'] }, releasedAt: { gte: new Date(`${brFrom}T00:00:00Z`), lte: new Date(`${brTo}T00:00:00Z`) } },
+      _sum: { amountReleased: true, amountRefunded: true },
+    });
+    const liqCard = (label: string) => (liqRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === label)?.value ?? -1;
+    check(
+      'the liquidation report’s released and returned are the requests released in the range',
+      liqRep.status === 200 && money(liqCard('Released'), Number(liqDb._sum.amountReleased ?? 0)) && money(liqCard('Total excess returned'), Number(liqDb._sum.amountRefunded ?? 0)),
+      `${liqCard('Released')} / ${liqCard('Total excess returned')} vs ${JSON.stringify(liqDb._sum)}`,
+    );
+
+    // ══ Reimbursements per the owner's module 6 ══════════════════════════════
+    console.log('\nReimbursements — the five-signature route, the stage words, the cards and the report');
+    const rmb = await eng('POST', '/expense-claims', {
+      purpose: `${TAG} client dinner`,
+      lines: [{ spentOn: todayIso, description: 'Dinner', receiptNo: 'OR-1', amount: 345.5 }],
+    });
+    const rmbSubmit = await eng('POST', `/expense-claims/${rmb.body.id}/submit`);
+    const rmbReq = await prisma.approvalRequest.findFirst({
+      where: { documentType: 'expense', documentId: String(rmb.body.id), status: 'PENDING' },
+      include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } } },
+    });
+    check(
+      'a reimbursement goes Team Leader › Back Support › Checking (Finance Staff) › Finance Manager › CEO / President',
+      rmbSubmit.status === 200 &&
+        JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)) ===
+          JSON.stringify(['Team Leader', 'Back Support', 'Checking (Finance Staff)', 'Finance Manager', 'CEO / President']),
+      JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)),
+    );
+    const stageOf = async () =>
+      ((await fin('GET', `/expense-claims?pageSize=5&search=${encodeURIComponent(String(rmb.body.number))}`)).body.rows?.[0] as { stage?: string } | undefined)?.stage;
+    const stageFirst = await stageOf();
+    const ordered: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const r = await prisma.approvalRequest.findUnique({ where: { id: rmbReq!.id }, include: { workflow: { include: { steps: true } } } });
+      if (r?.status !== 'PENDING') break;
+      const st = r.workflow!.steps.find((x) => x.sequence === r.currentSequence)!;
+      // An approver who decides no later step: one who does would co-sign it
+      // ("one signature per person") and the walk would skip a stage — which
+      // one the database lists first is not this check's business.
+      const eligible = (await approversForStep(st, r.requesterId, prisma, {})).filter((id) => id !== r.requesterId);
+      const later = new Set<string>();
+      for (const ls of r.workflow!.steps.filter((x) => x.sequence > r.currentSequence)) {
+        for (const id of await approversForStep(ls, r.requesterId, prisma, {})) later.add(id);
+      }
+      const who = eligible.find((id) => !later.has(id)) ?? eligible[0];
+      await act({ requestId: r.id, userId: who, action: 'APPROVED' });
+      ordered.push((await stageOf()) ?? '?');
+    }
+    check(
+      'the register says where it stands in the owner’s words: TL Approval, then Back Support, Checking, FM Approval, CEO Approval',
+      stageFirst === 'TL Approval' && JSON.stringify(ordered) === JSON.stringify(['Back Support', 'Checking', 'FM Approval', 'CEO Approval']),
+      `${stageFirst} → ${JSON.stringify(ordered)}`,
+    );
+    await settle(rmbReq!.id);
+    const rmbStage = await stageOf();
+    const [rmbAll, rmbPending, rmbRelease] = await Promise.all([
+      fin('GET', '/expense-claims?pageSize=1'),
+      fin('GET', '/expense-claims?pageSize=1&pending=true'),
+      fin('GET', '/expense-claims?pageSize=1&forRelease=true'),
+    ]);
+    check(
+      'approved by all five it is For Release, and the cards equal the lists they open',
+      rmbStage === 'For Release' &&
+        rmbAll.body.summary?.pendingCount === rmbPending.body.total &&
+        rmbAll.body.summary?.forReleaseCount === rmbRelease.body.total,
+      `${rmbStage} · ${JSON.stringify(rmbAll.body.summary)} vs ${rmbPending.body.total} ${rmbRelease.body.total}`,
+    );
+    const rmbRep = await fin('GET', `/fin-reports/reimbursements?from=${todayIso}&to=${todayIso}&requestedById=${engineer.id}`);
+    const rmbDb = await prisma.expenseClaim.aggregate({
+      where: { claimedById: engineer.id, status: { notIn: ['DRAFT', 'REJECTED', 'CANCELLED'] }, claimDate: dayKey(new Date()) },
+      _sum: { total: true },
+    });
+    const rmbCard = (rmbRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === 'Sum of all reimbursements')?.value;
+    check(
+      'the reimbursement report sums the requester’s claims dated in the range',
+      rmbRep.status === 200 && money(rmbCard ?? -1, Number(rmbDb._sum.total ?? 0)) && String(rmbRep.body.filterLine).includes(engineer.name),
+      `${rmbCard} vs ${rmbDb._sum.total}`,
+    );
+
+    // ══ Cash advance as money lent (the owner's module 7) ═══════════════════
+    console.log('\nCash advances — money lent, repaid in instalments and by salary deduction');
+    await saveFinanceSettings({ blockAdvanceWhileUnliquidated: false });
+    const loan = await eng('POST', '/cash-advances', { purpose: `${TAG} roadshow allowance`, amount: 3_500 });
+    await eng('POST', `/cash-advances/${loan.body.id}/submit`);
+    const loanReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'cash_advance', documentId: String(loan.body.id), status: 'PENDING' } });
+    const loanRoute = await stepNames(loanReq?.workflowId ?? null);
+    await settle(loanReq!.id);
+    const loanRelease = await fin('POST', '/payments', {
+      kind: 'DISBURSEMENT',
+      method: 'CASH',
+      payeeUserId: engineer.id,
+      allocations: [{ kind: 'advance', id: loan.body.id, amount: 3_500 }],
+    });
+    const loanOut = await prisma.cashAdvance.findUnique({ where: { id: String(loan.body.id) } });
+    check(
+      'a new advance is money lent: five signatures, released, then RELEASED with no liquidation deadline',
+      loan.body.repayable === true &&
+        JSON.stringify(loanRoute) === JSON.stringify(['TEAM LEADER', 'BACK SUPPORT', 'CHECKING (FINANCE STAFF)', 'FINANCE MANAGER', 'CEO / PRESIDENT']) &&
+        loanRelease.status === 201 &&
+        loanOut?.status === 'RELEASED' &&
+        loanOut.liquidationDueDate === null,
+      `${loan.body.repayable} ${JSON.stringify(loanRoute)} ${loanRelease.status} ${loanOut?.status} ${loanOut?.liquidationDueDate}`,
+    );
+    const loanLiquidate = await eng('POST', '/expense-claims', {
+      purpose: `${TAG} wrong door`,
+      advanceId: loan.body.id,
+      lines: [{ spentOn: todayIso, description: 'x', receiptNo: 'OR', amount: 1 }],
+    });
+    check('money lent is repaid, never liquidated with receipts', loanLiquidate.status === 400 && /repaid, not liquidated/.test(String(loanLiquidate.body.error)), `${loanLiquidate.status} ${loanLiquidate.body.error}`);
+    const deduction = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'SALARY_DEDUCTION',
+      payeeUserId: engineer.id,
+      allocations: [{ kind: 'advance_refund', id: loan.body.id, amount: 1_000 }],
+    });
+    const badDeduction = await fin('POST', '/payments', {
+      kind: 'DISBURSEMENT',
+      method: 'SALARY_DEDUCTION',
+      payeeUserId: engineer.id,
+      allocations: [{ kind: 'advance', id: loan.body.id, amount: 1 }],
+    });
+    const loanList = await fin('GET', `/cash-advances?pageSize=5&search=${encodeURIComponent(String(loan.body.number))}`);
+    const loanRow = loanList.body.rows?.[0];
+    check(
+      'a salary deduction repays part of it: the list says Repaying, 1,000 made, 2,500 left; a deduction settles nothing else',
+      deduction.status === 201 &&
+        !!deduction.body.clearedAt &&
+        loanRow?.stage === 'Repaying' &&
+        money(loanRow?.paymentsMade, 1_000) &&
+        money(loanRow?.balance, 2_500) &&
+        badDeduction.status === 400,
+      `${deduction.status} ${deduction.body.clearedAt} ${loanRow?.stage} ${loanRow?.paymentsMade} ${loanRow?.balance} · ${badDeduction.status}`,
+    );
+    const [caAll, caOwing] = await Promise.all([fin('GET', '/cash-advances?pageSize=1'), fin('GET', '/cash-advances?pageSize=200&owing=true')]);
+    const owingSum = (caOwing.body.rows ?? []).reduce((s: number, r: { balance: number }) => s + r.balance, 0);
+    check(
+      'the Net outstanding balance card is the balances of the loans still being repaid',
+      money(caAll.body.summary?.outstanding, owingSum) && caAll.body.summary?.owingCount === caOwing.body.total,
+      `${JSON.stringify(caAll.body.summary)} vs ${owingSum}`,
+    );
+    const tooMuch = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'CASH',
+      payeeUserId: engineer.id,
+      allocations: [{ kind: 'advance_refund', id: loan.body.id, amount: 2_600 }],
+    });
+    const rest = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'CASH',
+      payeeUserId: engineer.id,
+      allocations: [{ kind: 'advance_refund', id: loan.body.id, amount: 2_500 }],
+    });
+    const loanPaid = await prisma.cashAdvance.findUnique({ where: { id: String(loan.body.id) } });
+    check(
+      'more than the balance is refused; the last 2,500 makes it PAID, dated',
+      tooMuch.status === 400 && rest.status === 201 && loanPaid?.status === 'PAID' && !!loanPaid.repaidAt,
+      `${tooMuch.status} ${rest.status} ${loanPaid?.status} ${loanPaid?.repaidAt}`,
+    );
+    const undo = await fin('DELETE', `/payments/${rest.body.id}`);
+    const loanBack = await prisma.cashAdvance.findUnique({ where: { id: String(loan.body.id) } });
+    check(
+      'deleting a repayment puts the balance back — re-derived, never incremented',
+      undo.status === 200 && loanBack?.status === 'RELEASED' && money(Number(loanBack.amountRefunded), 1_000) && loanBack.repaidAt === null,
+      `${undo.status} ${loanBack?.status} ${loanBack?.amountRefunded} ${loanBack?.repaidAt}`,
+    );
+    const caRep = await fin('GET', `/fin-reports/cash-advances?from=${todayIso}&to=${todayIso}&requestedById=${engineer.id}`);
+    const caCard = (label: string) => (caRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === label)?.value ?? -1;
+    check(
+      'the CA report counts the payments made and the balance still owed',
+      caRep.status === 200 && caCard('Payments made') >= 1_000 - 0.005 && caCard('Net outstanding balance') >= 2_500 - 0.005,
+      JSON.stringify(caRep.body.cards),
+    );
+
+    // ══ Invoice requests (2026-10-15) ═══════════════════════════════════════
+    console.log('\nInvoice requests — the salesperson asks, Back Support approves, A/R gets the draft invoice');
+    const irSeller = await makeUser('ZZ IR Seller', 'irseller@verifyf.local', ['sales']);
+    const irStranger = await makeUser('ZZ IR Other Seller', 'irother@verifyf.local', ['sales']);
+    const irSupport = await makeUser('ZZ IR Back Support', 'irsupport@verifyf.local', ['back_support']);
+    const irQuote = await prisma.quotation.create({
+      data: { number: `${TAG}-Q-IR1`, customerId: customer.id, ownerId: irSeller.id, subject: `${TAG} IR PROJECT` },
+    });
+    const irRev = await prisma.quotationRevision.create({ data: { quotationId: irQuote.id, revision: 0, status: 'APPROVED' } });
+    const irOrder = await prisma.salesOrder.create({
+      data: {
+        number: `${TAG}-SO-IR1`,
+        status: 'ISSUED',
+        quotationId: irQuote.id,
+        customerId: customer.id,
+        ownerId: irSeller.id,
+        orderDate: dayKey(new Date()),
+        termsDays: 60,
+        poNumber: `${TAG}-PO-IR`,
+        vatRate: D(0.12),
+        subtotal: D(150_000),
+        vatAmount: D(18_000),
+        total: D(168_000),
+      },
+    });
+    const irJob = await prisma.job.create({
+      data: {
+        number: `${TAG}-PRJ-IR`,
+        name: `${TAG} Invoice request project`,
+        customerId: customer.id,
+        costingId: costing.id,
+        quotationRevisionId: irRev.id,
+        contractValue: D(150_000),
+        createdById: finance.id,
+      },
+    });
+    const irBilling = async (n: number, gross: number, status: 'APPROVED' | 'DRAFT' = 'APPROVED') => {
+      const report = await prisma.progressReport.create({
+        data: {
+          number: `${TAG}-IR-PR-${n}`,
+          reportNo: n,
+          jobId: irJob.id,
+          status: 'APPROVED',
+          periodFrom: dayKey(new Date()),
+          periodTo: dayKey(new Date()),
+          preparedById: irSeller.id,
+          accomplishment: `${TAG} report ${n}`,
+        },
+      });
+      const tax = taxBreakdown(gross, 0.12, 0.02);
+      return prisma.progressBilling.create({
+        data: {
+          number: `${TAG}-IR-PB-${n}`,
+          jobId: irJob.id,
+          billingNo: n,
+          status,
+          progressReportId: report.id,
+          billingDate: dayKey(new Date()),
+          grossAmount: D(tax.grossAmount),
+          vatRate: D(0.12),
+          vatAmount: D(tax.vatAmount),
+          ewtRate: D(0.02),
+          ewtAmount: D(tax.ewtAmount),
+          invoiceTotal: D(tax.invoiceTotal),
+          netCollectible: D(tax.netCollectible),
+          approvedAt: status === 'APPROVED' ? new Date() : null,
+        },
+      });
+    };
+    const irB1 = await irBilling(1, 100_000);
+    const irDraftBilling = await irBilling(2, 10_000, 'DRAFT');
+    const seller = as(irSeller);
+    const source = await seller('GET', `/invoice-requests/source?billingId=${irB1.id}`);
+    check(
+      'the request form offers the project’s issued sales order with what is left of its net, and says the seller may ask',
+      source.status === 200 &&
+        source.body.mayRequest === true &&
+        source.body.problem === null &&
+        (source.body.salesOrders as { id: string; left: number }[]).some((o) => o.id === irOrder.id && money(o.left, 150_000)),
+      JSON.stringify(source.body).slice(0, 240),
+    );
+    const notMine = await as(irStranger)('POST', '/invoice-requests', { progressBillingId: irB1.id, salesOrderId: irOrder.id });
+    const notApproved = await seller('POST', '/invoice-requests', { progressBillingId: irDraftBilling.id, salesOrderId: irOrder.id });
+    check(
+      'another salesperson may not ask for this project’s invoice, and a billing not yet approved cannot be asked',
+      notMine.status === 403 && notApproved.status === 400,
+      `${notMine.status} / ${notApproved.status} ${JSON.stringify(notApproved.body).slice(0, 120)}`,
+    );
+    const ir = await seller('POST', '/invoice-requests', { progressBillingId: irB1.id, salesOrderId: irOrder.id });
+    const irSecond = await seller('POST', '/invoice-requests', { progressBillingId: irB1.id, salesOrderId: irOrder.id });
+    check(
+      'the seller raises one, numbered GT-IR, taking the order’s PO and terms — and a second while it is live is refused',
+      ir.status === 201 &&
+        /-IR-\d{4}-\d{4}$/.test(String(ir.body.number)) &&
+        ir.body.poReference === `${TAG}-PO-IR` &&
+        ir.body.termsDays === 60 &&
+        ir.body.salesperson?.id === irSeller.id &&
+        irSecond.status === 400,
+      `${ir.status} ${ir.body.number} ${ir.body.poReference} ${ir.body.termsDays} · ${irSecond.status}`,
+    );
+    const irId = String(ir.body.id);
+    const directWhileLive = await fin('POST', `/invoices/from-billing/${irB1.id}`, {});
+    check('finance’s direct door waits while the request is open', directWhileLive.status === 400 && String(directWhileLive.body.error).includes(String(ir.body.number)), JSON.stringify(directWhileLive.body));
+    const irDraftPdf = await seller('GET', `/invoice-requests/${irId}/pdf`);
+    const irDraftText = (irDraftPdf.bytes ? pdfText(irDraftPdf.bytes) : '').replace(/\s+/g, ' ');
+    check(
+      'its paper, in the standard dress: the order, the PO, the particulars, the totals, and Back Support Pending',
+      irDraftPdf.status === 200 &&
+        irDraftText.includes('INVOICE REQUEST') &&
+        irDraftText.includes(`${TAG}-SO-IR1`) &&
+        irDraftText.includes(`${TAG}-PO-IR`) &&
+        irDraftText.includes('Net collectible') &&
+        irDraftText.includes('BACK SUPPORT') &&
+        irDraftText.includes('Pending'),
+      irDraftText.slice(0, 600),
+    );
+    const irSubmit = await seller('POST', `/invoice-requests/${irId}/submit`);
+    const irReq = await prisma.approvalRequest.findFirst({
+      where: { documentType: 'invoice_request', documentId: irId, status: 'PENDING' },
+      include: { workflow: { include: { steps: true } } },
+    });
+    const supportApprovers = irReq ? await approversForStep(irReq.workflow!.steps[0], irSeller.id, prisma, {}) : [];
+    check(
+      'submitted, it goes to Back Support',
+      irSubmit.status === 200 && irSubmit.body.status === 'PENDING_APPROVAL' && irReq?.workflow?.steps.map((st) => st.name).join(',') === 'Back Support' && supportApprovers.includes(irSupport.id),
+      `${irSubmit.status} ${irSubmit.body.status} ${irReq?.workflow?.steps.map((st) => st.name)}`,
+    );
+    const irWithdraw = await seller('POST', `/invoice-requests/${irId}/withdraw`);
+    const irResubmit = await seller('POST', `/invoice-requests/${irId}/submit`);
+    check('pulled back it is a draft, and it is sent again', irWithdraw.body.status === 'DRAFT' && irResubmit.body.status === 'PENDING_APPROVAL', `${irWithdraw.status} ${irResubmit.status}`);
+    const irOpen = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'invoice_request', documentId: irId, status: 'PENDING' } });
+    await act({ requestId: irOpen.id, userId: irSupport.id, action: 'APPROVED' });
+    const irDone = await prisma.invoiceRequest.findUniqueOrThrow({ where: { id: irId }, include: { invoice: true } });
+    const irB1After = await prisma.progressBilling.findUniqueOrThrow({ where: { id: irB1.id } });
+    check(
+      'Back Support’s approval raises ONE draft invoice on the order, with its PO, terms and the billing’s money, and the billing is invoiced',
+      irDone.status === 'APPROVED' &&
+        irDone.invoice?.status === 'DRAFT' &&
+        irDone.invoice.salesOrderId === irOrder.id &&
+        irDone.invoice.poReference === `${TAG}-PO-IR` &&
+        irDone.invoice.termsDays === 60 &&
+        irDone.invoice.salespersonId === irSeller.id &&
+        money(Number(irDone.invoice.netCollectible), Number(irB1.netCollectible)) &&
+        irB1After.status === 'INVOICED' &&
+        (await prisma.invoice.count({ where: { progressBillingId: irB1.id } })) === 1,
+      `${irDone.status} ${irDone.invoice?.status} ${irDone.invoice?.poReference} ${irB1After.status}`,
+    );
+    await settleInvoiceRequest(irOpen, 'APPROVED');
+    check('a settlement that arrives twice raises nothing more', (await prisma.invoice.count({ where: { progressBillingId: irB1.id } })) === 1);
+    const financeTold = await prisma.notification.findFirst({ where: { userId: finance.id, type: 'invoice_request.invoiced', link: `/g-fin/ar/${irDone.invoiceId}` } });
+    check('finance is told the draft invoice is ready to issue', !!financeTold);
+    // What is left of the order now refuses a billing bigger than it.
+    const irB3 = await irBilling(3, 60_000);
+    const over = await seller('POST', '/invoice-requests', { progressBillingId: irB3.id, salesOrderId: irOrder.id });
+    check(
+      'a billing past what is left of the order’s net is refused, naming what is left',
+      over.status === 400 && String(over.body.error).includes('left to invoice'),
+      `${over.status} ${JSON.stringify(over.body).slice(0, 160)}`,
+    );
+    // Cancel and delete: a draft request is cancelled with a reason, then deleted.
+    const irB4 = await irBilling(4, 20_000);
+    const ir4 = await seller('POST', '/invoice-requests', { progressBillingId: irB4.id, salesOrderId: irOrder.id });
+    const ir4Cancel = await seller('POST', `/invoice-requests/${ir4.body.id}/cancel`, { reason: 'raised on the wrong order' });
+    const ir4Again = await seller('POST', '/invoice-requests', { progressBillingId: irB4.id, salesOrderId: irOrder.id });
+    const ir4Delete = await seller('DELETE', `/invoice-requests/${ir4.body.id}`);
+    check(
+      'a cancelled request frees its billing for a new one, and is deleted',
+      ir4Cancel.body.status === 'CANCELLED' && ir4Again.status === 201 && ir4Delete.status === 200,
+      `${ir4Cancel.status} ${ir4Again.status} ${ir4Delete.status}`,
+    );
+    const irList = await fin('GET', `/invoice-requests?pageSize=50&jobId=${irJob.id}`);
+    const irListPdf = await fin('GET', `/invoice-requests/pdf?jobId=${irJob.id}`);
+    check(
+      'the register lists the project’s requests with their cards, and prints',
+      irList.status === 200 &&
+        irList.body.total === 2 &&
+        typeof irList.body.summary?.drafts === 'number' &&
+        irListPdf.status === 200 &&
+        (irListPdf.bytes ? pdfText(irListPdf.bytes) : '').replace(/\s+/g, ' ').includes('INVOICE REQUESTS'),
+      `${irList.status} ${irList.body.total} ${JSON.stringify(irList.body.summary)} · ${irListPdf.status}`,
+    );
+    const irStrangerRead = await as(irStranger)('GET', `/invoice-requests/${irId}`);
+    check('someone else’s request is not theirs to read', irStrangerRead.status === 404, String(irStrangerRead.status));
+
+    // ── From the sales order (2026-10-16) ──
+    console.log('\nInvoice requests from a sales order — the invoice number, the countered date, the raiser credited');
+    const soSource = await seller('GET', `/invoice-requests/source?salesOrderId=${irOrder.id}`);
+    check(
+      'a sales order’s request form says what is left — after its invoices AND the open requests on it',
+      soSource.status === 200 &&
+        soSource.body.kind === 'order' &&
+        soSource.body.mayRequest === true &&
+        money(soSource.body.salesOrder?.requested, 20_000) &&
+        money(soSource.body.salesOrder?.left, 30_000),
+      JSON.stringify(soSource.body).slice(0, 300),
+    );
+    const soStranger = await as(irStranger)('POST', '/invoice-requests', { salesOrderId: irOrder.id, grossAmount: 1_000 });
+    const soAskTooMuch = await seller('POST', '/invoice-requests', { salesOrderId: irOrder.id, grossAmount: 30_000.01 });
+    const soNoAmount = await seller('POST', '/invoice-requests', { salesOrderId: irOrder.id });
+    check(
+      'another salesperson may not ask; more than is left, or no amount, is refused',
+      soStranger.status === 403 && soAskTooMuch.status === 400 && String(soAskTooMuch.body.error).includes('left to invoice') && soNoAmount.status === 400,
+      `${soStranger.status} ${soAskTooMuch.status} ${soNoAmount.status}`,
+    );
+    const soIr = await seller('POST', '/invoice-requests', { salesOrderId: irOrder.id, grossAmount: 25_000, description: `${TAG} first delivery` });
+    check(
+      'the seller asks for 25,000 of the order: no billing, the order’s PO and terms, credited to the one asking',
+      soIr.status === 201 &&
+        soIr.body.kind === 'order' &&
+        soIr.body.progressBilling === null &&
+        money(soIr.body.grossAmount, 25_000) &&
+        money(soIr.body.vatAmount, 3_000) &&
+        money(soIr.body.netCollectible, 27_500) &&
+        soIr.body.poReference === `${TAG}-PO-IR` &&
+        soIr.body.termsDays === 60 &&
+        soIr.body.salesperson?.id === irSeller.id,
+      `${soIr.status} ${JSON.stringify(soIr.body).slice(0, 300)}`,
+    );
+    const soPdf = await seller('GET', `/invoice-requests/${soIr.body.id}/pdf`);
+    const soPdfText = (soPdf.bytes ? pdfText(soPdf.bytes) : '').replace(/\s+/g, ' ');
+    check('its paper names the order and the line asked for', soPdf.status === 200 && soPdfText.includes(`${TAG}-SO-IR1`) && soPdfText.includes(`${TAG} first delivery`), soPdfText.slice(0, 300));
+    const soSubmit = await seller('POST', `/invoice-requests/${soIr.body.id}/submit`);
+    const soOpen = await prisma.approvalRequest.findFirst({ where: { documentType: 'invoice_request', documentId: String(soIr.body.id), status: 'PENDING' } });
+    if (soOpen) await act({ requestId: soOpen.id, userId: irSupport.id, action: 'APPROVED' });
+    const soDone = await prisma.invoiceRequest.findUniqueOrThrow({ where: { id: String(soIr.body.id) }, include: { invoice: { include: { lines: true } } } });
+    check(
+      'Back Support approves it and the draft invoice bills the order: 25,000 at the order’s VAT, one line, the seller credited',
+      soSubmit.status === 200 &&
+        soDone.status === 'APPROVED' &&
+        soDone.invoice?.status === 'DRAFT' &&
+        soDone.invoice.salesOrderId === irOrder.id &&
+        soDone.invoice.progressBillingId === null &&
+        money(Number(soDone.invoice.grossAmount), 25_000) &&
+        money(Number(soDone.invoice.vatAmount), 3_000) &&
+        soDone.invoice.lines.length === 1 &&
+        soDone.invoice.lines[0].description === `${TAG} first delivery` &&
+        soDone.invoice.salespersonId === irSeller.id,
+      `${soSubmit.status} ${soDone.status} ${soDone.invoice?.grossAmount} ${soDone.invoice?.lines.length}`,
+    );
+    if (soOpen) await settleInvoiceRequest(soOpen, 'APPROVED');
+    check('a second settlement raises no second invoice', (await prisma.invoice.count({ where: { salesOrderId: irOrder.id, progressBillingId: null } })) === 1);
+    const soPage = await seller('GET', `/sales-orders/${irOrder.id}`);
+    check(
+      'the sales order page lists its invoice requests, and says what is left to invoice',
+      soPage.status === 200 &&
+        (soPage.body.invoicing?.requests as { id: string }[] | undefined)?.some((r) => r.id === soIr.body.id) === true &&
+        money(soPage.body.invoicing?.left, 25_000) &&
+        soPage.body.invoicing?.canRequest === true,
+      JSON.stringify(soPage.body.invoicing).slice(0, 300),
+    );
+    const credit = await fin('GET', `/invoices/credit?salesOrderId=${irOrder.id}`);
+    check('a new invoice on the order is credited to whoever raised its invoice request', credit.status === 200 && credit.body.salesperson?.id === irSeller.id, JSON.stringify(credit.body));
+    const siSet = await fin('PUT', `/invoices/${soDone.invoiceId}`, { siNumber: `${TAG}SI-1` });
+    const siTwice = await fin('POST', '/invoices', {
+      customerId: customer.id,
+      siNumber: `${TAG.toLowerCase()}si-1`,
+      lines: [{ description: `${TAG} other`, amount: 100 }],
+    });
+    check(
+      'the printed invoice number is kept on the draft — and the same number on another invoice is refused, case-blind',
+      siSet.status === 200 && siSet.body.siNumber === `${TAG}SI-1` && siTwice.status === 409,
+      `${siSet.status} ${siSet.body.siNumber} · ${siTwice.status}`,
+    );
+    const counteredDay = new Date(dayKey(new Date()).getTime() - 2 * 86_400_000).toISOString().slice(0, 10);
+    const withCounter = await fin('POST', '/invoices', {
+      customerId: customer.id,
+      counteredDate: counteredDay,
+      termsDays: 30,
+      siNumber: `${TAG}SI-2`,
+      lines: [{ description: `${TAG} countered`, amount: 1_000 }],
+    });
+    const due = new Date(new Date(`${counteredDay}T00:00:00Z`).getTime() + 30 * 86_400_000).toISOString().slice(0, 10);
+    check(
+      'an invoice given only its countered date is dated and countered that day, due 30 days after',
+      withCounter.status === 201 &&
+        String(withCounter.body.counteredDate).slice(0, 10) === counteredDay &&
+        String(withCounter.body.invoiceDate).slice(0, 10) === counteredDay &&
+        String(withCounter.body.dueDate).slice(0, 10) === due,
+      `${withCounter.status} ${withCounter.body.counteredDate} ${withCounter.body.invoiceDate} ${withCounter.body.dueDate}`,
+    );
+    const future = await fin('POST', '/invoices', { customerId: customer.id, counteredDate: '2099-01-01', lines: [{ description: `${TAG} x`, amount: 1 }] });
+    check('a countered date still to come is refused', future.status === 400, String(future.status));
+    const siSearch = await fin('GET', `/invoices?search=${encodeURIComponent(`${TAG}SI-2`)}`);
+    check('the A/R list finds an invoice by its printed number', siSearch.status === 200 && siSearch.body.total === 1, String(siSearch.body.total));
+
+    // ── A purchaser by name, and money on account (2026-10-16) ──
+    console.log('\nA purchaser typed by name; a collection line added by hand, applied later');
+    const namedBill = await fin('POST', '/supplier-bills', {
+      supplierId: supplier.id,
+      purchaserName: `${TAG} Walk-in Buyer`,
+      lines: [{ description: `${TAG} named buyer`, quantity: 1, unitPrice: 500 }],
+    });
+    const namedSearch = await fin('GET', `/supplier-bills?search=${encodeURIComponent(`${TAG} Walk-in`)}`);
+    const switched = await fin('PUT', `/supplier-bills/${namedBill.body.id}`, { purchaserId: finance.id, lines: [{ description: `${TAG} named buyer`, quantity: 1, unitPrice: 500 }] });
+    check(
+      'a bill keeps a purchaser with no login by name, is found by it, and picking a login clears the name',
+      namedBill.status === 201 &&
+        namedBill.body.purchaserName === `${TAG} Walk-in Buyer` &&
+        namedBill.body.purchaserId === null &&
+        namedSearch.body.total === 1 &&
+        switched.status === 200 &&
+        switched.body.purchaserId === finance.id &&
+        switched.body.purchaserName === null,
+      `${namedBill.status} ${namedBill.body.purchaserName} · ${namedSearch.body.total} · ${switched.status} ${switched.body.purchaserName}`,
+    );
+    const onAccount = await fin('POST', '/payments', {
+      kind: 'RECEIPT',
+      method: 'CHECK',
+      customerId: customer.id,
+      reference: `${TAG}-CHQ-OA`,
+      lines: [{ reference: `${TAG} SI 7781 not yet on file`, amount: 1_500 }],
+    });
+    check(
+      'a collection with only a line typed by hand is money on account: it gets an OR, the amount, and settles nothing',
+      onAccount.status === 201 &&
+        !!onAccount.body.orNumber &&
+        money(onAccount.body.amount, 1_500) &&
+        money(onAccount.body.onAccount, 1_500) &&
+        (onAccount.body.allocations as unknown[]).length === 0 &&
+        (onAccount.body.lines as unknown[]).length === 1,
+      `${onAccount.status} ${JSON.stringify(onAccount.body).slice(0, 240)}`,
+    );
+    const outLines = await fin('POST', '/payments', { kind: 'DISBURSEMENT', supplierId: supplier.id, lines: [{ reference: 'x', amount: 1 }] });
+    const noParty = await fin('POST', '/payments', { kind: 'RECEIPT', lines: [{ reference: 'x', amount: 1 }] });
+    const nothing = await fin('POST', '/payments', { kind: 'RECEIPT', customerId: customer.id });
+    check('lines by hand are money in from a named customer only, and a payment with nothing is refused', outLines.status === 400 && noParty.status === 400 && nothing.status === 400, `${outLines.status} ${noParty.status} ${nothing.status}`);
+    const oaPaper = await fin('GET', `/payments/${onAccount.body.id}/pdf`);
+    const oaText = (oaPaper.bytes ? pdfText(oaPaper.bytes) : '').replace(/\s+/g, ' ');
+    check('the collection receipt lists the line as on account', oaPaper.status === 200 && oaText.includes('SI 7781') && oaText.includes('On account'), oaText.slice(0, 300));
+    // The invoice it was for, now on file and issued.
+    const later = await fin('POST', '/invoices', { customerId: customer.id, lines: [{ description: `${TAG} SI 7781`, amount: 1_000 }] });
+    await fin('POST', `/invoices/${later.body.id}/issue`);
+    const laterOwed = Number((await fin('GET', `/invoices/${later.body.id}`)).body.outstanding);
+    const lineId = (onAccount.body.lines as { id: string }[])[0].id;
+    const applied = await fin('POST', `/payments/${onAccount.body.id}/lines/${lineId}/apply`, { invoiceId: later.body.id });
+    const laterAfter = await fin('GET', `/invoices/${later.body.id}`);
+    check(
+      'applied to the invoice once it is on file: the invoice is paid, the line keeps only what was over',
+      applied.status === 200 &&
+        laterAfter.body.status === 'PAID' &&
+        money(applied.body.onAccount, Math.round((1_500 - laterOwed) * 100) / 100) &&
+        (applied.body.allocations as { invoiceId: string }[]).some((a) => a.invoiceId === later.body.id),
+      `${applied.status} ${laterAfter.body.status} ${applied.body.onAccount} owed ${laterOwed}`,
+    );
+
+    // ── Pulled back after approval (2026-10-16) ──
+    console.log('\nAn invoice request pulled back after approval');
+    const sellerUser = (await resolveUser(irSeller.id))!;
+    // The order's request: its draft invoice is deleted and it is a draft again.
+    const soInvoiceId = soDone.invoiceId!;
+    const pulled = await as(irSeller)('POST', `/approvals/reopen/invoice_request/${soIr.body.id}`, { reason: `${TAG} wrong amount` });
+    const soBack = await prisma.invoiceRequest.findUniqueOrThrow({ where: { id: String(soIr.body.id) } });
+    check(
+      'the seller pulls the approved request back: a draft, its draft invoice deleted',
+      pulled.status === 200 && soBack.status === 'DRAFT' && soBack.invoiceId === null && !(await prisma.invoice.findUnique({ where: { id: soInvoiceId } })),
+      `${pulled.status} ${JSON.stringify(pulled.body).slice(0, 160)} ${soBack.status}`,
+    );
+    // The billing's request: its invoice issued, the pull-back is refused naming it.
+    await fin('POST', `/invoices/${irDone.invoiceId}/issue`);
+    let issuedRefusal = '';
+    try {
+      await reopenApproved('invoice_request', irId, sellerUser, `${TAG} try`);
+    } catch (err) {
+      issuedRefusal = (err as Error).message;
+    }
+    check(
+      'once its invoice is issued the request is refused, naming the invoice',
+      issuedRefusal.includes(String(irDone.invoice?.number)) && (await prisma.invoiceRequest.findUniqueOrThrow({ where: { id: irId } })).status === 'APPROVED',
+      issuedRefusal,
+    );
+    // Cancel it, and the billing comes back to be requested again.
+    await fin('POST', `/invoices/${irDone.invoiceId}/cancel`, { reason: `${TAG} reissue` });
+    const cancelledInv = await prisma.invoice.findUniqueOrThrow({ where: { id: irDone.invoiceId! } });
+    if (cancelledInv.status === 'CANCELLED') {
+      await reopenApproved('invoice_request', irId, sellerUser, `${TAG} reissue`);
+      const irBack = await prisma.invoiceRequest.findUniqueOrThrow({ where: { id: irId } });
+      const b1Back = await prisma.progressBilling.findUniqueOrThrow({ where: { id: irB1.id } });
+      check('with its invoice cancelled, the request is a draft again and the billing approved to be asked afresh', irBack.status === 'DRAFT' && b1Back.status === 'APPROVED', `${irBack.status} ${b1Back.status}`);
+    } else {
+      check('the issued invoice could be cancelled for the next case', false, cancelledInv.status);
+    }
+    // ══ Commissions (2026-10-16) ══════════════════════════════════════════
+    console.log('\nCommissions — fully collected first, Finance Manager then CEO, paid with the CA deduction repaid');
+    const cmSeller = await makeUser('ZZ CM Seller', 'cmseller@verifyf.local', ['sales']);
+    const cmQuote = await prisma.quotation.create({ data: { number: `${TAG}-Q-CM1`, customerId: customer.id, ownerId: cmSeller.id, subject: `${TAG} CM DEAL` } });
+    const cmOrder = await prisma.salesOrder.create({
+      data: {
+        number: `${TAG}-SO-CM1`,
+        status: 'ISSUED',
+        quotationId: cmQuote.id,
+        customerId: customer.id,
+        ownerId: cmSeller.id,
+        orderDate: dayKey(new Date()),
+        vatRate: D(0.12),
+        subtotal: D(1_000_000),
+        vatAmount: D(120_000),
+        total: D(1_120_000),
+        lines: { create: [{ title: 'COMPRESSOR PACKAGE', quantity: D(1), unitPrice: D(1_000_000), amount: D(1_000_000), unitCost: D(650_000), costAmount: D(650_000) }] },
+      },
+    });
+    const cmInvoice = await prisma.invoice.create({
+      data: {
+        number: await nextNumber('invoice'),
+        customerId: customer.id,
+        salesOrderId: cmOrder.id,
+        invoiceDate: dayKey(new Date()),
+        counteredDate: dayKey(new Date()),
+        dueDate: addDays(dayKey(new Date()), 30),
+        grossAmount: D(1_000_000),
+        vatRate: D(0.12),
+        vatAmount: D(120_000),
+        ewtRate: D(0),
+        ewtAmount: D(0),
+        invoiceTotal: D(1_120_000),
+        netCollectible: D(1_120_000),
+        status: 'ISSUED',
+        issuedAt: new Date(),
+        createdById: finance.id,
+      },
+    });
+    const cmAs = as(cmSeller);
+    const cmBody = (caDeduction: number) => ({
+      salesOrderId: cmOrder.id,
+      commissionType: 'GROUP',
+      ratePct: 0.1,
+      shares: [
+        { userId: cmSeller.id, sharePct: 0.6, taxPct: 0.1, caDeduction: 0 },
+        { userId: engineer.id, sharePct: 0.4, taxPct: 0.1, caDeduction },
+      ],
+    });
+    const cmEarly = await cmAs('POST', '/commissions', cmBody(0));
+    const earlySrc = await cmAs('GET', `/commissions/source?salesOrderId=${cmOrder.id}`);
+    check(
+      'a commission is refused while the order is not fully collected, and the source says why',
+      cmEarly.status === 400 && /not fully collected/.test(String(cmEarly.body.error)) && earlySrc.body.fullyCollected === false,
+      `${cmEarly.status} ${cmEarly.body.error}`,
+    );
+    const collect = await fin('POST', '/payments', { kind: 'RECEIPT', method: 'CHECK', reference: `${TAG}-CHK`, allocations: [{ kind: 'invoice', id: cmInvoice.id, amount: 1_120_000 }] });
+    const src = await cmAs('GET', `/commissions/source?salesOrderId=${cmOrder.id}`);
+    check(
+      'collected in full: the source reads margin 350,000, the OR number, and offers the order’s author',
+      collect.status === 201 && src.body.fullyCollected === true && money(src.body.margin, 350_000) &&
+        (src.body.orNumbers as string[]).includes(String(collect.body.orNumber)) &&
+        (src.body.people as { id: string; roles: string[] }[]).some((p) => p.id === cmSeller.id && p.roles.includes('Sales order')),
+      `${collect.status} ${src.body.fullyCollected} ${src.body.margin} ${JSON.stringify(src.body.orNumbers)}`,
+    );
+    const engLoan = await prisma.cashAdvance.findFirst({ where: { requestedById: engineer.id, repayable: true, status: 'RELEASED' } });
+    const engOwed = engLoan ? cents(num(engLoan.amountReleased) - num(engLoan.amountRefunded)) : 0;
+    const tooBig = await cmAs('POST', '/commissions', cmBody(cents(engOwed + 100)));
+    check('a CA deduction past the person’s open advance balance is refused', !!engLoan && tooBig.status === 400 && /left to repay/.test(String(tooBig.body.error)), `${engOwed} ${tooBig.status} ${tooBig.body.error}`);
+    const caTake = Math.min(2_000, engOwed);
+    const rfc = await cmAs('POST', '/commissions', cmBody(caTake));
+    const twice = await cmAs('POST', '/commissions', cmBody(0));
+    check(
+      'raised: 35,000 gross; 21,000 − 2,100 and 14,000 − 1,400 − the CA; one standing request per order',
+      rfc.status === 201 && /RFC/.test(String(rfc.body.number)) && money(rfc.body.grossCommission, 35_000) &&
+        money(rfc.body.shares?.[0]?.net, 18_900) && money(rfc.body.shares?.[1]?.net, cents(12_600 - caTake)) && twice.status === 400,
+      `${rfc.status} ${rfc.body.error ?? ''} ${rfc.body.number} ${rfc.body.grossCommission} · ${twice.status}`,
+    );
+    await cmAs('POST', `/commissions/${rfc.body.id}/submit`);
+    const cmReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'commission', documentId: String(rfc.body.id), status: 'PENDING' } });
+    const cmRoute = await stepNames(cmReq?.workflowId ?? null);
+    check('the route is the Finance Manager, then the CEO / President', JSON.stringify(cmRoute) === JSON.stringify(['FINANCE MANAGER', 'CEO / PRESIDENT']), JSON.stringify(cmRoute));
+    const earlyPay = await fin('POST', `/commissions/${rfc.body.id}/pay`, {});
+    await settle(cmReq!.id);
+    const approvedCm = await prisma.commissionRequest.findUniqueOrThrow({ where: { id: String(rfc.body.id) } });
+    check('a pending commission is not paid; both signatures make it APPROVED', earlyPay.status === 400 && approvedCm.status === 'APPROVED', `${earlyPay.status} ${approvedCm.status}`);
+    const paid = await fin('POST', `/commissions/${rfc.body.id}/pay`, { method: 'BANK_TRANSFER' });
+    const vouchers = await prisma.paymentAllocation.findMany({ where: { commissionShare: { requestId: String(rfc.body.id) } }, include: { payment: true } });
+    const loanAfter = await prisma.cashAdvance.findUniqueOrThrow({ where: { id: engLoan!.id } });
+    const deductionPay = await prisma.payment.findFirst({ where: { method: 'COMMISSION_DEDUCTION', allocations: { some: { advanceId: engLoan!.id } } }, orderBy: { createdAt: 'desc' } });
+    check(
+      'paid: a voucher per person for their net, the CA deduction recorded as a repayment of the advance',
+      paid.status === 200 && paid.body.status === 'PAID' && vouchers.length === 2 &&
+        vouchers.every((v) => v.payment.kind === 'DISBURSEMENT') &&
+        money(vouchers.reduce((t, v) => t + num(v.amount), 0), cents(28_500 + 3_000 - caTake)) &&
+        !!deductionPay && money(num(deductionPay.amount), caTake) &&
+        money(cents(num(loanAfter.amountRefunded) - num(engLoan!.amountRefunded)), caTake),
+      `${paid.status} ${paid.body.error ?? paid.body.status} ${vouchers.length} ${loanAfter.amountRefunded}`,
+    );
+    const undoDeduction = deductionPay ? await fin('DELETE', `/payments/${deductionPay.id}`) : { status: 0, body: {} };
+    const paidTwice = await fin('POST', `/commissions/${rfc.body.id}/pay`, {});
+    check('a commission is paid once, and its deduction is not reversed on its own', paidTwice.status === 400 && undoDeduction.status === 400, `${paidTwice.status} ${undoDeduction.status}`);
+    const cmList = await fin('GET', '/commissions?pageSize=200');
+    const cmPaper = await fin('GET', `/commissions/${rfc.body.id}/pdf`);
+    const cmRep = await fin('GET', `/fin-reports/commissions?from=${todayIso}&to=${todayIso}`);
+    check(
+      'the register lists it with its cards; it prints; the report counts it',
+      cmList.status === 200 && (cmList.body.rows as { id: string }[]).some((r) => r.id === rfc.body.id) && cmList.body.summary?.paid >= 35_000 - 0.005 &&
+        cmPaper.status === 200 && !!cmPaper.bytes && cmRep.status === 200,
+      `${cmList.status} ${JSON.stringify(cmList.body.summary)} ${cmPaper.status} ${cmRep.status}`,
+    );
+
+    await saveFinanceSettings({ blockAdvanceWhileUnliquidated: true });
   }
 
   await cleanup();

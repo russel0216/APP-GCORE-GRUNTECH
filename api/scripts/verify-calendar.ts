@@ -26,6 +26,7 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { activityEmailText, activityWhere, repeatOccurrences, sendDueReminders } from '../src/shared/activities';
+import { mapLinkFor } from '../src/shared/calendar-links';
 import { seedActivityTypes } from '../src/shared/activityTypes';
 import { annualDayIn, fillGreeting, occurrencesBetween, sendDueGreetings } from '../src/shared/celebrations';
 import { GREETING_DEFAULTS } from '../src/shared/hr';
@@ -520,6 +521,8 @@ async function main() {
       durationMinutes: 1440,
       isPrivate: true,
       callLink: 'https://meet.google.com/abc-defg-hij',
+      location: 'Gruntech office, Pasig',
+      mapUrl: 'https://maps.app.goo.gl/zzVerify',
       notes: 'the quiet part',
       inviteeIds: [colleague.id],
     });
@@ -533,6 +536,18 @@ async function main() {
         (wholeDay.body.createdBy as { id: string } | null)?.id === sales.id,
       `${wholeDay.status} ${JSON.stringify(wholeDay.body).slice(0, 220)}`,
     );
+    const badMap = await apiSend(salesToken, 'POST', '/activities', { subject: `${TAG} bad map`, startsAt: startsAt.toISOString(), mapUrl: 'javascript:alert(1)' });
+    check(
+      'a Google Maps link is kept with the address (2026-10-13), and one that is not http(s) is refused (400)',
+      wholeDay.body.mapUrl === 'https://maps.app.goo.gl/zzVerify' && badMap.status === 400,
+      `${wholeDay.body.mapUrl} ${badMap.status}`,
+    );
+    check(
+      'the invitation email carries the map, and with no link pasted a Google Maps search for the address',
+      activityEmailText({ title: 'Invited: x', body: 'when' }, 'https://app/x', true, mapLinkFor('Gruntech office, Pasig', 'https://maps.app.goo.gl/zzVerify')).includes('Map: https://maps.app.goo.gl/zzVerify') &&
+        mapLinkFor('Gruntech office, Pasig', null) === 'https://www.google.com/maps/search/?api=1&query=Gruntech%20office%2C%20Pasig' &&
+        mapLinkFor(null, 'javascript:alert(1)') === null,
+    );
     const halfDay = await apiSend(salesToken, 'POST', '/activities', { subject: `${TAG} half day`, allDay: true, startsAt: '2031-03-10T03:30:00Z', durationMinutes: 600 });
     check('an all-day activity runs whole days or is refused (400)', halfDay.status === 400, String(halfDay.status));
     const privId = String(wholeDay.body.id);
@@ -542,6 +557,8 @@ async function main() {
       subject?: string;
       notes?: string | null;
       callLink?: string | null;
+      mapUrl?: string | null;
+      location?: string | null;
       masked?: boolean;
       invitees?: unknown[];
       googleCalendarUrl?: string | null;
@@ -550,11 +567,13 @@ async function main() {
       (await apiGet(strangerToken, '/activities?from=2031-03-09T00:00:00Z&to=2031-03-11T00:00:00Z')).body as { id: string; subject: string; masked?: boolean }[]
     ).find((a) => a.id === privId);
     check(
-      'a private activity reads as "Busy" to someone not on it — no notes, call link, invitees or Google hand-off — on the page and on the calendar',
+      'a private activity reads as "Busy" to someone not on it — no notes, address, map, call link, invitees or Google hand-off — on the page and on the calendar',
       seenByStranger.masked === true &&
         seenByStranger.subject === 'Busy' &&
         seenByStranger.notes === null &&
         seenByStranger.callLink === null &&
+        seenByStranger.mapUrl === null &&
+        seenByStranger.location === null &&
         seenByStranger.invitees?.length === 0 &&
         seenByStranger.googleCalendarUrl === null &&
         listedToStranger?.subject === 'Busy' &&

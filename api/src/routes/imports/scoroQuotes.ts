@@ -53,7 +53,7 @@ const SOURCE = 'the SCORO quotes import';
 const STATUS_OUTCOME: Record<string, QuotationOutcome> = {
   opportunity: 'OPEN',
   'this month forecast': 'OPEN',
-  hold: 'OPEN',
+  hold: 'ON_HOLD',
   negotiation: 'SUBMITTED',
   closing: 'NEGOTIATION',
   confirmed: 'WON',
@@ -147,6 +147,7 @@ interface ScoroQuoteRecord {
   submittedAt: Date | null;
   decidedAt: Date | null;
   lostReason: string | null;
+  lostKind: 'LOST' | 'CANCELLED' | null;
   /** SCORO's doc_date: the issue date, `createdAt` of the quotation and its revision. */
   issuedAt: Date;
   expectedClosing: Date | null;
@@ -365,7 +366,7 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
     const validityDays = docDate && deadline && daysApart(docDate, deadline) >= 1 ? daysApart(docDate, deadline) : 30;
     const statusChanged = scoroDate(row, 'status_changed_date');
     const confirmed = scoroDate(row, 'confirmed_date');
-    const moved = outcome !== 'OPEN';
+    const moved = outcome !== 'OPEN' && outcome !== 'ON_HOLD';
     const decided = outcome === 'WON' || outcome === 'LOST';
 
     const discount = scoroDecimal(row, 'discount') ?? new Prisma.Decimal(0);
@@ -393,6 +394,8 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
       submittedAt: moved ? (statusChanged ?? issuedAt) : null,
       decidedAt: decided ? (confirmed ?? statusChanged ?? issuedAt) : null,
       lostReason: outcome === 'LOST' ? `SCORO status: ${collapse(statusName)}` : null,
+      // A cancelled SCORO quote is a cancelled one here (2026-10-13), not a lost one.
+      lostKind: outcome === 'LOST' ? (sameName(statusName, 'Cancelled') ? 'CANCELLED' : 'LOST') : null,
       issuedAt,
       expectedClosing: scoroDate(row, 'estimated_closing_date'),
       currency,
@@ -704,6 +707,7 @@ async function writeScoroQuotes(
           submittedAt: record.submittedAt,
           decidedAt: record.decidedAt,
           lostReason: record.lostReason,
+          lostKind: record.lostKind,
           expectedClosing: record.expectedClosing,
           currency: record.currency,
           // The team the importer chose; none follows the owner's team.

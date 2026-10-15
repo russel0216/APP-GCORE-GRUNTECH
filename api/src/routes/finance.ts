@@ -6,6 +6,7 @@ import {
   BillStatus,
   ExpenseStatus,
   PaymentKind,
+  PaymentMethod,
   type ApprovalRequest,
 } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -20,6 +21,7 @@ import {
   badRequest,
   forbidden,
   deleteOrRefuse,
+  conflict,
   type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
@@ -31,14 +33,18 @@ import { notify } from '../shared/notifications';
 import {
   submitForApproval,
   onApprovalSettled,
-  approvalSlots,
+  onApprovalReopened,
+  approvalSlots, preparedAt,
   slotSignatories,
   contactOf,
   contactsOf,
   cancelOpenRequest,
+  openSteps,
+  stageWords,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { postJobCost } from '../shared/inventory';
+import { assertOrderLeft, billingForInvoiceInclude, createInvoiceFromBilling } from '../shared/billingInvoice';
 import {
   LIST_CAP,
   listReference,
@@ -91,6 +97,21 @@ import {
   type AgedRow,
   type SettleableKind,
 } from '../shared/finance';
+import { contentDisposition, paperFileName } from '../shared/paperName';
+import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
+import { teamShares, TEAM_REF_SELECT, TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
+import { BILL_PAYABLE, DUE_SOON_DAYS, billDueDate, billTermsLabel, dueSoonWhere } from '../shared/payables';
+import {
+  TERMS_CHOICES,
+  AWAITING_COUNTER_WHERE,
+  daysLate,
+  expectedCollection,
+  invoiceCredit,
+  isOverdue,
+  overdueWhere,
+  parseTermsDays,
+  termsLabel,
+} from '../shared/receivables';
 
 function asDate(value: string, label: string): Date {
   const date = new Date(value);
@@ -229,7 +250,9 @@ export async function cashRequestSignatories(input: {
     input.status === 'DRAFT' ? { amount: input.amount, requesterId: input.requester.id, jobId: input.jobId } : undefined,
   );
   return [
-    { role: 'Requested by', ...requester, at: input.raisedAt },
+    // One timestamp per person: a preparer who signed a step at submit (a
+    // Team Leader's own budget request) prints that instant here too.
+    { role: 'Requested by', ...requester, at: preparedAt(slots) ?? input.raisedAt },
     ...(slots.length ? slotSignatories(slots) : awaitsApproval(input.status) ? [{ role: 'Approved by' }] : []),
     ...(input.releasedOn ? [{ role: 'Received by', ...requester, at: input.releasedOn }] : []),
   ];
@@ -247,14 +270,19 @@ const invoiceInclude = {
   job: { select: { id: true, number: true, name: true } },
   progressBilling: { select: { id: true, number: true, billingNo: true } },
   jobOrder: { select: { id: true, number: true } },
+  salesOrder: { select: { id: true, number: true, poNumber: true } },
+  salesperson: { select: { id: true, name: true } },
+  team: TEAM_REF_SELECT,
   lines: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.InvoiceInclude;
 
 type InvoiceRow = Prisma.InvoiceGetPayload<{ include: typeof invoiceInclude }>;
 
-function presentInvoice(row: InvoiceRow) {
+function presentInvoice(row: InvoiceRow, attachments?: number) {
   const netCollectible = num(row.netCollectible);
   const collected = num(row.amountCollected);
+  const outstanding = cents(netCollectible - collected);
+  const owed = row.status === 'ISSUED' || row.status === 'PARTIALLY_PAID';
   return {
     ...row,
     grossAmount: num(row.grossAmount),
@@ -267,11 +295,34 @@ function presentInvoice(row: InvoiceRow) {
     amountCollected: collected,
     // The number every A/R screen actually needs. Measured against net
     // collectible, because the withheld EWT is never going to arrive as cash.
-    outstanding: cents(netCollectible - collected),
-    daysOverdue: daysBetween(row.dueDate, new Date()),
+    outstanding,
+    // Late only once countered (2026-10-15): until the customer has the
+    // invoice in hand its terms have not started.
+    daysOverdue: daysLate({ ...row, outstanding }),
+    awaitingCounter: owed && !row.counteredDate,
+    termsLabel: termsLabel(row.termsDays, row.terms),
+    ...(attachments === undefined ? {} : { attachments }),
     lines: row.lines.map((l) => ({ ...l, amount: num(l.amount) })),
   };
 }
+
+/** How many files each invoice carries — the list's "Invoice copy" column. */
+async function attachmentCounts(ids: string[]): Promise<Map<string, number>> {
+  if (!ids.length) return new Map();
+  const rows = await prisma.attachment.groupBy({ by: ['entityId'], where: { entityType: 'invoice', entityId: { in: ids } }, _count: { _all: true } });
+  return new Map(rows.map((r) => [r.entityId, r._count._all]));
+}
+
+/**
+ * The invoice's files — the customer's countered copy, the signed delivery,
+ * whatever finance keeps with it: read with A/R, written by whoever raises or
+ * edits invoices; printed behind the invoice's paper.
+ */
+registerAttachmentGuard(
+  'invoice',
+  async (user) => can(user, 'gfin.ar.view_all'),
+  { write: async (user) => can(user, 'gfin.ar.create') || can(user, 'gfin.ar.edit_all') },
+);
 
 /** An invoice something is owed on — the receivable, as `financePosition` reads it. */
 const INVOICE_OWED: InvoiceStatus[] = ['ISSUED', 'PARTIALLY_PAID'];
@@ -286,33 +337,100 @@ const BILL_OWED: BillStatus[] = ['APPROVED', 'PARTIALLY_PAID'];
 function invoiceListWhere(q: ListQuery): Prisma.InvoiceWhereInput {
   const where: Prisma.InvoiceWhereInput = {};
 
-  const status = choice(q.filters.status, InvoiceStatus, 'Status');
+  const and: Prisma.InvoiceWhereInput[] = [];
+  const f = q.filters;
+  const status = choice(f.status, InvoiceStatus, 'Status');
   if (status) where.status = status;
-  if (q.filters.customerId) where.customerId = q.filters.customerId;
-  if (q.filters.jobId) where.jobId = q.filters.jobId;
-  const from = filterDay(q.filters.from, 'From');
-  const to = filterDay(q.filters.to, 'To');
+  if (f.customerId) where.customerId = f.customerId;
+  if (f.jobId) where.jobId = f.jobId;
+  if (f.salesOrderId) where.salesOrderId = f.salesOrderId;
+  if (f.salespersonId) where.salespersonId = f.salespersonId === 'none' ? null : f.salespersonId;
+  if (f.teamId) where.teamId = f.teamId === 'none' ? null : f.teamId;
+  if (f.termsDays) {
+    const days = Number(f.termsDays);
+    if (!Number.isInteger(days) || days < 0 || days > 365) throw badRequest('Terms is a number of days');
+    where.termsDays = days;
+  }
+  const from = filterDay(f.from, 'From');
+  const to = filterDay(f.to, 'To');
   if (from || to) where.invoiceDate = { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) };
+  // The expected collection — the due date, counted from the countered day.
+  const dueFrom = filterDay(f.dueFrom, 'Expected from');
+  const dueTo = filterDay(f.dueTo, 'Expected to');
+  if (dueFrom || dueTo) where.dueDate = { ...(dueFrom ? { gte: dayOf(dueFrom) } : {}), ...(dueTo ? { lte: dayOf(dueTo) } : {}) };
+  const countered = choice(f.countered, { yes: 'yes', no: 'no' }, 'Countered', (v) => (v === 'yes' ? 'Countered' : 'Awaiting countering'));
+  if (countered === 'yes') where.counteredDate = { not: null };
+  if (countered === 'no') and.push(AWAITING_COUNTER_WHERE);
   // "Outstanding" is not a status — a partially paid invoice and an issued
   // one are both outstanding, and a paid one never is.
-  if (q.filters.outstanding === 'true') {
+  if (f.outstanding === 'true') {
     where.status = { in: ['ISSUED', 'PARTIALLY_PAID'] };
   }
-  if (q.filters.overdue === 'true') {
-    where.status = { in: ['ISSUED', 'PARTIALLY_PAID'] };
-    where.dueDate = { lt: dayKey(new Date()) };
-  }
+  // Overdue only once countered: an invoice the customer has not received
+  // has not started its terms.
+  if (f.overdue === 'true') and.push(overdueWhere());
   if (q.search) {
     where.OR = [
       { number: { contains: q.search, mode: 'insensitive' } },
       { poReference: { contains: q.search, mode: 'insensitive' } },
+      { siNumber: { contains: q.search, mode: 'insensitive' } },
       { customer: { name: { contains: q.search, mode: 'insensitive' } } },
       { job: { number: { contains: q.search, mode: 'insensitive' } } },
+      { salesOrder: { number: { contains: q.search, mode: 'insensitive' } } },
+      { salesperson: { name: { contains: q.search, mode: 'insensitive' } } },
     ];
   }
-  const ids = idsFilter(q.filters.ids);
+  const ids = idsFilter(f.ids);
   if (ids) where.id = { in: ids };
-  return where;
+  return and.length ? { AND: [where, ...and] } : where;
+}
+
+/**
+ * The cards over the list (the owner's sample: "TOTAL RECEIVABLES SUM — N
+ * active invoices pending collection"), under the list's own query: the
+ * receivable (issued and partly paid, against net collectible), what of it is
+ * overdue and what is awaiting countering, what has been collected on the
+ * invoices listed, and the receivable split by the team credited — the same
+ * cards as the sales lists (`teamShares`).
+ */
+async function invoiceListSummary(where: Prisma.InvoiceWhereInput) {
+  const today = dayKey(new Date());
+  const [owed, collected] = await Promise.all([
+    prisma.invoice.findMany({
+      where: { AND: [where, { status: { in: INVOICE_OWED } }] },
+      select: { status: true, counteredDate: true, dueDate: true, netCollectible: true, amountCollected: true, team: TEAM_REF_SELECT },
+    }),
+    prisma.invoice.aggregate({ where: { AND: [where, { status: { not: 'CANCELLED' } }] }, _sum: { amountCollected: true } }),
+  ]);
+  let receivable = 0;
+  let overdue = 0;
+  let overdueCount = 0;
+  let awaiting = 0;
+  let awaitingCount = 0;
+  const shares: { team: { id: string; code: string; name: string } | null; cents: number }[] = [];
+  for (const r of owed) {
+    const outstanding = Math.round((num(r.netCollectible) - num(r.amountCollected)) * 100);
+    if (outstanding <= 0) continue;
+    receivable += outstanding;
+    shares.push({ team: r.team, cents: outstanding });
+    if (!r.counteredDate) {
+      awaiting += outstanding;
+      awaitingCount++;
+    } else if (isOverdue({ ...r, outstanding: outstanding / 100 }, today)) {
+      overdue += outstanding;
+      overdueCount++;
+    }
+  }
+  return {
+    receivable: receivable / 100,
+    active: shares.length,
+    overdue: overdue / 100,
+    overdueCount,
+    awaiting: awaiting / 100,
+    awaitingCount,
+    collected: num(collected._sum.amountCollected),
+    teams: await teamShares(shares),
+  };
 }
 
 const INVOICE_SORTS = ['number', 'invoiceDate', 'dueDate', 'createdAt'];
@@ -334,8 +452,79 @@ invoiceRoutes.get(
       }),
       prisma.invoice.count({ where }),
     ]);
+    const [files, summary] = await Promise.all([attachmentCounts(rows.map((r) => r.id)), invoiceListSummary(where)]);
 
-    res.json(listResult(rows.map(presentInvoice), total, q));
+    res.json({ ...listResult(rows.map((r) => presentInvoice(r, files.get(r.id) ?? 0)), total, q), summary });
+  }),
+);
+
+/**
+ * The issued sales orders a new invoice may bill — the form's "From a sales
+ * order" choices, for one customer: each with its net (the order's total
+ * before VAT), what live invoices already bill of it, what is left, its PO,
+ * its terms and who sold it. Above `/:id`.
+ */
+/**
+ * Who an invoice would be credited to — the person who raised the order's
+ * invoice request, else the order's or project's salesperson — so the form
+ * shows the names it will fill in (2026-10-16). Above `/:id`.
+ */
+invoiceRoutes.get(
+  '/credit',
+  require_('gfin.ar.create'),
+  handler(async (req, res) => {
+    const str = (k: string) => (typeof req.query[k] === 'string' && req.query[k] ? String(req.query[k]) : null);
+    const credit = await invoiceCredit({ salesOrderId: str('salesOrderId'), jobId: str('jobId'), jobOrderId: str('jobOrderId') });
+    const [person, team] = await Promise.all([
+      credit.salespersonId ? prisma.user.findUnique({ where: { id: credit.salespersonId }, select: { id: true, name: true } }) : null,
+      credit.teamId ? prisma.industry.findUnique({ where: { id: credit.teamId }, select: { id: true, code: true, name: true } }) : null,
+    ]);
+    res.json({ salesperson: person, team });
+  }),
+);
+
+invoiceRoutes.get(
+  '/sales-orders',
+  require_('gfin.ar.create'),
+  handler(async (req, res) => {
+    const customerId = typeof req.query.customerId === 'string' ? req.query.customerId : '';
+    if (!customerId) throw badRequest('Which customer?');
+    const orders = await prisma.salesOrder.findMany({
+      where: { customerId, status: 'ISSUED' },
+      orderBy: { orderDate: 'desc' },
+      select: {
+        id: true,
+        number: true,
+        orderDate: true,
+        poNumber: true,
+        termsDays: true,
+        total: true,
+        vatAmount: true,
+        vatRate: true,
+        owner: { select: { id: true, name: true } },
+        quotation: { select: { subject: true } },
+        invoices: { where: { status: { not: 'CANCELLED' } }, select: { grossAmount: true } },
+      },
+    });
+    res.json(
+      orders.map((o) => {
+        const net = cents(num(o.total) - num(o.vatAmount));
+        const invoiced = cents(o.invoices.reduce((s, i) => s + num(i.grossAmount), 0));
+        return {
+          id: o.id,
+          number: o.number,
+          orderDate: o.orderDate,
+          poNumber: o.poNumber,
+          termsDays: o.termsDays,
+          vatRate: num(o.vatRate),
+          subject: o.quotation.subject,
+          owner: o.owner,
+          net,
+          invoiced,
+          left: cents(Math.max(0, net - invoiced)),
+        };
+      }),
+    );
   }),
 );
 
@@ -368,6 +557,9 @@ invoiceRoutes.get(
           customer: { select: { name: true } },
           job: { select: { number: true, name: true } },
           jobOrder: { select: { number: true } },
+          salesOrder: { select: { number: true } },
+          salesperson: { select: { name: true } },
+          team: { select: { code: true } },
         },
         orderBy: orderBy(q, INVOICE_SORTS, { invoiceDate: 'desc' }),
         take: LIST_CAP,
@@ -380,15 +572,30 @@ invoiceRoutes.get(
       recordNamed('customer', q.filters.customerId),
       recordNamed('project', q.filters.jobId),
     ]);
+    const [salespersonNamed, teamNamed, orderNamed] = await Promise.all([
+      q.filters.salespersonId === 'none' ? 'no salesperson' : recordNamed('person', q.filters.salespersonId),
+      q.filters.teamId === 'none'
+        ? 'no team'
+        : q.filters.teamId
+          ? prisma.industry.findUnique({ where: { id: q.filters.teamId }, select: { code: true } }).then((t) => (t ? `team ${t.code}` : undefined))
+          : undefined,
+      recordNamed('sales order', q.filters.salesOrderId),
+    ]);
 
     const f = q.filters;
     const status = choice(f.status, InvoiceStatus, 'Status');
     const reference = listReference(count, rows.length, ['invoice', 'invoices'], [
       q.search && `search "${q.search}"`,
       f.overdue === 'true' ? 'overdue' : f.outstanding === 'true' ? 'outstanding' : status && `status ${statusLabel(status)}`,
+      f.countered === 'yes' ? 'countered' : f.countered === 'no' ? 'awaiting countering' : undefined,
       customer,
       project,
+      orderNamed,
+      salespersonNamed,
+      teamNamed,
+      f.termsDays && termsLabel(Number(f.termsDays)),
       rangeNamed('dated', f.from, f.to),
+      rangeNamed('expected', f.dueFrom, f.dueTo),
       f.ids && 'the rows selected',
     ]);
     const today = dayKey(new Date());
@@ -401,20 +608,33 @@ invoiceRoutes.get(
     const sections: PdfSection[] = [
       {
         kind: 'table',
-        head: ['Number', 'Customer and project', 'Dated', 'Due', `Invoiced (${currency})`, `Collectible (${currency})`, `Outstanding (${currency})`, 'Status'],
+        head: ['Number', 'Customer and project', 'Countered', 'Expected', `Invoiced (${currency})`, `Collectible (${currency})`, `Outstanding (${currency})`, 'Status'],
         align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'left'],
         rows: rows.map((r) => {
           const inSum = r.status !== 'CANCELLED';
           const outstanding = cents(num(r.netCollectible) - num(r.amountCollected));
-          const late = (r.status === 'ISSUED' || r.status === 'PARTIALLY_PAID') && outstanding > 0 ? daysBetween(r.dueDate, today) : 0;
+          const late = daysLate({ ...r, outstanding }, today);
+          const owed = r.status === 'ISSUED' || r.status === 'PARTIALLY_PAID';
+          const credit = [r.salesperson?.name, r.team?.code].filter(Boolean).join(' · ');
           return [
-            r.number,
+            r.siNumber ? { title: r.number, body: `SI ${r.siNumber}` } : r.number,
             {
               title: r.customer.name,
-              body: r.job ? `${r.job.number} — ${r.job.name}` : r.jobOrder ? `Job order ${r.jobOrder.number}` : 'No project',
+              body: [
+                r.job ? `${r.job.number} — ${r.job.name}` : r.salesOrder ? `Sales order ${r.salesOrder.number}` : r.jobOrder ? `Job order ${r.jobOrder.number}` : 'No project',
+                credit,
+              ]
+                .filter(Boolean)
+                .join(' · '),
             },
-            formatShortDate(r.invoiceDate),
-            late > 0 ? { title: formatShortDate(r.dueDate), body: `${late} day${late === 1 ? '' : 's'} late` } : formatShortDate(r.dueDate),
+            r.counteredDate
+              ? { title: formatShortDate(r.counteredDate), body: termsLabel(r.termsDays, r.terms) }
+              : { title: owed ? 'Awaiting' : '—', body: termsLabel(r.termsDays, r.terms) },
+            late > 0
+              ? { title: formatShortDate(r.dueDate), body: `${late} day${late === 1 ? '' : 's'} late` }
+              : owed && !r.counteredDate
+                ? { title: formatShortDate(r.dueDate), body: 'not yet countered' }
+                : formatShortDate(r.dueDate),
             bracketed(formatAmount(num(r.invoiceTotal)), inSum),
             bracketed(formatAmount(num(r.netCollectible)), inSum),
             // Nothing is owed on a draft until it is issued.
@@ -519,14 +739,19 @@ invoiceRoutes.get(
         columns: 3,
         fields: [
           { label: 'Customer', value: inv.customer.name },
+          { label: 'Invoice no.', value: inv.siNumber ?? '—' },
           { label: 'TIN', value: inv.customer.tin ?? '—' },
           { label: 'Project', value: inv.job ? `${inv.job.number} — ${inv.job.name}` : '—' },
-          { label: 'Customer P.O.', value: inv.poReference ?? '—' },
-          { label: 'Terms', value: inv.terms ?? '—' },
-          { label: 'Due date', value: formatDate(inv.dueDate) },
-          inv.jobOrder
-            ? { label: 'Job order', value: inv.jobOrder.number }
-            : { label: 'Billing no.', value: inv.progressBilling ? `${inv.progressBilling.number} (#${inv.progressBilling.billingNo})` : '—' },
+          { label: 'Customer P.O.', value: inv.poReference ?? inv.salesOrder?.poNumber ?? '—' },
+          { label: 'Payment terms', value: termsLabel(inv.termsDays, inv.terms) },
+          { label: 'Countered', value: inv.counteredDate ? formatDate(inv.counteredDate) : 'Not yet' },
+          { label: inv.counteredDate ? 'Due date' : 'Due (if countered on the invoice date)', value: formatDate(inv.dueDate) },
+          inv.salesOrder
+            ? { label: 'Sales order', value: inv.salesOrder.number }
+            : inv.jobOrder
+              ? { label: 'Job order', value: inv.jobOrder.number }
+              : { label: 'Billing no.', value: inv.progressBilling ? `${inv.progressBilling.number} (#${inv.progressBilling.billingNo})` : '—' },
+          { label: 'Sales personnel', value: [inv.salesperson?.name, inv.team?.code].filter(Boolean).join(' · ') || '—' },
           { label: 'Status', value: statusLabel(inv.status) },
         ],
       },
@@ -590,7 +815,7 @@ invoiceRoutes.get(
       });
     }
 
-    const pdf = await renderDocument({
+    const bare = await renderDocument({
       title: 'Sales Invoice',
       documentNumber: inv.number,
       date: inv.invoiceDate,
@@ -598,13 +823,22 @@ invoiceRoutes.get(
       sections,
       signatories,
     });
+    // The invoice's files (the countered copy, the signed delivery) print
+    // behind it unless `?attachments=0`.
+    const files = req.query.attachments === '0' ? [] : await attachedFiles('invoice', inv.id);
+    const { pdf, listed } = await withAttachments(bare, files, { title: 'Sales invoice', number: inv.number, reference: inv.customer.name });
 
     await audit(
-      { entityType: 'invoice', entityId: inv.id, action: 'EXPORTED', summary: `Printed ${inv.number}` },
+      {
+        entityType: 'invoice',
+        entityId: inv.id,
+        action: 'EXPORTED',
+        summary: `Printed ${inv.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}`,
+      },
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${inv.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Invoice', number: inv.number, author: inv.createdBy.name, date: inv.invoiceDate })));
     res.send(pdf);
   }),
 );
@@ -612,11 +846,90 @@ invoiceRoutes.get(
 /** An invoice's own header — what a billing's invoice may set, raised or modified. */
 const invoiceHeaderSchema = z.object({
   invoiceDate: z.string().optional(),
+  /**
+   * The day the customer received it (2026-10-16, the owner's call: the form
+   * asks this in place of the invoice date). Given, it is the invoice date
+   * too unless one is sent, and the terms run from it.
+   */
+  counteredDate: z.string().optional().nullable(),
+  /** The printed sales invoice (BIR booklet) number — one invoice each. */
+  siNumber: z.string().trim().max(60).optional().nullable(),
   dueDate: z.string().optional(),
+  /** Net days — the due date follows from it unless a due date is typed. */
+  termsDays: z.number().int().min(0).max(365).optional().nullable(),
   terms: z.string().optional().nullable(),
   poReference: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
 });
+
+/** Who is credited with an invoice — named on the form, else its source's. */
+const creditSchema = z.object({
+  salespersonId: z.string().optional().nullable(),
+  teamId: z.string().optional().nullable(),
+});
+
+/**
+ * The salesperson and team an invoice is credited to: those the form names
+ * (checked to exist — a team must be active), else the ones its source
+ * names (`invoiceCredit`), the team falling back to the salesperson's own.
+ * `undefined` in the body means "from the source"; null means nobody.
+ */
+async function resolveCredit(
+  body: { salespersonId?: string | null; teamId?: string | null },
+  source: { salesOrderId?: string | null; jobId?: string | null; jobOrderId?: string | null },
+): Promise<{ salespersonId: string | null; teamId: string | null }> {
+  const fromSource = body.salespersonId === undefined || body.teamId === undefined ? await invoiceCredit(source) : null;
+  const salespersonId = body.salespersonId === undefined ? fromSource!.salespersonId : body.salespersonId || null;
+  if (salespersonId && body.salespersonId) {
+    const known = await prisma.user.findUnique({ where: { id: salespersonId }, select: { id: true } });
+    if (!known) throw badRequest('That salesperson is not on file');
+  }
+  let teamId: string | null;
+  if (body.teamId === undefined) {
+    teamId = fromSource!.teamId;
+    if (!teamId && salespersonId && body.salespersonId) {
+      teamId = (await prisma.employee.findUnique({ where: { userId: salespersonId }, select: { industryId: true } }))?.industryId ?? null;
+    }
+  } else {
+    teamId = body.teamId || null;
+    if (teamId) {
+      const team = await prisma.industry.findUnique({ where: { id: teamId }, select: { isActive: true } });
+      if (!team?.isActive) throw badRequest('That team is not on the list');
+    }
+  }
+  return { salespersonId, teamId };
+}
+
+/**
+ * A printed sales invoice number belongs to one live invoice: the same number
+ * (case- and space-blind) on another invoice that is not cancelled is a 409
+ * naming it, before anything is written.
+ */
+async function assertSiNumberFree(siNumber: string | null | undefined, exceptId?: string) {
+  const si = siNumber?.trim();
+  if (!si) return;
+  const taken = await prisma.invoice.findFirst({
+    where: { siNumber: { equals: si, mode: 'insensitive' }, status: { not: 'CANCELLED' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { number: true },
+  });
+  if (taken) throw conflict(`Invoice no. ${si} is already on ${taken.number}`);
+}
+
+/** The invoice date and countered day a form sends: countered alone is both. */
+function datesFrom(body: { invoiceDate?: string; counteredDate?: string | null }, fallback: Date) {
+  const counteredDate = body.counteredDate ? asDate(body.counteredDate, 'Countered date') : null;
+  const invoiceDate = body.invoiceDate ? asDate(body.invoiceDate, 'Invoice date') : (counteredDate ?? fallback);
+  if (counteredDate && counteredDate < invoiceDate) throw badRequest('It cannot be countered before its invoice date');
+  if (counteredDate && counteredDate > dayKey(new Date())) throw badRequest('It cannot be countered on a day still to come');
+  return { invoiceDate, counteredDate };
+}
+
+/** The due date: typed, else the countered day (else the invoice date) plus the terms. */
+function dueFrom(body: { dueDate?: string; termsDays?: number | null }, invoiceDate: Date, counteredDate: Date | null, termsDays: number): Date {
+  const dueDate = body.dueDate ? asDate(body.dueDate, 'Due date') : expectedCollection(invoiceDate, counteredDate, termsDays);
+  if (dueDate < invoiceDate) throw badRequest('The due date is before the invoice date');
+  return dueDate;
+}
 
 /**
  * Raising an invoice from an approved progress billing.
@@ -632,15 +945,11 @@ invoiceRoutes.post(
   require_('gfin.ar.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(invoiceHeaderSchema, req.body);
+    const body = parseBody(invoiceHeaderSchema.merge(creditSchema).extend({ ewtRate: z.number().min(0).max(0.15).optional().nullable() }), req.body);
 
     const billing = await prisma.progressBilling.findUnique({
       where: { id: req.params.billingId },
-      include: {
-        job: { select: { id: true, number: true, name: true, customerId: true } },
-        lines: { include: { scopeItem: true } },
-        invoice: { select: { id: true, number: true } },
-      },
+      include: billingForInvoiceInclude,
     });
     if (!billing) throw notFound('Progress billing not found');
     if (billing.status !== 'APPROVED' && billing.status !== 'INVOICED') {
@@ -653,51 +962,30 @@ invoiceRoutes.post(
         `${billing.number} has already been invoiced as ${billing.invoice.number}. Raise a credit note against that instead of a second invoice.`,
       );
     }
+    // The other door: an invoice request on its way to Back Support raises this
+    // billing's invoice when approved, so this one waits for it (2026-10-15).
+    const live = await prisma.invoiceRequest.findFirst({
+      where: { progressBillingId: billing.id, status: { in: ['DRAFT', 'PENDING_APPROVAL'] } },
+      select: { number: true },
+    });
+    if (live) throw badRequest(`${billing.number} has invoice request ${live.number} open — its approval raises the invoice`);
 
     const settings = await financeSettings();
-    const invoiceDate = body.invoiceDate ? asDate(body.invoiceDate, 'Invoice date') : dayKey(new Date());
-    const dueDate = body.dueDate
-      ? asDate(body.dueDate, 'Due date')
-      : addDays(invoiceDate, settings.defaultTermsDays);
-    if (dueDate < invoiceDate) throw badRequest('The due date is before the invoice date');
+    const { invoiceDate, counteredDate } = datesFrom(body, dayKey(new Date()));
+    const termsDays = body.termsDays ?? parseTermsDays(body.terms) ?? settings.defaultTermsDays;
+    const dueDate = dueFrom(body, invoiceDate, counteredDate, termsDays);
+    const credit = await resolveCredit(body, { jobId: billing.jobId });
+    await assertSiNumberFree(body.siNumber);
 
-    const invoice = await prisma.$transaction(async (tx) => {
-      const number = await nextNumber('invoice', tx);
-      const created = await tx.invoice.create({
-        data: {
-          number,
-          customerId: billing.job.customerId,
-          jobId: billing.jobId,
-          progressBillingId: billing.id,
-          invoiceDate,
-          dueDate,
-          terms: body.terms ?? `${settings.defaultTermsDays} days`,
-          poReference: body.poReference || null,
-          // Carried, not recomputed.
-          grossAmount: billing.grossAmount,
-          vatRate: billing.vatRate,
-          vatAmount: billing.vatAmount,
-          ewtRate: billing.ewtRate,
-          ewtAmount: billing.ewtAmount,
-          invoiceTotal: billing.invoiceTotal,
-          netCollectible: billing.netCollectible,
-          notes: body.notes || null,
-          createdById: me.id,
-          lines: {
-            create: billing.lines.map((line, i) => ({
-              sortOrder: i,
-              description: line.scopeItem?.name ?? 'Progress billing',
-              detail: `${num(line.toDatePct)}% complete to date (${num(line.previousPct)}% already billed)`,
-              amount: line.thisPeriodAmount,
-            })),
-          },
-        },
-        include: invoiceInclude,
-      });
-
-      await tx.progressBilling.update({ where: { id: billing.id }, data: { status: 'INVOICED' } });
-      return created;
-    });
+    const made = await prisma.$transaction((tx) =>
+      createInvoiceFromBilling(
+        tx,
+        billing,
+        { invoiceDate, dueDate, termsDays, terms: body.terms, poReference: body.poReference, siNumber: body.siNumber, notes: body.notes, ewtRate: body.ewtRate ?? null, ...credit },
+        me.id,
+      ).then(async (inv) => (counteredDate ? tx.invoice.update({ where: { id: inv.id }, data: { counteredDate } }) : inv)),
+    );
+    const invoice = await prisma.invoice.findUniqueOrThrow({ where: { id: made.id }, include: invoiceInclude });
 
     await audit(
       {
@@ -713,12 +1001,17 @@ invoiceRoutes.post(
 );
 
 /** A standalone invoice, for work with no progress billing behind it. */
-const manualInvoiceSchema = z.object({
+const manualInvoiceSchema = creditSchema.extend({
   customerId: z.string().optional().nullable(),
   jobId: z.string().optional().nullable(),
+  /** An issued sales order this invoice bills — never past what is left of its net. */
+  salesOrderId: z.string().optional().nullable(),
+  termsDays: z.number().int().min(0).max(365).optional().nullable(),
   /** A completed, chargeable job order — billed once, like a billing. */
   jobOrderId: z.string().optional().nullable(),
   invoiceDate: z.string().optional(),
+  counteredDate: z.string().optional().nullable(),
+  siNumber: z.string().trim().max(60).optional().nullable(),
   dueDate: z.string().optional(),
   terms: z.string().optional().nullable(),
   poReference: z.string().optional().nullable(),
@@ -810,17 +1103,37 @@ invoiceRoutes.post(
       body.poReference ??= jo.customerPoNumber;
       jobOrder = { id: jo.id, number: jo.number };
     }
+    // An issued sales order (2026-10-15, the owner's "+ Add Invoice"): its
+    // customer, PO, terms and VAT rate unless the body says otherwise, and
+    // never more than is left of its net — checked again under a lock below.
+    let salesOrder: { id: string; number: string; net: number } | null = null;
+    if (body.salesOrderId) {
+      if (jobOrder) throw badRequest('An invoice bills a job order or a sales order, not both');
+      const so = await prisma.salesOrder.findUnique({
+        where: { id: body.salesOrderId },
+        select: { id: true, number: true, status: true, customerId: true, poNumber: true, termsDays: true, vatRate: true, total: true, vatAmount: true },
+      });
+      if (!so) throw notFound('Sales order not found');
+      if (so.status !== 'ISSUED') throw badRequest(`${so.number} is ${statusLabel(so.status).toLowerCase()} — only an issued sales order is invoiced`);
+      if (body.customerId && body.customerId !== so.customerId) throw badRequest(`${so.number} is another customer's order`);
+      body.customerId ??= so.customerId;
+      body.poReference ??= so.poNumber;
+      body.termsDays ??= so.termsDays;
+      body.vatRate ??= num(so.vatRate);
+      salesOrder = { id: so.id, number: so.number, net: cents(num(so.total) - num(so.vatAmount)) };
+    }
     if (!body.customerId) throw badRequest('Which customer?');
     const customerId = body.customerId;
 
     const money = manualInvoiceMoney(body.lines, body.vatRate ?? rates.vatRate, body.ewtRate ?? rates.ewtRate);
-    const invoiceDate = body.invoiceDate ? asDate(body.invoiceDate, 'Invoice date') : dayKey(new Date());
-    const dueDate = body.dueDate
-      ? asDate(body.dueDate, 'Due date')
-      : addDays(invoiceDate, settings.defaultTermsDays);
-    if (dueDate < invoiceDate) throw badRequest('The due date is before the invoice date');
+    const { invoiceDate, counteredDate } = datesFrom(body, dayKey(new Date()));
+    const termsDays = body.termsDays ?? parseTermsDays(body.terms) ?? settings.defaultTermsDays;
+    const dueDate = dueFrom(body, invoiceDate, counteredDate, termsDays);
+    await assertSiNumberFree(body.siNumber);
+    const credit = await resolveCredit(body, { salesOrderId: salesOrder?.id, jobId: body.jobId, jobOrderId: jobOrder?.id });
 
     const invoice = await prisma.$transaction(async (tx) => {
+      if (salesOrder) await assertOrderLeft(tx, salesOrder, money.tax.grossAmount);
       const number = await nextNumber('invoice', tx);
       return tx.invoice.create({
         data: {
@@ -828,10 +1141,15 @@ invoiceRoutes.post(
           customerId,
           jobId: body.jobId || null,
           jobOrderId: jobOrder?.id ?? null,
+          salesOrderId: salesOrder?.id ?? null,
           invoiceDate,
+          counteredDate,
           dueDate,
-          terms: body.terms ?? `${settings.defaultTermsDays} days`,
+          termsDays,
+          ...credit,
+          terms: body.terms ?? termsLabel(termsDays),
           poReference: body.poReference || null,
+          siNumber: body.siNumber?.trim() || null,
           ...money.figures,
           notes: body.notes || null,
           createdById: me.id,
@@ -846,7 +1164,11 @@ invoiceRoutes.post(
         entityType: 'invoice',
         entityId: invoice.id,
         action: 'CREATED',
-        summary: jobOrder ? `${invoice.number} raised from job order ${jobOrder.number}` : `${invoice.number} raised`,
+        summary: jobOrder
+          ? `${invoice.number} raised from job order ${jobOrder.number}`
+          : salesOrder
+            ? `${invoice.number} raised from sales order ${salesOrder.number} — ${num(invoice.grossAmount)} of its ${salesOrder.net} net`
+            : `${invoice.number} raised`,
       },
       req,
     );
@@ -855,7 +1177,10 @@ invoiceRoutes.post(
 );
 
 /** What a billing's invoice never takes on Modify: its figures and whom they bill. */
-const BILLING_CARRIED = ['customerId', 'jobId', 'jobOrderId', 'vatRate', 'ewtRate', 'lines'] as const;
+// The withholding rate is the one figure a billing's draft takes (2026-10-16,
+// the owner's call: "editable withholding tax, e.g. 1% or 2%") — EWT is the
+// customer's to withhold, and it is withheld on the gross the billing carries.
+const BILLING_CARRIED = ['customerId', 'jobId', 'jobOrderId', 'vatRate', 'lines'] as const;
 
 /**
  * Modifying a draft invoice (2026-10-09, Phase 2 of the button standard).
@@ -880,6 +1205,7 @@ invoiceRoutes.put(
       include: {
         progressBilling: { select: { number: true } },
         jobOrder: { select: { number: true } },
+        salesOrder: { select: { id: true, number: true, total: true, vatAmount: true } },
       },
     });
     if (!existing) throw notFound('Invoice not found');
@@ -897,15 +1223,36 @@ invoiceRoutes.put(
       }
     } else if (raw.jobOrderId !== undefined && raw.jobOrderId !== existing.jobOrderId) {
       throw badRequest('The job order an invoice bills does not change — cancel this one and raise another');
+    } else if (raw.salesOrderId !== undefined && (raw.salesOrderId || null) !== existing.salesOrderId) {
+      throw badRequest('The sales order an invoice bills does not change — cancel this one and raise another');
     }
 
     const header = parseBody(invoiceHeaderSchema, raw);
-    const invoiceDate = header.invoiceDate ? asDate(header.invoiceDate, 'Invoice date') : existing.invoiceDate;
-    const dueDate = header.dueDate ? asDate(header.dueDate, 'Due date') : existing.dueDate;
+    const counteredDate =
+      header.counteredDate === undefined ? existing.counteredDate : header.counteredDate ? asDate(header.counteredDate, 'Countered date') : null;
+    const invoiceDate = header.invoiceDate
+      ? asDate(header.invoiceDate, 'Invoice date')
+      : header.counteredDate && counteredDate
+        ? counteredDate
+        : existing.invoiceDate;
+    if (counteredDate && counteredDate < invoiceDate) throw badRequest('It cannot be countered before its invoice date');
+    if (counteredDate && counteredDate > dayKey(new Date())) throw badRequest('It cannot be countered on a day still to come');
+    const termsDays = header.termsDays ?? existing.termsDays;
+    // The due date follows the terms unless one is typed; an invoice from
+    // before the terms were kept keeps the one it was given.
+    const dueDate = header.dueDate
+      ? asDate(header.dueDate, 'Due date')
+      : termsDays !== null && (header.termsDays !== undefined || header.invoiceDate || header.counteredDate !== undefined)
+        ? expectedCollection(invoiceDate, counteredDate, termsDays)
+        : existing.dueDate;
     if (dueDate < invoiceDate) throw badRequest('The due date is before the invoice date');
+    if (header.siNumber !== undefined) await assertSiNumberFree(header.siNumber, existing.id);
     const headerData = {
       invoiceDate,
+      counteredDate,
+      siNumber: header.siNumber === undefined ? existing.siNumber : header.siNumber?.trim() || null,
       dueDate,
+      termsDays,
       terms: header.terms === undefined ? existing.terms : header.terms || null,
       poReference: header.poReference === undefined ? existing.poReference : header.poReference || null,
       notes: header.notes === undefined ? existing.notes : header.notes || null,
@@ -914,7 +1261,9 @@ invoiceRoutes.put(
     let manual: ReturnType<typeof manualInvoiceMoney> | null = null;
     let customerId = existing.customerId;
     let jobId = existing.jobId;
-    if (!fromBilling) {
+    // A body without lines changes the header alone (the printed invoice
+    // number, the countered day) and leaves the figures as they stand.
+    if (!fromBilling && raw.lines !== undefined) {
       const body = parseBody(manualInvoiceSchema.omit({ jobOrderId: true }), raw);
       customerId = body.customerId ?? existing.customerId;
       if (customerId !== existing.customerId) {
@@ -932,10 +1281,25 @@ invoiceRoutes.put(
       manual = manualInvoiceMoney(body.lines, body.vatRate ?? num(existing.vatRate), body.ewtRate ?? num(existing.ewtRate));
     }
 
+    // A new withholding rate with no lines (a billing's draft, or a header
+    // save): EWT again on the stored gross, the rest of the figures kept.
+    const ewtOnly =
+      !manual && raw.ewtRate !== undefined
+        ? (() => {
+            const rate = parseBody(z.object({ ewtRate: z.number().min(0).max(0.15) }), raw).ewtRate;
+            const tax = taxBreakdown(num(existing.grossAmount), num(existing.vatRate), rate);
+            return { ewtRate: D(tax.ewtRate), ewtAmount: D(tax.ewtAmount), netCollectible: D(tax.netCollectible) };
+          })()
+        : null;
+
     const updated = await prisma.$transaction(async (tx) => {
+      if (manual && existing.salesOrder) {
+        const order = existing.salesOrder;
+        await assertOrderLeft(tx, { id: order.id, number: order.number, net: cents(num(order.total) - num(order.vatAmount)) }, manual.tax.grossAmount, existing.id);
+      }
       const claimed = await tx.invoice.updateMany({
         where: { id: existing.id, status: 'DRAFT' },
-        data: { ...headerData, ...(manual ? { customerId, jobId, ...manual.figures } : {}) },
+        data: { ...headerData, ...(manual ? { customerId, jobId, ...manual.figures } : {}), ...(ewtOnly ?? {}) },
       });
       if (!claimed.count) throw badRequest('It was issued or cancelled a moment ago — reload to see where it stands');
       if (manual) {
@@ -950,7 +1314,9 @@ invoiceRoutes.put(
         entityType: 'invoice',
         entityId: existing.id,
         action: 'UPDATED',
-        summary: manual
+        summary: ewtOnly
+          ? `${existing.number} modified — EWT ${ratePct(num(ewtOnly.ewtRate))}, ${num(ewtOnly.netCollectible)} collectible (was ${num(existing.netCollectible)})`
+          : manual
           ? `${existing.number} modified — ${num(updated.netCollectible)} collectible (was ${num(existing.netCollectible)})`
           : `${existing.number} modified — dates, terms, PO reference or notes; the figures stay ${existing.progressBilling?.number ?? 'the billing'}'s`,
         before: {
@@ -992,6 +1358,99 @@ invoiceRoutes.post(
         entityId: invoice.id,
         action: 'SUBMITTED',
         summary: `${invoice.number} issued — ${num(invoice.netCollectible)} collectible, due ${invoice.dueDate.toISOString().slice(0, 10)}`,
+      },
+      req,
+    );
+    res.json(presentInvoice(updated));
+  }),
+);
+
+/**
+ * Countered (2026-10-15, the owner's sample): the customer received the
+ * issued invoice on this day. The terms run from it, so the due date — the
+ * expected collection — moves with it; until it is recorded the invoice is
+ * awaiting countering and never overdue. A wrong day is corrected by saying
+ * it again; never a day before the invoice or after today.
+ */
+invoiceRoutes.post(
+  '/:id/counter',
+  require_('gfin.ar.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(
+      z.object({
+        counteredDate: z.string().optional(),
+        termsDays: z.number().int().min(0).max(365).optional(),
+      }),
+      req.body,
+    );
+    const invoice = await prisma.invoice.findUnique({ where: { id: req.params.id } });
+    if (!invoice) throw notFound('Invoice not found');
+    // "Mark as received" (2026-10-16, the owner's call: no customer is
+    // involved in G-CORE's side of it): on a draft it issues the invoice and
+    // records the day the customer received it, in one step.
+    if (!['DRAFT', 'ISSUED', 'PARTIALLY_PAID', 'PAID'].includes(invoice.status)) {
+      throw badRequest('A cancelled invoice is not countered');
+    }
+    const issuing = invoice.status === 'DRAFT';
+    const today = dayKey(new Date());
+    const counteredDate = body.counteredDate ? asDate(body.counteredDate, 'Countered date') : today;
+    if (counteredDate < invoice.invoiceDate) throw badRequest('It cannot be countered before its invoice date');
+    if (counteredDate > today) throw badRequest('It cannot be countered on a day still to come');
+    const termsDays = body.termsDays ?? invoice.termsDays ?? Math.max(0, daysBetween(invoice.invoiceDate, invoice.dueDate));
+    const dueDate = expectedCollection(invoice.invoiceDate, counteredDate, termsDays);
+
+    // Claimed on what was read, so two people countering at once do not
+    // both write a trail row over the other's day.
+    const claimed = await prisma.invoice.updateMany({
+      where: { id: invoice.id, status: invoice.status, counteredDate: invoice.counteredDate },
+      data: { counteredDate, termsDays, dueDate, ...(issuing ? { status: 'ISSUED' as const, issuedAt: new Date() } : {}) },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+    const updated = await prisma.invoice.findUniqueOrThrow({ where: { id: invoice.id }, include: invoiceInclude });
+
+    await audit(
+      {
+        entityType: 'invoice',
+        entityId: invoice.id,
+        action: 'UPDATED',
+        summary: `${invoice.number} ${issuing ? 'issued and ' : ''}received by the customer on ${formatDate(counteredDate)} — ${termsLabel(termsDays)}, expected ${formatDate(dueDate)}`,
+        before: { counteredDate: invoice.counteredDate, dueDate: invoice.dueDate, termsDays: invoice.termsDays },
+        after: { counteredDate, dueDate, termsDays },
+      },
+      req,
+    );
+    res.json(presentInvoice(updated));
+  }),
+);
+
+/**
+ * Who is credited with the invoice — the salesperson and the team. A
+ * category, not a figure, so it changes at any stage but a cancelled one's.
+ */
+invoiceRoutes.patch(
+  '/:id/credit',
+  require_('gfin.ar.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(creditSchema, req.body);
+    const invoice = await prisma.invoice.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, number: true, status: true, salespersonId: true, teamId: true, salesOrderId: true, jobId: true, jobOrderId: true },
+    });
+    if (!invoice) throw notFound('Invoice not found');
+    if (invoice.status === 'CANCELLED') throw badRequest('A cancelled invoice keeps the credit it had');
+    const credit = await resolveCredit(
+      { salespersonId: body.salespersonId === undefined ? invoice.salespersonId : body.salespersonId, teamId: body.teamId },
+      invoice,
+    );
+    const updated = await prisma.invoice.update({ where: { id: invoice.id }, data: credit, include: invoiceInclude });
+    await audit(
+      {
+        entityType: 'invoice',
+        entityId: invoice.id,
+        action: 'UPDATED',
+        summary: `${invoice.number} credited to ${updated.salesperson?.name ?? 'nobody'}${updated.team ? ` (${updated.team.code})` : ''}`,
+        before: { salespersonId: invoice.salespersonId, teamId: invoice.teamId },
+        after: credit,
       },
       req,
     );
@@ -1154,6 +1613,7 @@ const billInclude = {
   receiving: { select: { id: true, number: true, receivedDate: true } },
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
+  purchaser: { select: { id: true, name: true } },
   lines: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.SupplierBillInclude;
 
@@ -1174,6 +1634,7 @@ function presentBill(row: BillRow) {
     amountPaid: paid,
     outstanding: cents(netPayable - paid),
     daysOverdue: daysBetween(row.dueDate, new Date()),
+    termsLabel: billTermsLabel(row.termsDays, row.terms),
     lines: row.lines.map((l) => ({
       ...l,
       quantity: num(l.quantity),
@@ -1193,18 +1654,40 @@ function billListWhere(q: ListQuery): Prisma.SupplierBillWhereInput {
 
   const status = choice(q.filters.status, BillStatus, 'Status');
   if (status) where.status = status;
-  if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
-  if (q.filters.jobId) where.jobId = q.filters.jobId;
-  if (q.filters.outstanding === 'true') where.status = { in: ['APPROVED', 'PARTIALLY_PAID'] };
-  if (q.filters.overdue === 'true') {
-    where.status = { in: ['APPROVED', 'PARTIALLY_PAID'] };
-    where.dueDate = { lt: dayKey(new Date()) };
+  const f = q.filters;
+  if (f.supplierId) where.supplierId = f.supplierId;
+  if (f.jobId) where.jobId = f.jobId;
+  if (f.purchaserId) Object.assign(where, f.purchaserId === 'none' ? { purchaserId: null, purchaserName: null } : { purchaserId: f.purchaserId });
+  const and: Prisma.SupplierBillWhereInput[] = [];
+  if (f.outstanding === 'true') and.push({ status: { in: [...BILL_PAYABLE] } });
+  if (f.overdue === 'true') and.push({ status: { in: [...BILL_PAYABLE] }, dueDate: { lt: dayKey(new Date()) } });
+  if (f.dueSoon === 'true') and.push(dueSoonWhere());
+  if (f.pending === 'true') and.push({ status: { in: ['DRAFT', 'PENDING_APPROVAL'] } });
+  if (f.dueFrom || f.dueTo) {
+    and.push({ dueDate: { ...(f.dueFrom ? { gte: asDate(f.dueFrom, 'Due from') } : {}), ...(f.dueTo ? { lte: asDate(f.dueTo, 'Due to') } : {}) } });
   }
+  if (f.deliveredFrom || f.deliveredTo) {
+    and.push({
+      deliveryDate: {
+        ...(f.deliveredFrom ? { gte: asDate(f.deliveredFrom, 'Delivered from') } : {}),
+        ...(f.deliveredTo ? { lte: asDate(f.deliveredTo, 'Delivered to') } : {}),
+      },
+    });
+  }
+  if (f.termsDays) {
+    const days = Number(f.termsDays);
+    if (!Number.isInteger(days) || days < 0) throw badRequest('Terms must be a whole number of days');
+    and.push({ termsDays: days });
+  }
+  if (and.length) where.AND = and;
   if (q.search) {
     where.OR = [
       { number: { contains: q.search, mode: 'insensitive' } },
       { supplierInvoiceNo: { contains: q.search, mode: 'insensitive' } },
       { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
+      { purchaser: { name: { contains: q.search, mode: 'insensitive' } } },
+      { purchaserName: { contains: q.search, mode: 'insensitive' } },
+      { order: { number: { contains: q.search, mode: 'insensitive' } } },
     ];
   }
   const ids = idsFilter(q.filters.ids);
@@ -1212,7 +1695,56 @@ function billListWhere(q: ListQuery): Prisma.SupplierBillWhereInput {
   return where;
 }
 
-const BILL_SORTS = ['number', 'billDate', 'dueDate', 'createdAt'];
+const BILL_SORTS = ['number', 'billDate', 'dueDate', 'deliveryDate', 'createdAt'];
+
+/**
+ * The A/P list's cards, under the list's own query (the owner's sample): the
+ * sum of all payables (approved and partly paid, what is left of each), the
+ * bills pending approval, what falls due in the next seven days, and what is
+ * overdue — each a filter of the same list, so a card equals the list it opens.
+ */
+async function billListSummary(where: Prisma.SupplierBillWhereInput) {
+  const today = dayKey(new Date());
+  const [owed, pending, soon] = await Promise.all([
+    prisma.supplierBill.findMany({
+      where: { AND: [where, { status: { in: [...BILL_PAYABLE] } }] },
+      select: { dueDate: true, netPayable: true, amountPaid: true },
+    }),
+    prisma.supplierBill.aggregate({
+      where: { AND: [where, { status: { in: ['DRAFT', 'PENDING_APPROVAL'] } }] },
+      _count: { _all: true },
+      _sum: { netPayable: true },
+    }),
+    prisma.supplierBill.findMany({ where: { AND: [where, dueSoonWhere(today)] }, select: { netPayable: true, amountPaid: true } }),
+  ]);
+  const left = (r: { netPayable: Prisma.Decimal; amountPaid: Prisma.Decimal }) => Math.round((num(r.netPayable) - num(r.amountPaid)) * 100);
+  let payable = 0;
+  let count = 0;
+  let overdue = 0;
+  let overdueCount = 0;
+  for (const r of owed) {
+    const c = left(r);
+    if (c <= 0) continue;
+    payable += c;
+    count++;
+    if (r.dueDate < today) {
+      overdue += c;
+      overdueCount++;
+    }
+  }
+  const dueSoon = soon.map(left).filter((c) => c > 0);
+  return {
+    payable: payable / 100,
+    payableCount: count,
+    pendingCount: pending._count._all,
+    pending: num(pending._sum.netPayable),
+    dueSoon: dueSoon.reduce((s, c) => s + c, 0) / 100,
+    dueSoonCount: dueSoon.length,
+    dueSoonDays: DUE_SOON_DAYS,
+    overdue: overdue / 100,
+    overdueCount,
+  };
+}
 
 billRoutes.get(
   '/',
@@ -1232,7 +1764,7 @@ billRoutes.get(
       prisma.supplierBill.count({ where }),
     ]);
 
-    res.json(listResult(rows.map(presentBill), total, q));
+    res.json({ ...listResult(rows.map(presentBill), total, q), summary: await billListSummary(where) });
   }),
 );
 
@@ -1255,13 +1787,14 @@ billRoutes.get(
     const countedWhere: Prisma.SupplierBillWhereInput = { AND: [where, { status: { not: 'CANCELLED' } }] };
     // What is payable: an approved bill, paid in part or not at all.
     const owedWhere: Prisma.SupplierBillWhereInput = { AND: [where, { status: { in: BILL_OWED } }] };
-    const [rows, count, sums, owed, byStatus, currency, supplier, project] = await Promise.all([
+    const [rows, count, sums, owed, byStatus, currency, supplier, project, purchaser] = await Promise.all([
       prisma.supplierBill.findMany({
         where,
         include: {
           supplier: { select: { name: true } },
           job: { select: { number: true, name: true } },
           receiving: { select: { number: true } },
+          purchaser: { select: { name: true } },
         },
         orderBy: orderBy(q, BILL_SORTS, { billDate: 'desc' }),
         take: LIST_CAP,
@@ -1273,6 +1806,11 @@ billRoutes.get(
       companyCurrency(),
       recordNamed('supplier', q.filters.supplierId),
       recordNamed('project', q.filters.jobId),
+      q.filters.purchaserId === 'none'
+        ? 'no purchaser'
+        : q.filters.purchaserId
+          ? prisma.user.findUnique({ where: { id: q.filters.purchaserId }, select: { name: true } }).then((u) => `bought by ${u?.name ?? 'someone not on file'}`)
+          : undefined,
     ]);
 
     const f = q.filters;
@@ -1280,8 +1818,14 @@ billRoutes.get(
     const reference = listReference(count, rows.length, ['supplier bill', 'supplier bills'], [
       q.search && `search "${q.search}"`,
       f.overdue === 'true' ? 'overdue' : f.outstanding === 'true' ? 'outstanding' : status && `status ${statusLabel(status)}`,
+      f.dueSoon === 'true' && `due in ${DUE_SOON_DAYS} days`,
+      f.pending === 'true' && 'pending approval',
+      (f.dueFrom || f.dueTo) && `due ${f.dueFrom ?? '…'} to ${f.dueTo ?? '…'}`,
+      (f.deliveredFrom || f.deliveredTo) && `delivered ${f.deliveredFrom ?? '…'} to ${f.deliveredTo ?? '…'}`,
+      f.termsDays && billTermsLabel(Number(f.termsDays)),
       supplier,
       project,
+      purchaser,
       f.ids && 'the rows selected',
     ]);
     const today = dayKey(new Date());
@@ -1294,8 +1838,8 @@ billRoutes.get(
     const sections: PdfSection[] = [
       {
         kind: 'table',
-        head: ['Number', 'Supplier and project', 'Dated', 'Due', `Billed (${currency})`, `Payable (${currency})`, `Outstanding (${currency})`, 'Status'],
-        align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'left'],
+        head: ['Number', 'Supplier and project', 'Delivered', 'Terms', 'Due', `Payable (${currency})`, `Outstanding (${currency})`, 'Purchaser', 'Status'],
+        align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left', 'left'],
         rows: rows.map((r) => {
           const inSum = r.status !== 'CANCELLED';
           const outstanding = cents(num(r.netPayable) - num(r.amountPaid));
@@ -1312,12 +1856,13 @@ billRoutes.get(
                 .filter(Boolean)
                 .join(' · '),
             },
-            formatShortDate(r.billDate),
+            r.deliveryDate ? formatShortDate(r.deliveryDate) : { title: '—', body: `billed ${formatShortDate(r.billDate)}` },
+            billTermsLabel(r.termsDays, r.terms),
             late > 0 ? { title: formatShortDate(r.dueDate), body: `${late} day${late === 1 ? '' : 's'} late` } : formatShortDate(r.dueDate),
-            bracketed(formatAmount(num(r.total)), inSum),
             bracketed(formatAmount(num(r.netPayable)), inSum),
             // Nothing is payable on a bill until it is approved.
             r.status === 'DRAFT' || r.status === 'PENDING_APPROVAL' ? '—' : bracketed(formatAmount(outstanding), inSum),
+            r.purchaser?.name ?? r.purchaserName ?? '—',
             statusLabel(r.status),
           ];
         }),
@@ -1392,6 +1937,13 @@ const billSchema = z.object({
   billDate: z.string().optional(),
   dueDate: z.string().optional(),
   terms: z.string().optional().nullable(),
+  /** When the goods or the work were delivered — the receiving's date where one is matched. */
+  deliveryDate: z.string().optional().nullable(),
+  termsDays: z.number().int().min(0).max(365).optional(),
+  /** The purchaser / buyer — the order's author when the bill is against one. */
+  purchaserId: z.string().optional().nullable(),
+  /** A purchaser with no login, by name — used when no `purchaserId` is sent. */
+  purchaserName: z.string().trim().max(120).optional().nullable(),
   vatRate: z.number().min(0).max(1).optional(),
   vatInclusive: z.boolean().default(false),
   ewtRate: z.number().min(0).max(1).default(0),
@@ -1471,16 +2023,20 @@ async function billLinks(input: {
 
   let jobId = input.jobId;
   let receivingId = input.receivingId;
+  let buyerId: string | null = null;
+  let receivedDate: Date | null = null;
   if (input.orderId) {
     const order = await prisma.purchaseOrder.findUnique({
       where: { id: input.orderId },
-      include: { receivings: { select: { id: true }, orderBy: { receivedDate: 'desc' } } },
+      // Goods RECEIVED — a report still waiting for its approval posted nothing.
+      include: { receivings: { where: { status: 'RECEIVED' }, select: { id: true }, orderBy: { receivedDate: 'desc' } } },
     });
     if (!order) throw notFound('Purchase order not found');
     if (order.supplierId !== input.supplierId) {
       throw badRequest('That order belongs to a different supplier');
     }
     if (!jobId) jobId = order.jobId;
+    buyerId = order.createdById;
     // If the goods have been received and nobody said which receiving, take
     // the latest: what matters is that a receiving EXISTS, because that is
     // what stops the bill posting cost a second time.
@@ -1489,17 +2045,31 @@ async function billLinks(input: {
   if (receivingId) {
     const receiving = await prisma.receiving.findUnique({
       where: { id: receivingId },
-      select: { orderId: true, order: { select: { supplierId: true } } },
+      select: { orderId: true, status: true, number: true, receivedDate: true, order: { select: { supplierId: true, createdById: true } } },
     });
     if (!receiving) throw notFound('Receiving not found');
+    receivedDate = receiving.receivedDate;
+    if (!buyerId && receiving.order) buyerId = receiving.order.createdById;
+    // A bill matched to a report that posted nothing would post no cost
+    // either — the cost the receiving was to carry would be charged nowhere.
+    if (receiving.status !== 'RECEIVED') throw badRequest(`${receiving.number} is ${receiving.status.toLowerCase().replace(/_/g, ' ')} — a bill is matched to goods received`);
     if (input.orderId && receiving.orderId !== input.orderId) {
       throw badRequest('That receiving is against a different order');
     }
+    // Goods received without an order have no supplier's bill behind them.
+    if (!receiving.order) throw badRequest(`${receiving.number} was received without a purchase order — there is no bill to match`);
     if (receiving.order.supplierId !== input.supplierId) {
       throw badRequest('Those goods came from a different supplier');
     }
   }
-  return { orderId: input.orderId, receivingId, jobId };
+  return { links: { orderId: input.orderId, receivingId, jobId }, buyerId, receivedDate };
+}
+
+/** A purchaser named on a bill must be an active login. */
+async function checkPurchaser(id: string | null | undefined): Promise<void> {
+  if (!id) return;
+  const user = await prisma.user.findUnique({ where: { id }, select: { isActive: true } });
+  if (!user?.isActive) throw badRequest('Purchaser: no such active login');
 }
 
 billRoutes.post(
@@ -1514,17 +2084,21 @@ billRoutes.post(
     const money = billMoney(body, body.vatRate ?? rates.vatRate);
 
     const billDate = body.billDate ? asDate(body.billDate, 'Bill date') : dayKey(new Date());
-    const dueDate = body.dueDate
-      ? asDate(body.dueDate, 'Due date')
-      : addDays(billDate, settings.defaultTermsDays);
-    if (dueDate < billDate) throw badRequest('The due date is before the bill date');
-
-    const links = await billLinks({
+    const { links, buyerId, receivedDate } = await billLinks({
       supplierId: body.supplierId,
       orderId: body.orderId || null,
       receivingId: body.receivingId || null,
       jobId: body.jobId || null,
     });
+    // The receiving's date, else typed; the terms run from it.
+    const deliveryDate = body.deliveryDate ? asDate(body.deliveryDate, 'Date of delivery') : receivedDate;
+    const termsDays = body.termsDays ?? parseTermsDays(body.terms) ?? settings.defaultTermsDays;
+    const dueDate = body.dueDate ? asDate(body.dueDate, 'Due date') : billDueDate(billDate, deliveryDate, termsDays);
+    if (dueDate < (deliveryDate ?? billDate)) throw badRequest(deliveryDate ? 'The due date is before the delivery' : 'The due date is before the bill date');
+    // A name typed for someone with no login stands in place of a login.
+    const purchaserName = !body.purchaserId && body.purchaserName ? body.purchaserName : null;
+    const purchaserId = purchaserName ? null : body.purchaserId || buyerId;
+    await checkPurchaser(purchaserId);
 
     const bill = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('supplier_bill', tx);
@@ -1537,7 +2111,11 @@ billRoutes.post(
           supplierInvoiceNo: body.supplierInvoiceNo || null,
           billDate,
           dueDate,
-          terms: body.terms ?? `${settings.defaultTermsDays} days`,
+          deliveryDate,
+          termsDays,
+          purchaserId: purchaserId ?? null,
+          purchaserName,
+          terms: body.terms ?? `${termsDays} days`,
           ...money.figures,
           notes: body.notes || null,
           createdById: me.id,
@@ -1622,15 +2200,39 @@ billRoutes.put(
       body.vatRate ?? num(existing.vatRate),
     );
     const billDate = body.billDate ? asDate(body.billDate, 'Bill date') : existing.billDate;
-    const dueDate = body.dueDate ? asDate(body.dueDate, 'Due date') : existing.dueDate;
-    if (dueDate < billDate) throw badRequest('The due date is before the bill date');
-
-    const links = await billLinks({
+    const { links, buyerId, receivedDate } = await billLinks({
       supplierId,
       orderId: keep(body.orderId, existing.orderId),
       receivingId: keep(body.receivingId, existing.receivingId),
       jobId: keep(body.jobId, existing.jobId),
     });
+    const deliveryDate =
+      body.deliveryDate === undefined
+        ? existing.deliveryDate ?? receivedDate
+        : body.deliveryDate
+          ? asDate(body.deliveryDate, 'Date of delivery')
+          : receivedDate;
+    const termsDays = body.termsDays ?? existing.termsDays ?? parseTermsDays(existing.terms) ?? 0;
+    const dueDate = body.dueDate
+      ? asDate(body.dueDate, 'Due date')
+      : body.termsDays !== undefined || body.deliveryDate !== undefined || body.billDate
+        ? billDueDate(billDate, deliveryDate, termsDays)
+        : existing.dueDate;
+    if (dueDate < (deliveryDate ?? billDate)) throw badRequest(deliveryDate ? 'The due date is before the delivery' : 'The due date is before the bill date');
+    const purchaserName =
+      body.purchaserId
+        ? null
+        : body.purchaserName === undefined
+          ? body.purchaserId === undefined
+            ? existing.purchaserName
+            : null
+          : body.purchaserName || null;
+    const purchaserId = purchaserName
+      ? null
+      : body.purchaserId === undefined
+        ? existing.purchaserId ?? buyerId
+        : body.purchaserId || buyerId;
+    await checkPurchaser(purchaserId);
 
     const updated = await prisma.$transaction(async (tx) => {
       const claimed = await tx.supplierBill.updateMany({
@@ -1642,7 +2244,11 @@ billRoutes.put(
           supplierInvoiceNo: keep(body.supplierInvoiceNo, existing.supplierInvoiceNo),
           billDate,
           dueDate,
-          terms: keep(body.terms, existing.terms),
+          deliveryDate,
+          termsDays,
+          purchaserId: purchaserId ?? null,
+          purchaserName,
+          terms: body.termsDays !== undefined ? `${termsDays} days` : keep(body.terms, existing.terms),
           ...money.figures,
           notes: keep(body.notes, existing.notes),
         },
@@ -1878,13 +2484,89 @@ onApprovalSettled('supplier_bill', async (approval, outcome) => {
   });
 });
 
+/**
+ * Takes back the INCURRED cost a document's approval posted, by posting its
+ * negative per project and budget line (never deleting — the ledger is a
+ * history). Reads what the ledger still holds for the source, so a document
+ * approved, pulled back and approved again nets out exactly.
+ */
+async function reverseIncurred(
+  tx: Prisma.TransactionClient,
+  source: { sourceType: string; sourceId: string; sourceNumber: string },
+  why: string,
+  actorId: string,
+): Promise<number> {
+  const rows = await tx.jobCostEntry.groupBy({
+    by: ['jobId', 'costCategoryId'],
+    where: { sourceType: source.sourceType, sourceId: source.sourceId, state: 'INCURRED' },
+    _sum: { amount: true },
+  });
+  let reversed = 0;
+  for (const r of rows) {
+    const net = num(r._sum.amount);
+    if (Math.abs(net) < 0.005) continue;
+    await postJobCost(tx, {
+      jobId: r.jobId,
+      costCategoryId: r.costCategoryId,
+      state: 'INCURRED',
+      amount: -net,
+      sourceType: source.sourceType,
+      sourceId: source.sourceId,
+      sourceNumber: source.sourceNumber,
+      description: `Reversed — ${source.sourceNumber} pulled back to draft: ${why}`,
+      createdById: actorId,
+    });
+    reversed = cents(reversed + net);
+  }
+  return reversed;
+}
+
+/**
+ * Pulled back after approval (2026-10-16): the bill goes back to DRAFT and the
+ * cost its approval charged the project is reversed. Refused once anything
+ * has been paid on it — the payment would be left settling a draft.
+ */
+onApprovalReopened('supplier_bill', {
+  may: async (actor, id) => {
+    const bill = await prisma.supplierBill.findUnique({ where: { id }, select: { status: true, createdById: true } });
+    return !!bill && !['DRAFT', 'PENDING_APPROVAL', 'CANCELLED'].includes(bill.status) && canEditRecord(actor, 'gfin', 'ap', bill.createdById);
+  },
+  reopen: async ({ documentId, tx, actor, reason }) => {
+    const bill = await tx.supplierBill.findUnique({ where: { id: documentId } });
+    if (!bill) throw badRequest('Bill not found');
+    const paid = await tx.paymentAllocation.findFirst({ where: { billId: bill.id }, include: { payment: { select: { number: true } } } });
+    if (paid || bill.status !== 'APPROVED') {
+      throw badRequest(`${bill.number} has been paid${paid ? ` (${paid.payment.number})` : ''} — remove the payment before pulling it back`);
+    }
+    const claimed = await tx.supplierBill.updateMany({
+      where: { id: bill.id, status: 'APPROVED' },
+      data: { status: 'DRAFT', approvedAt: null, postedToJob: false, postedAt: null },
+    });
+    if (!claimed.count) throw badRequest(`${bill.number} changed a moment ago — reload to see where it stands`);
+    const reversed = await reverseIncurred(tx, { sourceType: 'supplier_bill', sourceId: bill.id, sourceNumber: bill.number }, reason, actor.id);
+    await audit(
+      {
+        entityType: 'supplier_bill',
+        entityId: bill.id,
+        action: 'UPDATED',
+        summary: `${bill.number} back to draft after approval${reversed ? ` — ${reversed} taken back off the project` : ''}`,
+        actorId: actor.id,
+        actorName: actor.name,
+      },
+      undefined,
+      tx,
+    );
+  },
+});
+
 /** Purchase orders with goods received and no bill yet — the A/P work queue. */
 billRoutes.get(
   '/queue/unbilled',
   require_('gfin.ap.view_all'),
   handler(async (_req, res) => {
     const receivings = await prisma.receiving.findMany({
-      where: { bills: { none: {} } },
+      // Goods received without an order are billed by nobody.
+      where: { status: 'RECEIVED', orderId: { not: null }, bills: { none: {} } },
       include: {
         order: {
           select: {
@@ -1907,7 +2589,7 @@ billRoutes.get(
         number: r.number,
         receivedDate: r.receivedDate,
         invoiceRefNo: r.invoiceRefNo,
-        order: { ...r.order, total: num(r.order.total) },
+        order: { ...r.order!, total: num(r.order!.total) },
         receivedValue: cents(r.items.reduce((s, i) => s + num(i.quantity) * num(i.unitCost), 0)),
         waitingDays: daysBetween(r.receivedDate, new Date()),
       })),
@@ -1944,7 +2626,7 @@ registerAttachmentGuard('expense_claim', async (user, id, mode: 'read' | 'write'
 });
 
 export const claimInclude = {
-  claimedBy: { select: { id: true, name: true, email: true } },
+  claimedBy: { select: { id: true, name: true, email: true, ...TEAM_OR_DEPT_SELECT.select } },
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
   // `amountRefunded`: unspent cash already handed back — the liquidation
@@ -1975,8 +2657,12 @@ export function presentClaim(row: ClaimRow) {
   const payable = claimPayable(row);
   const released = liquidatedReleased(row);
   const liquidates = !!(row.advance || row.budgetRequest);
+  const { department: _d, employee: _e, ...claimant } = row.claimedBy;
   return {
     ...row,
+    claimedBy: claimant,
+    /** The claimant's team, else their department — the register's Team column. */
+    team: teamOrDepartment(row.claimedBy),
     total,
     amountPaid: paid,
     payable,
@@ -2040,6 +2726,15 @@ function claimListWhere(me: ReturnType<typeof currentUser>, q: ListQuery) {
   if (q.filters.jobId) where.jobId = q.filters.jobId;
   if (q.filters.advanceId) where.advanceId = q.filters.advanceId;
   if (q.filters.budgetRequestId) where.budgetRequestId = q.filters.budgetRequestId;
+  const f = q.filters;
+  const and: Prisma.ExpenseClaimWhereInput[] = [];
+  if (f.claimedById) and.push({ claimedById: f.claimedById });
+  if (f.teamId) and.push({ claimedBy: userTeamWhere(f.teamId) });
+  if (f.from || f.to) and.push({ claimDate: { ...(f.from ? { gte: asDate(f.from, 'From') } : {}), ...(f.to ? { lte: asDate(f.to, 'To') } : {}) } });
+  // In approval, approved and still to pay — the cards' filters.
+  if (f.pending === 'true') and.push({ status: 'PENDING_APPROVAL' });
+  if (f.forRelease === 'true') and.push({ status: 'APPROVED' });
+  if (and.length) where.AND = and;
   // A liquidation is a claim that names an advance or a budget request; a
   // reimbursement is one that names neither. Same table, a column apart.
   if (q.filters.kind === 'liquidation') where.OR = [{ advanceId: { not: null } }, { budgetRequestId: { not: null } }];
@@ -2057,7 +2752,7 @@ function claimListWhere(me: ReturnType<typeof currentUser>, q: ListQuery) {
     ];
     // The kind filter already uses OR: the two conditions AND together.
     if (where.OR) {
-      where.AND = [{ OR: where.OR }, { OR: terms }];
+      where.AND = [...((where.AND as Prisma.ExpenseClaimWhereInput[] | undefined) ?? []), { OR: where.OR }, { OR: terms }];
       delete where.OR;
     } else {
       where.OR = terms;
@@ -2088,10 +2783,50 @@ expenseRoutes.get(
       }),
       prisma.expenseClaim.count({ where }),
     ]);
+    const [steps, summary] = await Promise.all([openSteps('expense', rows.map((r) => r.id)), claimListSummary(where)]);
 
-    res.json(listResult(rows.map(presentClaim), total, q));
+    res.json({
+      ...listResult(
+        rows.map((r) => {
+          const row = presentClaim(r);
+          // The owner's words for where it stands: TL Approval … For Release, Paid.
+          return { ...row, stage: stageWords(r.status, steps.get(r.id), row.outstanding > 0.005) };
+        }),
+        total,
+        q,
+      ),
+      summary,
+    });
   }),
 );
+
+/**
+ * The reimbursement register's cards (the owner's module 6), under the
+ * list's own query: the sum of every claim still standing, what waits in
+ * approval ("pending process"), what is approved and still to pay ("for
+ * release"), and what was paid out.
+ */
+async function claimListSummary(where: Prisma.ExpenseClaimWhereInput) {
+  const agg = (extra: Prisma.ExpenseClaimWhereInput) =>
+    prisma.expenseClaim.aggregate({ where: { AND: [where, extra] }, _count: { _all: true }, _sum: { total: true, amountPaid: true } });
+  const [all, pending, approved, paid] = await Promise.all([
+    agg({ status: { notIn: ['REJECTED', 'CANCELLED'] } }),
+    agg({ status: 'PENDING_APPROVAL' }),
+    prisma.expenseClaim.findMany({ where: { AND: [where, { status: 'APPROVED' }] }, include: { advance: true, budgetRequest: true } }),
+    agg({ amountPaid: { gt: 0 } }),
+  ]);
+  const owed = approved.map((c) => cents(claimPayable(c as Parameters<typeof claimPayable>[0]) - num(c.amountPaid))).filter((x) => x > 0.005);
+  return {
+    total: num(all._sum.total),
+    count: all._count._all,
+    pending: num(pending._sum.total),
+    pendingCount: pending._count._all,
+    forRelease: cents(owed.reduce((s, x) => s + x, 0)),
+    forReleaseCount: owed.length,
+    paidOut: num(paid._sum.amountPaid),
+    paidCount: paid._count._all,
+  };
+}
 
 /** A claim that will never be paid — listed, never summed. */
 const CLAIM_CLOSED: ExpenseStatus[] = ['REJECTED', 'CANCELLED'];
@@ -2248,6 +2983,7 @@ const claimSchema = z.object({
         description: z.string().trim().min(1, 'Every line needs a description'),
         category: z.string().optional().nullable(),
         receiptNo: z.string().optional().nullable(),
+        vendor: z.string().trim().max(200).optional().nullable(),
         amount: z.number().positive('Every line must be more than zero'),
       }),
     )
@@ -2266,6 +3002,7 @@ function claimLines(input: z.infer<typeof claimSchema>['lines']) {
     description: l.description,
     category: l.category || null,
     receiptNo: l.receiptNo || null,
+    vendor: l.vendor || null,
     amount: cents(l.amount),
   }));
   return {
@@ -2299,6 +3036,7 @@ expenseRoutes.post(
         },
       });
       if (!advance) throw notFound('Cash advance not found');
+      if (advance.repayable) throw badRequest(`${advance.number} is money lent — it is repaid, not liquidated with receipts`);
       if (advance.requestedById !== me.id && !me.isSuperAdmin) {
         throw forbidden('Only the person who received the advance can liquidate it');
       }
@@ -2777,6 +3515,60 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
 };
 onApprovalSettled('expense', settleExpense);
 
+/**
+ * Pulled back after approval (2026-10-16): the claim — a reimbursement or a
+ * liquidation — goes back to DRAFT, the cost its approval charged the project
+ * is reversed, and a liquidation's advance or budget request is re-derived so
+ * its status follows (back to RELEASED). Refused once anything was paid on the
+ * claim, or once unspent cash came back on the source the liquidation settled.
+ */
+onApprovalReopened('expense', {
+  may: async (actor, id) => {
+    const claim = await prisma.expenseClaim.findUnique({ where: { id }, select: { status: true, claimedById: true } });
+    return !!claim && !['DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED'].includes(claim.status) && canEditRecord(actor, 'gfin', 'expenses', claim.claimedById);
+  },
+  reopen: async ({ documentId, tx, actor, reason }) => {
+    const claim = await tx.expenseClaim.findUnique({
+      where: { id: documentId },
+      include: { advance: { select: { id: true, number: true } }, budgetRequest: { select: { id: true, number: true } } },
+    });
+    if (!claim) throw badRequest('Claim not found');
+    const paid = await tx.paymentAllocation.findFirst({ where: { claimId: claim.id }, include: { payment: { select: { number: true } } } });
+    if (paid) throw badRequest(`${claim.number} has been paid (${paid.payment.number}) — remove the payment before pulling it back`);
+    if (claim.status !== 'APPROVED' && claim.status !== 'SETTLED') {
+      throw badRequest(`${claim.number} is ${claim.status.toLowerCase().replace(/_/g, ' ')} — only an approved claim nobody has paid can be pulled back`);
+    }
+    const source = claim.advance ?? claim.budgetRequest;
+    if (source) {
+      const refund = await tx.paymentAllocation.findFirst({
+        where: { ...(claim.advanceId ? { advanceId: claim.advanceId } : { budgetRequestId: claim.budgetRequestId }), payment: { kind: 'RECEIPT' } },
+        include: { payment: { select: { number: true } } },
+      });
+      if (refund) throw badRequest(`Unspent cash has come back on ${source.number} (${refund.payment.number}) — remove that refund before pulling the liquidation back`);
+    }
+    const claimed = await tx.expenseClaim.updateMany({
+      where: { id: claim.id, status: { in: ['APPROVED', 'SETTLED'] } },
+      data: { status: 'DRAFT', approvedAt: null, postedToJob: false, postedAt: null },
+    });
+    if (!claimed.count) throw badRequest(`${claim.number} changed a moment ago — reload to see where it stands`);
+    const reversed = await reverseIncurred(tx, { sourceType: 'expense_claim', sourceId: claim.id, sourceNumber: claim.number }, reason, actor.id);
+    if (claim.advanceId) await refreshAdvance(tx, claim.advanceId);
+    if (claim.budgetRequestId) await refreshBudgetRequest(tx, claim.budgetRequestId);
+    await audit(
+      {
+        entityType: 'expense_claim',
+        entityId: claim.id,
+        action: 'UPDATED',
+        summary: `${claim.number} back to draft after approval${reversed ? ` — ${reversed} taken back off the project` : ''}${source ? `; ${source.number} awaits its liquidation again` : ''}`,
+        actorId: actor.id,
+        actorName: actor.name,
+      },
+      undefined,
+      tx,
+    );
+  },
+});
+
 expenseRoutes.post(
   '/:id/cancel',
   handler(async (req, res) => {
@@ -2944,14 +3736,14 @@ expenseRoutes.get(
       {
         kind: 'table',
         title: 'Receipts',
-        head: ['No.', 'Date', 'Description', 'Receipt no.', `Amount (${currency})`],
-        widths: [7, 14, 43, 18, 18],
+        head: ['No.', 'Date', 'Company / receipt', 'Item / purpose', `Amount (${currency})`],
+        widths: [7, 14, 28, 33, 18],
         align: ['right', 'left', 'left', 'left', 'right'],
         rows: claim.lines.map((l, n) => [
           String(n + 1),
           formatShortDate(l.spentOn),
-          l.category ? `${l.description} (${l.category})` : l.description,
-          l.receiptNo ?? '—',
+          { title: l.vendor ?? '—', body: l.receiptNo ? `Receipt ${l.receiptNo}` : 'No receipt no.' },
+          { title: l.description, body: l.category ?? undefined },
           formatAmount(num(l.amount)),
         ]),
       },
@@ -2983,7 +3775,7 @@ expenseRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${claim.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Expense Claim', number: claim.number, author: claim.claimedBy.name, date: claim.claimDate })));
     res.send(pdf);
   }),
 );
@@ -3002,20 +3794,47 @@ const paymentInclude = {
   recordedBy: { select: { id: true, name: true } },
   allocations: {
     include: {
-      invoice: { select: { id: true, number: true, netCollectible: true } },
+      invoice: {
+        select: {
+          id: true,
+          number: true,
+          invoiceDate: true,
+          netCollectible: true,
+          salesperson: { select: { id: true, name: true } },
+          team: TEAM_REF_SELECT,
+        },
+      },
       bill: { select: { id: true, number: true, netPayable: true } },
       claim: { select: { id: true, number: true, total: true } },
       advance: { select: { id: true, number: true, amount: true } },
       budgetRequest: { select: { id: true, number: true, amount: true } },
+      commissionShare: { select: { id: true, request: { select: { id: true, number: true } } } },
     },
   },
+  lines: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.PaymentInclude;
 
 type PaymentRow = Prisma.PaymentGetPayload<{ include: typeof paymentInclude }>;
 
+/**
+ * Who a collection is credited to (the owner's sample: Sale Personnel and
+ * Team on every collection) — read off the invoices it settles, never kept on
+ * the payment: one name where they agree, every name where they do not.
+ */
+function collectionCredit(row: { allocations: { invoice: { salesperson: { id: string; name: string } | null; team: { id: string; code: string; name: string } | null } | null }[] }) {
+  const people = new Map<string, { id: string; name: string }>();
+  const teams = new Map<string, { id: string; code: string; name: string }>();
+  for (const a of row.allocations) {
+    if (a.invoice?.salesperson) people.set(a.invoice.salesperson.id, a.invoice.salesperson);
+    if (a.invoice?.team) teams.set(a.invoice.team.id, a.invoice.team);
+  }
+  return { salespeople: [...people.values()], teams: [...teams.values()] };
+}
+
 function presentPayment(row: PaymentRow) {
   return {
     ...row,
+    ...collectionCredit(row),
     amount: num(row.amount),
     allocations: row.allocations.map((a) => ({
       ...a,
@@ -3025,7 +3844,11 @@ function presentPayment(row: PaymentRow) {
       claim: a.claim ? { ...a.claim, total: num(a.claim.total) } : null,
       advance: a.advance ? { ...a.advance, amount: num(a.advance.amount) } : null,
       budgetRequest: a.budgetRequest ? { ...a.budgetRequest, amount: num(a.budgetRequest.amount) } : null,
+      commission: a.commissionShare ? a.commissionShare.request : null,
     })),
+    lines: row.lines.map((l) => ({ ...l, amount: num(l.amount) })),
+    /** Received on account — typed lines settling no invoice yet. */
+    onAccount: cents(row.lines.reduce((t, l) => t + num(l.amount), 0)),
   };
 }
 
@@ -3062,10 +3885,20 @@ function paymentListWhere(q: ListQuery): Prisma.PaymentWhereInput {
   const to = filterDay(q.filters.to, 'To');
   if (from || to) where.paymentDate = { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) };
   if (q.filters.uncleared === 'true') where.clearedAt = null;
+  const method = choice(q.filters.method, PaymentMethod, 'Method');
+  if (method) where.method = method;
+  // A collection's salesperson and team are its invoices' (`collectionCredit`).
+  const invoiceCredit: Prisma.InvoiceWhereInput = {};
+  if (q.filters.salespersonId) invoiceCredit.salespersonId = q.filters.salespersonId === 'none' ? null : q.filters.salespersonId;
+  if (q.filters.teamId) invoiceCredit.teamId = q.filters.teamId === 'none' ? null : q.filters.teamId;
+  if (Object.keys(invoiceCredit).length) where.allocations = { some: { invoice: invoiceCredit } };
+  if (q.filters.invoiceId) where.allocations = { some: { invoiceId: q.filters.invoiceId } };
   if (q.search) {
     where.OR = [
       { number: { contains: q.search, mode: 'insensitive' } },
+      { orNumber: { contains: q.search, mode: 'insensitive' } },
       { reference: { contains: q.search, mode: 'insensitive' } },
+      { allocations: { some: { invoice: { number: { contains: q.search, mode: 'insensitive' } } } } },
       { customer: { name: { contains: q.search, mode: 'insensitive' } } },
       { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
       // A person is a party too: reimbursements, releases and refunds.
@@ -3097,9 +3930,46 @@ paymentRoutes.get(
       prisma.payment.count({ where }),
     ]);
 
-    res.json(listResult(rows.map(presentPayment), total, q));
+    res.json({ ...listResult(rows.map(presentPayment), total, q), summary: await paymentListSummary(where) });
   }),
 );
+
+/**
+ * The cards over the register (the owner's "TOTAL COLLECTIONS SUM"), under
+ * the list's own query: what customers paid (collections only — a refund of
+ * unspent cash is money in, never a collection), what of it is still an
+ * uncleared cheque, money out, and the collections split by the team of the
+ * invoices they settled (`teamShares`, by the amount applied to each).
+ */
+async function paymentListSummary(where: Prisma.PaymentWhereInput) {
+  const collectionWhere: Prisma.PaymentWhereInput = { AND: [where, { kind: 'RECEIPT', customerId: { not: null } }] };
+  const chequeWhere: Prisma.PaymentWhereInput = { AND: [collectionWhere, { method: 'CHECK' }] };
+  const [collected, uncleared, out, allocations, cheques, chequesCleared] = await Promise.all([
+    prisma.payment.aggregate({ where: collectionWhere, _sum: { amount: true }, _count: { _all: true } }),
+    prisma.payment.aggregate({ where: { AND: [collectionWhere, { clearedAt: null }] }, _sum: { amount: true }, _count: { _all: true } }),
+    prisma.payment.aggregate({ where: { AND: [where, { kind: 'DISBURSEMENT' }] }, _sum: { amount: true }, _count: { _all: true } }),
+    prisma.paymentAllocation.findMany({
+      where: { payment: collectionWhere, invoiceId: { not: null } },
+      select: { amount: true, invoice: { select: { team: TEAM_REF_SELECT } } },
+    }),
+    prisma.payment.aggregate({ where: chequeWhere, _sum: { amount: true }, _count: { _all: true } }),
+    prisma.payment.aggregate({ where: { AND: [chequeWhere, { clearedAt: { not: null } }] }, _sum: { amount: true }, _count: { _all: true } }),
+  ]);
+  const chequeTotal = num(cheques._sum.amount);
+  return {
+    // Cheques received from customers, and the share of their value the bank has cleared.
+    cheques: cheques._count._all,
+    chequesCleared: chequesCleared._count._all,
+    chequesClearedPct: chequeTotal > 0 ? Math.round((num(chequesCleared._sum.amount) / chequeTotal) * 1000) / 10 : null,
+    collected: num(collected._sum.amount),
+    collections: collected._count._all,
+    uncleared: num(uncleared._sum.amount),
+    unclearedCount: uncleared._count._all,
+    paidOut: num(out._sum.amount),
+    disbursements: out._count._all,
+    teams: await teamShares(allocations.map((a) => ({ team: a.invoice?.team ?? null, cents: Math.round(num(a.amount) * 100) }))),
+  };
+}
 
 /**
  * The payment register on paper — the list as filtered (or the rows ticked),
@@ -3129,6 +3999,7 @@ paymentRoutes.get(
               claim: { select: { number: true } },
               advance: { select: { number: true } },
               budgetRequest: { select: { number: true } },
+              commissionShare: { select: { request: { select: { number: true } } } },
             },
           },
         },
@@ -3154,6 +4025,9 @@ paymentRoutes.get(
       payee,
       rangeNamed('dated', f.from, f.to),
       f.uncleared === 'true' && 'uncleared only',
+      f.method && statusLabel(f.method),
+      f.salespersonId && (f.salespersonId === 'none' ? 'no salesperson' : await recordNamed('person', f.salespersonId)),
+      f.teamId && (f.teamId === 'none' ? 'no team' : `team ${(await prisma.industry.findUnique({ where: { id: f.teamId }, select: { code: true } }))?.code ?? '?'}`),
       f.ids && 'the rows selected',
     ]);
     const sumOf = (k: PaymentKind) => num(byKind.find((g) => g.kind === k)?._sum.amount);
@@ -3164,7 +4038,7 @@ paymentRoutes.get(
     const only: PaymentKind | null = kind ?? (kinds.size === 1 ? [...kinds][0] : null);
     const settles = (r: (typeof rows)[number]) =>
       r.allocations
-        .map((a) => a.invoice?.number ?? a.bill?.number ?? a.claim?.number ?? a.advance?.number ?? a.budgetRequest?.number)
+        .map((a) => a.invoice?.number ?? a.bill?.number ?? a.claim?.number ?? a.advance?.number ?? a.budgetRequest?.number ?? a.commissionShare?.request.number)
         .filter(Boolean)
         .join('\n');
 
@@ -3174,7 +4048,7 @@ paymentRoutes.get(
         head: ['Number', 'Date', 'Who', 'Direction', 'Settles', `Amount (${currency})`, 'Cleared'],
         align: ['left', 'left', 'left', 'left', 'left', 'right', 'left'],
         rows: rows.map((r) => [
-          r.number,
+          r.orNumber ? { title: r.number, body: `OR ${r.orNumber}` } : r.number,
           formatShortDate(r.paymentDate),
           {
             title: r.customer?.name ?? r.supplier?.name ?? r.payeeUser?.name ?? '—',
@@ -3210,7 +4084,7 @@ paymentRoutes.get(
       ]),
     );
 
-    const pdf = await renderDocument({ title: 'Payments', date: new Date(), reference, sections });
+    const pdf = await renderDocument({ title: 'Collections', date: new Date(), reference, sections });
     await audit(
       { entityType: 'payment', entityId: 'list', action: 'EXPORTED', summary: `Exported the payment list as PDF (${rows.length} payment(s))` },
       req,
@@ -3232,9 +4106,79 @@ paymentRoutes.get(
   }),
 );
 
+/**
+ * One payment on paper. Money in from a customer is a **Collection
+ * Receipt** under its OR number (G-CORE's `official_receipt` series): who
+ * paid, how — the cheque or transfer reference and the bank — and the
+ * invoices it settled with the amount applied to each. Money out is a
+ * **Payment Voucher**. Signed by whoever recorded it, dated when they did;
+ * an uncleared cheque says so in the foot.
+ */
+paymentRoutes.get(
+  '/:id/pdf',
+  requireAny('gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all'),
+  handler(async (req, res) => {
+    const row = await prisma.payment.findUnique({ where: { id: req.params.id }, include: paymentInclude });
+    if (!row) throw notFound('Payment not found');
+    const currency = await companyCurrency();
+    const receipt = row.kind === 'RECEIPT';
+    const party = row.customer?.name ?? row.supplier?.name ?? row.payeeUser?.name ?? '—';
+    const credit = collectionCredit(row);
+    const settled = row.allocations.map((a) => {
+      const t = a.invoice ?? a.bill ?? a.claim ?? a.advance ?? a.budgetRequest ?? a.commissionShare?.request;
+      const what = a.invoice ? 'Sales invoice' : a.bill ? 'Supplier bill' : a.claim ? 'Expense claim' : a.advance ? 'Cash advance' : a.budgetRequest ? 'Budget request' : 'Commission';
+      return [t?.number ?? '—', what, a.invoice?.invoiceDate ? formatShortDate(a.invoice.invoiceDate) : '—', formatAmount(num(a.amount))];
+    });
+    // Lines typed by hand: received on account, settling no invoice yet.
+    for (const l of row.lines) settled.push([l.reference, 'On account', '—', formatAmount(num(l.amount))]);
+    const sections: PdfSection[] = [
+      {
+        kind: 'fields',
+        columns: 3,
+        fields: [
+          { label: receipt ? 'Received from' : 'Paid to', value: party },
+          { label: 'Method', value: statusLabel(row.method) },
+          { label: row.method === 'CHECK' ? 'Cheque no.' : 'Reference', value: row.reference ?? '—' },
+          { label: 'Bank', value: row.bank ?? '—' },
+          { label: 'Cleared', value: row.clearedAt ? formatDate(row.clearedAt) : 'Not yet' },
+          ...(row.orNumber ? [{ label: 'Payment no.', value: row.number }] : []),
+          ...(credit.salespeople.length ? [{ label: 'Sales personnel', value: credit.salespeople.map((p) => p.name).join(', ') }] : []),
+          ...(credit.teams.length ? [{ label: 'Team', value: credit.teams.map((t) => t.code).join(', ') }] : []),
+        ],
+      },
+      {
+        kind: 'table',
+        title: receipt ? 'In payment of' : 'Settles',
+        head: ['Number', 'Document', 'Dated', `Applied (${currency})`],
+        align: ['left', 'left', 'left', 'right'],
+        rows: settled,
+      },
+      { kind: 'totals', rows: [{ label: receipt ? 'Amount received' : 'Amount paid', value: formatMoney(num(row.amount), currency), bold: true }] },
+    ];
+    if (row.notes) sections.push({ kind: 'text', title: 'Notes', body: row.notes });
+    const recorder = await contactOf(row.recordedBy.id);
+    const pdf = await renderDocument({
+      title: receipt ? (row.orNumber ? 'Collection Receipt' : 'Receipt') : 'Payment Voucher',
+      documentNumber: row.orNumber ?? row.number,
+      date: row.paymentDate,
+      reference: party,
+      sections,
+      signatories: [{ role: receipt ? 'Received by' : 'Prepared by', name: row.recordedBy.name, ...recorder, at: row.createdAt }],
+      footerNote: row.method === 'CHECK' && !row.clearedAt ? 'Cheque received — not yet cleared.' : undefined,
+    });
+    await audit({ entityType: 'payment', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.orNumber ? `OR ${row.orNumber}` : row.number}` }, req);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      contentDisposition(paperFileName({ kind: receipt ? 'Collection Receipt' : 'Payment Voucher', number: row.orNumber ?? row.number, author: row.recordedBy.name, date: row.paymentDate })),
+    );
+    res.send(pdf);
+  }),
+);
+
 const paymentSchema = z.object({
   kind: z.enum(['RECEIPT', 'DISBURSEMENT']),
-  method: z.enum(['CASH', 'CHECK', 'BANK_TRANSFER', 'ONLINE', 'OFFSET']).default('BANK_TRANSFER'),
+  method: z.enum(['CASH', 'CHECK', 'BANK_TRANSFER', 'ONLINE', 'OFFSET', 'SALARY_DEDUCTION']).default('BANK_TRANSFER'),
   paymentDate: z.string().optional(),
   customerId: z.string().optional().nullable(),
   supplierId: z.string().optional().nullable(),
@@ -3251,7 +4195,21 @@ const paymentSchema = z.object({
         amount: z.number().positive('An allocation must be more than zero'),
       }),
     )
-    .min(1, 'Say which documents this payment settles'),
+    .default([]),
+  /**
+   * Lines typed by hand on a customer's collection (2026-10-16, the owner's
+   * call): a reference and an amount received on account, against no invoice
+   * on file — applied to one later.
+   */
+  lines: z
+    .array(
+      z.object({
+        reference: z.string().trim().min(1, 'Every line needs a reference — an SI no. or what it is for').max(200),
+        amount: z.number().positive('A line must be more than zero'),
+      }),
+    )
+    .max(50)
+    .default([]),
 });
 
 /**
@@ -3267,6 +4225,10 @@ paymentRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(paymentSchema, req.body);
+    if (!body.allocations.length && !body.lines.length) throw badRequest('Say which documents this payment settles, or add a line by hand');
+    if (body.lines.length && (body.kind !== 'RECEIPT' || body.method === 'SALARY_DEDUCTION')) {
+      throw badRequest('Lines typed by hand are a customer’s money received on account — record a disbursement against its documents');
+    }
 
     // Recording money in and recording money out are different rights.
     const needed = body.kind === 'RECEIPT' ? 'gfin.ar.create' : 'gfin.ap.create';
@@ -3278,6 +4240,11 @@ paymentRoutes.post(
     // unspent advance coming back. Money out settles what we owe: a bill, a
     // claim, or the advance itself.
     const MONEY_IN = ['invoice', 'advance_refund', 'budget_request_refund'];
+    // A salary deduction repays a cash advance out of the person's pay; it
+    // settles nothing else.
+    if (body.method === 'SALARY_DEDUCTION' && (body.kind !== 'RECEIPT' || body.allocations.some((a) => a.kind !== 'advance_refund'))) {
+      throw badRequest('A salary deduction repays a cash advance — record anything else as cash, cheque or transfer');
+    }
     if (body.kind === 'RECEIPT' && body.allocations.some((a) => !MONEY_IN.includes(a.kind))) {
       throw badRequest('A receipt settles customer invoices or returns unspent cash. Record money going out as a disbursement.');
     }
@@ -3285,7 +4252,7 @@ paymentRoutes.post(
       throw badRequest('A disbursement settles supplier bills, expense claims, cash advances or budget requests, not money coming in.');
     }
 
-    const amount = cents(body.allocations.reduce((s, a) => s + a.amount, 0));
+    const amount = cents(body.allocations.reduce((s, a) => s + a.amount, 0) + body.lines.reduce((s, l) => s + cents(l.amount), 0));
     if (amount <= 0) throw badRequest('The payment must be more than zero');
 
     // Every allocation is checked against what is actually still owed, before
@@ -3298,7 +4265,9 @@ paymentRoutes.post(
       if (!target) throw notFound(`That ${allocation.kind.replace(/_/g, ' ')} does not exist`);
       if (allocation.amount > target.outstanding + 0.005) {
         throw badRequest(
-          `${target.number} has only ${target.outstanding} outstanding, but ${allocation.amount} is being applied to it.`,
+          target.outstanding <= 0.005 && allocation.kind === 'advance_refund'
+            ? `${target.number} has nothing to repay or return`
+            : `${target.number} has only ${target.outstanding} outstanding, but ${allocation.amount} is being applied to it.`,
         );
       }
       // An advance — and a budget request — is released in one voucher. Half
@@ -3314,11 +4283,31 @@ paymentRoutes.post(
       }
     }
 
+    // A customer's collection is given an official receipt, numbered by
+    // G-CORE in the same transaction (2026-10-15, the owner's call). It is
+    // from ONE customer — the invoices', named on the payment whether or not
+    // the form said so.
+    const collection = body.kind === 'RECEIPT' && (body.allocations.some((a) => a.kind === 'invoice') || body.lines.length > 0);
+    if (body.lines.length && !body.customerId && !body.allocations.some((a) => a.kind === 'invoice')) {
+      throw badRequest('Money received on account is a customer’s — say which company paid');
+    }
+    if (body.lines.length && body.customerId && !(await prisma.customer.findUnique({ where: { id: body.customerId }, select: { id: true } }))) {
+      throw badRequest('That customer does not exist');
+    }
+    if (collection) {
+      const invoiceIds = body.allocations.filter((a) => a.kind === 'invoice').map((a) => a.id);
+      const owners = await prisma.invoice.findMany({ where: { id: { in: invoiceIds } }, select: { customerId: true }, distinct: ['customerId'] });
+      if (owners.length > 1) throw badRequest('One collection is from one customer — record each customer’s payment on its own');
+      if (owners[0] && body.customerId && body.customerId !== owners[0].customerId) throw badRequest('Those invoices are another customer’s');
+      body.customerId = owners[0]?.customerId ?? body.customerId;
+    }
     const payment = await prisma.$transaction(async (tx) => {
       const number = await nextNumber(body.kind === 'RECEIPT' ? 'payment' : 'disbursement', tx);
+      const orNumber = collection ? await nextNumber('official_receipt', tx) : null;
       const created = await tx.payment.create({
         data: {
           number,
+          orNumber,
           kind: body.kind,
           method: body.method,
           paymentDate: body.paymentDate ? asDate(body.paymentDate, 'Payment date') : dayKey(new Date()),
@@ -3348,6 +4337,7 @@ paymentRoutes.post(
               amount: D(a.amount),
             })),
           },
+          lines: { create: body.lines.map((l, i) => ({ sortOrder: i, reference: l.reference, amount: D(cents(l.amount)) })) },
         },
         include: paymentInclude,
       });
@@ -3414,11 +4404,54 @@ paymentRoutes.post(
         entityType: 'payment',
         entityId: payment.id,
         action: 'CREATED',
-        summary: `${payment.number} — ${amount} ${body.kind === 'RECEIPT' ? 'received' : 'paid'} across ${body.allocations.length} document(s)`,
+        summary: `${payment.number}${payment.orNumber ? ` (OR ${payment.orNumber})` : ''} — ${amount} ${body.kind === 'RECEIPT' ? 'received' : 'paid'} across ${body.allocations.length} document(s)${body.lines.length ? `, ${body.lines.length} line(s) on account` : ''}`,
       },
       req,
     );
     res.status(201).json(presentPayment(payment));
+  }),
+);
+
+/**
+ * Applying money received on account to an invoice once it is on file
+ * (2026-10-16): the line's amount — or part of it — becomes an allocation on
+ * the same payment, never past the invoice's outstanding, the same customer's
+ * invoice only; the line shrinks or goes. Settled totals re-derive as ever.
+ */
+paymentRoutes.post(
+  '/:id/lines/:lineId/apply',
+  require_('gfin.ar.create'),
+  handler(async (req, res) => {
+    const body = parseBody(z.object({ invoiceId: z.string().min(1, 'Which invoice?'), amount: z.number().positive().optional() }), req.body);
+    const payment = await prisma.payment.findUnique({ where: { id: req.params.id }, include: { lines: true } });
+    if (!payment) throw notFound('Payment not found');
+    const line = payment.lines.find((l) => l.id === req.params.lineId);
+    if (!line) throw notFound('That line is not on this payment');
+    const invoice = await prisma.invoice.findUnique({ where: { id: body.invoiceId }, select: { id: true, number: true, customerId: true } });
+    if (!invoice) throw notFound('Invoice not found');
+    if (payment.customerId && invoice.customerId !== payment.customerId) throw badRequest(`${invoice.number} is another customer’s invoice`);
+    const lineAmount = num(line.amount);
+    const applying = cents(body.amount ?? lineAmount);
+    if (applying > lineAmount + 0.005) throw badRequest(`Only ${lineAmount} is on that line`);
+    const target = await settleable('invoice', invoice.id);
+    if (!target) throw notFound('Invoice not found');
+    const amount = cents(Math.min(applying, target.outstanding));
+    if (amount <= 0.005) throw badRequest(`${invoice.number} has nothing outstanding`);
+    await prisma.$transaction(async (tx) => {
+      const left = cents(lineAmount - amount);
+      const moved = left > 0.005
+        ? await tx.paymentLine.updateMany({ where: { id: line.id, amount: line.amount }, data: { amount: D(left) } })
+        : await tx.paymentLine.deleteMany({ where: { id: line.id, amount: line.amount } });
+      if (!moved.count) throw badRequest('That line changed a moment ago — reload');
+      await tx.paymentAllocation.create({ data: { paymentId: payment.id, invoiceId: invoice.id, amount: D(amount) } });
+      await refreshSettlement(tx, 'invoice', invoice.id);
+    });
+    await audit(
+      { entityType: 'payment', entityId: payment.id, action: 'UPDATED', summary: `${payment.number}: ${amount} on account (${line.reference}) applied to ${invoice.number}` },
+      req,
+    );
+    const fresh = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id }, include: paymentInclude });
+    res.json(presentPayment(fresh));
   }),
 );
 
@@ -3461,6 +4494,12 @@ paymentRoutes.delete(
       include: { allocations: true },
     });
     if (!payment) throw notFound('Payment not found');
+    // A commission's payout and the advance repayment it deducted are one
+    // decision, written together by POST /commissions/:id/pay (2026-10-16);
+    // reversing half of it would pay a beneficiary twice or forgive a loan.
+    if (payment.method === 'COMMISSION_DEDUCTION' || payment.allocations.some((a) => a.commissionShareId)) {
+      throw badRequest('This payment is a commission payout or its cash advance deduction — it is not reversed on its own');
+    }
 
     const touched = payment.allocations.map((a) => ({
       kind: allocationKind(a, payment.kind),
@@ -3545,7 +4584,9 @@ paymentRoutes.get(
     if (kind === 'advance' || kind === 'advance_refund') {
       const rows = await prisma.cashAdvance.findMany({
         where: {
-          status: kind === 'advance' ? 'APPROVED' : 'REFUND_DUE',
+          // Money back on an advance: unspent cash after a liquidation, or a
+          // loan's repayments while it is out (2026-10-15).
+          ...(kind === 'advance' ? { status: 'APPROVED' as const } : { OR: [{ status: 'REFUND_DUE' as const }, { status: 'RELEASED' as const, repayable: true }] }),
           ...(partyId ? { requestedById: partyId } : {}),
         },
         include: { requestedBy: { select: { id: true, name: true } } },
@@ -3558,7 +4599,9 @@ paymentRoutes.get(
             const outstanding =
               kind === 'advance'
                 ? cents(num(r.amount) - released)
-                : cents(Math.max(0, released - num(r.amountSpent)) - num(r.amountRefunded));
+                : r.repayable
+                  ? cents(released - num(r.amountRefunded))
+                  : cents(Math.max(0, released - num(r.amountSpent)) - num(r.amountRefunded));
             return {
               id: r.id,
               number: r.number,
@@ -3643,10 +4686,13 @@ financeReportRoutes.get(
         const payable = num(inv.netCollectible);
         const paid = num(inv.amountCollected);
         const outstanding = cents(payable - paid);
-        const daysOverdue = daysBetween(inv.dueDate, asOf);
+        // Not countered: the terms have not started, so it is never late
+        // (it ages as Current and is counted apart below).
+        const daysOverdue = inv.counteredDate ? daysBetween(inv.dueDate, asOf) : Math.min(0, daysBetween(inv.dueDate, asOf));
         return {
           id: inv.id,
           number: inv.number,
+          awaitingCounter: !inv.counteredDate,
           party: inv.customer.name,
           partyId: inv.customerId,
           date: inv.invoiceDate,
@@ -3685,6 +4731,8 @@ financeReportRoutes.get(
       customers: [...byCustomer.values()].sort((a, b) => b.outstanding - a.outstanding),
       totalOutstanding: cents(rows.reduce((s, r) => s + r.outstanding, 0)),
       totalOverdue: cents(rows.filter((r) => r.daysOverdue > 0).reduce((s, r) => s + r.outstanding, 0)),
+      // Issued and not yet received by the customer — not overdue, whatever its date.
+      awaitingCountering: cents(rows.filter((r) => r.awaitingCounter).reduce((s, r) => s + r.outstanding, 0)),
       // Withheld at source and not yet certificated. Real money, but it comes
       // back as a tax credit — never chase it as an unpaid invoice.
       withheldAwaitingCertificate: cents(rows.reduce((s, r) => s + (r.withheld ?? 0), 0)),
@@ -4106,7 +5154,7 @@ financeReportRoutes.get(
         _sum: { grossAmount: true },
       }),
       prisma.progressBilling.count({ where: { status: 'APPROVED', invoice: null } }),
-      prisma.receiving.count({ where: { bills: { none: {} } } }),
+      prisma.receiving.count({ where: { status: 'RECEIVED', orderId: { not: null }, bills: { none: {} } } }),
       prisma.cashAdvance.count({ where: { status: 'APPROVED' } }),
       prisma.cashAdvance.count({ where: { status: 'RELEASED', liquidationDueDate: { lt: today } } }),
       prisma.cashAdvance.count({ where: { status: 'REFUND_DUE' } }),

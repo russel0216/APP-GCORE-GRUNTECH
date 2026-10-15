@@ -80,3 +80,39 @@
     width: auto;
   }
 }
+
+/* The payment terms (Accounts Receivable, 2026-10-15): Net 15 / 30 / 45 / 60
+   as chips, and a box for any other number of days beside them. */
+.ar-terms {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+.ar-terms input {
+  max-width: 7rem;
+}
+
+/* Files picked on a claim or liquidation form, filed with the save. */
+.fin-files {
+  list-style: none;
+  margin: var(--s-2) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s-1);
+}
+.fin-files li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  font-size: var(--fs-sm);
+}
+
+/* A reimbursement line: company over receipt no., item over kind. */
+.fin-line-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 12rem;
+}

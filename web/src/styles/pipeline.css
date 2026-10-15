@@ -92,11 +92,6 @@
   border-bottom-color: rgb(var(--danger-rgb) / 0.4);
 }
 
-.pipe-col[data-tone='forecast'] .pipe-band {
-  background: rgb(var(--warn-rgb) / 0.12);
-  border-bottom-color: rgb(var(--warn-rgb) / 0.5);
-}
-
 .pipe-total {
   font-size: var(--fs-sm);
   color: var(--neon-dim);
@@ -260,16 +255,6 @@
 .pipe-col.collapsed .pipe-body,
 .pipe-col.collapsed .pipe-total.weighted {
   display: none;
-}
-
-/* The forecast column: read-only, never a drop target. */
-.pipe-col.forecast {
-  border-style: dashed;
-  background: rgb(var(--tint-rgb) / 0.02);
-}
-
-.pipe-col.forecast .pipe-head strong {
-  color: var(--neon-dim);
 }
 
 .pipe-head-tools {

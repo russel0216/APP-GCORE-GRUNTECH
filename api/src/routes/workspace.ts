@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { peopleFlowWork } from '../shared/peopleFlow';
 import { Prisma } from '@prisma/client';
 import { ratePct } from '../shared/listPaper';
 import fs from 'node:fs';
@@ -7,7 +8,7 @@ import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, notFound, badRequest, forbidden } from '../http/kit';
 import { authenticate, currentUser } from '../auth/middleware';
 import { globalSearch, searchProviders, canSearch } from '../shared/search';
-import { act, contactOf, deciderFor, historyFor, pendingFor } from '../shared/approvals';
+import { act, contactOf, deciderFor, historyFor, mayReopen, pendingFor, reopenApproved } from '../shared/approvals';
 import { audit } from '../shared/audit';
 import {
   upload,
@@ -24,6 +25,8 @@ import { aftermarketSettings, renewalPipeline, sweepOverdue } from '../shared/af
 import { activityTypeNames } from '../shared/activityTypes';
 import { celebrationsBetween, yearsText } from '../shared/celebrations';
 import { manilaDayKey } from '../shared/day';
+import { contentDisposition, paperFileName } from '../shared/paperName';
+import { issueTicket, ticketPath, TICKET_TTL_MS } from '../shared/printTickets';
 
 // ════════════════════════════════════════════════════════════════════
 //  NOTIFICATIONS
@@ -157,7 +160,17 @@ approvalRoutes.get(
     // /approvals/:id/act, the one path.
     res.json(
       await Promise.all(
-        rows.map(async (r) => {
+        rows.map(async (r, i) => {
+          // `canReopen`: the latest request stands APPROVED and the viewer may
+          // pull the document back to draft (the module's own rule).
+          if (r.status === 'APPROVED') {
+            const canReopen = i === 0 && (await mayReopen(req.params.documentType, req.params.documentId, me));
+            return { ...r, canAct: false, canReopen };
+          }
+          if (r.reopenedById) {
+            const by = await prisma.user.findUnique({ where: { id: r.reopenedById }, select: { name: true } });
+            return { ...r, canAct: false, reopenedBy: by?.name ?? null };
+          }
           if (r.status !== 'PENDING' || r.requesterId === me.id) return { ...r, canAct: false };
           const step = await prisma.approvalStep.findFirst({
             where: { workflowId: r.workflowId ?? '', sequence: r.currentSequence },
@@ -170,6 +183,20 @@ approvalRoutes.get(
         }),
       ),
     );
+  }),
+);
+
+/**
+ * Pulling an APPROVED document back to draft (2026-10-16): the engine's
+ * `reopenApproved`, the module's own undo and refusals behind it.
+ */
+approvalRoutes.post(
+  '/reopen/:documentType/:documentId',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ reason: z.string().trim().min(1, 'Say why it is being pulled back').max(1000) }), req.body);
+    const request = await reopenApproved(req.params.documentType, req.params.documentId, me, body.reason);
+    res.json({ ok: true, requestId: request.id });
   }),
 );
 
@@ -528,8 +555,81 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
       overdue: isOverdue(r.neededBy, dayStart),
       link: `/g-ops/cad-job-orders/${r.id}`,
     })),
+    // People Flow (2026-10-13): HR's items due this week, or the person's
+    // own onboarding while they stand in it — shared/peopleFlow.ts.
+    ...(await peopleFlowWork(me)),
+    // Borrow slips (2026-10-14): the warehouse's approved requests waiting
+    // for their release, and what I hold that is due back within three days.
+    ...(await borrowWork(me, dayStart)),
+    // Outgoing (2026-10-15): what was issued to me and is waiting for me to
+    // confirm I received it — the slip is my receive proof.
+    ...(await outgoingToConfirm(me)),
   ];
   return rows.sort(byUrgency);
+}
+
+/**
+ * The borrow slips that are somebody's next move: for the warehouse
+ * (`gchain.borrow_slips.edit_all`), every approved request not yet released;
+ * for anyone, what they hold that is due back within three days or late. A
+ * Team Leader's requests to decide are in the approvals queue already.
+ */
+async function borrowWork(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> {
+  const soon = new Date(dayStart.getTime() + 3 * 86_400_000);
+  const [toRelease, dueBack] = await Promise.all([
+    can(me, 'gchain.borrow_slips.edit_all')
+      ? prisma.borrowSlip.findMany({
+          where: { status: 'APPROVED' },
+          select: { id: true, number: true, borrowerName: true, neededOn: true, warehouse: { select: { name: true } } },
+          orderBy: [{ neededOn: 'asc' }, { createdAt: 'asc' }],
+          take: 10,
+        })
+      : [],
+    prisma.borrowSlip.findMany({
+      where: { borrowerId: me.id, status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lte: soon } },
+      select: { id: true, number: true, purpose: true, dueAt: true, warehouse: { select: { name: true } } },
+      orderBy: { dueAt: 'asc' },
+      take: 10,
+    }),
+  ]);
+  return [
+    ...toRelease.map((r) => ({
+      id: r.id,
+      kind: 'borrow_slip',
+      title: r.borrowerName,
+      subtitle: `${r.number} · approved — to release from ${r.warehouse.name}`,
+      when: r.neededOn,
+      overdue: isOverdue(r.neededOn, dayStart),
+      link: `/g-chain/borrow-slips/${r.id}`,
+    })),
+    ...dueBack.map((r) => ({
+      id: r.id,
+      kind: 'borrow_slip',
+      title: r.purpose,
+      subtitle: `${r.number} · due back to ${r.warehouse.name}`,
+      when: r.dueAt,
+      overdue: isOverdue(r.dueAt, dayStart),
+      link: `/g-chain/borrow-slips/${r.id}`,
+    })),
+  ];
+}
+
+/** Outgoing slips issued to me that I have not yet confirmed receiving. */
+async function outgoingToConfirm(me: ResolvedUser): Promise<WorkRow[]> {
+  const rows = await prisma.stockIssue.findMany({
+    where: { issuedToId: me.id, status: 'ISSUED', receivedAt: null },
+    select: { id: true, number: true, purpose: true, issuedAt: true, issueDate: true, warehouse: { select: { name: true } } },
+    orderBy: { issueDate: 'asc' },
+    take: 10,
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    kind: 'stock_issue',
+    title: r.purpose,
+    subtitle: `${r.number} · issued to you from ${r.warehouse.name} — confirm you received it`,
+    when: r.issuedAt ?? r.issueDate,
+    link: `/g-chain/outgoing/${r.id}`,
+  }));
 }
 
 /**
@@ -974,6 +1074,23 @@ export const pdfRoutes = Router();
 pdfRoutes.use(authenticate);
 
 /**
+ * A print ticket (2026-10-12, shared/printTickets.ts): `openPdf()` asks for
+ * one and opens `path?ticket=…` in a new tab, so the paper is a real address
+ * and the browser saves it under the server's standard name. Only a paper's
+ * address (a `/pdf` path under /api) takes one; nothing is checked here
+ * beyond that — the GET the ticket opens runs every check a bearer would.
+ */
+pdfRoutes.post(
+  '/tickets',
+  handler(async (req, res) => {
+    const { path } = parseBody(z.object({ path: z.string().min(1).max(2000) }), req.body);
+    const at = ticketPath(path);
+    if (!at || !/(\/pdf(\/|$)|\.pdf$)/.test(at.split('?')[0])) throw badRequest('A print ticket is for a paper\'s address under /api');
+    res.json({ ticket: issueTicket(currentUser(req).id, at), expiresInSeconds: TICKET_TTL_MS / 1000 });
+  }),
+);
+
+/**
  * Renders a specimen of every section kind the engine supports — fields,
  * text, a table with a subheading row and title-over-description cells, the
  * totals block, a Gantt appendix on landscape pages of its own — with a
@@ -1082,7 +1199,7 @@ pdfRoutes.get(
           kind: 'gantt',
           title: 'Schedule',
           landscape: true,
-          legend: 'Planned duration in working days (Mon–Fri) — 30 working days in all.',
+          legend: 'Planned duration in working days (Mon–Sat) — 30 working days in all.',
           groups: [
             {
               name: 'Mobilisation',
@@ -1121,7 +1238,7 @@ pdfRoutes.get(
 
     await audit({ entityType: 'pdf_specimen', entityId: 'specimen', action: 'EXPORTED', summary: `Printed the document specimen ${documentNumber}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="gcore-specimen.pdf"');
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Specimen', author: currentUser(req).name, date: new Date() })));
     res.send(pdf);
   }),
 );

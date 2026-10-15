@@ -18,6 +18,7 @@ import { signToken } from '../src/auth/middleware';
 import { addressOf, buildMessage, encodeHeader, sendMail, type SmtpConfig } from '../src/shared/mail';
 import { hashToken, linkEmail, linkFor } from '../src/shared/accounts';
 import { statusLabel } from '../src/shared/pdf';
+import { moveAdminEmail } from '../src/shared/adminEmail';
 import {
   checkListPaper,
   flat,
@@ -46,7 +47,10 @@ function check(label: string, condition: boolean, detail?: string) {
 const TAG = 'ZZACCT';
 const DOMAIN = '@verifya.local';
 
+const MOVE_MARK = 'seed.adminEmailMoved.__verify__';
+
 async function cleanup() {
+  await prisma.setting.deleteMany({ where: { key: { startsWith: MOVE_MARK } } });
   await prisma.employee.deleteMany({ where: { lastName: { startsWith: TAG } } });
   const users = await prisma.user.findMany({ where: { email: { endsWith: DOMAIN } }, select: { id: true } });
   const ids = users.map((u) => u.id);
@@ -321,6 +325,43 @@ async function main() {
   check('it says when the link runs out, in Manila time', email.text.includes('Oct 5, 2026') && email.text.includes('Manila'));
   check('a name cannot inject markup into the HTML email', !email.html.includes('<script>') && email.html.includes('&lt;script&gt;'));
 
+  // ── 2b. The seeded admin's sign-in email moves once (2026-10-13) ───────────
+  console.log('\nThe admin\'s sign-in email');
+  const oldAdmin = await makeUser(`${TAG} Seeded Admin`, `oldadmin${DOMAIN}`, [], true);
+  const adminMoved = await moveAdminEmail([`OLDADMIN${DOMAIN}`], `gcore${DOMAIN}`, MOVE_MARK);
+  const movedRow = await prisma.user.findUnique({ where: { id: oldAdmin.id }, select: { email: true, passwordHash: true } });
+  check(
+    'the super admin on the old address signs in as the new one — the same login, its password kept',
+    adminMoved.moved && movedRow?.email === `gcore${DOMAIN}` && movedRow.passwordHash === oldAdmin.passwordHash,
+    JSON.stringify(adminMoved),
+  );
+  check(
+    'the move is on the login\'s trail, old and new address named',
+    (await prisma.auditLog.count({ where: { entityType: 'user', entityId: oldAdmin.id, summary: { contains: `oldadmin${DOMAIN} to gcore${DOMAIN}` } } })) === 1,
+  );
+  await prisma.user.update({ where: { id: oldAdmin.id }, data: { email: `oldadmin${DOMAIN}` } });
+  const adminAgain = await moveAdminEmail([`oldadmin${DOMAIN}`], `gcore${DOMAIN}`, MOVE_MARK);
+  check(
+    'it runs once: an address changed back by hand afterwards stays as it is',
+    !adminAgain.moved && adminAgain.reason === 'done' && (await prisma.user.findUnique({ where: { id: oldAdmin.id } }))?.email === `oldadmin${DOMAIN}`,
+  );
+  const holder = await makeUser(`${TAG} Holder`, `taken${DOMAIN}`, []);
+  const blocked = await moveAdminEmail([`oldadmin${DOMAIN}`], `taken${DOMAIN}`, `${MOVE_MARK}.taken`);
+  check(
+    'an address already another login\'s is never taken over — both left as they are, and the step tries again next deploy',
+    !blocked.moved &&
+      blocked.reason === 'taken' &&
+      (await prisma.user.findUnique({ where: { id: oldAdmin.id } }))?.email === `oldadmin${DOMAIN}` &&
+      (await prisma.user.findUnique({ where: { id: holder.id } }))?.email === `taken${DOMAIN}` &&
+      !(await prisma.setting.findUnique({ where: { key: `${MOVE_MARK}.taken` } })),
+  );
+  const notAdmin = await makeUser(`${TAG} Plain`, `plainold${DOMAIN}`, []);
+  const skipped = await moveAdminEmail([`plainold${DOMAIN}`], `plainnew${DOMAIN}`, `${MOVE_MARK}.plain`);
+  check(
+    'only a super admin is moved — an ordinary login on that address is left alone',
+    !skipped.moved && (await prisma.user.findUnique({ where: { id: notAdmin.id } }))?.email === `plainold${DOMAIN}`,
+  );
+
   // ── 3. Over HTTP ───────────────────────────────────────────────────────────
   if (!(await apiReachable())) {
     failed++;
@@ -570,6 +611,34 @@ async function main() {
   });
   check('a login email already in use refuses the save (409)', taken.status === 409);
   check('and the employee is not created without it', (await prisma.employee.count({ where: { employeeNo: `${TAG}-003` } })) === 0);
+  const takenBy = taken.body?.details?.[0]?.existingLogin;
+  check(
+    'the refusal names the employee already on that login, and offers no link',
+    takenBy?.linkable === false && /already the G-CORE login of .*on the register/.test(taken.body?.error ?? ''),
+    JSON.stringify(taken.body),
+  );
+
+  // A login made before its person was on the register: the save says whose
+  // it is and the form links the new employee to it instead (userId).
+  const orphan = await makeUser(`Orphan ${TAG}`, `orphan${DOMAIN}`, ['employee']);
+  const orphanTry = await http(adminT, 'POST', '/employees', {
+    employeeNo: `${TAG}-009`,
+    firstName: 'Orphan',
+    lastName: `${TAG} Login`,
+    login: { email: `ORPHAN${DOMAIN}` },
+  });
+  const offer = orphanTry.body?.details?.[0]?.existingLogin;
+  check(
+    'an email that is a login with no employee is a 409 offering to link it',
+    orphanTry.status === 409 && offer?.linkable === true && offer?.id === orphan.id && (orphanTry.body?.error ?? '').includes(orphan.name),
+    JSON.stringify(orphanTry.body),
+  );
+  const orphanLinked = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-009`, firstName: 'Orphan', lastName: `${TAG} Login`, userId: offer?.id });
+  check(
+    'and the same save with that login linked creates the employee on it',
+    orphanLinked.status === 201 && (await prisma.employee.findUnique({ where: { employeeNo: `${TAG}-009` } }))?.userId === orphan.id,
+    JSON.stringify(orphanLinked.body),
+  );
 
   // Every refusal lands before the person is written: nothing half-made.
   const inactive = await http(adminT, 'POST', '/employees', {

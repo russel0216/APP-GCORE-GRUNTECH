@@ -210,7 +210,7 @@ export const STANDARD_QUOTATION_DESIGN: PdfDesign = {
         { key: 'unitPrice', label: 'Unit price ({{quotation.currency}})', width: 109.4, align: 'right' },
         { key: 'amount', label: 'Total ({{quotation.currency}})', width: 86.28, align: 'right' },
       ],
-      size: 9, headColor: PURPLE, headingColor: GREEN, textColor: INK, bodyColor: '#555555', ruleColor: RULE,
+      size: 9, headColor: PURPLE, headingColor: GREEN, textColor: INK, bodyColor: '#555555', ruleColor: RULE, lineNotes: true,
     },
     {
       id: 'totals', name: 'Totals', type: 'totals', anchor: 'after', x: 327.48, y: 491, w: 231.8, h: 79,

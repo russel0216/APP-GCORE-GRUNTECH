@@ -7,6 +7,8 @@
  * from a single curve, which is the whole reason there are three.
  */
 
+import { curveTicks } from '../../lib/sCurve';
+
 export interface CurvePoint {
   date: string;
   planned: number;
@@ -48,11 +50,9 @@ export function SCurve({ points }: { points: CurvePoint[] }) {
   const lastActual = [...points].reverse().find((p) => p.actual !== null);
   const lastBilled = [...points].reverse().find((p) => p.billed !== null);
 
-  // A month-ish tick spacing that stays readable whatever the job length.
-  const tickCount = Math.min(6, points.length);
-  const ticks = Array.from({ length: tickCount }, (_, i) =>
-    points[Math.round((i * (points.length - 1)) / Math.max(1, tickCount - 1))],
-  );
+  // Labels by TIME across the span, never one per point: progress reports
+  // cluster, and labelling points stacked their dates on one spot.
+  const ticks = curveTicks(points[0].date, points[points.length - 1].date, { left: PAD.left, width: innerW });
 
   return (
     <div>
@@ -74,16 +74,17 @@ export function SCurve({ points }: { points: CurvePoint[] }) {
           </g>
         ))}
 
-        {ticks.map((p, i) => (
+        {ticks.map((t, i) => (
           <text
-            key={`${p.date}-${i}`}
-            x={x(p.date)}
+            key={`${t.label}-${i}`}
+            x={t.x}
             y={H - 12}
-            textAnchor="middle"
+            // The ends hug the plot's edges so neither runs off the chart.
+            textAnchor={i === 0 ? 'start' : i === ticks.length - 1 ? 'end' : 'middle'}
             fontSize="9"
             fill="var(--faint)"
           >
-            {new Date(p.date).toLocaleDateString('en-PH', { day: 'numeric', month: 'short' })}
+            {t.label}
           </text>
         ))}
 

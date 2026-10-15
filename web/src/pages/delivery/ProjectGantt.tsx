@@ -35,7 +35,12 @@ export interface GanttTask {
   dueDate: string | null;
   scopeItemId: string | null;
   assignedTo: { id: string; name: string } | null;
+  /** Its weight in its phase (2026-10-15); none counts as 1. A Decimal, so it may arrive as text. */
+  weight?: number | string | null;
 }
+
+/** A task's weight, 1 when none is set — the progress report's "from tasks" rule. */
+const weightOf = (t: GanttTask) => (t.weight === null || t.weight === undefined || t.weight === '' ? 1 : Number(t.weight));
 
 const TASK_TONES = { DONE: 'ok', BLOCKED: 'danger', IN_PROGRESS: 'info', NOT_STARTED: '' } as const;
 const STATUS_LABEL: Record<string, string> = {
@@ -91,7 +96,10 @@ export function ProjectGantt({
       const own = byItem.get(item.id) ?? [];
       const starts = own.map((t) => keyOf(t.startDate)).filter((k): k is string => !!k);
       const ends = own.map((t) => keyOf(t.dueDate)).filter((k): k is string => !!k);
-      const pct = own.length ? Math.round(own.reduce((s, t) => s + t.progressPct, 0) / own.length) : null;
+      // The phase's % is its tasks' weighted by their weights — what the
+      // progress report takes "from tasks".
+      const weights = own.reduce((s, t) => s + weightOf(t), 0);
+      const pct = own.length && weights > 0 ? Math.round(own.reduce((s, t) => s + weightOf(t) * (t.status === 'DONE' ? 100 : t.progressPct), 0) / weights) : null;
       out.push({
         kind: 'phase',
         item,
@@ -248,7 +256,7 @@ export function ProjectGantt({
                       return (
                         <div
                           key={d.key}
-                          className={`gantt-day${dow === 0 || dow === 6 ? ' is-weekend' : ''}${d.key === today ? ' is-today' : ''}`}
+                          className={`gantt-day${dow === 0 ? ' is-off' : ''}${d.key === today ? ' is-today' : ''}`}
                           title={formatDate(d.key)}
                         >
                           {d.date.getDate()}
@@ -377,6 +385,7 @@ function TaskEditor({
     progressPct: task?.progressPct ?? 0,
     status: task?.status ?? 'NOT_STARTED',
     assignedToId: task?.assignedTo?.id ?? '',
+    weight: task?.weight === null || task?.weight === undefined ? '' : String(Number(task.weight)),
   });
 
   const valid = form.name.trim().length >= 2 && (!form.startDate || !form.dueDate || form.dueDate >= form.startDate);
@@ -390,6 +399,7 @@ function TaskEditor({
         startDate: form.startDate || null,
         dueDate: form.dueDate || null,
         assignedToId: form.assignedToId || null,
+        weight: form.weight === '' ? null : Number(form.weight),
       };
       if (task) {
         await api.patch(`/jobs/${jobId}/tasks/${task.id}`, {
@@ -461,6 +471,9 @@ function TaskEditor({
             value={form.progressPct}
             onChange={(e) => setForm({ ...form, progressPct: Math.max(0, Math.min(100, Number(e.target.value) || 0)) })}
           />
+        </Field>
+        <Field label="Weight in its phase" hint="How much of the phase this task is — 1 when left blank. The progress report weighs the phase’s % by it.">
+          <NumberInput kind="decimal" value={form.weight} onChange={(e) => setForm({ ...form, weight: e.target.value })} />
         </Field>
         <Field label="Assigned to" htmlFor={assigneeId}>
           <PersonSelect

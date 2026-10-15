@@ -25,6 +25,7 @@ import { groupKey, rememberGroups } from '../shared/quotationGroups';
 import {
   submitForApproval,
   onApprovalSettled,
+  onApprovalReopened,
   approvalOptions,
   approvalSlots,
   cancelOpenRequest,
@@ -32,6 +33,7 @@ import {
   routeBrief,
   mayDecide,
   preparedAt,
+  onePerPerson,
   slotSignatories,
 } from '../shared/approvals';
 import {
@@ -93,11 +95,10 @@ import {
   valueRevision,
   standsApproved,
   groupShares,
-  NO_GROUP,
-} from '../shared/pipeline';
+  NO_GROUP, lostKindAfter } from '../shared/pipeline';
 import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../shared/day';
 import { env } from '../env';
-import { googleCalendarUrl } from '../shared/calendar-links';
+import { googleCalendarUrl, mapLinkFor } from '../shared/calendar-links';
 import { pipelineStageOverrides, pipelineStages, stageSettingsSchema, STAGE_SETTING_KEY, DEFAULT_STAGES, mergeStages } from '../shared/pipelineStages';
 import {
   buildForecast,
@@ -144,6 +145,7 @@ import {
   upperText,
   capsParts,
 } from '../shared/quotation';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -327,7 +329,7 @@ leadRoutes.get(
             ...presentLead(r as unknown as Record<string, unknown>),
             quotationCount: r._count.quotations,
             stage,
-            stageLabel: stages.find((st) => st.key === stage)?.label ?? null,
+            stageLabel: cancelledLabel(stages.find((st) => st.key === stage)?.label ?? null, r.lostKind),
             // What the mass actions plan with; the PATCH still decides.
             canEdit: canEditRecord(me, 'gops', 'leads', r.assignedToId),
           };
@@ -570,7 +572,7 @@ leadRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${lead.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Lead', number: lead.number, author: lead.createdBy?.name, date: lead.createdAt })));
     res.send(pdf);
   }),
 );
@@ -653,6 +655,8 @@ const leadSchema = z.object({
   nextActionDate: z.string().optional().nullable(),
   status: z.enum(LEAD_STATUSES).optional(),
   lostReason: z.string().optional().nullable(),
+  /** Lost, or cancelled by the customer (2026-10-13) — only with LOST. */
+  lostKind: z.enum(['LOST', 'CANCELLED']).optional(),
   notes: z.string().optional().nullable(),
 });
 
@@ -763,6 +767,8 @@ leadRoutes.patch(
     }
     if (body.probability !== undefined) data.probability = body.probability;
     if (body.status !== undefined) data.status = body.status;
+    const leadLostKind = lostKindAfter(before.status, body.status, body.lostKind);
+    if (leadLostKind !== undefined) data.lostKind = leadLostKind;
     // SCORO's ladder: a stage move sets the odds — unless this same request
     // typed them, because an explicit value is somebody's judgement.
     if (body.status !== undefined && body.status !== before.status && body.probability === undefined) {
@@ -1318,8 +1324,9 @@ quotationRoutes.get(
             number: r.number,
             subject: r.subject,
             outcome: r.outcome,
+            lostKind: r.lostKind,
             stage: quotationStage(r.outcome, booked, stages),
-            stageLabel: stages.find((st) => st.key === quotationStage(r.outcome, booked, stages))?.label ?? null,
+            stageLabel: cancelledLabel(stages.find((st) => st.key === quotationStage(r.outcome, booked, stages))?.label ?? null, r.lostKind),
             probability: r.probability,
             expectedClosing: r.expectedClosing,
             currency: r.currency,
@@ -1938,7 +1945,7 @@ quotationRoutes.get(
       stages,
       closedInDays,
       stage: stageKey,
-      stageLabel: pipeline.find((s) => s.key === stageKey)?.label ?? null,
+      stageLabel: cancelledLabel(pipeline.find((s) => s.key === stageKey)?.label ?? null, quotation.lostKind),
       quotationStages: quotationStages(pipeline).map((st) => ({
         key: st.key,
         label: st.label,
@@ -2355,14 +2362,21 @@ async function revisionForEdit(req: Parameters<typeof currentUser>[0], quotation
   return { quotation, revision };
 }
 
+/** A lost record the customer cancelled reads "Cancelled" wherever its stage is named (2026-10-13). */
+export function cancelledLabel(label: string | null, lostKind: string | null | undefined): string | null {
+  return lostKind === 'CANCELLED' ? 'Cancelled' : label;
+}
+
 quotationRoutes.patch(
   '/:id',
   require_('gops.quotations.edit_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(quotationSchema.partial().extend({
-      outcome: z.enum(['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON', 'LOST']).optional(),
+      outcome: z.enum(['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON', 'LOST', 'ON_HOLD']).optional(),
       lostReason: z.string().optional().nullable(),
+      /** Lost, or cancelled by the customer (2026-10-13) — only with LOST. */
+      lostKind: z.enum(['LOST', 'CANCELLED']).optional(),
     }), req.body);
 
     const before = await prisma.quotation.findUnique({
@@ -2389,6 +2403,8 @@ quotationRoutes.patch(
         jobNumber: job?.number ?? null,
       });
     }
+
+    const lostKind = lostKindAfter(before.outcome, body.outcome, body.lostKind);
 
     const renumber = body.number !== undefined && body.number !== before.number;
     if (renumber) await checkQuoteNumber(body.number!, before.id);
@@ -2421,6 +2437,7 @@ quotationRoutes.patch(
       const teamId = await pickedTeam(body.teamId, before.teamId);
       data.team = teamId ? { connect: { id: teamId } } : { disconnect: true };
     }
+    if (lostKind !== undefined) data.lostKind = lostKind;
     if (body.outcome !== undefined) {
       data.outcome = body.outcome;
       if (body.outcome === 'SUBMITTED') data.submittedAt = new Date();
@@ -2453,9 +2470,11 @@ quotationRoutes.patch(
               ? 'QUOTATION_SUBMITTED'
               : body.outcome === 'NEGOTIATION'
                 ? 'NEGOTIATION'
-                : body.outcome === 'OPEN'
-                  ? 'QUOTATION_CREATED' // pulled back to a draft
-                  : null;
+                : body.outcome === 'ON_HOLD'
+                  ? 'ON_HOLD'
+                  : body.outcome === 'OPEN'
+                    ? 'QUOTATION_CREATED' // pulled back to a draft
+                    : null;
       if (leadStatus) {
         const lead = await prisma.lead.findUnique({ where: { id: before.leadId }, select: { status: true, probability: true } });
         await prisma.lead.update({
@@ -2465,6 +2484,8 @@ quotationRoutes.patch(
             // The lead follows the stage's odds too, so the funnel stays coherent.
             ...(lead ? { probability: probabilityAfterMove(lead.status, leadStatus, lead.probability, await pipelineStages()) } : {}),
             ...(body.outcome === 'LOST' && body.lostReason ? { lostReason: body.lostReason } : {}),
+            // Cancelled or lost, the lead says the same as its quotation.
+            lostKind: body.outcome === 'LOST' ? (lostKind ?? 'LOST') : null,
           },
         });
       }
@@ -3166,6 +3187,58 @@ onApprovalSettled('quotation', async (request, outcome) => {
   });
 });
 
+/**
+ * An APPROVED revision may be pulled back to draft (2026-10-16, the owner's
+ * call: "every approval request can be pulled back"), by the quotation's
+ * author or `edit_all`. Approval only made the revision APPROVED (and
+ * superseded an earlier approved one, which stays superseded), so the pull
+ * back sets it to DRAFT again — refused while the quotation is won, a live
+ * sales order books it, or a job order or project stands on it.
+ */
+onApprovalReopened('quotation', {
+  may: async (actor, revisionId) => {
+    const revision = await prisma.quotationRevision.findUnique({
+      where: { id: revisionId },
+      select: { status: true, quotation: { select: { ownerId: true } } },
+    });
+    return !!revision && revision.status === 'APPROVED' && canEditRecord(actor, 'gops', 'quotations', revision.quotation.ownerId);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const revision = await tx.quotationRevision.findUnique({
+      where: { id: documentId },
+      select: { id: true, revision: true, quotationId: true, quotation: { select: { number: true, outcome: true } } },
+    });
+    if (!revision) throw notFound('Revision not found');
+    const label = `Revision ${revision.revision} of ${revision.quotation.number}`;
+    if (revision.quotation.outcome === 'WON') {
+      throw badRequest(`${label} cannot be pulled back — the quotation is won. Move it off Won first.`);
+    }
+    const orders = await tx.salesOrder.findMany({
+      where: { quotationId: revision.quotationId, status: { not: 'CANCELLED' } },
+      select: { number: true },
+    });
+    if (orders.length) {
+      throw badRequest(`${label} cannot be pulled back — sales order ${orders.map((o) => o.number).join(', ')} books it`);
+    }
+    const jobs = await tx.job.findMany({ where: { quotationRevisionId: revision.id, status: { not: 'CANCELLED' } }, select: { number: true } });
+    if (jobs.length) {
+      throw badRequest(`${label} cannot be pulled back — project ${jobs.map((j) => j.number).join(', ')} is built on it`);
+    }
+    const jobOrders = await tx.jobOrder.findMany({
+      where: { quotationId: revision.quotationId, status: { notIn: ['CANCELLED', 'REJECTED'] } },
+      select: { number: true },
+    });
+    if (jobOrders.length) {
+      throw badRequest(`${label} cannot be pulled back — job order ${jobOrders.map((j) => j.number).join(', ')} stands on it`);
+    }
+    const claimed = await tx.quotationRevision.updateMany({
+      where: { id: revision.id, status: 'APPROVED' },
+      data: { status: 'DRAFT', approvedAt: null },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+  },
+});
+
 // ── Quotation PDF ────────────────────────────────────────────────────────────
 
 type LoadedQuotation = NonNullable<Awaited<ReturnType<typeof loadQuotation>>>;
@@ -3349,7 +3422,14 @@ export async function quotationPrintData(
       // (a Team Leader's own quotation): one timestamp for both (2026-10-12).
       at: preparedAt(slots) ?? revision.createdAt,
     },
-    ...(revision.importedUnchanged ? [] : slots.length ? slotSignatories(slots) : await unroutedApproval(revision)),
+    // Each person once (`onePerPerson`): a Team Leader who is also CEO /
+    // President signs under Team Leader alone, and the author's own steps
+    // are their "Prepared by".
+    ...(revision.importedUnchanged
+      ? []
+      : slots.length
+        ? slotSignatories(onePerPerson(slots, owner.id))
+        : await unroutedApproval(revision)),
   ];
 
   return {
@@ -3408,9 +3488,8 @@ quotationRoutes.get(
     const { design } = await quotationDesign();
     const optionId = typeof req.query.option === 'string' && req.query.option ? req.query.option : null;
     const bare = await renderDesigned(design, await quotationPrintData(quotation, revision, { optionId }));
-    // The quotation's attachments print behind it (2026-10-12) unless
-    // `?attachments=0` asks for the bare document.
-    const files = req.query.attachments === '0' ? [] : await attachedFiles('quotation', quotation.id);
+    // The bare document by default (2026-10-16, the owner's call); `?attachments=1` puts the files behind it.
+    const files = req.query.attachments !== '1' ? [] : await attachedFiles('quotation', quotation.id);
     const { pdf, listed } = await withAttachments(bare, files, {
       title: 'Quotation',
       number: quotation.number,
@@ -3428,7 +3507,7 @@ quotationRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${quotation.number}-R${revision.revision}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Quotation', number: quotation.number, revision: revision.revision, author: quotation.owner.name, date: revision.createdAt })));
     res.send(pdf);
   }),
 );
@@ -3599,7 +3678,10 @@ activityRoutes.get(
           uid: row.id,
           number: shown.typeName,
           title: row.subject,
-          description: [row.callLink ? `Call: ${row.callLink}` : null, row.notes].filter(Boolean).join('\n\n') || null,
+          description:
+            [row.callLink ? `Call: ${row.callLink}` : null, row.mapUrl ? `Map: ${mapLinkFor(row.location, row.mapUrl)}` : null, row.notes]
+              .filter(Boolean)
+              .join('\n\n') || null,
           location: row.location,
           startsAt: row.startsAt,
           endsAt: shown.endsAt,
@@ -3646,6 +3728,8 @@ const activitySchema = z.object({
   isPrivate: z.boolean().optional(),
   /** Conference call link, http(s) only. */
   callLink: z.string().trim().max(500).optional().nullable(),
+  /** A Google Maps link for the address (2026-10-13), http(s) only. */
+  mapUrl: z.string().trim().max(2000).optional().nullable(),
   /** The customer's contact person — one of the customer's contacts. */
   contactId: z.string().optional().nullable(),
   /** The project it is for. */
@@ -3724,6 +3808,7 @@ activityRoutes.post(
     const links = { customerId: body.customerId || null, contactId: body.contactId || null, jobId: body.jobId || null };
     await checkActivityLinks(links);
     const callLink = body.callLink ? safeHttpUrl(body.callLink) : null;
+    const mapUrl = body.mapUrl ? safeHttpUrl(body.mapUrl) : null;
     const names = await activityTypeNames();
     const firstStart = allDay ? allDayStart(new Date(body.startsAt)) : new Date(body.startsAt);
     // A repeating booking (SCORO's "Recurring"): every occurrence is a row of its own.
@@ -3736,6 +3821,7 @@ activityRoutes.post(
       notes: body.notes || null,
       location: body.location || null,
       callLink,
+      mapUrl,
       allDay,
       isPrivate: body.isPrivate ?? false,
       assignedToId,
@@ -3795,7 +3881,7 @@ activityRoutes.post(
         body: `${activityWhen(activity)}${activity.location ? ` · ${activity.location}` : ''}${repeats} · from ${me.name}`,
         link: activityLink(activity),
       },
-      { respondLinks: true },
+      { respondLinks: true, map: mapLinkFor(activity.location, activity.mapUrl) },
     );
     const typeName = (names.get(typeKey) ?? humaniseTypeKey(typeKey)).toLowerCase();
     for (const [i, row] of rows.entries()) {
@@ -3861,6 +3947,7 @@ activityRoutes.patch(
       });
     }
     const callLink = body.callLink !== undefined ? (body.callLink ? safeHttpUrl(body.callLink) : null) : undefined;
+    const mapUrl = body.mapUrl !== undefined ? (body.mapUrl ? safeHttpUrl(body.mapUrl) : null) : undefined;
 
     const { invitees: _invitees, ...existingRow } = existing;
     void _invitees;
@@ -3872,6 +3959,7 @@ activityRoutes.patch(
           ...(body.allDay !== undefined ? { allDay: body.allDay } : {}),
           ...(body.isPrivate !== undefined ? { isPrivate: body.isPrivate } : {}),
           ...(callLink !== undefined ? { callLink } : {}),
+          ...(mapUrl !== undefined ? { mapUrl } : {}),
           ...(body.contactId !== undefined ? { contactId: body.contactId || null } : {}),
           ...(body.jobId !== undefined ? { jobId: body.jobId || null } : {}),
           // A new time or a new reminder is a reminder not yet sent.
@@ -3912,7 +4000,7 @@ activityRoutes.patch(
         body: `${activityWhen(updated)}${updated.location ? ` · ${updated.location}` : ''} · from ${me.name}`,
         link,
       },
-      { respondLinks: true },
+      { respondLinks: true, map: mapLinkFor(updated.location, updated.mapUrl) },
     );
     const stayed = [updated.assignedToId, ...inviteeIds.filter((id) => !added.includes(id))].filter((id) => id !== me.id);
     if (body.status === 'CANCELLED' && existing.status !== 'CANCELLED') {
@@ -4043,7 +4131,8 @@ async function loadBoard(req: Parameters<typeof currentUser>[0]): Promise<BoardR
     prisma.quotation.findMany({
       where: {
         OR: [
-          { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] } },
+          // On hold (2026-10-13) stays on the board, parked, like a held lead.
+          { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'ON_HOLD'] } },
           { outcome: { in: ['WON', 'LOST'] }, decidedAt: { gte: decidedFrom } },
         ],
         ...(ownerId ? { ownerId } : {}),
@@ -4171,8 +4260,8 @@ pipelineRoutes.get(
   require_('gops.pipeline.export'),
   handler(async (req, res) => {
     const board = await loadBoard(req);
-    const cards = [...board.columns.flatMap((c) => c.cards), ...board.forecast.cards.map((c) => ({ ...c, column: 'FORECAST' }))];
-    const label = (key: string) => (key === 'FORECAST' ? board.forecast.label : (columnByKey(key)?.label ?? key));
+    const cards = board.columns.flatMap((c) => c.cards);
+    const label = (key: string) => columnByKey(key)?.label ?? key;
     const rows = cards.map((c) => [
       label(c.column),
       c.kind,

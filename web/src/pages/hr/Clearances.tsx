@@ -6,7 +6,7 @@ import { DataList, type Column } from '../../components/DataList';
 import { Meter, Stat } from '../../components/charts';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { PersonSelect, usePeople } from '../../components/People';
 import {
@@ -652,6 +652,7 @@ export function ClearanceDetail() {
         confirm={confirm}
       />
 
+      <DecisionNote documentType="clearance" documentId={c.id} reloadToken={reload} />
       <DocumentApproval documentType="clearance" documentId={c.id} reloadToken={reload} />
 
       <ErrorBox error={error} />

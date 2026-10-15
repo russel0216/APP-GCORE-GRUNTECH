@@ -91,12 +91,14 @@ const QUOTATION_STAGES = ['QUOTATION_CREATED', 'QUOTATION_SUBMITTED', 'NEGOTIATI
 function LeadProgress({
   status,
   lostReason,
+  lostKind,
   canEdit,
   hasQuotation,
   onMove,
 }: {
   status: string;
   lostReason: string | null;
+  lostKind?: 'LOST' | 'CANCELLED' | null;
   canEdit: boolean;
   hasQuotation: boolean;
   onMove: (status: string) => void;
@@ -122,7 +124,7 @@ function LeadProgress({
         <div>
           <div className="section-label">WHERE IT IS NOW</div>
           <div className="lead-now">
-            <StatusBadge status={status} />
+            <StatusBadge status={status} label={lost && lostKind === 'CANCELLED' ? 'Cancelled' : undefined} />
             {!off && (
               <span className="faint">
                 stage {index + 1} of {PIPELINE.length}
@@ -198,6 +200,8 @@ interface LeadRow {
   nextActionDate: string | null;
   notes: string | null;
   lostReason: string | null;
+  /** LOST or CANCELLED while lost (2026-10-13). */
+  lostKind?: 'LOST' | 'CANCELLED' | null;
   assignedTo: { id: string; name: string };
   /** Who recorded the enquiry; a manager often adds a lead and assigns it on. */
   createdBy: { id: string; name: string } | null;
@@ -662,11 +666,11 @@ export function LeadDetail() {
    * plain words at least: Sales Analytics groups the reasons, and "no" teaches
    * nobody anything.
    */
-  async function markLost(reason: string) {
+  async function markLost(reason: string, kind: 'LOST' | 'CANCELLED' = 'LOST') {
     if (!lead) return;
     if (reason.length < 3) throw new Error('Say why in a few words — Sales Analytics reports the reasons.');
-    await api.patch(`/leads/${lead.id}`, { status: 'LOST', lostReason: reason });
-    toast('ok', `${lead.companyName} marked lost`);
+    await api.patch(`/leads/${lead.id}`, { status: 'LOST', lostReason: reason, lostKind: kind });
+    toast('ok', `${lead.companyName} ${kind === 'CANCELLED' ? 'cancelled' : 'marked lost'}`);
     await load();
   }
 
@@ -772,7 +776,23 @@ export function LeadDetail() {
                 minReason: 3,
                 // A lead lost before and picked up again offers the reason it was lost with.
                 initialReason: lead.lostReason ?? '',
-                onConfirm: (reason) => markLost(reason),
+                onConfirm: (reason) => markLost(reason, 'LOST'),
+              },
+            },
+          // Cancel (2026-10-13): the customer dropped it — neither won nor lost in a win rate.
+          lead.canEdit &&
+            !won &&
+            !lost && {
+              label: 'Cancel lead',
+              danger: true,
+              confirm: {
+                title: `Cancel ${lead.companyName}?`,
+                body: 'The customer dropped the requirement. It goes to Lost marked cancelled, and a win rate counts it as neither won nor lost.',
+                confirmLabel: 'Cancel lead',
+                reason: 'required',
+                reasonLabel: 'Why was it cancelled?',
+                minReason: 3,
+                onConfirm: (reason) => markLost(reason, 'CANCELLED'),
               },
             },
           lead.canEdit &&
@@ -815,6 +835,7 @@ export function LeadDetail() {
       <LeadProgress
         status={lead.status}
         lostReason={lead.lostReason}
+        lostKind={lead.lostKind}
         canEdit={lead.canEdit}
         hasQuotation={hasQuotation}
         onMove={setStatus}
@@ -878,7 +899,7 @@ export function LeadDetail() {
           <Row label="Owner" value={lead.assignedTo.name} />
           <Row label="Next action" value={lead.nextAction} />
           <Row label="Due" value={formatDate(lead.nextActionDate)} />
-          {lead.status === 'LOST' && <Row label="Lost because" value={lead.lostReason} />}
+          {lead.status === 'LOST' && <Row label={lead.lostKind === 'CANCELLED' ? 'Cancelled because' : 'Lost because'} value={lead.lostReason} />}
         </div>
 
         <div className="card">

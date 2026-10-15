@@ -153,6 +153,8 @@ const itemsBlock = z.object({
   /** A line's description, under its product name. */
   bodyColor: color('#555555'),
   ruleColor: color('#D9D9D9'),
+  /** Print a line's supplier and note under its figure, where the line has them (the costing). */
+  lineNotes: z.boolean().default(true),
 });
 
 const totalsBlock = z.object({
@@ -968,16 +970,24 @@ class Renderer {
     const cellLines = (cell: PdfCell | undefined, width: number): CellLine[] => {
       if (cell === undefined || cell === null) return [];
       if (typeof cell === 'object') {
-        const title = wrap(doc, [[{ text: pdfSafe(cell.title ?? ''), bold: true }]], width, body).map((line) => ({ line, color: b.textColor, gap: 0 }));
-        const text = cell.body ? pdfSafe(cell.body) : '';
-        const desc = text
-          ? wrap(doc, text.split(/\r?\n/).map((t) => [{ text: t, bold: false }]), width, body).map((line, i) => ({
-              line,
-              color: b.bodyColor,
-              gap: i === 0 && cell.title ? 2 : 0,
-            }))
-          : [];
-        return [...(cell.title ? title : []), ...desc];
+        const title = wrap(doc, [[{ text: pdfSafe(cell.title ?? ''), bold: !cell.plain }]], width, body).map((line) => ({ line, color: b.textColor, gap: 0 }));
+        const under = (raw: string | undefined, ink: string): CellLine[] => {
+          const text = raw ? pdfSafe(raw) : '';
+          return text
+            ? wrap(doc, text.split(/\r?\n/).map((t) => [{ text: t, bold: false }]), width, body).map((line, i) => ({
+                line,
+                color: ink,
+                gap: i === 0 && cell.title ? 2 : 0,
+              }))
+            : [];
+        };
+        const notes = b.lineNotes !== false;
+        return [
+          ...(cell.title ? title : []),
+          ...under(cell.body, b.bodyColor),
+          ...(notes ? under(cell.accent, b.headingColor) : []),
+          ...(notes ? under(cell.note, b.bodyColor) : []),
+        ];
       }
       return wrap(doc, pdfSafe(String(cell)).split(/\r?\n/).map((t) => [{ text: t, bold: false }]), width, body).map((line) => ({
         line,

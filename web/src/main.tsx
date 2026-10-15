@@ -31,6 +31,7 @@ import './styles/costing.css';
 import './styles/pdf-templates.css';
 import './styles/file-viewer.css';
 import './styles/cad.css';
+import './styles/people-flow.css';
 import './styles/help.css';
 import './styles/face.css';
 

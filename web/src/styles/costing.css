@@ -109,7 +109,7 @@ table.data.cs-lines {
 }
 
 .cs-col-cost {
-  width: 9rem;
+  width: 12rem;
 }
 
 .cs-col-amount {
@@ -396,3 +396,15 @@ table.data.cs-tasks {
   white-space: pre-wrap;
 }
 
+
+/* A line's supplier and note, under its unit cost (2026-10-14). */
+.cs-col-cost .cs-line-supplier-input,
+.cs-col-cost .cs-line-note {
+  margin-top: var(--s-1);
+  width: 100%;
+}
+
+.cs-line-supplier {
+  color: var(--ok);
+  font-size: var(--fs-sm);
+}

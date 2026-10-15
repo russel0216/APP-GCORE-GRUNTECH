@@ -1,8 +1,8 @@
 /**
  * Reset a user's password from the server console.
  *
- *   npx tsx scripts/reset-password.ts admin@gruntech.com
- *   npx tsx scripts/reset-password.ts admin@gruntech.com "TheNewPassword"
+ *   npx tsx scripts/reset-password.ts gcore@gruntechnology.com
+ *   npx tsx scripts/reset-password.ts gcore@gruntechnology.com "TheNewPassword"
  *
  * With no password given it generates one and prints it once.
  *

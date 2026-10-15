@@ -2,11 +2,13 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type Column } from '../../components/DataList';
+import { DataList, type Column, type FilterDef } from '../../components/DataList';
+import { Stat } from '../../components/charts';
+import { usePeople } from '../../components/People';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import {
   ErrorBox,
@@ -21,7 +23,7 @@ import {
   useToast,
   type Tone,
 } from '../../components/ui';
-import { RecordPaymentModal, paymentLink } from './Receivables';
+import { RecordPaymentModal, paymentLink, useTeams } from './Receivables';
 import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -96,6 +98,10 @@ interface Claim {
   postedAt: string | null;
   notes: string | null;
   claimedBy: { id: string; name: string; email: string };
+  /** The claimant's team, else their department. */
+  team?: { label: string; title: string } | null;
+  /** Where it stands in the owner's words: TL Approval … For Release, Paid. */
+  stage?: string;
   job: { id: string; number: string; name: string } | null;
   costCategory: { id: string; name: string } | null;
   advance: ClaimAdvance | null;
@@ -106,6 +112,7 @@ interface Claim {
     description: string;
     category: string | null;
     receiptNo: string | null;
+    vendor: string | null;
     amount: number;
   }[];
   allocations?: {
@@ -115,98 +122,120 @@ interface Claim {
   }[];
 }
 
+interface ClaimsSummary {
+  total: number;
+  count: number;
+  pending: number;
+  pendingCount: number;
+  forRelease: number;
+  forReleaseCount: number;
+  paidOut: number;
+  paidCount: number;
+}
+
+/** The stage words' tones: waiting on someone, owed, done. */
+const STAGE_TONES: Record<string, Tone> = {
+  'TL Approval': 'warn',
+  'Back Support': 'warn',
+  Checking: 'warn',
+  'FM Approval': 'warn',
+  'CEO Approval': 'warn',
+  'For Release': 'info',
+  Paid: 'ok',
+  Settled: 'ok',
+  Rejected: 'danger',
+};
+
+/**
+ * Reimbursements — the owner's module 6 (2026-10-15): Reimbursement No.,
+ * Date of reimburse, Requester, Team (else department), Project / Purpose,
+ * Amount, Status in his words (TL Approval, Back Support, Checking, FM
+ * Approval, CEO Approval, For Release, Paid), under the cards Sum of all
+ * reimbursements, Pending process, For release and Total paid out.
+ * Liquidations are the same document and stay in the list (Kind).
+ */
 export function Expenses() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const [filing, setFiling] = useState(false);
   const [reload, setReload] = useState(0);
+  const { people } = usePeople('gfin.expenses.create');
+  const teams = useTeams();
 
   const columns: Column<Claim>[] = [
+    { key: 'number', label: 'Reimbursement No.', sortKey: 'number', width: '170px', render: (r) => <span className="mono">{r.number}</span> },
+    { key: 'claimDate', label: 'Date of reimburse', sortKey: 'claimDate', render: (r) => formatDate(r.claimDate) },
+    { key: 'claimedBy', label: 'Requester', render: (r) => r.claimedBy.name },
     {
-      key: 'number',
-      label: 'Number',
-      sortKey: 'number',
-      render: (r) => <span className="mono">{r.number}</span>,
+      key: 'team',
+      label: 'Team',
+      render: (r) => (r.team ? <span title={r.team.title}>{r.team.label}</span> : <span className="faint">—</span>),
     },
     {
-      key: 'claimedBy',
-      label: 'Claimed by',
-      render: (r) => (
-        <div>
-          <div>{r.claimedBy.name}</div>
-          <div className="faint">{r.purpose}</div>
-        </div>
-      ),
-    },
-    {
-      key: 'kind',
-      label: 'Kind',
+      key: 'purpose',
+      label: 'Project / Purpose',
       render: (r) => {
         const source = liquidationSource(r);
-        return source ? (
-          <span>
-            Liquidation <span className="faint mono">{source.number}</span>
-          </span>
-        ) : (
-          <span className="faint">Reimbursement</span>
+        return (
+          <div>
+            <div>{r.purpose}</div>
+            <div className="faint">
+              {r.job ? <span className="mono">{r.job.number}</span> : 'Overheads'}
+              {source && (
+                <>
+                  {' · liquidation of '}
+                  <span className="mono">{source.number}</span>
+                </>
+              )}
+            </div>
+          </div>
         );
       },
     },
     {
-      key: 'claimDate',
-      label: 'Dated',
-      sortKey: 'claimDate',
-      render: (r) => formatDate(r.claimDate),
-    },
-    {
-      key: 'job',
-      label: 'Charged to',
-      render: (r) =>
-        r.job ? (
-          <div>
-            <div className="mono">{r.job.number}</div>
-            <div className="faint">{r.costCategory?.name ?? '—'}</div>
-          </div>
-        ) : (
-          <span className="faint">overheads</span>
-        ),
-    },
-    {
-      key: 'lines',
-      label: 'Lines',
-      align: 'right',
-      render: (r) => r.lines.length,
-      optional: true,
-    },
-    {
       key: 'total',
-      label: 'Spent',
+      label: 'Amount',
       align: 'right',
-      render: (r) => <span className="mono">{formatMoney(r.total)}</span>,
-    },
-    {
-      key: 'outstanding',
-      label: 'Owed back',
-      align: 'right',
-      render: (r) =>
-        r.status === 'APPROVED' && r.outstanding > 0 ? (
-          <span className="mono warn">{formatMoney(r.outstanding)}</span>
-        ) : (
-          <span className="faint">—</span>
-        ),
+      render: (r) => (
+        <div>
+          <div className="mono">{formatMoney(r.total)}</div>
+          {r.status === 'APPROVED' && r.outstanding > 0 && r.outstanding < r.total && <div className="faint">{formatMoney(r.outstanding)} to pay</div>}
+        </div>
+      ),
     },
     {
       key: 'status',
       label: 'Status',
-      render: (r) => <StatusBadge status={r.status} extra={CLAIM_TONES} />,
+      render: (r) => <StatusBadge status={r.stage ?? r.status} label={r.stage} extra={{ ...CLAIM_TONES, ...STAGE_TONES }} />,
     },
+    {
+      key: 'kind',
+      label: 'Kind',
+      optional: true,
+      render: (r) => (liquidationSource(r) ? 'Liquidation' : <span className="faint">Reimbursement</span>),
+    },
+    { key: 'lines', label: 'Lines', align: 'right', render: (r) => r.lines.length, optional: true },
+  ];
+
+  const filters: FilterDef[] = [
+    { key: 'status', label: 'Status', options: STATUSES },
+    { key: 'pending', label: 'Pending process', options: [{ value: 'true', label: 'In approval' }] },
+    { key: 'forRelease', label: 'For release', options: [{ value: 'true', label: 'Approved, not yet paid' }] },
+    { key: 'kind', label: 'Kind', options: KINDS },
+    { key: 'claimedById', label: 'Requester', options: people.map((p) => ({ value: p.id, label: p.name })) },
+    {
+      key: 'teamId',
+      label: 'Team',
+      options: [...teams.map((t) => ({ value: t.id, label: `${t.code} — ${t.name}` })), { value: 'none', label: 'No team' }],
+    },
+    { key: 'from', toKey: 'to', label: 'Date of reimburse', type: 'dateRange' },
   ];
 
   return (
     <div>
       <div className="page-head">
         <div>
-          <h1>Expense Claims</h1>
+          <h1>Reimbursements</h1>
         </div>
       </div>
 
@@ -214,22 +243,40 @@ export function Expenses() {
         listKey="expense-claims"
         endpoint="/expense-claims"
         printPath="/api/expense-claims/pdf"
+        reportPath={can('gfin.reports.view_all') ? '/g-fin/reports?kind=reimbursements' : undefined}
         columns={columns}
         rowKey={(r) => r.id}
         scoped
+        selectable
         reloadToken={reload}
-        searchPlaceholder="Search number, purpose, person, advance, budget request…"
-        emptyTitle="No claims yet"
+        searchPlaceholder="Search number, purpose, requester, advance, budget request…"
+        emptyTitle="No reimbursements yet"
         emptyHint="Every line needs a receipt number before a claim can be submitted."
         onRowClick={(r) => navigate(`/g-fin/expenses/${r.id}`)}
-        filters={[
-          { key: 'status', label: 'Status', options: STATUSES },
-          { key: 'kind', label: 'Kind', options: KINDS },
-        ]}
+        filters={filters}
+        summary={(raw) => {
+          const sum = raw as unknown as ClaimsSummary | undefined;
+          if (!sum) return null;
+          return (
+            <>
+              <Stat label="Sum of all reimbursements" value={formatMoney(sum.total)} figure sub={`${sum.count} claim${sum.count === 1 ? '' : 's'}, rejected and cancelled left out`} />
+              <Stat
+                label="Pending process"
+                value={formatMoney(sum.pending)}
+                figure
+                accent={sum.pending > 0 ? 'warn' : undefined}
+                sub={`${sum.pendingCount} claim${sum.pendingCount === 1 ? '' : 's'} in approval`}
+                to="/g-fin/expenses?pending=true"
+              />
+              <Stat label="For release" value={formatMoney(sum.forRelease)} figure sub={`${sum.forReleaseCount} approved, not yet paid`} to="/g-fin/expenses?forRelease=true" />
+              <Stat label="Total paid out" value={formatMoney(sum.paidOut)} figure accent="ok" sub={`${sum.paidCount} claim${sum.paidCount === 1 ? '' : 's'}`} />
+            </>
+          );
+        }}
         actions={
           can('gfin.expenses.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setFiling(true)}>
-              + New expense claim
+              + Add reimbursement
             </button>
           ) : null
         }
@@ -324,9 +371,10 @@ export function NewClaimModal({
           description: l.description,
           category: l.category ?? '',
           receiptNo: l.receiptNo ?? '',
+          vendor: l.vendor ?? '',
           amount: l.amount,
         }))
-      : [{ spentOn: today, description: '', category: '', receiptNo: '', amount: 0 }],
+      : [{ spentOn: today, description: '', category: '', receiptNo: '', vendor: '', amount: 0 }],
   );
 
   useEffect(() => {
@@ -342,6 +390,10 @@ export function NewClaimModal({
       .catch(() => {});
   }, [liquidating]);
 
+  // Receipts and supporting papers, picked here and filed with the save — so
+  // the checker sees them from the first step (the owner's call: "at the
+  // bottom can have an attachment for early approval or checking").
+  const [files, setFiles] = useState<File[]>([]);
   const total = lines.reduce((s, l) => s + (l.amount || 0), 0);
   const missingReceipts = lines.filter((l) => l.description.trim() && !l.receiptNo.trim()).length;
   const difference = advance ? Math.round((total - advance.amountReleased) * 100) / 100 : 0;
@@ -363,6 +415,7 @@ export function NewClaimModal({
           description: l.description,
           category: l.category || null,
           receiptNo: l.receiptNo || null,
+          vendor: l.vendor.trim() || null,
           amount: l.amount,
         })),
     };
@@ -370,6 +423,15 @@ export function NewClaimModal({
       const saved = existing
         ? await api.put<{ id: string }>(`/expense-claims/${existing.id}`, body)
         : await api.post<{ id: string }>('/expense-claims', body);
+      if (files.length) {
+        const form = new FormData();
+        for (const f of files) form.append('files', f);
+        try {
+          await api.post(`/attachments/expense_claim/${saved.id}`, form);
+        } catch {
+          toast('error', 'Saved, but the attachments could not be filed — add them on the claim');
+        }
+      }
       if (submitNow) await api.post(`/expense-claims/${saved.id}/submit`);
       toast('ok', submitNow ? 'Submitted for approval' : existing ? 'Saved' : 'Saved as a draft');
       onCreated(saved.id);
@@ -388,7 +450,7 @@ export function NewClaimModal({
           ? `Modify ${liquidating ? 'liquidation' : 'expense claim'} ${existing.number}`
           : advance
             ? `Liquidate ${advance.number}`
-            : 'New expense claim'
+            : 'New reimbursement'
       }
       onClose={onClose}
       wide
@@ -484,9 +546,8 @@ export function NewClaimModal({
           <thead>
             <tr>
               <th>Date</th>
-              <th>Description</th>
-              <th>Kind</th>
-              <th>Receipt no.</th>
+              <th>Company / receipt</th>
+              <th>Item / purpose</th>
               <th className="right">Amount</th>
               <th className="fin-col-tight" />
             </tr>
@@ -509,27 +570,36 @@ export function NewClaimModal({
                     />
                   </td>
                   <td>
-                    <input
-                      aria-label={`Line ${i + 1} description`}
-                      value={l.description}
-                      onChange={(e) => update({ description: e.target.value })}
-                      placeholder="Fare, meals, accommodation…"
-                    />
+                    <div className="fin-line-stack">
+                      <input
+                        aria-label={`Line ${i + 1} company`}
+                        value={l.vendor}
+                        onChange={(e) => update({ vendor: e.target.value })}
+                        placeholder="Company / store"
+                      />
+                      <input
+                        aria-label={`Line ${i + 1} receipt number`}
+                        value={l.receiptNo}
+                        onChange={(e) => update({ receiptNo: e.target.value })}
+                        placeholder="OR / SI no."
+                      />
+                    </div>
                   </td>
                   <td>
-                    <input
-                      aria-label={`Line ${i + 1} kind`}
-                      value={l.category}
-                      onChange={(e) => update({ category: e.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      aria-label={`Line ${i + 1} receipt number`}
-                      value={l.receiptNo}
-                      onChange={(e) => update({ receiptNo: e.target.value })}
-                      placeholder="OR / SI no."
-                    />
+                    <div className="fin-line-stack">
+                      <input
+                        aria-label={`Line ${i + 1} item or purpose`}
+                        value={l.description}
+                        onChange={(e) => update({ description: e.target.value })}
+                        placeholder="Item bought, or what it was for"
+                      />
+                      <input
+                        aria-label={`Line ${i + 1} kind`}
+                        value={l.category}
+                        onChange={(e) => update({ category: e.target.value })}
+                        placeholder="Kind: fare, meals, materials…"
+                      />
+                    </div>
                   </td>
                   <td>
                     <NumberInput
@@ -559,7 +629,7 @@ export function NewClaimModal({
           </tbody>
           <tfoot>
             <tr>
-              <th colSpan={4} className="right">
+              <th colSpan={3} className="right">
                 Total
               </th>
               <th className="right mono">{formatMoney(total)}</th>
@@ -571,7 +641,7 @@ export function NewClaimModal({
       <button
         className="btn btn-sm fin-gap-top-sm"
         onClick={() =>
-          setLines([...lines, { spentOn: today, description: '', category: '', receiptNo: '', amount: 0 }])
+          setLines([...lines, { spentOn: today, description: '', category: '', receiptNo: '', vendor: '', amount: 0 }])
         }
       >
         + Add line
@@ -585,6 +655,36 @@ export function NewClaimModal({
               ? `${formatMoney(-difference)} of the ${cashWord} was not spent — once approved, return it to finance.`
               : `The receipts match the ${cashWord} exactly — nothing will be owed either way.`}
         </p>
+      )}
+
+      <h4 className="fin-section-title">Attachments</h4>
+      <p className="faint fin-flush">
+        The receipts and anything that supports them — photos or scans, PDF or images. They go with the{' '}
+        {liquidating ? 'liquidation' : 'claim'}, so whoever checks it sees them from the first step.
+        {existing ? ' Files already on it stay; add more here or on its page.' : ''}
+      </p>
+      <input
+        type="file"
+        multiple
+        accept="image/*,application/pdf"
+        aria-label="Attach receipts"
+        onChange={(e) => {
+          const picked = Array.from(e.target.files ?? []);
+          setFiles((cur) => [...cur, ...picked]);
+          e.target.value = '';
+        }}
+      />
+      {files.length > 0 && (
+        <ul className="fin-files">
+          {files.map((f, i) => (
+            <li key={`${f.name}-${i}`}>
+              <span>{f.name}</span>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setFiles(files.filter((_, j) => j !== i))}>
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
 
       {missingReceipts > 0 && (
@@ -768,6 +868,7 @@ export function ExpenseClaimDetail() {
         confirm={confirm}
       />
 
+      <DecisionNote documentType="expense" documentId={row.id} reloadToken={reload} />
       <DocumentApproval documentType="expense" documentId={row.id} reloadToken={reload} />
 
       <ErrorBox error={error} />
@@ -808,8 +909,8 @@ export function ExpenseClaimDetail() {
               <thead>
                 <tr>
                   <th>Date</th>
-                  <th>Description</th>
-                  <th>Receipt</th>
+                  <th>Company / receipt</th>
+                  <th>Item / purpose</th>
                   <th className="right">Amount</th>
                 </tr>
               </thead>
@@ -818,10 +919,13 @@ export function ExpenseClaimDetail() {
                   <tr key={l.id}>
                     <td className="faint">{formatDate(l.spentOn)}</td>
                     <td>
+                      <div>{l.vendor ?? '—'}</div>
+                      <div className="mono faint">{l.receiptNo ?? 'No receipt no.'}</div>
+                    </td>
+                    <td>
                       <div>{l.description}</div>
                       {l.category && <div className="faint">{l.category}</div>}
                     </td>
-                    <td className="mono faint">{l.receiptNo ?? '—'}</td>
                     <td className="right mono">{formatMoney(l.amount)}</td>
                   </tr>
                 ))}

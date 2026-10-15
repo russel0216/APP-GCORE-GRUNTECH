@@ -2,10 +2,12 @@ import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type 
 import { upperText } from '../../lib/caps';
 import { api, qs } from '../../lib/api';
 import { lineAmount, quotationTotals } from '../../lib/quotationMath';
-import { formatMoney } from '../../components/ui';
+import { formatMoney, useToast } from '../../components/ui';
 import { Icon } from '../../components/Icon';
 import { NumberInput } from '../../components/NumberInput';
 import { MemoryInput, QUOTATION_MEMORY } from '../../components/MemoryInput';
+import { useAuth } from '../../lib/auth';
+import { withSupplierNote } from '../../lib/supplierNote';
 
 /*
   The pieces the quotation editor and the sales order editor share
@@ -318,6 +320,7 @@ export function CostCell({
             label={`Line ${n} ${line.providerKind === 'user' ? 'in-house person' : 'supplier'}`}
             value={line.provider}
             onChange={(provider) => onChange({ provider })}
+            onKeepAsNote={(name) => onChange({ costNote: withSupplierNote(line.costNote, name) })}
           />
         ) : (
           <span className="faint qe-provider-hint">Who carries the cost</span>
@@ -377,22 +380,42 @@ export interface QuotationListRow {
   latest: { revision: number; total: number } | null;
 }
 
+/**
+ * Who carries a line's cost: a person or a supplier, from
+ * `/quotations/providers`. For a supplier not on file (2026-10-13, the
+ * owner's call) the menu ends with what can be done about it, once the
+ * lookup has answered for what is typed — SupplierPicker's rule: "add “X”
+ * as a new supplier" for a holder of `gchain.suppliers.create` (the ordinary
+ * `POST /suppliers`, then picked), else "keep “X” as a note on this line",
+ * which writes `Supplier: X` into the line's cost note (the SCORO import's
+ * rule for a supplier not on file) and invents nothing on the master.
+ */
 export function ProviderLookup({
   kind,
   label,
   value,
   onChange,
+  onKeepAsNote,
 }: {
   kind: 'user' | 'supplier';
   label: string;
   value: { id: string; name: string } | null;
   onChange: (v: { id: string; name: string } | null) => void;
+  /** A supplier not on file, kept as words on the line instead. */
+  onKeepAsNote?: (name: string) => void;
 }) {
+  const { can } = useAuth();
+  const toast = useToast();
   const [text, setText] = useState(value?.name ?? '');
   const [open, setOpen] = useState(false);
   const [options, setOptions] = useState<{ id: string; name: string; code?: string; position?: string | null }[]>([]);
+  // The term the options answer, so the offers wait for the answer; a failed lookup answers too.
+  const [answered, setAnswered] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
   const menuRef = useRef<HTMLUListElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const mayCreate = kind === 'supplier' && can('gchain.suppliers.create');
 
   // A choice made elsewhere shows its name; clearing it leaves the typing alone.
   useEffect(() => {
@@ -401,13 +424,28 @@ export function ProviderLookup({
 
   useEffect(() => {
     if (!open || value) return;
+    const term = text.trim();
+    let stale = false;
     const t = setTimeout(() => {
       api
-        .get<typeof options>(`/quotations/providers${qs({ kind, q: text.trim() || undefined })}`)
-        .then(setOptions)
-        .catch(() => setOptions([]));
+        .get<typeof options>(`/quotations/providers${qs({ kind, q: term || undefined })}`)
+        .then((found) => {
+          if (stale) return;
+          setOptions(found);
+          setFailed(false);
+          setAnswered(term);
+        })
+        .catch(() => {
+          if (stale) return;
+          setOptions([]);
+          setFailed(true);
+          setAnswered(term);
+        });
     }, 200);
-    return () => clearTimeout(t);
+    return () => {
+      stale = true;
+      clearTimeout(t);
+    };
   }, [kind, text, open, value]);
 
   function pick(o: { id: string; name: string }) {
@@ -419,6 +457,42 @@ export function ProviderLookup({
     inputRef.current?.focus();
   }
 
+  async function addSupplier(name: string) {
+    setBusy(true);
+    try {
+      const created = await api.post<{ id: string; name: string; code: string }>('/suppliers', { name });
+      toast('ok', `${created.name} added as a supplier`);
+      pick(created);
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : 'The supplier could not be added');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function keepAsNote(name: string) {
+    onKeepAsNote?.(name);
+    setText('');
+    setOpen(false);
+    inputRef.current?.focus();
+  }
+
+  const term = text.trim();
+  const settled = answered === term;
+  const sameName = options.some((o) => o.name.trim().toLowerCase() === term.toLowerCase());
+  const offerNew = kind === 'supplier' && settled && !failed && term.length >= 2 && !sameName;
+  const offerCreate = offerNew && mayCreate;
+  const offerNote = offerNew && !mayCreate && !!onKeepAsNote;
+  const notice =
+    kind === 'supplier' && settled && term.length >= 2
+      ? failed
+        ? 'Suppliers could not be listed.'
+        : options.length === 0 && !mayCreate
+          ? `No supplier on file matches “${term}”.`
+          : null
+      : null;
+  const showMenu = open && !value && (options.length > 0 || notice !== null || offerCreate || offerNote);
+
   return (
     <div
       className="lookup"
@@ -429,10 +503,10 @@ export function ProviderLookup({
       <input
         ref={inputRef}
         aria-label={label}
-        placeholder={kind === 'user' ? 'Choose a person' : 'Choose a supplier'}
+        placeholder={kind === 'user' ? 'Choose a person' : mayCreate ? 'Create or choose a supplier' : 'Choose a supplier'}
         autoComplete="off"
         value={text}
-        aria-expanded={open}
+        aria-expanded={showMenu}
         onFocus={() => setOpen(true)}
         onChange={(e) => {
           setText(e.target.value);
@@ -455,7 +529,7 @@ export function ProviderLookup({
           ✓
         </span>
       )}
-      {open && !value && options.length > 0 && (
+      {showMenu && (
         <ul className="lookup-menu" ref={menuRef}>
           {options.map((o) => (
             <li key={o.id}>
@@ -472,6 +546,25 @@ export function ProviderLookup({
               </button>
             </li>
           ))}
+          {notice && <li className="lookup-none">{notice}</li>}
+          {offerCreate && (
+            <li className="lookup-new">
+              <div className="lookup-new-row">
+                <button type="button" disabled={busy} onClick={() => void addSupplier(term)}>
+                  {options.length ? 'Not one of these — ' : ''}add “{term}” as a new supplier
+                </button>
+              </div>
+            </li>
+          )}
+          {offerNote && (
+            <li className="lookup-new">
+              <div className="lookup-new-row">
+                <button type="button" onClick={() => keepAsNote(term)}>
+                  Keep “{term}” as a note on this line
+                </button>
+              </div>
+            </li>
+          )}
         </ul>
       )}
     </div>

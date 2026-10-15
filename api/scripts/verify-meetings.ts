@@ -465,6 +465,116 @@ async function main() {
   const icsDenied = await api(tok.bystander, 'GET', `/meetings/${meetingId}/ics`);
   check('a bystander gets no file', icsDenied.status === 404, String(icsDenied.status));
 
+  // ══ 14b. Minutes of meeting and the map (2026-10-13) ═════════════════════
+  console.log('\nMinutes and the map');
+  const early = await api(tok.invitee, 'PUT', `/meetings/${meetingId}/minutes`, { minutes: 'Too soon' });
+  check('minutes are refused before the meeting has started (409)', early.status === 409 && /once the meeting has started/.test(String(early.body.error)), `${early.status} ${early.body.error}`);
+  check('and the page is told it cannot write them yet', asInvitee.body.canWriteMinutes === false);
+
+  // A meeting held this morning: two hours ago, for an hour.
+  const heldStart = new Date(Date.now() - 2 * 3_600_000);
+  const held = await api(tok.organizer, 'POST', '/meetings', {
+    title: `${TAG} Site coordination`,
+    location: 'Gruntech office, Pasig',
+    startsAt: heldStart.toISOString(),
+    endsAt: new Date(heldStart.getTime() + 3_600_000).toISOString(),
+    inviteeIds: [invitee.id, optional.id],
+  });
+  const heldId = String(held.body.id ?? '');
+  const byStranger = await api(tok.bystander, 'PUT', `/meetings/${heldId}/minutes`, { minutes: 'Not mine to write' });
+  check('someone not on the meeting cannot write its minutes (it does not exist for them: 404)', byStranger.status === 404, String(byStranger.status));
+  const written = await api(tok.invitee, 'PUT', `/meetings/${heldId}/minutes`, {
+    minutes: '  Agreed the zzpumproom layout; Invitee to send the revised drawing by Friday.  ',
+  });
+  check(
+    'anyone invited writes the minutes once it has started; they are kept trimmed, with who wrote them and when',
+    written.status === 200 &&
+      written.body.minutes === 'Agreed the zzpumproom layout; Invitee to send the revised drawing by Friday.' &&
+      (written.body.minutesBy as { id: string } | null)?.id === invitee.id &&
+      typeof written.body.minutesAt === 'string' &&
+      written.body.canWriteMinutes === true,
+    `${written.status} ${JSON.stringify(written.body).slice(0, 200)}`,
+  );
+  const minuteBells = () =>
+    prisma.notification.findMany({ where: { link: `/g-hr/meetings/${heldId}`, title: { startsWith: 'Minutes:' } }, select: { userId: true } });
+  const firstBells = await minuteBells();
+  check(
+    'everyone on the meeting but the writer is told — the organiser and the other invitee',
+    firstBells.length === 2 && firstBells.some((n) => n.userId === organizer.id) && firstBells.some((n) => n.userId === optional.id) && !firstBells.some((n) => n.userId === invitee.id),
+    JSON.stringify(firstBells),
+  );
+  const rewritten = await api(tok.organizer, 'PUT', `/meetings/${heldId}/minutes`, {
+    minutes: 'Agreed the zzpumproom layout; Invitee to send the revised drawing by Friday.\nNext site visit on Monday.',
+  });
+  check(
+    'a second save the same day changes them and rings no second bell',
+    rewritten.status === 200 && (rewritten.body.minutesBy as { id: string } | null)?.id === organizer.id && (await minuteBells()).length === 2,
+    `${rewritten.status} bells=${(await minuteBells()).length}`,
+  );
+  const minuteAudits = await prisma.auditLog.findMany({ where: { entityType: 'meeting', entityId: heldId, summary: { contains: 'minutes' } }, select: { summary: true, after: true } });
+  check(
+    'each save is audited — written, then changed — and the text stays on the record, not in the trail',
+    minuteAudits.length === 2 && minuteAudits.some((r) => r.summary.endsWith('minutes written')) && minuteAudits.some((r) => r.summary.endsWith('minutes changed')) &&
+      !JSON.stringify(minuteAudits).includes('zzpumproom'),
+    JSON.stringify(minuteAudits),
+  );
+  const found = await api(tok.optional, 'GET', '/meetings?search=zzpumproom&pageSize=50');
+  const foundRows = (found.body.rows ?? []) as { id: string; hasMinutes?: boolean }[];
+  check('the meetings list finds a word from the minutes, and the row says minutes are written', foundRows.some((r) => r.id === heldId && r.hasMinutes === true), `${found.status} ${JSON.stringify(foundRows)}`);
+  const searchHits = await globalSearch('zzpumproom', (await resolveUser(optional.id))!);
+  check('so does Ctrl+K, for someone on the meeting', JSON.stringify(searchHits).includes(heldId), JSON.stringify(searchHits).slice(0, 200));
+  // The attendees agree the minutes (2026-10-14): only those who said Going.
+  await prisma.meetingInvitee.updateMany({ where: { meetingId: heldId, userId: invitee.id }, data: { response: 'ACCEPTED', respondedAt: new Date() } });
+  await prisma.meetingInvitee.updateMany({ where: { meetingId: heldId, userId: optional.id }, data: { response: 'DECLINED', respondedAt: new Date() } });
+  const sendByInvitee = await api(tok.invitee, 'POST', `/meetings/${heldId}/minutes/send`);
+  const minutesOut = await api(tok.organizer, 'POST', `/meetings/${heldId}/minutes/send`);
+  const asked = (minutesOut.body.agreementRound ?? []) as { userId: string; response: string }[];
+  check(
+    'only the organiser sends the minutes for agreement, and only the attendees who said Going are asked',
+    sendByInvitee.status === 403 && minutesOut.status === 200 && minutesOut.body.minutesStatus === 'FOR_AGREEMENT' && asked.length === 1 && asked[0].userId === invitee.id,
+    `${sendByInvitee.status} ${minutesOut.status} ${minutesOut.body.minutesStatus} ${JSON.stringify(asked)}`,
+  );
+  const editWhileOut = await api(tok.invitee, 'PUT', `/meetings/${heldId}/minutes`, { minutes: 'My own version' });
+  const noChangeWords = await api(tok.invitee, 'POST', `/meetings/${heldId}/minutes/respond`, { response: 'CHANGE_ASKED' });
+  const changeAsked = await api(tok.invitee, 'POST', `/meetings/${heldId}/minutes/respond`, { response: 'CHANGE_ASKED', comment: 'Friday, not Thursday' });
+  const strangerAnswer = await api(tok.organizer, 'POST', `/meetings/${heldId}/minutes/respond`, { response: 'AGREED' });
+  check(
+    'once out, an attendee asks for a change (with words) rather than editing; someone not asked cannot answer',
+    editWhileOut.status === 403 && noChangeWords.status === 400 && changeAsked.status === 200 && changeAsked.body.minutesStatus === 'FOR_AGREEMENT' && strangerAnswer.status === 403,
+    `${editWhileOut.status} ${noChangeWords.status} ${changeAsked.status} ${changeAsked.body.minutesStatus} ${strangerAnswer.status}`,
+  );
+  const agreedNow = await api(tok.invitee, 'POST', `/meetings/${heldId}/minutes/respond`, { response: 'AGREED' });
+  const minutesPaper = await fetch(`${BASE}/meetings/${heldId}/minutes/pdf`, { headers: { Authorization: `Bearer ${tok.organizer}` } });
+  check(
+    'the last agreement closes the round Agreed, and the minutes print as a paper',
+    agreedNow.status === 200 && agreedNow.body.minutesStatus === 'AGREED' && minutesPaper.status === 200 && (minutesPaper.headers.get('content-type') ?? '').includes('pdf'),
+    `${agreedNow.status} ${agreedNow.body.minutesStatus} ${minutesPaper.status}`,
+  );
+  const changedAfter = await api(tok.organizer, 'PUT', `/meetings/${heldId}/minutes`, { minutes: 'Agreed the zzpumproom layout; drawing by Friday.' });
+  const keptRounds = await prisma.minutesAgreement.count({ where: { meetingId: heldId } });
+  check(
+    'the organiser changing agreed minutes makes them a draft to send again, the round’s answers kept',
+    changedAfter.status === 200 && changedAfter.body.minutesStatus === 'DRAFT' && keptRounds === 1,
+    `${changedAfter.status} ${changedAfter.body.minutesStatus} ${keptRounds}`,
+  );
+  const blanked = await api(tok.organizer, 'PUT', `/meetings/${heldId}/minutes`, { minutes: '   ' });
+  const afterBlank = ((await api(tok.organizer, 'GET', `/meetings?search=${encodeURIComponent(`${TAG} Site coordination`)}&pageSize=50`)).body.rows ?? []) as { id: string; hasMinutes?: boolean }[];
+  check(
+    'an empty save clears them, and the row no longer says they are written',
+    blanked.status === 200 && blanked.body.minutes === null && blanked.body.minutesAt === null && afterBlank.some((r) => r.id === heldId && r.hasMinutes === false),
+    `${blanked.status} ${JSON.stringify(afterBlank)}`,
+  );
+  await api(tok.organizer, 'POST', `/meetings/${heldId}/cancel`, { reason: 'Rained out' });
+  const onCancelled = await api(tok.organizer, 'PUT', `/meetings/${heldId}/minutes`, { minutes: 'After the fact' });
+  check('a cancelled meeting takes no minutes (409)', onCancelled.status === 409, String(onCancelled.status));
+
+  const badMap = await api(tok.organizer, 'PATCH', `/meetings/${meetingId}`, { mapUrl: 'javascript:alert(1)' });
+  check('a map link that is not http(s) is refused (400)', badMap.status === 400, `${badMap.status} ${badMap.body.error}`);
+  const mapped = await api(tok.organizer, 'PATCH', `/meetings/${meetingId}`, { mapUrl: 'https://maps.app.goo.gl/zzMeeting' });
+  check('a Google Maps link is kept with the Where', mapped.status === 200 && mapped.body.mapUrl === 'https://maps.app.goo.gl/zzMeeting', `${mapped.status} ${mapped.body.mapUrl}`);
+  const mappedIcs = unfold((await api(tok.invitee, 'GET', `/meetings/${meetingId}/ics`)).text);
+  check('and the calendar file carries it in the description', mappedIcs.includes('Map: https://maps.app.goo.gl/zzMeeting'), mappedIcs.slice(0, 300));
+
   // ══ 15. The people picker's lookup ═══════════════════════════════════════
   console.log('\nThe people lookup');
 

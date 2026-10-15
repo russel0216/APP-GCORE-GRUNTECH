@@ -389,6 +389,11 @@ async function main() {
   const sb = searched.body as unknown as BoardBody;
   const cards = sb.columns.flatMap((c) => c.cards);
   check(
+    'the board has no "This month forecast" column any more (2026-10-13, the owner\'s call — the Forecast menu does it)',
+    !('forecast' in (searched.body as Record<string, unknown>)) && !sb.columns.some((c) => c.key === 'FORECAST'),
+    Object.keys(searched.body as Record<string, unknown>).join(),
+  );
+  check(
     'a lead with a quotation is not a card',
     !cards.some((c) => c.ref === `lead:${quotedLead.id}`),
   );
@@ -709,7 +714,7 @@ async function main() {
   const stagesSeen = pageBody.quotationStages?.map((s) => `${s.key}:${s.outcomes.join('+')}`).join();
   check(
     'and it names every stage a quotation can stand in, with the outcome each gathers',
-    stagesSeen === 'OPPORTUNITY:OPEN,NEGOTIATION:SUBMITTED,CLOSING:NEGOTIATION,CONFIRMED:WON,COMPLETED:,LOST:LOST',
+    stagesSeen === 'OPPORTUNITY:OPEN,NEGOTIATION:SUBMITTED,CLOSING:NEGOTIATION,CONFIRMED:WON,COMPLETED:,LOST:LOST,HOLD:ON_HOLD',
     stagesSeen,
   );
   // A drop on Closing is a PATCH to NEGOTIATION — the board's own move.
@@ -723,6 +728,66 @@ async function main() {
     'dropped on Closing: the board card, the list row and the quotation page all say CLOSING',
     dropped.status === 200 && cardNow?.stage === 'CLOSING' && rowNow?.stage === 'CLOSING' && pageNow.stage === 'CLOSING' && pageNow.outcome === 'NEGOTIATION',
     `${dropped.status} card ${cardNow?.stage} row ${rowNow?.stage} page ${pageNow.stage}`,
+  );
+
+  // ── Hold and Cancel (2026-10-13, the owner's call) ───────────────────────
+  console.log('\nHold and Cancel');
+  const heldLead = await prisma.lead.create({
+    data: {
+      number: await nextNumber('lead'),
+      companyName: `${TAG} Held Lead`,
+      customerId: customer.id,
+      status: 'QUOTATION_SUBMITTED',
+      assignedToId: manager.id,
+      createdById: manager.id,
+    },
+  });
+  const held = await newQuotation('Held deal', 'SUBMITTED', [{ revision: 0, status: 'APPROVED', total: 123_456.78 }], { leadId: heldLead.id });
+  const holdIt = await http(managerToken, 'PATCH', `/quotations/${held.id}`, { outcome: 'ON_HOLD' });
+  const heldBoard = (await http(managerToken, 'GET', `/pipeline?search=${encodeURIComponent(`${TAG} Held deal`)}`)).body as unknown as BoardBody;
+  const heldCard = heldBoard.columns.flatMap((c) => c.cards).find((c) => c.ref === `quotation:${held.id}`) as
+    | (BoardBody['columns'][number]['cards'][number] & { allowedTargets: string[] })
+    | undefined;
+  const heldPage = (await http(managerToken, 'GET', `/quotations/${held.id}`)).body as unknown as { stage: string; stageLabel: string };
+  check(
+    'Put on hold: the quotation stands in On hold on the board and its page, and its lead is on hold with it',
+    holdIt.status === 200 && heldCard?.column === 'ON_HOLD' && heldCard?.stage === 'HOLD' && heldPage.stage === 'HOLD' &&
+      heldPage.stageLabel === 'On hold' && (await prisma.lead.findUnique({ where: { id: heldLead.id } }))?.status === 'ON_HOLD',
+    `${holdIt.status} ${heldCard?.column} ${heldCard?.stage} ${heldPage.stage}`,
+  );
+  check(
+    'a held quotation goes back to an open stage or to Lost — never straight to Won',
+    !!heldCard && heldCard.allowedTargets.includes('SUBMITTED') && heldCard.allowedTargets.includes('LOST') && !heldCard.allowedTargets.includes('WON'),
+    heldCard?.allowedTargets.join(),
+  );
+  check(
+    'a held quotation is not in the open figures: no weighted value, not an open quote',
+    heldBoard.kpis.openQuotes === 0,
+    JSON.stringify(heldBoard.kpis.openQuotes),
+  );
+  const resumed = await http(managerToken, 'PATCH', `/quotations/${held.id}`, { outcome: 'SUBMITTED' });
+  check(
+    'resumed to Submitted, the lead follows back',
+    resumed.status === 200 && (await prisma.lead.findUnique({ where: { id: heldLead.id } }))?.status === 'QUOTATION_SUBMITTED',
+  );
+  const kindAlone = await http(managerToken, 'PATCH', `/quotations/${held.id}`, { lostKind: 'CANCELLED' });
+  check('a cancel without moving it to Lost is refused', kindAlone.status === 400, `${kindAlone.status}`);
+  const cancelIt = await http(managerToken, 'PATCH', `/quotations/${held.id}`, { outcome: 'LOST', lostReason: 'Customer dropped the project', lostKind: 'CANCELLED' });
+  const cancelledPage = (await http(managerToken, 'GET', `/quotations/${held.id}`)).body as unknown as { stage: string; stageLabel: string; lostKind: string };
+  const cancelBoard = (await http(managerToken, 'GET', `/pipeline?search=${encodeURIComponent(`${TAG} Held deal`)}`)).body as unknown as BoardBody & {
+    kpis: { lostCount: number; cancelledCount: number };
+  };
+  check(
+    'Cancel: Lost marked cancelled — the page says Cancelled, the lead is cancelled too, and the board counts it apart from the lost',
+    cancelIt.status === 200 && cancelledPage.stage === 'LOST' && cancelledPage.stageLabel === 'Cancelled' && cancelledPage.lostKind === 'CANCELLED' &&
+      (await prisma.lead.findUnique({ where: { id: heldLead.id } }))?.lostKind === 'CANCELLED' &&
+      cancelBoard.kpis.cancelledCount === 1 && cancelBoard.kpis.lostCount === 0,
+    `${cancelIt.status} ${cancelledPage.stageLabel} ${JSON.stringify(cancelBoard.kpis)}`,
+  );
+  const heldReopened = await http(managerToken, 'PATCH', `/quotations/${held.id}`, { outcome: 'NEGOTIATION' });
+  check(
+    'reopened, it is no longer cancelled',
+    heldReopened.status === 200 && (await prisma.quotation.findUnique({ where: { id: held.id } }))?.lostKind === null,
   );
 
   // ── 5. Lead → quotation hand-off ─────────────────────────────────────────

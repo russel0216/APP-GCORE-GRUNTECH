@@ -16,7 +16,7 @@ import {
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
-import { nextNumber, previewNext } from '../shared/numbering';
+import { nextNumber, previewNext, setCounter } from '../shared/numbering';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { formatShortDate, renderDocument } from '../shared/pdf';
 import { LIST_CAP, listReference, rangeNamed, recordNamed, sendListPdf, filterDay } from '../shared/listPaper';
@@ -280,12 +280,16 @@ customerRoutes.get(
  * template and counter lookup nextNumber() uses, without the reservation —
  * a hand-rolled year key here once disagreed with a monthly template.
  */
+/** A customer code already on file — what the series steps over. */
+const codeTaken = (tx: Prisma.TransactionClient) => async (code: string) =>
+  !!(await tx.customer.findUnique({ where: { code }, select: { id: true } }));
+
 customerRoutes.get(
   '/next-code',
   require_('gops.customers.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const preview = await previewNext('customer', { ownerId: me.id });
+    const preview = await previewNext('customer', { ownerId: me.id }, prisma, codeTaken(prisma));
     res.json({ code: preview.number });
   }),
 );
@@ -597,10 +601,13 @@ customerRoutes.post(
       const team = body.industryId ? await activeTeam(tx, body.industryId) : null;
       // Only consume a number when none was supplied — an operator pasting
       // their own code should not silently burn a sequence value.
-      const code = body.code || (await nextNumber('customer', tx, { ownerId: me.id }));
-      if (await tx.customer.findUnique({ where: { code } })) {
-        throw conflict(`Customer code "${code}" is already in use`);
+      // A typed code is checked, then the series FOLLOWS it (the quotation
+      // number's rule): the next automatic code is the typed one plus one.
+      // An automatic one steps over codes already on file (typed or imported).
+      if (body.code && (await tx.customer.findUnique({ where: { code: body.code } }))) {
+        throw conflict(`Customer code "${body.code}" is already in use`);
       }
+      const code = body.code || (await nextNumber('customer', tx, { ownerId: me.id }, codeTaken(tx)));
       const customer = await tx.customer.create({
         data: {
           code,
@@ -620,6 +627,7 @@ customerRoutes.post(
           createdById: me.id,
         },
       });
+      if (body.code) await setCounter('customer', body.code, tx, { mode: 'set' });
       return { customer, subIndustry };
     });
 

@@ -4,6 +4,7 @@ import { badRequest, forbidden, notFound } from '../http/kit';
 import { notify } from './notifications';
 import { audit } from './audit';
 import type { Signatory } from './pdf';
+import type { ResolvedUser } from '../permissions/resolve';
 
 /**
  * The approval engine (model §6.1).
@@ -176,7 +177,9 @@ export const PROJECT_MANAGER_FALLBACK_ROLE = 'executive';
  * request's), and falls back to the step's role — Executive unless the step
  * names another — when the project has no manager, the document names no
  * project, or the manager IS the requester (2026-10-07, the owner's call: a
- * PM's own request goes up to management, never to nobody).
+ * PM's own request goes up to management, never to nobody). The project's
+ * manager is its Technical Manager (2026-10-15); a step falling back to the
+ * `technical_manager` role asks the one on the requester's team.
  */
 export async function approversForStep(
   step: ApprovalStep,
@@ -198,9 +201,14 @@ export async function approversForStep(
       if (step.roleId) {
         const rows = await tx.userRole.findMany({
           where: { roleId: step.roleId, user: { isActive: true } },
-          select: { userId: true },
+          select: { userId: true, role: { select: { key: true } } },
         });
-        return rows.map((r) => r.userId);
+        const holders = rows.map((r) => r.userId);
+        // The Technical Manager fallback (2026-10-15: the project's manager IS
+        // its Technical Manager) is the one on the requester's own team, as a
+        // ROLE step naming that role is — never a Technical Manager of another team.
+        if (rows.length && OWN_TEAM_ROLES.includes(rows[0].role.key)) return leadersFor(holders, requesterId, tx);
+        return holders;
       }
       return usersInRole(PROJECT_MANAGER_FALLBACK_ROLE, tx);
     }
@@ -215,8 +223,10 @@ export async function approversForStep(
         select: { userId: true, role: { select: { key: true } } },
       });
       const holders = rows.map((r) => r.userId);
-      if (!rows.length || !TEAM_SCOPED_ROLES.includes(rows[0].role.key)) return holders;
-      return supportersFor(holders, requesterId, tx);
+      if (!rows.length) return holders;
+      if (TEAM_SCOPED_ROLES.includes(rows[0].role.key)) return supportersFor(holders, requesterId, tx);
+      if (OWN_TEAM_ROLES.includes(rows[0].role.key)) return leadersFor(holders, requesterId, tx);
+      return holders;
     }
 
     case 'SUPERVISOR': {
@@ -224,15 +234,19 @@ export async function approversForStep(
         where: { id: requesterId },
         select: { supervisorId: true },
       });
-      if (requester?.supervisorId) return [requester.supervisorId];
-      if (step.roleId) {
+      let base: string[];
+      if (requester?.supervisorId) base = [requester.supervisorId];
+      else if (step.roleId) {
         const rows = await tx.userRole.findMany({
           where: { roleId: step.roleId, user: { isActive: true } },
           select: { userId: true },
         });
-        return leadersFor(rows.map((r) => r.userId), requesterId, tx);
-      }
-      return usersInRole('hr', tx);
+        base = await leadersFor(rows.map((r) => r.userId), requesterId, tx);
+      } else base = await usersInRole('hr', tx);
+      // The step's other roles, on the requester's own team only — beside
+      // the "Reports to" or the fallback, never instead of them.
+      const also = await teamHoldersOf(step.alsoRoleIds ?? [], requesterId, tx);
+      return also.length ? [...new Set([...base, ...also])] : base;
     }
 
     case 'HR':
@@ -253,28 +267,48 @@ export async function approversForStep(
 export const TEAM_SCOPED_ROLES = ['back_support'];
 
 /**
- * The holders of a team-scoped role who decide for this requester: those
- * supporting the requester's team (`Employee.industryId`), else those who
- * name no team (they support every team), else every holder — a document
- * never stalls because nobody was set for its team. A requester with no team
- * goes to the holders who name none, else every holder.
+ * Roles whose ROLE step goes to the holders on the PREPARER's own team
+ * (`Employee.industryId`, the Team on Admin › Users), as a Team Leader step
+ * does (`leadersFor`): a Technical Manager handles their own team's costings,
+ * purchase requisitions and requests for approval (2026-10-13, the owner's
+ * report: Ivan's HIT costing was waiting on every Technical Manager, where
+ * Ricardo alone handles HIT). A preparer with no team, or a team with no
+ * Technical Manager, goes to every holder — never to nobody.
+ */
+export const OWN_TEAM_ROLES = ['technical_manager'];
+
+/**
+ * The holders of a team-scoped role (Back Support) who decide for this
+ * requester — the Technical Manager's team rule (2026-10-13, the owner's
+ * call: "apply the same team rule to Back Support"), with the teams a holder
+ * is set to support on top: a holder handles the teams ticked under
+ * "Supports teams" on Admin › Users, else their OWN team
+ * (`Employee.industryId`). The step goes to those handling the requester's
+ * team, else to every holder — a requester with no team, or a team nobody
+ * handles, never stalls. (Until this, a holder with nothing ticked handled
+ * every team.)
  */
 export async function supportersFor(holders: string[], requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<string[]> {
   if (!holders.length) return holders;
-  const [requester, links] = await Promise.all([
+  const [requester, links, own] = await Promise.all([
     tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } }),
     tx.userSupportTeam.findMany({ where: { userId: { in: holders } }, select: { userId: true, industryId: true } }),
+    tx.employee.findMany({ where: { userId: { in: holders } }, select: { userId: true, industryId: true } }),
   ]);
   const team = requester?.industryId ?? null;
-  const onTeam = team ? holders.filter((h) => links.some((l) => l.userId === h && l.industryId === team)) : [];
-  if (onTeam.length) return onTeam;
-  const everyTeam = holders.filter((h) => !links.some((l) => l.userId === h));
-  return everyTeam.length ? everyTeam : holders;
+  if (!team) return holders;
+  const handles = (h: string) => {
+    const ticked = links.filter((l) => l.userId === h);
+    return ticked.length ? ticked.some((l) => l.industryId === team) : own.some((e) => e.userId === h && e.industryId === team);
+  };
+  const onTeam = holders.filter(handles);
+  return onTeam.length ? onTeam : holders;
 }
 
 /**
  * The holders of a SUPERVISOR step's fallback role who decide for a requester
- * with no "Reports to": those on the requester's own team
+ * with no "Reports to" — and of an `OWN_TEAM_ROLES` step (the Technical
+ * Manager's) for every requester: those on the requester's own team
  * (`Employee.industryId`) — the CEO on SIT goes to SIT's Team Leader, not to
  * every Team Leader (2026-10-12) — else every holder, so a document never
  * stalls because the team has no leader. The requester is never the reason a
@@ -294,20 +328,66 @@ export async function leadersFor(holders: string[], requesterId: string, tx: Pri
 }
 
 /**
+ * The active holders of `roleIds` on the requester's own team
+ * (`Employee.industryId`) — never every holder, never the requester. The
+ * borrow slip's first step (2026-10-14): a Technical Manager on the
+ * requester's team decides it beside their "Reports to".
+ */
+export async function teamHoldersOf(roleIds: string[], requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<string[]> {
+  if (!roleIds.length) return [];
+  const requester = await tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } });
+  if (!requester?.industryId) return [];
+  const rows = await tx.userRole.findMany({
+    where: {
+      roleId: { in: roleIds },
+      userId: { not: requesterId },
+      user: { isActive: true, employee: { industryId: requester.industryId } },
+    },
+    select: { userId: true },
+  });
+  return [...new Set(rows.map((r) => r.userId))];
+}
+
+/**
  * Whether the requester HOLDS a step — the role it names (a ROLE step's, or a
  * SUPERVISOR step's fallback: "Team Leader" on the quotation is the
  * `team_leader` role), or the person a USER step names. On a route that lets
  * the preparer sign (`ApprovalWorkflow.preparerSigns`) such a step is signed
  * at submit, dated the submit instant (the owner's call, 2026-10-12: a Team
  * Leader's own quotation, the CEO's own sales order, a Technical Manager's
- * own costing). A PROJECT_MANAGER or HR step is never held: a PM's own
- * request goes up (2026-10-07), and HR never signs its own filing.
+ * own costing). An HR step is never held: HR never signs its own filing. A
+ * PROJECT_MANAGER step is held when the document names the preparer as its
+ * Technical Manager, or names none and the preparer holds its role (the job
+ * order, 2026-10-16).
  */
-export async function holdsStep(step: ApprovalStep, requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<boolean> {
+export async function holdsStep(
+  step: ApprovalStep,
+  requesterId: string,
+  tx: Prisma.TransactionClient = prisma,
+  ctx: ApprovalContext = {},
+): Promise<boolean> {
   if (step.approverType === 'USER') return step.userId === requesterId;
-  if ((step.approverType === 'ROLE' || step.approverType === 'SUPERVISOR') && step.roleId) {
+  // A job order's Technical Manager step (2026-10-16, the owner's report:
+  // Brian Jay, UIT's Technical Manager, raised one and was not on it): held
+  // when the order names the preparer as its Technical Manager, or names
+  // nobody and the preparer holds the step's role — never when it names
+  // somebody else, who must sign it.
+  if (step.approverType === 'PROJECT_MANAGER') {
+    if (ctx.projectManagerId) return ctx.projectManagerId === requesterId;
+    if (ctx.jobId) return false;
+    if (!step.roleId) return false;
     return !!(await tx.userRole.findFirst({
       where: { userId: requesterId, roleId: step.roleId, user: { isActive: true } },
+      select: { userId: true },
+    }));
+  }
+  if (step.approverType === 'ROLE' || step.approverType === 'SUPERVISOR') {
+    // A SUPERVISOR step's other roles count too: a Technical Manager's own
+    // borrow request is signed at submit as a Team Leader's is.
+    const roleIds = [step.roleId, ...(step.approverType === 'SUPERVISOR' ? (step.alsoRoleIds ?? []) : [])].filter((r): r is string => !!r);
+    if (!roleIds.length) return false;
+    return !!(await tx.userRole.findFirst({
+      where: { userId: requesterId, roleId: { in: roleIds }, user: { isActive: true } },
       select: { userId: true },
     }));
   }
@@ -319,10 +399,11 @@ export async function heldSequences(
   workflow: { preparerSigns: boolean; steps: ApprovalStep[] },
   requesterId: string,
   tx: Prisma.TransactionClient = prisma,
+  ctx: ApprovalContext = {},
 ): Promise<Set<number>> {
   const held = new Set<number>();
   if (!workflow.preparerSigns) return held;
-  for (const step of workflow.steps) if (await holdsStep(step, requesterId, tx)) held.add(step.sequence);
+  for (const step of workflow.steps) if (await holdsStep(step, requesterId, tx, ctx)) held.add(step.sequence);
   return held;
 }
 
@@ -438,7 +519,7 @@ export async function routePreview(
   if (!workflow) return null;
   // A step the preparer holds on a route that lets them sign is THEIRS: it is
   // signed at submit, so it names them alone (`held`).
-  const held = await heldSequences(workflow, requesterId);
+  const held = await heldSequences(workflow, requesterId, prisma, ctx);
   const self = held.size
     ? await prisma.user.findUnique({
         where: { id: requesterId },
@@ -575,7 +656,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
   // (`preparerSigns`): signed at submit, dated the request's own instant, so
   // "Prepared by" and those steps print one timestamp. The document waits
   // only on the steps other people hold.
-  const held = await heldSequences(workflow, input.requesterId);
+  const held = await heldSequences(workflow, input.requesterId, prisma, { jobId: input.jobId ?? null, projectManagerId: input.projectManagerId ?? null });
   const open = workflow.steps.filter((st) => !held.has(st.sequence));
 
   // A step whose only eligible approver is the requester can never be acted on:
@@ -754,7 +835,25 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     ),
   );
   const steps = request.workflow!.steps;
-  const next = steps.slice(steps.findIndex((s) => s.sequence === step.sequence) + 1).find((s) => !signed.has(s.sequence));
+  const later = steps.slice(steps.findIndex((s) => s.sequence === step.sequence) + 1).filter((s) => !signed.has(s.sequence));
+
+  // One signature per person (2026-10-13, the owner's call: "the time stamp
+  // of the same employee with multiple roles … make it uniform"). On a route
+  // where the preparer signs the steps they hold, an approver's Approve also
+  // signs every LATER unsigned step they may decide in their own right —
+  // never as a stand-in, never the requester — at the same instant, so one
+  // person is asked once and prints one timestamp. A stand-in signs only the
+  // step they stood in for.
+  const coSigned: ApprovalStep[] = [];
+  if (input.action === 'APPROVED' && request.workflow?.preparerSigns && !decider.onBehalfOfId) {
+    for (const st of later) {
+      const eligible = await approversForStep(st, request.requesterId, prisma, ctxOf(request));
+      if (eligible.includes(input.userId)) coSigned.push(st);
+    }
+  }
+  const coSignedSeqs = new Set(coSigned.map((s) => s.sequence));
+  const next = later.find((s) => !coSignedSeqs.has(s.sequence));
+  const at = new Date();
 
   const settled = await prisma.$transaction(async (tx) => {
     // Claimed, never simply written: the request must still be open at this
@@ -765,10 +864,10 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
       where: { id: request.id, status: 'PENDING', currentSequence: step.sequence },
       data:
         input.action !== 'APPROVED'
-          ? { status: input.action === 'REJECTED' ? 'REJECTED' : 'CANCELLED', closedAt: new Date() }
+          ? { status: input.action === 'REJECTED' ? 'REJECTED' : 'CANCELLED', closedAt: at }
           : next
             ? { currentSequence: next.sequence }
-            : { status: 'APPROVED', closedAt: new Date() },
+            : { status: 'APPROVED', closedAt: at },
     });
     if (!claimed.count) {
       throw badRequest('This request was decided or withdrawn a moment ago — reload to see where it stands');
@@ -783,8 +882,22 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
         onBehalfOfId: decider.onBehalfOfId,
         action: input.action,
         comment: input.comment ?? null,
+        actedAt: at,
       },
     });
+    if (coSigned.length) {
+      await tx.approvalAction.createMany({
+        data: coSigned.map((st) => ({
+          requestId: request.id,
+          stepId: st.id,
+          sequence: st.sequence,
+          approverId: input.userId,
+          action: 'APPROVED' as const,
+          coSignedWith: step.sequence,
+          actedAt: at,
+        })),
+      });
+    }
     return tx.approvalRequest.findUniqueOrThrow({ where: { id: request.id } });
   });
 
@@ -795,6 +908,15 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     summary: `${step.name} — ${actor?.name ?? 'unknown'}${stoodInFor ? ` (standing in for ${stoodInFor.name})` : ''}${input.comment ? `: ${input.comment}` : ''}`,
     actorId: input.userId,
   });
+  for (const st of coSigned) {
+    await audit({
+      entityType: request.documentType,
+      entityId: request.documentId,
+      action: 'APPROVED',
+      summary: `${st.name} — ${actor?.name ?? 'unknown'}, signed with ${step.name} (holds both)`,
+      actorId: input.userId,
+    });
+  }
 
   if (settled.status === 'PENDING') {
     await notifyCurrentStep(settled);
@@ -890,6 +1012,99 @@ export async function cancelOpenRequest(
     withdrawn.push(request);
   }
   return withdrawn;
+}
+
+// ── Pulling back an approved document ────────────────────────────────────────
+
+/**
+ * Every approved document can be pulled back to draft (2026-10-16, the
+ * owner's call) — by whoever prepared it, or whoever may edit them all. The
+ * module that owns the document registers how: `may` says whether this user
+ * may (the button), `reopen` undoes what the approval did and puts the
+ * document back to its draft state inside the engine's transaction — or
+ * throws a 400 naming what stands on it (an order with goods received, an
+ * invoice with a collection), and then nothing changes. The engine closes
+ * the approved request CANCELLED with `reopenedAt`, `reopenedById` and the
+ * reason (its signatures stay in the history), audits it and tells whoever
+ * signed and whoever raised it. Not an outcome: no onApprovalSettled
+ * subscriber hears of it. One path, like every other decision (rule 2).
+ */
+export interface ReopenContext {
+  documentId: string;
+  tx: Prisma.TransactionClient;
+  actor: ResolvedUser;
+  reason: string;
+}
+interface Reopener {
+  may: (actor: ResolvedUser, documentId: string) => Promise<boolean>;
+  reopen: (ctx: ReopenContext) => Promise<void>;
+}
+const reopeners = new Map<string, Reopener>();
+
+export function onApprovalReopened(documentType: string, reopener: Reopener): void {
+  reopeners.set(documentType, reopener);
+}
+
+/** The latest request of a document, when it stands APPROVED. */
+async function standingApproval(documentType: string, documentId: string, tx: Prisma.TransactionClient = prisma) {
+  const latest = await tx.approvalRequest.findFirst({ where: { documentType, documentId }, orderBy: { createdAt: 'desc' } });
+  return latest?.status === 'APPROVED' ? latest : null;
+}
+
+/** Whether the viewer may pull this approved document back (the button). */
+export async function mayReopen(documentType: string, documentId: string, actor: ResolvedUser): Promise<boolean> {
+  const reopener = reopeners.get(documentType);
+  if (!reopener) return false;
+  if (!(await standingApproval(documentType, documentId))) return false;
+  return reopener.may(actor, documentId);
+}
+
+export async function reopenApproved(documentType: string, documentId: string, actor: ResolvedUser, reason: string): Promise<ApprovalRequest> {
+  const reopener = reopeners.get(documentType);
+  if (!reopener) throw badRequest('This document cannot be pulled back once approved');
+  const approved = await standingApproval(documentType, documentId);
+  if (!approved) throw badRequest('It is not approved — nothing to pull back');
+  if (!(await reopener.may(actor, documentId))) throw forbidden('Only whoever prepared it, or whoever may edit them all, can pull it back');
+  const why = reason.trim();
+  if (!why) throw badRequest('Say why it is being pulled back');
+
+  const request = await prisma.$transaction(
+    async (tx) => {
+      const claimed = await tx.approvalRequest.updateMany({
+        where: { id: approved.id, status: 'APPROVED' },
+        data: { status: 'CANCELLED', reopenedAt: new Date(), reopenedById: actor.id, reopenReason: why },
+      });
+      if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+      await reopener.reopen({ documentId, tx, actor, reason: why });
+      await audit(
+        {
+          entityType: documentType,
+          entityId: documentId,
+          action: 'CANCELLED',
+          summary: `Pulled back to draft after approval by ${actor.name} — ${why}`,
+          actorId: actor.id,
+        },
+        undefined,
+        tx,
+      );
+      const signers = await tx.approvalAction.findMany({ where: { requestId: approved.id }, select: { approverId: true } });
+      const told = new Set([...signers.map((a) => a.approverId), approved.requesterId]);
+      told.delete(actor.id);
+      await notify(
+        [...told].map((userId) => ({
+          userId,
+          type: 'approval.withdrawn' as const,
+          title: `Pulled back after approval: ${approved.subject}`,
+          body: [approved.documentNumber, `${actor.name}: ${why}`].filter(Boolean).join(' — '),
+          link: approved.link ?? undefined,
+        })),
+        tx,
+      );
+      return tx.approvalRequest.findUniqueOrThrow({ where: { id: approved.id } });
+    },
+    { maxWait: 15_000, timeout: 60_000 },
+  );
+  return request;
 }
 
 // ── Reading ──────────────────────────────────────────────────────────────────
@@ -1011,6 +1226,37 @@ export function slotSignatories(slots: ApprovalSlot[]): Signatory[] {
   });
 }
 
+/**
+ * One name per person on paper (2026-10-13, the owner's call for the
+ * quotation: "any name with multiple roles … is one name only"). The slots
+ * to print after the document's own "Prepared by" (`preparerId`): a step
+ * signed by somebody already on the paper is left out — the preparer's own
+ * steps (signed at submit, or named on a draft's preview) are their
+ * Prepared by, an approver's co-signed steps their first signature — and so
+ * is an open step that somebody already on it may sign. Only what
+ * is PRINTED changes: the request keeps every signature, and the Approval
+ * panel still shows each step.
+ */
+export function onePerPerson(slots: ApprovalSlot[], preparerId: string): ApprovalSlot[] {
+  const seen = new Set<string>([preparerId]);
+  const kept: ApprovalSlot[] = [];
+  for (const slot of slots) {
+    if (slot.name) {
+      if (slot.userId && seen.has(slot.userId)) continue;
+      if (slot.userId) seen.add(slot.userId);
+    } else {
+      // Somebody already on the paper who may sign this step will sign it
+      // with their own earlier signature (`act()` co-signs every later step
+      // the decider holds), so it is not printed again.
+      const who = slot.assigned ?? [];
+      if (who.some((p) => seen.has(p.id))) continue;
+      if (who.length === 1) seen.add(who[0].id);
+    }
+    kept.push(slot);
+  }
+  return kept;
+}
+
 /** One step of a document's sign-off block. */
 export interface ApprovalSlot {
   step: string;
@@ -1022,8 +1268,12 @@ export interface ApprovalSlot {
   at?: Date;
   /** A step still open: who may yet sign it (never the requester). */
   assigned?: StepPerson[];
+  /** Who signed it — set with `name`. */
+  userId?: string;
   /** Signed by the preparer at submit (`preparerSigns`), at the submit instant. */
   selfSigned?: boolean;
+  /** Signed with the same approver's Approve on an earlier step, at that instant. */
+  coSigned?: boolean;
 }
 
 /**
@@ -1097,12 +1347,14 @@ export async function approvalSlots(documentType: string, documentId: string, dr
       if (a) {
         return {
           step: st.name,
+          userId: a.approverId,
           name: a.approver.name,
           position: a.approver.position ?? undefined,
           phone: contactPhone(a.approver),
           email: a.approver.email,
           at: a.actedAt,
           ...(a.selfSigned ? { selfSigned: true } : {}),
+          ...(a.coSignedWith != null ? { coSigned: true } : {}),
         };
       }
       return open ? { step: st.name, assigned: await namedApprovers(st, request.requesterId, prisma, ctxOf(request)) } : null;
@@ -1172,4 +1424,52 @@ export async function contactsOf(ids: (string | null | undefined)[]): Promise<Ma
   const wanted = [...new Set(ids.filter((v): v is string => !!v))];
   const users = wanted.length ? await prisma.user.findMany({ where: { id: { in: wanted } }, select: CONTACT_SELECT }) : [];
   return new Map(users.map((u) => [u.id, { name: u.name, phone: contactPhone(u), email: u.email }]));
+}
+
+/**
+ * The step each document's OPEN request waits on, by document id — the
+ * money-out registers' status words (2026-10-15, the owner's sample:
+ * "TL Approval / Back Support / Checking / FM Approved / For Release /
+ * Paid"). One query for a page of rows; a document with no open request is
+ * absent from the map.
+ */
+export async function openSteps(documentType: string, documentIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!documentIds.length) return out;
+  const open = await prisma.approvalRequest.findMany({
+    where: { documentType, documentId: { in: documentIds }, status: 'PENDING' },
+    select: { documentId: true, currentSequence: true, workflow: { select: { steps: { select: { sequence: true, name: true } } } } },
+    orderBy: { createdAt: 'desc' },
+  });
+  for (const r of open) {
+    if (out.has(r.documentId)) continue;
+    const step = r.workflow?.steps.find((s) => s.sequence === r.currentSequence);
+    if (step) out.set(r.documentId, step.name);
+  }
+  return out;
+}
+
+/**
+ * A money-out document's stage in the owner's words: the open step's short
+ * name while it is with an approver ("TL Approval", "Back Support",
+ * "Checking", "FM Approval", "CEO Approval"), "For Release" once approved
+ * and nothing paid, then the document's own status.
+ */
+export function stageWords(status: string, openStep: string | undefined, owed: boolean): string {
+  if (status === 'PENDING_APPROVAL' && openStep) {
+    // A document still on a retired route reads in the same words.
+    if (/team leader|supervisor/i.test(openStep)) return 'TL Approval';
+    if (/checking|finance staff|^finance approval/i.test(openStep)) return 'Checking';
+    if (/finance manager/i.test(openStep)) return 'FM Approval';
+    if (/ceo|president/i.test(openStep)) return 'CEO Approval';
+    if (/back support/i.test(openStep)) return 'Back Support';
+    if (/technical manager/i.test(openStep)) return 'TM Approval';
+    return openStep;
+  }
+  if (status === 'APPROVED') return owed ? 'For Release' : 'Approved';
+  if (status === 'REIMBURSED') return 'Paid';
+  return status
+    .toLowerCase()
+    .replace(/_/g, ' ')
+    .replace(/^\w/, (c) => c.toUpperCase());
 }

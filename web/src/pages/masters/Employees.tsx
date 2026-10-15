@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, ApiError } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
@@ -8,6 +8,7 @@ import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, formatDate, forma
 import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { EmployeeEvaluationsTab } from '../hr/EmployeeEvaluationsTab';
+import { EmployeeFlowTab } from '../hr/PeopleFlow';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople, type PersonRow } from '../../components/People';
 import { FaceSamplesPanel } from '../hr/FaceSamples';
@@ -370,7 +371,7 @@ export function Employees() {
   );
 }
 
-type EmployeeTab = 'person' | 'employment' | 'login' | 'pay' | 'evaluations' | 'face';
+type EmployeeTab = 'person' | 'employment' | 'login' | 'pay' | 'evaluations' | 'face' | 'flow';
 
 /**
  * Which door a new person comes in by (2026-10-10, the owner's call: "unite
@@ -383,6 +384,23 @@ type EmployeeTab = 'person' | 'employment' | 'login' | 'pay' | 'evaluations' | '
  *               employee already on the register (`POST /employees/:id/login`).
  */
 export type PersonDoor = 'hr' | 'admin';
+
+/** A login the typed email already belongs to — `details[0].existingLogin` on the server's 409. */
+interface ExistingLogin {
+  id: string;
+  name: string;
+  email: string;
+  linkable: boolean;
+  isActive?: boolean;
+  employeeId?: string;
+  employeeNo?: string;
+}
+
+function existingLoginIn(err: unknown): ExistingLogin | null {
+  if (!(err instanceof ApiError) || err.status !== 409) return null;
+  const found = (err.details?.[0] as { existingLogin?: ExistingLogin } | undefined)?.existingLogin;
+  return found && typeof found.id === 'string' ? found : null;
+}
 
 /** An employee on the register with no login yet — `GET /employees/lookup` rows with `!hasUser`. */
 interface RegisterOption {
@@ -451,6 +469,7 @@ function EmployeeForm({
   const seeRates = can('ghr.employee_rates.view_all');
   const setRates = can('ghr.employee_rates.edit_all');
   const seeEvaluations = !!employee && can('ghr.evaluations.view_all');
+  const seeFlow = !!employee && can('ghr.people_flow.view_all');
   // The samples the clock matches this person against: HR's to look at and
   // remove (a blurred one, or someone else's); they are only ever ADDED by
   // the person on the Clock page.
@@ -508,6 +527,12 @@ function EmployeeForm({
   const [loginEmailTouched, setLoginEmailTouched] = useState(false);
   const [roles, setRoles] = useState<RoleOption[] | null>(null);
   const [issued, setIssued] = useState<{ delivery: Delivery; email: string; name: string; created: boolean } | null>(null);
+  /**
+   * The login the email already belongs to, when the server says so (a 409
+   * whose details carry `existingLogin`): a login with no employee record yet
+   * is offered to link — one click — instead of a second account.
+   */
+  const [existingLogin, setExistingLogin] = useState<ExistingLogin | null>(null);
 
   const [form, setForm] = useState({
     employeeNo: employee?.employeeNo ?? '',
@@ -645,7 +670,8 @@ function EmployeeForm({
         onSaved();
       }
     } catch (err) {
-      setError(err);
+      // The server's words alone: the field line under them would say the same again.
+      setError(existingLoginIn(err) ? new Error((err as Error).message) : err);
     } finally {
       setBusy(false);
     }
@@ -665,9 +691,11 @@ function EmployeeForm({
     }
   }
 
-  async function save() {
+  /** Saves; `linkTo` links an existing login instead of making one (the 409's offer). */
+  async function save(linkTo?: ExistingLogin) {
     setBusy(true);
     setError(null);
+    setExistingLogin(null);
     try {
       // Admin › Users, for someone HR already registered: the login alone,
       // onto their record — the same route the record's own login tab uses.
@@ -733,7 +761,9 @@ function EmployeeForm({
         payload.tin = form.tin || null;
       }
 
-      if (!employee && (makeLogin || adminDoor)) {
+      if (linkTo) {
+        payload.userId = linkTo.id;
+      } else if (!employee && (makeLogin || adminDoor)) {
         payload.login = loginPayload();
         delete payload.userId;
       }
@@ -754,10 +784,21 @@ function EmployeeForm({
         }
       }
 
-      toast('ok', employee ? `${form.firstName} ${form.lastName} saved` : `${form.firstName} ${form.lastName} added`);
+      toast(
+        'ok',
+        linkTo
+          ? `${form.firstName} ${form.lastName} ${employee ? 'saved' : 'added'}, linked to the login ${linkTo.email}`
+          : employee
+            ? `${form.firstName} ${form.lastName} saved`
+            : `${form.firstName} ${form.lastName} added`,
+      );
       onSaved();
     } catch (err) {
-      setError(err);
+      const found = existingLoginIn(err);
+      setExistingLogin(found);
+      // A login that can be linked is said once, in the offer; one on another
+      // employee's record is the server's words alone, without the field line.
+      setError(found ? (found.linkable && !forExisting && mayEdit ? null : new Error((err as Error).message)) : err);
       setBusy(false);
     }
   }
@@ -828,7 +869,7 @@ function EmployeeForm({
           {mayEdit && (
             <button
               className="btn btn-primary"
-              onClick={save}
+              onClick={() => void save()}
               disabled={busy || (forExisting ? !existingId : !form.firstName || !form.lastName)}
             >
               {busy ? 'Saving…' : 'Save'}
@@ -838,6 +879,19 @@ function EmployeeForm({
       }
     >
       <ErrorBox error={error} />
+      {existingLogin?.linkable && !forExisting && mayEdit && (
+        <div className="alert info row existing-login-offer">
+          <span>
+            <span className="mono">{existingLogin.email}</span> is already the G-CORE login of{' '}
+            <strong>{existingLogin.name}</strong>, who has no employee record yet. Link{' '}
+            <strong>{form.firstName || 'this person'} {form.lastName}</strong> to it — its roles and reporting line stay as
+            they are{existingLogin.isActive === false ? ', and it stays switched off' : ''} — or use another email.
+          </span>
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void save(existingLogin)}>
+            Link the existing login
+          </button>
+        </div>
+      )}
 
       <div className="row" style={{ marginBottom: 'var(--s-4)' }}>
         <div className="scope-switch">
@@ -869,6 +923,11 @@ function EmployeeForm({
           {seeEvaluations && (
             <button className={tab === 'evaluations' ? 'active' : ''} onClick={() => setTab('evaluations')}>
               Evaluations
+            </button>
+          )}
+          {seeFlow && (
+            <button className={tab === 'flow' ? 'active' : ''} onClick={() => setTab('flow')}>
+              People Flow
             </button>
           )}
           {seeFaces && (
@@ -1220,6 +1279,8 @@ function EmployeeForm({
       {tab === 'face' && seeFaces && employee && (
         <FaceSamplesPanel employeeId={employee.id} self={false} editable flaggedSampleId={flaggedSampleId} />
       )}
+
+      {tab === 'flow' && seeFlow && employee && <EmployeeFlowTab employeeId={employee.id} />}
 
       {tab === 'evaluations' && seeEvaluations && employee && (
         <EmployeeEvaluationsTab

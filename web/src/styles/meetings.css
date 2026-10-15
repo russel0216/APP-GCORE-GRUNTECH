@@ -63,6 +63,16 @@
   line-height: 1.55;
 }
 
+/* The minutes' own Save under the text, and who wrote them under the text. */
+.meeting-minutes-foot {
+  justify-content: flex-end;
+  gap: var(--s-2);
+}
+
+.meeting-minutes-by {
+  margin: var(--s-2) 0 0;
+}
+
 .meeting-invitees td {
   vertical-align: top;
 }
@@ -83,4 +93,24 @@
   .meeting-body {
     grid-template-columns: 1fr;
   }
+}
+
+/* The attendees agree the minutes (2026-10-14). */
+.minutes-mine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.minutes-ask {
+  flex: 1;
+}
+.minutes-round {
+  margin-top: var(--s-4);
 }

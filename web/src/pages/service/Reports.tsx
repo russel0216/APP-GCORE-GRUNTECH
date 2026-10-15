@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'reac
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -757,6 +757,7 @@ export function ServiceReportDetail() {
 
       <ErrorBox error={actionError} />
 
+      <DecisionNote documentType={REPORT_DOC_TYPE[row.kind]} documentId={row.id} reloadToken={reload} />
       <DocumentApproval documentType={REPORT_DOC_TYPE[row.kind]} documentId={row.id} reloadToken={reload} />
 
       {row.status === 'REJECTED' && (

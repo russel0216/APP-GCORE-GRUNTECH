@@ -511,7 +511,7 @@ function UserEditor({
               label="Team"
               hint={
                 detail?.employee
-                  ? 'Their quotations, leads and sales orders count under this team — the team cards, the Team view and the forecast. Team Leaders and sales need one.'
+                  ? 'Their quotations, leads and sales orders count under this team — the team cards, the Team view and the forecast — and a Technical Manager or Team Leader approves for their own team. Team Leaders, Technical Managers and sales need one.'
                   : 'This login has no employee record, so it cannot keep a team — add one in HR › Employees.'
               }
             >
@@ -582,7 +582,7 @@ function UserEditor({
           {roles.some((r) => TEAM_SCOPED_ROLES.includes(r.key) && form.roleIds.includes(r.id)) && (
             <Field
               label="Supports teams (Back Support)"
-              hint="Where they support in back admin: a Back Support approval goes to whoever supports the preparer's team, whoever their own manager is. None ticked supports every team."
+              hint="Where they support in back admin: a Back Support approval goes to whoever supports the preparer's team, whoever their own manager is. None ticked: their own Team (Details)."
             >
               <div className="row">
                 {teams

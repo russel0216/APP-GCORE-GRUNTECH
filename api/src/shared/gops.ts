@@ -157,7 +157,7 @@ export async function gopsOverview(
             where: { type: 'PROJECT' },
           })
         : null,
-      sees.progress ? prisma.progressReport.count({ where: { status: 'SUBMITTED' } }) : null,
+      sees.progress ? prisma.progressReport.count({ where: { status: 'PENDING_APPROVAL' } }) : null,
       sees.contracts ? prisma.serviceContract.groupBy({ by: ['status'], _count: { _all: true } }) : null,
       // Cover the business is carrying right now — a live figure, so no range.
       sees.contracts ? prisma.serviceContract.count({ where: { status: 'ACTIVE' } }) : null,

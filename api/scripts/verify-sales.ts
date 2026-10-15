@@ -18,7 +18,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { nextNumber, previewNext, employeeToken, parseNumber, renderPattern, FREE_NUMBER_TRIES } from '../src/shared/numbering';
-import { submitForApproval, act, pendingFor, pickWorkflow, routePreview } from '../src/shared/approvals';
+import { submitForApproval, act, pendingFor, pickWorkflow, routePreview, reopenApproved } from '../src/shared/approvals';
 import { formatDateTime, renderDocument } from '../src/shared/pdf';
 import { resolveUser, canEditRecord, type ResolvedUser } from '../src/permissions/resolve';
 import { signToken } from '../src/auth/middleware';
@@ -55,8 +55,7 @@ import {
   quotationStages,
   leadStage,
   leadStages,
-  standsApproved,
-} from '../src/shared/pipeline';
+  standsApproved, lostKindAfter } from '../src/shared/pipeline';
 import { DEFAULT_STAGES } from '../src/shared/pipelineStages';
 import { valueRevision as valuedRevisionOf } from '../src/shared/pipeline';
 import {
@@ -86,6 +85,7 @@ import '../src/routes/sales';
 import { leadListSummary, leadListWhere, printableQuotation, quotationListSummary, quotationListWhere, quotationPrintData } from '../src/routes/sales';
 import { capsParts, markUnchangedScoroImports, upperText } from '../src/shared/quotation';
 import { upperText as webUpperText } from '../../web/src/lib/caps';
+import { withSupplierNote } from '../../web/src/lib/supplierNote';
 import { deleteGroup, deletedGroupKeys, setDeletedGroupKeys } from '../src/shared/quotationGroups';
 import { documentAddress } from '../src/shared/customerAddress';
 import { salesOrderListSummary, salesOrderListWhere } from '../src/routes/salesOrders';
@@ -745,6 +745,83 @@ async function main() {
     (await withdrawStaleQuotationApprovals([staleR3.rev.id, waitingR4.rev.id])).length === 0,
   );
 
+  // ── 6c. Pulled back after approval (2026-10-16) ───────────────────────────
+  // "Every approval request can be pulled back and return to draft, even if
+  // it's fully approved" — refused while something stands on it.
+  console.log('\nPulled back after approval');
+  {
+    const refusedWith = async (fn: () => Promise<unknown>) => {
+      try {
+        await fn();
+        return '';
+      } catch (e) {
+        return (e as Error).message;
+      }
+    };
+    const latestReq = async (type: string, id: string) =>
+      prisma.approvalRequest.findFirstOrThrow({ where: { documentType: type, documentId: id }, orderBy: { createdAt: 'desc' } });
+    const otherResolved = (await resolveUser(other.id))!;
+
+    // A sales order on the approved R1, through its four signatures.
+    const bsR = await makeUser('Verify Reopen Back Support', 'bs-reopen@verifys.local', ['back_support']);
+    const ccR = await makeUser('Verify Reopen Cost Controller', 'cc-reopen@verifys.local', ['cost_controller']);
+    const reopenOrder = await prisma.salesOrder.create({
+      data: { number: `${TAG}-RSO1`, quotationId: staleQuote.id, customerId: customer.id, ownerId: sales.id, orderDate: new Date(), status: 'PENDING_APPROVAL', total: d(1120) },
+    });
+    const soReq = await submitForApproval({
+      documentType: 'sales_order',
+      documentId: reopenOrder.id,
+      documentNumber: reopenOrder.number,
+      subject: `${TAG} Reopen order`,
+      amount: 1_120,
+      requesterId: sales.id,
+    });
+    for (const who of [manager, bsR, ccR, ceo]) await act({ requestId: soReq.id, userId: who.id, action: 'APPROVED' });
+    check('a sales order approved by all four is issued', (await prisma.salesOrder.findUniqueOrThrow({ where: { id: reopenOrder.id } })).status === 'ISSUED');
+
+    // The quotation revision: refused while won, and while the order books it.
+    await prisma.quotation.update({ where: { id: staleQuote.id }, data: { outcome: 'WON' } });
+    const wonMsg = await refusedWith(() => reopenApproved('quotation', liveR1.rev.id, salesUser, 'Customer changed the scope'));
+    check('an approved revision of a won quotation cannot be pulled back', /is won/.test(wonMsg), wonMsg);
+    await prisma.quotation.update({ where: { id: staleQuote.id }, data: { outcome: 'OPEN' } });
+    const bookedMsg = await refusedWith(() => reopenApproved('quotation', liveR1.rev.id, salesUser, 'Customer changed the scope'));
+    check('nor while a live sales order books it — named', bookedMsg.includes(reopenOrder.number), bookedMsg);
+    check(
+      'a refused pull-back leaves the revision and its request approved',
+      (await statusOf(liveR1.rev.id)) === 'APPROVED' && (await latestReq('quotation', liveR1.rev.id)).status === 'APPROVED',
+    );
+
+    // The sales order: refused by a colleague, and while an invoice request stands on it.
+    const notMine = await refusedWith(() => reopenApproved('sales_order', reopenOrder.id, otherResolved, 'Not mine'));
+    check('a colleague cannot pull back the author’s approved order', notMine.length > 0, notMine);
+    const ir = await prisma.invoiceRequest.create({
+      data: { number: `${TAG}-IR1`, salesOrderId: reopenOrder.id, requestedById: sales.id, status: 'DRAFT' },
+    });
+    const irMsg = await refusedWith(() => reopenApproved('sales_order', reopenOrder.id, salesUser, 'Wrong PO'));
+    check('an issued order is not pulled back while an invoice request stands on it — named', irMsg.includes(`${TAG}-IR1`), irMsg);
+    await prisma.invoiceRequest.delete({ where: { id: ir.id } });
+    await reopenApproved('sales_order', reopenOrder.id, salesUser, 'Wrong PO');
+    const soReq2 = await latestReq('sales_order', reopenOrder.id);
+    check(
+      'the author pulls the approved order back to draft; its request is closed, reason kept',
+      (await prisma.salesOrder.findUniqueOrThrow({ where: { id: reopenOrder.id } })).status === 'DRAFT' &&
+        soReq2.status === 'CANCELLED' && soReq2.reopenReason === 'Wrong PO' && soReq2.reopenedById === sales.id,
+      `${soReq2.status} ${soReq2.reopenReason}`,
+    );
+
+    // With the order cancelled, the revision comes back to draft.
+    await prisma.salesOrder.update({ where: { id: reopenOrder.id }, data: { status: 'CANCELLED', cancelReason: 'verify' } });
+    await reopenApproved('quotation', liveR1.rev.id, salesUser, 'Customer changed the scope');
+    const r1Back = await prisma.quotationRevision.findUniqueOrThrow({ where: { id: liveR1.rev.id } });
+    check(
+      'the author pulls the approved revision back to draft, its request closed',
+      r1Back.status === 'DRAFT' && r1Back.approvedAt === null && (await latestReq('quotation', liveR1.rev.id)).status === 'CANCELLED',
+      r1Back.status,
+    );
+    const again = await refusedWith(() => reopenApproved('quotation', liveR1.rev.id, salesUser, 'Twice'));
+    check('and a second pull-back finds nothing approved', again.length > 0, again);
+  }
+
   // ── 7. Lead follows the quotation ──────────────────────────────────────────
   console.log('\nLead and pipeline');
 
@@ -931,6 +1008,28 @@ async function main() {
   check(
     'nor negotiated',
     refuses(() => assertLeadStatusChange('COSTING', 'NEGOTIATION', { hasQuotations: false }), 'won by its quotation'),
+  );
+  // Hold and Cancel (2026-10-13).
+  check(
+    'an open quotation may be put on hold; a held one goes back to an open stage or Lost, never straight to Won',
+    allowedTargets({ kind: 'quotation', column: 'SUBMITTED', hasApprovedRevision: true }).includes('ON_HOLD') &&
+      (() => {
+        const t = allowedTargets({ kind: 'quotation', column: 'ON_HOLD', hasApprovedRevision: true });
+        return t.includes('QUOTED') && t.includes('NEGOTIATION') && t.includes('LOST') && !t.includes('WON') && !t.includes('ON_HOLD');
+      })() &&
+      !allowedTargets({ kind: 'quotation', column: 'WON', hasApprovedRevision: true }).includes('ON_HOLD'),
+  );
+  check(
+    'a held quotation stands in the On hold column and stage',
+    columnFor({ kind: 'quotation', outcome: 'ON_HOLD' }) === 'ON_HOLD',
+  );
+  check(
+    'lostKindAfter: Lost by default, Cancelled when asked, cleared on leaving Lost, refused without Lost',
+    lostKindAfter('SUBMITTED', 'LOST', undefined) === 'LOST' &&
+      lostKindAfter('SUBMITTED', 'LOST', 'CANCELLED') === 'CANCELLED' &&
+      lostKindAfter('LOST', 'NEGOTIATION', undefined) === null &&
+      lostKindAfter('SUBMITTED', 'NEGOTIATION', undefined) === undefined &&
+      refuses(() => lostKindAfter('SUBMITTED', 'NEGOTIATION', 'CANCELLED'), 'Only a lost one'),
   );
   check(
     'a lead card can be dropped on its own stages and Lost, never on a quotation stage',
@@ -1188,8 +1287,8 @@ async function main() {
   );
   check(
     'an ON_HOLD lead is left out of the forecast even when dated this month',
-    b2.forecast.count === 2,
-    `${b2.forecast.count}`,
+    b2.kpis.forecastCount === 2,
+    `${b2.kpis.forecastCount}`,
   );
   check(
     'forecastWeighted = Σ value × probability',
@@ -1350,8 +1449,8 @@ async function main() {
     });
 
     check(
-      'a quotation stands in the board’s stages: Opportunity to Lost, never On hold',
-      quotationStages(stages).map((st) => st.key).join(',') === 'OPPORTUNITY,NEGOTIATION,CLOSING,CONFIRMED,COMPLETED,LOST',
+      'a quotation stands in the board’s stages: Opportunity to Lost, and On hold since 2026-10-13',
+      quotationStages(stages).map((st) => st.key).join(',') === 'OPPORTUNITY,NEGOTIATION,CLOSING,CONFIRMED,COMPLETED,LOST,HOLD',
       quotationStages(stages).map((st) => st.key).join(','),
     );
     check(
@@ -1402,7 +1501,8 @@ async function main() {
     const perStage = Object.entries(summary.tabCounts).filter(([k]) => k !== '');
     check(
       'every stage has one, and the stage counts add up to All',
-      perStage.every(([, n]) => n === 1) && perStage.reduce((t, [, n]) => t + n, 0) === summary.tabCounts[''],
+      // Six quotations, one per stage — none of them held.
+      perStage.every(([k, n]) => n === (k === 'HOLD' ? 0 : 1)) && perStage.reduce((t, [, n]) => t + n, 0) === summary.tabCounts[''],
       JSON.stringify(summary.tabCounts),
     );
     check(
@@ -1412,7 +1512,7 @@ async function main() {
     );
     check(
       'the summary carries the tabs, named and coloured as the stages are',
-      (summary.tabs ?? []).map((t) => t.label).join(',') === 'Opportunity,Negotiation,Closing,Confirmed,Completed,Lost' &&
+      (summary.tabs ?? []).map((t) => t.label).join(',') === 'Opportunity,Negotiation,Closing,Confirmed,Completed,Lost,On hold' &&
         (summary.tabs ?? []).every((t) => /^#[0-9A-F]{6}$/i.test(t.color ?? '')),
     );
 
@@ -1488,7 +1588,7 @@ async function main() {
     check('"Expected closing" includes the day it names', closing === 1, String(closing));
 
     let refused = 0;
-    for (const bad of [{ stage: 'HOLD' }, { stage: 'NOPE' }, { createdFrom: '30/04/2026' }, { revision: 'SUPERSEDED' }, { salesOrder: 'maybe' }]) {
+    for (const bad of [{ stage: 'ON_HOLD' }, { stage: 'NOPE' }, { createdFrom: '30/04/2026' }, { revision: 'SUPERSEDED' }, { salesOrder: 'maybe' }]) {
       try {
         quotationListWhere(superUser, listQ(bad), stages);
       } catch (err) {
@@ -2549,6 +2649,22 @@ async function main() {
       JSON.stringify(samples.map(upperText)),
     );
     check('the web’s copy capitalises exactly as the server does', samples.every((t) => webUpperText(t) === upperText(t)));
+    // The cost cell's supplier not on file (2026-10-13, the owner's call).
+    check(
+      'a supplier not on file is kept on the line as "Supplier: X", before the note there, and only once',
+      withSupplierNote('', ' Acme Pumps ') === 'Supplier: Acme Pumps' &&
+        withSupplierNote('freight extra', 'Acme Pumps') === 'Supplier: Acme Pumps — freight extra' &&
+        withSupplierNote('Supplier: Acme Pumps — freight extra', 'acme pumps') === 'Supplier: Acme Pumps — freight extra',
+    );
+    const sellingRoles = await prisma.role.findMany({
+      where: { key: { in: ['sales', 'sales_manager', 'team_leader', 'industry_specialist'] } },
+      select: { key: true, permissions: { select: { permission: { select: { key: true } } } } },
+    });
+    check(
+      'the selling roles may add a supplier from a quotation line (gchain.suppliers.create; run the seed if this fails)',
+      sellingRoles.length === 4 && sellingRoles.every((r) => r.permissions.some((p) => p.permission.key === 'gchain.suppliers.create')),
+      sellingRoles.filter((r) => !r.permissions.some((p) => p.permission.key === 'gchain.suppliers.create')).map((r) => r.key).join(),
+    );
     const parts = capsParts({ brand: ' schneider electric ', productType: 'circuit breaker', partNumber: '' });
     check(
       'a line’s Brand, Product type and Part number are stored in capitals, an empty one null',
@@ -3803,9 +3919,11 @@ async function main() {
     );
     check('the signature is dated the submit instant itself', tlReq.actions[0]?.actedAt.getTime() === tlReq.createdAt.getTime());
     const tlPaper = await paperOf(String(tlQuote.body.id), tlRev.id, managerToken);
+    // One name per person on paper (2026-10-13): the preparer's own step is
+    // their Prepared by, so the Team Leader slot is not printed again.
     check(
-      'its PDF prints Prepared by and the Team Leader step with ONE timestamp, nothing Pending',
-      timesIn(tlPaper, tlReq.createdAt) >= 2 && !tlPaper.includes('Pending'),
+      'its PDF prints the preparer once — Prepared by at the submit instant, no Team Leader slot, nothing Pending',
+      timesIn(tlPaper, tlReq.createdAt) === 1 && !tlPaper.includes('TEAM LEADER') && !tlPaper.includes('Pending'),
       `${formatDateTime(tlReq.createdAt)} ×${timesIn(tlPaper, tlReq.createdAt)}`,
     );
 
@@ -3853,8 +3971,12 @@ async function main() {
     );
     const ceoHalf = await paperOf(String(ceoQuote.body.id), ceoRev.id, ceoToken);
     check(
-      'halfway, its PDF prints the CEO once as preparer and once as approver under one timestamp, the Team Leader Pending',
-      timesIn(ceoHalf, ceoReq.createdAt) >= 2 && ceoHalf.includes('Pending') && ceoHalf.includes(sitLeader.name),
+      'halfway, its PDF prints the CEO once, as Prepared by — not again under CEO / President — and the Team Leader Pending',
+      timesIn(ceoHalf, ceoReq.createdAt) === 1 &&
+        !ceoHalf.includes('CEO / PRESIDENT') &&
+        ceoHalf.includes('TEAM LEADER') &&
+        ceoHalf.includes('Pending') &&
+        ceoHalf.includes(sitLeader.name),
       `${formatDateTime(ceoReq.createdAt)} ×${timesIn(ceoHalf, ceoReq.createdAt)}`,
     );
     const ceoCanAct = async (token: string) =>
@@ -3873,9 +3995,44 @@ async function main() {
     );
     const ceoPaper = await paperOf(String(ceoQuote.body.id), ceoRev.id, ceoToken);
     check(
-      'and the signed PDF keeps the one timestamp, nothing Pending',
-      timesIn(ceoPaper, ceoReq.createdAt) >= 2 && !ceoPaper.includes('Pending') && ceoPaper.includes(sitLeader.name),
+      'and the signed PDF keeps the one timestamp, the Team Leader signed, nothing Pending',
+      ceoPaper.split(ceo.name).length - 1 === 1 && !ceoPaper.includes('CEO / PRESIDENT') && !ceoPaper.includes('Pending') && ceoPaper.includes(sitLeader.name),
     );
+
+    // An approver holding both steps signs both with one Approve, and the
+    // paper names them once — under Team Leader (2026-10-13, the owner's call).
+    const ceoRole = await prisma.role.findUniqueOrThrow({ where: { key: 'ceo' } });
+    await prisma.userRole.create({ data: { userId: manager.id, roleId: ceoRole.id } });
+    try {
+      const both = await http(salesToken, 'POST', '/quotations', {
+        customerId: clinic.id,
+        subject: `${TAG} Leader who is CEO`,
+        lines: [{ group: `${TAG} Installation`, title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 2_000_000 }],
+      });
+      const bothRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(both.body.id) } });
+      const bothDraft = await paperOf(String(both.body.id), bothRev.id, salesToken);
+      check(
+        'a draft whose Team Leader is also the CEO / President prints them once, under Team Leader',
+        bothDraft.includes('TEAM LEADER') && !bothDraft.includes('CEO / PRESIDENT') && bothDraft.split(manager.name).length - 1 === 1,
+      );
+      await http(salesToken, 'POST', `/quotations/${both.body.id}/revisions/${bothRev.id}/submit`);
+      const bothReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'quotation', documentId: bothRev.id, status: 'PENDING' } });
+      await act({ requestId: bothReq.id, userId: manager.id, action: 'APPROVED' });
+      const bothDone = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: bothReq.id }, include: { actions: true } });
+      const bothPaper = await paperOf(String(both.body.id), bothRev.id, salesToken);
+      check(
+        'approved with one Approve (the CEO / President step co-signed), the paper names them once, under Team Leader',
+        bothDone.status === 'APPROVED' &&
+          bothDone.actions.length === 2 &&
+          bothPaper.split(manager.name).length - 1 === 1 &&
+          bothPaper.includes('TEAM LEADER') &&
+          !bothPaper.includes('CEO / PRESIDENT') &&
+          !bothPaper.includes('Pending'),
+        `${bothDone.status} ${bothDone.actions.length}`,
+      );
+    } finally {
+      await prisma.userRole.deleteMany({ where: { userId: manager.id, roleId: ceoRole.id } });
+    }
 
     // A stand-in: the approver's manager may decide the step from the
     // document — never listed, never told, never queued.
@@ -4020,11 +4177,11 @@ async function main() {
     );
     const pagesOf = async (buf: Buffer) => (await PDFDocument.load(buf)).getPageCount();
     const bytesOf = async (url: string, token = salesToken) => Buffer.from(await (await fetch(`${BASE}${url}`, { headers: { Authorization: `Bearer ${token}` } })).arrayBuffer());
-    const qBare = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf?attachments=0`);
-    const qFull = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf`);
+    const qBare = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf`);
+    const qFull = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf?attachments=1`);
     const qFullText = pdfText(qFull);
     check(
-      'printed, the quotation carries its files: an Attachments page, the photo on a page, the PO’s two pages',
+      'printed with its attachments, the quotation carries its files: an Attachments page, the photo on a page, the PO’s two pages',
       (await pagesOf(qFull)) === (await pagesOf(qBare)) + 1 + 1 + 2,
       `${await pagesOf(qBare)} → ${await pagesOf(qFull)}`,
     );
@@ -4033,7 +4190,7 @@ async function main() {
       qFullText.includes('ATTACHMENTS') && [`${TAG}-site-photo.png`, `${TAG}-customer-PO.pdf`, `${TAG}-specs.docx`, `${TAG}-broken.pdf`].every((n) => qFullText.includes(n)) &&
         qFullText.includes('Not printable') && qFullText.includes('Could not be read') && qFullText.includes('3 pages follow'),
     );
-    check('“Print without attachments” is the bare quotation', !pdfText(qBare).includes(`${TAG}-site-photo.png`));
+    check('Print is the bare quotation (2026-10-16)', !pdfText(qBare).includes(`${TAG}-site-photo.png`));
     // SCORO's Create invoice: what is left to book, then bookings against it.
     const booking0 = await http(salesToken, 'GET', `/sales-orders/booking?quotationId=${soQuoteId}`);
     const bk0 = booking0.body as unknown as { net: number; availableNet: number; lines: { id: string; available: number; booked: number; isHeading: boolean }[] };

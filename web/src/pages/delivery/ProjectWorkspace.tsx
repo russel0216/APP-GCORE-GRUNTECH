@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { CommissionsCard } from '../finance/Commissions';
 import { api, type ListResult } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import {
@@ -18,7 +19,7 @@ import {
 import { Stat } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
 import { RecordHeader } from '../../components/RecordHeader';
-import { useConfirm, type ConfirmApi } from '../../components/Confirm';
+import { useConfirm } from '../../components/Confirm';
 import { recordLink } from '../../lib/links';
 import { SCurve, type CurvePoint } from './SCurve';
 import { ProjectGantt } from './ProjectGantt';
@@ -27,6 +28,10 @@ import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
 import { ProjectBudgetRequestsCard, BudgetRequestModal } from './BudgetRequests';
+import { ProjectPlanApprovalsCard } from './PlanApprovals';
+import { ProjectCostingCard } from './ProjectCosting';
+import { ProjectJobOrders } from '../service/JobOrders';
+import { REQUEST_TONES } from '../finance/InvoiceRequests';
 
 /**
  * The project workspace (model §8.1).
@@ -78,6 +83,8 @@ interface Job {
   startDate: string | null;
   targetEndDate: string | null;
   actualEndDate: string | null;
+  /** Whether the dates tally with the scope of work: its last planned day, and working days (Mon–Sat) to it and to the target end. */
+  schedule?: { planFinish: string | null; planDays: number | null; targetDays: number | null };
   notes: string | null;
   downpaymentPct: number | null;
   retentionPct: number | null;
@@ -101,6 +108,7 @@ interface Job {
     status: string;
     periodFrom: string;
     periodTo: string;
+    billing: { id: string } | null;
   }[];
   billings: {
     id: string;
@@ -110,9 +118,14 @@ interface Job {
     billingDate: string;
     grossAmount: number;
     netCollectible: number;
+    /** Beside each billing, its invoice and its latest invoice request (2026-10-15). */
+    invoice: { id: string; number: string; status: string } | null;
+    invoiceRequests: { id: string; number: string; status: string }[];
   }[];
+  /** The project's Requests for Approval (2026-10-13). */
   plans: {
     id: string;
+    number: string | null;
     title: string;
     drawingNo: string | null;
     revision: string;
@@ -121,6 +134,7 @@ interface Job {
     approvedAt: string | null;
     approvedBy: string | null;
     createdAt: string;
+    uploadedBy: { id: string; name: string } | null;
   }[];
   tasks: {
     id: string;
@@ -162,27 +176,36 @@ type Tab =
   | 'plans'
   | 'budget'
   | 'procurement'
+  | 'costing'
+  | 'joborders'
   | 'requests'
   | 'scope'
-  | 'progress'
-  | 'finance'
-  | 'service';
+  | 'progress';
 
 /**
  * The owner's order (2026-10-06), after the old gasiontech G-CORE's project
- * menu: Overview, Meetings & Records, Approved Plans, Budget Monitoring,
+ * menu: Overview, Meetings & Records, Request for Approval, Budget Monitoring,
  * Purchase Requisition, Budget Requests, Scope of Work (the Gantt chart),
- * Progress & Billing. Finance and Service stay at the end: the turnover
- * register and the project's invoices live nowhere else.
+ * Progress & Billing. Finance and Service went on 2026-10-15 (the owner's
+ * call): the invoices sit beside their billings on Progress & Billing, and
+ * the equipment installed opens Aftermarket's Installed Base from the overview. Costing and Job
+ * Orders follow Overview (2026-10-15, the owner's call): the costing the
+ * project was built from, and the job orders raised for it.
  */
-const TABS: Tab[] = ['overview', 'meetings', 'plans', 'budget', 'procurement', 'requests', 'scope', 'progress', 'finance', 'service'];
+const TABS: Tab[] = ['overview', 'costing', 'joborders', 'meetings', 'plans', 'budget', 'procurement', 'requests', 'scope', 'progress'];
 
 /** Where the tabs that used to exist went, so an old link or notification still lands. */
-const TAB_ALIASES: Record<string, Tab> = { billing: 'progress', tasks: 'scope', documents: 'meetings', activity: 'meetings' };
+const TAB_ALIASES: Record<string, Tab> = {
+  billing: 'progress',
+  tasks: 'scope',
+  documents: 'meetings',
+  activity: 'meetings',
+  // The tabs removed on 2026-10-15.
+  finance: 'progress',
+  service: 'overview',
+};
 
 /** Plan statuses the shared rules do not already colour. */
-const PLAN_TONES = { FOR_APPROVAL: 'warn', SUPERSEDED: '' } as const;
-
 export function ProjectWorkspace() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -197,7 +220,6 @@ export function ProjectWorkspace() {
   const [editing, setEditing] = useState(false);
   const [budgetRequest, setBudgetRequest] = useState(false);
   const [newReport, setNewReport] = useState(false);
-  const [newPlan, setNewPlan] = useState(false);
   const [turnover, setTurnover] = useState<'turnover' | 'register' | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const [activity, setActivity] = useState<
@@ -252,23 +274,10 @@ export function ProjectWorkspace() {
     'gchain.stock_issuance.view_all',
     'gchain.borrow_slips.view_all',
   ];
-  const financeKeys = [
-    'gfin.ar.view_all',
-    'gfin.ap.view_all',
-    'gfin.expenses.view_all',
-    'ghr.overtime.view_all',
-    'gops.budget_monitoring.view_all',
-  ];
-  const serviceKeys = [
-    'gops.installed_base.view_all',
-    'gops.service_contracts.view_all',
-    'gops.commissioning_reports.view_all',
-    'gops.pm_reports.view_all',
-    'gops.inspection_reports.view_all',
-    'gops.job_orders.view_all',
-  ];
   const visible: Record<Tab, boolean> = {
     overview: true,
+    costing: true,
+    joborders: can('gops.job_orders.view_all') || can('gops.job_orders.view_own'),
     meetings: true,
     plans: true,
     budget: true,
@@ -276,8 +285,6 @@ export function ProjectWorkspace() {
     requests: can('gops.budget_requests.view_all') || can('gops.budget_requests.view_own'),
     scope: true,
     progress: true,
-    finance: financeKeys.some(can),
-    service: serviceKeys.some(can),
   };
   const current: Tab = visible[tab] ? tab : 'overview';
 
@@ -291,15 +298,15 @@ export function ProjectWorkspace() {
 
   const tabLabel: Record<Tab, string> = {
     overview: 'Overview',
+    costing: 'Costing',
+    joborders: 'Job Orders',
     meetings: 'Meetings & Records',
-    plans: `Approved Plans (${job.plans.length})`,
+    plans: `Request for Approval (${job.plans.length})`,
     budget: 'Budget Monitoring',
     procurement: 'Purchase Requisition',
     requests: `Budget Requests (${job.budgetRequestCount})`,
     scope: 'Scope of Work (Gantt)',
     progress: `Progress & Billing (${job.progressReports.length})`,
-    finance: 'Finance',
-    service: job.installedAssetCount ? `Service (${job.installedAssetCount})` : 'Service',
   };
 
   return (
@@ -317,7 +324,7 @@ export function ProjectWorkspace() {
           <>
             <Link to={`/g-ops/customers/${job.customer.id}`}>{job.customer.name}</Link>
             {job.site ? ` · ${job.site.name}` : ''}
-            {job.projectManager ? ` · project manager ${job.projectManager.name}` : ' · no project manager'}
+            {job.projectManager ? ` · Technical Manager ${job.projectManager.name}` : ' · no Technical Manager'}
             {job.costing && (
               <>
                 {' '}
@@ -384,6 +391,13 @@ export function ProjectWorkspace() {
           </>
         }
         more={[
+          // Equipment this project installed that was not registered at
+          // turnover (the Service tab's button until 2026-10-15).
+          mayRegister &&
+            job.status === 'TURNED_OVER' && {
+              label: 'Add equipment',
+              onSelect: () => setTurnover('register'),
+            },
           mayEdit &&
             (job.status === 'PLANNING' || job.status === 'IN_PROGRESS') && {
               label: 'Put on hold',
@@ -557,9 +571,52 @@ export function ProjectWorkspace() {
             <h3 className="card-title">Schedule</h3>
             <dl className="kv">
               <Row label="Start" value={job.startDate ? formatDate(job.startDate) : null} />
-              <Row label="Target end" value={job.targetEndDate ? formatDate(job.targetEndDate) : null} />
+              <Row
+                label="Target end"
+                value={
+                  job.targetEndDate ? (
+                    <>
+                      {formatDate(job.targetEndDate)}
+                      {job.schedule?.targetDays != null && (
+                        <span className="muted"> · {job.schedule.targetDays} working days (Mon–Sat)</span>
+                      )}
+                    </>
+                  ) : null
+                }
+              />
+              {job.schedule?.planFinish && (
+                <Row
+                  label="Scope of work ends"
+                  value={
+                    <>
+                      {formatDate(job.schedule.planFinish)}
+                      {job.schedule.planDays != null && <span className="muted"> · {job.schedule.planDays} working days</span>}
+                      {job.schedule.targetDays != null &&
+                        job.schedule.planDays != null &&
+                        job.schedule.targetDays !== job.schedule.planDays && (
+                          <div className="hint">
+                            The target end is {job.schedule.targetDays} working days after the start — the scope of work plans{' '}
+                            {job.schedule.planDays}.
+                          </div>
+                        )}
+                    </>
+                  }
+                />
+              )}
               <Row label="Actual end" value={job.actualEndDate ? formatDate(job.actualEndDate) : null} />
-              <Row label="Project manager" value={job.projectManager?.name} />
+              <Row label="Technical Manager" value={job.projectManager?.name} />
+              {job.installedAssetCount > 0 && (
+                <Row
+                  label="Equipment installed"
+                  value={
+                    can('gops.installed_base.view_all') ? (
+                      <Link to={`/g-ops/installed-base?jobId=${job.id}`}>{job.installedAssetCount} in the Installed Base ↗</Link>
+                    ) : (
+                      job.installedAssetCount
+                    )
+                  }
+                />
+              )}
               <Row label="Site" value={job.site ? [job.site.name, job.site.city].filter(Boolean).join(' — ') : null} />
               <Row label="Created by" value={job.createdBy.name} />
             </dl>
@@ -572,6 +629,12 @@ export function ProjectWorkspace() {
             </div>
           )}
         </div>
+      )}
+
+      {current === 'costing' && <ProjectCostingCard costing={job.costing} />}
+
+      {current === 'joborders' && (
+        <ProjectJobOrders jobId={job.id} customerId={job.customer.id} quotationId={job.quotationRevision?.quotation.id ?? null} />
       )}
 
       {current === 'budget' && <BudgetTab job={job} reloadToken={reloadToken} />}
@@ -649,14 +712,7 @@ export function ProjectWorkspace() {
         </div>
       )}
 
-      {current === 'plans' && (
-        <PlansTab
-          job={job}
-          onAdd={can('gops.plans.create') ? () => setNewPlan(true) : undefined}
-          onChanged={load}
-          confirm={confirm}
-        />
-      )}
+      {current === 'plans' && <ProjectPlanApprovalsCard job={job} plans={job.plans} onChanged={() => void load()} />}
 
       {current === 'procurement' && <ProcurementTab job={job} />}
 
@@ -710,70 +766,11 @@ export function ProjectWorkspace() {
             </div>
           )}
         </div>
-        <div className="card">
-          <h3 className="card-title">Progress billings</h3>
-          <p className="muted del-lede">
-            Raised from an approved progress report, never keyed by hand. Each billing covers only
-            what has not already been billed.
-          </p>
-          {job.billings.length === 0 ? (
-            <Empty title="Nothing billed yet" hint="Approve a progress report, then bill it." />
-          ) : (
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Number</th>
-                    <th>Date</th>
-                    <th className="right">Gross</th>
-                    <th className="right">Net collectible</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {job.billings.map((b) => (
-                    <tr key={b.id}>
-                      <td className="mono">{b.billingNo}</td>
-                      <td>
-                        <Link className="mono" to={`/g-ops/billings/${b.id}`}>
-                          {b.number}
-                        </Link>
-                      </td>
-                      <td>{formatDate(b.billingDate)}</td>
-                      <td className="right mono">{formatMoney(b.grossAmount)}</td>
-                      <td className="right mono">{formatMoney(b.netCollectible)}</td>
-                      <td>
-                        <StatusBadge status={b.status} />
-                      </td>
-                    </tr>
-                  ))}
-                  <tr>
-                    <td colSpan={3} className="right">
-                      <strong>TOTAL BILLED</strong>
-                    </td>
-                    <td className="right mono">
-                      <strong>{formatMoney(s.billed)}</strong>
-                    </td>
-                    <td colSpan={2} />
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+        <ProgressBillingsCard job={job} totalBilled={s.billed} onChanged={() => void load()} />
+        <CommissionsCard jobId={job.id} />
         </div>
       )}
 
-      {current === 'finance' && <FinanceTab job={job} />}
-
-      {current === 'service' && (
-        <ServiceTab
-          job={job}
-          reloadToken={reloadToken}
-          onRegister={mayRegister && job.status === 'TURNED_OVER' ? () => setTurnover('register') : undefined}
-        />
-      )}
 
       {current === 'meetings' && (
         <div className="stack">
@@ -850,17 +847,6 @@ export function ProjectWorkspace() {
         />
       )}
 
-      {newPlan && (
-        <NewPlanModal
-          job={job}
-          onClose={() => setNewPlan(false)}
-          onSaved={() => {
-            setNewPlan(false);
-            void load();
-          }}
-        />
-      )}
-
       {turnover && (
         <TurnoverModal
           job={job}
@@ -878,6 +864,158 @@ export function ProjectWorkspace() {
 }
 
 /** One label / value pair inside a `.kv` list. */
+/**
+ * Under the progress reports, the project's billings (2026-10-15, the owner's
+ * call): "+ New progress billing" bills an approved report not yet billed (the
+ * same `POST /billings` as the report page's Raise billing), and each billing
+ * shows its invoice request and its invoice — the invoices live here since the
+ * Finance tab went. "Request invoice" opens the billing, where the salesperson
+ * or Team Leader holding the project asks for it.
+ */
+function ProgressBillingsCard({ job, totalBilled, onChanged }: { job: Job; totalBilled: number; onChanged: () => void }) {
+  const { can } = useAuth();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [picking, setPicking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const unbilled = job.progressReports.filter((r) => r.status === 'APPROVED' && !r.billing);
+
+  async function bill(reportId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const made = await api.post<{ id: string; number: string }>('/billings', { progressReportId: reportId });
+      toast('ok', `${made.number} raised — submit it for approval`);
+      onChanged();
+      navigate(`/g-ops/billings/${made.id}`);
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="del-card-head">
+        <h3 className="card-title">Progress billings</h3>
+        {can('gops.progress_billing.create') && (
+          <button
+            className="btn btn-primary btn-sm"
+            disabled={unbilled.length === 0 || busy}
+            title={unbilled.length === 0 ? 'Every approved report is billed — approve the next report first' : undefined}
+            onClick={() => (unbilled.length === 1 ? bill(unbilled[0].id) : setPicking((p) => !p))}
+          >
+            + New progress billing
+          </button>
+        )}
+      </div>
+      <p className="muted del-lede">
+        Raised from an approved progress report, never keyed by hand, and approved by the Technical Manager and the Team
+        Leader. Then the salesperson or Team Leader requests the invoice: Back Support approves it, and the draft invoice
+        lands in Accounts Receivable.
+      </p>
+      <ErrorBox error={error} />
+      {picking && unbilled.length > 1 && (
+        <div className="alert info">
+          Which approved report?{' '}
+          {unbilled.map((r) => (
+            <button key={r.id} className="btn btn-sm" disabled={busy} onClick={() => bill(r.id)}>
+              {r.number} · {formatDate(r.periodFrom)} — {formatDate(r.periodTo)}
+            </button>
+          ))}
+        </div>
+      )}
+      {job.billings.length === 0 ? (
+        <Empty title="Nothing billed yet" hint="Approve a progress report, then bill it." />
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Number</th>
+                <th>Date</th>
+                <th className="right">Gross</th>
+                <th className="right">Net collectible</th>
+                <th>Status</th>
+                <th>Invoice request</th>
+                <th>Invoice</th>
+              </tr>
+            </thead>
+            <tbody>
+              {job.billings.map((b) => {
+                const req = b.invoiceRequests[0];
+                return (
+                  <tr key={b.id}>
+                    <td className="mono">{b.billingNo}</td>
+                    <td>
+                      <Link className="mono" to={`/g-ops/billings/${b.id}`}>
+                        {b.number}
+                      </Link>
+                    </td>
+                    <td>{formatDate(b.billingDate)}</td>
+                    <td className="right mono">{formatMoney(b.grossAmount)}</td>
+                    <td className="right mono">{formatMoney(b.netCollectible)}</td>
+                    <td>
+                      <StatusBadge status={b.status} />
+                    </td>
+                    <td>
+                      {req ? (
+                        <>
+                          <Link className="mono" to={`/g-fin/invoice-requests/${req.id}`}>
+                            {req.number}
+                          </Link>
+                          <div>
+                            <StatusBadge status={req.status} extra={REQUEST_TONES} />
+                          </div>
+                        </>
+                      ) : b.status === 'APPROVED' && !b.invoice && can('gfin.invoice_requests.create') ? (
+                        <Link className="btn btn-sm" to={`/g-ops/billings/${b.id}`}>
+                          Request invoice
+                        </Link>
+                      ) : (
+                        <span className="faint">—</span>
+                      )}
+                    </td>
+                    <td>
+                      {b.invoice ? (
+                        can('gfin.ar.view_all') ? (
+                          <>
+                            <Link className="mono" to={`/g-fin/ar/${b.invoice.id}`}>
+                              {b.invoice.number}
+                            </Link>
+                            <div>
+                              <StatusBadge status={b.invoice.status} />
+                            </div>
+                          </>
+                        ) : (
+                          <span className="mono">{b.invoice.number}</span>
+                        )
+                      ) : (
+                        <span className="faint">—</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              <tr>
+                <td colSpan={3} className="right">
+                  <strong>TOTAL BILLED</strong>
+                </td>
+                <td className="right mono">
+                  <strong>{formatMoney(totalBilled)}</strong>
+                </td>
+                <td colSpan={4} />
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Row({ label, value }: { label: string; value: ReactNode }) {
   return (
     <>
@@ -1037,7 +1175,7 @@ function ProcurementTab({ job }: { job: Job }) {
           empty="Nothing requested for this project yet."
           action={
             can('gchain.purchase_requests.create') ? (
-              <Link className="btn btn-primary btn-sm" to={`/g-chain/purchase-requests?new=1&jobId=${job.id}`}>
+              <Link className="btn btn-primary btn-sm" to={`/g-ops/purchase-requests/new?jobId=${job.id}`}>
                 + New purchase request
               </Link>
             ) : undefined
@@ -1095,7 +1233,7 @@ function ProcurementTab({ job }: { job: Job }) {
           belongs={(r) => onJob(r.order?.job)}
           empty="Nothing received against this project's orders."
           columns={[
-            { label: 'Number', render: (r) => <DocLink to={`/g-chain/receiving/${r.id}`}>{r.number}</DocLink> },
+            { label: 'Number', render: (r) => <DocLink to={`/g-chain/incoming/${r.id}`}>{r.number}</DocLink> },
             { label: 'Order', render: (r) => <DocLink to={`/g-chain/purchase-orders/${r.order.id}`}>{r.order.number}</DocLink> },
             { label: 'Supplier', render: (r) => r.order.supplier.name },
             { label: 'Received', render: (r) => formatDate(r.receivedDate) },
@@ -1120,7 +1258,7 @@ function ProcurementTab({ job }: { job: Job }) {
           belongs={(r) => onJob(r.job)}
           empty="No stock issued to this project."
           columns={[
-            { label: 'Number', render: (r) => <DocLink to={`/g-chain/stock-issuance/${r.id}`}>{r.number}</DocLink> },
+            { label: 'Number', render: (r) => <DocLink to={`/g-chain/outgoing/${r.id}`}>{r.number}</DocLink> },
             { label: 'Date', render: (r) => formatDate(r.issueDate) },
             { label: 'Issued to', render: (r) => r.issuedToName ?? '—' },
             { label: 'Value', align: 'right', render: (r) => formatMoney(r.value) },
@@ -1157,558 +1295,6 @@ function ProcurementTab({ job }: { job: Job }) {
     </div>
   );
 }
-
-// ── Finance ──────────────────────────────────────────────────────────────────
-
-interface AdvanceRow {
-  id: string;
-  number: string;
-  status: string;
-  purpose: string;
-  requestDate: string;
-  amount: number;
-  amountReleased: number;
-  spent: number;
-  refundDue: number;
-  liquidationDueDate: string | null;
-  liquidationOverdue: boolean;
-  requestedBy: Named;
-  liquidation: { id: string; number: string; status: string; total: number } | null;
-}
-
-interface ClaimRow {
-  id: string;
-  number: string;
-  status: string;
-  purpose: string;
-  claimDate: string;
-  total: number;
-  kind: 'liquidation' | 'reimbursement';
-  claimedBy: Named;
-  job: JobRef | null;
-}
-
-const claimColumns: RelCol<ClaimRow>[] = [
-  { label: 'Number', render: (r) => <DocLink to={`/g-fin/expenses/${r.id}`}>{r.number}</DocLink> },
-  { label: 'Kind', render: (r) => (r.kind === 'liquidation' ? 'Liquidation' : 'Reimbursement') },
-  { label: 'Claimed by', render: (r) => r.claimedBy.name },
-  { label: 'Date', render: (r) => formatDate(r.claimDate) },
-  { label: 'Total', align: 'right', render: (r) => formatMoney(r.total) },
-  { label: 'Status', render: (r) => <StatusBadge status={r.status} /> },
-];
-
-function FinanceTab({ job }: { job: Job }) {
-  const { can } = useAuth();
-  const onJob = (j: { id: string } | null | undefined) => j?.id === job.id;
-  const seesBudget = can('gops.budget_monitoring.view_all');
-
-  // Advances and liquidations charged to this job — Finance's route, gated on
-  // the budget right, because this is the project's cost seen from the job.
-  const [forJob, setForJob] = useState<{ advances: AdvanceRow[]; claims: ClaimRow[] } | null>(null);
-  const [forJobError, setForJobError] = useState<unknown>(null);
-  useEffect(() => {
-    if (!seesBudget) return;
-    api
-      .get<{ advances: AdvanceRow[]; claims: ClaimRow[] }>(`/cash-advances/for-job/${job.id}`)
-      .then(setForJob)
-      .catch(setForJobError);
-  }, [job.id, seesBudget]);
-
-  return (
-    <div className="stack">
-      {can('gfin.ar.view_all') && (
-        <RelatedCard<{
-          id: string;
-          number: string;
-          status: string;
-          invoiceDate: string;
-          invoiceTotal: number;
-          netCollectible: number;
-          outstanding: number;
-          progressBilling: { id: string; number: string } | null;
-          job: JobRef | null;
-        }>
-          title="Invoices"
-          endpoint="/invoices"
-          jobId={job.id}
-          belongs={(r) => onJob(r.job)}
-          blurb="Net collectible is what arrives as cash — the customer withholds EWT at source, so it is never overdue."
-          empty="Nothing invoiced on this project yet."
-          columns={[
-            { label: 'Number', render: (r) => <DocLink to={`/g-fin/ar/${r.id}`}>{r.number}</DocLink> },
-            {
-              label: 'Billing',
-              render: (r) =>
-                r.progressBilling ? (
-                  <DocLink to={`/g-ops/billings/${r.progressBilling.id}`}>{r.progressBilling.number}</DocLink>
-                ) : (
-                  '—'
-                ),
-            },
-            { label: 'Date', render: (r) => formatDate(r.invoiceDate) },
-            { label: 'Invoice total', align: 'right', render: (r) => formatMoney(r.invoiceTotal) },
-            { label: 'Net collectible', align: 'right', render: (r) => formatMoney(r.netCollectible) },
-            { label: 'Outstanding', align: 'right', render: (r) => formatMoney(r.outstanding) },
-            { label: 'Status', render: (r) => <StatusBadge status={r.status} /> },
-          ]}
-        />
-      )}
-
-      {can('gfin.ap.view_all') && (
-        <RelatedCard<{
-          id: string;
-          number: string;
-          status: string;
-          billDate: string;
-          dueDate: string;
-          total: number;
-          supplier: Named;
-          job: JobRef | null;
-        }>
-          title="Supplier bills"
-          endpoint="/supplier-bills"
-          jobId={job.id}
-          belongs={(r) => onJob(r.job)}
-          blurb="A bill matched to a receiving adds no cost here — the receiving already charged it."
-          empty="No supplier bills against this project."
-          columns={[
-            { label: 'Number', render: (r) => <DocLink to={`/g-fin/ap/${r.id}`}>{r.number}</DocLink> },
-            { label: 'Supplier', render: (r) => r.supplier.name },
-            { label: 'Bill date', render: (r) => formatDate(r.billDate) },
-            { label: 'Due', render: (r) => formatDate(r.dueDate) },
-            { label: 'Total', align: 'right', render: (r) => formatMoney(r.total) },
-            { label: 'Status', render: (r) => <StatusBadge status={r.status} /> },
-          ]}
-        />
-      )}
-
-      {seesBudget && (
-        <section className="card">
-          <h3 className="card-title">Cash advances &amp; liquidations</h3>
-          <p className="muted del-lede">
-            An advance charges nothing when it is approved or released. The project is charged once,
-            at what was actually spent, when the liquidation is approved.
-          </p>
-          <ErrorBox error={forJobError} />
-          {!forJob && !forJobError ? (
-            <Loading />
-          ) : forJob && forJob.advances.length === 0 ? (
-            <p className="faint del-note">No cash advanced against this project.</p>
-          ) : forJob ? (
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>Advance</th>
-                    <th>Requested by</th>
-                    <th>Purpose</th>
-                    <th className="right">Released</th>
-                    <th className="right">Spent</th>
-                    <th>Liquidation</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {forJob.advances.map((a) => (
-                    <tr key={a.id}>
-                      <td>
-                        <DocLink to={`/g-fin/cash-advances/${a.id}`}>{a.number}</DocLink>
-                      </td>
-                      <td>{a.requestedBy.name}</td>
-                      <td>{a.purpose}</td>
-                      <td className="right mono">{formatMoney(a.amountReleased)}</td>
-                      <td className="right mono">{a.liquidation ? formatMoney(a.spent) : '—'}</td>
-                      <td>
-                        {a.liquidation ? (
-                          <>
-                            <DocLink to={`/g-fin/expenses/${a.liquidation.id}`}>{a.liquidation.number}</DocLink>{' '}
-                            <StatusBadge status={a.liquidation.status} />
-                          </>
-                        ) : a.liquidationDueDate ? (
-                          <span className={a.liquidationOverdue ? 'del-danger' : 'faint'}>
-                            due {formatDate(a.liquidationDueDate)}
-                            {a.liquidationOverdue ? ' — overdue' : ''}
-                          </span>
-                        ) : (
-                          <span className="faint">—</span>
-                        )}
-                      </td>
-                      <td>
-                        <StatusBadge status={a.status} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-        </section>
-      )}
-
-      {can('gfin.expenses.view_all') ? (
-        <RelatedCard<ClaimRow>
-          title="Expense claims"
-          endpoint="/expense-claims"
-          jobId={job.id}
-          belongs={(r) => onJob(r.job)}
-          empty="No expense claims charged to this project."
-          columns={claimColumns}
-        />
-      ) : (
-        seesBudget &&
-        forJob &&
-        forJob.claims.length > 0 && (
-          <section className="card">
-            <h3 className="card-title">Expense claims ({forJob.claims.length})</h3>
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    {claimColumns.map((c) => (
-                      <th key={c.label} className={c.align === 'right' ? 'right' : undefined}>
-                        {c.label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {forJob.claims.map((r) => (
-                    <tr key={r.id}>
-                      {claimColumns.map((c) => (
-                        <td key={c.label} className={c.align === 'right' ? 'right mono' : undefined}>
-                          {c.render(r)}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )
-      )}
-
-      {can('ghr.overtime.view_all') && (
-        <RelatedCard<{
-          id: string;
-          number: string;
-          stage: string;
-          date: string;
-          estimatedHours: number;
-          actualHours: number | null;
-          amount: number | null;
-          employee: { id: string; firstName: string; lastName: string };
-          job: JobRef | null;
-        }>
-          title="Overtime"
-          endpoint="/overtime"
-          jobId={job.id}
-          belongs={(r) => onJob(r.job)}
-          blurb="Posted at the burdened rate once both supervisor and HR approve. The amount charged is shown; the rate never is."
-          empty="No overtime charged to this project."
-          columns={[
-            { label: 'Number', render: (r) => <DocLink to={`/g-hr/overtime/${r.id}`}>{r.number}</DocLink> },
-            { label: 'Employee', render: (r) => `${r.employee.firstName} ${r.employee.lastName}` },
-            { label: 'Date', render: (r) => formatDate(r.date) },
-            {
-              label: 'Hours',
-              align: 'right',
-              render: (r) => (r.actualHours ?? r.estimatedHours).toFixed(2),
-            },
-            {
-              // Only a posted filing has cost the project anything.
-              label: 'Posted',
-              align: 'right',
-              render: (r) => (r.stage === 'APPROVED' && r.amount != null ? formatMoney(r.amount) : '—'),
-            },
-            { label: 'Stage', render: (r) => <StatusBadge status={r.stage} /> },
-          ]}
-        />
-      )}
-    </div>
-  );
-}
-
-// ── Service ──────────────────────────────────────────────────────────────────
-
-interface ServiceRead {
-  assets:
-    | {
-        id: string;
-        code: string;
-        name: string;
-        manufacturer: string | null;
-        model: string | null;
-        serialNo: string | null;
-        location: string | null;
-        status: string;
-        installedAt: string | null;
-        warrantyEndsAt: string | null;
-      }[]
-    | null;
-  contract: {
-    id: string;
-    number: string;
-    status: string;
-    startsAt: string;
-    endsAt: string;
-    frequencyMonths: number;
-    plannedVisits: number;
-    assetCount: number;
-    renewedFrom: { id: string; number: string } | null;
-    renewedTo: { id: string; number: string } | null;
-  } | null;
-  contractVisible: boolean;
-  reports:
-    | {
-        id: string;
-        number: string;
-        kind: string;
-        status: string;
-        performedAt: string;
-        billable: boolean;
-        asset: { id: string; code: string; name: string } | null;
-        performedBy: Named;
-      }[]
-    | null;
-  jobOrders:
-    | { id: string; number: string; title: string; projectName: string | null; status: string; kind: string; requestedFor: string; targetFinish: string | null }[]
-    | null;
-}
-
-const KIND_LABEL: Record<string, string> = {
-  COMMISSIONING: 'Commissioning',
-  PREVENTIVE_MAINTENANCE: 'Preventive maintenance',
-  INSPECTION: 'Inspection',
-  CORRECTIVE: 'Corrective',
-};
-
-function ServiceTab({
-  job,
-  reloadToken,
-  onRegister,
-}: {
-  job: Job;
-  reloadToken: number;
-  onRegister?: () => void;
-}) {
-  const [data, setData] = useState<ServiceRead | null>(null);
-  const [error, setError] = useState<unknown>(null);
-
-  useEffect(() => {
-    api.get<ServiceRead>(`/jobs/${job.id}/service`).then(setData).catch(setError);
-  }, [job.id, reloadToken]);
-
-  if (error) return <ErrorBox error={error} />;
-  if (!data) return <Loading />;
-  const today = todayLocal();
-
-  return (
-    <div className="stack">
-      {data.contractVisible && job.type === 'SERVICE_CONTRACT' && (
-        <section className="card">
-          <h3 className="card-title">Coverage terms</h3>
-          {data.contract ? (
-            <dl className="kv">
-              <Row
-                label="Contract"
-                value={
-                  <>
-                    <DocLink to={`/g-ops/service-contracts/${data.contract.id}`}>{data.contract.number}</DocLink>{' '}
-                    <StatusBadge status={data.contract.status} />
-                  </>
-                }
-              />
-              <Row
-                label="Cover"
-                value={`${formatDate(data.contract.startsAt)} — ${formatDate(data.contract.endsAt)}`}
-              />
-              <Row
-                label="Visits"
-                value={`${data.contract.plannedVisits} planned, every ${data.contract.frequencyMonths} month(s)`}
-              />
-              <Row label="Equipment covered" value={String(data.contract.assetCount)} />
-              {data.contract.renewedFrom && (
-                <Row
-                  label="Renewal of"
-                  value={
-                    <DocLink to={`/g-ops/service-contracts/${data.contract.renewedFrom.id}`}>
-                      {data.contract.renewedFrom.number}
-                    </DocLink>
-                  }
-                />
-              )}
-              {data.contract.renewedTo && (
-                <Row
-                  label="Renewed as"
-                  value={
-                    <DocLink to={`/g-ops/service-contracts/${data.contract.renewedTo.id}`}>
-                      {data.contract.renewedTo.number}
-                    </DocLink>
-                  }
-                />
-              )}
-            </dl>
-          ) : (
-            <p className="faint del-note">
-              This service job has no coverage terms yet. Add them from{' '}
-              <Link to="/g-ops/service-contracts">Service Contracts</Link> — that is where its PM
-              schedule comes from.
-            </p>
-          )}
-        </section>
-      )}
-
-      {data.assets && (
-        <section className="card">
-          <div className="del-card-head">
-            <h3 className="card-title">Equipment installed ({data.assets.length})</h3>
-            {onRegister && (
-              <button className="btn btn-sm" onClick={onRegister}>
-                + Add equipment
-              </button>
-            )}
-          </div>
-          {data.assets.length === 0 ? (
-            <p className="faint del-note">
-              {job.type === 'PROJECT'
-                ? 'Nothing registered from this project. Equipment is registered when the project is turned over.'
-                : 'This job installed nothing — a service contract covers equipment registered by other projects.'}
-            </p>
-          ) : (
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>Code</th>
-                    <th>Equipment</th>
-                    <th>Serial no.</th>
-                    <th>Location</th>
-                    <th>Installed</th>
-                    <th>Warranty until</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.assets.map((a) => (
-                    <tr key={a.id}>
-                      <td>
-                        <DocLink to={`/g-ops/installed-base/${a.id}`}>{a.code}</DocLink>
-                      </td>
-                      <td>
-                        <div>{a.name}</div>
-                        {(a.manufacturer || a.model) && (
-                          <div className="faint">{[a.manufacturer, a.model].filter(Boolean).join(' · ')}</div>
-                        )}
-                      </td>
-                      <td className="mono">{a.serialNo ?? '—'}</td>
-                      <td>{a.location ?? '—'}</td>
-                      <td>{formatDate(a.installedAt)}</td>
-                      <td>
-                        {a.warrantyEndsAt ? (
-                          <span className={a.warrantyEndsAt.slice(0, 10) < today ? 'faint' : undefined}>
-                            {formatDate(a.warrantyEndsAt)}
-                            {a.warrantyEndsAt.slice(0, 10) < today ? ' — lapsed' : ''}
-                          </span>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                      <td>
-                        <StatusBadge status={a.status} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
-
-      {data.reports && (
-        <section className="card">
-          <h3 className="card-title">Service reports ({data.reports.length})</h3>
-          {data.reports.length === 0 ? (
-            <p className="faint del-note">No reports written against this job or its equipment.</p>
-          ) : (
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>Number</th>
-                    <th>Kind</th>
-                    <th>Equipment</th>
-                    <th>Performed</th>
-                    <th>By</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.reports.map((r) => (
-                    <tr key={r.id}>
-                      <td>
-                        <DocLink to={`/g-ops/service-reports/${r.id}`}>{r.number}</DocLink>
-                      </td>
-                      <td>{KIND_LABEL[r.kind] ?? r.kind}</td>
-                      <td>{r.asset ? `${r.asset.code} — ${r.asset.name}` : '—'}</td>
-                      <td>{formatDate(r.performedAt)}</td>
-                      <td>{r.performedBy.name}</td>
-                      <td>
-                        <StatusBadge status={r.status} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
-
-      {data.jobOrders && (
-        <section className="card">
-          <h3 className="card-title">Job orders ({data.jobOrders.length})</h3>
-          {data.jobOrders.length === 0 ? (
-            <p className="faint del-note">No job orders charged to this job.</p>
-          ) : (
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>Number</th>
-                    <th>Title</th>
-                    <th>Target</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.jobOrders.map((o) => (
-                    <tr key={o.id}>
-                      <td>
-                        <DocLink to={`/g-ops/job-orders/${o.id}`}>{o.number}</DocLink>
-                      </td>
-                      <td>{o.projectName ?? o.title}</td>
-                      <td>
-                        {formatDate(o.requestedFor)}
-                        {o.targetFinish ? ` → ${formatDate(o.targetFinish)}` : ''}
-                      </td>
-                      <td>
-                        <StatusBadge status={o.status} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
-    </div>
-  );
-}
-
-// ── Budget ───────────────────────────────────────────────────────────────────
 
 interface LedgerRow {
   id: string;
@@ -1915,154 +1501,6 @@ function LedgerCard({ job, reloadToken }: { job: Job; reloadToken: number }) {
   );
 }
 
-// ── Plans ────────────────────────────────────────────────────────────────────
-
-function PlansTab({
-  job,
-  onAdd,
-  onChanged,
-  confirm,
-}: {
-  job: Job;
-  onAdd?: () => void;
-  onChanged: () => Promise<void>;
-  /** The page's confirm bar, under the project's header. */
-  confirm: ConfirmApi;
-}) {
-  const { can } = useAuth();
-  const toast = useToast();
-  const [open, setOpen] = useState<string | null>(null);
-  const mayApprove = can('gops.plans.edit_all');
-  const mayAttach = can('gops.plans.create') || can('gops.plans.edit_all');
-
-  /** Asked in the confirm bar first; a refusal is shown there. */
-  function approve(plan: Job['plans'][number]) {
-    const name = plan.drawingNo ? `${plan.drawingNo} rev ${plan.revision}` : `“${plan.title}” rev ${plan.revision}`;
-    confirm.ask({
-      title: `Approve ${name}?`,
-      body: 'Work may start on it once it is approved.',
-      confirmLabel: 'Approve',
-      tone: 'primary',
-      onConfirm: async () => {
-        await api.patch(`/jobs/${job.id}/plans/${plan.id}`, { status: 'APPROVED' });
-        toast('ok', 'Plan approved');
-        await onChanged();
-      },
-    });
-  }
-
-  return (
-    <section className="card">
-      <div className="del-card-head">
-        <h3 className="card-title">Approved plans</h3>
-        {onAdd && (
-          <button className="btn btn-sm" onClick={onAdd}>
-            + Add plan
-          </button>
-        )}
-      </div>
-      {job.plans.length === 0 ? (
-        <Empty
-          title="No plans registered"
-          hint="Work should not start on an unapproved plan — register the drawings here."
-        />
-      ) : (
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr>
-                <th>Drawing</th>
-                <th>Title</th>
-                <th>Rev</th>
-                <th>Discipline</th>
-                <th>Status</th>
-                <th>Approved</th>
-                <th>
-                  <span className="visually-hidden">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {job.plans.map((p) => (
-                <PlanRow
-                  key={p.id}
-                  plan={p}
-                  open={open === p.id}
-                  onToggle={() => setOpen(open === p.id ? null : p.id)}
-                  onApprove={mayApprove && p.status === 'FOR_APPROVAL' ? () => approve(p) : undefined}
-                  mayAttach={mayAttach}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function PlanRow({
-  plan: p,
-  open,
-  onToggle,
-  onApprove,
-  mayAttach,
-}: {
-  plan: Job['plans'][number];
-  open: boolean;
-  onToggle: () => void;
-  onApprove?: () => void;
-  mayAttach: boolean;
-}) {
-  return (
-    <>
-      <tr>
-        <td className="mono">{p.drawingNo ?? '—'}</td>
-        <td>{p.title}</td>
-        <td className="mono">{p.revision}</td>
-        <td>{p.discipline ?? '—'}</td>
-        <td>
-          <StatusBadge status={p.status} extra={PLAN_TONES} />
-        </td>
-        <td className="muted">
-          {p.approvedAt ? `${formatDate(p.approvedAt)}${p.approvedBy ? ` · ${p.approvedBy}` : ''}` : '—'}
-        </td>
-        <td>
-          <div className="row">
-            <button
-              type="button"
-              className="btn btn-sm btn-ghost"
-              aria-expanded={open}
-              aria-controls={`plan-files-${p.id}`}
-              onClick={onToggle}
-            >
-              Files
-            </button>
-            {onApprove && (
-              <button className="btn btn-sm" onClick={onApprove}>
-                Approve
-              </button>
-            )}
-          </div>
-        </td>
-      </tr>
-      {open && (
-        <tr className="del-expand-row">
-          <td colSpan={7} id={`plan-files-${p.id}`}>
-            <Attachments
-              entityType="approved_plan"
-              entityId={p.id}
-              title={`Files — ${p.drawingNo ?? p.title} rev ${p.revision}`}
-              hint="The drawing itself, and the approval stamp or transmittal that went with it."
-              canEdit={mayAttach}
-            />
-          </td>
-        </tr>
-      )}
-    </>
-  );
-}
-
 // ── Tasks ────────────────────────────────────────────────────────────────────
 
 /** A meeting held for this project — GET /meetings?jobId=, the list's own row. */
@@ -2074,6 +1512,8 @@ interface ProjectMeeting {
   startsAt: string;
   status: string;
   organizer: { id: string; name: string };
+  /** Minutes have been written (2026-10-13) — the trail at a glance. */
+  hasMinutes?: boolean;
 }
 
 /**
@@ -2108,8 +1548,8 @@ function ProjectMeetingsCard({ job }: { job: Job }) {
         )}
       </div>
       <p className="muted del-lede">
-        Kick-off, site and turnover meetings held for this project. Minutes and other records go in the documents
-        below.
+        Kick-off, site and turnover meetings held for this project — each with its minutes of meeting, so anyone can
+        look back on what was discussed. Other records go in the documents below.
       </p>
       <ErrorBox error={error} />
       {!rows && !error ? (
@@ -2125,6 +1565,7 @@ function ProjectMeetingsCard({ job }: { job: Job }) {
                 <th>Meeting</th>
                 <th>When</th>
                 <th>Organiser</th>
+                <th>Minutes</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -2142,6 +1583,7 @@ function ProjectMeetingsCard({ job }: { job: Job }) {
                   </td>
                   <td>{formatDateTime(m.startsAt)}</td>
                   <td>{m.organizer.name}</td>
+                  <td>{m.hasMinutes ? '✓ Written' : <span className="faint">—</span>}</td>
                   <td>
                     <StatusBadge status={m.status} />
                   </td>
@@ -2161,8 +1603,8 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  // Naming a project manager is not the admin right to list users.
-  const { people } = usePeople();
+  // The project's manager is its Technical Manager; naming one is not the admin right to list users.
+  const { people } = usePeople('role:technical_manager');
   const pmId = useId();
   const [form, setForm] = useState({
     name: job.name,
@@ -2233,7 +1675,7 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
             ))}
           </select>
         </Field>
-        <Field label="Project manager" htmlFor={pmId}>
+        <Field label="Technical Manager" htmlFor={pmId}>
           <PersonSelect
             id={pmId}
             value={form.projectManagerId}
@@ -2352,77 +1794,6 @@ function NewReportModal({
           />
         </Field>
       </div>
-    </Modal>
-  );
-}
-
-function NewPlanModal({ job, onClose, onSaved }: { job: Job; onClose: () => void; onSaved: () => void }) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [form, setForm] = useState({ title: '', drawingNo: '', revision: '0', discipline: '' });
-
-  async function save() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.post(`/jobs/${job.id}/plans`, {
-        title: form.title,
-        drawingNo: form.drawingNo || null,
-        revision: form.revision,
-        discipline: form.discipline || null,
-      });
-      toast('ok', 'Plan registered');
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title="Add plan"
-      onClose={onClose}
-      footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={save} disabled={busy || form.title.length < 2}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </ModalFoot>
-      }
-    >
-      <ErrorBox error={error} />
-      <Field label="Title">
-        <input value={form.title} autoFocus onChange={(e) => setForm({ ...form, title: e.target.value })} />
-      </Field>
-      <div className="grid grid-3">
-        <Field label="Drawing no.">
-          <input
-            className="mono"
-            value={form.drawingNo}
-            onChange={(e) => setForm({ ...form, drawingNo: e.target.value })}
-          />
-        </Field>
-        <Field label="Revision">
-          <input
-            className="mono"
-            value={form.revision}
-            onChange={(e) => setForm({ ...form, revision: e.target.value })}
-          />
-        </Field>
-        <Field label="Discipline">
-          <input
-            value={form.discipline}
-            placeholder="Mechanical, electrical…"
-            onChange={(e) => setForm({ ...form, discipline: e.target.value })}
-          />
-        </Field>
-      </div>
-      <p className="faint del-note">
-        Attach the drawing from the plan's <em>Files</em> once it is registered. A plan starts as{' '}
-        <em>for approval</em> — work should not begin until it is approved.
-      </p>
     </Modal>
   );
 }

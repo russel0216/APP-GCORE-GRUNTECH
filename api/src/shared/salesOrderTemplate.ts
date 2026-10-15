@@ -248,7 +248,7 @@ export const STANDARD_SALES_ORDER_DESIGN: PdfDesign = {
         { key: 'cost', label: 'Cost + supplier', width: 115, align: 'right' },
         { key: 'margin', label: 'Margin', width: 70, align: 'right' },
       ],
-      size: 9, headColor: PURPLE, headingColor: GREEN, textColor: INK, bodyColor: '#555555', ruleColor: RULE,
+      size: 9, headColor: PURPLE, headingColor: GREEN, textColor: INK, bodyColor: '#555555', ruleColor: RULE, lineNotes: true,
     },
     text({
       id: 'internal-note', name: 'Internal note', anchor: 'after', x: L, y: 364, w: 480, h: 8.1,

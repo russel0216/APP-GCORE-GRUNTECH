@@ -18,6 +18,7 @@ import {
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { deletePhotoIfUnused, dropAccountPhotoFromSamples } from '../shared/faceSamples';
+import { deleteAttachment } from '../shared/attachments';
 import { nextNumber } from '../shared/numbering';
 import { can } from '../permissions/resolve';
 import { positionFields, setEmployeePosition } from '../shared/plantilla';
@@ -541,7 +542,8 @@ employeeRoutes.post(
         const taken = await tx.employee.findUnique({ where: { userId: body.userId } });
         if (taken) throw conflict('That user account is already linked to another employee');
       }
-      // Checked before the person is written, like the login's email.
+      // Checked before the person is written: the login's email first.
+      if (body.login) await assertLoginEmailFree(tx, body.login.email);
       const roleIds = body.login ? await checkRoleIds(tx, body.login.roleIds, 'login.roleIds') : [];
       const supervisorId = body.login ? await checkSupervisorId(tx, body.login.supervisorId, 'login.supervisorId') : null;
 
@@ -623,6 +625,35 @@ employeeRoutes.post(
 );
 
 /**
+ * An email that is already somebody's login, said in words the person at the
+ * form can act on (2026-10-13, the owner's report: "I can't add employee" —
+ * the bare "Someone already uses that email address" named nobody and offered
+ * nothing). A login with no employee record yet is LINKABLE: the 409 carries
+ * it (`details[0].existingLogin`) so the form offers "Link … existing login"
+ * instead of making a second account. One already on another employee's
+ * record names that record — adding the person again would be a duplicate.
+ * Checked before anything is written; `createLogin()` keeps its own check.
+ */
+async function assertLoginEmailFree(tx: Prisma.TransactionClient, rawEmail: string): Promise<void> {
+  const email = rawEmail.trim().toLowerCase();
+  const user = await tx.user.findUnique({
+    where: { email },
+    select: { id: true, name: true, email: true, isActive: true, employee: { select: { id: true, employeeNo: true, firstName: true, lastName: true } } },
+  });
+  if (!user) return;
+  const field = 'login.email';
+  if (user.employee) {
+    const who = `${user.employee.employeeNo} — ${user.employee.firstName} ${user.employee.lastName}`;
+    const message = `${user.email} is already the G-CORE login of ${who} on the register. Open their record instead of adding them again, or use another email.`;
+    throw conflict(message, [
+      { field, message, existingLogin: { id: user.id, name: user.name, email: user.email, linkable: false, employeeId: user.employee.id, employeeNo: user.employee.employeeNo } },
+    ]);
+  }
+  const message = `${user.email} is already the G-CORE login of ${user.name}${user.isActive ? '' : ' (switched off)'}, who has no employee record yet. Link this employee to that login instead of making a new one.`;
+  throw conflict(message, [{ field, message, existingLogin: { id: user.id, name: user.name, email: user.email, linkable: true, isActive: user.isActive } }]);
+}
+
+/**
  * A login for someone already on the register — the employee HR added before
  * logins could be made here, or one who never had one. Same account, same
  * invitation as making them together.
@@ -650,6 +681,7 @@ employeeRoutes.post(
       if (!employee) throw notFound('Employee not found');
       if (employee.userId) throw conflict(`${employee.firstName} ${employee.lastName} already has a login`);
       if (!employee.isActive) throw badRequest('This employee is inactive — reactivate them before giving them a login');
+      await assertLoginEmailFree(tx, body.email);
       const login = await createLogin(
         tx,
         {
@@ -828,6 +860,12 @@ employeeRoutes.delete(
       select: { id: true },
     });
     for (const f of faces) await deletePhotoIfUnused(f.id);
+    // Their People Flow rows cascade; the files filed on those items go too.
+    const flowFiles = await prisma.attachment.findMany({
+      where: { entityType: 'employee_flow_item', entityId: { startsWith: `${employee.id}~` } },
+      select: { id: true },
+    });
+    for (const f of flowFiles) await deleteAttachment(f.id);
     await audit(
       {
         entityType: 'employee',

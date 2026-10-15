@@ -23,7 +23,7 @@ import { nextNumber } from '../shared/numbering';
 import { registerAttachmentGuard } from '../shared/attachments';
 import { notify, type NotifyInput } from '../shared/notifications';
 import { registerSearch } from '../shared/search';
-import { contactsOf, onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/approvals';
+import { contactsOf, onApprovalSettled, onApprovalReopened, pickWorkflow, submitForApproval } from '../shared/approvals';
 import { renderDocument, formatDate, formatDateTime, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { buildIcs, googleCalendarUrl, parseGoogleLink, timeWindow } from '../shared/calendar-links';
 import { myEmployee } from '../shared/hr';
@@ -47,6 +47,7 @@ import {
   sweepExpiryNotices,
   teamReadiness,
 } from '../shared/academy';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * Gruntech Academy — G-HR › Academy (item 13).
@@ -1172,7 +1173,7 @@ sessionRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${s.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Training Attendance Sheet', number: s.number, author: s.trainer.name, date: s.startsAt })));
     res.send(pdf);
   }),
 );
@@ -2188,6 +2189,49 @@ onApprovalSettled('training_certification', async (request, outcome) => {
       data: { status: 'REJECTED' },
     });
   }
+});
+
+/**
+ * A verified external certificate may be pulled back (2026-10-16, the
+ * owner's call) — by the employee who filed it (their own login, holding
+ * `ghr.passport.create`) or `ghr.passports.edit_all`. A certificate has no
+ * draft: filing it IS the submission, and a request returned goes to
+ * REJECTED. So pulling it back puts it where a returned one stands —
+ * REJECTED, its verification cleared, counting for nothing in the passport —
+ * from where the employee removes it and files it again, or HR corrects it.
+ * Approval wrote no other record, so nothing else stands on it. A session's
+ * record never came through the engine and is not touched.
+ */
+onApprovalReopened('training_certification', {
+  may: async (actor, id) => {
+    const rec = await prisma.trainingRecord.findUnique({
+      where: { id },
+      select: { status: true, source: true, employee: { select: { userId: true } } },
+    });
+    if (!rec || rec.status !== 'VERIFIED' || rec.source !== 'EXTERNAL') return false;
+    if (can(actor, 'ghr.passports.edit_all')) return true;
+    return rec.employee.userId === actor.id && can(actor, 'ghr.passport.create');
+  },
+  reopen: async ({ documentId, tx }) => {
+    const rec = await tx.trainingRecord.findUnique({ where: { id: documentId }, select: { id: true, number: true, source: true } });
+    if (!rec) throw notFound('Training record not found');
+    if (rec.source !== 'EXTERNAL') throw badRequest('A session record is the session’s result — it cannot be pulled back');
+    const claimed = await tx.trainingRecord.updateMany({
+      where: { id: documentId, status: 'VERIFIED' },
+      data: { status: 'REJECTED', verifiedById: null, verifiedAt: null },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+    await audit(
+      {
+        entityType: 'training_record',
+        entityId: rec.id,
+        action: 'UPDATED',
+        summary: `${rec.number ?? 'Training record'} pulled back after verification — it no longer counts; remove it and file it again, or HR corrects it`,
+      },
+      undefined,
+      tx,
+    );
+  },
 });
 
 // ════════════════════════════════════════════════════════════════════

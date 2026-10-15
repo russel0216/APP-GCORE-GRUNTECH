@@ -35,6 +35,8 @@ import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
 import { attachedFiles, copyAttachments, withAttachments } from '../shared/pdfAttachments';
 import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { bookingFor, thou } from '../shared/salesOrderBooking';
+import { mayRequestInvoice } from './invoiceRequests';
+import { orderInvoiced, orderNet } from '../shared/billingInvoice';
 import {
   companyCurrency,
   formatAmount,
@@ -57,6 +59,7 @@ import {
   contactOf,
   contactsOf,
   onApprovalSettled,
+  onApprovalReopened,
   pickWorkflow,
   routeBrief,
   submitForApproval,
@@ -66,6 +69,7 @@ import {
   type ApprovalSlot,
 } from '../shared/approvals';
 import { bracketNote, bracketed, LIST_CAP, listNotes, listReference, rangeNamed, recordNamed, scopeNamed, filterDay, choice, sendListPdf, totalLabel, ratePct } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * SALES ORDERS — SCORO's "Create invoice", under its real name here: the
@@ -634,9 +638,51 @@ salesOrderRoutes.get(
       needsApproval: !!workflow,
       approvalOptions: options,
       approvalRoutes,
+      invoicing: await orderInvoicing(me, order),
     });
   }),
 );
+
+/**
+ * After the order is issued, its invoicing (2026-10-16, the owner's call:
+ * "after Sales Order, route to invoice request"): the invoice requests and
+ * invoices on it, what is left to invoice before VAT, and whether the viewer
+ * may ask for one — the request route's own rule, `mayRequestInvoice`.
+ */
+async function orderInvoicing(me: ReturnType<typeof currentUser>, order: { id: string; status: string; total: Prisma.Decimal; vatAmount: Prisma.Decimal }) {
+  const [requests, invoices, invoiced] = await Promise.all([
+    prisma.invoiceRequest.findMany({
+      where: { salesOrderId: order.id },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, number: true, status: true, grossAmount: true, progressBilling: { select: { number: true, grossAmount: true } }, invoice: { select: { id: true, number: true } } },
+    }),
+    can(me, 'gfin.ar.view_all')
+      ? prisma.invoice.findMany({
+          where: { salesOrderId: order.id },
+          orderBy: { invoiceDate: 'desc' },
+          select: { id: true, number: true, siNumber: true, status: true, invoiceDate: true, grossAmount: true, netCollectible: true },
+        })
+      : Promise.resolve([]),
+    orderInvoiced(prisma, order.id),
+  ]);
+  const net = orderNet(order);
+  return {
+    net,
+    invoiced,
+    left: Math.max(0, Math.round((net - invoiced) * 100) / 100),
+    canRequest: order.status === 'ISSUED' && (await mayRequestInvoice(me, { salesOrderId: order.id })),
+    seesRequests: me.isSuperAdmin || can(me, 'gfin.invoice_requests.view_all') || can(me, 'gfin.invoice_requests.view_own'),
+    requests: requests.map((r) => ({
+      id: r.id,
+      number: r.number,
+      status: r.status,
+      billing: r.progressBilling?.number ?? null,
+      grossAmount: num(r.progressBilling?.grossAmount ?? r.grossAmount),
+      invoice: r.invoice,
+    })),
+    invoices: invoices.map((i) => ({ ...i, grossAmount: num(i.grossAmount), netCollectible: num(i.netCollectible) })),
+  };
+}
 
 // ── Create from a quotation ──────────────────────────────────────────────────
 
@@ -1148,11 +1194,60 @@ onApprovalSettled('sales_order', async (request, outcome) => {
   await settleSalesOrder(request.documentId, outcome);
 });
 
+/**
+ * An order stock was pulled out against (2026-10-14) is not reopened or
+ * cancelled while a pull-out slip stands on it: its lines are what the slip
+ * answers, and the stock has gone (or is about to go) to the customer.
+ */
+async function refuseWhilePulledOut(orderId: string, number: string, verb: string) {
+  const slips = await prisma.pulloutSlip.findMany({ where: { salesOrderId: orderId, status: { not: 'CANCELLED' } }, select: { number: true } });
+  if (slips.length) throw badRequest(`${number} cannot be ${verb} — pull-out slip ${slips.map((s) => s.number).join(', ')} stands on it`);
+}
+
+/**
+ * Nor while an invoice bills it (2026-10-15): the invoice is a receivable
+ * the customer holds, and the order is what it was raised against. Cancel
+ * the invoice first.
+ */
+async function refuseWhileInvoiced(orderId: string, number: string, verb: string) {
+  const invoices = await prisma.invoice.findMany({ where: { salesOrderId: orderId, status: { not: 'CANCELLED' } }, select: { number: true } });
+  if (invoices.length) throw badRequest(`${number} cannot be ${verb} — invoice ${invoices.map((i) => i.number).join(', ')} bills it`);
+}
+
+/**
+ * An ISSUED order may be pulled back to draft after approval (2026-10-16),
+ * by its author or `edit_all` — approval only booked it (ISSUED). Refused
+ * while a pull-out slip, a live invoice or a live invoice request stands on it.
+ */
+onApprovalReopened('sales_order', {
+  may: async (actor, orderId) => {
+    const order = await prisma.salesOrder.findUnique({ where: { id: orderId }, select: { status: true, ownerId: true } });
+    return !!order && order.status === 'ISSUED' && canEditRecord(actor, 'gops', 'sales_orders', order.ownerId);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const order = await tx.salesOrder.findUnique({ where: { id: documentId }, select: { id: true, number: true } });
+    if (!order) throw notFound('Sales order not found');
+    await refuseWhilePulledOut(order.id, order.number, 'pulled back');
+    await refuseWhileInvoiced(order.id, order.number, 'pulled back');
+    const requests = await tx.invoiceRequest.findMany({
+      where: { salesOrderId: order.id, status: { in: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'] } },
+      select: { number: true },
+    });
+    if (requests.length) {
+      throw badRequest(`${order.number} cannot be pulled back — invoice request ${requests.map((r) => r.number).join(', ')} stands on it`);
+    }
+    const claimed = await tx.salesOrder.updateMany({ where: { id: order.id, status: 'ISSUED' }, data: { status: 'DRAFT' } });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+  },
+});
+
 salesOrderRoutes.post(
   '/:id/reopen',
   require_('gops.sales_orders.edit_own'),
   handler(async (req, res) => {
     const { order } = await orderForEdit(req, req.params.id, false);
+    await refuseWhilePulledOut(order.id, order.number, 'reopened');
+    await refuseWhileInvoiced(order.id, order.number, 'reopened');
     const claimed = await prisma.salesOrder.updateMany({
       where: { id: order.id, status: 'ISSUED' },
       data: { status: 'DRAFT' },
@@ -1172,6 +1267,8 @@ salesOrderRoutes.post(
   handler(async (req, res) => {
     const { me, order } = await orderForEdit(req, req.params.id, false);
     const { reason } = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled') }), req.body);
+    await refuseWhilePulledOut(order.id, order.number, 'cancelled');
+    await refuseWhileInvoiced(order.id, order.number, 'cancelled');
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.salesOrder.updateMany({
         where: { id: order.id, status: { in: ['DRAFT', 'PENDING_APPROVAL', 'ISSUED'] } },
@@ -1544,7 +1641,7 @@ salesOrderRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="SO-${order.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Sales Order', number: order.number, author: order.owner.name, date: order.orderDate })));
     res.send(pdf);
   }),
 );

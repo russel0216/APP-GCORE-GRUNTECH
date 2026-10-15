@@ -1,6 +1,7 @@
 import PDFDocument from 'pdfkit';
 import fs from 'node:fs';
 import { prisma } from '../prisma';
+import { workingDayDate } from './day';
 
 /**
  * The document engine (model §7).
@@ -31,7 +32,22 @@ interface PdfField {
  * A table cell: plain text, or a bold title with regular text under it — the
  * way a quotation line prints its product title above its description.
  */
-export type PdfCell = string | { title: string; body?: string };
+/**
+ * A cell: plain text, or a title over a body. `plain` draws the title regular
+ * (a figure, not a name); `accent` and `note` are the costing's supplier and
+ * line note under a unit cost (2026-10-14) — the accent in the subheading
+ * colour, the note in the description colour — which a designed layout's line
+ * table may switch off (`lineNotes`). `renderDocument` reads title and body.
+ */
+export type PdfCell = string | { title: string; body?: string; plain?: boolean; accent?: string; note?: string };
+
+/** A run of a table's columns named in a band over its head — `accent` sets the name in green (the canvass's award). */
+export interface PdfColumnGroup {
+  label: string;
+  sub?: string;
+  span: number;
+  accent?: boolean;
+}
 
 /**
  * A table row: its cells, or a subheading between the lines — 9.5pt green on
@@ -80,8 +96,23 @@ export type PdfSection =
        * "No." — in which case the heading takes the item column too.
        */
       headingSpan?: number;
+      /**
+       * A band over the head naming runs of columns (2026-10-14, the canvass
+       * sheet: each supplier's name and contact over its unit cost and
+       * amount). Spans run left to right from the first column; a group with
+       * no label leaves its columns' band blank. Redrawn with the head on
+       * every page.
+       */
+      groups?: PdfColumnGroup[];
     }
   | { kind: 'text'; title?: string; body: string }
+  /**
+   * Blocks side by side, each under its own section title, its lines bold
+   * with no labels — the purchase order's Supplier and Delivery and terms
+   * (2026-10-14, the owner's layout). A line may run onto several.
+   */
+  /** Side-by-side address blocks: the first line bold, the rest regular, an email underlined. */
+  | { kind: 'blocks'; titleSize?: number; blocks: { title: string; lines: string[] }[] }
   /**
    * The money block: label and figure on ruled rows in a box at the right,
    * the bold row the total — larger, in the accent colour, over a heavier
@@ -92,8 +123,17 @@ export type PdfSection =
    * A schedule drawn as bars against numbered working days: Task, Start, End,
    * Days, then the day grid. `landscape` starts it on a landscape page (and
    * keeps its overflow pages landscape), for the width a long plan needs.
+   * `startDate` ('YYYY-MM-DD', 2026-10-13) puts working day 1 on that date:
+   * Start, End and the day head print dates (Mon–Sat) instead of "Day n".
    */
-  | { kind: 'gantt'; title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string };
+  | { kind: 'gantt'; title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string; startDate?: string }
+  /**
+   * Pictures in a grid, three to a row by default, each fitted inside its
+   * cell (never enlarged) with its caption under it — the Accomplishment
+   * Report's site photographs (2026-10-15). `data` is JPEG or PNG bytes; the
+   * route turns anything else into one. A row goes over whole.
+   */
+  | { kind: 'photos'; title?: string; perRow?: number; photos: { data: Buffer; caption?: string }[] };
 
 export interface Signatory {
   role: string;
@@ -123,10 +163,32 @@ export interface PdfDocumentSpec {
   date?: Date;
   /** Customer / project reference, printed in the details under the letterhead and in the running header. */
   reference?: string;
+  /**
+   * A line under "# number" top-right — the purchase order's "P.O. Date:
+   * …" (2026-10-14, the owner's call). Printed in the number's green, regular.
+   */
+  numberNote?: string;
+  /** The document's name in bold — the purchase order's (2026-10-14, the owner's call); every other document keeps it regular. */
+  titleBold?: boolean;
+  /**
+   * The DETAILS block in place of Date and Reference: columns side by side,
+   * each a stack of label and value — the purchase order's quotation
+   * reference over its delivery date, its terms beside them.
+   */
+  details?: [string, string][][];
+  /** The heading over `details` (DETAILS by default) and its size (8.5 by default). */
+  detailsTitle?: string;
+  detailsTitleSize?: number;
   sections: PdfSection[];
   signatories?: Signatory[];
   /** Small print above the footer rule. */
   footerNote?: string;
+  /**
+   * An italic line over the sign-offs, under the rule that sets them off —
+   * the purchase order's "The name, date and time are considered a digital
+   * signature of approval." (the sales order's words).
+   */
+  signoffNote?: string;
   /**
    * The whole document on landscape pages — a list with more columns than
    * portrait can carry without breaking its heads mid-word (the sales
@@ -134,6 +196,13 @@ export interface PdfDocumentSpec {
    * dress is the same; only the width changes.
    */
   landscape?: boolean;
+  /**
+   * Only the sections — the costing's Scope of Work chart — on landscape
+   * pages with the page furniture, and no letterhead, details or sign-offs:
+   * the appendix a designed document joins behind its own pages
+   * (`appendPdf`, 2026-10-13).
+   */
+  appendixOnly?: boolean;
 }
 
 // ── The dress ─────────────────────────────────────────────────────────────────
@@ -208,7 +277,7 @@ export async function renderDocument(input: PdfDocumentSpec): Promise<Buffer> {
   const spec = safeSpec(input);
   const row = await prisma.company.findUnique({ where: { id: 'company' } });
   const company = row && safeCompany(row);
-  pageLandscape = !!spec.landscape;
+  pageLandscape = !!spec.landscape || !!spec.appendixOnly;
   const doc = new PDFDocument({
     size: 'A4',
     layout: pageLandscape ? 'landscape' : 'portrait',
@@ -228,6 +297,15 @@ export async function renderDocument(input: PdfDocumentSpec): Promise<Buffer> {
   const done = new Promise<Buffer>((resolve) => {
     doc.on('end', () => resolve(Buffer.concat(chunks)));
   });
+
+  if (spec.appendixOnly) {
+    // The first page is already landscape: a chart starts on it rather than
+    // turning a page, and runs over onto landscape pages (`pageLandscape`).
+    for (const section of spec.sections) drawSection(doc, isAppendix(section) ? ({ ...section, landscape: false } as PdfSection) : section);
+    paginate(doc, spec, company);
+    doc.end();
+    return done;
+  }
 
   drawLetterhead(doc, spec, company);
   // A landscape section at the end is an APPENDIX (the costing's Scope of
@@ -365,6 +443,13 @@ function safeSection(section: PdfSection): PdfSection {
           tasks: g.tasks.map((task) => ({ ...task, name: pdfSafe(task.name ?? '') })),
         })),
       };
+    case 'photos':
+      return { ...section, title: t(section.title), photos: section.photos.map((p) => ({ data: p.data, caption: t(p.caption) })) };
+    case 'blocks':
+      return {
+        ...section,
+        blocks: section.blocks.map((b) => ({ title: pdfSafe(b.title), lines: b.lines.map((l) => pdfSafe(l)) })),
+      };
     case 'fields':
       return {
         ...section,
@@ -376,6 +461,7 @@ function safeSection(section: PdfSection): PdfSection {
         ...section,
         title: t(section.title),
         head: section.head.map(pdfSafe),
+        ...(section.groups ? { groups: section.groups.map((g) => ({ ...g, label: pdfSafe(g.label ?? ''), ...(g.sub !== undefined ? { sub: pdfSafe(g.sub) } : {}) })) } : {}),
         rows: section.rows.map((r) =>
           isHeading(r)
             ? { heading: pdfSafe(r.heading ?? '') }
@@ -398,6 +484,7 @@ function safeSpec(spec: PdfDocumentSpec): PdfDocumentSpec {
     revision: t(spec.revision),
     reference: t(spec.reference),
     footerNote: t(spec.footerNote),
+    signoffNote: t(spec.signoffNote),
     sections: spec.sections.map(safeSection),
     signatories: spec.signatories?.map((p) => ({
       ...p,
@@ -530,12 +617,19 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
   // single word wider than the box, or a name that would run to a third line.
   const title = caps(spec.title);
   let size = 24;
-  let titleLines = wrapText(doc, title, titleW, false, size);
-  while (size > 13 && (titleLines.length > 2 || titleLines.some((l) => doc.widthOfString(l) > titleW))) {
+  const bold = !!spec.titleBold;
+  let titleLines = wrapText(doc, title, titleW, bold, size);
+  // A word wider than the box is shrunk, never broken: wrapText would cut
+  // "ACCOMPLISHMENT" into "ACCOMPLISHM" over "ENT".
+  const wordTooWide = () => {
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size);
+    return title.split(/\s+/).some((w) => doc.widthOfString(w) > titleW);
+  };
+  while (size > 13 && (titleLines.length > 2 || wordTooWide() || titleLines.some((l) => doc.widthOfString(l) > titleW))) {
     size -= 1;
-    titleLines = wrapText(doc, title, titleW, false, size);
+    titleLines = wrapText(doc, title, titleW, bold, size);
   }
-  titleLines.forEach((line, n) => drawLine(doc, line, titleX, titleTop + (24 - size) / 2 + n * size * LINE, titleW, 'right', false, size, PURPLE));
+  titleLines.forEach((line, n) => drawLine(doc, line, titleX, titleTop + (24 - size) / 2 + n * size * LINE, titleW, 'right', bold, size, PURPLE));
   // What the title grew by pushes the number and the rule down with it, the
   // designed engine's rule for a box under a box that grew.
   const titleExtra = Math.max(0, titleLines.length * size * LINE - titleBoxH);
@@ -543,6 +637,10 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
     const rev = spec.revision ? ` ${/^\d+$/.test(spec.revision) ? `R${spec.revision}` : spec.revision}` : '';
     doc.font('Helvetica-Bold').fontSize(10).fillColor(GREEN);
     doc.text(`# ${spec.documentNumber}${rev}`, titleX, top + 32 + titleExtra, { width: titleW, align: 'right', lineBreak: false });
+    if (spec.numberNote) {
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK);
+      doc.text(pdfSafe(spec.numberNote), titleX, top + 46 + titleExtra, { width: titleW, align: 'right', lineBreak: false });
+    }
   }
 
   // The rule under the letterhead: 14.75 under the company's details and
@@ -553,20 +651,38 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
   // DETAILS: the heading 22.75 under the rule (137 on the template), its
   // lines 22 under that (159) — the date, then the reference.
   doc.y = ruleY + 22.75 - 10;
-  sectionTitle(doc, 'Details', DETAIL_LINE);
+  sectionTitle(doc, spec.detailsTitle ?? 'Details', DETAIL_LINE, spec.detailsTitleSize);
   const detailsTop = doc.y;
-  const meta: [string, string][] = [['Date', formatShortDate(spec.date ?? new Date())]];
-  if (spec.reference) meta.push(['Reference', spec.reference]);
   doc.font('Helvetica-Bold').fontSize(DETAIL_SIZE).fillColor(INK);
-  for (const [label, value] of meta) {
-    doc.text(`${label}: ${value}`, left, doc.y, { width: right - left, lineGap: DETAIL_GAP });
+  if (spec.details) {
+    const cols = spec.details.filter((c) => c.length);
+    const colW = (right - left) / Math.max(1, cols.length);
+    let bottom = doc.y;
+    cols.forEach((col, j) => {
+      doc.y = detailsTop;
+      for (const [label, value] of col) {
+        // The label bold, its value regular — the owner's layout.
+        doc.font('Helvetica-Bold').text(`${pdfSafe(label)}: `, left + j * colW, doc.y, { width: colW - 10, lineGap: DETAIL_GAP, continued: true });
+        doc.font('Helvetica').text(pdfSafe(value));
+      }
+      bottom = Math.max(bottom, doc.y);
+    });
+    doc.y = bottom;
+  } else {
+    const meta: [string, string][] = [['Date', formatShortDate(spec.date ?? new Date())]];
+    if (spec.reference) meta.push(['Reference', spec.reference]);
+    for (const [label, value] of meta) {
+      doc.text(`${label}: ${value}`, left, doc.y, { width: right - left, lineGap: DETAIL_GAP });
+    }
   }
   // The template's details box is 41pt, taller when its lines are, and the
   // line table hangs 23 under it: an untitled table starts exactly there.
   doc.x = left;
   // The template's DETAILS box is 41pt whatever it holds, so every document's
   // first table starts where the quotation's does.
-  doc.y = detailsTop + Math.max(41, doc.y - detailsTop) + 23;
+  // A document laying out its own details (the purchase order) runs
+  // straight on into its first section, as the owner's layout places it.
+  doc.y = spec.details ? doc.y - 2 : detailsTop + Math.max(41, doc.y - detailsTop) + 23;
 }
 
 /**
@@ -576,11 +692,11 @@ function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
  * follows it (a table's head and first row, a line of text), so the title
  * goes over to the next page WITH its content rather than ending a page alone.
  */
-function sectionTitle(doc: PDFKit.PDFDocument, title?: string, needed = 0) {
+function sectionTitle(doc: PDFKit.PDFDocument, title?: string, needed = 0, size = 8.5) {
   if (!title) return;
   ensureSpace(doc, 10 + 22 + needed);
   doc.y += 10;
-  doc.font('Helvetica-Bold').fontSize(8.5).fillColor(PURPLE).text(caps(title), T.left, doc.y, { lineBreak: false });
+  doc.font('Helvetica-Bold').fontSize(size).fillColor(PURPLE).text(caps(title), T.left, doc.y, { lineBreak: false });
   doc.y += 22;
 }
 
@@ -657,6 +773,80 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       drawGantt(doc, section);
       return;
 
+    case 'photos': {
+      const perRow = Math.max(1, Math.min(4, section.perRow ?? 3));
+      const gap = 10;
+      const width = usableWidth(doc);
+      const cellW = (width - gap * (perRow - 1)) / perRow;
+      const imageH = cellW * 0.75;
+      const CAP = 7.5;
+      const capLine = CAP * LINE + 0.5;
+      sectionTitle(doc, section.title, imageH + capLine * 2);
+      for (let i = 0; i < section.photos.length; i += perRow) {
+        const row = section.photos.slice(i, i + perRow);
+        const captions = row.map((p) => (p.caption ? wrapText(doc, p.caption, cellW, false, CAP).slice(0, 3) : []));
+        const rowH = imageH + 4 + Math.max(0, ...captions.map((c) => c.length)) * capLine + 8;
+        ensureSpace(doc, rowH);
+        const top = doc.y;
+        row.forEach((p, k) => {
+          const x = T.left + k * (cellW + gap);
+          try {
+            const img = (doc as unknown as { openImage(d: Buffer): { width: number; height: number } }).openImage(p.data);
+            const scale = Math.min(cellW / img.width, imageH / img.height, 1);
+            const w = img.width * scale;
+            const h = img.height * scale;
+            doc.image(img as unknown as Buffer, x + (cellW - w) / 2, top + (imageH - h) / 2, { width: w, height: h });
+          } catch {
+            doc.rect(x, top, cellW, imageH).strokeColor(RULE).lineWidth(0.75).stroke();
+            drawLine(doc, 'Picture could not be read', x, top + imageH / 2 - CAP / 2, cellW, 'center', false, CAP, GREY);
+          }
+          let y = top + imageH + 4;
+          for (const part of captions[k]) {
+            drawLine(doc, part, x, y, cellW, 'center', false, CAP, GREY);
+            y += capLine;
+          }
+        });
+        doc.x = T.left;
+        doc.y = top + rowH;
+      }
+      return;
+    }
+
+    case 'blocks': {
+      const n = Math.max(1, section.blocks.length);
+      const colWidth = usableWidth(doc) / n;
+      const BLOCK_SIZE = 8.5;
+      const line = BLOCK_SIZE * LINE + 0.5;
+      const tallest = Math.max(...section.blocks.map((b) => b.lines.length), 1);
+      ensureSpace(doc, 10 + 22 + Math.min(tallest, 4) * line);
+      doc.y += 10;
+      const top = doc.y;
+      let bottom = top;
+      section.blocks.forEach((block, i) => {
+        const x = T.left + i * colWidth;
+        doc.font('Helvetica-Bold').fontSize(section.titleSize ?? 8.5).fillColor(PURPLE).text(caps(block.title), x, top, { lineBreak: false });
+        let y = top + 17;
+        block.lines.forEach((text, k) => {
+          const bold = k === 0;
+          const email = /^\S+@\S+\.\S+$/.test(text.trim());
+          if (email) {
+            // An email is one line, shrunk to fit rather than broken.
+            drawLine(doc, text.trim(), x, y, colWidth - 12, 'left', bold, fitSize(doc, text.trim(), colWidth - 12, BLOCK_SIZE), INK);
+            y += line;
+            return;
+          }
+          for (const part of wrapText(doc, text, colWidth - 12, bold, BLOCK_SIZE)) {
+            drawLine(doc, part, x, y, colWidth - 12, 'left', bold, BLOCK_SIZE, INK);
+            y += line;
+          }
+        });
+        bottom = Math.max(bottom, y);
+      });
+      doc.x = T.left;
+      doc.y = bottom + 4;
+      return;
+    }
+
     case 'fields': {
       // Each field is a DETAILS line — "Label: value" in bold 9.5 on 4pt of
       // lead, the template's own style for Date / Payment Terms / PR Number —
@@ -693,7 +883,7 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
           ? normalise(section.widths, usable)
           : autoWidths(doc, section.head, section.rows, usable);
       const align = section.align ?? section.head.map(() => 'left' as const);
-      const head = tableHead(doc, section.head, widths);
+      const head = tableHead(doc, section.head, widths, section.groups);
       // The title goes over with the head and a one-line row, never alone.
       sectionTitle(doc, section.title, head.height + T.size * LINE + T.padRow);
       drawTable(doc, section, head, widths, align);
@@ -705,6 +895,8 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
 }
 
 /** The last working day a plan reaches. */
+const GANTT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
 function ganttEnd(groups: PdfGanttGroup[]): number {
   let end = 0;
   for (const g of groups) {
@@ -735,13 +927,22 @@ function dayStep(dayWidth: number): number {
 /**
  * The schedule as bars (the costing's Scope of Work page): each phase a shaded
  * row with a purple bar over the span of its tasks, each task a row with a
- * light bar labelled with its length. Days are numbered working days, not
- * dates — a costing is priced before anybody knows the start date.
+ * light bar labelled with its length. Days are numbered working days — a
+ * costing is often priced before anybody knows the start date — and dated
+ * (Mon–Sat) once the section names one.
  */
 function drawGantt(
   doc: PDFKit.PDFDocument,
-  section: { title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string },
+  section: { title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string; startDate?: string },
 ) {
+  // Working day n as the paper names it: its date when the plan has a start
+  // (Mon–Sat, `workingDayDate`), else "Day n".
+  const start = section.startDate && /^\d{4}-\d{2}-\d{2}$/.test(section.startDate) ? new Date(`${section.startDate}T00:00:00Z`) : null;
+  const dayName = (day: number) => {
+    if (!start) return `Day ${day}`;
+    const d = workingDayDate(start, day);
+    return `${GANTT_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+  };
   const newPage = () => {
     if (section.landscape || pageLandscape) doc.addPage({ size: 'A4', layout: 'landscape', margins: doc.page.margins });
     else doc.addPage();
@@ -756,7 +957,7 @@ function drawGantt(
   // Start and End are as wide as the longest "Day n" a phase prints in bold,
   // so a year-long plan's "Day 360" stays on one line.
   doc.font('Helvetica-Bold').fontSize(8);
-  const colStart = Math.max(40, Math.ceil(doc.widthOfString(`Day ${total}`)) + 12);
+  const colStart = Math.max(40, Math.ceil(Math.max(doc.widthOfString(dayName(total)), doc.widthOfString('Sep 30'))) + 12);
   const colEnd = colStart;
   const colDays = 30;
   const fixed = colTask + colStart + colEnd + colDays;
@@ -784,7 +985,7 @@ function drawGantt(
     }
     doc.font('Helvetica').fontSize(6.5);
     for (let day = 1; day <= total; day += step) {
-      doc.text(`Day ${day}`, dayX(day) + 1.5, top + 7.5, { width: Math.max(step * dayW - 2, 10), lineBreak: false });
+      doc.text(dayName(day), dayX(day) + 1.5, top + 7.5, { width: Math.max(step * dayW - 2, 10), lineBreak: false });
     }
     hairline(doc, top + height, usable);
     doc.y = top + height;
@@ -818,8 +1019,8 @@ function drawGantt(
     const span = groupSpan(group);
     if (span) {
       doc.font('Helvetica-Bold').fontSize(size).fillColor(INK);
-      doc.text(`Day ${span.from}`, T.left + colTask + 5, gTop + 5, { width: colStart - 10, lineBreak: false });
-      doc.text(`Day ${span.to}`, T.left + colTask + colStart + 5, gTop + 5, { width: colEnd - 10, lineBreak: false });
+      doc.text(dayName(span.from), T.left + colTask + 5, gTop + 5, { width: colStart - 10, lineBreak: false });
+      doc.text(dayName(span.to), T.left + colTask + colStart + 5, gTop + 5, { width: colEnd - 10, lineBreak: false });
       doc.text(String(span.to - span.from + 1), T.left + colTask + colStart + colEnd + 5, gTop + 5, {
         width: colDays - 10,
         align: 'right',
@@ -840,8 +1041,8 @@ function drawGantt(
       doc.font('Helvetica').fontSize(size).fillColor(INK);
       doc.text(task.name, T.left + 14, top + 4, { width: colTask - 20 });
       const mid = top + rowH / 2 - size / 2 + 0.5;
-      doc.text(`Day ${task.start}`, T.left + colTask + 5, mid, { width: colStart - 10, lineBreak: false });
-      doc.text(`Day ${end}`, T.left + colTask + colStart + 5, mid, { width: colEnd - 10, lineBreak: false });
+      doc.text(dayName(task.start), T.left + colTask + 5, mid, { width: colStart - 10, lineBreak: false });
+      doc.text(dayName(end), T.left + colTask + colStart + 5, mid, { width: colEnd - 10, lineBreak: false });
       doc.text(String(task.days), T.left + colTask + colStart + colEnd + 5, mid, {
         width: colDays - 10,
         align: 'right',
@@ -1040,6 +1241,13 @@ function wrapText(doc: PDFKit.PDFDocument, text: string, width: number, bold: bo
 }
 
 /** One line at (x, y), aligned inside `width`, never wrapped and never breaking a page. */
+/** The size, at most `size`, at which `text` fits `width` on one line (6pt the floor). */
+function fitSize(doc: PDFKit.PDFDocument, text: string, width: number, size: number): number {
+  doc.font('Helvetica').fontSize(size);
+  const w = doc.widthOfString(text);
+  return w <= width ? size : Math.max(6, Math.floor((size * width) / w * 10) / 10);
+}
+
 function drawLine(doc: PDFKit.PDFDocument, text: string, x: number, y: number, width: number, align: Align, bold: boolean, size: number, color: string) {
   if (!text.trim()) return;
   doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size).fillColor(color);
@@ -1072,26 +1280,57 @@ function cellLines(doc: PDFKit.PDFDocument, cell: PdfCell | undefined, width: nu
 interface TableHead {
   lines: string[][];
   height: number;
+  /** The band over the head, when the table names runs of columns. */
+  groups: { x: number; width: number; label: string[]; sub: string[]; accent: boolean }[];
+  groupHeight: number;
 }
 
 /**
  * The table head as the designed line table sets it: 8.5pt bold purple
  * capitals on white, text 11pt down, the band at least 30pt (taller when a
- * label wraps), and ONE rule — under it.
+ * label wraps), and ONE rule — under it. With `groups`, a band over it names
+ * runs of columns (bold capitals, a grey line under), each ruled across
+ * only its own columns.
  */
-function tableHead(doc: PDFKit.PDFDocument, head: string[], widths: number[]): TableHead {
+function tableHead(doc: PDFKit.PDFDocument, head: string[], widths: number[], groups?: PdfColumnGroup[]): TableHead {
   const size = T.size - 0.5;
   const lines = head.map((cell, i) => wrapText(doc, caps(cell), widths[i] - T.padX * 2, true, size));
-  const height = Math.max(30, Math.max(...lines.map((l) => l.length)) * size * LINE + 20);
-  return { lines, height };
+  const headHeight = Math.max(30, Math.max(...lines.map((l) => l.length)) * size * LINE + 20);
+  const band: TableHead['groups'] = [];
+  let groupHeight = 0;
+  if (groups?.length) {
+    let col = 0;
+    for (const g of groups) {
+      if (col >= widths.length) break;
+      const span = Math.max(1, Math.min(Math.round(g.span), widths.length - col));
+      const x = sum(widths.slice(0, col));
+      const width = sum(widths.slice(col, col + span));
+      const label = g.label.trim() ? wrapText(doc, caps(g.label), width - T.padX * 2, true, size) : [];
+      const sub = g.sub?.trim() ? wrapText(doc, g.sub, width - T.padX * 2, false, size) : [];
+      band.push({ x, width, label, sub, accent: !!g.accent });
+      groupHeight = Math.max(groupHeight, (label.length + sub.length) * size * LINE + 14);
+      col += span;
+    }
+  }
+  return { lines, height: groupHeight + headHeight, groups: band, groupHeight };
 }
 
 function drawTableHead(doc: PDFKit.PDFDocument, head: TableHead, widths: number[], align: Align[]) {
   const size = T.size - 0.5;
   const top = doc.y;
+  for (const g of head.groups) {
+    const at = (n: number) => top + 8 + n * size * LINE;
+    g.label.forEach((line, n) => drawLine(doc, line, T.left + g.x + T.padX, at(n), g.width - T.padX * 2, 'left', true, size, g.accent ? GREEN : PURPLE));
+    g.sub.forEach((line, n) => drawLine(doc, line, T.left + g.x + T.padX, at(g.label.length + n), g.width - T.padX * 2, 'left', false, size, GREY));
+    if (g.label.length) {
+      const y = top + head.groupHeight;
+      doc.moveTo(T.left + g.x + 2, y).lineTo(T.left + g.x + g.width - 2, y).strokeColor(RULE).lineWidth(0.75).stroke();
+    }
+  }
+  const headTop = top + head.groupHeight;
   let x = T.left;
   head.lines.forEach((lines, i) => {
-    lines.forEach((line, n) => drawLine(doc, line, x + T.padX, top + 11 + n * size * LINE, widths[i] - T.padX * 2, align[i], true, size, PURPLE));
+    lines.forEach((line, n) => drawLine(doc, line, x + T.padX, headTop + 11 + n * size * LINE, widths[i] - T.padX * 2, align[i], true, size, PURPLE));
     x += widths[i];
   });
   hairline(doc, top + head.height, sum(widths));
@@ -1272,7 +1511,7 @@ function drawSignoffs(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec) {
       person.name
         ? [person.phone, person.email].filter((v): v is string => !!v?.trim()).concat(person.at ? formatDateTime(person.at) : 'Pending')
         : ['Pending']
-    ).flatMap((t) => wrapText(doc, t, width, false, textSize));
+    ).flatMap((t) => (/^\S+@\S+\.\S+$/.test(t.trim()) ? [t.trim()] : wrapText(doc, t, width, false, textSize)));
     return { role, name, details };
   };
   const heightOf = (person: Signatory, width: number) => {
@@ -1290,10 +1529,15 @@ function drawSignoffs(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec) {
   // makes room for it rather than sit on it.
   const bottom = doc.page.height - T.signoffBottomUp - (spec.footerNote ? 11 : 0);
   const top = bottom - blockHeight;
-  if (doc.y + 12 > top) doc.addPage();
+  const noteRoom = spec.signoffNote ? 18 : 0;
+  if (doc.y + 12 + noteRoom > top) doc.addPage();
   // A light rule over the block, as the template rules off its text before
   // the sign-offs — only where the content left room for it.
-  if (doc.y + 14 <= top) hairline(doc, top - 10, usable);
+  if (doc.y + 14 + noteRoom <= top) hairline(doc, top - 10 - noteRoom, usable);
+  if (spec.signoffNote) {
+    doc.font('Helvetica-Oblique').fontSize(9).fillColor(INK);
+    doc.text(spec.signoffNote, T.left, top - noteRoom - 1, { width: usable, lineBreak: false, ellipsis: true });
+  }
 
   // The block sits below the content's bottom margin; PDFKit would start a
   // page for a line past it, so the margin is dropped while it draws.
@@ -1316,7 +1560,7 @@ function drawSignoffs(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec) {
         y += nameLine;
       }
       for (const line of details) {
-        drawLine(doc, line, x, y, width, 'left', false, textSize, INK);
+        drawLine(doc, line, x, y, width, 'left', false, /^\S+@\S+\.\S+$/.test(line) ? fitSize(doc, line, width, textSize) : textSize, INK);
         y += textLine;
       }
     });

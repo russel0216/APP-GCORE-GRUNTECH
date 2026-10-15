@@ -2,10 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type Column } from '../../components/DataList';
+import { DataList, type Column, type FilterDef } from '../../components/DataList';
+import { Stat } from '../../components/charts';
+import { usePeople } from '../../components/People';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import {
   ErrorBox,
   Field,
@@ -19,7 +21,7 @@ import {
   useToast,
   type Tone,
 } from '../../components/ui';
-import { RecordPaymentModal, paymentLink } from './Receivables';
+import { RecordPaymentModal, paymentLink, useTeams } from './Receivables';
 import { NewClaimModal, CLAIM_TONES } from './Expenses';
 import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
@@ -44,6 +46,17 @@ export const ADVANCE_TONES: Record<string, Tone> = {
   RELEASED: 'warn',
   REFUND_DUE: 'warn',
   LIQUIDATED: 'ok',
+  PAID: 'ok',
+  REPAYING: 'warn',
+  // The owner's words (2026-10-15).
+  'TL Approval': 'warn',
+  'Back Support': 'warn',
+  Checking: 'warn',
+  'FM Approval': 'warn',
+  'CEO Approval': 'warn',
+  'For Release': 'info',
+  Repaying: 'warn',
+  Paid: 'ok',
 };
 
 const STATUSES = [
@@ -53,6 +66,7 @@ const STATUSES = [
   { value: 'RELEASED', label: 'Released — awaiting liquidation' },
   { value: 'REFUND_DUE', label: 'Unspent cash owed back' },
   { value: 'LIQUIDATED', label: 'Liquidated' },
+  { value: 'PAID', label: 'Paid — repaid in full' },
   { value: 'REJECTED', label: 'Rejected' },
   { value: 'CANCELLED', label: 'Cancelled' },
 ];
@@ -82,6 +96,13 @@ export interface Advance {
   liquidationDueDate: string | null;
   approvedAt: string | null;
   liquidatedAt: string | null;
+  /** Money lent (2026-10-15): repaid in instalments, never liquidated. */
+  repayable: boolean;
+  repaidAt: string | null;
+  paymentsMade: number;
+  balance: number;
+  team?: { label: string; title: string } | null;
+  stage?: string;
   requestedBy: { id: string; name: string; email: string; position: string | null };
   job: { id: string; number: string; name: string } | null;
   costCategory: { id: string; name: string } | null;
@@ -126,89 +147,116 @@ function Deadline({ row }: { row: Advance }) {
   );
 }
 
+interface AdvancesSummary {
+  granted: number;
+  grantedCount: number;
+  paymentsMade: number;
+  outstanding: number;
+  owingCount: number;
+  pending: number;
+  pendingCount: number;
+  toRelease: number;
+  toReleaseCount: number;
+}
+
+/**
+ * Cash advances — the owner's module 7 (2026-10-15): money LENT to an
+ * employee. CA No., Date requested, Requester, Team (else department),
+ * Project / Purpose, Amount, Status in his words (TL Approval … CEO
+ * Approval, For Release, Repaying, Paid), Total payment made and the
+ * payment history on the advance's page; the cards Total granted, Less total
+ * payments made, Net outstanding balance. **Payment Entry** logs a repayment
+ * — a receipt, or a salary deduction — against an active advance. An advance
+ * raised before keeps its liquidation.
+ */
 export function CashAdvances() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const [filing, setFiling] = useState(false);
+  const [paying, setPaying] = useState(false);
   const [reload, setReload] = useState(0);
+  const { people } = usePeople('gfin.cash_advances.create');
+  const teams = useTeams();
 
   const columns: Column<Advance>[] = [
+    { key: 'number', label: 'CA No.', sortKey: 'number', width: '150px', render: (r) => <span className="mono">{r.number}</span> },
+    { key: 'requestDate', label: 'Date requested', sortKey: 'requestDate', render: (r) => formatDate(r.requestDate) },
+    { key: 'requestedBy', label: 'Requester', render: (r) => r.requestedBy.name },
     {
-      key: 'number',
-      label: 'Number',
-      sortKey: 'number',
-      render: (r) => <span className="mono">{r.number}</span>,
+      key: 'team',
+      label: 'Team',
+      render: (r) => (r.team ? <span title={r.team.title}>{r.team.label}</span> : <span className="faint">—</span>),
     },
     {
-      key: 'requestedBy',
-      label: 'Requested by',
+      key: 'purpose',
+      label: 'Project / Purpose',
       render: (r) => (
         <div>
-          <div>{r.requestedBy.name}</div>
-          <div className="faint">{r.purpose}</div>
+          <div>{r.purpose}</div>
+          <div className="faint">{r.job ? <span className="mono">{r.job.number}</span> : 'Overheads'}</div>
         </div>
       ),
     },
+    { key: 'amount', label: 'Amount', sortKey: 'amount', align: 'right', render: (r) => <span className="mono">{formatMoney(r.amount)}</span> },
     {
-      key: 'requestDate',
-      label: 'Dated',
-      sortKey: 'requestDate',
-      render: (r) => formatDate(r.requestDate),
-    },
-    {
-      key: 'job',
-      label: 'Charged to',
+      key: 'status',
+      label: 'Status',
       render: (r) =>
-        r.job ? (
-          <div>
-            <div className="mono">{r.job.number}</div>
-            <div className="faint">{r.costCategory?.name ?? '—'}</div>
-          </div>
+        r.liquidationOverdue ? (
+          <StatusBadge status="OVERDUE" label="Liquidation overdue" />
         ) : (
-          <span className="faint">overheads</span>
+          <StatusBadge status={r.stage ?? r.status} label={r.stage} extra={ADVANCE_TONES} />
         ),
     },
     {
-      key: 'amount',
-      label: 'Amount',
-      sortKey: 'amount',
+      key: 'paymentsMade',
+      label: 'Total payment made',
       align: 'right',
-      render: (r) => <span className="mono">{formatMoney(r.amount)}</span>,
+      render: (r) =>
+        r.repayable ? (
+          <div>
+            <div className="mono">{formatMoney(r.paymentsMade)}</div>
+            {r.balance > 0 && <div className="faint">{formatMoney(r.balance)} left</div>}
+          </div>
+        ) : ['REFUND_DUE', 'LIQUIDATED', 'RELEASED'].includes(r.status) ? (
+          // An advance raised before 2026-10-15 is accounted for by receipts.
+          <span className="faint">by liquidation</span>
+        ) : (
+          <span className="faint">—</span>
+        ),
+    },
+    {
+      key: 'history',
+      label: 'Payment history',
+      render: (r) => (
+        <Link to={`/g-fin/cash-advances/${r.id}#payments`} onClick={(e) => e.stopPropagation()} className="btn btn-sm">
+          History
+        </Link>
+      ),
     },
     {
       key: 'amountReleased',
       label: 'Released',
       align: 'right',
       optional: true,
-      render: (r) =>
-        r.amountReleased > 0 ? <span className="mono">{formatMoney(r.amountReleased)}</span> : <span className="faint">—</span>,
+      render: (r) => (r.amountReleased > 0 ? <span className="mono">{formatMoney(r.amountReleased)}</span> : <span className="faint">—</span>),
     },
+    { key: 'liquidationDueDate', label: 'Liquidate by', sortKey: 'liquidationDueDate', optional: true, render: (r) => <Deadline row={r} /> },
+  ];
+
+  const filters: FilterDef[] = [
+    { key: 'status', label: 'Status', options: STATUSES },
+    { key: 'owing', label: 'Repayment', options: [{ value: 'true', label: 'Still being repaid' }] },
+    { key: 'pending', label: 'Approval', options: [{ value: 'true', label: 'In approval' }] },
+    { key: 'forRelease', label: 'For release', options: [{ value: 'true', label: 'Approved, not yet released' }] },
+    { key: 'overdue', label: 'Liquidation', options: [{ value: 'true', label: 'Overdue only' }] },
+    { key: 'requestedById', label: 'Requester', options: people.map((p) => ({ value: p.id, label: p.name })) },
     {
-      key: 'spent',
-      label: 'Spent',
-      align: 'right',
-      optional: true,
-      render: (r) =>
-        r.liquidatedAt ? <span className="mono">{formatMoney(r.spent)}</span> : <span className="faint">—</span>,
+      key: 'teamId',
+      label: 'Team',
+      options: [...teams.map((t) => ({ value: t.id, label: `${t.code} — ${t.name}` })), { value: 'none', label: 'No team' }],
     },
-    {
-      key: 'liquidationDueDate',
-      label: 'Liquidate by',
-      sortKey: 'liquidationDueDate',
-      optional: true,
-      render: (r) => <Deadline row={r} />,
-    },
-    {
-      key: 'status',
-      label: 'Status',
-      render: (r) => (
-        <StatusBadge
-          status={r.liquidationOverdue ? 'OVERDUE' : r.status}
-          extra={ADVANCE_TONES}
-          label={r.liquidationOverdue ? 'Liquidation overdue' : undefined}
-        />
-      ),
-    },
+    { key: 'from', toKey: 'to', label: 'Date requested', type: 'dateRange' },
   ];
 
   return (
@@ -223,24 +271,55 @@ export function CashAdvances() {
         listKey="cash-advances"
         endpoint="/cash-advances"
         printPath="/api/cash-advances/pdf"
+        reportPath={can('gfin.reports.view_all') ? '/g-fin/reports?kind=cash-advances' : undefined}
         columns={columns}
         rowKey={(r) => r.id}
         scoped
+        selectable
         reloadToken={reload}
-        searchPlaceholder="Search number, purpose, person…"
+        searchPlaceholder="Search CA no., purpose, requester…"
         emptyTitle="No cash advances yet"
-        emptyHint="Money issued before it is spent — file one with + New cash advance"
+        emptyHint="Money lent to an employee, repaid in instalments or by salary deduction."
         onRowClick={(r) => navigate(`/g-fin/cash-advances/${r.id}`)}
-        filters={[
-          { key: 'status', label: 'Status', options: STATUSES },
-          { key: 'overdue', label: 'Liquidation', options: [{ value: 'true', label: 'Overdue only' }] },
-        ]}
+        filters={filters}
+        summary={(raw) => {
+          const sum = raw as unknown as AdvancesSummary | undefined;
+          if (!sum) return null;
+          return (
+            <>
+              <Stat label="Total granted CA" value={formatMoney(sum.granted)} figure sub={`${sum.grantedCount} advance${sum.grantedCount === 1 ? '' : 's'}`} />
+              <Stat label="Less total payments made" value={formatMoney(sum.paymentsMade)} figure accent="ok" sub="repaid on loans" />
+              <Stat
+                label="Net outstanding balance"
+                value={formatMoney(sum.outstanding)}
+                figure
+                accent={sum.outstanding > 0 ? 'warn' : undefined}
+                sub={`${sum.owingCount} still being repaid`}
+                to="/g-fin/cash-advances?owing=true"
+              />
+              <Stat
+                label="In approval"
+                value={formatMoney(sum.pending)}
+                figure
+                sub={`${sum.pendingCount} waiting · ${formatMoney(sum.toRelease)} for release`}
+                to="/g-fin/cash-advances?pending=true"
+              />
+            </>
+          );
+        }}
         actions={
-          can('gfin.cash_advances.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => setFiling(true)}>
-              + New cash advance
-            </button>
-          ) : null
+          <>
+            {can('gfin.cash_advances.create') && (
+              <button className="btn btn-primary btn-sm" onClick={() => setFiling(true)}>
+                + Cash advance request
+              </button>
+            )}
+            {can('gfin.ar.create') && (
+              <button className="btn btn-sm" onClick={() => setPaying(true)}>
+                Payment entry
+              </button>
+            )}
+          </>
         }
       />
 
@@ -254,7 +333,69 @@ export function CashAdvances() {
           }}
         />
       )}
+      {paying && (
+        <PaymentEntryModal
+          onClose={() => setPaying(false)}
+          onSaved={() => {
+            setPaying(false);
+            setReload((r) => r + 1);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Payment Entry (the owner's "Log Repayment"): pick an active advance — a
+ * loan released and not yet repaid — then the ordinary repayment form, a
+ * receipt allocated to it, salary deduction among the methods.
+ */
+function PaymentEntryModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const [active, setActive] = useState<Advance[] | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [picked, setPicked] = useState('');
+  useEffect(() => {
+    api
+      .get<{ rows: Advance[] }>('/cash-advances?owing=true&pageSize=200')
+      .then((r) => setActive(r.rows))
+      .catch((err) => {
+        setError(err);
+        setActive([]);
+      });
+  }, []);
+  const row = active?.find((a) => a.id === picked);
+  if (row) {
+    return (
+      <RecordPaymentModal
+        kind="RECEIPT"
+        party={{ id: row.requestedBy.id, name: row.requestedBy.name }}
+        target={{ kind: 'advance_refund', id: row.id, number: row.number, outstanding: row.balance }}
+        onClose={onClose}
+        onSaved={onSaved}
+      />
+    );
+  }
+  return (
+    <Modal title="Payment entry" onClose={onClose} footer={<ModalFoot onCancel={onClose} />}>
+      <ErrorBox error={error} />
+      {active === null ? (
+        <Loading />
+      ) : active.length === 0 ? (
+        <p className="muted">No cash advance is being repaid — nothing is out on loan.</p>
+      ) : (
+        <Field label="Select active CA no." hint="A cash advance released and not yet repaid in full">
+          <select value={picked} onChange={(e) => setPicked(e.target.value)}>
+            <option value="">— choose —</option>
+            {active.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.number} ({a.requestedBy.name} — {formatMoney(a.balance)} left of {formatMoney(a.amountReleased)})
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
+    </Modal>
   );
 }
 
@@ -411,8 +552,9 @@ export function NewCashAdvanceModal({
       </Field>
 
       <p className="fin-note">
-        With your supervisor, then finance. Nothing is charged to a project until you liquidate it
-        — and then only what you actually spent.
+        It goes to your Team Leader, Back Support, Checking (Finance), the Finance Manager and the
+        CEO / President. Once released it is money lent to you: you repay it in instalments, or by
+        salary deduction, until the balance is nil.
       </p>
     </Modal>
   );
@@ -454,7 +596,8 @@ export function CashAdvanceDetail() {
   const canCancel =
     (row.status === 'DRAFT' || row.status === 'PENDING_APPROVAL' || (row.status === 'APPROVED' && row.amountReleased <= 0)) &&
     (own || editAll);
-  const canLiquidate = row.status === 'RELEASED' && !row.liquidation && (own || superAdmin) && can('gfin.expenses.create');
+  const canLiquidate = !row.repayable && row.status === 'RELEASED' && !row.liquidation && (own || superAdmin) && can('gfin.expenses.create');
+  const canRepay = row.repayable && row.status === 'RELEASED' && row.balance > 0 && can('gfin.ar.create');
   const seePayments = can('gfin.payments.view_all') || can('gfin.ap.view_all') || can('gfin.ar.view_all');
 
   const done = () => {
@@ -486,7 +629,7 @@ export function CashAdvanceDetail() {
         type="Cash Advance"
         code={row.number}
         title={row.purpose}
-        status={row.status}
+        status={row.repayable && row.status === 'RELEASED' ? 'REPAYING' : row.status}
         statusExtra={ADVANCE_TONES}
         amount={formatMoney(row.amount)}
         amountLabel="Requested"
@@ -530,6 +673,11 @@ export function CashAdvanceDetail() {
                 Record refund
               </button>
             )}
+            {canRepay && (
+              <button className="btn btn-primary" onClick={() => setModal('refund')}>
+                Record repayment
+              </button>
+            )}
           </>
         }
         print={`/api/cash-advances/${row.id}/pdf`}
@@ -556,6 +704,7 @@ export function CashAdvanceDetail() {
         confirm={confirm}
       />
 
+      <DecisionNote documentType="cash_advance" documentId={row.id} reloadToken={reload} />
       <DocumentApproval documentType="cash_advance" documentId={row.id} reloadToken={reload} />
 
       <ErrorBox error={error} />
@@ -565,16 +714,31 @@ export function CashAdvanceDetail() {
       )}
       {row.status === 'PENDING_APPROVAL' && (
         <div className="alert info">
-          With your supervisor, then finance. Nothing is charged to a project until you liquidate it.
+          {row.repayable
+            ? 'Waiting for approval — the Approval panel says with whom.'
+            : 'With your supervisor, then finance. Nothing is charged to a project until you liquidate it.'}
         </div>
       )}
-      {row.status === 'APPROVED' && (
+      {row.repayable && row.status === 'RELEASED' && (
+        <div className="alert info">
+          {formatMoney(row.amountReleased)} lent
+          {row.releasedAt && <> on {formatDate(row.releasedAt)}</>}. {formatMoney(row.paymentsMade)} repaid so far —{' '}
+          {formatMoney(row.balance)} still owed, repaid in instalments or by salary deduction.
+        </div>
+      )}
+      {row.status === 'PAID' && (
+        <div className="alert ok">
+          Repaid in full{row.repaidAt && <> on {formatDate(row.repaidAt)}</>} — {formatMoney(row.paymentsMade)} over{' '}
+          {row.allocations?.filter((a) => a.payment.kind === 'RECEIPT').length ?? 0} payment(s).
+        </div>
+      )}
+      {row.status === 'APPROVED' && !row.repayable && (
         <div className="alert info">
           Approved. Finance releases {formatMoney(row.toRelease)} in one voucher. Nothing is charged
           to a project until the receipts are in.
         </div>
       )}
-      {row.status === 'RELEASED' && !row.liquidation && (
+      {!row.repayable && row.status === 'RELEASED' && !row.liquidation && (
         <div className={`alert ${row.liquidationOverdue ? 'warn' : 'info'}`}>
           {formatMoney(row.amountReleased)} released
           {row.releasedAt && <> on {formatDate(row.releasedAt)}</>}.{' '}
@@ -618,6 +782,15 @@ export function CashAdvanceDetail() {
             <dd className="mono">
               {row.amountReleased > 0 ? formatMoney(row.amountReleased) : <span className="faint">not yet</span>}
             </dd>
+            {row.repayable ? (
+              <>
+                <dt>Repaid</dt>
+                <dd className="mono">{formatMoney(row.paymentsMade)}</dd>
+                <dt>Balance</dt>
+                <dd className="mono fin-settlement-total">{formatMoney(row.balance)}</dd>
+              </>
+            ) : (
+              <>
             <dt>Liquidate by</dt>
             <dd>
               <Deadline row={row} />
@@ -642,10 +815,13 @@ export function CashAdvanceDetail() {
                 <dd className="mono fin-settlement-total">{formatMoney(row.refundOutstanding)}</dd>
               </>
             )}
+              </>
+            )}
           </dl>
         </div>
 
         <div>
+          {!row.repayable && (
           <div className="card">
             <h3 className="card-title">Liquidation</h3>
             {row.liquidations.length === 0 ? (
@@ -678,8 +854,10 @@ export function CashAdvanceDetail() {
             )}
           </div>
 
-          <div className="card">
-            <h3 className="card-title">Payments</h3>
+          )}
+
+          <div className="card" id="payments">
+            <h3 className="card-title">{row.repayable ? 'Payment history' : 'Payments'}</h3>
             {!row.allocations?.length ? (
               <p className="muted fin-flush">Nothing released yet.</p>
             ) : (
@@ -697,7 +875,7 @@ export function CashAdvanceDetail() {
                             <span className="mono">{a.payment.number}</span>
                           )}
                           <div className="faint">
-                            {a.payment.kind === 'RECEIPT' ? 'returned' : 'released'} ·{' '}
+                            {a.payment.kind === 'RECEIPT' ? (row.repayable ? 'repaid' : 'returned') : 'released'} ·{' '}
                             {formatDate(a.payment.paymentDate)} · {humanise(a.payment.method)}
                           </div>
                         </td>
@@ -728,7 +906,7 @@ export function CashAdvanceDetail() {
         <RecordPaymentModal
           kind="RECEIPT"
           party={{ id: row.requestedBy.id, name: row.requestedBy.name }}
-          target={{ kind: 'advance_refund', id: row.id, number: row.number, outstanding: row.refundOutstanding }}
+          target={{ kind: 'advance_refund', id: row.id, number: row.number, outstanding: row.repayable ? row.balance : row.refundOutstanding }}
           onClose={() => setModal(null)}
           onSaved={done}
         />

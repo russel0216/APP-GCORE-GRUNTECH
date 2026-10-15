@@ -21,14 +21,19 @@ import { nextNumber } from '../shared/numbering';
 import {
   submitForApproval,
   onApprovalSettled,
+  onApprovalReopened,
   cancelOpenRequest,
+  openSteps,
+  stageWords,
   type ApprovalOutcome,
 } from '../shared/approvals';
+import { TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
 import { registerSearch } from '../shared/search';
 import { renderDocument, companyCurrency, formatAmount, formatMoney, formatShortDate, statusLabel, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween, financeSettings } from '../shared/finance';
 import { claimInclude, presentClaim, cashRequestSections, cashRequestSignatories } from './finance';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * Cash advances — money issued to a person BEFORE it is spent.
@@ -48,7 +53,7 @@ export const advanceRoutes = Router();
 advanceRoutes.use(authenticate);
 
 const advanceInclude = {
-  requestedBy: { select: { id: true, name: true, email: true, position: true } },
+  requestedBy: { select: { id: true, name: true, email: true, position: true, ...TEAM_OR_DEPT_SELECT.select } },
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
   liquidations: {
@@ -70,8 +75,15 @@ function presentAdvance(row: AdvanceRow, today = dayKey(new Date())) {
   const liquidated = !!row.liquidatedAt;
   const refundDue = liquidated ? cents(Math.max(0, released - spent)) : 0;
   const liquidation = row.liquidations.find((l) => (LIVE_LIQUIDATION as readonly string[]).includes(l.status)) ?? null;
+  const { department: _d, employee: _e, ...requester } = row.requestedBy;
   return {
     ...row,
+    requestedBy: requester,
+    /** The requester's team, else their department. */
+    team: teamOrDepartment(row.requestedBy),
+    /** Money lent: the repayments made and what is still owed (2026-10-15). */
+    paymentsMade: row.repayable ? refunded : 0,
+    balance: row.repayable && ['RELEASED', 'PAID'].includes(row.status) ? cents(released - refunded) : 0,
     amount,
     amountReleased: released,
     amountSpent: spent,
@@ -118,6 +130,17 @@ function advanceListWhere(me: ReturnType<typeof currentUser>, q: ListQuery, toda
   const status = choice(q.filters.status, CashAdvanceStatus, 'Status');
   if (status) where.status = status;
   if (q.filters.jobId) where.jobId = q.filters.jobId;
+  const f = q.filters;
+  const and: Prisma.CashAdvanceWhereInput[] = [];
+  if (f.teamId) and.push({ requestedBy: userTeamWhere(f.teamId) });
+  if (f.from || f.to) {
+    and.push({ requestDate: { ...(f.from ? { gte: asDate(f.from, 'From') } : {}), ...(f.to ? { lte: asDate(f.to, 'To') } : {}) } });
+  }
+  // A loan still owed on (released, not repaid) — Payment Entry's choices.
+  if (f.owing === 'true') and.push({ repayable: true, status: 'RELEASED' });
+  if (f.pending === 'true') and.push({ status: 'PENDING_APPROVAL' });
+  if (f.forRelease === 'true') and.push({ status: 'APPROVED' });
+  if (and.length) where.AND = [...((where.AND as Prisma.CashAdvanceWhereInput[] | undefined) ?? []), ...and];
   // Overdue is not a status: released, past the deadline, no approved liquidation.
   if (q.filters.overdue === 'true') {
     where.status = 'RELEASED';
@@ -159,10 +182,60 @@ advanceRoutes.get(
       }),
       prisma.cashAdvance.count({ where }),
     ]);
+    const [steps, summary] = await Promise.all([openSteps('cash_advance', rows.map((r) => r.id)), advanceListSummary(where)]);
 
-    res.json(listResult(rows.map((r) => presentAdvance(r, today)), total, q));
+    res.json({
+      ...listResult(
+        rows.map((r) => {
+          const row = presentAdvance(r, today);
+          return { ...row, stage: advanceStage(r.status, steps.get(r.id), row.toRelease > 0.005, r.repayable) };
+        }),
+        total,
+        q,
+      ),
+      summary,
+    });
   }),
 );
+
+/**
+ * Where an advance stands in the owner's words: the open step (TL Approval …
+ * CEO Approval), For Release, then — for a loan — Repaying while a balance is
+ * owed and Paid once it is not; an older advance keeps its liquidation words.
+ */
+function advanceStage(status: string, openStep: string | undefined, toRelease: boolean, repayable: boolean): string {
+  if (repayable && status === 'RELEASED') return 'Repaying';
+  return stageWords(status, openStep, toRelease);
+}
+
+/**
+ * The register's cards (the owner's module 7), under the list's own query:
+ * the total granted (every advance still standing), the payments made on the
+ * loans, and the net outstanding balance — what was released and not yet
+ * repaid; plus what waits in approval and to be released.
+ */
+async function advanceListSummary(where: Prisma.CashAdvanceWhereInput) {
+  const agg = (extra: Prisma.CashAdvanceWhereInput) =>
+    prisma.cashAdvance.aggregate({ where: { AND: [where, extra] }, _count: { _all: true }, _sum: { amount: true, amountReleased: true, amountRefunded: true } });
+  const [granted, loansOut, pending, toRelease] = await Promise.all([
+    agg({ status: { notIn: ['DRAFT', 'REJECTED', 'CANCELLED'] } }),
+    agg({ repayable: true, status: { in: ['RELEASED', 'PAID'] } }),
+    agg({ status: 'PENDING_APPROVAL' }),
+    agg({ status: 'APPROVED' }),
+  ]);
+  const owing = await agg({ repayable: true, status: 'RELEASED' });
+  return {
+    granted: num(granted._sum.amount),
+    grantedCount: granted._count._all,
+    paymentsMade: num(loansOut._sum.amountRefunded),
+    outstanding: cents(num(owing._sum.amountReleased) - num(owing._sum.amountRefunded)),
+    owingCount: owing._count._all,
+    pending: num(pending._sum.amount),
+    pendingCount: pending._count._all,
+    toRelease: cents(num(toRelease._sum.amount) - num(toRelease._sum.amountReleased)),
+    toReleaseCount: toRelease._count._all,
+  };
+}
 
 /** An advance that will never be handed over — listed, never summed. */
 const ADVANCE_CLOSED: CashAdvanceStatus[] = ['REJECTED', 'CANCELLED'];
@@ -378,10 +451,14 @@ advanceRoutes.post(
     if (settings.blockAdvanceWhileUnliquidated) {
       const open = await prisma.cashAdvance.findFirst({
         where: { requestedById: me.id, status: 'RELEASED' },
-        select: { number: true },
+        select: { number: true, repayable: true },
       });
       if (open) {
-        throw badRequest(`${open.number} has not been liquidated yet. File its receipts before asking for another advance.`);
+        throw badRequest(
+          open.repayable
+            ? `${open.number} has not been repaid yet. Repay it before asking for another advance.`
+            : `${open.number} has not been liquidated yet. File its receipts before asking for another advance.`,
+        );
       }
     }
 
@@ -398,6 +475,8 @@ advanceRoutes.post(
           purpose: body.purpose,
           amount: D(body.amount),
           notes: body.notes || null,
+          // Money lent (2026-10-15): repaid in instalments, never liquidated.
+          repayable: true,
         },
         include: advanceInclude,
       });
@@ -547,6 +626,33 @@ export const settleAdvance = async (approval: ApprovalRequest, outcome: Approval
 };
 onApprovalSettled('cash_advance', settleAdvance);
 
+/**
+ * Pulled back after approval (2026-10-16): back to DRAFT while finance has
+ * released nothing. Approval moved no money and charged nothing, so there is
+ * nothing to undo — only refused once cash has gone out on it.
+ */
+onApprovalReopened('cash_advance', {
+  may: async (actor, id) => {
+    const row = await prisma.cashAdvance.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+    return !!row && !['DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED'].includes(row.status) && canEditRecord(actor, 'gfin', 'cash_advances', row.requestedById);
+  },
+  reopen: async ({ documentId, tx, actor }) => {
+    const row = await tx.cashAdvance.findUnique({ where: { id: documentId } });
+    if (!row) throw badRequest('Not found');
+    const paid = await tx.paymentAllocation.findFirst({ where: { advanceId: row.id }, include: { payment: { select: { number: true } } } });
+    if (paid || row.status !== 'APPROVED') {
+      throw badRequest(`${row.number} has been released${paid ? ` (${paid.payment.number})` : ''} — remove the release before pulling it back`);
+    }
+    const claimed = await tx.cashAdvance.updateMany({ where: { id: row.id, status: 'APPROVED' }, data: { status: 'DRAFT', approvedAt: null } });
+    if (!claimed.count) throw badRequest(`${row.number} changed a moment ago — reload to see where it stands`);
+    await audit(
+      { entityType: 'cash_advance', entityId: row.id, action: 'UPDATED', summary: `${row.number} back to draft after approval — nothing had been released`, actorId: actor.id, actorName: actor.name },
+      undefined,
+      tx,
+    );
+  },
+});
+
 advanceRoutes.post(
   '/:id/cancel',
   handler(async (req, res) => {
@@ -652,7 +758,7 @@ advanceRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${row.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Cash Advance', number: row.number, author: row.requestedBy.name, date: row.requestDate })));
     res.send(pdf);
   }),
 );

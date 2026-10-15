@@ -118,10 +118,8 @@ export const BOARD_COLUMNS: BoardColumn[] = [
   { key: 'NEGOTIATION', label: 'Negotiation', kind: 'quotation', outcome: 'NEGOTIATION' },
   { key: 'WON', label: 'Won', kind: 'terminal', outcome: 'WON', leadStatus: 'WON' },
   { key: 'LOST', label: 'Lost', kind: 'terminal', outcome: 'LOST', leadStatus: 'LOST' },
-  { key: 'ON_HOLD', label: 'On hold', kind: 'parked', leadStatus: 'ON_HOLD' },
+  { key: 'ON_HOLD', label: 'On hold', kind: 'parked', leadStatus: 'ON_HOLD', outcome: 'ON_HOLD' },
 ];
-
-export const FORECAST_KEY = 'FORECAST';
 
 const LEAD_COLUMN_KEYS = ['NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT', 'COSTING', 'ON_HOLD'];
 const QUOTATION_OPEN_KEYS = ['QUOTED', 'SUBMITTED', 'NEGOTIATION'];
@@ -155,6 +153,7 @@ export function columnFor(
     case 'NEGOTIATION':
     case 'WON':
     case 'LOST':
+    case 'ON_HOLD':
       return card.outcome;
     default:
       return null;
@@ -187,6 +186,10 @@ export function allowedTargets(card: {
   const targets = [...QUOTATION_OPEN_KEYS];
   if (card.hasApprovedRevision) targets.push('WON');
   targets.push('LOST');
+  // On hold (2026-10-13): an open quotation may be parked; a held one goes
+  // back to an open stage (or is lost) — never straight to Won.
+  if (card.column === 'ON_HOLD') return targets.filter((k) => k !== 'WON');
+  if (QUOTATION_OPEN_KEYS.includes(card.column)) targets.push('ON_HOLD');
   return targets.filter((k) => k !== card.column);
 }
 
@@ -223,6 +226,24 @@ export function assertOutcomeChange(
   if (next === 'LOST' && !(ctx.lostReason ?? '').trim()) throw badRequest(MSG_LOST_REASON);
 }
 
+/**
+ * What a lead's or quotation's `lostKind` becomes on a save (2026-10-13, the
+ * owner's "Cancel" beside "Lost"): the kind sent — LOST by default — when the
+ * record goes to LOST, the kind sent when it stays LOST, null when it leaves
+ * LOST, and undefined when there is nothing to write. A kind sent for a
+ * record that is not lost is refused: cancelling IS losing, with a kind.
+ */
+export function lostKindAfter(
+  before: string,
+  next: string | undefined,
+  kind: 'LOST' | 'CANCELLED' | undefined,
+): 'LOST' | 'CANCELLED' | null | undefined {
+  const target = next ?? before;
+  if (kind !== undefined && target !== 'LOST') throw badRequest('Only a lost one is cancelled — move it to Lost with the kind');
+  if (target === 'LOST') return next !== undefined && next !== before ? (kind ?? 'LOST') : kind;
+  return next !== undefined && next !== before && before === 'LOST' ? null : undefined;
+}
+
 // ── Outcome history (SCORO's "Previous status" and "Opportunity 46 days") ────
 
 /** One move of a quotation's outcome: from what, to what, when, and by whom. */
@@ -233,7 +254,7 @@ export interface OutcomeChange {
   by: { id: string | null; name: string } | null;
 }
 
-const OUTCOME_KEYS = new Set(['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON', 'LOST']);
+const OUTCOME_KEYS = new Set(['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON', 'LOST', 'ON_HOLD']);
 /** "Quotation 0012609061: OPEN → SUBMITTED", as PATCH /quotations/:id has always summarised a move. */
 const SUMMARY_MOVE = /: ([A-Z_]+) → ([A-Z_]+)$/;
 
@@ -387,6 +408,8 @@ export interface BoardLead {
   nextAction: string | null;
   nextActionDate: Date | null;
   lostReason: string | null;
+  /** LOST or CANCELLED while lost (2026-10-13). */
+  lostKind?: 'LOST' | 'CANCELLED' | null;
   createdAt: Date;
   updatedAt: Date;
   assignedToId: string;
@@ -424,6 +447,8 @@ export interface BoardQuotation {
   submittedAt: Date | null;
   decidedAt: Date | null;
   lostReason: string | null;
+  /** LOST or CANCELLED while lost (2026-10-13). */
+  lostKind?: 'LOST' | 'CANCELLED' | null;
   expectedClosing: Date | null;
   createdAt: Date;
   ownerId: string;
@@ -456,6 +481,8 @@ export interface Card {
   hasApprovedRevision: boolean;
   job: { id: string; number: string } | null;
   lostReason: string | null;
+  /** LOST or CANCELLED while lost (2026-10-13). */
+  lostKind?: 'LOST' | 'CANCELLED' | null;
   overdue: boolean;
   canMove: boolean;
   allowedTargets: string[];
@@ -492,6 +519,8 @@ export interface BoardKpis {
   wonValue: number;
   lostCount: number;
   lostValue: number;
+  /** Lost cards that were cancelled by the customer — not in `lostCount`. */
+  cancelledCount: number;
   forecastValue: number;
   forecastWeighted: number;
   forecastCount: number;
@@ -505,7 +534,6 @@ export interface BoardResponse {
   /** The stages as configured — the bands the board draws its columns into. */
   stages: Stage[];
   columns: BoardColumnOut[];
-  forecast: { key: string; label: string; count: number; value: number; weighted: number; cards: Card[] };
   people: BoardPerson[];
 }
 
@@ -561,6 +589,7 @@ function leadCard(lead: BoardLead, now: Date, me: ResolvedUser): Card | null {
     hasApprovedRevision: false,
     job: null,
     lostReason: lead.lostReason,
+    lostKind: lead.lostKind ?? null,
     overdue:
       column === 'LOST' || column === 'ON_HOLD'
         ? false
@@ -613,6 +642,7 @@ function quotationCard(q: BoardQuotation, now: Date, me: ResolvedUser): Card | n
     hasApprovedRevision,
     job,
     lostReason: q.lostReason,
+    lostKind: q.lostKind ?? null,
     overdue: open
       ? isOverdue(
           {
@@ -650,7 +680,7 @@ export function stageOfCard(card: Pick<Card, 'column' | 'booked'>, stages: Stage
 // the same two functions — `columnFor` and `stageOfCard` — so a tab's count
 // and the board's band can never sort a quotation differently.
 
-export const QUOTATION_OUTCOME_KEYS = ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON', 'LOST'] as const;
+export const QUOTATION_OUTCOME_KEYS = ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON', 'LOST', 'ON_HOLD'] as const;
 
 /**
  * Booked in operations: a sales order or a project from one of its revisions.
@@ -667,7 +697,7 @@ export function quotationStage(outcome: string, booked: boolean, stages: Stage[]
   return column ? stageOfCard({ column, booked }, stages) : '';
 }
 
-/** The stages a quotation can stand in, in the board's order. On hold is a lead's, never a quotation's. */
+/** The stages a quotation can stand in, in the board's order — On hold too since 2026-10-13. */
 export function quotationStages(stages: Stage[]): Stage[] {
   const reached = new Set<string>();
   for (const outcome of QUOTATION_OUTCOME_KEYS) {
@@ -831,7 +861,9 @@ export function buildBoard(input: {
   }
 
   const won = cards.filter((c) => c.column === 'WON');
-  const lost = cards.filter((c) => c.column === 'LOST');
+  // A cancelled deal (2026-10-13) is neither won nor lost — counted apart.
+  const lost = cards.filter((c) => c.column === 'LOST' && c.lostKind !== 'CANCELLED');
+  const cancelled = cards.filter((c) => c.column === 'LOST' && c.lostKind === 'CANCELLED');
 
   const forecastCards = openCards.filter((c) => c.expectedClosing && inForecastMonth(new Date(c.expectedClosing), now));
   const forecastValue = cents(forecastCards.reduce((s, c) => s + c.value, 0));
@@ -860,6 +892,7 @@ export function buildBoard(input: {
       wonValue: cents(won.reduce((s, c) => s + c.value, 0)),
       lostCount: lost.length,
       lostValue: cents(lost.reduce((s, c) => s + c.value, 0)),
+      cancelledCount: cancelled.length,
       forecastValue,
       forecastWeighted,
       forecastCount: forecastCards.length,
@@ -867,14 +900,6 @@ export function buildBoard(input: {
     },
     stages,
     columns,
-    forecast: {
-      key: FORECAST_KEY,
-      label: 'This month forecast',
-      count: forecastCards.length,
-      value: forecastValue,
-      weighted: forecastWeighted,
-      cards: forecastCards,
-    },
     people: [...people.values()].sort((a, b) => a.name.localeCompare(b.name)),
   };
 }

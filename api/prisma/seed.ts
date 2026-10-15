@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { allPermissions, permissionsFor } from '../src/permissions/registry';
 import { DOCUMENT_TYPES } from '../src/shared/numbering';
+import { moveCanvassCode } from '../src/shared/canvassCode';
 import { backfillPositions } from '../src/shared/plantilla';
 import { markUnchangedScoroImports, withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
@@ -15,11 +16,16 @@ import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawing
 import { migrateFaceThreshold } from '../src/shared/faceSamples';
 import { removeScoroArchive } from '../src/shared/scoroArchive';
 import { backfillCustomerAddresses } from '../src/shared/customerAddress';
+import { backfillInvoiceCountering, fillInvoiceCredit } from '../src/shared/receivables';
+import { fillBillTerms } from '../src/shared/payables';
+import { renumberProgressDocs } from '../src/shared/progressReport';
+import { repairTypedStockReceipts } from '../src/shared/typedItems';
 import { prisma as sharedPrisma } from '../src/prisma';
+import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
 const prisma = new PrismaClient();
 
-const ADMIN_EMAIL = process.env.SEED_ADMIN_EMAIL ?? 'admin@gruntech.com';
+const ADMIN_EMAIL = process.env.SEED_ADMIN_EMAIL ?? SEEDED_ADMIN_EMAIL;
 const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD ?? 'ChangeMe!2026';
 
 /**
@@ -43,6 +49,49 @@ const VIEW_OWN_SELF = (mod: string, sub: string) => [
   `${mod}.${sub}.create`,
   `${mod}.${sub}.edit_own`,
 ];
+
+/**
+ * What a project's manager does (2026-10-15, the owner's call: "project
+ * manager is the technical manager"): the `project_manager` role keeps these,
+ * and the `technical_manager` role holds them too, since that is who manages
+ * projects now.
+ */
+const PROJECT_MANAGER_GRANTS: [string, string?][] = [
+  ['gops', 'projects'],
+  ['gops', 'plans'],
+  ['gops', 'budget_monitoring'],
+  ['gops', 'purchase_requests'],
+  ['gops', 'budget_requests'],
+  ['gops', 'progress_billing'],
+  ['gops', 'costing'],
+];
+const PROJECT_MANAGER_ONLY: string[] = [
+  'gops.dashboard.view_all',
+  'gops.customers.view_all',
+  // Margin on the projects they run.
+  'insights.profitability.view_all',
+  'insights.profitability.export',
+  'gops.installed_base.view_all',
+  'gops.visits.view_all',
+  'gops.quotations.view_all',
+  'gops.job_orders.view_all',
+  ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
+  'gops.cad_job_orders.view_all',
+  'gchain.purchase_requests.view_all',
+  // A PM raises stock-replenishment requests too, not only direct-to-job
+  // ones from the project workspace.
+  'gchain.purchase_requests.create',
+  'gchain.purchase_requests.edit_own',
+  'gchain.purchase_requests.view_own',
+  'gchain.purchase_orders.view_all',
+  'gchain.inventory.view_all',
+  'gfin.budget_vs_actual.view_all',
+  ...VIEW_OWN_SELF('gfin', 'expenses'),
+  ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+  ...VIEW_OWN_SELF('ghr', 'evaluations'),
+  ...VIEW_OWN_SELF('ghr', 'meetings'),
+];
+
 
 const ROLES: RoleSeed[] = [
   {
@@ -83,10 +132,23 @@ const ROLES: RoleSeed[] = [
       'gops.projects.view_all',
       // A partner's catalogue and price list are what a salesperson sells from.
       'gops.partners.view_all',
+      // "Add … as a new supplier" from a quotation line's cost cell
+      // (2026-10-13, the owner's call): the supplier is filed by name, the
+      // rest filled on its page by procurement later.
+      'gchain.suppliers.create',
       // Sales takes the service call and raises the job order for it.
       ...VIEW_OWN_SELF('gops', 'job_orders'),
       // And asks the design team for a drawing (2026-10-09).
       ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
+      // Writes the project's Accomplishment Report and raises its billing
+      // (2026-10-15, the owner's call: "creator (Project Engineer) or Sales").
+      ...VIEW_OWN_SELF('gops', 'progress_billing'),
+      // Asks for an approved billing to be invoiced against the project's
+      // sales order (2026-10-15) — Back Support approves it.
+      ...VIEW_OWN_SELF('gfin', 'invoice_requests'),
+      'gfin.invoice_requests.delete',
+      // Raises the commission on a fully collected sales order (2026-10-16).
+      ...VIEW_OWN_SELF('gfin', 'commissions'),
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       ...VIEW_OWN_SELF('ghr', 'meetings'),
@@ -110,6 +172,8 @@ const ROLES: RoleSeed[] = [
     only: [
       'gops.dashboard.view_all',
       'gops.projects.view_all',
+      // A supplier not on file, added from a quotation line (2026-10-13).
+      'gchain.suppliers.create',
       // The pipeline analytics are their own numbers, seen whole.
       'insights.pipeline.view_all',
       'insights.pipeline.export',
@@ -132,10 +196,23 @@ const ROLES: RoleSeed[] = [
     // stall at step 2, and audit-workflows.ts says so.
     key: 'back_support',
     name: 'Back Support / Admin',
-    description: 'Checks a sales order after the team leader — the second signature on the sales order route',
+    description: 'Checks a sales order and a budget request after the team leader; prepares purchase orders',
     only: [
       'gops.dashboard.view_all',
       'gops.sales_orders.view_all',
+      // Approves a billing's invoice request (2026-10-15), so reads them all.
+      'gfin.invoice_requests.view_all',
+      // The routing sheet of 2026-10-13: Back Support prepares purchase
+      // orders (from the requisitions and canvasses it reads) and budget
+      // requests, and is the second signature on every budget request.
+      ...VIEW_OWN_SELF('gchain', 'purchase_orders'),
+      'gchain.purchase_requests.view_all',
+      'gchain.rfq.view_all',
+      'gchain.canvass.view_all',
+      'gchain.suppliers.view_all',
+      ...VIEW_OWN_SELF('gops', 'budget_requests'),
+      'gops.budget_requests.view_all',
+      'gops.projects.view_all',
       'gops.quotations.view_all',
       'gops.customers.view_all',
       'gops.partners.view_all',
@@ -173,14 +250,31 @@ const ROLES: RoleSeed[] = [
     // holds it, costings stall at step 1 and audit-workflows.ts says so.
     key: 'technical_manager',
     name: 'Technical Manager',
-    description: 'Reviews a costing before the team leader — the first signature on the costing route',
+    description: 'Manages projects (the project manager is the Technical Manager) and is the first signature on costings, requisitions, job orders and supplier bills',
+    grants: PROJECT_MANAGER_GRANTS,
     only: [
+      ...PROJECT_MANAGER_ONLY,
+      // The first signature on a supplier bill (2026-10-15), so reads them.
+      'gfin.ap.view_all',
       'gops.dashboard.view_all',
       'gops.costing.view_all',
+      // The routing sheet of 2026-10-13: a Technical Manager prepares
+      // costings and purchase requisitions too, and is the first signature on
+      // every requisition, so reads them all.
+      ...VIEW_OWN_SELF('gops', 'costing'),
+      ...VIEW_OWN_SELF('gops', 'purchase_requests'),
+      ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
+      'gops.purchase_requests.view_all',
+      'gchain.purchase_requests.view_all',
       'gops.quotations.view_all',
       'gops.customers.view_all',
       'gops.projects.view_all',
       'gops.plans.view_all',
+      // The first signature on every Request for Approval, and a preparer of
+      // them too (2026-10-13).
+      ...VIEW_OWN_SELF('gops', 'plans'),
+      // The first signature on every progress report and billing (2026-10-15).
+      'gops.progress_billing.view_all',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       ...VIEW_OWN_SELF('ghr', 'meetings'),
@@ -233,50 +327,19 @@ const ROLES: RoleSeed[] = [
   {
     key: 'project_manager',
     name: 'Project Manager',
-    description: 'Runs projects — budget, procurement requests, progress and billing',
-    grants: [
-      ['gops', 'projects'],
-      ['gops', 'plans'],
-      ['gops', 'budget_monitoring'],
-      ['gops', 'purchase_requests'],
-      ['gops', 'budget_requests'],
-      ['gops', 'progress_billing'],
-      ['gops', 'costing'],
-    ],
-    only: [
-      'gops.dashboard.view_all',
-      'gops.customers.view_all',
-      // Margin on the projects they run.
-      'insights.profitability.view_all',
-      'insights.profitability.export',
-      'gops.installed_base.view_all',
-      'gops.visits.view_all',
-      'gops.quotations.view_all',
-      'gops.job_orders.view_all',
-      ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
-      'gops.cad_job_orders.view_all',
-      'gchain.purchase_requests.view_all',
-      // A PM raises stock-replenishment requests too, not only direct-to-job
-      // ones from the project workspace.
-      'gchain.purchase_requests.create',
-      'gchain.purchase_requests.edit_own',
-      'gchain.purchase_requests.view_own',
-      'gchain.purchase_orders.view_all',
-      'gchain.inventory.view_all',
-      'gfin.budget_vs_actual.view_all',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'evaluations'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
+    description: 'Runs projects — budget, procurement requests, progress and billing. Technical Managers now hold the same rights; this role is kept for those who already have it',
+    grants: PROJECT_MANAGER_GRANTS,
+    only: PROJECT_MANAGER_ONLY,
   },
   {
     key: 'project_engineer',
     name: 'Project Engineer',
-    description: 'Executes the work: progress reports, purchase requests, plans — and costs the work (the costing route starts with an engineer)',
+    description: 'Executes the work: progress reports, purchase requests, requests for approval — and costs the work (the costing route starts with an engineer)',
     only: [
       'gops.projects.view_all',
       'gops.plans.view_all',
+      // Sends the project's drawings for approval (2026-10-13).
+      ...VIEW_OWN_SELF('gops', 'plans'),
       // The costing route's creator (2026-10-09, the owner's call): an
       // engineer raises and edits their own costings.
       ...VIEW_OWN_SELF('gops', 'costing'),
@@ -373,6 +436,7 @@ const ROLES: RoleSeed[] = [
     name: 'Procurement',
     description: 'Canvasses suppliers and issues purchase orders — does not receive and does not pay',
     grants: [
+      ['gchain', 'rfq'],
       ['gchain', 'canvass'],
       ['gchain', 'purchase_orders'],
       ['gchain', 'suppliers'],
@@ -399,6 +463,7 @@ const ROLES: RoleSeed[] = [
       ['gchain', 'receiving'],
       ['gchain', 'stock_issuance'],
       ['gchain', 'borrow_slips'],
+      ['gchain', 'pullout_slips'],
       ['gchain', 'inventory'],
     ],
     only: [
@@ -431,6 +496,7 @@ const ROLES: RoleSeed[] = [
       ['gfin', 'cash_advances'],
       // Project cash: every project's budget requests, to release and to chase.
       ['gfin', 'budget_requests'],
+      ['gfin', 'budget_liquidations'],
     ],
     only: [
       'insights.dashboard.view_all',
@@ -440,6 +506,10 @@ const ROLES: RoleSeed[] = [
       'insights.cash.export',
       'gops.projects.view_all',
       'gops.progress_billing.view_all',
+      // The invoice requests whose approval lands a draft invoice in A/R (2026-10-15).
+      'gfin.invoice_requests.view_all',
+      // Pays the approved commissions (2026-10-16) — the payout is A/P's right.
+      'gfin.commissions.view_all',
       // Finance raises the supplier bill (Phase 7 notes), so it must find the
       // supplier on the bill form (SupplierPicker reads /suppliers/lookup).
       'gchain.suppliers.view_all',
@@ -464,6 +534,7 @@ const ROLES: RoleSeed[] = [
       'gfin.ar.view_all',
       'gfin.ar.create',
       'gfin.ar.edit_all',
+      'gfin.invoice_requests.view_all',
       'gfin.ap.view_all',
       'gfin.ap.create',
       'gfin.ap.edit_all',
@@ -496,6 +567,7 @@ const ROLES: RoleSeed[] = [
       ['ghr', 'training_calendar'],
       ['ghr', 'training_sessions'],
       ['ghr', 'passports'],
+      ['ghr', 'people_flow'],
     ],
     only: [
       'ghr.clock.view_own',
@@ -512,6 +584,8 @@ const ROLES: RoleSeed[] = [
     only: [
       'ghr.clock.view_own',
       'ghr.dashboard.view_all',
+      // Their own path, and through the dashboard right their reports'.
+      'ghr.people_flow.view_own',
       ...VIEW_OWN_SELF('ghr', 'leave'),
       'ghr.leave.view_all',
       ...VIEW_OWN_SELF('ghr', 'overtime'),
@@ -542,12 +616,15 @@ const ROLES: RoleSeed[] = [
       'ghr.clearances.view_own',
       'ghr.clearances.create',
       'ghr.evaluations.view_own',
+      'ghr.people_flow.view_own',
       ...VIEW_OWN_SELF('ghr', 'meetings'),
       'ghr.training_calendar.view_all',
       'ghr.passport.view_own',
       'ghr.passport.create',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      // Anyone may ask to borrow a tool (2026-10-14); the warehouse releases it.
+      ...VIEW_OWN_SELF('gchain', 'borrow_slips'),
     ],
   },
   {
@@ -600,16 +677,83 @@ const ROLES: RoleSeed[] = [
     {
       key: 'team_leader',
       name: 'Team Leader',
-      description: 'Leads a sales team — approves the industry specialists\' quotations and sales orders; their own go to the CEO / President',
+      description: 'Leads a sales team — approves its quotations, sales orders, costings, purchase requisitions and budget requests',
       grants: like('sales_manager').grants,
-      only: like('sales_manager').only,
+      only: [
+        ...(like('sales_manager').only ?? []),
+        // The routing sheet of 2026-10-13: a Team Leader prepares purchase
+        // requisitions and budget requests, and is a signature on both, so
+        // reads every one.
+        ...VIEW_OWN_SELF('gops', 'purchase_requests'),
+        ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
+        'gops.purchase_requests.view_all',
+        'gchain.purchase_requests.view_all',
+        ...VIEW_OWN_SELF('gops', 'budget_requests'),
+        'gops.budget_requests.view_all',
+        // The second signature on every progress report and billing (2026-10-15).
+        'gops.progress_billing.view_all',
+        // Raises a billing's invoice request for the team's projects, and
+        // reads every one (2026-10-15).
+        ...VIEW_OWN_SELF('gfin', 'invoice_requests'),
+        'gfin.invoice_requests.view_all',
+        'gfin.invoice_requests.delete',
+        // Raises the team's commissions (2026-10-16).
+        ...VIEW_OWN_SELF('gfin', 'commissions'),
+      ],
     },
     {
       key: 'industry_specialist',
       name: 'Industry Specialist',
-      description: 'Prepares quotations and sales orders — the team leader approves, and the CEO / President too above ₱1,000,000',
+      description: 'Prepares quotations, sales orders, purchase requisitions and budget requests — the team leader approves first',
       grants: like('sales').grants,
-      only: like('sales').only,
+      only: [
+        ...(like('sales').only ?? []),
+        ...VIEW_OWN_SELF('gops', 'purchase_requests'),
+        ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
+        ...VIEW_OWN_SELF('gops', 'budget_requests'),
+      ],
+    },
+  );
+}
+
+// The routing sheet of 2026-10-13 (APPROVAL_ROUTE.xlsx): two managers the
+// purchase order and the budget request route to. Each starts from the role
+// whose work it manages — Procurement's, Finance's — and is edited in Admin ›
+// Roles from there; Procurement and Finance stay for the staff who are not
+// the manager. Assign both in Admin › Users: until somebody holds them,
+// purchase orders and budget requests stall at their steps, and
+// audit-workflows.ts says so.
+{
+  const like = (key: string) => ROLES.find((r) => r.key === key)!;
+  ROLES.push(
+    {
+      key: 'purchasing_manager',
+      name: 'Purchasing Manager',
+      description: 'Approves every purchase order — the first signature; the CEO / President follows above ₱100,000',
+      grants: like('procurement').grants,
+      only: like('procurement').only,
+    },
+    {
+      key: 'finance_manager',
+      name: 'Finance Manager',
+      description: 'Approves budget requests after the team leader and back support; the CEO / President follows above ₱100,000',
+      grants: like('finance').grants,
+      // The first signature on a commission, and its keeper (2026-10-16).
+      only: [...(like('finance').only ?? []), ...VIEW_OWN_SELF('gops', 'budget_requests'), 'gfin.commissions.edit_all', 'gfin.commissions.delete'],
+    },
+    // The warehouse flow (2026-10-14): Incoming and Outgoing go to the
+    // warehouse person's "Reports to", else a Warehouse Supervisor — who
+    // starts from the Warehouse role's rights (all four registers in full).
+    // Assign in Admin › Users; until somebody holds it, a receiving or an
+    // issue raised by someone with no "Reports to" cannot be submitted.
+    {
+      key: 'warehouse_supervisor',
+      name: 'Warehouse Supervisor',
+      description: 'Approves incoming and outgoing for warehouse staff who report to nobody else; runs the warehouse',
+      grants: like('warehouse').grants,
+      // The automatic reorder's requisitions are raised in the supervisor's
+      // name (2026-10-15): they check, modify and submit their own.
+      only: [...like('warehouse').only, ...VIEW_OWN_SELF('gchain', 'purchase_requests'), 'gchain.purchase_requests.delete'],
     },
   );
 }
@@ -656,6 +800,8 @@ interface SeedStep {
    * the project has no manager or the manager raised the document.
    */
   roleKey?: string;
+  /** SUPERVISOR only: roles whose holders on the requester's team decide it too (`ApprovalStep.alsoRoleIds`). */
+  alsoRoleKeys?: string[];
 }
 
 const WORKFLOWS: WorkflowSeed[] = [
@@ -680,75 +826,145 @@ const WORKFLOWS: WorkflowSeed[] = [
       { sequence: 2, name: 'HR approval', approverType: 'HR' },
     ],
   },
+  // ── The routing sheet of 2026-10-13 (APPROVAL_ROUTE.xlsx) ──────────────
+  // One route per document whoever prepared it, as the quotation's and the
+  // sales order's: the preparer signs the steps they hold at submit, an
+  // approver signs every later step they hold with their one Approve (one
+  // timestamp per person), and an approver's manager may stand in.
   {
+    // PURCHASE REQUISITION: Technical Manager, then Team Leader — prepared by
+    // a Project Engineer, an Industry Specialist, a Technical Manager or a
+    // Team Leader. No amount band: the budget guard still refuses an
+    // over-budget direct-to-job request. The two banded routes are RETIRED.
     documentType: 'purchase_request',
-    name: 'Purchase Request — up to ₱50,000',
-    maxAmount: 50_000,
-    steps: [
-      { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
-    ],
-  },
-  {
-    documentType: 'purchase_request',
-    name: 'Purchase Request — ₱50,000 and above',
-    minAmount: 50_000,
-    steps: [
-      { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
-      { sequence: 2, name: 'Finance review', approverType: 'ROLE', roleKey: 'finance' },
-      { sequence: 3, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
-    ],
-  },
-  {
-    // A budget request is project cash (2026-10-07, the owner's call): the
-    // project's own manager allows the spend, then finance approves and
-    // releases the cash. The PM step resolves to the project's manager — not
-    // to the project_manager ROLE, which is what the requester usually holds
-    // — and falls back to Executive when the project has no manager or the
-    // manager raised it themself, so a PM's own request goes up, never to
-    // nobody.
-    documentType: 'budget_request',
-    name: 'Budget Request — project manager then finance',
-    steps: [
-      { sequence: 1, name: 'Project Manager', approverType: 'PROJECT_MANAGER', roleKey: 'executive' },
-      { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
-    ],
-  },
-  {
-    // The margin a costing sets is what the company commits to on every
-    // quotation and project built from it, so management signs it off. Sales
-    // and project managers raise costings; routing to either would leave a
-    // one-person team approving their own. To go without costing approval,
-    // DEACTIVATE this workflow (Admin › Approval Workflows) rather than
-    // deleting it — a deleted seeded workflow is recreated on the next seed,
-    // a deactivated one is left alone, and the page returns to "Mark final".
-    // The costing route (2026-10-09, the owner's call: "creator engineer ›
-    // reviewer technical manager › approval team leader › 2nd approval
-    // CTG" — CTG being the CEO's initials, Carter T. Gasiong, so the last
-    // step is the executive role, as the quotation's and the sales order's
-    // CEO steps are). Step 2 is a SUPERVISOR step — the author's "Reports
-    // to" — falling back to the sales managers, as the other Team Leader
-    // steps do; audit-workflows.ts checks the fallback is held. "Costing —
-    // management approval" (one step, the executive role) is RETIRED below:
-    // a costing pending on it finishes on it. `previously` is the route as
-    // it was seeded for a few minutes with a role of its own for CTG.
-    //
-    // Since 2026-10-12 the Team Leader step falls back to the Team Leader
-    // role, as the quotation's and the sales order's do (it was the sales
-    // managers), and the preparer signs the steps they hold: a Technical
-    // Manager's own costing is signed at step 1 when it is submitted.
-    documentType: 'costing',
-    name: 'Costing — technical manager, team leader, CTG',
+    name: 'Purchase Request — technical manager, team leader',
     preparerSigns: true,
     standIns: true,
     steps: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
-      { sequence: 3, name: 'CEO (CTG)', approverType: 'ROLE', roleKey: 'executive' },
     ],
-    previously: [
+  },
+  {
+    // BUDGET REQUEST (project cash): Team Leader, Admin Back Support (the
+    // holders supporting the preparer's team), Finance Manager, and the CEO /
+    // President above ₱100,000. The project manager's step of 2026-10-07 is
+    // not on the sheet; that route is RETIRED.
+    documentType: 'budget_request',
+    name: 'Budget Request — team leader, back support, finance manager',
+    maxAmount: 100_000,
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 3, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+    ],
+  },
+  {
+    documentType: 'budget_request',
+    name: 'Budget Request — team leader, back support, finance manager, then CEO / President over ₱100,000',
+    minAmount: 100_000.01,
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 3, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+      { sequence: 4, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+  },
+  {
+    // COSTING (the sheet of 2026-10-13): Technical Manager, then Team Leader —
+    // prepared by a Project Engineer or a Technical Manager. The three-step
+    // route with the CEO (CTG) is RETIRED: the step count changed, which
+    // `previously` cannot update in place; a costing pending on it finishes
+    // on it. To go without costing approval, DEACTIVATE this workflow — a
+    // deleted seeded workflow is recreated on the next seed.
+    documentType: 'costing',
+    name: 'Costing — technical manager, team leader',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
-      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
-      { sequence: 3, name: 'CEO (CTG)', approverType: 'ROLE', roleKey: 'executive' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+  },
+  // PROGRESS REPORT and PROGRESS BILLING (2026-10-15, the owner's call:
+  // "creator (Project Engineer) or Sales › Technical Manager › Team
+  // Leader"). Nobody approves one by hand any more. The Technical Manager
+  // is the preparer's team's (OWN_TEAM_ROLES), the Team Leader their
+  // "Reports to", else their team's leader.
+  {
+    documentType: 'progress_report',
+    name: 'Progress report — technical manager, team leader',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+  },
+  {
+    documentType: 'progress_billing',
+    name: 'Progress billing — technical manager, team leader',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+  },
+  {
+    // INVOICE REQUEST (2026-10-15, the owner's call): the project's
+    // salesperson or their Team Leader asks for an approved billing to be
+    // invoiced against the sales order; Back Support processes it — the one
+    // on the requester's team (TEAM_SCOPED_ROLES) — and its approval raises
+    // the draft invoice in Accounts Receivable.
+    documentType: 'invoice_request',
+    name: 'Invoice request — back support',
+    standIns: true,
+    steps: [{ sequence: 1, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' }],
+  },
+  {
+    // CAD J.O. (2026-10-16, the owner's sample: "Initial status: TL Approval"):
+    // the requester's Team Leader approves a drawing request before it reaches
+    // the designers' queue — their "Reports to", else a Team Leader on their
+    // team. A Team Leader's own request is signed at submit.
+    documentType: 'cad_job_order',
+    name: 'CAD J.O. — team leader',
+    preparerSigns: true,
+    standIns: true,
+    steps: [{ sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' }],
+  },
+  // REQUEST FOR APPROVAL (2026-10-13, the owner's call: "Internal Approval
+  // (Technical Manager, Team Leader and CEO more than 1 million Project
+  // Costing)"): a project's drawing or document, decided by the Technical
+  // Manager, then the preparer's Team Leader, and the CEO / President too
+  // when the PROJECT's contract value is above ₱1,000,000 (the amount the
+  // submit snapshots). The costing's two switches: a preparer who holds a
+  // step signs it at submit, and a manager may stand in.
+  {
+    documentType: 'plan_approval',
+    name: 'Request for Approval — technical manager, team leader',
+    maxAmount: 1_000_000,
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+  },
+  {
+    documentType: 'plan_approval',
+    name: 'Request for Approval — technical manager, team leader, then CEO / President over ₱1,000,000',
+    minAmount: 1_000_000.01,
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 3, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   // ── The owner's routing sheet (2026-10-12) ─────────────────────────────
@@ -812,18 +1028,71 @@ const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
+    // PURCHASE ORDER (the sheet of 2026-10-13): the Purchasing Manager, and
+    // the CEO / President too above ₱100,000 — prepared by Admin Back Support
+    // or a Purchasing Manager, whose own order is signed at step 1 when it is
+    // submitted. "Purchase Order — project manager then finance" is RETIRED.
     documentType: 'purchase_order',
-    name: 'Purchase Order — project manager then finance',
-    // NOT routed to procurement: procurement is who raises a purchase order,
-    // and nobody approves their own document. Routing step 1 back to their own
-    // role would stall every order in a team with one buyer.
-    //
-    // The project manager owns the budget it spends; finance owns the cash that
-    // leaves. Those are the two people with a reason to look.
+    name: 'Purchase Order — purchasing manager',
+    maxAmount: 100_000,
+    preparerSigns: true,
+    standIns: true,
+    steps: [{ sequence: 1, name: 'Purchasing Manager', approverType: 'ROLE', roleKey: 'purchasing_manager' }],
+  },
+  {
+    documentType: 'purchase_order',
+    name: 'Purchase Order — purchasing manager, then CEO / President over ₱100,000',
+    minAmount: 100_000.01,
+    preparerSigns: true,
+    standIns: true,
     steps: [
-      { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
-      { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 1, name: 'Purchasing Manager', approverType: 'ROLE', roleKey: 'purchasing_manager' },
+      { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
+  },
+  // ── The warehouse flow (2026-10-14, the owner's call) ──────────────────
+  // "Incoming — the warehouse receives this, approval of his/her report to";
+  // "Outgoing — the warehouse issues this, approval of his/her report to".
+  // One SUPERVISOR step each: the receiver's or issuer's "Reports to", else
+  // a Warehouse Supervisor (on their team first). The approval posts the
+  // stock and the job cost; nothing moves while it waits.
+  {
+    // The owner's route for Incoming (2026-10-14: "WAREHOUSE — creator ›
+    // back support › purchasing manager"), with or without a purchase
+    // order. Back Support is the one supporting the preparer's team.
+    documentType: 'receiving',
+    name: 'Incoming — back support, purchasing manager',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 2, name: 'Purchasing Manager', approverType: 'ROLE', roleKey: 'purchasing_manager' },
+    ],
+  },
+  {
+    documentType: 'stock_issue',
+    name: "Outgoing — the issuer's supervisor",
+    steps: [{ sequence: 1, name: 'Supervisor', approverType: 'SUPERVISOR', roleKey: 'warehouse_supervisor' }],
+  },
+  {
+    // Anyone may ask to borrow (2026-10-14, the owner's call): the Team
+    // Leader / Technical Manager they report to or on their team, then the
+    // warehouse's own sign-off before it releases. A person holding both
+    // signs once.
+    documentType: 'borrow_slip',
+    name: 'Borrow slip — team leader, warehouse',
+    preparerSigns: true,
+    steps: [
+      { sequence: 1, name: 'Team Leader / Technical Manager', approverType: 'SUPERVISOR', roleKey: 'team_leader', alsoRoleKeys: ['technical_manager'] },
+      { sequence: 2, name: 'Warehouse Supervisor', approverType: 'ROLE', roleKey: 'warehouse_supervisor' },
+    ],
+  },
+  {
+    // Stock out against an issued sales order or an approved request
+    // (2026-10-14): the warehouse prepares it, its reports-to approves.
+    documentType: 'pullout_slip',
+    name: "Pull-out slip — the warehouse's supervisor",
+    steps: [{ sequence: 1, name: 'Supervisor', approverType: 'SUPERVISOR', roleKey: 'warehouse_supervisor' }],
   },
   {
     // A service report is written on site by the engineer who did the work, so
@@ -854,33 +1123,66 @@ const WORKFLOWS: WorkflowSeed[] = [
     documentType: 'supplier_bill',
     name: 'Supplier bill — up to P50,000',
     maxAmount: 50_000,
-    steps: [{ sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' }],
+    // The Technical Manager on the preparer's team since 2026-10-15 — the
+    // project's manager is its Technical Manager.
+    steps: [{ sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' }],
+    previously: [{ sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' }],
   },
   {
     documentType: 'supplier_bill',
     name: 'Supplier bill — P50,000 and above',
     minAmount: 50_000,
     steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+    ],
+    previously: [
       { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
       { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
     ],
   },
   {
+    // REIMBURSEMENT (the owner's money-out sheet, 2026-10-15: "Back Support >
+    // Finance Staff > Finance Manager > CEO", after the requester's Team
+    // Leader): every expense claim and liquidation. "Checking" is Finance
+    // staff. The supervisor-then-finance route is RETIRED.
     documentType: 'expense',
-    name: 'Expense claim — supervisor then finance',
+    name: 'Reimbursement — team leader, back support, checking, finance manager, CEO / President',
+    preparerSigns: true,
+    standIns: true,
     steps: [
-      { sequence: 1, name: 'Supervisor approval', approverType: 'SUPERVISOR' },
-      { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 3, name: 'Checking (Finance Staff)', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+      { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   {
-    documentType: 'cash_advance',
-    // Finance approves because finance releases the cash and must have said
-    // yes before the voucher exists. Not routed to the requester's own role.
-    name: 'Cash advance — supervisor then finance',
+    // COMMISSION (2026-10-16, the owner's "Commission Request System":
+    // "Workflow Target: Finance Manager / Admin Approval"): the Finance
+    // Manager, then the CEO / President; a manager may stand in.
+    documentType: 'commission',
+    name: 'Commission — finance manager, CEO / President',
+    standIns: true,
     steps: [
-      { sequence: 1, name: 'Supervisor approval', approverType: 'SUPERVISOR' },
-      { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 1, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+      { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+  },
+  {
+    // CASH ADVANCE, money lent to an employee (the same sheet): the same five
+    // signatures; finance releases it, the employee repays it.
+    documentType: 'cash_advance',
+    name: 'Cash advance — team leader, back support, checking, finance manager, CEO / President',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 3, name: 'Checking (Finance Staff)', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+      { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   {
@@ -892,9 +1194,23 @@ const WORKFLOWS: WorkflowSeed[] = [
     // PM raised it), then the salesperson's Team Leader — their "Reports to",
     // the sales managers when none is set. "Job order — service manager" is
     // RETIRED below.
+    // The project's manager IS its Technical Manager (2026-10-15, the owner's
+    // call): step 1 reads the Technical Manager named on the order, falling
+    // back to the Technical Managers on the requester's team.
     name: 'Job order — project manager then team leader',
+    // The Technical Manager and the Team Leader of the preparer's team, never
+    // the CEO (2026-10-16, the owner's call): the Team Leader step falls back
+    // to the team's `team_leader`, and a preparer who holds a step signs it
+    // at submit (Brian Jay, UIT's Technical Manager and a Team Leader, signs
+    // both of his own); a manager may stand in.
+    preparerSigns: true,
+    standIns: true,
     steps: [
-      { sequence: 1, name: 'Project Manager', approverType: 'PROJECT_MANAGER', roleKey: 'project_manager' },
+      { sequence: 1, name: 'Technical Manager', approverType: 'PROJECT_MANAGER', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+    previously: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'PROJECT_MANAGER', roleKey: 'technical_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
     ],
   },
@@ -1094,6 +1410,9 @@ async function main() {
       ownDefault.length ? `; own default on ${ownDefault.join(', ')}` : ''
     })`,
   );
+  // The RFQ took the canvass's code on 2026-10-14; a stored canvass template
+  // still on it moves to CVS, once.
+  if ((await moveCanvassCode()).moved) console.log('  · Canvass numbering code moved from RFQ to CVS');
 
   // Quotation.expectedClosing arrived after quotations existed. Copy the lead's
   // date onto any quotation still without one — nulls only, so a date a
@@ -1109,11 +1428,20 @@ async function main() {
   const roleByKey = new Map(
     (await prisma.role.findMany({ select: { id: true, key: true } })).map((r) => [r.key, r.id]),
   );
+  const alsoRoles = (st: SeedStep) => (st.alsoRoleKeys ?? []).map((k) => roleByKey.get(k)).filter((id): id is string => !!id);
 
   // Seeded workflows that were superseded by a corrected version. Left in place
   // but deactivated, so they stop matching new documents while any history
   // routed through them stays readable. Deleting them would orphan that.
   const RETIRED = [
+    // The money-out routes of 2026-10-15: reimbursements and cash advances
+    // take five signatures; a claim or advance pending on the old two-step
+    // route finishes on it.
+    'Expense claim — supervisor then finance',
+    'Cash advance — supervisor then finance',
+    // Incoming routes to Back Support, then the Purchasing Manager
+    // (2026-10-14); a report pending on the supervisor's route finishes on it.
+    "Incoming — the receiver's supervisor",
     'Budget Request — management',
     // A budget request stopped changing the budget and became project cash
     // (2026-10-07); its route now opens with the project's manager.
@@ -1140,6 +1468,15 @@ async function main() {
     'Quotation — prepared by a Team Leader: CEO / President',
     'Sales Order — prepared by the CEO / President: back support, cost controller',
     'Sales Order — prepared by a Team Leader: back support, cost controller, CEO / President',
+    // The routing sheet of 2026-10-13 (APPROVAL_ROUTE.xlsx): the costing
+    // loses its CEO step, the purchase requisition its amount bands, the
+    // purchase order and the budget request their project manager and
+    // finance steps.
+    'Costing — technical manager, team leader, CTG',
+    'Purchase Request — up to ₱50,000',
+    'Purchase Request — ₱50,000 and above',
+    'Purchase Order — project manager then finance',
+    'Budget Request — project manager then finance',
   ];
   for (const name of RETIRED) {
     const stale = await prisma.approvalWorkflow.findFirst({ where: { name, isActive: true } });
@@ -1209,6 +1546,7 @@ async function main() {
               name: s.name,
               approverType: s.approverType,
               roleId: s.roleKey ? (roleByKey.get(s.roleKey) ?? null) : null,
+              alsoRoleIds: alsoRoles(s),
             })),
           });
         });
@@ -1232,6 +1570,7 @@ async function main() {
             name: s.name,
             approverType: s.approverType,
             roleId: s.roleKey ? (roleByKey.get(s.roleKey) ?? null) : null,
+            alsoRoleIds: alsoRoles(s),
           })),
         },
       },
@@ -1260,6 +1599,21 @@ async function main() {
     }
   }
 
+  // The job order's route takes the preparer's signature and stand-ins once
+  // (2026-10-16), after the general mark above had already run on live.
+  {
+    const MARK = 'seed.jobOrderPreparerSigns';
+    if (!(await prisma.setting.findUnique({ where: { key: MARK } }))) {
+      const { count } = await prisma.approvalWorkflow.updateMany({
+        where: { documentType: 'job_order', name: 'Job order — project manager then team leader' },
+        data: { preparerSigns: true, standIns: true },
+      });
+      await prisma.setting.create({
+        data: { key: MARK, value: { at: new Date().toISOString(), flagged: count }, description: 'seed: the job order route lets the preparer sign and managers stand in, once' },
+      });
+    }
+  }
+
   // Raising a quotation revision once superseded the last one without
   // withdrawing its approval request, which then sat in the approver's queue
   // for good. Any still open is withdrawn — CANCELLED, never deleted. One
@@ -1271,6 +1625,10 @@ async function main() {
     if (legacy.linked || legacy.summarised) console.log(`Linked ${legacy.linked} sales order line(s) and ${legacy.summarised} summarised line(s) to their quotation lines`);
     // Budget requests approved as budget INCREASES (the rule before
     // 2026-10-07) are closed, so they do not read as cash finance still owes.
+    // Stock order lines typed without an item built no stock when received
+    // (until 2026-10-16); each now takes its item and its stock, once.
+    const typedReceipts = await repairTypedStockReceipts();
+    if (typedReceipts) console.log(`  · Posted the stock of ${typedReceipts} received line(s) typed without an item`);
     const closedIncreases = await closeLegacyBudgetIncreases();
     if (closedIncreases) console.log(`  · Closed ${closedIncreases} budget request(s) approved as budget increases under the old rule`);
     // Costings priced with a markup, a contingency % or a discount (the rule
@@ -1285,6 +1643,14 @@ async function main() {
         `  · Withdrew ${withdrawn.length} approval request(s) left open on quotation revisions no longer awaiting approval: ${withdrawn.join(', ')}`,
       );
     }
+  }
+
+  // A plan registered before 2026-10-13 waited "for approval" with no route
+  // behind it; it is a draft Request for Approval now, for its requester to
+  // send. A second run moves none.
+  {
+    const { count } = await prisma.approvedPlan.updateMany({ where: { status: 'FOR_APPROVAL' }, data: { status: 'DRAFT' } });
+    if (count) console.log(`  · ${count} plan(s) registered before Requests for Approval are drafts now, for their requesters to send`);
   }
 
   // The Quotation Groups master (Admin › Categories) starts from the groups
@@ -1331,6 +1697,21 @@ async function main() {
   {
     const filled = await fillQuotationTeams();
     if (filled) console.log(`  · Set the team of ${filled} older quotation(s) to their author's team`);
+  }
+
+  // Accounts Receivable per the owner's sample (2026-10-15): invoices issued
+  // before countering existed are taken as countered on their invoice date
+  // (once), and every invoice with no salesperson takes its source's.
+  {
+    const countered = await backfillInvoiceCountering();
+    if (countered) console.log(`  · Took ${countered} older invoice(s) as countered on their invoice date`);
+    const credited = await fillInvoiceCredit();
+    if (credited) console.log(`  · Credited ${credited} invoice(s) to their salesperson and team`);
+    // Accounts Payable: delivery, terms and purchaser from what is on file.
+    const renumbered = await renumberProgressDocs();
+    if (renumbered) console.log(`  · Numbered ${renumbered} progress report(s) and billing(s) under their project`);
+    const bills = await fillBillTerms();
+    if (bills) console.log(`  · Gave ${bills} supplier bill(s) their delivery date, terms and purchaser`);
   }
 
   // Activity types as data (2026-10-08): the six built-ins under the enum's
@@ -1424,6 +1805,30 @@ async function main() {
     await prisma.itemCategory.upsert({ where: { code: c.code }, create: c, update: {} });
   }
   console.log('  ✓ Item categories (9)');
+  // The inventory's eight (2026-10-15, the owner's inventory screen), in his
+  // order, each with what it covers — a head start, renamed freely; a
+  // category on file is never overwritten, only a blank description filled.
+  const INVENTORY_CATEGORIES = [
+    { code: 'PMP', name: 'Pumps & Motors', description: 'UL/FM Fire, Booster, Submersible' },
+    { code: 'CTL', name: 'Industrial Controls', description: 'VFDs, HMI, Starters, Switchgear' },
+    { code: 'INS', name: 'Instruments', description: 'Analyzers, Gauges, Flowmeters' },
+    { code: 'PRT', name: 'Parts & Hardware', description: 'Impellers, Seals, Fittings, Kits' },
+    { code: 'CNS', name: 'Consumables', description: 'Lubricants, Desiccants, Oils' },
+    { code: 'FLT', name: 'Filters & Separation', description: 'CO2 Polishing, Water & Air Elements' },
+    { code: 'DRY', name: 'Dryers & Treatment', description: 'Refrigerated, Desiccant Skids' },
+    { code: 'PIP', name: 'Piping & Valves', description: 'Aluminum Air Loops, Check Valves' },
+  ];
+  for (const [n, c] of INVENTORY_CATEGORIES.entries()) {
+    const found = await prisma.itemCategory.findUnique({ where: { code: c.code } });
+    if (!found) await prisma.itemCategory.create({ data: { ...c, sortOrder: n + 1 } });
+    else if (!found.description) await prisma.itemCategory.update({ where: { id: found.id }, data: { description: c.description, ...(found.sortOrder ? {} : { sortOrder: n + 1 }) } });
+  }
+  // The first starting tree goes after them, so the eight lead the screen; an
+  // order an administrator set is kept.
+  for (const [n, code] of ['PIPE', 'VALV', 'ELEC', 'COMP', 'GASE', 'FAB', 'CONS', 'TOOL', 'SAFE'].entries()) {
+    await prisma.itemCategory.updateMany({ where: { code, sortOrder: 0 }, data: { sortOrder: 100 + n } });
+  }
+  console.log('  ✓ Inventory categories (8)');
 
   // ── Teams (the Industry master) ────────────────────────────────────────────
   // The owner's five sales teams (2026-10-08): a person's team is the Industry
@@ -1784,7 +2189,12 @@ async function main() {
   console.log(`  ✓ Report templates (${TEMPLATES.length})`);
 
   // ── Super admin ────────────────────────────────────────────────────────────
-  const existingAdmin = await prisma.user.findUnique({ where: { email: ADMIN_EMAIL } });
+  // Made only on a database with no super admin at all — never because the
+  // configured address is not on file (it may have moved, below), which
+  // would leave a second super admin behind on the known starting password.
+  const existingAdmin =
+    (await prisma.user.findUnique({ where: { email: ADMIN_EMAIL } })) ??
+    (await prisma.user.findFirst({ where: { isSuperAdmin: true }, orderBy: { createdAt: 'asc' } }));
   if (!existingAdmin) {
     await prisma.user.create({
       data: {
@@ -1799,8 +2209,12 @@ async function main() {
     console.log(`\n  ⚠  Password: ${ADMIN_PASSWORD}`);
     console.log('     Change it on first sign-in — Account › Change password.\n');
   } else {
-    console.log(`  ✓ Super admin already exists: ${ADMIN_EMAIL}`);
+    console.log(`  ✓ Super admin already exists: ${existingAdmin.email}`);
   }
+  // Once: the seeded admin signs in as gcore@gruntechnology.com (2026-10-13).
+  const adminMove = await moveAdminEmail([OLD_ADMIN_EMAIL, process.env.SEED_ADMIN_EMAIL ?? OLD_ADMIN_EMAIL]);
+  if (adminMove.moved) console.log(`  ✓ Super admin's sign-in email moved: ${adminMove.from} → ${adminMove.to}`);
+  else if (adminMove.reason === 'taken') console.log(`  ⚠  ${adminMove.to} is already another login's email — the admin's address was left as it is`);
 
   console.log('Seed complete.');
 }

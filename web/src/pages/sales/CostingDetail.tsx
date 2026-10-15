@@ -1,8 +1,9 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
+import { parseDay } from '../../lib/day';
 import { useAuth } from '../../lib/auth';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
@@ -41,7 +42,14 @@ export interface CostLine {
   sortOrder: number;
   costCategory: { id: string; code: string; name: string; sortOrder: number };
   item: Ref | null;
+  /** Who supplies it — on file, else the name typed — and the line's note (printed). */
+  supplier?: { id: string; name: string } | null;
+  supplierName?: string | null;
+  lineNote?: string | null;
 }
+
+/** "Oct 14" — a plan's day on the calendar, short enough for a Start or End cell. */
+const shortDay = (key: string) => parseDay(key).toLocaleDateString('en-PH', { month: 'short', day: 'numeric' });
 
 export interface ScopeTask {
   id: string;
@@ -50,6 +58,9 @@ export interface ScopeTask {
   durationDays: number;
   start: number;
   end: number;
+  /** The working days' dates once the costing has a start date (Mon–Sat). */
+  startDate?: string | null;
+  endDate?: string | null;
 }
 
 export interface ScopeSection {
@@ -59,10 +70,15 @@ export interface ScopeSection {
   description: string | null;
   durationDays: number;
   value: number;
+  /** Where the value comes from (2026-10-13). */
+  valueSource?: 'SPREAD' | 'DECLARED' | 'CATEGORY';
+  costCategoryIds?: string[];
   sortOrder: number;
   startDay: number | null;
   endDay: number | null;
   planDays: number;
+  startDate?: string | null;
+  endDate?: string | null;
   tasks: ScopeTask[];
 }
 
@@ -70,12 +86,17 @@ export interface CostingDetail extends Omit<CostingRow, 'status'> {
   status: 'DRAFT' | 'PENDING_APPROVAL' | 'FINAL';
   /** The margin on the price, a fraction to six decimals. */
   marginPct: number;
+  /** A fixed price, net of VAT (2026-10-13); null when priced from the margin. */
+  targetContractValue?: number | null;
   vatRate: number;
   /** Contract value − cost, from the stored figures. */
   marginAmount: number;
   vatAmount: number;
   grandTotal: number;
   validUntil: string | null;
+  /** The day the scope of work starts, and the plan's last working day (derived, Mon–Sat). */
+  plannedStart?: string | null;
+  plannedFinish?: string | null;
   systemUnit: string | null;
   notes: string | null;
   terms: string | null;
@@ -379,6 +400,7 @@ export function CostingDetailPage() {
         <Stat label="Gross margin" value={<MarginBadge pct={costing.grossMarginPct} />} />
       </div>
 
+      <DecisionNote documentType="costing" documentId={costing.id} reloadToken={reload} />
       {(costing.approvalConfigured || !isDraft) && <DocumentApproval documentType="costing" documentId={costing.id} reloadToken={reload} />}
 
       <section className="card" aria-labelledby="cs-details">
@@ -390,6 +412,10 @@ export function CostingDetailPage() {
           <Fact label="Date" value={formatDate(costing.createdAt)} />
           <Fact label="Project / job" value={costing.title} />
           <Fact label="Valid until" value={costing.validUntil ? formatDate(`${costing.validUntil}T00:00:00`) : null} />
+          {costing.plannedStart && <Fact label="Start date" value={formatDate(`${costing.plannedStart}T00:00:00`)} />}
+          {costing.plannedStart && (
+            <Fact label="Finish date" value={costing.plannedFinish ? formatDate(`${costing.plannedFinish}T00:00:00`) : 'No phase is planned yet'} />
+          )}
           <Fact
             label="Customer"
             value={
@@ -445,7 +471,7 @@ export function CostingDetailPage() {
                 </tr>
               </thead>
               <tbody>
-                {ordered.map((bucket, bi) => {
+                {ordered.map((bucket) => {
                   const open = !collapsed.has(bucket.category.id);
                   return (
                     <Fragment key={bucket.category.id}>
@@ -464,7 +490,7 @@ export function CostingDetailPage() {
                               })
                             }
                           >
-                            <span aria-hidden="true">{open ? '▾' : '▸'}</span> {bucket.lines[0]?.rank ?? bi + 1} {bucket.category.name}
+                            <span aria-hidden="true">{open ? '▾' : '▸'}</span> {bucket.category.name}
                           </button>
                         </td>
                         <td className="right mono">{formatMoney(bucket.total)}</td>
@@ -490,7 +516,13 @@ export function CostingDetailPage() {
                               </td>
                               <td>{line.unit}</td>
                               <td className="right mono">{line.quantity}</td>
-                              <td className="right mono">{formatMoney(line.unitCost)}</td>
+                              <td className="right">
+                                <span className="mono">{formatMoney(line.unitCost)}</span>
+                                {(line.supplier?.name || line.supplierName) && (
+                                  <div className="cs-line-supplier">{line.supplier?.name ?? line.supplierName}</div>
+                                )}
+                                {line.lineNote && <div className="faint cs-line-desc">{line.lineNote}</div>}
+                              </td>
                               <td className="right mono">{formatMoney(line.amount)}</td>
                             </tr>
                           ),
@@ -589,7 +621,10 @@ export function CostingDetailPage() {
           </h2>
           <div className="row">
             <span className="faint">
-              {costing.planDays > 0 ? `${costing.planDays} working days (Mon–Fri)` : ''}
+              {costing.planDays > 0 ? `${costing.planDays} working days (Mon–Sat)` : ''}
+              {costing.planDays > 0 && costing.plannedStart && costing.plannedFinish
+                ? ` · ${formatDate(`${costing.plannedStart}T00:00:00`)} – ${formatDate(`${costing.plannedFinish}T00:00:00`)}`
+                : ''}
             </span>
             {editable && costing.scopeSections.length > 0 && (
               <button
@@ -627,8 +662,14 @@ export function CostingDetailPage() {
                           <strong>{s.name}</strong> <span className="faint">· {KIND_LABEL[s.kind]}</span>
                           {s.description && <div className="faint">{s.description}</div>}
                         </td>
-                        <td className="right mono">{s.startDay ? `Day ${s.startDay}` : '—'}</td>
-                        <td className="right mono">{s.endDay ? `Day ${s.endDay}` : '—'}</td>
+                        <td className="right mono">
+                          {s.startDay ? `Day ${s.startDay}` : '—'}
+                          {s.startDate && <div className="faint">{shortDay(s.startDate)}</div>}
+                        </td>
+                        <td className="right mono">
+                          {s.endDay ? `Day ${s.endDay}` : '—'}
+                          {s.endDate && <div className="faint">{shortDay(s.endDate)}</div>}
+                        </td>
                         <td className="right mono">{s.planDays}</td>
                         <td className="cs-col-bar">
                           {s.startDay && <PlanBar start={s.startDay} days={s.planDays} total={Math.max(costing.planDays, 1)} />}
@@ -641,8 +682,14 @@ export function CostingDetailPage() {
                       {s.tasks.map((t) => (
                         <tr key={t.id}>
                           <td className="cs-task-name">{t.name}</td>
-                          <td className="right mono">Day {t.start}</td>
-                          <td className="right mono">Day {t.end}</td>
+                          <td className="right mono">
+                            Day {t.start}
+                            {t.startDate && <div className="faint">{shortDay(t.startDate)}</div>}
+                          </td>
+                          <td className="right mono">
+                            Day {t.end}
+                            {t.endDate && <div className="faint">{shortDay(t.endDate)}</div>}
+                          </td>
                           <td className="right mono">{t.durationDays}</td>
                           <td className="cs-col-bar">
                             <PlanBar start={t.start} days={t.durationDays} total={Math.max(costing.planDays, 1)} />

@@ -107,10 +107,13 @@ import { readWorkbook } from '../../web/src/lib/spreadsheetRead';
 import { workingDayDate } from '../src/shared/day';
 import { ARCHIVE_ATTACHMENT, ARCHIVE_LIST_KEY, SCORO_ARCHIVE_REMOVED, removeScoroArchive } from '../src/shared/scoroArchive';
 import { recordLink } from '../../web/src/lib/links';
+import { parseDelimited, rowsToPrLines, prLineAmount, matchCategory, orderTotals, preferredFrom } from '../../web/src/lib/prLines';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
 import { contentStreams, pdfRuns, pdfText, runWidth, shown, type PdfRun } from './lib/paper';
 import { attachmentKind, fitImage } from '../src/shared/pdfAttachments';
+import { contentDisposition, kindOfFile, paperFileName } from '../src/shared/paperName';
+import { issueTicket, redeemTicket, ticketPath, TICKET_TTL_MS, TICKET_REUSE_MS } from '../src/shared/printTickets';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -141,6 +144,9 @@ async function expectRejection(label: string, fn: () => Promise<unknown>, expect
 }
 
 const TAG = '__verify__';
+/** G-CHAIN's two flows (the owner's order of 2026-10-14), as built so far. */
+const PROCUREMENT_STRIP = 'Purchase Requests,RFQ,Canvass,Purchase Orders';
+const WAREHOUSE_STRIP = 'Incoming,Inventory,Outgoing,Borrow Slips,Pull-out Slips';
 /**
  * What every approval this script submits is about. A seeded workflow routes
  * to whoever really holds the role, so its notifications reach real people;
@@ -329,7 +335,7 @@ async function main() {
   check('approval goes to the workflow, not to a key: no ghr.clearances.approve, no gops.quotations.approve', !permissionKeys.has('ghr.clearances.approve') && !permissionKeys.has('gops.quotations.approve'));
   check(
     'the three approve rights left are the ones something checks (CAD dispatch, progress reports, certificates)',
-    [...permissionKeys].filter((k) => k.endsWith('.approve')).sort().join() === 'ghr.passports.approve,gops.cad_job_orders.approve,gops.progress_billing.approve',
+    [...permissionKeys].filter((k) => k.endsWith('.approve')).sort().join() === 'ghr.passports.approve,gops.cad_job_orders.approve',
     [...permissionKeys].filter((k) => k.endsWith('.approve')).join(),
   );
 
@@ -354,7 +360,18 @@ async function main() {
     .find((m) => m.key === 'gops')!
     .submodules.filter((s) => s.group === 'Project Management' && !s.hidden)
     .map((s) => s.label);
-  check('Project Management shows Costing, Job Orders, CAD J.O., Projects in that order', pmStrip.join() === 'Costing,Job Orders,CAD J.O.,Projects', pmStrip.join());
+  check('Project Management shows Costing, Projects, Job Orders, CAD J.O. in that order', pmStrip.join() === 'Costing,Projects,Job Orders,CAD J.O.', pmStrip.join());
+  // The owner's order of 2026-10-14: the divisions G-OPS, G-CHAIN, G-FIN,
+  // G-HR, and G-CHAIN's two flows.
+  const divisions = menuFor(superUser).map((m) => m.key).filter((k) => ['gops', 'gchain', 'gfin', 'ghr'].includes(k));
+  check('the divisions run G-OPS, G-CHAIN, G-FIN, G-HR', divisions.join() === 'gops,gchain,gfin,ghr', divisions.join());
+  const chainStrip = (group: string) =>
+    menuFor(superUser).find((m) => m.key === 'gchain')!.submodules.filter((s) => s.group === group && !s.hidden).map((s) => s.label).join();
+  check(
+    `Procurement is ${PROCUREMENT_STRIP.replace(/,/g, ', ')}; Warehouse is ${WAREHOUSE_STRIP.replace(/,/g, ', ')}`,
+    chainStrip('Procurement') === PROCUREMENT_STRIP && chainStrip('Warehouse') === WAREHOUSE_STRIP,
+    `${chainStrip('Procurement')} | ${chainStrip('Warehouse')}`,
+  );
   // The Sales strip is the sales flow (2026-10-08, the owner's call).
   const salesStrip = menuFor(superUser)
     .find((m) => m.key === 'gops')!
@@ -369,11 +386,15 @@ async function main() {
   const jan1 = new Date('2026-01-01');
   const onDay = (n: number) => workingDayDate(jan1, n).toISOString().slice(0, 10);
   check(
-    'a working day counts Mon–Fri from the start, skipping weekends',
-    onDay(1) === '2026-01-01' && onDay(2) === '2026-01-02' && onDay(3) === '2026-01-05' && onDay(7) === '2026-01-09' && onDay(8) === '2026-01-12',
-    [1, 2, 3, 7, 8].map(onDay).join(' '),
+    'a working day counts Mon–Sat from the start, skipping Sundays',
+    onDay(1) === '2026-01-01' && onDay(3) === '2026-01-03' && onDay(4) === '2026-01-05' && onDay(9) === '2026-01-10' && onDay(10) === '2026-01-12',
+    [1, 3, 4, 9, 10].map(onDay).join(' '),
   );
-  check('a start on a weekend counts from the Monday after it', workingDayDate(new Date('2026-01-03'), 1).toISOString().slice(0, 10) === '2026-01-05');
+  check(
+    'a start on a Sunday counts from the Monday after it; a Saturday is a working day',
+    workingDayDate(new Date('2026-01-04'), 1).toISOString().slice(0, 10) === '2026-01-05' &&
+      workingDayDate(new Date('2026-01-03'), 1).toISOString().slice(0, 10) === '2026-01-03',
+  );
 
   // ── 2. Document numbering ──────────────────────────────────────────────────
   console.log('\nNumbering');
@@ -713,6 +734,11 @@ async function main() {
   const bsKat = await makeUser('Verify BS KAT', 'bskat@verify.local', ['back_support']);
   const bsHit = await makeUser('Verify BS HIT', 'bshit@verify.local', ['back_support']);
   const bsAll = await makeUser('Verify BS All', 'bsall@verify.local', ['back_support']);
+  // Nothing ticked: handles their own team (2026-10-13, the Technical Manager's rule).
+  const bsOwn = await makeUser('Verify BS Own', 'bsown@verify.local', ['back_support']);
+  await prisma.employee.create({
+    data: { employeeNo: `${TAG}EMP5`, firstName: 'Verify', lastName: 'BS Own', userId: bsOwn.id, industryId: kat.id },
+  });
   await prisma.userSupportTeam.createMany({
     data: [
       { userId: bsKat.id, industryId: kat.id },
@@ -729,9 +755,15 @@ async function main() {
     JSON.stringify(forKat),
   );
   check(
-    'a preparer with no team goes to the Back Support naming no team; nobody on the team never stalls it',
-    forNoTeam.join() === bsAll.id && onlyHit.join() === bsHit.id,
+    'a preparer with no team goes to every Back Support; nobody on the team never stalls it',
+    forNoTeam.length === 3 && onlyHit.join() === bsHit.id,
     `${JSON.stringify(forNoTeam)} / ${JSON.stringify(onlyHit)}`,
+  );
+  const withOwn = await supportersFor([...three, bsOwn.id], preparer.id);
+  check(
+    'with nothing ticked a Back Support handles their own team — never every team',
+    withOwn.includes(bsKat.id) && withOwn.includes(bsOwn.id) && !withOwn.includes(bsAll.id) && !withOwn.includes(bsHit.id),
+    JSON.stringify(withOwn),
   );
   const backRole = await prisma.role.findUniqueOrThrow({ where: { key: 'back_support' } });
   const viaStep = await approversForStep(
@@ -775,6 +807,23 @@ async function main() {
   const leaderStep = await approversForStep({ approverType: 'SUPERVISOR', roleId: roleB.id, userId: null } as unknown as ApprovalStep, katSeller.id);
   check('the SUPERVISOR step reads it', leaderStep.join() === leadKat.id, JSON.stringify(leaderStep));
   await prisma.userRole.deleteMany({ where: { roleId: roleB.id } });
+
+  // A Technical Manager step goes to the Technical Manager on the preparer's
+  // team (2026-10-13, the owner's report: a HIT costing waited on every
+  // Technical Manager), else every one. Real holders of the role may be on
+  // file, so the checks name only this script's two.
+  const tmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'technical_manager' } });
+  await prisma.userRole.createMany({ data: [{ userId: leadKat.id, roleId: tmRole.id }, { userId: leadHit.id, roleId: tmRole.id }] });
+  const tmStep = { approverType: 'ROLE', roleId: tmRole.id, userId: null } as unknown as ApprovalStep;
+  const tmForKat = await approversForStep(tmStep, katSeller.id);
+  const tmForLoner = await approversForStep(tmStep, loner.id);
+  check(
+    'a Technical Manager step goes to the Technical Manager on the preparer’s own team, not to every one',
+    tmForKat.includes(leadKat.id) && !tmForKat.includes(leadHit.id),
+    JSON.stringify(tmForKat),
+  );
+  check('a preparer with no team goes to every Technical Manager', tmForLoner.includes(leadKat.id) && tmForLoner.includes(leadHit.id));
+  await prisma.userRole.deleteMany({ where: { roleId: tmRole.id, userId: { in: [leadKat.id, leadHit.id] } } });
 
   // The preparer signs, at submit, the steps whose role they hold — only
   // where the route says so — and a manager may stand in only where it says so.
@@ -871,15 +920,106 @@ async function main() {
     `${mineReq.status} ${settledMine}`,
   );
 
+  // One signature per person (2026-10-13): an approver's Approve signs every
+  // LATER step they hold in their own right, at the same instant — only where
+  // the route lets the preparer sign — and a stand-in signs only their step.
+  console.log('\nOne signature per person');
+  const roleC = await prisma.role.create({ data: { key: `${TAG}_rolec`, name: 'Verify Finance Manager' } });
+  const dual = await makeUser('Verify Dual', 'dual@verify.local', []);
+  const coPrep = await makeUser('Verify Co Preparer', 'coprep@verify.local', []);
+  await prisma.userRole.createMany({
+    data: [
+      { userId: dual.id, roleId: roleA.id },
+      { userId: dual.id, roleId: roleC.id },
+    ],
+  });
+  const threeSteps = [
+    ...twoSteps,
+    { sequence: 3, name: 'Finance Manager', approverType: 'ROLE' as const, roleId: roleC.id },
+  ];
+  await prisma.approvalWorkflow.create({
+    data: { documentType: `${TAG}_cosign_doc`, name: 'Verify — one signature per person', preparerSigns: true, standIns: true, steps: { create: threeSteps } },
+  });
+  await prisma.approvalWorkflow.create({
+    data: { documentType: `${TAG}_coplain_doc`, name: 'Verify — asked at every step', steps: { create: threeSteps } },
+  });
+  const coReq = await submitForApproval({ documentType: `${TAG}_cosign_doc`, documentId: `${TAG}-cosign`, subject: `${SUBJECT} co-sign`, requesterId: coPrep.id });
+  await act({ requestId: coReq.id, userId: dual.id, action: 'APPROVED' });
+  const coActions = await prisma.approvalAction.findMany({ where: { requestId: coReq.id }, orderBy: { sequence: 'asc' } });
+  const coAfter = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: coReq.id } });
+  check(
+    'an approver holding a later step signs it with the same Approve, at the same instant — even with a step between',
+    coActions.length === 2 &&
+      coActions[0].sequence === 1 && coActions[0].coSignedWith === null &&
+      coActions[1].sequence === 3 && coActions[1].coSignedWith === 1 && coActions[1].approverId === dual.id &&
+      coActions[1].actedAt.getTime() === coActions[0].actedAt.getTime() &&
+      coAfter.status === 'PENDING' && coAfter.currentSequence === 2,
+    JSON.stringify({ coActions, status: coAfter.status, at: coAfter.currentSequence }),
+  );
+  check(
+    'nobody is asked for the step already signed: the next step waits, the co-signed one never queues',
+    (await pendingFor(approverB.id)).some((r) => r.id === coReq.id) &&
+      !(await pendingFor(dual.id)).some((r) => r.id === coReq.id) &&
+      (await prisma.notification.count({ where: { userId: dual.id, type: 'approval.required', title: { startsWith: 'Finance Manager:' } } })) === 0,
+  );
+  await act({ requestId: coReq.id, userId: approverB.id, action: 'APPROVED' });
+  const coDone = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: coReq.id } });
+  const coSlots = await approvalSlots(`${TAG}_cosign_doc`, `${TAG}-cosign`);
+  check(
+    'the middle step settles it, the co-signed step already standing; the paper prints one timestamp for the one person',
+    coDone.status === 'APPROVED' &&
+      coSlots.length === 3 &&
+      coSlots[2].coSigned === true && coSlots[2].name === dual.name &&
+      coSlots[2].at?.getTime() === coSlots[0].at?.getTime() && !coSlots[0].coSigned,
+    JSON.stringify(coSlots.map((x) => [x.step, x.name, x.at, x.coSigned])),
+  );
+  check(
+    'the trail says so',
+    (await prisma.auditLog.count({ where: { entityId: `${TAG}-cosign`, summary: { contains: 'signed with Reviewer (holds both)' } } })) === 1,
+  );
+  // A stand-in who also holds a later step signs only the step they stood in for.
+  await prisma.userRole.create({ data: { userId: bossOf.id, roleId: roleC.id } });
+  const standReq = await submitForApproval({ documentType: `${TAG}_cosign_doc`, documentId: `${TAG}-costand`, subject: `${SUBJECT} co-sign stand-in`, requesterId: coPrep.id });
+  await act({ requestId: standReq.id, userId: signer.id, action: 'APPROVED' });
+  await act({ requestId: standReq.id, userId: bossOf.id, action: 'APPROVED' });
+  const standAfter = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: standReq.id } });
+  check(
+    'a step held by nobody who pressed it is not signed; a stand-in signs only the step they stood in for',
+    standAfter.status === 'PENDING' &&
+      standAfter.currentSequence === 3 &&
+      (await prisma.approvalAction.count({ where: { requestId: standReq.id, coSignedWith: { not: null } } })) === 0,
+    `${standAfter.status} ${standAfter.currentSequence}`,
+  );
+  const plainCo = await submitForApproval({ documentType: `${TAG}_coplain_doc`, documentId: `${TAG}-coplain`, subject: `${SUBJECT} co-sign off`, requesterId: coPrep.id });
+  await act({ requestId: plainCo.id, userId: dual.id, action: 'APPROVED' });
+  check(
+    'where the route does not let the preparer sign, the same person is asked again at their later step',
+    (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: plainCo.id } })).currentSequence === 2 &&
+      (await prisma.approvalAction.count({ where: { requestId: plainCo.id } })) === 1,
+  );
+  const returnedCo = await submitForApproval({ documentType: `${TAG}_cosign_doc`, documentId: `${TAG}-coreturn`, subject: `${SUBJECT} co-sign returned`, requesterId: coPrep.id });
+  await act({ requestId: returnedCo.id, userId: dual.id, action: 'RETURNED', comment: 'fix it' });
+  check(
+    'a return signs nothing more',
+    (await prisma.approvalAction.count({ where: { requestId: returnedCo.id } })) === 1 &&
+      (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: returnedCo.id } })).status === 'CANCELLED',
+  );
+
   // ── 5. Amount bands pick the workflow ──────────────────────────────────────
   console.log('\nApproval thresholds');
 
-  // Someone has to hold the project_manager role, or these workflows route to
-  // nobody. The engine warns loudly in that case rather than silently stalling.
-  const pm = await makeUser('Verify PM', 'pm@verify.local', ['project_manager']);
+  // Someone has to hold the technical_manager role (the supplier bill's first
+  // step since 2026-10-15, when the project's manager became its Technical
+  // Manager), or these workflows route to nobody. The engine warns loudly in
+  // that case rather than silently stalling. The supplier bill's routes: the
+  // purchase requisition's became one route with no band on 2026-10-13, and
+  // the bill's still band at ₱50,000 and do not let the preparer sign — what
+  // these checks are about. The requester has no team, so the team-scoped step
+  // falls back to every Technical Manager.
+  const pm = await makeUser('Verify PM', 'pm@verify.local', ['technical_manager', 'project_manager']);
 
   const small = await submitForApproval({
-    documentType: 'purchase_request',
+    documentType: 'supplier_bill',
     documentId: `${TAG}-pr-small`,
     subject: `${SUBJECT} small PR`,
     amount: 20_000,
@@ -927,9 +1067,9 @@ async function main() {
 
   // With a second project manager the same document submits fine — and the
   // self-approval rule is what stops the requester acting on it.
-  const pm2 = await makeUser('Verify PM Two', 'pm2@verify.local', ['project_manager']);
+  const pm2 = await makeUser('Verify PM Two', 'pm2@verify.local', ['technical_manager', 'project_manager']);
   const pmOwnRequest = await submitForApproval({
-    documentType: 'purchase_request',
+    documentType: 'supplier_bill',
     documentId: `${TAG}-pr-pm-own`,
     subject: `${SUBJECT} PM raises their own PR`,
     amount: 20_000,
@@ -956,7 +1096,7 @@ async function main() {
   check('a small request takes the short route', smallWf?.steps.length === 1, `${smallWf?.steps.length} steps`);
 
   const large = await submitForApproval({
-    documentType: 'purchase_request',
+    documentType: 'supplier_bill',
     documentId: `${TAG}-pr-large`,
     subject: `${SUBJECT} large PR`,
     amount: 450_000,
@@ -966,13 +1106,13 @@ async function main() {
     where: { id: large.workflowId! },
     include: { steps: true },
   });
-  check('a large request collects more signatures', (largeWf?.steps.length ?? 0) === 3, `${largeWf?.steps.length} steps`);
+  check('a large request collects more signatures', (largeWf?.steps.length ?? 0) === 2, `${largeWf?.steps.length} steps`);
 
   await expectRejection(
     'the same document cannot be submitted twice while pending',
     () =>
       submitForApproval({
-        documentType: 'purchase_request',
+        documentType: 'supplier_bill',
         documentId: `${TAG}-pr-small`,
         subject: `${SUBJECT} duplicate`,
         amount: 20_000,
@@ -1583,6 +1723,36 @@ async function main() {
     );
     check('and still carries the strapline', wideListText.toUpperCase().includes((co.documentTagline ?? co.website ?? '').toUpperCase().slice(0, 12)));
 
+    // A table's group band (2026-10-14, the canvass sheet): runs of columns
+    // named over the head — the supplier's name in capitals, its contact
+    // under it — and redrawn with the head on every page the rows reach.
+    const grouped = await renderDocument({
+      title: 'Canvass Sheet',
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Item', 'Qty', 'Unit cost', 'Amount', 'Unit cost', 'Amount'],
+          groups: [
+            { label: '', span: 2 },
+            { label: 'Reference budget', sub: 'approved PR estimate', span: 2 },
+            { label: `${TAG} Supply Co.`, sub: 'Tel 0917 · Ana', span: 2, accent: true },
+          ],
+          rows: Array.from({ length: 40 }, (_, i) => [`Line ${i + 1}`, '1', '1.00', '1.00', '2.00', '2.00']),
+        },
+      ],
+    });
+    const groupedLines = pdfText(grouped).split('\n');
+    const groupedPages = pages(grouped);
+    check(
+      'a table can name runs of its columns over its head, the band repeated with the head on every page',
+      groupedPages >= 2 &&
+        groupedLines.filter((l) => l === `${TAG.toUpperCase()} SUPPLY CO.`).length === groupedPages &&
+        groupedLines.filter((l) => l === 'REFERENCE BUDGET').length === groupedPages &&
+        groupedLines.filter((l) => l === 'Tel 0917 · Ana').length === groupedPages,
+      `${groupedPages} pages: ${groupedLines.filter((l) => l.includes('SUPPLY') || l.includes('REFERENCE')).join(' | ')}`,
+    );
+
     // A document long enough for a second page carries the running header
     // — reference, document and number, the date as MM/DD/YYYY — on every
     // page after the first, and "Page n of m" on every page.
@@ -1856,8 +2026,9 @@ async function main() {
     );
     const clearanceLines = pdfText(clearance).split('\n');
     check(
-      'an email too long for its column breaks after its @',
-      clearanceLines.includes('camille.reyes@') && clearanceLines.includes('gruntechnology.com'),
+      // One line, shrunk to fit (2026-10-14, the owner's call: "email is only one liner throughout the PDF").
+      'an email too long for its column stays on one line, smaller, never broken after its @',
+      clearanceLines.includes('camille.reyes@gruntechnology.com') && !clearanceLines.includes('camille.reyes@'),
       clearanceLines.filter((l) => l.includes('camille') || l.includes('gruntech')).join(' / '),
     );
     const houseOverruns = signoffOverruns(clearanceRuns, 'REQUESTED BY', 595.28 - 36, 841.89 - 57.38);
@@ -2375,6 +2546,52 @@ async function main() {
     editor.rules['.empty'] === undefined,
   );
 
+  // ── The requisition page's lines (web/src/lib/prLines.ts) ─────────────────
+  {
+    console.log('\nPurchase requisition lines: import and paste');
+    const cats = [
+      { id: 'mat', code: 'MAT', name: 'Materials' },
+      { id: 'eqp', code: 'EQP', name: 'Equipment' },
+    ];
+    const csv = 'Budget line,Part No.,Item,Description,Unit,Qty,Est. unit cost\r\nMaterials,S3 R 68,"COMPRESSOR OIL, 4L","Corena ""S3""",pcs,2,"1,240.00"\r\n2,A048199,OIL FILTER,,,1,1650\r\n,,,,,,\r\n';
+    const fromCsv = rowsToPrLines(parseDelimited(csv), cats);
+    check(
+      'an imported CSV is read by its headings: quotes, doubled quotes, commas in a figure, a budget line by name or place',
+      fromCsv.lines.length === 2 && fromCsv.lines[0].name === 'COMPRESSOR OIL, 4L' && fromCsv.lines[0].description === 'Corena "S3"' &&
+        fromCsv.lines[0].estimatedCost === '1240' && fromCsv.lines[0].costCategoryId === 'mat' && fromCsv.lines[1].costCategoryId === 'eqp' &&
+        fromCsv.lines[1].unit === 'pcs',
+      JSON.stringify(fromCsv),
+    );
+    const pasted = rowsToPrLines(parseDelimited('A1\tAIR FILTER\t\tpc\t3\t1,250\nB2\t\t\tpc\t1\t5\nC3\tSEPARATOR\t\tpc\tx\t5'), cats);
+    check(
+      'a block pasted from a spreadsheet (tabs, no headings) is read in the page\'s column order, and a row that cannot be read is named, never dropped silently',
+      pasted.lines.length === 1 && pasted.lines[0].partNumber === 'A1' && pasted.lines[0].quantity === '3' && pasted.lines[0].estimatedCost === '1250' &&
+        pasted.skipped.length === 2 && /Row 2/.test(pasted.skipped[0]) && /Row 3/.test(pasted.skipped[1]),
+      JSON.stringify(pasted),
+    );
+    check(
+      'a line\'s amount is the server\'s centavo rule, and a budget line matches by code, name or "1 Materials"',
+      prLineAmount(4, 950.555) === Math.round(4 * 950.555 * 100) / 100 && matchCategory('eqp', cats) === 'eqp' &&
+        matchCategory('1 Materials', cats) === 'mat' && matchCategory('Labour', cats) === '',
+    );
+    const added = orderTotals([3502, 1200], 0.12, false);
+    const inside = orderTotals([2626.5], 0.12, true);
+    check(
+      'the order page\'s money is recalcPo\'s: VAT added to the subtotal, or taken out of it when the prices include it',
+      added.subtotal === 4702 && added.vatAmount === 564.24 && added.total === 5266.24 &&
+        inside.subtotal === 2626.5 && inside.vatAmount === 281.41 && inside.total === 2626.5,
+      JSON.stringify([added, inside]),
+    );
+    const many = Array.from({ length: 30 }, (_, i) => `SUPPLIER NUMBER ${i}`);
+    check(
+      'lines from the costing fill an empty preferred supplier with their suppliers, each once, and never overwrite one typed',
+      preferredFrom('', ['ABB', null, ' abb ', 'Schneider  PH', '']) === 'ABB, Schneider PH' &&
+        preferredFrom('Typed Co', ['ABB']) === 'Typed Co' &&
+        preferredFrom('', [null]) === '' &&
+        preferredFrom('', many).length <= 200,
+    );
+  }
+
   // ── Numeric inputs (web/src/lib/number.ts) ─────────────────────────────────
   console.log('\nNumeric inputs');
   check(
@@ -2825,6 +3042,62 @@ async function main() {
     long?.rows.length === MAX_ROWS && long?.truncatedRows === true,
     `${long?.rows.length} ${long?.truncatedRows}`,
   );
+
+  // ── The name a paper is saved under, and the print ticket (2026-10-12) ────
+  console.log('\nPaper names and print tickets');
+  check(
+    'a paper is named <Kind> <Number> R<n> - <Author> - <the document\'s Manila day>',
+    paperFileName({ kind: 'Quotation', number: '0062602018', revision: 0, author: 'Carter Gasiong', date: new Date('2026-10-07T17:30:00Z') }) ===
+      'Quotation 0062602018 R0 - Carter Gasiong - 2026-10-08.pdf' &&
+      paperFileName({ kind: 'Sales Order', number: '4720', author: 'Carter Gasiong', date: '2026-05-30' }) ===
+        'Sales Order 4720 - Carter Gasiong - 2026-05-30.pdf',
+    paperFileName({ kind: 'Quotation', number: '0062602018', revision: 0, author: 'Carter Gasiong', date: new Date('2026-10-07T17:30:00Z') }),
+  );
+  const oddName = paperFileName({ kind: 'Purchase Order', number: 'PO/2026:01*', author: 'A  "B"  <C>|D', date: null });
+  check(
+    'a character a file system refuses becomes "-", spaces run as one, and a missing part drops out',
+    oddName === 'Purchase Order PO-2026-01- - A -B- -C--D.pdf' &&
+      paperFileName({ kind: 'Lead', number: 'GT-LD-1', author: null, date: undefined }) === 'Lead GT-LD-1.pdf',
+    oddName,
+  );
+  const longName = paperFileName({ kind: 'Quotation', number: 'X'.repeat(300), author: 'Someone', date: '2026-01-01' });
+  check('a name is kept under 150 characters before its extension', longName.length <= 154 && longName.endsWith('.pdf'), String(longName.length));
+  check(
+    "a list's old file name becomes its kind; a name outside ASCII travels whole in filename*",
+    kindOfFile('sales-forecast.pdf') === 'Sales Forecast' &&
+      contentDisposition('Lead 1 - Peñalosa.pdf') === `inline; filename="Lead 1 - Pe_alosa.pdf"; filename*=UTF-8''Lead%201%20-%20Pe%C3%B1alosa.pdf`,
+    contentDisposition('Lead 1 - Peñalosa.pdf'),
+  );
+  check(
+    'a ticket names an API path only, in one spelling, with any ticket parameter taken out',
+    ticketPath('/api/quotations/1/revisions/2/pdf?option=x&ticket=abc') === '/api/quotations/1/revisions/2/pdf?option=x' &&
+      ticketPath('/api/a/pdf?q=x%20y') === ticketPath('/api/a/pdf?q=x+y') &&
+      ticketPath('https://evil.example/api/a/pdf') === null && ticketPath('//evil.example/api/a') === null && ticketPath('/g-ops/x') === null,
+  );
+  {
+    const t0 = 1_800_000_000_000;
+    const paper = '/api/quotations/q1/revisions/r1/pdf';
+    const t = issueTicket('user1', paper, t0);
+    const other = redeemTicket(t, '/api/quotations/q2/revisions/r1/pdf', t0 + 1000);
+    const forgedUser = redeemTicket(t.replace('.user1.', '.user2.'), paper, t0 + 1000);
+    const late = redeemTicket(issueTicket('user1', paper, t0), paper, t0 + TICKET_TTL_MS + 1);
+    const first = redeemTicket(t, paper, t0 + 1000);
+    const viewer = redeemTicket(t, paper, t0 + 1000 + TICKET_REUSE_MS);
+    const again = redeemTicket(t, paper, t0 + 1001 + TICKET_REUSE_MS);
+    const muchLater = redeemTicket(t, paper, t0 + 1000 + TICKET_TTL_MS + TICKET_REUSE_MS - 1);
+    check(
+      'a ticket opens its own path for its own person within two minutes, and again for a minute after (a viewer extension) — another path, another person, late or after that minute are refused',
+      'userId' in first && first.userId === 'user1' &&
+        'userId' in viewer && viewer.userId === 'user1' &&
+        'refused' in other && other.refused === 'forged' &&
+        'refused' in forgedUser && forgedUser.refused === 'forged' &&
+        'refused' in late && late.refused === 'expired' &&
+        'refused' in again && again.refused === 'used' &&
+        'refused' in muchLater && muchLater.refused === 'used' &&
+        'refused' in (redeemTicket('garbage', paper, t0) as object),
+      JSON.stringify({ first, viewer, other, forgedUser, late, again, muchLater }),
+    );
+  }
 
   // ── Attachments printed behind a document (2026-10-12) ────────────────────
   console.log('\nAttachments on paper');

@@ -75,8 +75,18 @@ import { useUnsavedChanges } from '../../components/Navigation';
 const DOCS = [
   { type: 'quotation', label: 'Quotation', plural: 'Quotations' },
   { type: 'sales_order', label: 'Sales Order', plural: 'Sales orders' },
+  // The Project Costing (2026-10-13): its Scope of Work chart prints behind the layout, unchanged by it.
+  { type: 'costing', label: 'Costing', plural: 'Costings' },
 ] as const;
 type DocType = (typeof DOCS)[number]['type'];
+
+/** A costing as the real-document picker lists it. */
+interface CostingPick {
+  id: string;
+  number: string;
+  title: string;
+  customer: { name: string } | null;
+}
 
 interface Loaded {
   type: string;
@@ -346,7 +356,7 @@ const HIDDEN_NOTE_KEY = 'pdfTemplates.hiddenCompanyNote';
  */
 export function PdfTemplates() {
   const [params] = useSearchParams();
-  const docType: DocType = params.get('doc') === 'sales_order' ? 'sales_order' : 'quotation';
+  const docType: DocType = DOCS.find((d) => d.type === params.get('doc'))?.type ?? 'quotation';
   return <PdfTemplateEditor key={docType} docType={docType} />;
 }
 
@@ -1226,7 +1236,7 @@ function TextBody({ block, values, scale, label }: { block: TextBlock; values: R
   );
 }
 
-function cellText(cell: PdfCell | undefined): { title?: string; body?: string } {
+function cellText(cell: PdfCell | undefined): { title?: string; body?: string; plain?: boolean; accent?: string; note?: string } {
   if (cell === undefined) return {};
   return typeof cell === 'object' ? cell : { body: cell };
 }
@@ -1260,8 +1270,10 @@ function ItemsBody({ block, sample, values, scale, rows }: { block: ItemsBlock; 
               const cell = cellText(row.cells[c.key]);
               return (
                 <span key={n} style={{ textAlign: c.align }}>
-                  {cell.title && <b>{cell.title}</b>}
+                  {cell.title && (cell.plain ? <span>{cell.title}</span> : <b>{cell.title}</b>)}
                   {cell.body && <span className="pt-items-body" style={cell.title ? { color: block.bodyColor } : undefined}>{cell.body}</span>}
+                  {block.lineNotes !== false && cell.accent && <span className="pt-items-body" style={{ color: block.headingColor }}>{cell.accent}</span>}
+                  {block.lineNotes !== false && cell.note && <span className="pt-items-body" style={{ color: block.bodyColor }}>{cell.note}</span>}
                 </span>
               );
             })}
@@ -1966,6 +1978,11 @@ function ItemsSettings({
       <ColorField label="Product names and figures" value={block.textColor} disabled={disabled} onChange={(v) => onPatch({ textColor: v }, 'textColor')} />
       <ColorField label="Descriptions" value={block.bodyColor} disabled={disabled} onChange={(v) => onPatch({ bodyColor: v }, 'bodyColor')} />
       <ColorField label="Rules" value={block.ruleColor} disabled={disabled} onChange={(v) => onPatch({ ruleColor: v }, 'ruleColor')} />
+      <Checkbox
+        checked={block.lineNotes !== false}
+        onChange={(v) => !disabled && onPatch({ lineNotes: v })}
+        label="A line's supplier and note, under its unit cost (the costing)"
+      />
       <p className="hint">
         The table starts where it is on page 1 and carries on from the top guide on later pages, its headings repeated. What follows it moves with it.
       </p>
@@ -2021,9 +2038,13 @@ function PreviewControl({
           ? api
               .get<{ rows: QuoteRow[] }>(`/quotations${qs({ search, pageSize: 6 })}`)
               .then((r) => r.rows.map((x) => ({ id: x.id, number: x.number, name: x.customer?.name ?? '', sub: x.subject })))
-          : api
-              .get<{ rows: OrderRow[] }>(`/sales-orders${qs({ search, pageSize: 6 })}`)
-              .then((r) => r.rows.map((x) => ({ id: x.id, number: x.number, name: x.customer?.name ?? '', sub: x.quotation?.subject ?? '' })));
+          : docType === 'costing'
+            ? api
+                .get<{ rows: CostingPick[] }>(`/costings${qs({ search, pageSize: 6 })}`)
+                .then((r) => r.rows.map((x) => ({ id: x.id, number: x.number, name: x.customer?.name ?? '', sub: x.title })))
+            : api
+                .get<{ rows: OrderRow[] }>(`/sales-orders${qs({ search, pageSize: 6 })}`)
+                .then((r) => r.rows.map((x) => ({ id: x.id, number: x.number, name: x.customer?.name ?? '', sub: x.quotation?.subject ?? '' })));
       load
         .then((list) => {
           setRows(list);

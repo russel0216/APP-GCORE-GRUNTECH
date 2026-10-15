@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { env } from '../env';
 import { forbidden, unauthorized } from '../http/kit';
 import { can, resolveUser, type ResolvedUser } from '../permissions/resolve';
+import { redeemTicket, ticketPath } from '../shared/printTickets';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -32,6 +33,33 @@ function bearer(req: Request): string | null {
 /** Requires a valid token and loads the user's effective permissions. */
 export const authenticate: RequestHandler = (req, _res, next) => {
   const token = bearer(req);
+  const ticket = typeof req.query.ticket === 'string' ? req.query.ticket : null;
+  // A print ticket (shared/printTickets.ts) stands in for the bearer on the
+  // ONE GET it was issued for — the tab a paper opens in carries no token.
+  if (!token && ticket) {
+    // Two routers under one prefix (/api/jobs) each authenticate: the
+    // ticket was spent by the first, and the user it named stands.
+    if (req.user) return next();
+    if (req.method !== 'GET') return next(unauthorized('A print ticket opens a paper, nothing else'));
+    const path = ticketPath(req.originalUrl);
+    const redeemed = path ? redeemTicket(ticket, path) : { refused: 'malformed' as const };
+    if ('refused' in redeemed) {
+      return next(
+        unauthorized(
+          redeemed.refused === 'used' || redeemed.refused === 'expired'
+            ? 'That print link was already used or has expired — print it again from G-CORE'
+            : 'That print link is not valid — print it again from G-CORE',
+        ),
+      );
+    }
+    return void resolveUser(redeemed.userId)
+      .then((user) => {
+        if (!user) return next(unauthorized('Your account is no longer active'));
+        req.user = user;
+        next();
+      })
+      .catch(next);
+  }
   if (!token) return next(unauthorized());
 
   let payload: TokenPayload;
