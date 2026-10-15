@@ -25,7 +25,7 @@ import { CANVASS_CODE_MOVED, moveCanvassCode } from '../src/shared/canvassCode';
 import { canvassFigures } from '../src/shared/canvassMath';
 import { deleteAttachment } from '../src/shared/attachments';
 import { PDFDocument } from 'pdf-lib';
-import { submitForApproval, act, pickWorkflow } from '../src/shared/approvals';
+import { submitForApproval, act, pickWorkflow, reopenApproved } from '../src/shared/approvals';
 import { budgetPosition } from '../src/routes/jobs';
 import {
   receiveStock,
@@ -2899,6 +2899,56 @@ async function main() {
       `${settledTwice} ${movesAfterTwice}`,
     );
 
+    // Pulled back after approval (2026-10-16, the owner's call): an issued
+    // slip goes back to a draft through the engine's one door, its stock
+    // returned and the project's cost reversed by rows of its own; once the
+    // receiver confirms it, it is refused.
+    {
+      const made = await api(keeperToken, 'POST', '/stock-issues', { warehouseId: warehouse.id, purpose: `${TAG} issue to pull back` });
+      const backId = String(made.body.id);
+      await api(keeperToken, 'POST', `/stock-issues/${backId}/items`, { itemId: item.id, quantity: 1 });
+      await api(keeperToken, 'PATCH', `/stock-issues/${backId}`, { jobId: job.id });
+      const approveIt = async () => {
+        await api(keeperToken, 'POST', `/stock-issues/${backId}/submit`);
+        const open = await prisma.approvalRequest.findFirst({ where: { documentType: 'stock_issue', documentId: backId, status: 'PENDING' } });
+        if (open) await api(bossToken, 'POST', `/approvals/${open.id}/act`, { action: 'APPROVED' });
+        return (await prisma.stockIssue.findUniqueOrThrow({ where: { id: backId } })).status;
+      };
+      const before = await onHand();
+      const incurredBefore = (await position()).incurred;
+      const firstIssue = await approveIt();
+      const whileOut = await onHand();
+      const back = await api(keeperToken, 'POST', `/approvals/reopen/stock_issue/${backId}`, { reason: `${TAG} wrong project` });
+      const backRow = await prisma.stockIssue.findUniqueOrThrow({ where: { id: backId } });
+      const ledgerNet = await prisma.jobCostEntry.aggregate({ where: { sourceType: 'stock_issue', sourceId: backId }, _sum: { amount: true } });
+      const reversals = await prisma.jobCostEntry.count({ where: { sourceType: 'stock_issue', sourceId: backId, amount: { lt: 0 } } });
+      check(
+        'an issued outgoing slip is pulled back to a draft by its issuer: the stock comes back and the project’s cost is reversed by negative rows, never deleted',
+        firstIssue === 'ISSUED' &&
+          money(before - whileOut, 1) &&
+          back.status === 200 &&
+          backRow.status === 'DRAFT' &&
+          backRow.issuedAt === null &&
+          money(await onHand(), before) &&
+          money((await position()).incurred, incurredBefore) &&
+          num(ledgerNet._sum.amount) === 0 &&
+          reversals === 2,
+        `${firstIssue}; ${before} → ${whileOut} → ${await onHand()}; ${back.status} ${JSON.stringify(back.body).slice(0, 140)}; ${backRow.status}; incurred ${incurredBefore} → ${(await position()).incurred}; net ${ledgerNet._sum.amount} (${reversals} reversals)`,
+      );
+      const secondIssue = await approveIt();
+      const confirmed = await api(bossToken, 'POST', `/stock-issues/${backId}/receive`, { note: `${TAG} signed copy` });
+      const refused = await api(keeperToken, 'POST', `/approvals/reopen/stock_issue/${backId}`, { reason: `${TAG} too late` });
+      check(
+        'sent again it issues again; once the receiver confirmed it, pulling it back is refused and says why',
+        secondIssue === 'ISSUED' &&
+          confirmed.status === 200 &&
+          refused.status === 400 &&
+          String(refused.body.error ?? '').includes('confirmed received') &&
+          (await prisma.stockIssue.findUniqueOrThrow({ where: { id: backId } })).status === 'ISSUED',
+        `${secondIssue}; confirm ${confirmed.status}; ${refused.status} ${JSON.stringify(refused.body).slice(0, 140)}`,
+      );
+    }
+
     const issuedEdit = await api(keeperToken, 'PATCH', `/stock-issues/${draftIssueId}`, { purpose: `${TAG} after the fact` });
     const issuedDelete = await api(bossToken, 'DELETE', `/stock-issues/${draftIssueId}`);
     const issuedFlags = await api(bossToken, 'GET', `/stock-issues/${draftIssueId}`);
@@ -4537,6 +4587,141 @@ async function main() {
         num(bltLine.quantity) === expectedQty &&
         (await prisma.approvalRequest.count({ where: { documentType: 'purchase_request', documentId: autoPrs[0].id } })) === 0,
       `${firstAdd.length}/${secondAdd.length}/${gskAdd.length}; ${autoPrs.length} PR(s) ${autoPrs[0]?.status} ${autoPrs[0]?.items.length} line(s); bolt ${bltLine ? num(bltLine.quantity) : 'none'} (expected ${expectedQty})`,
+    );
+  }
+
+  // ── Pulled back after approval (2026-10-16) ───────────────────────────────
+  // The owner's call: "every approval request can be pulled back and return
+  // to draft, even if it's fully approved". The requisition's approval
+  // committed budget, the order's issue replaced it with its own: pulling
+  // either back undoes exactly that, and anything standing on it refuses.
+  console.log('\nPulled back after approval');
+  {
+    const engResolved = (await resolveUser(engineer.id))!;
+    const procResolved = (await resolveUser(procurement.id))!;
+    const finResolved = (await resolveUser(finance.id))!;
+    const committedBefore = (await position()).committed;
+    const backPr = await prisma.purchaseRequest.create({
+      data: {
+        number: await nextNumber('purchase_request'),
+        kind: 'DIRECT_TO_JOB',
+        jobId: job.id,
+        warehouseId: warehouse.id,
+        requestedById: engineer.id,
+        purpose: `${TAG} request to pull back`,
+        items: {
+          create: [{ itemId: item.id, costCategoryId: materials.id, description: `${TAG} Stainless pipe`, quantity: D(10), unit: 'pcs', estimatedCost: D(100), estimatedAmount: D(1_000) }],
+        },
+      },
+      include: { items: true },
+    });
+    const approvePr = async () => {
+      await prisma.purchaseRequest.update({ where: { id: backPr.id }, data: { status: 'PENDING_APPROVAL' } });
+      const r = await submitForApproval({
+        documentType: 'purchase_request',
+        documentId: backPr.id,
+        documentNumber: backPr.number,
+        subject: `${TAG} request to pull back`,
+        amount: 1_000,
+        requesterId: engineer.id,
+      });
+      await act({ requestId: r.id, userId: pm.id, action: 'APPROVED' });
+      return r;
+    };
+    const prReq = await approvePr();
+    const committedApproved = (await position()).committed;
+    const strangerTry = await reopenApproved('purchase_request', backPr.id, finResolved, `${TAG} not mine`).then(() => 'reopened', (e: Error) => e.message);
+    const prBack = await reopenApproved('purchase_request', backPr.id, engResolved, `${TAG} wrong quantity`).then(() => 'ok', (e: Error) => e.message);
+    const prRow = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: backPr.id } });
+    const prReqRow = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: prReq.id } });
+    check(
+      'an approved requisition is pulled back to a draft by its requester (nobody else): its request closes, and the budget its approval committed is released by a negative row',
+      money(committedApproved - committedBefore, 1_000) &&
+        strangerTry !== 'reopened' &&
+        prBack === 'ok' &&
+        prRow.status === 'DRAFT' &&
+        prRow.approvedAt === null &&
+        prReqRow.status === 'CANCELLED' &&
+        prReqRow.reopenedById === engineer.id &&
+        money((await position()).committed, committedBefore),
+      `${committedBefore} → ${committedApproved} → ${(await position()).committed}; stranger: ${strangerTry}; ${prBack}; ${prRow.status} ${prReqRow.status}`,
+    );
+
+    await approvePr();
+    const backPo = await prisma.purchaseOrder.create({
+      data: {
+        number: await nextNumber('purchase_order'),
+        kind: 'DIRECT_TO_JOB',
+        supplierId: supplier.id,
+        requestId: backPr.id,
+        jobId: job.id,
+        warehouseId: warehouse.id,
+        createdById: procurement.id,
+        notes: `${TAG} order to pull back`,
+        subtotal: D(900),
+        total: D(900),
+        items: {
+          create: [{ requestItemId: backPr.items[0].id, itemId: item.id, costCategoryId: materials.id, description: `${TAG} Stainless pipe`, quantity: D(10), unit: 'pcs', unitPrice: D(90), amount: D(900) }],
+        },
+      },
+    });
+    const prWithOrder = await reopenApproved('purchase_request', backPr.id, engResolved, `${TAG} again`).then(() => 'ok', (e: Error) => e.message);
+    check(
+      'a requisition with a purchase order standing on it (even a draft one) is refused, naming the order',
+      prWithOrder.includes(backPo.number) && (await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: backPr.id } })).status === 'APPROVED',
+      prWithOrder,
+    );
+
+    const approvePo = async () => {
+      await prisma.purchaseOrder.update({ where: { id: backPo.id }, data: { status: 'PENDING_APPROVAL' } });
+      const r = await submitForApproval({
+        documentType: 'purchase_order',
+        documentId: backPo.id,
+        documentNumber: backPo.number,
+        subject: `${TAG} order to pull back`,
+        amount: 900,
+        requesterId: procurement.id,
+      });
+      await act({ requestId: r.id, userId: purchMgr.id, action: 'APPROVED' });
+    };
+    await approvePo();
+    const issuedPo = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: backPo.id } });
+    const committedIssued = (await position()).committed;
+    const poBack = await reopenApproved('purchase_order', backPo.id, procResolved, `${TAG} wrong supplier`).then(() => 'ok', (e: Error) => e.message);
+    const poRow = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: backPo.id } });
+    const prAfterPo = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: backPr.id }, include: { items: true } });
+    check(
+      'an issued order is pulled back to a draft by its buyer: its firm commitment reversed, the request’s ordered quantity and status put back, and the request’s commitment restored',
+      issuedPo.status === 'ISSUED' &&
+        money(committedIssued - committedBefore, 900) &&
+        poBack === 'ok' &&
+        poRow.status === 'DRAFT' &&
+        poRow.issuedAt === null &&
+        prAfterPo.status === 'APPROVED' &&
+        num(prAfterPo.items[0].orderedQty) === 0 &&
+        money((await position()).committed - committedBefore, 1_000),
+      `${issuedPo.status}; committed ${committedIssued} → ${(await position()).committed} (from ${committedBefore}); ${poBack}; ${poRow.status}; PR ${prAfterPo.status} ordered ${num(prAfterPo.items[0].orderedQty)}`,
+    );
+
+    await approvePo();
+    const committedAgain = (await position()).committed;
+    const draftIn = await prisma.receiving.create({
+      data: {
+        number: await nextNumber('receiving'),
+        orderId: backPo.id,
+        warehouseId: warehouse.id,
+        receivedById: procurement.id,
+        status: 'DRAFT',
+        items: { create: [{ orderItemId: (await prisma.purchaseOrderItem.findFirstOrThrow({ where: { orderId: backPo.id } })).id, quantity: D(1), unitCost: D(90) }] },
+      },
+    });
+    const poWithGoods = await reopenApproved('purchase_order', backPo.id, procResolved, `${TAG} again`).then(() => 'ok', (e: Error) => e.message);
+    check(
+      'issued a second time it commits once more at the order’s price (not twice); with goods being received against it, pulling it back is refused, naming the report',
+      money(committedAgain - committedBefore, 900) &&
+        poWithGoods.includes(draftIn.number) &&
+        (await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: backPo.id } })).status === 'ISSUED',
+      `${committedAgain}; ${poWithGoods}`,
     );
   }
 

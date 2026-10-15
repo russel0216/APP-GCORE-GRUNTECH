@@ -21,6 +21,7 @@ import {
   slotSignatories,
   preparedAt,
   mayDecide,
+  onApprovalReopened,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { registerAttachmentGuard } from '../shared/attachments';
@@ -28,7 +29,7 @@ import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
 import { renderDocument, formatDate, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { manilaDate } from '../shared/day';
 import { LIST_CAP, listReference, recordNamed, choice, sendListPdf } from '../shared/listPaper';
-import { issueStock, postJobCost, releaseCommitment } from '../shared/inventory';
+import { issueStock, postJobCost, releaseCommitment, returnIssuedStock, reverseJobCost } from '../shared/inventory';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
@@ -1212,6 +1213,70 @@ export async function settlePullout(documentId: string, outcome: ApprovalOutcome
 
 onApprovalSettled(DOC, async (request, outcome) => {
   await settlePullout(request.documentId, outcome);
+});
+
+/**
+ * Pulled back after approval (2026-10-16, the owner's call): PULLED_OUT →
+ * DRAFT, `postPullout` undone by movements of its own — the stock put back
+ * at the cost each line left at, a request's pulled quantities and status
+ * put back and its commitment restored by what the slip released, the
+ * project's cost reversed. A request no longer open (cancelled meanwhile)
+ * refuses it.
+ */
+onApprovalReopened(DOC, {
+  may: async (actor, id) => {
+    const slip = await prisma.pulloutSlip.findUnique({ where: { id }, select: { preparedById: true } });
+    return !!slip && mayHandle(actor, slip);
+  },
+  reopen: async ({ documentId, tx, actor, reason }) => {
+    const slip = await tx.pulloutSlip.findUnique({ where: { id: documentId }, include: { items: true, request: { include: { items: true } } } });
+    if (!slip) throw notFound('Pull-out slip not found');
+    if (slip.status !== 'PULLED_OUT') throw badRequest(`${slip.number} is ${statusLabel(slip.status).toLowerCase()} — only a pulled-out slip is pulled back`);
+    if (slip.request && !['APPROVED', 'PARTIALLY_ORDERED', 'ORDERED'].includes(slip.request.status)) {
+      throw badRequest(`${slip.request.number} is ${statusLabel(slip.request.status).toLowerCase()} — ${slip.number} cannot be pulled back`);
+    }
+    const claimed = await tx.pulloutSlip.updateMany({
+      where: { id: slip.id, status: 'PULLED_OUT' },
+      data: { status: 'DRAFT', releasedById: null, releasedAt: null },
+    });
+    if (!claimed.count) throw badRequest(`${slip.number} changed a moment ago — reload to see where it stands`);
+    const why = `${slip.number} pulled back to draft by ${actor.name}: ${reason}`;
+    const prLines = new Map((slip.request?.items ?? []).map((i) => [i.id, i]));
+    for (const line of slip.items) {
+      await returnIssuedStock(tx, {
+        itemId: line.itemId,
+        warehouseId: slip.warehouseId,
+        quantity: num(line.quantity),
+        unitCost: num(line.unitCost),
+        sourceType: DOC,
+        sourceId: slip.id,
+        sourceNumber: slip.number,
+        notes: why,
+        createdById: actor.id,
+      });
+      const pr = slip.kind === 'PURCHASE_REQUEST' && line.sourceLineId ? prLines.get(line.sourceLineId) : undefined;
+      if (pr) {
+        const left = Math.max(0, Math.round((num(pr.pulledQty) - num(line.quantity)) * 1000) / 1000);
+        await tx.purchaseRequestItem.update({ where: { id: pr.id }, data: { pulledQty: D(left) } });
+        pr.pulledQty = D(left);
+      }
+    }
+    if (slip.request) {
+      const items = [...prLines.values()];
+      const none = items.every((i) => num(i.orderedQty) + num(i.pulledQty) < 0.0005);
+      const covered = items.every((i) => num(i.orderedQty) + num(i.pulledQty) >= num(i.quantity) - 0.0005);
+      await tx.purchaseRequest.update({ where: { id: slip.request.id }, data: { status: none ? 'APPROVED' : covered ? 'ORDERED' : 'PARTIALLY_ORDERED' } });
+      await reverseJobCost(tx, {
+        sourceType: 'purchase_request',
+        sourceId: slip.request.id,
+        states: ['COMMITTED'],
+        description: `Taken from stock on ${slip.number}`,
+        reason: why,
+        createdById: actor.id,
+      });
+    }
+    await reverseJobCost(tx, { sourceType: DOC, sourceId: slip.id, reason: why, sourceNumber: slip.number, createdById: actor.id });
+  },
 });
 
 // The delivery receipt or photos: read as the slip is read, added while it

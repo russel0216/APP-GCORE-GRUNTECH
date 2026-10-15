@@ -354,3 +354,157 @@ export async function overBudgetIsBlocked(): Promise<boolean> {
   if (!setting) return true;
   return setting.value !== false;
 }
+
+// ════════════════════════════════════════════════════════════════════
+//  PULLING AN APPROVED DOCUMENT BACK (2026-10-16)
+// ════════════════════════════════════════════════════════════════════
+//
+// The owner's call: "every approval request can be pulled back and return to
+// draft, even if it's fully approved". What an approval moved is moved back
+// by a movement of its own — a stock card line, a ledger row — never by
+// deleting what was written, so the card and the ledger stay a history.
+
+/**
+ * Takes back a receipt: the quantity leaves at the cost it came in at, and
+ * the average is worked back to what the rest cost before it arrived.
+ * Refused when that much is no longer available at the warehouse — the
+ * stock has moved on (issued, lent, pulled out).
+ */
+export async function reverseReceipt(tx: Tx, input: MoveInput & { unitCost: number }) {
+  const balance = await tx.inventoryBalance.findUnique({
+    where: { itemId_warehouseId: { itemId: input.itemId, warehouseId: input.warehouseId } },
+    include: { item: { select: { code: true, name: true } } },
+  });
+  const onHand = num(balance?.quantity);
+  const available = qty(onHand - num(balance?.borrowedQty));
+  if (!balance || available + 0.0005 < input.quantity) {
+    const label = balance ? `${balance.item.code} — ${balance.item.name}` : 'an item';
+    throw badRequest(
+      `The stock it brought in has moved on: ${available} of ${label} is available at the warehouse, ${input.quantity} came in on ${input.sourceNumber ?? 'it'}`,
+    );
+  }
+  const newQty = qty(onHand - input.quantity);
+  const average = num(balance.averageCost);
+  const remainingValue = onHand * average - input.quantity * input.unitCost;
+  // Nothing left, or a value the arithmetic cannot carry (a cost moved by a
+  // later receipt): the average stands as it is.
+  const newAverage = newQty > 0 && remainingValue > 0 ? remainingValue / newQty : average;
+  await tx.inventoryBalance.update({
+    where: { itemId_warehouseId: { itemId: input.itemId, warehouseId: input.warehouseId } },
+    data: { quantity: D(newQty), averageCost: D(Math.round(newAverage * 10000) / 10000) },
+  });
+  await tx.inventoryTransaction.create({
+    data: {
+      itemId: input.itemId,
+      warehouseId: input.warehouseId,
+      type: 'ADJUSTMENT',
+      quantity: D(-input.quantity),
+      unitCost: D(input.unitCost),
+      balanceAfter: D(newQty),
+      sourceType: input.sourceType,
+      sourceId: input.sourceId ?? null,
+      sourceNumber: input.sourceNumber ?? null,
+      notes: input.notes ?? 'Receipt pulled back',
+      createdById: input.createdById ?? null,
+    },
+  });
+}
+
+/**
+ * Puts back what an issue or a pull-out took, at the cost it left at — the
+ * average moves exactly as a receipt at that cost would, but the item's last
+ * purchase cost is left alone (nothing was bought).
+ */
+export async function returnIssuedStock(tx: Tx, input: MoveInput & { unitCost: number }) {
+  if (input.quantity <= 0) return;
+  const balance = await tx.inventoryBalance.findUnique({
+    where: { itemId_warehouseId: { itemId: input.itemId, warehouseId: input.warehouseId } },
+  });
+  const onHand = num(balance?.quantity);
+  const average = num(balance?.averageCost);
+  const newQty = qty(onHand + input.quantity);
+  const newAverage = onHand > 0 ? (onHand * average + input.quantity * input.unitCost) / newQty : input.unitCost;
+  await tx.inventoryBalance.upsert({
+    where: { itemId_warehouseId: { itemId: input.itemId, warehouseId: input.warehouseId } },
+    create: { itemId: input.itemId, warehouseId: input.warehouseId, quantity: D(newQty), averageCost: D(Math.round(newAverage * 10000) / 10000) },
+    update: { quantity: D(newQty), averageCost: D(Math.round(newAverage * 10000) / 10000) },
+  });
+  await tx.inventoryTransaction.create({
+    data: {
+      itemId: input.itemId,
+      warehouseId: input.warehouseId,
+      type: 'ADJUSTMENT',
+      quantity: D(input.quantity),
+      unitCost: D(input.unitCost),
+      balanceAfter: D(newQty),
+      sourceType: input.sourceType,
+      sourceId: input.sourceId ?? null,
+      sourceNumber: input.sourceNumber ?? null,
+      notes: input.notes ?? 'Issue pulled back',
+      createdById: input.createdById ?? null,
+    },
+  });
+}
+
+/** What a pulled-back posting's reversing rows say after the original's words. */
+export const PULLED_BACK = ' — pulled back';
+
+/**
+ * Posts the negative of every ledger row a source wrote (net of reversals
+ * already posted, so a second pull-back after a second approval reverses
+ * only the second posting), per job, budget line and state. With
+ * `description`, only rows carrying it — a release one document posted
+ * against another's commitment ("Superseded by order PO-1") — and their own
+ * reversals count. Returns the reversed nets.
+ */
+export async function reverseJobCost(
+  tx: Tx,
+  opts: {
+    sourceType: string;
+    sourceId: string;
+    states?: Array<'COMMITTED' | 'INCURRED' | 'CONSUMED'>;
+    description?: string;
+    reason: string;
+    sourceNumber?: string | null;
+    createdById?: string | null;
+  },
+) {
+  const rows = await tx.jobCostEntry.findMany({
+    where: {
+      sourceType: opts.sourceType,
+      sourceId: opts.sourceId,
+      ...(opts.states ? { state: { in: opts.states } } : {}),
+      ...(opts.description ? { description: { in: [opts.description, opts.description + PULLED_BACK] } } : {}),
+    },
+  });
+  const nets = new Map<string, { jobId: string; costCategoryId: string; state: 'COMMITTED' | 'INCURRED' | 'CONSUMED'; amount: Prisma.Decimal }>();
+  for (const row of rows) {
+    const key = `${row.jobId}|${row.costCategoryId}|${row.state}`;
+    const prior = nets.get(key);
+    nets.set(key, {
+      jobId: row.jobId,
+      costCategoryId: row.costCategoryId,
+      state: row.state as 'COMMITTED' | 'INCURRED' | 'CONSUMED',
+      amount: (prior?.amount ?? new Prisma.Decimal(0)).plus(row.amount),
+    });
+  }
+  const reversed: Array<{ jobId: string; costCategoryId: string; state: string; amount: number }> = [];
+  for (const net of nets.values()) {
+    if (net.amount.isZero()) continue;
+    await tx.jobCostEntry.create({
+      data: {
+        jobId: net.jobId,
+        costCategoryId: net.costCategoryId,
+        state: net.state,
+        amount: net.amount.negated(),
+        sourceType: opts.sourceType,
+        sourceId: opts.sourceId,
+        sourceNumber: opts.sourceNumber ?? null,
+        description: opts.description ? opts.description + PULLED_BACK : opts.reason,
+        createdById: opts.createdById ?? null,
+      },
+    });
+    reversed.push({ jobId: net.jobId, costCategoryId: net.costCategoryId, state: net.state, amount: Number(net.amount) });
+  }
+  return reversed;
+}

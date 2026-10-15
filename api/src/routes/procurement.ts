@@ -31,6 +31,7 @@ import {
   contactOf,
   cancelOpenRequest,
   routeBrief,
+  onApprovalReopened,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import {
@@ -51,6 +52,7 @@ import { LIST_CAP, listReference, totalLabel, bracketed, counted, bracketNote, l
 import {
   postJobCost,
   releaseCommitment,
+  reverseJobCost,
   availableBudget,
   overBudgetIsBlocked,
 } from '../shared/inventory';
@@ -1374,6 +1376,55 @@ export async function settlePurchaseRequest(documentId: string, outcome: Approva
 
 onApprovalSettled('purchase_request', async (request, outcome) => {
   await settlePurchaseRequest(request.documentId, outcome);
+});
+
+/**
+ * Pulled back after approval (2026-10-16, the owner's call): APPROVED →
+ * DRAFT, the budget its approval committed released by a row of its own.
+ * Refused while anything stands on it — an order, an RFQ, a canvass or a
+ * pull-out slip not cancelled, or a line already ordered or pulled out.
+ */
+onApprovalReopened('purchase_request', {
+  may: async (actor, id) => {
+    const pr = await prisma.purchaseRequest.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+    return !!pr && mayEditPr(actor, pr);
+  },
+  reopen: async ({ documentId, tx, actor, reason }) => {
+    const pr = await tx.purchaseRequest.findUnique({
+      where: { id: documentId },
+      include: {
+        orders: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        rfqs: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        pulloutSlips: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        items: { select: { orderedQty: true, pulledQty: true } },
+      },
+    });
+    if (!pr) throw notFound('Purchase request not found');
+    const names = (rows: Array<{ number: string }>) => rows.map((r) => r.number).join(', ');
+    if (pr.orders.length) throw badRequest(`Purchase order ${names(pr.orders)} stands on ${pr.number} — cancel it first`);
+    if (pr.rfqs.length) throw badRequest(`RFQ ${names(pr.rfqs)} stands on ${pr.number} — cancel it first`);
+    if (pr.canvasses.length) throw badRequest(`Canvass ${names(pr.canvasses)} stands on ${pr.number} — cancel it first`);
+    if (pr.pulloutSlips.length) throw badRequest(`Pull-out slip ${names(pr.pulloutSlips)} stands on ${pr.number} — cancel it first`);
+    if (pr.items.some((i) => num(i.orderedQty) > 0 || num(i.pulledQty) > 0)) {
+      throw badRequest(`Part of ${pr.number} was already ordered or taken from stock — it cannot be pulled back`);
+    }
+    if (pr.status !== 'APPROVED') throw badRequest(`${pr.number} is ${statusLabel(pr.status).toLowerCase()} — only an approved request is pulled back`);
+    const claimed = await tx.purchaseRequest.updateMany({
+      where: { id: pr.id, status: 'APPROVED' },
+      data: { status: 'DRAFT', approvedAt: null },
+    });
+    if (!claimed.count) throw badRequest(`${pr.number} changed a moment ago — reload to see where it stands`);
+    if (pr.kind === 'DIRECT_TO_JOB' && pr.jobId) {
+      await releaseCommitment(tx, {
+        jobId: pr.jobId,
+        sourceType: 'purchase_request',
+        sourceId: pr.id,
+        reason: `${pr.number} pulled back to draft by ${actor.name}: ${reason}`,
+        createdById: actor.id,
+      });
+    }
+  },
 });
 
 purchaseRequestRoutes.delete(
@@ -3557,6 +3608,89 @@ export async function settlePurchaseOrder(documentId: string, outcome: ApprovalO
 
 onApprovalSettled('purchase_order', async (request, outcome) => {
   await settlePurchaseOrder(request.documentId, outcome);
+});
+
+/**
+ * Pulled back after approval (2026-10-16): ISSUED → DRAFT, everything the
+ * issue did undone in reverse — its firm commitment reversed, the request's
+ * ordered quantities and status put back, and the request's soft commitment
+ * restored by exactly what this order's issue released. Refused once goods
+ * are received against it or a supplier bill names it, and — where its issue
+ * released the request's commitment — while a later order on the same
+ * request still stands (restoring it then would count that order twice).
+ */
+onApprovalReopened('purchase_order', {
+  may: async (actor, id) => {
+    const po = await prisma.purchaseOrder.findUnique({ where: { id }, select: { status: true, createdById: true } });
+    return !!po && mayEditPo(actor, po);
+  },
+  reopen: async ({ documentId, tx, actor, reason }) => {
+    const po = await tx.purchaseOrder.findUnique({
+      where: { id: documentId },
+      include: {
+        items: true,
+        receivings: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+        bills: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+      },
+    });
+    if (!po) throw notFound('Purchase order not found');
+    if (po.receivings.length) {
+      throw badRequest(`Goods are received against ${po.number} on ${po.receivings.map((r) => r.number).join(', ')} — pull that back or cancel it first`);
+    }
+    if (po.items.some((i) => num(i.receivedQty) > 0)) throw badRequest(`Goods were received against ${po.number} — it cannot be pulled back`);
+    if (po.bills.length) throw badRequest(`Supplier bill ${po.bills.map((b) => b.number).join(', ')} is matched to ${po.number} — cancel it first`);
+    if (po.status !== 'ISSUED') throw badRequest(`${po.number} is ${statusLabel(po.status).toLowerCase()} — only an issued order is pulled back`);
+
+    const claimed = await tx.purchaseOrder.updateMany({
+      where: { id: po.id, status: 'ISSUED' },
+      data: { status: 'DRAFT', approvedAt: null, issuedAt: null },
+    });
+    if (!claimed.count) throw badRequest(`${po.number} changed a moment ago — reload to see where it stands`);
+
+    const supersededWords = `Superseded by order ${po.number}`;
+    if (po.kind === 'DIRECT_TO_JOB' && po.jobId && po.requestId) {
+      const released = await tx.jobCostEntry.aggregate({
+        where: { sourceType: 'purchase_request', sourceId: po.requestId, description: { in: [supersededWords, supersededWords + ' — pulled back'] } },
+        _sum: { amount: true },
+      });
+      if (released._sum.amount && !released._sum.amount.isZero()) {
+        const others = await tx.purchaseOrder.findMany({
+          where: { requestId: po.requestId, id: { not: po.id }, status: { in: ['PENDING_APPROVAL', 'ISSUED', 'PARTIALLY_RECEIVED', 'RECEIVED'] } },
+          select: { number: true },
+        });
+        if (others.length) {
+          throw badRequest(`${others.map((o) => o.number).join(', ')} was ordered on the same request after ${po.number} — pull that back first`);
+        }
+      }
+    }
+
+    for (const line of po.items) {
+      if (!line.requestItemId) continue;
+      const reqItem = await tx.purchaseRequestItem.findUnique({ where: { id: line.requestItemId } });
+      if (!reqItem) continue;
+      await tx.purchaseRequestItem.update({
+        where: { id: reqItem.id },
+        data: { orderedQty: D(Math.max(0, Math.round((num(reqItem.orderedQty) - num(line.quantity)) * 1000) / 1000)) },
+      });
+    }
+    if (po.requestId) {
+      const reqItems = await tx.purchaseRequestItem.findMany({ where: { requestId: po.requestId } });
+      const none = reqItems.every((i) => num(i.orderedQty) + num(i.pulledQty) < 0.0005);
+      const fully = reqItems.every((i) => num(i.orderedQty) + num(i.pulledQty) >= num(i.quantity) - 0.0005);
+      await tx.purchaseRequest.updateMany({
+        where: { id: po.requestId, status: { in: ['APPROVED', 'PARTIALLY_ORDERED', 'ORDERED'] } },
+        data: { status: none ? 'APPROVED' : fully ? 'ORDERED' : 'PARTIALLY_ORDERED' },
+      });
+    }
+
+    if (po.kind === 'DIRECT_TO_JOB' && po.jobId) {
+      const why = `${po.number} pulled back to draft by ${actor.name}: ${reason}`;
+      await reverseJobCost(tx, { sourceType: 'purchase_order', sourceId: po.id, states: ['COMMITTED'], reason: why, sourceNumber: po.number, createdById: actor.id });
+      if (po.requestId) {
+        await reverseJobCost(tx, { sourceType: 'purchase_request', sourceId: po.requestId, states: ['COMMITTED'], description: supersededWords, reason: why, createdById: actor.id });
+      }
+    }
+  },
 });
 
 purchaseOrderRoutes.delete(

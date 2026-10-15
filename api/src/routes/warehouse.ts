@@ -33,6 +33,7 @@ import {
   preparedAt,
   mayDecide,
   usersInRole,
+  onApprovalReopened,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { registerAttachmentGuard } from '../shared/attachments';
@@ -57,6 +58,9 @@ import {
   returnBorrowedStock,
   postJobCost,
   releaseCommitment,
+  reverseReceipt,
+  returnIssuedStock,
+  reverseJobCost,
 } from '../shared/inventory';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 
@@ -1148,6 +1152,86 @@ export async function settleReceiving(documentId: string, outcome: ApprovalOutco
 
 onApprovalSettled(RECEIVING_DOC, async (request, outcome) => {
   await settleReceiving(request.documentId, outcome);
+});
+
+/**
+ * Pulled back after approval (2026-10-16, the owner's call): RECEIVED →
+ * DRAFT, everything `postReceiving` did undone by movements of its own — the
+ * stock taken back out at the cost it came in at, the order's received
+ * quantities and status put back, the project's cost reversed and the
+ * order's commitment restored by what the receipt released. Refused once a
+ * supplier bill is matched to it, or once the stock it brought in has moved
+ * on (less is available at the warehouse than it received).
+ */
+onApprovalReopened(RECEIVING_DOC, {
+  may: async (actor, id) => {
+    const r = await prisma.receiving.findUnique({ where: { id }, select: { receivedById: true } });
+    return !!r && mayHandleReceiving(actor, r);
+  },
+  reopen: async ({ documentId, tx, actor, reason }) => {
+    const receiving = await tx.receiving.findUnique({
+      where: { id: documentId },
+      include: {
+        items: true,
+        order: { include: { items: true } },
+        bills: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+      },
+    });
+    if (!receiving) throw notFound('Incoming report not found');
+    if (receiving.status !== 'RECEIVED') {
+      throw badRequest(`${receiving.number} is ${statusLabel(receiving.status).toLowerCase()} — only a received report is pulled back`);
+    }
+    if (receiving.bills.length) {
+      throw badRequest(`Supplier bill ${receiving.bills.map((b) => b.number).join(', ')} is matched to ${receiving.number} — cancel it first`);
+    }
+    const claimed = await tx.receiving.updateMany({ where: { id: receiving.id, status: 'RECEIVED' }, data: { status: 'DRAFT' } });
+    if (!claimed.count) throw badRequest(`${receiving.number} changed a moment ago — reload to see where it stands`);
+
+    const why = `${receiving.number} pulled back to draft by ${actor.name}: ${reason}`;
+    const order = receiving.order;
+    const byOrderItem = new Map((order?.items ?? []).map((i) => [i.id, i]));
+    for (const line of receiving.items) {
+      const orderItem = line.orderItemId ? byOrderItem.get(line.orderItemId) : undefined;
+      // What came into stock: every line without an order, a replenishment's lines with an item.
+      const itemId = order ? (order.kind === 'STOCK_REPLENISHMENT' ? orderItem?.itemId : null) : line.itemId;
+      if (itemId && receiving.warehouseId) {
+        await reverseReceipt(tx, {
+          itemId,
+          warehouseId: receiving.warehouseId,
+          quantity: num(line.quantity),
+          unitCost: num(line.unitCost),
+          sourceType: 'receiving',
+          sourceId: receiving.id,
+          sourceNumber: receiving.number,
+          notes: why,
+          createdById: actor.id,
+        });
+      }
+      if (orderItem) {
+        const left = Math.max(0, Math.round((num(orderItem.receivedQty) - num(line.quantity)) * 1000) / 1000);
+        await tx.purchaseOrderItem.update({ where: { id: orderItem.id }, data: { receivedQty: D(left) } });
+        orderItem.receivedQty = D(left);
+      }
+    }
+    if (order) {
+      const lines = [...byOrderItem.values()];
+      const none = lines.every((i) => num(i.receivedQty) < 0.0005);
+      const fully = lines.every((i) => num(i.receivedQty) >= num(i.quantity) - 0.0005);
+      await tx.purchaseOrder.updateMany({
+        where: { id: order.id, status: { in: ['ISSUED', 'PARTIALLY_RECEIVED', 'RECEIVED'] } },
+        data: { status: none ? 'ISSUED' : fully ? 'RECEIVED' : 'PARTIALLY_RECEIVED' },
+      });
+      await reverseJobCost(tx, { sourceType: 'receiving', sourceId: receiving.id, reason: why, sourceNumber: receiving.number, createdById: actor.id });
+      await reverseJobCost(tx, {
+        sourceType: 'purchase_order',
+        sourceId: order.id,
+        states: ['COMMITTED'],
+        description: `Received on ${receiving.number}`,
+        reason: why,
+        createdById: actor.id,
+      });
+    }
+  },
 });
 
 /**
@@ -2343,6 +2427,45 @@ onApprovalSettled(ISSUE_DOC, async (request, outcome) => {
   await settleStockIssue(request.documentId, outcome);
 });
 
+/**
+ * Pulled back after approval (2026-10-16): ISSUED → DRAFT, the stock put
+ * back at the cost each line left at and the project's cost reversed by rows
+ * of its own. Refused once the person it went to confirmed receiving it —
+ * that confirmation is the slip's record of fact.
+ */
+onApprovalReopened(ISSUE_DOC, {
+  may: async (actor, id) => {
+    const issue = await prisma.stockIssue.findUnique({ where: { id }, select: { issuedById: true } });
+    return !!issue && ((issue.issuedById === actor.id && can(actor, 'gchain.stock_issuance.create')) || can(actor, 'gchain.stock_issuance.edit_all'));
+  },
+  reopen: async ({ documentId, tx, actor, reason }) => {
+    const issue = await tx.stockIssue.findUnique({ where: { id: documentId }, include: { items: true } });
+    if (!issue) throw notFound('Stock issue not found');
+    if (issue.status !== 'ISSUED') throw badRequest(`${issue.number} is ${statusLabel(issue.status).toLowerCase()} — only an issued slip is pulled back`);
+    if (issue.receivedAt) throw badRequest(`${issue.number} was confirmed received — it cannot be pulled back`);
+    const claimed = await tx.stockIssue.updateMany({
+      where: { id: issue.id, status: 'ISSUED', receivedAt: null },
+      data: { status: 'DRAFT', issuedAt: null },
+    });
+    if (!claimed.count) throw badRequest(`${issue.number} changed a moment ago — reload to see where it stands`);
+    const why = `${issue.number} pulled back to draft by ${actor.name}: ${reason}`;
+    for (const line of issue.items) {
+      await returnIssuedStock(tx, {
+        itemId: line.itemId,
+        warehouseId: issue.warehouseId,
+        quantity: num(line.quantity),
+        unitCost: num(line.unitCost),
+        sourceType: 'stock_issue',
+        sourceId: issue.id,
+        sourceNumber: issue.number,
+        notes: why,
+        createdById: actor.id,
+      });
+    }
+    await reverseJobCost(tx, { sourceType: 'stock_issue', sourceId: issue.id, reason: why, sourceNumber: issue.number, createdById: actor.id });
+  },
+});
+
 // The signed gate pass, photos of what left: read as the slip is read, added
 // while it is a draft or pending by whoever may raise one.
 registerAttachmentGuard(
@@ -3305,6 +3428,28 @@ export async function settleBorrowSlip(documentId: string, outcome: ApprovalOutc
 
 onApprovalSettled(BORROW_DOC, async (request, outcome) => {
   await settleBorrowSlip(request.documentId, outcome);
+});
+
+/**
+ * Pulled back after approval (2026-10-16): APPROVED → DRAFT while the
+ * warehouse has not released it — approval moved nothing, so nothing is
+ * undone. Once released (out, back, overdue) it is refused: the loan is a
+ * fact, closed by its return.
+ */
+onApprovalReopened(BORROW_DOC, {
+  may: async (actor, id) => {
+    const slip = await prisma.borrowSlip.findUnique({ where: { id }, select: { requestedById: true, borrowerId: true } });
+    return !!slip && mayHandleRequest(actor, slip);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const slip = await tx.borrowSlip.findUnique({ where: { id: documentId }, select: { id: true, number: true, status: true, releasedAt: true } });
+    if (!slip) throw notFound('Borrow slip not found');
+    if (slip.status !== 'APPROVED' || slip.releasedAt) {
+      throw badRequest(`${slip.number} is ${statusLabel(slip.status).toLowerCase()} — once the warehouse released it, it cannot be pulled back`);
+    }
+    const claimed = await tx.borrowSlip.updateMany({ where: { id: slip.id, status: 'APPROVED', releasedAt: null }, data: { status: 'DRAFT' } });
+    if (!claimed.count) throw badRequest(`${slip.number} was released a moment ago — reload to see where it stands`);
+  },
 });
 
 /**
