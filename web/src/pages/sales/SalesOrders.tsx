@@ -30,6 +30,7 @@ import { CostPanelBlock, type Item } from './Quotations';
 import { AppendQuotePanel, linesFromItems } from './QuotationEditor';
 import { loadPeople } from '../../components/People';
 import { PulloutCard } from '../chain/PulloutSlips';
+import { InvoiceRequestModal, REQUEST_TONES } from '../finance/InvoiceRequests';
 import {
   DiscountCalculator,
   ProductCells,
@@ -133,6 +134,16 @@ interface SalesOrderDetailRow extends SalesOrderRow {
   canSeeCost: boolean;
   /** A route is active for sales orders: the order is submitted, not issued. */
   needsApproval?: boolean;
+  /** After it is issued: its invoice requests and invoices, and whether the viewer may ask for one. */
+  invoicing?: {
+    net: number;
+    invoiced: number;
+    left: number;
+    canRequest: boolean;
+    seesRequests: boolean;
+    requests: { id: string; number: string; status: string; billing: string | null; grossAmount: number; invoice: { id: string; number: string } | null }[];
+    invoices: { id: string; number: string; siNumber: string | null; status: string; invoiceDate: string; grossAmount: number; netCollectible: number }[];
+  };
   /** Optional routes the submitter may tick — "Add the CEO as approver". */
   approvalOptions?: { id: string; label: string }[];
   approvalRoutes?: { standard: ApprovalRoute | null; options: { id: string; route: ApprovalRoute | null }[] } | null;
@@ -454,6 +465,7 @@ export function SalesOrderDetail() {
   const [busy, setBusy] = useState(false);
   const [optionId, setOptionId] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
+  const [requesting, setRequesting] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -537,6 +549,12 @@ export function SalesOrderDetail() {
                 onClick={() => act(() => api.post(`/sales-orders/${order.id}/submit`, { optionId: chosenOption }), 'Submitted for approval')}
               >
                 Submit for approval
+              </button>
+            )}
+            {/* After the order, the invoice request (2026-10-16, the owner's call). */}
+            {order.status === 'ISSUED' && order.invoicing?.canRequest && order.invoicing.left > 0.005 && (
+              <button className="btn btn-primary" onClick={() => setRequesting(true)}>
+                Request invoice
               </button>
             )}
           </>
@@ -738,7 +756,20 @@ export function SalesOrderDetail() {
         </div>
       </div>
 
+      {order.status === 'ISSUED' && order.invoicing && <InvoicingCard order={order} invoicing={order.invoicing} />}
+
       <PulloutCard salesOrderId={order.id} />
+
+      {requesting && (
+        <InvoiceRequestModal
+          salesOrderId={order.id}
+          onClose={() => setRequesting(false)}
+          onSaved={(saved) => {
+            setRequesting(false);
+            navigate(`/g-fin/invoice-requests/${saved.id}`);
+          }}
+        />
+      )}
 
       {/* Last on the page (2026-10-12, the owner's call): the quotation's files,
           copied when the order was raised, and its own — printed behind the order. */}
@@ -751,6 +782,99 @@ export function SalesOrderDetail() {
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * After the order, its invoicing (2026-10-16): what is left to invoice, the
+ * invoice requests raised on it and the invoices they became — the steps from
+ * the sales order to Accounts Receivable.
+ */
+function InvoicingCard({ order, invoicing }: { order: SalesOrderDetailRow; invoicing: NonNullable<SalesOrderDetailRow['invoicing']> }) {
+  const currency = order.quotation.currency;
+  return (
+    <section className="card sales-card-gap">
+      <h3 className="card-title">Invoicing</h3>
+      <dl className="kv">
+        <dt>Order before VAT</dt>
+        <dd className="mono">{formatMoney(invoicing.net, currency)}</dd>
+        <dt>Invoiced</dt>
+        <dd className="mono">{formatMoney(invoicing.invoiced, currency)}</dd>
+        <dt>Left to invoice</dt>
+        <dd className="mono">
+          <b>{formatMoney(invoicing.left, currency)}</b>
+        </dd>
+      </dl>
+      {invoicing.seesRequests && invoicing.requests.length > 0 && (
+        <div className="table-wrap fin-gap-top">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Invoice request</th>
+                <th>From</th>
+                <th className="num">Before VAT</th>
+                <th>Status</th>
+                <th>Invoice</th>
+              </tr>
+            </thead>
+            <tbody>
+              {invoicing.requests.map((r) => (
+                <tr key={r.id}>
+                  <td>
+                    <Link to={`/g-fin/invoice-requests/${r.id}`} className="mono">
+                      {r.number}
+                    </Link>
+                  </td>
+                  <td>{r.billing ? <span className="mono">{r.billing}</span> : 'The sales order'}</td>
+                  <td className="num">{formatMoney(r.grossAmount, currency)}</td>
+                  <td>
+                    <StatusBadge status={r.status} extra={REQUEST_TONES} />
+                  </td>
+                  <td className="mono">{r.invoice?.number ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {invoicing.invoices.length > 0 && (
+        <div className="table-wrap fin-gap-top">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Invoice</th>
+                <th>Invoice no.</th>
+                <th>Dated</th>
+                <th className="num">Before VAT</th>
+                <th className="num">Net collectible</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {invoicing.invoices.map((i) => (
+                <tr key={i.id}>
+                  <td>
+                    <Link to={`/g-fin/ar/${i.id}`} className="mono">
+                      {i.number}
+                    </Link>
+                  </td>
+                  <td className="mono">{i.siNumber ?? '—'}</td>
+                  <td>{formatDate(i.invoiceDate)}</td>
+                  <td className="num">{formatMoney(i.grossAmount, currency)}</td>
+                  <td className="num">{formatMoney(i.netCollectible, currency)}</td>
+                  <td>
+                    <StatusBadge status={i.status} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {!invoicing.requests.length && !invoicing.invoices.length && (
+        <p className="faint">Nothing invoiced yet. "Request invoice" sends it to Back Support; its approval raises the invoice in Accounts Receivable.</p>
+      )}
+    </section>
   );
 }
 

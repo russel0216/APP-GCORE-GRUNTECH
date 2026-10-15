@@ -4077,6 +4077,9 @@ model Invoice {
   dueDate       DateTime  @db.Date
   terms         String?
   poReference   String?
+  /// The number printed on the sales invoice booklet (BIR), typed by hand
+  /// (2026-10-16, the owner's call); `number` stays G-CORE's own record.
+  siNumber      String?
 
   /// Who sold it — credited with the collection. Filled from the document
   /// behind the invoice (the sales order's or quotation's owner), editable.
@@ -4127,6 +4130,7 @@ model Invoice {
   @@index([customerId, status])
   @@index([dueDate])
   @@index([jobId])
+  @@index([siNumber])
   @@index([salesOrderId])
   @@index([salespersonId])
   @@index([teamId])
@@ -5249,12 +5253,20 @@ model InvoiceRequest {
   number String
   status InvoiceRequestStatus @default(DRAFT)
 
-  progressBillingId String
-  progressBilling   ProgressBilling @relation(fields: [progressBillingId], references: [id], onDelete: Cascade)
-  jobId             String
-  job               Job             @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  /// The progress billing it asks to be invoiced — or none, when the request
+  /// is raised straight from an issued sales order (2026-10-16, the owner's
+  /// call: "after Sales Order, route to invoice request").
+  progressBillingId String?
+  progressBilling   ProgressBilling? @relation(fields: [progressBillingId], references: [id], onDelete: Cascade)
+  jobId             String?
+  job               Job?             @relation(fields: [jobId], references: [id], onDelete: Cascade)
   salesOrderId      String
-  salesOrder        SalesOrder      @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  salesOrder        SalesOrder       @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  /// A request from a sales order: what to invoice of it, before VAT, and
+  /// the invoice line's words. Null on a billing's request (its gross is the
+  /// billing's).
+  grossAmount       Decimal?         @db.Decimal(18, 2)
+  description       String?
 
   /// What the invoice will carry.
   invoiceDate   DateTime? @db.Date
@@ -5281,5 +5293,6 @@ model InvoiceRequest {
 
   @@index([number])
   @@index([progressBillingId, status])
+  @@index([salesOrderId, status])
   @@index([status, createdAt])
 }

@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,304 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,316 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,11 +574,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 178, chain 329, hr 468, plantilla 123, meetings
-115, evaluations 152, academy 120, finance 385, aftermarket 265, cad 118,
+115, evaluations 152, academy 120, finance 397, aftermarket 265, cad 118,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -5222,6 +5222,37 @@ approved it goes to Accounts Receivable", the paper in the standard dress.
   standard dress: details, Particulars (the billing lines), the totals,
   notes, Requested by and the Back Support slot ("Pending" until signed),
   the files behind it. The list prints (`GET /invoice-requests/pdf`).
+- **A request can come straight from the SALES ORDER** (2026-10-16, the
+  owner's call: "after Sales Order, route to invoice request"). An issued
+  order's page has **Request invoice** (its next step, for the holders
+  `mayRequestInvoice(me, { salesOrderId })` names: the order's author, the
+  quotation's owner, their Team Leader, edit_all) and an **Invoicing** card
+  (before VAT, invoiced, left; its requests and invoices). Such a request
+  has no `progressBillingId` (nullable now, and `jobId` too — the project
+  built from the order's quotation where there is one) and carries
+  `grossAmount` (before VAT, what is left by default) and `description` (the
+  invoice line). What is left is the order's net less its live invoices
+  AND the live requests on it (`orderLeft`, `requested`), checked under a
+  lock on the order. Approved, `createInvoiceFromOrder()`
+  (`shared/billingInvoice.ts`) raises the DRAFT invoice: one line, VAT at the
+  ORDER's rate, EWT at the company's, never past what is left. The money on
+  the page and the paper is `taxBreakdown` of the gross the same way.
+- **The invoice is credited to whoever raised the request**, never typed
+  (the owner's call): a request's `salespersonId` is its requester and
+  `teamId` their team, else the order's quotation's team; `invoiceCredit()`
+  takes the latest live request on a sales order first, so a manual invoice
+  on that order follows it too. The New invoice form shows the names
+  (`GET /invoices/credit`, above `/:id`) and has no Sales personnel / Team
+  pickers; the invoice page's "Change salesperson or team" stays.
+- **The New invoice form asks the COUNTERED DATE, not the invoice date,
+  and the printed INVOICE NO., not the PO** (2026-10-16): `Invoice.siNumber`
+  (the BIR booklet number, typed; one live invoice each, case-blind — a 409
+  naming the other, `assertSiNumberFree`; the list shows it over G-CORE's
+  number and searches it; the paper prints "Invoice no."); `counteredDate`
+  on `POST /invoices`, `/from-billing/:id` and a draft's `PUT` is the
+  invoice date too unless one is sent, never a day to come, and the terms
+  run from it (`datesFrom()`). The PO still comes from the order. A draft's
+  PUT without `lines` changes the header alone.
 - **Assign Back Support with "Supports teams"** for every selling team —
   until then requests stall and `audit-workflows.ts` says so.
 

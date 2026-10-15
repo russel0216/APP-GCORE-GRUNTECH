@@ -21,6 +21,7 @@ import {
   badRequest,
   forbidden,
   deleteOrRefuse,
+  conflict,
   type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
@@ -371,6 +372,7 @@ function invoiceListWhere(q: ListQuery): Prisma.InvoiceWhereInput {
     where.OR = [
       { number: { contains: q.search, mode: 'insensitive' } },
       { poReference: { contains: q.search, mode: 'insensitive' } },
+      { siNumber: { contains: q.search, mode: 'insensitive' } },
       { customer: { name: { contains: q.search, mode: 'insensitive' } } },
       { job: { number: { contains: q.search, mode: 'insensitive' } } },
       { salesOrder: { number: { contains: q.search, mode: 'insensitive' } } },
@@ -461,6 +463,25 @@ invoiceRoutes.get(
  * before VAT), what live invoices already bill of it, what is left, its PO,
  * its terms and who sold it. Above `/:id`.
  */
+/**
+ * Who an invoice would be credited to — the person who raised the order's
+ * invoice request, else the order's or project's salesperson — so the form
+ * shows the names it will fill in (2026-10-16). Above `/:id`.
+ */
+invoiceRoutes.get(
+  '/credit',
+  require_('gfin.ar.create'),
+  handler(async (req, res) => {
+    const str = (k: string) => (typeof req.query[k] === 'string' && req.query[k] ? String(req.query[k]) : null);
+    const credit = await invoiceCredit({ salesOrderId: str('salesOrderId'), jobId: str('jobId'), jobOrderId: str('jobOrderId') });
+    const [person, team] = await Promise.all([
+      credit.salespersonId ? prisma.user.findUnique({ where: { id: credit.salespersonId }, select: { id: true, name: true } }) : null,
+      credit.teamId ? prisma.industry.findUnique({ where: { id: credit.teamId }, select: { id: true, code: true, name: true } }) : null,
+    ]);
+    res.json({ salesperson: person, team });
+  }),
+);
+
 invoiceRoutes.get(
   '/sales-orders',
   require_('gfin.ar.create'),
@@ -595,7 +616,7 @@ invoiceRoutes.get(
           const owed = r.status === 'ISSUED' || r.status === 'PARTIALLY_PAID';
           const credit = [r.salesperson?.name, r.team?.code].filter(Boolean).join(' · ');
           return [
-            r.number,
+            r.siNumber ? { title: r.number, body: `SI ${r.siNumber}` } : r.number,
             {
               title: r.customer.name,
               body: [
@@ -717,6 +738,7 @@ invoiceRoutes.get(
         columns: 3,
         fields: [
           { label: 'Customer', value: inv.customer.name },
+          { label: 'Invoice no.', value: inv.siNumber ?? '—' },
           { label: 'TIN', value: inv.customer.tin ?? '—' },
           { label: 'Project', value: inv.job ? `${inv.job.number} — ${inv.job.name}` : '—' },
           { label: 'Customer P.O.', value: inv.poReference ?? inv.salesOrder?.poNumber ?? '—' },
@@ -823,6 +845,14 @@ invoiceRoutes.get(
 /** An invoice's own header — what a billing's invoice may set, raised or modified. */
 const invoiceHeaderSchema = z.object({
   invoiceDate: z.string().optional(),
+  /**
+   * The day the customer received it (2026-10-16, the owner's call: the form
+   * asks this in place of the invoice date). Given, it is the invoice date
+   * too unless one is sent, and the terms run from it.
+   */
+  counteredDate: z.string().optional().nullable(),
+  /** The printed sales invoice (BIR booklet) number — one invoice each. */
+  siNumber: z.string().trim().max(60).optional().nullable(),
   dueDate: z.string().optional(),
   /** Net days — the due date follows from it unless a due date is typed. */
   termsDays: z.number().int().min(0).max(365).optional().nullable(),
@@ -867,6 +897,30 @@ async function resolveCredit(
     }
   }
   return { salespersonId, teamId };
+}
+
+/**
+ * A printed sales invoice number belongs to one live invoice: the same number
+ * (case- and space-blind) on another invoice that is not cancelled is a 409
+ * naming it, before anything is written.
+ */
+async function assertSiNumberFree(siNumber: string | null | undefined, exceptId?: string) {
+  const si = siNumber?.trim();
+  if (!si) return;
+  const taken = await prisma.invoice.findFirst({
+    where: { siNumber: { equals: si, mode: 'insensitive' }, status: { not: 'CANCELLED' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { number: true },
+  });
+  if (taken) throw conflict(`Invoice no. ${si} is already on ${taken.number}`);
+}
+
+/** The invoice date and countered day a form sends: countered alone is both. */
+function datesFrom(body: { invoiceDate?: string; counteredDate?: string | null }, fallback: Date) {
+  const counteredDate = body.counteredDate ? asDate(body.counteredDate, 'Countered date') : null;
+  const invoiceDate = body.invoiceDate ? asDate(body.invoiceDate, 'Invoice date') : (counteredDate ?? fallback);
+  if (counteredDate && counteredDate < invoiceDate) throw badRequest('It cannot be countered before its invoice date');
+  if (counteredDate && counteredDate > dayKey(new Date())) throw badRequest('It cannot be countered on a day still to come');
+  return { invoiceDate, counteredDate };
 }
 
 /** The due date: typed, else the countered day (else the invoice date) plus the terms. */
@@ -916,18 +970,19 @@ invoiceRoutes.post(
     if (live) throw badRequest(`${billing.number} has invoice request ${live.number} open — its approval raises the invoice`);
 
     const settings = await financeSettings();
-    const invoiceDate = body.invoiceDate ? asDate(body.invoiceDate, 'Invoice date') : dayKey(new Date());
+    const { invoiceDate, counteredDate } = datesFrom(body, dayKey(new Date()));
     const termsDays = body.termsDays ?? parseTermsDays(body.terms) ?? settings.defaultTermsDays;
-    const dueDate = dueFrom(body, invoiceDate, null, termsDays);
+    const dueDate = dueFrom(body, invoiceDate, counteredDate, termsDays);
     const credit = await resolveCredit(body, { jobId: billing.jobId });
+    await assertSiNumberFree(body.siNumber);
 
     const made = await prisma.$transaction((tx) =>
       createInvoiceFromBilling(
         tx,
         billing,
-        { invoiceDate, dueDate, termsDays, terms: body.terms, poReference: body.poReference, notes: body.notes, ...credit },
+        { invoiceDate, dueDate, termsDays, terms: body.terms, poReference: body.poReference, siNumber: body.siNumber, notes: body.notes, ...credit },
         me.id,
-      ),
+      ).then(async (inv) => (counteredDate ? tx.invoice.update({ where: { id: inv.id }, data: { counteredDate } }) : inv)),
     );
     const invoice = await prisma.invoice.findUniqueOrThrow({ where: { id: made.id }, include: invoiceInclude });
 
@@ -954,6 +1009,8 @@ const manualInvoiceSchema = creditSchema.extend({
   /** A completed, chargeable job order — billed once, like a billing. */
   jobOrderId: z.string().optional().nullable(),
   invoiceDate: z.string().optional(),
+  counteredDate: z.string().optional().nullable(),
+  siNumber: z.string().trim().max(60).optional().nullable(),
   dueDate: z.string().optional(),
   terms: z.string().optional().nullable(),
   poReference: z.string().optional().nullable(),
@@ -1068,9 +1125,10 @@ invoiceRoutes.post(
     const customerId = body.customerId;
 
     const money = manualInvoiceMoney(body.lines, body.vatRate ?? rates.vatRate, body.ewtRate ?? rates.ewtRate);
-    const invoiceDate = body.invoiceDate ? asDate(body.invoiceDate, 'Invoice date') : dayKey(new Date());
+    const { invoiceDate, counteredDate } = datesFrom(body, dayKey(new Date()));
     const termsDays = body.termsDays ?? parseTermsDays(body.terms) ?? settings.defaultTermsDays;
-    const dueDate = dueFrom(body, invoiceDate, null, termsDays);
+    const dueDate = dueFrom(body, invoiceDate, counteredDate, termsDays);
+    await assertSiNumberFree(body.siNumber);
     const credit = await resolveCredit(body, { salesOrderId: salesOrder?.id, jobId: body.jobId, jobOrderId: jobOrder?.id });
 
     const invoice = await prisma.$transaction(async (tx) => {
@@ -1084,11 +1142,13 @@ invoiceRoutes.post(
           jobOrderId: jobOrder?.id ?? null,
           salesOrderId: salesOrder?.id ?? null,
           invoiceDate,
+          counteredDate,
           dueDate,
           termsDays,
           ...credit,
           terms: body.terms ?? termsLabel(termsDays),
           poReference: body.poReference || null,
+          siNumber: body.siNumber?.trim() || null,
           ...money.figures,
           notes: body.notes || null,
           createdById: me.id,
@@ -1164,18 +1224,29 @@ invoiceRoutes.put(
     }
 
     const header = parseBody(invoiceHeaderSchema, raw);
-    const invoiceDate = header.invoiceDate ? asDate(header.invoiceDate, 'Invoice date') : existing.invoiceDate;
+    const counteredDate =
+      header.counteredDate === undefined ? existing.counteredDate : header.counteredDate ? asDate(header.counteredDate, 'Countered date') : null;
+    const invoiceDate = header.invoiceDate
+      ? asDate(header.invoiceDate, 'Invoice date')
+      : header.counteredDate && counteredDate
+        ? counteredDate
+        : existing.invoiceDate;
+    if (counteredDate && counteredDate < invoiceDate) throw badRequest('It cannot be countered before its invoice date');
+    if (counteredDate && counteredDate > dayKey(new Date())) throw badRequest('It cannot be countered on a day still to come');
     const termsDays = header.termsDays ?? existing.termsDays;
     // The due date follows the terms unless one is typed; an invoice from
     // before the terms were kept keeps the one it was given.
     const dueDate = header.dueDate
       ? asDate(header.dueDate, 'Due date')
-      : termsDays !== null && (header.termsDays !== undefined || header.invoiceDate)
-        ? expectedCollection(invoiceDate, null, termsDays)
+      : termsDays !== null && (header.termsDays !== undefined || header.invoiceDate || header.counteredDate !== undefined)
+        ? expectedCollection(invoiceDate, counteredDate, termsDays)
         : existing.dueDate;
     if (dueDate < invoiceDate) throw badRequest('The due date is before the invoice date');
+    if (header.siNumber !== undefined) await assertSiNumberFree(header.siNumber, existing.id);
     const headerData = {
       invoiceDate,
+      counteredDate,
+      siNumber: header.siNumber === undefined ? existing.siNumber : header.siNumber?.trim() || null,
       dueDate,
       termsDays,
       terms: header.terms === undefined ? existing.terms : header.terms || null,
@@ -1186,7 +1257,9 @@ invoiceRoutes.put(
     let manual: ReturnType<typeof manualInvoiceMoney> | null = null;
     let customerId = existing.customerId;
     let jobId = existing.jobId;
-    if (!fromBilling) {
+    // A body without lines changes the header alone (the printed invoice
+    // number, the countered day) and leaves the figures as they stand.
+    if (!fromBilling && raw.lines !== undefined) {
       const body = parseBody(manualInvoiceSchema.omit({ jobOrderId: true }), raw);
       customerId = body.customerId ?? existing.customerId;
       if (customerId !== existing.customerId) {

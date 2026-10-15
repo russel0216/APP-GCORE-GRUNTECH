@@ -35,6 +35,8 @@ import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
 import { attachedFiles, copyAttachments, withAttachments } from '../shared/pdfAttachments';
 import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { bookingFor, thou } from '../shared/salesOrderBooking';
+import { mayRequestInvoice } from './invoiceRequests';
+import { orderInvoiced, orderNet } from '../shared/billingInvoice';
 import {
   companyCurrency,
   formatAmount,
@@ -635,9 +637,51 @@ salesOrderRoutes.get(
       needsApproval: !!workflow,
       approvalOptions: options,
       approvalRoutes,
+      invoicing: await orderInvoicing(me, order),
     });
   }),
 );
+
+/**
+ * After the order is issued, its invoicing (2026-10-16, the owner's call:
+ * "after Sales Order, route to invoice request"): the invoice requests and
+ * invoices on it, what is left to invoice before VAT, and whether the viewer
+ * may ask for one — the request route's own rule, `mayRequestInvoice`.
+ */
+async function orderInvoicing(me: ReturnType<typeof currentUser>, order: { id: string; status: string; total: Prisma.Decimal; vatAmount: Prisma.Decimal }) {
+  const [requests, invoices, invoiced] = await Promise.all([
+    prisma.invoiceRequest.findMany({
+      where: { salesOrderId: order.id },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, number: true, status: true, grossAmount: true, progressBilling: { select: { number: true, grossAmount: true } }, invoice: { select: { id: true, number: true } } },
+    }),
+    can(me, 'gfin.ar.view_all')
+      ? prisma.invoice.findMany({
+          where: { salesOrderId: order.id },
+          orderBy: { invoiceDate: 'desc' },
+          select: { id: true, number: true, siNumber: true, status: true, invoiceDate: true, grossAmount: true, netCollectible: true },
+        })
+      : Promise.resolve([]),
+    orderInvoiced(prisma, order.id),
+  ]);
+  const net = orderNet(order);
+  return {
+    net,
+    invoiced,
+    left: Math.max(0, Math.round((net - invoiced) * 100) / 100),
+    canRequest: order.status === 'ISSUED' && (await mayRequestInvoice(me, { salesOrderId: order.id })),
+    seesRequests: me.isSuperAdmin || can(me, 'gfin.invoice_requests.view_all') || can(me, 'gfin.invoice_requests.view_own'),
+    requests: requests.map((r) => ({
+      id: r.id,
+      number: r.number,
+      status: r.status,
+      billing: r.progressBilling?.number ?? null,
+      grossAmount: num(r.progressBilling?.grossAmount ?? r.grossAmount),
+      invoice: r.invoice,
+    })),
+    invoices: invoices.map((i) => ({ ...i, grossAmount: num(i.grossAmount), netCollectible: num(i.netCollectible) })),
+  };
+}
 
 // ── Create from a quotation ──────────────────────────────────────────────────
 

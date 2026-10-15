@@ -92,6 +92,21 @@ export async function invoiceCredit(
   };
 
   if (source.salesOrderId) {
+    // Whoever last asked for this order's invoice is the one credited
+    // (2026-10-16, the owner's call: sales personnel and team follow the
+    // person who raised the invoice request).
+    const asked = await db.invoiceRequest.findFirst({
+      where: { salesOrderId: source.salesOrderId, status: { not: 'CANCELLED' } },
+      orderBy: { createdAt: 'desc' },
+      select: { salespersonId: true, teamId: true, requestedById: true },
+    });
+    if (asked) {
+      credit.salespersonId = asked.salespersonId ?? asked.requestedById;
+      credit.teamId = asked.teamId ?? (await teamOf(credit.salespersonId))?.id ?? null;
+      return credit;
+    }
+  }
+  if (source.salesOrderId) {
     const so = await db.salesOrder.findUnique({
       where: { id: source.salesOrderId },
       select: { ownerId: true, quotation: { select: OWNER_TEAM } },

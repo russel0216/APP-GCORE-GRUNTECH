@@ -37,13 +37,12 @@ import {
 } from '../shared/pdf';
 import { LIST_CAP, listReference, recordNamed, choice, sendListPdf, rangeNamed, filterDay } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
-import { cents, num } from '../shared/finance';
-import { financeSettings } from '../shared/finance';
+import { cents, num, financeSettings, taxBreakdown, currentRates } from '../shared/finance';
 import { dayKey, manilaDayStart, manilaDayEnd } from '../shared/day';
 import { expectedCollection, invoiceCredit, termsLabel } from '../shared/receivables';
-import { quotationTeamOf } from '../shared/team';
+import { quotationTeamOf, teamOf } from '../shared/team';
 import { usersHolding } from '../shared/clearance';
-import { assertOrderLeft, billingForInvoiceInclude, createInvoiceFromBilling, orderInvoiced, orderNet } from '../shared/billingInvoice';
+import { assertOrderLeft, billingForInvoiceInclude, createInvoiceFromBilling, createInvoiceFromOrder, orderInvoiced, orderNet } from '../shared/billingInvoice';
 
 /**
  * INVOICE REQUESTS (2026-10-15, the owner's call: "the Sales or Team Leader
@@ -80,7 +79,22 @@ const requestInclude = {
     },
   },
   job: { select: { id: true, number: true, name: true, customer: { select: { id: true, name: true } } } },
-  salesOrder: { select: { id: true, number: true, poNumber: true, termsDays: true, total: true, vatAmount: true, status: true } },
+  salesOrder: {
+    select: {
+      id: true,
+      number: true,
+      poNumber: true,
+      termsDays: true,
+      total: true,
+      vatAmount: true,
+      vatRate: true,
+      status: true,
+      customerId: true,
+      ownerId: true,
+      customer: { select: { id: true, name: true } },
+      quotationId: true,
+    },
+  },
   salesperson: userSelect,
   team: { select: { id: true, code: true, name: true } },
   requestedBy: userSelect,
@@ -117,16 +131,37 @@ async function projectHolders(jobId: string) {
   return { job, quotation, team: quotation ? quotationTeamOf(quotation) : null };
 }
 
+/** A sales order's quotation, its owner and team, and the order's own author — who holds the order. */
+async function orderHolders(salesOrderId: string) {
+  const so = await prisma.salesOrder.findUnique({
+    where: { id: salesOrderId },
+    select: {
+      ownerId: true,
+      quotation: {
+        select: {
+          id: true,
+          ownerId: true,
+          team: { select: { id: true, code: true, name: true } },
+          owner: { select: { id: true, name: true, supervisorId: true, employee: { select: { industry: { select: { id: true, code: true, name: true } } } } } },
+        },
+      },
+    },
+  });
+  if (!so) throw notFound('Sales order not found');
+  return { quotation: so.quotation, team: quotationTeamOf(so.quotation), orderOwnerId: so.ownerId };
+}
+
 /**
- * Who may raise a billing's invoice request: the salesperson who owns the
+ * Who may raise an invoice request (a billing's or a sales order's): the salesperson who owns the
  * project's quotation, their Team Leader (their "Reports to", or a Team
  * Leader on the quotation's team), or whoever may edit every request. The
  * route and the page's button both ask this one function.
  */
-export async function mayRequestInvoice(me: ResolvedUser, jobId: string): Promise<boolean> {
+export async function mayRequestInvoice(me: ResolvedUser, source: string | { salesOrderId: string }): Promise<boolean> {
   if (!(me.isSuperAdmin || can(me, 'gfin.invoice_requests.create'))) return false;
   if (me.isSuperAdmin || can(me, 'gfin.invoice_requests.edit_all')) return true;
-  const { quotation, team } = await projectHolders(jobId);
+  const { quotation, team, orderOwnerId } = typeof source === 'string' ? { ...(await projectHolders(source)), orderOwnerId: null } : await orderHolders(source.salesOrderId);
+  if (orderOwnerId === me.id) return true;
   if (!quotation) return false;
   if (quotation.ownerId === me.id) return true;
   if (!me.roleKeys.includes('team_leader')) return false;
@@ -150,8 +185,18 @@ async function loadVisible(me: ResolvedUser, id: string, deciderOnly = false): P
 
 const mayEdit = (me: ResolvedUser, row: { requestedById: string }) => canEditRecord(me, 'gfin', 'invoice_requests', row.requestedById);
 
-/** The billing's money, as numbers. */
-function moneyOf(b: RequestRow['progressBilling']) {
+/**
+ * A request's money, as numbers: a billing's is the billing's, carried; a
+ * sales order's is the gross asked for, VAT at the order's rate and EWT at
+ * the company's — what `createInvoiceFromOrder` will raise.
+ */
+async function moneyOf(row: RequestRow) {
+  if (row.progressBilling) return billingMoney(row.progressBilling);
+  const rates = await currentRates();
+  return taxBreakdown(num(row.grossAmount), num(row.salesOrder.vatRate), rates.ewtRate);
+}
+
+function billingMoney(b: NonNullable<RequestRow['progressBilling']>) {
   return {
     grossAmount: num(b.grossAmount),
     vatRate: num(b.vatRate),
@@ -163,31 +208,46 @@ function moneyOf(b: RequestRow['progressBilling']) {
   };
 }
 
-/** What is left of a sales order to invoice, before VAT. */
-async function orderLeft(order: { id: string; total: Prisma.Decimal; vatAmount: Prisma.Decimal }) {
+/**
+ * What is left of a sales order to invoice, before VAT — less what live
+ * requests on it already ask (`requested`), so two requests cannot both ask
+ * for the last of it. `exceptRequestId` leaves a request's own ask out.
+ */
+async function orderLeft(order: { id: string; total: Prisma.Decimal; vatAmount: Prisma.Decimal }, exceptRequestId?: string) {
   const net = orderNet(order);
   const invoiced = await orderInvoiced(prisma, order.id);
-  return { net, invoiced, left: cents(Math.max(0, net - invoiced)) };
+  const live = await prisma.invoiceRequest.findMany({
+    where: { salesOrderId: order.id, status: { in: LIVE }, ...(exceptRequestId ? { id: { not: exceptRequestId } } : {}) },
+    select: { grossAmount: true, progressBilling: { select: { grossAmount: true } } },
+  });
+  const requested = cents(live.reduce((s, r) => s + num(r.progressBilling?.grossAmount ?? r.grossAmount), 0));
+  return { net, invoiced, requested, left: cents(Math.max(0, net - invoiced - requested)) };
 }
+
+/** A request's customer and project, whichever it came from. */
+const customerOf = (row: RequestRow) => row.job?.customer ?? row.salesOrder.customer;
 
 async function present(me: ResolvedUser, row: RequestRow) {
   const editable = row.status === 'DRAFT';
   const editor = mayEdit(me, row);
-  const money = moneyOf(row.progressBilling);
-  const order = await orderLeft(row.salesOrder);
+  const money = await moneyOf(row);
+  const order = await orderLeft(row.salesOrder, row.id);
+  const b = row.progressBilling;
   return {
     id: row.id,
     number: row.number,
     status: row.status,
+    kind: b ? 'billing' : 'order',
     job: row.job,
-    customer: row.job.customer,
-    progressBilling: {
-      id: row.progressBilling.id,
-      number: row.progressBilling.number,
-      status: row.progressBilling.status,
-      billingDate: row.progressBilling.billingDate,
-      report: row.progressBilling.progressReport,
-      lines: row.progressBilling.lines
+    customer: customerOf(row),
+    description: row.description,
+    progressBilling: b && {
+      id: b.id,
+      number: b.number,
+      status: b.status,
+      billingDate: b.billingDate,
+      report: b.progressReport,
+      lines: b.lines
         .slice()
         .sort((a, b) => (a.scopeItem?.sortOrder ?? 0) - (b.scopeItem?.sortOrder ?? 0))
         .map((l) => ({
@@ -219,7 +279,7 @@ async function present(me: ResolvedUser, row: RequestRow) {
     canWithdraw: row.status === 'PENDING_APPROVAL' && editor,
     canCancel: (editable || row.status === 'PENDING_APPROVAL') && editor,
     canDelete: (editable || row.status === 'CANCELLED') && editor && can(me, 'gfin.invoice_requests.delete'),
-    approvalRoute: editable ? await routeBrief(DOC, money.netCollectible, row.requestedById, null, { jobId: row.jobId }) : null,
+    approvalRoute: editable ? await routeBrief(DOC, money.netCollectible, row.requestedById, null, { jobId: row.jobId ?? undefined }) : null,
   };
 }
 
@@ -261,9 +321,9 @@ export function requestListWhere(me: ResolvedUser, q: ReturnType<typeof listQuer
         { poReference: { contains: q.search, mode: 'insensitive' } },
         { progressBilling: { number: { contains: q.search, mode: 'insensitive' } } },
         { salesOrder: { number: { contains: q.search, mode: 'insensitive' } } },
+        { salesOrder: { customer: { name: { contains: q.search, mode: 'insensitive' } } } },
         { job: { number: { contains: q.search, mode: 'insensitive' } } },
         { job: { name: { contains: q.search, mode: 'insensitive' } } },
-        { job: { customer: { name: { contains: q.search, mode: 'insensitive' } } } },
       ],
     });
   }
@@ -284,29 +344,31 @@ async function requestListSummary(base: Prisma.InvoiceRequestWhereInput) {
     prisma.invoiceRequest.count({ where: { AND: [base, { status: 'PENDING_APPROVAL' }] } }),
     prisma.invoiceRequest.count({ where: { AND: [base, { status: 'DRAFT' }] } }),
     prisma.invoiceRequest.count({ where: { AND: [base, { status: 'APPROVED' }, { approvedAt: { gte: monthStart } }] } }),
-    prisma.invoiceRequest.findMany({ where: { AND: [base, { status: 'PENDING_APPROVAL' }] }, select: { progressBilling: { select: { netCollectible: true } } } }),
+    prisma.invoiceRequest.findMany({ where: { AND: [base, { status: 'PENDING_APPROVAL' }] }, include: requestInclude }),
   ]);
+  const values = await Promise.all(waitingSum.map(async (r) => (await moneyOf(r)).netCollectible));
   return {
     waiting,
-    waitingValue: cents(waitingSum.reduce((s, r) => s + num(r.progressBilling.netCollectible), 0)),
+    waitingValue: cents(values.reduce((s, v) => s + v, 0)),
     drafts,
     approvedThisMonth: approved,
   };
 }
 
-function listRow(r: RequestRow, stage: string | undefined) {
+async function listRow(r: RequestRow, stage: string | undefined) {
+  const money = await moneyOf(r);
   return {
     id: r.id,
     number: r.number,
     status: r.status,
     stage: stage ?? null,
     job: r.job,
-    customer: r.job.customer,
-    billing: { id: r.progressBilling.id, number: r.progressBilling.number },
+    customer: customerOf(r),
+    billing: r.progressBilling && { id: r.progressBilling.id, number: r.progressBilling.number },
     salesOrder: { id: r.salesOrder.id, number: r.salesOrder.number },
     poReference: r.poReference,
-    netCollectible: num(r.progressBilling.netCollectible),
-    invoiceTotal: num(r.progressBilling.invoiceTotal),
+    netCollectible: money.netCollectible,
+    invoiceTotal: money.invoiceTotal,
     requestedBy: r.requestedBy,
     team: r.team,
     invoice: r.invoice,
@@ -333,7 +395,7 @@ invoiceRequestRoutes.get(
       requestListSummary(base),
     ]);
     const steps = await openSteps(DOC, rows.filter((r) => r.status === 'PENDING_APPROVAL').map((r) => r.id));
-    res.json({ ...listResult(rows.map((r) => listRow(r, steps.get(r.id))), total, q), summary });
+    res.json({ ...listResult(await Promise.all(rows.map((r) => listRow(r, steps.get(r.id)))), total, q), summary });
   }),
 );
 
@@ -370,18 +432,18 @@ invoiceRequestRoutes.get(
         {
           kind: 'table',
           head: ['Number', 'Project', 'Customer', 'Billing', 'Sales order', `Net collectible (${currency})`, 'Requested by', 'Raised', 'Invoice', 'Status'],
-          rows: rows.map((r) => [
+          rows: await Promise.all(rows.map(async (r) => [
             r.number,
-            { title: r.job.number, body: r.job.name },
-            r.job.customer.name,
-            r.progressBilling.number,
+            r.job ? { title: r.job.number, body: r.job.name } : '—',
+            customerOf(r).name,
+            r.progressBilling?.number ?? 'Sales order',
             r.salesOrder.number,
-            formatAmount(num(r.progressBilling.netCollectible)),
+            formatAmount((await moneyOf(r)).netCollectible),
             r.requestedBy.name,
             formatShortDate(r.createdAt),
             r.invoice?.number ?? '',
             statusLabel(r.status),
-          ]),
+          ])),
         },
       ],
     });
@@ -391,23 +453,49 @@ invoiceRequestRoutes.get(
 );
 
 /**
- * What a request is raised FROM: the billing (approved, not invoiced, nothing
- * live on it), the project's ISSUED sales orders with what is left of each,
- * and the salesperson and team the invoice would be credited to. Above `/:id`.
+ * What a request is raised FROM. `?billingId=`: the billing (approved, not
+ * invoiced, nothing live on it) and the project's ISSUED sales orders with
+ * what is left of each. `?salesOrderId=` (2026-10-16): the issued order alone,
+ * what is left of it after its invoices and the live requests on it, and its
+ * PO and terms. Either way, whether the caller may ask. Above `/:id`.
  */
 invoiceRequestRoutes.get(
   '/source',
   require_('gfin.invoice_requests.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
+    const salesOrderId = String(req.query.salesOrderId ?? '');
+    if (salesOrderId) {
+      const order = await prisma.salesOrder.findUnique({
+        where: { id: salesOrderId },
+        select: { id: true, number: true, status: true, poNumber: true, termsDays: true, total: true, vatAmount: true, vatRate: true, orderDate: true, customer: { select: { id: true, name: true } }, quotation: { select: { subject: true } } },
+      });
+      if (!order) throw notFound('Sales order not found');
+      const left = await orderLeft(order);
+      res.json({
+        kind: 'order',
+        salesOrder: { id: order.id, number: order.number, poNumber: order.poNumber, termsDays: order.termsDays, orderDate: order.orderDate, vatRate: num(order.vatRate), subject: order.quotation.subject, ...left },
+        customer: order.customer,
+        ewtRate: (await currentRates()).ewtRate,
+        problem:
+          order.status !== 'ISSUED'
+            ? `${order.number} is ${statusLabel(order.status).toLowerCase()} — only an issued sales order is invoiced`
+            : left.left <= 0.005
+              ? `Nothing of ${order.number} is left to invoice${left.requested > 0 ? ' — open requests already ask for the rest' : ''}`
+              : null,
+        mayRequest: await mayRequestInvoice(me, { salesOrderId: order.id }),
+      });
+      return;
+    }
     const billingId = String(req.query.billingId ?? '');
-    if (!billingId) throw badRequest('Which billing?');
+    if (!billingId) throw badRequest('Which billing or sales order?');
     const billing = await prisma.progressBilling.findUnique({
       where: { id: billingId },
       include: { job: { select: { id: true, number: true, name: true, customer: { select: { id: true, name: true } } } }, invoice: { select: { number: true } } },
     });
     if (!billing) throw notFound('Progress billing not found');
     res.json({
+      kind: 'billing',
       billing: {
         id: billing.id,
         number: billing.number,
@@ -418,10 +506,10 @@ invoiceRequestRoutes.get(
         invoice: billing.invoice,
       },
       job: billing.job,
+      customer: billing.job.customer,
       problem: await sourceProblem(billing),
       mayRequest: await mayRequestInvoice(me, billing.jobId),
       salesOrders: await projectOrders(billing.jobId),
-      credit: await invoiceCredit({ jobId: billing.jobId }),
     });
   }),
 );
@@ -435,7 +523,7 @@ async function sourceProblem(billing: { id: string; number: string; status: stri
 }
 
 /** The project's ISSUED sales orders — through the quotation the project was won from — with what is left of each. */
-async function projectOrders(jobId: string) {
+async function projectOrders(jobId: string, exceptRequestId?: string) {
   const { quotation } = await projectHolders(jobId);
   if (!quotation) return [];
   const orders = await prisma.salesOrder.findMany({
@@ -450,7 +538,7 @@ async function projectOrders(jobId: string) {
       poNumber: o.poNumber,
       termsDays: o.termsDays,
       orderDate: o.orderDate,
-      ...(await orderLeft(o)),
+      ...(await orderLeft(o, exceptRequestId)),
     })),
   );
 }
@@ -472,38 +560,51 @@ const headerSchema = z.object({
   invoiceDate: z.string().optional().nullable(),
   termsDays: z.number().int().min(0).max(365).optional().nullable(),
   poReference: z.string().trim().max(120).optional().nullable(),
-  salespersonId: z.string().optional().nullable(),
-  teamId: z.string().optional().nullable(),
   notes: z.string().trim().max(5000).optional().nullable(),
+  /** A sales order's request: what to invoice of it, before VAT, and the line's words. */
+  grossAmount: z.number().positive('Say how much to invoice').optional().nullable(),
+  description: z.string().trim().max(500).optional().nullable(),
 });
 
 /**
- * The header a request may carry, checked: the order ISSUED, the job's
- * customer's and booked from the project's quotation, the billing's gross
- * within what is left of the order's net; the PO and terms the order's unless
- * typed; a salesperson and an active team that exist.
+ * The header a request may carry, checked. A billing's: the order ISSUED,
+ * one of the project's (booked from its quotation), the billing's gross
+ * within what is left of the order's net. A sales order's: the order ISSUED,
+ * the gross asked within what is left after its invoices and the other live
+ * requests. Either way the PO and terms are the order's unless typed.
  */
-async function checkHeader(body: z.infer<typeof headerSchema>, billing: { jobId: string; grossAmount: Prisma.Decimal }) {
-  const orders = await projectOrders(billing.jobId);
-  const order = orders.find((o) => o.id === body.salesOrderId);
-  if (!order) {
-    throw badRequest(
-      orders.length
-        ? 'That sales order is not one of this project’s issued orders'
-        : 'This project has no issued sales order — the quotation it was won from must be booked as a sales order first',
-    );
+async function checkHeader(
+  body: z.infer<typeof headerSchema>,
+  source: { billing: { jobId: string; grossAmount: Prisma.Decimal } | null; exceptRequestId?: string },
+) {
+  const currency = await companyCurrency();
+  let order: { id: string; number: string; poNumber: string | null; termsDays: number | null; left: number };
+  let gross: number;
+  if (source.billing) {
+    const orders = await projectOrders(source.billing.jobId, source.exceptRequestId);
+    const found = orders.find((o) => o.id === body.salesOrderId);
+    if (!found) {
+      throw badRequest(
+        orders.length
+          ? 'That sales order is not one of this project’s issued orders'
+          : 'This project has no issued sales order — the quotation it was won from must be booked as a sales order first',
+      );
+    }
+    order = found;
+    gross = num(source.billing.grossAmount);
+  } else {
+    const so = await prisma.salesOrder.findUnique({
+      where: { id: body.salesOrderId },
+      select: { id: true, number: true, status: true, poNumber: true, termsDays: true, total: true, vatAmount: true },
+    });
+    if (!so) throw notFound('Sales order not found');
+    if (so.status !== 'ISSUED') throw badRequest(`${so.number} is ${statusLabel(so.status).toLowerCase()} — only an issued sales order is invoiced`);
+    order = { ...so, ...(await orderLeft(so, source.exceptRequestId)) };
+    if (!body.grossAmount) throw badRequest('Say how much of the order to invoice (before VAT)');
+    gross = cents(body.grossAmount);
   }
-  const gross = num(billing.grossAmount);
   if (gross > order.left + 0.005) {
-    throw badRequest(`Only ${formatMoney(order.left, await companyCurrency())} of ${order.number} is left to invoice (before VAT) — this billing is ${formatMoney(gross, await companyCurrency())}`);
-  }
-  if (body.salespersonId) {
-    const known = await prisma.user.findUnique({ where: { id: body.salespersonId }, select: { id: true } });
-    if (!known) throw badRequest('That salesperson is not on file');
-  }
-  if (body.teamId) {
-    const team = await prisma.industry.findUnique({ where: { id: body.teamId }, select: { isActive: true } });
-    if (!team?.isActive) throw badRequest('That team is not on the list');
+    throw badRequest(`Only ${formatMoney(order.left, currency)} of ${order.number} is left to invoice (before VAT) — this asks for ${formatMoney(gross, currency)}`);
   }
   const invoiceDate = body.invoiceDate ? new Date(body.invoiceDate) : null;
   if (invoiceDate && Number.isNaN(invoiceDate.getTime())) throw badRequest('Invoice date is not a valid date');
@@ -513,7 +614,21 @@ async function checkHeader(body: z.infer<typeof headerSchema>, billing: { jobId:
     termsDays: body.termsDays ?? order.termsDays ?? null,
     poReference: body.poReference?.trim() || order.poNumber || null,
     notes: body.notes || null,
+    ...(source.billing ? {} : { grossAmount: new Prisma.Decimal(gross), description: body.description?.trim() || `Sales order ${order.number}` }),
   };
+}
+
+/**
+ * The invoice is credited to whoever raised the request (2026-10-16, the
+ * owner's call: "sales personnel and team automatic from the sales personnel
+ * who raised the invoice request") — and to their team, else the team of the
+ * quotation behind the order.
+ */
+async function requesterCredit(requesterId: string, salesOrderId: string) {
+  const own = await teamOf(requesterId);
+  if (own) return { salespersonId: requesterId, teamId: own.id };
+  const { team } = await orderHolders(salesOrderId);
+  return { salespersonId: requesterId, teamId: team?.id ?? null };
 }
 
 invoiceRequestRoutes.post(
@@ -521,38 +636,55 @@ invoiceRequestRoutes.post(
   require_('gfin.invoice_requests.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(headerSchema.extend({ progressBillingId: z.string().min(1, 'Which billing?') }), req.body);
-    const billing = await prisma.progressBilling.findUnique({
-      where: { id: body.progressBillingId },
-      include: { invoice: { select: { number: true } } },
-    });
-    if (!billing) throw notFound('Progress billing not found');
-    if (!(await mayRequestInvoice(me, billing.jobId))) {
-      throw forbidden('Only the salesperson who holds the project, or their Team Leader, can ask for its invoice');
+    const body = parseBody(headerSchema.extend({ progressBillingId: z.string().optional().nullable() }), req.body);
+    const billing = body.progressBillingId
+      ? await prisma.progressBilling.findUnique({ where: { id: body.progressBillingId }, include: { invoice: { select: { number: true } } } })
+      : null;
+    if (body.progressBillingId && !billing) throw notFound('Progress billing not found');
+    if (!(await mayRequestInvoice(me, billing ? billing.jobId : { salesOrderId: body.salesOrderId }))) {
+      throw forbidden(
+        billing
+          ? 'Only the salesperson who holds the project, or their Team Leader, can ask for its invoice'
+          : 'Only the salesperson who holds the sales order, or their Team Leader, can ask for its invoice',
+      );
     }
-    const header = await checkHeader(body, billing);
-    const credit =
-      body.salespersonId === undefined || body.teamId === undefined ? await invoiceCredit({ jobId: billing.jobId, salesOrderId: header.salesOrderId }) : null;
+    const header = await checkHeader(body, { billing });
+    const credit = await requesterCredit(me.id, header.salesOrderId);
+    // A sales order's request names the project built from the order's quotation, where there is one.
+    const orderJob = billing
+      ? null
+      : ((
+          await prisma.job.findFirst({
+            where: { quotationRevision: { quotation: { salesOrders: { some: { id: header.salesOrderId } } } } },
+            orderBy: { createdAt: 'asc' },
+            select: { id: true },
+          })
+        )?.id ?? null);
 
     const made = await prisma.$transaction(async (tx) => {
-      // One live request per billing, decided under a lock on the billing's row.
-      await tx.$queryRaw`SELECT id FROM "ProgressBilling" WHERE id = ${billing.id} FOR UPDATE`;
-      const fresh = await tx.progressBilling.findUniqueOrThrow({ where: { id: billing.id }, include: { invoice: { select: { number: true } } } });
-      const problem = await sourceProblem(fresh);
-      if (problem) throw badRequest(problem);
+      if (billing) {
+        // One live request per billing, decided under a lock on the billing's row.
+        await tx.$queryRaw`SELECT id FROM "ProgressBilling" WHERE id = ${billing.id} FOR UPDATE`;
+        const fresh = await tx.progressBilling.findUniqueOrThrow({ where: { id: billing.id }, include: { invoice: { select: { number: true } } } });
+        const problem = await sourceProblem(fresh);
+        if (problem) throw badRequest(problem);
+      } else {
+        // Two requests at once cannot both ask for the last of the order.
+        await tx.$queryRaw`SELECT id FROM "SalesOrder" WHERE id = ${header.salesOrderId} FOR UPDATE`;
+      }
       return tx.invoiceRequest.create({
         data: {
           number: await nextNumber(DOC, tx),
-          progressBillingId: billing.id,
-          jobId: billing.jobId,
+          progressBillingId: billing?.id ?? null,
+          jobId: billing?.jobId ?? orderJob,
           ...header,
-          salespersonId: body.salespersonId === undefined ? credit!.salespersonId : body.salespersonId || null,
-          teamId: body.teamId === undefined ? credit!.teamId : body.teamId || null,
+          ...credit,
           requestedById: me.id,
         },
       });
     });
-    await audit({ entityType: 'invoice_request', entityId: made.id, action: 'CREATED', summary: `Raised ${made.number} for ${billing.number}` }, req);
+    const order = await prisma.salesOrder.findUniqueOrThrow({ where: { id: header.salesOrderId }, select: { number: true } });
+    await audit({ entityType: 'invoice_request', entityId: made.id, action: 'CREATED', summary: `Raised ${made.number} for ${billing ? billing.number : `sales order ${order.number}`}` }, req);
     res.status(201).json(await present(me, await loadVisible(me, made.id)));
   }),
 );
@@ -566,15 +698,9 @@ invoiceRequestRoutes.put(
     const row = await loadVisible(me, req.params.id);
     if (!mayEdit(me, row)) throw forbidden('Only the person who raised this request can change it');
     if (row.status !== 'DRAFT') throw badRequest('Only a draft can be changed — pull it back first');
-    const header = await checkHeader(body, row.progressBilling);
-    const claimed = await prisma.invoiceRequest.updateMany({
-      where: { id: row.id, status: 'DRAFT' },
-      data: {
-        ...header,
-        ...(body.salespersonId !== undefined ? { salespersonId: body.salespersonId || null } : {}),
-        ...(body.teamId !== undefined ? { teamId: body.teamId || null } : {}),
-      },
-    });
+    if (!row.progressBillingId && body.salesOrderId !== row.salesOrderId) throw badRequest('The sales order a request bills does not change — cancel it and raise another');
+    const header = await checkHeader(body, { billing: row.progressBilling, exceptRequestId: row.id });
+    const claimed = await prisma.invoiceRequest.updateMany({ where: { id: row.id, status: 'DRAFT' }, data: header });
     if (!claimed.count) throw badRequest('It was submitted a moment ago — reload');
     await audit({ entityType: 'invoice_request', entityId: row.id, action: 'UPDATED', summary: `${row.number} changed` }, req);
     res.json(await present(me, await loadVisible(me, row.id)));
@@ -583,8 +709,8 @@ invoiceRequestRoutes.put(
 
 /**
  * Submitting: claimed on DRAFT and on what it read, filed in the requester's
- * name whoever presses the button, the billing's net collectible as the
- * amount; back to DRAFT if the engine refuses — never pending with no request.
+ * name whoever presses the button, the net collectible as the amount; back to
+ * DRAFT if the engine refuses — never pending with no request.
  */
 invoiceRequestRoutes.post(
   '/:id/submit',
@@ -594,8 +720,12 @@ invoiceRequestRoutes.post(
     const row = await loadVisible(me, req.params.id);
     if (!mayEdit(me, row)) throw forbidden('Only the person who raised this request can submit it');
     if (row.status !== 'DRAFT') throw badRequest('This request has already been submitted');
-    // The order must still hold the billing — another invoice may have taken it since.
-    await checkHeader({ salesOrderId: row.salesOrderId, termsDays: row.termsDays, poReference: row.poReference }, row.progressBilling);
+    // The order must still hold it — another invoice may have taken it since.
+    await checkHeader(
+      { salesOrderId: row.salesOrderId, termsDays: row.termsDays, poReference: row.poReference, grossAmount: row.grossAmount ? num(row.grossAmount) : null, description: row.description },
+      { billing: row.progressBilling, exceptRequestId: row.id },
+    );
+    const money = await moneyOf(row);
 
     const claimed = await prisma.invoiceRequest.updateMany({
       where: { id: row.id, status: 'DRAFT', updatedAt: row.updatedAt },
@@ -607,11 +737,13 @@ invoiceRequestRoutes.post(
         documentType: DOC,
         documentId: row.id,
         documentNumber: row.number,
-        subject: `${row.job.number} — invoice ${row.progressBilling.number} on ${row.salesOrder.number}`,
-        amount: num(row.progressBilling.netCollectible),
+        subject: row.progressBilling
+          ? `${row.job?.number ?? ''} — invoice ${row.progressBilling.number} on ${row.salesOrder.number}`
+          : `${customerOf(row).name} — invoice ${row.salesOrder.number}`,
+        amount: money.netCollectible,
         link: INVOICE_REQUEST_LINK(row.id),
         requesterId: row.requestedById,
-        jobId: row.jobId,
+        jobId: row.jobId ?? undefined,
       });
     } catch (err) {
       await prisma.invoiceRequest.updateMany({ where: { id: row.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT', submittedAt: null } });
@@ -709,28 +841,32 @@ export async function settleInvoiceRequest(approval: ApprovalRequest, outcome: A
     invoiceNumber = await prisma.$transaction(async (tx) => {
       const claimed = await tx.invoiceRequest.updateMany({ where: { id: row.id, status: 'PENDING_APPROVAL' }, data: { status: 'APPROVED', approvedAt: new Date() } });
       if (!claimed.count) return null;
+      const invoiceDate = row.invoiceDate ?? dayKey(new Date());
+      const termsDays = row.termsDays ?? settings.defaultTermsDays;
+      const header = {
+        invoiceDate,
+        dueDate: expectedCollection(invoiceDate, null, termsDays),
+        termsDays,
+        poReference: row.poReference,
+        notes: row.notes,
+        salespersonId: row.salespersonId,
+        teamId: row.teamId,
+        salesOrderId: row.salesOrderId,
+      };
+      const actor = last?.approverId ?? row.requestedById;
+      if (!row.progressBillingId) {
+        const so = await tx.salesOrder.findUniqueOrThrow({ where: { id: row.salesOrderId } });
+        if (so.status !== 'ISSUED') throw new Error(`${so.number} is ${statusLabel(so.status).toLowerCase()}`);
+        const invoice = await createInvoiceFromOrder(tx, so, num(row.grossAmount), row.description ?? `Sales order ${so.number}`, { ...header, jobId: row.jobId }, actor);
+        await tx.invoiceRequest.update({ where: { id: row.id }, data: { invoiceId: invoice.id } });
+        return invoice.number;
+      }
       await tx.$queryRaw`SELECT id FROM "ProgressBilling" WHERE id = ${row.progressBillingId} FOR UPDATE`;
       const billing = await tx.progressBilling.findUniqueOrThrow({ where: { id: row.progressBillingId }, include: billingForInvoiceInclude });
       if (billing.invoice) throw new Error(`${billing.number} was invoiced as ${billing.invoice.number} meanwhile`);
       if (billing.status !== 'APPROVED') throw new Error(`${billing.number} is ${statusLabel(billing.status).toLowerCase()}`);
       await assertOrderLeft(tx, { id: row.salesOrder.id, number: row.salesOrder.number, net: orderNet(row.salesOrder) }, num(billing.grossAmount));
-      const invoiceDate = row.invoiceDate ?? dayKey(new Date());
-      const termsDays = row.termsDays ?? settings.defaultTermsDays;
-      const invoice = await createInvoiceFromBilling(
-        tx,
-        billing,
-        {
-          invoiceDate,
-          dueDate: expectedCollection(invoiceDate, null, termsDays),
-          termsDays,
-          poReference: row.poReference,
-          notes: row.notes,
-          salespersonId: row.salespersonId,
-          teamId: row.teamId,
-          salesOrderId: row.salesOrderId,
-        },
-        last?.approverId ?? row.requestedById,
-      );
+      const invoice = await createInvoiceFromBilling(tx, billing, header, actor);
       await tx.invoiceRequest.update({ where: { id: row.id }, data: { invoiceId: invoice.id } });
       return invoice.number;
     });
@@ -759,7 +895,7 @@ export async function settleInvoiceRequest(approval: ApprovalRequest, outcome: A
       userId: row.requestedById,
       type: 'invoice_request.invoiced',
       title: `${row.number} approved — invoice ${invoiceNumber}`,
-      body: `${row.progressBilling.number} is now draft invoice ${invoiceNumber} in Accounts Receivable.`,
+      body: `${row.progressBilling?.number ?? `Sales order ${row.salesOrder.number}`} is now draft invoice ${invoiceNumber} in Accounts Receivable.`,
       link: INVOICE_REQUEST_LINK(row.id),
     },
     ...finance
@@ -768,7 +904,7 @@ export async function settleInvoiceRequest(approval: ApprovalRequest, outcome: A
         userId,
         type: 'invoice_request.invoiced' as const,
         title: `Draft invoice ${invoiceNumber} is ready to issue`,
-        body: `From ${row.number} — ${row.job.number} ${row.job.name}, on ${row.salesOrder.number}.`,
+        body: `From ${row.number} — ${row.job ? `${row.job.number} ${row.job.name}` : customerOf(row).name}, on ${row.salesOrder.number}.`,
         link: fresh?.invoiceId ? `/g-fin/ar/${fresh.invoiceId}` : INVOICE_REQUEST_LINK(row.id),
       })),
   ]);
@@ -792,27 +928,32 @@ invoiceRequestRoutes.get(
     const me = currentUser(req);
     const row = await loadVisible(me, req.params.id, res.locals.deciderOnly === true);
     const currency = await companyCurrency();
-    const money = moneyOf(row.progressBilling);
+    const money = await moneyOf(row);
     const slots =
       row.status === 'DRAFT'
-        ? await approvalSlots(DOC, row.id, { amount: money.netCollectible, requesterId: row.requestedById, jobId: row.jobId })
+        ? await approvalSlots(DOC, row.id, { amount: money.netCollectible, requesterId: row.requestedById, jobId: row.jobId ?? undefined })
         : await approvalSlots(DOC, row.id);
     const requester = { name: row.requestedBy.name, ...(await contactOf(row.requestedById)) };
     const signatories: Signatory[] = [{ role: 'Requested by', ...requester, at: preparedAt(slots) ?? row.createdAt }, ...slotSignatories(slots)];
-    const report = row.progressBilling.progressReport;
-    const period = `${formatDate(report.periodFrom)} – ${formatDate(report.periodTo)}`;
-    const lines = row.progressBilling.lines.slice().sort((a, b) => (a.scopeItem?.sortOrder ?? 0) - (b.scopeItem?.sortOrder ?? 0));
+    const b = row.progressBilling;
+    const period = b ? `${formatDate(b.progressReport.periodFrom)} – ${formatDate(b.progressReport.periodTo)}` : '';
+    const lines = b ? b.lines.slice().sort((x, y) => (x.scopeItem?.sortOrder ?? 0) - (y.scopeItem?.sortOrder ?? 0)) : [];
+    const customer = customerOf(row);
     const sections: PdfSection[] = [
       {
         kind: 'fields',
         columns: 3,
         fields: [
-          { label: 'Customer', value: row.job.customer.name },
-          { label: 'Project', value: `${row.job.number} — ${row.job.name}` },
+          { label: 'Customer', value: customer.name },
+          { label: 'Project', value: row.job ? `${row.job.number} — ${row.job.name}` : '' },
           { label: 'Sales order', value: row.salesOrder.number },
           { label: 'Customer P.O.', value: row.poReference ?? '' },
-          { label: 'Billing no.', value: row.progressBilling.number },
-          { label: 'Report period', value: period },
+          ...(b
+            ? [
+                { label: 'Billing no.', value: b.number },
+                { label: 'Report period', value: period },
+              ]
+            : []),
           { label: 'Payment terms', value: termsLabel(row.termsDays ?? undefined) },
           { label: 'Invoice date', value: row.invoiceDate ? formatDate(row.invoiceDate) : 'On approval' },
           { label: 'Sales personnel', value: row.salesperson?.name ?? '' },
@@ -821,19 +962,27 @@ invoiceRequestRoutes.get(
           { label: 'Invoice', value: row.invoice?.number ?? '' },
         ],
       },
-      {
-        kind: 'table',
-        title: 'Particulars',
-        head: ['No.', 'Scope of work', 'Previous', 'To date', `Amount (${currency})`],
-        widths: [8, 50, 12, 12, 18],
-        rows: lines.map((l, i) => [
-          String(i + 1),
-          l.scopeItem?.name ?? 'Progress billing',
-          `${num(l.previousPct).toFixed(2)}%`,
-          `${num(l.toDatePct).toFixed(2)}%`,
-          formatAmount(num(l.thisPeriodAmount)),
-        ]),
-      },
+      b
+        ? {
+            kind: 'table',
+            title: 'Particulars',
+            head: ['No.', 'Scope of work', 'Previous', 'To date', `Amount (${currency})`],
+            widths: [8, 50, 12, 12, 18],
+            rows: lines.map((l, i) => [
+              String(i + 1),
+              l.scopeItem?.name ?? 'Progress billing',
+              `${num(l.previousPct).toFixed(2)}%`,
+              `${num(l.toDatePct).toFixed(2)}%`,
+              formatAmount(num(l.thisPeriodAmount)),
+            ]),
+          }
+        : {
+            kind: 'table',
+            title: 'Particulars',
+            head: ['No.', 'Description', `Amount (${currency})`],
+            widths: [8, 74, 18],
+            rows: [['1', { title: row.description ?? `Sales order ${row.salesOrder.number}`, body: `Sales order ${row.salesOrder.number}` }, formatAmount(money.grossAmount)]],
+          },
       {
         kind: 'totals',
         rows: [
@@ -852,12 +1001,12 @@ invoiceRequestRoutes.get(
       title: 'Invoice Request',
       documentNumber: row.number,
       date: row.createdAt,
-      reference: row.job.customer.name,
+      reference: customer.name,
       sections,
       signatories,
     });
     const files = req.query.attachments === '0' ? [] : await attachedFiles('invoice_request', row.id);
-    const { pdf, listed } = await withAttachments(bare, files, { title: 'Invoice Request', number: row.number, reference: row.job.name });
+    const { pdf, listed } = await withAttachments(bare, files, { title: 'Invoice Request', number: row.number, reference: row.job?.name ?? customer.name });
     await audit(
       { entityType: 'invoice_request', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}` },
       req,
@@ -881,17 +1030,25 @@ registerSearch({
           { number: { contains: term, mode: 'insensitive' } },
           { progressBilling: { number: { contains: term, mode: 'insensitive' } } },
           { job: { name: { contains: term, mode: 'insensitive' } } },
+          { salesOrder: { number: { contains: term, mode: 'insensitive' } } },
         ],
       },
-      select: { id: true, number: true, status: true, job: { select: { number: true, name: true } }, progressBilling: { select: { number: true } } },
+      select: {
+        id: true,
+        number: true,
+        status: true,
+        job: { select: { number: true, name: true } },
+        progressBilling: { select: { number: true } },
+        salesOrder: { select: { number: true, customer: { select: { name: true } } } },
+      },
       take: limit,
       orderBy: { createdAt: 'desc' },
     });
     return rows.map((r) => ({
       kind: 'invoice_request',
       id: r.id,
-      title: `${r.number} — ${r.progressBilling.number}`,
-      subtitle: `${r.job.number} ${r.job.name} · ${statusLabel(r.status).toLowerCase()}`,
+      title: `${r.number} — ${r.progressBilling?.number ?? r.salesOrder.number}`,
+      subtitle: `${r.job ? `${r.job.number} ${r.job.name}` : r.salesOrder.customer.name} · ${statusLabel(r.status).toLowerCase()}`,
       link: INVOICE_REQUEST_LINK(r.id),
     }));
   },

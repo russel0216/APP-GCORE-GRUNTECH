@@ -10,6 +10,7 @@ import { Attachments } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
 import { TermsPicker } from './Receivables';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * INVOICE REQUESTS (2026-10-15, the owner's call): an approved progress
@@ -43,9 +44,9 @@ interface RequestRow {
   number: string;
   status: string;
   stage: string | null;
-  job: { id: string; number: string; name: string };
+  job: { id: string; number: string; name: string } | null;
   customer: Named;
-  billing: { id: string; number: string };
+  billing: { id: string; number: string } | null;
   salesOrder: { id: string; number: string };
   poReference: string | null;
   netCollectible: number;
@@ -72,8 +73,14 @@ export function InvoiceRequests() {
       label: 'Project',
       render: (r) => (
         <>
-          <span className="mono">{r.job.number}</span>
-          <div className="faint">{r.job.name}</div>
+          {r.job ? (
+            <>
+              <span className="mono">{r.job.number}</span>
+              <div className="faint">{r.job.name}</div>
+            </>
+          ) : (
+            <span className="faint">—</span>
+          )}
         </>
       ),
     },
@@ -83,8 +90,8 @@ export function InvoiceRequests() {
       label: 'Billing · Sales order',
       render: (r) => (
         <>
-          <span className="mono">{r.billing.number}</span>
-          <div className="faint mono">{r.salesOrder.number}</div>
+          <span className="mono">{r.billing?.number ?? r.salesOrder.number}</span>
+          <div className="faint mono">{r.billing ? r.salesOrder.number : 'from the sales order'}</div>
         </>
       ),
     },
@@ -120,7 +127,7 @@ export function InvoiceRequests() {
         searchPlaceholder="Search number, billing, sales order, project, customer, PO…"
         onRowClick={(r) => navigate(`/g-fin/invoice-requests/${r.id}`)}
         emptyTitle="No invoice requests"
-        emptyHint="An approved progress billing is asked to be invoiced from its project's Progress & Billing tab."
+        emptyHint="Ask for an invoice from an issued sales order, or from an approved progress billing on its project's Progress & Billing tab."
         filters={[
           { key: 'status', label: 'Status', options: STATUSES },
           { key: 'dateFrom', toKey: 'dateTo', label: 'Raised', type: 'dateRange' },
@@ -155,24 +162,37 @@ interface SourceOrder {
   termsDays: number | null;
   net: number;
   invoiced: number;
+  requested: number;
   left: number;
 }
 
-interface Source {
-  billing: { id: string; number: string; status: string; grossAmount: number; invoiceTotal: number; netCollectible: number };
-  job: { id: string; number: string; name: string; customer: Named };
-  problem: string | null;
-  mayRequest: boolean;
-  salesOrders: SourceOrder[];
-  credit: { salespersonId: string | null; teamId: string | null };
-}
+type Source =
+  | {
+      kind: 'billing';
+      billing: { id: string; number: string; status: string; grossAmount: number; invoiceTotal: number; netCollectible: number };
+      job: { id: string; number: string; name: string; customer: Named };
+      customer: Named;
+      problem: string | null;
+      mayRequest: boolean;
+      salesOrders: SourceOrder[];
+    }
+  | {
+      kind: 'order';
+      salesOrder: SourceOrder & { vatRate: number; subject: string | null };
+      customer: Named;
+      ewtRate: number;
+      problem: string | null;
+      mayRequest: boolean;
+    };
 
 export interface InvoiceRequestDetail {
   id: string;
   number: string;
   status: string;
-  job: { id: string; number: string; name: string };
+  kind: 'billing' | 'order';
+  job: { id: string; number: string; name: string } | null;
   customer: Named;
+  description: string | null;
   progressBilling: {
     id: string;
     number: string;
@@ -180,7 +200,7 @@ export interface InvoiceRequestDetail {
     billingDate: string;
     report: { id: string; number: string; periodFrom: string; periodTo: string };
     lines: { id: string; name: string; previousPct: number; toDatePct: number; amount: number }[];
-  };
+  } | null;
   grossAmount: number;
   vatRate: number;
   vatAmount: number;
@@ -188,7 +208,7 @@ export interface InvoiceRequestDetail {
   ewtAmount: number;
   invoiceTotal: number;
   netCollectible: number;
-  salesOrder: { id: string; number: string; poNumber: string | null; net: number; invoiced: number; left: number };
+  salesOrder: { id: string; number: string; poNumber: string | null; net: number; invoiced: number; requested: number; left: number };
   invoiceDate: string | null;
   termsDays: number | null;
   terms: string;
@@ -210,18 +230,25 @@ export interface InvoiceRequestDetail {
   approvalRoute: { name: string; steps: { name: string; held?: boolean; approvers: { id: string; name: string }[] }[] } | null;
 }
 
+const cents = (n: number) => Math.round(n * 100) / 100;
+
 /**
- * "Request invoice" and Modify: the sales order the billing is invoiced on
- * (the project's issued orders, with what is left of each), the invoice date,
- * the terms and the customer's PO — the order's unless typed.
+ * "Request invoice" and Modify. From a billing: the sales order it is
+ * invoiced on (the project's issued orders, with what is left of each). From
+ * a sales order (2026-10-16, the owner's call): how much of the order to
+ * invoice, before VAT — what is left by default — and the line's words. Either
+ * way the invoice date, the terms and the customer's PO (the order's unless
+ * typed). The sales personnel and team are the requester's — never typed.
  */
 export function InvoiceRequestModal({
   billingId,
+  salesOrderId,
   existing,
   onClose,
   onSaved,
 }: {
-  billingId: string;
+  billingId?: string;
+  salesOrderId?: string;
   existing?: InvoiceRequestDetail;
   onClose: () => void;
   onSaved: (saved: InvoiceRequestDetail) => void;
@@ -229,35 +256,58 @@ export function InvoiceRequestModal({
   const toast = useToast();
   const [source, setSource] = useState<Source | null>(null);
   const [form, setForm] = useState({
-    salesOrderId: existing?.salesOrder.id ?? '',
+    salesOrderId: existing?.salesOrder.id ?? salesOrderId ?? '',
     invoiceDate: existing?.invoiceDate?.slice(0, 10) ?? '',
     termsDays: existing?.termsDays ?? 30,
     poReference: existing?.poReference ?? '',
     notes: existing?.notes ?? '',
+    grossAmount: existing && existing.kind === 'order' ? existing.grossAmount : 0,
+    description: existing?.description ?? '',
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const sourceKey = billingId ? `billingId=${billingId}` : `salesOrderId=${salesOrderId ?? existing?.salesOrder.id ?? ''}`;
 
   useEffect(() => {
     api
-      .get<Source>(`/invoice-requests/source?billingId=${billingId}`)
+      .get<Source>(`/invoice-requests/source?${sourceKey}`)
       .then((s) => {
         setSource(s);
-        // One order: it is the answer. Its PO and terms fill an empty form.
-        if (!existing && s.salesOrders.length === 1) {
+        if (existing) return;
+        if (s.kind === 'billing' && s.salesOrders.length === 1) {
+          // One order: it is the answer. Its PO and terms fill an empty form.
           const o = s.salesOrders[0];
           setForm((f) => ({ ...f, salesOrderId: o.id, poReference: f.poReference || o.poNumber || '', termsDays: o.termsDays ?? f.termsDays }));
         }
+        if (s.kind === 'order') {
+          const o = s.salesOrder;
+          setForm((f) => ({
+            ...f,
+            salesOrderId: o.id,
+            poReference: f.poReference || o.poNumber || '',
+            termsDays: o.termsDays ?? f.termsDays,
+            grossAmount: o.left,
+            description: f.description || `Sales order ${o.number}${o.subject ? ` — ${o.subject}` : ''}`,
+          }));
+        }
       })
       .catch(setError);
-  }, [billingId, existing]);
+  }, [sourceKey, existing]);
 
-  const order = source?.salesOrders.find((o) => o.id === form.salesOrderId) ?? null;
-  const gross = source?.billing.grossAmount ?? existing?.grossAmount ?? 0;
-  const over = !!order && gross > order.left + 0.005;
+  const fromOrder = source?.kind === 'order';
+  const order = !source ? null : source.kind === 'order' ? source.salesOrder : (source.salesOrders.find((o) => o.id === form.salesOrderId) ?? null);
+  // A modified request's own ask is not counted against what is left.
+  const left = order ? cents(order.left + (existing ? (existing.kind === 'order' ? existing.grossAmount : 0) : 0)) : 0;
+  const gross = source?.kind === 'billing' ? source.billing.grossAmount : form.grossAmount;
+  const over = !!order && gross > left + 0.005;
+  const vatRate = source?.kind === 'order' ? source.salesOrder.vatRate : 0;
+  const ewtRate = source?.kind === 'order' ? source.ewtRate : 0;
+  const vat = cents(gross * vatRate);
+  const ewt = cents(gross * ewtRate);
 
   function pickOrder(id: string) {
-    const o = source?.salesOrders.find((x) => x.id === id);
+    if (source?.kind !== 'billing') return;
+    const o = source.salesOrders.find((x) => x.id === id);
     setForm((f) => ({ ...f, salesOrderId: id, poReference: o?.poNumber ?? f.poReference, termsDays: o?.termsDays ?? f.termsDays }));
   }
 
@@ -271,10 +321,11 @@ export function InvoiceRequestModal({
         termsDays: form.termsDays,
         poReference: form.poReference || null,
         notes: form.notes || null,
+        ...(fromOrder ? { grossAmount: form.grossAmount, description: form.description || null } : {}),
       };
       const saved = existing
         ? await api.put<InvoiceRequestDetail>(`/invoice-requests/${existing.id}`, body)
-        : await api.post<InvoiceRequestDetail>('/invoice-requests', { ...body, progressBillingId: billingId });
+        : await api.post<InvoiceRequestDetail>('/invoice-requests', { ...body, progressBillingId: billingId ?? null });
       toast('ok', existing ? 'Saved' : `${saved.number} raised — submit it to Back Support`);
       onSaved(saved);
     } catch (err) {
@@ -283,13 +334,19 @@ export function InvoiceRequestModal({
     }
   }
 
+  const blocked = !existing && !!source?.problem;
   return (
     <Modal
       title={existing ? `Modify invoice request ${existing.number}` : 'New invoice request'}
       onClose={onClose}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
-          <button type="button" className="btn btn-primary" onClick={save} disabled={busy || !form.salesOrderId || over || (!existing && !!source?.problem)}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={save}
+            disabled={busy || !form.salesOrderId || over || blocked || (fromOrder && !(form.grossAmount > 0))}
+          >
             {busy ? 'Saving…' : 'Save'}
           </button>
         </ModalFoot>
@@ -300,43 +357,77 @@ export function InvoiceRequestModal({
         <Loading />
       ) : (
         <>
-          {!existing && source.problem && <div className="alert warn">{source.problem}</div>}
-          <dl className="kv">
-            <dt>Billing</dt>
-            <dd className="mono">{source.billing.number}</dd>
-            <dt>Project</dt>
-            <dd>
-              <span className="mono">{source.job.number}</span> {source.job.name}
-            </dd>
-            <dt>Customer</dt>
-            <dd>{source.job.customer.name}</dd>
-            <dt>Net collectible</dt>
-            <dd>
-              {formatMoney(source.billing.netCollectible)} <span className="faint">({formatMoney(source.billing.grossAmount)} before VAT)</span>
-            </dd>
-          </dl>
-          <Field
-            label="Sales order"
-            required
-            hint={
-              source.salesOrders.length === 0
-                ? 'This project has no issued sales order — book its quotation as a sales order first.'
-                : order
-                  ? `${formatMoney(order.left)} of ${formatMoney(order.net)} left to invoice (before VAT)`
-                  : 'The order this billing is invoiced on.'
-            }
-            error={over ? `Only ${formatMoney(order!.left)} of ${order!.number} is left — this billing is ${formatMoney(gross)}` : undefined}
-          >
-            <select value={form.salesOrderId} onChange={(e) => pickOrder(e.target.value)}>
-              <option value="">— choose —</option>
-              {source.salesOrders.map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.number}
-                  {o.poNumber ? ` · PO ${o.poNumber}` : ''} — {formatMoney(o.left)} left
-                </option>
-              ))}
-            </select>
-          </Field>
+          {blocked && <div className="alert warn">{source.problem}</div>}
+          {!existing && !source.mayRequest && (
+            <div className="alert warn">Only the salesperson who holds it, or their Team Leader, can ask for its invoice.</div>
+          )}
+          {source.kind === 'billing' ? (
+            <>
+              <dl className="kv">
+                <dt>Billing</dt>
+                <dd className="mono">{source.billing.number}</dd>
+                <dt>Project</dt>
+                <dd>
+                  <span className="mono">{source.job.number}</span> {source.job.name}
+                </dd>
+                <dt>Customer</dt>
+                <dd>{source.customer.name}</dd>
+                <dt>Net collectible</dt>
+                <dd>
+                  {formatMoney(source.billing.netCollectible)} <span className="faint">({formatMoney(source.billing.grossAmount)} before VAT)</span>
+                </dd>
+              </dl>
+              <Field
+                label="Sales order"
+                required
+                hint={
+                  source.salesOrders.length === 0
+                    ? 'This project has no issued sales order — book its quotation as a sales order first.'
+                    : order
+                      ? `${formatMoney(left)} of ${formatMoney(order.net)} left to invoice (before VAT)`
+                      : 'The order this billing is invoiced on.'
+                }
+                error={over ? `Only ${formatMoney(left)} of ${order!.number} is left — this billing is ${formatMoney(gross)}` : undefined}
+              >
+                <select value={form.salesOrderId} onChange={(e) => pickOrder(e.target.value)}>
+                  <option value="">— choose —</option>
+                  {source.salesOrders.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.number}
+                      {o.poNumber ? ` · PO ${o.poNumber}` : ''} — {formatMoney(o.left)} left
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </>
+          ) : (
+            <>
+              <dl className="kv">
+                <dt>Sales order</dt>
+                <dd className="mono">{source.salesOrder.number}</dd>
+                <dt>Customer</dt>
+                <dd>{source.customer.name}</dd>
+                <dt>Left to invoice</dt>
+                <dd>
+                  {formatMoney(left)} <span className="faint">of {formatMoney(source.salesOrder.net)} before VAT</span>
+                  {source.salesOrder.requested > 0 && <div className="faint">{formatMoney(source.salesOrder.requested)} is already asked for in open requests</div>}
+                </dd>
+              </dl>
+              <div className="grid-2">
+                <Field
+                  label="Amount to invoice (before VAT)"
+                  required
+                  error={over ? `Only ${formatMoney(left)} is left` : undefined}
+                  hint={`VAT ${formatMoney(vat)} · total ${formatMoney(cents(gross + vat))} · net collectible ${formatMoney(cents(gross + vat - ewt))}`}
+                >
+                  <NumberInput kind="money" min={0} value={form.grossAmount} onChange={(e) => setForm((f) => ({ ...f, grossAmount: Number(e.target.value) }))} />
+                </Field>
+                <Field label="Invoice line" hint="What the invoice says it is for">
+                  <input value={form.description} maxLength={500} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} />
+                </Field>
+              </div>
+            </>
+          )}
           <div className="grid-2">
             <Field label="Customer P.O." hint="The sales order's, unless typed">
               <input value={form.poReference} onChange={(e) => setForm((f) => ({ ...f, poReference: e.target.value }))} maxLength={120} />
@@ -351,6 +442,7 @@ export function InvoiceRequestModal({
           <Field label="Notes for Back Support and finance">
             <textarea rows={2} value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} />
           </Field>
+          <p className="faint">The invoice is credited to you and your team, as the one asking for it.</p>
         </>
       )}
     </Modal>
@@ -407,22 +499,27 @@ export function InvoiceRequestPage() {
       <RecordHeader
         type="Invoice Request"
         code={row.number}
-        title={`${row.progressBilling.number} on ${row.salesOrder.number}`}
+        title={row.progressBilling ? `${row.progressBilling.number} on ${row.salesOrder.number}` : (row.description ?? `Sales order ${row.salesOrder.number}`)}
         status={row.status}
         statusExtra={REQUEST_TONES}
         amount={formatMoney(row.netCollectible)}
         amountLabel="Net collectible"
         meta={
           <>
-            Requested by {row.requestedBy.name} on {formatDate(row.createdAt)} · {row.customer.name} ·{' '}
-            {can('gops.projects.view_all') || can('gops.projects.view_own') ? (
-              <Link to={`/g-ops/projects/${row.job.id}?tab=progress`} className="mono">
-                {row.job.number}
-              </Link>
-            ) : (
-              <span className="mono">{row.job.number}</span>
-            )}{' '}
-            {row.job.name}
+            Requested by {row.requestedBy.name} on {formatDate(row.createdAt)} · {row.customer.name}
+            {row.job && (
+              <>
+                {' · '}
+                {can('gops.projects.view_all') || can('gops.projects.view_own') ? (
+                  <Link to={`/g-ops/projects/${row.job.id}?tab=progress`} className="mono">
+                    {row.job.number}
+                  </Link>
+                ) : (
+                  <span className="mono">{row.job.number}</span>
+                )}{' '}
+                {row.job.name}
+              </>
+            )}
           </>
         }
         actions={
@@ -511,15 +608,19 @@ export function InvoiceRequestPage() {
           <section className="card">
             <h3 className="card-title">What is to be invoiced</h3>
             <dl className="kv">
-              <dt>Billing</dt>
-              <dd>
-                <Link to={`/g-ops/billings/${row.progressBilling.id}`} className="mono">
-                  {row.progressBilling.number}
-                </Link>{' '}
-                <span className="faint">
-                  {formatDate(row.progressBilling.report.periodFrom)} – {formatDate(row.progressBilling.report.periodTo)}
-                </span>
-              </dd>
+              {row.progressBilling && (
+                <>
+                  <dt>Billing</dt>
+                  <dd>
+                    <Link to={`/g-ops/billings/${row.progressBilling.id}`} className="mono">
+                      {row.progressBilling.number}
+                    </Link>{' '}
+                    <span className="faint">
+                      {formatDate(row.progressBilling.report.periodFrom)} – {formatDate(row.progressBilling.report.periodTo)}
+                    </span>
+                  </dd>
+                </>
+              )}
               <dt>Sales order</dt>
               <dd>
                 <Link to={`/g-ops/sales-orders/${row.salesOrder.id}`} className="mono">
@@ -546,7 +647,7 @@ export function InvoiceRequestPage() {
             </dl>
           </section>
           <section className="card">
-            <h3 className="card-title">The money (the billing's, never re-keyed)</h3>
+            <h3 className="card-title">{row.progressBilling ? "The money (the billing's, never re-keyed)" : 'The money'}</h3>
             <dl className="kv">
               <dt>Gross</dt>
               <dd>{formatMoney(row.grossAmount)}</dd>
@@ -567,26 +668,46 @@ export function InvoiceRequestPage() {
         <section className="card">
           <h3 className="card-title">Particulars</h3>
           <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th>Scope of work</th>
-                  <th className="num">Previous</th>
-                  <th className="num">To date</th>
-                  <th className="num">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {row.progressBilling.lines.map((l) => (
-                  <tr key={l.id}>
-                    <td>{l.name}</td>
-                    <td className="num">{l.previousPct.toFixed(2)}%</td>
-                    <td className="num">{l.toDatePct.toFixed(2)}%</td>
-                    <td className="num">{formatMoney(l.amount)}</td>
+            {row.progressBilling ? (
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Scope of work</th>
+                    <th className="num">Previous</th>
+                    <th className="num">To date</th>
+                    <th className="num">Amount</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {row.progressBilling.lines.map((l) => (
+                    <tr key={l.id}>
+                      <td>{l.name}</td>
+                      <td className="num">{l.previousPct.toFixed(2)}%</td>
+                      <td className="num">{l.toDatePct.toFixed(2)}%</td>
+                      <td className="num">{formatMoney(l.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Description</th>
+                    <th className="num">Amount (before VAT)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>
+                      {row.description ?? `Sales order ${row.salesOrder.number}`}
+                      <div className="faint">Sales order {row.salesOrder.number}</div>
+                    </td>
+                    <td className="num">{formatMoney(row.grossAmount)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            )}
           </div>
         </section>
 
@@ -601,7 +722,8 @@ export function InvoiceRequestPage() {
 
       {editing && (
         <InvoiceRequestModal
-          billingId={row.progressBilling.id}
+          billingId={row.progressBilling?.id}
+          salesOrderId={row.salesOrder.id}
           existing={row}
           onClose={() => setEditing(false)}
           onSaved={() => {

@@ -165,7 +165,9 @@ async function cleanup() {
     });
   }
   // Invoice requests hold their sales order (Restrict); their invoices go next.
-  await prisma.invoiceRequest.deleteMany({ where: { job: { customer: { name: { startsWith: TAG } } } } });
+  await prisma.invoiceRequest.deleteMany({
+    where: { OR: [{ job: { customer: { name: { startsWith: TAG } } } }, { salesOrder: { customer: { name: { startsWith: TAG } } } }] },
+  });
   await prisma.invoice.deleteMany({ where: { id: { in: invoices.map((i) => i.id) } } });
   // The A/R checks' sales order and its quotation, after their invoices.
   await prisma.salesOrder.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
@@ -3558,8 +3560,8 @@ async function main() {
         soInv1.body.team?.id === (team?.id ?? undefined),
       `${soInv1.status} ${JSON.stringify(soInv1.body).slice(0, 220)}`,
     );
-    const soOver = await fin('POST', '/invoices', { customerId: customer.id, salesOrderId: so.id, lines: [{ description: 'Too much', amount: 50_000 }] });
-    check('never past what is left of its net', soOver.status === 400 && String(soOver.body.error).includes('left to invoice'), `${soOver.status} ${soOver.body.error}`);
+    const soTooMuch = await fin('POST', '/invoices', { customerId: customer.id, salesOrderId: so.id, lines: [{ description: 'Too much', amount: 50_000 }] });
+    check('never past what is left of its net', soTooMuch.status === 400 && String(soTooMuch.body.error).includes('left to invoice'), `${soTooMuch.status} ${soTooMuch.body.error}`);
     const soRest = await fin('POST', '/invoices', { customerId: customer.id, salesOrderId: so.id, lines: [{ description: 'The rest', amount: 40_000 }] });
     const soLeft = ((await fin('GET', `/invoices/sales-orders?customerId=${customer.id}`)).body as { id: string; left: number }[]).find((o) => o.id === so.id);
     check('the rest goes on a second invoice, and nothing is left', soRest.status === 201 && !!soLeft && money(soLeft.left, 0), `${soRest.status} ${JSON.stringify(soLeft)}`);
@@ -4180,6 +4182,107 @@ async function main() {
     );
     const irStrangerRead = await as(irStranger)('GET', `/invoice-requests/${irId}`);
     check('someone else’s request is not theirs to read', irStrangerRead.status === 404, String(irStrangerRead.status));
+
+    // ── From the sales order (2026-10-16) ──
+    console.log('\nInvoice requests from a sales order — the invoice number, the countered date, the raiser credited');
+    const soSource = await seller('GET', `/invoice-requests/source?salesOrderId=${irOrder.id}`);
+    check(
+      'a sales order’s request form says what is left — after its invoices AND the open requests on it',
+      soSource.status === 200 &&
+        soSource.body.kind === 'order' &&
+        soSource.body.mayRequest === true &&
+        money(soSource.body.salesOrder?.requested, 20_000) &&
+        money(soSource.body.salesOrder?.left, 30_000),
+      JSON.stringify(soSource.body).slice(0, 300),
+    );
+    const soStranger = await as(irStranger)('POST', '/invoice-requests', { salesOrderId: irOrder.id, grossAmount: 1_000 });
+    const soAskTooMuch = await seller('POST', '/invoice-requests', { salesOrderId: irOrder.id, grossAmount: 30_000.01 });
+    const soNoAmount = await seller('POST', '/invoice-requests', { salesOrderId: irOrder.id });
+    check(
+      'another salesperson may not ask; more than is left, or no amount, is refused',
+      soStranger.status === 403 && soAskTooMuch.status === 400 && String(soAskTooMuch.body.error).includes('left to invoice') && soNoAmount.status === 400,
+      `${soStranger.status} ${soAskTooMuch.status} ${soNoAmount.status}`,
+    );
+    const soIr = await seller('POST', '/invoice-requests', { salesOrderId: irOrder.id, grossAmount: 25_000, description: `${TAG} first delivery` });
+    check(
+      'the seller asks for 25,000 of the order: no billing, the order’s PO and terms, credited to the one asking',
+      soIr.status === 201 &&
+        soIr.body.kind === 'order' &&
+        soIr.body.progressBilling === null &&
+        money(soIr.body.grossAmount, 25_000) &&
+        money(soIr.body.vatAmount, 3_000) &&
+        money(soIr.body.netCollectible, 27_500) &&
+        soIr.body.poReference === `${TAG}-PO-IR` &&
+        soIr.body.termsDays === 60 &&
+        soIr.body.salesperson?.id === irSeller.id,
+      `${soIr.status} ${JSON.stringify(soIr.body).slice(0, 300)}`,
+    );
+    const soPdf = await seller('GET', `/invoice-requests/${soIr.body.id}/pdf`);
+    const soPdfText = (soPdf.bytes ? pdfText(soPdf.bytes) : '').replace(/\s+/g, ' ');
+    check('its paper names the order and the line asked for', soPdf.status === 200 && soPdfText.includes(`${TAG}-SO-IR1`) && soPdfText.includes(`${TAG} first delivery`), soPdfText.slice(0, 300));
+    const soSubmit = await seller('POST', `/invoice-requests/${soIr.body.id}/submit`);
+    const soOpen = await prisma.approvalRequest.findFirst({ where: { documentType: 'invoice_request', documentId: String(soIr.body.id), status: 'PENDING' } });
+    if (soOpen) await act({ requestId: soOpen.id, userId: irSupport.id, action: 'APPROVED' });
+    const soDone = await prisma.invoiceRequest.findUniqueOrThrow({ where: { id: String(soIr.body.id) }, include: { invoice: { include: { lines: true } } } });
+    check(
+      'Back Support approves it and the draft invoice bills the order: 25,000 at the order’s VAT, one line, the seller credited',
+      soSubmit.status === 200 &&
+        soDone.status === 'APPROVED' &&
+        soDone.invoice?.status === 'DRAFT' &&
+        soDone.invoice.salesOrderId === irOrder.id &&
+        soDone.invoice.progressBillingId === null &&
+        money(Number(soDone.invoice.grossAmount), 25_000) &&
+        money(Number(soDone.invoice.vatAmount), 3_000) &&
+        soDone.invoice.lines.length === 1 &&
+        soDone.invoice.lines[0].description === `${TAG} first delivery` &&
+        soDone.invoice.salespersonId === irSeller.id,
+      `${soSubmit.status} ${soDone.status} ${soDone.invoice?.grossAmount} ${soDone.invoice?.lines.length}`,
+    );
+    if (soOpen) await settleInvoiceRequest(soOpen, 'APPROVED');
+    check('a second settlement raises no second invoice', (await prisma.invoice.count({ where: { salesOrderId: irOrder.id, progressBillingId: null } })) === 1);
+    const soPage = await seller('GET', `/sales-orders/${irOrder.id}`);
+    check(
+      'the sales order page lists its invoice requests, and says what is left to invoice',
+      soPage.status === 200 &&
+        (soPage.body.invoicing?.requests as { id: string }[] | undefined)?.some((r) => r.id === soIr.body.id) === true &&
+        money(soPage.body.invoicing?.left, 25_000) &&
+        soPage.body.invoicing?.canRequest === true,
+      JSON.stringify(soPage.body.invoicing).slice(0, 300),
+    );
+    const credit = await fin('GET', `/invoices/credit?salesOrderId=${irOrder.id}`);
+    check('a new invoice on the order is credited to whoever raised its invoice request', credit.status === 200 && credit.body.salesperson?.id === irSeller.id, JSON.stringify(credit.body));
+    const siSet = await fin('PUT', `/invoices/${soDone.invoiceId}`, { siNumber: `${TAG}SI-1` });
+    const siTwice = await fin('POST', '/invoices', {
+      customerId: customer.id,
+      siNumber: `${TAG.toLowerCase()}si-1`,
+      lines: [{ description: `${TAG} other`, amount: 100 }],
+    });
+    check(
+      'the printed invoice number is kept on the draft — and the same number on another invoice is refused, case-blind',
+      siSet.status === 200 && siSet.body.siNumber === `${TAG}SI-1` && siTwice.status === 409,
+      `${siSet.status} ${siSet.body.siNumber} · ${siTwice.status}`,
+    );
+    const counteredDay = new Date(dayKey(new Date()).getTime() - 2 * 86_400_000).toISOString().slice(0, 10);
+    const withCounter = await fin('POST', '/invoices', {
+      customerId: customer.id,
+      counteredDate: counteredDay,
+      termsDays: 30,
+      siNumber: `${TAG}SI-2`,
+      lines: [{ description: `${TAG} countered`, amount: 1_000 }],
+    });
+    const due = new Date(new Date(`${counteredDay}T00:00:00Z`).getTime() + 30 * 86_400_000).toISOString().slice(0, 10);
+    check(
+      'an invoice given only its countered date is dated and countered that day, due 30 days after',
+      withCounter.status === 201 &&
+        String(withCounter.body.counteredDate).slice(0, 10) === counteredDay &&
+        String(withCounter.body.invoiceDate).slice(0, 10) === counteredDay &&
+        String(withCounter.body.dueDate).slice(0, 10) === due,
+      `${withCounter.status} ${withCounter.body.counteredDate} ${withCounter.body.invoiceDate} ${withCounter.body.dueDate}`,
+    );
+    const future = await fin('POST', '/invoices', { customerId: customer.id, counteredDate: '2099-01-01', lines: [{ description: `${TAG} x`, amount: 1 }] });
+    check('a countered date still to come is refused', future.status === 400, String(future.status));
+    const siSearch = await fin('GET', `/invoices?search=${encodeURIComponent(`${TAG}SI-2`)}`);
+    check('the A/R list finds an invoice by its printed number', siSearch.status === 200 && siSearch.body.total === 1, String(siSearch.body.total));
     await saveFinanceSettings({ blockAdvanceWhileUnliquidated: true });
   }
 

@@ -21,7 +21,7 @@ import {
   humanise,
   useToast,
 } from '../../components/ui';
-import { todayLocal } from '../../lib/day';
+import { addDays, todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
 
 /**
@@ -50,6 +50,7 @@ export interface Invoice {
   dueDate: string;
   terms: string | null;
   poReference: string | null;
+  siNumber: string | null;
   grossAmount: number;
   vatRate: number;
   vatAmount: number;
@@ -226,7 +227,12 @@ export function Receivables() {
       label: 'SI No.',
       sortKey: 'number',
       width: '170px',
-      render: (r) => <span className="mono">{r.number}</span>,
+      render: (r) => (
+        <>
+          <span className="mono">{r.siNumber ?? r.number}</span>
+          {r.siNumber && <div className="faint mono">{r.number}</div>}
+        </>
+      ),
     },
     {
       key: 'customer',
@@ -615,21 +621,43 @@ function InvoiceModal({
   const [error, setError] = useState<unknown>(null);
   const isNew = !billing && !existing;
   const [terms, setTerms] = useState(existing ? existing.termsDays ?? daysFrom(existing.invoiceDate, existing.dueDate) : 30);
-  const today = todayLocal();
+
+  // The countered date stands in for the invoice date (2026-10-16, the
+  // owner's call): the day the customer received it, the terms running from
+  // it; blank, it is dated today and countered later. The printed sales
+  // invoice number stands in for the PO reference, which the order lends.
   const [form, setForm] = useState({
-    invoiceDate: existing?.invoiceDate.slice(0, 10) ?? today,
+    counteredDate: existing?.counteredDate?.slice(0, 10) ?? '',
+    siNumber: existing?.siNumber ?? '',
     poReference: existing?.poReference ?? '',
     notes: existing?.notes ?? '',
   });
   const [customer, setCustomer] = useState<CustomerRef | null>(null);
   const [orders, setOrders] = useState<OrderOption[] | null>(null);
   const [orderId, setOrderId] = useState('');
-  // '' = from the document behind it; the server fills those.
-  const [salespersonId, setSalespersonId] = useState('');
-  const [teamId, setTeamId] = useState('');
   const [copy, setCopy] = useState<File | null>(null);
-  const { people } = usePeople('gops.quotations.create');
-  const teams = useTeams();
+  // Sales personnel and team are never typed: the person who raised the
+  // order's invoice request, else whoever sold it — the server fills them,
+  // and this shows who.
+  const [credit, setCredit] = useState<{ salesperson: { name: string } | null; team: { code: string; name: string } | null } | null>(
+    existing ? { salesperson: existing.salesperson, team: existing.team } : null,
+  );
+  useEffect(() => {
+    if (existing) return;
+    const source = billing ? { jobId: billing.job.id } : orderId ? { salesOrderId: orderId } : null;
+    if (!source) {
+      setCredit(null);
+      return;
+    }
+    let live = true;
+    api
+      .get<NonNullable<typeof credit>>(`/invoices/credit${qs(source)}`)
+      .then((c) => live && setCredit(c))
+      .catch(() => live && setCredit(null));
+    return () => {
+      live = false;
+    };
+  }, [existing, billing, orderId]);
   // A manual invoice's lines are its figures; a billing's are the billing's.
   const manual = isNew || (!!existing && !existing.progressBilling);
   const [lines, setLines] = useState(
@@ -686,14 +714,11 @@ function InvoiceModal({
     setBusy(true);
     setError(null);
     const header = {
-      invoiceDate: form.invoiceDate,
+      counteredDate: form.counteredDate || null,
+      siNumber: form.siNumber.trim() || null,
       termsDays: terms,
-      poReference: form.poReference || null,
+      ...(existing ? {} : { poReference: form.poReference || null }),
       notes: form.notes || null,
-    };
-    const credit = {
-      ...(salespersonId ? { salespersonId } : {}),
-      ...(teamId ? { teamId } : {}),
     };
     const payloadLines = lines
       .filter((l) => l.description.trim() && l.amount)
@@ -704,12 +729,11 @@ function InvoiceModal({
         await api.put(`/invoices/${existing.id}`, manual ? { ...header, lines: payloadLines } : header);
         id = existing.id;
       } else if (billing) {
-        id = (await api.post<{ id: string }>(`/invoices/from-billing/${billing.id}`, { ...header, ...credit })).id;
+        id = (await api.post<{ id: string }>(`/invoices/from-billing/${billing.id}`, header)).id;
       } else {
         id = (
           await api.post<{ id: string }>('/invoices', {
             ...header,
-            ...credit,
             customerId: customer!.id,
             salesOrderId: orderId || null,
             lines: payloadLines,
@@ -834,8 +858,17 @@ function InvoiceModal({
       )}
 
       <div className="grid grid-2 fin-gap-top">
-        <Field label="Invoice date">
-          <input type="date" value={form.invoiceDate} onChange={(e) => setForm({ ...form, invoiceDate: e.target.value })} />
+        <Field
+          label="Countered date"
+          hint={
+            form.counteredDate
+              ? terms === 0
+                ? `Due ${formatDate(form.counteredDate)}`
+                : `Due ${formatDate(addDays(form.counteredDate, terms))} — ${terms} days after it`
+              : 'The day the customer received it. Blank: not yet — record it on the invoice later'
+          }
+        >
+          <input type="date" value={form.counteredDate} max={todayLocal()} onChange={(e) => setForm({ ...form, counteredDate: e.target.value })} />
         </Field>
         <Field label="Payment terms" hint={terms === 0 ? 'Due when the customer counters it' : `Due ${terms} days after the customer counters it`}>
           <TermsPicker value={terms} onChange={setTerms} />
@@ -843,8 +876,11 @@ function InvoiceModal({
       </div>
 
       <div className="grid grid-2">
-        <Field label="Customer PO reference" hint="Optional — what they will match it against">
-          <input value={form.poReference} onChange={(e) => setForm({ ...form, poReference: e.target.value })} />
+        <Field
+          label="Invoice no."
+          hint={form.poReference ? `The printed sales invoice number · Customer PO ${form.poReference} (from the order)` : 'The printed sales invoice number'}
+        >
+          <input value={form.siNumber} maxLength={60} onChange={(e) => setForm({ ...form, siNumber: e.target.value })} placeholder="e.g. 0012345" />
         </Field>
         {!existing && (
           <Field label="Attach invoice copy (PDF)" hint="Optional — the paper the customer receives">
@@ -853,23 +889,14 @@ function InvoiceModal({
         )}
       </div>
 
-      {!existing && (
-        <div className="grid grid-2">
-          <Field label="Sales personnel" hint="Blank: whoever sold the order or quotation behind it">
-            <PersonSelect value={salespersonId} onChange={setSalespersonId} people={people} placeholder="— from the source —" />
-          </Field>
-          <Field label="Team" hint="Blank: the quotation's team, else the salesperson's">
-            <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
-              <option value="">— from the source —</option>
-              {teams.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.code} — {t.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-        </div>
-      )}
+      <dl className="kv">
+        <dt>Sales personnel</dt>
+        <dd>
+          {credit?.salesperson?.name ?? <span className="faint">{existing ? '—' : 'Filled in on save — the person who raised the invoice request, else whoever sold it'}</span>}
+        </dd>
+        <dt>Team</dt>
+        <dd>{credit?.team ? `${credit.team.code} — ${credit.team.name}` : <span className="faint">{existing ? '—' : 'Their team'}</span>}</dd>
+      </dl>
 
       {manual && (
         <>
@@ -1235,6 +1262,8 @@ export function InvoiceDetail() {
           <div className="card">
             <h3 className="card-title">Where it stands</h3>
             <dl className="kv">
+              <dt>Invoice no.</dt>
+              <dd className="mono">{row.siNumber ?? <span className="faint">not yet typed — Modify the draft</span>}</dd>
               <dt>Dated</dt>
               <dd>{formatDate(row.invoiceDate)}</dd>
               <dt>Countered</dt>

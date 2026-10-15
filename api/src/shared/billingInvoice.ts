@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { nextNumber } from './numbering';
-import { cents, num } from './finance';
+import { cents, num, taxBreakdown, currentRates } from './finance';
 import { termsLabel } from './receivables';
 import { formatMoney, companyCurrency } from './pdf';
 import { badRequest } from '../http/kit';
@@ -29,6 +29,8 @@ export interface BillingInvoiceHeader {
   teamId: string | null;
   /** The sales order the invoice bills (an invoice request names one). */
   salesOrderId?: string | null;
+  /** The printed sales invoice number, when it is already known. */
+  siNumber?: string | null;
 }
 
 export const billingForInvoiceInclude = {
@@ -60,6 +62,7 @@ export async function createInvoiceFromBilling(
       teamId: header.teamId,
       terms: header.terms ?? termsLabel(header.termsDays),
       poReference: header.poReference || null,
+      siNumber: header.siNumber || null,
       // Carried, not recomputed.
       grossAmount: billing.grossAmount,
       vatRate: billing.vatRate,
@@ -112,4 +115,52 @@ export async function assertOrderLeft(
   if (gross > left + 0.005) {
     throw badRequest(`Only ${formatMoney(Math.max(0, left), await companyCurrency())} of ${order.number} is left to invoice (before VAT)`);
   }
+}
+
+/**
+ * Raising an invoice straight from an issued sales order — what an approved
+ * invoice request with no progress billing behind it makes (2026-10-16, the
+ * owner's call: "after Sales Order, route to invoice request"). One line, the
+ * gross asked for; VAT at the ORDER's rate (the rate it was sold under), EWT
+ * at the company's — the manual invoice's own arithmetic (`taxBreakdown`),
+ * never past what is left of the order's net (checked under its lock).
+ */
+export async function createInvoiceFromOrder(
+  tx: Prisma.TransactionClient,
+  order: { id: string; number: string; customerId: string; vatRate: Prisma.Decimal; total: Prisma.Decimal; vatAmount: Prisma.Decimal },
+  gross: number,
+  description: string,
+  header: BillingInvoiceHeader & { jobId?: string | null },
+  actorId: string,
+) {
+  await assertOrderLeft(tx, { id: order.id, number: order.number, net: orderNet(order) }, gross);
+  const rates = await currentRates(tx);
+  const tax = taxBreakdown(gross, num(order.vatRate), rates.ewtRate);
+  const D = (n: number) => new Prisma.Decimal(n);
+  return tx.invoice.create({
+    data: {
+      number: await nextNumber('invoice', tx),
+      customerId: order.customerId,
+      jobId: header.jobId ?? null,
+      salesOrderId: order.id,
+      invoiceDate: header.invoiceDate,
+      dueDate: header.dueDate,
+      termsDays: header.termsDays,
+      salespersonId: header.salespersonId,
+      teamId: header.teamId,
+      terms: header.terms ?? termsLabel(header.termsDays),
+      poReference: header.poReference || null,
+      siNumber: header.siNumber || null,
+      grossAmount: D(tax.grossAmount),
+      vatRate: D(tax.vatRate),
+      vatAmount: D(tax.vatAmount),
+      ewtRate: D(tax.ewtRate),
+      ewtAmount: D(tax.ewtAmount),
+      invoiceTotal: D(tax.invoiceTotal),
+      netCollectible: D(tax.netCollectible),
+      notes: header.notes || null,
+      createdById: actorId,
+      lines: { create: [{ sortOrder: 0, description, detail: `Sales order ${order.number}`, amount: D(tax.grossAmount) }] },
+    },
+  });
 }
