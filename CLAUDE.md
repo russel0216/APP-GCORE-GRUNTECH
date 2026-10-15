@@ -768,6 +768,22 @@ Two traps worth knowing before you edit those scripts:
   matches on the *command line*, which is why `start-api.cmd` launches with an
   absolute script path. Do not "simplify" either half.
 
+## Carrying the administrators' settings (2026-10-16)
+
+The owner asked for the server's card positions, PDF templates, roles and
+settings in the repository. They are DATABASE rows, so they travel as a
+file, never with a push: `api/scripts/export-settings.ts` (read-only, on the
+server, → `data/settings-snapshot.json`; Settings except `seed.*` and
+`__verify__`, roles and permissions, users' roles / Reports to / team /
+Back Support teams / overrides by email, workflows by document type and
+name, numbering TEMPLATES — never counters, passwords or tokens) and
+`api/scripts/import-settings.ts [file] [--apply]` (dry run unless
+`--apply`; never creates or deletes a login, role or workflow, never
+removes a signed step; one audit row). The kept copy is
+`deploy/settings/snapshot.json` (`deploy/settings/README.md`). Never commit
+on the server (the deploy is `--ff-only`), and never apply a snapshot from
+the seed.
+
 ## Known advisory
 
 `npm audit` flags `deepmerge-ts` (high) reached through the Prisma **CLI**'s
