@@ -30,6 +30,7 @@ const DETAIL: Record<string, string> = {
   project: '/g-ops/projects',
   progress_report: '/g-ops/progress',
   progress_billing: '/g-ops/billings',
+  commission: '/g-fin/commissions',
   invoice_request: '/g-fin/invoice-requests',
   // Procurement and warehouse
   purchase_request: '/g-chain/purchase-requests',
@@ -123,6 +124,24 @@ const SCREEN: Record<string, string> = {
   approval_request: '/my-work',
   pipeline: '/g-ops/pipeline',
   insights: '/insights',
+  // Reference lists edited on Admin › Categories.
+  quotation_group: '/admin/categories',
+  activity_type: '/admin/categories',
+  cad_drawing_type: '/admin/categories',
+  costing_template: '/g-ops/costing',
+  // A report's paper and CSV audit as EXPORTED under its division's type.
+  chain_report: '/g-chain/reports',
+  finance_report: '/g-fin/reports',
+  hr_report: '/g-hr/reports',
+};
+
+/**
+ * Where a DETAIL type's printed list (entityId 'list') lands, when the list is
+ * not at the detail page's own base — a progress billing's page is
+ * `/g-ops/billings/:id`, its register the Progress & Billing list.
+ */
+const DETAIL_LIST: Record<string, string> = {
+  progress_billing: '/g-ops/progress',
 };
 
 /**
@@ -134,6 +153,10 @@ function settingLink(id: string): string {
   if (id.startsWith('finance.')) return '/g-fin/settings';
   if (id.startsWith('aftermarket.')) return '/g-ops/aftermarket';
   if (id.startsWith('appearance')) return '/admin/appearance';
+  // Each designed paper's layout is edited in Admin › PDF Templates.
+  if (id.startsWith('pdfTemplate.')) return '/admin/pdf-templates';
+  if (id.startsWith('pipeline.')) return '/admin/pipeline-stages';
+  if (id.startsWith('helpTickets.')) return '/admin/help-tickets';
   return '/admin/settings';
 }
 
@@ -147,7 +170,7 @@ export function recordLink(entityType: string, id: string): string | null {
   // printed lists): that row opens the list itself, never a record page that
   // would ask the API for a record called "list". The same holds for a type
   // opened through a query parameter (`?visit=list` is a "not found" modal).
-  if (type in DETAIL) return id && id !== 'list' ? `${DETAIL[type]}/${encodeURIComponent(id)}` : DETAIL[type];
+  if (type in DETAIL) return id && id !== 'list' ? `${DETAIL[type]}/${encodeURIComponent(id)}` : DETAIL_LIST[type] ?? DETAIL[type];
   if (type in QUERY) return id && id !== 'list' ? `${QUERY[type]}${encodeURIComponent(id)}` : QUERY_LIST[type] ?? null;
   if (type in SCREEN) return SCREEN[type];
   // partner_resource: it lives inside its partner's page and carries no

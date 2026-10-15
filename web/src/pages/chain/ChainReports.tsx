@@ -12,8 +12,8 @@ import { ReportPage, type ReportKind } from '../../components/ReportPage';
 export const REPORT_KINDS: readonly ReportKind[] = [
   { key: 'overview', label: 'Overview', list: '/g-chain' },
   { key: 'purchase-requests', label: 'Purchase requests', list: '/g-chain/purchase-requests' },
-  { key: 'rfq', label: 'RFQ', list: '/g-chain/rfqs' },
-  { key: 'canvass', label: 'Canvass', list: '/g-chain/canvasses' },
+  { key: 'rfq', label: 'RFQ', list: '/g-chain/rfq' },
+  { key: 'canvass', label: 'Canvass', list: '/g-chain/canvass' },
   { key: 'purchase-orders', label: 'Purchase orders', list: '/g-chain/purchase-orders' },
   { key: 'incoming', label: 'Incoming', list: '/g-chain/incoming' },
   { key: 'inventory', label: 'Inventory', list: '/g-chain/inventory' },

@@ -2675,6 +2675,68 @@ async function main() {
     `${recordLink('lead', 'list')} ${recordLink('lead', 'abc')}`,
   );
 
+  // Every type the API audits under has a screen (2026-10-16, the review's
+  // link check): a row in the audit log or on Home with no link reads as a
+  // dead end. Read off the source — every `entityType: '…'` literal in
+  // api/src, plus the commission's constant — and every link must land on a
+  // path App.tsx declares. Parts of a record (a CAD revision, a report's
+  // day, a People Flow item, a partner's resource) carry composite ids and
+  // live on their record's page: deliberately unlinked.
+  {
+    const srcRoot = path.resolve(__dirname, '../src');
+    const walk = (dir: string): string[] =>
+      fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory() ? walk(path.join(dir, e.name)) : e.name.endsWith('.ts') ? [path.join(dir, e.name)] : [],
+      );
+    const audited = new Set<string>(['commission']);
+    for (const file of walk(srcRoot)) {
+      for (const m of fs.readFileSync(file, 'utf8').matchAll(/entityType:\s*'([a-z_]+)'/g)) audited.add(m[1]);
+    }
+    const PARTS = new Set(['cad_comment', 'cad_revision', 'employee_flow_item', 'progress_report_day', 'partner_resource']);
+    const unlinked = [...audited].filter((t) => !PARTS.has(t) && recordLink(t, 'list') === null).sort();
+    check(
+      `every type the API audits under links to a screen (${audited.size} types read off the source)`,
+      unlinked.length === 0,
+      unlinked.join(', '),
+    );
+    const appSource = fs.readFileSync(path.resolve(__dirname, '../../web/src/App.tsx'), 'utf8');
+    const routes = [...appSource.matchAll(/path="([^"]+)"/g)].map((m) => m[1]);
+    const routed = (link: string) => {
+      const bare = link.split('?')[0].replace(/\/$/, '');
+      const segs = bare.split('/');
+      return routes.some((r) => {
+        const rs = r.split('/');
+        return rs.length === segs.length && rs.every((x, i) => x.startsWith(':') || x === segs[i]);
+      });
+    };
+    const misrouted = [...audited]
+      .filter((t) => !PARTS.has(t))
+      .flatMap((t) => [recordLink(t, 'list'), recordLink(t, 'r1')])
+      .filter((l): l is string => !!l && !routed(l));
+    check(
+      'and every such link — the list and a record — is a path App.tsx declares (no "No screen at this address")',
+      misrouted.length === 0,
+      [...new Set(misrouted)].join(', '),
+    );
+    // A report's "Open the list" (G-CHAIN's RFQ and Canvass pointed at
+    // /g-chain/rfqs and /g-chain/canvasses, which no route answers).
+    const reportLists = ['web/src/pages/chain/ChainReports.tsx', 'web/src/pages/finance/Reports.tsx'].flatMap((f) =>
+      [...fs.readFileSync(path.resolve(__dirname, '../..', f), 'utf8').matchAll(/list: '(\/[^']+)'/g)].map((m) => m[1]),
+    );
+    const deadReports = reportLists.filter((l) => !routed(l));
+    check(
+      `every report's "Open the list" is a path App.tsx declares (${reportLists.length} read)`,
+      reportLists.length > 0 && deadReports.length === 0,
+      deadReports.join(', '),
+    );
+    check(
+      "a progress billing's printed list opens the Progress & Billing register; a PDF layout's setting opens Admin › PDF Templates",
+      recordLink('progress_billing', 'list') === '/g-ops/progress' &&
+        recordLink('setting', 'pdfTemplate.quotation') === '/admin/pdf-templates' &&
+        recordLink('setting', 'pipeline.stages') === '/admin/pipeline-stages',
+    );
+  }
+
   // ── The list pattern's URL (web/src/lib/listUrl.ts, rule 16) ───────────────
   console.log('\nList URLs, filters and saved views');
   {

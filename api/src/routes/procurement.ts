@@ -282,7 +282,7 @@ purchaseRequestRoutes.get(
 //
 // The owner's call: "Purchase request in Project should not be popup window,
 // it should be a full form with line item and budget allocation". The page
-// (`/g-ops/projects/:jobId/purchase-requests/new`, `/…/:id/edit`) reads three
+// (`/g-ops/purchase-requests/new?jobId=`, `/…/:id/edit`) reads three
 // things before anything is saved, each declared above `/:id`: the project's
 // budget by budget line, what a line may be filled from (the project's
 // costing and the item master), and the route submitting would take.

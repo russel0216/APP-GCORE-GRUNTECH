@@ -1589,6 +1589,7 @@ function Routed() {
         <Route path="/g-hr/*" element={<NotFound />} />
         <Route path="/g-fin/*" element={<NotFound />} />
         <Route path="/g-chain/*" element={<NotFound />} />
+        <Route path="/admin/*" element={<NotFound />} />
 
         {/* The warehouse's old addresses (Receiving and Stock Issuance, renamed
             Incoming and Outgoing on 2026-10-14) still land, query and all. */}
