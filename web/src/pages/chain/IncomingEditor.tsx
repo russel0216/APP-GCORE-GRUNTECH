@@ -262,7 +262,7 @@ export function IncomingEditor() {
     if (!header.warehouseId) problems.push('Choose the warehouse');
     if (!freeSent.length) problems.push('Add at least one line');
     freeSent.forEach((l, n) => {
-      if (!l.item) problems.push(`Line ${n + 1}: choose the item`);
+      if (!l.item && !l.partNumber.trim() && !l.description.trim()) problems.push(`Line ${n + 1}: choose the item, or type its part number or description`);
       else if (!(Number(l.quantity) > 0)) problems.push(`Line ${n + 1}: quantity must be more than zero`);
       else if (l.unitCost === '') problems.push(`Line ${n + 1}: type the unit cost (0 for a free item)`);
     });
@@ -638,6 +638,9 @@ export function IncomingEditor() {
                                 ),
                               )
                             }
+                            onTyped={(text) =>
+                              setFree((ls) => ls.map((x) => (x.key === l.key && !x.item && !x.description.trim() ? { ...x, description: text } : x)))
+                            }
                           />
                         </td>
                         <td className="inc-unit-cell">
@@ -797,7 +800,16 @@ function OrderLookup({ onPick }: { onPick: (o: OrderOption) => void }) {
 }
 
 /** An item from the item master, for a line received without an order. */
-function ItemLookup({ value, onPick }: { value: ItemOption | null; onPick: (item: ItemOption | null) => void }) {
+function ItemLookup({
+  value,
+  onPick,
+  onTyped,
+}: {
+  value: ItemOption | null;
+  onPick: (item: ItemOption | null) => void;
+  /** What was typed and not picked, when the box is left — a new item's description. */
+  onTyped?: (text: string) => void;
+}) {
   const [term, setTerm] = useState(value ? `${value.code} — ${value.name}` : '');
   const [rows, setRows] = useState<ItemOption[] | null>(null);
   const [open, setOpen] = useState(false);
@@ -821,7 +833,14 @@ function ItemLookup({ value, onPick }: { value: ItemOption | null; onPick: (item
     };
   }, [term, open]);
   return (
-    <div className="lookup" onBlur={(e) => !e.currentTarget.contains(e.relatedTarget as Node) && setOpen(false)}>
+    <div
+      className="lookup"
+      onBlur={(e) => {
+        if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+        setOpen(false);
+        if (!value && term.trim()) onTyped?.(term.trim());
+      }}
+    >
       <input
         value={term}
         autoComplete="off"
@@ -852,7 +871,7 @@ function ItemLookup({ value, onPick }: { value: ItemOption | null; onPick: (item
               </button>
             </li>
           ))}
-          {!rows.length && <li className="lookup-none">No item matches “{term}” — add it in the item master first.</li>}
+          {!rows.length && <li className="lookup-none">No item matches “{term}” — it is added to the item master when you save (type its part number and description).</li>}
         </ul>
       )}
     </div>

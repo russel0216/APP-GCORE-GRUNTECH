@@ -751,6 +751,7 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     return {
       header: { orderId: order.id, supplierId: null, sourceName: null, reason: null, ...misc, warehouseId: warehouseId ?? order.warehouseId ?? null },
       rows,
+      newItems: new Map<number, { name: string; partNumber: string | null; unit: string }>(),
       label: `against ${order.number}`,
     };
   }
@@ -768,22 +769,44 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
   const itemIds = [...new Set(body.items.map((l) => l.itemId).filter((v): v is string => !!v))];
   const items = await prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, name: true, unit: true, partNumber: true } });
   const byItem = new Map(items.map((i) => [i.id, i]));
-  const rows = body.items.map((l, n) => {
+  // A line typed without picking from the item master: the one active item
+  // whose part number or code (else name) is what was typed, else a new item
+  // filed in the item master when the report is saved (2026-10-16, the
+  // owner's report: "Can't save").
+  const newItems = new Map<number, { name: string; partNumber: string | null; unit: string }>();
+  const rows: Array<{
+    orderItemId: null; itemId: string | null; partNumber: string | null; description: string | null; unit: string | null;
+    quantity: Prisma.Decimal; unitCost: Prisma.Decimal; locationId: string | null; serialNo: string | null; batchNo: string | null; remarks: string | null;
+  }> = [];
+  for (const [n, l] of body.items.entries()) {
     if (l.orderItemId) throw badRequest(`Line ${n + 1}: there is no purchase order on this report`);
-    const item = l.itemId ? byItem.get(l.itemId) : undefined;
-    if (!item) throw badRequest(`Line ${n + 1}: choose the item from the item master — stock is kept by item`);
     if (l.unitCost === undefined) throw badRequest(`Line ${n + 1}: type the unit cost it is taken into stock at (0 for a free item)`);
-    return {
+    let item: { id: string; name: string; unit: string; partNumber: string | null } | undefined | null = l.itemId ? byItem.get(l.itemId) : undefined;
+    if (l.itemId && !item) throw badRequest(`Line ${n + 1}: that item is not on file`);
+    const part = l.partNumber?.trim() || null;
+    const desc = l.description?.trim() || null;
+    if (!item) {
+      if (!part && !desc) throw badRequest(`Line ${n + 1}: type the part number or the description of the item`);
+      const sel = { id: true, name: true, unit: true, partNumber: true } as const;
+      let found = part
+        ? await prisma.item.findMany({ where: { isActive: true, OR: [{ partNumber: { equals: part, mode: 'insensitive' } }, { code: { equals: part, mode: 'insensitive' } }] }, select: sel, take: 2 })
+        : [];
+      if (!found.length && desc) found = await prisma.item.findMany({ where: { isActive: true, name: { equals: desc, mode: 'insensitive' } }, select: sel, take: 2 });
+      if (found.length > 1) throw badRequest(`Line ${n + 1}: “${part ?? desc}” matches more than one item — pick it from the list`);
+      item = found[0] ?? null;
+      if (!item) newItems.set(n, { name: desc ?? part!, partNumber: part, unit: l.unit?.trim() || 'pcs' });
+    }
+    rows.push({
       orderItemId: null,
-      itemId: item.id,
-      partNumber: l.partNumber?.trim() || item.partNumber || null,
-      description: l.description?.trim() || item.name,
-      unit: l.unit?.trim() || item.unit,
+      itemId: item?.id ?? null,
+      partNumber: part || item?.partNumber || null,
+      description: desc || item?.name || part,
+      unit: l.unit?.trim() || item?.unit || 'pcs',
       quantity: D(l.quantity),
       unitCost: D(l.unitCost),
       ...extras(l),
-    };
-  });
+    });
+  }
   return {
     header: {
       orderId: null,
@@ -793,8 +816,26 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
       ...misc,
     },
     rows,
+    newItems,
     label: `from ${supplierName ?? body.sourceName!.trim()}, without a purchase order`,
   };
+}
+
+/** Files the items a no-PO report typed by hand, inside the save's transaction. */
+async function fileNewItems(
+  tx: Prisma.TransactionClient,
+  rows: Array<{ itemId: string | null }>,
+  newItems: Map<number, { name: string; partNumber: string | null; unit: string }>,
+  actorId: string,
+) {
+  for (const [n, it] of newItems) {
+    const code = await nextNumber('item', tx);
+    const created = await tx.item.create({ data: { code, name: it.name, partNumber: it.partNumber, unit: it.unit } });
+    rows[n].itemId = created.id;
+    await tx.auditLog.create({
+      data: { entityType: 'item', entityId: created.id, action: 'CREATED', summary: `${code} ${it.name} added from an incoming report`, actorId },
+    });
+  }
 }
 
 /**
@@ -927,13 +968,14 @@ receivingRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(receivingSchema, req.body);
-    const { header, rows, label } = await checkReceivingSheet(body);
+    const { header, rows, label, newItems } = await checkReceivingSheet(body);
     const value = cents(rows.reduce((s, l) => s + num(l.quantity) * num(l.unitCost), 0));
     // With the Incoming route active the report waits for its approval;
     // without one it posts now.
     const routed = !!(await pickWorkflow(RECEIVING_DOC, value, { requesterId: me.id }));
 
     const receiving = await prisma.$transaction(async (tx) => {
+      await fileNewItems(tx, rows, newItems, me.id);
       const number = await nextNumber('receiving', tx);
       const created = await tx.receiving.create({
         data: {
@@ -977,13 +1019,14 @@ receivingRoutes.put(
     if (!existing) throw notFound('Receiving report not found');
     if (!mayHandleReceiving(me, existing)) throw forbidden('This report is someone else’s — they, or the warehouse lead, modify it');
     if (existing.status !== 'DRAFT') throw badRequest(`${existing.number} is ${statusLabel(existing.status).toLowerCase()} — only a draft is modified`);
-    const { header, rows } = await checkReceivingSheet(body, existing.id);
+    const { header, rows, newItems } = await checkReceivingSheet(body, existing.id);
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.receiving.updateMany({
         where: { id: existing.id, status: 'DRAFT', ...(body.version ? { updatedAt: new Date(body.version) } : {}) },
         data: header,
       });
       if (!claimed.count) throw badRequest(`${existing.number} changed a moment ago — reload to see where it stands`);
+      await fileNewItems(tx, rows, newItems, me.id);
       await tx.receivingItem.deleteMany({ where: { receivingId: existing.id } });
       await tx.receivingItem.createMany({ data: rows.map((r) => ({ ...r, receivingId: existing.id })) });
     });

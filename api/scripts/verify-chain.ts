@@ -4024,6 +4024,33 @@ async function main() {
       String(await onHand()),
     );
 
+    // A line typed without picking an item (2026-10-16, "Can't save"): the
+    // item is filed in the master when the report is saved, and a second
+    // report typing the same part number takes that item, never a twin.
+    {
+      const typedPart = `${TAG}-PN-${Date.now()}`;
+      const typedBody = {
+        sourceName: `${TAG} typed`,
+        reason: `${TAG} typed item`,
+        warehouseId: warehouse.id,
+        items: [{ partNumber: typedPart, description: `${TAG} typed valve`, unit: 'set', quantity: 1, unitCost: 50 }],
+      };
+      const t1 = await api(receiverToken, 'POST', '/receivings', typedBody);
+      const t2 = await api(receiverToken, 'POST', '/receivings', typedBody);
+      const made = await prisma.item.findMany({ where: { partNumber: typedPart } });
+      const lines = await prisma.receivingItem.findMany({ where: { receivingId: { in: [String(t1.body.id), String(t2.body.id)] } } });
+      const blank = await api(receiverToken, 'POST', '/receivings', { ...typedBody, items: [{ quantity: 1, unitCost: 1 }] });
+      check(
+        'a line typed without picking an item files it once in the item master and the next report takes it',
+        t1.status === 201 && t2.status === 201 && made.length === 1 && made[0].unit === 'set' &&
+          lines.length === 2 && lines.every((l) => l.itemId === made[0].id) && blank.status === 400,
+        `${t1.status}/${t2.status} items ${made.length} lines ${lines.map((l) => l.itemId).join(',')} blank ${blank.status}`,
+      );
+      await prisma.receiving.deleteMany({ where: { id: { in: [String(t1.body.id), String(t2.body.id)] } } });
+      await prisma.auditLog.deleteMany({ where: { entityType: 'item', entityId: { in: made.map((m) => m.id) } } });
+      await prisma.item.deleteMany({ where: { id: { in: made.map((m) => m.id) } } });
+    }
+
     // Without a purchase order (2026-10-14): where from, why, a warehouse and
     // an item per line; refused without them; approved, it builds stock at
     // the typed cost and charges no order.
