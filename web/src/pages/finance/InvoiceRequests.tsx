@@ -5,7 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
-import { ApprovalStepper, DocumentApproval, previewSteps } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, DecisionNote, previewSteps } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
@@ -590,6 +590,7 @@ export function InvoiceRequestPage() {
           <ApprovalStepper steps={previewSteps(route)} />
         </div>
       )}
+      <DecisionNote documentType="invoice_request" documentId={row.id} reloadToken={reload} />
       {!draft && row.status !== 'CANCELLED' && <DocumentApproval documentType="invoice_request" documentId={row.id} reloadToken={reload} />}
 
       <ErrorBox error={error} />

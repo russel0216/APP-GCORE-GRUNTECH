@@ -19,7 +19,7 @@ import {
 import { BarList, Panel, Stat } from '../../components/charts';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
-import { ApprovalStepper, DocumentApproval, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { label } from './PurchaseRequests';
 
@@ -347,6 +347,7 @@ export function ReceivingDetail() {
           <ApprovalStepper steps={previewSteps(route)} />
         </div>
       )}
+      <DecisionNote documentType="receiving" documentId={recId} reloadToken={reload} />
       {(status === 'PENDING_APPROVAL' || received) && <DocumentApproval documentType="receiving" documentId={recId} reloadToken={reload} />}
 
       <ErrorBox error={error} />

@@ -510,7 +510,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,321 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,323 assertions across twenty-two scripts** (counted 2026-10-13, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -574,10 +574,10 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass"):
 foundation
 373, masters 92, sales 608, costing 197, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 178, chain 329, hr 468, plantilla 123, meetings
+79, partners 120, delivery 178, chain 331, hr 468, plantilla 123, meetings
 115, evaluations 152, academy 120, finance 402, aftermarket 265, cad 118,
 insights 98, insights-brief 50, workspace 82, accounts 133. The
 verify scripts share
@@ -5279,6 +5279,27 @@ approved it goes to Accounts Receivable", the paper in the standard dress.
   on the same payment, the line shrinking or going (claimed on its amount),
   the invoice re-derived as ever; the payment page's "Apply to an
   invoice…" does it.
+- **The approver's word shows on the document** (2026-10-16, the owner's
+  call: "return and rejected comments in the viewing environment — add in
+  all"). `DecisionNote` (`components/ApprovalStepper.tsx`) sits beside
+  every page's `DocumentApproval` (23 pages; outside its own condition, so
+  a draft sent back shows it): while the latest request stands RETURNED or
+  REJECTED it says "Returned for changes by <name> (<step>) on <when> —
+  “comment”", read from `GET /approvals/history`, never copied onto the
+  document; submitted again, it is gone. The stepper's step lines carry
+  each decision's comment too.
+- **A purchase order is pulled back to draft** (2026-10-16):
+  `POST /purchase-orders/:id/withdraw` (the buyer or edit_all; the
+  purchase request's rule — claimed on PENDING_APPROVAL, the request
+  withdrawn through `cancelOpenRequest` in the same transaction, a decision
+  that landed first wins), `canWithdraw` on `GET /:id`, "Pull back to
+  draft" in the order page's ⋯.
+- **"+ New canvass" on the Canvass list** (2026-10-16): a panel over
+  `GET /rfqs/canvassable` (above `/:id`, `gchain.canvass.create`: SENT or
+  QUOTED, a supplier quoted, no live canvass — the RFQ page's
+  `canStartCanvass`); picking one posts the ordinary `POST /canvasses
+  { rfqId }`, or — past six quoting suppliers — opens the RFQ page with
+  `?canvass=1`, which opens its choose-six panel.
 - **Assign Back Support with "Supports teams"** for every selling team —
   until then requests stall and `audit-workflows.ts` says so.
 

@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../../lib/api';
 import { parseDay } from '../../lib/day';
 import { useAuth } from '../../lib/auth';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
@@ -400,6 +400,7 @@ export function CostingDetailPage() {
         <Stat label="Gross margin" value={<MarginBadge pct={costing.grossMarginPct} />} />
       </div>
 
+      <DecisionNote documentType="costing" documentId={costing.id} reloadToken={reload} />
       {(costing.approvalConfigured || !isDraft) && <DocumentApproval documentType="costing" documentId={costing.id} reloadToken={reload} />}
 
       <section className="card" aria-labelledby="cs-details">

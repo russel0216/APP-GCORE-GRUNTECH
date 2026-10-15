@@ -7,7 +7,7 @@ import { addDays, dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { yearStartKey } from '../../lib/listUrl';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
-import { allHeld, ApprovalStepper, DocumentApproval, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
+import { allHeld, ApprovalStepper, DocumentApproval, DecisionNote, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
@@ -1461,6 +1461,7 @@ export function QuotationDetail() {
           )}
 
           {/* Who has this revision, and since when — the one approval rail. */}
+          <DecisionNote documentType="quotation" documentId={revision.id} reloadToken={reload} />
           <DocumentApproval documentType="quotation" documentId={revision.id} reloadToken={reload} />
 
           <div className="card sales-card-gap">

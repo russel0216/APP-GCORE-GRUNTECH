@@ -7,7 +7,7 @@ import { Stat } from '../../components/charts';
 import { usePeople } from '../../components/People';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import {
   ErrorBox,
   Field,
@@ -704,6 +704,7 @@ export function CashAdvanceDetail() {
         confirm={confirm}
       />
 
+      <DecisionNote documentType="cash_advance" documentId={row.id} reloadToken={reload} />
       <DocumentApproval documentType="cash_advance" documentId={row.id} reloadToken={reload} />
 
       <ErrorBox error={error} />

@@ -12,7 +12,7 @@ import { Icon } from '../../components/Icon';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { PersonSelect, loadPeople, usePeople, type PersonRow } from '../../components/People';
 import { ApiError } from '../../lib/api';
-import { ApprovalStepper, DocumentApproval, previewSteps } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, DecisionNote, previewSteps } from '../../components/ApprovalStepper';
 import { ListReportModal } from '../../components/ListReport';
 import {
   Avatar,
@@ -1139,6 +1139,7 @@ export function CadJobOrderDetail() {
           <ApprovalStepper steps={previewSteps(r.approvalRoute)} />
         </div>
       )}
+      <DecisionNote documentType="cad_job_order" documentId={r.id} reloadToken={r.status === 'PENDING_APPROVAL' ? 1 : 0} />
       {r.status !== 'DRAFT' && <DocumentApproval documentType="cad_job_order" documentId={r.id} reloadToken={r.status === 'PENDING_APPROVAL' ? 1 : 0} />}
 
       <ErrorBox error={error} />

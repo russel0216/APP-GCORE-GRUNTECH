@@ -7,7 +7,7 @@ import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatD
 import { Stat } from '../../components/charts';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
-import { ApprovalStepper, DocumentApproval, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
@@ -831,6 +831,7 @@ export function BorrowSlipDetail() {
           <ApprovalStepper steps={previewSteps(route)} />
         </div>
       )}
+      <DecisionNote documentType="borrow_slip" documentId={String(id)} reloadToken={reload} />
       {status !== 'DRAFT' && status !== 'CANCELLED' && requestedBy && (
         <DocumentApproval documentType="borrow_slip" documentId={String(id)} reloadToken={reload} />
       )}

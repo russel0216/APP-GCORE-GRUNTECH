@@ -8,7 +8,7 @@ import { usePeople } from '../../components/People';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import {
   ErrorBox,
@@ -868,6 +868,7 @@ export function ExpenseClaimDetail() {
         confirm={confirm}
       />
 
+      <DecisionNote documentType="expense" documentId={row.id} reloadToken={reload} />
       <DocumentApproval documentType="expense" documentId={row.id} reloadToken={reload} />
 
       <ErrorBox error={error} />

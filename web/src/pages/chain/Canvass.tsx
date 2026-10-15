@@ -49,8 +49,117 @@ interface CanvassSummary {
 
 const pctText = (v: number | null | undefined) => (v == null ? '—' : `${v.toFixed(2)}%`);
 
+interface CanvassableRfq {
+  id: string;
+  number: string;
+  status: string;
+  request: { number: string; purpose: string; job: { number: string; name: string } | null };
+  quotedSuppliers: number;
+}
+
+/**
+ * "+ New canvass" (2026-10-16, the owner's call: "cannot add at the moment"):
+ * the RFQs with quotes in and no live sheet, in the page; picking one opens
+ * its comparison sheet — or, past six quoting suppliers, the RFQ page to
+ * choose the six.
+ */
+function NewCanvassPanel({ onClose }: { onClose: () => void }) {
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [q, setQ] = useState('');
+  const [rows, setRows] = useState<CanvassableRfq[] | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    const t = setTimeout(() => {
+      api
+        .get<CanvassableRfq[]>(`/rfqs/canvassable${q ? `?q=${encodeURIComponent(q)}` : ''}`)
+        .then((r) => live && setRows(r))
+        .catch((e) => live && setError(e));
+    }, 200);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [q]);
+  async function start(r: CanvassableRfq) {
+    if (r.quotedSuppliers > 6) {
+      navigate(`/g-chain/rfq/${r.id}?canvass=1`);
+      return;
+    }
+    setBusy(r.id);
+    setError(null);
+    try {
+      const created = await api.post<{ id: string; number?: string }>('/canvasses', { rfqId: r.id });
+      toast('ok', 'Canvass started');
+      navigate(`/g-chain/canvass/${created.id}`);
+    } catch (err) {
+      setError(err);
+      setBusy(null);
+    }
+  }
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h3 className="card-title">New canvass — which RFQ does it compare?</h3>
+        <button type="button" className="btn btn-sm" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <ErrorBox error={error} />
+      <Field label="Search">
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="RFQ or request number, purpose…" autoFocus />
+      </Field>
+      {!rows ? (
+        <Loading />
+      ) : rows.length === 0 ? (
+        <p className="faint">
+          No RFQ is ready: a canvass compares an RFQ that went out and has at least one quote, with no sheet already open. Record the
+          quotes on the <Link to="/g-chain/rfq">RFQ</Link> first.
+        </p>
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>RFQ</th>
+                <th>For</th>
+                <th className="num">Suppliers quoted</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td className="mono">{r.number}</td>
+                  <td>
+                    {r.request.purpose}
+                    <div className="faint mono">
+                      {r.request.number}
+                      {r.request.job ? ` · ${r.request.job.number}` : ''}
+                    </div>
+                  </td>
+                  <td className="num">{r.quotedSuppliers}</td>
+                  <td className="right">
+                    <button type="button" className="btn btn-sm btn-primary" disabled={busy !== null} onClick={() => void start(r)}>
+                      {busy === r.id ? 'Starting…' : r.quotedSuppliers > 6 ? 'Choose six…' : 'Start canvass'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function Canvasses() {
   const navigate = useNavigate();
+  const { can } = useAuth();
+  const [adding, setAdding] = useState(false);
 
   const columns: Column<CanvassRow>[] = [
     { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (c) => <span className="mono">{c.number}</span> },
@@ -115,6 +224,7 @@ export function Canvasses() {
           <h1>Canvass</h1>
         </div>
       </div>
+      {adding && <NewCanvassPanel onClose={() => setAdding(false)} />}
 
       <DataList<CanvassRow>
         listKey="canvasses"
@@ -127,6 +237,13 @@ export function Canvasses() {
         onRowClick={(c) => navigate(`/g-chain/canvass/${c.id}`)}
         emptyTitle="No canvasses yet"
         emptyHint="Start one from an RFQ once the quotes are in."
+        actions={
+          can('gchain.canvass.create') ? (
+            <button type="button" className="btn btn-sm btn-primary" onClick={() => setAdding(true)}>
+              + New canvass
+            </button>
+          ) : undefined
+        }
         selectable
         filters={[
           {

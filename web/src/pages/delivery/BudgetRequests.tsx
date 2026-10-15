@@ -9,7 +9,7 @@ import { useTeams } from '../finance/Receivables';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
-import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, humanise, useToast, type Tone } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { RecordPaymentModal, paymentLink } from '../finance/Receivables';
@@ -964,6 +964,7 @@ export function BudgetRequestDetail() {
           />
         </div>
       )}
+      <DecisionNote documentType="budget_request" documentId={row.id} reloadToken={reload} />
       {row.status !== 'DRAFT' && <DocumentApproval documentType="budget_request" documentId={row.id} reloadToken={reload} />}
 
       <ErrorBox error={error} />

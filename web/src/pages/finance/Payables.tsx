@@ -5,7 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import {
   Checkbox,
   ErrorBox,
@@ -1000,6 +1000,7 @@ export function BillDetail() {
         confirm={confirm}
       />
 
+      <DecisionNote documentType="supplier_bill" documentId={row.id} reloadToken={reload} />
       <DocumentApproval documentType="supplier_bill" documentId={row.id} reloadToken={reload} />
 
       <ErrorBox error={error} />

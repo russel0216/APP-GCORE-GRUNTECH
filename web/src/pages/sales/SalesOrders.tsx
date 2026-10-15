@@ -5,7 +5,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, openPdf, qs } from '../../lib/api';
 import { Attachments } from '../../components/Attachments';
 import { useAuth } from '../../lib/auth';
-import { ApprovalStepper, DocumentApproval, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, DecisionNote, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
 import { yearStartKey } from '../../lib/listUrl';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
@@ -646,6 +646,7 @@ export function SalesOrderDetail() {
           )}
         </div>
       )}
+      <DecisionNote documentType="sales_order" documentId={order.id} reloadToken={reload} />
       {(pending || order.status === 'ISSUED') && <DocumentApproval documentType="sales_order" documentId={order.id} reloadToken={reload} />}
 
       {order.status === 'CANCELLED' && order.cancelReason && (

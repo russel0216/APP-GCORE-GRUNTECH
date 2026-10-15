@@ -13,7 +13,7 @@ import {
   useToast,
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { ProgressBar } from '../delivery/Projects';
 
@@ -154,6 +154,7 @@ interface PoDetailData {
   billsVisible: boolean;
   /** DRAFT and the caller may change it (edit_all, or its author with edit_own). */
   canEdit: boolean;
+  canWithdraw?: boolean;
   /** Placed from this awarded canvass: the supplier is decided. */
   fromCanvass: { id: string; number: string } | null;
   /** The approver's reason, when the latest submission was rejected back to draft. */
@@ -292,6 +293,19 @@ export function PurchaseOrderDetail() {
         }
         print={`/api/purchase-orders/${po.id}/pdf`}
         more={[
+          po.canWithdraw && {
+            label: 'Pull back to draft',
+            confirm: {
+              title: `Pull ${po.number} back to draft?`,
+              body: 'The approval request is withdrawn and the approvers are told. It comes back as the same draft to modify and submit again.',
+              confirmLabel: 'Pull it back',
+              onConfirm: async () => {
+                await api.post(`/purchase-orders/${po.id}/withdraw`);
+                toast('ok', 'Back to draft');
+                await load();
+              },
+            },
+          },
           mayDelete && {
             label: 'Delete',
             danger: true,
@@ -306,6 +320,7 @@ export function PurchaseOrderDetail() {
         modify={po.canEdit ? `/g-chain/purchase-orders/${po.id}/edit` : undefined}
       />
 
+      <DecisionNote documentType="purchase_order" documentId={po.id} reloadToken={reload} />
       <DocumentApproval documentType="purchase_order" documentId={po.id} reloadToken={reload} />
 
       <ErrorBox error={error} />

@@ -7,7 +7,7 @@ import { Empty, ErrorBox, Field, Loading, StatusBadge, formatDate, formatDateTim
 import { Stat } from '../../components/charts';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
-import { ApprovalStepper, DocumentApproval, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
@@ -1007,6 +1007,7 @@ export function StockIssueDetail() {
           <ApprovalStepper steps={previewSteps(issue.approvalRoute)} />
         </div>
       )}
+      <DecisionNote documentType="stock_issue" documentId={String(id)} reloadToken={reload} />
       {(status === 'PENDING_APPROVAL' || status === 'ISSUED') && <DocumentApproval documentType="stock_issue" documentId={String(id)} reloadToken={reload} />}
 
       <ErrorBox error={error} />

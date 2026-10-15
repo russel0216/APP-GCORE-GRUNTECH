@@ -1088,6 +1088,18 @@ async function main() {
       JSON.stringify(returned),
     );
 
+    // Pulled back to draft (2026-10-16): the request withdrawn, the same order back.
+    const resent = await api(buyerToken, 'POST', `/purchase-orders/${draftId}/submit`);
+    const poPulled = await api(buyerToken, 'POST', `/purchase-orders/${draftId}/withdraw`);
+    const pulledAgain = await api(buyerToken, 'POST', `/purchase-orders/${draftId}/withdraw`);
+    const stillOpen = await prisma.approvalRequest.count({ where: { documentType: 'purchase_order', documentId: draftId, status: 'PENDING' } });
+    const afterPull = await api(buyerToken, 'GET', `/purchase-orders/${draftId}`);
+    check(
+      'a pending order is pulled back to the same draft, its request withdrawn; a second pull has nothing to pull',
+      resent.status === 200 && poPulled.status === 200 && pulledAgain.status === 400 && stillOpen === 0 && afterPull.body.status === 'DRAFT' && afterPull.body.canEdit === true,
+      `${resent.status} ${poPulled.status} ${pulledAgain.status} open ${stillOpen} ${afterPull.body.status}`,
+    );
+
     // An order placed from an awarded canvass keeps its supplier.
     const otherSupplier = await prisma.supplier.create({
       data: { code: `${TAG}-S2`, name: `${TAG} Other Supply` },
@@ -2359,7 +2371,16 @@ async function main() {
       const draftRfq = await api(rfqBuyerToken, 'POST', '/rfqs', { requestId: rfqPr.id, itemIds: [bracketLine.id] });
       const fromDraftRfq = await api(sheetToken, 'POST', '/canvasses', { rfqId: draftRfq.body.id });
       await api(rfqBuyerToken, 'DELETE', `/rfqs/${String(draftRfq.body.id)}`);
+      const readyBefore = await api(sheetToken, 'GET', '/rfqs/canvassable');
       const sheetMade = await api(sheetToken, 'POST', '/canvasses', { rfqId });
+      const readyAfter = await api(sheetToken, 'GET', '/rfqs/canvassable');
+      check(
+        '"+ New canvass" offers an RFQ with quotes and no live sheet, and no longer once a sheet compares it',
+        readyBefore.status === 200 &&
+          (readyBefore.body as { id: string }[]).some((r) => r.id === rfqId) &&
+          !(readyAfter.body as { id: string }[]).some((r) => r.id === rfqId),
+        `${readyBefore.status} ${JSON.stringify(readyBefore.body).slice(0, 160)}`,
+      );
       const sheetId = String(sheetMade.body.id);
       const secondSheet = await api(sheetToken, 'POST', '/canvasses', { rfqId });
       const sheetRow = await prisma.canvass.findUniqueOrThrow({ where: { id: sheetId }, include: { suppliers: { include: { quotes: true } } } });

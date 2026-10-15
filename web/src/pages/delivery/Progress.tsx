@@ -19,7 +19,7 @@ import { Stat } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
-import { ApprovalStepper, DocumentApproval, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { useBackLink } from '../../components/Navigation';
 import { NumberInput } from '../../components/NumberInput';
 import { InvoiceRequestModal, REQUEST_TONES } from '../finance/InvoiceRequests';
@@ -507,6 +507,7 @@ export function ProgressReportDetail() {
           <ApprovalStepper steps={previewSteps(route)} />
         </div>
       )}
+      <DecisionNote documentType="progress_report" documentId={report.id} reloadToken={reload} />
       {!draft && <DocumentApproval documentType="progress_report" documentId={report.id} reloadToken={reload} />}
 
       <ErrorBox error={error} />
@@ -1141,6 +1142,7 @@ export function BillingDetailPage() {
           <ApprovalStepper steps={previewSteps(route)} />
         </div>
       )}
+      <DecisionNote documentType="progress_billing" documentId={billing.id} reloadToken={reload} />
       {billing.status !== 'DRAFT' && <DocumentApproval documentType="progress_billing" documentId={billing.id} reloadToken={reload} />}
 
       <ErrorBox error={error} />

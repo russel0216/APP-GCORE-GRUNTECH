@@ -14,7 +14,7 @@ import {
   formatMoney,
   useToast,
 } from '../../components/ui';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
@@ -462,6 +462,7 @@ export function PurchaseRequestDetail() {
         confirm={confirm}
       />
 
+      <DecisionNote documentType="purchase_request" documentId={pr.id} reloadToken={reload} />
       <DocumentApproval documentType="purchase_request" documentId={pr.id} reloadToken={reload} />
 
       <ErrorBox error={error} />

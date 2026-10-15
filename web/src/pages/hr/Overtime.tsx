@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import {
   StatusBadge,
   type Tone,
@@ -655,10 +655,12 @@ export function OvertimeDetail() {
       <div className="grid grid-2 hraud-chains">
         <div>
           <h2 className="hraud-chain-label">Before the work — authorisation</h2>
+          <DecisionNote documentType="overtime_prior" documentId={row.id} reloadToken={reload} />
           <DocumentApproval documentType="overtime_prior" documentId={row.id} reloadToken={reload} />
         </div>
         <div>
           <h2 className="hraud-chain-label">After the work — the hours</h2>
+          <DecisionNote documentType="overtime_request" documentId={row.id} reloadToken={reload} />
           {actualFiled ? (
             <DocumentApproval
               documentType="overtime_request"

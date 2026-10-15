@@ -757,6 +757,16 @@ export function RfqDetail() {
   const [error, setError] = useState<unknown>(null);
   const [quoting, setQuoting] = useState<string | null>(null);
   const [choosing, setChoosing] = useState(false);
+  const [params, setParams] = useSearchParams();
+  // "+ New canvass" on the Canvass list sends an RFQ with more than six
+  // quotes here with ?canvass=1, to choose the six (2026-10-16).
+  useEffect(() => {
+    if (params.get('canvass') !== '1') return;
+    setChoosing(true);
+    const next = new URLSearchParams(params);
+    next.delete('canvass');
+    setParams(next, { replace: true });
+  }, [params, setParams]);
 
   const load = useCallback(async () => {
     if (!id) return;

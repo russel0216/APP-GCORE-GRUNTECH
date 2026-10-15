@@ -5,7 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { PeoplePicker } from '../../components/PeoplePicker';
 import { PersonSelect, toPerson, usePeople } from '../../components/People';
@@ -969,6 +969,7 @@ export function JobOrderDetail() {
         confirm={confirm}
       />
 
+      <DecisionNote documentType="job_order" documentId={r.id} reloadToken={reload} />
       <DocumentApproval documentType="job_order" documentId={r.id} reloadToken={reload} />
 
       <ErrorBox error={error} />

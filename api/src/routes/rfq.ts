@@ -270,6 +270,54 @@ rfqRoutes.get(
  * behind the RFQ's own create right, so a buyer need not read every request
  * register to ask suppliers about one. Numbers and purposes only.
  */
+/**
+ * The RFQs a canvass may be started from (2026-10-16, the owner's call: the
+ * Canvass list's "+ New canvass"): sent or quoted, at least one supplier
+ * quoted, no live canvass yet — the RFQ page's own `canStartCanvass` rule.
+ * Above `/:id`.
+ */
+rfqRoutes.get(
+  '/canvassable',
+  require_('gchain.canvass.create'),
+  handler(async (req, res) => {
+    const q = String(req.query.q ?? '').trim();
+    const rows = await prisma.rfq.findMany({
+      where: {
+        status: { in: ['SENT', 'QUOTED'] },
+        canvasses: { none: { status: { not: 'CANCELLED' } } },
+        suppliers: { some: { quotes: { some: {} } } },
+        ...(q
+          ? {
+              OR: [
+                { number: { contains: q, mode: 'insensitive' } },
+                { request: { number: { contains: q, mode: 'insensitive' } } },
+                { request: { purpose: { contains: q, mode: 'insensitive' } } },
+              ],
+            }
+          : {}),
+      },
+      select: {
+        id: true,
+        number: true,
+        status: true,
+        request: { select: { number: true, purpose: true, job: { select: { number: true, name: true } } } },
+        suppliers: { select: { _count: { select: { quotes: true } } } },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 30,
+    });
+    res.json(
+      rows.map((r) => ({
+        id: r.id,
+        number: r.number,
+        status: r.status,
+        request: r.request,
+        quotedSuppliers: r.suppliers.filter((x) => x._count.quotes > 0).length,
+      })),
+    );
+  }),
+);
+
 rfqRoutes.get(
   '/requests',
   require_('gchain.rfq.create'),

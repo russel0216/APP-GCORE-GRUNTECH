@@ -2716,6 +2716,7 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
     bills: seesBills ? bills.map((b) => ({ ...b, total: num(b.total) })) : [],
     billsVisible: seesBills,
     canEdit: !!me && po.status === 'DRAFT' && mayEditPo(me, po),
+    canWithdraw: !!me && po.status === 'PENDING_APPROVAL' && mayEditPo(me, po),
     /** What the order page's save claims on (`PUT /:id/sheet`'s `version`). */
     version: po.updatedAt.toISOString(),
     vatRate: num(po.vatRate),
@@ -3389,6 +3390,43 @@ purchaseOrderRoutes.post(
       req,
     );
     res.json({ ok: true, status: 'PENDING_APPROVAL' });
+  }),
+);
+
+/**
+ * Pulling an order back from its approver to change it (2026-10-16, the
+ * owner's call), the purchase request's rule: the buyer (or edit_all) claims
+ * PENDING_APPROVAL → DRAFT and the open request is withdrawn through the
+ * engine in the same transaction, telling the approvers. A decision that
+ * landed first wins — the claim rolls back and the route says so. The same
+ * order, the same number, comes back to change and send again.
+ */
+purchaseOrderRoutes.post(
+  '/:id/withdraw',
+  requireAny(...PO_EDIT),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const po = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } });
+    if (!po) throw notFound('Purchase order not found');
+    if (!mayEditPo(me, po)) throw forbidden('This order belongs to someone else');
+    if (po.status !== 'PENDING_APPROVAL') throw badRequest('This order is not with the approver — nothing to pull back');
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.purchaseOrder.updateMany({ where: { id: po.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      if (!claimed.count) throw badRequest('It was decided a moment ago — reload to see where it stands');
+      const withdrawn = await cancelOpenRequest('purchase_order', po.id, tx, `pulled back to draft by ${me.name}`, me.id);
+      if (!withdrawn.length) {
+        const last = await tx.approvalRequest.findFirst({
+          where: { documentType: 'purchase_order', documentId: po.id },
+          orderBy: { createdAt: 'desc' },
+          select: { status: true, actions: { where: { action: 'RETURNED' }, select: { id: true }, take: 1 } },
+        });
+        if (last && (last.status === 'APPROVED' || last.status === 'REJECTED' || last.actions.length)) {
+          throw badRequest('It was decided a moment ago — reload to see where it stands');
+        }
+      }
+    });
+    await audit({ entityType: 'purchase_order', entityId: po.id, action: 'UPDATED', summary: `Pulled ${po.number} back to draft` }, req);
+    res.json({ ok: true, status: 'DRAFT' });
   }),
 );
 

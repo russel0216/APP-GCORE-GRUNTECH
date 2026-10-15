@@ -6,7 +6,7 @@ import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
-import { ApprovalStepper, DocumentApproval, allHeld, previewSteps } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
 
@@ -452,6 +452,7 @@ export function PlanApprovalPage() {
           <ApprovalStepper steps={previewSteps(route)} />
         </div>
       )}
+      <DecisionNote documentType="plan_approval" documentId={row.id} reloadToken={reload} />
       {!draft && row.status !== 'CANCELLED' && <DocumentApproval documentType="plan_approval" documentId={row.id} reloadToken={reload} />}
 
       <ErrorBox error={error} />

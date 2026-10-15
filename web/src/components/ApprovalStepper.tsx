@@ -246,7 +246,7 @@ export function DocumentApproval({
   const steps: Step[] = workflowSteps.map((step) => {
     const acted = request.actions.find((a) => a.sequence === step.sequence);
     if (acted) {
-      const when = formatDateTime(new Date(acted.actedAt));
+      const when = formatDateTime(new Date(acted.actedAt)) + (acted.comment ? ` — “${acted.comment}”` : '');
       return {
         label: step.name,
         approver: acted.selfSigned
@@ -414,5 +414,41 @@ export function DocumentApproval({
           </div>
         ))}
     </section>
+  );
+}
+
+/**
+ * The approver's word when a document came back (2026-10-16, the owner's
+ * call: "approval return and rejected comments in the viewing environment —
+ * add in all"): a banner on the document's own page while it stands
+ * returned or rejected — "Returned by Maria Santos on Oct 15 — 'attach the
+ * supplier quote'" — read from the approval history, never a copy kept on
+ * the document. Gone once the document is submitted again.
+ */
+export function DecisionNote({ documentType, documentId, reloadToken = 0 }: { documentType: string; documentId: string; reloadToken?: number }) {
+  const [request, setRequest] = useState<Request | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .get<Request[]>(`/approvals/history/${documentType}/${documentId}`)
+      .then((rows) => live && setRequest(rows[0] ?? null))
+      .catch(() => live && setRequest(null));
+    return () => {
+      live = false;
+    };
+  }, [documentType, documentId, reloadToken]);
+  if (!request) return null;
+  const last = request.actions[request.actions.length - 1];
+  if (!last) return null;
+  const returned = request.status === 'CANCELLED' && last.action === 'RETURNED';
+  const rejected = request.status === 'REJECTED' && last.action === 'REJECTED';
+  if (!returned && !rejected) return null;
+  const step = request.workflow?.steps.find((s) => s.sequence === last.sequence)?.name;
+  return (
+    <div className={`alert ${rejected ? 'error' : 'warn'}`} role="status">
+      <strong>{rejected ? 'Rejected' : 'Returned for changes'}</strong> by {last.approver.name}
+      {step ? ` (${step})` : ''} on {formatDateTime(new Date(last.actedAt))}
+      {last.comment ? <> — “{last.comment}”</> : ' — no comment left'}
+    </div>
   );
 }
