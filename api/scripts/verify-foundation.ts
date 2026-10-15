@@ -2663,6 +2663,26 @@ async function main() {
       browserAsks.length === 0,
       browserAsks.join(', '),
     );
+    // The review of 2026-10-16: seven module copies of a card's head, a
+    // btn-ok nobody else drew, and admin-gated /users fetches feeding forms.
+    const cssFiles = [path.join(webSrc, 'styles.css'), ...fs.readdirSync(path.join(webSrc, 'styles')).map((f) => path.join(webSrc, 'styles', f))];
+    const headCopies = [
+      ...offenders(/[a-z]+-card-head\b/),
+      ...cssFiles.flatMap((f) =>
+        code(f)
+          .filter(({ text }) => /\.[a-z]+-card-head\b/.test(text))
+          .map(({ line }) => `${path.relative(webSrc, f)}:${line}`),
+      ),
+    ];
+    check('one card head: no module writes its own *-card-head (.card-head, rule 19)', headCopies.length === 0, headCopies.join(', '));
+    const okButtons = offenders(/\bbtn-ok\b/);
+    check('no btn-ok: the next step is btn-primary (rule 19)', okButtons.length === 0, okButtons.join(', '));
+    const userLists = offenders(/[`'"]\/users\?pageSize/, ['pages/admin/OrgChart.tsx']);
+    check(
+      'no form reads the admin-gated /users list for its people (PersonSelect / usePeople; the org chart alone needs Reports to)',
+      userLists.length === 0,
+      userLists.join(', '),
+    );
     check('the source scan found the web app', files.length > 100, `${files.length} files`);
   }
 

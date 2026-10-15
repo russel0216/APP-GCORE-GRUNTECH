@@ -888,7 +888,7 @@ export function PartnerDetail() {
 
       {tab === 'catalogues' && (
         <div className="stack">
-          <div className="m-card-head">
+          <div className="card-head">
             <h3 className="card-title">Catalogues</h3>
             {addResource('CATALOGUE', 'catalogue')}
           </div>
@@ -902,7 +902,7 @@ export function PartnerDetail() {
           )}
           {(others.length > 0 || mayEdit) && (
             <>
-              <div className="m-card-head">
+              <div className="card-head">
                 <h4 className="m-section-head">Other documents</h4>
                 {addResource('OTHER', 'document')}
               </div>
@@ -918,7 +918,7 @@ export function PartnerDetail() {
 
       {tab === 'prices' && (
         <div className="stack">
-          <div className="m-card-head">
+          <div className="card-head">
             <h3 className="card-title">Price list documents</h3>
             {addResource('PRICE_LIST', 'price list')}
           </div>
@@ -1019,7 +1019,7 @@ export function PartnerDetail() {
 
       {tab === 'sizing' && (
         <div className="stack">
-          <div className="m-card-head">
+          <div className="card-head">
             <h3 className="card-title">Software</h3>
             {addResource('SIZING_APP', 'software')}
           </div>
@@ -1036,7 +1036,7 @@ export function PartnerDetail() {
 
       {tab === 'links' && (
         <div className="stack">
-          <div className="m-card-head">
+          <div className="card-head">
             <h3 className="card-title">Links</h3>
             {addResource('LINK', 'link')}
           </div>
@@ -1053,7 +1053,7 @@ export function PartnerDetail() {
 
       {tab === 'people' && (
         <div className="card">
-          <div className="m-card-head">
+          <div className="card-head">
             <h3 className="card-title">People</h3>
             {can('gchain.suppliers.view_all') && (
               <Link to={`/g-chain/suppliers/${partner.id}`}>Manage on the supplier record ›</Link>

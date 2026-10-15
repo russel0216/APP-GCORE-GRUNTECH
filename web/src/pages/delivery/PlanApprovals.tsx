@@ -138,7 +138,7 @@ export function ProjectPlanApprovalsCard({
   const [raising, setRaising] = useState(false);
   return (
     <section className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">Request for Approval</h3>
         {can('gops.plans.create') && (
           <button className="btn btn-sm" onClick={() => setRaising(true)}>

@@ -370,7 +370,7 @@ export function PurchaseOrderDetail() {
       </div>
 
       <div className="card proc-card">
-        <div className="proc-card-head">
+        <div className="card-head">
           <h3 className="card-title">Order lines</h3>
         </div>
         {po.items.length === 0 ? (

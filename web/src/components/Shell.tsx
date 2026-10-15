@@ -304,7 +304,7 @@ export function Shell() {
           G-CORE
         </Link>
         {activeModule && (
-          <span className="badge" style={{ letterSpacing: 1 }}>
+          <span className="badge" style={{ letterSpacing: '0.06em' }}>
             {activeModule.label}
           </span>
         )}
@@ -382,7 +382,7 @@ export function Shell() {
             </button>
           </div>
           {notifications.length === 0 ? (
-            <div className="empty" style={{ padding: 30 }}>
+            <div className="empty" style={{ padding: 'var(--s-7)' }}>
               Nothing new
             </div>
           ) : (

@@ -513,7 +513,7 @@ export function BorrowRequestEditor() {
               maxLength={300}
               required
               autoFocus={!editing}
-              placeholder="e.g. Pressure test at the client's plant"
+              placeholder="e.g. Pressure test at the customer's plant"
               onChange={(e) => set({ purpose: e.target.value })}
             />
           </Field>
@@ -526,7 +526,7 @@ export function BorrowRequestEditor() {
       </section>
 
       <section className="card" aria-labelledby="bs-items">
-        <div className="prq-card-head">
+        <div className="card-head">
           <h2 id="bs-items" className="card-title">
             Items
           </h2>

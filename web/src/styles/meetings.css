@@ -31,11 +31,6 @@
   flex-wrap: wrap;
 }
 
-.meeting-card-head {
-  align-items: center;
-  margin-bottom: var(--card-gap);
-}
-
 .meeting-flush {
   margin: 0;
 }

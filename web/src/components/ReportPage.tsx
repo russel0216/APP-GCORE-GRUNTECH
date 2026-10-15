@@ -264,7 +264,7 @@ export function ReportPage({
                           <td key={i} className={report.series.columns[i]?.align === 'left' ? undefined : 'right mono'}>
                             {i === firstMoney ? (
                               <div className="rep-bar-cell">
-                                <MiniBar value={v} peak={peakOf(i)} tone="neon" />
+                                <MiniBar value={v} peak={peakOf(i)} />
                                 <span>{formatMoney(v)}</span>
                               </div>
                             ) : (

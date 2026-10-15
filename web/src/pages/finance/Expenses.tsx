@@ -875,8 +875,8 @@ export function ExpenseClaimDetail() {
 
       {row.status === 'PENDING_APPROVAL' && (
         <div className="alert info">
-          With your supervisor, then finance. Nothing is charged to a project and nothing is owed
-          until both have approved.
+          Waiting for approval — the Approval panel says with whom. Nothing is charged to a project
+          and nothing is owed until every step has approved.
         </div>
       )}
       {row.status === 'APPROVED' && (

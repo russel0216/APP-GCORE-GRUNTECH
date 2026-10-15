@@ -806,7 +806,7 @@ export function ClearanceDetail() {
                                 <div className="clearance-actions">
                                   {mayAct && item.status === 'PENDING' && !item.derived && (
                                     <button
-                                      className="btn btn-sm btn-ok"
+                                      className="btn btn-sm btn-primary"
                                       disabled={busy}
                                       onClick={() =>
                                         run('Cleared', () => api.post(`/clearances/${c.id}/items/${item.id}/clear`, {}))

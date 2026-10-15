@@ -4,6 +4,7 @@ import { ApiError, api, downloadBlob, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Stat } from '../../components/charts';
 import { Menu } from '../../components/Menu';
+import { PersonSelect } from '../../components/People';
 import { NumberInput } from '../../components/NumberInput';
 import { useConfirm } from '../../components/Confirm';
 import {
@@ -19,6 +20,7 @@ import {
   formatDate,
   formatMoney,
   useToast,
+  marginTone,
 } from '../../components/ui';
 import { LeadForm, loadPeople, type Person } from './Leads';
 
@@ -1185,7 +1187,7 @@ function KpiRow({ kpis, board, show, canInsights }: { kpis: Kpis; board: Board; 
           label="Margin"
           value={`${kpis.expectedMarginPct}%`}
           figure
-          accent={kpis.expectedMarginPct < 0 ? 'danger' : kpis.expectedMarginPct < 10 ? 'warn' : undefined}
+          accent={marginTone(kpis.expectedMarginPct) || undefined}
           sub={`from costing, ${kpis.marginSample.withCosting} of ${kpis.marginSample.open} quotes`}
         />
       ),
@@ -1844,13 +1846,13 @@ function ForecastDealForm({
         </Field>
       </div>
       <Field label="Salesperson" hint="They are notified when it is not you">
-        <select value={form.assignedToId} onChange={(e) => setForm({ ...form, assignedToId: e.target.value })}>
-          {people.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.id === me ? `${p.name} (me)` : p.name}
-            </option>
-          ))}
-        </select>
+        <PersonSelect
+          value={form.assignedToId}
+          onChange={(id) => setForm({ ...form, assignedToId: id })}
+          people={people}
+          self={me}
+          required
+        />
       </Field>
     </Modal>
   );

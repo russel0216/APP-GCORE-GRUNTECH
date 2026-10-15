@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { formatDateTime } from './ui';
+import { useConfirm } from './Confirm';
 
 /**
  * The approval chain, in two parts.
@@ -196,12 +197,9 @@ export function DocumentApproval({
   compact?: boolean;
 }) {
   const [requests, setRequests] = useState<Request[] | null>(null);
-  const [deciding, setDeciding] = useState<Decision | null>(null);
-  const [comment, setComment] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [decideError, setDecideError] = useState<string | null>(null);
-  const [reopening, setReopening] = useState(false);
-  const [reopenReason, setReopenReason] = useState('');
+  // Asking is the one confirm bar of rule 19 (2026-10-16, the review): the
+  // decision's comment and the pull-back's reason are its reason box.
+  const confirm = useConfirm();
 
   useEffect(() => {
     let live = true;
@@ -350,62 +348,37 @@ export function DocumentApproval({
 
       {request.status === 'PENDING' && request.canAct && (
         <div className="approval-decide" role="group" aria-label="Your decision">
-          {deciding === null ? (
-            <>
-              <p className="panel-blurb">This step is waiting on you.</p>
-              <div className="row approval-decide-buttons">
-                <button type="button" className="btn btn-sm btn-primary" onClick={() => setDeciding('APPROVED')}>
-                  Approve
-                </button>
-                <button type="button" className="btn btn-sm" onClick={() => setDeciding('RETURNED')}>
-                  Return
-                </button>
-                <button type="button" className="btn btn-sm btn-danger" onClick={() => setDeciding('REJECTED')}>
-                  Reject
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <label className="approval-decide-label" htmlFor={`decide-${request.id}`}>
-                {DECISION_VERB[deciding]} — comment {deciding === 'APPROVED' ? '(optional)' : '(say what needs to change)'}
-              </label>
-              <textarea
-                id={`decide-${request.id}`}
-                value={comment}
-                autoFocus
-                onChange={(e) => setComment(e.target.value)}
-                placeholder={deciding === 'APPROVED' ? 'Anything the requester should know' : 'This is what the requester sees'}
-              />
-              {decideError && <div className="alert error">{decideError}</div>}
-              {/* The confirm grammar of rule 19: [Keep it] then the decision itself, on the right. */}
-              <div className="panel-foot approval-decide-buttons">
-                <button type="button" className="btn btn-sm" disabled={busy} onClick={() => { setDeciding(null); setDecideError(null); }}>
-                  Keep it
-                </button>
-                <button
-                  type="button"
-                  className={`btn btn-sm ${deciding === 'APPROVED' ? 'btn-primary' : deciding === 'REJECTED' ? 'btn-danger' : ''}`}
-                  disabled={busy}
-                  onClick={async () => {
-                    setBusy(true);
-                    setDecideError(null);
-                    try {
-                      await api.post(`/approvals/${request.id}/act`, { action: deciding, comment: comment.trim() || undefined });
+          <p className="panel-blurb">This step is waiting on you.</p>
+          <div className="row approval-decide-buttons">
+            {(['APPROVED', 'RETURNED', 'REJECTED'] as Decision[]).map((decision) => (
+              <button
+                key={decision}
+                type="button"
+                className={`btn btn-sm${decision === 'APPROVED' ? ' btn-primary' : decision === 'REJECTED' ? ' btn-danger' : ''}`}
+                onClick={() =>
+                  confirm.ask({
+                    title: `${DECISION_VERB[decision]} this step?`,
+                    body: 'Recorded against the document permanently, with your name and the time.',
+                    confirmLabel: DECISION_VERB[decision],
+                    tone: decision === 'APPROVED' ? 'primary' : 'danger',
+                    // Sent back or refused, the requester is owed the why.
+                    reason: decision === 'APPROVED' ? 'optional' : 'required',
+                    reasonLabel:
+                      decision === 'APPROVED'
+                        ? 'Comment (optional) — anything the requester should know'
+                        : 'Comment — say what needs to change; this is what the requester sees',
+                    onConfirm: async (comment) => {
+                      await api.post(`/approvals/${request.id}/act`, { action: decision, comment: comment.trim() || undefined });
                       // The document's own status moves with the decision — read the page again.
                       window.location.reload();
-                    } catch (err) {
-                      setDecideError(err instanceof Error ? err.message : 'The decision was not recorded');
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  {busy ? 'Working…' : DECISION_VERB[deciding]}
-                </button>
-              </div>
-              <p className="faint">Recorded against the document permanently, with your name and the time.</p>
-            </>
-          )}
+                    },
+                  })
+                }
+              >
+                {DECISION_VERB[decision]}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -413,46 +386,31 @@ export function DocumentApproval({
           the engine's one path, the module's own refusals shown here. */}
       {request.status === 'APPROVED' && request.canReopen && (
         <div className="approval-decide" role="group" aria-label="Pull back to draft">
-          {!reopening ? (
-            <div className="row approval-decide-buttons">
-              <button type="button" className="btn btn-sm btn-danger" onClick={() => setReopening(true)}>
-                Pull back to draft
-              </button>
-            </div>
-          ) : (
-            <>
-              <label className="approval-decide-label" htmlFor={`reopen-${request.id}`}>
-                Pull it back to draft — what the approval did is undone, and it goes through approval again. Why?
-              </label>
-              <textarea id={`reopen-${request.id}`} value={reopenReason} autoFocus onChange={(e) => setReopenReason(e.target.value)} />
-              {decideError && <div className="alert error">{decideError}</div>}
-              <div className="panel-foot approval-decide-buttons">
-                <button type="button" className="btn btn-sm" disabled={busy} onClick={() => { setReopening(false); setDecideError(null); }}>
-                  Keep it
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-sm btn-danger"
-                  disabled={busy || !reopenReason.trim()}
-                  onClick={async () => {
-                    setBusy(true);
-                    setDecideError(null);
-                    try {
-                      await api.post(`/approvals/reopen/${documentType}/${documentId}`, { reason: reopenReason.trim() });
-                      window.location.reload();
-                    } catch (err) {
-                      setDecideError(err instanceof Error ? err.message : 'It was not pulled back');
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  {busy ? 'Working…' : 'Pull back to draft'}
-                </button>
-              </div>
-            </>
-          )}
+          <div className="row approval-decide-buttons">
+            <button
+              type="button"
+              className="btn btn-sm btn-danger"
+              onClick={() =>
+                confirm.ask({
+                  title: 'Pull it back to draft?',
+                  body: 'What the approval did is undone, and it goes through approval again.',
+                  confirmLabel: 'Pull back to draft',
+                  reason: 'required',
+                  reasonLabel: 'Why?',
+                  onConfirm: async (reason) => {
+                    await api.post(`/approvals/reopen/${documentType}/${documentId}`, { reason: reason.trim() });
+                    window.location.reload();
+                  },
+                })
+              }
+            >
+              Pull back to draft
+            </button>
+          </div>
         </div>
       )}
+
+      {confirm.bar}
 
       {/* A comment is usually why something was sent back, so it is not hidden
           behind a hover. */}

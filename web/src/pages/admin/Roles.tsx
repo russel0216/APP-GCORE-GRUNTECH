@@ -95,10 +95,10 @@ export function Roles() {
               <strong>{role.name}</strong>
               {role.isSystem && <span className="badge">system</span>}
             </div>
-            <div className="muted" style={{ fontSize: 12, margin: '6px 0 10px', minHeight: 32 }}>
+            <div className="muted" style={{ fontSize: 'var(--fs-sm)', margin: 'var(--s-2) 0 var(--s-3)', minHeight: '2rem' }}>
               {role.description}
             </div>
-            <div className="faint mono" style={{ fontSize: 11 }}>
+            <div className="faint mono" style={{ fontSize: 'var(--fs-xs)' }}>
               {role.permissions.length} permissions · {role.userCount} user
               {role.userCount === 1 ? '' : 's'}
             </div>
@@ -245,9 +245,9 @@ function RoleEditor({
 
       <hr className="rule" />
 
-      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
+      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 'var(--s-3)' }}>
         <strong>Permissions</strong>
-        <span className="faint" style={{ fontSize: 12 }}>
+        <span className="faint" style={{ fontSize: 'var(--fs-sm)' }}>
           {selected.size} of {catalog.total} · click a screen name to toggle all its actions
         </span>
       </div>
@@ -268,7 +268,7 @@ function RoleEditor({
               <h4>
                 {isCollapsed ? '▸' : '▾'} {mod.label}
               </h4>
-              <span className="faint mono" style={{ fontSize: 11 }}>
+              <span className="faint mono" style={{ fontSize: 'var(--fs-xs)' }}>
                 {on}/{modKeys.length}
               </span>
             </header>

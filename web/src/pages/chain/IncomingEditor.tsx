@@ -521,7 +521,7 @@ export function IncomingEditor() {
           </section>
 
           <section className="card" aria-labelledby="inc-lines">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="inc-lines" className="card-title">
                 {mode === 'order' ? 'What came in' : 'Lines'}
               </h2>

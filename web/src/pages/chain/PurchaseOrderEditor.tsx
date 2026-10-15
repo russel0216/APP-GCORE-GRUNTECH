@@ -639,7 +639,7 @@ export function PurchaseOrderEditor() {
 
           {/* ── Lines ───────────────────────────────────────────────────────── */}
           <section className="card" aria-labelledby="poe-lines">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="poe-lines" className="card-title">Lines</h2>
               <button type="button" className="btn btn-sm" onClick={() => fileRef.current?.click()}>
                 Import CSV
@@ -834,7 +834,7 @@ export function PurchaseOrderEditor() {
         {/* ── Budget, as issuing would leave it ──────────────────────────────── */}
         {direct && job && (
           <aside className="card prq-budget" aria-labelledby="poe-budget">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="poe-budget" className="card-title">Budget — on issue</h2>
               <span className="muted prq-source">as you type</span>
             </div>

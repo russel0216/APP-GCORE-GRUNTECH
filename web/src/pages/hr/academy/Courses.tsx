@@ -4,7 +4,7 @@ import { api } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
 import { DataList, type Column } from '../../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../../components/ImportModal';
-import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../../components/ui';
+import { ActiveBadge, Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../../components/ui';
 import { NumberInput } from '../../../components/NumberInput';
 
 /**
@@ -61,7 +61,6 @@ interface PositionOption {
   departmentName: string | null;
 }
 
-const ACTIVE_TONES = { ACTIVE: 'ok', INACTIVE: '' } as const;
 
 export function Courses() {
   const { can } = useAuth();
@@ -152,7 +151,7 @@ export function Courses() {
       key: 'active',
       label: 'Status',
       render: (r) => (
-        <StatusBadge status={r.isActive ? 'ACTIVE' : 'INACTIVE'} extra={ACTIVE_TONES} label={r.isActive ? 'Active' : 'Inactive'} />
+        <ActiveBadge active={r.isActive} />
       ),
     },
   ];

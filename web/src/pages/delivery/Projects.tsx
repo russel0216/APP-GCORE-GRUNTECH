@@ -13,6 +13,7 @@ import {
   formatMoney,
   useToast,
   type Tone,
+  marginTone,
 } from '../../components/ui';
 import { Meter as ProgressBar } from '../../components/charts';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
@@ -171,7 +172,7 @@ export function Projects() {
       // reads 100% on a job that has barely started.
       render: (j) => (
         <span
-          className={`badge ${j.expectedMarginPct < 0 ? 'danger' : j.expectedMarginPct < 10 ? 'warn' : 'ok'}`}
+          className={`badge ${marginTone(j.expectedMarginPct)}`}
           title="Expected margin, from the costing"
         >
           {j.expectedMarginPct.toFixed(1)}%

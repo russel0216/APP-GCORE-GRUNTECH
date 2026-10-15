@@ -4,7 +4,7 @@ import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { Stat } from '../../components/charts';
-import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
+import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, marginTone, useToast, type Tone } from '../../components/ui';
 
 /** A costing's statuses; none is in the shared lifecycle table as it stands. */
 export const COSTING_TONES: Record<string, Tone> = { DRAFT: 'warn', PENDING_APPROVAL: 'info', FINAL: 'ok' };
@@ -223,9 +223,8 @@ function CostingTiles({ scope }: { scope: 'mine' | 'all' }) {
 
 export function MarginBadge({ pct }: { pct: number }) {
   const value = `${(pct * 100).toFixed(1)}%`;
-  // Below 10% a job is barely worth the risk; below zero it is losing money.
-  const tone = pct < 0 ? 'danger' : pct < 0.1 ? 'warn' : 'ok';
-  return <span className={`badge ${tone}`}>{value}</span>;
+  // A costing's margin is a fraction; marginTone reads a percentage.
+  return <span className={`badge ${marginTone(pct * 100)}`}>{value}</span>;
 }
 
 interface TemplateRow {

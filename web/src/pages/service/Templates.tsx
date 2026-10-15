@@ -306,8 +306,8 @@ function TemplateEditor({
         </Field>
 
         {sections.map((section, si) => (
-          <div key={si} className="card" style={{ marginTop: 14 }}>
-            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
+          <div key={si} className="card" style={{ marginTop: 'var(--s-4)' }}>
+            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 'var(--s-3)' }}>
               <input
                 value={section.title}
                 onChange={(e) =>
@@ -316,7 +316,7 @@ function TemplateEditor({
                     key: template ? section.key : slug(e.target.value, new Set(sections.filter((_, j) => j !== si).map((s) => s.key))),
                   })
                 }
-                style={{ fontWeight: 600, maxWidth: 320 }}
+                style={{ fontWeight: 600, maxWidth: '20rem' }}
               />
               <div className="row">
                 <Checkbox
@@ -340,10 +340,10 @@ function TemplateEditor({
                 <thead>
                   <tr>
                     <th>Field</th>
-                    <th style={{ width: 150 }}>Type</th>
-                    <th style={{ width: 150 }}>Options / unit</th>
-                    <th style={{ width: 90 }}>Required</th>
-                    <th style={{ width: 40 }} />
+                    <th style={{ width: '9.375rem' }}>Type</th>
+                    <th style={{ width: '9.375rem' }}>Options / unit</th>
+                    <th style={{ width: '5.625rem' }}>Required</th>
+                    <th style={{ width: '2.5rem' }} />
                   </tr>
                 </thead>
                 <tbody>
@@ -433,7 +433,7 @@ function TemplateEditor({
             {!readOnly && (
               <button
                 className="btn btn-sm"
-                style={{ marginTop: 8 }}
+                style={{ marginTop: 'var(--s-2)' }}
                 onClick={() => {
                   const taken = new Set(section.fields.map((f) => f.key));
                   patchSection(si, {
@@ -448,7 +448,7 @@ function TemplateEditor({
               </button>
             )}
             {section.fields.length === 0 && (
-              <div className="alert warn" style={{ marginTop: 10, marginBottom: 0 }}>
+              <div className="alert warn" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
                 A section with no fields cannot be saved.
               </div>
             )}
@@ -458,7 +458,7 @@ function TemplateEditor({
         {!readOnly && (
           <button
             className="btn btn-sm"
-            style={{ marginTop: 14 }}
+            style={{ marginTop: 'var(--s-4)' }}
             onClick={() => {
               const taken = new Set(sections.map((s) => s.key));
               setSections([
@@ -507,7 +507,7 @@ export function AftermarketDashboard() {
   if (tab === 'rules') {
     return (
       <div>
-        <div className="scope-switch" style={{ marginBottom: 16 }}>
+        <div className="scope-switch" style={{ marginBottom: 'var(--s-4)' }}>
           <button onClick={() => setTab('overview')}>Overview</button>
           <button className="active">Rules</button>
         </div>
@@ -549,7 +549,7 @@ export function AftermarketDashboard() {
 
   return (
     <div>
-      <div className="scope-switch" style={{ marginBottom: 16 }}>
+      <div className="scope-switch" style={{ marginBottom: 'var(--s-4)' }}>
         <button className="active">Overview</button>
         <button onClick={() => setTab('rules')}>Rules</button>
       </div>
@@ -585,7 +585,7 @@ export function AftermarketDashboard() {
             <dt>Out of warranty</dt>
             <dd className="mono">{data.installedBase.outOfWarranty}</dd>
           </dl>
-          <p className="faint" style={{ marginTop: 12, marginBottom: 0 }}>
+          <p className="faint" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
             A machine leaving warranty with nothing behind it is a customer about to start paying
             for what they got free. <Link to="/g-ops/renewals">See the renewal pipeline.</Link>
           </p>

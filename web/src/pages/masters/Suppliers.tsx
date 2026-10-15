@@ -613,7 +613,7 @@ export function SupplierDetail() {
         </div>
 
         <div className="card m-span-all">
-          <div className="m-card-head">
+          <div className="card-head">
             <h3 className="card-title">People</h3>
             {mayEdit && (
               <button className="btn btn-sm" onClick={() => setContactModal('new')}>

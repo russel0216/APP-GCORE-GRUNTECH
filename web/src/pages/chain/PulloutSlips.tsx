@@ -742,7 +742,7 @@ export function PulloutEditor() {
       </section>
 
       <section className="card" aria-labelledby="po-lines">
-        <div className="prq-card-head">
+        <div className="card-head">
           <h2 id="po-lines" className="card-title">
             {none ? 'Items to pull out' : `Lines of ${source.number}`}
           </h2>

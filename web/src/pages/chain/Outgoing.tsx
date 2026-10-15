@@ -565,7 +565,7 @@ export function OutgoingEditor() {
           </section>
 
           <section className="card" aria-labelledby="out-lines">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="out-lines" className="card-title">Outgoing items</h2>
               <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls, blankLine()])}>
                 + Add line

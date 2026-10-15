@@ -527,7 +527,7 @@ export function RfqEditor() {
           </section>
 
           <section className="card" aria-labelledby="rfq-lines">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="rfq-lines" className="card-title">Lines asked</h2>
               <span className="muted prq-source">
                 {picked.size} of {lines.length} · estimated {formatMoney(estimate)}
@@ -591,7 +591,7 @@ export function RfqEditor() {
           </section>
 
           <section className="card" aria-labelledby="rfq-suppliers">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="rfq-suppliers" className="card-title">Suppliers asked</h2>
               <button type="button" className="btn btn-sm" onClick={() => setRows((rs) => [...rs, blankRow()])}>
                 + Add supplier
@@ -969,7 +969,7 @@ export function RfqDetail() {
       </div>
 
       <section className="card" aria-labelledby="rfq-sups">
-        <div className="proc-card-head">
+        <div className="card-head">
           <h3 id="rfq-sups" className="card-title">Suppliers asked</h3>
           <span className="faint">
             {quoted.length} of {rfq.suppliers.length} quoted
@@ -1215,7 +1215,7 @@ function QuotePanel({
   return (
     <>
     <section className="card rfq-quote" aria-labelledby="rfq-quote-head">
-      <div className="proc-card-head">
+      <div className="card-head">
         <h3 id="rfq-quote-head" className="card-title">
           {row.supplier.name}’s quote
         </h3>
@@ -1317,7 +1317,7 @@ function ChooseSuppliers({ rfq, onClose, onStart }: { rfq: RfqDetailData; onClos
   const [error, setError] = useState<unknown>(null);
   return (
     <section className="card" aria-labelledby="rfq-choose">
-      <div className="proc-card-head">
+      <div className="card-head">
         <h3 id="rfq-choose" className="card-title">
           Start canvass — choose six suppliers
         </h3>

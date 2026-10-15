@@ -7,16 +7,6 @@
 }
 
 /* Card heading with an action on the right ("Order lines" … "+ Add line"). */
-.proc-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-3);
-  margin-bottom: var(--card-gap);
-}
-.proc-card-head .card-title {
-  margin: 0;
-}
 
 /* Stat row on a record page. */
 .proc-stats {
@@ -174,18 +164,7 @@
   margin: var(--s-2) 0 0;
 }
 
-.prq-card-head {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  flex-wrap: wrap;
-  margin-bottom: var(--s-3);
-}
 
-.prq-card-head .card-title {
-  margin: 0;
-  flex: 1;
-}
 
 .prq-source {
   font-size: var(--fs-sm);

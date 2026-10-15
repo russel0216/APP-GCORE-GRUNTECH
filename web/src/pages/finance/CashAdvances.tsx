@@ -716,7 +716,7 @@ export function CashAdvanceDetail() {
         <div className="alert info">
           {row.repayable
             ? 'Waiting for approval — the Approval panel says with whom.'
-            : 'With your supervisor, then finance. Nothing is charged to a project until you liquidate it.'}
+            : 'Waiting for approval — the Approval panel says with whom. Nothing is charged to a project until you liquidate it.'}
         </div>
       )}
       {row.repayable && row.status === 'RELEASED' && (

@@ -350,7 +350,7 @@ export function Customer360Page() {
         </div>
 
         <div className="card">
-          <div className="m-card-head">
+          <div className="card-head">
             <h3 className="card-title">Contacts</h3>
             {mayEdit && (
               <button className="btn btn-sm" onClick={() => setContactModal('new')}>
@@ -404,7 +404,7 @@ export function Customer360Page() {
         </div>
 
         <div className="card">
-          <div className="m-card-head">
+          <div className="card-head">
             <h3 className="card-title">Sites</h3>
             {mayEdit && (
               <button className="btn btn-sm" onClick={() => setSiteModal('new')}>

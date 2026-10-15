@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { Checkbox, Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../components/ui';
+import { ActiveBadge, Checkbox, Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../components/ui';
 import { useConfirm } from '../../components/Confirm';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -553,7 +553,7 @@ function CategoryCard<T extends CategoryRow>({
 
   return (
     <div className={className}>
-      <div className="m-card-head">
+      <div className="card-head">
         <h3 className="card-title">{spec.title}</h3>
         {can('admin.categories.create') && (
           <button className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
@@ -934,13 +934,11 @@ export function Warehouses() {
           {rows.map((w) => (
             <div key={w.id} className="card">
               {/* The card's head: what it is on the left; + Add location, then Modify right-most. */}
-              <div className="m-card-head">
+              <div className="card-head">
                 <div className="row">
                   <strong>{w.name}</strong>
                   <span className="mono faint">{w.code}</span>
-                  <span className={`badge ${w.isActive ? 'ok' : ''}`}>
-                    {w.isActive ? 'Active' : 'Inactive'}
-                  </span>
+                  <ActiveBadge active={w.isActive} />
                 </div>
                 {mayEdit && (
                   <div className="row">
@@ -954,11 +952,11 @@ export function Warehouses() {
                 )}
               </div>
 
-              <div className="muted" style={{ fontSize: 12, margin: '6px 0 12px' }}>
+              <div className="muted" style={{ fontSize: 'var(--fs-sm)', margin: 'var(--s-2) 0 var(--s-3)' }}>
                 {[w.address, w.city].filter(Boolean).join(', ') || 'No address recorded'}
               </div>
 
-              <div className="row" style={{ gap: 5 }}>
+              <div className="row" style={{ gap: 'var(--s-1)' }}>
                 {w.locations.length === 0 ? (
                   <span className="faint">No locations</span>
                 ) : (

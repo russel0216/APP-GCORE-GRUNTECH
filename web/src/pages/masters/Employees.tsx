@@ -4,7 +4,7 @@ import { api, ApiError } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
-import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, formatDate, formatMoney, useToast } from '../../components/ui';
+import { ActiveBadge, Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, formatDate, formatMoney, useToast } from '../../components/ui';
 import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { EmployeeEvaluationsTab } from '../hr/EmployeeEvaluationsTab';
@@ -239,7 +239,7 @@ export function Employees() {
       key: 'isActive',
       label: 'Status',
       render: (e) => (
-        <span className={`badge ${e.isActive ? 'ok' : ''}`}>{e.isActive ? 'Active' : 'Inactive'}</span>
+        <ActiveBadge active={e.isActive} />
       ),
     },
   ];

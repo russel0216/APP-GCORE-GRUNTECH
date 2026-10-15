@@ -13,6 +13,7 @@ import {
   formatDate,
   formatMoney,
   useToast,
+  marginTone,
 } from '../../components/ui';
 import { ProgressBar } from './Projects';
 import { Stat } from '../../components/charts';
@@ -654,7 +655,7 @@ export function ProgressReportDetail() {
       </div>
 
       <section className="card del-gap-top">
-        <div className="pr-card-head">
+        <div className="card-head">
           <h3 className="card-title">Daily accomplishments</h3>
           {report.canEdit && (
             <button className="btn btn-sm" onClick={() => setDay('new')}>
@@ -1359,7 +1360,7 @@ export function BudgetMonitoring() {
       // reads 100% on a job that has barely started.
       render: (j) => (
         <span
-          className={`badge ${j.expectedMarginPct < 0 ? 'danger' : j.expectedMarginPct < 10 ? 'warn' : 'ok'}`}
+          className={`badge ${marginTone(j.expectedMarginPct)}`}
           title="Expected margin, from the costing"
         >
           {j.expectedMarginPct.toFixed(1)}%

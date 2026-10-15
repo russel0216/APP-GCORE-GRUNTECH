@@ -1465,7 +1465,7 @@ export function QuotationDetail() {
           <DocumentApproval documentType="quotation" documentId={revision.id} reloadToken={reload} />
 
           <div className="card sales-card-gap">
-            <div className="row sales-card-head">
+            <div className="card-head">
               <h2 className="card-title">Lines</h2>
             </div>
 
@@ -1614,7 +1614,7 @@ function QuotationSalesOrders({
 
   return (
     <div className="card sales-card-gap">
-      <div className="row sales-card-head">
+      <div className="card-head">
         <h2 className="card-title">Sales orders</h2>
       </div>
       {rows && rows.length > 0 && (

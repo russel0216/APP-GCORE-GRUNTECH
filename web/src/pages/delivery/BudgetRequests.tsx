@@ -653,7 +653,7 @@ export function ProjectBudgetRequestsCard({
 
   return (
     <section className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">Budget requests{rows && rows.length ? ` (${rows.length})` : ''}</h3>
         {onRaise && (
           <button className="btn btn-primary btn-sm" onClick={onRaise}>

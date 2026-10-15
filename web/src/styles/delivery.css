@@ -12,18 +12,7 @@
 }
 
 /* A card's title with its one action on the right. */
-.del-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-3);
-  flex-wrap: wrap;
-  margin-bottom: var(--card-gap);
-}
 
-.del-card-head .card-title {
-  margin: 0;
-}
 
 /* The explanatory line under a card title. */
 .del-lede {
@@ -390,12 +379,6 @@
 
 /* The Accomplishment Report (2026-10-15): a card head with its button, each
    day's entry ruled off from the next, and a link-weight button in a cell. */
-.pr-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-3);
-}
 
 .pr-day {
   border-top: 1px solid var(--line);

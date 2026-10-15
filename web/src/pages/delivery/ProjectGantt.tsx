@@ -191,7 +191,7 @@ export function ProjectGantt({
 
   return (
     <div className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">Scope of work — Gantt chart</h3>
         {canEdit && (
           <div className="row">

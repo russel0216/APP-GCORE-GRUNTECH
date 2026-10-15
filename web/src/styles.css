@@ -578,12 +578,6 @@ textarea {
   border-color: #d33ae4;
 }
 
-.btn-ok {
-  background: rgb(var(--neon-rgb) / 0.12);
-  border-color: rgb(var(--neon-rgb) / 0.5);
-  color: var(--neon);
-}
-
 .btn-danger {
   background: rgb(var(--danger-rgb) / 0.1);
   border-color: rgb(var(--danger-rgb) / 0.45);
@@ -2009,6 +2003,15 @@ table.data .mono {
   color: var(--faint);
 }
 
+/* "Type at least two characters", "Searching…", "Nothing matched": a line of
+   its own, not a group heading. */
+.palette-note {
+  padding: var(--s-4);
+  font-size: var(--fs-sm);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 .palette-hit {
   display: flex;
   align-items: center;
@@ -2884,21 +2887,6 @@ hr.rule {
   min-width: 80px;
 }
 
-.flow-in,
-.flow-out {
-  height: 7px;
-  border-radius: 2px;
-  min-width: 1px;
-}
-
-.flow-in {
-  background: rgb(var(--neon-rgb) / 0.55);
-}
-
-.flow-out {
-  background: rgb(var(--warn-rgb) / 0.5);
-}
-
 /* ─────────────────────── Aftermarket: report read-back ─────────────────── */
 
 /* A submitted report is read, not edited. Rendering its answers as plain text
@@ -3219,6 +3207,22 @@ hr.rule {
 .card.panel-block > * {
   margin-top: 0;
   margin-bottom: 0;
+}
+
+/* A card's head (2026-10-16, the review): its title on the left, the card's
+   own buttons (.btn-sm) on the right, wrapping on a phone. One rule for every
+   card — the module copies (del-, m-, proc-, prq-, pr-, meeting-, sales-card-head) are gone. */
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--card-gap);
+}
+
+.card-head .card-title {
+  margin: 0;
 }
 
 .panel-head {
@@ -5584,4 +5588,26 @@ a.icon-row:hover {
 }
 .import-groups .faint {
   margin-block: var(--s-1) var(--s-2);
+}
+
+/* The import dialog (components/ImportModal.tsx). */
+.import-lede {
+  margin-top: 0;
+}
+.import-report,
+.import-columns {
+  margin-top: var(--s-3);
+}
+.import-columns summary {
+  cursor: pointer;
+}
+.import-rows {
+  max-height: 17.5rem;
+  margin-top: var(--s-2);
+}
+.import-col-row {
+  width: 4rem;
+}
+.import-col-action {
+  width: 6rem;
 }

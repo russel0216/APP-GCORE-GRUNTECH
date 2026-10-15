@@ -15,6 +15,7 @@ import {
   formatDateTime,
   formatMoney,
   useToast,
+  marginTone,
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
@@ -497,7 +498,7 @@ export function ProjectWorkspace() {
           label="Expected margin"
           value={`${s.expectedMarginPct.toFixed(1)}%`}
           hint={`${formatMoney(s.expectedProfit)} if delivered to budget`}
-          accent={s.expectedMarginPct < 0 ? 'danger' : s.expectedMarginPct < 10 ? 'warn' : 'ok'}
+          accent={marginTone(s.expectedMarginPct)}
         />
       </div>
 
@@ -719,7 +720,7 @@ export function ProjectWorkspace() {
       {current === 'progress' && (
         <div className="stack">
         <div className="card">
-          <div className="del-card-head">
+          <div className="card-head">
             <h3 className="card-title">Progress reports</h3>
             {can('gops.progress_billing.create') && (
               <button className="btn btn-primary btn-sm" onClick={() => setNewReport(true)}>
@@ -897,7 +898,7 @@ function ProgressBillingsCard({ job, totalBilled, onChanged }: { job: Job; total
 
   return (
     <div className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">Progress billings</h3>
         {can('gops.progress_billing.create') && (
           <button
@@ -1083,7 +1084,7 @@ function RelatedCard<T extends { id: string }>({
 
   return (
     <section className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">
           {title}
           {rows && rows.length > 0 ? ` (${total})` : ''}
@@ -1428,7 +1429,7 @@ function LedgerCard({ job, reloadToken }: { job: Job; reloadToken: number }) {
 
   return (
     <section className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">Cost ledger{total ? ` (${total})` : ''}</h3>
         <label className="row">
           <span className="faint del-small">Show</span>
@@ -1539,7 +1540,7 @@ function ProjectMeetingsCard({ job }: { job: Job }) {
   if (!sees) return null;
   return (
     <section className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">Meetings{rows && rows.length ? ` (${rows.length})` : ''}</h3>
         {can('ghr.meetings.create') && (
           <Link className="btn btn-primary btn-sm" to={`/g-hr/meetings?new=1&job=${job.id}`}>
