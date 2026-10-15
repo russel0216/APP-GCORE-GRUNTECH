@@ -22,6 +22,7 @@ import { ProgressBar } from '../delivery/Projects';
 // ════════════════════════════════════════════════════════════════════
 
 interface PoRow {
+  currency?: string;
   id: string;
   number: string;
   kind: string;
@@ -63,7 +64,7 @@ export function PurchaseOrders() {
       label: 'Total',
       sortKey: 'total',
       align: 'right',
-      render: (o) => <span className="mono">{formatMoney(o.total)}</span>,
+      render: (o) => <span className="mono">{formatMoney(o.total, o.currency ?? 'PHP')}</span>,
     },
     {
       key: 'received',
@@ -127,6 +128,7 @@ export function PurchaseOrders() {
 }
 
 interface PoDetailData {
+  currency?: string;
   id: string;
   number: string;
   kind: string;
@@ -247,7 +249,7 @@ export function PurchaseOrderDetail() {
         code={po.number}
         title={po.supplier.name}
         status={po.status}
-        amount={formatMoney(po.total)}
+        amount={formatMoney(po.total, po.currency ?? 'PHP')}
         amountLabel="Order total"
         meta={
           <>
@@ -351,14 +353,14 @@ export function PurchaseOrderDetail() {
       )}
 
       <div className="kpi-grid proc-stats">
-        <Stat label="Subtotal" value={formatMoney(po.subtotal)} figure />
+        <Stat label="Subtotal" value={formatMoney(po.subtotal, po.currency ?? 'PHP')} figure />
         <Stat
-          label={`VAT ${(po.vatRate * 100).toFixed(0)}%`}
-          value={formatMoney(po.vatAmount)}
-          sub={po.vatInclusive ? 'included in the prices' : 'added to the prices'}
+          label={po.vatRate > 0 ? `VAT ${(po.vatRate * 100).toFixed(0)}%` : 'VAT'}
+          value={formatMoney(po.vatAmount, po.currency ?? 'PHP')}
+          sub={po.vatRate > 0 ? (po.vatInclusive ? 'included in the prices' : 'added to the prices') : 'not applied (importation)'}
           figure
         />
-        <Stat label="Total" value={formatMoney(po.total)} accent="neon" figure />
+        <Stat label="Total" value={formatMoney(po.total, po.currency ?? 'PHP')} accent="neon" figure />
         <Stat
           label="Outstanding"
           value={`${outstanding} units`}
@@ -414,8 +416,8 @@ export function PurchaseOrderDetail() {
                   </td>
                   <td className="right mono">{i.quantity}</td>
                   <td>{i.unit}</td>
-                  <td className="right mono">{formatMoney(i.unitPrice)}</td>
-                  <td className="right mono">{formatMoney(i.amount)}</td>
+                  <td className="right mono">{formatMoney(i.unitPrice, po.currency ?? 'PHP')}</td>
+                  <td className="right mono">{formatMoney(i.amount, po.currency ?? 'PHP')}</td>
                   <td className="right mono">{i.receivedQty || <span className="faint">—</span>}</td>
                   <td className={`right mono${i.outstandingQty > 0 && !isDraft ? ' proc-short' : ''}`}>
                     {i.outstandingQty || '—'}

@@ -143,6 +143,7 @@ function receivingListWhere(q: ListQuery): Prisma.ReceivingWhereInput {
         { number: { contains: q.search, mode: 'insensitive' } },
         { deliveryRefNo: { contains: q.search, mode: 'insensitive' } },
         { sourceName: { contains: q.search, mode: 'insensitive' } },
+        { items: { some: { partNumber: { contains: q.search, mode: 'insensitive' } } } },
         { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
         { order: { number: { contains: q.search, mode: 'insensitive' } } },
         { order: { supplier: { name: { contains: q.search, mode: 'insensitive' } } } },
@@ -484,6 +485,7 @@ function lineFacts(i: LoadedReceiving['items'][number]) {
   if (i.orderItem) {
     return {
       code: i.orderItem.item?.code ?? i.orderItem.partNumber ?? null,
+      partNumber: i.orderItem.partNumber ?? null,
       name: i.orderItem.name,
       description: i.orderItem.description,
       unit: i.orderItem.unit,
@@ -491,6 +493,7 @@ function lineFacts(i: LoadedReceiving['items'][number]) {
   }
   return {
     code: i.item?.code ?? null,
+    partNumber: i.partNumber ?? null,
     name: i.item?.name ?? null,
     description: i.description ?? i.item?.name ?? '',
     unit: i.unit ?? i.item?.unit ?? '',
@@ -647,6 +650,7 @@ const receivingSchema = z.object({
       z.object({
         orderItemId: z.string().optional().nullable(),
         itemId: z.string().optional().nullable(),
+        partNumber: z.string().trim().max(120).optional().nullable(),
         description: z.string().trim().max(2000).optional().nullable(),
         unit: z.string().trim().max(40).optional().nullable(),
         quantity: z.number().positive(),
@@ -733,6 +737,7 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     const rows = body.items.map((l) => ({
       orderItemId: l.orderItemId!,
       itemId: null,
+      partNumber: null,
       description: null,
       unit: null,
       quantity: D(l.quantity),
@@ -757,7 +762,7 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
   if (!body.reason?.trim()) throw badRequest('Say why there is no purchase order');
   if (!warehouseId) throw badRequest('Goods received without a purchase order go into a warehouse — choose one');
   const itemIds = [...new Set(body.items.map((l) => l.itemId).filter((v): v is string => !!v))];
-  const items = await prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, name: true, unit: true } });
+  const items = await prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, name: true, unit: true, partNumber: true } });
   const byItem = new Map(items.map((i) => [i.id, i]));
   const rows = body.items.map((l, n) => {
     if (l.orderItemId) throw badRequest(`Line ${n + 1}: there is no purchase order on this report`);
@@ -767,6 +772,7 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     return {
       orderItemId: null,
       itemId: item.id,
+      partNumber: l.partNumber?.trim() || item.partNumber || null,
       description: l.description?.trim() || item.name,
       unit: l.unit?.trim() || item.unit,
       quantity: D(l.quantity),
@@ -1195,11 +1201,12 @@ receivingRoutes.get(
       {
         kind: 'table',
         // No widths: each column from its content, the description taking what is left (rule 6).
-        head: ['No.', 'Code', 'Description', 'Qty', 'Unit', 'Unit cost', 'Amount'],
-        align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
+        head: ['No.', 'Code', 'Part No.', 'Description', 'Qty', 'Unit', 'Unit cost', 'Amount'],
+        align: ['right', 'left', 'left', 'left', 'right', 'left', 'right', 'right'],
         rows: view.items.map((i, n) => [
           String(n + 1),
           i.code ?? '',
+          i.partNumber ?? '',
           i.name && i.description && i.description !== i.name ? { title: i.name, body: i.description } : (i.name ?? i.description ?? ''),
           qty(i.quantity),
           i.unit ?? '',

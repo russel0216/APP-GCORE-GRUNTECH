@@ -2859,6 +2859,8 @@ model ReceivingItem {
 
   itemId      String?
   item        Item?   @relation("ReceivedWithoutOrder", fields: [itemId], references: [id], onDelete: Restrict)
+  /// The part number on the delivery (a report with no order); filled from the item master.
+  partNumber  String?
   description String?
   unit        String?
 
@@ -5099,6 +5101,8 @@ model CadJobOrder {
 
   requestedById String
   requestedBy   User      @relation("CadRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  /// When the design work is planned to start (the requestor's form).
+  plannedStart  DateTime? @db.Date
   /// When the requestor needs the drawing. A DATE; overdue is derived from it.
   neededBy      DateTime? @db.Date
 

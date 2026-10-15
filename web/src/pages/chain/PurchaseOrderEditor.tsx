@@ -124,6 +124,7 @@ interface Header {
   currency: string;
   notes: string;
   vatInclusive: boolean;
+  applyVat: boolean;
 }
 
 let nextKey = 0;
@@ -202,6 +203,7 @@ export function PurchaseOrderEditor() {
     currency: 'PHP',
     notes: '',
     vatInclusive: false,
+    applyVat: true,
   });
   const [lines, setLines] = useState<Line[]>(() => [blankLine()]);
   const [saved, setSaved] = useState<string | null>(null);
@@ -231,6 +233,7 @@ export function PurchaseOrderEditor() {
             currency: po.currency ?? 'PHP',
             notes: po.notes ?? '',
             vatInclusive: po.vatInclusive,
+            applyVat: Number(po.vatRate) > 0,
           };
           ls = po.items.map((i) => ({
             key: newKey(),
@@ -288,7 +291,8 @@ export function PurchaseOrderEditor() {
   const request = existing?.request ?? draft?.request ?? null;
   const canvass = existing?.fromCanvass ?? draft?.canvass ?? null;
   const warehouse = existing?.warehouse ?? draft?.warehouse ?? null;
-  const vatRate = existing?.vatRate ?? draft?.vatRate ?? 0.12;
+  const companyRate = Number(existing?.vatRate) || Number(draft?.vatRate) || 0.12;
+  const vatRate = header.applyVat ? companyRate : 0;
 
   useEffect(() => {
     setBudget(null);
@@ -404,7 +408,8 @@ export function PurchaseOrderEditor() {
       quoteRef: header.quoteRef.trim() || null,
       currency: header.currency,
       notes: header.notes.trim() || null,
-      vatInclusive: header.vatInclusive,
+      vatInclusive: header.applyVat && header.vatInclusive,
+      applyVat: header.applyVat,
       lines: sent.map((l) => ({
         id: l.id,
         requestItemId: l.requestItemId,
@@ -602,6 +607,15 @@ export function PurchaseOrderEditor() {
                   <label className="checkbox">
                     <input
                       type="checkbox"
+                      checked={header.applyVat}
+                      onChange={(e) => setHeader((h) => ({ ...h, applyVat: e.target.checked, vatInclusive: e.target.checked && h.vatInclusive }))}
+                    />
+                    <span>Apply VAT (untick for an importation)</span>
+                  </label>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      disabled={!header.applyVat}
                       checked={header.vatInclusive}
                       onChange={(e) => setHeader((h) => ({ ...h, vatInclusive: e.target.checked }))}
                     />
@@ -745,7 +759,7 @@ export function PurchaseOrderEditor() {
                             onChange={(e) => setLine(l.key, { unitPrice: e.target.value })}
                           />
                         </td>
-                        <td className="right mono">{formatMoney(amountOf(l))}</td>
+                        <td className="right mono">{formatMoney(amountOf(l), header.currency)}</td>
                         <td>
                           <button
                             type="button"
@@ -785,11 +799,11 @@ export function PurchaseOrderEditor() {
               <dt>No. of lines</dt>
               <dd>{sent.length}</dd>
               <dt>Subtotal{header.vatInclusive ? ' (VAT included)' : ''}</dt>
-              <dd className="mono">{formatMoney(money.subtotal)}</dd>
-              <dt>VAT ({Math.round(vatRate * 10000) / 100}%)</dt>
-              <dd className="mono">{formatMoney(money.vatAmount)}</dd>
+              <dd className="mono">{formatMoney(money.subtotal, header.currency)}</dd>
+              <dt>{header.applyVat ? `VAT (${Math.round(vatRate * 10000) / 100}%)` : 'VAT — not applied'}</dt>
+              <dd className="mono">{formatMoney(money.vatAmount, header.currency)}</dd>
               <dt className="prq-total-big">Order total</dt>
-              <dd className="prq-total-big mono">{formatMoney(money.total)}</dd>
+              <dd className="prq-total-big mono">{formatMoney(money.total, header.currency)}</dd>
             </dl>
           </section>
 

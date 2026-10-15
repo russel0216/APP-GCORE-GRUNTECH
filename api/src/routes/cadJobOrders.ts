@@ -579,6 +579,7 @@ const cadSchema = z.object({
   title: z.string().trim().min(3, 'Say in a line what drawing is wanted').max(300),
   scope: z.string().trim().min(5, 'Describe what the drawing should show').max(20000),
   neededBy: z.string().regex(DAY, 'Use a date').optional().nullable(),
+  plannedStart: z.string().regex(DAY, 'Use a date').optional().nullable(),
   teamId: z.string().optional().nullable(),
   amount: z.number().min(0).optional().nullable(),
 });
@@ -618,6 +619,8 @@ cadJobOrderRoutes.post(
     const body = parseBody(cadSchema, req.body);
     await checkLinks(body.customerId, body);
     const neededBy = body.neededBy ? asDate(body.neededBy, 'Needed by') : null;
+    const plannedStart = body.plannedStart ? asDate(body.plannedStart, 'Start date') : null;
+    if (plannedStart && neededBy && plannedStart > neededBy) throw badRequest('The start date is after the target date to finish');
     const teamId = await teamFor(body.teamId, me.id);
 
     const row = await prisma.$transaction(async (tx) => {
@@ -633,6 +636,7 @@ cadJobOrderRoutes.post(
           title: body.title,
           scope: body.scope,
           neededBy,
+          plannedStart,
           requestedById: me.id,
           // A new request is a draft until it goes to the Team Leader (2026-10-16).
           status: 'DRAFT',
@@ -712,6 +716,7 @@ cadJobOrderRoutes.patch(
         ...(body.title ? { title: body.title } : {}),
         ...(body.scope ? { scope: body.scope } : {}),
         ...(body.neededBy !== undefined ? { neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null } : {}),
+        ...(body.plannedStart !== undefined ? { plannedStart: body.plannedStart ? asDate(body.plannedStart, 'Start date') : null } : {}),
         ...(body.teamId !== undefined ? { teamId: await teamFor(body.teamId, existing.requestedById) } : {}),
         ...(body.amount !== undefined ? { amount: body.amount == null ? null : new Prisma.Decimal(body.amount) } : {}),
       },
@@ -1256,6 +1261,7 @@ cadJobOrderRoutes.get(
           // The name only: the dated "Requested by" sign-off says when, in
           // Manila, so the paper never carries two dates for one request.
           { label: 'Requested by', value: row.requestedBy.name },
+          { label: 'Start date', value: row.plannedStart ? formatDate(row.plannedStart) : '—' },
           { label: 'Needed by', value: row.neededBy ? formatDate(row.neededBy) : '—' },
           { label: 'Designer', value: row.assignedTo?.name ?? 'Open' },
           { label: 'Priority', value: statusLabel(row.priority) },

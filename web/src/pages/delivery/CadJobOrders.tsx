@@ -108,6 +108,7 @@ export interface CadRow {
   title: string;
   scope: string;
   neededBy: string | null;
+  plannedStart?: string | null;
   overdue: boolean;
   assignedAt: string | null;
   startedAt: string | null;
@@ -665,6 +666,7 @@ export function CadRequestModal({
     title: existing?.title ?? '',
     scope: existing?.scope ?? '',
     neededBy: existing?.neededBy?.slice(0, 10) ?? '',
+    plannedStart: existing?.plannedStart?.slice(0, 10) ?? '',
     teamId: existing?.team?.id ?? '',
     amount: existing?.amount != null ? String(existing.amount) : '',
   }));
@@ -723,6 +725,7 @@ export function CadRequestModal({
       title: form.title.trim(),
       scope: form.scope.trim(),
       neededBy: form.neededBy || null,
+      plannedStart: form.plannedStart || null,
     };
     try {
       if (existing) {
@@ -864,6 +867,9 @@ export function CadRequestModal({
               </option>
             ))}
           </select>
+        </Field>
+        <Field label="Start date" hint="When the design work should start">
+          <input type="date" value={form.plannedStart} max={form.neededBy || undefined} onChange={(e) => set('plannedStart', e.target.value)} />
         </Field>
         <Field label="Target date to finish" hint="The design team sets the priority; the date says when you need it">
           <input type="date" value={form.neededBy} onChange={(e) => set('neededBy', e.target.value)} />
@@ -1271,6 +1277,8 @@ export function CadJobOrderDetail() {
                 '—'
               )}
             </dd>
+            <dt>Start date</dt>
+            <dd>{r.plannedStart ? formatDate(r.plannedStart) : <span className="faint">not set</span>}</dd>
             <dt>Needed by</dt>
             <dd>{r.neededBy ? formatDate(r.neededBy) : <span className="faint">no date given</span>}</dd>
             <dt>Requested by</dt>

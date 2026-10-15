@@ -2866,7 +2866,21 @@ const poSchema = z.object({
   terms: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   vatInclusive: z.boolean().default(false),
+  /**
+   * VAT on or off (2026-10-16, the owner's call: an importation order carries
+   * no VAT). Off stores a 0% rate — no VAT row, the total is the subtotal; on
+   * takes the company's rate. Left out, the order keeps what it has.
+   */
+  applyVat: z.boolean().optional(),
 });
+
+/** The rate an order's VAT switch stands for: the company's, or none. */
+async function poVat(applyVat: boolean | undefined): Promise<{ vatRate?: Prisma.Decimal; vatInclusive?: boolean }> {
+  if (applyVat === undefined) return {};
+  if (!applyVat) return { vatRate: D(0), vatInclusive: false };
+  const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+  return { vatRate: company?.vatRate ?? D(0.12) };
+}
 
 /** One line of the order page's save — `POST /` with `lines[]` and `PUT /:id/sheet`. */
 const poLineSchema = z.object({
@@ -3078,8 +3092,8 @@ purchaseOrderRoutes.post(
           currency: body.currency ?? (await companyCurrency()),
           terms: body.terms || null,
           notes: body.notes || null,
-          vatRate: company?.vatRate ?? D(0.12),
-          vatInclusive: body.vatInclusive,
+          vatRate: body.applyVat === false ? D(0) : (company?.vatRate ?? D(0.12)),
+          vatInclusive: body.applyVat === false ? false : body.vatInclusive,
         },
       });
       await writePoLines(tx, created.id, lines);
@@ -3260,6 +3274,7 @@ purchaseOrderRoutes.patch(
         ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
         ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
+        ...(await poVat(body.applyVat)),
       },
     });
     await recalcPo(req.params.id);
@@ -3322,6 +3337,7 @@ purchaseOrderRoutes.put(
           terms: body.terms || null,
           notes: body.notes || null,
           vatInclusive: body.vatInclusive,
+          ...(await poVat(body.applyVat)),
         },
       });
       if (!claimed.count) throw badRequest(`${po.number} changed a moment ago — reload it and make the change again`);
@@ -3631,7 +3647,7 @@ purchaseOrderRoutes.get(
       {
         kind: 'table',
         // No widths: each column from its content, the description taking what is left (rule 6).
-        head: ['No.', 'Part No.', 'Description', 'Qty', 'Unit', 'Unit price', 'Amount'],
+        head: ['No.', 'Part No.', 'Description', 'Qty', 'Unit', `Unit price (${po.currency})`, `Amount (${po.currency})`],
         align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
         rows: view.items.map((i, n) => [
           String(n + 1),
@@ -3650,8 +3666,10 @@ purchaseOrderRoutes.get(
         kind: 'totals',
         rows: [
           { label: 'Subtotal', value: formatAmount(view.subtotal) },
-          { label: po.vatInclusive ? `VAT included (${rate})` : `VAT (${rate})`, value: formatAmount(view.vatAmount) },
-          { label: 'Total', value: formatAmount(view.total), bold: true },
+          num(po.vatRate) === 0
+            ? { label: 'VAT — not applied', value: formatAmount(0) }
+            : { label: po.vatInclusive ? `VAT included (${rate})` : `VAT (${rate})`, value: formatAmount(view.vatAmount) },
+          { label: `Total (${po.currency})`, value: formatAmount(view.total), bold: true },
         ],
       },
     ];

@@ -1362,6 +1362,17 @@ async function main() {
         afterPagePut.items[0].partNumber === 'GK-16B' && Number(afterPagePut.subtotal) === 2626.5 && Number(afterPagePut.total) === 2626.5 && afterPagePut.vatInclusive,
       `${pagePut.status} ${JSON.stringify(pagePut.body).slice(0, 160)}`,
     );
+    const noVat = await api(buyerToken, 'PUT', `/purchase-orders/${pageOrderId}/sheet`, {
+      supplierId: supplier.id, notes: `${TAG} importation`, applyVat: false, currency: 'USD',
+      version: String(afterPagePut.updatedAt.toISOString()),
+      lines: [{ id: pageLines[0].id, requestItemId: approvedPr.items[0].id, costCategoryId: materials.id, partNumber: 'GK-16B', name: `${TAG} Gasket set`, quantity: 3, unit: 'set', unitPrice: 875.5 }],
+    });
+    const afterNoVat = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: pageOrderId } });
+    check(
+      'an importation order: Apply VAT off keeps the total at the subtotal, in its own currency',
+      noVat.status === 200 && Number(afterNoVat.vatRate) === 0 && Number(afterNoVat.total) === Number(afterNoVat.subtotal) && afterNoVat.currency === 'USD',
+      `${noVat.status} ${JSON.stringify(noVat.body).slice(0, 160)}`,
+    );
     const stalePo = await api(buyerToken, 'PUT', `/purchase-orders/${pageOrderId}/sheet`, {
       supplierId: supplier.id, notes: `${TAG} stale`, version: String(pageOrderRead.body.version), lines: [],
     });

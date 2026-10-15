@@ -409,6 +409,10 @@ async function main() {
   console.log('\nHold, resume, cancel');
   const second = await http(requestorT, 'POST', '/cad-job-orders', { customerId: customer.id, title: `${TAG} Single-line diagram`, scope: 'SLD of the new MCC, 480 V', neededBy: '2026-01-02' });
   const id2 = String(second.body.id);
+  const badStart = await http(requestorT, 'POST', '/cad-job-orders', { customerId: customer.id, title: `${TAG} Late start`, scope: 'x', neededBy: '2026-01-02', plannedStart: '2026-02-01' });
+  check('a start date after the target date to finish is refused', badStart.status === 400);
+  const started = await http(requestorT, 'PATCH', `/cad-job-orders/${id2}`, { plannedStart: '2026-01-01' });
+  check('the requestor sets a start date on the form', started.status === 200 && (await prisma.cadJobOrder.findUnique({ where: { id: id2 } }))?.plannedStart?.toISOString().slice(0, 10) === '2026-01-01', `${started.status}`);
   await toQueue(id2);
   await http(leadT, 'POST', `/cad-job-orders/${id2}/assign`, { userId: support.id });
   check('the lead assigns the second request to the support designer', (await prisma.cadJobOrder.findUnique({ where: { id: id2 } }))?.assignedToId === support.id);

@@ -73,6 +73,7 @@ interface ItemOption {
 interface FreeLine {
   key: string;
   item: ItemOption | null;
+  partNumber: string;
   description: string;
   unit: string;
   quantity: string;
@@ -98,6 +99,7 @@ interface Existing {
     orderItemId: string | null;
     itemId: string | null;
     code: string | null;
+    partNumber?: string | null;
     name: string | null;
     description: string;
     unit: string;
@@ -110,7 +112,7 @@ type Mode = 'order' | 'none';
 
 let keySeq = 0;
 const newKey = () => `l${++keySeq}`;
-const blankFree = (): FreeLine => ({ key: newKey(), item: null, description: '', unit: '', quantity: '', unitCost: '' });
+const blankFree = (): FreeLine => ({ key: newKey(), item: null, partNumber: '', description: '', unit: '', quantity: '', unitCost: '' });
 const cents = (n: number) => Math.round(n * 100) / 100;
 const qtyText = (n: number) => new Intl.NumberFormat('en-PH', { maximumFractionDigits: 3 }).format(n);
 
@@ -189,6 +191,7 @@ export function IncomingEditor() {
             const ls = r.items.map((i) => ({
               key: newKey(),
               item: i.itemId ? { id: i.itemId, code: i.code ?? '', name: i.name ?? i.description, partNumber: null, unit: i.unit, standardCost: 0 } : null,
+              partNumber: i.partNumber ?? '',
               description: i.description,
               unit: i.unit,
               quantity: String(i.quantity),
@@ -289,6 +292,7 @@ export function IncomingEditor() {
       reason: header.reason.trim(),
       items: freeSent.map((l) => ({
         itemId: l.item?.id ?? null,
+        partNumber: l.partNumber.trim() || null,
         description: l.description.trim() || null,
         unit: l.unit.trim() || null,
         quantity: Number(l.quantity),
@@ -602,6 +606,7 @@ export function IncomingEditor() {
                     <tr>
                       <th>#</th>
                       <th>Item</th>
+                      <th>Part No.</th>
                       <th>Description</th>
                       <th>Unit</th>
                       <th className="right">Qty</th>
@@ -624,6 +629,7 @@ export function IncomingEditor() {
                                     ? {
                                         ...x,
                                         item,
+                                        partNumber: x.partNumber || item?.partNumber || '',
                                         description: x.description || item?.name || '',
                                         unit: x.unit || item?.unit || '',
                                         unitCost: x.unitCost || (item ? String(item.standardCost) : ''),
@@ -632,6 +638,13 @@ export function IncomingEditor() {
                                 ),
                               )
                             }
+                          />
+                        </td>
+                        <td className="inc-unit-cell">
+                          <input
+                            aria-label={`Part No. — line ${n + 1}`}
+                            value={l.partNumber}
+                            onChange={(e) => setFree((ls) => ls.map((x) => (x.key === l.key ? { ...x, partNumber: e.target.value } : x)))}
                           />
                         </td>
                         <td>
