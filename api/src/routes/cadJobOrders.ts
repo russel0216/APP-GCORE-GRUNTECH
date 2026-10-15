@@ -24,7 +24,7 @@ import { nextNumber } from '../shared/numbering';
 import { notify, type NotificationType } from '../shared/notifications';
 import { mailConfig, sendMail } from '../shared/mail';
 import { renderDocument, formatDate, formatShortDate, formatDateTime, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
-import { contactsOf, submitForApproval, cancelOpenRequest, onApprovalSettled, pickWorkflow, mayDecide, routeBrief, type ApprovalOutcome } from '../shared/approvals';
+import { contactsOf, submitForApproval, cancelOpenRequest, onApprovalSettled, onApprovalReopened, pickWorkflow, mayDecide, routeBrief, type ApprovalOutcome } from '../shared/approvals';
 import type { ApprovalRequest } from '@prisma/client';
 import { teamOf } from '../shared/team';
 import { toCsv } from '../shared/csv';
@@ -1135,6 +1135,38 @@ export async function settleCadJobOrder(approval: ApprovalRequest, outcome: Appr
   if (claimed.count && outcome === 'APPROVED') await intoQueue(row, null);
 }
 onApprovalSettled(DOC, settleCadJobOrder);
+
+/**
+ * Pulled back after the Team Leader's approval (2026-10-16): back to DRAFT,
+ * out of the designers' queue — only while nobody has started on it: still
+ * REQUESTED, no designer given or taking it, no revision drawn. Once design
+ * work has started it is refused; cancel it or put it on hold instead.
+ */
+onApprovalReopened(DOC, {
+  may: async (actor, id) => {
+    const row = await prisma.cadJobOrder.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+    // Any request past its approval: one the designers have started is
+    // refused by `reopen`, naming why, rather than hiding the button.
+    return !!row && !BEFORE_QUEUE.includes(row.status) && (isRequestor(actor, row) || isLead(actor) || actor.isSuperAdmin);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const row = await tx.cadJobOrder.findUnique({
+      where: { id: documentId },
+      select: { id: true, number: true, status: true, assignedToId: true, startedAt: true, _count: { select: { revisions: true } } },
+    });
+    if (!row) throw notFound('CAD job order not found');
+    if (row.status !== 'REQUESTED' || row.assignedToId || row.startedAt || row._count.revisions) {
+      throw badRequest(
+        `${row.number} is already with the design team (${STATUS_LABEL[row.status].toLowerCase()}${row.assignedToId ? ', a designer on it' : ''}${row._count.revisions ? `, ${row._count.revisions} revision${row._count.revisions === 1 ? '' : 's'} drawn` : ''}) — it cannot go back to draft; cancel it or put it on hold instead`,
+      );
+    }
+    const claimed = await tx.cadJobOrder.updateMany({
+      where: { id: row.id, status: 'REQUESTED', assignedToId: null, startedAt: null },
+      data: { status: 'DRAFT', progressPct: 0 },
+    });
+    if (!claimed.count) throw badRequest('A designer took it a moment ago — it cannot go back to draft');
+  },
+});
 
 // ── The thread ──────────────────────────────────────────────────────────────
 

@@ -35,7 +35,7 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, approversForStep, ctxOf } from '../src/shared/approvals';
+import { submitForApproval, act, approversForStep, ctxOf, reopenApproved } from '../src/shared/approvals';
 import {
   addMonths,
   coverageFor,
@@ -942,6 +942,35 @@ async function main() {
     'a settlement that arrives twice builds nothing twice',
     (await prisma.job.count({ where: { costingId: orderCosting.id } })) === 1,
   );
+
+  // Pulled back after approval (2026-10-16): the project the approval built
+  // goes with it, but only while nothing stands on it.
+  {
+    const salesResolved = await resolveUser(sales.id);
+    const builtJobId = (await prisma.jobOrder.findUniqueOrThrow({ where: { id: costedOrder.id } })).jobId!;
+    const task = await prisma.jobTask.create({ data: { jobId: builtJobId, name: `${TAG} a planned task` } });
+    const refused = await reopenApproved('job_order', costedOrder.id, salesResolved, 'wrong amount').then(
+      () => null,
+      (e: Error) => e.message,
+    );
+    check(
+      'a job order whose project has something on it is not pulled back — the refusal names it, and nothing moves',
+      !!refused && refused.includes('scheduled task') &&
+        (await prisma.jobOrder.findUniqueOrThrow({ where: { id: costedOrder.id } })).status === 'APPROVED' &&
+        (await prisma.approvalRequest.findFirst({ where: { documentType: 'job_order', documentId: costedOrder.id }, orderBy: { createdAt: 'desc' } }))?.status === 'APPROVED',
+      refused ?? 'reopened',
+    );
+    await prisma.jobTask.delete({ where: { id: task.id } });
+    await reopenApproved('job_order', costedOrder.id, salesResolved, 'wrong amount');
+    const back = await prisma.jobOrder.findUniqueOrThrow({ where: { id: costedOrder.id } });
+    check(
+      'pulled back after approval: a draft again, the labor agreement cleared, the project it built deleted and its costing a draft again',
+      back.status === 'DRAFT' && !back.jobId && back.laborAgreedById === null && back.laborCostingAmount === null &&
+        !(await prisma.job.findUnique({ where: { id: builtJobId } })) &&
+        (await prisma.costing.findUniqueOrThrow({ where: { id: orderCosting.id } })).status === 'DRAFT',
+      `${back.status} job ${back.jobId}`,
+    );
+  }
 
   // A call-out under the contract, as the service schedule books it: the
   // order and its hand-booked visit carrying the contract — and regenerating

@@ -13,6 +13,7 @@ import {
   contactOf,
   mayDecide,
   onApprovalSettled,
+  onApprovalReopened,
   preparedAt,
   routeBrief,
   slotSignatories,
@@ -560,6 +561,35 @@ export async function settlePlanApproval(approval: ApprovalRequest, outcome: App
   });
 }
 onApprovalSettled(DOC, settlePlanApproval);
+
+/**
+ * Pulled back after approval (2026-10-16): the APPROVED request goes back to
+ * DRAFT, undated and unsigned, for its requester to change and send again.
+ * Only the one still APPROVED — one superseded since by a later approval of
+ * the same drawing is a record and stays. The earlier approvals it
+ * superseded stay superseded: re-approving it is how the drawing stands again.
+ */
+onApprovalReopened(DOC, {
+  may: async (actor, id) => {
+    const row = await prisma.approvedPlan.findUnique({ where: { id }, select: { status: true, uploadedById: true } });
+    // A superseded one is refused by `reopen`, saying why.
+    return !!row && mayEdit(actor, row);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const row = await tx.approvedPlan.findUnique({ where: { id: documentId }, select: { id: true, number: true, title: true, status: true } });
+    if (!row) throw notFound('Request for approval not found');
+    if (row.status !== 'APPROVED') {
+      throw badRequest(
+        `${row.number ?? row.title} is ${statusLabel(row.status).toLowerCase()} — only the approved request goes back to draft${row.status === 'SUPERSEDED' ? '; a later approval of the drawing replaced it' : ''}`,
+      );
+    }
+    const claimed = await tx.approvedPlan.updateMany({
+      where: { id: row.id, status: 'APPROVED' },
+      data: { status: 'DRAFT', approvedAt: null, approvedBy: null },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+  },
+});
 
 // ── The paper ────────────────────────────────────────────────────────────────
 

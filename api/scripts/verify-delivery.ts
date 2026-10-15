@@ -1137,6 +1137,21 @@ async function main() {
       rfaLater.status === 'APPROVED' && rfaSuperseded.status === 'SUPERSEDED',
       `${rfaLater.status} / ${rfaSuperseded.status}`,
     );
+    // Pulled back after approval (2026-10-16): only the approval that stands.
+    const reopenSuperseded = await http(rfaEngToken, 'POST', `/approvals/reopen/plan_approval/${rfaId}`, { reason: 'drawing revised' });
+    check(
+      'a superseded request is not pulled back — the refusal says a later approval replaced it',
+      reopenSuperseded.status === 400 && JSON.stringify(reopenSuperseded.body).includes('superseded'),
+      `${reopenSuperseded.status} ${JSON.stringify(reopenSuperseded.body).slice(0, 160)}`,
+    );
+    const reopenRfa = await http(rfaTmToken, 'POST', `/approvals/reopen/plan_approval/${rfa2Id}`, { reason: 'drawing revised' });
+    const rfa2Back = await prisma.approvedPlan.findUniqueOrThrow({ where: { id: rfa2Id } });
+    check(
+      'the approved request goes back to draft, unsigned — the one it superseded stays superseded',
+      reopenRfa.status === 200 && rfa2Back.status === 'DRAFT' && !rfa2Back.approvedAt && !rfa2Back.approvedBy &&
+        (await prisma.approvedPlan.findUniqueOrThrow({ where: { id: rfaId } })).status === 'SUPERSEDED',
+      `${reopenRfa.status} ${JSON.stringify(reopenRfa.body).slice(0, 160)} ${rfa2Back.status}`,
+    );
 
     // Cancelled while pending, then a decision lands: nothing is applied.
     const rfa3 = await http(rfaEngToken, 'POST', '/plans', { jobId: job.id, title: `${TAG} Cable tray route`, drawingNo: 'ZZ-E-201' });
@@ -1470,6 +1485,51 @@ async function main() {
         pendingCount(r3Text) === 0,
       `${r3Pdf.status} biller ×${times(r3Text, `${TAG} Biller`)}, approver ×${times(r3Text, `${TAG} Approver`)}, ${signedCount(r3Text)} signed · ${[/accomplishment\s*report/i.test(r3Text), flat(r3Text).includes('WEIGHT'), r3Text.includes('Installed the booster pumps'), r3Text.includes('Findings: One anchor bolt short'), r3Text.includes('Behind schedule')].join(',')}`,
     );
+    // Pulled back after approval (2026-10-16): a report while nothing billed
+    // it, a billing while nothing invoiced it.
+    {
+      // A draft billing standing on the report (written here: the report adds
+      // nothing new to bill through the route).
+      const onR3 = {
+        status: 201,
+        body: await prisma.progressBilling.create({
+          data: {
+            number: `${job.number}-PB-ZZ`,
+            billingNo: 9_999,
+            jobId: job.id,
+            progressReportId: r3.body.id,
+            grossAmount: d(0),
+            vatAmount: d(0),
+            ewtAmount: d(0),
+            invoiceTotal: d(0),
+            netCollectible: d(0),
+          },
+        }),
+      };
+      const reopenBilled = await http(billerToken, 'POST', `/approvals/reopen/progress_report/${r3.body.id}`, { reason: 'wrong figures' });
+      check(
+        'an approved report a billing is raised on is not pulled back — the refusal names the billing',
+        onR3.status === 201 && reopenBilled.status === 400 && JSON.stringify(reopenBilled.body).includes(String(onR3.body.number)) &&
+          (await prisma.progressReport.findUniqueOrThrow({ where: { id: r3.body.id } })).status === 'APPROVED',
+        `${onR3.status} ${reopenBilled.status} ${JSON.stringify(reopenBilled.body).slice(0, 160)}`,
+      );
+      if (onR3.body?.id) await prisma.progressBilling.delete({ where: { id: onR3.body.id } });
+      const reopenReport = await http(billerToken, 'POST', `/approvals/reopen/progress_report/${r3.body.id}`, { reason: 'wrong figures' });
+      const r3Back = await prisma.progressReport.findUniqueOrThrow({ where: { id: r3.body.id } });
+      check(
+        'with nothing billed on it, the approved report goes back to draft, unsigned',
+        reopenReport.status === 200 && r3Back.status === 'DRAFT' && !r3Back.approvedAt && !r3Back.approvedById,
+        `${reopenReport.status} ${JSON.stringify(reopenReport.body).slice(0, 160)} ${r3Back.status}`,
+      );
+      const reopenBill = await http(billerToken, 'POST', `/approvals/reopen/progress_billing/${raised.body.id}`, { reason: 'wrong period' });
+      const billBack = await prisma.progressBilling.findUniqueOrThrow({ where: { id: raised.body.id } });
+      check(
+        'an approved billing nothing invoiced goes back to draft',
+        reopenBill.status === 200 && billBack.status === 'DRAFT' && !billBack.approvedAt,
+        `${reopenBill.status} ${JSON.stringify(reopenBill.body).slice(0, 160)} ${billBack.status}`,
+      );
+    }
+
     // A billing written outside the routes has no trail to name anybody: the
     // paper names nobody rather than the project's manager it used to guess.
     const bareBill = await printed(leadToken, `/billings/${b1.id}/pdf`);

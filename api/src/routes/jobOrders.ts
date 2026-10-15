@@ -24,6 +24,7 @@ import { notify } from '../shared/notifications';
 import {
   submitForApproval,
   onApprovalSettled,
+  onApprovalReopened,
   approvalSlots,
   slotSignatories,
   contactOf,
@@ -1335,6 +1336,165 @@ export async function settleJobOrder(
 }
 
 onApprovalSettled('job_order', settleJobOrder);
+
+/**
+ * Pulled back after approval (2026-10-16, the owner's call: "every approval
+ * request can be pulled back and return to draft, even if it's fully
+ * approved"). The order goes back to DRAFT and the Technical Manager's
+ * agreement on its amount is cleared. The project its approval BUILT goes with
+ * it — only while nothing stands on it but its opening budget: any cost,
+ * document, report, meeting, task or file on the project refuses the pull-back
+ * naming it. Its costing goes back to DRAFT only where this build is what made
+ * it FINAL (no costing approval behind it, finalised with the project, no
+ * other project on it); otherwise the costing is left as it is. An order
+ * linked to a project that existed before is simply reopened.
+ */
+onApprovalReopened('job_order', {
+  may: async (actor, id) => {
+    const jo = await prisma.jobOrder.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+    // A COMPLETED one is refused by `reopen`, saying why.
+    return !!jo && (jo.status === 'APPROVED' || jo.status === 'COMPLETED') && canEditRecord(actor, 'gops', 'job_orders', jo.requestedById);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const jo = await tx.jobOrder.findUnique({
+      where: { id: documentId },
+      select: { id: true, number: true, status: true, jobId: true, visit: { select: { id: true } } },
+    });
+    if (!jo) throw notFound('Job order not found');
+    if (jo.status !== 'APPROVED') {
+      throw badRequest(`${jo.number} is ${statusLabel(jo.status).toLowerCase()} — only an approved job order goes back to draft`);
+    }
+    if (jo.visit) throw badRequest(`${jo.number} scheduled a service visit — cancel the visit first`);
+    const invoices = await tx.invoice.count({ where: { jobOrderId: jo.id, status: { not: 'CANCELLED' } } });
+    if (invoices) throw badRequest(`${jo.number} has been invoiced — cancel the invoice first`);
+
+    // The project this approval built, if it built one.
+    const job = jo.jobId
+      ? await tx.job.findUnique({
+          where: { id: jo.jobId },
+          select: {
+            id: true,
+            number: true,
+            status: true,
+            notes: true,
+            createdAt: true,
+            costingId: true,
+            _count: {
+              select: {
+                budgetRequests: true,
+                progressReports: true,
+                billings: true,
+                plans: true,
+                tasks: true,
+                meetings: true,
+                purchaseRequests: true,
+                purchaseOrders: true,
+                stockIssues: true,
+                pulloutSlips: true,
+                borrowSlips: true,
+                overtime: true,
+                invoices: true,
+                supplierBills: true,
+                expenseClaims: true,
+                cashAdvances: true,
+                installedAssets: true,
+                serviceReports: true,
+                jobOrders: true,
+                salesActivities: true,
+                cadJobOrders: true,
+                invoiceRequests: true,
+              },
+            },
+          },
+        })
+      : null;
+    const built = !!job && (job.notes ?? '').startsWith(`Built from job order ${jo.number}`);
+
+    if (job && built) {
+      const c = job._count;
+      const blockers: [string, number][] = [
+        ['budget request', c.budgetRequests],
+        ['progress report', c.progressReports],
+        ['progress billing', c.billings],
+        ['request for approval', c.plans],
+        ['scheduled task', c.tasks],
+        ['meeting', c.meetings],
+        ['purchase request', c.purchaseRequests],
+        ['purchase order', c.purchaseOrders],
+        ['outgoing slip', c.stockIssues],
+        ['pull-out slip', c.pulloutSlips],
+        ['borrow slip', c.borrowSlips],
+        ['overtime filing', c.overtime],
+        ['invoice', c.invoices],
+        ['invoice request', c.invoiceRequests],
+        ['supplier bill', c.supplierBills],
+        ['expense claim', c.expenseClaims],
+        ['cash advance', c.cashAdvances],
+        ['installed machine', c.installedAssets],
+        ['service report', c.serviceReports],
+        ['other job order', c.jobOrders - 1],
+        ['sales activity', c.salesActivities],
+        ['CAD J.O.', c.cadJobOrders],
+        ['cost entry', await tx.jobCostEntry.count({ where: { jobId: job.id, state: { not: 'BUDGETED' } } })],
+        ['attached file', await tx.attachment.count({ where: { entityType: 'job', entityId: job.id } })],
+        ['service contract', (await tx.serviceContract.count({ where: { jobId: job.id } }))],
+      ];
+      const standing = blockers.filter(([, n]) => n > 0);
+      if (standing.length) {
+        throw badRequest(
+          `Project ${job.number}, built when ${jo.number} was approved, has ${standing
+            .map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`)
+            .join(', ')} on it — ${jo.number} cannot go back to draft while the project is in use`,
+        );
+      }
+      if (job.status !== 'PLANNING') {
+        throw badRequest(`Project ${job.number}, built when ${jo.number} was approved, is ${statusLabel(job.status).toLowerCase()} — it is kept`);
+      }
+    }
+
+    const claimed = await tx.jobOrder.updateMany({
+      where: { id: jo.id, status: 'APPROVED' },
+      data: {
+        status: 'DRAFT',
+        approvedAt: null,
+        laborCostingAmount: null,
+        laborAgreedById: null,
+        laborAgreedAt: null,
+        ...(built ? { jobId: null } : {}),
+      },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+
+    if (job && built) {
+      await deleteOrRefuse(`Project ${job.number}`, () => tx.job.delete({ where: { id: job.id } }));
+      // The costing goes back to draft only where this build finalised it.
+      const costing = await tx.costing.findUnique({ where: { id: job.costingId }, select: { id: true, number: true, status: true, finalAt: true } });
+      const otherJobs = await tx.job.count({ where: { costingId: job.costingId } });
+      const costingApproval = await tx.approvalRequest.findFirst({
+        where: { documentType: 'costing', documentId: job.costingId },
+        orderBy: { createdAt: 'desc' },
+        select: { status: true },
+      });
+      const finalisedByBuild =
+        !!costing?.finalAt && Math.abs(costing.finalAt.getTime() - job.createdAt.getTime()) < 10_000;
+      let costingNote = '';
+      if (costing && costing.status === 'FINAL' && !otherJobs && costingApproval?.status !== 'APPROVED' && finalisedByBuild) {
+        await tx.costing.updateMany({ where: { id: costing.id, status: 'FINAL' }, data: { status: 'DRAFT', finalAt: null } });
+        costingNote = `; costing ${costing.number} back to draft`;
+      }
+      await audit(
+        {
+          entityType: 'job',
+          entityId: job.id,
+          action: 'DELETED',
+          summary: `Deleted project ${job.number} — ${jo.number} was pulled back to draft after approval${costingNote}`,
+        },
+        undefined,
+        tx,
+      );
+    }
+  },
+});
 
 // ── Ctrl+K ──────────────────────────────────────────────────────────────────
 

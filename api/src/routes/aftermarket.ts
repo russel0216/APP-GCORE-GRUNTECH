@@ -31,7 +31,7 @@ import { registerSchedule } from './workspace';
 import { LIST_CAP, listReference, totalLabel, listDay, namedInFilter, choice, bracketed, bracketNote, listNotes, sendListPdf, filterDay, dayOf } from '../shared/listPaper';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { submitForApproval, onApprovalSettled } from '../shared/approvals';
+import { submitForApproval, onApprovalSettled, onApprovalReopened } from '../shared/approvals';
 import {
   aftermarketSettings,
   saveAftermarketSettings,
@@ -2681,6 +2681,64 @@ function onReportSettled(documentType: string) {
 onReportSettled('commissioning_report');
 onReportSettled('pm_report');
 onReportSettled('inspection_report');
+
+/**
+ * Pulled back after approval (2026-10-16): the report is a draft again, and
+ * what its approval closed opens again — its visit back to SCHEDULED, and the
+ * job order that visit completed back to APPROVED. Refused rather than half
+ * undone: while that job order is invoiced, and on a commissioning report
+ * whose approval started its machine's warranty (the commissioning date and
+ * warranty end are on the equipment's record now, and other reports have
+ * judged warranty from them).
+ */
+function onReportReopened(documentType: string) {
+  onApprovalReopened(documentType, {
+    may: async (actor, id) => {
+      const report = await prisma.serviceReport.findUnique({ where: { id }, select: { status: true, kind: true, performedById: true } });
+      if (!report || report.status !== 'APPROVED') return false;
+      const sub = reportPermission(report.kind, 'edit_all').split('.')[1];
+      return actor.isSuperAdmin || report.performedById === actor.id || canEditRecord(actor, 'gops', sub, report.performedById);
+    },
+    reopen: async ({ documentId, tx }) => {
+      const report = await tx.serviceReport.findUnique({
+        where: { id: documentId },
+        include: { visit: { include: { jobOrder: { select: { id: true, number: true, status: true, completedAt: true } } } }, asset: true },
+      });
+      if (!report) throw notFound('Report not found');
+      if (report.status !== 'APPROVED') throw badRequest(`${report.number} is not approved — nothing to pull back`);
+      if (
+        report.kind === 'COMMISSIONING' &&
+        report.asset?.commissionedAt &&
+        isoDay(report.asset.commissionedAt) === isoDay(report.performedAt)
+      ) {
+        throw badRequest(
+          `${report.number} started the warranty of ${report.asset.name} on ${isoDay(report.performedAt)} — a commissioning report that started a warranty stays approved`,
+        );
+      }
+      const jo = report.visit?.jobOrder ?? null;
+      if (jo) {
+        const invoices = await tx.invoice.count({ where: { jobOrderId: jo.id, status: { not: 'CANCELLED' } } });
+        if (invoices) throw badRequest(`Job order ${jo.number}, completed by ${report.number}, has been invoiced — cancel the invoice first`);
+      }
+      const claimed = await tx.serviceReport.updateMany({ where: { id: report.id, status: 'APPROVED' }, data: { status: 'DRAFT', approvedAt: null } });
+      if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+      if (report.visitId) {
+        await tx.serviceVisit.updateMany({ where: { id: report.visitId, status: 'COMPLETED' }, data: { status: 'SCHEDULED', performedAt: null } });
+      }
+      if (jo && jo.status === 'COMPLETED') {
+        await tx.jobOrder.updateMany({ where: { id: jo.id, status: 'COMPLETED' }, data: { status: 'APPROVED', completedAt: null } });
+        await audit(
+          { entityType: 'job_order', entityId: jo.id, action: 'UPDATED', summary: `${jo.number} open again — ${report.number} was pulled back to draft` },
+          undefined,
+          tx,
+        );
+      }
+    },
+  });
+}
+onReportReopened('commissioning_report');
+onReportReopened('pm_report');
+onReportReopened('inspection_report');
 
 // ════════════════════════════════════════════════════════════════════
 //  AFTERMARKET DASHBOARD, RENEWALS AND SETTINGS

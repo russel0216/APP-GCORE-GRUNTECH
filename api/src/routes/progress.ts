@@ -47,6 +47,7 @@ import {
   contactsOf,
   mayDecide,
   onApprovalSettled,
+  onApprovalReopened,
   preparedAt,
   routeBrief,
   slotSignatories,
@@ -845,6 +846,36 @@ export async function settleProgressReport(approval: ApprovalRequest, outcome: A
 }
 onApprovalSettled(DOC, settleProgressReport);
 
+/**
+ * Pulled back after approval (2026-10-16): the report is a draft again,
+ * undated and unsigned. Refused while a billing (draft or later) is raised
+ * on it — the billing measured its increment against these figures — and
+ * while a later report follows it in the chain, which carried its to-date
+ * percentages forward: only the latest report reopens.
+ */
+onApprovalReopened(DOC, {
+  may: async (actor, id) => {
+    const report = await prisma.progressReport.findUnique({ where: { id }, select: { status: true, preparedById: true } });
+    return !!report && report.status === 'APPROVED' && mayEditReport(actor, report);
+  },
+  reopen: async ({ documentId, tx }) => {
+    const report = await tx.progressReport.findUnique({ where: { id: documentId }, select: { id: true, number: true, status: true } });
+    if (!report) throw notFound('Progress report not found');
+    if (report.status !== 'APPROVED') throw badRequest(`${report.number} is ${statusLabel(report.status).toLowerCase()} — only an approved report goes back to draft`);
+    const billing = await tx.progressBilling.findUnique({ where: { progressReportId: report.id }, select: { number: true, status: true } });
+    if (billing) {
+      throw badRequest(`Progress billing ${billing.number} (${statusLabel(billing.status).toLowerCase()}) is raised on ${report.number} — it cannot go back to draft while the billing stands`);
+    }
+    const next = await tx.progressReport.findFirst({ where: { previousReportId: report.id }, select: { number: true } });
+    if (next) throw badRequest(`${next.number} follows ${report.number} and carried its figures forward — only the latest report goes back to draft`);
+    const claimed = await tx.progressReport.updateMany({
+      where: { id: report.id, status: 'APPROVED' },
+      data: { status: 'DRAFT', approvedAt: null, approvedById: null },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+  },
+});
+
 progressRoutes.delete(
   '/:id',
   require_('gops.progress_billing.delete'),
@@ -1499,6 +1530,30 @@ export async function settleProgressBilling(approval: ApprovalRequest, outcome: 
   });
 }
 onApprovalSettled(BILL_DOC, settleProgressBilling);
+
+/**
+ * Pulled back after approval (2026-10-16): the billing is a draft again.
+ * Refused while an invoice or a live invoice request stands on it — cancel
+ * those first (an INVOICED billing always has one).
+ */
+onApprovalReopened(BILL_DOC, {
+  may: async (actor, id) => {
+    const billing = await prisma.progressBilling.findUnique({ where: { id }, select: { id: true, status: true, preparedById: true } });
+    // An INVOICED one is refused by `reopen`, naming the invoice.
+    return !!billing && mayEditBilling(actor, await billingPreparer(billing));
+  },
+  reopen: async ({ documentId, tx }) => {
+    const billing = await tx.progressBilling.findUnique({ where: { id: documentId }, select: { id: true, number: true, status: true } });
+    if (!billing) throw notFound('Billing not found');
+    const invoice = await tx.invoice.findFirst({ where: { progressBillingId: billing.id, status: { not: 'CANCELLED' } }, select: { number: true } });
+    if (invoice) throw badRequest(`Invoice ${invoice.number} is raised on ${billing.number} — cancel the invoice first`);
+    const request = await tx.invoiceRequest.findFirst({ where: { progressBillingId: billing.id, status: { not: 'CANCELLED' } }, select: { number: true } });
+    if (request) throw badRequest(`Invoice request ${request.number} is raised on ${billing.number} — cancel the request first`);
+    if (billing.status !== 'APPROVED') throw badRequest(`${billing.number} is ${statusLabel(billing.status).toLowerCase()} — only an approved billing goes back to draft`);
+    const claimed = await tx.progressBilling.updateMany({ where: { id: billing.id, status: 'APPROVED' }, data: { status: 'DRAFT', approvedAt: null } });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+  },
+});
 
 billingRoutes.delete(
   '/:id',

@@ -298,6 +298,29 @@ async function main() {
   check('and the requestor was told who has it', (await bells(requestor.id, 'cad.assigned')) === 1);
   const takenAgain = await http(leadT, 'POST', `/cad-job-orders/${id}/take`);
   check('a taken request cannot be taken again — the lead reassigns', takenAgain.status === 400, takenAgain.text);
+
+  // Pulled back after approval (2026-10-16): only while nobody has started on it.
+  const reopenTaken = await http(requestorT, 'POST', `/approvals/reopen/cad_job_order/${id}`, { reason: 'scope changed' });
+  check(
+    'a request a designer has taken is not pulled back to draft — the refusal says it is with the design team',
+    reopenTaken.status === 400 && reopenTaken.text.includes('design team') &&
+      (await prisma.cadJobOrder.findUniqueOrThrow({ where: { id } })).status === 'IN_PROGRESS',
+    reopenTaken.text,
+  );
+  {
+    const spare = await http(requestorT, 'POST', '/cad-job-orders', { customerId: customer.id, title: `${TAG} Spare layout`, scope: 'A request pulled back after approval' });
+    const spareId = String(spare.body.id);
+    await toQueue(spareId);
+    const reopened = await http(requestorT, 'POST', `/approvals/reopen/cad_job_order/${spareId}`, { reason: 'scope changed' });
+    const after = await prisma.cadJobOrder.findUniqueOrThrow({ where: { id: spareId } });
+    const req = await prisma.approvalRequest.findFirst({ where: { documentType: 'cad_job_order', documentId: spareId }, orderBy: { createdAt: 'desc' } });
+    check(
+      'an approved request nobody has taken is pulled back: a draft again, its approval closed',
+      reopened.status === 200 && after.status === 'DRAFT' && req?.status === 'CANCELLED',
+      `${reopened.status} ${reopened.text.slice(0, 160)} ${after.status} ${req?.status}`,
+    );
+    await prisma.cadJobOrder.delete({ where: { id: spareId } });
+  }
   const requestorPriority = await http(requestorT, 'POST', `/cad-job-orders/${id}/priority`, { priority: 'URGENT' });
   check('the requestor cannot set the priority', requestorPriority.status === 403, String(requestorPriority.status));
   const priority = await http(supportT, 'POST', `/cad-job-orders/${id}/priority`, { priority: 'URGENT' });
