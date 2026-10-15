@@ -62,13 +62,23 @@ async function main() {
   });
   const roleKeyById = new Map(roles.map((r) => [r.id, r.key]));
   const numbering = await prisma.numberSequence.findMany({ where: { periodKey: '' }, orderBy: { documentType: 'asc' } });
+  const emailById = new Map((await prisma.user.findMany({ select: { id: true, email: true } })).map((u) => [u.id, u.email]));
+
+  /** A setting that names logins by database id travels with their emails too — an id means nothing on another install. */
+  const portable = (key: string, value: unknown): unknown => {
+    if (key === 'helpTickets.receivers' && value && typeof value === 'object' && Array.isArray((value as { userIds?: unknown }).userIds)) {
+      const ids = (value as { userIds: string[] }).userIds;
+      return { ...(value as object), userEmails: ids.map((id) => emailById.get(id)).filter((e): e is string => !!e) };
+    }
+    return value;
+  };
 
   const snapshot = {
     version: SNAPSHOT_VERSION,
     exportedAt: new Date().toISOString(),
     settings: settings
       .filter((s) => !isBookkeeping(s.key))
-      .map((s) => ({ key: s.key, value: s.value, description: s.description })),
+      .map((s) => ({ key: s.key, value: portable(s.key, s.value), description: s.description })),
     roles: roles.map((r) => ({
       key: r.key,
       name: r.name,

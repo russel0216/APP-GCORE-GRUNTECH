@@ -71,20 +71,42 @@ async function main() {
   const roles = new Map((await prisma.role.findMany({ select: { id: true, key: true } })).map((r) => [r.key, r.id]));
   const teams = new Map((await prisma.industry.findMany({ select: { id: true, code: true } })).map((t) => [t.code, t.id]));
   const userIds = new Map((await prisma.user.findMany({ select: { id: true, email: true } })).map((u) => [u.email.toLowerCase(), u.id]));
+  const knownIds = new Set(userIds.values());
+
+  /**
+   * The Help box's receivers are stored as login ids, which differ between
+   * installs: an email the snapshot carries is turned into this install's id,
+   * an id is kept only where it is a login here. Nobody left → undefined (skip).
+   */
+  const localise = (key: string, value: Prisma.InputJsonValue): Prisma.InputJsonValue | undefined => {
+    if (key !== 'helpTickets.receivers' || !value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const v = value as { userIds?: unknown; userEmails?: unknown };
+    const fromEmails = Array.isArray(v.userEmails)
+      ? v.userEmails.map((e) => userIds.get(String(e).toLowerCase())).filter((id): id is string => !!id)
+      : [];
+    const fromIds = Array.isArray(v.userIds) ? v.userIds.filter((id): id is string => typeof id === 'string' && knownIds.has(id)) : [];
+    const ids = [...new Set([...fromEmails, ...fromIds])];
+    return ids.length ? { userIds: ids } : undefined;
+  };
 
   await prisma.$transaction(
     async (tx) => {
       // ── Settings ──────────────────────────────────────────────────────
       for (const s of snap.settings) {
         if (isBookkeeping(s.key)) continue;
+        const value = localise(s.key, s.value);
+        if (value === undefined) {
+          skipped.push(`Setting ${s.key}: none of the people it names has a login here`);
+          continue;
+        }
         const now = await tx.setting.findUnique({ where: { key: s.key } });
-        if (now && same(now.value, s.value)) continue;
+        if (now && same(now.value, value)) continue;
         say(`${now ? 'Change' : 'Add'} setting ${s.key}`);
         if (apply) {
           await tx.setting.upsert({
             where: { key: s.key },
-            create: { key: s.key, value: s.value, description: s.description },
-            update: { value: s.value },
+            create: { key: s.key, value, description: s.description },
+            update: { value },
           });
         }
       }
