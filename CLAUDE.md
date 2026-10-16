@@ -384,6 +384,16 @@ four databases and four copies of "customer".
       Active / Inactive pill is `ActiveBadge`, a margin's tone
       `marginTone(pct)` (a percentage: below 0 danger, under 10 warn) —
       both in `components/ui.tsx`.
+    - **One gap between blocks** (2026-10-16, the owner's report: "some
+      card spacing that aren't uniform"; a crawl measured 110 screens): every
+      card, KPI row, toolbar and alert on a page sits `--block-gap` (16) from
+      the next. A `.stack` or `.grid` spaces its children itself; a classless
+      wrapper `<div>` holding a card or a KPI row now does too (the
+      `:has()` rule in `styles.css`, which also names `.forecast` and
+      `.costing-page`) — cards had sat flush on the reports, Insights,
+      Report Templates and the costing record. Wrap a page's blocks in a
+      plain `<div>` or a `.stack`; never space a card with a margin of its
+      own. A `.card-button` (a clickable card) is a column from the top.
     - **Every modal footer is `ModalFoot`** (`components/ui.tsx`):
       [Delete] … [Cancel] [Save] — Delete only on a record edited in that
       modal with no page of its own, and it asks in the foot. Titles say

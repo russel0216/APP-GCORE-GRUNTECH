@@ -988,9 +988,14 @@ textarea {
   margin-bottom: 0;
 }
 
-/* A card that is really a button has to be reset back to looking like a card. */
+/* A card that is really a button has to be reset back to looking like a card.
+   A column from the top: a button centres its content, so in a row of
+   stretched cards the shorter ones floated mid-card (Approval Workflows,
+   2026-10-16). */
 .card-button {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
   width: 100%;
   text-align: left;
   font: inherit;
@@ -1101,6 +1106,26 @@ a.card:hover {
   display: flex;
   flex-direction: column;
   gap: var(--block-gap);
+}
+
+/*
+  A plain wrapper that holds cards is a stack too (2026-10-16, the owner's
+  report: "some card spacing that aren't uniform"). A page or a tab often
+  wraps its blocks in a classless <div>, and in block flow nothing spaced
+  them: measured across 110 screens, cards sat flush (0 px) on the G-CHAIN
+  and G-FIN reports, every Insights report, Report Templates, the costing
+  record, the forecast and the plantilla, where every other screen reads
+  --block-gap. The Forecast's and the costing page's roots carry a class of
+  their own and are named. The children's own margins go, the gap spaces them.
+*/
+.content :is(div:not([class]), .forecast, .costing-page):has(> .card, > .kpi-grid) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--block-gap);
+}
+
+.content :is(div:not([class]), .forecast, .costing-page):has(> .card, > .kpi-grid) > * {
+  margin-block: 0;
 }
 
 /* A stack spaces its children itself: a child that carries its own bottom

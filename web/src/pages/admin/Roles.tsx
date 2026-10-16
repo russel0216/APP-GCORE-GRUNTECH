@@ -83,12 +83,10 @@ export function Roles() {
       <div className="grid grid-3">
         {roles.map((role) => (
           // A button, not a div: opening a role to modify it was mouse-only (rule 13).
-          // A column, so the card's text starts at its top as it did, not centred as a button centres it.
           <button
             type="button"
             key={role.id}
             className="card clickable card-button"
-            style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-start' }}
             onClick={() => setEditing(role)}
           >
             <div className="row" style={{ justifyContent: 'space-between' }}>
