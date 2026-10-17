@@ -6,7 +6,7 @@ import { authenticate } from '../auth/middleware';
 import { type Range } from '../shared/insights';
 import { addDays, dayKey, daysBetween } from '../shared/day';
 import { statusLabel, formatShortDate } from '../shared/pdf';
-import { bucketFor, bucketLabels, claimPayable, financeSettings } from '../shared/finance';
+import { bucketFor, bucketLabels, claimPayable, financeSettings, LIVE_MONEY } from '../shared/finance';
 import { termsLabel } from '../shared/receivables';
 import { billTermsLabel } from '../shared/payables';
 import { TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
@@ -282,7 +282,7 @@ async function collections(range: Range, ctx: ReportContext): Promise<Report> {
     where: {
       invoiceId: { not: null },
       invoice: creditWhere,
-      payment: { kind: 'RECEIPT', paymentDate: { gte: range.from, lte: range.to }, ...(f.where.customerId ? { customerId: f.where.customerId as string } : {}) },
+      payment: { kind: 'RECEIPT', ...LIVE_MONEY, paymentDate: { gte: range.from, lte: range.to }, ...(f.where.customerId ? { customerId: f.where.customerId as string } : {}) },
     },
     select: {
       amount: true,

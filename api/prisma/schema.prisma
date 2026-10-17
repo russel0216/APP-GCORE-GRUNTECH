@@ -4154,6 +4154,10 @@ model Invoice {
   ewtCertificateNo String?
   ewtCertificateAt DateTime? @db.Date
 
+  /// 'SCORO' on an invoice the SCORO invoices import raised (2026-10-17):
+  /// a real receivable, its paper and number G-CORE's, its origin kept.
+  importedFrom String?
+
   notes      String?
   issuedAt   DateTime?
   voidedAt   DateTime?
@@ -4528,6 +4532,12 @@ model Payment {
   bank      String?
   /// A cheque is not cash until it clears; until then it is a promise.
   clearedAt DateTime? @db.Date
+
+  /// 'SCORO' on a collection the SCORO invoices import recorded (2026-10-17,
+  /// the owner's call: "keep them out as history"). It settles its invoice,
+  /// but no collection total, cash-flow actual or dashboard figure counts it
+  /// (`LIVE_MONEY` in shared/finance.ts).
+  importedFrom String?
 
   notes String?
 

@@ -91,6 +91,7 @@ import {
   claimPayable,
   liquidatedReleased,
   LIQUIDATION_SOURCES,
+  LIVE_MONEY,
   financePosition,
   bucketFor,
   summarise,
@@ -3942,9 +3943,9 @@ paymentRoutes.get(
  * invoices they settled (`teamShares`, by the amount applied to each).
  */
 async function paymentListSummary(where: Prisma.PaymentWhereInput) {
-  const collectionWhere: Prisma.PaymentWhereInput = { AND: [where, { kind: 'RECEIPT', customerId: { not: null } }] };
+  const collectionWhere: Prisma.PaymentWhereInput = { AND: [where, { kind: 'RECEIPT', customerId: { not: null }, ...LIVE_MONEY }] };
   const chequeWhere: Prisma.PaymentWhereInput = { AND: [collectionWhere, { method: 'CHECK' }] };
-  const [collected, uncleared, out, allocations, cheques, chequesCleared] = await Promise.all([
+  const [collected, uncleared, out, allocations, cheques, chequesCleared, history] = await Promise.all([
     prisma.payment.aggregate({ where: collectionWhere, _sum: { amount: true }, _count: { _all: true } }),
     prisma.payment.aggregate({ where: { AND: [collectionWhere, { clearedAt: null }] }, _sum: { amount: true }, _count: { _all: true } }),
     prisma.payment.aggregate({ where: { AND: [where, { kind: 'DISBURSEMENT' }] }, _sum: { amount: true }, _count: { _all: true } }),
@@ -3954,6 +3955,8 @@ async function paymentListSummary(where: Prisma.PaymentWhereInput) {
     }),
     prisma.payment.aggregate({ where: chequeWhere, _sum: { amount: true }, _count: { _all: true } }),
     prisma.payment.aggregate({ where: { AND: [chequeWhere, { clearedAt: { not: null } }] }, _sum: { amount: true }, _count: { _all: true } }),
+    // SCORO's collections, listed but never counted (the owner's call).
+    prisma.payment.aggregate({ where: { AND: [where, { kind: 'RECEIPT', importedFrom: { not: null } }] }, _sum: { amount: true }, _count: { _all: true } }),
   ]);
   const chequeTotal = num(cheques._sum.amount);
   return {
@@ -3968,6 +3971,7 @@ async function paymentListSummary(where: Prisma.PaymentWhereInput) {
     paidOut: num(out._sum.amount),
     disbursements: out._count._all,
     teams: await teamShares(allocations.map((a) => ({ team: a.invoice?.team ?? null, cents: Math.round(num(a.amount) * 100) }))),
+    history: { count: history._count._all, amount: num(history._sum.amount) },
   };
 }
 
@@ -4857,7 +4861,7 @@ financeReportRoutes.get(
     const from = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth() - months + 1, 1));
 
     const payments = await prisma.payment.findMany({
-      where: { clearedAt: { not: null, gte: from } },
+      where: { clearedAt: { not: null, gte: from }, ...LIVE_MONEY },
       select: { kind: true, amount: true, clearedAt: true },
     });
 
@@ -5142,11 +5146,11 @@ financeReportRoutes.get(
       // Customer receipts only. A person returning unspent advance money is
       // cash in, but it was never a collection.
       prisma.payment.aggregate({
-        where: { kind: 'RECEIPT', customerId: { not: null }, clearedAt: { gte: monthStart } },
+        where: { kind: 'RECEIPT', customerId: { not: null }, ...LIVE_MONEY, clearedAt: { gte: monthStart } },
         _sum: { amount: true },
       }),
       prisma.payment.aggregate({
-        where: { kind: 'RECEIPT', customerId: { not: null }, clearedAt: { gte: yearStart } },
+        where: { kind: 'RECEIPT', customerId: { not: null }, ...LIVE_MONEY, clearedAt: { gte: yearStart } },
         _sum: { amount: true },
       }),
       prisma.invoice.aggregate({

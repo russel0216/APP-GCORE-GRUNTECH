@@ -5,7 +5,7 @@ import { prisma } from '../prisma';
 import { handler, badRequest } from '../http/kit';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
-import { financePosition, claimPayable } from '../shared/finance';
+import { financePosition, claimPayable, LIVE_MONEY } from '../shared/finance';
 import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES } from '../shared/chain';
 import { groupShares, quotationValue, valueRevision } from '../shared/pipeline';
 import { groupKey } from '../shared/quotationGroups';
@@ -158,11 +158,11 @@ insightRoutes.get(
       // Customer receipts only. A person handing back unspent advance money is
       // cash in, but it was never a collection.
       prisma.payment.aggregate({
-        where: { kind: 'RECEIPT', customerId: { not: null }, clearedAt: { gte: monthStart } },
+        where: { kind: 'RECEIPT', customerId: { not: null }, ...LIVE_MONEY, clearedAt: { gte: monthStart } },
         _sum: { amount: true },
       }),
       prisma.payment.aggregate({
-        where: { kind: 'RECEIPT', customerId: { not: null }, clearedAt: { gte: range.from, lte: range.to } },
+        where: { kind: 'RECEIPT', customerId: { not: null }, ...LIVE_MONEY, clearedAt: { gte: range.from, lte: range.to } },
         _sum: { amount: true },
       }),
       stockOnHand(),
@@ -271,7 +271,7 @@ insightRoutes.get(
       }),
       // Customer receipts only — an advance refund is not a collection.
       prisma.payment.findMany({
-        where: { kind: 'RECEIPT', customerId: { not: null }, clearedAt: { gte: start } },
+        where: { kind: 'RECEIPT', customerId: { not: null }, ...LIVE_MONEY, clearedAt: { gte: start } },
         select: { clearedAt: true, amount: true },
       }),
       prisma.jobCostEntry.findMany({

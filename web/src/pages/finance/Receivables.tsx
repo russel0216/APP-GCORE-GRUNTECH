@@ -2003,6 +2003,7 @@ interface PaymentRow {
   lines?: { id: string; reference: string; amount: number }[];
   /** The official receipt a collection was given (G-CORE's numbering). */
   orNumber: string | null;
+  importedFrom?: string | null;
   /** Read off the invoices it settled. */
   salespeople: { id: string; name: string }[];
   teams: { id: string; code: string; name: string }[];
@@ -2072,6 +2073,7 @@ interface PaymentsSummary {
   chequesCleared: number;
   chequesClearedPct: number | null;
   teams: TeamShare[];
+  history?: { count: number; amount: number };
 }
 
 /**
@@ -2145,7 +2147,14 @@ export function Payments() {
       key: 'orNumber',
       label: 'OR No.',
       width: '160px',
-      render: (r) => (r.orNumber ? <span className="mono">{r.orNumber}</span> : <span className="faint">—</span>),
+      render: (r) =>
+        r.orNumber ? (
+          <span className="mono">{r.orNumber}</span>
+        ) : r.importedFrom ? (
+          <span className="faint">SCORO history</span>
+        ) : (
+          <span className="faint">—</span>
+        ),
     },
     {
       key: 'salesperson',
@@ -2261,7 +2270,13 @@ export function Payments() {
                 value={formatMoney(sum.collected)}
                 figure
                 accent="ok"
-                sub={[`${sum.collections} collection${sum.collections === 1 ? '' : 's'}`, noTeamNote(sum.teams)].filter(Boolean).join(' · ')}
+                sub={[
+                  `${sum.collections} collection${sum.collections === 1 ? '' : 's'}`,
+                  noTeamNote(sum.teams),
+                  sum.history?.count ? `${sum.history.count} from SCORO kept as history, not counted` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
               />
               <Stat
                 label="Uncleared cheques"

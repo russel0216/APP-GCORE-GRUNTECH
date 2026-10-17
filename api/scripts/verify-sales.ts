@@ -98,6 +98,7 @@ import { decodeCsv, parseCsv, runImport, toCsv } from '../src/shared/csv';
 import { pipelineStages, stageProbability } from '../src/shared/pipelineStages';
 // The SCORO quotes import's spec and writer by name — what the route runs.
 import { scoroQuoteSpec, writeScoroQuotes, SUMMARY_LINE_TITLE } from '../src/routes/imports/scoroQuotes';
+import { LIVE_MONEY } from '../src/shared/finance';
 import { scoroInvoiceSpec, writeScoroInvoices, scoroPoNumber } from '../src/routes/imports/scoroInvoices';
 import { bookingFor } from '../src/shared/salesOrderBooking';
 import {
@@ -246,6 +247,18 @@ async function cleanup() {
   ).flatMap((q) => [q.id, ...q.revisions.map((r) => r.id)]);
   if (quoteTrail.length) {
     await prisma.auditLog.deleteMany({ where: { entityType: 'quotation', entityId: { in: quoteTrail } } });
+  }
+  // The SCORO invoices import raises invoices (and SCORO's collections) on
+  // its orders, which hold the orders (Restrict): payments first — their
+  // allocations cascade — then the invoices.
+  const tagInvoiceIds = (
+    await prisma.invoice.findMany({ where: { salesOrder: { quotation: { subject: { startsWith: TAG } } } }, select: { id: true } })
+  ).map((i) => i.id);
+  if (tagInvoiceIds.length) {
+    const tagPayments = await prisma.payment.findMany({ where: { allocations: { some: { invoiceId: { in: tagInvoiceIds } } } }, select: { id: true } });
+    await prisma.auditLog.deleteMany({ where: { entityType: { in: ['invoice', 'payment'] }, entityId: { in: [...tagInvoiceIds, ...tagPayments.map((p) => p.id)] } } });
+    await prisma.payment.deleteMany({ where: { id: { in: tagPayments.map((p) => p.id) } } });
+    await prisma.invoice.deleteMany({ where: { id: { in: tagInvoiceIds } } });
   }
   // Sales orders hold their quotation (Restrict), so they go first.
   await prisma.salesOrder.deleteMany({ where: { quotation: { subject: { startsWith: TAG } } } });
@@ -2654,7 +2667,7 @@ async function main() {
         'quote_id', 'doc_description', 'payment_type', 'currency', 'status_name', 'discount', 'total_sum', 'total_vat',
         'total_sum_vat', 'total_cost', 'paid_sum', 'c_purchaseordernumber', 'line_id', 'product_group', 'product_code',
         'product_name', 'amount', 'unit', 'price', 'line_sum', 'line_vat_percent', 'is_subheading', 'line_comment', 'line_cost',
-        'cost_comment', 'supplier_name', 'doer_id', 'doer_name', 'is_internal',
+        'cost_comment', 'supplier_name', 'doer_id', 'doer_name', 'is_internal', 'latest_receipt_date',
       ] as const;
       type InvRow = Record<(typeof INV_HEADERS)[number], string>;
       const invFile = (rows: InvRow[]) =>
@@ -2674,6 +2687,7 @@ async function main() {
         product_name: 'SCHNEIDER ELECTRIC, VARIABLE FREQUENCY DRIVE, ATV320U75N4C', amount: '1.000000000000', unit: 'unit', price: '84000.000000',
         line_sum: '84000.00', line_vat_percent: '12.000', is_subheading: '0', line_comment: 'VFD', line_cost: '37256.8300',
         cost_comment: 'ATV320U75N4C 33,265.02 X 1.12 37,256.83', supplier_name: 'SCHNEIDER ELECTRIC PHILIPPINES', doer_id: '', doer_name: '', is_internal: '0',
+        latest_receipt_date: '',
         ...over,
       });
       const invRows = [
@@ -2726,17 +2740,72 @@ async function main() {
           (createdRow?.after as { scoroOwner?: string } | null)?.scoroOwner === 'Nobody By This Name',
         JSON.stringify(createdRow?.after).slice(0, 200),
       );
+      // A/R holds it too (2026-10-17, the owner's call): a real invoice,
+      // SCORO's number as its invoice no., countered on SCORO's date and due
+      // on SCORO's deadline; nothing paid, so nothing collected.
+      const ewtCompany = Number((await prisma.company.findUniqueOrThrow({ where: { id: 'company' }, select: { ewtRate: true } })).ewtRate);
+      const orderInvoices = () => prisma.invoice.findMany({ where: { salesOrderId: order?.id ?? '', status: { not: 'CANCELLED' } }, include: { allocations: true } });
+      const unpaidInv = (await orderInvoices())[0];
+      check(
+        'an issued SCORO invoice is an ISSUED invoice in A/R: its number the invoice no., countered on its date, due on its deadline, the order’s money, marked SCORO',
+        !!unpaidInv && unpaidInv.status === 'ISSUED' && unpaidInv.siNumber === `${TAG}4899` && unpaidInv.importedFrom === 'SCORO' &&
+          unpaidInv.counteredDate?.toISOString().slice(0, 10) === '2026-09-30' && unpaidInv.dueDate.toISOString().slice(0, 10) === '2026-10-30' &&
+          Number(unpaidInv.grossAmount) === 94000 && Number(unpaidInv.vatAmount) === 11280 && Number(unpaidInv.invoiceTotal) === 105280 &&
+          Number(unpaidInv.ewtRate) === ewtCompany && unpaidInv.allocations.length === 0 && unpaidInv.salespersonId === invQuote?.ownerId,
+        JSON.stringify(unpaidInv && { status: unpaidInv.status, si: unpaidInv.siNumber, due: unpaidInv.dueDate, gross: unpaidInv.grossAmount, ewt: unpaidInv.ewtRate }),
+      );
       const invAgain = await importInvoices(invRows, true);
       check(
-        'the same file again changes nothing: the order is already on file',
-        invAgain.created === 0 && invAgain.updated === 1 && (await prisma.salesOrder.count({ where: { number: { startsWith: `${TAG}4899` } } })) === 1,
+        'the same file again changes nothing: the order is already on file, and it raises no second invoice',
+        invAgain.created === 0 && invAgain.updated === 1 && (await prisma.salesOrder.count({ where: { number: { startsWith: `${TAG}4899` } } })) === 1 &&
+          (await orderInvoices()).length === 1,
       );
+      // An order imported before invoices came across catches up, once.
+      await prisma.invoice.delete({ where: { id: unpaidInv!.id } });
+      await importInvoices(invRows, true);
+      await importInvoices(invRows, true);
+      check('an order this import made before takes its invoice on the next run of the same file — once', (await orderInvoices()).length === 1);
+
+      // A PAID SCORO invoice: the invoice closes exactly — what the payment
+      // left short is the customer's withholding — and SCORO's collection
+      // settles it but is kept as history, out of every collection figure.
+      const paidQuoteNo = scoroNumber(61);
+      await importScoro(
+        [
+          pricedLine({ id: '9009', doc_no: paidQuoteNo, quote_name: `${TAG} VFD paid in SCORO`, status_name: 'Confirmed', product_name: 'SCHNEIDER ELECTRIC, VARIABLE FREQUENCY DRIVE, ATV320U75N4C', amount: '1', unit: 'unit', price: '84000.000000', line_cost: '37256.8300', line_id: '9201', total_sum: '94000.00', total_vat: '11280.00' }),
+          pricedLine({ id: '9009', doc_no: paidQuoteNo, quote_name: `${TAG} VFD paid in SCORO`, status_name: 'Confirmed', product_name: 'JOB ORDER', amount: '1', unit: 'lot', price: '10000.000000', line_cost: '10600.0000', line_id: '9202', supplier_name: '', total_sum: '94000.00', total_vat: '11280.00' }),
+        ],
+        true,
+      );
+      const paidRows = invRows.map((r) => ({ ...r, id: '4588', doc_no: `${TAG}4900`, quote_no: paidQuoteNo, status_name: 'Paid', paid_sum: '103400.00', latest_receipt_date: '2026-10-20', payment_type: 'cheque' }));
+      await importInvoices(paidRows, true);
+      const paidOrder = await prisma.salesOrder.findFirst({ where: { number: `${TAG}4900` }, select: { id: true } });
+      const paidInv = await prisma.invoice.findFirst({ where: { salesOrderId: paidOrder?.id ?? '' }, include: { allocations: { include: { payment: true } } } });
+      const scoroPay = paidInv?.allocations[0]?.payment;
+      check(
+        'a paid SCORO invoice reads PAID: 103,400 collected, the 1,880 SCORO’s payment left short taken as the 2% withheld',
+        paidInv?.status === 'PAID' && Number(paidInv.amountCollected) === 103400 && Number(paidInv.ewtAmount) === 1880 && Number(paidInv.ewtRate) === 0.02 &&
+          Number(paidInv.netCollectible) === 103400,
+        JSON.stringify(paidInv && { status: paidInv.status, collected: paidInv.amountCollected, ewt: paidInv.ewtAmount }),
+      );
+      check(
+        'its collection is SCORO’s: cheque, dated and cleared on the last receipt, no OR number, marked SCORO',
+        scoroPay?.importedFrom === 'SCORO' && scoroPay.method === 'CHECK' && scoroPay.kind === 'RECEIPT' && scoroPay.orNumber === null &&
+          scoroPay.paymentDate.toISOString().slice(0, 10) === '2026-10-20' && scoroPay.clearedAt?.toISOString().slice(0, 10) === '2026-10-20',
+        JSON.stringify(scoroPay && { method: scoroPay.method, date: scoroPay.paymentDate, from: scoroPay.importedFrom }),
+      );
+      const scoroCounted = await prisma.payment.count({ where: { id: scoroPay?.id ?? '', kind: 'RECEIPT', customerId: { not: null }, ...LIVE_MONEY } });
+      check('no collection figure counts it: the live-money rule leaves it out', !!scoroPay && scoroCounted === 0);
       const cancelled = await importInvoices([invRow({ doc_no: `${TAG}4899.1`, status_name: 'Cancelled', owner_name: sales.name })], true);
       const cancelledOrder = await prisma.salesOrder.findFirst({ where: { number: `${TAG}4899.1` } });
       check(
         'a cancelled SCORO invoice is a CANCELLED order with SCORO’s status as its reason, owned by the login SCORO names',
         cancelled.created === 1 && cancelledOrder?.status === 'CANCELLED' && cancelledOrder.cancelReason === 'SCORO status: Cancelled' && cancelledOrder.ownerId === sales.id,
         JSON.stringify(cancelledOrder),
+      );
+      check(
+        'a cancelled SCORO invoice raises no invoice',
+        (await prisma.invoice.count({ where: { salesOrder: { number: `${TAG}4899.1` } } })) === 0,
       );
       const noQuote = await importInvoices([invRow({ doc_no: `${TAG}5000`, quote_no: 'ZZ-NOT-A-QUOTE' })], false);
       check(

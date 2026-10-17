@@ -612,9 +612,9 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history):
 foundation
-385, masters 92, sales 628, costing 200, pipeline 121, calendar 98, numbering
+385, masters 92, sales 634, costing 200, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 187, chain 340, hr 485, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 140. The
@@ -3179,11 +3179,32 @@ SCORO.
   Draft → DRAFT; Unpaid, Sent, Overdue, Partially paid, Paid → ISSUED with
   no approval (issued in SCORO; a COMPLETED audit row in the owner's name
   is the paper's "Issued by"); Cancelled, Void, Credited → CANCELLED with
-  "SCORO status: …". **Nothing reaches G-FIN**: `paid_sum` and the payer
-  stay on the CREATED audit row; invoices and collections are raised in
-  G-CORE. A number already on file is skipped, so a re-run changes nothing;
-  one transaction per invoice, a refusal stopping the import naming it.
-  The quotation's outcome and attachments are left as they are.
+  "SCORO status: …". **An issued one is an INVOICE in A/R too, and what
+  SCORO says was paid is a collection KEPT AS HISTORY** (2026-10-17, the
+  owner's call: "keep them out as history"). `writeReceivable()` in the
+  same transaction: G-CORE's invoice number, SCORO's `doc_no` as the
+  invoice no. (`siNumber`, unless another live invoice holds it), dated and
+  countered on `doc_date`, due on `doc_deadline`, the order's money and
+  credit (`invoiceCredit`), `Invoice.importedFrom` 'SCORO'; a FULLY PAID
+  one withholds what SCORO's payment left short (`total − paid_sum`, up to
+  15% of the gross) so it closes exactly, anything else the company's EWT.
+  `paid_sum` > 0 is one RECEIPT on `latest_receipt_date` (else the invoice
+  date), cleared that day, SCORO's `payment_type` as its method, no OR
+  number, `Payment.importedFrom` 'SCORO', allocated to the invoice and
+  settled through `refreshSettlement` — so the invoice reads Paid and
+  commissions see the order collected. **No collection figure counts it**:
+  `LIVE_MONEY` (`{ importedFrom: null }`, `shared/finance.ts`) is ANDed
+  into the Collections cards (whose Total collections card says how many
+  SCORO ones are kept as history), the collections report, cash flow, the
+  G-FIN dashboard and Insights' collected figures — add it to any new
+  collection or cash total. The register still lists them, "SCORO history"
+  in the OR column. A number already on file is skipped, so a re-run
+  changes nothing — except that an ISSUED order this import made before
+  invoices came across (its CREATED row says "Imported from SCORO
+  invoice") takes its invoice and collection on the next run of the same
+  file, once (an order with a live invoice is left alone). One transaction
+  per invoice, a refusal stopping the import naming it. The quotation's
+  outcome and attachments are left as they are.
 - **A SCORO group not on the list is the importer's call, else OTHERS**
   (2026-10-11, the owner's call: "let me decide or set it as OTHER"). The
   import never adds a group to the master: a file's group matched by

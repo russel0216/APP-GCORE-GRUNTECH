@@ -26,6 +26,14 @@ export const cents = (n: number) => Math.round(n * 100) / 100;
 export const D = (v: number) => new Prisma.Decimal(cents(v));
 export const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
 
+/**
+ * Money that happened in G-CORE (2026-10-17, the owner's call on SCORO's paid
+ * invoices: "keep them out as history"). A collection the SCORO invoices
+ * import recorded settles its invoice, but no collection total, cash-flow
+ * actual or dashboard figure counts it — AND this into every such query.
+ */
+export const LIVE_MONEY = { importedFrom: null } as const;
+
 // ── Tax ──────────────────────────────────────────────────────────────────────
 
 export interface TaxBreakdown {
