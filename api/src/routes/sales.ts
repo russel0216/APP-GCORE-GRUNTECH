@@ -146,6 +146,7 @@ import {
   capsParts,
 } from '../shared/quotation';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { exchangeRates, inBase, RATE_SELECT, rateOf, storedRate } from '../shared/exchangeRates';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -1169,13 +1170,17 @@ export async function quotationListSummary(
     prisma.quotation.findMany({
       where,
       select: {
+        ...RATE_SELECT,
         revisions: { select: LIST_REVISION_SELECT },
         owner: OWNER_TEAM_SELECT,
         team: TEAM_REF_SELECT,
       },
     }),
     opts.teamWhere
-      ? prisma.quotation.findMany({ where: { AND: [where, opts.teamWhere] }, select: { revisions: { select: { status: true, total: true, revision: true } } } })
+      ? prisma.quotation.findMany({
+          where: { AND: [where, opts.teamWhere] },
+          select: { ...RATE_SELECT, revisions: { select: { status: true, total: true, revision: true } } },
+        })
       : null,
   ]);
   const flat = (rows: { outcome: string; _count: { _all: number } }[]) =>
@@ -1184,10 +1189,12 @@ export async function quotationListSummary(
   tabCounts[''] = perOutcome.reduce((t, r) => t + r._count._all, 0);
 
   // The set split by the owner's team (shared/team.ts), the lists' team cards.
+  // Every figure in pesos: a quotation in another currency counts at its own
+  // rate (shared/exchangeRates.ts, 2026-10-17).
   let valueCents = 0;
   const shares: { team: TeamRef; cents: number }[] = [];
   for (const r of valued) {
-    const cents = toCents(quotationValue(r.revisions));
+    const cents = toCents(inBase(quotationValue(r.revisions), r));
     valueCents += cents;
     // The tag the SCORO import gave it, else its owner's team.
     shares.push({ team: quotationTeamOf(r), cents });
@@ -1197,9 +1204,14 @@ export async function quotationListSummary(
   // The stages, as Admin › Pipeline Stages names and colours them — sent with
   // the counts so a list reader needs no pipeline right to filter by them.
   const tabs = quotationStages(stages).map((st) => ({ value: st.key, label: st.label, color: st.color }));
-  const team = teamRows ? { count: teamRows.length, value: teamRows.reduce((t, r) => t + toCents(quotationValue(r.revisions)), 0) / 100 } : undefined;
+  const team = teamRows ? { count: teamRows.length, value: teamRows.reduce((t, r) => t + toCents(inBase(quotationValue(r.revisions), r)), 0) / 100 } : undefined;
   const margin = opts.margin
-    ? await revisionsMargin(valued.map((r) => valueRevision(r.revisions)).filter((r): r is NonNullable<typeof r> => !!r))
+    ? await revisionsMargin(
+        valued.flatMap((r) => {
+          const rev = valueRevision(r.revisions);
+          return rev ? [{ ...rev, rate: rateOf(r) }] : [];
+        }),
+      )
     : undefined;
   return { tabs, tabCounts, count: valued.length, value: valueCents / 100, teams, ...(team ? { team } : {}), ...(margin ? { margin } : {}) };
 }
@@ -1213,7 +1225,8 @@ export async function quotationListSummary(
  * Only computed where the caller may see every listed quotation's cost.
  */
 export async function revisionsMargin(
-  revisions: { id: string; discountPct: Prisma.Decimal; vatRate: Prisma.Decimal; vatInclusive: boolean }[],
+  /** `rate`: pesos per unit of the quotation's currency (1 when left out). */
+  revisions: { id: string; discountPct: Prisma.Decimal; vatRate: Prisma.Decimal; vatInclusive: boolean; rate?: number }[],
 ): Promise<{ amount: number; pct: number | null; costed: number }> {
   const sums = revisions.length
     ? await prisma.quotationItem.groupBy({
@@ -1235,8 +1248,9 @@ export async function revisionsMargin(
       vatRate: rev.vatRate,
       vatInclusive: rev.vatInclusive,
     });
-    marginCents += toCents(t.cost.totalMargin);
-    netCents += toCents(t.netOfTax);
+    const rate = rev.rate ?? 1;
+    marginCents += toCents(t.cost.totalMargin * rate);
+    netCents += toCents(t.netOfTax * rate);
     costed++;
   }
   return { amount: marginCents / 100, pct: netCents > 0 ? Math.round((marginCents / netCents) * 1000) / 10 : null, costed };
@@ -1497,6 +1511,8 @@ quotationRoutes.get(
       // A new quotation is in PHP unless the author picks another (2026-10-11).
       currency: DEFAULT_QUOTATION_CURRENCY,
       currencies: QUOTATION_CURRENCIES,
+      // Pesos per unit, as Settings keep them (2026-10-17): the editor's default rate.
+      exchangeRates: await exchangeRates(),
       // The team the quotation counts under (2026-10-12): the author's, unless picked.
       ownerTeamId: ownerTeam?.id ?? null,
       teams,
@@ -1955,6 +1971,8 @@ quotationRoutes.get(
       companyVatRate: companyRate,
       taxOptions: quotationTaxOptions(companyRate),
       currencies: QUOTATION_CURRENCIES,
+      exchangeRate: quotation.exchangeRate == null ? null : Number(quotation.exchangeRate),
+      exchangeRates: await exchangeRates(),
       approvalOptions: options,
       approvalRoutes,
       // The customer's own address — what the quotation prints unless a site is chosen (2026-10-11).
@@ -2124,6 +2142,8 @@ const quotationSchema = z.object({
   expectedClosing: z.string().optional().nullable(),
   /** PHP unless another is picked (2026-10-11); one of QUOTATION_CURRENCIES. */
   currency: z.enum(QUOTATION_CURRENCY_CODES, { message: 'Choose a currency from the list' }).optional(),
+  /** Pesos per unit of `currency` (2026-10-17); Settings' rate when left out. Ignored for PHP. */
+  exchangeRate: z.number().positive('The exchange rate must be above zero').max(1_000_000).optional().nullable(),
   // SCORO's header fields. Payment terms default to the customer's own.
   prNumber: z.string().trim().max(120).optional().nullable(),
   delivery: z.string().trim().max(500).optional().nullable(),
@@ -2262,6 +2282,7 @@ quotationRoutes.post(
           probability: body.probability ?? (lead?.probability ? lead.probability : 50),
           expectedClosing,
           currency: body.currency ?? DEFAULT_QUOTATION_CURRENCY,
+          exchangeRate: storedRate(body.currency ?? DEFAULT_QUOTATION_CURRENCY, body.exchangeRate, await exchangeRates(tx)),
           teamId,
           revisions: {
             create: [
@@ -2425,6 +2446,14 @@ quotationRoutes.patch(
         throw badRequest(`The currency cannot change — sales order ${before.salesOrders[0].number} was booked in ${before.currency}`);
       }
       data.currency = body.currency;
+    }
+    // The rate is the quotation's own: changed with its currency (Settings'
+    // rate unless one is typed), or on its own — a summary's conversion, never
+    // a figure on the quotation, so it moves at any stage.
+    const nextCurrency = (data.currency as string | undefined) ?? before.currency;
+    if (data.currency !== undefined || body.exchangeRate !== undefined) {
+      const typed = body.exchangeRate ?? (data.currency !== undefined ? null : Number(before.exchangeRate ?? 0) || null);
+      data.exchangeRate = storedRate(nextCurrency, typed, await exchangeRates());
     }
     if (body.contactId !== undefined) {
       data.contact = body.contactId ? { connect: { id: body.contactId } } : { disconnect: true };
@@ -4487,7 +4516,8 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
       : q.expectedClosing
         ? q.expectedClosing.toISOString().slice(0, 10)
         : null;
-    const value = quotationValue(q.revisions);
+    // In pesos: the forecast adds quotations (2026-10-17, shared/exchangeRates.ts).
+    const value = inBase(quotationValue(q.revisions), q);
     const stage = quotationStage(q.outcome, false, stages);
     const probability = outcomeOdds(q.outcome, q.probability);
     return {

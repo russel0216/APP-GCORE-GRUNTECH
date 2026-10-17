@@ -105,6 +105,8 @@ interface Header {
   hideTotal: boolean;
   /** Every figure's currency: PHP unless another is picked (2026-10-11). */
   currency: string;
+  /** Pesos per unit of the currency (2026-10-17) — what the lists' totals convert at. '' for PHP. */
+  exchangeRate: string;
   /** The team it counts under — the author's unless picked (2026-10-12). '' follows the author's. */
   teamId: string;
   discountPct: string;
@@ -124,6 +126,8 @@ interface Preview {
   vatRate: number;
   currency: string;
   currencies: { code: string; label: string }[];
+  /** Settings' rates, pesos per unit — a new quotation's default. */
+  exchangeRates?: Record<string, number>;
   /** The author's own team — what a new quotation counts under unless another is picked. */
   ownerTeamId: string | null;
   teams: { id: string; code: string; name: string }[];
@@ -268,6 +272,7 @@ export function QuotationEditor() {
     vatRate: 0.12,
     hideTotal: false,
     currency: 'PHP',
+    exchangeRate: '',
     teamId: '',
     discountPct: '0',
     outcome: 'OPEN',
@@ -316,6 +321,8 @@ export function QuotationEditor() {
     const listed = (editing ? quotation?.currencies : preview?.currencies) ?? [{ code: 'PHP', label: 'PHP — Philippine peso' }];
     return listed.some((c) => c.code === currency) ? listed : [...listed, { code: currency, label: currency }];
   })();
+  /** Settings' rates (pesos per unit): what a change of currency starts from. */
+  const settingsRates = (editing ? quotation?.exchangeRates : preview?.exchangeRates) ?? {};
 
   /** A change somebody made — as opposed to a prefill — marks the page dirty. */
   const set = useCallback(<K extends keyof Header>(key: K, value: Header[K]) => {
@@ -366,6 +373,7 @@ export function QuotationEditor() {
             vatRate: draft.vatRate,
             hideTotal: draft.hideTotal ?? false,
             currency: q.currency ?? 'PHP',
+            exchangeRate: q.exchangeRate ? String(q.exchangeRate) : '',
             teamId: q.team?.id ?? '',
             discountPct: String(draft.discountPct ?? 0),
             outcome: q.outcome,
@@ -528,6 +536,7 @@ export function QuotationEditor() {
           ...(src.vatRate === 0 ? { vatRate: 0 } : {}),
           hideTotal: src.hideTotal ?? false,
           currency: q.currency ?? 'PHP',
+          exchangeRate: q.exchangeRate ? String(q.exchangeRate) : '',
           discountPct: String(src.discountPct ?? 0),
         }));
         if (src.vatRate === 0) vatTouched.current = true;
@@ -870,6 +879,7 @@ export function QuotationEditor() {
           vatRate: header.vatRate,
           hideTotal: header.hideTotal,
           currency: header.currency,
+          ...(header.currency !== 'PHP' && Number(header.exchangeRate) > 0 ? { exchangeRate: Number(header.exchangeRate) } : {}),
           ...(header.teamId ? { teamId: header.teamId } : {}),
           discountPct: Number(header.discountPct || 0),
           ...(canPickAuthor && header.ownerId && header.ownerId !== myId ? { ownerId: header.ownerId } : {}),
@@ -909,6 +919,9 @@ export function QuotationEditor() {
         contactId: header.contactId || null,
         siteId: header.siteId || null,
         ...(header.currency !== quotation!.currency ? { currency: header.currency } : {}),
+        ...(header.currency !== 'PHP' && Number(header.exchangeRate) > 0 && Number(header.exchangeRate) !== (quotation!.exchangeRate ?? 0)
+          ? { exchangeRate: Number(header.exchangeRate) }
+          : {}),
         ...((header.teamId || null) !== (quotation!.team?.id ?? null) ? { teamId: header.teamId || null } : {}),
         ...(moved ? { outcome: header.outcome } : {}),
         ...(moved && header.outcome === 'LOST' ? { lostReason: header.lostReason.trim() } : {}),
@@ -1198,7 +1211,16 @@ export function QuotationEditor() {
               </select>
             </Field>
             <Field label="Currency" hint="Every figure on this quotation is in it — nothing is converted">
-              <select id="qe-currency" value={currency} onChange={(e) => set('currency', e.target.value)}>
+              <select
+                id="qe-currency"
+                value={currency}
+                onChange={(e) => {
+                  set('currency', e.target.value);
+                  // A new currency starts from the rate Settings keep for it.
+                  const r = settingsRates[e.target.value];
+                  set('exchangeRate', e.target.value === 'PHP' || !r ? '' : String(r));
+                }}
+              >
                 {currencyOptions.map((c) => (
                   <option key={c.code} value={c.code}>
                     {c.label}
@@ -1206,6 +1228,14 @@ export function QuotationEditor() {
                 ))}
               </select>
             </Field>
+            {currency !== 'PHP' && (
+              <Field
+                label={`Rate to PHP`}
+                hint={`Pesos per 1 ${currency} — the lists, the board and the forecast add this quotation at it. The quotation itself stays in ${currency}.`}
+              >
+                <NumberInput kind="decimal" min={0} value={header.exchangeRate} onChange={(e) => set('exchangeRate', e.target.value)} />
+              </Field>
+            )}
             {editing ? (
               <Field
                 label="Status"

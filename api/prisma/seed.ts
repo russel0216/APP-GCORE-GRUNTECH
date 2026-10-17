@@ -11,6 +11,7 @@ import { migrateCostingMargins } from '../src/shared/costingLegacy';
 import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGroups';
 import { seedActivityTypes } from '../src/shared/activityTypes';
 import { TEAMS, fillQuotationTeams, retireFirstIndustries } from '../src/shared/team';
+import { fillQuotationRates } from '../src/shared/exchangeRates';
 import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
 import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawingTypes';
 import { migrateFaceThreshold } from '../src/shared/faceSamples';
@@ -1791,6 +1792,13 @@ async function main() {
   {
     const filled = await fillQuotationTeams();
     if (filled) console.log(`  · Set the team of ${filled} older quotation(s) to their author's team`);
+  }
+
+  // A quotation in another currency with no rate takes Settings' rate for it
+  // (2026-10-17), once Settings has one; a rate on the quotation is never touched.
+  {
+    const rated = await fillQuotationRates();
+    if (rated) console.log(`  · Gave ${rated} foreign-currency quotation(s) the exchange rate in Company Settings`);
   }
 
   // Accounts Receivable per the owner's sample (2026-10-15): invoices issued

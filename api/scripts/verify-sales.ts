@@ -99,6 +99,8 @@ import { pipelineStages, stageProbability } from '../src/shared/pipelineStages';
 // The SCORO quotes import's spec and writer by name — what the route runs.
 import { scoroQuoteSpec, writeScoroQuotes, SUMMARY_LINE_TITLE } from '../src/routes/imports/scoroQuotes';
 import { LIVE_MONEY } from '../src/shared/finance';
+import { orderSource as commissionSource } from '../src/routes/commissions';
+import { inBase, storedRate } from '../src/shared/exchangeRates';
 import { scoroInvoiceSpec, writeScoroInvoices, scoroPoNumber } from '../src/routes/imports/scoroInvoices';
 import { bookingFor } from '../src/shared/salesOrderBooking';
 import {
@@ -2611,6 +2613,34 @@ async function main() {
         counted.join() === tagTeam.code && tagSummary.team?.count === 1 && inTagView === 1 && inOwnerView === 0,
         JSON.stringify({ counted, team: tagSummary.team, inTagView, inOwnerView }),
       );
+
+      // Foreign currency (2026-10-17): a summary converts at the quotation's own rate.
+      {
+        const usd = { currency: 'USD', exchangeRate: 56.25 };
+        check(
+          'inBase converts a figure at the quotation’s rate, to the centavo; PHP and a rateless one stay as they are',
+          inBase(1000.01, usd) === 56250.56 && inBase(1000, { currency: 'PHP', exchangeRate: null }) === 1000 && inBase(1000, { currency: 'EUR', exchangeRate: null }) === 1000,
+          `${inBase(1000.01, usd)}`,
+        );
+        check(
+          'storedRate: nothing for PHP, the one typed, else Settings’',
+          storedRate('PHP', 50, { USD: 56 }) === null &&
+            Number(storedRate('USD', 57.5, { USD: 56 })) === 57.5 &&
+            Number(storedRate('USD', null, { USD: 56 })) === 56 &&
+            storedRate('EUR', null, { USD: 56 }) === null,
+        );
+        const php = await quotationListSummary({ id: taggedQ!.id }, { id: taggedQ!.id }, tagStages);
+        await prisma.quotation.update({ where: { id: taggedQ!.id }, data: { currency: 'USD', exchangeRate: 56.25 } });
+        const asUsd = await quotationListSummary({ id: taggedQ!.id }, { id: taggedQ!.id }, tagStages, { teamWhere: quotationTeamWhere(tagTeam.id) });
+        await prisma.quotation.update({ where: { id: taggedQ!.id }, data: { currency: 'PHP', exchangeRate: null } });
+        const want = Math.round(php.value * 56.25 * 100) / 100;
+        const teamSum = asUsd.teams.reduce((t, x) => t + x.value, 0);
+        check(
+          'a USD quotation counts in the list’s Sum, team cards and My team at its rate to PHP',
+          php.value > 0 && asUsd.value === want && Math.abs(teamSum - want) < 0.005 && asUsd.team?.value === want,
+          JSON.stringify({ php: php.value, usd: asUsd.value, want, teamSum, team: asUsd.team }),
+        );
+      }
       const retagged = await importScoro([tagRow], true, { team: retagTeam.id });
       const retaggedQ = await quoteByNumber(scoroNumber(57));
       const retagTrail = await prisma.auditLog.findFirst({ where: { entityType: 'quotation', entityId: taggedQ!.id, action: 'UPDATED' }, orderBy: { at: 'desc' } });
@@ -2796,6 +2826,12 @@ async function main() {
       );
       const scoroCounted = await prisma.payment.count({ where: { id: scoroPay?.id ?? '', kind: 'RECEIPT', customerId: { not: null }, ...LIVE_MONEY } });
       check('no collection figure counts it: the live-money rule leaves it out', !!scoroPay && scoroCounted === 0);
+      const paidSource = paidOrder ? await commissionSource(paidOrder.id) : null;
+      check(
+        'a deal paid in SCORO raises no commission — commissions start with deals booked in G-CORE',
+        !!paidSource && paidSource.fully && (paidSource.problem ?? '').includes('invoiced in SCORO'),
+        paidSource?.problem ?? 'no source',
+      );
       const cancelled = await importInvoices([invRow({ doc_no: `${TAG}4899.1`, status_name: 'Cancelled', owner_name: sales.name })], true);
       const cancelledOrder = await prisma.salesOrder.findFirst({ where: { number: `${TAG}4899.1` } });
       check(

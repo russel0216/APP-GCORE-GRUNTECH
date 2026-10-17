@@ -8,6 +8,7 @@ import { audit } from '../shared/audit';
 import { financePosition, claimPayable, LIVE_MONEY } from '../shared/finance';
 import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES } from '../shared/chain';
 import { groupShares, quotationValue, valueRevision } from '../shared/pipeline';
+import { inBase, RATE_SELECT } from '../shared/exchangeRates';
 import { groupKey } from '../shared/quotationGroups';
 import { manilaDayStart } from '../shared/day';
 
@@ -126,6 +127,7 @@ insightRoutes.get(
       prisma.quotation.findMany({
         where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] } },
         select: {
+          ...RATE_SELECT,
           probability: true,
           // Every revision, because the value of a quotation is its APPROVED
           // revision and — where none has been approved yet — its latest.
@@ -179,9 +181,9 @@ insightRoutes.get(
     // honest way to total a pipeline, and the only figure anybody should plan
     // against.
     const weightedPipeline = cents(
-      pipelineOpen.reduce((sum, q) => sum + quotationValue(q.revisions) * (q.probability / 100), 0),
+      pipelineOpen.reduce((sum, q) => sum + inBase(quotationValue(q.revisions), q) * (q.probability / 100), 0),
     );
-    const openPipeline = cents(pipelineOpen.reduce((sum, q) => sum + quotationValue(q.revisions), 0));
+    const openPipeline = cents(pipelineOpen.reduce((sum, q) => sum + inBase(quotationValue(q.revisions), q), 0));
 
     const decided = quotationsWon + quotationsLost;
 
@@ -284,6 +286,7 @@ insightRoutes.get(
       prisma.quotation.findMany({
         where: { outcome: 'WON', decidedAt: { gte: startAt } },
         select: {
+          ...RATE_SELECT,
           decidedAt: true,
           revisions: { select: { total: true, status: true, revision: true } },
         },
@@ -310,7 +313,7 @@ insightRoutes.get(
     }
     for (const q of quotations) {
       const k = monthKey(q.decidedAt!);
-      if (k in won) won[k] = cents(won[k] + quotationValue(q.revisions));
+      if (k in won) won[k] = cents(won[k] + inBase(quotationValue(q.revisions), q));
     }
 
     res.json({
@@ -482,6 +485,7 @@ insightRoutes.get(
       }),
       prisma.quotation.findMany({
         select: {
+          ...RATE_SELECT,
           id: true,
           number: true,
           subject: true,
@@ -517,7 +521,8 @@ insightRoutes.get(
     ]);
 
     /** A quotation's value: its approved revision, else its latest (shared/pipeline.ts). */
-    const valueOf = (q: (typeof quotations)[number]) => quotationValue(q.revisions);
+    // In pesos: a quotation in another currency at its own rate (2026-10-17).
+    const valueOf = (q: (typeof quotations)[number]) => inBase(quotationValue(q.revisions), q);
 
     const decidedInRange = quotations.filter(
       (q) => q.decidedAt && q.decidedAt >= range.fromAt && q.decidedAt <= range.toAt,
@@ -771,7 +776,7 @@ insightRoutes.get(
       // were (it held the customer's industry until 2026-10-08).
       ['Quotation', 'Subject', 'Customer', 'Salesperson', 'Outcome', 'Probability %', 'Value', 'Weighted', 'Raised', 'Submitted', 'Decided', 'Lost reason', 'Sub-industry', 'Groups'],
       quotations.map((q) => {
-        const value = quotationValue(q.revisions);
+        const value = inBase(quotationValue(q.revisions), q);
         return [
           q.number,
           q.subject,
@@ -1264,6 +1269,7 @@ insightRoutes.get(
       prisma.quotation.findMany({
         where: { createdAt: { gte: range.fromAt, lte: range.toAt } },
         select: {
+          ...RATE_SELECT,
           outcome: true,
           owner: { select: { id: true, name: true } },
           revisions: { select: { total: true, status: true, revision: true } },
@@ -1300,7 +1306,7 @@ insightRoutes.get(
       entry.raised++;
       if (q.outcome === 'WON') {
         entry.won++;
-        entry.wonValue = cents(entry.wonValue + quotationValue(q.revisions));
+        entry.wonValue = cents(entry.wonValue + inBase(quotationValue(q.revisions), q));
       }
       sales.set(q.owner.id, entry);
     }

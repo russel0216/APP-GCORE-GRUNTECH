@@ -9,6 +9,7 @@ import { pipelineStages, stageProbability } from '../../shared/pipelineStages';
 import { audit } from '../../shared/audit';
 import { lineData, QUOTE_NUMBER, type QuotationLineInput } from '../sales';
 import type { Registered } from '../imports';
+import { exchangeRates, storedRate } from '../../shared/exchangeRates';
 
 /**
  * SCORO's "quotes export", as SCORO writes it (2026-10-11, the owner's file:
@@ -710,6 +711,7 @@ async function writeScoroQuotes(
           lostKind: record.lostKind,
           expectedClosing: record.expectedClosing,
           currency: record.currency,
+          exchangeRate: storedRate(record.currency, null, await exchangeRates(tx)),
           // The team the importer chose; none follows the owner's team.
           teamId: team?.id ?? null,
           createdAt: record.issuedAt,

@@ -29,6 +29,8 @@ import { currentUser } from '../auth/middleware';
 import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { LIST_CAP, listReference, rangeNamed, sendListPdf, filterDay } from '../shared/listPaper';
+import { EXCHANGE_RATES_KEY, exchangeRates, type RateTable } from '../shared/exchangeRates';
+import { QUOTATION_CURRENCIES } from '../shared/quotation';
 
 // ════════════════════════════════════════════════════════════════════
 //  COMPANY SETTINGS  — drives every PDF header
@@ -43,7 +45,14 @@ companyRoutes.get(
   handler(async (_req, res) => {
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
     if (!company) throw notFound('Company settings have not been seeded');
-    res.json({ ...company, vatRate: Number(company.vatRate), ewtRate: Number(company.ewtRate) });
+    res.json({
+      ...company,
+      vatRate: Number(company.vatRate),
+      ewtRate: Number(company.ewtRate),
+      // Pesos per unit of each other quotation currency (2026-10-17).
+      exchangeRates: await exchangeRates(),
+      currencies: QUOTATION_CURRENCIES.filter((c) => c.code !== 'PHP'),
+    });
   }),
 );
 
@@ -74,14 +83,31 @@ const companySchema = z.object({
     .max(6)
     .regex(/^[A-Z0-9]+$/, 'Use capital letters and numbers only')
     .optional(),
+  /**
+   * Pesos per unit of each other currency a quotation may be in (2026-10-17):
+   * the rate a NEW quotation in it starts from. A quotation keeps its own
+   * after, so changing one here restates nothing on file. Blank removes it.
+   */
+  exchangeRates: z
+    .record(z.string(), z.number().positive('An exchange rate must be above zero').max(1_000_000).nullable())
+    .optional(),
 });
 
 companyRoutes.put(
   '/',
   require_('admin.company.edit_all'),
   handler(async (req, res) => {
-    const body = parseBody(companySchema, req.body);
+    const { exchangeRates: rates, ...body } = parseBody(companySchema, req.body);
     const before = await prisma.company.findUnique({ where: { id: 'company' } });
+    const ratesBefore = await exchangeRates();
+    let ratesAfter: RateTable = ratesBefore;
+    if (rates) {
+      const known = new Set(QUOTATION_CURRENCIES.map((c) => c.code).filter((c) => c !== 'PHP'));
+      const unknown = Object.keys(rates).filter((c) => !known.has(c));
+      if (unknown.length) throw badRequest(`Not a quotation currency: ${unknown.join(', ')}`);
+      ratesAfter = {};
+      for (const [code, rate] of Object.entries(rates)) if (rate) ratesAfter[code] = rate;
+    }
 
     // A blank box means "not set", never an empty string: the PDF engine
     // prints a line only when its value is there, and "" would print a label
@@ -100,19 +126,34 @@ companyRoutes.put(
       ewtRate: body.ewtRate !== undefined ? new Prisma.Decimal(body.ewtRate) : undefined,
     };
 
-    const company = await prisma.company.update({ where: { id: 'company' }, data });
+    const company = await prisma.$transaction(async (tx) => {
+      if (rates) {
+        await tx.setting.upsert({
+          where: { key: EXCHANGE_RATES_KEY },
+          create: { key: EXCHANGE_RATES_KEY, value: ratesAfter },
+          update: { value: ratesAfter },
+        });
+      }
+      return tx.company.update({ where: { id: 'company' }, data });
+    });
     await audit(
       {
         entityType: 'company',
         entityId: 'company',
         action: 'UPDATED',
         summary: 'Updated company settings',
-        before,
-        after: company,
+        before: { ...before, exchangeRates: ratesBefore },
+        after: { ...company, exchangeRates: ratesAfter },
       },
       req,
     );
-    res.json({ ...company, vatRate: Number(company.vatRate), ewtRate: Number(company.ewtRate) });
+    res.json({
+      ...company,
+      vatRate: Number(company.vatRate),
+      ewtRate: Number(company.ewtRate),
+      exchangeRates: ratesAfter,
+      currencies: QUOTATION_CURRENCIES.filter((c) => c.code !== 'PHP'),
+    });
   }),
 );
 

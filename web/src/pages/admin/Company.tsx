@@ -24,6 +24,9 @@ interface CompanyData {
   vatRate: number;
   ewtRate: number;
   numberPrefix: string;
+  /** Pesos per unit of each other quotation currency (2026-10-17). */
+  exchangeRates: Record<string, number>;
+  currencies: { code: string; label: string }[];
 }
 
 /**
@@ -72,6 +75,7 @@ export function Company() {
         vatRate: data.vatRate,
         ewtRate: data.ewtRate,
         numberPrefix: data.numberPrefix,
+        exchangeRates: Object.fromEntries(data.currencies.map((c) => [c.code, data.exchangeRates[c.code] || null])),
       });
       setData(saved);
       toast('ok', 'Company settings saved');
@@ -306,6 +310,31 @@ export function Company() {
           <div className="alert info company-note">
             EWT is withheld at source and returns as a tax certificate, not as cash. A/R tracks
             invoiced, collected and withheld separately so withholding never reads as a late payment.
+          </div>
+        </div>
+
+        <div className="card">
+          <h3 className="card-title">Exchange rates</h3>
+          <p className="muted">
+            Pesos per one unit. A new quotation in another currency starts from its rate here and keeps
+            its own after, and every total that adds quotations — the lists, the board, the forecast,
+            Insights — converts at that rate. Changing a rate here restates nothing already on file.
+          </p>
+          <div className="grid grid-2">
+            {data.currencies.map((c) => (
+              <Field key={c.code} label={c.label} hint={data.exchangeRates[c.code] ? undefined : 'Not set — counted unconverted until it is'}>
+                <NumberInput
+                  kind="decimal"
+                  value={data.exchangeRates[c.code] ?? ''}
+                  onChange={(e) =>
+                    setData({
+                      ...data,
+                      exchangeRates: { ...data.exchangeRates, [c.code]: Number(e.target.value) || 0 },
+                    })
+                  }
+                />
+              </Field>
+            ))}
           </div>
         </div>
       </div>

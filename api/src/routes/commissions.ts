@@ -102,7 +102,7 @@ type RequestRow = Prisma.CommissionRequestGetPayload<{ include: typeof requestIn
  * the government on our account, not lost (Phase 7: invoiced ≠ collectible,
  * but EWT is never short-paid).
  */
-async function orderSource(salesOrderId: string) {
+export async function orderSource(salesOrderId: string) {
   const order = await prisma.salesOrder.findUnique({
     where: { id: salesOrderId },
     include: {
@@ -133,6 +133,7 @@ async function orderSource(salesOrderId: string) {
           ewtAmount: true,
           netCollectible: true,
           amountCollected: true,
+          importedFrom: true,
           allocations: { where: { payment: { kind: 'RECEIPT' } }, select: { amount: true, payment: { select: { id: true, number: true, orNumber: true, paymentDate: true } } } },
         },
       },
@@ -148,8 +149,13 @@ async function orderSource(salesOrderId: string) {
   const collectedOn = collections.reduce<Date | null>((d, c) => (!d || c.paymentDate > d ? c.paymentDate : d), null);
   const unpaid = order.invoices.filter((i) => i.status !== 'PAID');
   const fully = order.invoices.length > 0 && invoiced + 0.005 >= net && unpaid.length === 0;
+  // A deal invoiced in SCORO was paid — and its commission settled — there
+  // (2026-10-17, the owner's call): commissions start with deals G-CORE booked.
+  const fromScoro = order.invoices.some((i) => i.importedFrom === 'SCORO');
   const problem =
-    order.status !== 'ISSUED'
+    fromScoro
+      ? `${order.number} was invoiced in SCORO — commissions are raised on deals booked in G-CORE`
+      : order.status !== 'ISSUED'
       ? `${order.number} is ${statusLabel(order.status).toLowerCase()} — a commission is raised on an issued sales order`
       : !order.invoices.length
         ? `${order.number} has not been invoiced yet — a commission is raised once the order is fully collected`
@@ -175,7 +181,7 @@ async function orderSource(salesOrderId: string) {
       invoiced,
     },
     fully,
-    problem: fully ? null : problem,
+    problem: fully && !fromScoro ? null : problem,
     orNumbers,
     collectedOn,
     collections,
@@ -543,7 +549,7 @@ commissionRoutes.get(
       where: {
         status: 'ISSUED',
         commissionRequests: { none: { status: { in: STANDING } } },
-        invoices: { some: { status: 'PAID' }, none: { status: { in: ['DRAFT', 'ISSUED', 'PARTIALLY_PAID'] } } },
+        invoices: { some: { status: 'PAID' }, none: { OR: [{ status: { in: ['DRAFT', 'ISSUED', 'PARTIALLY_PAID'] } }, { importedFrom: 'SCORO', status: { not: 'CANCELLED' } }] } },
         ...(q ? { OR: [{ number: { contains: q, mode: 'insensitive' } }, { customer: { name: { contains: q, mode: 'insensitive' } } }] } : {}),
       },
       orderBy: { orderDate: 'desc' },

@@ -1490,6 +1490,12 @@ model Quotation {
   /// owner's call: "interchangeable, by default PHP"). One of
   /// QUOTATION_CURRENCIES; its sales orders print in it too.
   currency        String    @default("PHP")
+  /// Pesos per one unit of `currency` (2026-10-17, the owner's call): null
+  /// for a PHP quotation. Filled from Settings' rate when the quotation is
+  /// saved and changeable on it; every summary that ADDS quotations converts
+  /// through it (`inBase()` in shared/exchangeRates.ts) — nothing on the
+  /// quotation's own page or paper is converted.
+  exchangeRate    Decimal?  @db.Decimal(14, 6)
   /// The team a quotation is counted under when somebody tagged it (the
   /// SCORO import's "Tag with team", 2026-10-12); null follows the owner's
   /// team — `quotationTeamWhere()` / `quotationTeamOf()` in shared/team.ts.

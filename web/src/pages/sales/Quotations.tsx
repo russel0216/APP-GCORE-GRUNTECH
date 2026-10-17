@@ -731,6 +731,10 @@ export interface QuotationDetail {
   /** Every figure's currency — PHP unless another was picked (2026-10-11). */
   currency: string;
   currencies?: { code: string; label: string }[];
+  /** Pesos per unit of `currency` (2026-10-17): what summaries convert at. Null for PHP. */
+  exchangeRate?: number | null;
+  /** Settings' rates, the default when the currency changes. */
+  exchangeRates?: Record<string, number>;
   canEdit: boolean;
   /** Whether the server sent the cost half of each line. */
   canSeeCost: boolean;

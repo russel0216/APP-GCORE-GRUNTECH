@@ -612,9 +612,9 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries):
 foundation
-385, masters 92, sales 634, costing 200, pipeline 121, calendar 98, numbering
+385, masters 92, sales 638, costing 200, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 187, chain 340, hr 485, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 140. The
@@ -3354,11 +3354,22 @@ SCORO.
   quotation's currency (`order.quotation.currency`). The PATCH refuses a
   change once a revision is APPROVED or PENDING_APPROVAL, or a live sales
   order booked it. The SCORO import takes the file's `currency` when it is
-  listed (blank is PHP). **The open item**: summaries that ADD quotations —
-  the list's Sum and team cards, the board, the forecast, Sales Analytics —
-  still add figures as they stand, so a USD quotation counts as that many
-  pesos there; the printed lists name a foreign currency beside its figure.
-  Converting needs exchange rates the owner has not decided on.
+  listed (blank is PHP). **Summaries that ADD quotations convert to PHP**
+  (2026-10-17): each foreign quotation stores its own rate,
+  `Quotation.exchangeRate` (pesos per unit, null for PHP), typed in the
+  editor's "Rate to PHP" box or taken at save from Company Settings ›
+  Exchange rates (one `quotation.exchangeRates` Setting, `exchangeRates()`
+  / `storedRate()` in `shared/exchangeRates.ts`; the SCORO import takes it
+  too, and the seed's `fillQuotationRates()` gives a rateless one Settings'
+  rate on every deploy). A rate changed in Settings restates nothing on
+  file. `inBase(value, q)` (with `RATE_SELECT` in the query) converts —
+  the quotation list's Sum, team cards, My team and margin
+  (`revisionsMargin`'s `rate`), the sales order list's booked value, team
+  cards and margin (at its quotation's rate), the board's cards, the
+  Forecast and its breakdowns, and Insights' pipeline, won and Sales
+  Analytics figures and CSV. A foreign quotation with no rate yet counts
+  unconverted. The quotation's page, paper, rows and sales orders stay in
+  its own currency; the printed lists still name it beside a row's figure.
 - **`hideTotal` ("Hide total") only changes the paper**: the PDF prints the
   lines and prices without the totals block; the stored totals are computed
   as always, and a new revision copies the flag.
@@ -5832,6 +5843,10 @@ The owner's "Commission Request System" spec: G-FIN › Money out ›
   it withheld at source (withheld is paid to the government on our account,
   never short-paid). One STANDING request per order (anything but
   CANCELLED, PAID included), decided under a lock on the order's row.
+  **Never on a deal invoiced in SCORO** (2026-10-17): an order with a live
+  invoice `importedFrom` 'SCORO' is refused ("… was invoiced in SCORO —
+  commissions are raised on deals booked in G-CORE") and left off the
+  eligible orders — its collection is history, not G-CORE's money.
 - **One arithmetic: `shared/commission.ts`** (exact in BigInt centavos,
   half away from zero; `web/src/lib/commission.ts` its copy, pinned equal on
   300 random requests by verify-finance): actual margin = collected − VAT −
