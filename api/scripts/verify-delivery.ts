@@ -24,7 +24,7 @@ import { curveTicks } from '../../web/src/lib/sCurve';
 import '../src/routes/budgetRequests';
 // …and the Request for Approval's (2026-10-13), whose settle is called directly too.
 import { settlePlanApproval } from '../src/routes/planApprovals';
-import '../src/routes/progress';
+import { projectVatRate } from '../src/routes/progress';
 import { deleteAttachmentsOf } from '../src/shared/attachments';
 import {
   flat,
@@ -994,6 +994,31 @@ async function main() {
     );
     check('a plain project answers serviceContractId null', created.body.serviceContractId === null);
 
+    // (a1) Progress billing takes the VAT the work was SOLD at (2026-10-17):
+    //      the quotation revision's rate, else the costing's, else the
+    //      company's — a zero-rated (PEZA/BOI, export) quotation is never
+    //      billed 12%.
+    if (quotedJobId) {
+      await prisma.quotationRevision.update({ where: { id: quotation.revisions[0].id }, data: { vatRate: d(0) } });
+      await prisma.costing.update({ where: { id: qCosting.id }, data: { vatRate: d(0.12) } });
+      const fromQuote = await projectVatRate(quotedJobId, 0.12);
+      check(
+        'a project won from a zero-rated quotation is billed at 0%, read from its quotation revision',
+        fromQuote.rate === 0 && fromQuote.source === 'quotation',
+        JSON.stringify(fromQuote),
+      );
+      await prisma.costing.update({ where: { id: costing.id }, data: { vatRate: d(0) } });
+      const fromCosting = await projectVatRate(job.id, 0.12);
+      check(
+        'a project with no approved quotation linked is billed at its costing\'s snapshotted rate',
+        fromCosting.rate === 0 && fromCosting.source === 'costing',
+        JSON.stringify(fromCosting),
+      );
+      await prisma.costing.update({ where: { id: costing.id }, data: { vatRate: costing.vatRate } });
+      const noJobRate = await projectVatRate('no-such-job', 0.12);
+      check('with neither, the company rate', noJobRate.rate === 0.12 && noJobRate.source === 'company', JSON.stringify(noJobRate));
+    }
+
     // (a2) The project's dates tally with its scope (2026-10-13, the owner's
     //      call): a costing that starts on Monday 2 November with a 30-day
     //      plan finishes on Saturday 5 December — five Mon–Sat weeks, the
@@ -1297,6 +1322,13 @@ async function main() {
     const billerToken = signToken(biller.id, biller.email);
     const approverToken = signToken(progTm.id, progTm.email);
     const raised = await http(billerToken, 'POST', '/billings', { progressReportId: r2.id });
+    const raisedRow = await prisma.auditLog.findFirst({ where: { entityType: 'progress_billing', entityId: raised.body.id ?? '', action: 'CREATED' } });
+    check(
+      'a billing keeps the rate it was raised at, and its trail says where the rate came from',
+      Number(raised.body.vatRate) === num(costing.vatRate) &&
+        (raisedRow?.after as { vatFrom?: string } | null)?.vatFrom === 'costing',
+      `${raised.body.vatRate} ${JSON.stringify(raisedRow?.after)}`,
+    );
     const draftBill = await printed(billerToken, `/billings/${raised.body.id}/pdf`);
     const draftBillText = draftBill.text;
     check(

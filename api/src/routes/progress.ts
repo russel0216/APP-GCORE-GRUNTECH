@@ -1228,6 +1228,30 @@ billingRoutes.get(
 );
 
 /**
+ * The VAT rate a project is billed at: the rate of the quotation revision it
+ * was won from (snapshotted on the revision — 12%, 8%, 6% or 0%), else its
+ * costing's own snapshotted rate (a project built before its quotation was
+ * approved links no revision), else the company's rate. Read once, when a
+ * billing is raised; the billing then keeps it, as an invoice keeps the
+ * billing's.
+ */
+export async function projectVatRate(
+  jobId: string,
+  companyRate: number,
+): Promise<{ rate: number; source: 'quotation' | 'costing' | 'company' }> {
+  const job = await prisma.job.findUnique({
+    where: { id: jobId },
+    select: {
+      quotationRevision: { select: { vatRate: true } },
+      costing: { select: { vatRate: true } },
+    },
+  });
+  if (job?.quotationRevision) return { rate: num(job.quotationRevision.vatRate), source: 'quotation' };
+  if (job?.costing) return { rate: num(job.costing.vatRate), source: 'costing' };
+  return { rate: companyRate, source: 'company' };
+}
+
+/**
  * Raising a billing from an approved progress report.
  *
  * The amount is computed here, from the schedule of values and what has already
@@ -1268,7 +1292,10 @@ billingRoutes.post(
     }
 
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
-    const vatRate = num(company?.vatRate ?? d(0.12));
+    // The VAT the work was SOLD at: a project won from a zero-rated (PEZA/BOI,
+    // export) or government quotation is billed at that quotation's rate, never
+    // the company's 12% (`projectVatRate`). EWT stays the company's rule.
+    const { rate: vatRate, source: vatSource } = await projectVatRate(report.jobId, num(company?.vatRate ?? d(0.12)));
     const ewtRate = num(company?.ewtRate ?? d(0.02));
 
     const lines = report.lines.map((l) => {
@@ -1338,6 +1365,7 @@ billingRoutes.post(
         entityId: billing.id,
         action: 'CREATED',
         summary: `Raised ${billing.number} from ${report.number} — ${formatMoney(gross)}`,
+        after: { vatRate, vatFrom: vatSource },
         actorId: me.id,
       },
       req,

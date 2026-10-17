@@ -612,10 +612,10 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT):
 foundation
 385, masters 92, sales 628, costing 200, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 183, chain 340, hr 485, plantilla 123, meetings
+79, partners 120, delivery 187, chain 340, hr 485, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 140. The
 verify scripts share
@@ -3303,9 +3303,14 @@ SCORO.
   checked by `checkVatRate()`
   before anything is written so a refused rate burns no number; a draft may
   keep the rate it was snapshotted with. A new revision copies it. **Progress
-  billing still takes the company rate** (`routes/progress.ts`), so a job won
-  from a zero-rated quotation is billed VAT — an open item: billing should
-  read the rate of the revision the job came from.
+  billing takes the rate the work was sold at** (2026-10-17, closing the
+  open item): `projectVatRate()` in `routes/progress.ts` reads the project's
+  quotation revision's `vatRate`, else its costing's snapshotted one (a
+  project built before its quotation was approved links no revision), else
+  the company's — so a job won from a zero-rated quotation is billed 0%,
+  never 12%. The billing keeps the rate (its CREATED audit row's
+  `after.vatFrom` names the source) and the invoice keeps the billing's;
+  EWT stays the company's rule.
 - **The discount is to six decimals** (2026-10-08): `discountPct` is
   `Decimal(9,6)` on the revision and the sales order;
   `quotationTotals` and its mirror return it to six. **SCORO's discount
