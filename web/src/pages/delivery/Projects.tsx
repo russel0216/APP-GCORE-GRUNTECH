@@ -19,6 +19,7 @@ import { Meter as ProgressBar } from '../../components/charts';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { PersonSelect, usePeople } from '../../components/People';
 import { isDayKey, parseDay, todayLocal, workingDayKey } from '../../lib/day';
+import { useHolidayKeys } from '../../lib/holidays';
 
 export const JOB_STATUSES = [
   { value: 'PLANNING', label: 'Planning' },
@@ -297,6 +298,7 @@ function NewJobModal({
   onCreated: (id: string) => void;
 }) {
   const toast = useToast();
+  const holidayKeys = useHolidayKeys();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [costings, setCostings] = useState<CostingOption[]>([]);
@@ -577,8 +579,8 @@ function NewJobModal({
           label="Start date"
           hint={
             chosen && chosen.planDays > 0 && isDayKey(form.startDate)
-              ? `The scope of work's ${chosen.planDays} working days (Mon–Sat) finish on ${formatDate(parseDay(workingDayKey(form.startDate, chosen.planDays)))} — the target end`
-              : 'The scope of work is placed on working days (Mon–Sat) from here'
+              ? `The scope of work's ${chosen.planDays} working days (Mon–Sat, holidays out) finish on ${formatDate(parseDay(workingDayKey(form.startDate, chosen.planDays, holidayKeys)))} — the target end`
+              : 'The scope of work is placed on working days (Mon–Sat, holidays out) from here'
           }
         >
           <input

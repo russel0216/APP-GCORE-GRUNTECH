@@ -152,25 +152,30 @@ export function toLocalInput(d: Date): string {
 /** Sunday is the one day off. */
 export const isWorkingDow = (dow: number): boolean => dow !== 0;
 
-/** Working days (Mon–Sat) from one day key to another, both counted; 0 when `to` is before `from`. */
-export function workingDaysBetween(from: string, to: string): number {
+/** Holidays the page was sent (`GET /reference/holidays`), as day keys; none skips Sundays alone. */
+export type HolidayKeys = ReadonlySet<string>;
+const NO_HOLIDAYS: HolidayKeys = new Set();
+const isWorking = (d: Date, holidays: HolidayKeys) => isWorkingDow(d.getDay()) && !holidays.has(dayKeyOf(d));
+
+/** Working days (Mon–Sat, holidays out) from one day key to another, both counted; 0 when `to` is before `from`. */
+export function workingDaysBetween(from: string, to: string, holidays: HolidayKeys = NO_HOLIDAYS): number {
   if (!isDayKey(from) || !isDayKey(to)) return 0;
   const d = parseDay(from);
   const end = parseDay(to).getTime();
   let days = 0;
   while (d.getTime() <= end) {
-    if (isWorkingDow(d.getDay())) days++;
+    if (isWorking(d, holidays)) days++;
     d.setDate(d.getDate() + 1);
   }
   return days;
 }
 
-/** The day key of working day `day` (Mon–Sat, day 1 = the first) counted from `start`. */
-export function workingDayKey(start: string, day: number): string {
+/** The day key of working day `day` (Mon–Sat, holidays out, day 1 = the first) counted from `start`. */
+export function workingDayKey(start: string, day: number, holidays: HolidayKeys = NO_HOLIDAYS): string {
   const d = parseDay(start);
   let left = Math.max(1, Math.floor(day));
   for (;;) {
-    if (isWorkingDow(d.getDay())) {
+    if (isWorking(d, holidays)) {
       left--;
       if (left === 0) return dayKeyOf(d);
     }

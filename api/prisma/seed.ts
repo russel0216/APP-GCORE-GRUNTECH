@@ -12,6 +12,7 @@ import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGro
 import { seedActivityTypes } from '../src/shared/activityTypes';
 import { TEAMS, fillQuotationTeams, retireFirstIndustries } from '../src/shared/team';
 import { fillQuotationRates } from '../src/shared/exchangeRates';
+import { prefillHolidays } from '../src/shared/holidays';
 import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
 import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawingTypes';
 import { migrateFaceThreshold } from '../src/shared/faceSamples';
@@ -1799,6 +1800,13 @@ async function main() {
   {
     const rated = await fillQuotationRates();
     if (rated) console.log(`  · Gave ${rated} foreign-currency quotation(s) the exchange rate in Company Settings`);
+  }
+
+  // The Philippine holidays for this year and next (2026-10-17), once per
+  // year, so a holiday an administrator removed is never put back.
+  {
+    const years = await prefillHolidays();
+    if (years.length) console.log(`  · Added the Philippine holidays for ${years.join(' and ')}`);
   }
 
   // Accounts Receivable per the owner's sample (2026-10-15): invoices issued

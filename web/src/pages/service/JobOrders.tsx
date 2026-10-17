@@ -22,7 +22,8 @@ import {
   useToast,
   type Tone,
 } from '../../components/ui';
-import { todayLocal, workingDaysBetween } from '../../lib/day';
+import { todayLocal, workingDaysBetween, type HolidayKeys } from '../../lib/day';
+import { useHolidayKeys } from '../../lib/holidays';
 import { NewReportModal, reportPermission } from './Reports';
 import { VisitBadge } from './Schedule';
 import { NumberInput } from '../../components/NumberInput';
@@ -137,8 +138,8 @@ interface JobOrderDetailRow extends JobOrderRow {
   route: { step: string; names: string[] }[];
 }
 
-/** Working days (Mon–Sat) from one day to another, both counted; the API's `workingDaysBetween`. */
-const workingDays = (from: string, to: string): number => (from && to ? workingDaysBetween(from, to) : 0);
+/** Working days (Mon–Sat, holidays out) from one day to another, both counted; the API's `workingDaysBetween`. */
+const workingDays = (from: string, to: string, holidays: HolidayKeys): number => (from && to ? workingDaysBetween(from, to, holidays) : 0);
 
 const daysLabel = (n: number) => `${n} working day${n === 1 ? '' : 's'}`;
 
@@ -403,6 +404,7 @@ export function JobOrderModal({
   onSaved: (id: string) => void;
 }) {
   const toast = useToast();
+  const holidayKeys = useHolidayKeys();
   const { can } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -513,7 +515,7 @@ export function JobOrderModal({
     setForm((f) => ({ ...f, contactId: id, contactNumber: f.contactNumber || c?.phone || '' }));
   }
 
-  const duration = workingDays(form.targetStart, form.targetFinish);
+  const duration = workingDays(form.targetStart, form.targetFinish, holidayKeys);
   const finishBeforeStart = !!form.targetStart && !!form.targetFinish && form.targetFinish < form.targetStart;
   const salesOrdersOffered = form.quotationId ? options.salesOrders.filter((o) => o.quotationId === form.quotationId) : options.salesOrders;
   const linkedQuotation = options.quotations.find((q) => q.id === form.quotationId);
@@ -787,7 +789,7 @@ export function JobOrderModal({
         </Field>
         <Field
           label="Target finish"
-          hint={finishBeforeStart ? 'Before the start' : form.targetStart && form.targetFinish ? `${daysLabel(duration)} (Mon–Sat)` : undefined}
+          hint={finishBeforeStart ? 'Before the start' : form.targetStart && form.targetFinish ? `${daysLabel(duration)} (Mon–Sat, holidays out)` : undefined}
         >
           <input type="date" value={form.targetFinish} min={form.targetStart || undefined} onChange={(e) => set('targetFinish', e.target.value)} />
         </Field>

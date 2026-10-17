@@ -359,15 +359,17 @@ async function main() {
   console.log('\nFixtures');
 
   const hrRole = await prisma.role.findUnique({ where: { key: 'hr' } });
-  const execRole = await prisma.role.findUnique({ where: { key: 'executive' } });
-  if (!hrRole || !execRole) throw new Error('The seeded hr/executive roles are missing — run the seed first');
+  // The second step is the CEO / President since the organisation chart of
+  // 2026-10-17 ("Management approval" corrected in place to the ceo role).
+  const execRole = await prisma.role.findUnique({ where: { key: 'ceo' } });
+  if (!hrRole || !execRole) throw new Error('The seeded hr/ceo roles are missing — run the seed first');
   const workflow = await prisma.approvalWorkflow.findFirst({
     where: { documentType: 'evaluation', isActive: true },
     include: { steps: { orderBy: { sequence: 'asc' }, include: { role: true } } },
   });
   check(
-    'the seeded evaluation workflow is HR, then executive',
-    !!workflow && workflow.steps.map((s) => (s.approverType === 'ROLE' ? s.role?.key : s.approverType.toLowerCase())).join('>') === 'hr>executive',
+    'the seeded evaluation workflow is HR, then the CEO / President',
+    !!workflow && workflow.steps.map((s) => (s.approverType === 'ROLE' ? s.role?.key : s.approverType.toLowerCase())).join('>') === 'hr>ceo',
     workflow?.steps.map((s) => s.approverType).join('>'),
   );
 

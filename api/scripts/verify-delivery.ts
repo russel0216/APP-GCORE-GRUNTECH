@@ -8,6 +8,7 @@
  * billed. All three are easy to get subtly wrong and invisible when they are.
  */
 
+import { holidaysAside, holidaysBack, putHolidays } from './lib/holidays';
 import bcrypt from 'bcryptjs';
 import { PDFDocument } from 'pdf-lib';
 import { Prisma } from '@prisma/client';
@@ -63,6 +64,8 @@ const ROLE_PREFIX = 'zzdeliv-';
 const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  // The holidays this run set aside (scripts/lib/holidays.ts) go back first.
+  await holidaysBack();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
@@ -199,6 +202,9 @@ async function makeUser(name: string, email: string, roleKeys: string[]) {
 async function main() {
   console.log('\nG-CORE delivery verification\n');
   await cleanup();
+  // The dates below were chosen for a Mon–Sat week: the stored holidays
+  // are set aside for the run, and the holiday checks bring their own.
+  await holidaysAside();
 
   const pm = await makeUser('Verify PM', 'pm@verifyd.local', ['project_manager']);
   const exec = await makeUser('Verify Exec', 'exec@verifyd.local', ['executive']);

@@ -29,6 +29,7 @@
  *     contract's schedule must never delete a call-out.
  */
 
+import { holidaysAside, holidaysBack, putHolidays } from './lib/holidays';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -113,6 +114,8 @@ const TAG = 'ZZAM';
 const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  // The holidays this run set aside (scripts/lib/holidays.ts) go back first.
+  await holidaysBack();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
@@ -186,6 +189,9 @@ async function settle(approvalId: string, outcome: 'APPROVED' | 'REJECTED' = 'AP
 async function main() {
   console.log('\nG-CORE aftermarket verification\n');
   await cleanup();
+  // The dates below were chosen for a Mon–Sat week: the stored holidays
+  // are set aside for the run, and the holiday checks bring their own.
+  await holidaysAside();
 
   // ══ The PM schedule ══════════════════════════════════════════════════════
   console.log('The PM schedule');

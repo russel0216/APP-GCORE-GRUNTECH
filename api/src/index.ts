@@ -112,6 +112,8 @@ import {
 } from './routes/academy';
 import { salesOrderRoutes } from './routes/salesOrders';
 import { startActivityReminders } from './shared/activities';
+import { loadHolidays } from './shared/holidays';
+import { holidayRoutes } from './routes/holidays';
 
 const app = express();
 
@@ -144,6 +146,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/roles', roleRoutes);
 app.use('/api/departments', departmentRoutes);
 app.use('/api/company', companyRoutes);
+app.use('/api/holidays', holidayRoutes);
 app.use('/api/numbering', numberingRoutes);
 app.use('/api/workflows', workflowRoutes);
 app.use('/api/audit', auditRoutes);
@@ -257,6 +260,11 @@ if (fs.existsSync(webDist)) {
 app.use(errorMiddleware);
 
 async function start() {
+  // Holidays are days off for every working-day count (shared/holidays.ts):
+  // loaded before the first request, then every five minutes, so a list
+  // saved by another process (the seed) reaches this one.
+  await loadHolidays().catch((err) => console.error('Loading holidays failed:', err));
+  setInterval(() => void loadHolidays().catch(() => undefined), 5 * 60_000).unref();
   await connectDb();
   app.listen(env.port, () => {
     console.log(`G-CORE API listening on http://localhost:${env.port}`);

@@ -157,6 +157,8 @@ function settingLink(id: string): string {
   if (id.startsWith('pdfTemplate.')) return '/admin/pdf-templates';
   if (id.startsWith('pipeline.')) return '/admin/pipeline-stages';
   if (id.startsWith('helpTickets.')) return '/admin/help-tickets';
+  // The holidays are kept on Company Settings (2026-10-17).
+  if (id.startsWith('calendar.')) return '/admin/company';
   return '/admin/settings';
 }
 

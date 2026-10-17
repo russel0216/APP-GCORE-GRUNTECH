@@ -4,6 +4,7 @@ import { addDays, daysBetween, mondayOf, parseDay, todayLocal } from '../../lib/
 import { Empty, ErrorBox, Field, ModalFoot, StatusBadge, formatDate, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
+import { useHolidayKeys } from '../../lib/holidays';
 
 /**
  * The Scope of Work as a Gantt chart (2026-10-06) — the old gasiontech
@@ -78,6 +79,8 @@ export function ProjectGantt({
   canEdit: boolean;
   onChanged: () => Promise<void>;
 }) {
+  // Holidays are days off like Sunday (2026-10-17), shaded the same.
+  const holidayKeys = useHolidayKeys();
   const toast = useToast();
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -256,7 +259,7 @@ export function ProjectGantt({
                       return (
                         <div
                           key={d.key}
-                          className={`gantt-day${dow === 0 ? ' is-off' : ''}${d.key === today ? ' is-today' : ''}`}
+                          className={`gantt-day${dow === 0 || holidayKeys.has(d.key) ? ' is-off' : ''}${d.key === today ? ' is-today' : ''}`}
                           title={formatDate(d.key)}
                         >
                           {d.date.getDate()}
