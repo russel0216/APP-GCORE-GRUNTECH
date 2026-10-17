@@ -277,7 +277,9 @@ receivingRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const amount = Number(req.query.amount ?? 0) || 0;
-    const route = (await pickWorkflow(RECEIVING_DOC, amount, { requesterId: me.id })) ? await routeBrief(RECEIVING_DOC, amount, me.id) : null;
+    // Goods of an importation order (no VAT) go to the Purchasing Manager (Importation).
+    const importation = String(req.query.importation ?? '') === '1';
+    const route = (await pickWorkflow(RECEIVING_DOC, amount, { requesterId: me.id })) ? await routeBrief(RECEIVING_DOC, amount, me.id, null, { importation }) : null;
     res.json({ route });
   }),
 );
@@ -347,6 +349,8 @@ receivingRoutes.get(
       job: order.job,
       warehouse: order.warehouse,
       receivable: order.status === 'ISSUED' || order.status === 'PARTIALLY_RECEIVED',
+      // An importation order (no VAT): its goods go to the Purchasing Manager (Importation).
+      importation: num(order.vatRate) === 0,
       lines: order.items.map((i) => {
         const waiting = pending.get(i.id) ?? 0;
         return {
@@ -505,6 +509,9 @@ function lineFacts(i: LoadedReceiving['items'][number]) {
   };
 }
 
+/** Goods of an importation order (no VAT, 2026-10-16) — the Purchasing Manager (Importation) signs them (the owner's chart of 2026-10-17). */
+const isImportation = (r: { order: { vatRate: Prisma.Decimal } | null }) => !!r.order && num(r.order.vatRate) === 0;
+
 /** Who may move a report on — submit, modify, pull back, cancel: whoever received it, or edit_all. */
 function mayHandleReceiving(me: ResolvedUser, r: { receivedById: string }) {
   return r.receivedById === me.id || can(me, 'gchain.receiving.edit_all');
@@ -529,7 +536,7 @@ async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
     needsApproval: draft ? !!route : null,
     canWithdraw: receiving.status === 'PENDING_APPROVAL' && handler_,
     canCancel: (draft || receiving.status === 'PENDING_APPROVAL') && handler_,
-    approvalRoute: draft && route ? await routeBrief(RECEIVING_DOC, value, receiving.receivedById) : null,
+    approvalRoute: draft && route ? await routeBrief(RECEIVING_DOC, value, receiving.receivedById, null, { importation: isImportation(receiving) }) : null,
     order: receiving.order ? { ...receiving.order, total: num(receiving.order.total) } : null,
     items: receiving.items.map((i) => ({
       id: i.id,
@@ -1096,6 +1103,9 @@ receivingRoutes.post(
         amount: value,
         link: `/g-chain/incoming/${receiving.id}`,
         requesterId: receiving.receivedById,
+        // Goods of an importation order (no VAT) go to the Purchasing Manager
+        // (Importation), the owner's chart of 2026-10-17.
+        importation: isImportation(receiving),
       });
     } catch (err) {
       await prisma.receiving.updateMany({ where: { id: receiving.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
@@ -1306,7 +1316,7 @@ receivingRoutes.get(
     const view = await presentReceiving(receiving, me);
     const slots =
       receiving.status === 'DRAFT'
-        ? await approvalSlots(RECEIVING_DOC, receiving.id, { amount: view.value, requesterId: receiving.receivedById })
+        ? await approvalSlots(RECEIVING_DOC, receiving.id, { amount: view.value, requesterId: receiving.receivedById, importation: isImportation(receiving) })
         : await approvalSlots(RECEIVING_DOC, receiving.id);
     const signatories: Signatory[] = [
       { role: 'Prepared by', name: receiving.receivedBy.name, ...(await contactOf(receiving.receivedById)), at: preparedAt(slots) ?? receiving.createdAt },

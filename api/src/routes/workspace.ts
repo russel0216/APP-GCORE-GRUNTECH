@@ -8,7 +8,7 @@ import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, notFound, badRequest, forbidden } from '../http/kit';
 import { authenticate, currentUser } from '../auth/middleware';
 import { globalSearch, searchProviders, canSearch } from '../shared/search';
-import { act, contactOf, deciderFor, historyFor, mayReopen, pendingFor, reopenApproved } from '../shared/approvals';
+import { act, contactOf, deciderFor, followUp, historyFor, mayReopen, pendingFor, reopenApproved } from '../shared/approvals';
 import { audit } from '../shared/audit';
 import {
   upload,
@@ -123,6 +123,9 @@ approvalRoutes.get(
         amount: r.amount ? Number(r.amount) : null,
         // Who raised it, so the approver decides on more than a subject line.
         requester: { name: r.requester.name },
+        // The requester followed it up to the viewer (2026-10-17), who is
+        // otherwise never queued: the approver's manager, standing in.
+        followedUpBy: r.followedUpBy ?? null,
       })),
     );
   }),
@@ -171,7 +174,14 @@ approvalRoutes.get(
             const by = await prisma.user.findUnique({ where: { id: r.reopenedById }, select: { name: true } });
             return { ...r, canAct: false, reopenedBy: by?.name ?? null };
           }
-          if (r.status !== 'PENDING' || r.requesterId === me.id) return { ...r, canAct: false };
+          // `canFollowUp`: the requester, on a route with stand-ins, may send
+          // the open step to the approver's manager (2026-10-17).
+          if (r.status !== 'PENDING' || r.requesterId === me.id) {
+            const standIns = r.status === 'PENDING' && r.workflowId
+              ? (await prisma.approvalWorkflow.findUnique({ where: { id: r.workflowId }, select: { standIns: true } }))?.standIns
+              : false;
+            return { ...r, canAct: false, canFollowUp: r.status === 'PENDING' && r.requesterId === me.id && !!standIns };
+          }
           const step = await prisma.approvalStep.findFirst({
             where: { workflowId: r.workflowId ?? '', sequence: r.currentSequence },
           });
@@ -183,6 +193,19 @@ approvalRoutes.get(
         }),
       ),
     );
+  }),
+);
+
+/**
+ * The requester's follow-up to the approver's manager (2026-10-17): the
+ * engine's `followUp`, every rule in it.
+ */
+approvalRoutes.post(
+  '/:id/follow-up',
+  handler(async (req, res) => {
+    const body = parseBody(z.object({ note: z.string().trim().max(1000).optional() }), req.body);
+    const row = await followUp(req.params.id, currentUser(req).id, body.note);
+    res.json({ ok: true, id: row.id, to: row.to, step: row.step });
   }),
 );
 
@@ -803,6 +826,9 @@ myWorkRoutes.get(
         link: a.link,
         createdAt: a.createdAt,
         requester: { name: a.requester.name },
+        // Followed up to the viewer by the requester (2026-10-17): the
+        // approver's manager, who is otherwise never queued.
+        followedUpBy: a.followedUpBy ?? null,
       })),
       myPendingSubmissions: submitted.map((s) => ({
         id: s.id,

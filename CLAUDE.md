@@ -614,7 +614,7 @@ and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list):
 foundation
-380, masters 92, sales 617, costing 200, pipeline 121, calendar 98, numbering
+385, masters 92, sales 617, costing 200, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 183, chain 340, hr 485, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 140. The
@@ -3565,6 +3565,98 @@ SCORO.
 
 The owner's routing sheets ("APPROVAL ROUTER — SALES ORDER AND QUOTATION", then
 `APPROVAL_ROUTE.xlsx` for six documents).
+
+### The organisation chart of 2026-10-17 — one approver, a hidden stand-in, the requester's follow-up
+
+The owner's `organizational_chart_executive_3.pptx` and `ROLE.xlsx`
+(`docs/notes/P-org-chart-2026-10-17.md`, with his eight answers), and his
+rule: "on approval their manager should not appear as OR … if the
+purchasing officer is absent, the purchasing manager can approve, but don't
+show them initially; the requestor can raise a follow-up to the purchasing
+manager."
+
+- **The chart is data, applied ONCE**: `ORG_CHART` in `shared/orgChart.ts`
+  (sixty people — name, the live login's email, team or department, the
+  teams they back-support, who they report to, their titles) and
+  `applyOrgChart()`, run by the seed and marked `seed.orgChart20261017`:
+  every login's roles RESET to its titles' (`TITLE_ROLES`, plus Employee,
+  plus Supervisor for anyone with a direct report), "Reports to", team
+  (`Employee.industryId`; department staff have none), department (the five
+  chart departments SCF, ACC, MKT, DSN, CCD seeded beside the old eight),
+  position and Supports teams (Dina SIT, Karen KAT, Mylin UIT, Joy GIB,
+  Wenchie HIT), audited per person; a person with no login becomes an
+  EMPLOYEE record (position, team or department) for the owner to invite
+  from the record — a "Reports to" waits until the login exists (the line
+  lives on `User`). A login not on the chart (Jhon Russel Balicas, Julian
+  Gasiong, the administrator) is untouched. `npx tsx scripts/org-chart.ts`
+  is the dry run (`--apply`, `--force`). The four ambiguous lines are the
+  first named (Reagan and Rey → Rolando; HIT's crew → Reagan; Arnel →
+  Renielle). `grantSupervisorRole()` (every deploy, offered once per login
+  in `seed.supervisorOffered`) gives Supervisor to anyone with a report.
+- **Titles → roles**: CEO / President `ceo`+`executive`; Team Leader,
+  Technical Manager, Sales Manager, Service Manager their roles (the same
+  four men on HIT, UIT, GIB, SIT; KAT has a Team Leader only); Sales
+  Engineer = `industry_specialist` (RENAMED "Sales Engineer"); Project
+  Engineer; **Project Lead** (new `project_lead`: the project to read,
+  progress reports, requisitions, drawing and budget requests of their
+  own); Welder, Electrician, Project Support and Service Technician are
+  POSITIONS with the `employee` role alone; Purchasing Officer =
+  `procurement` (RENAMED "Purchasing Officer") + `back_support` — the three
+  officers ARE their teams' Back Support; Finance Officer, Finance Clerk
+  and Collection all `finance` (RENAMED "Finance Officer"; any of the four
+  is "Checking", the owner's call); Warehouse Officer `warehouse` +
+  `warehouse_supervisor`; Accounting Manager / Officer / Clerk
+  `accounting`; Marketing Manager / Assistant new `marketing` (the sales
+  side to read, leads, calendar, no approvals); HR Officer `hr` (one
+  holder); CAD Supervisor / Operator `designer_lead` / `designer` (RENAMED
+  "CAD Supervisor" / "CAD Operator"); Cost Controller.
+- **Purchasing Manager, Local and Importation**: `purchasing_manager`
+  (Dina) and the new `purchasing_manager_import` (Carter).
+  `IMPORTATION_ROLES` in `shared/approvals.ts` is the twin map; a ROLE
+  step naming the local role goes to the twin's holders when the request
+  is an importation (`ApprovalRequest.importation`, set at submit from the
+  document: a purchase order or incoming report with no VAT —
+  `SubmitInput.importation`), and to the local manager when nobody holds
+  the twin. `holdsStep` reads the same, so Carter's own importation order
+  is signed at submit. Never both: one name on the paper and the panel.
+- **No "A or B" on any step**: the ORs came from roles handed out
+  wholesale (fourteen HR holders, Dina and Karen with twenty roles each),
+  never from the stand-in, which `namedApprovers` never lists. After the
+  reset every step names one person; `service_manager` joined
+  `OWN_TEAM_ROLES` (the service reports go to the requester's team's
+  Service Manager), and "Management approval" on the commissioning
+  report, the supplier bill ≥ ₱50,000 and the evaluation is the CEO /
+  President (`ceo`), corrected in place through `previously` — which now
+  takes several earlier shapes (`SeedStep[][]`).
+- **"Always the Team Leader"** (the owner's call): a SUPERVISOR step
+  naming a `TEAM_FIRST_ROLES` role (`team_leader`) goes to that role's
+  holders on the requester's own TEAM before their "Reports to"
+  (`teamFirstHolders`) — a welder reports to a Project Lead and an engineer
+  to the Technical Manager, and their documents still go to the team's
+  leader; a requester with no team (department staff) and a team with no
+  leader keep the "Reports to"; a step naming no role (leave, overtime)
+  stays the direct superior's.
+- **The follow-up** (`followUp()` in `shared/approvals.ts`; `POST
+  /approvals/:id/follow-up { note? }`; "Follow up" in the Approval panel
+  for the requester while PENDING on a route with `standIns`, asked in the
+  confirm bar with an optional note): the "Reports to" of EVERY approver of
+  the open step is told (bell `approval.follow_up` and email where SMTP is
+  set) and so is the approver; an `ApprovalFollowUp` row (request, step,
+  by, `toIds`, note) and one SUBMITTED audit row; once per step per 24
+  hours (`FOLLOW_UP_EVERY_MS`, a 409 saying when); a 400 naming the
+  approver when nobody is above them, or on a route without stand-ins.
+  From then on the manager is QUEUED (`pendingFor` adds a request followed
+  up to them, `followedUpBy` on My Work and the launcher: "Followed up to
+  you by …") and may decide it — `deciderFor` always could; the request
+  itself never moves. `GET /approvals/history` carries `followUps` (to, by
+  name) and `canFollowUp`; the route preview, the paper's "Pending" names
+  and the step's approver list still name the approver alone.
+  verify-foundation pins the queue before and after, the two bells, the
+  once-a-day rule, the stand-in's decision after, the refusal without
+  stand-ins, the team-first Team Leader and the importation twin.
+- **Assign in Admin › Users what the chart leaves open**: a login for each
+  employee record made (invite from the record), and their "Reports to"
+  once it exists.
 
 ### The routing sheet of 2026-10-13 — six documents, one signature per person
 

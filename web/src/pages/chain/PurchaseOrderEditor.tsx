@@ -316,12 +316,12 @@ export function PurchaseOrderEditor() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       api
-        .get<{ route: Route | null }>(`/purchase-orders/route${qs({ amount: String(money.total), orderId: id ?? '' })}`)
+        .get<{ route: Route | null }>(`/purchase-orders/route${qs({ amount: String(money.total), orderId: id ?? '', importation: header.applyVat ? '' : '1' })}`)
         .then((r) => setRoute(r.route))
         .catch(() => setRoute(null));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [money.total, id]);
+  }, [money.total, id, header.applyVat]);
 
   const dirty = saved !== null && snapshot(header, lines) !== saved;
   useUnsavedChanges(dirty && !busy);

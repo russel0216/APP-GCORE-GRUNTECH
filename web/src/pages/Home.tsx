@@ -41,6 +41,7 @@ interface MyWork {
     link: string | null;
     createdAt: string;
     requester?: { name: string };
+    followedUpBy?: string | null;
   }[];
   myPendingSubmissions: {
     id: string;
@@ -160,6 +161,7 @@ export function Home() {
                         <span className="faint mono">
                           {a.documentNumber ?? a.documentType}
                           {a.requester?.name ? ` · ${a.requester.name}` : ''} · {relativeTime(a.createdAt)}
+                          {a.followedUpBy ? ` · followed up to you by ${a.followedUpBy}` : ''}
                         </span>
                       </span>
                       {a.amount !== null && <span className="mono">{formatMoney(a.amount)}</span>}

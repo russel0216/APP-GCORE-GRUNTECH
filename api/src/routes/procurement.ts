@@ -2881,7 +2881,9 @@ purchaseOrderRoutes.get(
     const orderId = req.query.orderId ? String(req.query.orderId) : null;
     const po = orderId ? await prisma.purchaseOrder.findUnique({ where: { id: orderId }, select: { createdById: true } }) : null;
     if (orderId && !po) throw notFound('Purchase order not found');
-    res.json({ route: await routeBrief('purchase_order', amount, po?.createdById ?? me.id) });
+    // An importation (the page's Apply VAT off) goes to the Purchasing Manager (Importation).
+    const importation = String(req.query.importation ?? '') === '1';
+    res.json({ route: await routeBrief('purchase_order', amount, po?.createdById ?? me.id, null, { importation }) });
   }),
 );
 
@@ -3436,6 +3438,9 @@ purchaseOrderRoutes.post(
         subject: `${po.supplier.name}${po.job ? ` — ${po.job.number}` : ''}`,
         amount: num(po.total),
         link: `/g-chain/purchase-orders/${po.id}`,
+        // An importation (no VAT, 2026-10-16) goes to the Purchasing Manager
+        // (Importation), the owner's chart of 2026-10-17.
+        importation: num(po.vatRate) === 0,
         // Filed in the BUYER's name whoever presses Submit, as a purchase
         // request is in its requester's: the self-approval rule then keeps
         // the person who raised the order off its route, and the route the
@@ -3824,7 +3829,7 @@ purchaseOrderRoutes.get(
     const slots = await approvalSlots(
       'purchase_order',
       po.id,
-      po.status === 'DRAFT' ? { amount: view.total, requesterId: po.createdById } : undefined,
+      po.status === 'DRAFT' ? { amount: view.total, requesterId: po.createdById, importation: num(po.vatRate) === 0 } : undefined,
     );
     const signatories: Signatory[] = [
       // A Purchasing Manager's own order: step 1 signed at submit, one timestamp.

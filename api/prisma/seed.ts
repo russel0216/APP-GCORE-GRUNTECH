@@ -21,6 +21,7 @@ import { fillBillTerms } from '../src/shared/payables';
 import { renumberProgressDocs } from '../src/shared/progressReport';
 import { repairTypedStockReceipts } from '../src/shared/typedItems';
 import { backfillLoginMirrors, linkAdminEmployees } from '../src/shared/personMirror';
+import { CHART_DEPARTMENTS, applyOrgChart, grantSupervisorRole } from '../src/shared/orgChart';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -288,7 +289,7 @@ const ROLES: RoleSeed[] = [
     // "Approve" on CAD J.O. means; both roles do the work on what is assigned
     // to them: progress, revisions, priority. Assign both in Admin › Users.
     key: 'designer_lead',
-    name: 'Designer Lead',
+    name: 'CAD Supervisor',
     description: 'Runs the design team’s queue: assigns CAD job orders, sets priority, submits and closes drawings',
     grants: [['gops', 'cad_job_orders']],
     only: [
@@ -306,7 +307,7 @@ const ROLES: RoleSeed[] = [
   },
   {
     key: 'designer',
-    name: 'Designer Support',
+    name: 'CAD Operator',
     description: 'Draws what the CAD job orders ask for: takes a request, reports progress, submits revisions',
     only: [
       'gops.dashboard.view_all',
@@ -433,8 +434,10 @@ const ROLES: RoleSeed[] = [
     ],
   },
   {
+    // "Purchasing Officer" on the owner's chart (2026-10-17): the three
+    // officers are their teams' Back Support too (that role beside this one).
     key: 'procurement',
-    name: 'Procurement',
+    name: 'Purchasing Officer',
     description: 'Canvasses suppliers and issues purchase orders — does not receive and does not pay',
     grants: [
       ['gchain', 'rfq'],
@@ -481,8 +484,10 @@ const ROLES: RoleSeed[] = [
     ],
   },
   {
+    // "Finance Officer" on the owner's chart (2026-10-17) — the Finance
+    // Officer, the clerks and Collection hold it: any of them is "Checking".
     key: 'finance',
-    name: 'Finance',
+    name: 'Finance Officer',
     description: 'Receivables, payables, expenses and cash — approves disbursements',
     grants: [
       ['gfin', 'ar'],
@@ -703,8 +708,9 @@ const ROLES: RoleSeed[] = [
       ],
     },
     {
+      // "Sales Engineer" on the owner's chart (2026-10-17); the key stays.
       key: 'industry_specialist',
-      name: 'Industry Specialist',
+      name: 'Sales Engineer',
       description: 'Prepares quotations, sales orders, purchase requisitions and budget requests — the team leader approves first',
       grants: like('sales').grants,
       only: [
@@ -759,6 +765,67 @@ const ROLES: RoleSeed[] = [
   );
 }
 
+// The owner's organisation chart (2026-10-17, organizational_chart_executive_3
+// and ROLE.xlsx): three roles the chart names that G-CORE had no word for.
+{
+  const like = (key: string) => ROLES.find((r) => r.key === key)!;
+  ROLES.push(
+    {
+      // Carter signs the importation orders, Dina the local ones: a step
+      // naming Purchasing Manager goes to this twin on an order with no VAT
+      // (IMPORTATION_ROLES in shared/approvals.ts).
+      key: 'purchasing_manager_import',
+      name: 'Purchasing Manager (Importation)',
+      description: 'Approves importation purchase orders and their incoming reports (no VAT) — the local Purchasing Manager signs the rest',
+      grants: like('purchasing_manager').grants,
+      only: like('purchasing_manager').only,
+    },
+    {
+      // Between the Project Engineer and the crew: reads the project, reports
+      // its progress, asks for materials, drawings and project cash.
+      key: 'project_lead',
+      name: 'Project Lead',
+      description: 'Leads the crew on site — reads the project, reports progress, raises purchase requests, drawing requests and budget requests of their own',
+      only: [
+        'gops.projects.view_all',
+        'gops.budget_monitoring.view_all',
+        'gops.customers.view_all',
+        'gchain.inventory.view_all',
+        ...VIEW_OWN_SELF('gops', 'progress_billing'),
+        ...VIEW_OWN_SELF('gops', 'purchase_requests'),
+        ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
+        ...VIEW_OWN_SELF('gops', 'budget_requests'),
+        ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
+        ...VIEW_OWN_SELF('gfin', 'expenses'),
+        ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+        ...VIEW_OWN_SELF('ghr', 'meetings'),
+      ],
+    },
+    {
+      // Marketing Manager and Assistant: the sales side to read, leads of
+      // their own, the calendar. Nothing to approve.
+      key: 'marketing',
+      name: 'Marketing',
+      description: 'Reads the pipeline and the customers, records leads and activities — no approvals',
+      grants: [['gops', 'calendar']],
+      only: [
+        'gops.dashboard.view_all',
+        'gops.pipeline.view_all',
+        'gops.forecast.view_all',
+        ...VIEW_OWN_SELF('gops', 'leads'),
+        'gops.leads.view_all',
+        'gops.customers.view_all',
+        'gops.customers.create',
+        'gops.quotations.view_all',
+        'gops.partners.view_all',
+        ...VIEW_OWN_SELF('gfin', 'expenses'),
+        ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+        ...VIEW_OWN_SELF('ghr', 'meetings'),
+      ],
+    },
+  );
+}
+
 /**
  * Default approval workflows.
  *
@@ -788,7 +855,7 @@ interface WorkflowSeed {
    * applied to it in place — step rows updated by sequence, never deleted, so
    * past decisions keep their step and an open request stays at its step.
    */
-  previously?: SeedStep[];
+  previously?: SeedStep[] | SeedStep[][];
 }
 
 interface SeedStep {
@@ -1101,7 +1168,13 @@ const WORKFLOWS: WorkflowSeed[] = [
     // commissioning report, which starts a warranty running — management too.
     documentType: 'commissioning_report',
     name: 'Commissioning report — service manager then management',
+    // The Service Manager is the preparer's team's (OWN_TEAM_ROLES) and
+    // management is the CEO / President (2026-10-17, the owner's chart).
     steps: [
+      { sequence: 1, name: 'Service Manager', approverType: 'ROLE', roleKey: 'service_manager' },
+      { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+    previously: [
       { sequence: 1, name: 'Service Manager', approverType: 'ROLE', roleKey: 'service_manager' },
       { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
     ],
@@ -1135,11 +1208,18 @@ const WORKFLOWS: WorkflowSeed[] = [
     minAmount: 50_000,
     steps: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
-      { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+      { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
+    // Two earlier shapes: as first seeded, and as corrected on 2026-10-15.
     previously: [
-      { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
-      { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+      [
+        { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
+        { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+      ],
+      [
+        { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+        { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+      ],
     ],
   },
   {
@@ -1236,6 +1316,10 @@ const WORKFLOWS: WorkflowSeed[] = [
     documentType: 'evaluation',
     name: 'Employee evaluation — HR then management',
     steps: [
+      { sequence: 1, name: 'HR review', approverType: 'HR' },
+      { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+    previously: [
       { sequence: 1, name: 'HR review', approverType: 'HR' },
       { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
     ],
@@ -1510,7 +1594,8 @@ async function main() {
             a[i].userId === null &&
             a[i].roleId === (s.roleKey ? (roleByKey.get(s.roleKey) ?? null) : null),
         );
-      if (same(current, seed.previously) && seed.steps.length === current.length) {
+      const priors: SeedStep[][] = Array.isArray(seed.previously[0]) ? (seed.previously as SeedStep[][]) : [seed.previously as SeedStep[]];
+      if (priors.some((prior) => same(current, prior)) && seed.steps.length === current.length) {
         await prisma.$transaction(
           seed.steps.map((s, i) =>
             prisma.approvalStep.update({
@@ -1760,6 +1845,8 @@ async function main() {
     { code: 'WHS', name: 'Warehouse' },
     { code: 'FIN', name: 'Finance & Accounting' },
     { code: 'HR', name: 'Human Resources' },
+    // The owner's chart of 2026-10-17: five departments beside the teams.
+    ...CHART_DEPARTMENTS,
   ]) {
     await prisma.department.upsert({ where: { code: d.code }, create: d, update: {} });
   }
@@ -1854,6 +1941,24 @@ async function main() {
   }
   console.log(`  ✓ Teams (${TEAMS.length})`);
   const retiredIndustries = await retireFirstIndustries();
+
+  // The organisation chart of 2026-10-17, applied ONCE (shared/orgChart.ts),
+  // after the teams and the departments it names: every login's roles,
+  // Reports to, team and Supports teams as the chart has them, and an
+  // employee record for everyone on it with no login. Then Supervisor for
+  // anyone with a direct report, offered once each. Never fatal: a chart
+  // that cannot be applied is said, and the rest of the seed runs.
+  try {
+    const org = await applyOrgChart();
+    if (org.applied) {
+      console.log(`  · Applied the organisation chart: ${org.people.length} people changed, ${org.unmatched.length} employee record(s) created`);
+      for (const p of org.people) console.log(`      ${p.name}: ${p.changes.join('; ')}`);
+    }
+    const bosses = await grantSupervisorRole();
+    if (bosses) console.log(`  · Gave Supervisor to ${bosses} login(s) with direct reports`);
+  } catch (err) {
+    console.error('  ✗ The organisation chart could not be applied:', err instanceof Error ? err.message : err);
+  }
   if (retiredIndustries) {
     console.log(`  ✓ Retired the first industries (${retiredIndustries.retired} switched off, ${retiredIndustries.moved} record(s) moved to their teams)`);
   }

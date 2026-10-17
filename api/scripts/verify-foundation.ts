@@ -44,6 +44,9 @@ import {
   historyFor,
   cancelOpenRequest,
   approversForStep,
+  followUp,
+  holdsStep,
+  OWN_TEAM_ROLES,
   supportersFor,
   leadersFor,
   deciderFor,
@@ -899,6 +902,69 @@ async function main() {
     'not yours',
   );
   await expectRejection('nobody stands in for their own document', () => act({ requestId: plainReq.id, userId: signer.id, action: 'APPROVED' }), 'raised yourself');
+
+  // ── The organisation chart of 2026-10-17 ──────────────────────────────
+  console.log('\nThe follow-up, the team’s Team Leader first, the importation twin');
+  // The requester follows an unanswered step up to the approver's manager:
+  // the manager is never queued before, is queued after, is told, and the
+  // approver too; once a day per step; only on a route with stand-ins.
+  const fuReq = await submitForApproval({ documentType: `${TAG}_sign_doc`, documentId: `${TAG}-followup`, subject: `${SUBJECT} follow-up`, requesterId: reviewer.id });
+  // The reviewer holds step 1 and signs it at submit; the request waits on Approver B.
+  check('before a follow-up the approver’s manager is not queued', fuReq.currentSequence === 2 && !(await pendingFor(bossOf.id)).some((r) => r.id === fuReq.id));
+  await expectRejection('only the requester follows up', () => followUp(fuReq.id, signer.id, 'please'), 'raised it');
+  const sent = await followUp(fuReq.id, reviewer.id, 'Approver B is on leave');
+  check('the follow-up goes to the approver’s "Reports to"', sent.to.map((t) => t.id).join() === bossOf.id && sent.step === 'Approver', JSON.stringify(sent.to));
+  const queued = (await pendingFor(bossOf.id)).find((r) => r.id === fuReq.id);
+  check('after it the manager is queued, told who followed up', queued?.followedUpBy === reviewer.name, JSON.stringify(queued?.followedUpBy));
+  check(
+    'the manager and the approver are both told',
+    (await prisma.notification.count({ where: { userId: { in: [bossOf.id, approverB.id] }, type: 'approval.follow_up', title: { contains: SUBJECT } } })) === 2,
+  );
+  await expectRejection('once a day per step', () => followUp(fuReq.id, reviewer.id), 'Already followed up');
+  const fuHistory = await historyFor(`${TAG}_sign_doc`, `${TAG}-followup`);
+  check(
+    'the history carries the follow-up by name, and the approver list still names only the approver',
+    fuHistory[0]?.followUps?.[0]?.to?.[0]?.name === bossOf.name && fuHistory[0]?.followUps?.[0]?.note === 'Approver B is on leave' && !JSON.stringify(fuHistory[0]?.workflow?.steps ?? []).includes(bossOf.id),
+  );
+  await act({ requestId: fuReq.id, userId: bossOf.id, action: 'APPROVED' });
+  check('the manager’s decision settles it, standing in', (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: fuReq.id } })).status === 'APPROVED');
+  const noStandIn = await submitForApproval({ documentType: `${TAG}_nosign_doc`, documentId: `${TAG}-followup-none`, subject: `${SUBJECT} no stand-in`, requesterId: reviewer.id });
+  await expectRejection('no follow-up on a route that lets nobody stand in', () => followUp(noStandIn.id, reviewer.id), 'nobody stand in');
+
+  // "Always the Team Leader" (2026-10-17): a Team Leader SUPERVISOR step goes
+  // to the team's holders before the requester's "Reports to"; a requester
+  // with no team, or a team with no leader, keeps the "Reports to".
+  const tlRole = await prisma.role.findUniqueOrThrow({ where: { key: 'team_leader' } });
+  await prisma.userRole.create({ data: { userId: leadKat.id, roleId: tlRole.id } });
+  const katCrew = await makeUser('Verify KAT Crew', 'katcrew@verify.local', [], katSeller.id);
+  await prisma.employee.create({ data: { employeeNo: `${TAG}EMP9`, firstName: 'Verify', lastName: 'KAT Crew', userId: katCrew.id, industryId: kat.id } });
+  const tlStep = { approverType: 'SUPERVISOR', roleId: tlRole.id, userId: null, alsoRoleIds: [] } as unknown as ApprovalStep;
+  check('a Team Leader step goes to the team’s Team Leader, not to the crew member’s own superior', (await approversForStep(tlStep, katCrew.id)).join() === leadKat.id, JSON.stringify(await approversForStep(tlStep, katCrew.id)));
+  check('a requester with no team keeps their "Reports to"', (await approversForStep(tlStep, approverB.id)).join() === bossOf.id);
+  const plainStep = { approverType: 'SUPERVISOR', roleId: null, userId: null, alsoRoleIds: [] } as unknown as ApprovalStep;
+  check('a step naming no role (leave, overtime) stays the direct superior’s', (await approversForStep(plainStep, katCrew.id)).join() === katSeller.id);
+  await prisma.userRole.deleteMany({ where: { roleId: tlRole.id, userId: leadKat.id } });
+
+  // The importation twin: a Purchasing Manager step on an importation goes
+  // to the Purchasing Manager (Importation) where somebody holds it.
+  const pmLocalRole = await prisma.role.findUniqueOrThrow({ where: { key: 'purchasing_manager' } });
+  const pmImport = await prisma.role.findUniqueOrThrow({ where: { key: 'purchasing_manager_import' } });
+  const local = await makeUser('Verify PM Local', 'pmlocal@verify.local', ['purchasing_manager']);
+  const importer = await makeUser('Verify PM Import', 'pmimport@verify.local', ['purchasing_manager_import']);
+  const pmStep = { approverType: 'ROLE', roleId: pmLocalRole.id, userId: null, alsoRoleIds: [] } as unknown as ApprovalStep;
+  const localOnes = await approversForStep(pmStep, katSeller.id, prisma, { importation: false });
+  const importOnes = await approversForStep(pmStep, katSeller.id, prisma, { importation: true });
+  check('a Purchasing Manager step goes to the local manager, never the importation one', localOnes.includes(local.id) && !localOnes.includes(importer.id));
+  check('on an importation it goes to the Purchasing Manager (Importation), never the local one', importOnes.includes(importer.id) && !importOnes.includes(local.id), JSON.stringify(importOnes));
+  check('the importation manager holds the step on an importation, the local one does not', (await holdsStep(pmStep, importer.id, prisma, { importation: true })) && !(await holdsStep(pmStep, local.id, prisma, { importation: true })));
+  await prisma.userRole.deleteMany({ where: { userId: importer.id, roleId: pmImport.id } });
+  // Only where the install has no real Importation manager (a check never depends on what the database holds).
+  const otherImporters = await prisma.userRole.count({ where: { roleId: pmImport.id, user: { isActive: true } } });
+  check(
+    otherImporters ? 'with nobody holding the twin, the local manager decides the importation too (skipped: somebody holds it here)' : 'with nobody holding the twin, the local manager decides the importation too',
+    otherImporters > 0 || (await approversForStep(pmStep, katSeller.id, prisma, { importation: true })).includes(local.id),
+  );
+  check('Service Manager is team-scoped like the Technical Manager', OWN_TEAM_ROLES.includes('service_manager') && OWN_TEAM_ROLES.includes('technical_manager'));
 
   // Every step the preparer's own: approved on submit, settled once.
   await prisma.approvalWorkflow.create({

@@ -161,6 +161,10 @@ interface Request {
   canAct?: boolean;
   /** The viewer may pull this APPROVED document back to draft (2026-10-16). */
   canReopen?: boolean;
+  /** The requester may follow the open step up to the approver's manager (2026-10-17). */
+  canFollowUp?: boolean;
+  /** The follow-ups sent: the step, who sent it, to whom, when, the note. */
+  followUps?: { id: string; sequence: number; createdAt: string; note: string | null; by: { id: string; name: string }; to: { id: string; name: string }[] }[];
   /** Set when an approved document was pulled back to draft. */
   reopenedAt?: string | null;
   reopenReason?: string | null;
@@ -381,6 +385,46 @@ export function DocumentApproval({
           </div>
         </div>
       )}
+
+      {/* The requester's follow-up (2026-10-17, the owner's call): the
+          approver's manager is never shown or queued until the requester asks
+          — then they are told and may decide the step in the approver's place. */}
+      {request.status === 'PENDING' && request.canFollowUp && (
+        <div className="approval-decide" role="group" aria-label="Follow up">
+          <p className="panel-blurb">
+            Is the approver away? Follow up to their manager, who can decide this step in their place.
+          </p>
+          <div className="row approval-decide-buttons">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() =>
+                confirm.ask({
+                  title: 'Follow up to the approver’s manager?',
+                  body: 'Their manager is told and can approve, return or reject this step in their place. Once a day per step.',
+                  confirmLabel: 'Follow up',
+                  reason: 'optional',
+                  reasonLabel: 'Note (optional) — why it is urgent, or what you know',
+                  onConfirm: async (note) => {
+                    await api.post(`/approvals/${request.id}/follow-up`, { note: note.trim() || undefined });
+                    window.location.reload();
+                  },
+                })
+              }
+            >
+              Follow up
+            </button>
+          </div>
+        </div>
+      )}
+
+      {(request.followUps ?? []).map((f) => (
+        <div key={f.id} className="alert info">
+          <strong>{f.by.name}</strong> followed up {workflowSteps.find((w) => w.sequence === f.sequence)?.name ?? `step ${f.sequence}`} to{' '}
+          {f.to.map((t) => t.name).join(' and ')} on {formatDateTime(new Date(f.createdAt))}
+          {f.note ? ` — “${f.note}”` : ''}
+        </div>
+      ))}
 
       {/* Pull back to draft after approval (2026-10-16, the owner's call):
           the engine's one path, the module's own refusals shown here. */}

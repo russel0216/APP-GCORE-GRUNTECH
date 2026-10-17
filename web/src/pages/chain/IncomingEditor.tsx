@@ -60,6 +60,8 @@ interface OrderData {
   supplier: { id: string; name: string };
   job: { id: string; number: string; name: string } | null;
   warehouse: { id: string; name: string } | null;
+  /** An importation order (no VAT): the route goes to the Purchasing Manager (Importation). */
+  importation?: boolean;
   lines: OrderLine[];
 }
 interface ItemOption {
@@ -232,12 +234,12 @@ export function IncomingEditor() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       api
-        .get<{ route: PreviewRoute | null }>(`/receivings/route${qs({ amount: String(value) })}`)
+        .get<{ route: PreviewRoute | null }>(`/receivings/route${qs({ amount: String(value), importation: mode === 'order' && order?.importation ? '1' : '' })}`)
         .then((r) => setRoute(r.route))
         .catch(() => setRoute(null));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [value]);
+  }, [value, mode, order?.importation]);
 
   const snapshot = () =>
     mode === 'order'

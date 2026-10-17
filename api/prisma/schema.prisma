@@ -57,6 +57,7 @@ model User {
   auditLogs              AuditLog[]
   approvalsRaised        ApprovalRequest[] @relation("Requester")
   approvalActions        ApprovalAction[]  @relation("ApprovalActor")
+  followUpsRaised ApprovalFollowUp[] @relation("FollowUpBy")
   stoodInFor             ApprovalAction[]  @relation("StoodInFor")
   workflowStepsTargeting ApprovalStep[]    @relation("StepUser")
 
@@ -490,8 +491,14 @@ model ApprovalRequest {
   reopenedAt      DateTime?
   reopenedById    String?
   reopenReason    String?
+  /// An importation (2026-10-17, the owner's chart: Purchasing Manager Local
+  /// and Importation are two people): a Purchasing Manager step on such a
+  /// document goes to the Importation manager. Set at submit from the
+  /// document (a purchase order or incoming report with no VAT).
+  importation     Boolean        @default(false)
 
   actions   ApprovalAction[]
+  followUps ApprovalFollowUp[]
   createdAt DateTime         @default(now())
   closedAt  DateTime?
 
@@ -525,6 +532,25 @@ model ApprovalAction {
   /// (their direct report). `approverId` is who really acted.
   onBehalfOfId String?
   onBehalfOf   User?              @relation("StoodInFor", fields: [onBehalfOfId], references: [id], onDelete: SetNull)
+
+  @@index([requestId])
+}
+
+/// The requester's follow-up to the managers of an absent approver
+/// (2026-10-17, the owner's call): a stand-in is never listed or queued
+/// until the requester asks — then the managers named here are told and see
+/// the request in their queue. One row per follow-up; the step it was at.
+model ApprovalFollowUp {
+  id        String          @id @default(cuid())
+  requestId String
+  request   ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  sequence  Int
+  byId      String
+  by        User            @relation("FollowUpBy", fields: [byId], references: [id], onDelete: Cascade)
+  /// The managers told — the "Reports to" of each approver of the step.
+  toIds     String[]
+  note      String?
+  createdAt DateTime        @default(now())
 
   @@index([requestId])
 }

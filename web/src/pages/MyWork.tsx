@@ -24,6 +24,8 @@ interface ApprovalRequest {
   status: string;
   createdAt: string;
   requester?: { name: string };
+  /** Followed up to the viewer by the requester: they stand in for the approver (2026-10-17). */
+  followedUpBy?: string | null;
   actions?: { action: string; comment: string | null; actedAt: string; approver?: { name: string } }[];
 }
 
@@ -270,7 +272,12 @@ export function MyWork() {
                         {r.documentNumber ?? r.documentType}
                       </Link>
                     </td>
-                    <td>{r.subject}</td>
+                    <td>
+                      {r.subject}
+                      {r.followedUpBy && (
+                        <div className="faint">Followed up to you by {r.followedUpBy} — the approver has not acted; you may decide it in their place</div>
+                      )}
+                    </td>
                     <td>{r.requester?.name ?? <span className="faint">—</span>}</td>
                     <td className="right mono">{r.amount === null ? '—' : formatMoney(r.amount)}</td>
                     <td className="muted">{relativeTime(r.createdAt)}</td>
