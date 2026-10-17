@@ -612,9 +612,9 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders):
 foundation
-385, masters 92, sales 617, costing 200, pipeline 121, calendar 98, numbering
+385, masters 92, sales 628, costing 200, pipeline 121, calendar 98, numbering
 79, partners 120, delivery 183, chain 340, hr 485, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 140. The
@@ -3033,8 +3033,8 @@ never installed on the server), and new work starts in G-CORE. SCORO's
 quotations come across the same way, as REAL quotations (2026-10-10: "later
 I will upload data of SCORO Quotation, it will act as part of the G-CORE;
 also the invoices from SCORO which will become a Sales Order in G-CORE"):
-the quotes export is built (below, 2026-10-11); the quote-lines export and
-the invoices, which become sales orders, are still to come.
+the quotes export with its lines is built (below, 2026-10-11), and so is
+the invoices export, as sales orders (below, 2026-10-17).
 `docs/notes/{S,C,Q,R}-*.md` carry the detail of what was patterned on
 SCORO.
 
@@ -3153,7 +3153,37 @@ SCORO.
   verify-sales builds both files as SCORO writes them (UTF-16, tabs) and
   drives the spec and writer by name — the lines file's totals come out as
   SCORO's own; verify-masters pins the decoding, the delimiter and the
-  grouping. SCORO's invoices, which become sales orders, are still to come.
+  grouping.
+- **SCORO's invoices arrive as SALES ORDERS** (2026-10-17, the owner's
+  invoices export): entity `scoro_invoices` (`routes/imports/
+  scoroInvoices.ts`, `gops.sales_orders.create`; the sales order list's ⋯
+  "Import from SCORO…"), the same file shape as the quotes export (UTF-16,
+  tabs, SCORO's headers, one row per line grouped by `doc_no`, the helpers
+  exported from `scoroQuotes.ts`). **Import the quotes first**: an
+  invoice's `quote_no` must be a quotation in G-CORE — none is an error
+  naming it — and the order is booked ON that quotation (its customer,
+  currency, team), never a customer of its own. The order takes SCORO's
+  `doc_no` as its number (`setCounter('sales_order', …, { mode: 'raise'
+  })`, which moves nothing for a number outside the pattern), `doc_date`,
+  the PO from `c_purchaseordernumber` ("Purchase Order No.:" stripped,
+  `scoroPoNumber`), the terms (`doc_deadline` − `doc_date`), the payment
+  method in words, `doc_description` as its comment, the contact on the
+  quotation's customer, and the owner the login `owner_name` names, else
+  the quotation's owner (SCORO's name kept on the trail). Lines as the
+  quotes import writes them (group by the importer's choice, else OTHERS;
+  a doer with `is_internal` 1 as the provider), the VAT from the first
+  line's `line_vat_percent`, totals through `recalcOrder`, and the lines
+  linked to the quotation's (`linkOrderBookings()` in
+  `shared/salesOrderBooking.ts` — title, unit and price, while the line
+  still has quantity left, so two half-lots both book one line). **Status**:
+  Draft → DRAFT; Unpaid, Sent, Overdue, Partially paid, Paid → ISSUED with
+  no approval (issued in SCORO; a COMPLETED audit row in the owner's name
+  is the paper's "Issued by"); Cancelled, Void, Credited → CANCELLED with
+  "SCORO status: …". **Nothing reaches G-FIN**: `paid_sum` and the payer
+  stay on the CREATED audit row; invoices and collections are raised in
+  G-CORE. A number already on file is skipped, so a re-run changes nothing;
+  one transaction per invoice, a refusal stopping the import naming it.
+  The quotation's outcome and attachments are left as they are.
 - **A SCORO group not on the list is the importer's call, else OTHERS**
   (2026-10-11, the owner's call: "let me decide or set it as OTHER"). The
   import never adds a group to the master: a file's group matched by

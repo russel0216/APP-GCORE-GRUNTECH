@@ -98,6 +98,8 @@ import { decodeCsv, parseCsv, runImport, toCsv } from '../src/shared/csv';
 import { pipelineStages, stageProbability } from '../src/shared/pipelineStages';
 // The SCORO quotes import's spec and writer by name — what the route runs.
 import { scoroQuoteSpec, writeScoroQuotes, SUMMARY_LINE_TITLE } from '../src/routes/imports/scoroQuotes';
+import { scoroInvoiceSpec, writeScoroInvoices, scoroPoNumber } from '../src/routes/imports/scoroInvoices';
+import { bookingFor } from '../src/shared/salesOrderBooking';
 import {
   flat,
   pdfText,
@@ -2632,6 +2634,116 @@ async function main() {
       );
       deletedKeys.delete(groupKey(`${TAG} Doomed`));
       await prisma.$transaction((tx) => setDeletedGroupKeys(tx, deletedKeys));
+
+      // ── SCORO invoices → sales orders (2026-10-17, the owner's file) ─────
+      console.log('\nSCORO invoices as sales orders');
+      // The quotation the invoice books, from the quotes import: one VFD and
+      // one lot of JOB ORDER, as the owner's quote 0022605106 had them.
+      const invQuoteNo = scoroNumber(60);
+      await importScoro(
+        [
+          pricedLine({ id: '9008', doc_no: invQuoteNo, quote_name: `${TAG} VFD supply and installation`, status_name: 'Confirmed', product_name: 'SCHNEIDER ELECTRIC, VARIABLE FREQUENCY DRIVE, ATV320U75N4C', amount: '1', unit: 'unit', price: '84000.000000', line_cost: '37256.8300', line_id: '9101', total_sum: '94000.00', total_vat: '11280.00' }),
+          pricedLine({ id: '9008', doc_no: invQuoteNo, quote_name: `${TAG} VFD supply and installation`, status_name: 'Confirmed', product_name: 'JOB ORDER', amount: '1', unit: 'lot', price: '10000.000000', line_cost: '10600.0000', line_id: '9102', supplier_name: '', line_comment: 'VFD installation and programming', total_sum: '94000.00', total_vat: '11280.00' }),
+        ],
+        true,
+      );
+      const invQuote = await quoteByNumber(invQuoteNo);
+      // The owner's invoices export, its columns as SCORO wrote them.
+      const INV_HEADERS = [
+        'id', 'doc_no', 'reference_no', 'doc_date', 'owner_name', 'doc_deadline', 'payer', 'payer_id', 'contact_person', 'quote_no',
+        'quote_id', 'doc_description', 'payment_type', 'currency', 'status_name', 'discount', 'total_sum', 'total_vat',
+        'total_sum_vat', 'total_cost', 'paid_sum', 'c_purchaseordernumber', 'line_id', 'product_group', 'product_code',
+        'product_name', 'amount', 'unit', 'price', 'line_sum', 'line_vat_percent', 'is_subheading', 'line_comment', 'line_cost',
+        'cost_comment', 'supplier_name', 'doer_id', 'doer_name', 'is_internal',
+      ] as const;
+      type InvRow = Record<(typeof INV_HEADERS)[number], string>;
+      const invFile = (rows: InvRow[]) =>
+        Buffer.concat([
+          Buffer.from([0xff, 0xfe]),
+          Buffer.from(
+            [INV_HEADERS as readonly string[], ...rows.map((r) => INV_HEADERS.map((h) => r[h]))].map((r) => r.map((v) => `"${v.replace(/"/g, '""')}"`).join('\t')).join('\r\n'),
+            'utf16le',
+          ),
+        ]);
+      const invRow = (over: Partial<InvRow>): InvRow => ({
+        id: '4587', doc_no: `${TAG}4899`, reference_no: '', doc_date: '2026-09-30', owner_name: 'Nobody By This Name', doc_deadline: '2026-10-30',
+        payer: 'MONDE M.Y SAN CORPORATION - CALAMBA', payer_id: '78', contact_person: 'Leo Solis', quote_no: invQuoteNo, quote_id: '9008',
+        doc_description: 'Warranty : 12 Months', payment_type: 'banktransfer', currency: 'PHP', status_name: 'unpaid', discount: '0.000000',
+        total_sum: '94000.00', total_vat: '11280.00', total_sum_vat: '105280.00', total_cost: '47856.8300', paid_sum: '0.00',
+        c_purchaseordernumber: 'Purchase Order No.: 2600012384', line_id: '17564', product_group: 'Schneider Electric', product_code: 'SVD-ATV320U75N4C',
+        product_name: 'SCHNEIDER ELECTRIC, VARIABLE FREQUENCY DRIVE, ATV320U75N4C', amount: '1.000000000000', unit: 'unit', price: '84000.000000',
+        line_sum: '84000.00', line_vat_percent: '12.000', is_subheading: '0', line_comment: 'VFD', line_cost: '37256.8300',
+        cost_comment: 'ATV320U75N4C 33,265.02 X 1.12 37,256.83', supplier_name: 'SCHNEIDER ELECTRIC PHILIPPINES', doer_id: '', doer_name: '', is_internal: '0',
+        ...over,
+      });
+      const invRows = [
+        invRow({}),
+        invRow({ line_id: '17565', product_group: 'Gruntech Services', product_code: 'GSV - SERVICES', product_name: 'JOB ORDER', amount: '0.500000000000', unit: 'lot', price: '10000.000000', line_sum: '5000.00', line_comment: 'VFD INSTALLATION', line_cost: '5600.0000', cost_comment: '', supplier_name: '', doer_name: sales.name, is_internal: '1' }),
+        invRow({ line_id: '17566', product_group: 'Gruntech Services', product_code: 'GSV - SERVICES', product_name: 'JOB ORDER', amount: '0.500000000000', unit: 'lot', price: '10000.000000', line_sum: '5000.00', line_comment: 'GAS ION PROGRAMING', line_cost: '5000.0000', cost_comment: '', supplier_name: '', doer_name: sales.name, is_internal: '1' }),
+      ];
+      const importInvoices = (rows: InvRow[], commit: boolean) =>
+        runImport(decodeCsv(invFile(rows)), scoroInvoiceSpec, commit, (records) => writeScoroInvoices(records as never, actor));
+      check('scoroPoNumber takes SCORO’s "Purchase Order No.:" off, and keeps anything else as written', scoroPoNumber('Purchase Order No.: 2600012384') === '2600012384' && scoroPoNumber('PO# 77-A') === '77-A' && scoroPoNumber('Project Alpha') === 'Project Alpha' && scoroPoNumber('') === null);
+      const invCheck = await importInvoices(invRows, false);
+      check(
+        'the check reads the invoice’s three rows as one sales order to create, and writes nothing',
+        invCheck.created === 1 && invCheck.errors === 0 && !(await prisma.salesOrder.findFirst({ where: { number: `${TAG}4899` } })),
+        JSON.stringify(invCheck.rows),
+      );
+      const invDone = await importInvoices(invRows, true);
+      const order = await prisma.salesOrder.findFirst({ where: { number: `${TAG}4899` }, include: { lines: { orderBy: { sortOrder: 'asc' } } } });
+      check(
+        'committed, the invoice is an ISSUED sales order on its quotation, its customer the quotation’s, owned by the quotation’s owner where no login carries SCORO’s name',
+        invDone.created === 1 && order?.status === 'ISSUED' && order.quotationId === invQuote?.id && order.customerId === invQuote?.customerId && order.ownerId === invQuote?.ownerId,
+        JSON.stringify({ status: order?.status, created: invDone.created }),
+      );
+      check(
+        'the PO, terms, payment method, comment and date are SCORO’s',
+        order?.poNumber === '2600012384' && order.termsDays === 30 && order.paymentMethod === 'Bank transfer' && order.comment === 'Warranty : 12 Months' &&
+          order.orderDate.toISOString().slice(0, 10) === '2026-09-30',
+        JSON.stringify({ po: order?.poNumber, terms: order?.termsDays, pay: order?.paymentMethod }),
+      );
+      check(
+        'its money is SCORO’s: 94,000 before VAT, 11,280 VAT, 105,280 in all',
+        Number(order?.subtotal) === 94000 && Number(order?.vatAmount) === 11280 && Number(order?.total) === 105280,
+        `${order?.subtotal} / ${order?.vatAmount} / ${order?.total}`,
+      );
+      const vfdItem = invQuote?.revisions[0].items.find((i) => i.title?.includes('ATV320U75N4C'));
+      const joItem = invQuote?.revisions[0].items.find((i) => i.title === 'JOB ORDER');
+      check(
+        'every line books its quotation line — the two half lots of JOB ORDER both book the one lot — and the in-house cost names the person',
+        order?.lines.length === 3 && order.lines[0].quotationItemId === vfdItem?.id && order.lines[1].quotationItemId === joItem?.id &&
+          order.lines[2].quotationItemId === joItem?.id && order.lines[1].providerUserId === sales.id,
+        JSON.stringify(order?.lines.map((l) => [l.title, l.quotationItemId === vfdItem?.id ? 'vfd' : l.quotationItemId === joItem?.id ? 'jo' : l.quotationItemId])),
+      );
+      const booked = await bookingFor((await prisma.quotation.findUniqueOrThrow({ where: { id: invQuote!.id }, include: { revisions: { include: { items: true } } } })) as never);
+      check('the quotation reads fully booked: nothing left to book on it', !!booked && booked.lines.filter((l) => !l.isHeading).every((l) => l.available === 0), JSON.stringify(booked?.lines.map((l) => l.available)));
+      const issuedRow = await prisma.auditLog.findFirst({ where: { entityType: 'sales_order', entityId: order?.id ?? '', action: 'COMPLETED' } });
+      const createdRow = await prisma.auditLog.findFirst({ where: { entityType: 'sales_order', entityId: order?.id ?? '', action: 'CREATED' } });
+      check(
+        'its trail says it was issued in SCORO, and keeps SCORO’s status, payer and the owner SCORO named',
+        issuedRow?.actorId === invQuote?.ownerId && (createdRow?.after as { scoroStatus?: string; scoroOwner?: string } | null)?.scoroStatus === 'unpaid' &&
+          (createdRow?.after as { scoroOwner?: string } | null)?.scoroOwner === 'Nobody By This Name',
+        JSON.stringify(createdRow?.after).slice(0, 200),
+      );
+      const invAgain = await importInvoices(invRows, true);
+      check(
+        'the same file again changes nothing: the order is already on file',
+        invAgain.created === 0 && invAgain.updated === 1 && (await prisma.salesOrder.count({ where: { number: { startsWith: `${TAG}4899` } } })) === 1,
+      );
+      const cancelled = await importInvoices([invRow({ doc_no: `${TAG}4899.1`, status_name: 'Cancelled', owner_name: sales.name })], true);
+      const cancelledOrder = await prisma.salesOrder.findFirst({ where: { number: `${TAG}4899.1` } });
+      check(
+        'a cancelled SCORO invoice is a CANCELLED order with SCORO’s status as its reason, owned by the login SCORO names',
+        cancelled.created === 1 && cancelledOrder?.status === 'CANCELLED' && cancelledOrder.cancelReason === 'SCORO status: Cancelled' && cancelledOrder.ownerId === sales.id,
+        JSON.stringify(cancelledOrder),
+      );
+      const noQuote = await importInvoices([invRow({ doc_no: `${TAG}5000`, quote_no: 'ZZ-NOT-A-QUOTE' })], false);
+      check(
+        'an invoice whose quotation is not in G-CORE is refused, naming it and the way out',
+        noQuote.errors === 1 && (noQuote.rows[0]?.message ?? '').includes('Quotation ZZ-NOT-A-QUOTE is not in G-CORE'),
+        JSON.stringify(noQuote.rows),
+      );
     } finally {
       // The series as it stood before the section, whatever happened.
       await setSeries(seriesWas);
