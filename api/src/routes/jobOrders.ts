@@ -51,6 +51,7 @@ import { workingDaysBetween, manilaDayStart, manilaDayEnd } from '../shared/day'
 import { teamOf } from '../shared/team';
 import { toCsv } from '../shared/csv';
 import { valueRevision } from '../shared/pipeline';
+import { inBase, RATE_SELECT } from '../shared/exchangeRates';
 import { costingForJob, createJobRecord } from './jobs';
 import { LIST_CAP, listReference, totalLabel, rangeNamed, recordNamed, namedInFilter, filterDay, dayOf, choice, bracketed, bracketNote, listNotes, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
@@ -526,6 +527,7 @@ jobOrderRoutes.get(
           outcome: true,
           contactId: true,
           siteId: true,
+          ...RATE_SELECT,
           revisions: { select: { status: true, revision: true, subtotal: true, discountAmount: true, costingId: true } },
         },
         orderBy: { createdAt: 'desc' },
@@ -533,7 +535,7 @@ jobOrderRoutes.get(
       }),
       prisma.salesOrder.findMany({
         where: { customerId, status: { not: 'CANCELLED' } },
-        select: { id: true, number: true, status: true, quotationId: true, contactId: true, poNumber: true, subtotal: true, discountAmount: true },
+        select: { id: true, number: true, status: true, quotationId: true, contactId: true, poNumber: true, subtotal: true, discountAmount: true, quotation: { select: RATE_SELECT } },
         orderBy: { createdAt: 'desc' },
         take: 100,
       }),
@@ -566,7 +568,9 @@ jobOrderRoutes.get(
           outcome: q.outcome,
           contactId: q.contactId,
           siteId: q.siteId,
-          amount: rev ? netOf(rev) : null,
+          // A job order's amount is in pesos: a quotation in another currency
+          // fills it at its own rate (2026-10-17).
+          amount: rev ? inBase(netOf(rev), q) : null,
           /** The Labor cost on the costing behind it — what the job order's amount must equal. */
           labor: rev?.costingId ? laborBy.get(rev.costingId) ?? 0 : null,
           /** Whether approval could build the project from it. */
@@ -580,7 +584,7 @@ jobOrderRoutes.get(
         quotationId: o.quotationId,
         contactId: o.contactId,
         poNumber: o.poNumber,
-        amount: netOf(o),
+        amount: inBase(netOf(o), o.quotation),
       })),
       jobs,
     });
@@ -728,8 +732,12 @@ async function agreedAmount(body: { salesOrderId?: string | null; quotationId?: 
   const costingId = await quotationCostingId(body.quotationId);
   if (costingId) return costingLabor(costingId);
   if (body.salesOrderId) {
-    const o = await prisma.salesOrder.findUnique({ where: { id: body.salesOrderId }, select: { subtotal: true, discountAmount: true } });
-    if (o) return netOf(o);
+    const o = await prisma.salesOrder.findUnique({
+      where: { id: body.salesOrderId },
+      select: { subtotal: true, discountAmount: true, quotation: { select: RATE_SELECT } },
+    });
+    // In pesos, at the quotation's own rate (2026-10-17).
+    if (o) return inBase(netOf(o), o.quotation);
   }
   if (body.quotationId) {
     const revisions = await prisma.quotationRevision.findMany({
@@ -737,7 +745,8 @@ async function agreedAmount(body: { salesOrderId?: string | null; quotationId?: 
       select: { status: true, revision: true, subtotal: true, discountAmount: true },
     });
     const rev = valueRevision(revisions);
-    if (rev) return netOf(rev);
+    const q = await prisma.quotation.findUnique({ where: { id: body.quotationId }, select: RATE_SELECT });
+    if (rev) return inBase(netOf(rev), q ?? {});
   }
   return null;
 }

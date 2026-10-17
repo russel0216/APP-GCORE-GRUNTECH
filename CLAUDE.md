@@ -3367,7 +3367,9 @@ SCORO.
   (`revisionsMargin`'s `rate`), the sales order list's booked value, team
   cards and margin (at its quotation's rate), the board's cards, the
   Forecast and its breakdowns, and Insights' pipeline, won and Sales
-  Analytics figures and CSV. A foreign quotation with no rate yet counts
+  Analytics figures and CSV, and the amount a job order takes from a
+  quotation or sales order (a job order's amount is in pesos). Customer
+  360 prints each quotation in its own currency. A foreign quotation with no rate yet counts
   unconverted. The quotation's page, paper, rows and sales orders stay in
   its own currency; the printed lists still name it beside a row's figure.
 - **`hideTotal` ("Hide total") only changes the paper**: the PDF prints the

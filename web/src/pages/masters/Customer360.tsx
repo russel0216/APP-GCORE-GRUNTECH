@@ -69,6 +69,8 @@ interface QuotationLine {
   revisionNo: number | null;
   revisionStatus: string | null;
   total: number | null;
+  /** The quotation's own currency — its value is in it. */
+  currency?: string;
 }
 
 interface ProjectLine {
@@ -496,7 +498,7 @@ export function Customer360Page() {
               </td>
               <td>{q.subject}</td>
               <td>{q.revisionNo === null ? '—' : `Rev ${q.revisionNo} · ${humanise(q.revisionStatus ?? '')}`}</td>
-              <td className="num">{q.total === null ? '—' : formatMoney(q.total)}</td>
+              <td className="num">{q.total === null ? '—' : formatMoney(q.total, q.currency)}</td>
               <td>
                 <StatusBadge status={q.outcome} />
               </td>

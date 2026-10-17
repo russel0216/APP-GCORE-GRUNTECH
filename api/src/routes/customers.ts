@@ -365,6 +365,7 @@ customerRoutes.get(
               subject: true,
               outcome: true,
               createdAt: true,
+              currency: true,
               revisions: {
                 orderBy: { revision: 'desc' },
                 select: { revision: true, status: true, total: true },
@@ -528,6 +529,8 @@ customerRoutes.get(
           revisionNo: best?.revision ?? null,
           revisionStatus: best?.status ?? null,
           total: best ? Number(best.total) : null,
+          // The figure is in the quotation's own currency (2026-10-17).
+          currency: q.currency,
         };
       }),
       projects: projects.map((j) => ({ ...j, contractValue: Number(j.contractValue) })),
