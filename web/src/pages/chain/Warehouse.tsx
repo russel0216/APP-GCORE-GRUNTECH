@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, openPdf, qs } from '../../lib/api';
+import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
@@ -363,8 +363,12 @@ export function ReceivingDetail() {
       ) : (
         <div className="alert info">
           {status === 'PENDING_APPROVAL'
-            ? 'Waiting for approval. Nothing has moved yet: the approval puts the goods into stock or onto the project.'
-            : 'A draft. Nothing has moved yet — attach the packing list or delivery receipt below, then submit it for approval.'}
+            ? 'Waiting for approval. Nothing has moved yet.'
+            : 'A draft — nothing has moved yet, and nothing will until it is submitted and approved. Attach the packing list or delivery receipt below, then submit it for approval.'}{' '}
+          {/* Where the goods land once approved — the two purchase kinds stay disjoint (Phase 5). */}
+          {order?.kind === 'DIRECT_TO_JOB'
+            ? `Approved, it is charged to ${order.job?.number ?? 'the project'} — goods bought for a project are not added to inventory.`
+            : 'Approved, the goods are added to the warehouse’s stock and show on Inventory.'}
         </div>
       )}
 
@@ -606,11 +610,11 @@ function since(at: string) {
 
 /**
  * Under the stock (2026-10-14, the owner's inventory screen): the latest
- * movements in and out, each linking to its document, and the quick
- * operations — receive new stock, and the stock report.
+ * movements in and out, each linking to its document. Receiving is the
+ * list's "+ New incoming" and the stock report its Report button and ⋯ ›
+ * Print (2026-10-18, rule 9) — the "Quick operations" card is gone.
  */
 function InventoryFoot() {
-  const { can } = useAuth();
   const [rows, setRows] = useState<Movement[] | null>(null);
   useEffect(() => {
     api.get<Movement[]>('/inventory/movements?limit=8').then(setRows).catch(() => setRows([]));
@@ -643,19 +647,6 @@ function InventoryFoot() {
           </ul>
         )}
       </section>
-      <section className="card" aria-labelledby="inv-quick">
-        <h2 id="inv-quick" className="card-title">Quick operations</h2>
-        <div className="stack">
-          {can('gchain.receiving.create') && (
-            <Link className="btn btn-sm btn-primary" to="/g-chain/incoming/new">
-              + Receive new stock
-            </Link>
-          )}
-          <button type="button" className="btn btn-sm" onClick={() => openPdf('/api/inventory/pdf', () => {})}>
-            Generate stock report
-          </button>
-        </div>
-      </section>
     </div>
   );
 }
@@ -672,6 +663,7 @@ function storedInventoryView(): 'list' | 'kanban' {
 
 export function Inventory() {
   const navigate = useNavigate();
+  const { can } = useAuth();
   const [params, setParams] = useSearchParams();
   const asked = params.get('view');
   const view: 'list' | 'kanban' = asked === 'kanban' || asked === 'list' ? asked : storedInventoryView();
@@ -792,7 +784,14 @@ export function Inventory() {
           searchPlaceholder="Search item name, code, part number…"
           onRowClick={(s) => navigate(`/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}`)}
           emptyTitle="No stock yet"
-          emptyHint="Stock appears once goods are received into a warehouse."
+          emptyHint="Stock appears once an incoming report for warehouse stock is approved. Goods bought for a project are charged to the project and do not appear here."
+          actions={
+            can('gchain.receiving.create') ? (
+              <Link className="btn btn-primary btn-sm" to="/g-chain/incoming/new">
+                + New incoming
+              </Link>
+            ) : undefined
+          }
           onSummary={(raw) => setCategories(((raw as InventorySummary).categories ?? []) as CategoryTile[])}
           summary={(raw) => {
             const sum = raw as InventorySummary;

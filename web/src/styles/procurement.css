@@ -528,17 +528,11 @@
   white-space: pre-wrap;
 }
 
-/* Under the stock (2026-10-14, the owner's inventory screen): the movement log beside the quick operations. */
+/* Under the stock (2026-10-14, the owner's inventory screen): the movement log, the page's width. */
 .inv-foot {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-  gap: var(--s-4);
-  margin-top: var(--s-4);
-}
-@media (max-width: 760px) {
-  .inv-foot {
-    grid-template-columns: minmax(0, 1fr);
-  }
+  gap: var(--block-gap);
+  margin-top: var(--block-gap);
 }
 .inv-moves {
   list-style: none;

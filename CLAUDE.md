@@ -5171,8 +5171,10 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   (`InventoryBalance.locationId`, set on the stock card by
   `gchain.inventory.edit_all` through `PATCH /inventory/balances/:id`, or
   by a receipt into a named bin while empty), Stock qty, Unit cost, Reorder
-  pt, Status; a "Stock value by category" bar chart; the movement log and
-  Quick operations under it. **`stockState()` in `shared/chain.ts` is the
+  pt, Status; a "Stock value by category" bar chart; the movement log
+  under it, and "+ New incoming" in the list's toolbar (the Quick
+  operations card went on 2026-10-18, rule 9: the stock report is the
+  Report button and ⋯ › Print). **`stockState()` in `shared/chain.ts` is the
   one rule**: CRITICAL (nothing available, or at/under `minStock`),
   LOW_STOCK (at/under the reorder level), ON_ORDER (either, with an issued
   PO still to arrive), IN_STOCK — the column, the filter, the cards, the
