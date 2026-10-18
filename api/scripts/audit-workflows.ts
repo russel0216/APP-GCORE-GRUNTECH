@@ -176,11 +176,11 @@ async function main() {
       }
       // A PROJECT_MANAGER step resolves to the manager the document names (a
       // job order's own), else the project's, and falls back to its role
-      // (Executive unless another is named) when there is none or the manager
+      // (the CEO / President unless another is named) when there is none or the manager
       // raised the document. The fallback has to be held: a PM's own request,
       // or one on an unmanaged project, goes there.
       if (step.approverType === 'PROJECT_MANAGER') {
-        const fallbackKey = step.role?.key ?? 'executive';
+        const fallbackKey = step.role?.key ?? 'ceo';
         const fallback = roleMembers.get(fallbackKey) ?? [];
         if (fallback.length === 0) {
           issues.push(
@@ -206,7 +206,7 @@ async function main() {
               s.alsoRoleIds.length ? ` (also ${s.alsoRoleIds.map((id) => roleKeyById.get(id) ?? '?').join(', ')} on the team)` : ''
             }`
           : s.approverType === 'PROJECT_MANAGER'
-            ? `${s.sequence}. the project's manager, else ${s.role?.key ?? 'executive'}`
+            ? `${s.sequence}. the project's manager, else ${s.role?.key ?? 'ceo'}`
             : `${s.sequence}. ${s.role?.key ?? s.user?.name ?? s.approverType.toLowerCase()}`,
       )
       .join(' → ');

@@ -29,6 +29,7 @@ import { backfillLoginMirrors, linkAdminEmployees } from '../src/shared/personMi
 import { CHART_DEPARTMENTS, applyOrgChart, grantSupervisorRole } from '../src/shared/orgChart';
 import { applyEmployeeNumbering, clearEmployeeNumbers } from '../src/shared/employeeNumbers';
 import { clearRoles, rolesCleared } from '../src/shared/rolesClear';
+import { replaceRolesWithChart } from '../src/shared/rolesFromChart';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -1593,6 +1594,19 @@ async function main() {
     const emptied = await clearRoles();
     if (emptied) {
       console.log(`  ✓ Emptied ${emptied.roles} role(s) — ${emptied.permissions} permission(s) and ${emptied.holders} holder(s) removed; the Access grid is the owner's to fill (sign in as the super admin to build the roles)`);
+    }
+  }
+
+  // ── Every role replaced by the organisation chart's titles (2026-10-18) ──
+  // Once, after the emptying: one role per title, empty of rights, the keys
+  // the engine reads kept on the renamed rows, every other role deleted and
+  // each person given their titles (shared/rolesFromChart.ts).
+  {
+    const replaced = await replaceRolesWithChart();
+    if (replaced) {
+      console.log(
+        `  ✓ Roles replaced by the organisation chart: ${replaced.created.length} created, ${replaced.renamed.length} renamed, ${replaced.deleted.length} deleted, ${replaced.assigned} login(s) given their titles`,
+      );
     }
   }
 

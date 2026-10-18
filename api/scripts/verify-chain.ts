@@ -1881,7 +1881,7 @@ async function main() {
       bigPulled.status === 200 &&
         draftPdf.status === 200 &&
         signedCount(draftText) === 1 &&
-        draftText.includes('Verify PM') &&
+        flat(draftText).includes('Verify PM') &&
         flat(draftText).includes('Status: Draft') &&
         pendingCount(draftText) === bigSteps.length &&
         bigSteps.every((st) => flat(draftText).includes(st.name.toUpperCase())),

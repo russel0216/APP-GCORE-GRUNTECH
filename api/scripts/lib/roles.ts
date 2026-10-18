@@ -15,6 +15,9 @@
  */
 import { prisma } from '../../src/prisma';
 import { ROLE_SEEDS, roleSeedPermissionKeys } from '../../src/shared/roleSeeds';
+import { CHART_ROLES } from '../../src/shared/rolesFromChart';
+
+const CHART_KEYS = new Set(CHART_ROLES.map((r) => r.key));
 
 export async function rolesLike(prefix: string, keys: string[]): Promise<{ id: string; key: string }[]> {
   const out: { id: string; key: string }[] = [];
@@ -27,13 +30,20 @@ export async function rolesLike(prefix: string, keys: string[]): Promise<{ id: s
       out.push(own);
       continue;
     }
-    const real = await prisma.role.upsert({
-      where: { key },
-      create: { key, name: seed.name, description: seed.description, isSystem: false },
-      update: {},
-      select: { id: true, key: true },
-    });
-    out.push(real);
+    // The real role only where it is one of the organisation chart's
+    // (shared/rolesFromChart.ts): a role the chart does not name (Executive,
+    // Sales, Warehouse …) is never put back on the install by a script — the
+    // user gets its rights through the throwaway copy alone.
+    if (CHART_KEYS.has(key)) {
+      const title = CHART_ROLES.find((r) => r.key === key)!.title;
+      const real = await prisma.role.upsert({
+        where: { key },
+        create: { key, name: title, description: seed.description, isSystem: false },
+        update: {},
+        select: { id: true, key: true },
+      });
+      out.push(real);
+    }
     const wanted = roleSeedPermissionKeys(key);
     const permissions = await prisma.permission.findMany({ where: { key: { in: wanted } }, select: { id: true } });
     const likeKey = `${prefix}like_${key}`;

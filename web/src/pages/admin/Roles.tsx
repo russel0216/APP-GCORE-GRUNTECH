@@ -234,7 +234,7 @@ function RoleEditor({
         </Field>
         <Field
           label="Key"
-          hint="Lowercase, no spaces. Used by approval workflows. These keys carry a rule of their own, whatever the role is named: team_leader, technical_manager, service_manager, back_support, purchasing_manager, purchasing_manager_import, hr, ceo, executive, employee, supervisor, warehouse_supervisor."
+          hint="Lowercase, no spaces. Used by approval workflows. These keys carry a rule of their own, whatever the role is named: team_leader, technical_manager, service_manager, back_support, purchasing_manager, purchasing_manager_import, hr, ceo, warehouse_supervisor. A role holding one of them cannot be deleted."
         >
           <input
             value={key}

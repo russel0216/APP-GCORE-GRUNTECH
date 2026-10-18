@@ -935,7 +935,7 @@ async function main() {
   await prisma.approvalWorkflow.create({
     data: { documentType: `${TAG}_role`, name: `${TAG} route`, steps: { create: [{ sequence: 1, name: 'ZZ step', approverType: 'ROLE', roleId: routedRole.id }] } },
   });
-  const builtIn = await prisma.role.findUniqueOrThrow({ where: { key: 'employee' } });
+  const builtIn = await prisma.role.findUniqueOrThrow({ where: { key: 'purchasing_manager_import' } });
   const delMade = await api(bossToken, 'DELETE', `/roles/${made.id}`);
   const holderRoles = await prisma.userRole.count({ where: { userId: holder.id } });
   check(
@@ -946,7 +946,7 @@ async function main() {
   const delRouted = await api(bossToken, 'DELETE', `/roles/${routedRole.id}`);
   const delBuiltIn = await api(bossToken, 'DELETE', `/roles/${builtIn.id}`);
   check(
-    'a role an approval route uses is refused, naming the route; a role the engine reads by key (employee) is refused',
+    'a role an approval route uses is refused, naming the route; a role the engine reads by key (purchasing_manager_import) is refused',
     delRouted.status === 400 && String(delRouted.body.error ?? delRouted.body.message ?? JSON.stringify(delRouted.body)).includes(`${TAG} route`) &&
       delBuiltIn.status === 400 && !!(await prisma.role.findUnique({ where: { id: routedRole.id } })),
     `${delRouted.status} ${JSON.stringify(delRouted.body)} / ${delBuiltIn.status}`,

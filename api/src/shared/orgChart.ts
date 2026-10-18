@@ -24,7 +24,12 @@ import { syncLoginFromEmployee } from './accounts';
 
 export const ORG_CHART_MARK = 'seed.orgChart20261017';
 
-/** The chart's titles, to G-CORE's roles. A title with none is a POSITION held with the `employee` role alone. */
+/**
+ * The chart's titles, to the roles the install had on 2026-10-17 — what
+ * `applyOrgChart()` (once, `ORG_CHART_MARK`) assigned. Since 2026-10-18 the
+ * roles ARE the chart's titles, one each: `CHART_ROLES` in
+ * shared/rolesFromChart.ts.
+ */
 export const TITLE_ROLES: Record<string, string[]> = {
   'CEO / President': ['ceo', 'executive'],
   'Team Leader': ['team_leader'],
@@ -373,7 +378,7 @@ export async function grantSupervisorRole(): Promise<number> {
  * whose name is the same, trimmed and case-blind (a title with no role of
  * that name is listed, never guessed), and each person with a login is GIVEN
  * those roles — added, never removed, so what the owner assigned by hand
- * stays. "Employee" is matched the same way when a role is so named. Never
+ * stays. Never
  * marked: the dry run lists every assignment, `--apply` writes them, audited
  * per login, and may be run again as the roles grow. Reports to, teams,
  * departments and Supports teams are not touched.
@@ -395,7 +400,7 @@ export async function applyChartRolesByName(opts: { dryRun?: boolean } = {}): Pr
   const roleByName = new Map(roles.map((r) => [fold(r.name), r]));
   const byEmail = new Map(users.map((u) => [u.email.toLowerCase(), u]));
   const userByName = new Map(users.map((u) => [fold(u.name), u]));
-  const titles = [...new Set(ORG_CHART.flatMap((p) => [...p.titles, 'Employee' as const]))];
+  const titles = [...new Set(ORG_CHART.flatMap((p) => p.titles))];
   const unmatchedTitles = titles.filter((t) => !roleByName.has(fold(t)));
 
   const people: OrgChange[] = [];
@@ -408,7 +413,7 @@ export async function applyChartRolesByName(opts: { dryRun?: boolean } = {}): Pr
       continue;
     }
     const have = new Set(user.roles.map((r) => r.roleId));
-    const want = [...p.titles, 'Employee'].map((t) => roleByName.get(fold(t))).filter((r): r is NonNullable<typeof r> => !!r);
+    const want = p.titles.map((t) => roleByName.get(fold(t))).filter((r): r is NonNullable<typeof r> => !!r);
     const add = want.filter((r) => !have.has(r.id));
     if (!add.length) continue;
     plan.push({ user, add });

@@ -23,7 +23,13 @@ import { audit } from './audit';
  */
 export const ROLES_CLEARED_MARK = 'seed.rolesCleared20261018';
 
-/** The role keys the approval engine, the accounts and the seed read by KEY — Admin › Roles names them on the New role form. */
+/**
+ * The role keys the approval engine reads by KEY — Admin › Roles names them
+ * on the New role form, and their rows cannot be deleted. Since the roles
+ * became the organisation chart's (shared/rolesFromChart.ts) each is one of
+ * the chart's titles; `executive`, `employee` and `supervisor` went with the
+ * roles the chart does not name.
+ */
 export const ENGINE_ROLE_KEYS: { key: string; meaning: string }[] = [
   { key: 'team_leader', meaning: 'a "Team Leader" step goes to its holder on the requester\'s own team first' },
   { key: 'technical_manager', meaning: 'a Technical Manager step goes to the holder on the requester\'s team' },
@@ -32,10 +38,7 @@ export const ENGINE_ROLE_KEYS: { key: string; meaning: string }[] = [
   { key: 'purchasing_manager', meaning: 'the local Purchasing Manager; an importation order goes to the twin below' },
   { key: 'purchasing_manager_import', meaning: 'the Purchasing Manager for importation orders' },
   { key: 'hr', meaning: 'the HR approver type (overtime, clearances, evaluations, training) reads its holders' },
-  { key: 'ceo', meaning: 'the CEO / President steps' },
-  { key: 'executive', meaning: 'the Management steps and the engine\'s fallback' },
-  { key: 'employee', meaning: 'given to every new login' },
-  { key: 'supervisor', meaning: 'given on every deploy to anyone with a direct report' },
+  { key: 'ceo', meaning: 'the CEO / President steps, and a project manager step\'s fallback' },
   { key: 'warehouse_supervisor', meaning: 'the warehouse routes\' fallback and the automatic reorder\'s requester' },
 ];
 

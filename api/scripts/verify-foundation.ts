@@ -24,6 +24,7 @@ import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/res
 import { allPermissions } from '../src/permissions/registry';
 import { ACCESS_SPLIT } from '../src/shared/accessSplit';
 import { ENGINE_ROLE_KEYS, ROLES_CLEARED_MARK } from '../src/shared/rolesClear';
+import { CHART_ROLES, ROLES_FROM_CHART_MARK, SUCCESSOR } from '../src/shared/rolesFromChart';
 import { CLEARED_MARK as NUMBERS_CLEARED_MARK } from '../src/shared/employeeNumbers';
 import {
   nextNumber,
@@ -58,6 +59,7 @@ import {
   slotSignatories,
   contactOf,
   contactsOf,
+  PROJECT_MANAGER_FALLBACK_ROLE,
 } from '../src/shared/approvals';
 import {
   renderDocument,
@@ -369,6 +371,23 @@ async function main() {
     const cleared = await prisma.setting.findUnique({ where: { key: ROLES_CLEARED_MARK } });
     const builtIn = await prisma.role.count({ where: { isSystem: true } });
     check('once the roles were emptied, none is built-in any more — the owner renames, fills or deletes each', !cleared || builtIn === 0, `${builtIn} built-in with the mark ${cleared ? 'down' : 'absent'}`);
+    // The roles are the organisation chart's (2026-10-18): every title is a
+    // role, and the roles the chart does not name are gone for good.
+    if (await prisma.setting.findUnique({ where: { key: ROLES_FROM_CHART_MARK } })) {
+      const keys = new Set((await prisma.role.findMany({ select: { key: true } })).map((r) => r.key));
+      const missing = CHART_ROLES.filter((r) => !keys.has(r.key)).map((r) => r.title);
+      check('every title on the organisation chart is a role', missing.length === 0, missing.join(', '));
+      const back = [...Object.keys(SUCCESSOR), 'employee'].filter((k) => keys.has(k));
+      check('the roles the chart does not name (Executive, Employee, Supervisor …) are not on file', back.length === 0, back.join(', '));
+      const titles = new Map(CHART_ROLES.map((r) => [r.key, r.title]));
+      const named = await prisma.role.findMany({ where: { key: { in: [...titles.keys()] } }, select: { key: true, name: true } });
+      check('the keys the engine reads sit on the chart titles that own them (Purchasing Officer is back_support)', named.find((r) => r.key === 'back_support')?.name !== undefined && CHART_ROLES.some((r) => r.key === 'back_support' && r.title === 'Purchasing Officer'));
+    } else {
+      check('the roles become the chart\'s on the next seed (no mark yet)', true);
+    }
+    const nullSteps = await prisma.approvalStep.count({ where: { approverType: 'ROLE', roleId: null, workflow: { isActive: true, documentType: { not: { startsWith: TAG } } } } });
+    check('no active route has a role step naming no role', nullSteps === 0, String(nullSteps));
+    check('a project manager step with no manager falls back to the CEO / President', PROJECT_MANAGER_FALLBACK_ROLE === 'ceo');
     const numbersCleared = await prisma.setting.findUnique({ where: { key: NUMBERS_CLEARED_MARK } });
     check('the employee numbers were cleared once (the mark stands), and the seed will not clear them again', !!numbersCleared);
   }
@@ -1227,7 +1246,7 @@ async function main() {
   // ── 5b. An optional route, taken only when the submitter asks ─────────────
   console.log('\nOptional routes (the CEO on a quotation over ₱1,000,000)');
 
-  const pmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'project_manager' } });
+  const pmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'technical_manager' } });
   const standardRoute = await prisma.approvalWorkflow.create({
     data: {
       documentType: `${TAG}_opt_doc`,

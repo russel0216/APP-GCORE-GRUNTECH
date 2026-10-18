@@ -188,7 +188,7 @@ async function stepRoleId(step: ApprovalStep, ctx: ApprovalContext, tx: Prisma.T
 }
 
 /** The role a PROJECT_MANAGER step falls back to when it names none. */
-export const PROJECT_MANAGER_FALLBACK_ROLE = 'executive';
+export const PROJECT_MANAGER_FALLBACK_ROLE = 'ceo';
 
 /**
  * The set of user ids allowed to act on one step.
@@ -202,7 +202,7 @@ export const PROJECT_MANAGER_FALLBACK_ROLE = 'executive';
  * for every step that names none (leave, overtime, claims…).
  *
  * PROJECT_MANAGER is the manager of the project the document names (a budget
- * request's), and falls back to the step's role — Executive unless the step
+ * request's), and falls back to the step's role — the CEO / President unless the step
  * names another — when the project has no manager, the document names no
  * project, or the manager IS the requester (2026-10-07, the owner's call: a
  * PM's own request goes up to management, never to nobody). The project's

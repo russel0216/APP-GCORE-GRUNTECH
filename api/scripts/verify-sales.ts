@@ -4048,7 +4048,9 @@ async function main() {
       ),
     );
     check('halfway, the PDF dates the team leader and says the CEO is pending', halfway.includes(manager.name) && halfway.includes('Pending') && halfway.includes(ceoStep));
-    check('naming the CEO who will sign', halfway.includes(ceo.name));
+    // flat(): a real CEO on the install shares the step ("A or B"), and the
+    // names wrap inside the sign-off column.
+    check('naming the CEO who will sign', flat(halfway).includes(ceo.name));
     const waiting = await http(salesToken, 'GET', `/approvals/history/quotation/${bigRev.id}`);
     const openStep = ((waiting.body as unknown as { workflow: { steps: { sequence: number; approvers?: { id: string }[] }[] } }[])[0]?.workflow.steps ?? []).find(
       (st) => st.sequence === 2,
@@ -4198,7 +4200,7 @@ async function main() {
         !ceoHalf.includes('CEO / PRESIDENT') &&
         ceoHalf.includes('TEAM LEADER') &&
         ceoHalf.includes('Pending') &&
-        ceoHalf.includes(sitLeader.name),
+        flat(ceoHalf).includes(sitLeader.name),
       `${formatDateTime(ceoReq.createdAt)} ×${timesIn(ceoHalf, ceoReq.createdAt)}`,
     );
     const ceoCanAct = async (token: string) =>

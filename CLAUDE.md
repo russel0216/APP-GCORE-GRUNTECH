@@ -4125,6 +4125,42 @@ stand-in's door, queue, bell and trail, and both switches off.
   in `shared/orgChart.ts`). verify-foundation pins the engine keys (each
   read in the API's source, each role on file), no built-in role once the
   mark is down, and the numbers' clearing mark.
+- **Then every role was REPLACED by the chart's titles** (2026-10-18, the
+  owner's call, after Admin › Roles refused to delete "Executive /
+  Management": "delete all and create all from the list of roles I sent
+  from the organizational chart; I'll edit their access per role later").
+  `replaceRolesWithChart()` in `shared/rolesFromChart.ts`, run by the seed
+  after the emptying, ONCE (`seed.rolesFromChart20261018`): one role per
+  title on the chart (`CHART_ROLES`, thirty: CEO / President, Team Leader,
+  Technical Manager, Sales Manager, Service Manager, Sales Engineer,
+  Project Engineer, Project Lead, Welder, Electrician, Project Support,
+  Service Engineer, Service Technician, both Purchasing Managers,
+  Purchasing Officer, Finance Manager / Officer / Clerk, Collection,
+  Warehouse Officer, Accounting Manager / Officer / Clerk, Marketing
+  Manager / Assistant, Human Resources Officer, CAD Supervisor / Operator,
+  Cost Controller), EMPTY of rights. A title the engine reads by key keeps
+  the key on its renamed row — Purchasing Officer is `back_support` (the
+  chart's officers ARE their teams' Back Support), Warehouse Officer
+  `warehouse_supervisor`, Finance Officer `finance` (so "Checking" is the
+  Finance Officer alone now; Finance Clerk and Collection are roles of
+  their own), Human Resources Officer `hr`, Sales Engineer
+  `industry_specialist`. Every other role is DELETED — Executive,
+  Employee, Supervisor, Sales, Project Manager, Trainer, Warehouse,
+  Procurement and any made since — after the steps naming one are pointed
+  at its successor (`SUCCESSOR`: Executive → CEO / President, Project
+  Manager → Technical Manager, Procurement → Purchasing Officer …), so no
+  active step routes to nobody. Every role comes off every person, then
+  each person on the chart with a login is given their titles' roles (by
+  email, else name; audited); "Reports to", Supports teams and overrides
+  stay. **What changed in code with it**: a project-manager step with no
+  manager falls back to `ceo` (`PROJECT_MANAGER_FALLBACK_ROLE`, was
+  `executive`); `ENGINE_ROLE_KEYS` no longer lists `executive`, `employee`
+  or `supervisor` — a new login starts with no role (`defaultRoleIds()`
+  finds no Employee), and `grantSupervisorRole()` finds no Supervisor;
+  `rolesLike` makes the real role only for a chart key, so a verify run
+  never puts a deleted role back; `--roles-by-name` no longer looks for
+  "Employee". `TITLE_ROLES` stays as the 2026-10-17 history
+  `applyOrgChart()` assigned.
 - **Assign the roles in Admin › Users**: until somebody holds Team Leader
   (for anyone with no "Reports to") and CEO / President, those steps route
   to nobody and `audit-workflows.ts` says so.

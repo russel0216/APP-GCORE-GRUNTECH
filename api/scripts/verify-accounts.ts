@@ -382,7 +382,10 @@ async function main() {
   const adminT = signToken(admin.id, admin.email);
   const hrT = signToken(hr.id, hr.email);
   const department = await prisma.department.create({ data: { code: `${TAG}-D`, name: `${TAG} Operations` } });
-  const employeeRole = await prisma.role.findUniqueOrThrow({ where: { key: 'employee' } });
+  // Any role on file stands in for "a role the form picked": since the roles
+  // became the organisation chart's (2026-10-18) there is no Employee role.
+  const employeeRole = await prisma.role.findUniqueOrThrow({ where: { key: 'project_support' } });
+  const defaultRole = await prisma.role.findUnique({ where: { key: 'employee' }, select: { key: true } });
 
   const options = await http(null, 'GET', '/auth/options');
   const mailOn = options.body.mail === true;
@@ -513,7 +516,10 @@ async function main() {
   check('saving the employee also makes their login, and links it', hire.status === 201 && !!hireLogin && hire.body.userId === hireLogin.user.id, hire.text.slice(0, 200));
   const lizaUser = hireLogin ? await prisma.user.findUniqueOrThrow({ where: { id: hireLogin.user.id }, include: { roles: { include: { role: true } } } }) : null;
   check('the login carries their name, department, position and mobile from the record', lizaUser?.name === `Liza ${TAG} Soberano` && lizaUser.departmentId === department.id && lizaUser.position === 'Service Engineer' && lizaUser.phone === '0917 111 2222');
-  check('it starts with the self-service Employee role', !!lizaUser && lizaUser.roles.map((r) => r.role.key).join(',') === 'employee');
+  check(
+    defaultRole ? 'it starts with the self-service Employee role' : 'it starts with no role — the chart\'s roles are given on Admin › Users',
+    !!lizaUser && lizaUser.roles.map((r) => r.role.key).join(',') === (defaultRole ? 'employee' : ''),
+  );
   check('and carries their employee number, for the face clock and the {EMP} in their quotation numbers', lizaUser?.employeeNo === `${TAG}-001`);
   check('and the invitation is ready to go', !!hireLogin?.invite?.link && hireLogin.user.invitePending === true);
   const lizaToken = tokenOf(hireLogin?.invite?.link);
