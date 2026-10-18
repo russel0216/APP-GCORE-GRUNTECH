@@ -25,7 +25,24 @@ four databases and four copies of "customer".
    `OWNED`, `OWNED_KEPT`, `SHARED`, `SHARED_KEPT`, `READ`, `REPORT` and
    `SETTINGS`, and verify-foundation reads the source and fails on a key no
    route or screen checks (the two view keys always count — `canView()`
-   puts the screen in the menu with them). Only three approve rights remain:
+   puts the screen in the menu with them). **No screen writes with another screen's
+   right** (2026-10-18, the owner's call: "check menu of Access, appear all
+   needed"): the Calendar is `OWNED` (Create books, Edit Own / Delete the
+   activities you are on — booked for, invited or booked by you —
+   `mayChangeActivity()` in routes/sales.ts, `activityRights()` on the web;
+   Edit All anyone's), Attendance is `SETTINGS` (View All opens the
+   register beside the HR dashboard right, Edit All corrects an entry — it
+   borrowed Employees › Edit All), and the Service Schedule and Report
+   Templates are `SHARED_KEPT` (Create books a call-out / starts or
+   duplicates a template, Edit All moves a visit / publishes a version —
+   they borrowed Preventive Maintenance › Create). `splitBorrowedRights()`
+   (`shared/accessSplit.ts`, the seed, once, `seed.accessSplit20261018`)
+   gave the new boxes to every role and ALLOW override holding the
+   borrowed right, so nobody lost anything; verify-foundation leaves that
+   file out of the "something checks it" corpus. The rest of the grid is
+   deliberate: a shared master (customers, items, suppliers) has no "own",
+   a dashboard or report is View All and Export, and a document that is
+   kept has no Delete — a box there would do nothing. Only three approve rights remain:
    CAD dispatch, progress reports and training certificates. **A cancelled
    document may be deleted** (2026-10-11, the owner's call, reversing the
    trim for five of them): job orders, CAD J.O., projects and expenses
@@ -612,9 +629,9 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split):
 foundation
-385, masters 92, sales 638, costing 205, pipeline 121, calendar 98, numbering
+386, masters 92, sales 638, costing 205, pipeline 121, calendar 101, numbering
 79, partners 120, delivery 187, chain 340, hr 485, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 140. The

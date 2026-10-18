@@ -21,6 +21,7 @@ import type { ApprovalStep, Prisma } from '@prisma/client';
 import { env } from '../src/env';
 import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/resolve';
 import { allPermissions } from '../src/permissions/registry';
+import { ACCESS_SPLIT } from '../src/shared/accessSplit';
 import {
   nextNumber,
   previewNext,
@@ -319,12 +320,15 @@ async function main() {
   {
     const roots = [path.resolve(__dirname, '../src'), path.resolve(__dirname, '../../web/src')];
     const registryFile = path.resolve(__dirname, '../src/permissions/registry.ts');
+    // The seed step that hands the boxes of 2026-10-18 out names keys; naming
+    // one is not checking it.
+    const splitFile = path.resolve(__dirname, '../src/shared/accessSplit.ts');
     let corpus = '';
     const walk = (dir: string) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (/\.tsx?$/.test(entry.name) && full !== registryFile) corpus += fs.readFileSync(full, 'utf8') + '\n';
+        else if (/\.tsx?$/.test(entry.name) && full !== registryFile && full !== splitFile) corpus += fs.readFileSync(full, 'utf8') + '\n';
       }
     };
     roots.forEach(walk);
@@ -335,6 +339,11 @@ async function main() {
       .map((p) => p.key);
     check('every permission the registry mints is checked by a route or a screen', unchecked.length === 0, unchecked.join(', '));
   }
+  check(
+    'every key the once-only Access split hands out, and every key it copies from, is in the registry',
+    ACCESS_SPLIT.every(({ from, to }) => permissionKeys.has(from) && to.every((k) => permissionKeys.has(k))),
+    ACCESS_SPLIT.flatMap(({ from, to }) => [from, ...to]).filter((k) => !permissionKeys.has(k)).join(', '),
+  );
   check('approval goes to the workflow, not to a key: no ghr.clearances.approve, no gops.quotations.approve', !permissionKeys.has('ghr.clearances.approve') && !permissionKeys.has('gops.quotations.approve'));
   check(
     'the three approve rights left are the ones something checks (CAD dispatch, progress reports, certificates)',

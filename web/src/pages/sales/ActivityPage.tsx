@@ -21,6 +21,7 @@ import {
   type Activity,
   type ActivityTypeDef,
   type Rsvp,
+  activityRights,
 } from './activityShared';
 
 // ════════════════════════════════════════════════════════════════════
@@ -56,7 +57,7 @@ export function ActivityPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
-  const { me } = useAuth();
+  const { me, can } = useAuth();
   const toast = useToast();
   const meId = me?.user.id ?? '';
 
@@ -205,6 +206,7 @@ export function ActivityPage() {
   };
 
   const linked = activity.lead || activity.quotation || activity.customer;
+  const rights = activityRights(activity, me?.user.id, can);
 
   const deleteBody = 'Everyone on it loses it from their calendar. It cannot be undone.';
   const deleteItems: MoreItem[] = activity.seriesId
@@ -269,6 +271,7 @@ export function ActivityPage() {
         }
         actions={
           !activity.masked &&
+          rights.edit &&
           planned && (
             <button type="button" className="btn btn-primary" onClick={markDone} disabled={busy}>
               Mark done
@@ -279,7 +282,7 @@ export function ActivityPage() {
           activity.masked
             ? []
             : [
-                planned && {
+                planned && rights.edit && {
                   label: 'Cancel activity',
                   danger: true,
                   confirm: {
@@ -289,10 +292,10 @@ export function ActivityPage() {
                     onConfirm: cancel,
                   },
                 },
-                ...deleteItems,
+                ...(rights.remove ? deleteItems : []),
               ]
         }
-        modify={activity.masked ? undefined : () => setEditing(true)}
+        modify={activity.masked || !rights.edit ? undefined : () => setEditing(true)}
         confirm={confirm}
       />
 
@@ -495,7 +498,7 @@ export function ActivityPage() {
         </>
       )}
 
-      {editing && !activity.masked && (
+      {editing && !activity.masked && rights.edit && (
         <ActivityModal
           activity={activity}
           people={people}

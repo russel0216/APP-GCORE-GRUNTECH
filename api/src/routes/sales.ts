@@ -3822,9 +3822,25 @@ async function checkInvitees(ids: string[], assignedToId: string, keep: string[]
   return wanted;
 }
 
+/**
+ * Who may change or remove an activity (2026-10-18): Edit All anyone's, Edit
+ * Own (or, for a removal, Delete) the ones they are on — booked for, invited
+ * or booked by them. `can()` gives a super admin everything.
+ */
+function mayChangeActivity(
+  me: ReturnType<typeof currentUser>,
+  a: { assignedToId: string; createdById?: string | null; invitees?: { userId: string }[] },
+  removing = false,
+): boolean {
+  if (can(me, 'gops.calendar.edit_all')) return true;
+  if (!removing && !can(me, 'gops.calendar.edit_own')) return false;
+  return isOnActivity(a, me.id);
+}
+
 activityRoutes.post(
   '/',
   require_('gops.calendar.view_all'),
+  require_('gops.calendar.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(activitySchema, req.body);
@@ -3934,6 +3950,7 @@ activityRoutes.post(
 activityRoutes.patch(
   '/:id',
   require_('gops.calendar.view_all'),
+  requireAny('gops.calendar.edit_own', 'gops.calendar.edit_all'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(activitySchema.partial(), req.body);
@@ -3942,6 +3959,8 @@ activityRoutes.patch(
       include: { invitees: { select: { userId: true } } },
     });
     if (!existing) throw notFound('Activity not found');
+    // Edit Own is the activities you are on; Edit All anyone's (2026-10-18).
+    if (!mayChangeActivity(me, existing)) throw forbidden('You may change only the activities you are on');
     // A private activity is changed only by the people on it.
     if (existing.isPrivate && !me.isSuperAdmin && !isOnActivity(existing, me.id)) {
       throw forbidden('A private activity is changed only by the people on it');
@@ -4068,6 +4087,7 @@ activityRoutes.patch(
 activityRoutes.delete(
   '/:id',
   require_('gops.calendar.view_all'),
+  require_('gops.calendar.delete'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const existing = await prisma.salesActivity.findUnique({
@@ -4075,6 +4095,7 @@ activityRoutes.delete(
       include: { invitees: { select: { userId: true } } },
     });
     if (!existing) throw notFound('Activity not found');
+    if (!mayChangeActivity(me, existing, true)) throw forbidden('You may remove only the activities you are on');
     if (existing.isPrivate && !me.isSuperAdmin && !isOnActivity(existing, me.id)) {
       throw forbidden('A private activity is removed only by the people on it');
     }

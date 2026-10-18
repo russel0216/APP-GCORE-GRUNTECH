@@ -1837,7 +1837,7 @@ const visitLink = (id: string) => `/g-ops/visits?visit=${id}`;
 /** An unscheduled call — a breakdown does not appear on a PM schedule. */
 visitRoutes.post(
   '/',
-  require_('gops.pm_reports.create'),
+  require_('gops.visits.create'),
   handler(async (req, res) => {
     const body = parseBody(visitSchema, req.body);
     const visit = await prisma.$transaction(async (tx) =>
@@ -1887,7 +1887,7 @@ visitRoutes.post(
  */
 visitRoutes.patch(
   '/:id',
-  require_('gops.pm_reports.create'),
+  require_('gops.visits.edit_all'),
   handler(async (req, res) => {
     const body = parseBody(
       z.object({
@@ -2018,7 +2018,7 @@ const templateSchema = z.object({
 
 templateRoutes.post(
   '/',
-  require_('gops.pm_reports.create'),
+  require_('gops.report_templates.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(templateSchema, req.body);
@@ -2061,7 +2061,7 @@ templateRoutes.post(
  */
 templateRoutes.put(
   '/:id',
-  require_('gops.pm_reports.create'),
+  require_('gops.report_templates.edit_all'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(templateSchema.partial({ kind: true }), req.body);
@@ -2117,7 +2117,7 @@ templateRoutes.put(
 /** Copying a template to start a new one — "duplicate and save as new". */
 templateRoutes.post(
   '/:id/duplicate',
-  require_('gops.pm_reports.create'),
+  require_('gops.report_templates.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(z.object({ name: z.string().trim().min(2) }), req.body);

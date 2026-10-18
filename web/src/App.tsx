@@ -987,9 +987,9 @@ function Routed() {
         <Route
           path="/g-hr/attendance"
           element={
-            <Guard permission="ghr.dashboard.view_all">
+            <GuardAny permissions={['ghr.attendance.view_all', 'ghr.dashboard.view_all']}>
               <AttendanceRegister />
-            </Guard>
+            </GuardAny>
           }
         />
         <Route

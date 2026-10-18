@@ -71,7 +71,9 @@ export function ReportTemplates() {
     load();
   }, [load]);
 
-  const editable = can('gops.pm_reports.create');
+  // Their own rights since 2026-10-18 (they borrowed Preventive Maintenance's Create).
+  const mayCreate = can('gops.report_templates.create');
+  const editable = can('gops.report_templates.edit_all');
 
   if (error) return <ErrorBox error={error} />;
   if (!templates) return <Loading />;
@@ -89,7 +91,7 @@ export function ReportTemplates() {
         </div>
         <div className="row">
           <Checkbox checked={showAll} onChange={setShowAll} label="Show old versions" />
-          {editable && (
+          {mayCreate && (
             <button className="btn btn-primary" onClick={() => setEditing('new')}>
               + New template
             </button>
@@ -153,6 +155,7 @@ export function ReportTemplates() {
         <TemplateEditor
           template={editing === 'new' ? null : editing}
           readOnly={editing !== 'new' && (!editable || !editing.isCurrent)}
+          mayDuplicate={mayCreate}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -167,11 +170,13 @@ export function ReportTemplates() {
 function TemplateEditor({
   template,
   readOnly,
+  mayDuplicate,
   onClose,
   onSaved,
 }: {
   template: Template | null;
   readOnly: boolean;
+  mayDuplicate: boolean;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -252,7 +257,7 @@ function TemplateEditor({
       wide
       footer={
         <ModalFoot onCancel={onClose} cancelLabel={readOnly ? 'Close' : 'Cancel'} busy={busy}>
-          {template && (
+          {template && mayDuplicate && (
             <button className="btn" onClick={duplicate} disabled={busy}>
               Duplicate
             </button>

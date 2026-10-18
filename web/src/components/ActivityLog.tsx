@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, qs } from '../lib/api';
+import { useAuth } from '../lib/auth';
 import { todayLocal } from '../lib/day';
 import { Empty, ErrorBox, Field, Loading, formatDateTime, useToast } from './ui';
 import { Icon, type IconName } from './Icon';
@@ -55,6 +56,8 @@ interface Activity {
   startsAt: string;
   completedAt: string | null;
   assignedTo: { id: string; name: string } | null;
+  createdBy?: { id: string } | null;
+  invitees?: { userId: string }[];
 }
 
 const iconOf = (key: string): IconName => TYPE_ICONS[key] ?? 'panel';
@@ -87,6 +90,17 @@ export function ActivityLog({
   canEdit?: boolean;
 }) {
   const toast = useToast();
+  const { me, can } = useAuth();
+  const meId = me?.user.id;
+  // The calendar's own rights (2026-10-18): Create logs one; Done is a change,
+  // Edit All on anyone's and Edit Own on the ones the viewer is on.
+  const mayLog = canEdit && can('gops.calendar.create');
+  const mayFinish = (row: Activity) =>
+    canEdit &&
+    (can('gops.calendar.edit_all') ||
+      (can('gops.calendar.edit_own') &&
+        !!meId &&
+        (row.assignedTo?.id === meId || row.createdBy?.id === meId || (row.invitees ?? []).some((i) => i.userId === meId))));
   const [rows, setRows] = useState<Activity[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -165,7 +179,7 @@ export function ActivityLog({
           Activity
           {rows?.length ? <span className="badge">{rows.length}</span> : null}
         </h3>
-        {canEdit && (
+        {mayLog && (
           <button className="btn btn-sm btn-primary" onClick={() => setOpen((o) => !o)}>
             {open ? 'Cancel' : 'Log activity'}
           </button>
@@ -178,7 +192,7 @@ export function ActivityLog({
 
       <ErrorBox error={error} />
 
-      {open && canEdit && (
+      {open && mayLog && (
         <form className="activity-form" onSubmit={add}>
           <div className="grid grid-2">
             <Field label="What happened">
@@ -265,7 +279,7 @@ export function ActivityLog({
                         {row.assignedTo?.name ?? 'unassigned'}
                       </span>
                     </div>
-                    {canEdit && (
+                    {mayFinish(row) && (
                       <button className="btn btn-sm" onClick={() => complete(row)} disabled={busy}>
                         Done
                       </button>

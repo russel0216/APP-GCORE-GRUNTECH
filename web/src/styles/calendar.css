@@ -453,7 +453,11 @@
   border-top-color: var(--line);
 }
 
-.tg-slot:hover {
+.tg-slot.is-static {
+  cursor: default;
+}
+
+.tg-slot:not(.is-static):hover {
   background: rgb(var(--magenta-rgb) / 0.08);
   color: var(--neon);
 }

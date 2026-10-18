@@ -121,7 +121,8 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'customers', group: 'Sales', label: 'Customers', path: '/g-ops/customers', actions: SHARED, phase: 2 },
       { key: 'partners', group: 'Sales', label: 'Partners', path: '/g-ops/partners', actions: SHARED, phase: 3,
         note: 'Principals whose equipment Gruntech sells and services: catalogues, price lists, software. One supplier record, seen from Sales.' },
-      { key: 'calendar', group: 'Sales', label: 'Calendar', path: '/g-ops/calendar', actions: READ, phase: 3 },
+      { key: 'calendar', group: 'Sales', label: 'Calendar', path: '/g-ops/calendar', actions: OWNED, phase: 3,
+        note: 'Create books an activity; Edit Own and Delete cover the ones you are on (booked for, invited or booked by you); Edit All anyone’s' },
       // Project Management (2026-10-06, the owner's order): Costing, Job
       // Orders, Projects — the way the old gasiontech G-CORE arranged it. The
       // registers that follow are hidden (rule: hidden, never deleted): each
@@ -146,9 +147,9 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'aftermarket', group: 'Aftermarket', label: 'Aftermarket', path: '/g-ops/aftermarket', actions: READ, phase: 8, note: 'Overview and the aftermarket rules' },
       { key: 'installed_base', group: 'Aftermarket', label: 'Installed Base', path: '/g-ops/installed-base', actions: SHARED_KEPT, phase: 8 },
       { key: 'service_contracts', group: 'Aftermarket', label: 'Service Contracts', path: '/g-ops/service-contracts', actions: OWNED_KEPT, phase: 8 },
-      { key: 'visits', group: 'Aftermarket', label: 'Service Schedule', path: '/g-ops/visits', actions: READ, phase: 8, note: 'Every visit on one calendar; scheduling and reporting use the Preventive Maintenance permissions' },
+      { key: 'visits', group: 'Aftermarket', label: 'Service Schedule', path: '/g-ops/visits', actions: SHARED_KEPT, phase: 8, note: 'Every visit on one calendar; Create books a call-out, Edit All moves, assigns or cancels a visit' },
       { key: 'renewals', group: 'Aftermarket', label: 'Renewals', path: '/g-ops/renewals', actions: READ, phase: 8 },
-      { key: 'report_templates', group: 'Service reports', label: 'Report Templates', path: '/g-ops/report-templates', actions: READ, phase: 8, note: 'Editing uses the Preventive Maintenance create permission' },
+      { key: 'report_templates', group: 'Service reports', label: 'Report Templates', path: '/g-ops/report-templates', actions: SHARED_KEPT, phase: 8, note: 'Create starts or duplicates a template; Edit All publishes a new version' },
       { key: 'commissioning_reports', group: 'Service reports', label: 'Commissioning Reports', path: '/g-ops/commissioning', actions: OWNED_KEPT, phase: 8 },
       { key: 'pm_reports', group: 'Service reports', label: 'Preventive Maintenance', path: '/g-ops/pm', actions: OWNED_KEPT, phase: 8 },
       { key: 'inspection_reports', group: 'Service reports', label: 'Service Inspections', path: '/g-ops/inspections', actions: OWNED_KEPT, phase: 8 },
@@ -241,9 +242,9 @@ export const REGISTRY: ModuleDef[] = [
         key: 'attendance', group: 'Records',
         label: 'Attendance',
         path: '/g-hr/attendance',
-        actions: READ,
+        actions: SETTINGS,
         phase: 6,
-        note: 'Uses the Dashboard permission',
+        note: 'View All reads the register (the Dashboard permission does too); Edit All corrects an entry',
       },
       { key: 'leave', group: 'My day', label: 'Leave', path: '/g-hr/leave', actions: OWNED_KEPT, phase: 6 },
       { key: 'overtime', group: 'My day', label: 'Overtime', path: '/g-hr/overtime', actions: OWNED_KEPT, phase: 6 },

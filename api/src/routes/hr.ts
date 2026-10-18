@@ -1336,7 +1336,7 @@ const ATTENDANCE_SORTS = ['date', 'timeIn'];
 
 attendanceRoutes.get(
   '/',
-  require_('ghr.dashboard.view_all'),
+  requireAny('ghr.attendance.view_all', 'ghr.dashboard.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
     const where = attendanceListWhere(q);
@@ -1404,7 +1404,7 @@ const clockText = (d: Date | null) => (d ? clockTime.format(d).replace(/\s+/g, '
  */
 attendanceRoutes.get(
   '/pdf',
-  require_('ghr.dashboard.view_all'),
+  requireAny('ghr.attendance.view_all', 'ghr.dashboard.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
     const where = attendanceListWhere(q);
@@ -1567,12 +1567,10 @@ attendanceRoutes.get(
 /** A manual correction — recorded as MANUAL, with who did it. */
 attendanceRoutes.patch(
   '/:id',
-  require_('ghr.dashboard.view_all'),
+  // Its own box since 2026-10-18 (it borrowed Employees › Edit All).
+  require_('ghr.attendance.edit_all'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    if (!me.isSuperAdmin && !me.permissions.has('ghr.employees.edit_all')) {
-      throw forbidden('Correcting attendance needs the employee edit permission');
-    }
     const body = parseBody(
       z.object({
         timeIn: z.string().optional().nullable(),

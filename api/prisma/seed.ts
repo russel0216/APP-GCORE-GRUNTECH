@@ -1,3 +1,4 @@
+import { splitBorrowedRights } from '../src/shared/accessSplit';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { allPermissions, permissionsFor } from '../src/permissions/registry';
@@ -1455,6 +1456,13 @@ async function main() {
   console.log(
     `  ✓ Roles (${ROLES.length})${grantedLater ? ` — granted ${grantedLater} newly introduced permission(s)` : ''}`,
   );
+  // The boxes of 2026-10-18: Calendar, Attendance, Service Schedule and
+  // Report Templates got their own write rights, given once to whoever held
+  // the right they borrowed (shared/accessSplit.ts).
+  {
+    const split = await splitBorrowedRights();
+    if (split) console.log(`  · Gave ${split} new Access box(es) to the roles that held the rights they replace`);
+  }
   // A "CTG" role was seeded for the costing route's last step for a few
   // minutes on 2026-10-09 before the owner said CTG is the CEO: that step is
   // the executive role, and the role goes — unless somebody was given it.

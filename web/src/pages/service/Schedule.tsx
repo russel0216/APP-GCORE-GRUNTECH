@@ -285,7 +285,7 @@ export function ServiceSchedule() {
               List
             </button>
           </div>
-          {can('gops.pm_reports.create') && (
+          {can('gops.visits.create') && (
             <button type="button" className="btn btn-primary" onClick={() => setCreating(true)}>
               + New call-out
             </button>
@@ -669,7 +669,7 @@ function VisitSheet({
     void load();
   }, [load]);
 
-  const canSchedule = can('gops.pm_reports.create');
+  const canSchedule = can('gops.visits.edit_all');
   useEffect(() => {
     if (!canSchedule) return;
     loadPeople('gops.pm_reports.create')

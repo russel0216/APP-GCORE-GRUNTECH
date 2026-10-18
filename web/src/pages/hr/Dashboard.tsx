@@ -541,7 +541,7 @@ export function AttendanceRegister() {
         rowKey={(r) => r.id}
         reloadToken={reload}
         searchPlaceholder="Search employee name or number…"
-        onRowClick={can('ghr.employees.edit_all') ? (r) => setEditing(r) : undefined}
+        onRowClick={can('ghr.attendance.edit_all') ? (r) => setEditing(r) : undefined}
         emptyTitle="No attendance recorded for this range"
         summary={(raw) => {
           const sum = raw as unknown as { missingOut: number } | undefined;
