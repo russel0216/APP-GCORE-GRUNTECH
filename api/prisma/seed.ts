@@ -30,6 +30,7 @@ import { CHART_DEPARTMENTS, applyOrgChart, grantSupervisorRole } from '../src/sh
 import { applyEmployeeNumbering, clearEmployeeNumbers } from '../src/shared/employeeNumbers';
 import { clearRoles, rolesCleared } from '../src/shared/rolesClear';
 import { replaceRolesWithChart } from '../src/shared/rolesFromChart';
+import { applyEmployeeNumberList } from '../src/shared/employeeNumbersFromList';
 import { backfillOwnAuthors } from '../src/shared/ownBackfill';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
@@ -1608,6 +1609,18 @@ async function main() {
       console.log(
         `  ✓ Roles replaced by the organisation chart: ${replaced.created.length} created, ${replaced.renamed.length} renamed, ${replaced.deleted.length} deleted, ${replaced.assigned} login(s) given their titles`,
       );
+    }
+  }
+
+  // ── The employee numbers of the owner's ROLE.xlsx (2026-10-18) ──────────
+  // Once, after the clearing and the chart's employee records: each number on
+  // the employee record, mirrored to the login, the series raised to it.
+  {
+    const numbered = await applyEmployeeNumberList();
+    if (numbered) {
+      console.log(`  ✓ Employee numbers from the owner's list: ${numbered.changed.length} set, ${numbered.unchanged} already so`);
+      if (numbered.notFound.length) console.log(`    not on file: ${numbered.notFound.join(', ')}`);
+      if (numbered.clashes.length) console.log(`    left (number in use): ${numbered.clashes.join('; ')}`);
     }
   }
 

@@ -1709,7 +1709,18 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   naming whoever already has it, an `employee` UPDATED audit row "(from Admin
   › Users)") — or on HR › Employees; both lists show "none yet", filter
   `?number=none|yes` and carry a "Without an employee number" card
-  (`summary.withoutNumber`). verify-numbering pins the readings, the hire
+  (`summary.withoutNumber`).
+  **The owner's list then set them once** (2026-10-18, `ROLE.xlsx`: "update
+  the employee number of the people / user from this list"):
+  `applyEmployeeNumberList()` in `shared/employeeNumbersFromList.ts`
+  (`EMPLOYEE_NUMBER_LIST`, sixty names and numbers), the seed's step after
+  the chart's roles, marked `seed.employeeNumbersFromList20261018` — each
+  person found as the chart finds them (the chart's email, else the name),
+  the number on the employee record, mirrored through
+  `syncLoginFromEmployee()`, the series raised to it (`mode: 'raise'`), one
+  audit row each; a number another record or login holds is left and named,
+  never a failed seed. `npx tsx scripts/employee-numbers.ts` is its dry run
+  (`--apply`, `--force`). A number changed afterwards stays. verify-numbering pins the readings, the hire
   year, the raise-only counter and the refusal; verify-accounts the
   write-through.
 - **An existing database keeps its configured pattern.** The seed only creates a
