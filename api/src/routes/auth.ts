@@ -215,7 +215,7 @@ const FACTS_SELECT = {
 function hrFacts(u: {
   position: string | null;
   employeeNo: string | null;
-  employee: { employeeNo: string; position: string | null; industry: { name: string } | null } | null;
+  employee: { employeeNo: string | null; position: string | null; industry: { name: string } | null } | null;
 }) {
   return {
     team: u.employee?.industry?.name ?? null,

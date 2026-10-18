@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../prisma';
 import { required, optional, bool, date, oneOf, type ImportSpec } from '../../shared/csv';
-import { nextNumber } from '../../shared/numbering';
+import { nextNumber, setCounter } from '../../shared/numbering';
 import { positionFields, setEmployeePosition } from '../../shared/plantilla';
 import type { Registered } from '../imports';
 import { createLogin, defaultRoleIds, deliverLink, syncLoginFromEmployee } from '../../shared/accounts';
@@ -44,7 +44,7 @@ const employeeSpec: ImportSpec<EmployeeImportRecord> = {
   entity: 'employees',
   label: 'Employees',
   columns: [
-    { header: 'Employee No', required: true, example: 'GT-EMP-2026-0001' },
+    { header: 'Employee No', required: true, example: 'GTC-0001-14' },
     { header: 'Last Name', required: true, example: 'Santos' },
     { header: 'First Name', required: true, example: 'Juan' },
     { header: 'Middle Name', example: 'Dela Cruz' },
@@ -214,6 +214,8 @@ export const employeesImport: Registered = {
           employeeId = existingId;
         } else {
           employeeId = (await tx.employee.create({ data: { ...record.data, ...(await positionFields(tx, positionId, null)) } })).id;
+          // A typed number moves the employee series up to it, never down.
+          if (record.data.employeeNo) await setCounter('employee', record.data.employeeNo, tx, { mode: 'raise' });
         }
         const current = await tx.employee.findUnique({ where: { id: employeeId }, select: { userId: true, employeeNo: true } });
         if (!current?.userId && record.login.linkUserId) {

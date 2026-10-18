@@ -122,6 +122,8 @@ interface Preview {
   taxOptions: TaxOption[];
   employeeNo: string | null;
   linked: boolean;
+  /** A person on the register with no employee number yet — the save is refused until one is set (2026-10-18). */
+  missingNumber: string | null;
   usesEmployeeDigits: boolean;
   vatRate: number;
   currency: string;
@@ -1008,7 +1010,13 @@ export function QuotationEditor() {
           and pick or add the company first.
         </div>
       )}
-      {!editing && preview && preview.usesEmployeeDigits && !preview.linked && (
+      {!editing && preview && preview.usesEmployeeDigits && preview.missingNumber && (
+        <div className="alert warn">
+          {preview.missingNumber} has no employee number yet, and the quotation number carries it — Save will be
+          refused until one is typed on their login (Admin › Users) or their employee record (G-HR › Employees).
+        </div>
+      )}
+      {!editing && preview && preview.usesEmployeeDigits && !preview.linked && !preview.missingNumber && (
         <div className="alert info">
           {header.ownerId === myId ? 'Your account is' : 'That author’s account is'} not linked to an
           employee record, so this number carries 000 where the employee digits would be. HR can link it

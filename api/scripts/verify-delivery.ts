@@ -13,6 +13,7 @@ import bcrypt from 'bcryptjs';
 import { PDFDocument } from 'pdf-lib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act, approversForStep, routePreview, pickWorkflow } from '../src/shared/approvals';
@@ -188,7 +189,8 @@ async function readyCosting(title: string, ownerId: string, customerId: string, 
 const iso = (dt: Date | string) => new Date(dt).toISOString().slice(0, 10);
 
 async function makeUser(name: string, email: string, roleKeys: string[]) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike(ROLE_PREFIX, roleKeys);
   return prisma.user.create({
     data: {
       name,

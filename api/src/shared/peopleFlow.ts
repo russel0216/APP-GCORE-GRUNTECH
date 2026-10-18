@@ -527,7 +527,7 @@ export const FLOW_EMPLOYEE_SELECT = {
 
 export interface FlowEmployee {
   id: string;
-  employeeNo: string;
+  employeeNo: string | null;
   firstName: string;
   lastName: string;
   position: string | null;

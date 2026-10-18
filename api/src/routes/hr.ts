@@ -322,7 +322,7 @@ clockRoutes.get(
         employee number, when there is one. Nobody else sees it — it names an
         employee record, and the register is HR's.
       */
-      let candidate: { id: string; employeeNo: string; name: string } | null = null;
+      let candidate: { id: string; employeeNo: string | null; name: string } | null = null;
       if (can(me, 'ghr.employees.view_all')) {
         const user = await prisma.user.findUnique({ where: { id: me.id }, select: { employeeNo: true } });
         const match = user?.employeeNo
@@ -1830,7 +1830,7 @@ leaveRoutes.get(
           align: ['left', 'left', 'left', 'left', 'left', 'right', 'left', 'left'],
           rows: rows.map((r) => [
             r.number,
-            { title: `${r.employee.lastName}, ${r.employee.firstName}`, body: r.employee.employeeNo },
+            { title: `${r.employee.lastName}, ${r.employee.firstName}`, body: r.employee.employeeNo ?? undefined },
             { title: r.leaveType.name, body: r.leaveType.isPaid ? 'Paid' : 'Unpaid' },
             at(r.startDate, r.startTime),
             at(r.endDate, r.endTime),

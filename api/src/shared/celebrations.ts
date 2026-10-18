@@ -23,7 +23,7 @@ export type CelebrationKind = 'BIRTHDAY' | 'ANNIVERSARY';
 export interface Celebration {
   kind: CelebrationKind;
   employeeId: string;
-  employeeNo: string;
+  employeeNo: string | null;
   name: string;
   firstName: string;
   /** 'YYYY-MM-DD' — the day it falls on in the window's year. */

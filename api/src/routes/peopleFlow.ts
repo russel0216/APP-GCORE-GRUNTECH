@@ -94,7 +94,7 @@ function matches(q: ListQuery, today: string) {
 
 const SORTS: Record<string, (a: Row, b: Row) => number> = {
   name: (a, b) => fullName(a.employee).localeCompare(fullName(b.employee)),
-  employeeNo: (a, b) => a.employee.employeeNo.localeCompare(b.employee.employeeNo),
+  employeeNo: (a, b) => (a.employee.employeeNo ?? '').localeCompare(b.employee.employeeNo ?? ''),
   stage: (a, b) => STAGE_KEYS.indexOf(a.path.stage) - STAGE_KEYS.indexOf(b.path.stage),
   open: (a, b) => a.path.open - b.path.open,
   overdue: (a, b) => a.path.overdue - b.path.overdue,

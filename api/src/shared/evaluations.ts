@@ -243,7 +243,7 @@ export function visibleTo(user: ResolvedUser, ev: VisibilitySubject): boolean {
 export interface DueRow {
   employee: {
     id: string;
-    employeeNo: string;
+    employeeNo: string | null;
     firstName: string;
     lastName: string;
     position: string | null;

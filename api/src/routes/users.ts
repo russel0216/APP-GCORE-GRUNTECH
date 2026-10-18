@@ -18,7 +18,9 @@ import {
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit, redact } from '../shared/audit';
 import { allPermissions, REGISTRY, ACTION_LABELS } from '../permissions/registry';
-import { ADMIN_RESET_HOURS, deliverLink, issueToken } from '../shared/accounts';
+import { ADMIN_RESET_HOURS, deliverLink, issueToken, syncLoginFromEmployee } from '../shared/accounts';
+import { setCounter, type CounterMove } from '../shared/numbering';
+import { ENGINE_ROLE_KEYS } from '../shared/rolesClear';
 import { mailConfig, sendMail } from '../shared/mail';
 import { renderDocument, formatShortDate } from '../shared/pdf';
 import { LIST_CAP, listReference, sendListPdf } from '../shared/listPaper';
@@ -80,6 +82,10 @@ function userListWhere(q: ListQuery): Prisma.UserWhereInput {
   // the "one person" rule asks for; `yes` the rest.
   if (q.filters.linked === 'no') where.employee = { is: null };
   else if (q.filters.linked === 'yes') where.employee = { isNot: null };
+  // `?number=none`: a login with no employee number (2026-10-18 — the numbers
+  // are typed here and written through to the employee record); `yes` the rest.
+  if (q.filters.number === 'none') where.employeeNo = null;
+  else if (q.filters.number === 'yes') where.employeeNo = { not: null };
   const ids = idsFilter(q.filters.ids);
   if (ids) where.id = { in: ids };
   return where;
@@ -110,13 +116,15 @@ userRoutes.get(
     ]);
     // The halves of a person still apart: logins with no employee record, and
     // active employees with no login (HR › Employees `?login=none`).
-    const [loginsAlone, employeesAlone] = await Promise.all([
+    const [loginsAlone, employeesAlone, withoutNumber] = await Promise.all([
       prisma.user.count({ where: { employee: { is: null }, isActive: true } }),
       prisma.employee.count({ where: { userId: null, isActive: true } }),
+      // Active logins still without an employee number (2026-10-18).
+      prisma.user.count({ where: { employeeNo: null, isActive: true } }),
     ]);
 
     res.json({
-      summary: { loginsAlone, employeesAlone },
+      summary: { loginsAlone, employeesAlone, withoutNumber },
       ...listResult(
         rows.map(({ employee, ...r }) => ({
           ...r,
@@ -175,6 +183,7 @@ userRoutes.get(
       f.isActive && (f.isActive === 'true' ? 'active' : 'inactive'),
       f.role && `role ${role?.name ?? 'not found'}`,
       f.departmentId && `department ${department?.name ?? 'not found'}`,
+      f.number && (f.number === 'none' ? 'no employee number yet' : 'with an employee number'),
       f.ids && 'the rows selected',
     ]);
 
@@ -519,16 +528,29 @@ userRoutes.patch(
     // The employee owns identity (2026-10-16): a login linked to an employee
     // record takes its name, number, phone, department and position from it
     // (`syncLoginFromEmployee`), so a CHANGE to one of them here is refused —
-    // the form sends them back unchanged, which is fine.
-    const owner = await prisma.employee.findUnique({ where: { userId: req.params.id }, select: { id: true } });
+    // the form sends them back unchanged, which is fine. The EMPLOYEE NUMBER
+    // is the one exception (2026-10-18, the owner's call: the numbers are
+    // typed on Admin › Users): it is written THROUGH to the employee record,
+    // as the Team is, and the login mirrors it back.
+    const owner = await prisma.employee.findUnique({
+      where: { userId: req.params.id },
+      select: { id: true, employeeNo: true, firstName: true, lastName: true },
+    });
+    const numberTyped = !!owner && body.employeeNo !== undefined && (body.employeeNo || null) !== (owner.employeeNo ?? null);
+    if (numberTyped && body.employeeNo) {
+      const holder = await prisma.employee.findFirst({
+        where: { employeeNo: body.employeeNo, id: { not: owner!.id } },
+        select: { firstName: true, lastName: true },
+      });
+      if (holder) throw conflict(`Employee number "${body.employeeNo}" is already ${holder.firstName} ${holder.lastName}'s`);
+    }
     if (owner) {
       const current = await prisma.user.findUnique({
         where: { id: req.params.id },
-        select: { name: true, employeeNo: true, position: true, phone: true, departmentId: true },
+        select: { name: true, position: true, phone: true, departmentId: true },
       });
       const asked: Record<string, unknown> = {
         name: body.name,
-        employeeNo: body.employeeNo,
         position: body.position,
         phone: body.phone,
         departmentId: body.departmentId,
@@ -546,7 +568,8 @@ userRoutes.patch(
 
     const data: Prisma.UserUpdateInput = {};
     if (body.name !== undefined) data.name = body.name;
-    if (body.employeeNo !== undefined) data.employeeNo = body.employeeNo || null;
+    // A linked login's number is the employee's (written below, mirrored back).
+    if (body.employeeNo !== undefined && !owner) data.employeeNo = body.employeeNo || null;
     if (body.position !== undefined) data.position = body.position || null;
     if (body.phone !== undefined) data.phone = body.phone || null;
     if (body.isActive !== undefined) data.isActive = body.isActive;
@@ -566,6 +589,9 @@ userRoutes.patch(
         : { disconnect: true };
     }
 
+    // A holder, not a `let`: TypeScript cannot see the assignment inside the
+    // transaction's callback and would narrow a plain variable to null.
+    const moved: { counter: CounterMove | null } = { counter: null };
     const updated = await prisma.$transaction(async (tx) => {
       // Any link still out stops working once a password is set by hand.
       if (body.password) {
@@ -586,8 +612,29 @@ userRoutes.patch(
       if (teamChanged && linked) {
         await tx.employee.update({ where: { id: linked.id }, data: { industryId: body.teamId || null } });
       }
+      if (numberTyped && owner) {
+        await tx.employee.update({ where: { id: owner.id }, data: { employeeNo: body.employeeNo || null } });
+        // A typed number moves the employee series up to it, never down.
+        if (body.employeeNo) moved.counter = await setCounter('employee', body.employeeNo, tx, { mode: 'raise' });
+        await syncLoginFromEmployee(tx, owner.id);
+      }
       return tx.user.update({ where: { id: req.params.id }, data, select: publicUser });
     });
+
+    const numberCounter = moved.counter;
+    if (numberTyped && owner) {
+      await audit(
+        {
+          entityType: 'employee',
+          entityId: owner.id,
+          action: 'UPDATED',
+          summary: `Employee number ${owner.employeeNo ?? 'none'} → ${body.employeeNo || 'none'} (from Admin › Users)${numberCounter && numberCounter.after !== numberCounter.before ? ' — the employee series continues from it' : ''}`,
+          before: { employeeNo: owner.employeeNo },
+          after: { employeeNo: body.employeeNo || null, ...(numberCounter ? { counter: numberCounter } : {}) },
+        },
+        req,
+      );
+    }
 
     if (teamChanged && linked) {
       await audit(
@@ -823,6 +870,10 @@ roleRoutes.delete(
     });
     if (!role) throw notFound('Role not found');
     if (role.isSystem) throw badRequest('A built-in role cannot be deleted — remove its permissions or take it off people instead');
+    // The engine reads these by KEY (2026-10-18): rename or empty one, never delete it.
+    if (ENGINE_ROLE_KEYS.some((k) => k.key === role.key)) {
+      throw badRequest(`The role key "${role.key}" is read by the approval engine or the accounts — rename it or empty it instead of deleting it`);
+    }
     const routes = await prisma.approvalWorkflow.findMany({
       where: { OR: [{ requesterRoleId: role.id }, { steps: { some: { roleId: role.id } } }] },
       select: { name: true },

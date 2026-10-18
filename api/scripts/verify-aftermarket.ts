@@ -33,6 +33,7 @@ import { holidaysAside, holidaysBack, putHolidays } from './lib/holidays';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
@@ -119,6 +120,7 @@ async function cleanup() {
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
+  await prisma.role.deleteMany({ where: { key: { startsWith: 'zzam_' } } });
   // An invoice raised from a job order holds it (Restrict), so invoices go first.
   await prisma.invoice.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.serviceReport.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
@@ -151,7 +153,8 @@ async function cleanup() {
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[]) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzam_', roleKeys);
   return prisma.user.create({
     data: {
       name,

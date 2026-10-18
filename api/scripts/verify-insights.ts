@@ -22,6 +22,7 @@
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
@@ -166,7 +167,8 @@ async function cleanup() {
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[]) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzins_', roleKeys);
   return prisma.user.create({
     data: {
       name,

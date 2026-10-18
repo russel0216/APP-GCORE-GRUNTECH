@@ -27,6 +27,8 @@ import bcrypt from 'bcryptjs';
 import fs from 'node:fs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
+import { roleSeedPermissionKeys } from '../src/shared/roleSeeds';
 import { env } from '../src/env';
 import { act } from '../src/shared/approvals';
 import '../src/routes/cadJobOrders';
@@ -73,6 +75,7 @@ const D = (v: number) => new Prisma.Decimal(v);
 const PDF = () => new Blob(['%PDF-1.4\n%verify\n'], { type: 'application/pdf' });
 
 async function cleanup() {
+  await prisma.role.deleteMany({ where: { key: { startsWith: 'zzcad_' } } });
   const requests = await prisma.cadJobOrder.findMany({
     where: { title: { startsWith: TAG } },
     select: { id: true, revisions: { select: { id: true } }, comments: { select: { id: true } }, approvedPlanId: true },
@@ -116,8 +119,9 @@ async function cleanup() {
 }
 
 async function makeUser(name: string, local: string, roleKeys: string[]) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
-  if (roles.length !== roleKeys.length) throw new Error(`Missing seeded role(s): ${roleKeys.join(', ')} — run the seed`);
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzcad_', roleKeys);
+  if (roles.length < roleKeys.length) throw new Error(`Missing seeded role(s): ${roleKeys.join(', ')} — run the seed`);
   return prisma.user.create({
     data: { name, email: `${local}${MAIL}`, passwordHash: await bcrypt.hash('x', 10), roles: { create: roles.map((r) => ({ roleId: r.id })) } },
   });
@@ -183,8 +187,9 @@ async function main() {
     ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete', 'approve', 'export'].every((a) => keys.has(`gops.cad_job_orders.${a}`)),
     [...keys].join(','),
   );
-  const roleKeys = async (key: string) =>
-    new Set((await prisma.rolePermission.findMany({ where: { role: { key } }, select: { permission: { select: { key: true } } } })).map((r) => r.permission.key));
+  // The seed's DEFINITION of each role — the install's own roles were emptied
+  // for the owner's (2026-10-18) and may hold anything.
+  const roleKeys = async (key: string) => new Set(roleSeedPermissionKeys(key));
   const leadKeys = await roleKeys('designer_lead');
   const supportKeys = await roleKeys('designer');
   const salesKeys = await roleKeys('sales');

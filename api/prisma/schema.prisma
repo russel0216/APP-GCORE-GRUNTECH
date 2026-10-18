@@ -893,7 +893,9 @@ enum EmploymentType {
 /// too many. An employee with no user account files nothing, so has no route.
 model Employee {
   id         String  @id @default(cuid())
-  employeeNo String  @unique
+  /// Nullable since 2026-10-18: every number was cleared once for the owner's
+  /// `GTC-0001-14` scheme, and a person without one is issued no `{EMP}` number.
+  employeeNo String? @unique
   firstName  String
   lastName   String
   middleName String?

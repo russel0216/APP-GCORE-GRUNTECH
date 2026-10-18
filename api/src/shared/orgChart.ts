@@ -364,3 +364,76 @@ export async function grantSupervisorRole(): Promise<number> {
   });
   return bosses.length;
 }
+
+/**
+ * The chart's titles assigned to the OWNER'S roles, by NAME (2026-10-18, his
+ * call, after every role was emptied for him to build his own: "assign
+ * people to them from the chart by role name through a script"). Each title
+ * on the chart — "Team Leader", "Purchasing Officer" … — is matched to a role
+ * whose name is the same, trimmed and case-blind (a title with no role of
+ * that name is listed, never guessed), and each person with a login is GIVEN
+ * those roles — added, never removed, so what the owner assigned by hand
+ * stays. "Employee" is matched the same way when a role is so named. Never
+ * marked: the dry run lists every assignment, `--apply` writes them, audited
+ * per login, and may be run again as the roles grow. Reports to, teams,
+ * departments and Supports teams are not touched.
+ */
+export async function applyChartRolesByName(opts: { dryRun?: boolean } = {}): Promise<{
+  applied: boolean;
+  people: OrgChange[];
+  /** The chart titles with no role of that name — the owner creates or renames one, then runs it again. */
+  unmatchedTitles: string[];
+  /** The people on the chart with no login yet — nothing to assign to. */
+  noLogin: string[];
+}> {
+  const [roles, users] = await Promise.all([
+    prisma.role.findMany({ select: { id: true, key: true, name: true } }),
+    prisma.user.findMany({
+      select: { id: true, email: true, name: true, isActive: true, roles: { select: { roleId: true } } },
+    }),
+  ]);
+  const roleByName = new Map(roles.map((r) => [fold(r.name), r]));
+  const byEmail = new Map(users.map((u) => [u.email.toLowerCase(), u]));
+  const userByName = new Map(users.map((u) => [fold(u.name), u]));
+  const titles = [...new Set(ORG_CHART.flatMap((p) => [...p.titles, 'Employee' as const]))];
+  const unmatchedTitles = titles.filter((t) => !roleByName.has(fold(t)));
+
+  const people: OrgChange[] = [];
+  const noLogin: string[] = [];
+  const plan: { user: (typeof users)[number]; add: { id: string; name: string }[] }[] = [];
+  for (const p of ORG_CHART) {
+    const user = (p.email && byEmail.get(p.email.toLowerCase())) || userByName.get(fold(p.name)) || null;
+    if (!user) {
+      noLogin.push(p.name);
+      continue;
+    }
+    const have = new Set(user.roles.map((r) => r.roleId));
+    const want = [...p.titles, 'Employee'].map((t) => roleByName.get(fold(t))).filter((r): r is NonNullable<typeof r> => !!r);
+    const add = want.filter((r) => !have.has(r.id));
+    if (!add.length) continue;
+    plan.push({ user, add });
+    people.push({ name: p.name, changes: [`roles added: ${add.map((r) => r.name).join(', ')}`] });
+  }
+  if (opts.dryRun || !plan.length) return { applied: false, people, unmatchedTitles, noLogin };
+
+  await prisma.$transaction(
+    async (tx) => {
+      for (const { user, add } of plan) {
+        await tx.userRole.createMany({ data: add.map((r) => ({ userId: user.id, roleId: r.id })), skipDuplicates: true });
+        await audit(
+          {
+            entityType: 'user',
+            entityId: user.id,
+            action: 'UPDATED',
+            summary: `Organisation chart: roles added by name — ${add.map((r) => r.name).join(', ')}`,
+            after: { roleIds: add.map((r) => r.id) },
+          },
+          undefined,
+          tx,
+        );
+      }
+    },
+    { maxWait: 15_000, timeout: 120_000 },
+  );
+  return { applied: true, people, unmatchedTitles, noLogin };
+}

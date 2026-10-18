@@ -57,6 +57,8 @@ interface UserRow {
 interface UsersSummary {
   loginsAlone: number;
   employeesAlone: number;
+  /** Active logins with no employee number yet (2026-10-18). */
+  withoutNumber: number;
 }
 
 /** The single-user endpoint returns role ids (the list only needs key + name). */
@@ -252,6 +254,14 @@ export function Users() {
               { value: 'yes', label: 'Linked to an employee' },
             ],
           },
+          {
+            key: 'number',
+            label: 'Employee number',
+            options: [
+              { value: 'none', label: 'No employee number yet' },
+              { value: 'yes', label: 'Has an employee number' },
+            ],
+          },
         ]}
         summary={(raw) => {
           const sum = raw as unknown as UsersSummary | undefined;
@@ -271,6 +281,13 @@ export function Users() {
                 accent={sum.employeesAlone > 0 ? 'warn' : undefined}
                 sub="active people who cannot sign in yet"
                 to="/g-hr/employees?login=none&isActive=true"
+              />
+              <Stat
+                label="Without an employee number"
+                value={sum.withoutNumber}
+                accent={sum.withoutNumber > 0 ? 'warn' : undefined}
+                sub="type it on the login (GTC-0001-14) — no quotation number is issued without one"
+                to={`${BASE}?number=none`}
               />
             </>
           );
@@ -401,12 +418,14 @@ function UserEditor({
     setError(null);
     try {
       const payload = {
-        // Kept on the employee record when there is one — not sent at all.
+        // Kept on the employee record when there is one — not sent at all,
+        // except the employee number (2026-10-18), which is typed here and
+        // written through to the record, as the Team is.
+        employeeNo: form.employeeNo || null,
         ...(kept
           ? {}
           : {
               name: form.name,
-              employeeNo: form.employeeNo || null,
               position: form.position || null,
               phone: form.phone || null,
               departmentId: form.departmentId || null,
@@ -495,9 +514,10 @@ function UserEditor({
         <>
           {detail?.employee && (
             <div className="alert info">
-              This login is {detail.employee.firstName} {detail.employee.lastName}'s — their name, employee number,
-              position, mobile and department are kept on the{' '}
-              <Link to={`/g-hr/employees/${detail.employee.id}`}>employee record ↗</Link> and follow it here.
+              This login is {detail.employee.firstName} {detail.employee.lastName}'s — their name, position,
+              mobile and department are kept on the{' '}
+              <Link to={`/g-hr/employees/${detail.employee.id}`}>employee record ↗</Link> and follow it here. The
+              employee number typed here is written onto the record.
             </div>
           )}
           <div className="grid grid-2">
@@ -507,10 +527,14 @@ function UserEditor({
             <Field label="Email" hint="The address they sign in with — it stays">
               <input type="email" value={form.email} disabled />
             </Field>
-            <Field label="Employee number">
+            <Field
+              label="Employee number"
+              hint="GTC-0001-14: the person's sequence, then the year hired. The {EMP} in their quotation numbers is the sequence (001)."
+            >
               <input
+                className="mono"
                 value={form.employeeNo}
-                disabled={kept}
+                placeholder="GTC-0001-14"
                 onChange={(e) => setForm({ ...form, employeeNo: e.target.value })}
               />
             </Field>

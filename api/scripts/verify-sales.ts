@@ -16,6 +16,8 @@ import { PDFDocument } from 'pdf-lib';
 import { deleteAttachment } from '../src/shared/attachments';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
+import { roleSeedPermissionKeys } from '../src/shared/roleSeeds';
 import { env } from '../src/env';
 import { nextNumber, previewNext, employeeToken, parseNumber, renderPattern, FREE_NUMBER_TRIES } from '../src/shared/numbering';
 import { submitForApproval, act, pendingFor, pickWorkflow, routePreview, reopenApproved } from '../src/shared/approvals';
@@ -290,7 +292,8 @@ async function cleanup() {
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[]) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike(`${TAG.toLowerCase()}_`, roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -2873,10 +2876,12 @@ async function main() {
         withSupplierNote('freight extra', 'Acme Pumps') === 'Supplier: Acme Pumps — freight extra' &&
         withSupplierNote('Supplier: Acme Pumps — freight extra', 'acme pumps') === 'Supplier: Acme Pumps — freight extra',
     );
-    const sellingRoles = await prisma.role.findMany({
-      where: { key: { in: ['sales', 'sales_manager', 'team_leader', 'industry_specialist'] } },
-      select: { key: true, permissions: { select: { permission: { select: { key: true } } } } },
-    });
+    // The seed's DEFINITION of the selling roles — the install's own roles
+    // were emptied for the owner's (2026-10-18) and may hold anything.
+    const sellingRoles = ['sales', 'sales_manager', 'team_leader', 'industry_specialist'].map((key) => ({
+      key,
+      permissions: roleSeedPermissionKeys(key).map((k) => ({ permission: { key: k } })),
+    }));
     check(
       'the selling roles may add a supplier from a quotation line (gchain.suppliers.create; run the seed if this fails)',
       sellingRoles.length === 4 && sellingRoles.every((r) => r.permissions.some((p) => p.permission.key === 'gchain.suppliers.create')),

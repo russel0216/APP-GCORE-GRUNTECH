@@ -567,7 +567,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,401 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,423 assertions across twenty-two scripts** (counted 2026-10-18, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -631,12 +631,12 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles):
 foundation
-386, masters 92, sales 638, costing 205, pipeline 121, calendar 101, numbering
-79, partners 120, delivery 187, chain 354, hr 485, plantilla 123, meetings
+390, masters 92, sales 638, costing 205, pipeline 121, calendar 101, numbering
+94, partners 120, delivery 187, chain 354, hr 485, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
-insights 98, insights-brief 50, workspace 82, accounts 140. The
+insights 98, insights-brief 50, workspace 82, accounts 143. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -665,7 +665,11 @@ service — the services have no click-path to test them, which is exactly why
 these scripts exist. A script that needs a module's `onApprovalSettled`,
 `registerSearch` or `registerSchedule` side effect imports that route module
 (`verify-academy` imports `routes/academy`, `verify-numbering` imports
-`issuedThisPeriod` from `routes/admin`).
+`issuedThisPeriod` from `routes/admin`). **A test user never leans on what
+the install's roles hold** (2026-10-18, every role emptied for the owner's
+own): `rolesLike(prefix, keys)` in `scripts/lib/roles.ts` gives them the
+real role (its KEY, for the engine) and a throwaway copy of the seed's
+rights for it (`src/shared/roleSeeds.ts`), deleted by the script's cleanup.
 
 **Cleaning up includes what a script told real people.** A document submitted
 through a seeded workflow notifies whoever really holds the role, and deleting
@@ -1636,9 +1640,49 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 ### Numbering
 
 - **An OWNER-scoped counter keys its rows `2026-09@007`**; the template row is
-  `periodKey ''`. `{EMP}` is the last run of digits in the employee number padded
-  to three, `000` for an unlinked login; `Employee.employeeNo` wins over
-  `User.employeeNo`.
+  `periodKey ''`. `Employee.employeeNo` wins over `User.employeeNo`.
+- **The employee number is `GTC-0001-14` — the person's SEQUENCE, then the
+  year HIRED — and `{EMP}` is that sequence** (2026-10-18, the owner's
+  ruling: "the existing number is manual, GTC-0001-14 for Carter Gasiong;
+  update the ruling, particularly in quotation numbering"). The employee
+  pattern is `GTC-{SEQ}-{YY}` (`EMPLOYEE_NUMBERING` in `shared/numbering.ts`:
+  padding 4, period NONE — one running count through the years — GLOBAL),
+  set ONCE by the seed where the stock pattern still stood
+  (`applyEmployeeNumbering()` in `shared/employeeNumbers.ts`,
+  `seed.employeeNumbering20261018`; an administrator's own pattern stays, and
+  Admin › Numbering may change it). `{YY}` / `{YYYY}` in that pattern is the
+  year hired: `POST /employees` issues the automatic number with `{ at:
+  dateHired }`. **`employeeToken(employeeNo, template, prefix)` reads the
+  number THROUGH the employee pattern** (`parseNumber`, the one parser) and
+  pads its `{SEQ}` to three — `GTC-0001-14` → `001`, so Carter's quotations
+  read `0012610…`; `GTC-1234-26` → `1234`, never truncated; a number outside
+  the pattern (`GT-EMP-095`, `12`) falls back to the rule before, the last
+  run of digits, so nothing issued earlier changes series;
+  `employeeDigits(employeeNo, tx)` is the call with the stored template.
+  **A typed employee number RAISES the employee series to its sequence,
+  never lowers it** (`setCounter('employee', …, { mode: 'raise' })` on
+  `POST /employees`, `PATCH /employees/:id`, the employee import and the
+  Admin › Users write-through), so the next automatic number never repeats
+  one typed in any order. **A person on the register with no number is
+  refused a `{EMP}` number**, never issued one in the `000` series: `nextNumber`
+  throws `missingNumberMessage()` ("Set an employee number on X's employee
+  record first — the quotation number carries it"), `previewNext` answers
+  `missingNumber` (the person), the quotation editor shows it as a warning
+  and Admin › Numbering's samples say so; a login with no employee record at
+  all still numbers under `000`. **Every number was cleared once**
+  (`clearEmployeeNumbers()`, `seed.employeeNumbersCleared20261018`, the
+  owner's call: "delete all existing employee numbers in the user"):
+  `Employee.employeeNo` is nullable since, the employee's and the login's
+  number both null, one audited row per person with the old number in
+  `before`; the counter was not lowered. The numbers are typed on **Admin ›
+  Users** — the Employee number box is the one mirrored field that WRITES
+  THROUGH to the employee record (`PATCH /users/:id { employeeNo }`, a 409
+  naming whoever already has it, an `employee` UPDATED audit row "(from Admin
+  › Users)") — or on HR › Employees; both lists show "none yet", filter
+  `?number=none|yes` and carry a "Without an employee number" card
+  (`summary.withoutNumber`). verify-numbering pins the readings, the hire
+  year, the raise-only counter and the refusal; verify-accounts the
+  write-through.
 - **An existing database keeps its configured pattern.** The seed only creates a
   missing template; `PUT /numbering/:type` is the only thing that changes one. A
   dev database older than the house scheme still issues `GT-QT-…` until an
@@ -4041,10 +4085,46 @@ stand-in's door, queue, bell and trail, and both switches off.
   (`admin.roles.delete`, the Delete in the role modal's foot) takes it off
   everybody holding it in the same transaction — the question says how
   many — and audits who lost it. Refused: a seeded (`isSystem`) role, which
-  the seed would make again and its routes name (the modal says so), and a
+  the seed would make again and its routes name (the modal says so), a
   role any approval route still names, as a step or as "Prepared by" — the
   400 names the routes, because deleting it would leave a step routing to
-  nobody.
+  nobody — and, since 2026-10-18, a role whose KEY the engine reads
+  (`ENGINE_ROLE_KEYS` in `shared/rolesClear.ts`: rename or empty it instead).
+- **Every role was EMPTIED once, and the roles are the owner's**
+  (2026-10-18, the owner's call: "delete all roles, I will create the roles
+  later"; his choice between deleting the rows and emptying them: empty).
+  `clearRoles()` in `shared/rolesClear.ts`, the seed's LAST step, marked
+  `seed.rolesCleared20261018`: every permission off every role, every role
+  off every person ("Supports teams" and the overrides stay — they are the
+  person's), the built-in mark (`isSystem`) lifted from all, the ROWS kept
+  so the 47 routes keep their steps and the keys the engine reads keep
+  their meaning — `team_leader` (team-first), `technical_manager` and
+  `service_manager` (own team), `back_support` (supports teams),
+  `purchasing_manager` / `purchasing_manager_import`, `hr` (the HR approver
+  type), `ceo`, `executive`, `employee` (every new login),
+  `supervisor` (every boss), `warehouse_supervisor` — whatever the owner
+  calls them; the New role form's Key hint lists them. **From then on the
+  seed neither recreates a role nor offers it a permission**: the role
+  definitions moved to `src/shared/roleSeeds.ts` (`ROLE_SEEDS`,
+  `roleSeedPermissionKeys`) and the seed's loop runs only while the mark is
+  absent (a fresh install gets the 29 and has them emptied in the same
+  run). Only the super admin can open anything until the owner builds and
+  assigns his roles (sign in as `gcore@gruntechnology.com`). **A verify
+  script never leans on what the install's roles hold**: `rolesLike(prefix,
+  keys)` in `scripts/lib/roles.ts` gives a test user the real role (its
+  KEY, for the engine) AND a throwaway `<prefix>like_<key>` role carrying
+  the seed definition's rights, refilled each run and deleted by the
+  script's cleanup — every `makeUser` that took seeded keys goes through it.
+  **The chart's titles reach the owner's roles BY NAME**: `npx tsx
+  scripts/org-chart.ts --roles-by-name` (dry run; `--apply` writes)
+  matches each title on `ORG_CHART` ("Team Leader", "Purchasing Officer",
+  "Employee" …) to a role of that name, case- and space-blind, ADDS it to
+  each person with a login (never removes one), lists the titles with no
+  role of that name and the people with no login, audits per login and is
+  never marked — run it again as the roles grow (`applyChartRolesByName()`
+  in `shared/orgChart.ts`). verify-foundation pins the engine keys (each
+  read in the API's source, each role on file), no built-in role once the
+  mark is down, and the numbers' clearing mark.
 - **Assign the roles in Admin › Users**: until somebody holds Team Leader
   (for anyone with no "Reports to") and CEO / President, those steps route
   to nobody and `audit-workflows.ts` says so.

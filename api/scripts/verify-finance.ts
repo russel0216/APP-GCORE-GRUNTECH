@@ -23,6 +23,7 @@
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act, approversForStep, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
@@ -267,7 +268,8 @@ async function settle(approvalId: string, outcome: 'APPROVED' | 'REJECTED' = 'AP
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[], supervisorId?: string) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzfin_', roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -417,6 +419,8 @@ async function main() {
   await makeUser('ZZ Director', 'exec@verifyf.local', ['executive']);
   // Reimbursements and cash advances (2026-10-15) end with the CEO / President.
   await makeUser('ZZ CEO', 'ceo@verifyf.local', ['ceo']);
+  // The supplier bill routes' first step (2026-10-15); the install's own holders are nobody's business.
+  await makeUser('ZZ Fin TM', 'tm@verifyf.local', ['technical_manager']);
   // Throwaway roles for the route guards: nothing at all, project access
   // without budget monitoring, and the right to file a claim and nothing else.
   const throwaway = async (key: string, permissionKeys: string[]) => {

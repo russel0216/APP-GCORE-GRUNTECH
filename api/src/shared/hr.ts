@@ -403,7 +403,7 @@ export function undertimeMinutes(timeOut: Date, dateKey: string, settings: HrSet
 export interface AttendanceDayRow {
   employee: {
     id: string;
-    employeeNo: string;
+    employeeNo: string | null;
     firstName: string;
     lastName: string;
     position: string | null;

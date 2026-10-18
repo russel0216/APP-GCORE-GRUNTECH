@@ -14,6 +14,8 @@ import { repairTypedStockReceipts } from '../src/shared/typedItems';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
+import { roleSeedPermissionKeys } from '../src/shared/roleSeeds';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { resolveUser } from '../src/permissions/resolve';
@@ -243,7 +245,8 @@ async function cleanup() {
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[]) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzchain_', roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -811,11 +814,11 @@ async function main() {
   // gchain keys. Without these grants the create button never appears.
   // The routing sheet of 2026-10-13 adds Industry Specialists, Technical
   // Managers and Team Leaders as preparers.
+  // The seed's DEFINITION — the install's own roles were emptied for the
+  // owner's (2026-10-18) and may hold anything.
   for (const roleKey of ['project_engineer', 'project_manager', 'industry_specialist', 'technical_manager', 'team_leader']) {
-    const holds = await prisma.rolePermission.count({
-      where: { role: { key: roleKey }, permission: { key: 'gchain.purchase_requests.create' } },
-    });
-    check(`the seeded ${roleKey} holds gchain.purchase_requests.create`, holds === 1);
+    const holds = roleSeedPermissionKeys(roleKey).includes('gchain.purchase_requests.create');
+    check(`the seeded ${roleKey} holds gchain.purchase_requests.create`, holds);
   }
 
   // ── 10. Search ─────────────────────────────────────────────────────────────

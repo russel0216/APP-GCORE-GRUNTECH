@@ -35,6 +35,9 @@ import {
   nextNumber,
   previewNext,
   employeeToken,
+  employeeTemplate,
+  employeeDigits,
+  EMPLOYEE_NUMBERING,
   periodKeyFor,
   scopedPeriodKey,
   parseNumber,
@@ -321,6 +324,67 @@ async function main() {
     'and says so when they are not',
     !peekNobody.linked && peekNobody.employeeNo === null && peekNobody.number.startsWith('000'),
     peekNobody.number,
+  );
+
+  // ══ The employee number ruling of 2026-10-18 ═══════════════════════════════
+  console.log('\nThe employee number: GTC-{SEQ}-{YY}, and {EMP} as its sequence');
+
+  // `GTC-0001-14` is person 1, hired in 2014: {EMP} is the SEQUENCE read
+  // through the employee pattern, never the last digits.
+  const empPrefix = (await prisma.company.findUnique({ where: { id: 'company' }, select: { numberPrefix: true } }))?.numberPrefix ?? 'GT';
+  const empTpl = { pattern: EMPLOYEE_NUMBERING.pattern, typeCode: 'EMP', period: EMPLOYEE_NUMBERING.period, scope: EMPLOYEE_NUMBERING.scope };
+  check(
+    'GTC-0001-14 reads as employee 001 through the employee pattern (the 14 — the year hired — takes no part)',
+    employeeToken('GTC-0001-14', empTpl, empPrefix) === '001' && employeeToken('GTC-0061-26', empTpl, empPrefix) === '061',
+    `${employeeToken('GTC-0001-14', empTpl, empPrefix)} ${employeeToken('GTC-0061-26', empTpl, empPrefix)}`,
+  );
+  check('a sequence wider than three digits is kept whole', employeeToken('GTC-1234-26', empTpl, empPrefix) === '1234', employeeToken('GTC-1234-26', empTpl, empPrefix));
+  check(
+    'a number outside the pattern falls back to its last digits, so nothing issued before changes series',
+    employeeToken('GT-EMP-095', empTpl, empPrefix) === '095' && employeeToken('12', empTpl, empPrefix) === '012',
+    `${employeeToken('GT-EMP-095', empTpl, empPrefix)} ${employeeToken('12', empTpl, empPrefix)}`,
+  );
+  // The stored employee template is the one `employeeDigits` reads: on this
+  // install it is the owner's pattern (the seed set it once), or an
+  // administrator's own — either way the real reading, not the fallback.
+  const storedEmp = await employeeTemplate();
+  check('the install keeps an employee numbering template', !!storedEmp, JSON.stringify(storedEmp));
+  if (storedEmp?.pattern === EMPLOYEE_NUMBERING.pattern) {
+    check('and under it a quotation for GTC-0001-14 carries 001', (await employeeDigits('GTC-0001-14')) === '001', await employeeDigits('GTC-0001-14'));
+    // Its own throwaway type, so the house type's September count stays what
+    // the "Issued this period" section expects.
+    const carter = await nextNumber(await makeType('carter', HOUSE), prisma, { employeeNo: 'GTC-0001-14', at: sept });
+    check('Carter Gasiong’s first quotation of Sep 2026 is 0012609…, not 014…', carter.startsWith('0012609'), carter);
+  }
+  // A throwaway type under the owner's own pattern: the year is the HIRE
+  // year (`at`), one running count through the years, and a typed number
+  // raises the series — never lowers it.
+  const empType = await makeType('emp', { ...EMPLOYEE_NUMBERING });
+  const hired2014 = await nextNumber(empType, prisma, { at: new Date(2014, 2, 3) });
+  const hired2026 = await nextNumber(empType, prisma, { at: new Date(2026, 9, 18) });
+  check('the automatic number carries the year hired and one running count', hired2014 === 'GTC-0001-14' && hired2026 === 'GTC-0002-26', `${hired2014} ${hired2026}`);
+  const typedRaise = await setCounter(empType, 'GTC-0057-19', prisma, { mode: 'raise' });
+  check('a typed number raises the employee series to its sequence', typedRaise?.periodKey === '' && typedRaise.after === 57, JSON.stringify(typedRaise));
+  check('and the next automatic number follows it', (await nextNumber(empType, prisma, { at: new Date(2026, 9, 18) })) === 'GTC-0058-26');
+  const typedLower = await setCounter(empType, 'GTC-0003-15', prisma, { mode: 'raise' });
+  check('a lower typed number never lowers it', typedLower?.after === 58, JSON.stringify(typedLower));
+  check('a number outside the pattern moves nothing', (await setCounter(empType, 'GT-EMP-095', prisma, { mode: 'raise' })) === null);
+
+  // A person ON THE REGISTER with no number yet is refused a {EMP} number —
+  // never issued one in the 000 series — and the preview names them.
+  const numberless = await makeUser('ZZ Numberless', 'numberless@verifynum.local', []);
+  await prisma.employee.create({ data: { firstName: 'Verify', lastName: `${TAG} Numberless`, userId: numberless.id } });
+  await expectRejection(
+    'a quotation number for a person with no employee number is refused, naming them',
+    () => nextNumber(qt, prisma, { ownerId: numberless.id, at: sept }),
+    `Set an employee number on Verify ${TAG} Numberless's employee record first`,
+  );
+  const peekNumberless = await previewNext(qt, { ownerId: numberless.id, at: sept });
+  check('and the preview says who must be given one', peekNumberless.missingNumber === `Verify ${TAG} Numberless` && !peekNumberless.linked, JSON.stringify(peekNumberless));
+  check('a login with no employee record at all still previews under 000, nobody named', peekNobody.missingNumber === null);
+  check(
+    'a pattern without {EMP} is issued whoever asks',
+    (await nextNumber(await makeType('plain', { pattern: '{PREFIX}-{SEQ}', period: 'NONE', scope: 'GLOBAL' }), prisma, { ownerId: numberless.id })) === `${empPrefix}-001`,
   );
 
   // A flat per-employee counter: no period at all, still one run per author.

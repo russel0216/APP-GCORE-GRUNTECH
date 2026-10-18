@@ -19,6 +19,7 @@
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { resolveUser } from '../src/permissions/resolve';
@@ -358,6 +359,10 @@ async function main() {
 
   console.log('\nFixtures');
 
+  // The seeded roles' KEYS (the route reads them) with a throwaway copy of
+  // their rights — the install's own hr/ceo roles may hold nothing (2026-10-18).
+  const hrRoles = await rolesLike('zzev_', ['hr']);
+  const ceoRoles = await rolesLike('zzev_', ['ceo']);
   const hrRole = await prisma.role.findUnique({ where: { key: 'hr' } });
   // The second step is the CEO / President since the organisation chart of
   // 2026-10-17 ("Management approval" corrected in place to the ceo role).
@@ -382,11 +387,11 @@ async function main() {
   const supervisor = await makeUser(`${TAG} Supervisor`, `sup${DOMAIN}`, [supRole.id]);
   const subject = await makeUser(`${TAG} Subject`, `subject${DOMAIN}`, [empRole.id]);
   const bystander = await makeUser(`${TAG} Bystander`, `bystander${DOMAIN}`, [empRole.id]);
-  const hr = await makeUser(`${TAG} HR Officer`, `hr${DOMAIN}`, [hrRole.id]);
-  const hr2 = await makeUser(`${TAG} HR Two`, `hr2${DOMAIN}`, [hrRole.id]);
-  const exec = await makeUser(`${TAG} Director`, `exec${DOMAIN}`, [execRole.id]);
+  const hr = await makeUser(`${TAG} HR Officer`, `hr${DOMAIN}`, hrRoles.map((r) => r.id));
+  const hr2 = await makeUser(`${TAG} HR Two`, `hr2${DOMAIN}`, hrRoles.map((r) => r.id));
+  const exec = await makeUser(`${TAG} Director`, `exec${DOMAIN}`, ceoRoles.map((r) => r.id));
   // An HR officer who is on probation — their own evaluation would route to HR.
-  const hrSubject = await makeUser(`${TAG} HR Probationer`, `hrsubject${DOMAIN}`, [hrRole.id, empRole.id]);
+  const hrSubject = await makeUser(`${TAG} HR Probationer`, `hrsubject${DOMAIN}`, [...hrRoles.map((r) => r.id), empRole.id]);
   // Somebody who joins management AFTER their evaluation was submitted.
   const late = await makeUser(`${TAG} Late Riser`, `late${DOMAIN}`, [empRole.id]);
 

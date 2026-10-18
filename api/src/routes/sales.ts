@@ -1502,6 +1502,9 @@ quotationRoutes.get(
       lastNumber: last?.number ?? null,
       employeeNo: preview.employeeNo,
       linked: preview.linked,
+      // The person on the register with no employee number yet, whose
+      // quotation number the save will refuse until one is set (2026-10-18).
+      missingNumber: preview.missingNumber,
       // Whether the pattern prints the author's digits at all — an unlinked
       // account only matters when it does.
       usesEmployeeDigits: (template?.pattern ?? '').includes('{EMP}'),

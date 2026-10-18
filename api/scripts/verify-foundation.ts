@@ -17,11 +17,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import type { ApprovalStep, Prisma } from '@prisma/client';
 import { env } from '../src/env';
 import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/resolve';
 import { allPermissions } from '../src/permissions/registry';
 import { ACCESS_SPLIT } from '../src/shared/accessSplit';
+import { ENGINE_ROLE_KEYS, ROLES_CLEARED_MARK } from '../src/shared/rolesClear';
+import { CLEARED_MARK as NUMBERS_CLEARED_MARK } from '../src/shared/employeeNumbers';
 import {
   nextNumber,
   previewNext,
@@ -231,7 +234,8 @@ async function cleanup() {
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[], supervisorId?: string) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike(TAG, roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -344,6 +348,30 @@ async function main() {
     ACCESS_SPLIT.every(({ from, to }) => permissionKeys.has(from) && to.every((k) => permissionKeys.has(k))),
     ACCESS_SPLIT.flatMap(({ from, to }) => [from, ...to]).filter((k) => !permissionKeys.has(k)).join(', '),
   );
+  // The roles emptied for the owner's own (2026-10-18, shared/rolesClear.ts):
+  // the keys the engine reads are each read somewhere in the API's source,
+  // every such role row stands (Delete refuses them), and once the mark is
+  // down no role is built-in any more — the grid is the owner's.
+  {
+    let apiSource = '';
+    const walkApi = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walkApi(full);
+        else if (/\.ts$/.test(entry.name) && !full.endsWith('rolesClear.ts') && !full.endsWith('roleSeeds.ts')) apiSource += fs.readFileSync(full, 'utf8') + '\n';
+      }
+    };
+    walkApi(path.resolve(__dirname, '../src'));
+    const unread = ENGINE_ROLE_KEYS.filter((k) => !apiSource.includes(`'${k.key}'`)).map((k) => k.key);
+    check('every role key the engine is said to read is read somewhere in the API', unread.length === 0, unread.join(', '));
+    const rows = await prisma.role.findMany({ where: { key: { in: ENGINE_ROLE_KEYS.map((k) => k.key) } }, select: { key: true } });
+    check('every role the engine reads by key is on file', rows.length === ENGINE_ROLE_KEYS.length, ENGINE_ROLE_KEYS.map((k) => k.key).filter((k) => !rows.some((r) => r.key === k)).join(', '));
+    const cleared = await prisma.setting.findUnique({ where: { key: ROLES_CLEARED_MARK } });
+    const builtIn = await prisma.role.count({ where: { isSystem: true } });
+    check('once the roles were emptied, none is built-in any more — the owner renames, fills or deletes each', !cleared || builtIn === 0, `${builtIn} built-in with the mark ${cleared ? 'down' : 'absent'}`);
+    const numbersCleared = await prisma.setting.findUnique({ where: { key: NUMBERS_CLEARED_MARK } });
+    check('the employee numbers were cleared once (the mark stands), and the seed will not clear them again', !!numbersCleared);
+  }
   check('approval goes to the workflow, not to a key: no ghr.clearances.approve, no gops.quotations.approve', !permissionKeys.has('ghr.clearances.approve') && !permissionKeys.has('gops.quotations.approve'));
   check(
     'the three approve rights left are the ones something checks (CAD dispatch, progress reports, certificates)',

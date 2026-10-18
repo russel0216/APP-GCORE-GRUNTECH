@@ -9,9 +9,10 @@
  */
 
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { resolveUser, can } from '../src/permissions/resolve';
-import { nextNumber, previewNext } from '../src/shared/numbering';
+import { nextNumber, previewNext, parseNumber, EMPLOYEE_NUMBERING } from '../src/shared/numbering';
 import { decodeCsv, parseCsv, runImport, sniffDelimiter, templateFor, toCsv, type ImportSpec } from '../src/shared/csv';
 // The real spec and writer the import route runs — importing the routes module
 // pulls in Express, which is harmless here and keeps this script from testing
@@ -45,6 +46,7 @@ function check(label: string, condition: boolean, detail?: string) {
 const TAG = 'ZZVERIFY';
 
 async function cleanup() {
+  await prisma.role.deleteMany({ where: { key: { startsWith: 'zzverify_' } } });
   // The list section's quotation holds its customer (Restrict); it goes first.
   await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
@@ -358,15 +360,16 @@ async function main() {
   // ── 5. Employee pay is gated ───────────────────────────────────────────────
   console.log('\nEmployee pay visibility');
 
-  const hrRole = await prisma.role.findUnique({ where: { key: 'hr' } });
-  const pmRole = await prisma.role.findUnique({ where: { key: 'project_manager' } });
+  // Throwaway copies of the seeded roles' rights (the install's own may hold nothing, 2026-10-18).
+  const hrRoles = await rolesLike('zzverify_', ['hr']);
+  const pmRoles = await rolesLike('zzverify_', ['project_manager']);
 
   const hrUser = await prisma.user.create({
     data: {
       name: 'Verify HR',
       email: 'hr@verifym.local',
       passwordHash: await bcrypt.hash('x', 10),
-      roles: { create: [{ roleId: hrRole!.id }] },
+      roles: { create: hrRoles.map((r) => ({ roleId: r.id })) },
     },
   });
   const pmUser = await prisma.user.create({
@@ -374,7 +377,7 @@ async function main() {
       name: 'Verify PM',
       email: 'pm@verifym.local',
       passwordHash: await bcrypt.hash('x', 10),
-      roles: { create: [{ roleId: pmRole!.id }] },
+      roles: { create: pmRoles.map((r) => ({ roleId: r.id })) },
     },
   });
 
@@ -393,7 +396,17 @@ async function main() {
   const employeeNo = await nextNumber('employee');
   check('supplier codes follow the pattern', /^GT-SUPP-\d{4}-\d{4}$/.test(supplierCode), supplierCode);
   check('item codes follow the pattern', /^GT-ITM-\d{4}-\d{4}$/.test(itemCode), itemCode);
-  check('employee numbers follow the pattern', /^GT-EMP-\d{4}-\d{4}$/.test(employeeNo), employeeNo);
+  // The owner's scheme since 2026-10-18 (GTC-0001-26: the sequence, then the
+  // year — the year hired, today's here), or whatever the administrator set:
+  // the number reads back through the stored template either way.
+  const employeeTpl = await prisma.numberSequence.findFirstOrThrow({ where: { documentType: 'employee', periodKey: '' } });
+  const employeePrefix = (await prisma.company.findUnique({ where: { id: 'company' }, select: { numberPrefix: true } }))?.numberPrefix ?? 'GT';
+  check(
+    'employee numbers follow the stored pattern (GTC-{SEQ}-{YY} since 2026-10-18)',
+    parseNumber(employeeTpl, employeePrefix, employeeNo) !== null &&
+      (employeeTpl.pattern !== EMPLOYEE_NUMBERING.pattern || /^GTC-\d{4}-\d{2}$/.test(employeeNo)),
+    `${employeeNo} under ${employeeTpl.pattern}`,
+  );
 
   // Codes are handed out inside the caller's transaction, exactly as the
   // customer route does it. Two people saving a new customer at the same moment

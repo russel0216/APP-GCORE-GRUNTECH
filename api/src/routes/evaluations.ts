@@ -1060,7 +1060,7 @@ evaluationRoutes.get(
         columns: 3,
         fields: [
           { label: 'Employee', value: fullName(ev.employee) },
-          { label: 'Employee number', value: ev.employee.employeeNo },
+          { label: 'Employee number', value: ev.employee.employeeNo ?? '—' },
           { label: 'Position', value: ev.employee.position ?? '—' },
           { label: 'Department', value: ev.employee.department?.name ?? '—' },
           { label: 'Kind', value: ev.kind === 'TRAINEE' ? 'Trainee evaluation' : 'Probationary evaluation' },

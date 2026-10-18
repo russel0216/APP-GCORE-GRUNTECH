@@ -26,6 +26,7 @@
 
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { dayKey } from '../src/shared/hr';
@@ -150,8 +151,9 @@ async function makeRole(key: string, permissionKeys: string[]) {
 
 /** A user in the named roles — seeded ones (hr, finance, warehouse) or this script's own. */
 async function makeUser(name: string, local: string, roleKeys: string[], supervisorId?: string) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
-  if (roles.length !== roleKeys.length) throw new Error(`Missing role(s) among ${roleKeys.join(', ')} — run the seed first`);
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzpl_', roleKeys);
+  if (roles.length < roleKeys.length) throw new Error(`Missing role(s) among ${roleKeys.join(', ')} — run the seed first`);
   return prisma.user.create({
     data: {
       name,

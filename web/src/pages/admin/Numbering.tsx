@@ -27,7 +27,7 @@ interface SequenceRow {
 
 interface NumberingResponse {
   prefix: string;
-  previewFor: { employeeNo: string | null; linked: boolean };
+  previewFor: { employeeNo: string | null; linked: boolean; missingNumber: string | null };
   rows: SequenceRow[];
 }
 
@@ -61,6 +61,7 @@ export function Numbering() {
   const [previewFor, setPreviewFor] = useState<NumberingResponse['previewFor']>({
     employeeNo: null,
     linked: false,
+    missingNumber: null,
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
@@ -177,14 +178,17 @@ export function Numbering() {
         Tokens: <span className="mono">{'{PREFIX}'}</span> company prefix ({prefix}) ·{' '}
         <span className="mono">{'{TYPE}'}</span> document code · <span className="mono">{'{YYYY}'}</span>{' '}
         year · <span className="mono">{'{YY}'}</span> short year · <span className="mono">{'{MM}'}</span>{' '}
-        month · <span className="mono">{'{EMP}'}</span> the author's employee number, last digits
-        padded to three (000 for a login with no employee record) ·{' '}
+        month · <span className="mono">{'{EMP}'}</span> the author's employee number's SEQUENCE read
+        through the employee pattern (GTC-0001-14 → 001; 000 for a login with no employee record; a person
+        with no number yet is refused the number) ·{' '}
         <span className="mono">{'{SEQ}'}</span> counter. Change the prefix in Company Settings.
       </p>
       <p className="muted numbering-for">
         {previewFor.linked
           ? `Next numbers are shown as they would print for you — employee ${previewFor.employeeNo}.`
-          : 'Your login is not linked to an employee, so {EMP} shows as 000 in the samples above.'}
+          : previewFor.missingNumber
+            ? `Your employee record (${previewFor.missingNumber}) has no employee number yet, so {EMP} shows as 000 in the samples above — a number carrying it would be refused until one is typed.`
+            : 'Your login is not linked to an employee, so {EMP} shows as 000 in the samples above.'}
       </p>
 
       {editing && (

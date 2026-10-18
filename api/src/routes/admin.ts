@@ -21,6 +21,7 @@ import {
   DOCUMENT_TYPES,
   previewNext,
   employeeNoFor,
+  authorNumber,
   periodKeyFor,
   type Period,
 } from '../shared/numbering';
@@ -272,7 +273,7 @@ numberingRoutes.get(
 
     res.json({
       prefix,
-      previewFor: { employeeNo, linked: employeeNo !== null },
+      previewFor: { employeeNo, linked: employeeNo !== null, missingNumber: (await authorNumber(me.id)).person },
       rows,
     });
   }),

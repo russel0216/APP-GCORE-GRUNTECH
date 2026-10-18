@@ -510,7 +510,7 @@ const round1 = (n: number) => Math.round(n * 10) / 10;
 
 interface TurnoverEmployee {
   id: string;
-  employeeNo: string;
+  employeeNo: string | null;
   firstName: string;
   lastName: string;
   position: string | null;
@@ -556,7 +556,7 @@ export interface TurnoverReport extends TurnoverFigures {
   }[];
   leavers: {
     id: string;
-    employeeNo: string;
+    employeeNo: string | null;
     name: string;
     department: { id: string; name: string } | null;
     position: string | null;

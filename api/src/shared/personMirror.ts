@@ -28,7 +28,7 @@ export async function backfillLoginMirrors(): Promise<{ changed: number; refused
       const fields = await prisma.$transaction((tx) => syncLoginFromEmployee(tx, e.id));
       if (fields.length) changed++;
     } catch {
-      refused.push(e.employeeNo);
+      refused.push(e.employeeNo ?? e.id);
     }
   }
   if (changed || refused.length) {

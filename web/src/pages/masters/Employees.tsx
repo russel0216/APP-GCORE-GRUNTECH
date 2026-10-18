@@ -12,6 +12,7 @@ import { EmployeeFlowTab } from '../hr/PeopleFlow';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople, type PersonRow } from '../../components/People';
 import { FaceSamplesPanel } from '../hr/FaceSamples';
+import { Stat } from '../../components/charts';
 
 const EMPLOYMENT_TYPES = [
   { value: 'REGULAR', label: 'Regular' },
@@ -43,7 +44,7 @@ interface TeamOption {
 
 interface EmployeeRow {
   id: string;
-  employeeNo: string;
+  employeeNo: string | null;
   firstName: string;
   lastName: string;
   middleName: string | null;
@@ -159,7 +160,7 @@ export function Employees() {
       label: 'Employee No.',
       sortKey: 'employeeNo',
       width: '12rem',
-      render: (e) => <span className="mono">{e.employeeNo}</span>,
+      render: (e) => (e.employeeNo ? <span className="mono">{e.employeeNo}</span> : <span className="faint">none yet</span>),
     },
     {
       key: 'name',
@@ -302,7 +303,28 @@ export function Employees() {
               { value: 'yes', label: 'Has a login' },
             ],
           },
+          {
+            key: 'number',
+            label: 'Employee number',
+            options: [
+              { value: 'none', label: 'No employee number yet' },
+              { value: 'yes', label: 'Has an employee number' },
+            ],
+          },
         ]}
+        summary={(raw) => {
+          const sum = raw as unknown as { withoutNumber: number } | undefined;
+          if (!sum) return null;
+          return (
+            <Stat
+              label="Without an employee number"
+              value={sum.withoutNumber}
+              accent={sum.withoutNumber > 0 ? 'warn' : undefined}
+              sub="GTC-0001-14 — the sequence, then the year hired; no quotation number is issued without one"
+              to="/g-hr/employees?number=none&isActive=true"
+            />
+          );
+        }}
         menuItems={
           can('ghr.employees.create')
             ? [
@@ -1003,10 +1025,11 @@ function EmployeeForm({
       {tab === 'employment' && (
         <>
           <div className="grid grid-2">
-            <Field label="Employee number" hint="Leave blank to auto-generate">
+            <Field label="Employee number" hint="GTC-0001-14 — the sequence, then the year hired. Leave blank for the next number (the year hired from the date below).">
               <input
                 className="mono"
                 value={form.employeeNo}
+                placeholder="GTC-0001-14"
                 onChange={(e) => setForm({ ...form, employeeNo: e.target.value })}
               />
             </Field>

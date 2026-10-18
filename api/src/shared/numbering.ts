@@ -45,13 +45,26 @@ export interface DocumentTypeDef {
   defaults?: { pattern: string; padding: number; period: Period; scope: Scope };
 }
 
+/**
+ * The employee number's own pattern (2026-10-18, the owner's call: the
+ * existing numbers are typed, `GTC-0001-14` for Carter Gasiong — the person's
+ * sequence, then the year hired). One running count, never restarting; the
+ * seed sets it once where the stock pattern still stood
+ * (`seed.employeeNumbering20261018`) and Admin › Numbering may change it.
+ */
+export const EMPLOYEE_NUMBERING = { pattern: 'GTC-{SEQ}-{YY}', padding: 4, period: 'NONE', scope: 'GLOBAL' } as const;
+
 export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   // Master record codes. Not documents, but they benefit from the same
   // configurable, collision-free machinery — and an operator can always
   // override the suggestion with their own scheme.
   { type: 'customer', code: 'CUST', label: 'Customer code' },
   { type: 'supplier', code: 'SUPP', label: 'Supplier code' },
-  { type: 'employee', code: 'EMP', label: 'Employee number' },
+  // The owner's scheme (2026-10-18): `GTC-0001-14` is person 1, hired in
+  // 2014 — the sequence runs on through the years, the year is the HIRE year
+  // (`nextNumber('employee', tx, { at: dateHired })`), and `{EMP}` on every
+  // other pattern is this sequence (`employeeToken`).
+  { type: 'employee', code: 'EMP', label: 'Employee number', defaults: EMPLOYEE_NUMBERING },
   { type: 'item', code: 'ITM', label: 'Item code' },
   { type: 'position', code: 'POS', label: 'Position code' },
 
@@ -133,17 +146,44 @@ export function scopedPeriodKey(period: Period, scope: Scope, at: Date, emp: str
   return periodKeyFor(period, at) + (scope === 'OWNER' ? `@${emp}` : '');
 }
 
+/** The shape `employeeToken` reads an employee number through — the employee template's own tokens. */
+export type EmployeePattern = { pattern: string; typeCode: string; period: string; scope: string };
+
 /**
- * The `{EMP}` token: the last run of digits in the employee number, padded to
- * three. `GT-EMP-2026-0007` → `007`, `12` → `012`, `1234` → `1234`. An author
- * with no employee record — an admin login, an import — is `000`.
+ * The `{EMP}` token: the employee number's SEQUENCE, padded to three
+ * (2026-10-18, the owner's ruling on `GTC-0001-14`). Read through the
+ * employee numbering pattern (`parseNumber`, the one parser): under
+ * `GTC-{SEQ}-{YY}`, `GTC-0001-14` → `001`, `GTC-0061-26` → `061`,
+ * `GTC-1234-26` → `1234` (never truncated), and the `14` — the year hired —
+ * takes no part. A number outside the pattern (an old `GT-EMP-095`, a bare
+ * `12`) falls back to the rule before: the LAST run of digits, so nothing
+ * already issued changes series. An author with no number at all — an admin
+ * login, an import — is `000`.
  */
-export function employeeToken(employeeNo: string | null | undefined): string {
+export function employeeToken(employeeNo: string | null | undefined, template?: EmployeePattern | null, prefix = 'GT'): string {
+  if (employeeNo && template) {
+    const parsed = parseNumber(template, prefix, employeeNo);
+    if (parsed) return String(parsed.seq).padStart(3, '0');
+  }
   const digits = employeeNo?.match(/(\d+)(?!.*\d)/)?.[1];
   // Leading zeros are the OLD padding (GT-EMP-2026-0007 is employee 7), so
   // they go before the three-digit padding is applied; a number wider than
   // three digits is kept whole rather than truncated.
   return String(Number(digits ?? '0')).padStart(3, '0');
+}
+
+/** The employee numbering template (the periodKey '' row), null where none is configured. */
+export async function employeeTemplate(tx: Prisma.TransactionClient = prisma): Promise<EmployeePattern | null> {
+  return tx.numberSequence.findFirst({
+    where: { documentType: 'employee', periodKey: '' },
+    select: { pattern: true, typeCode: true, period: true, scope: true },
+  });
+}
+
+/** `employeeToken` with the stored employee pattern — what every `{EMP}` outside this module should read. */
+export async function employeeDigits(employeeNo: string | null | undefined, tx: Prisma.TransactionClient = prisma): Promise<string> {
+  if (!employeeNo) return '000';
+  return employeeToken(employeeNo, await employeeTemplate(tx), await prefixFor(tx));
 }
 
 /**
@@ -154,10 +194,29 @@ export async function employeeNoFor(
   userId: string,
   tx: Prisma.TransactionClient = prisma,
 ): Promise<string | null> {
-  const employee = await tx.employee.findUnique({ where: { userId }, select: { employeeNo: true } });
-  if (employee?.employeeNo) return employee.employeeNo;
+  return (await authorNumber(userId, tx)).employeeNo;
+}
+
+/**
+ * The number behind a login, and WHO the login is when it has an employee
+ * record and no number yet (2026-10-18): a person on the register without a
+ * number must be given one before a `{EMP}` number is issued in their name —
+ * `000…` would put everybody without a number into one shared series.
+ */
+export async function authorNumber(
+  userId: string,
+  tx: Prisma.TransactionClient = prisma,
+): Promise<{ employeeNo: string | null; person: string | null }> {
+  const employee = await tx.employee.findUnique({ where: { userId }, select: { employeeNo: true, firstName: true, lastName: true } });
+  if (employee?.employeeNo) return { employeeNo: employee.employeeNo, person: null };
   const user = await tx.user.findUnique({ where: { id: userId }, select: { employeeNo: true } });
-  return user?.employeeNo ?? null;
+  if (user?.employeeNo) return { employeeNo: user.employeeNo, person: null };
+  return { employeeNo: null, person: employee ? `${employee.firstName} ${employee.lastName}`.trim() : null };
+}
+
+/** The words a `{EMP}` number is refused with for a person on the register who has no number yet. */
+export function missingNumberMessage(person: string, label: string): string {
+  return `Set an employee number on ${person}'s employee record first — the ${label.toLowerCase()} number carries it`;
 }
 
 /** The one token chain. Everything that renders a number goes through here. */
@@ -208,12 +267,18 @@ async function templateFor(
   // The lookup is only paid for when the number needs it — or when a preview
   // wants to tell the author whether they are linked to an employee at all.
   let employeeNo: string | null = null;
+  // A person on the register with no number yet (2026-10-18): the issue
+  // refuses, the preview says who (`missingNumber`).
+  let person: string | null = null;
   if (scope === 'OWNER' || usesEmp || opts.resolveAuthor) {
-    employeeNo = ctx.employeeNo ?? (ctx.ownerId ? await employeeNoFor(ctx.ownerId, tx) : null);
+    if (ctx.employeeNo) employeeNo = ctx.employeeNo;
+    else if (ctx.ownerId) ({ employeeNo, person } = await authorNumber(ctx.ownerId, tx));
   }
-  const emp = scope === 'OWNER' || usesEmp ? employeeToken(employeeNo) : '000';
+  const needsEmp = scope === 'OWNER' || usesEmp;
+  const emp = needsEmp ? await employeeDigits(employeeNo, tx) : '000';
+  const missingNumber = needsEmp && !employeeNo ? person : null;
 
-  return { template, period, scope, emp, employeeNo };
+  return { template, period, scope, emp, employeeNo, missingNumber };
 }
 
 async function prefixFor(tx: Prisma.TransactionClient): Promise<string> {
@@ -271,7 +336,10 @@ export async function nextNumber(
   isTaken?: (number: string) => Promise<boolean>,
 ): Promise<string> {
   const at = ctx.at ?? new Date();
-  const { template, period, scope, emp } = await templateFor(documentType, tx, ctx);
+  const { template, period, scope, emp, missingNumber } = await templateFor(documentType, tx, ctx);
+  // Refused before anything is written: a person with no employee number is
+  // given one first, never a number in the `000` series (2026-10-18).
+  if (missingNumber) throw badRequest(missingNumberMessage(missingNumber, template.label));
 
   // Decided before anything is written: the key names the row the increment
   // lands on, and an OWNER key carries the author.
@@ -342,9 +410,9 @@ export async function previewNext(
    * steps past any already taken — the same ones `nextNumber`'s caller skips.
    */
   isTaken?: (number: string) => Promise<boolean>,
-): Promise<{ number: string; employeeNo: string | null; linked: boolean; periodKey: string }> {
+): Promise<{ number: string; employeeNo: string | null; linked: boolean; periodKey: string; missingNumber: string | null }> {
   const at = ctx.at ?? new Date();
-  const { template, period, scope, emp, employeeNo } = await templateFor(documentType, tx, ctx, {
+  const { template, period, scope, emp, employeeNo, missingNumber } = await templateFor(documentType, tx, ctx, {
     resolveAuthor: true,
   });
   const periodKey = scopedPeriodKey(period, scope, at, emp);
@@ -373,6 +441,9 @@ export async function previewNext(
     employeeNo,
     linked: employeeNo !== null,
     periodKey,
+    // Who must be given an employee number before the issue goes through
+    // (`nextNumber` refuses it); null when the number can be issued.
+    missingNumber,
   };
 }
 

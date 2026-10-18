@@ -32,6 +32,7 @@ import bcrypt from 'bcryptjs';
 import sharp from 'sharp';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
@@ -593,7 +594,8 @@ async function main() {
 
   const supervisor = await makeUser('ZZ Supervisor', 'sup@verifyhr.local', []);
   const worker = await makeUser('ZZ Worker', 'worker@verifyhr.local', [workerRole.id], supervisor.id);
-  const hrOfficer = await makeUser('ZZ HR Officer', 'hr@verifyhr.local', [hrRole.id]);
+  // The seeded key (the HR step reads it) and a throwaway copy of HR's rights.
+  const hrOfficer = await makeUser('ZZ HR Officer', 'hr@verifyhr.local', (await rolesLike('zzhr_', ['hr'])).map((r) => r.id));
 
   const employee = await prisma.employee.create({
     data: {
@@ -4467,7 +4469,8 @@ async function main() {
         email: 'unlinked@verifyhr.local',
         employeeNo: `${TAG}-004`,
         passwordHash: await bcrypt.hash('x', 10),
-        roles: { create: [{ roleId: hrRole.id }] },
+        // HR's rights as the seed defines them (the install's own hr role may hold nothing).
+        roles: { create: (await rolesLike('zzhr_', ['hr'])).map((r) => ({ roleId: r.id })) },
       },
     });
     const orphan = await prisma.employee.create({

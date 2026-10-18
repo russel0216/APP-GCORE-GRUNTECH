@@ -1130,7 +1130,7 @@ sessionRoutes.get(
         align: ['right', 'left', 'left', 'left', 'left', 'left', 'right'],
         rows: s.attendees.map((a, i) => [
           String(i + 1),
-          a.employee.employeeNo,
+          a.employee.employeeNo ?? '—',
           fullName(a.employee),
           a.employee.position ?? '',
           a.employee.department?.name ?? '',
@@ -1826,7 +1826,7 @@ async function passportRows(q: ListQuery) {
   if (q.sort === 'pct') rows.sort((a, b) => ((a.pct ?? 101) - (b.pct ?? 101)) * dir);
   else if (q.sort === 'required') rows.sort((a, b) => (a.required - b.required) * dir);
   else if (q.sort === 'name') rows.sort((a, b) => a.name.localeCompare(b.name) * dir);
-  else if (q.sort === 'employeeNo') rows.sort((a, b) => a.employeeNo.localeCompare(b.employeeNo) * dir);
+  else if (q.sort === 'employeeNo') rows.sort((a, b) => (a.employeeNo ?? '').localeCompare(b.employeeNo ?? '') * dir);
   return rows;
 }
 
@@ -1894,7 +1894,7 @@ passportRoutes.get(
           head: ['Number', 'Employee', 'Position', 'Readiness', 'Held', 'Expiring', 'Gaps', 'Awaiting HR'],
           align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'right'],
           rows: rows.map((r) => [
-            r.employeeNo,
+            r.employeeNo ?? '—',
             r.isActive ? r.name : { title: r.name, body: 'Inactive' },
             { title: r.position ?? 'Unclassified', body: r.department?.name ?? 'No department' },
             r.pct == null ? 'Nothing required' : `${r.pct}%`,

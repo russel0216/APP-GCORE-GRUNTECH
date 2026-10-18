@@ -946,7 +946,7 @@ async function main() {
   const delRouted = await api(bossToken, 'DELETE', `/roles/${routedRole.id}`);
   const delBuiltIn = await api(bossToken, 'DELETE', `/roles/${builtIn.id}`);
   check(
-    'a role an approval route uses is refused, naming the route; a built-in role is refused',
+    'a role an approval route uses is refused, naming the route; a role the engine reads by key (employee) is refused',
     delRouted.status === 400 && String(delRouted.body.error ?? delRouted.body.message ?? JSON.stringify(delRouted.body)).includes(`${TAG} route`) &&
       delBuiltIn.status === 400 && !!(await prisma.role.findUnique({ where: { id: routedRole.id } })),
     `${delRouted.status} ${JSON.stringify(delRouted.body)} / ${delBuiltIn.status}`,

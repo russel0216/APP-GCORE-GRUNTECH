@@ -19,7 +19,7 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { audit } from '../shared/audit';
 import { deletePhotoIfUnused, dropAccountPhotoFromSamples } from '../shared/faceSamples';
 import { deleteAttachment } from '../shared/attachments';
-import { nextNumber } from '../shared/numbering';
+import { nextNumber, setCounter, type CounterMove } from '../shared/numbering';
 import { can } from '../permissions/resolve';
 import { positionFields, setEmployeePosition } from '../shared/plantilla';
 import { sweepSeparations } from '../shared/clearance';
@@ -97,6 +97,12 @@ function employeeListWhere(q: ListQuery): Prisma.EmployeeWhereInput {
   const login = choice(f.login, { none: 'none', yes: 'yes' }, 'Login');
   if (login === 'none') where.userId = null;
   if (login === 'yes') where.userId = { not: null };
+  // `?number=none`: a person with no employee number yet (2026-10-18, the
+  // numbers cleared for the owner's scheme) — no `{EMP}` number is issued
+  // in their name until one is typed; `yes` the rest.
+  const number = choice(f.number, { none: 'none', yes: 'yes' }, 'Employee number');
+  if (number === 'none') where.employeeNo = null;
+  if (number === 'yes') where.employeeNo = { not: null };
   const ids = idsFilter(f.ids);
   if (ids) where.id = { in: ids };
   return where;
@@ -132,14 +138,18 @@ employeeRoutes.get(
       }),
       prisma.employee.count({ where }),
     ]);
+    // The people still without a number (the card over the list), under the
+    // register as a whole — a tile equals the list it opens (`?number=none`).
+    const withoutNumber = await prisma.employee.count({ where: { employeeNo: null, isActive: true } });
 
-    res.json(
-      listResult(
+    res.json({
+      summary: { withoutNumber },
+      ...listResult(
         rows.map((r) => stripRates(decimalsToNumbers(r) as typeof r, seeRates)),
         total,
         q,
       ),
-    );
+    });
   }),
 );
 
@@ -198,6 +208,7 @@ employeeRoutes.get(
       f.industryId && (f.industryId === 'none' ? 'no team yet' : `team ${team?.name ?? 'not found'}`),
       f.employmentType && `type ${statusLabel(f.employmentType)}`,
       f.positionId && (f.positionId === 'none' ? 'no plantilla position' : `position ${position?.title ?? 'not found'}`),
+      f.number && (f.number === 'none' ? 'no employee number yet' : 'with an employee number'),
       f.login && (f.login === 'none' ? 'no login yet' : 'with a login'),
       f.ids && 'the rows selected',
     ]);
@@ -216,7 +227,7 @@ employeeRoutes.get(
             const initial = e.middleName?.trim()?.[0];
             const post = e.positionRef?.title ?? e.position;
             return [
-              e.employeeNo,
+              e.employeeNo ?? '—',
               {
                 title: `${e.lastName}, ${e.firstName}${initial ? ` ${initial}.` : ''}`,
                 body: post ? `${post}${!e.positionId ? ' · unclassified' : ''}` : undefined,
@@ -512,7 +523,8 @@ async function checkDepartmentId(tx: Prisma.TransactionClient, id: string | null
  * somebody links or fixes it — a login without its number reads `000` in
  * every quotation number it raises.
  */
-async function mirrorEmployeeNo(tx: Prisma.TransactionClient, employeeNo: string): Promise<string> {
+async function mirrorEmployeeNo(tx: Prisma.TransactionClient, employeeNo: string | null): Promise<string | null> {
+  if (!employeeNo) return null;
   const taken = await tx.user.findUnique({ where: { employeeNo }, select: { email: true } });
   if (taken) {
     throw conflict(
@@ -542,11 +554,16 @@ employeeRoutes.post(
       ]);
     }
 
-    const { employee, login } = await prisma.$transaction(async (tx) => {
-      const employeeNo = body.employeeNo || (await nextNumber('employee', tx));
+    const { employee, login, counter } = await prisma.$transaction(async (tx) => {
+      // The automatic number carries the year HIRED (`GTC-{SEQ}-{YY}`, the
+      // owner's scheme of 2026-10-18); a number typed by hand moves the
+      // series up to it, never down, so the next automatic one never repeats
+      // a typed one (`setCounter`, raise — the quotation's rule).
+      const employeeNo = body.employeeNo || (await nextNumber('employee', tx, { at: asDate(body.dateHired) ?? undefined }));
       if (await tx.employee.findUnique({ where: { employeeNo } })) {
         throw conflict(`Employee number "${employeeNo}" is already in use`);
       }
+      const counter: CounterMove | null = body.employeeNo ? await setCounter('employee', employeeNo, tx, { mode: 'raise' }) : null;
       if (body.userId) {
         if (!(await tx.user.findUnique({ where: { id: body.userId }, select: { id: true } }))) {
           throw notFound('User not found');
@@ -589,7 +606,7 @@ employeeRoutes.post(
       // An existing login linked here takes the record's identity (2026-10-16).
       if (!body.login) {
         if (created.userId) await syncLoginFromEmployee(tx, created.id);
-        return { employee: created, login: null };
+        return { employee: created, login: null, counter };
       }
 
       // The login, in the same transaction: a refused email leaves no person behind.
@@ -609,7 +626,7 @@ employeeRoutes.post(
         me.id,
       );
       const linked = await tx.employee.update({ where: { id: created.id }, data: { userId: login.user.id } });
-      return { employee: linked, login };
+      return { employee: linked, login, counter };
     });
 
     await audit(
@@ -617,7 +634,8 @@ employeeRoutes.post(
         entityType: 'employee',
         entityId: employee.id,
         action: 'CREATED',
-        summary: `Created employee ${employee.employeeNo} — ${employee.firstName} ${employee.lastName}${login ? `, with the login ${login.user.email}` : ''}`,
+        summary: `Created employee ${employee.employeeNo} — ${employee.firstName} ${employee.lastName}${login ? `, with the login ${login.user.email}` : ''}${counter && counter.after !== counter.before ? ' (the employee series continues from the typed number)' : ''}`,
+        ...(counter ? { after: { counter } } : {}),
       },
       req,
     );
@@ -809,8 +827,13 @@ employeeRoutes.patch(
     }
 
     let loginSynced: string[] = [];
+    let counter: CounterMove | null = null;
     const employee = await prisma.$transaction(async (tx) => {
       const updated = await tx.employee.update({ where: { id: req.params.id }, data });
+      // A number typed by hand moves the employee series up to it (never down).
+      if (body.employeeNo && body.employeeNo !== before.employeeNo) {
+        counter = await setCounter('employee', body.employeeNo, tx, { mode: 'raise' });
+      }
       // The position goes through the one writer of the mirror. A free-text
       // title on an employee who holds a plantilla position is ignored: the
       // title belongs to the position, and is changed there.
@@ -829,11 +852,15 @@ employeeRoutes.patch(
         entityType: 'employee',
         entityId: employee.id,
         action: 'UPDATED',
-        summary: `Updated employee ${employee.employeeNo} — ${employee.firstName} ${employee.lastName}`,
+        summary: `Updated employee ${employee.employeeNo ?? '(no number)'} — ${employee.firstName} ${employee.lastName}`,
         // `redact()` in the audit service strips costRate/salary; the explicit
         // field list here keeps the statutory numbers out too.
         before: stripRates(before as Record<string, unknown>, false),
-        after: { ...stripRates(employee as Record<string, unknown>, false), ...(loginSynced.length ? { loginSynced } : {}) },
+        after: {
+          ...stripRates(employee as Record<string, unknown>, false),
+          ...(loginSynced.length ? { loginSynced } : {}),
+          ...(counter ? { counter } : {}),
+        },
       },
       req,
     );

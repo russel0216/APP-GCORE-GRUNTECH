@@ -224,12 +224,18 @@ function RoleEditor({
       {role?.isSystem && can('admin.roles.delete') && (
         <p className="faint">A built-in role cannot be deleted — remove its permissions or take it off people instead. Roles you made can be deleted here.</p>
       )}
+      {role && !role.isSystem && can('admin.roles.delete') && (
+        <p className="faint">A role an approval route still names (a step, or Prepared by) is refused — change the route in Admin › Approval Workflows first.</p>
+      )}
 
       <div className="grid grid-2">
         <Field label="Role name">
           <input value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <Field label="Key" hint="Lowercase, no spaces. Used by approval workflows.">
+        <Field
+          label="Key"
+          hint="Lowercase, no spaces. Used by approval workflows. These keys carry a rule of their own, whatever the role is named: team_leader, technical_manager, service_manager, back_support, purchasing_manager, purchasing_manager_import, hr, ceo, executive, employee, supervisor, warehouse_supervisor."
+        >
           <input
             value={key}
             disabled={!!role}

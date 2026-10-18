@@ -13,6 +13,7 @@
 import net from 'node:net';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { addressOf, buildMessage, encodeHeader, sendMail, type SmtpConfig } from '../src/shared/mail';
@@ -63,11 +64,13 @@ async function cleanup() {
     await prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
   await prisma.department.deleteMany({ where: { code: { startsWith: TAG } } });
+  await prisma.role.deleteMany({ where: { key: { startsWith: 'zzacct_' } } });
   await prisma.industry.deleteMany({ where: { name: { startsWith: TAG } } });
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[], superAdmin = false) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzacct_', roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -790,6 +793,22 @@ async function main() {
       renamed.status === 400 && /employee record/.test(renamed.text) && sameName.status === 200,
       `${renamed.status} ${sameName.status} ${renamed.text.slice(0, 120)}`,
     );
+    // The employee number is the one mirrored field that writes THROUGH
+    // (2026-10-18, the owner's call: the numbers are typed on Admin › Users).
+    const typedNo = await http(adminT, 'PATCH', `/users/${kimUser!.id}`, { employeeNo: `${TAG}-GTC-0004-26` });
+    const kimEmpNow = await prisma.employee.findUniqueOrThrow({ where: { id: kimEmpId } });
+    const kimLoginNow = await prisma.user.findUniqueOrThrow({ where: { id: kimUser!.id } });
+    check(
+      'an employee number typed on Admin › Users is written onto the employee record and mirrored back to the login',
+      typedNo.status === 200 && kimEmpNow.employeeNo === `${TAG}-GTC-0004-26` && kimLoginNow.employeeNo === `${TAG}-GTC-0004-26`,
+      `${typedNo.status} ${kimEmpNow.employeeNo} / ${kimLoginNow.employeeNo} ${typedNo.text.slice(0, 120)}`,
+    );
+    check(
+      'and the record\'s own trail says so',
+      (await prisma.auditLog.count({ where: { entityType: 'employee', entityId: kimEmpId, action: 'UPDATED', summary: { contains: '(from Admin › Users)' } } })) === 1,
+    );
+    const otherNo = await http(adminT, 'PATCH', `/users/${kimUser!.id}`, { employeeNo: `${TAG}-009` });
+    check('a number already another person\'s is a 409 naming them', otherNo.status === 409 && /Orphan/.test(otherNo.text), `${otherNo.status} ${otherNo.text.slice(0, 100)}`);
     const hrOnly = await http(hrT, 'PATCH', `/employees/${kimEmpId}`, { userId: null });
     check(
       'unlinking a login is an administrator\'s: HR without admin.users.edit_all is refused (403)',
