@@ -924,9 +924,9 @@ function Routed() {
         <Route
           path="/g-chain/pullout-slips"
           element={
-            <Guard permission="gchain.pullout_slips.view_all">
+            <GuardAny permissions={['gchain.pullout_slips.view_all', 'gchain.pullout_slips.view_own']}>
               <PulloutSlips />
-            </Guard>
+            </GuardAny>
           }
         />
         <Route
@@ -940,7 +940,7 @@ function Routed() {
         <Route
           path="/g-chain/pullout-slips/:id/edit"
           element={
-            <GuardAny permissions={['gchain.pullout_slips.create', 'gchain.pullout_slips.edit_all']}>
+            <GuardAny permissions={['gchain.pullout_slips.edit_own', 'gchain.pullout_slips.edit_all']}>
               <PulloutEditor />
             </GuardAny>
           }

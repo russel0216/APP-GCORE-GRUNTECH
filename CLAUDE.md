@@ -38,7 +38,9 @@ four databases and four copies of "customer".
    they borrowed Preventive Maintenance › Create). `splitBorrowedRights()`
    (`shared/accessSplit.ts`, the seed, once, `seed.accessSplit20261018`)
    gave the new boxes to every role and ALLOW override holding the
-   borrowed right, so nobody lost anything; verify-foundation leaves that
+   borrowed right, so nobody lost anything (each split once, by key in
+   `done`; Pull-out Slips' View Own / Edit Own followed the same day, to
+   whoever held its Create, when anyone was let raise one); verify-foundation leaves that
    file out of the "something checks it" corpus. The rest of the grid is
    deliberate: a shared master (customers, items, suppliers) has no "own",
    a dashboard or report is View All and Export, and a document that is
@@ -629,10 +631,10 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock):
 foundation
 386, masters 92, sales 638, costing 205, pipeline 121, calendar 101, numbering
-79, partners 120, delivery 187, chain 340, hr 485, plantilla 123, meetings
+79, partners 120, delivery 187, chain 354, hr 485, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 140. The
 verify scripts share
@@ -943,11 +945,35 @@ launcher as the way out) — never a stale phase sentence.
   overdue.
 ## Phase 5 notes worth carrying forward
 
-- **The two purchase kinds must stay disjoint.** DIRECT_TO_JOB charges the job
-  at receiving and does NOT build stock. STOCK_REPLENISHMENT builds stock and
-  charges a job only at issuance. Adding a direct-to-job receipt to inventory
-  would let the same material be charged twice — a bug that shipped briefly and
-  is now covered by a test.
+- **The two purchase kinds must stay disjoint IN MONEY.** DIRECT_TO_JOB charges
+  the job at receiving and never builds the COMPANY's stock. STOCK_REPLENISHMENT
+  builds stock and charges a job only at issuance. Adding a direct-to-job
+  receipt to the company's inventory would let the same material be charged
+  twice — a bug that shipped briefly and is now covered by a test.
+  **Project goods received into a WAREHOUSE are the project's own stock**
+  (2026-10-18, the owner's call: "project goods received into the warehouse
+  should also show in inventory so that the warehouse officer can create an
+  outgoing; project management or anyone should create a pull-out slip").
+  `ProjectStock` (project × item × warehouse, its own moving average) in
+  `shared/projectStock.ts`: `postReceiving` charges the job as ever AND, when
+  the report names a warehouse (not site), puts the goods there as the
+  project's stock (a typed line gets its item through `itemForTypedLine`);
+  every movement is an `InventoryTransaction` carrying `jobId`. It never mixes
+  into an `InventoryBalance`, its average or the company's stock value. It
+  leaves by an **Outgoing line marked `projectStock`** (the slip names the
+  project; the editor lists the project's own goods first, `GET
+  /stock-issues/options?jobId=` → `projectStock`) or a **PROJECT_STOCK
+  pull-out** (`PulloutKind.PROJECT_STOCK`, the project as its source, lines
+  from what it holds at the warehouse) — either posts CONSUMED only, never a
+  second INCURRED; pulling one back puts the goods back on the project's shelf,
+  and pulling the receipt back takes them off (refused once some left).
+  Inventory shows them under the **Stock** filter (`?stock=project`:
+  `projectStockList()`, rows with their Project, the paper "Project Stock"),
+  a "Project stock" card on the company list, and a stock card per project
+  (`/:itemId/card?jobId=`; the company's card leaves project moves out).
+  `backfillProjectStock()` (the seed, once, `seed.projectStockBackfilled`)
+  shelved what was received into a warehouse before, posting nothing.
+  verify-chain pins it.
 - **Every handover releases what came before.** PR approval commits at estimate
   → PO issue releases that and commits the agreed price → receiving releases
   that and incurs. Use `releaseCommitment()`; it posts a negative row rather
@@ -5375,7 +5401,11 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   reopened or cancelled (`refuseWhilePulledOut`), while a slip stands on it.
   The sales order page's ⋯ "Pull out stock…" and the request page's ⋯ "Pull
   out from stock…" open `/g-chain/pullout-slips/new?salesOrder=` /
-  `?request=`; both pages show a **Pulled out** card (`PulloutCard`, the
+  `?request=` (and Inventory's project stock list "+ New pull-out slip" →
+  `?kind=project`, a project's own stock — see Phase 5's project stock);
+  **anyone may raise one** (2026-10-18: OWNED_KEPT, the `employee` role holds
+  Create, View Own and Edit Own — View Own reads what one prepared or asked
+  for, Edit Own moves one's own draft); both pages show a **Pulled out** card (`PulloutCard`, the
   register's own list, hidden without its right) and the request's lines
   say what came from stock. The list (`listWhere` → `{ base, where }`,
   cards Waiting for approval / Pulled out / Drafts) prints; Ctrl+K finds

@@ -29,7 +29,7 @@ import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 
 export const PULLOUT_TONES = { PULLED_OUT: 'ok', PENDING_APPROVAL: 'warn' } as const;
 
-type Kind = 'SALES_ORDER' | 'PURCHASE_REQUEST' | 'OTHER';
+type Kind = 'SALES_ORDER' | 'PURCHASE_REQUEST' | 'OTHER' | 'PROJECT_STOCK';
 
 interface PulloutRow {
   id: string;
@@ -136,6 +136,7 @@ export function PulloutSlips() {
             options: [
               { value: 'SALES_ORDER', label: 'Sales orders' },
               { value: 'PURCHASE_REQUEST', label: 'Purchase requests' },
+              { value: 'PROJECT_STOCK', label: 'Project stock' },
               { value: 'OTHER', label: 'No source document' },
             ],
           },
@@ -262,8 +263,9 @@ const BLANK: Header = {
 };
 
 /** Asks which document a new slip pulls against, when the link named none — or none at all. */
-function PickSource({ onPick, onNone }: { onPick: (kind: 'SALES_ORDER' | 'PURCHASE_REQUEST', id: string) => void; onNone: () => void }) {
-  const [kind, setKind] = useState<'SALES_ORDER' | 'PURCHASE_REQUEST'>('SALES_ORDER');
+type PickKind = 'SALES_ORDER' | 'PURCHASE_REQUEST' | 'PROJECT_STOCK';
+function PickSource({ onPick, onNone, start }: { onPick: (kind: PickKind, id: string) => void; onNone: () => void; start?: PickKind }) {
+  const [kind, setKind] = useState<PickKind>(start ?? 'SALES_ORDER');
   const [term, setTerm] = useState('');
   const [rows, setRows] = useState<{ id: string; number: string; label: string; date: string }[] | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -292,21 +294,33 @@ function PickSource({ onPick, onNone }: { onPick: (kind: 'SALES_ORDER' | 'PURCHA
         <button type="button" className={kind === 'PURCHASE_REQUEST' ? 'active' : ''} aria-pressed={kind === 'PURCHASE_REQUEST'} onClick={() => setKind('PURCHASE_REQUEST')}>
           An approved project request
         </button>
+        <button type="button" className={kind === 'PROJECT_STOCK' ? 'active' : ''} aria-pressed={kind === 'PROJECT_STOCK'} onClick={() => setKind('PROJECT_STOCK')}>
+          A project's own stock
+        </button>
         <button type="button" onClick={onNone}>
           No source document
         </button>
       </div>
-      <p className="faint">No source document: a supplier return, testing, a repair — you say why on the slip.</p>
+      <p className="faint">
+        A project's own stock: goods bought for the project and received into a warehouse, released to its site — already charged to it, so
+        nothing is charged again. No source document: a supplier return, testing, a repair — you say why on the slip.
+      </p>
       <div className="qe-rows">
         <Field label="Find">
-          <input value={term} onChange={(e) => setTerm(e.target.value)} placeholder={kind === 'SALES_ORDER' ? 'Order number, customer or PO no.' : 'Request number, project or purpose'} />
+          <input value={term} onChange={(e) => setTerm(e.target.value)} placeholder={kind === 'SALES_ORDER' ? 'Order number, customer or PO no.' : kind === 'PROJECT_STOCK' ? 'Project number or name' : 'Request number, project or purpose'} />
         </Field>
       </div>
       <ErrorBox error={error} />
       {rows === null ? (
         <Loading />
       ) : rows.length === 0 ? (
-        <Empty title="Nothing to pull out against" hint={kind === 'SALES_ORDER' ? 'Only an issued sales order is pulled out against.' : 'Only an approved project request not yet wholly ordered.'} />
+        <Empty title="Nothing to pull out against" hint={
+            kind === 'SALES_ORDER'
+              ? 'Only an issued sales order is pulled out against.'
+              : kind === 'PROJECT_STOCK'
+                ? 'No project holds goods of its own in a warehouse yet — they arrive on an approved incoming report into a warehouse.'
+                : 'Only an approved project request not yet wholly ordered.'
+          } />
       ) : (
         <div className="table-wrap">
           <table className="data">
@@ -351,6 +365,8 @@ export function PulloutEditor() {
   const salesOrderParam = params.get('salesOrder');
   const requestParam = params.get('request');
   const noneParam = params.get('kind') === 'other';
+  // A project's own stock (2026-10-18): `?project=<jobId>`.
+  const projectParam = params.get('project');
   const [existing, setExisting] = useState<Record<string, unknown> | null>(null);
   const [data, setData] = useState<SourceData | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -364,9 +380,10 @@ export function PulloutEditor() {
   useBackLink(editing ? `/g-chain/pullout-slips/${id}` : '/g-chain/pullout-slips', editing ? (existing ? String(existing.number) : 'the slip') : 'Pull-out Slips');
   useUnsavedChanges(dirty && !busy);
 
-  const sourceQuery = (soId: string | null, prId: string | null, none: boolean, warehouseId?: string) =>
+  const sourceQuery = (soId: string | null, prId: string | null, none: boolean, warehouseId?: string, jobId?: string | null) =>
     `/pullout-slips/source${qs({
-      kind: none ? 'OTHER' : undefined,
+      kind: jobId ? 'PROJECT_STOCK' : none ? 'OTHER' : undefined,
+      jobId: jobId ?? undefined,
       salesOrderId: soId ?? undefined,
       requestId: prId ?? undefined,
       slipId: editing ? id : undefined,
@@ -382,19 +399,21 @@ export function PulloutEditor() {
         let soId = salesOrderParam;
         let prId = requestParam;
         let none = noneParam;
+        let jobId = projectParam;
         let warehouseId = '';
         if (editing) {
           slip = await api.get<Record<string, unknown>>(`/pullout-slips/${id}`);
           soId = (slip.salesOrderId as string | null) ?? null;
           prId = (slip.requestId as string | null) ?? null;
           none = slip.kind === 'OTHER';
+          jobId = slip.kind === 'PROJECT_STOCK' ? ((slip.job as { id: string } | null)?.id ?? null) : null;
           warehouseId = (slip.warehouse as { id: string }).id;
         }
-        if (!soId && !prId && !none) return;
-        const loaded = await api.get<SourceData>(sourceQuery(soId, prId, none));
+        if (!soId && !prId && !none && !jobId) return;
+        const loaded = await api.get<SourceData>(sourceQuery(soId, prId, none, undefined, jobId));
         if (!live) return;
         warehouseId = warehouseId || (loaded.warehouses.length === 1 ? loaded.warehouses[0].id : '');
-        const withStock = warehouseId ? await api.get<SourceData>(sourceQuery(soId, prId, none, warehouseId)) : loaded;
+        const withStock = warehouseId ? await api.get<SourceData>(sourceQuery(soId, prId, none, warehouseId, jobId)) : loaded;
         if (!live) return;
         setData(withStock);
         const src = withStock.source;
@@ -418,7 +437,7 @@ export function PulloutEditor() {
             notes: str('notes'),
           });
           const items = slip.items as { sourceLineId: string | null; item: { id: string }; quantity: number; serialNo: string | null; condition: string | null }[];
-          if (none) {
+          if (none || jobId) {
             setFree(
               items.length
                 ? items.map((i) => ({ key: `f${++freeSeq}`, itemId: i.item.id, quantity: String(i.quantity), serialNo: i.serialNo ?? '', condition: i.condition ?? '' }))
@@ -436,7 +455,7 @@ export function PulloutEditor() {
           setForm({
             ...BLANK,
             warehouseId,
-            purpose: src.kind === 'SALES_ORDER' ? 'SALES_ORDER' : src.kind === 'PURCHASE_REQUEST' ? 'PROJECT_USE' : '',
+            purpose: src.kind === 'SALES_ORDER' ? 'SALES_ORDER' : src.kind === 'PURCHASE_REQUEST' || src.kind === 'PROJECT_STOCK' ? 'PROJECT_USE' : '',
             requestedById: src.owner?.id ?? me?.user.id ?? '',
             poReference: src.poReference ?? '',
             drReference: src.drReference ?? '',
@@ -453,7 +472,7 @@ export function PulloutEditor() {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editing, id, salesOrderParam, requestParam, noneParam]);
+  }, [editing, id, salesOrderParam, requestParam, noneParam, projectParam]);
 
   // A warehouse chosen: what it holds now.
   async function chooseWarehouse(warehouseId: string) {
@@ -461,7 +480,11 @@ export function PulloutEditor() {
     setDirty(true);
     if (!data || !warehouseId) return;
     try {
-      setData(await api.get<SourceData>(sourceQuery(data.source.salesOrderId, data.source.requestId, data.source.kind === 'OTHER', warehouseId)));
+      setData(
+        await api.get<SourceData>(
+          sourceQuery(data.source.salesOrderId, data.source.requestId, data.source.kind === 'OTHER', warehouseId, data.source.kind === 'PROJECT_STOCK' ? data.source.job?.id : null),
+        ),
+      );
     } catch (err) {
       setError(err);
     }
@@ -470,18 +493,22 @@ export function PulloutEditor() {
   const itemById = useMemo(() => new Map((data?.items ?? []).map((i) => [i.id, i])), [data]);
 
   if (error && !data) return <ErrorBox error={error} />;
-  if (!editing && !salesOrderParam && !requestParam && !noneParam) {
+  if (!editing && !salesOrderParam && !requestParam && !noneParam && !projectParam) {
     return (
       <div className="prq">
         <section className="card qe-card prq-head-card">
           <div className="qe-head">
             <div>
               <h1 className="qe-heading">New pull-out slip</h1>
-              <p className="muted qe-lead">The warehouse's authority to release stock — against an issued sales order, an approved project request, or no source document.</p>
+              <p className="muted qe-lead">The warehouse's authority to release stock — against an issued sales order, an approved project request, a project's own stock, or no source document.</p>
             </div>
           </div>
         </section>
-        <PickSource onPick={(kind, sid) => setParams(kind === 'SALES_ORDER' ? { salesOrder: sid } : { request: sid })} onNone={() => setParams({ kind: 'other' })} />
+        <PickSource
+          start={params.get('kind') === 'project' ? 'PROJECT_STOCK' : undefined}
+          onPick={(kind, sid) => setParams(kind === 'SALES_ORDER' ? { salesOrder: sid } : kind === 'PROJECT_STOCK' ? { project: sid } : { request: sid })}
+          onNone={() => setParams({ kind: 'other' })}
+        />
       </div>
     );
   }
@@ -496,6 +523,9 @@ export function PulloutEditor() {
 
   const { source } = data;
   const none = source.kind === 'OTHER';
+  // A project's own stock is chosen line by line like a slip with no source document.
+  const own = source.kind === 'PROJECT_STOCK';
+  const freeMode = none || own;
   const purposes = data.purposes.filter((p) => !none || p.noSource);
   const chosen = source.lines.filter((l) => picks[l.id]?.include);
   const freeSent = free.filter((l) => l.itemId || l.quantity);
@@ -503,7 +533,7 @@ export function PulloutEditor() {
   if (!form.warehouseId) problems.push('choose the warehouse');
   if (!form.purpose) problems.push('say what it is for');
   if (none && form.reason.trim().length < 3) problems.push('say why there is no source document');
-  if (none) {
+  if (freeMode) {
     if (!freeSent.length) problems.push('add at least one item');
     const asked = new Map<string, number>();
     for (const l of freeSent) asked.set(l.itemId, (asked.get(l.itemId) ?? 0) + (Number(l.quantity) || 0));
@@ -538,6 +568,7 @@ export function PulloutEditor() {
       kind: source.kind,
       salesOrderId: source.salesOrderId,
       requestId: source.requestId,
+      jobId: own ? (source.job?.id ?? null) : null,
       warehouseId: form.warehouseId,
       pulloutDate: form.pulloutDate || null,
       purpose: form.purpose || null,
@@ -552,7 +583,7 @@ export function PulloutEditor() {
       returnBy: form.returnBy || null,
       reason: none ? t(form.reason) : null,
       notes: t(form.notes),
-      lines: none
+      lines: freeMode
         ? freeSent.map((l) => ({ itemId: l.itemId, quantity: Number(l.quantity), serialNo: t(l.serialNo), condition: t(l.condition) }))
         : chosen.map((l) => ({
             sourceLineId: l.id,
@@ -622,6 +653,11 @@ export function PulloutEditor() {
             <p className="muted qe-lead">
               {none ? (
                 'No source document — say why below. No project is charged.'
+              ) : own ? (
+                <>
+                  {source.job ? <Link to={`/g-ops/projects/${source.job.id}`}>{source.job.number}</Link> : 'The project'}'s own stock — bought for it and
+                  charged to it when it arrived, so releasing it charges nothing again.
+                </>
               ) : (
                 <>
                   Against{' '}
@@ -744,9 +780,9 @@ export function PulloutEditor() {
       <section className="card" aria-labelledby="po-lines">
         <div className="card-head">
           <h2 id="po-lines" className="card-title">
-            {none ? 'Items to pull out' : `Lines of ${source.number}`}
+            {none ? 'Items to pull out' : own ? `${source.number}'s stock to pull out` : `Lines of ${source.number}`}
           </h2>
-          {none && form.warehouseId && (
+          {freeMode && form.warehouseId && (
             <button type="button" className="btn btn-sm" onClick={() => setFree((ls) => [...ls, blankFree()])}>
               + Add line
             </button>
@@ -754,7 +790,7 @@ export function PulloutEditor() {
         </div>
         {!form.warehouseId ? (
           <Empty title="Choose the warehouse first" hint="What it holds, and how much is free, appears beside each line." />
-        ) : none ? (
+        ) : freeMode ? (
           <div className="table-wrap">
             <table className="data">
               <thead>
@@ -1192,7 +1228,7 @@ export function PulloutDetail() {
 export function PulloutCard({ salesOrderId, requestId }: { salesOrderId?: string; requestId?: string }) {
   const { can } = useAuth();
   const [rows, setRows] = useState<PulloutRow[] | null>(null);
-  const may = can('gchain.pullout_slips.view_all');
+  const may = can('gchain.pullout_slips.view_all') || can('gchain.pullout_slips.view_own');
   useEffect(() => {
     if (!may) return;
     let live = true;

@@ -55,11 +55,11 @@ model User {
   savedFilters           SavedFilter[]
   attachments            Attachment[]
   auditLogs              AuditLog[]
-  approvalsRaised        ApprovalRequest[] @relation("Requester")
-  approvalActions        ApprovalAction[]  @relation("ApprovalActor")
-  followUpsRaised ApprovalFollowUp[] @relation("FollowUpBy")
-  stoodInFor             ApprovalAction[]  @relation("StoodInFor")
-  workflowStepsTargeting ApprovalStep[]    @relation("StepUser")
+  approvalsRaised        ApprovalRequest[]  @relation("Requester")
+  approvalActions        ApprovalAction[]   @relation("ApprovalActor")
+  followUpsRaised        ApprovalFollowUp[] @relation("FollowUpBy")
+  stoodInFor             ApprovalAction[]   @relation("StoodInFor")
+  workflowStepsTargeting ApprovalStep[]     @relation("StepUser")
 
   employee         Employee?
   customersCreated Customer[]        @relation("CustomerCreator")
@@ -499,7 +499,7 @@ model ApprovalRequest {
 
   actions   ApprovalAction[]
   followUps ApprovalFollowUp[]
-  createdAt DateTime         @default(now())
+  createdAt DateTime           @default(now())
   closedAt  DateTime?
 
   @@index([documentType, documentId])
@@ -1072,6 +1072,7 @@ model Item {
   issueItems           StockIssueItem[]
   borrowItems          BorrowSlipItem[]
   balances             InventoryBalance[]
+  projectStock         ProjectStock[]
   pulloutItems         PulloutItem[]
   stockMoves           InventoryTransaction[]
   installedAssets      InstalledAsset[]
@@ -1099,6 +1100,7 @@ model Warehouse {
   borrowSlips      BorrowSlip[]
   pulloutSlips     PulloutSlip[]
   balances         InventoryBalance[]
+  projectStock     ProjectStock[]
   stockMoves       InventoryTransaction[]
 
   createdAt DateTime @default(now())
@@ -1117,6 +1119,7 @@ model Location {
   receivingItems ReceivingItem[]
   issueItems     StockIssueItem[]
   balances       InventoryBalance[]
+  projectStock   ProjectStock[]
 
   createdAt DateTime @default(now())
 
@@ -2000,10 +2003,13 @@ model Job {
   salesActivities  SalesActivity[]
   cadJobOrders     CadJobOrder[]
 
-  createdAt          DateTime            @default(now())
-  updatedAt          DateTime            @updatedAt
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
   commissionRequests CommissionRequest[]
   invoiceRequests    InvoiceRequest[]
+  /// Goods bought for the project and received into a warehouse (2026-10-18).
+  projectStock       ProjectStock[]
+  projectStockMoves  InventoryTransaction[] @relation("ProjectStockMoves")
 
   @@index([status])
   @@index([customerId])
@@ -2991,15 +2997,18 @@ model StockIssueItem {
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
-  quantity  Decimal @db.Decimal(18, 3)
+  quantity     Decimal @db.Decimal(18, 3)
   /// Moving-average cost at the moment of issue, snapshotted.
-  unitCost  Decimal @default(0) @db.Decimal(18, 2)
-  amount    Decimal @default(0) @db.Decimal(18, 2)
-  remarks   String?
+  unitCost     Decimal @default(0) @db.Decimal(18, 2)
+  amount       Decimal @default(0) @db.Decimal(18, 2)
+  /// Drawn from the slip's project's own stock (2026-10-18): already charged
+  /// to the project at receiving, so issuing it posts no cost again.
+  projectStock Boolean @default(false)
+  remarks      String?
   /// Serial or batch, and its condition as it left (2026-10-15).
-  serialNo  String?
-  condition String?
-  sortOrder Int     @default(0)
+  serialNo     String?
+  condition    String?
+  sortOrder    Int     @default(0)
 
   @@index([issueId])
 }
@@ -3012,6 +3021,10 @@ enum PulloutKind {
   /// No source document (2026-10-15, the owner's call): a supplier return,
   /// testing, a repair — the reason is kept on the slip.
   OTHER
+  /// A project's own stock (2026-10-18): goods bought for it and received
+  /// into a warehouse, released to its site. Charged at receiving, so the
+  /// release posts no cost again.
+  PROJECT_STOCK
 }
 
 /// What a pull-out is for (2026-10-15, the owner's pull-out slip: the
@@ -3258,6 +3271,36 @@ model InventoryBalance {
   @@index([warehouseId])
 }
 
+/// Goods bought for a project (a direct-to-job order) and received into a
+/// warehouse rather than to site (2026-10-18, the owner's call: "project goods
+/// received into the warehouse should show in inventory"). The project was
+/// charged at receiving, so this is the project's stock, kept apart from the
+/// company's: it never mixes into a balance's moving average, never counts in
+/// the company's stock value, and leaving the warehouse — an Outgoing line
+/// marked project stock or a PROJECT_STOCK pull-out — posts no cost again.
+model ProjectStock {
+  id          String    @id @default(cuid())
+  jobId       String
+  job         Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  quantity    Decimal @default(0) @db.Decimal(18, 3)
+  /// Moving average of what the project paid for it, as the company stock's.
+  averageCost Decimal @default(0) @db.Decimal(18, 4)
+
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([jobId, itemId, warehouseId])
+  @@index([warehouseId])
+  @@index([itemId])
+}
+
 enum StockMoveType {
   RECEIPT
   ISSUE
@@ -3286,11 +3329,17 @@ model InventoryTransaction {
   sourceNumber String?
   notes        String?
 
+  /// A movement of a project's own stock (ProjectStock) — never of the
+  /// company's. Null for company stock.
+  jobId String?
+  job   Job?    @relation("ProjectStockMoves", fields: [jobId], references: [id], onDelete: SetNull)
+
   createdById String?
   createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
 
   occurredAt DateTime @default(now())
 
+  @@index([jobId])
   @@index([itemId, warehouseId, occurredAt])
   @@index([sourceType, sourceId])
 }
@@ -3379,13 +3428,13 @@ model Attendance {
   timeOutPhoto  String?
   timeOutScore  Decimal?     @db.Decimal(6, 4)
 
-  status        AttendanceStatus @default(PRESENT)
-  lateMinutes   Int              @default(0)
+  status           AttendanceStatus @default(PRESENT)
+  lateMinutes      Int              @default(0)
   /// Net of the unpaid break, so it is hours actually worked.
-  workedMinutes Int              @default(0)
+  workedMinutes    Int              @default(0)
   /// Left before the working day's end (HR Settings' workEnd), at clock-out
   /// on the same Manila day; 0 for a day closed after midnight (2026-10-16).
-  undertimeMinutes Int @default(0)
+  undertimeMinutes Int              @default(0)
 
   /// The clock-in fallback's written reason (or HR's note on a correction).
   notes        String?

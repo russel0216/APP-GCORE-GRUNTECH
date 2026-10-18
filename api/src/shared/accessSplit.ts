@@ -11,29 +11,41 @@ import { prisma } from '../prisma';
  */
 const MARK = 'seed.accessSplit20261018';
 
-export const ACCESS_SPLIT: { from: string; to: string[] }[] = [
+export const ACCESS_SPLIT: { key: string; from: string; to: string[] }[] = [
   // Booking, changing and removing activities needed only the calendar's view.
   {
+    key: 'calendar',
     from: 'gops.calendar.view_all',
     to: ['gops.calendar.create', 'gops.calendar.edit_own', 'gops.calendar.edit_all', 'gops.calendar.delete'],
   },
   // A correction to an attendance entry borrowed Employees › Edit All.
-  { from: 'ghr.employees.edit_all', to: ['ghr.attendance.view_all', 'ghr.attendance.edit_all'] },
+  { key: 'attendance', from: 'ghr.employees.edit_all', to: ['ghr.attendance.view_all', 'ghr.attendance.edit_all'] },
   // A call-out, a visit's move and the report templates borrowed PM › Create.
   {
+    key: 'visits',
     from: 'gops.pm_reports.create',
     to: ['gops.visits.create', 'gops.visits.edit_all', 'gops.report_templates.create', 'gops.report_templates.edit_all'],
   },
+  // Pull-out slips became OWNED_KEPT (2026-10-18: anyone raises one): whoever
+  // raised them keeps reading and changing their own.
+  { key: 'pullout', from: 'gchain.pullout_slips.create', to: ['gchain.pullout_slips.view_own', 'gchain.pullout_slips.edit_own'] },
 ];
+/** The splits the first version of this step ran under its one mark. */
+const FIRST_RUN = ['calendar', 'attendance', 'visits'];
 
-/** Returns how many grants it made, or null when it had already run. */
+/** Returns how many grants it made, or null when every split had already run. Each split runs once. */
 export async function splitBorrowedRights(): Promise<number | null> {
-  if (await prisma.setting.findUnique({ where: { key: MARK } })) return null;
+  const mark = await prisma.setting.findUnique({ where: { key: MARK } });
+  const stored = mark?.value as { done?: string[] } | null | undefined;
+  const done = new Set<string>(mark ? (stored?.done ?? FIRST_RUN) : []);
+  const todo = ACCESS_SPLIT.filter((x) => !done.has(x.key));
+  if (!todo.length) return null;
   const perms = new Map(
     (await prisma.permission.findMany({ select: { id: true, key: true } })).map((p) => [p.key, p.id]),
   );
   let granted = 0;
-  for (const { from, to } of ACCESS_SPLIT) {
+  for (const { key, from, to } of todo) {
+    done.add(key);
     const fromId = perms.get(from);
     const toIds = to.map((k) => perms.get(k)).filter((id): id is string => !!id);
     if (!fromId || !toIds.length) continue;
@@ -57,12 +69,15 @@ export async function splitBorrowedRights(): Promise<number | null> {
       granted += made.count;
     }
   }
-  await prisma.setting.create({
-    data: {
+  const value = { done: [...done], at: new Date().toISOString(), granted };
+  await prisma.setting.upsert({
+    where: { key: MARK },
+    create: {
       key: MARK,
-      value: { at: new Date().toISOString(), granted },
-      description: 'The Calendar, Attendance, Service Schedule and Report Templates boxes were given, once, to whoever held the right they borrowed.',
+      value,
+      description: 'The Access boxes given, once each, to whoever held the right they replace (calendar, attendance, visits, pullout).',
     },
+    update: { value },
   });
   return granted;
 }

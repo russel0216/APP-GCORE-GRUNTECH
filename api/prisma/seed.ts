@@ -1,4 +1,5 @@
 import { splitBorrowedRights } from '../src/shared/accessSplit';
+import { backfillProjectStock } from '../src/shared/projectStock';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { allPermissions, permissionsFor } from '../src/permissions/registry';
@@ -634,6 +635,9 @@ const ROLES: RoleSeed[] = [
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       // Anyone may ask to borrow a tool (2026-10-14); the warehouse releases it.
       ...VIEW_OWN_SELF('gchain', 'borrow_slips'),
+      // Anyone may raise a pull-out slip (2026-10-18) — a project's own stock
+      // to its site, most often; the requester's supervisor approves it.
+      ...VIEW_OWN_SELF('gchain', 'pullout_slips'),
     ],
   },
   {
@@ -1459,6 +1463,12 @@ async function main() {
   // The boxes of 2026-10-18: Calendar, Attendance, Service Schedule and
   // Report Templates got their own write rights, given once to whoever held
   // the right they borrowed (shared/accessSplit.ts).
+  {
+    // Project goods received into a warehouse before they were kept as the
+    // project's own stock (2026-10-18) go on the shelf, once — no cost posted.
+    const stocked = await backfillProjectStock(prisma);
+    if (stocked) console.log(`  · Put ${stocked} earlier project receipt line(s) on the shelf as project stock`);
+  }
   {
     const split = await splitBorrowedRights();
     if (split) console.log(`  · Gave ${split} new Access box(es) to the roles that held the rights they replace`);
