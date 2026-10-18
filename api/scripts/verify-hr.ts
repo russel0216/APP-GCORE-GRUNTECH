@@ -2354,6 +2354,21 @@ async function main() {
             typeof otherBossRow.timeInScore === 'number',
           `${bossRow?.timeInPhoto} / ${otherBossRow?.timeInPhoto}`,
         );
+        // Attendance › View Own covers one's DIRECT REPORTS' days (2026-10-18):
+        // a manager holding only it reads Faye's entry and photo while she
+        // reports to them; a holder she does not report to reads nothing of hers.
+        const ownRole = await makeRole('zzhr_att_own', `${TAG} Attendance own`, ['ghr.attendance.view_own']);
+        const ownBoss = await makeUser('ZZ Own Boss', 'ownboss@verifyhr.local', [ownRole.id]);
+        const ownStranger = await makeUser('ZZ Own Stranger', 'ownstranger@verifyhr.local', [ownRole.id]);
+        await prisma.user.update({ where: { id: faye.user.id }, data: { supervisorId: ownBoss.id } });
+        const ownBossRow = await registerRow(signToken(ownBoss.id, ownBoss.email));
+        const strangerRow = await registerRow(signToken(ownStranger.id, ownStranger.email));
+        await prisma.user.update({ where: { id: faye.user.id }, data: { supervisorId: boss.id } });
+        check(
+          "Attendance › View Own reads a direct report's days and photo, and nobody else's",
+          ownBossRow?.timeInPhoto === inPhoto.id && strangerRow === undefined,
+          `${ownBossRow?.timeInPhoto} / ${strangerRow ? 'stranger saw a row' : 'none'}`,
+        );
         const dropEvidence = await api(faye.token, 'DELETE', `/attachments/${inPhoto.id}`);
         check(
           'and nobody deletes clock-in evidence through the generic attachment route, not even who uploaded it',

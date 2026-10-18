@@ -255,7 +255,7 @@ export const REGISTRY: ModuleDef[] = [
       // person was identified. Gated by the dashboard permission — seeing the
       // day's counts and seeing the entries behind them are the same right.
       {
-        key: 'attendance', own: 'your own attendance', group: 'Records',
+        key: 'attendance', own: "your own attendance and your direct reports'", group: 'Records',
         label: 'Attendance',
         path: '/g-hr/attendance',
         actions: SETTINGS,

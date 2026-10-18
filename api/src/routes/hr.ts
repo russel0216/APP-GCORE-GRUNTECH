@@ -279,7 +279,9 @@ async function isOwnEmployee(user: ResolvedUser, employeeId: string): Promise<bo
 async function captureReader(me: ResolvedUser): Promise<(employeeId: string) => boolean> {
   if (me.isSuperAdmin || can(me, 'ghr.attendance.view_all') || can(me, 'ghr.employees.edit_all')) return () => true;
   const mine = await myEmployee(me.id);
-  const reports = can(me, 'ghr.dashboard.view_all')
+  // A supervisor reads their DIRECT REPORTS' captures — through the dashboard
+  // right, or through Attendance › View Own, which covers them (2026-10-18).
+  const reports = can(me, 'ghr.dashboard.view_all') || can(me, 'ghr.attendance.view_own')
     ? await prisma.employee.findMany({ where: { user: { supervisorId: me.id } }, select: { id: true } })
     : [];
   const open = new Set([...(mine ? [mine.id] : []), ...reports.map((r) => r.id)]);
@@ -1338,14 +1340,17 @@ const ATTENDANCE_SORTS = ['date', 'timeIn'];
 /**
  * View Own on the register (2026-10-18): a holder of
  * `ghr.attendance.view_own` alone reads their OWN days — the entries of the
- * employee record linked to their login. View All, and the dashboard right
+ * employee record linked to their login — and, for anyone with direct
+ * reports, their DIRECT REPORTS' days too (the owner's call the same day:
+ * managers see their reports' attendance, never the company's). View All,
+ * and the dashboard right
  * (seeing the day's counts and the entries behind them are one right), read
  * every entry as before. The rows, the summary card and the paper all go
  * through it.
  */
 function attendanceScoped(me: ResolvedUser, where: Prisma.AttendanceWhereInput): Prisma.AttendanceWhereInput {
   if (can(me, 'ghr.attendance.view_all') || can(me, 'ghr.dashboard.view_all')) return where;
-  return { AND: [where, { employee: { userId: me.id } }] };
+  return { AND: [where, { employee: { OR: [{ userId: me.id }, { user: { supervisorId: me.id } }] } }] };
 }
 
 attendanceRoutes.get(

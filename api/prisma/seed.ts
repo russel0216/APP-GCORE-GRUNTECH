@@ -31,6 +31,7 @@ import { applyEmployeeNumbering, clearEmployeeNumbers } from '../src/shared/empl
 import { clearRoles, rolesCleared } from '../src/shared/rolesClear';
 import { replaceRolesWithChart } from '../src/shared/rolesFromChart';
 import { applyEmployeeNumberList } from '../src/shared/employeeNumbersFromList';
+import { applyHrAccess } from '../src/shared/hrAccess';
 import { backfillOwnAuthors } from '../src/shared/ownBackfill';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
@@ -1610,6 +1611,13 @@ async function main() {
         `  ✓ Roles replaced by the organisation chart: ${replaced.created.length} created, ${replaced.renamed.length} renamed, ${replaced.deleted.length} deleted, ${replaced.assigned} login(s) given their titles`,
       );
     }
+  }
+
+  // ── G-HR's common rights on every role; all of G-HR to the HR Officer ────
+  // Once, after the chart's roles (shared/hrAccess.ts, 2026-10-18).
+  {
+    const hr = await applyHrAccess();
+    if (hr) console.log(`  ✓ G-HR access: the common set on ${hr.roles} role(s) (${hr.common} boxes), the HR Officer ${hr.officer} more`);
   }
 
   // ── The employee numbers of the owner's ROLE.xlsx (2026-10-18) ──────────
