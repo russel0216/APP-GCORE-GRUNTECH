@@ -47,16 +47,25 @@ export const ACTION_LABELS: Record<Action, string> = {
 const OWNED: Action[] = ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete'];
 /** An owned document that is cancelled or closed, never deleted. */
 const OWNED_KEPT: Action[] = ['view_own', 'view_all', 'create', 'edit_own', 'edit_all'];
-/** Shared reference data — no meaningful "own". */
-const SHARED: Action[] = ['view_all', 'create', 'edit_all', 'delete'];
-/** Shared records that are kept once written (a receipt, a login). */
-const SHARED_KEPT: Action[] = ['view_all', 'create', 'edit_all'];
+/**
+ * Shared reference data. Since 2026-10-18 (the owner's call: "every screen
+ * with Edit All should have Edit Own and View Own") it carries the own pair
+ * too: View Own is the records one ADDED (`createdById` — `own` on the entry
+ * says what it is), Edit Own changes only those. Same keys as OWNED.
+ */
+const SHARED: Action[] = ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete'];
+/** Shared records that are kept once written (a receipt, a login) — with the own pair, as SHARED. */
+const SHARED_KEPT: Action[] = ['view_own', 'view_all', 'create', 'edit_own', 'edit_all'];
 /** Registers and calendars: reading is the whole right. */
 const READ: Action[] = ['view_all'];
 /** Dashboards and reports, whose CSV and PDF are a right of their own. */
 const REPORT: Action[] = ['view_all', 'export'];
-/** A settings page. */
-const SETTINGS: Action[] = ['view_all', 'edit_all'];
+/**
+ * A settings page, with the own pair since 2026-10-18. Where the page keeps
+ * no record anybody owns, "own" opens and saves the page as "all" does — the
+ * entry's `own` says so on Admin › Roles.
+ */
+const SETTINGS: Action[] = ['view_own', 'view_all', 'edit_own', 'edit_all'];
 
 export interface SubmoduleDef {
   key: string;
@@ -90,6 +99,12 @@ export interface SubmoduleDef {
    * would drop its permission keys.
    */
   hidden?: boolean;
+  /**
+   * What View Own and Edit Own mean on this screen (2026-10-18), shown on
+   * Admin › Roles beside the two boxes — "records you added", "your own
+   * employee record", "the page itself (it keeps no records of anybody's)".
+   */
+  own?: string;
 }
 
 export interface ModuleDef {
@@ -118,8 +133,8 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'quotations', group: 'Sales', label: 'Quotations', path: '/g-ops/quotations', actions: OWNED, phase: 3 },
       { key: 'sales_orders', group: 'Sales', label: 'Sales Orders', path: '/g-ops/sales-orders', actions: OWNED, phase: 9,
         note: 'Books a quotation in operations — SCORO\'s "Create invoice"' },
-      { key: 'customers', group: 'Sales', label: 'Customers', path: '/g-ops/customers', actions: SHARED, phase: 2 },
-      { key: 'partners', group: 'Sales', label: 'Partners', path: '/g-ops/partners', actions: SHARED, phase: 3,
+      { key: 'customers', own: 'customers you added', group: 'Sales', label: 'Customers', path: '/g-ops/customers', actions: SHARED, phase: 2 },
+      { key: 'partners', own: 'partners you added (as a supplier)', group: 'Sales', label: 'Partners', path: '/g-ops/partners', actions: SHARED, phase: 3,
         note: 'Principals whose equipment Gruntech sells and services: catalogues, price lists, software. One supplier record, seen from Sales.' },
       { key: 'calendar', group: 'Sales', label: 'Calendar', path: '/g-ops/calendar', actions: OWNED, phase: 3,
         note: 'Create books an activity; Edit Own and Delete cover the ones you are on (booked for, invited or booked by you); Edit All anyone’s' },
@@ -145,11 +160,11 @@ export const REGISTRY: ModuleDef[] = [
       // project into a renewal pipeline — without it nobody can answer "what
       // did we put in that hospital, and when does its warranty run out".
       { key: 'aftermarket', group: 'Aftermarket', label: 'Aftermarket', path: '/g-ops/aftermarket', actions: READ, phase: 8, note: 'Overview and the aftermarket rules' },
-      { key: 'installed_base', group: 'Aftermarket', label: 'Installed Base', path: '/g-ops/installed-base', actions: SHARED_KEPT, phase: 8 },
+      { key: 'installed_base', own: 'machines you registered', group: 'Aftermarket', label: 'Installed Base', path: '/g-ops/installed-base', actions: SHARED_KEPT, phase: 8 },
       { key: 'service_contracts', group: 'Aftermarket', label: 'Service Contracts', path: '/g-ops/service-contracts', actions: OWNED_KEPT, phase: 8 },
-      { key: 'visits', group: 'Aftermarket', label: 'Service Schedule', path: '/g-ops/visits', actions: SHARED_KEPT, phase: 8, note: 'Every visit on one calendar; Create books a call-out, Edit All moves, assigns or cancels a visit' },
+      { key: 'visits', own: 'visits assigned to you', group: 'Aftermarket', label: 'Service Schedule', path: '/g-ops/visits', actions: SHARED_KEPT, phase: 8, note: 'Every visit on one calendar; Create books a call-out, Edit All moves, assigns or cancels a visit' },
       { key: 'renewals', group: 'Aftermarket', label: 'Renewals', path: '/g-ops/renewals', actions: READ, phase: 8 },
-      { key: 'report_templates', group: 'Service reports', label: 'Report Templates', path: '/g-ops/report-templates', actions: SHARED_KEPT, phase: 8, note: 'Create starts or duplicates a template; Edit All publishes a new version' },
+      { key: 'report_templates', own: 'templates you made', group: 'Service reports', label: 'Report Templates', path: '/g-ops/report-templates', actions: SHARED_KEPT, phase: 8, note: 'Create starts or duplicates a template; Edit All publishes a new version' },
       { key: 'commissioning_reports', group: 'Service reports', label: 'Commissioning Reports', path: '/g-ops/commissioning', actions: OWNED_KEPT, phase: 8 },
       { key: 'pm_reports', group: 'Service reports', label: 'Preventive Maintenance', path: '/g-ops/pm', actions: OWNED_KEPT, phase: 8 },
       { key: 'inspection_reports', group: 'Service reports', label: 'Service Inspections', path: '/g-ops/inspections', actions: OWNED_KEPT, phase: 8 },
@@ -169,18 +184,18 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'rfq', group: 'Procurement', label: 'RFQ', path: '/g-chain/rfq', actions: OWNED, phase: 5 },
       { key: 'canvass', group: 'Procurement', label: 'Canvass', path: '/g-chain/canvass', actions: OWNED, phase: 5 },
       { key: 'purchase_orders', group: 'Procurement', label: 'Purchase Orders', path: '/g-chain/purchase-orders', actions: OWNED, phase: 5 },
-      // The warehouse flow (2026-10-14, the owner's call): Incoming › Inventory
-      // › Outgoing › Borrow Slips › Pull-out Slips. Incoming and Outgoing keep
+      // The warehouse flow (2026-10-18, the owner's call): Incoming › Inventory
+      // › Pull-out Slips › Borrow Slips › Outgoing. Incoming and Outgoing keep
       // the keys of Receiving and Stock Issuance, so no right moves.
-      { key: 'receiving', group: 'Warehouse', label: 'Incoming', path: '/g-chain/incoming', actions: SHARED_KEPT, phase: 5 },
-      { key: 'inventory', group: 'Warehouse', label: 'Inventory', path: '/g-chain/inventory', actions: ['view_all', 'edit_all'], phase: 5 },
-      { key: 'stock_issuance', group: 'Warehouse', label: 'Outgoing', path: '/g-chain/outgoing', actions: SHARED, phase: 5 },
-      { key: 'borrow_slips', group: 'Warehouse', label: 'Borrow Slips', path: '/g-chain/borrow-slips', actions: OWNED_KEPT, phase: 5 },
+      { key: 'receiving', own: 'incoming reports you received', group: 'Warehouse', label: 'Incoming', path: '/g-chain/incoming', actions: SHARED_KEPT, phase: 5 },
+      { key: 'inventory', own: 'the stock of items you added', group: 'Warehouse', label: 'Inventory', path: '/g-chain/inventory', actions: SETTINGS, phase: 5 },
       { key: 'pullout_slips', group: 'Warehouse', label: 'Pull-out Slips', path: '/g-chain/pullout-slips', actions: OWNED_KEPT, phase: 5,
         note: 'Anyone may raise one (Create, View Own, Edit Own); View All and Edit All are the warehouse’s' },
-      { key: 'items', group: 'Master data', label: 'Item Master', path: '/g-chain/items', actions: SHARED, phase: 2 },
-      { key: 'suppliers', group: 'Master data', label: 'Suppliers', path: '/g-chain/suppliers', actions: SHARED, phase: 2 },
-      { key: 'warehouses', group: 'Master data', label: 'Warehouses', path: '/g-chain/warehouses', actions: SHARED, phase: 2 },
+      { key: 'borrow_slips', group: 'Warehouse', label: 'Borrow Slips', path: '/g-chain/borrow-slips', actions: OWNED_KEPT, phase: 5 },
+      { key: 'stock_issuance', own: 'outgoing slips you issued', group: 'Warehouse', label: 'Outgoing', path: '/g-chain/outgoing', actions: SHARED, phase: 5 },
+      { key: 'items', own: 'items you added', group: 'Master data', label: 'Item Master', path: '/g-chain/items', actions: SHARED, phase: 2 },
+      { key: 'suppliers', own: 'suppliers you added', group: 'Master data', label: 'Suppliers', path: '/g-chain/suppliers', actions: SHARED, phase: 2 },
+      { key: 'warehouses', own: 'warehouses you added', group: 'Master data', label: 'Warehouses', path: '/g-chain/warehouses', actions: SHARED, phase: 2 },
       { key: 'reports', group: 'Analysis', label: 'Reports', path: '/g-chain/reports', actions: READ, phase: 5 },
     ],
   },
@@ -194,8 +209,8 @@ export const REGISTRY: ModuleDef[] = [
       // their Team Leader raises it, Back Support approves it, and the approval
       // raises the draft invoice (2026-10-15).
       { key: 'invoice_requests', group: 'Money in', label: 'Invoice Requests', path: '/g-fin/invoice-requests', actions: OWNED, phase: 7 },
-      { key: 'ar', group: 'Money in', label: 'Accounts Receivable', path: '/g-fin/ar', actions: SHARED, phase: 7 },
-      { key: 'ap', group: 'Money out', label: 'Accounts Payable', path: '/g-fin/ap', actions: SHARED, phase: 7 },
+      { key: 'ar', own: 'invoices you raised', group: 'Money in', label: 'Accounts Receivable', path: '/g-fin/ar', actions: SHARED, phase: 7 },
+      { key: 'ap', own: 'supplier bills you entered', group: 'Money out', label: 'Accounts Payable', path: '/g-fin/ap', actions: SHARED, phase: 7 },
       { key: 'expenses', group: 'Money out', label: 'Reimbursements', path: '/g-fin/expenses', actions: OWNED, phase: 7 },
       { key: 'cash_advances', group: 'Money out', label: 'Cash Advances', path: '/g-fin/cash-advances', actions: OWNED_KEPT, phase: 7 },
       // A sales order's commission, raised once it is fully collected, split
@@ -221,7 +236,7 @@ export const REGISTRY: ModuleDef[] = [
       // own rules — owning them should not require being a system
       // administrator, the same way HR owns the working day.
       {
-        key: 'settings', group: 'Administration',
+        key: 'settings', own: 'the page itself — it keeps no record of anybody’s', group: 'Administration',
         label: 'Finance Settings',
         path: '/g-fin/settings',
         actions: SETTINGS,
@@ -240,7 +255,7 @@ export const REGISTRY: ModuleDef[] = [
       // person was identified. Gated by the dashboard permission — seeing the
       // day's counts and seeing the entries behind them are the same right.
       {
-        key: 'attendance', group: 'Records',
+        key: 'attendance', own: 'your own attendance', group: 'Records',
         label: 'Attendance',
         path: '/g-hr/attendance',
         actions: SETTINGS,
@@ -254,12 +269,12 @@ export const REGISTRY: ModuleDef[] = [
       // is pasted from the organiser's own Google account — G-Core holds no
       // Google credentials and sends no email (shared/calendar-links.ts).
       { key: 'meetings', group: 'My day', label: 'Meetings', path: '/g-hr/meetings', actions: OWNED, phase: 6 },
-      { key: 'employees', group: 'Records', label: 'Employees', path: '/g-hr/employees', actions: SHARED, phase: 2 },
+      { key: 'employees', own: 'your own employee record', group: 'Records', label: 'Employees', path: '/g-hr/employees', actions: SHARED, phase: 2 },
       // Pay data is separated from the employee record on purpose. A project
       // manager needs headcount and assignment; they must not see salaries.
       // Labor cost reaches projects as a burdened rate, never as a wage.
       {
-        key: 'employee_rates', group: 'Records',
+        key: 'employee_rates', own: 'your own pay rate', group: 'Records',
         label: 'Employee Pay Rates',
         path: '/g-hr/employees',
         actions: SETTINGS,
@@ -268,27 +283,27 @@ export const REGISTRY: ModuleDef[] = [
       // The authorised staffing pattern: positions per department, how many of
       // each are approved, who fills them and what is vacant. Filled/vacant are
       // counted off active employees, never stored.
-      { key: 'plantilla', group: 'Records', label: 'Plantilla', path: '/g-hr/plantilla', actions: SHARED, phase: 6 },
+      { key: 'plantilla', own: 'positions you added', group: 'Records', label: 'Plantilla', path: '/g-hr/plantilla', actions: SHARED, phase: 6 },
       // Pay data and evaluations are the two things on an employee a colleague
       // must not see; both live behind their own key rather than under employees.
       // One person's path from pre-boarding to the clearance certificate
       // (2026-10-13, the owner's PEOPLE_FLOW file). HR ticks; the person
       // reads their own; a supervisor with the dashboard right their direct
       // reports' — shared/peopleFlow.ts.
-      { key: 'people_flow', group: 'People', label: 'People Flow', path: '/g-hr/people-flow', actions: ['view_all', 'view_own', 'edit_all'], phase: 10, note: 'Edit All ticks the checklist; View Own reads your own path' },
+      { key: 'people_flow', own: 'your own path', group: 'People', label: 'People Flow', path: '/g-hr/people-flow', actions: ['view_own', 'view_all', 'edit_own', 'edit_all'], phase: 10, note: 'Edit All ticks the checklist; View Own reads your own path' },
       { key: 'evaluations', group: 'People', label: 'Evaluations', path: '/g-hr/evaluations', actions: OWNED_KEPT, phase: 6, note: 'Probationary and trainee evaluations — the evaluator owns the record; the person evaluated reads it once approved' },
       // Turnover of accountabilities before someone leaves, cleared by the area
       // that owns each item and signed off through the approval engine. The
       // screen opens with the 12-month turnover figures so the label is true.
       { key: 'clearances', group: 'People', label: 'Turnover & Clearance', path: '/g-hr/clearances', actions: OWNED_KEPT, phase: 6 },
       // Gruntech Academy.
-      { key: 'courses', group: 'Academy', label: 'Courses', path: '/g-hr/academy/courses', actions: SHARED, phase: 6, note: 'Course master, and which departments and positions must hold each course' },
+      { key: 'courses', own: 'courses you added', group: 'Academy', label: 'Courses', path: '/g-hr/academy/courses', actions: SHARED, phase: 6, note: 'Course master, and which departments and positions must hold each course' },
       { key: 'training_calendar', group: 'Academy', label: 'Training Calendar', path: '/g-hr/academy/calendar', actions: READ, phase: 6 },
       { key: 'training_sessions', group: 'Academy', label: 'Training Sessions', path: '/g-hr/academy/sessions', actions: OWNED, phase: 6, note: 'Create is the Trainer right — schedule, enrol and complete a session; Edit Own covers sessions you train' },
       { key: 'passport', group: 'Academy', label: 'My Training Passport', path: '/g-hr/academy/passport', actions: ['view_own', 'create'], phase: 6, note: 'Create lets an employee enter an external certification for HR to verify' },
-      { key: 'passports', group: 'Academy', label: 'Training Passports', path: '/g-hr/academy/passports', actions: ['view_all', 'create', 'edit_all', 'delete', 'approve'], phase: 6, note: 'Every employee’s passport; verify external certifications; record training directly' },
+      { key: 'passports', own: 'your own passport', group: 'Academy', label: 'Training Passports', path: '/g-hr/academy/passports', actions: ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete', 'approve'], phase: 6, note: 'Every employee’s passport; verify external certifications; record training directly' },
       { key: 'reports', group: 'Administration', label: 'HR Reports', path: '/g-hr/reports', actions: REPORT, phase: 6 },
-      { key: 'settings', group: 'Administration', label: 'HR Settings', path: '/g-hr/settings', actions: SETTINGS, phase: 6 },
+      { key: 'settings', own: 'the page itself — it keeps no record of anybody’s', group: 'Administration', label: 'HR Settings', path: '/g-hr/settings', actions: SETTINGS, phase: 6 },
     ],
   },
   {
@@ -314,23 +329,23 @@ export const REGISTRY: ModuleDef[] = [
     label: 'Admin',
     blurb: 'Users, roles, workflows and company configuration',
     submodules: [
-      { key: 'users', group: 'People', label: 'Users', path: '/admin/users', actions: SHARED_KEPT, phase: 1 },
-      { key: 'roles', group: 'People', label: 'Roles & Permissions', path: '/admin/roles', actions: SHARED, phase: 1 },
-      { key: 'workflows', group: 'Process', label: 'Approval Workflows', path: '/admin/workflows', actions: SHARED, phase: 1 },
-      { key: 'company', group: 'Configuration', label: 'Company Settings', path: '/admin/company', actions: SETTINGS, phase: 1 },
-      { key: 'numbering', group: 'Process', label: 'Numbering', path: '/admin/numbering', actions: SETTINGS, phase: 1 },
-      { key: 'categories', group: 'Configuration', label: 'Categories', path: '/admin/categories', actions: SHARED, phase: 2, note: 'Cost, item and industry categories' },
-      { key: 'templates', group: 'Process', label: 'Document Templates', path: '/admin/templates', actions: SETTINGS, phase: 1,
+      { key: 'users', own: 'your own login', group: 'People', label: 'Users', path: '/admin/users', actions: SHARED_KEPT, phase: 1 },
+      { key: 'roles', own: 'roles you made', group: 'People', label: 'Roles & Permissions', path: '/admin/roles', actions: SHARED, phase: 1 },
+      { key: 'workflows', own: 'approval routes you made', group: 'Process', label: 'Approval Workflows', path: '/admin/workflows', actions: SHARED, phase: 1 },
+      { key: 'company', own: 'the page itself — it keeps no record of anybody’s', group: 'Configuration', label: 'Company Settings', path: '/admin/company', actions: SETTINGS, phase: 1 },
+      { key: 'numbering', own: 'the page itself — it keeps no record of anybody’s', group: 'Process', label: 'Numbering', path: '/admin/numbering', actions: SETTINGS, phase: 1 },
+      { key: 'categories', own: 'entries you added', group: 'Configuration', label: 'Categories', path: '/admin/categories', actions: SHARED, phase: 2, note: 'Cost, item and industry categories' },
+      { key: 'templates', own: 'the page itself — it keeps no record of anybody’s', group: 'Process', label: 'Document Templates', path: '/admin/templates', actions: ['view_own', 'view_all'], phase: 1,
         note: 'Service report form templates (Phase 8). The quotation’s PDF layout is under PDF Templates.', hidden: true },
-      { key: 'pdf_templates', group: 'Process', label: 'PDF Templates', path: '/admin/pdf-templates', actions: SETTINGS, phase: 1,
+      { key: 'pdf_templates', own: 'the page itself — it keeps no record of anybody’s', group: 'Process', label: 'PDF Templates', path: '/admin/pdf-templates', actions: SETTINGS, phase: 1,
         note: 'Lay out the quotation and sales order PDFs: place the boxes and choose what each one prints' },
-      { key: 'pipeline_stages', group: 'Process', label: 'Pipeline Stages', path: '/admin/pipeline-stages', actions: SETTINGS, phase: 3,
+      { key: 'pipeline_stages', own: 'the page itself — it keeps no record of anybody’s', group: 'Process', label: 'Pipeline Stages', path: '/admin/pipeline-stages', actions: SETTINGS, phase: 3,
         note: 'The sales pipeline’s stages, as SCORO’s statuses: name, odds, colour and which are on the board' },
       { key: 'audit', group: 'Records', label: 'Audit Logs', path: '/admin/audit', actions: READ, phase: 1 },
-      { key: 'help_tickets', group: 'Records', label: 'Help Tickets', path: '/admin/help-tickets', actions: SETTINGS, phase: 10,
+      { key: 'help_tickets', own: 'tickets you raised', group: 'Records', label: 'Help Tickets', path: '/admin/help-tickets', actions: SETTINGS, phase: 10,
         note: 'What people raised from the Help box: improvements, faults and questions, with their screenshots' },
-      { key: 'settings', group: 'Configuration', label: 'System Settings', path: '/admin/settings', actions: SETTINGS, phase: 1 },
-      { key: 'appearance', group: 'Configuration', label: 'Appearance & Layout', path: '/admin/appearance', actions: SETTINGS, phase: 1, note: 'Spacing, type, colour and layout of every screen' },
+      { key: 'settings', own: 'the page itself — it keeps no record of anybody’s', group: 'Configuration', label: 'System Settings', path: '/admin/settings', actions: ['view_own', 'view_all'] /* read-only: no Edit box does anything (2026-10-18) */, phase: 1 },
+      { key: 'appearance', own: 'the page itself — it keeps no record of anybody’s', group: 'Configuration', label: 'Appearance & Layout', path: '/admin/appearance', actions: SETTINGS, phase: 1, note: 'Spacing, type, colour and layout of every screen' },
     ],
   },
 ];

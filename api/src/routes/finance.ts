@@ -25,7 +25,8 @@ import {
   type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
-import { can, canEditRecord } from '../permissions/resolve';
+import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
 import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
@@ -321,8 +322,22 @@ async function attachmentCounts(ids: string[]): Promise<Map<string, number>> {
  */
 registerAttachmentGuard(
   'invoice',
-  async (user) => can(user, 'gfin.ar.view_all'),
-  { write: async (user) => can(user, 'gfin.ar.create') || can(user, 'gfin.ar.edit_all') },
+  // View Own reads the files of the invoices one raised, Edit Own writes them
+  // (2026-10-18).
+  async (user, id) => {
+    if (can(user, 'gfin.ar.view_all')) return true;
+    if (!can(user, 'gfin.ar.view_own')) return false;
+    const inv = await prisma.invoice.findUnique({ where: { id }, select: { createdById: true } });
+    return inv?.createdById === user.id;
+  },
+  {
+    write: async (user, id) => {
+      if (can(user, 'gfin.ar.create') || can(user, 'gfin.ar.edit_all')) return true;
+      if (!can(user, 'gfin.ar.edit_own')) return false;
+      const inv = await prisma.invoice.findUnique({ where: { id }, select: { createdById: true } });
+      return inv?.createdById === user.id;
+    },
+  },
 );
 
 /** An invoice something is owed on — the receivable, as `financePosition` reads it. */
@@ -331,11 +346,15 @@ const INVOICE_OWED: InvoiceStatus[] = ['ISSUED', 'PARTIALLY_PAID'];
 const BILL_OWED: BillStatus[] = ['APPROVED', 'PARTIALLY_PAID'];
 
 /**
- * The invoice list's where-builder — the screen's rows and the printed list
- * read the same set. A/R is `gfin.ar.view_all` throughout, so there is no
- * own-scope to apply; `?ids=` narrows to the rows ticked.
+ * The invoice list's where-builder — the screen's rows, its cards and the
+ * printed list read the same set; `?ids=` narrows to the rows ticked. A View
+ * Own holder reads the invoices they raised (2026-10-18, `ownOnly`).
  */
-function invoiceListWhere(q: ListQuery): Prisma.InvoiceWhereInput {
+function invoiceListWhere(me: ResolvedUser, q: ListQuery): Prisma.InvoiceWhereInput {
+  return ownOnly(me, 'gfin', 'ar', invoiceListWhereAll(q), { createdById: me.id });
+}
+
+function invoiceListWhereAll(q: ListQuery): Prisma.InvoiceWhereInput {
   const where: Prisma.InvoiceWhereInput = {};
 
   const and: Prisma.InvoiceWhereInput[] = [];
@@ -438,10 +457,11 @@ const INVOICE_SORTS = ['number', 'invoiceDate', 'dueDate', 'createdAt'];
 
 invoiceRoutes.get(
   '/',
-  require_('gfin.ar.view_all'),
+  requireView('gfin', 'ar'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
-    const where = invoiceListWhere(q);
+    const where = invoiceListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.invoice.findMany({
@@ -455,7 +475,10 @@ invoiceRoutes.get(
     ]);
     const [files, summary] = await Promise.all([attachmentCounts(rows.map((r) => r.id)), invoiceListSummary(where)]);
 
-    res.json({ ...listResult(rows.map((r) => presentInvoice(r, files.get(r.id) ?? 0)), total, q), summary });
+    res.json({
+      ...listResult(rows.map((r) => ({ ...presentInvoice(r, files.get(r.id) ?? 0), canEdit: mayEdit(me, 'gfin', 'ar', r.createdById === me.id) })), total, q),
+      summary,
+    });
   }),
 );
 
@@ -544,10 +567,10 @@ invoiceRoutes.get(
  */
 invoiceRoutes.get(
   '/pdf',
-  require_('gfin.ar.view_all'),
+  requireView('gfin', 'ar'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = invoiceListWhere(q);
+    const where = invoiceListWhere(currentUser(req), q);
     const countedWhere: Prisma.InvoiceWhereInput = { AND: [where, { status: { not: 'CANCELLED' } }] };
     // What is owed: an issued invoice, paid in part or not at all.
     const owedWhere: Prisma.InvoiceWhereInput = { AND: [where, { status: { in: INVOICE_OWED } }] };
@@ -675,8 +698,9 @@ invoiceRoutes.get(
 
 invoiceRoutes.get(
   '/:id',
-  require_('gfin.ar.view_all'),
+  requireView('gfin', 'ar'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const row = await prisma.invoice.findUnique({
       where: { id: req.params.id },
       include: {
@@ -699,9 +723,12 @@ invoiceRoutes.get(
       },
     });
     if (!row) throw notFound('Invoice not found');
+    // View Own reads the invoices one raised; Edit Own changes them (2026-10-18).
+    assertCanView(me, 'gfin', 'ar', row.createdById === me.id);
 
     res.json({
       ...presentInvoice(row),
+      canEdit: mayEdit(me, 'gfin', 'ar', row.createdById === me.id),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
     });
   }),
@@ -721,7 +748,7 @@ invoiceRoutes.get(
  */
 invoiceRoutes.get(
   '/:id/pdf',
-  require_('gfin.ar.view_all'),
+  requireView('gfin', 'ar'),
   handler(async (req, res) => {
     const inv = await prisma.invoice.findUnique({
       where: { id: req.params.id },
@@ -732,6 +759,7 @@ invoiceRoutes.get(
       },
     });
     if (!inv) throw notFound('Invoice not found');
+    assertCanView(currentUser(req), 'gfin', 'ar', inv.createdById === currentUser(req).id);
     const currency = await companyCurrency();
 
     const sections: PdfSection[] = [
@@ -1199,7 +1227,7 @@ const BILLING_CARRIED = ['customerId', 'jobId', 'jobOrderId', 'vatRate', 'lines'
  */
 invoiceRoutes.put(
   '/:id',
-  require_('gfin.ar.edit_all'),
+  requireEdit('gfin', 'ar'),
   handler(async (req, res) => {
     const existing = await prisma.invoice.findUnique({
       where: { id: req.params.id },
@@ -1210,6 +1238,7 @@ invoiceRoutes.put(
       },
     });
     if (!existing) throw notFound('Invoice not found');
+    assertCanEdit(currentUser(req), 'gfin', 'ar', existing.createdById === currentUser(req).id);
     if (existing.status !== 'DRAFT') {
       throw badRequest('Only a draft invoice can be modified — once issued, cancel it and raise another');
     }
@@ -1341,10 +1370,11 @@ invoiceRoutes.put(
 /** Issuing is the act of sending it. Until then it is a draft nobody owes. */
 invoiceRoutes.post(
   '/:id/issue',
-  require_('gfin.ar.edit_all'),
+  requireEdit('gfin', 'ar'),
   handler(async (req, res) => {
     const invoice = await prisma.invoice.findUnique({ where: { id: req.params.id } });
     if (!invoice) throw notFound('Invoice not found');
+    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id);
     if (invoice.status !== 'DRAFT') throw badRequest('This invoice has already been issued');
 
     const updated = await prisma.invoice.update({
@@ -1375,7 +1405,7 @@ invoiceRoutes.post(
  */
 invoiceRoutes.post(
   '/:id/counter',
-  require_('gfin.ar.edit_all'),
+  requireEdit('gfin', 'ar'),
   handler(async (req, res) => {
     const body = parseBody(
       z.object({
@@ -1386,6 +1416,7 @@ invoiceRoutes.post(
     );
     const invoice = await prisma.invoice.findUnique({ where: { id: req.params.id } });
     if (!invoice) throw notFound('Invoice not found');
+    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id);
     // "Mark as received" (2026-10-16, the owner's call: no customer is
     // involved in G-CORE's side of it): on a draft it issues the invoice and
     // records the day the customer received it, in one step.
@@ -1430,14 +1461,15 @@ invoiceRoutes.post(
  */
 invoiceRoutes.patch(
   '/:id/credit',
-  require_('gfin.ar.edit_all'),
+  requireEdit('gfin', 'ar'),
   handler(async (req, res) => {
     const body = parseBody(creditSchema, req.body);
     const invoice = await prisma.invoice.findUnique({
       where: { id: req.params.id },
-      select: { id: true, number: true, status: true, salespersonId: true, teamId: true, salesOrderId: true, jobId: true, jobOrderId: true },
+      select: { id: true, number: true, status: true, salespersonId: true, teamId: true, salesOrderId: true, jobId: true, jobOrderId: true, createdById: true },
     });
     if (!invoice) throw notFound('Invoice not found');
+    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id);
     if (invoice.status === 'CANCELLED') throw badRequest('A cancelled invoice keeps the credit it had');
     const credit = await resolveCredit(
       { salespersonId: body.salespersonId === undefined ? invoice.salespersonId : body.salespersonId, teamId: body.teamId },
@@ -1462,7 +1494,7 @@ invoiceRoutes.patch(
 /** Recording the BIR 2307 that makes the withheld tax creditable. */
 invoiceRoutes.patch(
   '/:id/certificate',
-  require_('gfin.ar.edit_all'),
+  requireEdit('gfin', 'ar'),
   handler(async (req, res) => {
     const body = parseBody(
       z.object({
@@ -1473,6 +1505,7 @@ invoiceRoutes.patch(
     );
     const invoice = await prisma.invoice.findUnique({ where: { id: req.params.id } });
     if (!invoice) throw notFound('Invoice not found');
+    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id);
     if (num(invoice.ewtAmount) <= 0) {
       throw badRequest('Nothing was withheld on this invoice, so there is no certificate to record');
     }
@@ -1503,7 +1536,7 @@ invoiceRoutes.patch(
 
 invoiceRoutes.post(
   '/:id/cancel',
-  require_('gfin.ar.edit_all'),
+  requireEdit('gfin', 'ar'),
   handler(async (req, res) => {
     const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Why?') }), req.body);
     const invoice = await prisma.invoice.findUnique({
@@ -1511,6 +1544,7 @@ invoiceRoutes.post(
       include: { allocations: true },
     });
     if (!invoice) throw notFound('Invoice not found');
+    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id);
     if (invoice.allocations.length) {
       throw badRequest(
         'Payments have been applied to this invoice. Remove the allocations first — cancelling it would leave money pointing at nothing.',
@@ -1646,11 +1680,15 @@ function presentBill(row: BillRow) {
 }
 
 /**
- * The supplier bill list's where-builder — the screen's rows and the printed
- * list read the same set (`gfin.ap.view_all` throughout; `?ids=` narrows to
- * the rows ticked).
+ * The supplier bill list's where-builder — the screen's rows, its cards and
+ * the printed list read the same set (`?ids=` narrows to the rows ticked). A
+ * View Own holder reads the bills they entered (2026-10-18, `ownOnly`).
  */
-function billListWhere(q: ListQuery): Prisma.SupplierBillWhereInput {
+function billListWhere(me: ResolvedUser, q: ListQuery): Prisma.SupplierBillWhereInput {
+  return ownOnly(me, 'gfin', 'ap', billListWhereAll(q), { createdById: me.id });
+}
+
+function billListWhereAll(q: ListQuery): Prisma.SupplierBillWhereInput {
   const where: Prisma.SupplierBillWhereInput = {};
 
   const status = choice(q.filters.status, BillStatus, 'Status');
@@ -1749,10 +1787,11 @@ async function billListSummary(where: Prisma.SupplierBillWhereInput) {
 
 billRoutes.get(
   '/',
-  require_('gfin.ap.view_all'),
+  requireView('gfin', 'ap'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
-    const where = billListWhere(q);
+    const where = billListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.supplierBill.findMany({
@@ -1765,7 +1804,10 @@ billRoutes.get(
       prisma.supplierBill.count({ where }),
     ]);
 
-    res.json({ ...listResult(rows.map(presentBill), total, q), summary: await billListSummary(where) });
+    res.json({
+      ...listResult(rows.map((r) => ({ ...presentBill(r), canEdit: mayEdit(me, 'gfin', 'ap', r.createdById === me.id) })), total, q),
+      summary: await billListSummary(where),
+    });
   }),
 );
 
@@ -1781,10 +1823,10 @@ billRoutes.get(
  */
 billRoutes.get(
   '/pdf',
-  require_('gfin.ap.view_all'),
+  requireView('gfin', 'ap'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = billListWhere(q);
+    const where = billListWhere(currentUser(req), q);
     const countedWhere: Prisma.SupplierBillWhereInput = { AND: [where, { status: { not: 'CANCELLED' } }] };
     // What is payable: an approved bill, paid in part or not at all.
     const owedWhere: Prisma.SupplierBillWhereInput = { AND: [where, { status: { in: BILL_OWED } }] };
@@ -1904,8 +1946,9 @@ billRoutes.get(
 
 billRoutes.get(
   '/:id',
-  require_('gfin.ap.view_all'),
+  requireView('gfin', 'ap'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const row = await prisma.supplierBill.findUnique({
       where: { id: req.params.id },
       include: {
@@ -1921,8 +1964,11 @@ billRoutes.get(
       },
     });
     if (!row) throw notFound('Supplier bill not found');
+    // View Own reads the bills one entered; Edit Own changes them (2026-10-18).
+    assertCanView(me, 'gfin', 'ap', row.createdById === me.id);
     res.json({
       ...presentBill(row),
+      canEdit: mayEdit(me, 'gfin', 'ap', row.createdById === me.id),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
     });
   }),
@@ -2168,7 +2214,7 @@ const billModifySchema = billSchema.extend({
  */
 billRoutes.put(
   '/:id',
-  require_('gfin.ap.edit_all'),
+  requireEdit('gfin', 'ap'),
   handler(async (req, res) => {
     const body = parseBody(billModifySchema, req.body);
     const existing = await prisma.supplierBill.findUnique({
@@ -2176,6 +2222,7 @@ billRoutes.put(
       include: { lines: { select: { amount: true } } },
     });
     if (!existing) throw notFound('Supplier bill not found');
+    assertCanEdit(currentUser(req), 'gfin', 'ap', existing.createdById === currentUser(req).id);
     if (existing.status !== 'DRAFT') {
       throw badRequest(
         existing.status === 'PENDING_APPROVAL'
@@ -2301,12 +2348,13 @@ billRoutes.put(
  */
 billRoutes.post(
   '/:id/cancel',
-  require_('gfin.ap.edit_all'),
+  requireEdit('gfin', 'ap'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Why?') }), req.body ?? {});
     const bill = await prisma.supplierBill.findUnique({ where: { id: req.params.id } });
     if (!bill) throw notFound('Supplier bill not found');
+    assertCanEdit(me, 'gfin', 'ap', bill.createdById === me.id);
     if (bill.status !== 'DRAFT') {
       throw badRequest(
         bill.status === 'CANCELLED'
@@ -5206,7 +5254,16 @@ financeSettingsRoutes.use(authenticate);
 
 financeSettingsRoutes.get(
   '/',
-  requireAny('gfin.settings.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all'),
+  // Either key of a pair (2026-10-18): the page keeps no record of anybody's,
+  // and the A/R and A/P forms read its terms.
+  requireAny(
+    'gfin.settings.view_all',
+    'gfin.settings.view_own',
+    'gfin.ar.view_all',
+    'gfin.ar.view_own',
+    'gfin.ap.view_all',
+    'gfin.ap.view_own',
+  ),
   handler(async (_req, res) => {
     const [settings, rates] = await Promise.all([financeSettings(), currentRates()]);
     res.json({ ...settings, ...rates });
@@ -5215,7 +5272,7 @@ financeSettingsRoutes.get(
 
 financeSettingsRoutes.put(
   '/',
-  require_('gfin.settings.edit_all'),
+  requireEdit('gfin', 'settings'),
   handler(async (req, res) => {
     const body = parseBody(
       z.object({

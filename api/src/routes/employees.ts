@@ -20,7 +20,8 @@ import { audit } from '../shared/audit';
 import { deletePhotoIfUnused, dropAccountPhotoFromSamples } from '../shared/faceSamples';
 import { deleteAttachment } from '../shared/attachments';
 import { nextNumber, setCounter, type CounterMove } from '../shared/numbering';
-import { can } from '../permissions/resolve';
+import { can, type ResolvedUser } from '../permissions/resolve';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit, editScope } from '../shared/ownScope';
 import { positionFields, setEmployeePosition } from '../shared/plantilla';
 import { sweepSeparations } from '../shared/clearance';
 import { createLogin, defaultRoleIds, deliverLink, personName, syncLoginFromEmployee } from '../shared/accounts';
@@ -42,6 +43,9 @@ employeeRoutes.use(authenticate);
  * project manager listing employees must not receive salaries in the JSON and
  * simply not see them rendered.
  */
+/** What Employees › Edit Own changes on one's own record (2026-10-18). */
+const OWN_EDITABLE = ['firstName', 'lastName', 'middleName', 'suffix', 'mobile', 'personalEmail', 'address', 'birthDate', 'emergencyContactName', 'emergencyContactPhone'];
+
 const RATE_FIELDS = [
   'dailyRate',
   'burdenMultiplier',
@@ -57,6 +61,28 @@ function stripRates<T extends Record<string, unknown>>(row: T, allowed: boolean)
   for (const f of RATE_FIELDS) delete out[f];
   return out;
 }
+
+/**
+ * Whose pay data the caller may read (2026-10-18): View All reads every
+ * employee's; View Own only the employee record linked to their own login —
+ * never a colleague's, whatever else they hold.
+ */
+function seesRatesOf(me: ResolvedUser, employeeUserId: string | null): boolean {
+  if (can(me, 'ghr.employee_rates.view_all')) return true;
+  return !!employeeUserId && employeeUserId === me.id && can(me, 'ghr.employee_rates.view_own');
+}
+
+/** And whose the caller may change — Edit All, or Edit Own on their own record. */
+function setsRatesOf(me: ResolvedUser, employeeUserId: string | null): boolean {
+  return mayEdit(me, 'ghr', 'employee_rates', !!employeeUserId && employeeUserId === me.id);
+}
+
+/**
+ * "Own" on the employee register (2026-10-18) is the caller's own employee
+ * record — the one linked to their login. View Own lists that one row and
+ * opens no other; Edit Own changes that one alone.
+ */
+const myRecord = (me: ResolvedUser): Prisma.EmployeeWhereInput => ({ userId: me.id });
 
 function decimalsToNumbers(row: Record<string, unknown>): Record<string, unknown> {
   const out = { ...row };
@@ -112,14 +138,13 @@ const EMPLOYEE_SORTS = ['employeeNo', 'lastName', 'dateHired', 'createdAt'];
 
 employeeRoutes.get(
   '/',
-  require_('ghr.employees.view_all'),
+  requireView('ghr', 'employees'),
   handler(async (req, res) => {
     // Sweep-on-read: anyone past their separation date drops out here.
     await sweepSeparations();
     const me = currentUser(req);
-    const seeRates = can(me, 'ghr.employee_rates.view_all');
     const q = listQuery(req);
-    const where = employeeListWhere(q);
+    const where = ownOnly(me, 'ghr', 'employees', employeeListWhere(q), myRecord(me));
 
     const [rows, total] = await Promise.all([
       prisma.employee.findMany({
@@ -140,12 +165,17 @@ employeeRoutes.get(
     ]);
     // The people still without a number (the card over the list), under the
     // register as a whole — a tile equals the list it opens (`?number=none`).
-    const withoutNumber = await prisma.employee.count({ where: { employeeNo: null, isActive: true } });
+    const withoutNumber = await prisma.employee.count({
+      where: ownOnly(me, 'ghr', 'employees', { employeeNo: null, isActive: true }, myRecord(me)),
+    });
 
     res.json({
       summary: { withoutNumber },
       ...listResult(
-        rows.map((r) => stripRates(decimalsToNumbers(r) as typeof r, seeRates)),
+        rows.map((r) => ({
+          ...stripRates(decimalsToNumbers(r) as typeof r, seesRatesOf(me, r.userId)),
+          canEdit: mayEdit(me, 'ghr', 'employees', r.userId === me.id),
+        })),
         total,
         q,
       ),
@@ -164,11 +194,12 @@ employeeRoutes.get(
  */
 employeeRoutes.get(
   '/pdf',
-  require_('ghr.employees.view_all'),
+  requireView('ghr', 'employees'),
   handler(async (req, res) => {
     await sweepSeparations();
     const q = listQuery(req);
-    const where = employeeListWhere(q);
+    const me = currentUser(req);
+    const where = ownOnly(me, 'ghr', 'employees', employeeListWhere(q), myRecord(me));
     const f = q.filters;
     const [rows, count, department, team, position] = await Promise.all([
       prisma.employee.findMany({
@@ -329,9 +360,9 @@ employeeRoutes.get(
 
 employeeRoutes.get(
   '/:id',
-  require_('ghr.employees.view_all'),
+  requireView('ghr', 'employees'),
   handler(async (req, res) => {
-    const seeRates = can(currentUser(req), 'ghr.employee_rates.view_all');
+    const me = currentUser(req);
     const employee = await prisma.employee.findUnique({
       where: { id: req.params.id },
       include: {
@@ -350,10 +381,16 @@ employeeRoutes.get(
       },
     });
     if (!employee) throw notFound('Employee not found');
+    const isMine = employee.userId === me.id;
+    assertCanView(me, 'ghr', 'employees', isMine);
+    const seeRates = seesRatesOf(me, employee.userId);
 
     res.json({
       ...stripRates(decimalsToNumbers(employee) as typeof employee, seeRates),
       canSeeRates: seeRates,
+      // What the page may offer (2026-10-18): Modify, and the pay fields in it.
+      canEdit: mayEdit(me, 'ghr', 'employees', isMine),
+      canEditRates: setsRatesOf(me, employee.userId),
       // Filled by Phase 6.
       attendance: [],
       leaveRequests: [],
@@ -766,14 +803,29 @@ employeeRoutes.post(
 
 employeeRoutes.patch(
   '/:id',
-  require_('ghr.employees.edit_all'),
+  requireEdit('ghr', 'employees'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(employeeSchema.partial(), req.body);
-    const maySetRates = can(me, 'ghr.employee_rates.edit_all');
 
     const before = await prisma.employee.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Employee not found');
+    // Edit Own (2026-10-18) changes the caller's own record alone. Every
+    // rule below still holds for it — linking a login needs
+    // admin.users.edit_all, the login mirrors what is written.
+    assertCanEdit(me, 'ghr', 'employees', before.userId === me.id);
+    const maySetRates = setsRatesOf(me, before.userId);
+    // Edit Own is self-service, never self-promotion: on one's own record it
+    // changes the personal and contact details alone (and the pay fields only
+    // where Employee Pay Rates › Edit Own lets them). The employment facts —
+    // number, position, team, dates, status, login — stay HR's (Edit All).
+    if (editScope(me, 'ghr', 'employees') !== 'all') {
+      const allowed = new Set<string>([...OWN_EDITABLE, ...(maySetRates ? RATE_FIELDS : [])]);
+      const refused = Object.keys(body).filter((k) => (body as Record<string, unknown>)[k] !== undefined && !allowed.has(k));
+      if (refused.length) {
+        throw forbidden(`On your own record you may change your personal and contact details only — not ${refused.join(', ')}`);
+      }
+    }
 
     if (body.employeeNo && body.employeeNo !== before.employeeNo) {
       if (await prisma.employee.findUnique({ where: { employeeNo: body.employeeNo } })) {

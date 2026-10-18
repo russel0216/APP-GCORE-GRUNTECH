@@ -719,7 +719,8 @@ export async function peopleFlowWork(me: ResolvedUser): Promise<FlowWorkRow[]> {
             id: `${mine.id}~${i.key}`,
             kind: 'people_flow',
             title: i.title,
-            subtitle: 'Your onboarding · HR ticks it off',
+            // Edit Own (2026-10-18) lets the person tick their own.
+            subtitle: can(me, 'ghr.people_flow.edit_own') ? 'Your onboarding · tick it off when done' : 'Your onboarding · HR ticks it off',
             when: i.dueOn ? asDate(i.dueOn) : null,
             overdue: i.overdue,
             link: `/g-hr/people-flow/${mine.id}`,

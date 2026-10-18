@@ -7,6 +7,7 @@ import { formatShortDate, renderDocument } from '../shared/pdf';
 import { LIST_CAP, listReference, rangeNamed, sendListPdf, filterDay, choice } from '../shared/listPaper';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
 import { categoryTabWhere, categoryTabs } from '../shared/supplierCategories';
 import { upload } from '../shared/attachments';
 import {
@@ -113,15 +114,43 @@ export async function partnerListSummary(base: Prisma.SupplierWhereInput, where:
   return { tabs, tabCounts, count, withPriceList, pricedItems };
 }
 
+/**
+ * The list as THIS caller may read it (2026-10-18): View Own sees the partners
+ * whose supplier record they added — rows, summary cards and paper alike.
+ */
+function visiblePartners(me: ReturnType<typeof currentUser>, q: ReturnType<typeof listQuery>) {
+  const { base, where } = partnerListWhere(me, q);
+  const mine = { createdById: me.id };
+  return {
+    base: ownOnly(me, 'gops', 'partners', base, mine),
+    where: ownOnly(me, 'gops', 'partners', where, mine),
+  };
+}
+
+/** One partner as the caller may read it — someone else's is a 404 to a View Own holder (2026-10-18). */
+async function readablePartner(me: ReturnType<typeof currentUser>, id: string) {
+  const partner = await prisma.supplier.findFirst({ where: { id, isPartner: true }, select: { id: true, createdById: true } });
+  if (!partner) throw notFound('Partner not found');
+  assertCanView(me, 'gops', 'partners', partner.createdById === me.id);
+  return partner;
+}
+
+/** The partner page's record, with whether the caller may change it (2026-10-18). */
+async function detailFor(me: ReturnType<typeof currentUser>, id: string) {
+  const detail = await partnerDetail(id);
+  if (!detail) return null;
+  return { ...detail, canEdit: mayEdit(me, 'gops', 'partners', detail.createdById === me.id) };
+}
+
 const PARTNER_SORTS = ['code', 'name', 'brand', 'createdAt', 'partnerSince'];
 
 partnerRoutes.get(
   '/',
-  require_('gops.partners.view_all'),
+  requireView('gops', 'partners'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const { base, where } = partnerListWhere(me, q);
+    const { base, where } = visiblePartners(me, q);
 
     const [rows, total, summary] = await Promise.all([
       prisma.supplier.findMany({
@@ -161,6 +190,8 @@ partnerRoutes.get(
           links: r.resources.filter((x) => x.kind === 'LINK').length,
           pricedItems: r._count.preferredItems,
           createdAt: r.createdAt,
+          createdById: r.createdById,
+          canEdit: mayEdit(me, 'gops', 'partners', r.createdById === me.id),
         })),
         total,
         q,
@@ -177,11 +208,11 @@ partnerRoutes.get(
  */
 partnerRoutes.get(
   '/pdf',
-  require_('gops.partners.view_all'),
+  requireView('gops', 'partners'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const { base, where } = partnerListWhere(me, q);
+    const { base, where } = visiblePartners(me, q);
     const [rows, summary] = await Promise.all([
       prisma.supplier.findMany({
         where,
@@ -250,13 +281,9 @@ partnerRoutes.get(
 
 partnerRoutes.get(
   '/:id/price-list',
-  require_('gops.partners.view_all'),
+  requireView('gops', 'partners'),
   handler(async (req, res) => {
-    const partner = await prisma.supplier.findFirst({
-      where: { id: req.params.id, isPartner: true },
-      select: { id: true },
-    });
-    if (!partner) throw notFound('Partner not found');
+    const partner = await readablePartner(currentUser(req), req.params.id);
     const q = listQuery(req);
     const { rows, total } = await partnerPriceList(partner.id, q);
     res.json(listResult(rows, total, q));
@@ -267,11 +294,11 @@ partnerRoutes.get(
 
 partnerRoutes.get(
   '/:id',
-  require_('gops.partners.view_all'),
+  requireView('gops', 'partners'),
   handler(async (req, res) => {
-    const detail = await partnerDetail(req.params.id);
-    if (!detail) throw notFound('Partner not found');
-    res.json(detail);
+    const me = currentUser(req);
+    await readablePartner(me, req.params.id);
+    res.json(await detailFor(me, req.params.id));
   }),
 );
 
@@ -294,7 +321,7 @@ partnerRoutes.post(
       },
       req,
     );
-    res.status(201).json(await partnerDetail(supplier.id));
+    res.status(201).json(await detailFor(me, supplier.id));
   }),
 );
 
@@ -311,11 +338,14 @@ const partnerPatchSchema = z.object({
 
 partnerRoutes.patch(
   '/:id',
-  require_('gops.partners.edit_all'),
+  requireEdit('gops', 'partners'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(partnerPatchSchema, req.body);
     const before = await prisma.supplier.findFirst({ where: { id: req.params.id, isPartner: true } });
     if (!before) throw notFound('Partner not found');
+    // Edit Own changes only the partners whose supplier record the caller added (2026-10-18).
+    assertCanEdit(me, 'gops', 'partners', before.createdById === me.id);
 
     const supplier = await prisma.supplier.update({
       where: { id: before.id },
@@ -340,7 +370,7 @@ partnerRoutes.patch(
       },
       req,
     );
-    res.json(await partnerDetail(supplier.id));
+    res.json(await detailFor(me, supplier.id));
   }),
 );
 
@@ -369,19 +399,26 @@ partnerRoutes.delete(
 async function partnerOr404(id: string) {
   const partner = await prisma.supplier.findFirst({
     where: { id, isPartner: true },
-    select: { id: true, name: true, brand: true },
+    select: { id: true, name: true, brand: true, createdById: true },
   });
   if (!partner) throw notFound('Partner not found');
   return partner;
 }
 
+/** A partner whose resources the caller may change — a resource is a change to its partner (2026-10-18). */
+async function partnerForEdit(me: ReturnType<typeof currentUser>, id: string) {
+  const partner = await partnerOr404(id);
+  assertCanEdit(me, 'gops', 'partners', partner.createdById === me.id);
+  return partner;
+}
+
 partnerRoutes.post(
   '/:id/resources',
-  require_('gops.partners.edit_all'),
+  requireEdit('gops', 'partners'),
   upload.single('file'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const partner = await partnerOr404(req.params.id);
+    const partner = await partnerForEdit(me, req.params.id);
     const body = parseBody(resourceSchema, req.body ?? {});
 
     const url = body.url ? safeHttpUrl(body.url) : null;
@@ -418,11 +455,11 @@ partnerRoutes.post(
 
 partnerRoutes.patch(
   '/:id/resources/:resourceId',
-  require_('gops.partners.edit_all'),
+  requireEdit('gops', 'partners'),
   upload.single('file'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const partner = await partnerOr404(req.params.id);
+    const partner = await partnerForEdit(me, req.params.id);
     const before = await prisma.partnerResource.findFirst({
       where: { id: req.params.resourceId, supplierId: partner.id },
     });

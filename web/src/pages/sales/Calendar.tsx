@@ -130,7 +130,8 @@ export function SalesCalendar() {
   const [visits, setVisits] = useState<ServiceVisitChip[]>([]);
   // On by default for anyone who may see the schedule; `?visits=0` hides it,
   // in the URL like the view, so a shared link shows what its sender saw.
-  const canVisits = can('gops.visits.view_all');
+  // View Own too (2026-10-18): the feed narrows such a viewer to their own visits.
+  const canVisits = can('gops.visits.view_all') || can('gops.visits.view_own');
   const showVisits = canVisits && params.get('visits') !== '0';
   // Only people who can open this calendar can be booked on it.
   const { people } = usePeople('gops.calendar.view_all');

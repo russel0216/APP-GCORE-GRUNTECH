@@ -32,6 +32,7 @@ import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { LIST_CAP, listReference, rangeNamed, sendListPdf, filterDay } from '../shared/listPaper';
 import { EXCHANGE_RATES_KEY, exchangeRates, type RateTable } from '../shared/exchangeRates';
 import { QUOTATION_CURRENCIES } from '../shared/quotation';
+import { requireView, requireEdit, ownOnly, assertCanEdit } from '../shared/ownScope';
 
 // ════════════════════════════════════════════════════════════════════
 //  COMPANY SETTINGS  — drives every PDF header
@@ -40,9 +41,11 @@ import { QUOTATION_CURRENCIES } from '../shared/quotation';
 export const companyRoutes = Router();
 companyRoutes.use(authenticate);
 
+// Company Settings keeps no record of anybody's (2026-10-18): either key of
+// each pair opens and saves the page — no narrowing.
 companyRoutes.get(
   '/',
-  require_('admin.company.view_all'),
+  requireView('admin', 'company'),
   handler(async (_req, res) => {
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
     if (!company) throw notFound('Company settings have not been seeded');
@@ -96,7 +99,7 @@ const companySchema = z.object({
 
 companyRoutes.put(
   '/',
-  require_('admin.company.edit_all'),
+  requireEdit('admin', 'company'),
   handler(async (req, res) => {
     const { exchangeRates: rates, ...body } = parseBody(companySchema, req.body);
     const before = await prisma.company.findUnique({ where: { id: 'company' } });
@@ -161,7 +164,7 @@ companyRoutes.put(
 /** The logo used by every PDF header. */
 companyRoutes.post(
   '/logo',
-  require_('admin.company.edit_all'),
+  requireEdit('admin', 'company'),
   upload.single('file'),
   handler(async (req, res) => {
     if (!req.file) throw badRequest('Choose an image file');
@@ -217,9 +220,10 @@ export function issuedThisPeriod(rows: CounterRow[], documentType: string, curre
     .reduce((sum, r) => sum + r.lastNumber, 0);
 }
 
+// Numbering, like Company Settings, opens and saves on either key (2026-10-18).
 numberingRoutes.get(
   '/',
-  require_('admin.numbering.view_all'),
+  requireView('admin', 'numbering'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
@@ -326,7 +330,7 @@ const numberingSchema = z
 
 numberingRoutes.put(
   '/:documentType',
-  require_('admin.numbering.edit_all'),
+  requireEdit('admin', 'numbering'),
   handler(async (req, res) => {
     const body = parseBody(numberingSchema, req.body);
     const existing = await prisma.numberSequence.findMany({
@@ -365,9 +369,12 @@ workflowRoutes.use(authenticate);
 
 workflowRoutes.get(
   '/',
-  require_('admin.workflows.view_all'),
-  handler(async (_req, res) => {
+  requireView('admin', 'workflows'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    // View Own: the approval routes they made (`createdById`, 2026-10-18).
     const workflows = await prisma.approvalWorkflow.findMany({
+      where: ownOnly(me, 'admin', 'workflows', {} as Prisma.ApprovalWorkflowWhereInput, { createdById: me.id }),
       include: {
         steps: {
           orderBy: { sequence: 'asc' },
@@ -421,7 +428,7 @@ workflowRoutes.get(
 
 workflowRoutes.get(
   '/document-types',
-  require_('admin.workflows.view_all'),
+  requireView('admin', 'workflows'),
   handler(async (_req, res) => {
     res.json(DOCUMENT_TYPES);
   }),
@@ -515,6 +522,8 @@ workflowRoutes.post(
         requesterRoleId: body.requesterRoleId || null,
         preparerSigns: body.preparerSigns ?? false,
         standIns: body.standIns ?? false,
+        // Who made it — Edit Own on Admin › Approval Workflows reads it (2026-10-18).
+        createdById: currentUser(req).id,
         steps: {
           create: body.steps.map((s) => ({
             sequence: s.sequence,
@@ -545,14 +554,17 @@ workflowRoutes.post(
 
 workflowRoutes.put(
   '/:id',
-  require_('admin.workflows.edit_all'),
+  requireEdit('admin', 'workflows'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(workflowSchema, req.body);
     validateSteps(body.steps);
     await checkPreparer(body);
 
     const existing = await prisma.approvalWorkflow.findUnique({ where: { id: req.params.id }, include: { steps: { select: { sequence: true, alsoRoleIds: true } } } });
     if (!existing) throw notFound('Workflow not found');
+    // Edit Own: the routes they made (2026-10-18); Edit All any, as before.
+    assertCanEdit(me, 'admin', 'workflows', existing.createdById === me.id);
     await checkAlsoRoles(body.steps);
     const alsoBefore = new Map(existing.steps.map((st) => [st.sequence, st.alsoRoleIds]));
 
@@ -792,7 +804,7 @@ settingRoutes.use(authenticate);
 
 settingRoutes.get(
   '/',
-  require_('admin.settings.view_all'),
+  requireView('admin', 'settings'),
   handler(async (_req, res) => {
     res.json(await prisma.setting.findMany({ orderBy: { key: 'asc' } }));
   }),

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, downloadBlob, qs } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { useAuth, mayEditPage } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
   ErrorBox,
@@ -340,6 +340,8 @@ export function HrDashboard() {
 
 interface AttendanceRow {
   id: string;
+  /** Edit All, or Edit Own on the viewer's own entry (2026-10-18) — the API says. */
+  canEdit?: boolean;
   date: string;
   timeIn: string | null;
   timeOut: string | null;
@@ -541,7 +543,7 @@ export function AttendanceRegister() {
         rowKey={(r) => r.id}
         reloadToken={reload}
         searchPlaceholder="Search employee name or number…"
-        onRowClick={can('ghr.attendance.edit_all') ? (r) => setEditing(r) : undefined}
+        onRowClick={mayEditPage(can, 'ghr', 'attendance') ? (r) => r.canEdit && setEditing(r) : undefined}
         emptyTitle="No attendance recorded for this range"
         summary={(raw) => {
           const sum = raw as unknown as { missingOut: number } | undefined;

@@ -51,6 +51,8 @@ interface CourseDetail {
   isActive: boolean;
   requirements: Requirement[];
   _count: { sessions: number; records: number };
+  /** Edit All, or Edit Own on a course the viewer added (2026-10-18) — the API says. */
+  canEdit?: boolean;
 }
 
 interface PositionOption {
@@ -271,7 +273,7 @@ function CourseModal({
   const [loading, setLoading] = useState(Boolean(id));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const editable = courseId ? can('ghr.courses.edit_all') : can('ghr.courses.create');
+  const editable = courseId ? !!course?.canEdit : can('ghr.courses.create');
 
   const [form, setForm] = useState(BLANK_COURSE);
   /** The details as last loaded or saved: the form is "changed" only against these. */

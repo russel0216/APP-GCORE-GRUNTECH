@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { useAuth, mayEditPage } from '../../lib/auth';
 import {
   Empty,
   ErrorBox,
@@ -960,7 +960,8 @@ interface FinSettings {
 export function FinanceSettings() {
   const { can } = useAuth();
   const toast = useToast();
-  const editable = can('gfin.settings.edit_all');
+  // Either key of the edit pair saves it: the page keeps no record of anybody's (2026-10-18).
+  const editable = mayEditPage(can, 'gfin', 'settings');
   const [settings, setSettings] = useState<FinSettings | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);

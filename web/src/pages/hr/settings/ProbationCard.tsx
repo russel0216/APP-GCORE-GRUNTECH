@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../../lib/api';
-import { useAuth } from '../../../lib/auth';
+import { useAuth, mayEditPage } from '../../../lib/auth';
 import { SettingListCard } from '../../../components/SettingListCard';
 import { ErrorBox, Field, Loading, useToast } from '../../../components/ui';
 import { NumberInput } from '../../../components/NumberInput';
@@ -58,7 +58,7 @@ const parseMonths = (text: string) =>
 export function ProbationCard() {
   const { can } = useAuth();
   const toast = useToast();
-  const editable = can('ghr.settings.edit_all');
+  const editable = mayEditPage(can, 'ghr', 'settings');
 
   const [rules, setRules] = useState<ProbationRules | null>(null);
   const [monthsText, setMonthsText] = useState('');

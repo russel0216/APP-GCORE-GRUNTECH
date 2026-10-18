@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEdit, useAuth } from '../../lib/auth';
 import { ActiveBadge, ErrorBox, Field, Loading, Modal, ModalFoot, formatMoney, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { TickPicker } from '../../components/TickPicker';
@@ -36,6 +36,8 @@ interface Workflow {
   standIns: boolean;
   steps: Step[];
   requestCount: number;
+  /** Who made it — Edit Own reads it (2026-10-18). */
+  createdById: string | null;
 }
 
 interface DocType {
@@ -233,7 +235,12 @@ function WorkflowEditor({
   onSaved: () => void;
 }) {
   const toast = useToast();
-  const { can } = useAuth();
+  const { can, me } = useAuth();
+  // A new route is the create right's; an existing one Edit All's, or Edit
+  // Own's on a route the viewer made (2026-10-18). The API decides for real.
+  const maySave = workflow
+    ? mayEdit(can, 'admin', 'workflows', !!me && workflow.createdById === me.user.id)
+    : can('admin.workflows.create');
   const [documentType, setDocumentType] = useState(workflow?.documentType ?? docTypes[0]?.type ?? '');
   const [name, setName] = useState(workflow?.name ?? '');
   const [isActive, setIsActive] = useState(workflow?.isActive ?? true);
@@ -335,9 +342,11 @@ function WorkflowEditor({
               : undefined
           }
         >
-          <button className="btn btn-primary" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
+          {maySave && (
+            <button className="btn btn-primary" onClick={save} disabled={busy}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          )}
         </ModalFoot>
       }
     >

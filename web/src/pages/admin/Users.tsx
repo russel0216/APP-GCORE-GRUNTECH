@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEdit, useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { Stat } from '../../components/charts';
 import {
@@ -349,6 +349,15 @@ function UserEditor({
   onSaved: () => void;
 }) {
   const toast = useToast();
+  /*
+    Edit Own on Admin › Users is the viewer's own login, and only its plain
+    details (2026-10-18): roles, overrides, Supports teams, Reports to, the
+    team, the employee number, Active and a password stay Edit All's — the
+    API refuses them (403) and the form neither offers nor sends them.
+  */
+  const { can, me } = useAuth();
+  const full = can('admin.users.edit_all');
+  const maySave = mayEdit(can, 'admin', 'users', !!me && me.user.id === id);
   const [tab, setTab] = useState<'details' | 'access'>('details');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -417,6 +426,21 @@ function UserEditor({
     setBusy(true);
     setError(null);
     try {
+      const details = kept
+        ? {}
+        : {
+            name: form.name,
+            position: form.position || null,
+            phone: form.phone || null,
+            departmentId: form.departmentId || null,
+          };
+      // Edit Own: their own plain details, nothing else (2026-10-18).
+      if (!full) {
+        await api.patch(`/users/${id}`, details);
+        toast('ok', `${form.name} updated`);
+        onSaved();
+        return;
+      }
       const payload = {
         // Kept on the employee record when there is one — not sent at all,
         // except the employee number (2026-10-18), which is typed here and
@@ -480,10 +504,12 @@ function UserEditor({
       title={`Modify user ${detail?.name ?? form.name}`.trim()}
       onClose={onClose}
       footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy} cancelLabel={maySave ? undefined : 'Close'}>
+          {maySave && (
+            <button className="btn btn-primary" onClick={save} disabled={busy}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          )}
         </ModalFoot>
       }
     >
@@ -535,6 +561,7 @@ function UserEditor({
                 className="mono"
                 value={form.employeeNo}
                 placeholder="GTC-0001-14"
+                disabled={!full}
                 onChange={(e) => setForm({ ...form, employeeNo: e.target.value })}
               />
             </Field>
@@ -559,6 +586,7 @@ function UserEditor({
               hint="Used by every approval step that routes to the supervisor. With none set, those steps fall through to HR."
             >
               <PersonSelect
+                disabled={!full}
                 value={form.supervisorId}
                 onChange={(pid) => setForm({ ...form, supervisorId: pid })}
                 people={people.filter((p) => p.id !== id)}
@@ -589,7 +617,7 @@ function UserEditor({
             >
               <select
                 value={form.teamId}
-                disabled={!detail?.employee}
+                disabled={!detail?.employee || !full}
                 onChange={(e) => setForm({ ...form, teamId: e.target.value })}
               >
                 <option value="">— no team —</option>
@@ -602,14 +630,16 @@ function UserEditor({
                   ))}
               </select>
             </Field>
-            <Field label="New password" htmlFor="user-password" hint="Leave blank to keep the current password">
-              <PasswordInput
-                id="user-password"
-                value={form.password}
-                autoComplete="new-password"
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-              />
-            </Field>
+            {full && (
+              <Field label="New password" htmlFor="user-password" hint="Leave blank to keep the current password">
+                <PasswordInput
+                  id="user-password"
+                  value={form.password}
+                  autoComplete="new-password"
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                />
+              </Field>
+            )}
           </div>
 
           {detail && (
@@ -621,14 +651,21 @@ function UserEditor({
             />
           )}
 
-          <Checkbox
-            checked={form.isActive}
-            onChange={(v) => setForm({ ...form, isActive: v })}
-            label="Active — inactive users cannot sign in and drop out of approval routing"
-          />
+          {full && (
+            <Checkbox
+              checked={form.isActive}
+              onChange={(v) => setForm({ ...form, isActive: v })}
+              label="Active — inactive users cannot sign in and drop out of approval routing"
+            />
+          )}
         </>
       ) : (
         <>
+          {!full && (
+            <div className="alert info">
+              Roles, Supports teams and overrides are changed by an administrator with Edit All on Users.
+            </div>
+          )}
           <Field label="Roles" hint="Roles grant the bulk of access. Adjust individual screens below.">
             <div className="row">
               {roles.map((r) => (
@@ -636,6 +673,7 @@ function UserEditor({
                   <input
                     type="checkbox"
                     checked={form.roleIds.includes(r.id)}
+                    disabled={!full}
                     onChange={(e) =>
                       setForm({
                         ...form,
@@ -664,6 +702,7 @@ function UserEditor({
                       <input
                         type="checkbox"
                         checked={form.supportTeamIds.includes(t.id)}
+                        disabled={!full}
                         onChange={(e) =>
                           setForm({
                             ...form,
@@ -714,6 +753,7 @@ function UserEditor({
                             type="button"
                             key={a.key}
                             className={`perm-chip${state === 'ALLOW' ? ' on' : state === 'DENY' ? ' deny' : ''}`}
+                            disabled={!full}
                             onClick={(e) => {
                               cycle(a.key);
                               markChanged(e.currentTarget);
@@ -795,7 +835,7 @@ function SignInPanel({
             {detail.lastLoginAt ? `Last signed in ${formatDateTime(detail.lastLoginAt)}.` : 'Has not signed in yet.'} If
             they are locked out, send them a link to choose a new password.
           </p>
-          {detail.isActive && (
+          {detail.isActive && can('admin.users.edit_all') && (
             <button type="button" className="btn btn-sm" disabled={busy} onClick={() => onIssue('reset')}>
               Send a password reset link
             </button>

@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { useAuth, mayView } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { ActiveBadge, Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, formatDate, formatMoney, useToast } from '../../components/ui';
@@ -82,7 +82,17 @@ interface EmployeeRow {
     invitePending?: boolean;
     supervisor?: { id: string; name: string } | null;
   } | null;
-  // Only present when the caller holds ghr.employee_rates.view_all
+  /*
+    What the viewer may do with this record, from `GET /employees/:id`
+    (2026-10-18): Modify (Edit All, or Edit Own on their own record), and
+    the pay fields — read and changed with the rates' View/Edit All, or
+    View/Edit Own on their own record alone.
+  */
+  canEdit?: boolean;
+  canSeeRates?: boolean;
+  canEditRates?: boolean;
+  // Only present when the caller may see this record's pay data
+  // (ghr.employee_rates.view_all, or view_own on their own record)
   dailyRate?: number | null;
   burdenMultiplier?: number | null;
   sssNo?: string | null;
@@ -108,7 +118,9 @@ export function Employees() {
   const [teams, setTeams] = useState<TeamOption[]>([]);
   const [positions, setPositions] = useState<PositionOption[]>([]);
 
-  const seeRates = can('ghr.employee_rates.view_all');
+  // The pay columns: View All fills every row, View Own the viewer's own
+  // (2026-10-18) — the API strips every other row's rates.
+  const seeRates = mayView(can, 'ghr', 'employee_rates');
   const seeUsers = can('admin.users.view_all');
 
   useEffect(() => {
@@ -496,8 +508,9 @@ function EmployeeForm({
 }) {
   const { can } = useAuth();
   const toast = useToast();
-  const seeRates = can('ghr.employee_rates.view_all');
-  const setRates = can('ghr.employee_rates.edit_all');
+  // Per record, as the API decides it (2026-10-18: own rates for an Own holder).
+  const seeRates = employee?.canSeeRates ?? can('ghr.employee_rates.view_all');
+  const setRates = employee?.canEditRates ?? can('ghr.employee_rates.edit_all');
   const seeEvaluations = !!employee && can('ghr.evaluations.view_all');
   const seeFlow = !!employee && can('ghr.people_flow.view_all');
   // The samples the clock matches this person against: HR's to look at and
@@ -541,7 +554,7 @@ function EmployeeForm({
     the right `POST /employees/:id/login` itself checks — so an administrator
     holding only the second is not shown the branch with nothing to save it.
   */
-  const mayEdit = employee ? can('ghr.employees.edit_all') : forExisting ? mayLinkExisting : mayNewPerson;
+  const mayEdit = employee ? (employee.canEdit ?? can('ghr.employees.edit_all')) : forExisting ? mayLinkExisting : mayNewPerson;
   const [existingId, setExistingId] = useState('');
   const [registerQ, setRegisterQ] = useState('');
   /** null while loading, 'failed' when the lookup refused (the viewer cannot read the register). */

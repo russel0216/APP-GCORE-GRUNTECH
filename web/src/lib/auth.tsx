@@ -86,3 +86,22 @@ export function useAuth(): AuthValue {
   if (!ctx) throw new Error('useAuth must be used inside <AuthProvider>');
   return ctx;
 }
+
+/**
+ * View Own / Edit Own on the screens that gained the pair on 2026-10-18 —
+ * the web's twin of api/src/shared/ownScope.ts. `can` is useAuth()'s. The
+ * page decides which buttons to draw with these; the API decides for real.
+ */
+export function mayView(can: (k: string) => boolean, m: string, s: string): boolean {
+  return can(`${m}.${s}.view_all`) || can(`${m}.${s}.view_own`);
+}
+
+/** Edit All, or Edit Own on a record that is the viewer's own. */
+export function mayEdit(can: (k: string) => boolean, m: string, s: string, isMine: boolean): boolean {
+  return can(`${m}.${s}.edit_all`) || (isMine && can(`${m}.${s}.edit_own`));
+}
+
+/** Either key of the edit pair — for a page that keeps no record of anybody's (a settings page). */
+export function mayEditPage(can: (k: string) => boolean, m: string, s: string): boolean {
+  return can(`${m}.${s}.edit_all`) || can(`${m}.${s}.edit_own`);
+}

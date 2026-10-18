@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEditPage, useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -88,7 +88,8 @@ export function Numbering() {
 
   if (loading) return <Loading />;
 
-  const canEdit = can('admin.numbering.edit_all');
+  // Edit Own or Edit All saves the page — it keeps no record of anybody's (2026-10-18).
+  const canEdit = mayEditPage(can, 'admin', 'numbering');
 
   return (
     <div>

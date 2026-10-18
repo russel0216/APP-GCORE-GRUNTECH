@@ -48,6 +48,7 @@ import {
   teamReadiness,
 } from '../shared/academy';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit as assertCanEditOwn, mayEdit, viewScope } from '../shared/ownScope';
 
 /**
  * Gruntech Academy — G-HR › Academy (item 13).
@@ -143,6 +144,14 @@ function courseListWhere(q: ListQuery): Prisma.CourseWhereInput {
 
 const COURSE_SORTS = ['code', 'title', 'category', 'hours', 'validityMonths'];
 
+/**
+ * "Own" on the course master (2026-10-18) is a course the caller added
+ * (`Course.createdById`, set on create and by the import from that day):
+ * View Own lists and opens those alone, Edit Own changes those alone. A
+ * course added before carries no author and is View All's / Edit All's.
+ */
+const coursesAddedBy = (me: ResolvedUser): Prisma.CourseWhereInput => ({ createdById: me.id });
+
 /** What the list shows of a course, the screen's and the paper's: the counts are read with it. */
 const courseListSelect = (now: Date) =>
   ({
@@ -154,6 +163,7 @@ const courseListSelect = (now: Date) =>
     validityMonths: true,
     requiresAssessment: true,
     isActive: true,
+    createdById: true,
     requirements: { select: requirementSelect },
     _count: {
       select: {
@@ -165,10 +175,11 @@ const courseListSelect = (now: Date) =>
 
 courseRoutes.get(
   '/',
-  require_('ghr.courses.view_all'),
+  requireView('ghr', 'courses'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = courseListWhere(q);
+    const me = currentUser(req);
+    const where = ownOnly(me, 'ghr', 'courses', courseListWhere(q), coursesAddedBy(me));
     const [rows, total] = await Promise.all([
       prisma.course.findMany({
         where,
@@ -181,8 +192,9 @@ courseRoutes.get(
     ]);
     res.json(
       listResult(
-        rows.map(({ requirements, _count, hours, ...c }) => ({
+        rows.map(({ requirements, _count, hours, createdById, ...c }) => ({
           ...c,
+          canEdit: mayEdit(me, 'ghr', 'courses', createdById === me.id),
           hours: Number(hours),
           requirementCount: requirements.length,
           requiredOf: requirements.map(requirementText),
@@ -205,10 +217,11 @@ courseRoutes.get(
  */
 courseRoutes.get(
   '/pdf',
-  require_('ghr.courses.view_all'),
+  requireView('ghr', 'courses'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = courseListWhere(q);
+    const me = currentUser(req);
+    const where = ownOnly(me, 'ghr', 'courses', courseListWhere(q), coursesAddedBy(me));
     const f = q.filters;
     const [rows, count] = await Promise.all([
       prisma.course.findMany({
@@ -305,6 +318,7 @@ async function loadCourse(id: string) {
       validityMonths: true,
       requiresAssessment: true,
       isActive: true,
+      createdById: true,
       createdAt: true,
       updatedAt: true,
       requirements: { select: requirementSelect, orderBy: { createdAt: 'asc' } },
@@ -321,9 +335,13 @@ async function loadCourse(id: string) {
 
 courseRoutes.get(
   '/:id',
-  require_('ghr.courses.view_all'),
+  requireView('ghr', 'courses'),
   handler(async (req, res) => {
-    res.json(await loadCourse(req.params.id));
+    const me = currentUser(req);
+    const course = await loadCourse(req.params.id);
+    const isMine = course.createdById === me.id;
+    assertCanView(me, 'ghr', 'courses', isMine);
+    res.json({ ...course, canEdit: mayEdit(me, 'ghr', 'courses', isMine) });
   }),
 );
 
@@ -354,7 +372,10 @@ courseRoutes.post(
   handler(async (req, res) => {
     const body = parseBody(courseSchema, req.body);
     await assertCodeFree(body.code);
-    const course = await prisma.course.create({ data: courseData(body), select: { id: true, code: true, title: true } });
+    const course = await prisma.course.create({
+      data: { ...courseData(body), createdById: currentUser(req).id },
+      select: { id: true, code: true, title: true },
+    });
     await audit(
       {
         entityType: 'course',
@@ -365,7 +386,9 @@ courseRoutes.post(
       },
       req,
     );
-    res.status(201).json(await loadCourse(course.id));
+    // The author may edit what they added — Edit Own's whole meaning here.
+    const created = await loadCourse(course.id);
+    res.status(201).json({ ...created, canEdit: mayEdit(currentUser(req), 'ghr', 'courses', true) });
   }),
 );
 
@@ -376,9 +399,11 @@ courseRoutes.post(
  */
 courseRoutes.patch(
   '/:id',
-  require_('ghr.courses.edit_all'),
+  requireEdit('ghr', 'courses'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const before = await loadCourse(req.params.id);
+    assertCanEditOwn(me, 'ghr', 'courses', before.createdById === me.id);
     const body = parseBody(courseSchema.partial(), req.body);
     if (body.code) await assertCodeFree(body.code, before.id);
     const data: Prisma.CourseUpdateInput = {};
@@ -415,7 +440,7 @@ courseRoutes.patch(
       },
       req,
     );
-    res.json(after);
+    res.json({ ...after, canEdit: mayEdit(me, 'ghr', 'courses', after.createdById === me.id) });
   }),
 );
 
@@ -431,9 +456,11 @@ const requirementRow = z.object({
  */
 courseRoutes.put(
   '/:id/requirements',
-  require_('ghr.courses.edit_all'),
+  requireEdit('ghr', 'courses'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const before = await loadCourse(req.params.id);
+    assertCanEditOwn(me, 'ghr', 'courses', before.createdById === me.id);
     const raw = Array.isArray(req.body) ? req.body : (req.body as { requirements?: unknown })?.requirements;
     const rows = parseBody(z.array(requirementRow).max(100), raw ?? []);
 
@@ -475,7 +502,7 @@ courseRoutes.put(
       },
       req,
     );
-    res.json(after);
+    res.json({ ...after, canEdit: mayEdit(me, 'ghr', 'courses', after.createdById === me.id) });
   }),
 );
 
@@ -558,14 +585,15 @@ const courseSpec: ImportSpec<CourseImportRecord> = {
 export const courseImport: Registered = {
   spec: courseSpec as unknown as ImportSpec<never>,
   permission: 'ghr.courses.create',
-  write: async (records) => {
+  write: async (records, actor) => {
     for (const { record, existingId } of records as unknown as {
       record: CourseImportRecord;
       existingId: string | null;
     }[]) {
       const data = { ...record, hours: new Prisma.Decimal(record.hours) };
       if (existingId) await prisma.course.update({ where: { id: existingId }, data });
-      else await prisma.course.create({ data });
+      // Who added it (2026-10-18): the importer, as on "+ New course".
+      else await prisma.course.create({ data: { ...data, createdById: actor?.id ?? null } });
     }
   },
 };
@@ -1721,12 +1749,20 @@ passportRoutes.get(
 /** The verification queue: external certificates waiting on HR. */
 passportRoutes.get(
   '/records',
-  require_('ghr.passports.view_all'),
+  requireView('ghr', 'passports'),
   handler(async (req, res) => {
     const status = typeof req.query.status === 'string' ? req.query.status : 'PENDING_VERIFICATION';
     if (!['PENDING_VERIFICATION', 'VERIFIED', 'REJECTED'].includes(status)) throw badRequest('Unknown status');
+    const me = currentUser(req);
     const rows = await prisma.trainingRecord.findMany({
-      where: { status: status as 'PENDING_VERIFICATION' | 'VERIFIED' | 'REJECTED', source: 'EXTERNAL' },
+      // View Own (2026-10-18): the caller's own certificates alone.
+      where: ownOnly<Prisma.TrainingRecordWhereInput>(
+        me,
+        'ghr',
+        'passports',
+        { status: status as 'PENDING_VERIFICATION' | 'VERIFIED' | 'REJECTED', source: 'EXTERNAL' },
+        { employee: { userId: me.id } },
+      ),
       orderBy: { createdAt: 'asc' },
       take: 100,
       select: {
@@ -1755,7 +1791,7 @@ passportRoutes.get(
 
 passportRoutes.get(
   '/me',
-  requireAny('ghr.passport.view_own', 'ghr.passports.view_all'),
+  requireAny('ghr.passport.view_own', 'ghr.passports.view_all', 'ghr.passports.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const emp = await myEmployee(me.id);
@@ -1770,9 +1806,11 @@ passportRoutes.get(
  * over the computed rows: a few hundred people at most, which is cheaper
  * than a second copy of the numbers. `?ids=` narrows to the rows ticked.
  */
-async function passportRows(q: ListQuery) {
+async function passportRows(q: ListQuery, me: ResolvedUser) {
   const f = q.filters;
   const and: Prisma.EmployeeWhereInput[] = [];
+  // View Own on the register (2026-10-18): the caller's own passport alone.
+  if (viewScope(me, 'ghr', 'passports') !== 'all') and.push({ userId: me.id });
   if (f.active !== 'all') and.push({ isActive: f.active === 'false' ? false : true });
   if (f.departmentId) and.push({ departmentId: f.departmentId === 'none' ? null : f.departmentId });
   if (f.positionId) and.push({ positionId: f.positionId === 'none' ? null : f.positionId });
@@ -1833,10 +1871,10 @@ async function passportRows(q: ListQuery) {
 /** The register: every employee with their readiness (`passportRows`). */
 passportRoutes.get(
   '/',
-  require_('ghr.passports.view_all'),
+  requireView('ghr', 'passports'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const rows = await passportRows(q);
+    const rows = await passportRows(q, currentUser(req));
     res.json(listResult(rows.slice((q.page - 1) * q.pageSize, q.page * q.pageSize), rows.length, q));
   }),
 );
@@ -1859,11 +1897,11 @@ const STANDING_NAMED: Record<string, string> = {
  */
 passportRoutes.get(
   '/pdf',
-  require_('ghr.passports.view_all'),
+  requireView('ghr', 'passports'),
   handler(async (req, res) => {
     const q = listQuery(req);
     const f = q.filters;
-    const all = await passportRows(q);
+    const all = await passportRows(q, currentUser(req));
     const rows = all.slice(0, LIST_CAP);
     const [department, position] = await Promise.all([
       f.departmentId && f.departmentId !== 'none'
@@ -1918,7 +1956,9 @@ passportRoutes.get(
 
 passportRoutes.get(
   '/:employeeId',
-  requireAny('ghr.passports.view_all', 'ghr.passport.view_own'),
+  // Training Passports › View Own (2026-10-18) opens the caller's own, as
+  // My Training Passport's View Own always did.
+  requireAny('ghr.passports.view_all', 'ghr.passports.view_own', 'ghr.passport.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     if (!can(me, 'ghr.passports.view_all')) {
@@ -2083,7 +2123,10 @@ const recordPatchSchema = externalSchema.omit({ courseId: true }).partial();
 /** HR corrects a verified or rejected external certificate. Session records are the session's. */
 passportRoutes.patch(
   '/records/:id',
-  require_('ghr.passports.edit_all'),
+  // Edit Own (2026-10-18) reaches only the caller's own passport — and a
+  // correction of one's own record is refused below, as it always was for
+  // Edit All: HR never corrects their own.
+  requireEdit('ghr', 'passports'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const before = await prisma.trainingRecord.findUnique({
@@ -2104,6 +2147,7 @@ passportRoutes.patch(
     if (!before) throw notFound('Training record not found');
     if (before.source !== 'EXTERNAL') throw conflict('A session record is the session’s result — it cannot be edited');
     if (before.status === 'PENDING_VERIFICATION') throw conflict('This certificate is waiting on HR — decide it first');
+    assertCanEditOwn(me, 'ghr', 'passports', before.employee.userId === me.id);
     if (before.employee.userId === me.id) throw forbidden('You cannot correct your own training record');
     const body = parseBody(recordPatchSchema, req.body);
     const data: Prisma.TrainingRecordUpdateInput = {};
@@ -2210,7 +2254,9 @@ onApprovalReopened('training_certification', {
     });
     if (!rec || rec.status !== 'VERIFIED' || rec.source !== 'EXTERNAL') return false;
     if (can(actor, 'ghr.passports.edit_all')) return true;
-    return rec.employee.userId === actor.id && can(actor, 'ghr.passport.create');
+    // Training Passports › Edit Own (2026-10-18) pulls back one's own, as
+    // the right to file it does.
+    return rec.employee.userId === actor.id && (can(actor, 'ghr.passport.create') || can(actor, 'ghr.passports.edit_own'));
   },
   reopen: async ({ documentId, tx }) => {
     const rec = await tx.trainingRecord.findUnique({ where: { id: documentId }, select: { id: true, number: true, source: true } });
@@ -2251,7 +2297,7 @@ academySettingsRoutes.get(
 
 academySettingsRoutes.put(
   '/',
-  require_('ghr.settings.edit_all'),
+  requireEdit('ghr', 'settings'),
   handler(async (req, res) => {
     const body = parseBody(
       z.object({
@@ -2293,8 +2339,10 @@ academySettingsRoutes.put(
 registerSearch({
   kind: 'course',
   label: 'Courses',
-  permission: 'ghr.courses.view_all',
-  search: async (term, _user, limit) => {
+  // View Own finds the courses the caller added (2026-10-18), as its list does.
+  permission: ['ghr.courses.view_all', 'ghr.courses.view_own'],
+  ownWhere: (user) => coursesAddedBy(user),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.course.findMany({
       where: {
         OR: [
@@ -2302,6 +2350,7 @@ registerSearch({
           { title: { contains: term, mode: 'insensitive' } },
           { category: { contains: term, mode: 'insensitive' } },
         ],
+        ...((own as Prisma.CourseWhereInput | undefined) ?? {}),
       },
       orderBy: { code: 'asc' },
       take: limit,

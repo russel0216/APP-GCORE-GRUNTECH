@@ -99,10 +99,13 @@ export async function globalSearch(
 registerSearch({
   kind: 'user',
   label: 'People',
-  permission: 'admin.users.view_all',
-  search: async (term, _user, limit) => {
+  // View Own finds only the caller's own login (2026-10-18).
+  permission: ['admin.users.view_all', 'admin.users.view_own'],
+  ownWhere: (user) => ({ id: user.id }),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.user.findMany({
       where: {
+        ...own,
         isActive: true,
         OR: [
           { name: { contains: term, mode: 'insensitive' } },
@@ -183,10 +186,13 @@ registerSearch({
 registerSearch({
   kind: 'employee',
   label: 'Employees',
-  permission: 'ghr.employees.view_all',
-  search: async (term, _user, limit) => {
+  // View Own finds only the caller's own record (2026-10-18).
+  permission: ['ghr.employees.view_all', 'ghr.employees.view_own'],
+  ownWhere: (user) => ({ userId: user.id }),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.employee.findMany({
       where: {
+        ...own,
         OR: [
           { firstName: { contains: term, mode: 'insensitive' } },
           { lastName: { contains: term, mode: 'insensitive' } },

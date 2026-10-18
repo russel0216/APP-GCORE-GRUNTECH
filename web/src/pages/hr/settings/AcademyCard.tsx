@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../../lib/api';
-import { useAuth } from '../../../lib/auth';
+import { useAuth, mayEditPage } from '../../../lib/auth';
 import { Checkbox, ErrorBox, Field, Loading, useToast } from '../../../components/ui';
 import { NumberInput } from '../../../components/NumberInput';
 
@@ -23,7 +23,7 @@ interface AcademyRules {
 export function AcademyCard() {
   const { can } = useAuth();
   const toast = useToast();
-  const canEdit = can('ghr.settings.edit_all');
+  const canEdit = mayEditPage(can, 'ghr', 'settings');
   const [rules, setRules] = useState<AcademyRules | null>(null);
   const [categories, setCategories] = useState('');
   const [dirty, setDirty] = useState(false);

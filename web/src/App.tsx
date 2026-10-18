@@ -123,7 +123,10 @@ import {
  */
 function Guard({ permission, children }: { permission: string; children: React.ReactNode }) {
   const { can } = useAuth();
-  if (!can(permission)) {
+  // View Own opens a screen as View All does (2026-10-18: every screen with
+  // Edit All gained the own pair); the API narrows what it shows.
+  const ownTwin = permission.endsWith('.view_all') ? permission.replace(/\.view_all$/, '.view_own') : null;
+  if (!can(permission) && !(ownTwin && can(ownTwin))) {
     return (
       <div className="card">
         <h3 className="card-title">No access</h3>
@@ -883,7 +886,7 @@ function Routed() {
         <Route
           path="/g-chain/outgoing/:id/edit"
           element={
-            <GuardAny permissions={['gchain.stock_issuance.create', 'gchain.stock_issuance.edit_all']}>
+            <GuardAny permissions={['gchain.stock_issuance.create', 'gchain.stock_issuance.edit_all', 'gchain.stock_issuance.edit_own']}>
               <OutgoingEditor />
             </GuardAny>
           }

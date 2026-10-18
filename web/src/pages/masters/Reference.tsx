@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEdit as mayEditRecord, mayEditPage, useAuth } from '../../lib/auth';
 import { ActiveBadge, Checkbox, Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../components/ui';
 import { useConfirm } from '../../components/Confirm';
 import { NumberInput } from '../../components/NumberInput';
@@ -108,6 +108,8 @@ export interface DrawingTypeDef {
 interface CategoryRow {
   id: string;
   name: string;
+  /** Who added it — what "own" means on Admin › Categories (2026-10-18); null on a seeded row. */
+  createdById?: string | null;
 }
 
 /** A modal's form: text, number and tick values by field key. */
@@ -546,9 +548,12 @@ function CategoryCard<T extends CategoryRow>({
   onChanged: () => void;
   className?: string;
 }) {
-  const { can } = useAuth();
+  const { can, me } = useAuth();
   const toast = useToast();
-  const mayEdit = can('admin.categories.edit_all');
+  // The Modify column shows for Edit All or Edit Own; each row opens only
+  // where the viewer may change it — Edit Own, the entries they added (2026-10-18).
+  const mayEdit = mayEditPage(can, 'admin', 'categories');
+  const mayEditRow = (row: T) => mayEditRecord(can, 'admin', 'categories', !!me && row.createdById === me.user.id);
   const [editing, setEditing] = useState<T | 'new' | null>(null);
 
   return (
@@ -579,13 +584,13 @@ function CategoryCard<T extends CategoryRow>({
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={row.id} {...opensModify(mayEdit ? () => setEditing(row) : null)}>
+                <tr key={row.id} {...opensModify(mayEditRow(row) ? () => setEditing(row) : null)}>
                   {spec.columns.map((c) => (
                     <td key={c.key} className={c.cellClass}>
                       {c.render(row)}
                     </td>
                   ))}
-                  {mayEdit && <ModifyCell onClick={() => setEditing(row)} />}
+                  {mayEdit && (mayEditRow(row) ? <ModifyCell onClick={() => setEditing(row)} /> : <td className="m-col-action" />)}
                 </tr>
               ))}
             </tbody>
@@ -857,6 +862,8 @@ interface Location {
 
 interface Warehouse {
   id: string;
+  /** Whether the viewer may change it — Edit All, or Edit Own on a warehouse they added (2026-10-18). */
+  canEdit?: boolean;
   code: string;
   name: string;
   address: string | null;
@@ -894,7 +901,8 @@ export function Warehouses() {
     void load();
   }, [load]);
 
-  const mayEdit = can('gchain.warehouses.edit_all');
+  // Per warehouse: Edit All, or Edit Own on one the viewer added — the API says which (2026-10-18).
+  const mayEdit = (w: Warehouse) => w.canEdit ?? can('gchain.warehouses.edit_all');
 
   /** Asked in the confirm bar first; a refusal is shown there, so it throws. */
   async function removeLocation(w: Warehouse, l: Location) {
@@ -940,7 +948,7 @@ export function Warehouses() {
                   <span className="mono faint">{w.code}</span>
                   <ActiveBadge active={w.isActive} />
                 </div>
-                {mayEdit && (
+                {mayEdit(w) && (
                   <div className="row">
                     <button className="btn btn-sm" onClick={() => setAddingLocation(w)}>
                       + Add location
@@ -961,7 +969,7 @@ export function Warehouses() {
                   <span className="faint">No locations</span>
                 ) : (
                   w.locations.map((l) =>
-                    mayEdit ? (
+                    mayEdit(w) ? (
                       // Removed from its chip, asking first: a location has nothing to modify.
                       <span key={l.id} className="list-chip" title={l.name ?? undefined}>
                         {l.code}

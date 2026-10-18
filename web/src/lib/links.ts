@@ -96,6 +96,7 @@ const SCREEN: Record<string, string> = {
   // The stock-on-hand list's paper audits as EXPORTED under 'inventory'.
   inventory: '/g-chain/inventory',
   cost_category: '/admin/categories',
+  item_category: '/admin/categories',
   industry: '/admin/categories',
   sub_industry: '/admin/categories',
   position: '/g-hr/plantilla',

@@ -578,6 +578,27 @@ a.inv-move:hover .inv-move-what {
 .inv-cats {
   grid-column: 1 / -1;
 }
+/*
+  The cards over the inventory share their grid with the category block,
+  which spans every column — so auto-fit kept nine narrow tracks and the six
+  cards stood thin, tall and short of the right edge (2026-10-18, the owner:
+  "card size are not standard"). With the block there the row is six equal
+  columns, as wide as the Incoming list's cards; narrower screens fold to
+  three, then two.
+*/
+.kpi-grid.list-summary:has(> .inv-cats) {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+@media (max-width: 1100px) {
+  .kpi-grid.list-summary:has(> .inv-cats) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 640px) {
+  .kpi-grid.list-summary:has(> .inv-cats) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 .inv-cats-head {
   display: flex;
   justify-content: space-between;
@@ -588,14 +609,27 @@ a.inv-move:hover .inv-move-what {
   text-transform: uppercase;
   margin-bottom: var(--s-2);
 }
+/* Even rows of four, every tile one height whatever its flags. */
 .inv-cats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-rows: 1fr;
   gap: var(--s-3);
+}
+@media (max-width: 1100px) {
+  .inv-cats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 640px) {
+  .inv-cats-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .inv-cat {
   display: grid;
   grid-template-columns: 1fr auto;
+  align-content: start;
   gap: var(--s-1) var(--s-2);
   padding: var(--s-3);
   border: 1px solid var(--line);

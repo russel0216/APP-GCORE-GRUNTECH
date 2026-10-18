@@ -21,7 +21,7 @@ import { rolesLike } from './lib/roles';
 import type { ApprovalStep, Prisma } from '@prisma/client';
 import { env } from '../src/env';
 import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/resolve';
-import { allPermissions } from '../src/permissions/registry';
+import { REGISTRY, allPermissions, findSubmodule } from '../src/permissions/registry';
 import { ACCESS_SPLIT } from '../src/shared/accessSplit';
 import { ENGINE_ROLE_KEYS, ROLES_CLEARED_MARK } from '../src/shared/rolesClear';
 import { CHART_ROLES, ROLES_FROM_CHART_MARK, SUCCESSOR } from '../src/shared/rolesFromChart';
@@ -155,7 +155,8 @@ async function expectRejection(label: string, fn: () => Promise<unknown>, expect
 const TAG = '__verify__';
 /** G-CHAIN's two flows (the owner's order of 2026-10-14), as built so far. */
 const PROCUREMENT_STRIP = 'Purchase Requests,RFQ,Canvass,Purchase Orders';
-const WAREHOUSE_STRIP = 'Incoming,Inventory,Outgoing,Borrow Slips,Pull-out Slips';
+// The owner's order of 2026-10-18: Incoming, Inventory, Pull-out Slips, Borrow Slips, Outgoing.
+const WAREHOUSE_STRIP = 'Incoming,Inventory,Pull-out Slips,Borrow Slips,Outgoing';
 /**
  * What every approval this script submits is about. A seeded workflow routes
  * to whoever really holds the role, so its notifications reach real people;
@@ -330,11 +331,17 @@ async function main() {
     // one is not checking it.
     const splitFile = path.resolve(__dirname, '../src/shared/accessSplit.ts');
     let corpus = '';
+    let checking = '';
     const walk = (dir: string) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (/\.tsx?$/.test(entry.name) && full !== registryFile && full !== splitFile) corpus += fs.readFileSync(full, 'utf8') + '\n';
+        else if (/\.tsx?$/.test(entry.name) && full !== registryFile && full !== splitFile) {
+          const text = fs.readFileSync(full, 'utf8') + '\n';
+          corpus += text;
+          // The role definitions name keys without checking them.
+          if (!full.endsWith('roleSeeds.ts')) checking += text;
+        }
       }
     };
     roots.forEach(walk);
@@ -344,6 +351,24 @@ async function main() {
       .filter((p) => !corpus.includes(p.key) && !(templated.has(p.action) && corpus.includes(`${p.module}.${p.submodule}`)))
       .map((p) => p.key);
     check('every permission the registry mints is checked by a route or a screen', unchecked.length === 0, unchecked.join(', '));
+    // The own pair of 2026-10-18: a screen that gained View Own and Edit Own
+    // reads each through the one rule (shared/ownScope.ts on the API,
+    // lib/auth.tsx on the web) — the generic scan above cannot tell, since
+    // canEditRecord's template already names every edit_own.
+    // A screen reads its pair through the helpers, by naming the key itself
+    // (a route's requireAny), or — for View Own — through the page's Guard on
+    // its View All, which admits the twin.
+    const reads = (fns: string, m: string, sub: string, action: string) =>
+      new RegExp(`(${fns})\\([^)]*'${m}',\\s*'${sub}'`).test(corpus) ||
+      checking.includes(`'${m}.${sub}.${action}'`) ||
+      (action === 'view_own' && corpus.includes(`permission="${m}.${sub}.view_all"`));
+    const ownScreens = REGISTRY.flatMap((m) => m.submodules.filter((s) => s.own).map((s) => ({ m: m.key, s: s.key })));
+    const noView = ownScreens.filter(({ m, s }) => !reads('requireView|ownOnly|assertCanView|viewScope|mayView', m, s, 'view_own')).map(({ m, s }) => `${m}.${s}`);
+    const noEdit = ownScreens
+      .filter(({ m, s }) => findSubmodule(m, s)?.actions.includes('edit_own'))
+      .filter(({ m, s }) => !reads('requireEdit|assertCanEdit|editScope|mayEdit|mayEditPage', m, s, 'edit_own')).map(({ m, s }) => `${m}.${s}`);
+    check(`every screen that gained View Own reads it through the one rule (${ownScreens.length} screens)`, ownScreens.length >= 34 && noView.length === 0, noView.join(', '));
+    check('every screen that gained Edit Own reads it through the one rule', noEdit.length === 0, noEdit.join(', '));
   }
   check(
     'every key the once-only Access split hands out, and every key it copies from, is in the registry',

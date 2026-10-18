@@ -26,6 +26,9 @@ import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { companyCurrency, formatAmount, formatMoney, formatShortDate, renderDocument, statusLabel } from '../shared/pdf';
 import { categoryTabWhere, categoryTabs } from '../shared/supplierCategories';
 import { LIST_CAP, listReference, rangeNamed, recordNamed, filterDay, choice, sendListPdf } from '../shared/listPaper';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
+
+type Me = ReturnType<typeof currentUser>;
 
 // The employee routes live in ./employees; re-exported here so the mount in
 // index.ts keeps resolving until it imports them from their own module.
@@ -129,6 +132,27 @@ export async function supplierListSummary(
   return { tabs, tabCounts, count, partners, inactive, ...(awaiting === null ? {} : { awaiting }) };
 }
 
+/**
+ * The supplier list as THIS caller may read it (2026-10-18): View Own sees the
+ * suppliers they added — rows, summary cards and paper alike.
+ */
+function visibleSuppliers(me: Me, q: ReturnType<typeof listQuery>, mayOrders: boolean) {
+  const { base, where } = supplierListWhere(me, q, mayOrders);
+  const mine = { createdById: me.id };
+  return {
+    base: ownOnly(me, 'gchain', 'suppliers', base, mine),
+    where: ownOnly(me, 'gchain', 'suppliers', where, mine),
+  };
+}
+
+/** One supplier for a change: Edit Own changes only the suppliers the caller added; a contact is a change to its supplier (2026-10-18). */
+async function supplierForEdit(me: Me, id: string) {
+  const supplier = await prisma.supplier.findUnique({ where: { id } });
+  if (!supplier) throw notFound('Supplier not found');
+  assertCanEdit(me, 'gchain', 'suppliers', supplier.createdById === me.id);
+  return supplier;
+}
+
 /** The counts a list row carries — the order counts only where they may be seen. */
 function supplierCounts(mayOrders: boolean) {
   return {
@@ -144,12 +168,12 @@ function supplierCounts(mayOrders: boolean) {
 
 supplierRoutes.get(
   '/',
-  require_('gchain.suppliers.view_all'),
+  requireView('gchain', 'suppliers'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
     const mayOrders = can(me, 'gchain.purchase_orders.view_all');
-    const { base, where } = supplierListWhere(me, q, mayOrders);
+    const { base, where } = visibleSuppliers(me, q, mayOrders);
 
     const [rows, total, summary] = await Promise.all([
       prisma.supplier.findMany({
@@ -170,6 +194,7 @@ supplierRoutes.get(
           contactCount: _count.contacts,
           orderCount: mayOrders ? (_count as { purchaseOrders?: number }).purchaseOrders ?? 0 : null,
           awaitingCount: mayOrders ? (purchaseOrders ?? []).length : null,
+          canEdit: mayEdit(me, 'gchain', 'suppliers', r.createdById === me.id),
         })),
         total,
         q,
@@ -188,12 +213,12 @@ supplierRoutes.get(
  */
 supplierRoutes.get(
   '/pdf',
-  require_('gchain.suppliers.view_all'),
+  requireView('gchain', 'suppliers'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
     const mayOrders = can(me, 'gchain.purchase_orders.view_all');
-    const { base, where } = supplierListWhere(me, q, mayOrders);
+    const { base, where } = visibleSuppliers(me, q, mayOrders);
     const [rows, summary] = await Promise.all([
       prisma.supplier.findMany({
         where,
@@ -283,7 +308,7 @@ supplierRoutes.get(
 
 supplierRoutes.get(
   '/:id',
-  require_('gchain.suppliers.view_all'),
+  requireView('gchain', 'suppliers'),
   handler(async (req, res) => {
     const supplier = await prisma.supplier.findUnique({
       where: { id: req.params.id },
@@ -293,6 +318,8 @@ supplierRoutes.get(
       },
     });
     if (!supplier) throw notFound('Supplier not found');
+    // View Own reads only the suppliers the caller added (2026-10-18).
+    assertCanView(currentUser(req), 'gchain', 'suppliers', supplier.createdById === currentUser(req).id);
 
     /*
       Supplier 360 — the same rule as the customer page: each collection sits
@@ -376,6 +403,7 @@ supplierRoutes.get(
 
     res.json({
       ...supplier,
+      canEdit: mayEdit(me, 'gchain', 'suppliers', supplier.createdById === me.id),
       purchaseOrders: purchaseOrders.map((o) => ({ ...o, total: Number(o.total) })),
       receivings: receivings.map((r) => ({ ...r, lineCount: r._count.items })),
       bills: bills.map((b) => ({
@@ -460,11 +488,10 @@ supplierRoutes.post(
 
 supplierRoutes.patch(
   '/:id',
-  require_('gchain.suppliers.edit_all'),
+  requireEdit('gchain', 'suppliers'),
   handler(async (req, res) => {
     const body = parseBody(supplierSchema.partial(), req.body);
-    const before = await prisma.supplier.findUnique({ where: { id: req.params.id } });
-    if (!before) throw notFound('Supplier not found');
+    const before = await supplierForEdit(currentUser(req), req.params.id);
 
     if (body.code && body.code !== before.code) {
       if (await prisma.supplier.findUnique({ where: { code: body.code } })) {
@@ -558,12 +585,10 @@ const supplierContactSchema = z.object({
 
 supplierRoutes.post(
   '/:id/contacts',
-  require_('gchain.suppliers.edit_all'),
+  requireEdit('gchain', 'suppliers'),
   handler(async (req, res) => {
     const body = parseBody(supplierContactSchema, req.body);
-    if (!(await prisma.supplier.findUnique({ where: { id: req.params.id } }))) {
-      throw notFound('Supplier not found');
-    }
+    await supplierForEdit(currentUser(req), req.params.id);
 
     const contact = await prisma.$transaction(async (tx) => {
       if (body.isPrimary) {
@@ -591,8 +616,9 @@ supplierRoutes.post(
 
 supplierRoutes.patch(
   '/:id/contacts/:contactId',
-  require_('gchain.suppliers.edit_all'),
+  requireEdit('gchain', 'suppliers'),
   handler(async (req, res) => {
+    await supplierForEdit(currentUser(req), req.params.id);
     const body = parseBody(supplierContactSchema.partial(), req.body);
     const contact = await prisma.$transaction(async (tx) => {
       const existing = await tx.supplierContact.findFirst({
@@ -624,8 +650,9 @@ supplierRoutes.patch(
 
 supplierRoutes.delete(
   '/:id/contacts/:contactId',
-  require_('gchain.suppliers.edit_all'),
+  requireEdit('gchain', 'suppliers'),
   handler(async (req, res) => {
+    await supplierForEdit(currentUser(req), req.params.id);
     const contact = await prisma.supplierContact.findFirst({
       where: { id: req.params.contactId, supplierId: req.params.id },
     });
@@ -682,10 +709,12 @@ export function itemListWhere(q: ListQuery): Prisma.ItemWhereInput {
 
 itemRoutes.get(
   '/',
-  require_('gchain.items.view_all'),
+  requireView('gchain', 'items'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
-    const where = itemListWhere(q);
+    // View Own lists the items the caller added (2026-10-18).
+    const where = ownOnly(me, 'gchain', 'items', itemListWhere(q), { createdById: me.id });
 
     const [rows, total] = await Promise.all([
       prisma.item.findMany({
@@ -702,7 +731,13 @@ itemRoutes.get(
       prisma.item.count({ where }),
     ]);
 
-    res.json(listResult(rows.map((r) => itemNumbers(r) as typeof r), total, q));
+    res.json(
+      listResult(
+        rows.map((r) => ({ ...(itemNumbers(r) as typeof r), canEdit: mayEdit(me, 'gchain', 'items', r.createdById === me.id) })),
+        total,
+        q,
+      ),
+    );
   }),
 );
 
@@ -715,10 +750,11 @@ itemRoutes.get(
  */
 itemRoutes.get(
   '/pdf',
-  require_('gchain.items.view_all'),
+  requireView('gchain', 'items'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
-    const where = itemListWhere(q);
+    const where = ownOnly(me, 'gchain', 'items', itemListWhere(q), { createdById: me.id });
     const f = q.filters;
     const [rows, count, currency, category, costCategory] = await Promise.all([
       prisma.item.findMany({
@@ -819,8 +855,9 @@ itemRoutes.get(
 
 itemRoutes.get(
   '/:id',
-  require_('gchain.items.view_all'),
+  requireView('gchain', 'items'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const item = await prisma.item.findUnique({
       where: { id: req.params.id },
       include: {
@@ -830,7 +867,14 @@ itemRoutes.get(
       },
     });
     if (!item) throw notFound('Item not found');
-    res.json({ ...itemNumbers(item), stockBalances: [], movements: [] });
+    // View Own reads only the items the caller added (2026-10-18).
+    assertCanView(me, 'gchain', 'items', item.createdById === me.id);
+    res.json({
+      ...itemNumbers(item),
+      canEdit: mayEdit(me, 'gchain', 'items', item.createdById === me.id),
+      stockBalances: [],
+      movements: [],
+    });
   }),
 );
 
@@ -873,6 +917,7 @@ itemRoutes.post(
   '/',
   require_('gchain.items.create'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(itemSchema, req.body);
 
     const item = await prisma.$transaction(async (tx) => {
@@ -901,6 +946,8 @@ itemRoutes.post(
           preferredSupplierId: body.preferredSupplierId || null,
           isActive: body.isActive,
           notes: body.notes || null,
+          // Who added it — what "own" means on the item master (2026-10-18).
+          createdById: me.id,
         },
       });
     });
@@ -920,11 +967,14 @@ itemRoutes.post(
 
 itemRoutes.patch(
   '/:id',
-  require_('gchain.items.edit_all'),
+  requireEdit('gchain', 'items'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(itemSchema.partial(), req.body);
     const before = await prisma.item.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Item not found');
+    // Edit Own changes only the items the caller added (2026-10-18).
+    assertCanEdit(me, 'gchain', 'items', before.createdById === me.id);
 
     if (body.code && body.code !== before.code) {
       if (await prisma.item.findUnique({ where: { code: body.code } })) {
@@ -998,6 +1048,17 @@ itemRoutes.delete(
 export const referenceRoutes = Router();
 referenceRoutes.use(authenticate);
 
+/*
+  Admin › Categories (2026-10-18): reading every list stays open to anyone
+  signed in — the forms of other modules need them. Adding an entry records
+  who added it, and changing one takes Edit All, or Edit Own on the entries
+  the caller added. Delete keeps its own key.
+*/
+const editCategory = requireEdit('admin', 'categories');
+function assertCategoryEdit(me: Me, row: { createdById: string | null }) {
+  assertCanEdit(me, 'admin', 'categories', row.createdById === me.id);
+}
+
 referenceRoutes.get(
   '/cost-categories',
   handler(async (_req, res) => {
@@ -1020,7 +1081,7 @@ referenceRoutes.post(
     if (await prisma.costCategory.findUnique({ where: { code: body.code } })) {
       throw conflict(`Cost category "${body.code}" already exists`);
     }
-    const created = await prisma.costCategory.create({ data: body });
+    const created = await prisma.costCategory.create({ data: { ...body, createdById: currentUser(req).id } });
     await audit(
       {
         entityType: 'cost_category',
@@ -1036,11 +1097,12 @@ referenceRoutes.post(
 
 referenceRoutes.patch(
   '/cost-categories/:id',
-  require_('admin.categories.edit_all'),
+  editCategory,
   handler(async (req, res) => {
     const body = parseBody(costCategorySchema.partial(), req.body);
     const before = await prisma.costCategory.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Cost category not found');
+    assertCategoryEdit(currentUser(req), before);
     // A system category's code is the key the cost ledger groups by; renaming
     // the label is fine, changing the code is not.
     if (before.isSystem && body.code && body.code !== before.code) {
@@ -1113,7 +1175,14 @@ referenceRoutes.post(
     }
     res.status(201).json(
       await prisma.itemCategory.create({
-        data: { code: body.code, name: body.name, parentId: body.parentId || null, description: body.description || null, sortOrder: body.sortOrder ?? 0 },
+        data: {
+          code: body.code,
+          name: body.name,
+          parentId: body.parentId || null,
+          description: body.description || null,
+          sortOrder: body.sortOrder ?? 0,
+          createdById: currentUser(req).id,
+        },
       }),
     );
   }),
@@ -1121,9 +1190,12 @@ referenceRoutes.post(
 
 referenceRoutes.patch(
   '/item-categories/:id',
-  require_('admin.categories.edit_all'),
+  editCategory,
   handler(async (req, res) => {
     const body = parseBody(itemCategorySchema.partial(), req.body);
+    const before = await prisma.itemCategory.findUnique({ where: { id: req.params.id }, select: { createdById: true } });
+    if (!before) throw notFound('Item category not found');
+    assertCategoryEdit(currentUser(req), before);
     if (body.parentId === req.params.id) {
       throw badRequest('A category cannot be its own parent');
     }
@@ -1202,7 +1274,7 @@ referenceRoutes.post(
     if (await prisma.industry.findUnique({ where: { code: body.code } })) {
       throw conflict(`Industry "${body.code}" already exists`);
     }
-    const created = await prisma.industry.create({ data: body });
+    const created = await prisma.industry.create({ data: { ...body, createdById: currentUser(req).id } });
     await audit(
       {
         entityType: 'industry',
@@ -1218,11 +1290,12 @@ referenceRoutes.post(
 
 referenceRoutes.patch(
   '/industries/:id',
-  require_('admin.categories.edit_all'),
+  editCategory,
   handler(async (req, res) => {
     const body = parseBody(industrySchema.partial(), req.body);
     const before = await prisma.industry.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Industry not found');
+    assertCategoryEdit(currentUser(req), before);
     // Reports group by the code and the owner may put it in customer codes one
     // day; the label is free to change, the code of a standard row is not.
     if (before.isSystem && body.code && body.code !== before.code) {
@@ -1323,7 +1396,7 @@ referenceRoutes.post(
   handler(async (req, res) => {
     const body = parseBody(subIndustrySchema, req.body);
     if (await subIndustryNameTaken(body.name)) throw conflict(`Sub-industry "${body.name}" already exists`);
-    const created = await prisma.subIndustry.create({ data: body });
+    const created = await prisma.subIndustry.create({ data: { ...body, createdById: currentUser(req).id } });
     await audit(
       { entityType: 'sub_industry', entityId: created.id, action: 'CREATED', summary: `Created sub-industry ${created.name}` },
       req,
@@ -1334,11 +1407,12 @@ referenceRoutes.post(
 
 referenceRoutes.patch(
   '/sub-industries/:id',
-  require_('admin.categories.edit_all'),
+  editCategory,
   handler(async (req, res) => {
     const body = parseBody(subIndustrySchema.partial(), req.body);
     const before = await prisma.subIndustry.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Sub-industry not found');
+    assertCategoryEdit(currentUser(req), before);
     if (body.name && body.name !== before.name && (await subIndustryNameTaken(body.name, before.id))) {
       throw conflict(`Sub-industry "${body.name}" already exists`);
     }
@@ -1424,7 +1498,9 @@ referenceRoutes.post(
       throw conflict(`There is already a group "${body.name}"`);
     }
     const created = await prisma.$transaction(async (tx) => {
-      const made = await tx.quotationGroup.create({ data: { ...body, name: body.name.replace(/\s+/g, ' '), key } });
+      const made = await tx.quotationGroup.create({
+        data: { ...body, name: body.name.replace(/\s+/g, ' '), key, createdById: currentUser(req).id },
+      });
       // Filed again by hand, a group once deleted is no longer kept out of the seed.
       const deleted = await deletedGroupKeys(tx);
       if (deleted.delete(key)) await setDeletedGroupKeys(tx, deleted);
@@ -1440,11 +1516,12 @@ referenceRoutes.post(
 
 referenceRoutes.patch(
   '/quotation-groups/:id',
-  require_('admin.categories.edit_all'),
+  editCategory,
   handler(async (req, res) => {
     const body = parseBody(quotationGroupSchema.partial(), req.body);
     const before = await prisma.quotationGroup.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Quotation group not found');
+    assertCategoryEdit(currentUser(req), before);
     const data: Prisma.QuotationGroupUpdateInput = { ...body };
     if (body.name !== undefined) {
       const key = groupKey(body.name);
@@ -1538,7 +1615,7 @@ referenceRoutes.post(
     const name = body.name.replace(/\s+/g, ' ');
     const key = activityTypeKey(name);
     if (await prisma.salesActivityType.findUnique({ where: { key } })) throw conflict(`There is already an activity type "${name}" (${key})`);
-    const created = await prisma.salesActivityType.create({ data: { ...body, name, key } });
+    const created = await prisma.salesActivityType.create({ data: { ...body, name, key, createdById: currentUser(req).id } });
     await audit({ entityType: 'activity_type', entityId: created.id, action: 'CREATED', summary: `Created activity type "${created.name}"` }, req);
     res.status(201).json(created);
   }),
@@ -1546,11 +1623,12 @@ referenceRoutes.post(
 
 referenceRoutes.patch(
   '/activity-types/:id',
-  require_('admin.categories.edit_all'),
+  editCategory,
   handler(async (req, res) => {
     const body = parseBody(activityTypeSchema.partial(), req.body);
     const before = await prisma.salesActivityType.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Activity type not found');
+    assertCategoryEdit(currentUser(req), before);
     // OTHER is where a custom type lands in the enum column, and the form's
     // fallback — it stays on offer.
     if (body.isActive === false && before.key === 'OTHER') throw badRequest('"Other" is the fallback type and stays active');
@@ -1594,16 +1672,26 @@ warehouseRoutes.use(authenticate);
 
 warehouseRoutes.get(
   '/',
-  require_('gchain.warehouses.view_all'),
-  handler(async (_req, res) => {
-    res.json(
-      await prisma.warehouse.findMany({
-        include: { locations: { orderBy: { code: 'asc' } } },
-        orderBy: { name: 'asc' },
-      }),
-    );
+  requireView('gchain', 'warehouses'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    // View Own lists the warehouses the caller added (2026-10-18).
+    const rows = await prisma.warehouse.findMany({
+      where: ownOnly(me, 'gchain', 'warehouses', {}, { createdById: me.id }),
+      include: { locations: { orderBy: { code: 'asc' } } },
+      orderBy: { name: 'asc' },
+    });
+    res.json(rows.map((w) => ({ ...w, canEdit: mayEdit(me, 'gchain', 'warehouses', w.createdById === me.id) })));
   }),
 );
+
+/** One warehouse for a change: Edit Own changes only the warehouses the caller added; a bin is a change to its warehouse (2026-10-18). */
+async function warehouseForEdit(me: Me, id: string) {
+  const warehouse = await prisma.warehouse.findUnique({ where: { id } });
+  if (!warehouse) throw notFound('Warehouse not found');
+  assertCanEdit(me, 'gchain', 'warehouses', warehouse.createdById === me.id);
+  return warehouse;
+}
 
 const warehouseSchema = z.object({
   code: z.string().trim().min(1).max(20),
@@ -1622,7 +1710,7 @@ warehouseRoutes.post(
       throw conflict(`Warehouse "${body.code}" already exists`);
     }
     const created = await prisma.warehouse.create({
-      data: { ...body, address: body.address || null, city: body.city || null },
+      data: { ...body, address: body.address || null, city: body.city || null, createdById: currentUser(req).id },
     });
     await audit(
       {
@@ -1639,9 +1727,10 @@ warehouseRoutes.post(
 
 warehouseRoutes.patch(
   '/:id',
-  require_('gchain.warehouses.edit_all'),
+  requireEdit('gchain', 'warehouses'),
   handler(async (req, res) => {
     const body = parseBody(warehouseSchema.partial(), req.body);
+    await warehouseForEdit(currentUser(req), req.params.id);
     res.json(
       await prisma.warehouse.update({
         where: { id: req.params.id },
@@ -1679,12 +1768,14 @@ warehouseRoutes.delete(
 
 warehouseRoutes.post(
   '/:id/locations',
-  require_('gchain.warehouses.edit_all'),
+  requireEdit('gchain', 'warehouses'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(
       z.object({ code: z.string().trim().min(1), name: z.string().trim().optional().nullable() }),
       req.body,
     );
+    await warehouseForEdit(me, req.params.id);
     const clash = await prisma.location.findFirst({
       where: { warehouseId: req.params.id, code: body.code },
     });
@@ -1692,7 +1783,7 @@ warehouseRoutes.post(
 
     res.status(201).json(
       await prisma.location.create({
-        data: { warehouseId: req.params.id, code: body.code, name: body.name || null },
+        data: { warehouseId: req.params.id, code: body.code, name: body.name || null, createdById: me.id },
       }),
     );
   }),
@@ -1700,8 +1791,9 @@ warehouseRoutes.post(
 
 warehouseRoutes.delete(
   '/:id/locations/:locationId',
-  require_('gchain.warehouses.edit_all'),
+  requireEdit('gchain', 'warehouses'),
   handler(async (req, res) => {
+    await warehouseForEdit(currentUser(req), req.params.id);
     const location = await prisma.location.findFirst({
       where: { id: req.params.locationId, warehouseId: req.params.id },
     });
@@ -1751,7 +1843,7 @@ referenceRoutes.post(
   handler(async (req, res) => {
     const body = parseBody(drawingTypeSchema, req.body);
     if (await drawingTypeNameTaken(body.name)) throw conflict(`Drawing type "${body.name}" already exists`);
-    const created = await prisma.cadDrawingType.create({ data: body });
+    const created = await prisma.cadDrawingType.create({ data: { ...body, createdById: currentUser(req).id } });
     await audit(
       { entityType: 'cad_drawing_type', entityId: created.id, action: 'CREATED', summary: `Created drawing type ${created.name}` },
       req,
@@ -1762,11 +1854,12 @@ referenceRoutes.post(
 
 referenceRoutes.patch(
   '/cad-drawing-types/:id',
-  require_('admin.categories.edit_all'),
+  editCategory,
   handler(async (req, res) => {
     const body = parseBody(drawingTypeSchema.partial(), req.body);
     const before = await prisma.cadDrawingType.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Drawing type not found');
+    assertCategoryEdit(currentUser(req), before);
     if (body.name && body.name !== before.name && (await drawingTypeNameTaken(body.name, before.id))) {
       throw conflict(`Drawing type "${body.name}" already exists`);
     }

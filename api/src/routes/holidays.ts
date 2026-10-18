@@ -1,14 +1,17 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { handler, parseBody } from '../http/kit';
-import { authenticate, require_ } from '../auth/middleware';
+import { authenticate } from '../auth/middleware';
 import { audit } from '../shared/audit';
+import { requireEdit } from '../shared/ownScope';
 import { holidays, loadHolidays, phHolidays, saveHolidays, type Holiday } from '../shared/holidays';
 
 /**
  * Holidays (2026-10-17): read by anyone signed in — the costing sheet, the
  * project form and the job order form count working days with them — and
- * changed on Company Settings › Holidays by whoever edits company settings.
+ * changed on Company Settings › Holidays by whoever edits company settings —
+ * Edit Own or Edit All alike, since the page keeps no record of anybody's
+ * (2026-10-18).
  */
 export const holidayRoutes = Router();
 holidayRoutes.use(authenticate);
@@ -23,7 +26,7 @@ holidayRoutes.get(
 /** The Philippine holidays of a year as the seed would add them — "Add <year>" on the card. */
 holidayRoutes.get(
   '/ph/:year',
-  require_('admin.company.edit_all'),
+  requireEdit('admin', 'company'),
   handler(async (req, res) => {
     const year = Number(req.params.year);
     res.json({ holidays: Number.isInteger(year) && year >= 2000 && year <= 2100 ? phHolidays(year) : [] });
@@ -44,7 +47,7 @@ const schema = z.object({
 
 holidayRoutes.put(
   '/',
-  require_('admin.company.edit_all'),
+  requireEdit('admin', 'company'),
   handler(async (req, res) => {
     const body = parseBody(schema, req.body);
     const before = await holidays();

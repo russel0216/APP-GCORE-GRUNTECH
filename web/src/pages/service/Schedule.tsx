@@ -67,6 +67,8 @@ export interface ScheduleVisit {
   assignedTo: { id: string; name: string } | null;
   report: { id: string; number: string; status: string; performedAt: string } | null;
   jobOrder: { id: string; number: string; status: string } | null;
+  /** Move, assign, cancel — Edit All, or Edit Own on a visit assigned to you (2026-10-18). */
+  canEdit?: boolean;
 }
 
 interface LooseReport {
@@ -640,7 +642,7 @@ function VisitSheet({
   onClose: () => void;
   onChanged: () => void;
 }) {
-  const { can } = useAuth();
+  const { can, canView } = useAuth();
   const navigate = useNavigate();
   const toast = useToast();
   const [visit, setVisit] = useState<ScheduleVisit | null>(initial);
@@ -669,7 +671,8 @@ function VisitSheet({
     void load();
   }, [load]);
 
-  const canSchedule = can('gops.visits.edit_all');
+  // The API's flag: Edit All, or Edit Own on a visit assigned to the viewer (2026-10-18).
+  const canSchedule = visit?.canEdit ?? can('gops.visits.edit_all');
   useEffect(() => {
     if (!canSchedule) return;
     loadPeople('gops.pm_reports.create')
@@ -831,7 +834,7 @@ function VisitSheet({
             <dt>Machine</dt>
             <dd>
               {visit.asset ? (
-                can('gops.installed_base.view_all') ? (
+                canView('gops', 'installed_base') ? (
                   <Link to={`/g-ops/installed-base/${visit.asset.id}`}>{visit.asset.name}</Link>
                 ) : (
                   visit.asset.name

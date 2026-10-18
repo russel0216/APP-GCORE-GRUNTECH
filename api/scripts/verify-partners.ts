@@ -425,10 +425,10 @@ async function main() {
     JSON.stringify(entry),
   );
   check(
-    'gops.partners has exactly the four shared actions',
+    'gops.partners has the shared actions with the own pair of 2026-10-18 (six)',
     JSON.stringify(permissionsFor('gops', 'partners').sort()) ===
       JSON.stringify(
-        ['gops.partners.view_all', 'gops.partners.create', 'gops.partners.edit_all', 'gops.partners.delete'].sort(),
+        ['gops.partners.view_own', 'gops.partners.view_all', 'gops.partners.create', 'gops.partners.edit_own', 'gops.partners.edit_all', 'gops.partners.delete'].sort(),
       ),
     permissionsFor('gops', 'partners').join(','),
   );

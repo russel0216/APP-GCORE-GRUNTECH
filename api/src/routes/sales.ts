@@ -16,6 +16,7 @@ import {
   idsFilter,
 } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
+import { requireEdit } from '../shared/ownScope';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
 import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
@@ -4238,7 +4239,7 @@ async function loadBoard(req: Parameters<typeof currentUser>[0]): Promise<BoardR
 /** Anyone who sees the board reads the stages; the admin page reads them too. */
 pipelineRoutes.get(
   '/stages',
-  requireAny('gops.pipeline.view_all', 'admin.pipeline_stages.view_all'),
+  requireAny('gops.pipeline.view_all', 'admin.pipeline_stages.view_all', 'admin.pipeline_stages.view_own'),
   handler(async (_req, res) => {
     res.json({ stages: await pipelineStages(), overrides: await pipelineStageOverrides(), defaults: DEFAULT_STAGES });
   }),
@@ -4252,7 +4253,8 @@ pipelineRoutes.get(
  */
 pipelineRoutes.put(
   '/stages',
-  require_('admin.pipeline_stages.edit_all'),
+  // Either key of the pair saves the page — it keeps no record of anybody's (2026-10-18).
+  requireEdit('admin', 'pipeline_stages'),
   handler(async (req, res) => {
     const overrides = parseBody(stageSettingsSchema, req.body);
     const before = await prisma.setting.findUnique({ where: { key: STAGE_SETTING_KEY } });
@@ -4279,7 +4281,8 @@ pipelineRoutes.put(
 
 pipelineRoutes.delete(
   '/stages',
-  require_('admin.pipeline_stages.edit_all'),
+  // Either key of the pair saves the page — it keeps no record of anybody's (2026-10-18).
+  requireEdit('admin', 'pipeline_stages'),
   handler(async (req, res) => {
     const before = await prisma.setting.findUnique({ where: { key: STAGE_SETTING_KEY } });
     if (before) {

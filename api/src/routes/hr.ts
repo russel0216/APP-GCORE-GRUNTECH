@@ -35,6 +35,7 @@ import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { postJobCost } from '../shared/inventory';
 import { upload, saveAttachment, attachmentPath, deleteAttachment, registerAttachmentGuard } from '../shared/attachments';
 import { retryAfterSeconds, throttled } from '../shared/throttle';
+import { requireView, requireEdit, assertCanEdit, mayEdit } from '../shared/ownScope';
 import { FACE_ENGINE, describeFace, faceEngineReady, faceQualityProblem, type FaceCapture, type FaceQuality } from '../shared/face';
 import {
   MIN_FRAMES,
@@ -919,7 +920,7 @@ clockRoutes.delete(
 /** HR's view of the enrolled faces: who can use the clock, who it may confuse, and why it refused. */
 clockRoutes.get(
   '/face-health',
-  require_('ghr.settings.view_all'),
+  requireView('ghr', 'settings'),
   handler(async (_req, res) => {
     res.json(await faceHealth());
   }),
@@ -1334,16 +1335,30 @@ function missingClockOutWhere(now: Date): Prisma.AttendanceWhereInput {
 
 const ATTENDANCE_SORTS = ['date', 'timeIn'];
 
+/**
+ * View Own on the register (2026-10-18): a holder of
+ * `ghr.attendance.view_own` alone reads their OWN days — the entries of the
+ * employee record linked to their login. View All, and the dashboard right
+ * (seeing the day's counts and the entries behind them are one right), read
+ * every entry as before. The rows, the summary card and the paper all go
+ * through it.
+ */
+function attendanceScoped(me: ResolvedUser, where: Prisma.AttendanceWhereInput): Prisma.AttendanceWhereInput {
+  if (can(me, 'ghr.attendance.view_all') || can(me, 'ghr.dashboard.view_all')) return where;
+  return { AND: [where, { employee: { userId: me.id } }] };
+}
+
 attendanceRoutes.get(
   '/',
-  requireAny('ghr.attendance.view_all', 'ghr.dashboard.view_all'),
+  requireAny('ghr.attendance.view_all', 'ghr.attendance.view_own', 'ghr.dashboard.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = attendanceListWhere(q);
+    const me = currentUser(req);
+    const where = attendanceScoped(me, attendanceListWhere(q));
     // A capture's id goes out only where it would open (the `attendance`
     // guard): a supervisor reads the whole register, the faces of their own
     // reports only.
-    const mayOpen = await captureReader(currentUser(req));
+    const mayOpen = await captureReader(me);
 
     const [rows, total] = await Promise.all([
       prisma.attendance.findMany({
@@ -1356,6 +1371,7 @@ attendanceRoutes.get(
               firstName: true,
               lastName: true,
               position: true,
+              userId: true,
               department: { select: { name: true } },
             },
           },
@@ -1366,13 +1382,17 @@ attendanceRoutes.get(
       }),
       prisma.attendance.count({ where }),
     ]);
-    const missingOut = await prisma.attendance.count({ where: missingClockOutWhere(new Date()) });
+    const missingOut = await prisma.attendance.count({ where: attendanceScoped(me, missingClockOutWhere(new Date())) });
 
     res.json({
       summary: { missingOut },
       ...listResult(
-        rows.map((r) => ({
+        rows.map(({ employee: { userId, ...employee }, ...r }) => ({
           ...r,
+          employee,
+          // Whether the row's Modify opens (2026-10-18): Edit All, or Edit
+          // Own on the caller's own entry.
+          canEdit: mayEdit(me, 'ghr', 'attendance', userId === me.id),
           timeInPhoto: mayOpen(r.employeeId) ? r.timeInPhoto : null,
           timeOutPhoto: mayOpen(r.employeeId) ? r.timeOutPhoto : null,
           timeInScore: r.timeInScore ? num(r.timeInScore) : null,
@@ -1404,10 +1424,10 @@ const clockText = (d: Date | null) => (d ? clockTime.format(d).replace(/\s+/g, '
  */
 attendanceRoutes.get(
   '/pdf',
-  requireAny('ghr.attendance.view_all', 'ghr.dashboard.view_all'),
+  requireAny('ghr.attendance.view_all', 'ghr.attendance.view_own', 'ghr.dashboard.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = attendanceListWhere(q);
+    const where = attendanceScoped(currentUser(req), attendanceListWhere(q));
     const f = q.filters;
     const [rows, count, employee] = await Promise.all([
       prisma.attendance.findMany({
@@ -1567,8 +1587,9 @@ attendanceRoutes.get(
 /** A manual correction — recorded as MANUAL, with who did it. */
 attendanceRoutes.patch(
   '/:id',
-  // Its own box since 2026-10-18 (it borrowed Employees › Edit All).
-  require_('ghr.attendance.edit_all'),
+  // Its own box since 2026-10-18 (it borrowed Employees › Edit All); Edit
+  // Own (the same day) corrects only the caller's own entries.
+  requireEdit('ghr', 'attendance'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(
@@ -1583,6 +1604,7 @@ attendanceRoutes.patch(
 
     const existing = await prisma.attendance.findUnique({ where: { id: req.params.id } });
     if (!existing) throw notFound('Attendance record not found');
+    assertCanEdit(me, 'ghr', 'attendance', await isOwnEmployee(me, existing.employeeId));
     // A changed time always carries why (2026-10-16): closing a forgotten
     // clock-out is the commonest correction, and the note is all an audit
     // of it has to go on.
@@ -1655,7 +1677,7 @@ const leaveTypeSchema = z.object({
 
 leaveRoutes.post(
   '/types',
-  require_('ghr.settings.edit_all'),
+  requireEdit('ghr', 'settings'),
   handler(async (req, res) => {
     const body = parseBody(leaveTypeSchema, req.body);
     const created = await prisma.leaveType.create({ data: { ...body, daysPerYear: D(body.daysPerYear) } });
@@ -1665,7 +1687,7 @@ leaveRoutes.post(
 
 leaveRoutes.patch(
   '/types/:id',
-  require_('ghr.settings.edit_all'),
+  requireEdit('ghr', 'settings'),
   handler(async (req, res) => {
     const body = parseBody(leaveTypeSchema.partial(), req.body);
     const updated = await prisma.leaveType.update({
@@ -3600,7 +3622,7 @@ hrSettingsRoutes.use(authenticate);
 
 hrSettingsRoutes.get(
   '/',
-  require_('ghr.settings.view_all'),
+  requireView('ghr', 'settings'),
   handler(async (_req, res) => {
     res.json(await hrSettings());
   }),
@@ -3608,7 +3630,7 @@ hrSettingsRoutes.get(
 
 hrSettingsRoutes.put(
   '/',
-  require_('ghr.settings.edit_all'),
+  requireEdit('ghr', 'settings'),
   handler(async (req, res) => {
     const body = parseBody(
       z.object({
@@ -3755,7 +3777,7 @@ function settingListKey(raw: string): SettingListKey {
 
 hrSettingsRoutes.get(
   '/lists/:key',
-  require_('ghr.settings.view_all'),
+  requireView('ghr', 'settings'),
   handler(async (req, res) => {
     const key = settingListKey(req.params.key);
     res.json({ key, rows: key === PEOPLE_FLOW_KEY ? await flowChecklist() : await settingList<unknown>(key, []) });
@@ -3764,7 +3786,7 @@ hrSettingsRoutes.get(
 
 hrSettingsRoutes.put(
   '/lists/:key',
-  require_('ghr.settings.edit_all'),
+  requireEdit('ghr', 'settings'),
   handler(async (req, res) => {
     const key = settingListKey(req.params.key);
     const { rows } = parseBody(z.object({ rows: SETTING_LISTS[key].schema }), req.body);

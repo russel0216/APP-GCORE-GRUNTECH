@@ -40,6 +40,8 @@ interface Holder {
 
 interface PositionRow {
   id: string;
+  /** Whether the viewer may change it — Edit All, or Edit Own on a position they added (2026-10-18). */
+  canEdit?: boolean;
   code: string;
   title: string;
   description: string | null;
@@ -311,7 +313,7 @@ function PositionModal({
 }) {
   const { can } = useAuth();
   const toast = useToast();
-  const mayEdit = position ? can('ghr.plantilla.edit_all') : can('ghr.plantilla.create');
+  const mayEdit = position ? (position.canEdit ?? can('ghr.plantilla.edit_all')) : can('ghr.plantilla.create');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [holders, setHolders] = useState<Holder[] | null>(position ? null : []);

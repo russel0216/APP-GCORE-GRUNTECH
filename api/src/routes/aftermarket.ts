@@ -32,6 +32,7 @@ import { LIST_CAP, listReference, totalLabel, listDay, namedInFilter, choice, br
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { submitForApproval, onApprovalSettled, onApprovalReopened } from '../shared/approvals';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
 import {
   aftermarketSettings,
   saveAftermarketSettings,
@@ -98,20 +99,29 @@ const assetInclude = {
 
 type AssetRow = Prisma.InstalledAssetGetPayload<{ include: typeof assetInclude }>;
 
-function presentAsset(row: AssetRow, warningDays: number) {
+function presentAsset(row: AssetRow, warningDays: number, me?: ResolvedUser) {
   const warranty = expiryState(row.warrantyEndsAt, warningDays);
   return {
     ...row,
     warranty: warranty.state,
     warrantyDaysRemaining: warranty.daysRemaining,
+    // Modify on the page: Edit All, or Edit Own on a machine the viewer
+    // registered (2026-10-18).
+    ...(me ? { canEdit: mayEdit(me, 'gops', 'installed_base', row.createdById === me.id) } : {}),
   };
 }
+
+/**
+ * "Own" on the Installed Base is the machines you registered (2026-10-18):
+ * a View Own holder's register, paper and record are narrowed to those.
+ */
+const assetMine = (me: ResolvedUser): Prisma.InstalledAssetWhereInput => ({ createdById: me.id });
 
 /**
  * Which assets a register query means — one rule for the list AND its PDF
  * export, so the paper matches the screen it was printed off.
  */
-function assetListWhere(q: ReturnType<typeof listQuery>, expiryWarningDays: number): Prisma.InstalledAssetWhereInput {
+function assetListWhere(me: ResolvedUser, q: ReturnType<typeof listQuery>, expiryWarningDays: number): Prisma.InstalledAssetWhereInput {
   const where: Prisma.InstalledAssetWhereInput = {};
 
   const status = choice(q.filters.status, AssetStatus, 'Status');
@@ -152,16 +162,17 @@ function assetListWhere(q: ReturnType<typeof listQuery>, expiryWarningDays: numb
       { address: { contains: q.search, mode: 'insensitive' } },
     ];
   }
-  return where;
+  return ownOnly(me, 'gops', 'installed_base', where, assetMine(me));
 }
 
 assetRoutes.get(
   '/',
-  require_('gops.installed_base.view_all'),
+  requireView('gops', 'installed_base'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
     const settings = await aftermarketSettings();
-    const where = assetListWhere(q, settings.expiryWarningDays);
+    const where = assetListWhere(me, q, settings.expiryWarningDays);
 
     const [rows, total] = await Promise.all([
       prisma.installedAsset.findMany({
@@ -176,7 +187,7 @@ assetRoutes.get(
       prisma.installedAsset.count({ where }),
     ]);
 
-    res.json(listResult(rows.map((r) => presentAsset(r, settings.expiryWarningDays)), total, q));
+    res.json(listResult(rows.map((r) => presentAsset(r, settings.expiryWarningDays, me)), total, q));
   }),
 );
 
@@ -205,7 +216,7 @@ async function rememberEquipmentTypes(names: (string | null | undefined)[]): Pro
 /** What the register's Equipment type field suggests. Above `/:id`, the route-order trap. */
 assetRoutes.get(
   '/types',
-  require_('gops.installed_base.view_all'),
+  requireView('gops', 'installed_base'),
   handler(async (_req, res) => {
     const rows = await prisma.equipmentType.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { name: true } });
     res.json(rows.map((r) => r.name));
@@ -219,11 +230,11 @@ assetRoutes.get(
  */
 assetRoutes.get(
   '/pdf',
-  require_('gops.installed_base.view_all'),
+  requireView('gops', 'installed_base'),
   handler(async (req, res) => {
     const q = listQuery(req);
     const settings = await aftermarketSettings();
-    const where = assetListWhere(q, settings.expiryWarningDays);
+    const where = assetListWhere(currentUser(req), q, settings.expiryWarningDays);
     const f = q.filters;
     const [rows, count, named] = await Promise.all([
       prisma.installedAsset.findMany({
@@ -307,8 +318,9 @@ const WARRANTY_FILTER: Record<(typeof WARRANTY_FILTERS)[number], string> = { ACT
 
 assetRoutes.get(
   '/:id',
-  require_('gops.installed_base.view_all'),
+  requireView('gops', 'installed_base'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const settings = await aftermarketSettings();
     const row = await prisma.installedAsset.findUnique({
       where: { id: req.params.id },
@@ -363,9 +375,10 @@ assetRoutes.get(
       },
     });
     if (!row) throw notFound('Asset not found');
+    assertCanView(me, 'gops', 'installed_base', row.createdById === me.id);
 
     res.json({
-      ...presentAsset(row as unknown as AssetRow, settings.expiryWarningDays),
+      ...presentAsset(row as unknown as AssetRow, settings.expiryWarningDays, me),
       contracts: row.contracts.map((c) => c.contract),
       reports: row.reports,
       upcomingVisits: row.visits,
@@ -462,18 +475,20 @@ assetRoutes.post(
       },
       req,
     );
-    res.status(201).json(presentAsset(asset, settings.expiryWarningDays));
+    res.status(201).json(presentAsset(asset, settings.expiryWarningDays, me));
   }),
 );
 
 assetRoutes.patch(
   '/:id',
-  require_('gops.installed_base.edit_all'),
+  requireEdit('gops', 'installed_base'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(assetSchema.partial(), req.body);
     const settings = await aftermarketSettings();
     const existing = await prisma.installedAsset.findUnique({ where: { id: req.params.id } });
     if (!existing) throw notFound('Asset not found');
+    assertCanEdit(me, 'gops', 'installed_base', existing.createdById === me.id);
 
     const updated = await prisma.installedAsset.update({
       where: { id: existing.id },
@@ -516,7 +531,7 @@ assetRoutes.patch(
       },
       req,
     );
-    res.json(presentAsset(updated, settings.expiryWarningDays));
+    res.json(presentAsset(updated, settings.expiryWarningDays, me));
   }),
 );
 
@@ -1484,6 +1499,10 @@ const VISIT_VIEW = [
   'gops.pm_reports.view_own',
   'gops.service_contracts.view_all',
   'gops.visits.view_all',
+  // View Own on the Service Schedule (2026-10-18): the visits assigned to
+  // you — `visitsOnlyOwn()` already narrows anyone without a whole-schedule
+  // key to exactly those, in the list, its paper and the calendar feed.
+  'gops.visits.view_own',
 ] as const;
 
 /**
@@ -1531,11 +1550,14 @@ function visitWhere(
 }
 
 /** Derived on read, never stored: a stored flag is wrong the moment midnight passes. */
-function presentVisit<T extends { status: string; dueDate: Date }>(row: T, today: Date) {
+function presentVisit<T extends { status: string; dueDate: Date; assignedToId: string | null }>(row: T, today: Date, me?: ResolvedUser) {
   return {
     ...row,
     daysUntilDue: daysBetween(today, row.dueDate),
     overdue: row.status === 'SCHEDULED' && row.dueDate < today,
+    // Move, assign, cancel: Edit All, or Edit Own on a visit assigned to the
+    // viewer (2026-10-18).
+    ...(me ? { canEdit: mayEdit(me, 'gops', 'visits', row.assignedToId === me.id) } : {}),
   };
 }
 
@@ -1658,7 +1680,7 @@ visitRoutes.get(
       from: isoDay(from),
       to: isoDay(to),
       asOf: isoDay(today),
-      visits: visits.map((v) => presentVisit(v, today)),
+      visits: visits.map((v) => presentVisit(v, today, me)),
       reports,
       engineers: engineers
         .map((e) => e.assignedTo)
@@ -1763,7 +1785,7 @@ visitRoutes.get(
     if (visitsOnlyOwn(me) && row.assignedToId !== me.id) {
       throw forbidden('That is someone else’s visit');
     }
-    res.json(presentVisit(row, dayKey(new Date())));
+    res.json(presentVisit(row, dayKey(new Date()), me));
   }),
 );
 
@@ -1817,7 +1839,7 @@ visitRoutes.get(
     ]);
 
     const today = dayKey(new Date());
-    res.json(listResult(rows.map((r) => presentVisit(r, today)), total, q));
+    res.json(listResult(rows.map((r) => presentVisit(r, today, me)), total, q));
   }),
 );
 
@@ -1887,8 +1909,9 @@ visitRoutes.post(
  */
 visitRoutes.patch(
   '/:id',
-  require_('gops.visits.edit_all'),
+  requireEdit('gops', 'visits'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(
       z.object({
         dueDate: z.string().optional(),
@@ -1902,6 +1925,8 @@ visitRoutes.patch(
     );
     const visit = await prisma.serviceVisit.findUnique({ where: { id: req.params.id } });
     if (!visit) throw notFound('Visit not found');
+    // Edit Own moves only a visit assigned to the caller (2026-10-18).
+    assertCanEdit(me, 'gops', 'visits', visit.assignedToId === me.id);
     if (visit.status === 'COMPLETED') {
       throw badRequest('This visit has been made and reported. Its record is what happened.');
     }
@@ -1956,7 +1981,7 @@ visitRoutes.patch(
       },
       req,
     );
-    res.json(presentVisit(updated, dayKey(new Date())));
+    res.json(presentVisit(updated, dayKey(new Date()), me));
   }),
 );
 
@@ -1967,20 +1992,39 @@ visitRoutes.patch(
 export const templateRoutes = Router();
 templateRoutes.use(authenticate);
 
+/**
+ * Who reads the templates (2026-10-18). A report writer picks from every
+ * template, so the report rights still read them all, as does Report
+ * Templates › View All; Report Templates › View Own alone reads the
+ * templates the caller made (`createdById` — "own" on the screen).
+ */
+const TEMPLATE_READ_ALL = [
+  'gops.pm_reports.view_all',
+  'gops.commissioning_reports.view_all',
+  'gops.inspection_reports.view_all',
+  'gops.report_templates.view_all',
+] as const;
+
+function templatesOnlyOwn(me: ResolvedUser): boolean {
+  return !(me.isSuperAdmin || TEMPLATE_READ_ALL.some((k) => me.permissions.has(k)));
+}
+
+/** Modify on the screen: Edit All, or Edit Own on a template the viewer made. */
+const templateCanEdit = (me: ResolvedUser, t: { createdById: string | null }) =>
+  mayEdit(me, 'gops', 'report_templates', t.createdById === me.id);
+
 templateRoutes.get(
   '/',
-  requireAny(
-    'gops.pm_reports.view_all',
-    'gops.commissioning_reports.view_all',
-    'gops.inspection_reports.view_all',
-  ),
+  requireAny(...TEMPLATE_READ_ALL, 'gops.report_templates.view_own'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const kind = choice(req.query.kind ? String(req.query.kind) : undefined, ServiceKind, 'Kind', kindWord);
     const all = req.query.all === 'true';
     const templates = await prisma.reportTemplate.findMany({
       where: {
         ...(kind ? { kind } : {}),
         ...(all ? {} : { isCurrent: true, isActive: true }),
+        ...(templatesOnlyOwn(me) ? { createdById: me.id } : {}),
       },
       include: {
         createdBy: { select: { id: true, name: true } },
@@ -1988,24 +2032,22 @@ templateRoutes.get(
       },
       orderBy: [{ kind: 'asc' }, { name: 'asc' }, { version: 'desc' }],
     });
-    res.json(templates);
+    res.json(templates.map((t) => ({ ...t, canEdit: templateCanEdit(me, t) })));
   }),
 );
 
 templateRoutes.get(
   '/:id',
-  requireAny(
-    'gops.pm_reports.view_all',
-    'gops.commissioning_reports.view_all',
-    'gops.inspection_reports.view_all',
-  ),
+  requireAny(...TEMPLATE_READ_ALL, 'gops.report_templates.view_own'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const template = await prisma.reportTemplate.findUnique({
       where: { id: req.params.id },
       include: { _count: { select: { reports: true } } },
     });
-    if (!template) throw notFound('Template not found');
-    res.json(template);
+    // Somebody else's template reads as an unknown id to a View Own holder.
+    if (!template || (templatesOnlyOwn(me) && template.createdById !== me.id)) throw notFound('Template not found');
+    res.json({ ...template, canEdit: templateCanEdit(me, template) });
   }),
 );
 
@@ -2061,7 +2103,7 @@ templateRoutes.post(
  */
 templateRoutes.put(
   '/:id',
-  require_('gops.report_templates.edit_all'),
+  requireEdit('gops', 'report_templates'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(templateSchema.partial({ kind: true }), req.body);
@@ -2070,6 +2112,9 @@ templateRoutes.put(
       include: { _count: { select: { reports: true } } },
     });
     if (!existing) throw notFound('Template not found');
+    // Edit Own changes, or publishes a new version of, only a template the
+    // caller made (2026-10-18).
+    assertCanEdit(me, 'gops', 'report_templates', existing.createdById === me.id);
 
     const sections = body.sections ? validateSections(body.sections) : (existing.sections as unknown as TemplateSection[]);
 
@@ -2122,7 +2167,8 @@ templateRoutes.post(
     const me = currentUser(req);
     const body = parseBody(z.object({ name: z.string().trim().min(2) }), req.body);
     const source = await prisma.reportTemplate.findUnique({ where: { id: req.params.id } });
-    if (!source) throw notFound('Template not found');
+    // A View Own holder copies only what they can read (2026-10-18).
+    if (!source || (templatesOnlyOwn(me) && source.createdById !== me.id)) throw notFound('Template not found');
 
     const copy = await prisma.reportTemplate.create({
       data: {
@@ -2876,10 +2922,13 @@ aftermarketRoutes.put(
 registerSearch({
   kind: 'installed_asset',
   label: 'Installed base',
-  permission: 'gops.installed_base.view_all',
-  search: async (term, _user, limit) => {
+  permission: ['gops.installed_base.view_all', 'gops.installed_base.view_own'],
+  // View Own: the machines the caller registered (2026-10-18).
+  ownWhere: (user) => ({ createdById: user.id }),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.installedAsset.findMany({
       where: {
+        ...(own ?? {}),
         OR: [
           { code: { contains: term, mode: 'insensitive' } },
           { name: { contains: term, mode: 'insensitive' } },
@@ -2980,10 +3029,13 @@ registerReportSearch('inspection_reports', 'Inspection reports', ['INSPECTION', 
 registerSearch({
   kind: 'service_visit',
   label: 'Service visits',
-  permission: 'gops.visits.view_all',
-  search: async (term, _user, limit) => {
+  permission: ['gops.visits.view_all', 'gops.visits.view_own'],
+  // View Own: the visits assigned to the caller (2026-10-18).
+  ownWhere: (user) => ({ assignedToId: user.id }),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.serviceVisit.findMany({
       where: {
+        ...(own ?? {}),
         OR: [
           { number: { contains: term, mode: 'insensitive' } },
           { customer: { name: { contains: term, mode: 'insensitive' } } },

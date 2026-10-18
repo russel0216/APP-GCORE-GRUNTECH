@@ -225,8 +225,10 @@ model Role {
   workflowStepsTargeting ApprovalStep[]     @relation("StepRole")
   workflowsForRequester  ApprovalWorkflow[] @relation("WorkflowRequesterRole")
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 /// One row per `module.submodule.action` triple. Seeded from
@@ -431,6 +433,9 @@ model ApprovalWorkflow {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 
   @@index([documentType, isActive])
 }
@@ -759,6 +764,8 @@ model Industry {
   invoiceRequests    InvoiceRequest[]
   jobOrders          JobOrder[]          @relation("JobOrderTeam")
   cadJobOrders       CadJobOrder[]       @relation("CadJobOrderTeam")
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById        String?
 }
 
 /// A customer's sub-industry (2026-10-08, the owner's eleven): Enterprise,
@@ -767,14 +774,16 @@ model Industry {
 /// contract as the cost categories — seeded system rows undeletable, names
 /// editable — and OPTIONAL on the customer: typed in by hand, later.
 model SubIndustry {
-  id        String     @id @default(cuid())
-  name      String     @unique
-  sortOrder Int        @default(0)
-  isSystem  Boolean    @default(false)
-  isActive  Boolean    @default(true)
-  customers Customer[]
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  id          String     @id @default(cuid())
+  name        String     @unique
+  sortOrder   Int        @default(0)
+  isSystem    Boolean    @default(false)
+  isActive    Boolean    @default(true)
+  customers   Customer[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 model Supplier {
@@ -994,8 +1003,10 @@ model CostCategory {
   expenseClaims  ExpenseClaim[]        @relation("ExpenseCategory")
   cashAdvances   CashAdvance[]         @relation("AdvanceCategory")
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 model ItemCategory {
@@ -1012,8 +1023,10 @@ model ItemCategory {
 
   items Item[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 enum ItemType {
@@ -1080,6 +1093,9 @@ model Item {
   installedAssets      InstalledAsset[]
   receivedWithoutOrder ReceivingItem[]        @relation("ReceivedWithoutOrder")
 
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
+
   @@index([isActive])
   @@index([name])
   @@index([partNumber])
@@ -1105,8 +1121,10 @@ model Warehouse {
   projectStock     ProjectStock[]
   stockMoves       InventoryTransaction[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 /// Bin / rack / shelf within a warehouse.
@@ -1124,6 +1142,9 @@ model Location {
   projectStock   ProjectStock[]
 
   createdAt DateTime @default(now())
+
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 
   @@unique([warehouseId, code])
 }
@@ -1760,6 +1781,8 @@ model QuotationGroup {
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 // ── Sales calendar ───────────────────────────────────────────────────────────
@@ -1800,18 +1823,20 @@ model Greeting {
 /// Admin › Categories › Activity types. The six built-ins are seeded with the
 /// enum's own keys, so every activity written before this maps 1:1.
 model SalesActivityType {
-  id        String   @id @default(cuid())
+  id          String   @id @default(cuid())
   /// CALL, SITE_VISIT … or a key derived from a typed name (DEMO_WALK). Never changes.
-  key       String   @unique
-  name      String
+  key         String   @unique
+  name        String
   /// #RRGGBB, the chip's edge on the calendar; null takes the default.
-  color     String?
-  sortOrder Int      @default(0)
+  color       String?
+  sortOrder   Int      @default(0)
   /// The six built-ins: renamed and recoloured freely, never deleted; OTHER is the fallback and stays active.
-  isSystem  Boolean  @default(false)
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  isSystem    Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 model SalesActivity {
@@ -3620,6 +3645,9 @@ model Position {
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
+
   @@index([departmentId])
 }
 
@@ -3954,6 +3982,9 @@ model Course {
   records            TrainingRecord[]
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
+
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 
   @@index([isActive])
 }
@@ -5189,7 +5220,9 @@ model CadDrawingType {
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
 
-  requests CadJobOrder[]
+  requests    CadJobOrder[]
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 /// A request to the design team for a drawing: the design team's one queue.

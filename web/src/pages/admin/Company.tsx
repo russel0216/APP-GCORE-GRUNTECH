@@ -3,6 +3,7 @@ import { api, openPdf } from '../../lib/api';
 import { ErrorBox, Field, Loading, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { dropHolidays, type Holiday } from '../../lib/holidays';
+import { mayEditPage, useAuth } from '../../lib/auth';
 
 interface CompanyData {
   name: string;
@@ -37,6 +38,9 @@ interface CompanyData {
  */
 export function Company() {
   const toast = useToast();
+  // Edit Own or Edit All saves the page — it keeps no record of anybody's (2026-10-18).
+  const { can } = useAuth();
+  const canEdit = mayEditPage(can, 'admin', 'company');
   const [data, setData] = useState<CompanyData | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -111,11 +115,11 @@ export function Company() {
   if (loading) return <Loading />;
   if (!data) return <ErrorBox error={error} />;
 
-  const saveButton = (
+  const saveButton = canEdit ? (
     <button className="btn btn-primary" onClick={save} disabled={busy}>
       {busy ? 'Saving…' : 'Save'}
     </button>
-  );
+  ) : null;
 
   return (
     <div>
@@ -169,9 +173,11 @@ export function Company() {
                   if (f) void uploadLogo(f);
                 }}
               />
-              <button className="btn btn-sm" onClick={() => fileRef.current?.click()} disabled={busy}>
-                {data.logoPath ? 'Replace logo' : 'Upload logo'}
-              </button>
+              {canEdit && (
+                <button className="btn btn-sm" onClick={() => fileRef.current?.click()} disabled={busy}>
+                  {data.logoPath ? 'Replace logo' : 'Upload logo'}
+                </button>
+              )}
               <span className="faint mono company-logo-name">
                 {data.logoPath ? data.logoPath.split(/[\\/]/).pop() : 'none set'}
               </span>
@@ -343,9 +349,7 @@ export function Company() {
       </div>
 
       {/* The form is long: Save again at its foot, right, as at its head. */}
-      <div className="page-foot company-actions">
-        {saveButton}
-      </div>
+      {saveButton && <div className="page-foot company-actions">{saveButton}</div>}
     </div>
   );
 }
@@ -359,6 +363,8 @@ export function Company() {
  */
 function HolidaysCard() {
   const toast = useToast();
+  const { can } = useAuth();
+  const canEdit = mayEditPage(can, 'admin', 'company');
   const thisYear = new Date().getFullYear();
   const [list, setList] = useState<Holiday[] | null>(null);
   const [year, setYear] = useState(thisYear);
@@ -433,12 +439,16 @@ function HolidaysCard() {
               </option>
             ))}
           </select>
-          <button type="button" className="btn btn-sm" onClick={() => void addPh()}>
-            Add PH holidays for {year}
-          </button>
-          <button type="button" className="btn btn-sm btn-primary" disabled={!dirty || busy} onClick={() => void save()}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
+          {canEdit && (
+            <>
+              <button type="button" className="btn btn-sm" onClick={() => void addPh()}>
+                Add PH holidays for {year}
+              </button>
+              <button type="button" className="btn btn-sm btn-primary" disabled={!dirty || busy} onClick={() => void save()}>
+                {busy ? 'Saving…' : 'Save'}
+              </button>
+            </>
+          )}
         </div>
       </div>
       <p className="muted">

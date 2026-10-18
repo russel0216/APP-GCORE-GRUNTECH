@@ -882,7 +882,9 @@ export function StockIssueDetail() {
   const isDraft = status === 'DRAFT';
   const receiver = issue.issuedTo?.name ?? issue.issuedToName;
   const mine = !!me && issue.issuedToId === me.user.id;
-  const showCost = can('gchain.stock_issuance.view_all');
+  // The register's readers see the cost — View All, or View Own on a slip the
+  // viewer issued (2026-10-18); the person it went to reads it without.
+  const showCost = can('gchain.stock_issuance.view_all') || (can('gchain.stock_issuance.view_own') && !!me && issue.issuedBy.id === me.user.id);
 
   /** Asked in the confirm bar, which shows a refusal — so these throw rather than catching. */
   async function commit() {

@@ -30,6 +30,7 @@ import { CHART_DEPARTMENTS, applyOrgChart, grantSupervisorRole } from '../src/sh
 import { applyEmployeeNumbering, clearEmployeeNumbers } from '../src/shared/employeeNumbers';
 import { clearRoles, rolesCleared } from '../src/shared/rolesClear';
 import { replaceRolesWithChart } from '../src/shared/rolesFromChart';
+import { backfillOwnAuthors } from '../src/shared/ownBackfill';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -1607,6 +1608,14 @@ async function main() {
       console.log(
         `  ✓ Roles replaced by the organisation chart: ${replaced.created.length} created, ${replaced.renamed.length} renamed, ${replaced.deleted.length} deleted, ${replaced.assigned} login(s) given their titles`,
       );
+    }
+  }
+
+  // ── "Who added it", for Edit Own (2026-10-18) ─────────────────────────────
+  {
+    const filled = await backfillOwnAuthors();
+    if (filled && Object.keys(filled).length) {
+      console.log(`  ✓ "Who added it" filled from the audit trail: ${Object.entries(filled).map(([t, n]) => `${t} ${n}`).join(', ')}`);
     }
   }
 

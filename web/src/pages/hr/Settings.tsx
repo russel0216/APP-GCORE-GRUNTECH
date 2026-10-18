@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useState } from 'react';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { useAuth, mayEditPage } from '../../lib/auth';
 import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../components/ui';
 import type { LeaveType } from './Leave';
 import { ProbationCard } from './settings/ProbationCard';
@@ -68,7 +68,7 @@ function edited(s: HrSettings): HrSettings {
 export function HrSettingsPage() {
   const { can } = useAuth();
   const toast = useToast();
-  const editable = can('ghr.settings.edit_all');
+  const editable = mayEditPage(can, 'ghr', 'settings');
   const livenessHintId = useId();
 
   const [settings, setSettings] = useState<HrSettings | null>(null);
@@ -133,7 +133,8 @@ export function HrSettingsPage() {
       {!editable && (
         <div className="alert info">
           You can see these rules but not change them. That needs{' '}
-          <span className="mono">ghr.settings.edit_all</span>.
+          <span className="mono">ghr.settings.edit_all</span> or{' '}
+          <span className="mono">ghr.settings.edit_own</span>.
         </div>
       )}
 

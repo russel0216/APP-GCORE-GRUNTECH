@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { useAuth, mayEditPage } from '../../lib/auth';
 import { dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type Column } from '../../components/DataList';
 import { Stat } from '../../components/charts';
@@ -526,7 +526,7 @@ export function PeopleFlowCard() {
         { key: 'source', label: 'Follows', kind: 'select', options: SOURCES },
       ]}
       newRow={() => ({ stage: 'ONBOARDING', key: '', title: '', description: '', dueDays: null, source: '' })}
-      canEdit={can('ghr.settings.edit_all')}
+      canEdit={mayEditPage(can, 'ghr', 'settings')}
     />
   );
 }

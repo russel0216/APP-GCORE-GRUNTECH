@@ -2,8 +2,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../prisma';
 import { handler, parseBody } from '../http/kit';
-import { authenticate, require_ } from '../auth/middleware';
+import { authenticate } from '../auth/middleware';
 import { audit } from '../shared/audit';
+import { requireEdit } from '../shared/ownScope';
 
 /**
  * Appearance — the design tokens, edited from inside the app.
@@ -22,7 +23,9 @@ import { audit } from '../shared/audit';
  * appearance — everybody's browser needs it to draw the page, and it carries
  * nothing about the business. It rides along on `/auth/me` rather than taking
  * a request of its own, so it costs nothing at boot. WRITING is gated on
- * `admin.appearance.edit_all` and audited like any other setting.
+ * `admin.appearance.edit_all` or `edit_own` — the page keeps no record of
+ * anybody's, so either saves it (2026-10-18) — and audited like any other
+ * setting.
  */
 
 export const APPEARANCE_KEY = 'appearance';
@@ -142,7 +145,7 @@ const saveSchema = z.object({
 
 appearanceRoutes.put(
   '/',
-  require_('admin.appearance.edit_all'),
+  requireEdit('admin', 'appearance'),
   handler(async (req, res) => {
     const body = parseBody(saveSchema, req.body);
     // Sanitised on the way in as well as on the way out, so a value that

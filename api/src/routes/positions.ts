@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, idsFilter, notFound, conflict, type ListQuery } from '../http/kit';
-import { authenticate, require_, requireAny } from '../auth/middleware';
+import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { filledByPosition, mirrorPositionTitle, plantillaSummary } from '../shared/plantilla';
@@ -34,9 +35,10 @@ type PositionRow = Prisma.PositionGetPayload<{ include: { department: { select: 
  * query. Filled and vacant are counted on read (never stored), so the
  * derived filters (vacant, over) and sort keys run over the counted rows in
  * memory: a plantilla is dozens of rows, not thousands. `?ids=` narrows to
- * the rows ticked.
+ * the rows ticked. A View Own holder (2026-10-18) gets the positions they
+ * added and nothing else — the screen and the paper alike.
  */
-async function plantillaRows(q: ListQuery): Promise<PositionRow[]> {
+async function plantillaRows(me: ReturnType<typeof currentUser>, q: ListQuery): Promise<PositionRow[]> {
   const where: Prisma.PositionWhereInput = {};
   if (q.filters.departmentId) where.departmentId = q.filters.departmentId;
   if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
@@ -50,7 +52,7 @@ async function plantillaRows(q: ListQuery): Promise<PositionRow[]> {
   if (ids) where.id = { in: ids };
 
   const positions = await prisma.position.findMany({
-    where,
+    where: ownOnly(me, 'ghr', 'plantilla', where, { createdById: me.id }),
     include: { department: { select: { id: true, name: true } } },
     orderBy: [{ department: { name: 'asc' } }, { sortOrder: 'asc' }, { title: 'asc' }],
   });
@@ -93,11 +95,12 @@ async function holdersOf(positionIds: string[]) {
 
 positionRoutes.get(
   '/',
-  require_('ghr.plantilla.view_all'),
+  requireView('ghr', 'plantilla'),
   handler(async (req, res) => {
     await sweepSeparations();
+    const me = currentUser(req);
     const q = listQuery(req);
-    const rows = await plantillaRows(q);
+    const rows = await plantillaRows(me, q);
     const total = rows.length;
     const page = rows.slice((q.page - 1) * q.pageSize, q.page * q.pageSize);
     const holdersBy = await holdersOf(page.map((p) => p.id));
@@ -117,6 +120,8 @@ positionRoutes.get(
             department: p.department,
             filled: p.filled,
             vacant: p.vacant,
+            createdById: p.createdById,
+            canEdit: mayEdit(me, 'ghr', 'plantilla', p.createdById === me.id),
             holderCount: list.length,
             holders: list.slice(0, HOLDER_PREVIEW).map((h) => ({
               id: h.id,
@@ -144,12 +149,12 @@ positionRoutes.get(
  */
 positionRoutes.get(
   '/pdf',
-  require_('ghr.plantilla.view_all'),
+  requireView('ghr', 'plantilla'),
   handler(async (req, res) => {
     await sweepSeparations();
     const q = listQuery(req);
     const f = q.filters;
-    const all = await plantillaRows(q);
+    const all = await plantillaRows(currentUser(req), q);
     const rows = all.slice(0, LIST_CAP);
     const [holdersBy, department] = await Promise.all([
       holdersOf(rows.map((p) => p.id)),
@@ -275,8 +280,9 @@ positionRoutes.get(
 
 positionRoutes.get(
   '/:id',
-  require_('ghr.plantilla.view_all'),
+  requireView('ghr', 'plantilla'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const position = await prisma.position.findUnique({
       where: { id: req.params.id },
       include: {
@@ -289,9 +295,12 @@ positionRoutes.get(
       },
     });
     if (!position) throw notFound('Position not found');
+    // View Own reads only the positions the caller added (2026-10-18).
+    assertCanView(me, 'ghr', 'plantilla', position.createdById === me.id);
     const { employees, ...rest } = position;
     res.json({
       ...rest,
+      canEdit: mayEdit(me, 'ghr', 'plantilla', position.createdById === me.id),
       filled: employees.length,
       vacant: position.authorisedHeadcount - employees.length,
       holderCount: employees.length,
@@ -340,6 +349,7 @@ positionRoutes.post(
   '/',
   require_('ghr.plantilla.create'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(positionSchema, req.body);
 
     const position = await prisma.$transaction(async (tx) => {
@@ -358,6 +368,8 @@ positionRoutes.post(
           description: body.description || null,
           sortOrder: body.sortOrder ?? 0,
           isActive: body.isActive ?? true,
+          // Who added it — what "own" means on the plantilla (2026-10-18).
+          createdById: me.id,
         },
         include: { department: { select: { id: true, name: true } } },
       });
@@ -372,17 +384,20 @@ positionRoutes.post(
       },
       req,
     );
-    res.status(201).json({ ...position, filled: 0, vacant: position.authorisedHeadcount, holders: [], holderCount: 0 });
+    res.status(201).json({ ...position, filled: 0, vacant: position.authorisedHeadcount, holders: [], holderCount: 0, canEdit: mayEdit(me, 'ghr', 'plantilla', true) });
   }),
 );
 
 positionRoutes.patch(
   '/:id',
-  require_('ghr.plantilla.edit_all'),
+  requireEdit('ghr', 'plantilla'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(positionSchema.partial(), req.body);
     const before = await prisma.position.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Position not found');
+    // Edit Own changes only the positions the caller added (2026-10-18).
+    assertCanEdit(me, 'ghr', 'plantilla', before.createdById === me.id);
 
     const position = await prisma.$transaction(async (tx) => {
       const title = body.title ?? before.title;
@@ -425,7 +440,7 @@ positionRoutes.patch(
       req,
     );
     const filled = (await filledByPosition([position.id])).get(position.id) ?? 0;
-    res.json({ ...position, filled, vacant: position.authorisedHeadcount - filled });
+    res.json({ ...position, filled, vacant: position.authorisedHeadcount - filled, canEdit: true });
   }),
 );
 

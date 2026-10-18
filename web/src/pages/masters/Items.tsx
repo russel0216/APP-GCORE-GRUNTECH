@@ -56,6 +56,8 @@ interface ItemRow {
   category: Ref | null;
   costCategory: Ref | null;
   preferredSupplier: Ref | null;
+  /** Whether the viewer may change it — Edit All, or Edit Own on an item they added (2026-10-18). */
+  canEdit?: boolean;
 }
 
 export function Items() {
@@ -302,6 +304,9 @@ function ItemForm({
     notes: item?.notes ?? '',
   });
 
+  // Someone else's item, to a viewer with Edit Own alone (2026-10-18): read, never saved.
+  const readOnly = !!item && item.canEdit === false;
+
   async function save() {
     setBusy(true);
     setError(null);
@@ -340,11 +345,12 @@ function ItemForm({
   return (
     <Modal
       wide
-      title={item ? `Modify item ${item.name}` : 'New item'}
+      title={item ? (readOnly ? item.name : `Modify item ${item.name}`) : 'New item'}
       onClose={onClose}
       footer={
         <ModalFoot
           onCancel={onClose}
+          cancelLabel={readOnly ? 'Close' : undefined}
           busy={busy}
           danger={
             item && can('gchain.items.delete')
@@ -361,9 +367,11 @@ function ItemForm({
               : undefined
           }
         >
-          <button className="btn btn-primary" onClick={save} disabled={busy || form.name.length < 2}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
+          {!readOnly && (
+            <button className="btn btn-primary" onClick={save} disabled={busy || form.name.length < 2}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          )}
         </ModalFoot>
       }
     >

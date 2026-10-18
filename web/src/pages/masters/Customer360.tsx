@@ -245,7 +245,8 @@ export function Customer360Page() {
       .catch(() => setHistory([]));
   }, [id]);
 
-  const mayEdit = can('gops.customers.edit_all');
+  // Edit All, or Edit Own on a customer the viewer added — the API says which (2026-10-18).
+  const mayEdit = customer?.canEdit ?? can('gops.customers.edit_all');
 
   if (loading) return <Loading />;
   if (!customer) return <ErrorBox error={error ?? new Error('Customer not found')} />;

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEditPage, useAuth } from '../../lib/auth';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { openAttachment } from '../../components/Attachments';
@@ -226,6 +226,8 @@ interface PartnerContact {
 
 interface Partner {
   id: string;
+  /** Whether the viewer may change it — Edit All, or Edit Own on a partner whose supplier they added (2026-10-18). */
+  canEdit?: boolean;
   code: string;
   name: string;
   brand: string | null;
@@ -411,7 +413,7 @@ export function Partners() {
         printPath="/api/partners/pdf"
         selectable
         rowLabel={(p) => `${p.code} ${p.brand ?? p.name}`}
-        bulkActions={can('gops.partners.edit_all') ? (ctx) => <PartnerBulkCategory ctx={ctx} known={knownCategories} /> : undefined}
+        bulkActions={mayEditPage(can, 'gops', 'partners') ? (ctx) => <PartnerBulkCategory ctx={ctx} known={knownCategories} /> : undefined}
         menuItems={
           can('gops.partners.create')
             ? [
@@ -755,7 +757,8 @@ export function PartnerDetail() {
   if (loading && !partner) return <Loading />;
   if (!partner) return <ErrorBox error={error ?? new Error('Partner not found')} />;
 
-  const mayEdit = can('gops.partners.edit_all');
+  // Edit All, or Edit Own on a partner the viewer added — the API says which (2026-10-18).
+  const mayEdit = partner.canEdit ?? can('gops.partners.edit_all');
   const mayDelete = can('gops.partners.delete');
   const brand = partner.brand ?? partner.name;
 

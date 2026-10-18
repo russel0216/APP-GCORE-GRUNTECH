@@ -1093,7 +1093,6 @@ function InventoryBoard({ warehouses }: { warehouses: { id: string; name: string
 
 export function StockCard() {
   const { itemId } = useParams<{ itemId: string }>();
-  const { can } = useAuth();
   const toast = useToast();
   const [params] = useSearchParams();
   const warehouseId = params.get('warehouseId');
@@ -1126,7 +1125,8 @@ export function StockCard() {
     location: { id: string; code: string } | null;
   }[];
   const project = data.project as { id: string; number: string; name: string } | null | undefined;
-  const mayPlace = can('gchain.inventory.edit_all') && !jobId;
+  // Edit All places any stock line; Edit Own the items the viewer added (2026-10-18, the card's `canEdit`).
+  const mayPlace = data.canEdit === true && !jobId;
   /** Files the stock line in a bin (2026-10-15). */
   async function placeIn(balanceId: string, locationId: string) {
     try {

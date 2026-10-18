@@ -13,6 +13,7 @@ import {
   notFound,
   conflict,
   badRequest,
+  forbidden,
   type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, currentUser } from '../auth/middleware';
@@ -22,6 +23,8 @@ import { ADMIN_RESET_HOURS, deliverLink, issueToken, syncLoginFromEmployee } fro
 import { setCounter, type CounterMove } from '../shared/numbering';
 import { ENGINE_ROLE_KEYS } from '../shared/rolesClear';
 import { mailConfig, sendMail } from '../shared/mail';
+import { requireView, requireEdit, ownOnly, viewScope, editScope, assertCanView, assertCanEdit } from '../shared/ownScope';
+import type { ResolvedUser } from '../permissions/resolve';
 import { renderDocument, formatShortDate } from '../shared/pdf';
 import { LIST_CAP, listReference, sendListPdf } from '../shared/listPaper';
 
@@ -91,12 +94,22 @@ function userListWhere(q: ListQuery): Prisma.UserWhereInput {
   return where;
 }
 
+/*
+  View Own on Admin › Users is the caller's OWN login (2026-10-18, the
+  registry's `own`): the list, its cards and its paper narrow to that one row;
+  View All reads as before.
+*/
+const MINE_USERS = (me: ResolvedUser): Prisma.UserWhereInput => ({ id: me.id });
+
 userRoutes.get(
   '/',
-  require_('admin.users.view_all'),
+  requireView('admin', 'users'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
-    const where = userListWhere(q);
+    const where = ownOnly(me, 'admin', 'users', userListWhere(q), MINE_USERS(me));
+    // The cards count everyone's logins — for an own-only reader, only their own.
+    const all = viewScope(me, 'admin', 'users') === 'all';
 
     const [rows, total] = await Promise.all([
       prisma.user.findMany({
@@ -117,10 +130,10 @@ userRoutes.get(
     // The halves of a person still apart: logins with no employee record, and
     // active employees with no login (HR › Employees `?login=none`).
     const [loginsAlone, employeesAlone, withoutNumber] = await Promise.all([
-      prisma.user.count({ where: { employee: { is: null }, isActive: true } }),
-      prisma.employee.count({ where: { userId: null, isActive: true } }),
+      prisma.user.count({ where: { employee: { is: null }, isActive: true, ...(all ? {} : MINE_USERS(me)) } }),
+      all ? prisma.employee.count({ where: { userId: null, isActive: true } }) : 0,
       // Active logins still without an employee number (2026-10-18).
-      prisma.user.count({ where: { employeeNo: null, isActive: true } }),
+      prisma.user.count({ where: { employeeNo: null, isActive: true, ...(all ? {} : MINE_USERS(me)) } }),
     ]);
 
     res.json({
@@ -149,10 +162,11 @@ userRoutes.get(
  */
 userRoutes.get(
   '/pdf',
-  require_('admin.users.view_all'),
+  requireView('admin', 'users'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
-    const where = userListWhere(q);
+    const where = ownOnly(me, 'admin', 'users', userListWhere(q), MINE_USERS(me));
     const f = q.filters;
     const [rows, count, role, department] = await Promise.all([
       prisma.user.findMany({
@@ -308,7 +322,7 @@ userRoutes.get(
  */
 userRoutes.get(
   '/mail-status',
-  require_('admin.users.view_all'),
+  requireView('admin', 'users'),
   handler(async (_req, res) => {
     const cfg = mailConfig();
     res.json({ enabled: !!cfg, host: cfg?.host ?? null, from: cfg?.from ?? null });
@@ -344,8 +358,10 @@ userRoutes.post(
 
 userRoutes.get(
   '/:id',
-  require_('admin.users.view_all'),
+  requireView('admin', 'users'),
   handler(async (req, res) => {
+    // View Own reads only their own login; anybody else's is a 404 (2026-10-18).
+    assertCanView(currentUser(req), 'admin', 'users', req.params.id === currentUser(req).id);
     const user = await prisma.user.findUnique({
       where: { id: req.params.id },
       select: {
@@ -478,12 +494,39 @@ const updateSchema = z.object({
   password: z.string().min(8, 'Use at least 8 characters').max(128, 'Use at most 128 characters').optional(),
 });
 
+/*
+  Edit Own on Admin › Users is the caller's OWN login, and only its plain
+  details (2026-10-18). Anything that decides what a login may do or who
+  decides for it — roles, Supports teams, "Reports to", the team (the
+  team-first approval steps read it), switching it on or off, the employee
+  number (the quotation series reads it) and a password set past the
+  current one — stays Edit All's: Edit Own must never be a door to more
+  rights. Overrides are their own route, Edit All only; the super-admin
+  flag is not writable here at all.
+*/
+const OWN_ONLY_REFUSED: Record<string, string> = {
+  roleIds: 'roles',
+  supportTeamIds: 'Supports teams',
+  supervisorId: 'Reports to',
+  teamId: 'the team',
+  isActive: 'Active',
+  employeeNo: 'the employee number',
+  password: 'the password (use My Account)',
+};
+
 userRoutes.patch(
   '/:id',
-  require_('admin.users.edit_all'),
+  requireEdit('admin', 'users'),
   handler(async (req, res) => {
     const me = currentUser(req);
+    assertCanEdit(me, 'admin', 'users', req.params.id === me.id);
     const body = parseBody(updateSchema, req.body);
+    if (editScope(me, 'admin', 'users') !== 'all') {
+      const refused = Object.keys(OWN_ONLY_REFUSED).filter((k) => (body as Record<string, unknown>)[k] !== undefined);
+      if (refused.length) {
+        throw forbidden(`Changing ${refused.map((k) => OWN_ONLY_REFUSED[k]).join(', ')} needs "admin.users.edit_all" — Edit Own changes only your own details`);
+      }
+    }
 
     const before = await prisma.user.findUnique({
       where: { id: req.params.id },
@@ -726,9 +769,12 @@ roleRoutes.use(authenticate);
 
 roleRoutes.get(
   '/',
-  require_('admin.roles.view_all'),
-  handler(async (_req, res) => {
+  requireView('admin', 'roles'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    // View Own: the roles they made (`createdById`, 2026-10-18).
     const roles = await prisma.role.findMany({
+      where: ownOnly(me, 'admin', 'roles', {} as Prisma.RoleWhereInput, { createdById: me.id }),
       include: {
         permissions: { select: { permission: { select: { key: true } } } },
         _count: { select: { users: true } },
@@ -742,6 +788,7 @@ roleRoutes.get(
         name: r.name,
         description: r.description,
         isSystem: r.isSystem,
+        createdById: r.createdById,
         userCount: r._count.users,
         permissions: r.permissions.map((p) => p.permission.key),
       })),
@@ -752,7 +799,7 @@ roleRoutes.get(
 /** The whole permission tree, for the role editor and the override editor. */
 roleRoutes.get(
   '/permission-catalog',
-  require_('admin.roles.view_all'),
+  requireView('admin', 'roles'),
   handler(async (_req, res) => {
     res.json({
       modules: REGISTRY.map((m) => ({
@@ -764,6 +811,7 @@ roleRoutes.get(
           label: s.label,
           phase: s.phase,
           note: s.note,
+          own: s.own,
           actions: s.actions.map((a) => ({
             action: a,
             label: ACTION_LABELS[a],
@@ -801,6 +849,8 @@ roleRoutes.post(
         key: body.key,
         name: body.name,
         description: body.description ?? null,
+        // Who made it — Edit Own on Admin › Roles reads it (2026-10-18).
+        createdById: currentUser(req).id,
         permissions: { create: permissionIds.map((permissionId) => ({ permissionId })) },
       },
     });
@@ -815,11 +865,19 @@ roleRoutes.post(
 
 roleRoutes.put(
   '/:id',
-  require_('admin.roles.edit_all'),
+  requireEdit('admin', 'roles'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(roleSchema.partial(), req.body);
     const role = await prisma.role.findUnique({ where: { id: req.params.id } });
     if (!role) throw notFound('Role not found');
+    // Edit Own: the roles they made (2026-10-18) — and never the rights of a
+    // role they hold themselves, or Edit Own would be a way to grant oneself
+    // more. Edit All edits any role, as before.
+    assertCanEdit(me, 'admin', 'roles', role.createdById === me.id);
+    if (body.permissions && editScope(me, 'admin', 'roles') !== 'all' && me.roleKeys.includes(role.key)) {
+      throw forbidden('You hold this role — changing its rights needs "admin.roles.edit_all"');
+    }
 
     const updated = await prisma.$transaction(async (tx) => {
       if (body.permissions) {

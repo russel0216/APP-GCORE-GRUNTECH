@@ -474,6 +474,8 @@ function AssetModal({
 // ── One machine, and everything that ever happened to it ─────────────────────
 
 interface AssetDetail extends Asset {
+  /** Edit All, or Edit Own on a machine the viewer registered (2026-10-18). */
+  canEdit?: boolean;
   contracts: {
     id: string;
     number: string;
@@ -552,7 +554,7 @@ export function AssetDetailPage() {
             )}
           </>
         }
-        modify={can('gops.installed_base.edit_all') ? () => setEditing(true) : undefined}
+        modify={row.canEdit ? () => setEditing(true) : undefined}
       />
 
       {row.warranty === 'EXPIRING' && !covered && (

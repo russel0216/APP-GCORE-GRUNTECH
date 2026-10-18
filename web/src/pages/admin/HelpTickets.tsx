@@ -249,6 +249,8 @@ interface TicketDetail {
   files: TicketFile[];
   canReply: boolean;
   canManage: boolean;
+  /** Edit All, or Edit Own on a ticket one raised (2026-10-18). */
+  canChangeStatus?: boolean;
 }
 
 /** A stored picture, fetched with the bearer token and shown; a click opens it full size. */
@@ -349,7 +351,7 @@ export function HelpTicketPage() {
           </>
         }
         actions={
-          r.canManage ? (
+          r.canManage || r.canChangeStatus ? (
             <>
               {r.status === 'NEW' && (
                 <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void run('Marked in progress', () => api.post(`/help-tickets/${r.id}/status`, { status: 'IN_PROGRESS' }))}>
@@ -364,7 +366,9 @@ export function HelpTicketPage() {
                   onClick={() =>
                     confirm.ask({
                       title: `Mark ${r.number} done?`,
-                      body: `${r.createdBy.name} is told. If they reply, it opens again.`,
+                      body: own
+                        ? 'The people who receive help tickets are told. Reply to it later and it opens again.'
+                        : `${r.createdBy.name} is told. If they reply, it opens again.`,
                       confirmLabel: 'Mark done',
                       reason: 'optional',
                       reasonLabel: 'What was done (they read it)',
@@ -385,7 +389,7 @@ export function HelpTicketPage() {
           ) : undefined
         }
         more={[
-          r.canManage &&
+          (r.canManage || r.canChangeStatus) &&
             !closed && {
               label: 'Won’t do',
               danger: true,

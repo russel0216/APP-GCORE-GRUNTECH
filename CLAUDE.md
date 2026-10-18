@@ -41,10 +41,39 @@ four databases and four copies of "customer".
    borrowed right, so nobody lost anything (each split once, by key in
    `done`; Pull-out Slips' View Own / Edit Own followed the same day, to
    whoever held its Create, when anyone was let raise one); verify-foundation leaves that
-   file out of the "something checks it" corpus. The rest of the grid is
-   deliberate: a shared master (customers, items, suppliers) has no "own",
-   a dashboard or report is View All and Export, and a document that is
-   kept has no Delete — a box there would do nothing. Only three approve rights remain:
+   file out of the "something checks it" corpus. **Every screen with Edit
+   All has View Own and Edit Own** (2026-10-18, the owner's call: "every
+   setting on Access should have Edit Own, View Own"): `SHARED`,
+   `SHARED_KEPT` and `SETTINGS` carry the pair, and each such entry's `own`
+   says what it means there (Admin › Roles shows it on the two boxes) —
+   the records one ADDED (`createdById`, new on Item, Warehouse, Position,
+   Course, Role, ApprovalWorkflow and the reference lists, filled once from
+   each row's CREATED audit row by `backfillOwnAuthors()`,
+   `seed.ownAuthorsBackfilled20261018`), one's own employee record, login,
+   attendance, pay rate, passport or path, the visits assigned to one, the
+   incoming reports one received and outgoing slips one issued, the stock
+   of items one added; a page that keeps no record of anybody's (Company,
+   Numbering, PDF Templates, Pipeline Stages, Appearance, HR / Finance
+   Settings) opens and saves on either key. System Settings and Document
+   Templates have View Own and View All alone: nothing on either ever read
+   their Edit All (one is read-only, the other edits under Report
+   Templates' rights), so those boxes went rather than gain a twin. ONE rule reads it:
+   `shared/ownScope.ts` — `requireView` / `requireEdit` (either key),
+   `ownOnly(me, m, s, where, mine)` narrows a list, its summary cards and its
+   paper alike, `assertCanView` (someone else's is a 404) and
+   `assertCanEdit` — and `mayView` / `mayEdit` / `mayEditPage` in
+   `web/src/lib/auth.tsx`; the web `Guard` on a `.view_all` admits the
+   matching `.view_own`. Pickers other screens use (`/customers/lookup` …)
+   and windows on other screens keep their View All. **Own is never
+   self-promotion**: Admin › Users' Edit Own changes one's own plain details
+   only (never roles, overrides, Active, Reports to, Supports teams, team,
+   number or password); Admin › Roles' Edit Own never changes a role one
+   holds; Employees' Edit Own changes one's personal and contact details
+   only (`OWN_EDITABLE`), the pay fields only with Pay Rates › Edit Own.
+   verify-foundation fails on a screen with `own` whose pair no route or
+   screen reads through those helpers. The rest of the grid is
+   deliberate: a dashboard or report is View All and Export, and a document
+   that is kept has no Delete — a box there would do nothing. Only three approve rights remain:
    CAD dispatch, progress reports and training certificates. **A cancelled
    document may be deleted** (2026-10-11, the owner's call, reversing the
    trim for five of them): job orders, CAD J.O., projects and expenses
@@ -567,7 +596,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,428 assertions across twenty-two scripts** (counted 2026-10-18, after
+**4,430 assertions across twenty-two scripts** (counted 2026-10-18, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -631,9 +660,9 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All):
 foundation
-395, masters 92, sales 638, costing 205, pipeline 121, calendar 101, numbering
+397, masters 92, sales 638, costing 205, pipeline 121, calendar 101, numbering
 94, partners 120, delivery 187, chain 354, hr 485, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 143. The
@@ -5127,8 +5156,8 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   module order (the launcher's `DIVISIONS` in `pages/Home.tsx`, the top
   bar and Ctrl+K follow it); verify-foundation pins it with the strips.
 - **Procurement** is Purchase Requests, RFQ, Canvass, Purchase Orders and
-  **Warehouse** is Incoming, Inventory, Outgoing, Borrow Slips, Pull-out
-  Slips (`PROCUREMENT_STRIP` / `WAREHOUSE_STRIP` in verify-foundation, the
+  **Warehouse** is Incoming, Inventory, Pull-out Slips, Borrow Slips,
+  Outgoing (the owner's order of 2026-10-18) (`PROCUREMENT_STRIP` / `WAREHOUSE_STRIP` in verify-foundation, the
   strips as built so far). **Incoming and Outgoing are Receiving and Stock
   Issuance renamed**: the registry KEYS (`receiving`, `stock_issuance`) and
   every permission string stay, so no right moved; the paths are
@@ -5313,7 +5342,10 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   (`InventoryBalance.locationId`, set on the stock card by
   `gchain.inventory.edit_all` through `PATCH /inventory/balances/:id`, or
   by a receipt into a named bin while empty), Stock qty, Unit cost, Reorder
-  pt, Status; a "Stock value by category" bar chart; the movement log
+  pt, Status (the six cards one row of six equal columns, the eight tiles
+  two even rows of four at one height — `.kpi-grid.list-summary:has(>
+  .inv-cats)` in `styles/procurement.css`, 2026-10-18, the owner: "card size
+  are not standard"); a "Stock value by category" bar chart; the movement log
   under it, and "+ New incoming" in the list's toolbar (the Quick
   operations card went on 2026-10-18, rule 9: the stock report is the
   Report button and ⋯ › Print). **`stockState()` in `shared/chain.ts` is the
@@ -5482,7 +5514,7 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   sales order is enough"). `PulloutSlip` + `PulloutItem` (new tables;
   numbering `pullout_slip`, GT-PS-2026-0001; `gchain.pullout_slips`
   SHARED_KEPT, held by the warehouse roles; Warehouse › **Pull-out Slips**,
-  last on the strip — verify-foundation pins it), `routes/pullouts.ts` at
+  third on the strip since 2026-10-18 — verify-foundation pins it), `routes/pullouts.ts` at
   `/api/pullout-slips`, `pages/chain/PulloutSlips.tsx`. `kind` SALES_ORDER
   (an ISSUED order — the customer's delivery) or PURCHASE_REQUEST (an
   APPROVED or partly ordered DIRECT_TO_JOB request — the project takes from

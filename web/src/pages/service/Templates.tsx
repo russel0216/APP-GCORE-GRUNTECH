@@ -73,7 +73,9 @@ export function ReportTemplates() {
 
   // Their own rights since 2026-10-18 (they borrowed Preventive Maintenance's Create).
   const mayCreate = can('gops.report_templates.create');
-  const editable = can('gops.report_templates.edit_all');
+  // Modify per template: the API's flag — Edit All, or Edit Own on a
+  // template the viewer made (2026-10-18).
+  const editable = (t: Template) => !!(t as Template & { canEdit?: boolean }).canEdit;
 
   if (error) return <ErrorBox error={error} />;
   if (!templates) return <Loading />;
@@ -139,7 +141,7 @@ export function ReportTemplates() {
                       </td>
                       <td className="right">
                         <button className="btn btn-sm" onClick={() => setEditing(t)}>
-                          {editable && t.isCurrent ? 'Modify' : 'View'}
+                          {editable(t) && t.isCurrent ? 'Modify' : 'View'}
                         </button>
                       </td>
                     </tr>
@@ -154,7 +156,7 @@ export function ReportTemplates() {
       {editing && (
         <TemplateEditor
           template={editing === 'new' ? null : editing}
-          readOnly={editing !== 'new' && (!editable || !editing.isCurrent)}
+          readOnly={editing !== 'new' && (!editable(editing) || !editing.isCurrent)}
           mayDuplicate={mayCreate}
           onClose={() => setEditing(null)}
           onSaved={() => {

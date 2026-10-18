@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEdit, useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../components/ui';
 
 interface Role {
@@ -9,6 +9,8 @@ interface Role {
   name: string;
   description: string | null;
   isSystem: boolean;
+  /** Who made it — Edit Own reads it (2026-10-18). */
+  createdById: string | null;
   userCount: number;
   permissions: string[];
 }
@@ -24,6 +26,8 @@ interface Catalog {
       label: string;
       phase: number;
       note?: string;
+      /** What View Own and Edit Own mean on this screen (2026-10-18). */
+      own?: string;
       actions: { action: string; label: string; key: string }[];
     }[];
   }[];
@@ -131,7 +135,10 @@ function RoleEditor({
   onSaved: () => void;
 }) {
   const toast = useToast();
-  const { can } = useAuth();
+  const { can, me } = useAuth();
+  // A new role is the create right's; an existing one Edit All's, or Edit
+  // Own's on a role the viewer made (2026-10-18). The API decides for real.
+  const maySave = role ? mayEdit(can, 'admin', 'roles', !!me && role.createdById === me.user.id) : can('admin.roles.create');
   const [name, setName] = useState(role?.name ?? '');
   const [key, setKey] = useState(role?.key ?? '');
   const [description, setDescription] = useState(role?.description ?? '');
@@ -214,9 +221,11 @@ function RoleEditor({
               : undefined
           }
         >
-          <button className="btn btn-primary" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
+          {maySave && (
+            <button className="btn btn-primary" onClick={save} disabled={busy}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          )}
         </ModalFoot>
       }
     >
@@ -311,7 +320,7 @@ function RoleEditor({
                             toggle(a.key);
                             markChanged(e.currentTarget);
                           }}
-                          title={a.key}
+                          title={sub.own && (a.action === 'view_own' || a.action === 'edit_own') ? `${a.key} — Own here means ${sub.own}` : a.key}
                         >
                           {a.label}
                         </button>

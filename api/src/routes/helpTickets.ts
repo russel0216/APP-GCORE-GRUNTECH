@@ -5,7 +5,7 @@ import { Prisma, HelpTicketKind, HelpTicketStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import { env } from '../env';
 import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, HttpError } from '../http/kit';
-import { authenticate, requireAny, currentUser } from '../auth/middleware';
+import { authenticate, currentUser } from '../auth/middleware';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
@@ -16,6 +16,7 @@ import { registerAttachmentGuard, upload, saveAttachment } from '../shared/attac
 import { throttled } from '../shared/throttle';
 import { LIST_CAP, listReference, rangeNamed, filterDay, choice, sendListPdf, recordNamed } from '../shared/listPaper';
 import { manilaDayStart, manilaDayEnd } from '../shared/day';
+import { requireView, requireEdit, ownOnly, assertCanEdit, mayEdit } from '../shared/ownScope';
 import { chosenReceiverIds, saveReceivers, ticketReceivers, MAX_RECEIVERS } from '../shared/helpReceivers';
 
 /**
@@ -38,6 +39,12 @@ import { chosenReceiverIds, saveReceivers, ticketReceivers, MAX_RECEIVERS } from
  * reads every ticket (the list, its paper, any ticket and its screenshots);
  * `admin.help_tickets.edit_all` answers them and moves their status. No seeded
  * role holds either: a super admin holds everything.
+ *
+ * View Own and Edit Own (2026-10-18): "own" is the tickets one raised. View
+ * Own opens the register narrowed to them (the box's My tickets needs no
+ * right at all, as before); Edit Own moves the status of one's own tickets —
+ * In progress, Done, Won't do. Answering somebody else's ticket stays Edit
+ * All's, and choosing who receives new tickets a super admin's.
  */
 
 export const helpTicketRoutes = Router();
@@ -283,12 +290,19 @@ async function ticketSummary(base: Prisma.HelpTicketWhereInput) {
   };
 }
 
+/** View Own narrows the register to the tickets the caller raised (2026-10-18). */
+const mineOnly = (me: ResolvedUser, where: Prisma.HelpTicketWhereInput) =>
+  ownOnly(me, 'admin', 'help_tickets', where, { createdById: me.id });
+
 helpTicketRoutes.get(
   '/',
-  requireAny(P.viewAll),
+  requireView('admin', 'help_tickets'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
-    const { base, where } = ticketListWhere(q);
+    const list = ticketListWhere(q);
+    const base = mineOnly(me, list.base);
+    const where = mineOnly(me, list.where);
     const [rows, total, summary] = await Promise.all([
       prisma.helpTicket.findMany({
         where,
@@ -307,10 +321,13 @@ helpTicketRoutes.get(
 // The printed list — above /:id (route order).
 helpTicketRoutes.get(
   '/pdf',
-  requireAny(P.viewAll),
+  requireView('admin', 'help_tickets'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
-    const { where, status, kind } = ticketListWhere(q);
+    const list = ticketListWhere(q);
+    const { status, kind } = list;
+    const where = mineOnly(me, list.where);
     const [rows, count, open] = await Promise.all([
       prisma.helpTicket.findMany({ where, include: listInclude, orderBy: orderBy(q, SORTABLE, { createdAt: 'desc' }), take: LIST_CAP }),
       prisma.helpTicket.count({ where }),
@@ -365,7 +382,7 @@ helpTicketRoutes.get(
 /** The chosen list, by name — read by whoever reads the register; changed by a super admin only. */
 helpTicketRoutes.get(
   '/receivers',
-  requireAny(P.viewAll),
+  requireView('admin', 'help_tickets'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const ids = await chosenReceiverIds();
@@ -448,6 +465,8 @@ helpTicketRoutes.get(
       files,
       canReply: row.createdById === me.id || manage,
       canManage: manage,
+      // Edit Own moves the status of a ticket one raised (2026-10-18).
+      canChangeStatus: mayEdit(me, 'admin', 'help_tickets', row.createdById === me.id),
     });
   }),
 );
@@ -511,11 +530,13 @@ const statusSchema = z.object({
 
 helpTicketRoutes.post(
   '/:id/status',
-  requireAny(P.editAll),
+  requireEdit('admin', 'help_tickets'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(statusSchema, req.body);
     const row = await load(req.params.id);
+    // Edit Own: the tickets they raised (2026-10-18); Edit All any, as before.
+    assertCanEdit(me, 'admin', 'help_tickets', row.createdById === me.id);
     if (row.status === body.status) throw badRequest(`It is already ${STATUS_LABEL[row.status].toLowerCase()}`);
     if (body.status === 'WONT_DO' && !body.note) throw badRequest('Say why it will not be done — the person who raised it reads it');
     const closing = CLOSED.includes(body.status);
@@ -541,8 +562,10 @@ helpTicketRoutes.post(
       },
       req,
     );
+    // The raiser moving their own ticket tells the people who receive them;
+    // anybody else moving it tells the raiser.
     await tell(
-      [row.createdById],
+      row.createdById === me.id ? [...(await receivers()), ...row.replies.map((r) => r.authorId)] : [row.createdById],
       {
         type: 'help.reply',
         title: `${row.number} is ${STATUS_LABEL[body.status].toLowerCase()}`,
