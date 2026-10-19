@@ -3715,6 +3715,29 @@ async function main() {
       );
       const outCancel = await api(keeperToken, 'POST', `/borrow-slips/${dueId}/cancel`, { reason: `${TAG} too late` });
       check('a slip already out is not cancelled — its items are taken back instead', outCancel.status === 400, String(outCancel.status));
+      // A cancelled request is deleted by a delete holder (2026-10-19, the
+      // owner's call); a slip on loan is the record of what went out.
+      const borrowDelRole = await makeRole('zzchain_borrowdel', 'ZZ Borrow deleter', [
+        'gchain.borrow_slips.view_all',
+        'gchain.borrow_slips.edit_all',
+        'gchain.borrow_slips.delete',
+      ]);
+      const borrowDeleter = await mkUser('Verify Borrow Deleter', 'borrowdel@verifyc.local', borrowDelRole.id);
+      const borrowDelToken = signToken(borrowDeleter.id, borrowDeleter.email);
+      const noRight = await api(borrowerToken, 'DELETE', `/borrow-slips/${thirdId}`);
+      const delFlags = await api(borrowDelToken, 'GET', `/borrow-slips/${thirdId}`);
+      const outDelete = await api(borrowDelToken, 'DELETE', `/borrow-slips/${dueId}`);
+      const goneDelete = await api(borrowDelToken, 'DELETE', `/borrow-slips/${thirdId}`);
+      check(
+        'a cancelled borrow request is deleted by a delete holder; without the right, or once on loan, it is refused',
+        noRight.status === 403 &&
+          delFlags.body.canDelete === true &&
+          outDelete.status === 400 &&
+          goneDelete.status === 200 &&
+          (await prisma.borrowSlip.findUnique({ where: { id: thirdId } })) === null &&
+          (await prisma.borrowSlip.findUnique({ where: { id: dueId } })) !== null,
+        `${noRight.status}; flags ${delFlags.body.canDelete}; out ${outDelete.status}; delete ${goneDelete.status} ${JSON.stringify(goneDelete.body).slice(0, 120)}`,
+      );
     }
 
     // ── Pull-out slips (2026-10-14) ──────────────────────────────────────

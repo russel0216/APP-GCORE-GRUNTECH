@@ -3142,6 +3142,7 @@ async function presentSlip(slip: LoadedSlip, me: ResolvedUser) {
     canSubmit: draft && handles && !!route && slip.items.length > 0,
     canWithdraw: slip.status === 'PENDING_APPROVAL' && handles,
     canCancel: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'].includes(slip.status) && handles,
+    canDelete: (draft || slip.status === 'CANCELLED') && handles && can(me, 'gchain.borrow_slips.delete'),
     canRelease: slip.status === 'APPROVED' && warehouse,
     canReturn: ON_LOAN.includes(slip.status) && warehouse,
     approvalRoute: draft && route ? await routeBrief(BORROW_DOC, null, slip.requestedById ?? me.id) : null,
@@ -3728,6 +3729,35 @@ borrowRoutes.post(
       });
     }
     res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
+/**
+ * A draft or a CANCELLED request is deleted (2026-10-19, the owner's call):
+ * nothing left the shelf on either. The delete right, and who asked for it
+ * or the warehouse; its files go after the commit.
+ */
+borrowRoutes.delete(
+  '/:id',
+  require_('gchain.borrow_slips.delete'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const slip = await prisma.borrowSlip.findUnique({ where: { id: req.params.id } });
+    if (!slip) throw notFound('Borrow slip not found');
+    if (!mayHandleRequest(me, slip)) throw forbidden('This request is someone else’s');
+    if (slip.status !== 'DRAFT' && slip.status !== 'CANCELLED') {
+      throw badRequest(`Only a draft or a cancelled slip can be deleted — ${slip.number} is ${statusLabel(slip.status).toLowerCase()}`);
+    }
+    const gone = await deleteOrRefuse(slip.number, () =>
+      prisma.borrowSlip.deleteMany({ where: { id: slip.id, status: { in: ['DRAFT', 'CANCELLED'] } } }),
+    );
+    if (!gone.count) throw badRequest(`${slip.number} changed a moment ago — it stays on record`);
+    await deleteAttachmentsOf(BORROW_DOC, [slip.id]);
+    await audit(
+      { entityType: 'borrow_slip', entityId: slip.id, action: 'DELETED', summary: `Deleted ${slip.status === 'CANCELLED' ? 'cancelled' : 'draft'} ${slip.number}` },
+      req,
+    );
+    res.json({ ok: true });
   }),
 );
 
