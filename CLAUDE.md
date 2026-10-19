@@ -2953,7 +2953,10 @@ leave the approver deciding on stale figures).
   /employees/:id { extraPositionIds }` (needs a main one; active posts;
   audited) and the employee form's "Also holds"; each counts its holder as
   filled (`filledByPosition`), the list's `?positionId=` finds them, and the
-  title (and the login's) reads "Main / Extra". Roles, not posts, decide
+  title (and the login's) reads "Main / Extra". HR › Employees and Admin › Users
+  show the main post with "Also holds: …" under it (`GET /users` sends
+  `mainPosition` and `alsoHolds`; the user editor shows them read-only and
+  sends Position only when changed). Roles, not posts, decide
   what they approve. `verify-plantilla.ts`
   asserts the mirror for every linked employee in the database. A position anyone
   has held is deactivated, not deleted.

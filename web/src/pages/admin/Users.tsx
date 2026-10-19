@@ -51,6 +51,9 @@ interface UserRow {
   team?: { code: string; name: string } | null;
   /** Their employee record, when the login has one — the person (2026-10-16). */
   employeeId?: string | null;
+  /** The main plantilla post and the others held (2026-10-19). */
+  mainPosition?: string | null;
+  alsoHolds?: string[];
 }
 
 /** The halves of a person still apart (GET /users summary, 2026-10-16). */
@@ -160,7 +163,8 @@ export function Users() {
               </span>
             )}
           </div>
-          <div className="faint">{u.position ?? '—'}</div>
+          <div className="faint">{u.mainPosition ?? u.position ?? '—'}</div>
+          {!!u.alsoHolds?.length && <div className="faint">Also holds: {u.alsoHolds.join(', ')}</div>}
         </div>
       ),
     },
@@ -426,7 +430,7 @@ function UserEditor({
           email: u.email,
           password: '',
           employeeNo: u.employeeNo ?? '',
-          position: u.position ?? '',
+          position: u.mainPosition ?? u.position ?? '',
           phone: u.phone ?? '',
           supervisorId: u.supervisor?.id ?? '',
           departmentId: u.department?.id ?? '',
@@ -449,7 +453,10 @@ function UserEditor({
         ...(kept
           ? { firstName: form.firstName.trim(), lastName: form.lastName.trim(), suffix: form.suffix.trim() || null }
           : { name: form.name }),
-        position: form.position || null,
+        // Sent only when changed: the login's title joins every post held.
+        ...((form.position || null) !== (detail?.mainPosition ?? detail?.position ?? null)
+          ? { position: form.position || null }
+          : {}),
         phone: form.phone || null,
         departmentId: form.departmentId || null,
       };
@@ -601,6 +608,11 @@ function UserEditor({
                 onChange={(e) => setForm({ ...form, position: e.target.value })}
               />
             </Field>
+            {!!detail?.alsoHolds?.length && (
+              <Field label="Also holds" hint="Set on the employee record (HR › Employees)">
+                <input readOnly value={detail.alsoHolds.join(', ')} />
+              </Field>
+            )}
             <Field label="Mobile" hint="Printed under the author's name on the quotations they raise">
               <input
                 type="tel"

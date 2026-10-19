@@ -101,6 +101,16 @@ function userListWhere(q: ListQuery): Prisma.UserWhereInput {
   registry's `own`): the list, its cards and its paper narrow to that one row;
   View All reads as before.
 */
+/**
+ * The main plantilla post and the ones also held (2026-10-19), from the
+ * employee record — the login's `position` is their joined mirror.
+ */
+function heldPositions(
+  e: { positionRef: { title: string } | null; extraPositions: { position: { title: string } }[] } | null | undefined,
+): { mainPosition: string | null; alsoHolds: string[] } {
+  return { mainPosition: e?.positionRef?.title ?? null, alsoHolds: (e?.extraPositions ?? []).map((x) => x.position.title) };
+}
+
 const MINE_USERS = (me: ResolvedUser): Prisma.UserWhereInput => ({ id: me.id });
 
 userRoutes.get(
@@ -121,7 +131,7 @@ userRoutes.get(
           department: { select: { id: true, name: true } },
           supervisor: { select: { id: true, name: true } },
           roles: { select: { role: { select: { key: true, name: true } } } },
-          employee: { select: { id: true, industry: { select: { code: true, name: true } } } },
+          employee: { select: { id: true, industry: { select: { code: true, name: true } }, positionRef: { select: { title: true } }, extraPositions: { orderBy: { sortOrder: 'asc' }, select: { position: { select: { title: true } } } } } },
         },
         orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
@@ -146,6 +156,7 @@ userRoutes.get(
           roles: r.roles.map((x) => x.role),
           team: employee?.industry ?? null,
           employeeId: employee?.id ?? null,
+          ...heldPositions(employee),
         })),
         total,
         q,
@@ -386,7 +397,7 @@ userRoutes.get(
       : null;
     const employee = await prisma.employee.findUnique({
       where: { userId: user.id },
-      select: { id: true, employeeNo: true, firstName: true, lastName: true, suffix: true, industryId: true },
+      select: { id: true, employeeNo: true, firstName: true, lastName: true, suffix: true, industryId: true, positionRef: { select: { title: true } }, extraPositions: { orderBy: { sortOrder: 'asc' }, select: { position: { select: { title: true } } } } },
     });
 
     res.json({
@@ -396,7 +407,15 @@ userRoutes.get(
       invite: invite
         ? { sentAt: invite.createdAt, expiresAt: invite.expiresAt, live: !invite.usedAt && invite.expiresAt > new Date() }
         : null,
-      employee,
+      employee: employee && {
+        id: employee.id,
+        employeeNo: employee.employeeNo,
+        firstName: employee.firstName,
+        lastName: employee.lastName,
+        suffix: employee.suffix,
+        industryId: employee.industryId,
+      },
+      ...heldPositions(employee),
     });
   }),
 );

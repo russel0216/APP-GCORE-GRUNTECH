@@ -190,6 +190,9 @@ export function Employees() {
             {e.positionRef?.title ?? e.position ?? '—'}
             {!e.positionId && e.position ? ' · unclassified' : ''}
           </div>
+          {!!e.extraPositions?.length && (
+            <div className="faint">Also holds: {e.extraPositions.map((x) => x.position.title).join(', ')}</div>
+          )}
         </div>
       ),
     },
