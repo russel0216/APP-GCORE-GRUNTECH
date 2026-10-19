@@ -4057,6 +4057,15 @@ hierarchy" — department removed EVERYWHERE, and both hierarchies.
   It is the Organizational Chart's forest (`buildForest`, exported) read
   through `useOrgPeople()` in `OrgChart.tsx` — still the one screen that
   reads the admin `/users?pageSize` list.
+- **The Organizational Chart has two sides** (2026-10-19, the owner's
+  call): under the head, **BOSS — Business and Operation Support
+  Services** (the direct reports with no selling team) on the left and the
+  **Industry Teams** (KAT, HIT, UIT, GIB, SIT, in that order) on the
+  right, each under its own label. A card shows the title (every role at
+  the highest level) and, under it, every OTHER role the person holds as a
+  chip, the managing ones (Team Leader, Technical Manager, Sales Manager,
+  Aftermarket Manager) marked first — so who is a team's Technical Manager
+  or Sales Manager reads off the chart.
 
 ### The organisation chart of 2026-10-17 — one approver, a hidden stand-in, the requester's follow-up
 

@@ -72,6 +72,16 @@ function countBelow(id: string, children: Map<string, Person[]>, seen = new Set<
   return (children.get(id) ?? []).reduce((n, c) => n + 1 + countBelow(c.id, children, seen), 0);
 }
 
+/** The managing roles a team turns to — marked on a card wherever they are held. */
+const KEY_ROLES = new Set(['technical_manager', 'sales_manager', 'team_leader', 'service_manager']);
+
+/** The teams in the owner's order; any other after them. */
+const TEAM_ORDER = ['KAT', 'HIT', 'UIT', 'GIB', 'SIT'];
+const teamRank = (code?: string) => {
+  const i = TEAM_ORDER.indexOf(code ?? '');
+  return i < 0 ? TEAM_ORDER.length : i;
+};
+
 /** Each card registers itself so the Back Support lines can find it. */
 type CardRef = (id: string, el: HTMLElement | null) => void;
 let registerCard: CardRef = () => {};
@@ -79,6 +89,13 @@ let registerCard: CardRef = () => {};
 function Card({ node, depth, meId, search }: { node: Node; depth: number; meId?: string; search: string }) {
   const p = node.person;
   const supports = (p.supportTeams ?? []).map((t) => t.industry?.code).filter(Boolean);
+  // Every role the title does not already name (2026-10-19, the owner's call:
+  // "reflect multiple role in the chart to determine who is the technical
+  // manager and sales manager") — the managing roles marked.
+  const title = ` / ${(p.position ?? '').toLowerCase()} / `;
+  const extra = (p.roles ?? [])
+    .filter((r) => !title.includes(` / ${r.name.trim().toLowerCase()} / `))
+    .sort((a, b) => Number(KEY_ROLES.has(b.key)) - Number(KEY_ROLES.has(a.key)) || (a.rank ?? 99) - (b.rank ?? 99));
   return (
     <Link
       ref={(el) => registerCard(p.id, el)}
@@ -92,6 +109,15 @@ function Card({ node, depth, meId, search }: { node: Node; depth: number; meId?:
           {p.id === meId && <span className="org-you"> (you)</span>}
         </span>
         <span className="org-position">{p.position || p.team?.name || '—'}</span>
+        {extra.length > 0 && (
+          <span className="org-roles" aria-label="Also holds">
+            {extra.map((r) => (
+              <span key={r.key} className={`org-role${KEY_ROLES.has(r.key) ? ' is-key' : ''}`}>
+                {r.name}
+              </span>
+            ))}
+          </span>
+        )}
         {supports.length > 0 && <span className="org-supports">Back Support → {supports.join(', ')}</span>}
       </span>
       {node.reports.length > 0 && <span className="visually-hidden">, {node.reports.length} direct reports</span>}
@@ -115,22 +141,48 @@ function Branch({ node, depth, meId, search }: { node: Node; depth: number; meId
   );
 }
 
+function RowItem({ node, meId, search }: { node: Node; meId?: string; search: string }) {
+  return (
+    <li className="org-row-item">
+      <Card node={node} depth={1} meId={meId} search={search} />
+      {node.reports.length > 0 && (
+        <ul className="org-column">
+          {node.reports.map((c) => (
+            <Branch key={c.person.id} node={c} depth={2} meId={meId} search={search} />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+/*
+  Under the head the chart splits in two (2026-10-19, the owner's call): BOSS —
+  Business and Operation Support Services, the people with no selling team — on
+  the left, and the Industry Teams (KAT, HIT, UIT, GIB, SIT) on the right.
+*/
 function Tree({ head, meId, search }: { head: Node; meId?: string; search: string }) {
+  const boss = head.reports.filter((r) => !r.person.team);
+  const industry = head.reports
+    .filter((r) => r.person.team)
+    .sort((a, b) => teamRank(a.person.team?.code) - teamRank(b.person.team?.code) || a.person.name.localeCompare(b.person.name));
+  const sides = [
+    { key: 'boss', label: 'BOSS — Business and Operation Support Services', nodes: boss },
+    { key: 'industry', label: 'Industry Teams', nodes: industry },
+  ].filter((x) => x.nodes.length > 0);
   return (
     <div className="org-tree">
       <Card node={head} depth={0} meId={meId} search={search} />
-      {head.reports.length > 0 && (
+      {sides.length > 0 && (
         <ul className="org-row">
-          {head.reports.map((r) => (
-            <li key={r.person.id} className="org-row-item">
-              <Card node={r} depth={1} meId={meId} search={search} />
-              {r.reports.length > 0 && (
-                <ul className="org-column">
-                  {r.reports.map((c) => (
-                    <Branch key={c.person.id} node={c} depth={2} meId={meId} search={search} />
-                  ))}
-                </ul>
-              )}
+          {sides.map((side) => (
+            <li key={side.key} className="org-row-item org-side" style={{ flexGrow: side.nodes.length }}>
+              <span className="org-side-label">{side.label}</span>
+              <ul className="org-row">
+                {side.nodes.map((r) => (
+                  <RowItem key={r.person.id} node={r} meId={meId} search={search} />
+                ))}
+              </ul>
             </li>
           ))}
         </ul>
