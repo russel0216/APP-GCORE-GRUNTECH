@@ -22,7 +22,7 @@ import { deleteAttachment } from '../shared/attachments';
 import { nextNumber, setCounter, type CounterMove } from '../shared/numbering';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit, editScope } from '../shared/ownScope';
-import { positionFields, setEmployeePosition } from '../shared/plantilla';
+import { positionFields, setEmployeePosition, setExtraPositions } from '../shared/plantilla';
 import { sweepSeparations } from '../shared/clearance';
 import { createLogin, defaultRoleIds, deliverLink, personName, syncLoginFromEmployee } from '../shared/accounts';
 import { celebrationsBetween } from '../shared/celebrations';
@@ -117,7 +117,13 @@ function employeeListWhere(q: ListQuery): Prisma.EmployeeWhereInput {
   if (employmentType) where.employmentType = employmentType;
   // `none` = unclassified: an active employee with no plantilla position.
   if (f.positionId === 'none') where.positionId = null;
-  else if (f.positionId) where.positionId = f.positionId;
+  // A position also held counts as held (2026-10-19).
+  else if (f.positionId) {
+    where.AND = [
+      ...((where.AND as Prisma.EmployeeWhereInput[] | undefined) ?? []),
+      { OR: [{ positionId: f.positionId }, { extraPositions: { some: { positionId: f.positionId } } }] },
+    ];
+  }
   // `?login=none`: an active employee with no G-CORE login yet (2026-10-16,
   // Admin › Users' Unlinked card links here); `yes` the rest.
   const login = choice(f.login, { none: 'none', yes: 'yes' }, 'Login');
@@ -152,6 +158,10 @@ employeeRoutes.get(
         include: {
           department: { select: { id: true, name: true } },
           positionRef: { select: { id: true, code: true, title: true } },
+        extraPositions: {
+          orderBy: { sortOrder: 'asc' },
+          select: { position: { select: { id: true, code: true, title: true } } },
+        },
           industry: { select: { id: true, code: true, name: true } },
           user: { select: { id: true, email: true, isActive: true, invitePending: true } },
         },
@@ -368,6 +378,10 @@ employeeRoutes.get(
       include: {
         department: { select: { id: true, name: true } },
         positionRef: { select: { id: true, code: true, title: true } },
+        extraPositions: {
+          orderBy: { sortOrder: 'asc' },
+          select: { position: { select: { id: true, code: true, title: true } } },
+        },
         industry: { select: { id: true, code: true, name: true } },
         user: {
           select: {
@@ -421,6 +435,8 @@ const employeeSchema = z.object({
   position: z.string().trim().optional().nullable(),
   /** The plantilla slot; when set, `position` mirrors its title (shared/plantilla.ts). */
   positionId: z.string().optional().nullable(),
+  /** Positions also held beside the main one (2026-10-19), replaced whole. */
+  extraPositionIds: z.array(z.string()).max(10).optional(),
   employmentType: z.enum(EMPLOYMENT_TYPES).default('REGULAR'),
   dateHired: z.string().optional().nullable(),
   dateRegularized: z.string().optional().nullable(),
@@ -879,6 +895,7 @@ employeeRoutes.patch(
     }
 
     let loginSynced: string[] = [];
+    let extrasBefore: string[] | null = null;
     let counter: CounterMove | null = null;
     const employee = await prisma.$transaction(async (tx) => {
       const updated = await tx.employee.update({ where: { id: req.params.id }, data });
@@ -894,6 +911,15 @@ employeeRoutes.patch(
         result = await setEmployeePosition(tx, updated.id, body.positionId || null, body.position ?? before.position);
       } else if (body.position !== undefined && !before.positionId) {
         result = await setEmployeePosition(tx, updated.id, null, body.position);
+      }
+      if (body.extraPositionIds !== undefined) {
+        const was = await tx.employeeExtraPosition.findMany({
+          where: { employeeId: updated.id },
+          orderBy: { sortOrder: 'asc' },
+          select: { positionId: true },
+        });
+        extrasBefore = was.map((x) => x.positionId);
+        result = await setExtraPositions(tx, updated.id, body.extraPositionIds);
       }
       // The login mirrors what was just written (`syncLoginFromEmployee`).
       loginSynced = await syncLoginFromEmployee(tx, updated.id);
@@ -912,6 +938,7 @@ employeeRoutes.patch(
           ...stripRates(employee as Record<string, unknown>, false),
           ...(loginSynced.length ? { loginSynced } : {}),
           ...(counter ? { counter } : {}),
+          ...(extrasBefore ? { extraPositionsBefore: extrasBefore, extraPositionIds: body.extraPositionIds } : {}),
         },
       },
       req,

@@ -921,6 +921,9 @@ model Employee {
   /// text only for an employee with no plantilla position (unclassified).
   positionId   String?
   positionRef  Position?   @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  /// Positions held beside the main one (2026-10-19: one person, two
+  /// managers' posts). Each counts as filled; `position` joins the titles.
+  extraPositions EmployeeExtraPosition[]
   /// The industry team the person works in (Utilities, Healthcare…), from the
   /// same Industry rows customers are classified by. Set by HR; shown to the
   /// person on their invitation and My Account, never edited by them.
@@ -3674,6 +3677,7 @@ model Position {
   sortOrder           Int                 @default(0)
   isActive            Boolean             @default(true)
   employees           Employee[]
+  extraHolders        EmployeeExtraPosition[]
   courseRequirements  CourseRequirement[]
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
@@ -3682,6 +3686,21 @@ model Position {
   createdById String?
 
   @@index([departmentId])
+}
+
+/// A plantilla position an employee ALSO holds (2026-10-19, the owner's call:
+/// "Karen is Accounting and HR Manager"). The main one stays on
+/// Employee.positionId; these count as filled too, and the mirrored title
+/// reads "Main / Extra". Roles, not positions, decide what one approves.
+model EmployeeExtraPosition {
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  positionId String
+  position   Position @relation(fields: [positionId], references: [id], onDelete: Cascade)
+  sortOrder  Int      @default(0)
+
+  @@id([employeeId, positionId])
+  @@index([positionId])
 }
 
 // ════════════════════════════════════════════════════════════════════

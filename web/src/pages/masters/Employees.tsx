@@ -1,3 +1,4 @@
+import { TickPicker } from '../../components/TickPicker';
 import { useEffect, useId, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
@@ -57,6 +58,8 @@ interface EmployeeRow {
   position: string | null;
   positionId: string | null;
   positionRef: { id: string; code: string; title: string } | null;
+  /** Positions held beside the main one (2026-10-19). */
+  extraPositions?: { position: { id: string; code: string; title: string } }[];
   employmentType: string;
   dateHired: string | null;
   dateRegularized: string | null;
@@ -588,6 +591,7 @@ function EmployeeForm({
     industryId: employee?.industry?.id ?? '',
     position: employee?.position ?? '',
     positionId: employee?.positionId ?? '',
+    extraPositionIds: (employee?.extraPositions ?? []).map((x) => x.position.id),
     employmentType: employee?.employmentType ?? 'REGULAR',
     dateHired: employee?.dateHired?.slice(0, 10) ?? '',
     dateRegularized: employee?.dateRegularized?.slice(0, 10) ?? '',
@@ -793,6 +797,9 @@ function EmployeeForm({
         payload.positionId = form.positionId || null;
       }
       if (!form.positionId) payload.position = form.position.trim() || null;
+      const extrasWere = (employee?.extraPositions ?? []).map((x) => x.position.id);
+      const extras = form.positionId ? form.extraPositionIds.filter((x) => x !== form.positionId) : [];
+      if (extras.join() !== extrasWere.join()) payload.extraPositionIds = extras;
 
       if (setRates) {
         payload.dailyRate = form.dailyRate === '' ? null : Number(form.dailyRate);
@@ -1079,12 +1086,32 @@ function EmployeeForm({
                 </p>
               )}
             </div>
+            {form.positionId && (
+              <Field label="Also holds" hint="Other plantilla posts this person fills. Each counts as filled; the title joins them.">
+                <TickPicker
+                  choices={positionOptions
+                    .filter((p) => p.id !== form.positionId)
+                    .map((p) => ({ value: p.id, label: p.title, hint: p.departmentName ?? undefined }))}
+                  value={form.extraPositionIds}
+                  onChange={(v) => setForm({ ...form, extraPositionIds: v })}
+                  none="Nothing else"
+                  noun="positions"
+                />
+              </Field>
+            )}
             {form.positionId ? (
               <Field label="Title" hint="Set by the plantilla — rename it there">
                 <input
                   readOnly
                   value={
-                    positionOptions.find((p) => p.id === form.positionId)?.title ?? held?.title ?? ''
+                    [
+                      positionOptions.find((p) => p.id === form.positionId)?.title ?? held?.title ?? '',
+                      ...form.extraPositionIds
+                        .filter((x) => x !== form.positionId)
+                        .map((x) => positionOptions.find((p) => p.id === x)?.title ?? ''),
+                    ]
+                      .filter(Boolean)
+                      .join(' / ')
                   }
                 />
               </Field>

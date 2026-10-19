@@ -63,7 +63,54 @@ export async function setEmployeePosition(
   freeText: string | null | undefined,
 ) {
   const data = await positionFields(tx, positionId, freeText);
-  return tx.employee.update({ where: { id: employeeId }, data });
+  // Off the plantilla, nothing else is held beside it.
+  if (!data.positionId) await tx.employeeExtraPosition.deleteMany({ where: { employeeId } });
+  else await tx.employeeExtraPosition.deleteMany({ where: { employeeId, positionId: data.positionId } });
+  await tx.employee.update({ where: { id: employeeId }, data });
+  return refreshPositionTitle(tx, employeeId);
+}
+
+/** The joined title: the main position's, then each one also held, " / " between. */
+export const POSITION_JOIN = ' / ';
+
+/**
+ * Re-derives an employee's mirrored title (and their login's) from the main
+ * position and the ones also held. Free text on an unlinked employee is left.
+ */
+export async function refreshPositionTitle(tx: Tx, employeeId: string) {
+  const e = await tx.employee.findUniqueOrThrow({
+    where: { id: employeeId },
+    select: {
+      positionId: true,
+      positionRef: { select: { title: true } },
+      extraPositions: { orderBy: { sortOrder: 'asc' }, select: { position: { select: { title: true } } } },
+    },
+  });
+  if (!e.positionId || !e.positionRef) return tx.employee.findUniqueOrThrow({ where: { id: employeeId } });
+  const title = [e.positionRef.title, ...e.extraPositions.map((x) => x.position.title)].join(POSITION_JOIN);
+  await tx.user.updateMany({ where: { employee: { id: employeeId } }, data: { position: title } });
+  return tx.employee.update({ where: { id: employeeId }, data: { position: title } });
+}
+
+/**
+ * Sets the positions an employee ALSO holds, replaced whole, in order. Needs a
+ * main position; each must be active; the main one and repeats are dropped.
+ */
+export async function setExtraPositions(tx: Tx, employeeId: string, positionIds: string[]) {
+  const e = await tx.employee.findUniqueOrThrow({ where: { id: employeeId }, select: { positionId: true } });
+  const ids = [...new Set(positionIds.map((x) => x.trim()).filter(Boolean))].filter((x) => x !== e.positionId);
+  if (ids.length && !e.positionId) throw badRequest('Choose the main plantilla position first');
+  if (ids.length) {
+    const found = await tx.position.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, isActive: true } });
+    if (found.length !== ids.length) throw notFound('One of those plantilla positions does not exist');
+    const off = found.find((p) => !p.isActive);
+    if (off) throw badRequest(`"${off.title}" is an inactive position — reactivate it in the Plantilla first`);
+  }
+  await tx.employeeExtraPosition.deleteMany({ where: { employeeId } });
+  if (ids.length) {
+    await tx.employeeExtraPosition.createMany({ data: ids.map((positionId, sortOrder) => ({ employeeId, positionId, sortOrder })) });
+  }
+  return refreshPositionTitle(tx, employeeId);
 }
 
 /**
@@ -72,13 +119,19 @@ export async function setEmployeePosition(
  */
 export async function mirrorPositionTitle(tx: Tx, positionId: string, title: string): Promise<number> {
   const { count } = await tx.employee.updateMany({
-    where: { positionId },
+    where: { positionId, extraPositions: { none: {} } },
     data: { position: title },
   });
   // And their logins, which mirror the employee (shared/accounts.ts,
   // `syncLoginFromEmployee` — 2026-10-16).
-  await tx.user.updateMany({ where: { employee: { positionId } }, data: { position: title } });
-  return count;
+  await tx.user.updateMany({ where: { employee: { positionId, extraPositions: { none: {} } } }, data: { position: title } });
+  // Anyone holding it beside another has a joined title to work out again.
+  const joined = await tx.employee.findMany({
+    where: { OR: [{ positionId, extraPositions: { some: {} } }, { extraPositions: { some: { positionId } } }] },
+    select: { id: true },
+  });
+  for (const j of joined) await refreshPositionTitle(tx, j.id);
+  return count + joined.length;
 }
 
 // ── Derived figures ──────────────────────────────────────────────────────────
@@ -98,6 +151,13 @@ export async function filledByPosition(
   });
   const out = new Map<string, number>();
   for (const g of groups) if (g.positionId) out.set(g.positionId, g._count._all);
+  // A position also held counts its holder as filling it.
+  const extra = await tx.employeeExtraPosition.groupBy({
+    by: ['positionId'],
+    where: { employee: { isActive: true }, ...(positionIds ? { positionId: { in: positionIds } } : {}) },
+    _count: { _all: true },
+  });
+  for (const g of extra) out.set(g.positionId, (out.get(g.positionId) ?? 0) + g._count._all);
   return out;
 }
 

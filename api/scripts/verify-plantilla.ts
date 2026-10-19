@@ -32,7 +32,7 @@ import { signToken } from '../src/auth/middleware';
 import { dayKey } from '../src/shared/hr';
 import { runImport } from '../src/shared/csv';
 import { employeesImport } from '../src/routes/imports/employees';
-import { plantillaSummary } from '../src/shared/plantilla';
+import { filledByPosition, plantillaSummary } from '../src/shared/plantilla';
 import { hrSignsOwnWork, sweepSeparations, turnover, tenureMonths } from '../src/shared/clearance';
 import { pendingFor, pickWorkflow } from '../src/shared/approvals';
 import { statusLabel } from '../src/shared/pdf';
@@ -410,6 +410,28 @@ async function main() {
   });
   const ontoDead = await http(T.hr, 'PATCH', `/employees/${viaCreate.body.id}`, { positionId: dead.id });
   check('an inactive position cannot be given to anyone', ontoDead.status === 400, `${ontoDead.status}`);
+
+  // A second post held beside the main one (2026-10-19: one person, two managers' posts).
+  const alsoPos = await prisma.position.create({
+    data: { code: `${TAG}-POS-HR`, title: `${TAG} HR Manager`, authorisedHeadcount: 1 },
+  });
+  const filledBefore = (await filledByPosition([alsoPos.id])).get(alsoPos.id) ?? 0;
+  const both = await http(T.hr, 'PATCH', `/employees/${free.body.id}`, { extraPositionIds: [alsoPos.id, pos.id] });
+  check(
+    'a position also held joins the title, main first',
+    both.status === 200 && both.body.position === `${renamed} / ${TAG} HR Manager`,
+    `${both.status} ${both.body.position}`,
+  );
+  check('…and counts its holder as filled', ((await filledByPosition([alsoPos.id])).get(alsoPos.id) ?? 0) === filledBefore + 1);
+  const viaExtra = await http(T.hr, 'GET', `/employees?positionId=${alsoPos.id}&search=${TAG}Free`);
+  check('…and the list filtered to it finds them', (viaExtra.body.rows as { id: string }[]).some((e) => e.id === free.body.id));
+  await http(T.hr, 'PATCH', `/positions/${alsoPos.id}`, { title: `${TAG} HR Head` });
+  const afterRename = await prisma.employee.findUnique({ where: { id: free.body.id }, select: { position: true } });
+  check('renaming the extra post rewrites the joined title', afterRename?.position === `${renamed} / ${TAG} HR Head`, `${afterRename?.position}`);
+  const offAgain = await http(T.hr, 'PATCH', `/employees/${free.body.id}`, { extraPositionIds: [] });
+  check('clearing them leaves the main title alone', offAgain.status === 200 && offAgain.body.position === renamed, `${offAgain.body.position}`);
+  const noMain = await http(T.hr, 'PATCH', `/employees/${viaCreate.body.id}`, { positionId: null, extraPositionIds: [alsoPos.id] });
+  check('a post also held needs a main one', noMain.status === 400, `${noMain.status}`);
 
   // ══ 5. Import: a dry run writes nothing ══════════════════════════════════
   console.log('\nImport — resolve in build, create in write');
@@ -1019,9 +1041,16 @@ async function main() {
 
   const drift = await prisma.employee.findMany({
     where: { positionId: { not: null } },
-    select: { employeeNo: true, position: true, positionRef: { select: { title: true } } },
+    select: {
+      employeeNo: true,
+      position: true,
+      positionRef: { select: { title: true } },
+      extraPositions: { orderBy: { sortOrder: 'asc' }, select: { position: { select: { title: true } } } },
+    },
   });
-  const bad = drift.filter((e) => e.position !== e.positionRef?.title);
+  const bad = drift.filter(
+    (e) => e.position !== [e.positionRef?.title, ...e.extraPositions.map((x) => x.position.title)].join(' / '),
+  );
   check(
     'every linked employee’s title equals its position’s title (the mirror holds everywhere)',
     bad.length === 0,
@@ -1029,7 +1058,9 @@ async function main() {
   );
 
   const active = await prisma.position.findMany({ where: { isActive: true }, select: { id: true } });
-  const filledDirect = await prisma.employee.count({ where: { isActive: true, positionId: { in: active.map((p) => p.id) } } });
+  const filledDirect =
+    (await prisma.employee.count({ where: { isActive: true, positionId: { in: active.map((p) => p.id) } } })) +
+    (await prisma.employeeExtraPosition.count({ where: { employee: { isActive: true }, positionId: { in: active.map((p) => p.id) } } }));
   const summaryNow = await http(T.hr, 'GET', '/positions/summary');
   check(
     'the plantilla summary’s filled equals a direct count of active holders',
