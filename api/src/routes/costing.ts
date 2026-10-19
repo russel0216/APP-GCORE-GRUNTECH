@@ -1,3 +1,4 @@
+import { jobsOnCostingWhere } from '../shared/costingSets';
 import { Router } from 'express';
 import { z } from 'zod';
 import { JobType, Prisma } from '@prisma/client';
@@ -328,7 +329,9 @@ function costingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Pri
   // it is a costing whose job happens to be a contract (model §4.5) — so it
   // would be a mistake to give it a second table to drift out of step with.
   const jobType = choice(q.filters.jobType, JobType, 'Project type');
-  if (jobType) where.jobs = { some: { type: jobType } };
+  if (jobType) {
+    where.AND = [{ OR: [{ jobs: { some: { type: jobType } } }, { jobLinks: { some: { job: { type: jobType } } } }] }];
+  }
   // The rows a person ticked (Print selected); the rules above still apply,
   // so an id never prints a costing the caller could not see in the list.
   const ids = idsFilter(q.filters.ids);
@@ -355,6 +358,8 @@ costingRoutes.get(
           // The project the costing became (2026-10-15, the owner's call: the
           // list says when a costing has been converted).
           jobs: { select: { id: true, number: true, name: true, status: true }, orderBy: { createdAt: 'asc' } },
+          // …or one it was built into beside another costing (2026-10-19).
+          jobLinks: { select: { job: { select: { id: true, number: true, name: true, status: true } } } },
           _count: { select: { lines: true, scopeSections: true } },
         },
         orderBy: orderBy(q, COSTING_SORTS, { createdAt: 'desc' }),
@@ -366,8 +371,8 @@ costingRoutes.get(
 
     res.json(
       listResult(
-        rows.map((r) => ({
-          ...present(r as unknown as Record<string, unknown>),
+        rows.map(({ jobLinks, ...r }) => ({
+          ...present({ ...r, jobs: [...r.jobs, ...jobLinks.map((l) => l.job)] } as unknown as Record<string, unknown>),
           lineCount: r._count.lines,
           sectionCount: r._count.scopeSections,
         })),
@@ -1025,7 +1030,7 @@ costingRoutes.delete(
 // ── Read one ─────────────────────────────────────────────────────────────────
 
 async function loadFull(id: string, tx: Tx = prisma) {
-  return tx.costing.findUnique({
+  const costing = await tx.costing.findUnique({
     where: { id },
     include: {
       customer: { select: { id: true, name: true, code: true } },
@@ -1060,8 +1065,24 @@ async function loadFull(id: string, tx: Tx = prisma) {
         select: { id: true, number: true, name: true, status: true, type: true },
         orderBy: { createdAt: 'desc' },
       },
+      // The quotations and projects it went into beside another costing (2026-10-19).
+      revisionLinks: {
+        select: {
+          revision: {
+            select: { id: true, revision: true, status: true, quotation: { select: { id: true, number: true, subject: true } } },
+          },
+        },
+      },
+      jobLinks: { select: { job: { select: { id: true, number: true, name: true, status: true, type: true } } } },
     },
   });
+  if (!costing) return null;
+  const { revisionLinks, jobLinks, ...rest } = costing;
+  return {
+    ...rest,
+    quotationRevisions: [...rest.quotationRevisions, ...revisionLinks.map((l) => l.revision)],
+    jobs: [...rest.jobs, ...jobLinks.map((l) => l.job)],
+  };
 }
 
 /** Whether costings go through the approval engine here, i.e. a costing workflow is active. */
@@ -1667,7 +1688,7 @@ costingRoutes.delete(
     const me = currentUser(req);
     const costing = await prisma.costing.findUnique({
       where: { id: req.params.id },
-      include: { _count: { select: { quotationRevisions: true, jobs: true } } },
+      include: { _count: { select: { quotationRevisions: true, jobs: true, revisionLinks: true, jobLinks: true } } },
     });
     if (!costing) throw notFound('Costing not found');
     if (!canEditRecord(me, 'gops', 'costing', costing.ownerId)) {
@@ -1676,10 +1697,14 @@ costingRoutes.delete(
     if (costing.status === 'PENDING_APPROVAL') {
       throw badRequest('This costing is with the approver and cannot be deleted while they decide.');
     }
-    if (costing._count.quotationRevisions > 0) {
-      throw badRequest(
-        `${costing._count.quotationRevisions} quotation revision(s) are built on this costing`,
-      );
+    // As the first costing or one of several (2026-10-19).
+    const onRevisions = costing._count.quotationRevisions + costing._count.revisionLinks;
+    if (onRevisions > 0) {
+      throw badRequest(`${onRevisions} quotation revision(s) are built on this costing`);
+    }
+    const onJobs = costing._count.jobs + costing._count.jobLinks;
+    if (onJobs > 0) {
+      throw badRequest(`${onJobs} project(s) are built on this costing`);
     }
 
     await prisma.costing.delete({ where: { id: req.params.id } });
@@ -1784,7 +1809,7 @@ onApprovalReopened('costing', {
   reopen: async ({ documentId, tx }) => {
     const costing = await tx.costing.findUnique({ where: { id: documentId }, select: { number: true } });
     if (!costing) throw notFound('Costing not found');
-    const jobs = await tx.job.findMany({ where: { costingId: documentId, status: { not: 'CANCELLED' } }, select: { number: true } });
+    const jobs = await tx.job.findMany({ where: { ...jobsOnCostingWhere(documentId), status: { not: 'CANCELLED' } }, select: { number: true } });
     if (jobs.length) {
       throw badRequest(`${costing.number} cannot be pulled back — project ${jobs.map((j) => j.number).join(', ')} is built on it`);
     }

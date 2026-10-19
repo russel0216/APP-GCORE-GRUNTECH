@@ -1308,6 +1308,10 @@ model Costing {
   scopeSections      ScopeSection[]
   quotationRevisions QuotationRevision[]
   jobs               Job[]
+  /// Where this costing is quoted or built as a second (third…) costing of a
+  /// revision or a project (2026-10-19) — `costingId` names the first.
+  revisionLinks      QuotationRevisionCosting[]
+  jobLinks           JobCostingLink[]
 
   /// When it last became FINAL (approval, "Mark final", or a job built on
   /// it); cleared when reopened. The Costing page's "Final this month" tile.
@@ -1593,8 +1597,10 @@ model QuotationRevision {
   approvedBy   User?     @relation("RevisionApprover", fields: [approvedById], references: [id], onDelete: SetNull)
   approvedAt   DateTime?
 
-  items QuotationItem[]
-  jobs  Job[]
+  items         QuotationItem[]
+  jobs          Job[]
+  /// The other costings this revision is quoted from — see QuotationRevisionCosting.
+  otherCostings QuotationRevisionCosting[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2005,6 +2011,8 @@ model Job {
   notes String?
 
   scopeItems      JobScopeItem[]
+  /// The other costings the project was built from — see JobCostingLink.
+  otherCostings   JobCostingLink[]
   costEntries     JobCostEntry[]
   budgetRequests  BudgetRequest[]
   progressReports ProgressReport[]
@@ -2843,8 +2851,8 @@ model PurchaseOrder {
   vatAmount    Decimal @default(0) @db.Decimal(18, 2)
   total        Decimal @default(0) @db.Decimal(18, 2)
 
-  issuedAt   DateTime?
-  approvedAt DateTime?
+  issuedAt     DateTime?
+  approvedAt   DateTime?
   /// Why it was cancelled (2026-10-19): a draft or pending order only — an
   /// issued one is pulled back to draft first, which undoes what issue did.
   cancelReason String?
@@ -3004,12 +3012,12 @@ model StockIssue {
   issuedTo     User?   @relation("IssuedTo", fields: [issuedToId], references: [id], onDelete: SetNull)
   issuedToName String?
 
-  issueDate DateTime  @default(now()) @db.Date
-  purpose   String
-  notes     String?
+  issueDate    DateTime  @default(now()) @db.Date
+  purpose      String
+  notes        String?
   /// Why a draft or pending slip was cancelled (2026-10-19).
   cancelReason String?
-  issuedAt  DateTime?
+  issuedAt     DateTime?
 
   /// The internal receive proof (2026-10-15, the owner's call: "Outgoing =
   /// internal receive proof to the requestor"): where it goes, how, and the
@@ -5624,4 +5632,36 @@ model CashAdvanceItem {
   amount      Decimal     @db.Decimal(18, 2)
 
   @@index([advanceId])
+}
+
+/// A quotation revision quoted from more than one costing (2026-10-19, the
+/// owner's call: "sometimes there will be 2 costings to generate the quotation
+/// or project"). `QuotationRevision.costingId` stays the FIRST costing; these
+/// rows are the others, in order — `revisionCostingIds()` in
+/// `shared/costingSets.ts` reads both as one list.
+model QuotationRevisionCosting {
+  revisionId String
+  revision   QuotationRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+  costingId  String
+  costing    Costing           @relation(fields: [costingId], references: [id], onDelete: Cascade)
+  sortOrder  Int               @default(0)
+
+  @@id([revisionId, costingId])
+  @@index([costingId])
+}
+
+/// A project built from more than one costing (2026-10-19). `Job.costingId`
+/// stays the FIRST; these are the others, in order. Each one's scope is
+/// snapshotted into the project's scope items, its buckets into the opening
+/// budget, and it is marked FINAL — a costing that produced a project is a
+/// commercial record, so the link restricts its deletion as the first does.
+model JobCostingLink {
+  jobId     String
+  job       Job     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  costingId String
+  costing   Costing @relation(fields: [costingId], references: [id], onDelete: Restrict)
+  sortOrder Int     @default(0)
+
+  @@id([jobId, costingId])
+  @@index([costingId])
 }

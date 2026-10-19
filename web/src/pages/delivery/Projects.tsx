@@ -84,13 +84,15 @@ interface JobRow {
 /** What the URL can hand the new-project form — see NewJobModal. */
 export interface NewJobPreset {
   costingId?: string;
+  /** Several costings, comma-separated, the first first (2026-10-19). */
+  costingIds?: string;
   quotationRevisionId?: string;
   type?: string;
   renewFrom?: string;
 }
 
 /** The URL keys the new-project form reads, removed again when it closes. */
-const PRESET_KEYS = ['new', 'costingId', 'quotationRevisionId', 'type', 'renewFrom'] as const;
+const PRESET_KEYS = ['new', 'costingId', 'costingIds', 'quotationRevisionId', 'type', 'renewFrom'] as const;
 
 export function Projects() {
   const { can } = useAuth();
@@ -109,6 +111,7 @@ export function Projects() {
   const preset: NewJobPreset = fromUrl
     ? {
         costingId: params.get('costingId') ?? undefined,
+        costingIds: params.get('costingIds') ?? undefined,
         quotationRevisionId: params.get('quotationRevisionId') ?? undefined,
         type: params.get('type') ?? undefined,
         renewFrom: params.get('renewFrom') ?? undefined,
@@ -307,6 +310,8 @@ function NewJobModal({
   const pmId = useId();
   const customerInputId = useId();
   const [chosen, setChosen] = useState<CostingDetail | null>(null);
+  /** The other costings, after the first (2026-10-19: a project may be built from two costings). */
+  const [others, setOthers] = useState<CostingDetail[]>([]);
   const [renewal, setRenewal] = useState<{ id: string; number: string } | null>(null);
 
   const renewing = !!preset.renewFrom;
@@ -333,7 +338,10 @@ function NewJobModal({
   }, []);
 
   useEffect(() => {
-    if (preset.costingId) void pickCosting(preset.costingId);
+    const presetIds = (preset.costingIds ?? preset.costingId ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+    if (presetIds.length) {
+      void pickCosting(presetIds[0]).then(() => Promise.all(presetIds.slice(1).map(addOther)));
+    }
     if (preset.renewFrom) {
       api
         .get<{ id: string; number: string }>(`/service-contracts/${preset.renewFrom}`)
@@ -363,8 +371,10 @@ function NewJobModal({
    */
   async function pickCosting(costingId: string) {
     setForm((f) => ({ ...f, costingId }));
+    setOthers((list) => list.filter((o) => o.id !== costingId));
     if (!costingId) {
       setChosen(null);
+      setOthers([]);
       return;
     }
     try {
@@ -393,12 +403,26 @@ function NewJobModal({
     }
   }
 
+  /** A second (third…) costing: its scope and budget join the first's in the one project. */
+  async function addOther(costingId: string) {
+    if (!costingId) return;
+    try {
+      const c = await api.get<CostingDetail>(`/costings/${costingId}`);
+      setOthers((list) => (list.some((x) => x.id === c.id) ? list : [...list, c]));
+      setCostings((list) =>
+        list.some((x) => x.id === c.id) ? list : [...list, { id: c.id, number: c.number, title: c.title, contractValue: c.contractValue }],
+      );
+    } catch (err) {
+      setError(err);
+    }
+  }
+
   async function create() {
     setBusy(true);
     setError(null);
     try {
       const created = await api.post<{ id: string; serviceContractId: string | null }>('/jobs', {
-        costingId: form.costingId,
+        costingIds: [form.costingId, ...others.map((o) => o.id)],
         quotationRevisionId: form.quotationRevisionId || null,
         name: form.name,
         type: form.type,
@@ -477,10 +501,40 @@ function NewJobModal({
         </select>
       </Field>
 
+      {chosen &&
+        others.map((o, i) => (
+          <Field key={o.id} label={`Costing ${i + 2}`}>
+            <div className="row">
+              <span>
+                {o.number} — {o.title} · {formatMoney(o.contractValue)}
+              </span>
+              <button type="button" className="btn btn-sm" onClick={() => setOthers((list) => list.filter((x) => x.id !== o.id))}>
+                Remove
+              </button>
+            </div>
+          </Field>
+        ))}
+      {chosen && costings.some((c) => c.id !== form.costingId && !others.some((o) => o.id === c.id)) && (
+        <Field label="Another costing" hint="When the work was costed in two (or more) costings — the project takes their scopes and budgets together">
+          <select value="" onChange={(e) => void addOther(e.target.value)}>
+            <option value="">+ Add another costing</option>
+            {costings
+              .filter((c) => c.id !== form.costingId && !others.some((o) => o.id === c.id))
+              .map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.number} — {c.title}
+                </option>
+              ))}
+          </select>
+        </Field>
+      )}
+
       {chosen && (
         <div className="alert info">
-          Contract value: <strong>{formatMoney(chosen.contractValue)}</strong>
-          {chosen.status === 'DRAFT' && ' · this costing is still a draft; creating the project finalises it'}
+          Contract value: <strong>{formatMoney(chosen.contractValue + others.reduce((sum, o) => sum + o.contractValue, 0))}</strong>
+          {others.length > 0 && ` (${others.length + 1} costings)`}
+          {[chosen, ...others].some((c) => c.status === 'DRAFT') &&
+            (others.length ? ' · a costing is still a draft; creating the project finalises it' : ' · this costing is still a draft; creating the project finalises it')}
           {revision && (
             <>
               {' '}
@@ -492,10 +546,10 @@ function NewJobModal({
           )}
         </div>
       )}
-      {chosen && chosen.jobs.length > 0 && (
+      {chosen && [chosen, ...others].some((c) => c.jobs.length > 0) && (
         <div className="alert warn">
-          This costing already produced{' '}
-          {chosen.jobs.map((j, i) => (
+          {others.length ? 'A costing here already produced' : 'This costing already produced'}{' '}
+          {[chosen, ...others].flatMap((c) => c.jobs).map((j, i) => (
             <span key={j.id}>
               {i > 0 && ', '}
               <Link className="mono" to={`/g-ops/projects/${j.id}`}>

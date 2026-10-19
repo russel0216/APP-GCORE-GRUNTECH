@@ -94,6 +94,8 @@ interface Header {
   expectedClosing: string;
   leadId: string;
   costingId: string;
+  /** The other costings, after the first (2026-10-19: a quotation may come from two costings). */
+  otherCostingIds: string[];
   prNumber: string;
   delivery: string;
   paymentTerms: string;
@@ -148,6 +150,8 @@ interface LeadForQuote {
 }
 
 interface CostingLine {
+  /** A subheading naming its costing, where the lines come from more than one. */
+  isHeading?: boolean;
   title: string;
   description: string;
   quantity: number;
@@ -189,6 +193,7 @@ export function linesFromItems(items: Item[]): Line[] {
 }
 
 function fromCostingLine(c: CostingLine): Line {
+  if (c.isHeading) return { ...blankLine(true), title: c.title };
   return { ...blankLine(), productType: c.title, title: c.title, description: c.description, quantity: String(c.quantity), unit: c.unit, unitPrice: String(c.unitPrice) };
 }
 
@@ -266,6 +271,7 @@ export function QuotationEditor() {
     expectedClosing: addDays(today, 30),
     leadId: preset.leadId,
     costingId: preset.costingId,
+    otherCostingIds: [],
     prNumber: '',
     delivery: '',
     paymentTerms: '',
@@ -367,6 +373,7 @@ export function QuotationEditor() {
             expectedClosing: q.expectedClosing?.slice(0, 10) ?? '',
             leadId: q.lead?.id ?? '',
             costingId: draft.costing?.id ?? '',
+            otherCostingIds: (draft.costings ?? []).slice(1).map((c) => c.id),
             prNumber: draft.prNumber ?? '',
             delivery: draft.delivery ?? '',
             paymentTerms: draft.paymentTerms ?? '',
@@ -382,7 +389,7 @@ export function QuotationEditor() {
             lostReason: q.lostReason ?? '',
           });
           vatTouched.current = true;
-          if (draft.costing) setPinnedCostings([draft.costing]);
+          if (draft.costing) setPinnedCostings(draft.costings?.length ? draft.costings : [draft.costing]);
           setLines(draft.items.length ? linesFromItems(draft.items) : [blankLine()]);
           linesTouched.current = draft.items.length > 0;
         }
@@ -626,15 +633,19 @@ export function QuotationEditor() {
     scope of work as the lines — the same mapping "Fill from costing" writes.
     Once the table has been touched, only the button replaces it.
   */
-  const loadCostingLines = useCallback(async (costingId: string) => {
-    const rows = await api.get<CostingLine[]>(`/quotations/costing-lines${qs({ costingId })}`);
+  const loadCostingLines = useCallback(async (costingIds: string) => {
+    const rows = await api.get<CostingLine[]>(`/quotations/costing-lines${qs({ costingIds })}`);
     return rows.map(fromCostingLine);
   }, []);
 
+  /** Every costing chosen, the first first, as the API takes them. */
+  const costingIds = [header.costingId, ...header.otherCostingIds].filter(Boolean);
+  const costingKey = costingIds.join(',');
+
   useEffect(() => {
-    if (editing || !header.costingId || linesTouched.current) return;
+    if (editing || !costingKey || linesTouched.current) return;
     let live = true;
-    loadCostingLines(header.costingId)
+    loadCostingLines(costingKey)
       .then((filled) => {
         if (!live || linesTouched.current || filled.length === 0) return;
         setLines((prev) => (prev.every(isBlank) ? filled : prev));
@@ -643,11 +654,11 @@ export function QuotationEditor() {
     return () => {
       live = false;
     };
-  }, [editing, header.costingId, loadCostingLines]);
+  }, [editing, costingKey, loadCostingLines]);
 
   /** The table becomes the costing's scope of work. Throws, so the confirm bar can say why not. */
   async function fillLines() {
-    const filled = await loadCostingLines(header.costingId);
+    const filled = await loadCostingLines(costingKey);
     if (!filled.length) throw new Error('That costing has no scope of work yet — add sections to it first');
     setLines(filled);
     linesTouched.current = true;
@@ -658,7 +669,7 @@ export function QuotationEditor() {
     if (!header.costingId) return;
     if (lines.some((l) => !isBlank(l))) {
       confirm.ask({
-        title: 'Replace the lines with the costing’s scope of work?',
+        title: costingIds.length > 1 ? 'Replace the lines with the costings’ scope of work?' : 'Replace the lines with the costing’s scope of work?',
         body: 'What is in the table now is replaced. Nothing is saved until you press Save.',
         confirmLabel: 'Replace',
         tone: 'primary',
@@ -672,7 +683,7 @@ export function QuotationEditor() {
   // The question is about the costing chosen when it was asked: choosing another
   // (or none) withdraws it, as the old in-line question went with the button.
   const closeConfirm = confirm.close;
-  useEffect(() => closeConfirm(), [header.costingId, closeConfirm]);
+  useEffect(() => closeConfirm(), [costingKey, closeConfirm]);
 
   // ── Lines ─────────────────────────────────────────────────────────────────
   function updateLine(key: string, patch: Partial<Line>) {
@@ -865,7 +876,7 @@ export function QuotationEditor() {
           contactId: header.contactId || null,
           siteId: header.siteId || null,
           leadId: header.leadId || null,
-          costingId: header.costingId || null,
+          costingIds,
           subject: upperText(header.subject.trim()),
           // Sent only when it is not the suggestion: otherwise the next free
           // number is issued as the quotation is saved.
@@ -899,7 +910,7 @@ export function QuotationEditor() {
       const base = `/quotations/${quotation!.id}/revisions/${revision!.id}`;
       await api.put(`${base}/lines`, { lines: payloadLines });
       await api.patch(base, {
-        costingId: header.costingId || null,
+        costingIds,
         validityDays,
         notes: header.notes || null,
         terms: header.terms || null,
@@ -1345,7 +1356,15 @@ export function QuotationEditor() {
               )
             )}
             <Field label="Costing" hint="Links the pricing to what you estimated; its scope of work can fill the lines">
-              <select value={header.costingId} onChange={(e) => set('costingId', e.target.value)}>
+              <select
+                value={header.costingId}
+                onChange={(e) => {
+                  const first = e.target.value;
+                  // No first costing, no others; the others never repeat the first.
+                  setHeader((h) => ({ ...h, costingId: first, otherCostingIds: first ? h.otherCostingIds.filter((x) => x !== first) : [] }));
+                  setDirty(true);
+                }}
+              >
                 <option value="">— none yet —</option>
                 {costingOptions.map((c) => (
                   <option key={c.id} value={c.id}>
@@ -1354,6 +1373,50 @@ export function QuotationEditor() {
                 ))}
               </select>
             </Field>
+            {/* A second (third…) costing, 2026-10-19: its scope follows the first's, under a subheading each. */}
+            {header.costingId &&
+              header.otherCostingIds.map((cid, i) => {
+                const c = costingOptions.find((o) => o.id === cid);
+                return (
+                  <Field key={cid} label={`Costing ${i + 2}`}>
+                    <div className="row">
+                      <span>{c ? `${c.number} — ${c.title}` : 'A costing'}</span>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => {
+                          setHeader((h) => ({ ...h, otherCostingIds: h.otherCostingIds.filter((x) => x !== cid) }));
+                          setDirty(true);
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </Field>
+                );
+              })}
+            {header.costingId && costingOptions.some((c) => !costingIds.includes(c.id)) && (
+              <Field label="Another costing" hint="When the work was costed in two (or more) costings — the quotation takes them all">
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const add = e.target.value;
+                    if (!add) return;
+                    setHeader((h) => ({ ...h, otherCostingIds: [...h.otherCostingIds, add] }));
+                    setDirty(true);
+                  }}
+                >
+                  <option value="">+ Add another costing</option>
+                  {costingOptions
+                    .filter((c) => !costingIds.includes(c.id))
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.number} — {c.title}
+                      </option>
+                    ))}
+                </select>
+              </Field>
+            )}
           </div>
         </div>
 

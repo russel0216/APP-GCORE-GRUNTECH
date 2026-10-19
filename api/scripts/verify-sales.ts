@@ -3704,6 +3704,7 @@ async function main() {
         same(
           costingPreview.body,
           written.map((i) => ({
+            isHeading: i.isHeading,
             title: i.title,
             description: i.description,
             quantity: Number(i.quantity),
@@ -3715,6 +3716,76 @@ async function main() {
         ),
       `${costingPreview.text.slice(0, 160)} / ${written.length} written`,
     );
+    // Two costings behind one quotation (2026-10-19, the owner's call): the
+    // lines are both scopes, each under a subheading naming its costing, the
+    // first first; the revision names both, and a new revision keeps both.
+    const second = await prisma.costing.create({
+      data: {
+        number: await nextNumber('costing'),
+        title: `${TAG} Second scope`,
+        ownerId: sales.id,
+        customerId: customer.id,
+        scopeSections: { create: [{ kind: 'MAIN_WORK', name: `${TAG} second section`, value: d(50_000), sortOrder: 0 }] },
+      },
+    });
+    const twoMade = await http(salesToken, 'POST', '/quotations', {
+      customerId: customer.id,
+      subject: `${TAG} Editor two costings`,
+      costingIds: [costing.id, second.id],
+    });
+    const twoRev = (twoMade.body.revisions as { id: string }[] | undefined)?.[0];
+    const twoPreview = await http(salesToken, 'GET', `/quotations/costing-lines?costingIds=${costing.id},${second.id}`);
+    const twoFilled = twoRev ? await http(salesToken, 'POST', `/quotations/${twoMade.body.id}/revisions/${twoRev.id}/from-costing`) : null;
+    const twoWritten = twoRev ? await prisma.quotationItem.findMany({ where: { revisionId: twoRev.id }, orderBy: { sortOrder: 'asc' } }) : [];
+    const headings = twoWritten.filter((i) => i.isHeading).map((i) => i.title);
+    check(
+      'a quotation from two costings takes both scopes, each under a subheading naming its costing, the first first',
+      twoMade.status === 201 &&
+        twoFilled?.status === 200 &&
+        headings.length === 2 &&
+        headings[0] === costing.title &&
+        headings[1] === second.title &&
+        twoWritten[twoWritten.length - 1].title === `${TAG} second section` &&
+        Number(twoWritten[twoWritten.length - 1].amount) === 50_000,
+      `${twoMade.status} ${twoFilled?.status} ${JSON.stringify(headings)} ${twoWritten.length}`,
+    );
+    check(
+      'and the preview is exactly what it writes',
+      twoPreview.status === 200 &&
+        same(
+          twoPreview.body,
+          twoWritten.map((i) => ({
+            isHeading: i.isHeading,
+            title: i.title,
+            description: i.description,
+            quantity: Number(i.quantity),
+            unit: i.unit,
+            unitPrice: Number(i.unitPrice),
+            amount: Number(i.amount),
+            sortOrder: i.sortOrder,
+          })),
+        ),
+      twoPreview.text.slice(0, 160),
+    );
+    const twoRead = await http(salesToken, 'GET', `/quotations/${twoMade.body.id}`);
+    const readCostings = (twoRead.body.revisions?.[0]?.costings ?? []).map((c: { id: string }) => c.id).join(',');
+    // A draft is finished first; a new revision is raised over a sent one.
+    if (twoRev) await prisma.quotationRevision.update({ where: { id: twoRev.id }, data: { status: 'APPROVED' } });
+    const twoNext = await http(salesToken, 'POST', `/quotations/${twoMade.body.id}/revisions`);
+    const nextLinks = twoNext.body.id
+      ? await prisma.quotationRevisionCosting.findMany({ where: { revisionId: twoNext.body.id }, select: { costingId: true } })
+      : [];
+    check(
+      'the revision reads back both costings, and a new revision keeps both',
+      readCostings === `${costing.id},${second.id}` && nextLinks.length === 1 && nextLinks[0].costingId === second.id,
+      `${readCostings} / ${JSON.stringify(nextLinks)} / ${twoNext.status}`,
+    );
+    if (twoNext.body.id) {
+      const backToOne = await http(salesToken, 'PATCH', `/quotations/${twoMade.body.id}/revisions/${twoNext.body.id}`, { costingIds: [costing.id] });
+      const left = await prisma.quotationRevisionCosting.count({ where: { revisionId: twoNext.body.id } });
+      check('naming one costing again drops the second', backToOne.status === 200 && left === 0, `${backToOne.status} ${left}`);
+    }
+
     const noCosting = await http(salesToken, 'GET', '/quotations/costing-lines');
     const unknownCosting = await http(salesToken, 'GET', '/quotations/costing-lines?costingId=nope');
     check(

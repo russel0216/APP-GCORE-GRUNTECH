@@ -436,6 +436,8 @@ export interface BoardRevision {
     contractValue: Prisma.Decimal | number;
     totalCost: Prisma.Decimal | number;
   } | null;
+  /** The revision's other costings (2026-10-19), counted with the first. */
+  otherCostings?: { costing: { contractValue: Prisma.Decimal | number; totalCost: Prisma.Decimal | number } }[];
   jobs: { id: string; number: string }[];
 }
 
@@ -862,8 +864,10 @@ export function buildBoard(input: {
     discounts.push(num(rev.discountPct) / 100);
     if (!rev.costing) continue;
     withCosting++;
-    contract += num(rev.costing.contractValue);
-    cost += num(rev.costing.totalCost);
+    for (const c of [rev.costing, ...(rev.otherCostings ?? []).map((o) => o.costing)]) {
+      contract += num(c.contractValue);
+      cost += num(c.totalCost);
+    }
   }
 
   const won = cards.filter((c) => c.column === 'WON');

@@ -1063,6 +1063,60 @@ async function main() {
       );
     }
 
+    // (a2b) Two costings, one project (2026-10-19, the owner's call:
+    //       "sometimes there will be 2 costings to generate the quotation or
+    //       project"): the contract value their sum, the scope both of them,
+    //       each plan from the project's start, the target end the later
+    //       finish, one opening budget row per costing, both read back.
+    const twoA = await readyCosting('Two A', pm.id, customer.id, 100_000);
+    const twoB = await readyCosting('Two B', pm.id, customer.id, 50_000);
+    await prisma.scopeSection.updateMany({ where: { costingId: twoB.id }, data: { durationDays: 10 } });
+    await prisma.costing.update({ where: { id: twoA.id }, data: { plannedStart: new Date('2026-11-02T00:00:00Z') } });
+    const two = await http(leadToken, 'POST', '/jobs', { costingIds: [twoA.id, twoB.id], name: `${TAG} Two costings`, customerId: customer.id });
+    const twoRead = two.body.id ? await http(leadToken, 'GET', `/jobs/${two.body.id}`) : null;
+    const twoItems: { name: string; value: number; plannedStart: string; plannedEnd: string }[] = twoRead?.body?.scopeItems ?? [];
+    check(
+      'a project built from two costings is worth both (₱150,000), carries both scopes and names both costings, the first first',
+      two.status === 201 &&
+        twoRead?.body?.contractValue === 150_000 &&
+        twoItems.length === 2 &&
+        twoItems[0].value === 100_000 &&
+        twoItems[1].value === 50_000 &&
+        (twoRead?.body?.costings ?? []).map((c: { id: string }) => c.id).join(',') === `${twoA.id},${twoB.id}`,
+      `${two.status} ${JSON.stringify(two.body).slice(0, 160)} ${twoRead?.body?.contractValue} ${twoItems.length}`,
+    );
+    check(
+      "each costing's plan runs from the project's start (2 November); the target end is the later finish (5 December)",
+      iso(twoItems[1]?.plannedStart ?? 0) === '2026-11-02' &&
+        iso(twoItems[1]?.plannedEnd ?? 0) === '2026-11-12' &&
+        iso(twoRead?.body?.targetEndDate ?? 0) === '2026-12-05',
+      `${twoItems[1]?.plannedStart} → ${twoItems[1]?.plannedEnd}; target ${twoRead?.body?.targetEndDate}`,
+    );
+    const twoBudget = two.body.id
+      ? await prisma.jobCostEntry.findMany({ where: { jobId: two.body.id, state: 'BUDGETED' }, select: { sourceId: true, amount: true } })
+      : [];
+    check(
+      'the opening budget is one row per costing — ₱80,000 from the first, ₱40,000 from the second',
+      twoBudget.length === 2 &&
+        Number(twoBudget.find((b) => b.sourceId === twoA.id)?.amount) === 80_000 &&
+        Number(twoBudget.find((b) => b.sourceId === twoB.id)?.amount) === 40_000,
+      JSON.stringify(twoBudget),
+    );
+    const secondRead = await http(leadToken, 'GET', `/costings/${twoB.id}`);
+    check(
+      'the second costing lists the project built on it too',
+      Array.isArray(secondRead.body.jobs) && secondRead.body.jobs.some((j: { id: string }) => j.id === two.body.id),
+      JSON.stringify(secondRead.body.jobs ?? null).slice(0, 160),
+    );
+    const strayCustomer = await prisma.customer.create({ data: { code: `${TAG}-C3`, name: `${TAG} Other customer` } });
+    const strayCosting = await readyCosting('Two stray', pm.id, strayCustomer.id, 10_000);
+    const mixed = await http(leadToken, 'POST', '/jobs', { costingIds: [twoA.id, strayCosting.id], name: `${TAG} Mixed`, customerId: customer.id });
+    check(
+      "a costing for another customer among them is refused, naming it",
+      mixed.status === 400 && String(mixed.body.error ?? mixed.body.message ?? '').includes(strayCosting.number),
+      `${mixed.status} ${JSON.stringify(mixed.body)}`,
+    );
+
     // (a3) Request for Approval (2026-10-13, the owner's call: "replace the
     //      Approved Plans with Request for Approval … Technical Manager, Team
     //      Leader and CEO more than 1 million"). Raised as a draft, sent with

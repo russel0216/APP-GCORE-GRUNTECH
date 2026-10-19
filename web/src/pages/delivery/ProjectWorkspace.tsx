@@ -95,6 +95,8 @@ interface Job {
   projectManager: { id: string; name: string } | null;
   createdBy: { id: string; name: string };
   costing: { id: string; number: string; title: string; totalCost: number; contractValue: number } | null;
+  /** Every costing the project was built from, the first first (2026-10-19). */
+  costings?: { id: string; number: string; title: string; totalCost: number; contractValue: number }[];
   quotationRevision: {
     id: string;
     revision: number;
@@ -329,9 +331,14 @@ export function ProjectWorkspace() {
               <>
                 {' '}
                 · from{' '}
-                <Link className="mono" to={`/g-ops/costing/${job.costing.id}`}>
-                  {job.costing.number}
-                </Link>
+                {(job.costings?.length ? job.costings : [job.costing]).map((c, i) => (
+                  <span key={c.id}>
+                    {i > 0 && ' + '}
+                    <Link className="mono" to={`/g-ops/costing/${c.id}`}>
+                      {c.number}
+                    </Link>
+                  </span>
+                ))}
               </>
             )}
             {job.quotationRevision && (
@@ -550,7 +557,14 @@ export function ProjectWorkspace() {
               <Row label="Type" value={job.type === 'PROJECT' ? 'Project' : 'Service contract'} />
               <Row label="Customer P.O." value={job.customerPoNumber} />
               <Row label="P.O. date" value={job.customerPoDate ? formatDate(job.customerPoDate) : null} />
-              <Row label="Estimated cost" value={job.costing ? formatMoney(job.costing.totalCost) : null} />
+              <Row
+                label="Estimated cost"
+                value={
+                  job.costing
+                    ? formatMoney((job.costings?.length ? job.costings : [job.costing]).reduce((sum, c) => sum + c.totalCost, 0))
+                    : null
+                }
+              />
               {job.serviceContract && (
                 <Row
                   label="Coverage terms"
@@ -631,7 +645,17 @@ export function ProjectWorkspace() {
         </div>
       )}
 
-      {current === 'costing' && <ProjectCostingCard costing={job.costing} />}
+      {current === 'costing' &&
+        (job.costings && job.costings.length > 1 ? (
+          // Built from several costings (2026-10-19): a card each, in order.
+          <div className="stack">
+            {job.costings.map((c) => (
+              <ProjectCostingCard key={c.id} costing={c} />
+            ))}
+          </div>
+        ) : (
+          <ProjectCostingCard costing={job.costing} />
+        ))}
 
       {current === 'joborders' && (
         <ProjectJobOrders jobId={job.id} customerId={job.customer.id} quotationId={job.quotationRevision?.quotation.id ?? null} />

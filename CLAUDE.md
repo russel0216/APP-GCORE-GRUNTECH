@@ -634,7 +634,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,442 assertions across twenty-two scripts** (counted 2026-10-18, after
+**4,451 assertions across twenty-two scripts** (counted 2026-10-18, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -698,10 +698,10 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings):
 foundation
-397, masters 92, sales 638, costing 205, pipeline 121, calendar 101, numbering
-94, partners 120, delivery 188, chain 361, hr 487, plantilla 123, meetings
+397, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
+94, partners 120, delivery 193, chain 361, hr 487, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 432, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 143. The
 verify scripts share
@@ -2437,6 +2437,40 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   The lead page lists each costing with whose it is and who assigned it,
   when; the costing page shows "Assigned by". The picker is
   `/users/lookup?holding=gops.costing.create`.
+- **A quotation or a project may come from SEVERAL costings** (2026-10-19,
+  the owner's call: "sometimes there will be 2 costings to generate the
+  quotation or project"). The first stays on the record's own `costingId`
+  (`QuotationRevision.costingId`, `Job.costingId`); the others are
+  `QuotationRevisionCosting` / `JobCostingLink` rows, in order — and
+  `shared/costingSets.ts` is the only reader and writer of that split
+  (`revisionCostingIds`, `jobCostingIds`, `setRevisionCostings`,
+  `costingIdsOf(body)` — `costingIds` beats the old single `costingId`,
+  which every caller may still send). **The quotation**: `POST /quotations`,
+  `PATCH …/revisions/:id` take `costingIds`; "Fill from costing" and
+  `GET /quotations/costing-lines?costingIds=a,b` write / preview
+  `quotationLinesFromCostings()` — each costing's scope as before, one after
+  another, a SUBHEADING naming each costing only where there is more than
+  one; a new revision keeps them all; `GET /quotations/:id` sends each
+  revision's `costings`. The editor has "+ Add another costing" under
+  Costing. **The project**: `POST /jobs { costingIds }` and a job order's
+  approval (the value revision's costings) go through `costingsForJob()`
+  (each one `costingForJob`'s checks: decided, the project's customer, a
+  scope adding up to its own contract value) and `createJobRecord(tx,
+  costings[])`: the contract value their sum, the scope items both scopes
+  in order, EACH costing's plan from the project's start (two scopes worked
+  side by side) and the target end the later finish, one BUDGETED row per
+  costing and bucket (`sourceId` names the costing), every one FINAL;
+  "Plan from costing" plans each costing's own sections the same way.
+  `GET /jobs/:id` sends `costings`; the list's expected margin, the
+  pipeline board's margin, a purchase requisition's costing suggestions
+  and a job order's Labor (`costingLabor(ids)`, `laborTally` naming
+  "A + B") read them all. A costing on either list counts as built on: it
+  is not deleted (a 400 naming the revisions or projects), not pulled back
+  while a project stands on it, and its page lists them; a job order
+  pulled back puts each costing its build finalised back to draft. The new
+  project form has "+ Add another costing" too (`?costingIds=a,b` from the
+  quotation's Create project), and the project's Costing tab draws a card
+  per costing.
 - **A duplicated costing copies the numbers and not the history** — DRAFT, owned
   by the copier, no lead, revisions or jobs, totals recomputed through
   `recalc(tx)` rather than copied, so it can never carry a figure its own lines

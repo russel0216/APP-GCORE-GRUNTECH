@@ -1,3 +1,4 @@
+import { assertCostingsExist, cleanCostingIds, costingIdsOf, revisionCostingIds, setRevisionCostings } from '../shared/costingSets';
 import { Router } from 'express';
 import { z } from 'zod';
 import { LeadStatus, Prisma, QuotationOutcome } from '@prisma/client';
@@ -135,8 +136,8 @@ import {
   recalcQuotationRevision,
   canSeeQuotationCost,
   stripLineCost,
-  quotationLinesFromSections,
-  costingScopeSections,
+  quotationLinesFromCostings,
+  costingsForQuote,
   quotationTaxOptions,
   QUOTATION_EXTRA_TAX_RATES,
   QUOTATION_CURRENCIES,
@@ -921,11 +922,15 @@ function presentRevision(rev: Record<string, unknown>, showCost: boolean) {
   if (showCost && totals) presented.costPanel = totals.cost;
 
   if (costing !== undefined) {
-    presented.costing = costing
-      ? showCost
-        ? { ...costing, contractValue: num(costing.contractValue as Prisma.Decimal), totalCost: num(costing.totalCost as Prisma.Decimal) }
-        : { id: costing.id, number: costing.number, title: costing.title, contractValue: num(costing.contractValue as Prisma.Decimal) }
-      : null;
+    const show = (c: Record<string, unknown>) =>
+      showCost
+        ? { ...c, contractValue: num(c.contractValue as Prisma.Decimal), totalCost: num(c.totalCost as Prisma.Decimal) }
+        : { id: c.id, number: c.number, title: c.title, contractValue: num(c.contractValue as Prisma.Decimal) };
+    presented.costing = costing ? show(costing) : null;
+    // Every costing the revision is quoted from, the first first (2026-10-19).
+    const others = ((rev.otherCostings ?? []) as { costing: Record<string, unknown> }[]).map((o) => o.costing);
+    presented.costings = costing ? [costing, ...others].map(show) : [];
+    delete presented.otherCostings;
   }
   return presented;
 }
@@ -1026,6 +1031,10 @@ async function loadQuotation(id: string) {
         include: {
           items: { orderBy: { sortOrder: 'asc' }, include: LINE_PROVIDERS },
           costing: { select: { id: true, number: true, title: true, contractValue: true, totalCost: true } },
+          otherCostings: {
+            orderBy: { sortOrder: 'asc' },
+            select: { costing: { select: { id: true, number: true, title: true, contractValue: true, totalCost: true } } },
+          },
           approvedBy: { select: { id: true, name: true } },
           // The project a revision became. Without it a WON quotation still
           // waiting to be a project looks the same as one already delivered.
@@ -1816,7 +1825,7 @@ quotationRoutes.get(
 /**
  * The lines a costing's scope of work would give a quotation — the editor's
  * preview before anything is saved. The same mapping `from-costing` writes
- * (`quotationLinesFromSections`), so what the page shows is what is stored.
+ * (`quotationLinesFromCostings`), so what the page shows is what is stored.
  * Prices only: a section's value is its share of the contract, not a cost.
  * Declared above `/:id` or that route swallows it.
  */
@@ -1825,13 +1834,16 @@ quotationRoutes.get(
   // The create form and the edit page both preview it.
   requireAny('gops.quotations.create', 'gops.quotations.edit_own', 'gops.quotations.edit_all'),
   handler(async (req, res) => {
-    const costingId = typeof req.query.costingId === 'string' ? req.query.costingId.trim() : '';
-    if (!costingId) throw badRequest('Say which costing — ?costingId=');
-    const costing = await prisma.costing.findUnique({ where: { id: costingId }, select: { id: true } });
-    if (!costing) throw notFound('Costing not found');
-    const lines = quotationLinesFromSections(await costingScopeSections(costingId));
+    // One costing (`?costingId=`) or several, comma-separated, the first first (2026-10-19).
+    const raw = typeof req.query.costingIds === 'string' ? req.query.costingIds : typeof req.query.costingId === 'string' ? req.query.costingId : '';
+    const costingIds = cleanCostingIds(raw.split(','));
+    if (!costingIds.length) throw badRequest('Say which costing — ?costingId=');
+    const costings = await costingsForQuote(costingIds);
+    if (costings.length !== costingIds.length) throw notFound(costingIds.length === 1 ? 'Costing not found' : 'One of the costings was not found');
+    const lines = quotationLinesFromCostings(costings);
     res.json(
       lines.map((l) => ({
+        isHeading: l.isHeading,
         title: l.title,
         description: l.description,
         quantity: num(l.quantity),
@@ -2141,6 +2153,8 @@ const quotationSchema = z.object({
   /** No longer asked for on the page; a quotation takes its lead's, else 50. */
   probability: z.number().int().min(0).max(100).optional(),
   costingId: z.string().optional().nullable(),
+  /** Several costings, the first first (2026-10-19); wins over `costingId`. */
+  costingIds: z.array(z.string()).max(10, 'A quotation takes at most ten costings').optional().nullable(),
   terms: z.string().optional().nullable(),
   validityDays: z.number().int().min(1).optional(),
   expectedClosing: z.string().optional().nullable(),
@@ -2203,6 +2217,9 @@ quotationRoutes.post(
     const me = currentUser(req);
     const body = parseBody(createQuotationSchema, req.body);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
+    // One costing or several (2026-10-19), checked before a number is issued.
+    const createCostings = costingIdsOf(body) ?? [];
+    await assertCostingsExist(createCostings);
 
     /*
       The author. Their employee digits go into the number, and "only the
@@ -2293,7 +2310,10 @@ quotationRoutes.post(
               {
                 revision: 0,
                 status: 'DRAFT',
-                costingId: body.costingId || null,
+                costingId: createCostings[0] ?? null,
+                ...(createCostings.length > 1
+                  ? { otherCostings: { create: createCostings.slice(1).map((costingId, i) => ({ costingId, sortOrder: i })) } }
+                  : {}),
                 validityDays: body.validityDays ?? 30,
                 terms: body.terms || null,
                 notes: body.notes || null,
@@ -2793,6 +2813,7 @@ quotationRoutes.post(
       );
     }
     const nextRevision = (latest?.revision ?? -1) + 1;
+    const latestCostings = latest ? await revisionCostingIds(latest) : [];
 
     const { created, withdrawn } = await prisma.$transaction(async (tx) => {
       let withdrawn = false;
@@ -2810,6 +2831,10 @@ quotationRoutes.post(
           revision: nextRevision,
           status: 'DRAFT',
           costingId: latest?.costingId ?? null,
+          // The other costings come along too (2026-10-19).
+          ...(latestCostings.length > 1
+            ? { otherCostings: { create: latestCostings.slice(1).map((costingId, i) => ({ costingId, sortOrder: i })) } }
+            : {}),
           validityDays: latest?.validityDays ?? 30,
           terms: latest?.terms ?? null,
           notes: latest?.notes ?? null,
@@ -2867,6 +2892,8 @@ quotationRoutes.post(
 
 const revisionSchema = z.object({
   costingId: z.string().optional().nullable(),
+  /** Several costings, the first first (2026-10-19); wins over `costingId`. */
+  costingIds: z.array(z.string()).max(10, 'A quotation takes at most ten costings').optional().nullable(),
   validityDays: z.number().int().min(1).optional(),
   terms: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
@@ -2906,11 +2933,15 @@ quotationRoutes.patch(
     const { revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
     const body = parseBody(revisionSchema, req.body);
     await checkVatRate(body.vatRate, revision.vatRate);
+    const costingIds = costingIdsOf(body);
+    if (costingIds) await assertCostingsExist(costingIds);
 
+    if (costingIds) {
+      await prisma.$transaction((tx) => setRevisionCostings(tx, req.params.revisionId, costingIds));
+    }
     await prisma.quotationRevision.update({
       where: { id: req.params.revisionId },
       data: {
-        ...(body.costingId !== undefined ? { costingId: body.costingId || null } : {}),
         ...(body.validityDays !== undefined ? { validityDays: body.validityDays } : {}),
         ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
@@ -2962,17 +2993,25 @@ quotationRoutes.post(
     const { revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
     if (!revision.costingId) throw badRequest('Link a costing to this revision first');
 
-    const sections = await costingScopeSections(revision.costingId);
-    if (!sections.length) {
-      throw badRequest('That costing has no scope of work yet — add sections to it first');
+    // Every costing the revision names (2026-10-19), the first first.
+    const costings = await costingsForQuote(await revisionCostingIds(revision));
+    const empty = costings.find((c) => !c.sections.length);
+    if (empty) {
+      throw badRequest(
+        costings.length > 1
+          ? `${empty.number} has no scope of work yet — add sections to it first`
+          : 'That costing has no scope of work yet — add sections to it first',
+      );
     }
+    const lines = quotationLinesFromCostings(costings);
+    const sections = lines.filter((l) => !l.isHeading);
 
     await prisma.$transaction(async (tx) => {
       await tx.quotationItem.deleteMany({ where: { revisionId: req.params.revisionId } });
       await tx.quotationRevision.update({ where: { id: req.params.revisionId }, data: { importedUnchanged: false } });
       await tx.quotationItem.createMany({
         // The one mapping (shared/quotation.ts) — the editor previews the same.
-        data: quotationLinesFromSections(sections).map((line) => ({
+        data: lines.map((line) => ({
           revisionId: req.params.revisionId,
           ...line,
         })),
@@ -2985,7 +3024,10 @@ quotationRoutes.post(
         entityType: 'quotation',
         entityId: req.params.id,
         action: 'UPDATED',
-        summary: `Filled revision ${revision.revision} from the costing's scope of work (${sections.length} lines)`,
+        summary:
+          costings.length > 1
+            ? `Filled revision ${revision.revision} from the scope of work of ${costings.map((c) => c.number).join(' and ')} (${sections.length} lines)`
+            : `Filled revision ${revision.revision} from the costing's scope of work (${sections.length} lines)`,
       },
       req,
     );
@@ -4207,6 +4249,7 @@ async function loadBoard(req: Parameters<typeof currentUser>[0]): Promise<BoardR
             discountPct: true,
             importedUnchanged: true,
             costing: { select: { contractValue: true, totalCost: true } },
+            otherCostings: { select: { costing: { select: { contractValue: true, totalCost: true } } } },
             jobs: { select: { id: true, number: true }, take: 1 },
           },
         },

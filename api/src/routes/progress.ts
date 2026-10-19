@@ -1847,10 +1847,18 @@ planRoutes.post(
     const sectionIds = job.scopeItems.map((s) => s.sourceSectionId).filter((id): id is string => !!id);
     const sections = await prisma.scopeSection.findMany({
       where: { id: { in: sectionIds } },
-      select: { id: true, durationDays: true, tasks: { orderBy: { sortOrder: 'asc' } } },
+      orderBy: { sortOrder: 'asc' },
+      select: { id: true, costingId: true, durationDays: true, tasks: { orderBy: { sortOrder: 'asc' } } },
     });
-    const plan = planTasks(sections.map((s) => ({ durationDays: s.durationDays, tasks: s.tasks })));
-    const bySection = new Map(sections.map((s, i) => [s.id, { tasks: s.tasks, planned: plan.sections[i] }]));
+    // Each costing's own plan, all from the project's start (2026-10-19: a
+    // project built from several costings works their scopes side by side,
+    // as createJobRecord placed them).
+    const bySection = new Map<string, { tasks: (typeof sections)[number]['tasks']; planned: ReturnType<typeof planTasks>['sections'][number] }>();
+    for (const costingId of [...new Set(sections.map((s) => s.costingId))]) {
+      const own = sections.filter((s) => s.costingId === costingId);
+      const plan = planTasks(own.map((s) => ({ durationDays: s.durationDays, tasks: s.tasks })));
+      own.forEach((s, i) => bySection.set(s.id, { tasks: s.tasks, planned: plan.sections[i] }));
+    }
 
     let created = 0;
     let skipped = 0;

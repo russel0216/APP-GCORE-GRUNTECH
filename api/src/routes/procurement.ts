@@ -58,6 +58,7 @@ import {
 } from '../shared/inventory';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { canvassFigures, MAX_SHEET_SUPPLIERS, type SheetLine } from '../shared/canvassMath';
+import { jobCostingIds } from '../shared/costingSets';
 
 const D = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -360,8 +361,10 @@ purchaseRequestRoutes.get(
  */
 export async function lineSuggestions(me: ResolvedUser, term: string, jobId: string) {
   const job = jobId
-    ? await prisma.job.findUnique({ where: { id: jobId }, select: { costingId: true, projectManagerId: true } })
+    ? await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, costingId: true, projectManagerId: true } })
     : null;
+  // Every costing the project was built from (2026-10-19), the first first.
+  const costingIds = job ? await jobCostingIds(job) : [];
   const seesCostingCost =
     can(me, 'gops.costing.view_all') ||
     can(me, 'gops.budget_monitoring.view_all') ||
@@ -378,7 +381,7 @@ export async function lineSuggestions(me: ResolvedUser, term: string, jobId: str
   const [costing, items] = await Promise.all([
     job
       ? prisma.costingLine.findMany({
-          where: { costingId: job.costingId, isHeading: false, ...words },
+          where: { costingId: { in: costingIds }, isHeading: false, ...words },
           orderBy: [{ costCategory: { sortOrder: 'asc' } }, { sortOrder: 'asc' }],
           take: term ? 25 : 500,
           select: {

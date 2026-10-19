@@ -52,7 +52,8 @@ import { teamOf } from '../shared/team';
 import { toCsv } from '../shared/csv';
 import { valueRevision } from '../shared/pipeline';
 import { inBase, RATE_SELECT } from '../shared/exchangeRates';
-import { costingForJob, createJobRecord } from './jobs';
+import { costingsForJob, createJobRecord } from './jobs';
+import { jobCostingIds, jobsOnCostingWhere, revisionCostingIds, revisionsCostingIds } from '../shared/costingSets';
 import { LIST_CAP, listReference, totalLabel, rangeNamed, recordNamed, namedInFilter, filterDay, dayOf, choice, bracketed, bracketNote, listNotes, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 
@@ -528,7 +529,7 @@ jobOrderRoutes.get(
           contactId: true,
           siteId: true,
           ...RATE_SELECT,
-          revisions: { select: { status: true, revision: true, subtotal: true, discountAmount: true, costingId: true } },
+          revisions: { select: { id: true, status: true, revision: true, subtotal: true, discountAmount: true, costingId: true } },
         },
         orderBy: { createdAt: 'desc' },
         take: 100,
@@ -546,8 +547,11 @@ jobOrderRoutes.get(
         take: 100,
       }),
     ]);
-    // The Labor bucket of each costing behind a quotation, in one GROUP BY.
-    const costingIds = [...new Set(quotations.map((q) => valueRevision(q.revisions)?.costingId).filter((v): v is string => !!v))];
+    // The Labor bucket of each costing behind a quotation, in one GROUP BY —
+    // every costing of the value revision (2026-10-19), summed per quotation.
+    const valueRevs = quotations.map((q) => valueRevision(q.revisions)).filter((r): r is NonNullable<typeof r> => !!r);
+    const costingsOf = await revisionsCostingIds(valueRevs);
+    const costingIds = [...new Set([...costingsOf.values()].flat())];
     const laborRows = costingIds.length
       ? await prisma.costingLine.groupBy({
           by: ['costingId'],
@@ -572,7 +576,9 @@ jobOrderRoutes.get(
           // fills it at its own rate (2026-10-17).
           amount: rev ? inBase(netOf(rev), q) : null,
           /** The Labor cost on the costing behind it — what the job order's amount must equal. */
-          labor: rev?.costingId ? laborBy.get(rev.costingId) ?? 0 : null,
+          labor: rev?.costingId
+            ? Math.round((costingsOf.get(rev.id) ?? []).reduce((sum, id) => sum + (laborBy.get(id) ?? 0), 0) * 100) / 100
+            : null,
           /** Whether approval could build the project from it. */
           costed: !!rev?.costingId,
         };
@@ -683,22 +689,25 @@ async function checkBelongs(
  * Management (the owner's call, 2026-10-16), so this is what it must tally
  * with before a project is built from it.
  */
-export async function costingLabor(costingId: string): Promise<number> {
+export async function costingLabor(costingId: string | string[]): Promise<number> {
+  const ids = Array.isArray(costingId) ? costingId : [costingId];
+  if (!ids.length) return 0;
   const sum = await prisma.costingLine.aggregate({
-    where: { costingId, isHeading: false, costCategory: { code: 'LAB' } },
+    where: { costingId: { in: ids }, isHeading: false, costCategory: { code: 'LAB' } },
     _sum: { amount: true },
   });
   return Math.round(Number(sum._sum.amount ?? 0) * 100) / 100;
 }
 
-/** The costing behind a quotation's value revision, if any. */
-async function quotationCostingId(quotationId: string | null | undefined): Promise<string | null> {
-  if (!quotationId) return null;
+/** The costings behind a quotation's value revision, the first first — none when it has none (2026-10-19: one or several). */
+async function quotationCostingIds(quotationId: string | null | undefined): Promise<string[]> {
+  if (!quotationId) return [];
   const revisions = await prisma.quotationRevision.findMany({
     where: { quotationId },
     select: { id: true, status: true, revision: true, costingId: true },
   });
-  return valueRevision(revisions)?.costingId ?? null;
+  const rev = valueRevision(revisions);
+  return rev ? revisionCostingIds(rev) : [];
 }
 
 /**
@@ -706,18 +715,20 @@ async function quotationCostingId(quotationId: string | null | undefined): Promi
  * against the Labor cost of the costing behind its quotation — null when no
  * costing stands behind it. A difference no longer stops anything: the
  * Technical Manager's approval is the agreement (2026-10-16), recorded on
- * the order when the project is built.
+ * the order when the project is built. Several costings behind it
+ * (2026-10-19): their Labor together.
  */
 export async function laborTally(row: { quotationId: string | null; amount: Prisma.Decimal | number | null }): Promise<
   { costingNumber: string; labor: number; amount: number | null; difference: number | null; tallies: boolean } | null
 > {
-  const costingId = await quotationCostingId(row.quotationId);
-  if (!costingId) return null;
-  const labor = await costingLabor(costingId);
-  const costing = await prisma.costing.findUnique({ where: { id: costingId }, select: { number: true } });
+  const costingIds = await quotationCostingIds(row.quotationId);
+  if (!costingIds.length) return null;
+  const labor = await costingLabor(costingIds);
+  const costings = await prisma.costing.findMany({ where: { id: { in: costingIds } }, select: { id: true, number: true } });
+  const costingNumber = costingIds.map((id) => costings.find((c) => c.id === id)?.number ?? '').filter(Boolean).join(' + ');
   const amount = row.amount == null ? null : Math.round(Number(row.amount) * 100) / 100;
   const difference = amount == null ? null : Math.round((amount - labor) * 100) / 100;
-  return { costingNumber: costing?.number ?? '', labor, amount, difference, tallies: difference !== null && Math.abs(difference) < 0.005 };
+  return { costingNumber, labor, amount, difference, tallies: difference !== null && Math.abs(difference) < 0.005 };
 }
 
 /**
@@ -729,8 +740,8 @@ export async function laborTally(row: { quotationId: string | null; amount: Pris
  * that is the price the customer agreed to.
  */
 async function agreedAmount(body: { salesOrderId?: string | null; quotationId?: string | null }): Promise<number | null> {
-  const costingId = await quotationCostingId(body.quotationId);
-  if (costingId) return costingLabor(costingId);
+  const costingIds = await quotationCostingIds(body.quotationId);
+  if (costingIds.length) return costingLabor(costingIds);
   if (body.salesOrderId) {
     const o = await prisma.salesOrder.findUnique({
       where: { id: body.salesOrderId },
@@ -1260,7 +1271,8 @@ export async function settleJobOrder(
       });
       const rev = valueRevision(revisions);
       if (!rev?.costingId) throw badRequest(`${jo.quotation?.number ?? 'the quotation'} has no costing behind it`);
-      const costing = await costingForJob(rev.costingId, jo.customerId);
+      // Every costing the quotation was costed from (2026-10-19), the first first.
+      const costing = await costingsForJob(await revisionCostingIds(rev), jo.customerId);
       const tally = await laborTally(jo);
       const t = targets(jo);
       built = await prisma.$transaction(async (tx) => {
@@ -1475,22 +1487,29 @@ onApprovalReopened('job_order', {
     if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
 
     if (job && built) {
+      // Every costing it was built from (2026-10-19), read before the delete takes the links.
+      const builtFrom = await jobCostingIds(job, tx);
       await deleteOrRefuse(`Project ${job.number}`, () => tx.job.delete({ where: { id: job.id } }));
-      // The costing goes back to draft only where this build finalised it.
-      const costing = await tx.costing.findUnique({ where: { id: job.costingId }, select: { id: true, number: true, status: true, finalAt: true } });
-      const otherJobs = await tx.job.count({ where: { costingId: job.costingId } });
-      const costingApproval = await tx.approvalRequest.findFirst({
-        where: { documentType: 'costing', documentId: job.costingId },
-        orderBy: { createdAt: 'desc' },
-        select: { status: true },
-      });
-      const finalisedByBuild =
-        !!costing?.finalAt && Math.abs(costing.finalAt.getTime() - job.createdAt.getTime()) < 10_000;
-      let costingNote = '';
-      if (costing && costing.status === 'FINAL' && !otherJobs && costingApproval?.status !== 'APPROVED' && finalisedByBuild) {
-        await tx.costing.updateMany({ where: { id: costing.id, status: 'FINAL' }, data: { status: 'DRAFT', finalAt: null } });
-        costingNote = `; costing ${costing.number} back to draft`;
+      // A costing goes back to draft only where this build finalised it.
+      const reverted: string[] = [];
+      for (const costingId of builtFrom) {
+        const costing = await tx.costing.findUnique({ where: { id: costingId }, select: { id: true, number: true, status: true, finalAt: true } });
+        const otherJobs = await tx.job.count({ where: jobsOnCostingWhere(costingId) });
+        const costingApproval = await tx.approvalRequest.findFirst({
+          where: { documentType: 'costing', documentId: costingId },
+          orderBy: { createdAt: 'desc' },
+          select: { status: true },
+        });
+        const finalisedByBuild =
+          !!costing?.finalAt && Math.abs(costing.finalAt.getTime() - job.createdAt.getTime()) < 10_000;
+        if (costing && costing.status === 'FINAL' && !otherJobs && costingApproval?.status !== 'APPROVED' && finalisedByBuild) {
+          await tx.costing.updateMany({ where: { id: costing.id, status: 'FINAL' }, data: { status: 'DRAFT', finalAt: null } });
+          reverted.push(costing.number);
+        }
       }
+      const costingNote = reverted.length
+        ? `; costing${reverted.length === 1 ? '' : 's'} ${reverted.join(', ')} back to draft`
+        : '';
       await audit(
         {
           entityType: 'job',
