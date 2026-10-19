@@ -4224,7 +4224,11 @@ stand-in's door, queue, bell and trail, and both switches off.
   (the owner's call: "apply the same team rule to Back Support") a holder
   with nothing ticked handles their OWN team** (their Team on Admin ›
   Users), the Technical Manager's rule — no longer every team; ticked
-  teams replace their own.
+  teams replace their own. **The org chart draws it** (2026-10-19): a dashed
+  arrow labelled with the team's code from each supporter to the head of
+  every team they support (the member whose own manager is on another team),
+  routed to the right of the cards, "Back Support → KAT, HIT" on the
+  supporter's card, and a switch to hide the lines (`OrgChart.tsx`).
 - **A person's TEAM is picked on Admin › Users too** (2026-10-12, the
   owner's call: "on users edit allow selection of Team, particularly in
   Team Leader Role and sales to categorize their quotation and sales order
