@@ -85,8 +85,8 @@ four databases and four copies of "customer".
    allocations on the claim or the request; for a project an invoice,
    bill, live PR, live PO, stock issue, claim, advance or a budget request
    past draft — a project's own DRAFT, REJECTED or CANCELLED purchase
-   requests and its DRAFT or CANCELLED purchase orders with nothing
-   received and no bill go WITH it since 2026-10-19, in the same
+   requests and its DRAFT or CANCELLED purchase orders with no live
+   incoming report and no bill go WITH it since 2026-10-19, in the same
    transaction, each audited, the owner's call for clearing sample
    projects), runs through `deleteOrRefuse()` in `http/kit.ts` (a foreign key
    that still points at it is a 400, nothing deleted), removes its files
@@ -99,8 +99,10 @@ four databases and four copies of "customer".
    issued one is pulled back to draft first, which undoes what issue
    did), `PurchaseOrder.cancelReason` kept — and `DELETE` takes a draft
    or a cancelled one, its buyer or edit_all with the delete right,
-   refused while any incoming report or a live supplier bill names it; a
-   cancelled order no longer blocks its request's cancel. **A purchase
+   refused while a live incoming report (draft, pending, received) or a
+   live supplier bill names it — its CANCELLED incoming reports, which
+   posted nothing, go with it, each audited; a cancelled order no longer
+   blocks its request's cancel. **A purchase
    request is cancelled too** (2026-10-11): `POST /purchase-requests/:id/
    cancel { reason }` — its requester or edit_all, a draft, a pending one
    (withdrawn through `cancelOpenRequest`, refused if a decision landed

@@ -1254,12 +1254,18 @@ async function main() {
     const poCancelled = await api(buyerToken, 'POST', `/purchase-orders/${cancelPo.id}/cancel`, { reason: 'Supplier withdrew the quote' });
     const openAfterCancel = await prisma.approvalRequest.count({ where: { documentType: 'purchase_order', documentId: cancelPo.id, status: 'PENDING' } });
     const cancelledRead = await api(buyerToken, 'GET', `/purchase-orders/${cancelPo.id}`);
+    // A cancelled incoming report on it posted nothing, and goes with it; a live one refuses the delete.
+    const deadReport = await prisma.receiving.create({
+      data: { number: `${TAG}-DEADRR-${Date.now()}`, orderId: cancelPo.id, receivedById: buyer.id, status: 'DRAFT', notes: `${TAG} dead report` },
+    });
+    const delWithLive = await api(buyerToken, 'DELETE', `/purchase-orders/${cancelPo.id}`);
+    await prisma.receiving.update({ where: { id: deadReport.id }, data: { status: 'CANCELLED', cancelReason: 'sample' } });
     const strangerDel = await api(colleagueToken, 'DELETE', `/purchase-orders/${cancelPo.id}`);
     const deleted = await api(buyerToken, 'DELETE', `/purchase-orders/${cancelPo.id}`);
     const goneRow = await prisma.purchaseOrder.findUnique({ where: { id: cancelPo.id } });
     const deletedRow = await prisma.auditLog.count({ where: { entityType: 'purchase_order', entityId: cancelPo.id, action: 'DELETED' } });
     check(
-      'a pending order is cancelled with its reason (request withdrawn), then deleted by its buyer alone; a pending one is not deleted',
+      'a pending order is cancelled with its reason (request withdrawn), then deleted by its buyer alone with its cancelled incoming report; a pending one, or one a live report stands on, is not deleted',
       delPending.status === 400 &&
         cancelShort.status === 400 &&
         poCancelled.status === 200 &&
@@ -1268,10 +1274,12 @@ async function main() {
         cancelledRead.body.cancelReason === 'Supplier withdrew the quote' &&
         cancelledRead.body.canDelete === true &&
         strangerDel.status === 403 &&
+        delWithLive.status === 400 &&
         deleted.status === 200 &&
         goneRow === null &&
+        !(await prisma.receiving.findUnique({ where: { id: deadReport.id } })) &&
         deletedRow === 1,
-      `${delPending.status} ${cancelShort.status} ${poCancelled.status} open ${openAfterCancel} ${cancelledRead.body.status} ${strangerDel.status} ${deleted.status} ${deletedRow}`,
+      `${delPending.status} ${delWithLive.status} ${cancelShort.status} ${poCancelled.status} open ${openAfterCancel} ${cancelledRead.body.status} ${strangerDel.status} ${deleted.status} ${deletedRow}`,
     );
 
     // An order placed from an awarded canvass keeps its supplier.

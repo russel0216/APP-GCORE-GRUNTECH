@@ -2776,7 +2776,7 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
     canDelete:
       !!me &&
       (po.status === 'DRAFT' || po.status === 'CANCELLED') &&
-      po.receivings.length === 0 &&
+      po.receivings.every((r) => r.status === 'CANCELLED') &&
       can(me, 'gchain.purchase_orders.delete') &&
       mayEditPo(me, po),
     /** What the order page's save claims on (`PUT /:id/sheet`'s `version`). */
@@ -3758,9 +3758,10 @@ purchaseOrderRoutes.post(
 
 /**
  * Deletes a draft or a CANCELLED order (2026-10-19): the delete right, and
- * its buyer or edit_all; never one with goods received against it (any
- * incoming report, even a cancelled one) or a live supplier bill. Its lines
- * cascade; its files go after the commit; one DELETED row.
+ * its buyer or edit_all; never one with a live incoming report (draft,
+ * pending or received) or a live supplier bill. Its lines cascade; its
+ * CANCELLED incoming reports — which posted nothing — go with it in the
+ * same transaction, each audited; the files go after the commit.
  */
 purchaseOrderRoutes.delete(
   '/:id',
@@ -3770,18 +3771,33 @@ purchaseOrderRoutes.delete(
     const po = await prisma.purchaseOrder.findUnique({
       where: { id: req.params.id },
       include: {
-        _count: { select: { receivings: true } },
+        receivings: { select: { id: true, number: true, status: true } },
         bills: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
       },
     });
     if (!po) throw notFound('Purchase order not found');
     if (!mayEditPo(me, po)) throw forbidden('This order belongs to someone else');
-    if (po._count.receivings > 0) throw badRequest('Goods have been received against this order');
+    const liveReports = po.receivings.filter((r) => r.status !== 'CANCELLED');
+    if (liveReports.length) {
+      throw badRequest(`Incoming report ${liveReports.map((r) => r.number).join(', ')} stands on ${po.number} — cancel it first`);
+    }
+    const goneReports = po.receivings;
     if (po.bills.length) throw badRequest(`Supplier bill ${po.bills.map((b) => b.number).join(', ')} is matched to ${po.number} — cancel it first`);
     if (po.status !== 'DRAFT' && po.status !== 'CANCELLED') throw badRequest('Only a draft or a cancelled order can be deleted — cancel it first');
 
-    await deleteOrRefuse(po.number, () => prisma.purchaseOrder.delete({ where: { id: po.id } }));
+    await deleteOrRefuse(po.number, () =>
+      prisma.$transaction(async (tx) => {
+        if (goneReports.length) await tx.receiving.deleteMany({ where: { id: { in: goneReports.map((r) => r.id) }, status: 'CANCELLED' } });
+        await tx.purchaseOrder.delete({ where: { id: po.id } });
+      }),
+    );
     await deleteAttachmentsOf('purchase_order', [po.id]);
+    if (goneReports.length) {
+      await deleteAttachmentsOf('receiving', goneReports.map((r) => r.id));
+      for (const r of goneReports) {
+        await audit({ entityType: 'receiving', entityId: r.id, action: 'DELETED', summary: `Deleted cancelled ${r.number} with ${po.number}` }, req);
+      }
+    }
     await audit(
       { entityType: 'purchase_order', entityId: po.id, action: 'DELETED', summary: `Deleted ${po.status === 'CANCELLED' ? 'cancelled ' : ''}${po.number}` },
       req,
