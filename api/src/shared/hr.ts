@@ -211,6 +211,28 @@ export const FACE_MARGIN = 0.05;
 export const MIN_FACE_SAMPLES = 3;
 
 /**
+ * Whether a new enrolment sample collides with another employee's face
+ * (2026-10-19). Within the threshold less the margin of their samples it is
+ * the same face — refused, whatever the person's own samples say. Up to the
+ * threshold plus the margin it is a look-alike (a relative): taken when it
+ * sits clearly with the person's own samples (the margin nearer to them) or
+ * is their first, refused otherwise. Further away nothing is said. The
+ * clock's `decideFace` still tells two enrolled look-alikes apart capture by
+ * capture.
+ */
+export function enrolCollision(
+  own: number | null,
+  nearestOther: number | null,
+  threshold: number,
+): 'same_face' | 'too_close' | 'lookalike' | null {
+  if (nearestOther == null) return null;
+  if (nearestOther <= threshold - FACE_MARGIN + 1e-9) return 'same_face';
+  if (nearestOther > threshold + FACE_MARGIN + 1e-9) return null;
+  if (own != null && own + FACE_MARGIN > nearestOther + 1e-9) return 'too_close';
+  return 'lookalike';
+}
+
+/**
  * The most a person may keep. More samples only widen the net a stranger can
  * fall into; a person whose face has changed removes an old one first.
  */

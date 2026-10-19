@@ -51,6 +51,7 @@ import {
   faceDistance,
   matchFace,
   decideFace,
+  enrolCollision,
   FACE_MARGIN,
   MIN_FACE_SAMPLES,
   MAX_FACE_SAMPLES,
@@ -666,6 +667,21 @@ async function main() {
   const decide = (m: { own: number | null; nearestOther: { employeeId: string; name: string; distance: number } | null; threshold: number }) =>
     decideFace({ own: m.own, nearestOther: m.nearestOther, threshold: m.threshold, margin: FACE_MARGIN });
   const verdict = (d: ReturnType<typeof decideFace>) => (d.ok ? 'ok' : d.reason);
+
+  // Enrolment against another employee's face (2026-10-19): the same face is
+  // refused; a look-alike (a relative) is taken as a first sample or when it
+  // sits the margin nearer its owner's samples, refused when it does not.
+  check(
+    'enrolment refuses the same face, takes a look-alike, and refuses a look-alike sample that sits nearer the colleague',
+    enrolCollision(null, 0.3, 0.55) === 'same_face' &&
+      enrolCollision(0.1, 0.5, 0.55) === 'same_face' &&
+      enrolCollision(null, 0.52, 0.55) === 'lookalike' &&
+      enrolCollision(0.3, 0.58, 0.55) === 'lookalike' &&
+      enrolCollision(0.55, 0.58, 0.55) === 'too_close' &&
+      enrolCollision(null, 0.61, 0.55) === null &&
+      enrolCollision(null, null, 0.55) === null,
+    [enrolCollision(null, 0.3, 0.55), enrolCollision(null, 0.52, 0.55), enrolCollision(0.55, 0.58, 0.55)].join(' '),
+  );
 
   await currentSample(employee.id, descriptor(1));
 
@@ -2162,8 +2178,8 @@ async function main() {
           'This does not look like the samples already on your account. Retake facing the camera in good light — if ' +
           'those samples are of someone else, remove them first.',
         collision:
-          "This face is too close to another employee's enrolled face for the clock to tell you apart. Use the " +
-          'fallback and tell HR.',
+          "This face is already enrolled on another employee's account. Use the fallback and ask HR to check Face " +
+          'health in HR Settings — the samples on that account may be yours.',
       };
       const needsSamples = (n: number) =>
         `Face clock-in needs ${MIN_FACE_SAMPLES} samples of your face — you have ${n}. Add them on this page, or use the fallback.`;

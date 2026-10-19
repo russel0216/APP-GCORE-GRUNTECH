@@ -78,6 +78,7 @@ import {
   matchFace,
   decideFace,
   FACE_MARGIN,
+  enrolCollision,
   MIN_FACE_SAMPLES,
   MAX_FACE_SAMPLES,
   type FaceRefusal,
@@ -583,8 +584,8 @@ const ENROL_MESSAGES = {
     `This does not look like the samples already on ${whose}. Retake facing the camera in good light — if those ` +
     'samples are of someone else, remove them first.',
   collision:
-    "This face is too close to another employee's enrolled face for the clock to tell you apart. Use the fallback " +
-    'and tell HR.',
+    "This face is already enrolled on another employee's account. Use the fallback and ask HR to check Face health " +
+    'in HR Settings — the samples on that account may be yours.',
 };
 
 /**
@@ -716,6 +717,7 @@ clockRoutes.post(
       kept = true;
 
       let decision: EnrolDecision;
+      let lookalike: { employeeId: string; name: string; distance: number } | null = null;
       try {
         decision = await prisma.$transaction(
           async (tx): Promise<EnrolDecision> => {
@@ -731,11 +733,20 @@ clockRoutes.post(
             if (own != null && own > limit) {
               return { refused: 'inconsistent', own, nearestOther, limit, onFile: onFile.current };
             }
-            // Collision: too near anybody else's face for the clock to tell
-            // the two apart, whoever is enrolling it.
-            if (nearestOther && nearestOther.distance <= limit) {
+            // Collision: the same face as one on another account — within
+            // the threshold less the margin of it, nearer than a genuine
+            // capture of a different person lands (2026-10-19, Karen
+            // Gasiong's ticket: a relative's face, between that and the
+            // threshold plus the margin, used to be refused as well, and a
+            // look-alike could never enrol). A look-alike's sample is taken
+            // when it sits clearly with its owner's own samples — the clock's
+            // margin rule tells the two apart capture by capture, both being
+            // enrolled — and HR sees the pair on Face health.
+            const clash = enrolCollision(own, nearestOther?.distance ?? null, threshold);
+            if (clash === 'same_face' || clash === 'too_close') {
               return { refused: 'collision', own, nearestOther, limit, onFile: onFile.current };
             }
+            lookalike = clash === 'lookalike' ? nearestOther : null;
 
             const created = await tx.faceEnrollment.create({
               data: {
@@ -787,13 +798,15 @@ clockRoutes.post(
         }
         throw badRequest(
           isHr && nearestOther
-            ? `This face is too close to ${nearestOther.name}'s enrolled face for the clock to tell them apart. ` +
-                "Check both people's face samples before enrolling it."
+            ? `This face is already enrolled on ${nearestOther.name}'s account (distance ${fourPlaces(nearestOther.distance)}). ` +
+                `If those samples are this person's, remove them from ${nearestOther.name}'s Face samples tab first.`
             : ENROL_MESSAGES.collision,
         );
       }
 
       const after = await sampleCounts(target.id);
+      // Set inside the transaction's callback, which the compiler cannot follow.
+      const resembles = lookalike as { employeeId: string; name: string; distance: number } | null;
       await audit(
         {
           entityType: 'employee',
@@ -801,7 +814,12 @@ clockRoutes.post(
           action: 'UPDATED',
           summary:
             `Face sample added (${after.current} on file` +
-            (after.current < MIN_FACE_SAMPLES ? `, ${MIN_FACE_SAMPLES} needed for face clock-in)` : ')'),
+            (after.current < MIN_FACE_SAMPLES ? `, ${MIN_FACE_SAMPLES} needed for face clock-in)` : ')') +
+            (resembles ? ' — it resembles another employee’s face' : ''),
+          // A look-alike's name and distance in the detail only, for HR.
+          after: resembles
+            ? ({ faceEnrolLookalike: { ...resembles, distance: fourPlaces(resembles.distance) } } as unknown as Prisma.InputJsonValue)
+            : undefined,
         },
         req,
       );
