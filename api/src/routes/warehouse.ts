@@ -1815,7 +1815,8 @@ async function issueView(issue: NonNullable<Awaited<ReturnType<typeof loadIssue>
     // by a delete holder; a pending one is pulled back first; issued stock
     // has moved.
     canEdit: draft && raiser,
-    canDelete: draft && can(me, 'gchain.stock_issuance.delete'),
+    canDelete: (draft || issue.status === 'CANCELLED') && raiser && can(me, 'gchain.stock_issuance.delete'),
+    canCancel: (draft || issue.status === 'PENDING_APPROVAL') && raiser,
     needsApproval: draft ? !!route : null,
     canSubmit: draft && !!route && raiser && issue.items.length > 0,
     canIssue: draft && !route && can(me, 'gchain.stock_issuance.create') && issue.items.length > 0,
@@ -2306,20 +2307,59 @@ stockIssueRoutes.patch(
   }),
 );
 
-/** A draft is deleted outright — nothing has moved. An issued one is the record of stock that left. */
+/**
+ * Cancels a draft or pending outgoing slip (2026-10-19, the owner's call):
+ * whoever may change it, the reason kept; a pending one's request is
+ * withdrawn in the same transaction. Neither moved any stock. An issued slip
+ * is pulled back to a draft first, which puts the stock back.
+ */
+stockIssueRoutes.post(
+  '/:id/cancel',
+  requireAny(...ISSUE_EDIT),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled').max(2000) }), req.body);
+    const issue = await prisma.stockIssue.findUnique({ where: { id: req.params.id } });
+    if (!issue) throw notFound('Stock issue not found');
+    assertChangeIssue(me, issue);
+    if (issue.status === 'CANCELLED') throw badRequest(`${issue.number} is already cancelled`);
+    if (issue.status !== 'DRAFT' && issue.status !== 'PENDING_APPROVAL') {
+      throw badRequest(`${issue.number} has been issued — pull it back to a draft first, then cancel it`);
+    }
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.stockIssue.updateMany({ where: { id: issue.id, status: issue.status }, data: { status: 'CANCELLED', cancelReason: body.reason } });
+      if (!claimed.count) throw badRequest(`${issue.number} changed a moment ago — reload to see where it stands`);
+      if (issue.status === 'PENDING_APPROVAL') {
+        const withdrawn = await cancelOpenRequest(ISSUE_DOC, issue.id, tx, `cancelled by ${me.name}: ${body.reason}`, me.id);
+        if (!withdrawn.length) throw badRequest(`${issue.number} was decided a moment ago — reload to see where it stands`);
+      }
+    });
+    await audit({ entityType: 'stock_issue', entityId: issue.id, action: 'CANCELLED', summary: `${issue.number} cancelled — ${body.reason}` }, req);
+    res.json(await issueView((await loadIssue(issue.id))!, me));
+  }),
+);
+
+/**
+ * A draft or a CANCELLED slip is deleted outright — nothing has moved: the
+ * delete right, and whoever may change it. An issued one is the record of
+ * stock that left. Its files go after the commit.
+ */
 stockIssueRoutes.delete(
   '/:id',
   require_('gchain.stock_issuance.delete'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const issue = await prisma.stockIssue.findUnique({ where: { id: req.params.id } });
     if (!issue) throw notFound('Stock issue not found');
-    if (issue.status !== 'DRAFT') {
-      throw badRequest(`${issue.number} has been issued — the stock has moved, so it stays on record`);
+    assertChangeIssue(me, issue);
+    if (issue.status !== 'DRAFT' && issue.status !== 'CANCELLED') {
+      throw badRequest(`Only a draft or a cancelled slip can be deleted — ${issue.number} is ${statusLabel(issue.status).toLowerCase()}`);
     }
-    const gone = await prisma.stockIssue.deleteMany({ where: { id: issue.id, status: 'DRAFT' } });
-    if (!gone.count) throw badRequest(`${issue.number} was issued a moment ago — it stays on record`);
+    const gone = await prisma.stockIssue.deleteMany({ where: { id: issue.id, status: { in: ['DRAFT', 'CANCELLED'] } } });
+    if (!gone.count) throw badRequest(`${issue.number} changed a moment ago — it stays on record`);
+    await deleteAttachmentsOf('stock_issue', [issue.id]);
     await audit(
-      { entityType: 'stock_issue', entityId: issue.id, action: 'DELETED', summary: `Deleted ${issue.number}` },
+      { entityType: 'stock_issue', entityId: issue.id, action: 'DELETED', summary: `Deleted ${issue.status === 'CANCELLED' ? 'cancelled' : 'draft'} ${issue.number}` },
       req,
     );
     res.json({ ok: true });

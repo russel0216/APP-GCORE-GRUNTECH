@@ -3007,6 +3007,8 @@ model StockIssue {
   issueDate DateTime  @default(now()) @db.Date
   purpose   String
   notes     String?
+  /// Why a draft or pending slip was cancelled (2026-10-19).
+  cancelReason String?
   issuedAt  DateTime?
 
   /// The internal receive proof (2026-10-15, the owner's call: "Outgoing =

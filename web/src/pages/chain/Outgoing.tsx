@@ -145,6 +145,7 @@ export function StockIssues() {
               { value: 'DRAFT', label: 'Draft' },
               { value: 'PENDING_APPROVAL', label: 'Pending approval' },
               { value: 'ISSUED', label: 'Issued' },
+              { value: 'CANCELLED', label: 'Cancelled' },
             ],
           },
           {
@@ -840,6 +841,8 @@ interface IssueRecord {
   }[];
   canEdit: boolean;
   canDelete: boolean;
+  canCancel: boolean;
+  cancelReason?: string | null;
   needsApproval: boolean | null;
   canSubmit: boolean;
   canIssue: boolean;
@@ -901,6 +904,11 @@ export function StockIssueDetail() {
     setIssue(await api.post<IssueRecord>(`/stock-issues/${id}/withdraw`));
     setReload((n) => n + 1);
     toast('ok', `${number} pulled back to a draft`);
+  }
+  async function cancel(reason: string) {
+    setIssue(await api.post<IssueRecord>(`/stock-issues/${id}/cancel`, { reason }));
+    setReload((n) => n + 1);
+    toast('ok', `${number} cancelled`);
   }
   async function remove() {
     await api.del(`/stock-issues/${id}`);
@@ -1008,12 +1016,27 @@ export function StockIssueDetail() {
               onConfirm: withdraw,
             },
           },
+          issue.canCancel && {
+            label: 'Cancel slip',
+            danger: true,
+            confirm: {
+              title: `Cancel ${number}?`,
+              body:
+                status === 'PENDING_APPROVAL'
+                  ? 'Its approval is withdrawn and the approver is told. Nothing has left the store. A cancelled slip can then be deleted.'
+                  : 'Nothing has left the store. A cancelled slip can then be deleted.',
+              confirmLabel: 'Cancel slip',
+              reason: 'required',
+              minReason: 3,
+              onConfirm: cancel,
+            },
+          },
           issue.canDelete && {
             label: 'Delete',
             danger: true,
             confirm: {
               title: `Delete ${number}?`,
-              body: 'Nothing has left the store yet. It cannot be undone.',
+              body: status === 'CANCELLED' ? 'Nothing left the store on it. It cannot be undone.' : 'Nothing has left the store yet. It cannot be undone.',
               confirmLabel: 'Delete',
               onConfirm: remove,
             },
@@ -1027,6 +1050,12 @@ export function StockIssueDetail() {
         <div className="qd-route">
           <span className="qd-route-label">{allHeld(issue.approvalRoute) ? 'No one else’s approval needed' : 'Submit for approval sends it to'}</span>
           <ApprovalStepper steps={previewSteps(issue.approvalRoute)} />
+        </div>
+      )}
+      {status === 'CANCELLED' && (
+        <div className="alert info" role="status">
+          <strong>Cancelled</strong>
+          {issue.cancelReason ? `: ${issue.cancelReason}` : '.'}
         </div>
       )}
       <DecisionNote documentType="stock_issue" documentId={String(id)} reloadToken={reload} />

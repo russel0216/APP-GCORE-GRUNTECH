@@ -3155,6 +3155,37 @@ async function main() {
       issuedEdit.status === 400 && issuedDelete.status === 400 && issuedFlags.body.canEdit === false && issuedFlags.body.canDelete === false,
       `${issuedEdit.status} ${issuedDelete.status}`,
     );
+    // A draft or pending slip is cancelled with its reason (a pending one's
+    // request withdrawn), and a cancelled slip deleted; an issued one is
+    // refused both (2026-10-19, the owner's call).
+    {
+      const made = await api(keeperToken, 'POST', '/stock-issues', { warehouseId: warehouse.id, purpose: `${TAG} issue to cancel` });
+      const goneId = String(made.body.id);
+      await api(keeperToken, 'POST', `/stock-issues/${goneId}/items`, { itemId: item.id, quantity: 1 });
+      const sent = await api(keeperToken, 'POST', `/stock-issues/${goneId}/submit`);
+      const noReason = await api(keeperToken, 'POST', `/stock-issues/${goneId}/cancel`, { reason: '' });
+      const cancelled = await api(keeperToken, 'POST', `/stock-issues/${goneId}/cancel`, { reason: `${TAG} not needed` });
+      const request = await prisma.approvalRequest.findFirst({ where: { documentType: 'stock_issue', documentId: goneId }, orderBy: { createdAt: 'desc' } });
+      const issuedCancel = await api(bossToken, 'POST', `/stock-issues/${draftIssueId}/cancel`, { reason: `${TAG} too late` });
+      const flags = await api(bossToken, 'GET', `/stock-issues/${goneId}`);
+      const deleted = await api(bossToken, 'DELETE', `/stock-issues/${goneId}`);
+      const row = await prisma.stockIssue.findUnique({ where: { id: goneId } });
+      check(
+        'a pending outgoing slip is cancelled with its reason, its request withdrawn, then deleted; an issued one cannot be cancelled',
+        sent.status === 200 &&
+          noReason.status === 400 &&
+          cancelled.status === 200 &&
+          cancelled.body.status === 'CANCELLED' &&
+          cancelled.body.cancelReason === `${TAG} not needed` &&
+          request?.status === 'CANCELLED' &&
+          issuedCancel.status === 400 &&
+          flags.body.canDelete === true &&
+          flags.body.canCancel === false &&
+          deleted.status === 200 &&
+          row === null,
+        `submit ${sent.status}; ${noReason.status} ${cancelled.status} ${cancelled.body.status}; request ${request?.status}; issued ${issuedCancel.status}; flags ${flags.body.canDelete}/${flags.body.canCancel}; delete ${deleted.status} ${JSON.stringify(deleted.body).slice(0, 120)}`,
+      );
+    }
     // Issued, the paper dates who prepared it and the supervisor who approved
     // it; "Received in good order by" waits for the receiver to confirm it
     // (2026-10-15, the owner's call: Outgoing is the internal receive proof).
