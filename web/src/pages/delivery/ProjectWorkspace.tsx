@@ -28,7 +28,7 @@ import { JOB_STATUSES, JOB_TONES, ProgressBar } from './Projects';
 import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
-import { ProjectBudgetRequestsCard, BudgetRequestModal } from './BudgetRequests';
+import { ProjectBudgetRequestsCard } from './BudgetRequests';
 import { ProjectPlanApprovalsCard } from './PlanApprovals';
 import { ProjectCostingCard } from './ProjectCosting';
 import { ProjectJobOrders } from '../service/JobOrders';
@@ -219,7 +219,6 @@ export function ProjectWorkspace() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
-  const [budgetRequest, setBudgetRequest] = useState(false);
   const [newReport, setNewReport] = useState(false);
   const [turnover, setTurnover] = useState<'turnover' | 'register' | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
@@ -644,7 +643,7 @@ export function ProjectWorkspace() {
         <ProjectBudgetRequestsCard
           job={job}
           reloadToken={reloadToken}
-          onRaise={can('gops.budget_requests.create') ? () => setBudgetRequest(true) : undefined}
+          onRaise={can('gops.budget_requests.create') ? () => navigate(`/g-ops/budget-requests/new?jobId=${job.id}`) : undefined}
         />
       )}
 
@@ -828,17 +827,6 @@ export function ProjectWorkspace() {
         />
       )}
 
-      {budgetRequest && (
-        <BudgetRequestModal
-          job={job}
-          onClose={() => setBudgetRequest(false)}
-          onSaved={() => {
-            setBudgetRequest(false);
-            setReloadToken((t) => t + 1);
-            void load();
-          }}
-        />
-      )}
 
       {newReport && (
         <NewReportModal

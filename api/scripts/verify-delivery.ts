@@ -1745,6 +1745,50 @@ async function main() {
     );
     await prisma.budgetRequest.delete({ where: { id: pmRequest.id } });
 
+    // The request page's breakdown (2026-10-19): lines, the amount their sum
+    // (qty × unit cost to the centavo), replaced whole by a Modify, printed;
+    // the page's budget panel and route answer for the project.
+    const lined = await http(engToken, 'POST', '/budget-requests', {
+      jobId: job.id,
+      costCategoryId: br.costCategoryId,
+      reason: 'ZZDELIVERY breakdown',
+      amount: 1, // ignored: the lines decide
+      items: [
+        { name: 'Teflon tape', quantity: 3, unit: 'roll', unitCost: 45.5 },
+        { name: 'Elbow 1/2"', description: 'GI, threaded', quantity: 2.5, unit: 'pcs', unitCost: 33.33 },
+      ],
+    });
+    const linedId = lined.body?.id as string | undefined;
+    const modified = linedId
+      ? await http(engToken, 'PUT', `/budget-requests/${linedId}`, {
+          jobId: job.id,
+          costCategoryId: br.costCategoryId,
+          reason: 'ZZDELIVERY breakdown',
+          items: [{ name: 'Teflon tape', quantity: 4, unit: 'roll', unitCost: 45.5 }],
+        })
+      : null;
+    const linedPdf = linedId ? await printed(engToken, `/budget-requests/${linedId}/pdf`) : null;
+    const panel = await http(engToken, 'GET', `/budget-requests/budget?jobId=${job.id}`);
+    const routeAnswer = await http(engToken, 'GET', `/budget-requests/route?amount=182&jobId=${job.id}`);
+    check(
+      'a budget request with a breakdown is the sum of its lines, a Modify replaces them, and the paper prints them',
+      lined.status === 201 &&
+        lined.body.amount === 219.83 && // 3 × 45.50 + 2.5 × 33.33 (83.325 → 83.33)
+        lined.body.items?.length === 2 &&
+        modified?.status === 200 &&
+        modified.body.amount === 182 &&
+        modified.body.items?.length === 1 &&
+        linedPdf?.status === 200 &&
+        flat(linedPdf.text).includes('BREAKDOWN') &&
+        flat(linedPdf.text).includes('Teflon tape') &&
+        panel.status === 200 &&
+        Array.isArray(panel.body.lines) &&
+        routeAnswer.status === 200 &&
+        'route' in routeAnswer.body,
+      `${lined.status} ${lined.body?.amount} ${lined.body?.items?.length} · ${modified?.status} ${modified?.body?.amount} · pdf ${linedPdf?.status} · ${panel.status} · ${routeAnswer.status}`,
+    );
+    if (linedId) await prisma.budgetRequest.delete({ where: { id: linedId } });
+
     // (f) The receiving register narrows to the job (PROC's jobId filter):
     //     every row it returns must belong to the job asked about.
     const receivings = await http(leadToken, 'GET', `/receivings?jobId=${job.id}&pageSize=200`);

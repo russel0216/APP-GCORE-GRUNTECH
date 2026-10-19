@@ -19,12 +19,13 @@ import {
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
-import { renderDocument, formatMoney, formatAmount, formatShortDate, statusLabel, companyCurrency, type PdfSection } from '../shared/pdf';
+import { renderDocument, formatMoney, formatAmount, formatQuantity, formatShortDate, statusLabel, companyCurrency, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween } from '../shared/finance';
 import { cashRequestSections, cashRequestSignatories } from './finance';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
+import { projectBudgetByLine } from './procurement';
 
 /**
  * BUDGET REQUESTS — project cash (model §5.2, 2026-10-07, the owner's call).
@@ -57,6 +58,7 @@ const requestInclude = {
     select: { id: true, number: true, status: true, total: true, amountPaid: true, claimDate: true, approvedAt: true },
     orderBy: { createdAt: 'desc' },
   },
+  items: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.BudgetRequestInclude;
 
 type RequestRow = Prisma.BudgetRequestGetPayload<{ include: typeof requestInclude }>;
@@ -97,6 +99,7 @@ export function presentBudgetRequest(row: RequestRow, today = dayKey(new Date())
       row.status === 'RELEASED' && row.liquidationDueDate ? -daysBetween(row.liquidationDueDate, today) : null,
     liquidation: liquidation ? { ...liquidation, total: num(liquidation.total), amountPaid: num(liquidation.amountPaid) } : null,
     liquidations: row.liquidations.map((l) => ({ ...l, total: num(l.total), amountPaid: num(l.amountPaid) })),
+    items: row.items.map((i) => ({ ...i, quantity: num(i.quantity), unitCost: num(i.unitCost), amount: num(i.amount) })),
   };
 }
 
@@ -386,6 +389,42 @@ budgetRequestRoutes.get(
   }),
 );
 
+const REQUEST_WRITERS = ['gops.budget_requests.create', 'gops.budget_requests.edit_own', 'gops.budget_requests.edit_all'];
+
+/**
+ * The project's budget by budget line for the request page's live panel —
+ * `projectBudgetByLine()`, the purchase requisition's own figures. A budget
+ * request commits nothing (project cash reaches the ledger only when it is
+ * liquidated), so the panel shows what is left beside what is asked.
+ */
+budgetRequestRoutes.get(
+  '/budget',
+  requireAny(...REQUEST_WRITERS),
+  handler(async (req, res) => {
+    const jobId = String(req.query.jobId ?? '');
+    if (!jobId) throw badRequest('Name the project');
+    const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, number: true, name: true } });
+    if (!job) throw notFound('Project not found');
+    res.json({ job, ...(await projectBudgetByLine(jobId)) });
+  }),
+);
+
+/** "Submit for approval sends it to …" — at the amount on the page, in the requester's name. Above `/:id`. */
+budgetRequestRoutes.get(
+  '/route',
+  requireAny(...REQUEST_WRITERS),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const amount = Number(req.query.amount ?? 0);
+    if (!Number.isFinite(amount) || amount < 0) throw badRequest('The amount is not a number');
+    const requestId = req.query.requestId ? String(req.query.requestId) : null;
+    const row = requestId ? await prisma.budgetRequest.findUnique({ where: { id: requestId }, select: { requestedById: true, jobId: true } }) : null;
+    if (requestId && !row) throw notFound('Budget request not found');
+    const jobId = row?.jobId ?? (req.query.jobId ? String(req.query.jobId) : null);
+    res.json({ route: await routeBrief('budget_request', amount, row?.requestedById ?? me.id, null, { jobId }) });
+  }),
+);
+
 async function loadRequest(id: string) {
   return prisma.budgetRequest.findUnique({
     where: { id },
@@ -425,14 +464,62 @@ budgetRequestRoutes.get(
   }),
 );
 
+const itemSchema = z.object({
+  name: z.string().trim().min(1, 'Say what the line buys').max(300),
+  description: z.string().trim().max(2000).optional().nullable(),
+  quantity: z.number().positive('A line’s quantity must be more than zero'),
+  unit: z.string().trim().max(40).optional().nullable(),
+  unitCost: z.number().min(0, 'A unit cost cannot be negative'),
+});
+
 const requestSchema = z.object({
   jobId: z.string().min(1, 'Which project?'),
   costCategoryId: z.string().min(1, 'Which budget line?'),
-  amount: z.number().positive('A budget request must be for more than zero'),
+  /** Typed when there is no breakdown; with `items`, their sum and nothing else. */
+  amount: z.number().optional(),
   reason: z.string().trim().min(3, 'What is the cash for?'),
   neededBy: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
+  /** The breakdown (2026-10-19). Sent, it replaces the request's lines whole. */
+  items: z.array(itemSchema).max(200).optional(),
 });
+
+type RequestBody = z.infer<typeof requestSchema>;
+
+/**
+ * The lines as stored and the amount they make: each line's amount is
+ * quantity (3 dp) × unit cost rounded to the centavo — the purchase
+ * requisition's `cents()` rule — and the request is their sum. With no lines
+ * the typed amount stands.
+ */
+/**
+ * A line's amount in exact integers: quantity in thousandths × unit cost in
+ * centavos ÷ 1000, half away from zero — never a float multiplied and stored
+ * (rule 10). The page's `requestLineAmount()` is the same rule.
+ */
+export function requestLineAmount(quantity: number, unitCost: number): number {
+  const milli = BigInt(Math.round(quantity * 1000));
+  const centavos = BigInt(Math.round(unitCost * 100));
+  const product = milli * centavos;
+  const sign = product < 0n ? -1n : 1n;
+  const rounded = ((product * sign + 500n) / 1000n) * sign;
+  return Number(rounded) / 100;
+}
+
+function moneyOf(body: RequestBody) {
+  const lines = (body.items ?? []).map((i, n) => ({
+    sortOrder: n,
+    name: i.name,
+    description: i.description?.trim() || null,
+    quantity: D(Math.round(i.quantity * 1000) / 1000),
+    unit: i.unit?.trim() || 'pcs',
+    unitCost: D(Math.round(i.unitCost * 100) / 100),
+    amount: D(requestLineAmount(i.quantity, i.unitCost)),
+  }));
+  const amount = lines.length ? cents(lines.reduce((s, l) => s + num(l.amount), 0)) : cents(body.amount ?? 0);
+  if (!(amount > 0)) throw badRequest(lines.length ? 'The lines add up to nothing — give them a unit cost' : 'A budget request must be for more than zero');
+  return { lines, amount };
+}
 
 function asDate(value: string, label: string): Date {
   const date = new Date(value);
@@ -457,6 +544,7 @@ budgetRequestRoutes.post(
     const me = currentUser(req);
     const body = parseBody(requestSchema, req.body);
     const job = await checkCharging(body);
+    const { lines, amount } = moneyOf(body);
 
     const request = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('budget_request', tx);
@@ -465,7 +553,8 @@ budgetRequestRoutes.post(
           number,
           jobId: body.jobId,
           costCategoryId: body.costCategoryId,
-          amount: D(body.amount),
+          amount: D(amount),
+          items: { create: lines },
           reason: body.reason,
           neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
           notes: body.notes || null,
@@ -480,7 +569,7 @@ budgetRequestRoutes.post(
         entityType: 'budget_request',
         entityId: request.id,
         action: 'CREATED',
-        summary: `Raised ${request.number} — ${cents(body.amount)} for ${job.number}: ${body.reason}`,
+        summary: `Raised ${request.number} — ${amount} for ${job.number}: ${body.reason}${lines.length ? ` (${lines.length} line${lines.length === 1 ? '' : 's'})` : ''}`,
       },
       req,
     );
@@ -502,17 +591,31 @@ budgetRequestRoutes.put(
     if (existing.status !== 'DRAFT') throw badRequest('Only a draft can be changed — this one has been submitted');
     if (body.jobId !== existing.jobId) throw badRequest('A budget request stays on the project it was raised for — raise another');
     await checkCharging(body);
+    // Lines sent replace the breakdown whole; none sent keeps it, with the
+    // amount still their sum (a typed amount counts only with no lines).
+    const kept = body.items ? null : await prisma.budgetRequestItem.findMany({ where: { requestId: existing.id }, orderBy: { sortOrder: 'asc' } });
+    const { lines, amount } = kept?.length
+      ? { lines: null, amount: cents(kept.reduce((s, l) => s + num(l.amount), 0)) }
+      : moneyOf(body);
 
-    const request = await prisma.budgetRequest.update({
-      where: { id: existing.id },
-      data: {
-        costCategoryId: body.costCategoryId,
-        amount: D(body.amount),
-        reason: body.reason,
-        neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
-        notes: body.notes || null,
-      },
-      include: requestInclude,
+    const request = await prisma.$transaction(async (tx) => {
+      // Claimed on DRAFT: a submit that landed first wins.
+      const claimed = await tx.budgetRequest.updateMany({
+        where: { id: existing.id, status: 'DRAFT' },
+        data: {
+          costCategoryId: body.costCategoryId,
+          amount: D(amount),
+          reason: body.reason,
+          neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
+          notes: body.notes || null,
+        },
+      });
+      if (!claimed.count) throw badRequest('This request moved a moment ago — reload to see where it stands');
+      if (lines) {
+        await tx.budgetRequestItem.deleteMany({ where: { requestId: existing.id } });
+        if (lines.length) await tx.budgetRequestItem.createMany({ data: lines.map((l) => ({ ...l, requestId: existing.id })) });
+      }
+      return tx.budgetRequest.findUniqueOrThrow({ where: { id: existing.id }, include: requestInclude });
     });
     await audit({ entityType: 'budget_request', entityId: request.id, action: 'UPDATED', summary: `${request.number} changed` }, req);
     res.json(presentBudgetRequest(request));
@@ -747,6 +850,24 @@ budgetRequestRoutes.get(
       notes: row.notes,
       currency: await companyCurrency(),
     });
+    if (row.items.length) {
+      const currency = await companyCurrency();
+      // The breakdown under the request's details, before its money.
+      sections.splice(1, 0, {
+        kind: 'table',
+        title: 'Breakdown',
+        head: ['#', 'Item and description', 'Qty', 'Unit', `Unit cost (${currency})`, `Amount (${currency})`],
+        align: ['left', 'left', 'right', 'left', 'right', 'right'],
+        rows: row.items.map((i, n) => [
+          String(n + 1),
+          i.description ? { title: i.name, body: i.description } : i.name,
+          formatQuantity(num(i.quantity)),
+          i.unit,
+          formatAmount(num(i.unitCost)),
+          formatAmount(num(i.amount)),
+        ]),
+      });
+    }
     if (row.cancelReason) sections.push({ kind: 'text', title: 'Cancelled', body: row.cancelReason });
 
     const pdf = await renderDocument({

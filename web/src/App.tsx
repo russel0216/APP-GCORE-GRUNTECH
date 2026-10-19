@@ -90,6 +90,7 @@ import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
 import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
 import { Commissions, CommissionEditor, CommissionPage } from './pages/finance/Commissions';
 import { BudgetRequests, BudgetRequestDetail, FinanceBudgetRequests, FinanceLiquidations } from './pages/delivery/BudgetRequests';
+import { BudgetRequestEditor } from './pages/delivery/BudgetRequestEditor';
 import {
   FinanceDashboard,
   FinanceReports,
@@ -606,6 +607,23 @@ function Routed() {
           element={
             <GuardAny permissions={['gops.budget_requests.view_all', 'gops.budget_requests.view_own']}>
               <BudgetRequests />
+            </GuardAny>
+          }
+        />
+        {/* The request page (2026-10-19): New and Modify, header and breakdown in one save. Above `:id`. */}
+        <Route
+          path="/g-ops/budget-requests/new"
+          element={
+            <Guard permission="gops.budget_requests.create">
+              <BudgetRequestEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/budget-requests/:id/edit"
+          element={
+            <GuardAny permissions={['gops.budget_requests.edit_own', 'gops.budget_requests.edit_all']}>
+              <BudgetRequestEditor />
             </GuardAny>
           }
         />

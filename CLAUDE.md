@@ -596,7 +596,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,433 assertions across twenty-two scripts** (counted 2026-10-18, after
+**4,434 assertions across twenty-two scripts** (counted 2026-10-18, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -663,7 +663,7 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All):
 foundation
 397, masters 92, sales 638, costing 205, pipeline 121, calendar 101, numbering
-94, partners 120, delivery 187, chain 355, hr 486, plantilla 123, meetings
+94, partners 120, delivery 188, chain 355, hr 486, plantilla 123, meetings
 115, evaluations 154, academy 123, finance 431, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 143. The
 verify scripts share
@@ -5986,9 +5986,27 @@ operations project), and the liquidation stays itemised with attachments
   requests (rejected and cancelled left out), Approved funds (approved and
   every state after), Pending approval, To release — each linking to its
   filter (verify-finance asserts the counts). **"+ Add budget request"** on
-  the list (`gops.budget_requests.create`): `BudgetRequestModal` with no
-  `job` asks the project from `GET /budget-requests/projects` (above `/:id`,
-  running projects, numbers and names only, the create right).
+  the list (`gops.budget_requests.create`) opens the request PAGE, which asks
+  the project from `GET /budget-requests/projects` (above `/:id`, running
+  projects, numbers and names only, the create right).
+- **The budget request is a full page with a breakdown** (2026-10-19, the
+  owner's call: "complete form, not a popup window"; his choice: itemised
+  lines, ONE budget line). `pages/delivery/BudgetRequestEditor.tsx`, in the
+  purchase requisition page's dress: `/g-ops/budget-requests/new?jobId=`
+  (the project's tab), `/g-ops/budget-requests/new` (the registers, the
+  project picked) and `/:id/edit` on a draft; `BudgetRequestModal` is gone.
+  `BudgetRequestItem` (name, description, quantity 3 dp, unit, unit cost,
+  amount) — the request's `amount` is the sum of its lines, each
+  `requestLineAmount()` (exact: thousandths × centavos, half away from zero;
+  the page's copy is the same), `POST` / `PUT /budget-requests` take
+  `items[]` and replace them whole (a typed `amount` counts only with no
+  lines; a PUT without `items` keeps them). One budget line still covers the
+  request, so the liquidation rule is unchanged. Beside the lines the
+  project's budget (`GET /budget-requests/budget?jobId=`,
+  `projectBudgetByLine()`; a request commits nothing, so the panel says what
+  is left), under them the route (`GET /budget-requests/route`). The record
+  page shows the Breakdown card and the paper a Breakdown table; an older
+  request opens on the page as one line worth its amount.
 - **Budget Liquidations** — G-FIN › Money out, `gfin.budget_liquidations`
   (READ, Finance holds it; it opens the list and every request through
   `seesAll`), `/g-fin/budget-liquidations`, `FinanceLiquidations`: the same
