@@ -441,3 +441,36 @@
   background: var(--surface-2);
   overflow-wrap: anywhere;
 }
+
+/* Back Support lines (2026-10-19): a dashed arrow from a supporter to the
+   head of each team they support, drawn over the chart. */
+.org-scroll { position: relative; }
+.org-links {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 1;
+}
+.org-link {
+  fill: none;
+  stroke: var(--info);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
+}
+.org-link-head { fill: var(--info); }
+.org-link-label {
+  fill: var(--info);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 4;
+}
+.org-supports {
+  color: var(--info);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}

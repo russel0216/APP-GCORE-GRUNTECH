@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -23,6 +23,9 @@ interface Person {
   photoPath: string | null;
   supervisor: { id: string; name: string } | null;
   department: { id: string; name: string } | null;
+  /** Their team (the employee record's), and the teams they back-support. */
+  team?: { id: string; code: string; name: string } | null;
+  supportTeams?: { industryId: string; industry?: { code: string } }[];
 }
 
 interface Node {
@@ -66,10 +69,19 @@ function countBelow(id: string, children: Map<string, Person[]>, seen = new Set<
   return (children.get(id) ?? []).reduce((n, c) => n + 1 + countBelow(c.id, children, seen), 0);
 }
 
+/** Each card registers itself so the Back Support lines can find it. */
+type CardRef = (id: string, el: HTMLElement | null) => void;
+let registerCard: CardRef = () => {};
+
 function Card({ node, depth, meId, search }: { node: Node; depth: number; meId?: string; search: string }) {
   const p = node.person;
+  const supports = (p.supportTeams ?? []).map((t) => t.industry?.code).filter(Boolean);
   return (
-    <Link to={`/admin/users/${p.id}${search}`} className={`org-card org-depth-${Math.min(depth, 3)}`}>
+    <Link
+      ref={(el) => registerCard(p.id, el)}
+      to={`/admin/users/${p.id}${search}`}
+      className={`org-card org-depth-${Math.min(depth, 3)}`}
+    >
       <Avatar name={p.name} photoId={p.photoPath} size={36} />
       <span className="org-card-text">
         <span className="org-name">
@@ -77,6 +89,7 @@ function Card({ node, depth, meId, search }: { node: Node; depth: number; meId?:
           {p.id === meId && <span className="org-you"> (you)</span>}
         </span>
         <span className="org-position">{p.position || p.department?.name || '—'}</span>
+        {supports.length > 0 && <span className="org-supports">Back Support → {supports.join(', ')}</span>}
       </span>
       {node.reports.length > 0 && <span className="visually-hidden">, {node.reports.length} direct reports</span>}
     </Link>
@@ -137,6 +150,68 @@ export function OrgChart() {
   }, []);
 
   const forest = useMemo(() => (people ? buildForest(people) : []), [people]);
+
+  // Back Support lines (2026-10-19): from each supporter to the head of every
+  // team they support — the team member whose own manager is on no other card
+  // of that team (the Team Leader, as the chart is drawn).
+  const links = useMemo(() => {
+    if (!people) return [];
+    const active = people.filter((p) => p.isActive);
+    const byId = new Map(active.map((p) => [p.id, p]));
+    const heads = new Map<string, Person>();
+    for (const p of active) {
+      if (!p.team) continue;
+      const boss = p.supervisor ? byId.get(p.supervisor.id) : undefined;
+      if (boss?.team?.id === p.team.id) continue;
+      if (!heads.has(p.team.id)) heads.set(p.team.id, p);
+    }
+    const out: { from: string; to: string; code: string }[] = [];
+    for (const p of active) {
+      for (const t of p.supportTeams ?? []) {
+        const head = heads.get(t.industryId);
+        if (head && head.id !== p.id) out.push({ from: p.id, to: head.id, code: t.industry?.code ?? '' });
+      }
+    }
+    return out;
+  }, [people]);
+  const [showLinks, setShowLinks] = useState(true);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const cards = useRef(new Map<string, HTMLElement>());
+  registerCard = useCallback<CardRef>((id, el) => {
+    if (el) cards.current.set(id, el);
+    else cards.current.delete(id);
+  }, []);
+  const [lines, setLines] = useState<{ d: string; x: number; y: number; code: string; key: string }[]>([]);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  useLayoutEffect(() => {
+    const root = scrollRef.current;
+    if (!root || !showLinks) return setLines([]);
+    const draw = () => {
+      const base = root.getBoundingClientRect();
+      const at = (el: HTMLElement) => {
+        const r = el.getBoundingClientRect();
+        return { right: r.right - base.left + root.scrollLeft, y: r.top - base.top + r.height / 2 };
+      };
+      // Each line leaves the supporter's right edge and swings out to the
+      // right before entering the team head's — clear of the cards between.
+      const next = links.flatMap((l, i) => {
+        const a = cards.current.get(l.from);
+        const b = cards.current.get(l.to);
+        if (!a || !b) return [];
+        const s = at(a);
+        const e = at(b);
+        const out = Math.max(s.right, e.right) + 48 + i * 28;
+        const d = `M ${s.right} ${s.y} C ${out} ${s.y}, ${out} ${e.y}, ${e.right + 2} ${e.y}`;
+        return [{ d, x: out - 10, y: (s.y + e.y) / 2, code: l.code, key: `${l.from}-${l.to}-${i}` }];
+      });
+      setBox({ w: root.scrollWidth + 240, h: root.scrollHeight });
+      setLines(next);
+    };
+    draw();
+    const ro = new ResizeObserver(draw);
+    ro.observe(root);
+    return () => ro.disconnect();
+  }, [links, showLinks, forest]);
   // The chart itself is a head plus everyone under them; lone accounts (no
   // manager, nobody reporting to them) are listed apart so they read as "not placed yet".
   const trees = forest.filter((t) => t.reports.length > 0);
@@ -152,7 +227,30 @@ export function OrgChart() {
         Drawn from each person's <strong>Reports to</strong> — the same line their leave, overtime and other approvals
         follow. Open anyone to change it.
       </p>
-      <div className="org-scroll">
+      {links.length > 0 && (
+        <label className="org-switch">
+          <input type="checkbox" checked={showLinks} onChange={(e) => setShowLinks(e.target.checked)} /> Show Back Support
+          lines to the teams they support
+        </label>
+      )}
+      <div className="org-scroll" ref={scrollRef}>
+        {lines.length > 0 && (
+          <svg className="org-links" width={box.w} height={box.h} aria-hidden="true">
+            <defs>
+              <marker id="org-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+                <path d="M0,0 L10,5 L0,10 z" className="org-link-head" />
+              </marker>
+            </defs>
+            {lines.map((l) => (
+              <g key={l.key}>
+                <path d={l.d} className="org-link" markerEnd="url(#org-arrow)" />
+                <text x={l.x} y={l.y} className="org-link-label">
+                  {l.code}
+                </text>
+              </g>
+            ))}
+          </svg>
+        )}
         {trees.map((t) => (
           <Tree key={t.person.id} head={t} meId={me?.user.id} search={location.search} />
         ))}

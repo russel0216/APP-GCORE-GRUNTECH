@@ -61,7 +61,7 @@ const publicUser = {
   /** Attachment id of the account picture — the org chart draws it. */
   photoPath: true,
   /** The teams they support on a team-scoped approval step (Back Support). */
-  supportTeams: { select: { industryId: true } },
+  supportTeams: { select: { industryId: true, industry: { select: { code: true } } } },
 } as const;
 
 // ── List ─────────────────────────────────────────────────────────────────────
@@ -131,7 +131,7 @@ userRoutes.get(
           department: { select: { id: true, name: true } },
           supervisor: { select: { id: true, name: true } },
           roles: { select: { role: { select: { key: true, name: true } } } },
-          employee: { select: { id: true, industry: { select: { code: true, name: true } }, positionRef: { select: { title: true } }, extraPositions: { orderBy: { sortOrder: 'asc' }, select: { position: { select: { title: true } } } } } },
+          employee: { select: { id: true, industry: { select: { id: true, code: true, name: true } }, positionRef: { select: { title: true } }, extraPositions: { orderBy: { sortOrder: 'asc' }, select: { position: { select: { title: true } } } } } },
         },
         orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
