@@ -1018,7 +1018,7 @@ async function main() {
       ]) === 'Technical Manager / Sales Manager' &&
       titleFromRoles([{ name: 'Unranked', rank: null, sortOrder: 0 }]) === null,
   );
-  check('a person may hold six roles, never seven', tooManyRoles(MAX_ROLES) === null && tooManyRoles(MAX_ROLES + 1) !== null);
+  check('a person may hold many roles', tooManyRoles(30) === null);
   {
     const alsoStep = { approverType: 'ROLE', roleId: roleA.id, userId: null, alsoRoleIds: [roleB.id] } as unknown as ApprovalStep;
     await prisma.userRole.createMany({ data: [{ userId: leadKat.id, roleId: roleA.id }, { userId: leadHit.id, roleId: roleB.id }] });

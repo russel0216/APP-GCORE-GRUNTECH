@@ -3999,7 +3999,7 @@ count by role, both check".
   prints it. The Plantilla stays as HEADCOUNT BY ROLE: `Position.roleId`
   ("Counts the role"), a slot per REV1 role, filled = the role's active
   holders (`filledByPosition`).
-- **Six roles at most** (`MAX_ROLES`): PATCH /users, a login made from the
+- **No cap on roles since 2026-10-19** (the owner's call: "don't limit the role for 6"; `MAX_ROLES` is 1000, the box counts without a limit). Before: **Six roles at most** (`MAX_ROLES`): PATCH /users, a login made from the
   employee record and `--roles-by-name` refuse a seventh (`tooManyRoles`);
   Admin › Users shows "Roles — n of 6", a "More than 6 roles" card and
   `?roles=over` for anyone over it from before.

@@ -263,11 +263,6 @@ export function Users() {
               { value: 'yes', label: 'Has an employee number' },
             ],
           },
-          {
-            key: 'roles',
-            label: 'Roles',
-            options: [{ value: 'over', label: `More than ${MAX_ROLES} roles` }],
-          },
         ]}
         summary={(raw) => {
           const sum = raw as unknown as UsersSummary | undefined;
@@ -656,8 +651,8 @@ function UserEditor({
             </div>
           )}
           <Field
-            label={`Roles — ${form.roleIds.length} of ${MAX_ROLES}`}
-            hint={`Roles are the whole of a person's access; ${MAX_ROLES} at most. The highest is their title on documents.`}
+            label={`Roles — ${form.roleIds.length}`}
+            hint="Roles are the whole of a person's access. The highest is their title on documents."
           >
             <div className="role-levels">
               {rolesByLevel(roles).map((level) => (
@@ -669,7 +664,7 @@ function UserEditor({
                   <input
                     type="checkbox"
                     checked={form.roleIds.includes(r.id)}
-                    disabled={!full || (!form.roleIds.includes(r.id) && form.roleIds.length >= MAX_ROLES)}
+                    disabled={!full}
                     onChange={(e) =>
                       setForm({
                         ...form,

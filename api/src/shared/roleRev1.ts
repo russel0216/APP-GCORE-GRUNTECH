@@ -26,7 +26,8 @@ import { nextNumber } from './numbering';
 export const ROLE_REV1_MARK = 'seed.roleRev1_20261019';
 
 /** A person holds this many roles at most (the owner's call, 2026-10-19). */
-export const MAX_ROLES = 6;
+/** No cap since 2026-10-19 (the owner's call: "don't limit the role to 6"). */
+export const MAX_ROLES = 1000;
 
 export interface ChartRole {
   key: string;
