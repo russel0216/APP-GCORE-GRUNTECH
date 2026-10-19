@@ -104,7 +104,10 @@ export function titleFromRoles(roles: Ranked[]): string | null {
   const ranked = roles.filter((r) => r.rank != null);
   if (!ranked.length) return null;
   ranked.sort((a, b) => a.rank! - b.rank! || a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
-  return ranked[0].name;
+  // Every role at the highest level, joined (2026-10-19, the owner's call:
+  // Dina's Finance Manager and Purchasing Manager (Local) both show).
+  const top = ranked.filter((r) => r.rank === ranked[0].rank).map((r) => r.name);
+  return [...new Set(top)].join(' / ');
 }
 
 export async function roleRev1Done(): Promise<boolean> {

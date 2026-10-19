@@ -30,7 +30,7 @@ import { CHART_DEPARTMENTS, applyOrgChart, grantSupervisorRole } from '../src/sh
 import { applyEmployeeNumbering, clearEmployeeNumbers } from '../src/shared/employeeNumbers';
 import { clearRoles, rolesCleared } from '../src/shared/rolesClear';
 import { replaceRolesWithChart } from '../src/shared/rolesFromChart';
-import { applyRoleRev1 } from '../src/shared/roleRev1';
+import { applyRoleRev1, refreshUserTitle } from '../src/shared/roleRev1';
 import { seedSharedPosts } from '../src/shared/teamPosts';
 import { dropOverrides } from '../src/shared/overridesDrop';
 import { applyEmployeeNumberList } from '../src/shared/employeeNumbersFromList';
@@ -1627,6 +1627,13 @@ async function main() {
         `  ✓ ROLE_REV1: ${rev1.created.length} role(s) created, ${rev1.renamed.length} renamed, ${rev1.deleted.length} deleted, ${rev1.positions} Plantilla slot(s) by role, ${rev1.titles} title(s) from roles`,
       );
     }
+    // Every deploy: a title is ALL the roles at a person's highest level
+    // (2026-10-19, the owner's call), so titles written before are refreshed.
+    let retitled = 0;
+    for (const u of await prisma.userRole.findMany({ distinct: ['userId'], select: { userId: true } })) {
+      if (await refreshUserTitle(prisma as never, u.userId)) retitled++;
+    }
+    if (retitled) console.log(`  ✓ Titles refreshed from roles: ${retitled}`);
     const posts = await seedSharedPosts();
     if (posts) console.log(`  ✓ KAT's Technical Manager and Aftermarket Manager shared with GIB, UIT and HIT (${posts} post(s))`);
   }

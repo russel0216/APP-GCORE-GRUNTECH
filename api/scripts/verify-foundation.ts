@@ -1006,7 +1006,7 @@ async function main() {
   // ROLE_REV1 (2026-10-19): a person's title is their highest role; a ROLE
   // step's other roles decide it too ("Checking" by either finance role).
   check(
-    'a title is the highest role, the chart’s order breaking a tie',
+    'a title is the highest role; several at that level all show, in the chart’s order',
     titleFromRoles([
       { name: 'Sales Manager', rank: 3, sortOrder: 4 },
       { name: 'Team Leader', rank: 2, sortOrder: 2 },
@@ -1015,7 +1015,7 @@ async function main() {
       titleFromRoles([
         { name: 'Sales Manager', rank: 3, sortOrder: 4 },
         { name: 'Technical Manager', rank: 3, sortOrder: 3 },
-      ]) === 'Technical Manager' &&
+      ]) === 'Technical Manager / Sales Manager' &&
       titleFromRoles([{ name: 'Unranked', rank: null, sortOrder: 0 }]) === null,
   );
   check('a person may hold six roles, never seven', tooManyRoles(MAX_ROLES) === null && tooManyRoles(MAX_ROLES + 1) !== null);

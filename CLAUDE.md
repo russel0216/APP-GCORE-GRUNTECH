@@ -3988,8 +3988,10 @@ count by role, both check".
   (`SUCCESSOR_REV1`) — holders and route steps moved first, then deleted.
   Everyone keeps their roles under the new names; Back Support and its
   "Supports teams" stay as they were.
-- **The title is the highest role** — `titleFromRoles()` (lowest rank, then
-  sortOrder), written onto `User.position` and the employee's `position` by
+- **The title is the highest role** — `titleFromRoles()` (lowest rank;
+  EVERY role at that level, joined " / " in the chart's order — 2026-10-19,
+  the owner's call: Dina's "Finance Manager / Purchasing Manager (Local)";
+  the seed refreshes every title on each deploy), written onto `User.position` and the employee's `position` by
   `refreshUserTitle()` after every role change (PATCH /users, a login made,
   a role renamed or re-levelled). The Position box is gone from Admin ›
   Users and the employee form (a read-only Title; an employee with no
