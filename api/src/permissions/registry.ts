@@ -189,7 +189,7 @@ export const REGISTRY: ModuleDef[] = [
       // the keys of Receiving and Stock Issuance, so no right moves.
       { key: 'receiving', own: 'incoming reports you received', group: 'Warehouse', label: 'Incoming', path: '/g-chain/incoming', actions: [...SHARED_KEPT, 'delete'], phase: 5 },
       { key: 'inventory', own: 'the stock of items you added', group: 'Warehouse', label: 'Inventory', path: '/g-chain/inventory', actions: SETTINGS, phase: 5 },
-      { key: 'pullout_slips', group: 'Warehouse', label: 'Pull-out Slips', path: '/g-chain/pullout-slips', actions: OWNED_KEPT, phase: 5,
+      { key: 'pullout_slips', group: 'Warehouse', label: 'Pull-out Slips', path: '/g-chain/pullout-slips', actions: [...OWNED_KEPT, 'delete'], phase: 5,
         note: 'Anyone may raise one (Create, View Own, Edit Own); View All and Edit All are the warehouse’s' },
       { key: 'borrow_slips', group: 'Warehouse', label: 'Borrow Slips', path: '/g-chain/borrow-slips', actions: OWNED_KEPT, phase: 5 },
       { key: 'stock_issuance', own: 'outgoing slips you issued', group: 'Warehouse', label: 'Outgoing', path: '/g-chain/outgoing', actions: SHARED, phase: 5 },

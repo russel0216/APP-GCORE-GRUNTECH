@@ -3877,6 +3877,31 @@ async function main() {
           !!(await prisma.auditLog.findFirst({ where: { entityType: 'pullout_slip', entityId: secondId, summary: { contains: 'not applied' } } })),
         `${secondCancel.status} ${secondRow.status}`,
       );
+      // A cancelled slip is deleted by a delete holder (2026-10-19, the
+      // owner's call); a pulled-out one is the record of stock that left.
+      {
+        const deleterRole = await makeRole('zzchain_pulldel', 'ZZ Pull-out deleter', [
+          'gchain.pullout_slips.view_all',
+          'gchain.pullout_slips.edit_all',
+          'gchain.pullout_slips.delete',
+        ]);
+        const deleter = await mkUser('Verify Pull Deleter', 'pulldel@verifyc.local', deleterRole.id);
+        const deleterToken = signToken(deleter.id, deleter.email);
+        const noRight = await api(pullerToken, 'DELETE', `/pullout-slips/${secondId}`);
+        const flags = await api(deleterToken, 'GET', `/pullout-slips/${secondId}`);
+        const pulledDelete = await api(deleterToken, 'DELETE', `/pullout-slips/${slipId}`);
+        const gone = await api(deleterToken, 'DELETE', `/pullout-slips/${secondId}`);
+        check(
+          'a cancelled pull-out slip is deleted by a delete holder; without the right, or once pulled out, it is refused',
+          noRight.status === 403 &&
+            flags.body.canDelete === true &&
+            pulledDelete.status === 400 &&
+            gone.status === 200 &&
+            (await prisma.pulloutSlip.findUnique({ where: { id: secondId } })) === null &&
+            (await prisma.pulloutSlip.findUnique({ where: { id: slipId } })) !== null,
+          `${noRight.status}; flags ${flags.body.canDelete}; pulled ${pulledDelete.status}; delete ${gone.status} ${JSON.stringify(gone.body).slice(0, 120)}`,
+        );
+      }
 
       // A sales order: the customer's delivery. No project was built from
       // its quotation, so the order is the whole reference and no job pays.

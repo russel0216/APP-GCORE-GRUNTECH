@@ -946,6 +946,7 @@ export function PulloutEditor() {
 
 export function PulloutDetail() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const toast = useToast();
   const confirm = useConfirm();
   const [slip, setSlip] = useState<Record<string, unknown> | null>(null);
@@ -1012,6 +1013,11 @@ export function PulloutDetail() {
     await api.post(`/pullout-slips/${id}/cancel`, { reason });
     toast('ok', `${number} cancelled`);
     await load();
+  }
+  async function remove() {
+    await api.del(`/pullout-slips/${id}`);
+    toast('ok', `${number} deleted`);
+    navigate('/g-chain/pullout-slips');
   }
 
   const charge = job ? ` ${job.number} is charged at the warehouse's average cost at that moment.` : '';
@@ -1103,6 +1109,16 @@ export function PulloutDetail() {
               reason: 'required',
               minReason: 3,
               onConfirm: cancel,
+            },
+          },
+          slip.canDelete === true && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${number}?`,
+              body: 'Nothing left the shelf on it. It cannot be undone.',
+              confirmLabel: 'Delete',
+              onConfirm: remove,
             },
           },
         ]}

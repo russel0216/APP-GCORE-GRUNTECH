@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, PulloutKind, PulloutPurpose, PulloutStatus } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, type ListQuery } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -24,7 +24,7 @@ import {
   onApprovalReopened,
   type ApprovalOutcome,
 } from '../shared/approvals';
-import { registerAttachmentGuard } from '../shared/attachments';
+import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
 import { renderDocument, formatDate, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { manilaDate } from '../shared/day';
@@ -837,6 +837,7 @@ async function presentSlip(slip: LoadedSlip, me: ResolvedUser) {
     canPullOut: draft && handles && !route && slip.items.length > 0,
     canWithdraw: slip.status === 'PENDING_APPROVAL' && handles,
     canCancel: (draft || slip.status === 'PENDING_APPROVAL') && handles,
+    canDelete: (draft || slip.status === 'CANCELLED') && handles && can(me, 'gchain.pullout_slips.delete'),
     approvalRoute: draft && route ? await routeBrief(DOC, null, requesterOf(slip)) : null,
     items: slip.items.map((i) => ({
       ...i,
@@ -1148,6 +1149,35 @@ pulloutRoutes.post(
     });
     await audit({ entityType: 'pullout_slip', entityId: slip.id, action: 'CANCELLED', summary: `${slip.number} cancelled — ${body.reason}` }, req);
     res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
+/**
+ * A draft or a CANCELLED slip is deleted (2026-10-19, the owner's call):
+ * nothing went out on either. The delete right, and whoever may change it;
+ * its files go after the commit.
+ */
+pulloutRoutes.delete(
+  '/:id',
+  require_('gchain.pullout_slips.delete'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const slip = await prisma.pulloutSlip.findUnique({ where: { id: req.params.id } });
+    if (!slip) throw notFound('Pull-out slip not found');
+    if (!mayHandle(me, slip)) throw forbidden('This slip is someone else’s');
+    if (slip.status !== 'DRAFT' && slip.status !== 'CANCELLED') {
+      throw badRequest(`Only a draft or a cancelled slip can be deleted — ${slip.number} is ${statusLabel(slip.status).toLowerCase()}`);
+    }
+    const gone = await deleteOrRefuse(slip.number, () =>
+      prisma.pulloutSlip.deleteMany({ where: { id: slip.id, status: { in: ['DRAFT', 'CANCELLED'] } } }),
+    );
+    if (!gone.count) throw badRequest(`${slip.number} changed a moment ago — it stays on record`);
+    await deleteAttachmentsOf(DOC, [slip.id]);
+    await audit(
+      { entityType: 'pullout_slip', entityId: slip.id, action: 'DELETED', summary: `Deleted ${slip.status === 'CANCELLED' ? 'cancelled' : 'draft'} ${slip.number}` },
+      req,
+    );
+    res.json({ ok: true });
   }),
 );
 
