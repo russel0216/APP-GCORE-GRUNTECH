@@ -1040,7 +1040,8 @@ async function main() {
   check('the clearance strip counts open clearances as the table does', clrSummary.body.open === openDirect, `${clrSummary.body.open} vs ${openDirect}`);
 
   const drift = await prisma.employee.findMany({
-    where: { positionId: { not: null } },
+    // A person with roles is titled by them (ROLE_REV1), not by a position.
+    where: { positionId: { not: null }, OR: [{ userId: null }, { user: { roles: { none: { role: { rank: { not: null } } } } } }] },
     select: {
       employeeNo: true,
       position: true,
@@ -1057,10 +1058,15 @@ async function main() {
     bad.slice(0, 5).map((e) => `${e.employeeNo}: ${e.position} ≠ ${e.positionRef?.title}`).join('; '),
   );
 
-  const active = await prisma.position.findMany({ where: { isActive: true }, select: { id: true } });
-  const filledDirect =
-    (await prisma.employee.count({ where: { isActive: true, positionId: { in: active.map((p) => p.id) } } })) +
-    (await prisma.employeeExtraPosition.count({ where: { employee: { isActive: true }, positionId: { in: active.map((p) => p.id) } } }));
+  const active = await prisma.position.findMany({ where: { isActive: true }, select: { id: true, roleId: true } });
+  // A slot that counts a role is filled by the role's active holders; any other by its employees.
+  const legacy = active.filter((p) => !p.roleId).map((p) => p.id);
+  let filledDirect =
+    (await prisma.employee.count({ where: { isActive: true, positionId: { in: legacy } } })) +
+    (await prisma.employeeExtraPosition.count({ where: { employee: { isActive: true }, positionId: { in: legacy } } }));
+  for (const p of active.filter((x) => x.roleId)) {
+    filledDirect += await prisma.userRole.count({ where: { roleId: p.roleId!, user: { isActive: true, employee: { isActive: true } } } });
+  }
   const summaryNow = await http(T.hr, 'GET', '/positions/summary');
   check(
     'the plantilla summary’s filled equals a direct count of active holders',

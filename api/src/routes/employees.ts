@@ -23,6 +23,7 @@ import { nextNumber, setCounter, type CounterMove } from '../shared/numbering';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit, editScope } from '../shared/ownScope';
 import { positionFields, setEmployeePosition, setExtraPositions } from '../shared/plantilla';
+import { MAX_ROLES, tooManyRoles } from '../shared/roleRev1';
 import { sweepSeparations } from '../shared/clearance';
 import { createLogin, defaultRoleIds, deliverLink, personName, syncLoginFromEmployee } from '../shared/accounts';
 import { celebrationsBetween } from '../shared/celebrations';
@@ -531,6 +532,8 @@ async function checkRoleIds(
 ): Promise<string[]> {
   const ids = [...new Set(roleIds ?? [])];
   if (!ids.length) return defaultRoleIds(tx);
+  const tooMany = tooManyRoles(ids.length);
+  if (tooMany) throw badRequest(tooMany, [{ field, message: `${MAX_ROLES} roles at most` }]);
   const found = await tx.role.findMany({ where: { id: { in: ids } }, select: { id: true } });
   const known = new Set(found.map((r) => r.id));
   const unknown = ids.filter((id) => !known.has(id));

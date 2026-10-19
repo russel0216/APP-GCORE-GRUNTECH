@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, idsFilter, notFound, conflict, type ListQuery } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, idsFilter, notFound, conflict, badRequest, type ListQuery } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
 import { audit } from '../shared/audit';
@@ -53,7 +53,7 @@ async function plantillaRows(me: ReturnType<typeof currentUser>, q: ListQuery): 
 
   const positions = await prisma.position.findMany({
     where: ownOnly(me, 'ghr', 'plantilla', where, { createdById: me.id }),
-    include: { department: { select: { id: true, name: true } } },
+    include: { department: { select: { id: true, name: true } }, role: { select: { id: true, name: true } } },
     orderBy: [{ department: { name: 'asc' } }, { sortOrder: 'asc' }, { title: 'asc' }],
   });
   const filled = await filledByPosition(positions.map((p) => p.id));
@@ -236,6 +236,15 @@ positionRoutes.get(
   }),
 );
 
+/** The roles a Plantilla slot may count (2026-10-19), names only — above `/:id`. */
+positionRoutes.get(
+  '/roles',
+  requireView('ghr', 'plantilla'),
+  handler(async (_req, res) => {
+    res.json(await prisma.role.findMany({ select: { id: true, name: true, rank: true }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] }));
+  }),
+);
+
 /**
  * The picker on the employee form and on a course's requirements. Naming a
  * position is not the plantilla right, so the employee and course keys are
@@ -287,6 +296,7 @@ positionRoutes.get(
       where: { id: req.params.id },
       include: {
         department: { select: { id: true, name: true } },
+        role: { select: { id: true, name: true } },
         employees: {
           where: { isActive: true },
           select: { id: true, employeeNo: true, firstName: true, lastName: true, employmentType: true },
@@ -297,7 +307,15 @@ positionRoutes.get(
     if (!position) throw notFound('Position not found');
     // View Own reads only the positions the caller added (2026-10-18).
     assertCanView(me, 'ghr', 'plantilla', position.createdById === me.id);
-    const { employees, ...rest } = position;
+    // A slot that counts a role is held by the role's active holders (2026-10-19).
+    const employees = position.roleId
+      ? await prisma.employee.findMany({
+          where: { isActive: true, user: { isActive: true, roles: { some: { roleId: position.roleId } } } },
+          select: { id: true, employeeNo: true, firstName: true, lastName: true, employmentType: true },
+          orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+        })
+      : position.employees;
+    const { employees: _legacy, ...rest } = position;
     res.json({
       ...rest,
       canEdit: mayEdit(me, 'ghr', 'plantilla', position.createdById === me.id),
@@ -322,7 +340,15 @@ const positionSchema = z.object({
   description: z.string().trim().optional().nullable(),
   sortOrder: z.number().int().optional(),
   isActive: z.boolean().optional(),
+  /** The role this slot counts (2026-10-19): filled = active holders of it. */
+  roleId: z.string().optional().nullable(),
 });
+
+async function checkRole(tx: Prisma.TransactionClient, roleId: string | null | undefined): Promise<string | null> {
+  if (!roleId) return null;
+  if (!(await tx.role.findUnique({ where: { id: roleId }, select: { id: true } }))) throw badRequest('roleId: that role was not found');
+  return roleId;
+}
 
 async function assertUniqueTitle(
   tx: Prisma.TransactionClient,
@@ -368,10 +394,11 @@ positionRoutes.post(
           description: body.description || null,
           sortOrder: body.sortOrder ?? 0,
           isActive: body.isActive ?? true,
+          roleId: await checkRole(tx, body.roleId),
           // Who added it — what "own" means on the plantilla (2026-10-18).
           createdById: me.id,
         },
-        include: { department: { select: { id: true, name: true } } },
+        include: { department: { select: { id: true, name: true } }, role: { select: { id: true, name: true } } },
       });
     });
 
@@ -420,8 +447,9 @@ positionRoutes.patch(
           ...(body.description !== undefined ? { description: body.description || null } : {}),
           ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
           ...(body.isActive !== undefined ? { isActive: body.isActive } : {}),
+          ...(body.roleId !== undefined ? { roleId: await checkRole(tx, body.roleId) } : {}),
         },
-        include: { department: { select: { id: true, name: true } } },
+        include: { department: { select: { id: true, name: true } }, role: { select: { id: true, name: true } } },
       });
       // The mirror rule: a renamed position renames every holder's title.
       if (title !== before.title) await mirrorPositionTitle(tx, before.id, title);

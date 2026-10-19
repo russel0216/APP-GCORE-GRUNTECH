@@ -1,5 +1,6 @@
 import { Prisma, type ApprovalRequest, type ApprovalStep } from '@prisma/client';
 import { prisma } from '../prisma';
+import { teamOfRequester, teamPostHolders } from './teamPosts';
 import { badRequest, conflict, forbidden, notFound } from '../http/kit';
 import { notify } from './notifications';
 import { audit } from './audit';
@@ -235,7 +236,10 @@ export async function approversForStep(
         // The Technical Manager fallback (2026-10-15: the project's manager IS
         // its Technical Manager) is the one on the requester's own team, as a
         // ROLE step naming that role is — never a Technical Manager of another team.
-        if (rows.length && OWN_TEAM_ROLES.includes(rows[0].role.key)) return leadersFor(holders, requesterId, tx);
+        if (rows.length && OWN_TEAM_ROLES.includes(rows[0].role.key)) {
+          const post = await teamPostHolders(rows[0].role.key, await teamOfRequester(requesterId, tx), requesterId, tx);
+          return post ?? leadersFor(holders, requesterId, tx);
+        }
         return holders;
       }
       return usersInRole(PROJECT_MANAGER_FALLBACK_ROLE, tx);
@@ -251,10 +255,24 @@ export async function approversForStep(
         where: { roleId, user: { isActive: true } },
         select: { userId: true, role: { select: { key: true } } },
       });
-      const holders = rows.map((r) => r.userId);
+      let holders = rows.map((r) => r.userId);
+      // A ROLE step's other roles decide it too (2026-10-19, "Checking" by the
+      // Account Payable Officer or the Credit and Collection Officer).
+      if (step.alsoRoleIds?.length) {
+        const also = await tx.userRole.findMany({
+          where: { roleId: { in: step.alsoRoleIds }, user: { isActive: true } },
+          select: { userId: true },
+        });
+        holders = [...new Set([...holders, ...also.map((a) => a.userId)])];
+        return holders;
+      }
       if (!rows.length) return holders;
-      if (TEAM_SCOPED_ROLES.includes(rows[0].role.key)) return supportersFor(holders, requesterId, tx);
-      if (OWN_TEAM_ROLES.includes(rows[0].role.key)) return leadersFor(holders, requesterId, tx);
+      const key = rows[0].role.key;
+      // A team's post set on Admin › Categories › Teams (shared or named) first.
+      const post = await teamPostHolders(key, await teamOfRequester(requesterId, tx), requesterId, tx);
+      if (post) return post;
+      if (TEAM_SCOPED_ROLES.includes(key)) return supportersFor(holders, requesterId, tx);
+      if (OWN_TEAM_ROLES.includes(key)) return leadersFor(holders, requesterId, tx);
       return holders;
     }
 
@@ -326,6 +344,8 @@ export const TEAM_FIRST_ROLES = ['team_leader'];
 async function teamFirstHolders(roleId: string, requesterId: string, tx: Prisma.TransactionClient): Promise<string[]> {
   const role = await tx.role.findUnique({ where: { id: roleId }, select: { key: true } });
   if (!role || !TEAM_FIRST_ROLES.includes(role.key)) return [];
+  const post = await teamPostHolders(role.key, await teamOfRequester(requesterId, tx), requesterId, tx);
+  if (post) return post;
   return teamHoldersOf([roleId], requesterId, tx);
 }
 
@@ -438,7 +458,7 @@ export async function holdsStep(
     // borrow request is signed at submit as a Team Leader's is. A ROLE step
     // on an importation is its importation twin's.
     const own = step.approverType === 'ROLE' ? await stepRoleId(step, ctx, tx) : step.roleId;
-    const roleIds = [own, ...(step.approverType === 'SUPERVISOR' ? (step.alsoRoleIds ?? []) : [])].filter((r): r is string => !!r);
+    const roleIds = [own, ...(step.alsoRoleIds ?? [])].filter((r): r is string => !!r);
     if (!roleIds.length) return false;
     return !!(await tx.userRole.findFirst({
       where: { userId: requesterId, roleId: { in: roleIds }, user: { isActive: true } },

@@ -4051,10 +4051,10 @@ async function main() {
       include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } } },
     });
     check(
-      'a reimbursement goes Team Leader › Back Support › Checking (Finance Staff) › Finance Manager › CEO / President',
+      'a reimbursement goes Team Leader › Back Support › Checking (Account Payable / Credit and Collection) › Finance Manager › CEO / President',
       rmbSubmit.status === 200 &&
         JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)) ===
-          JSON.stringify(['Team Leader', 'Back Support', 'Checking (Finance Staff)', 'Finance Manager', 'CEO / President']),
+          JSON.stringify(['Team Leader', 'Back Support', 'Checking (Account Payable / Credit and Collection)', 'Finance Manager', 'CEO / President']),
       JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)),
     );
     const stageOf = async () =>
@@ -4126,7 +4126,7 @@ async function main() {
     check(
       'a new advance is money lent: five signatures, released, then RELEASED with no liquidation deadline',
       loan.body.repayable === true &&
-        JSON.stringify(loanRoute) === JSON.stringify(['TEAM LEADER', 'BACK SUPPORT', 'CHECKING (FINANCE STAFF)', 'FINANCE MANAGER', 'CEO / PRESIDENT']) &&
+        JSON.stringify(loanRoute) === JSON.stringify(['TEAM LEADER', 'BACK SUPPORT', 'CHECKING (ACCOUNT PAYABLE / CREDIT AND COLLECTION)', 'FINANCE MANAGER', 'CEO / PRESIDENT']) &&
         loanRelease.status === 201 &&
         loanOut?.status === 'RELEASED' &&
         loanOut.liquidationDueDate === null,

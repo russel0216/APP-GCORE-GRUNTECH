@@ -1,4 +1,3 @@
-import { TickPicker } from '../../components/TickPicker';
 import { useEffect, useId, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
@@ -495,7 +494,7 @@ function EmployeeForm({
   flaggedSampleId,
   departments,
   teams,
-  positions,
+  positions: _positions,
   onClose,
   onSaved,
 }: {
@@ -652,22 +651,6 @@ function EmployeeForm({
   // A login is told apart by the email it signs in with, so that is what the
   // choice shows beside the name.
   const loginOptions: PersonRow[] = users.map((u) => ({ ...u, position: u.email ?? u.position }));
-  const held = employee?.positionRef ?? null;
-  const positionOptions: PositionOption[] =
-    held && !positions.some((p) => p.id === held.id)
-      ? [
-          ...positions,
-          {
-            id: held.id,
-            code: held.code,
-            title: `${held.title} (inactive)`,
-            departmentId: null,
-            departmentName: null,
-            authorisedHeadcount: 0,
-            filled: 0,
-          },
-        ]
-      : positions;
 
   // The list never carries pay data — fetch the full record when editing so the
   // rate fields are populated for someone allowed to see them.
@@ -796,13 +779,9 @@ function EmployeeForm({
       // The position goes through the server's one writer of the mirror. Sent
       // only when it changed, so an employee on a since-deactivated position
       // can still be saved for something else.
-      if (!employee || form.positionId !== (employee.positionId ?? '')) {
-        payload.positionId = form.positionId || null;
-      }
-      if (!form.positionId) payload.position = form.position.trim() || null;
-      const extrasWere = (employee?.extraPositions ?? []).map((x) => x.position.id);
-      const extras = form.positionId ? form.extraPositionIds.filter((x) => x !== form.positionId) : [];
-      if (extras.join() !== extrasWere.join()) payload.extraPositionIds = extras;
+      // The title is the highest role once there is a login (ROLE_REV1, 2026-10-19);
+      // until then it is free text.
+      if (!employee?.user && !form.positionId) payload.position = form.position.trim() || null;
 
       if (setRates) {
         payload.dailyRate = form.dailyRate === '' ? null : Number(form.dailyRate);
@@ -1057,75 +1036,21 @@ function EmployeeForm({
               />
             </Field>
             <div>
-              <Field
-                label="Position"
-                hint="From the plantilla. Pick none to type a title that has no authorised slot yet."
-              >
-                <select
-                  value={form.positionId}
-                  onChange={(e) => {
-                    const next = positions.find((p) => p.id === e.target.value);
-                    setForm({
-                      ...form,
-                      positionId: e.target.value,
-                      // A position that sits in a department suggests it.
-                      departmentId:
-                        next?.departmentId && !form.departmentId ? next.departmentId : form.departmentId,
-                    });
-                  }}
-                >
-                  <option value="">— none (unclassified) —</option>
-                  {positionOptions.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.title}
-                      {p.departmentName ? ` · ${p.departmentName}` : ''} ({p.filled}/{p.authorisedHeadcount})
-                    </option>
-                  ))}
-                </select>
-              </Field>
+              {employee?.user ? (
+                <Field label="Title" hint="Their highest role on Admin › Users — what documents print">
+                  <input readOnly value={employee.position ?? ''} placeholder="— no role yet —" />
+                </Field>
+              ) : (
+                <Field label="Title" hint="Free text until they have a login and roles — then the highest role is their title">
+                  <input value={form.position} onChange={(e) => setForm({ ...form, position: e.target.value })} />
+                </Field>
+              )}
               {employee && can('ghr.passports.view_all') && (
                 <p className="muted">
                   <Link to={`/g-hr/academy/passports/${employee.id}`}>Training passport →</Link>
                 </p>
               )}
             </div>
-            {form.positionId && (
-              <Field label="Also holds" hint="Other plantilla posts this person fills. Each counts as filled; the title joins them.">
-                <TickPicker
-                  choices={positionOptions
-                    .filter((p) => p.id !== form.positionId)
-                    .map((p) => ({ value: p.id, label: p.title, hint: p.departmentName ?? undefined }))}
-                  value={form.extraPositionIds}
-                  onChange={(v) => setForm({ ...form, extraPositionIds: v })}
-                  none="Nothing else"
-                  noun="positions"
-                />
-              </Field>
-            )}
-            {form.positionId ? (
-              <Field label="Title" hint="Set by the plantilla — rename it there">
-                <input
-                  readOnly
-                  value={
-                    [
-                      positionOptions.find((p) => p.id === form.positionId)?.title ?? held?.title ?? '',
-                      ...form.extraPositionIds
-                        .filter((x) => x !== form.positionId)
-                        .map((x) => positionOptions.find((p) => p.id === x)?.title ?? ''),
-                    ]
-                      .filter(Boolean)
-                      .join(' / ')
-                  }
-                />
-              </Field>
-            ) : (
-              <Field label="Title (unclassified)" hint="Free text, until HR adds it to the plantilla">
-                <input
-                  value={form.position}
-                  onChange={(e) => setForm({ ...form, position: e.target.value })}
-                />
-              </Field>
-            )}
             <Field label="Department">
               <select
                 value={form.departmentId}

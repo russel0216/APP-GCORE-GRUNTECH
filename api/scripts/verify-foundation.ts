@@ -13,6 +13,7 @@
  * against a development database; it refuses to run against production.
  */
 
+import { MAX_ROLES, ROLE_REV1, ROLE_REV1_MARK, SUCCESSOR_REV1, titleFromRoles, tooManyRoles } from '../src/shared/roleRev1';
 import fs from 'node:fs';
 import path from 'node:path';
 import bcrypt from 'bcryptjs';
@@ -400,7 +401,8 @@ async function main() {
     // role, and the roles the chart does not name are gone for good.
     if (await prisma.setting.findUnique({ where: { key: ROLES_FROM_CHART_MARK } })) {
       const keys = new Set((await prisma.role.findMany({ select: { key: true } })).map((r) => r.key));
-      const missing = CHART_ROLES.filter((r) => !keys.has(r.key)).map((r) => r.title);
+      // ROLE_REV1 (2026-10-19) retired Welder, Electrician and Collection.
+      const missing = CHART_ROLES.filter((r) => !keys.has(r.key) && !SUCCESSOR_REV1[r.key]).map((r) => r.title);
       check('every title on the organisation chart is a role', missing.length === 0, missing.join(', '));
       const back = [...Object.keys(SUCCESSOR), 'employee'].filter((k) => keys.has(k));
       check('the roles the chart does not name (Executive, Employee, Supervisor …) are not on file', back.length === 0, back.join(', '));
@@ -899,6 +901,10 @@ async function main() {
   const tmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'technical_manager' } });
   await prisma.userRole.createMany({ data: [{ userId: leadKat.id, roleId: tmRole.id }, { userId: leadHit.id, roleId: tmRole.id }] });
   const tmStep = { approverType: 'ROLE', roleId: tmRole.id, userId: null } as unknown as ApprovalStep;
+  // KAT's post may be shared on this install (2026-10-19): set aside for the
+  // own-team checks, put back after.
+  const katPost = await prisma.teamPost.findUnique({ where: { teamId_roleKey: { teamId: kat.id, roleKey: 'technical_manager' } } });
+  await prisma.teamPost.deleteMany({ where: { teamId: kat.id, roleKey: 'technical_manager' } });
   const tmForKat = await approversForStep(tmStep, katSeller.id);
   const tmForLoner = await approversForStep(tmStep, loner.id);
   check(
@@ -907,7 +913,53 @@ async function main() {
     JSON.stringify(tmForKat),
   );
   check('a preparer with no team goes to every Technical Manager', tmForLoner.includes(leadKat.id) && tmForLoner.includes(leadHit.id));
+
+  // Team managers (2026-10-19): KAT's post shared from HIT goes to HIT's holder,
+  // named people go to them, and OWN goes back to the team's own.
+  await prisma.teamPost.create({ data: { teamId: kat.id, roleKey: 'technical_manager', mode: 'SHARED', sharedTeamIds: [hit.id] } });
+  const shared = await approversForStep(tmStep, katSeller.id);
+  check('a team post shared from another team goes to that team’s holder of the role', shared.includes(leadHit.id) && !shared.includes(leadKat.id), JSON.stringify(shared));
+  check('…and the holder of the shared post signs it at submit as the role’s holder', await holdsStep(tmStep, leadHit.id));
+  await prisma.teamPost.update({ where: { teamId_roleKey: { teamId: kat.id, roleKey: 'technical_manager' } }, data: { mode: 'PEOPLE', sharedTeamIds: [], userIds: [loner.id] } });
+  check('a team post naming people goes to them', JSON.stringify(await approversForStep(tmStep, katSeller.id)) === JSON.stringify([loner.id]));
+  await prisma.teamPost.update({ where: { teamId_roleKey: { teamId: kat.id, roleKey: 'technical_manager' } }, data: { mode: 'OWN', userIds: [] } });
+  const own = await approversForStep(tmStep, katSeller.id);
+  check('set back to its own team (a hire), the post goes to the team’s own holder again', own.includes(leadKat.id) && !own.includes(leadHit.id), JSON.stringify(own));
+  await prisma.teamPost.deleteMany({ where: { teamId: kat.id, roleKey: 'technical_manager' } });
+  if (katPost) await prisma.teamPost.create({ data: katPost });
   await prisma.userRole.deleteMany({ where: { roleId: tmRole.id, userId: { in: [leadKat.id, leadHit.id] } } });
+
+  // ROLE_REV1 (2026-10-19): a person's title is their highest role; a ROLE
+  // step's other roles decide it too ("Checking" by either finance role).
+  check(
+    'a title is the highest role, the chart’s order breaking a tie',
+    titleFromRoles([
+      { name: 'Sales Manager', rank: 3, sortOrder: 4 },
+      { name: 'Team Leader', rank: 2, sortOrder: 2 },
+      { name: 'Technical Manager', rank: 3, sortOrder: 3 },
+    ]) === 'Team Leader' &&
+      titleFromRoles([
+        { name: 'Sales Manager', rank: 3, sortOrder: 4 },
+        { name: 'Technical Manager', rank: 3, sortOrder: 3 },
+      ]) === 'Technical Manager' &&
+      titleFromRoles([{ name: 'Unranked', rank: null, sortOrder: 0 }]) === null,
+  );
+  check('a person may hold six roles, never seven', tooManyRoles(MAX_ROLES) === null && tooManyRoles(MAX_ROLES + 1) !== null);
+  {
+    const alsoStep = { approverType: 'ROLE', roleId: roleA.id, userId: null, alsoRoleIds: [roleB.id] } as unknown as ApprovalStep;
+    await prisma.userRole.createMany({ data: [{ userId: leadKat.id, roleId: roleA.id }, { userId: leadHit.id, roleId: roleB.id }] });
+    const either = await approversForStep(alsoStep, loner.id);
+    check('a ROLE step with another role is decided by the holders of either', either.includes(leadKat.id) && either.includes(leadHit.id), JSON.stringify(either));
+    check('…and the other role’s holder signs it at submit', await holdsStep(alsoStep, leadHit.id));
+    await prisma.userRole.deleteMany({ where: { userId: { in: [leadKat.id, leadHit.id] }, roleId: { in: [roleA.id, roleB.id] } } });
+  }
+  if (await prisma.setting.findUnique({ where: { key: ROLE_REV1_MARK } })) {
+    const rev1 = await prisma.role.findMany({ where: { key: { in: ROLE_REV1.map((r) => r.key) } }, select: { key: true, rank: true } });
+    const off = ROLE_REV1.filter((r) => !rev1.some((x) => x.key === r.key && x.rank === r.rank)).map((r) => r.name);
+    check('every ROLE_REV1 role is on file at its level', off.length === 0, off.join(', '));
+    const unlinked = await prisma.role.count({ where: { key: { in: ROLE_REV1.map((r) => r.key) }, plantilla: { none: {} } } });
+    check('every ROLE_REV1 role has a Plantilla slot that counts it', unlinked === 0, `${unlinked} without`);
+  }
 
   // The preparer signs, at submit, the steps whose role they hold — only
   // where the route says so — and a manager may stand in only where it says so.

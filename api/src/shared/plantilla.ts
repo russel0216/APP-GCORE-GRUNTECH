@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest, notFound } from '../http/kit';
 import { nextNumber } from './numbering';
+import { titleFromRoles } from './roleRev1';
 
 /**
  * The plantilla — the authorised staffing pattern (model §4.7).
@@ -84,8 +85,15 @@ export async function refreshPositionTitle(tx: Tx, employeeId: string) {
       positionId: true,
       positionRef: { select: { title: true } },
       extraPositions: { orderBy: { sortOrder: 'asc' }, select: { position: { select: { title: true } } } },
+      user: { select: { id: true, roles: { select: { role: { select: { name: true, rank: true, sortOrder: true } } } } } },
     },
   });
+  // A person with roles is titled by the highest of them (ROLE_REV1, 2026-10-19).
+  const byRole = e.user ? titleFromRoles(e.user.roles.map((r) => r.role)) : null;
+  if (byRole) {
+    await tx.user.update({ where: { id: e.user!.id }, data: { position: byRole } });
+    return tx.employee.update({ where: { id: employeeId }, data: { position: byRole } });
+  }
   if (!e.positionId || !e.positionRef) return tx.employee.findUniqueOrThrow({ where: { id: employeeId } });
   const title = [e.positionRef.title, ...e.extraPositions.map((x) => x.position.title)].join(POSITION_JOIN);
   await tx.user.updateMany({ where: { employee: { id: employeeId } }, data: { position: title } });
@@ -151,6 +159,22 @@ export async function filledByPosition(
   });
   const out = new Map<string, number>();
   for (const g of groups) if (g.positionId) out.set(g.positionId, g._count._all);
+  // A slot that counts a role (ROLE_REV1, 2026-10-19: "keep plantilla, count
+  // by role") is filled by the active employees whose login holds the role.
+  const byRole = await tx.position.findMany({
+    where: { roleId: { not: null }, ...(positionIds ? { id: { in: positionIds } } : {}) },
+    select: { id: true, roleId: true },
+  });
+  if (byRole.length) {
+    const holders = await tx.userRole.groupBy({
+      by: ['roleId'],
+      where: { roleId: { in: byRole.map((p) => p.roleId!) }, user: { isActive: true, employee: { isActive: true } } },
+      _count: { _all: true },
+    });
+    const n = new Map(holders.map((h) => [h.roleId, h._count._all]));
+    for (const p of byRole) out.set(p.id, n.get(p.roleId!) ?? 0);
+    return out;
+  }
   // A position also held counts its holder as filling it.
   const extra = await tx.employeeExtraPosition.groupBy({
     by: ['positionId'],
@@ -195,7 +219,7 @@ export async function plantillaSummary(): Promise<PlantillaSummary> {
       },
     }),
     filledByPosition(),
-    prisma.employee.count({ where: { isActive: true, positionId: null } }),
+    prisma.employee.count({ where: { isActive: true, positionId: null, OR: [{ userId: null }, { user: { roles: { none: {} } } }] } }),
   ]);
 
   const byDept = new Map<string, PlantillaSummary['byDepartment'][number]>();

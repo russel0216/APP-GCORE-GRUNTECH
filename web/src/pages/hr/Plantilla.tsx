@@ -49,6 +49,8 @@ interface PositionRow {
   sortOrder: number;
   authorisedHeadcount: number;
   department: { id: string; name: string } | null;
+  /** The role this slot counts (2026-10-19): filled = its active holders. */
+  role?: { id: string; name: string } | null;
   filled: number;
   /** Authorised − filled. Negative is over-complement. */
   vacant: number;
@@ -100,6 +102,7 @@ export function Plantilla() {
         <div>
           <strong>{p.title}</strong>
           <div className="faint mono">{p.code}</div>
+          {p.role && <div className="faint">Counts the {p.role.name} role</div>}
         </div>
       ),
     },
@@ -317,10 +320,15 @@ function PositionModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [holders, setHolders] = useState<Holder[] | null>(position ? null : []);
+  const [roles, setRoles] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    api.get<{ id: string; name: string }[]>('/positions/roles').then(setRoles).catch(() => setRoles([]));
+  }, []);
   const [form, setForm] = useState({
     title: position?.title ?? '',
     code: position?.code ?? '',
     departmentId: position?.department?.id ?? '',
+    roleId: position?.role?.id ?? '',
     authorisedHeadcount: String(position?.authorisedHeadcount ?? 1),
     description: position?.description ?? '',
     isActive: position?.isActive ?? true,
@@ -346,6 +354,7 @@ function PositionModal({
         title: form.title.trim(),
         code: form.code.trim() || null,
         departmentId: form.departmentId || null,
+        roleId: form.roleId || null,
         authorisedHeadcount: headcount,
         description: form.description.trim() || null,
         isActive: form.isActive,
@@ -424,6 +433,23 @@ function PositionModal({
             disabled={!mayEdit}
             onChange={(e) => setForm({ ...form, code: e.target.value })}
           />
+        </Field>
+        <Field label="Counts the role" hint="Filled is the active people holding this role on Admin › Users">
+          <select
+            value={form.roleId}
+            disabled={!mayEdit}
+            onChange={(e) => {
+              const role = roles.find((r) => r.id === e.target.value);
+              setForm({ ...form, roleId: e.target.value, title: form.title.trim() ? form.title : (role?.name ?? '') });
+            }}
+          >
+            <option value="">— none —</option>
+            {roles.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name}
+              </option>
+            ))}
+          </select>
         </Field>
         <Field label="Department">
           <select

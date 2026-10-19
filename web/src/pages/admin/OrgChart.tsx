@@ -154,6 +154,22 @@ export function OrgChart() {
   // Back Support lines (2026-10-19): from each supporter to the head of every
   // team they support — the team member whose own manager is on no other card
   // of that team (the Team Leader, as the chart is drawn).
+  // Shared team posts (2026-10-19): KAT's Technical Manager is GIB/UIT/HIT's —
+  // a line from that person to the head of the team they cover, labelled.
+  const [shared, setShared] = useState<{ teamId: string; code: string; label: string; people: { id: string }[] }[]>([]);
+  useEffect(() => {
+    api
+      .get<{ teams: { id: string; code: string; posts: { label: string; mode: string; people: { id: string }[] }[] }[] }>('/reference/team-posts')
+      .then((r) =>
+        setShared(
+          r.teams.flatMap((t) =>
+            t.posts.filter((p) => p.mode !== 'OWN').map((p) => ({ teamId: t.id, code: t.code, label: p.label, people: p.people })),
+          ),
+        ),
+      )
+      .catch(() => setShared([]));
+  }, []);
+
   const links = useMemo(() => {
     if (!people) return [];
     const active = people.filter((p) => p.isActive);
@@ -172,8 +188,14 @@ export function OrgChart() {
         if (head && head.id !== p.id) out.push({ from: p.id, to: head.id, code: t.industry?.code ?? '' });
       }
     }
+    for (const s of shared) {
+      const head = heads.get(s.teamId);
+      for (const who of s.people) {
+        if (head && head.id !== who.id && byId.has(who.id)) out.push({ from: who.id, to: head.id, code: `${s.code} ${s.label}` });
+      }
+    }
     return out;
-  }, [people]);
+  }, [people, shared]);
   const [showLinks, setShowLinks] = useState(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const cards = useRef(new Map<string, HTMLElement>());
@@ -230,7 +252,7 @@ export function OrgChart() {
       {links.length > 0 && (
         <label className="org-switch">
           <input type="checkbox" checked={showLinks} onChange={(e) => setShowLinks(e.target.checked)} /> Show Back Support
-          lines to the teams they support
+          and shared-manager lines
         </label>
       )}
       <div className="org-scroll" ref={scrollRef}>

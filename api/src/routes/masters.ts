@@ -21,6 +21,7 @@ import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { deleteGroup, deletedGroupKeys, FALLBACK_GROUP, groupKey, setDeletedGroupKeys } from '../shared/quotationGroups';
 import { activityTypeKey } from '../shared/activityTypes';
+import { TEAM_POST_KEYS, TEAM_POST_ROLES } from '../shared/teamPosts';
 import { nextNumber } from '../shared/numbering';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { companyCurrency, formatAmount, formatMoney, formatShortDate, renderDocument, statusLabel } from '../shared/pdf';
@@ -1252,6 +1253,100 @@ referenceRoutes.get(
         orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
       }),
     );
+  }),
+);
+
+// ── Team managers (2026-10-19) ───────────────────────────────────────────────
+// Who holds each team's Team Leader, Technical Manager, Sales Manager and
+// Aftermarket Manager post: OWN (the role's holders on the team), SHARED with
+// other teams, or named PEOPLE — read by the approval engine
+// (shared/teamPosts.ts). Anyone signed in reads it; changing it is a category edit.
+
+referenceRoutes.get(
+  '/team-posts',
+  handler(async (_req, res) => {
+    const [teams, posts, holders] = await Promise.all([
+      prisma.industry.findMany({ where: { isActive: true }, orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }], select: { id: true, code: true, name: true } }),
+      prisma.teamPost.findMany(),
+      prisma.userRole.findMany({
+        where: { role: { key: { in: TEAM_POST_KEYS } }, user: { isActive: true } },
+        select: { role: { select: { key: true } }, user: { select: { id: true, name: true, employee: { select: { industryId: true } } } } },
+      }),
+    ]);
+    const users = await prisma.user.findMany({
+      where: { id: { in: [...new Set(posts.flatMap((p) => p.userIds))] } },
+      select: { id: true, name: true },
+    });
+    const nameOf = new Map(users.map((u) => [u.id, u.name]));
+    const onTeam = (key: string, teamIds: string[]) =>
+      holders.filter((h) => h.role.key === key && h.user.employee?.industryId && teamIds.includes(h.user.employee.industryId)).map((h) => ({ id: h.user.id, name: h.user.name }));
+    res.json({
+      roles: TEAM_POST_ROLES,
+      teams: teams.map((t) => ({
+        ...t,
+        posts: TEAM_POST_ROLES.map((r) => {
+          const post = posts.find((p) => p.teamId === t.id && p.roleKey === r.key);
+          const mode = post?.mode ?? 'OWN';
+          const people =
+            mode === 'PEOPLE'
+              ? (post!.userIds.map((id) => ({ id, name: nameOf.get(id) ?? '(removed)' })))
+              : onTeam(r.key, mode === 'SHARED' ? post!.sharedTeamIds : [t.id]);
+          return { roleKey: r.key, label: r.label, mode, sharedTeamIds: post?.sharedTeamIds ?? [], userIds: post?.userIds ?? [], people };
+        }),
+      })),
+    });
+  }),
+);
+
+const teamPostSchema = z.object({
+  mode: z.enum(['OWN', 'SHARED', 'PEOPLE']),
+  sharedTeamIds: z.array(z.string()).max(10).default([]),
+  userIds: z.array(z.string()).max(10).default([]),
+});
+
+referenceRoutes.put(
+  '/team-posts/:teamId/:roleKey',
+  editCategory,
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(teamPostSchema, req.body);
+    const { teamId, roleKey } = req.params;
+    if (!TEAM_POST_KEYS.includes(roleKey)) throw badRequest(`roleKey: one of ${TEAM_POST_KEYS.join(', ')}`);
+    const team = await prisma.industry.findUnique({ where: { id: teamId }, select: { id: true, code: true } });
+    if (!team) throw notFound('Team not found');
+    if (body.mode === 'SHARED') {
+      const ids = [...new Set(body.sharedTeamIds)].filter((id) => id !== teamId);
+      if (!ids.length) throw badRequest('Choose the teams it is shared with', [{ field: 'sharedTeamIds', message: 'Choose at least one other team' }]);
+      if ((await prisma.industry.count({ where: { id: { in: ids } } })) !== ids.length) throw badRequest('One of those teams was not found');
+      body.sharedTeamIds = ids;
+    }
+    if (body.mode === 'PEOPLE') {
+      const ids = [...new Set(body.userIds)];
+      if (!ids.length) throw badRequest('Choose who holds it', [{ field: 'userIds', message: 'Choose at least one person' }]);
+      if ((await prisma.user.count({ where: { id: { in: ids }, isActive: true } })) !== ids.length) throw badRequest('One of those people is not an active login');
+      body.userIds = ids;
+    }
+    const before = await prisma.teamPost.findUnique({ where: { teamId_roleKey: { teamId, roleKey } } });
+    const data = {
+      mode: body.mode,
+      sharedTeamIds: body.mode === 'SHARED' ? body.sharedTeamIds : [],
+      userIds: body.mode === 'PEOPLE' ? body.userIds : [],
+      updatedById: me.id,
+    };
+    const saved = await prisma.teamPost.upsert({ where: { teamId_roleKey: { teamId, roleKey } }, create: { teamId, roleKey, ...data }, update: data });
+    const label = TEAM_POST_ROLES.find((r) => r.key === roleKey)!.label;
+    await audit(
+      {
+        entityType: 'industry',
+        entityId: teamId,
+        action: 'UPDATED',
+        summary: `${team.code} ${label}: ${body.mode === 'OWN' ? 'its own team' : body.mode === 'SHARED' ? 'shared with other teams' : 'named people'}`,
+        before: before ? { mode: before.mode, sharedTeamIds: before.sharedTeamIds, userIds: before.userIds } : { mode: 'OWN' },
+        after: { mode: saved.mode, sharedTeamIds: saved.sharedTeamIds, userIds: saved.userIds },
+      },
+      req,
+    );
+    res.json(saved);
   }),
 );
 

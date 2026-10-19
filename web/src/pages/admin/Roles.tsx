@@ -8,6 +8,8 @@ interface Role {
   key: string;
   name: string;
   description: string | null;
+  /** Its level on the chart (1 the CEO … 6 the skilled trades): a person's title is their highest role. */
+  rank: number | null;
   isSystem: boolean;
   /** Who made it — Edit Own reads it (2026-10-18). */
   createdById: string | null;
@@ -101,6 +103,7 @@ export function Roles() {
               {role.description}
             </div>
             <div className="faint mono" style={{ fontSize: 'var(--fs-xs)' }}>
+              {role.rank ? `Level ${role.rank} · ` : ''}
               {role.permissions.length} permissions · {role.userCount} user
               {role.userCount === 1 ? '' : 's'}
             </div>
@@ -142,6 +145,7 @@ function RoleEditor({
   const [name, setName] = useState(role?.name ?? '');
   const [key, setKey] = useState(role?.key ?? '');
   const [description, setDescription] = useState(role?.description ?? '');
+  const [rank, setRank] = useState(role?.rank != null ? String(role.rank) : '');
   const [selected, setSelected] = useState<Set<string>>(new Set(role?.permissions ?? []));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -181,7 +185,7 @@ function RoleEditor({
     setBusy(true);
     setError(null);
     try {
-      const payload = { key, name, description: description || null, permissions: [...selected] };
+      const payload = { key, name, description: description || null, rank: rank ? Number(rank) : null, permissions: [...selected] };
       if (role) await api.put(`/roles/${role.id}`, payload);
       else await api.post('/roles', payload);
       toast('ok', `${name} saved`);
@@ -243,7 +247,7 @@ function RoleEditor({
         </Field>
         <Field
           label="Key"
-          hint="Lowercase, no spaces. Used by approval workflows. These keys carry a rule of their own, whatever the role is named: team_leader, technical_manager, service_manager, back_support, purchasing_manager, purchasing_manager_import, hr, ceo, warehouse_supervisor. A role holding one of them cannot be deleted."
+          hint="Lowercase, no spaces. Used by approval workflows. These keys carry a rule of their own, whatever the role is named: team_leader, technical_manager, sales_manager, service_manager (Aftermarket Manager), back_support, finance and credit_collection (Checking), purchasing_manager, purchasing_manager_import, hr, ceo, warehouse_supervisor. A role holding one of them cannot be deleted."
         >
           <input
             value={key}
@@ -252,9 +256,24 @@ function RoleEditor({
           />
         </Field>
       </div>
-      <Field label="Description">
-        <input value={description} onChange={(e) => setDescription(e.target.value)} />
-      </Field>
+      <div className="grid grid-2">
+        <Field label="Description">
+          <input value={description} onChange={(e) => setDescription(e.target.value)} />
+        </Field>
+        <Field
+          label="Level on the chart"
+          hint="1 CEO / President · 2 Team Leader, department heads · 3 managers, officers · 4 engineers, clerks · 5 leads, technicians · 6 skilled. A person's title on documents is their highest role."
+        >
+          <select value={rank} onChange={(e) => setRank(e.target.value)}>
+            <option value="">— none —</option>
+            {[1, 2, 3, 4, 5, 6].map((n) => (
+              <option key={n} value={n}>
+                Level {n}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
 
       <hr className="rule" />
 

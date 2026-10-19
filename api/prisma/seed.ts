@@ -30,6 +30,8 @@ import { CHART_DEPARTMENTS, applyOrgChart, grantSupervisorRole } from '../src/sh
 import { applyEmployeeNumbering, clearEmployeeNumbers } from '../src/shared/employeeNumbers';
 import { clearRoles, rolesCleared } from '../src/shared/rolesClear';
 import { replaceRolesWithChart } from '../src/shared/rolesFromChart';
+import { applyRoleRev1 } from '../src/shared/roleRev1';
+import { seedSharedPosts } from '../src/shared/teamPosts';
 import { applyEmployeeNumberList } from '../src/shared/employeeNumbersFromList';
 import { applyHrAccess } from '../src/shared/hrAccess';
 import { applyFinAccess } from '../src/shared/finAccess';
@@ -81,7 +83,7 @@ interface SeedStep {
    * the project has no manager or the manager raised the document.
    */
   roleKey?: string;
-  /** SUPERVISOR only: roles whose holders on the requester's team decide it too (`ApprovalStep.alsoRoleIds`). */
+  /** Roles whose holders decide it too (`ApprovalStep.alsoRoleIds`): on a SUPERVISOR step those on the requester's team, on a ROLE step every holder. */
   alsoRoleKeys?: string[];
 }
 
@@ -447,7 +449,7 @@ const WORKFLOWS: WorkflowSeed[] = [
     steps: [
       { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
       { sequence: 2, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
-      { sequence: 3, name: 'Checking (Finance Staff)', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 3, name: 'Checking (Account Payable / Credit and Collection)', approverType: 'ROLE', roleKey: 'finance', alsoRoleKeys: ['credit_collection'] },
       { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
       { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
@@ -474,7 +476,7 @@ const WORKFLOWS: WorkflowSeed[] = [
     steps: [
       { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
       { sequence: 2, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
-      { sequence: 3, name: 'Checking (Finance Staff)', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 3, name: 'Checking (Account Payable / Credit and Collection)', approverType: 'ROLE', roleKey: 'finance', alsoRoleKeys: ['credit_collection'] },
       { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
       { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
@@ -1613,6 +1615,19 @@ async function main() {
         `  ✓ Roles replaced by the organisation chart: ${replaced.created.length} created, ${replaced.renamed.length} renamed, ${replaced.deleted.length} deleted, ${replaced.assigned} login(s) given their titles`,
       );
     }
+  }
+
+  // ── ROLE_REV1 (2026-10-19): ranks, renames, new roles, Plantilla by role ─
+  // Once, after the chart's roles (shared/roleRev1.ts); then KAT's shared posts.
+  {
+    const rev1 = await applyRoleRev1();
+    if (rev1) {
+      console.log(
+        `  ✓ ROLE_REV1: ${rev1.created.length} role(s) created, ${rev1.renamed.length} renamed, ${rev1.deleted.length} deleted, ${rev1.positions} Plantilla slot(s) by role, ${rev1.titles} title(s) from roles`,
+      );
+    }
+    const posts = await seedSharedPosts();
+    if (posts) console.log(`  ✓ KAT's Technical Manager and Aftermarket Manager shared with GIB, UIT and HIT (${posts} post(s))`);
   }
 
   // ── G-HR's common rights on every role; all of G-HR to the HR Officer ────

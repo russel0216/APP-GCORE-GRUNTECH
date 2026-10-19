@@ -1,4 +1,5 @@
 import type { Prisma } from '@prisma/client';
+import { MAX_ROLES } from './roleRev1';
 import { prisma } from '../prisma';
 import { audit } from './audit';
 import { nextNumber } from './numbering';
@@ -414,7 +415,8 @@ export async function applyChartRolesByName(opts: { dryRun?: boolean } = {}): Pr
     }
     const have = new Set(user.roles.map((r) => r.roleId));
     const want = p.titles.map((t) => roleByName.get(fold(t))).filter((r): r is NonNullable<typeof r> => !!r);
-    const add = want.filter((r) => !have.has(r.id));
+    // Six roles at most (2026-10-19): what would pass the cap is left out.
+    const add = want.filter((r) => !have.has(r.id)).slice(0, Math.max(0, MAX_ROLES - have.size));
     if (!add.length) continue;
     plan.push({ user, add });
     people.push({ name: p.name, changes: [`roles added: ${add.map((r) => r.name).join(', ')}`] });

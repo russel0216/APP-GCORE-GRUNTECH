@@ -4,6 +4,7 @@ import { mayEdit as mayEditRecord, mayEditPage, useAuth } from '../../lib/auth';
 import { ActiveBadge, Checkbox, Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../components/ui';
 import { useConfirm } from '../../components/Confirm';
 import { NumberInput } from '../../components/NumberInput';
+import { TeamPostsCard } from './TeamPosts';
 
 // ════════════════════════════════════════════════════════════════════
 //  CATEGORIES — cost categories, item categories, teams, sub-industries,
@@ -842,6 +843,7 @@ export function Categories() {
         types: what a CAD job order asks for; the output is always a PDF.
       */}
       <CategoryCard spec={TEAMS} rows={lists.teams} onChanged={changed} className="card m-industries" />
+      <TeamPostsCard />
       <CategoryCard spec={SUB_INDUSTRIES} rows={lists.subIndustries} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={QUOTATION_GROUPS} rows={lists.groups} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={ACTIVITY_TYPES} rows={lists.activityTypes} onChanged={changed} className="card m-industries" />

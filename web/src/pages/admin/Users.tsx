@@ -54,6 +54,8 @@ interface UserRow {
   /** The main plantilla post and the others held (2026-10-19). */
   mainPosition?: string | null;
   alsoHolds?: string[];
+  /** The title on documents: the highest of the roles (ROLE_REV1, 2026-10-19). */
+  title?: string | null;
 }
 
 /** The halves of a person still apart (GET /users summary, 2026-10-16). */
@@ -62,6 +64,9 @@ interface UsersSummary {
   employeesAlone: number;
   /** Active logins with no employee number yet (2026-10-18). */
   withoutNumber: number;
+  /** Logins holding more than six roles — listed, never trimmed (2026-10-19). */
+  moreThanMaxRoles?: number;
+  maxRoles?: number;
 }
 
 /** The single-user endpoint returns role ids (the list only needs key + name). */
@@ -110,6 +115,9 @@ interface PermissionCatalog {
     }[];
   }[];
 }
+
+/** A person holds six roles at most (the owner's call, 2026-10-19; the API refuses a seventh). */
+const MAX_ROLES = 6;
 
 const BASE = '/admin/users';
 
@@ -163,8 +171,7 @@ export function Users() {
               </span>
             )}
           </div>
-          <div className="faint">{u.mainPosition ?? u.position ?? '—'}</div>
-          {!!u.alsoHolds?.length && <div className="faint">Also holds: {u.alsoHolds.join(', ')}</div>}
+          <div className="faint">{u.title ?? u.position ?? '—'}</div>
         </div>
       ),
     },
@@ -273,6 +280,11 @@ export function Users() {
               { value: 'yes', label: 'Has an employee number' },
             ],
           },
+          {
+            key: 'roles',
+            label: 'Roles',
+            options: [{ value: 'over', label: `More than ${MAX_ROLES} roles` }],
+          },
         ]}
         summary={(raw) => {
           const sum = raw as unknown as UsersSummary | undefined;
@@ -300,6 +312,15 @@ export function Users() {
                 sub="type it on the login (GTC-0001-14) — no quotation number is issued without one"
                 to={`${BASE}?number=none`}
               />
+              {!!sum.moreThanMaxRoles && (
+                <Stat
+                  label={`More than ${MAX_ROLES} roles`}
+                  value={sum.moreThanMaxRoles}
+                  accent="warn"
+                  sub={`a person holds ${MAX_ROLES} roles at most — their next save needs it trimmed`}
+                  to={`${BASE}?roles=over`}
+                />
+              )}
             </>
           );
         }}
@@ -454,9 +475,6 @@ function UserEditor({
           ? { firstName: form.firstName.trim(), lastName: form.lastName.trim(), suffix: form.suffix.trim() || null }
           : { name: form.name }),
         // Sent only when changed: the login's title joins every post held.
-        ...((form.position || null) !== (detail?.mainPosition ?? detail?.position ?? null)
-          ? { position: form.position || null }
-          : {}),
         phone: form.phone || null,
         departmentId: form.departmentId || null,
       };
@@ -598,21 +616,9 @@ function UserEditor({
                 <input value={form.suffix} onChange={(e) => setForm({ ...form, suffix: e.target.value })} />
               </Field>
             )}
-            <Field
-              label="Position"
-              hint={kept ? 'A title the Plantilla holds puts them on that position' : undefined}
-            >
-              <input
-                value={form.position}
-                disabled={kept && !full}
-                onChange={(e) => setForm({ ...form, position: e.target.value })}
-              />
+            <Field label="Title" hint="Their highest role (Access tab) — what documents print">
+              <input readOnly value={detail?.position ?? ''} placeholder="— no role yet —" />
             </Field>
-            {!!detail?.alsoHolds?.length && (
-              <Field label="Also holds" hint="Set on the employee record (HR › Employees)">
-                <input readOnly value={detail.alsoHolds.join(', ')} />
-              </Field>
-            )}
             <Field label="Mobile" hint="Printed under the author's name on the quotations they raise">
               <input
                 type="tel"
@@ -706,14 +712,17 @@ function UserEditor({
               Roles, Supports teams and overrides are changed by an administrator with Edit All on Users.
             </div>
           )}
-          <Field label="Roles" hint="Roles grant the bulk of access. Adjust individual screens below.">
+          <Field
+            label={`Roles — ${form.roleIds.length} of ${MAX_ROLES}`}
+            hint={`Roles grant the bulk of access; ${MAX_ROLES} at most. The highest is their title on documents. Adjust individual screens below.`}
+          >
             <div className="row">
               {roles.map((r) => (
                 <label key={r.id} className="checkbox">
                   <input
                     type="checkbox"
                     checked={form.roleIds.includes(r.id)}
-                    disabled={!full}
+                    disabled={!full || (!form.roleIds.includes(r.id) && form.roleIds.length >= MAX_ROLES)}
                     onChange={(e) =>
                       setForm({
                         ...form,

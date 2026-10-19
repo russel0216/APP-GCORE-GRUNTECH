@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { refreshUserTitle } from './roleRev1';
 import bcrypt from 'bcryptjs';
 import type { AccountTokenPurpose, Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -165,6 +166,10 @@ export async function createLogin(tx: Prisma.TransactionClient, input: NewLogin,
     select: LOGIN_SELECT,
   });
   const invite = invited ? await issueToken(tx, user.id, 'INVITE', { createdById: actorId }) : null;
+  // Its title is the highest of its roles (ROLE_REV1).
+  if (input.roleIds?.length && (await refreshUserTitle(tx, user.id))) {
+    return { user: await tx.user.findUniqueOrThrow({ where: { id: user.id }, select: LOGIN_SELECT }), invite };
+  }
   return { user, invite };
 }
 

@@ -219,8 +219,14 @@ model Role {
   // System roles cannot be deleted, but their permissions remain editable —
   // "Roles should be customizable" (requirements §14).
   isSystem    Boolean @default(false)
+  /// Its level on the organisation chart (2026-10-19, ROLE_REV1): 1 is the
+  /// CEO / President, 6 the skilled trades. A person's title on documents is
+  /// their highest role — the lowest rank, then `sortOrder` (the chart's order).
+  rank        Int?
+  sortOrder   Int     @default(0)
 
   permissions            RolePermission[]
+  plantilla              Position[]         @relation("PositionRole")
   users                  UserRole[]
   workflowStepsTargeting ApprovalStep[]     @relation("StepRole")
   workflowsForRequester  ApprovalWorkflow[] @relation("WorkflowRequesterRole")
@@ -764,6 +770,7 @@ model Industry {
   invoiceRequests    InvoiceRequest[]
   jobOrders          JobOrder[]          @relation("JobOrderTeam")
   cadJobOrders       CadJobOrder[]       @relation("CadJobOrderTeam")
+  posts              TeamPost[]
   // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
   createdById        String?
 }
@@ -3678,6 +3685,10 @@ model Position {
   isActive            Boolean             @default(true)
   employees           Employee[]
   extraHolders        EmployeeExtraPosition[]
+  /// The role this slot counts (2026-10-19: "keep plantilla, count by role") —
+  /// filled is the active employees whose login holds it.
+  roleId              String?
+  role                Role?               @relation("PositionRole", fields: [roleId], references: [id], onDelete: SetNull)
   courseRequirements  CourseRequirement[]
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
@@ -3686,6 +3697,33 @@ model Position {
   createdById String?
 
   @@index([departmentId])
+  @@index([roleId])
+}
+
+/// Who holds a team's management post (2026-10-19, the owner's call: "KAT's
+/// Technical Manager and Aftermarket Manager are shared with GIB, UIT, HIT's;
+/// later prepare the setting if someone is hired"). No row is OWN: the
+/// holders of the role on the team, as before. Read by the approval engine
+/// before its own-team rule (`teamPostHolders` in shared/teamPosts.ts).
+model TeamPost {
+  teamId        String
+  team          Industry     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  roleKey       String
+  mode          TeamPostMode @default(OWN)
+  /// SHARED: the holders of the role on these teams decide for this one.
+  sharedTeamIds String[]     @default([])
+  /// PEOPLE: these logins decide.
+  userIds       String[]     @default([])
+  updatedAt     DateTime     @updatedAt
+  updatedById   String?
+
+  @@id([teamId, roleKey])
+}
+
+enum TeamPostMode {
+  OWN
+  SHARED
+  PEOPLE
 }
 
 /// A plantilla position an employee ALSO holds (2026-10-19, the owner's call:

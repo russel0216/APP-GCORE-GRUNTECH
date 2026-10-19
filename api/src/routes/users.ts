@@ -22,6 +22,7 @@ import { allPermissions, REGISTRY, ACTION_LABELS } from '../permissions/registry
 import { ADMIN_RESET_HOURS, deliverLink, issueToken, syncLoginFromEmployee } from '../shared/accounts';
 import { setCounter, type CounterMove } from '../shared/numbering';
 import { setEmployeePosition } from '../shared/plantilla';
+import { MAX_ROLES, refreshUserTitle, titleFromRoles, tooManyRoles } from '../shared/roleRev1';
 import { ENGINE_ROLE_KEYS } from '../shared/rolesClear';
 import { mailConfig, sendMail } from '../shared/mail';
 import { requireView, requireEdit, ownOnly, viewScope, editScope, assertCanView, assertCanEdit } from '../shared/ownScope';
@@ -120,6 +121,11 @@ userRoutes.get(
     const me = currentUser(req);
     const q = listQuery(req);
     const where = ownOnly(me, 'admin', 'users', userListWhere(q), MINE_USERS(me));
+    // Logins holding more than six roles (the cap of 2026-10-19 — listed, never trimmed).
+    const overIds = (
+      await prisma.userRole.groupBy({ by: ['userId'], _count: { _all: true }, having: { userId: { _count: { gt: MAX_ROLES } } } })
+    ).map((g) => g.userId);
+    if (q.filters.roles === 'over') where.AND = [...((where.AND as Prisma.UserWhereInput[]) ?? []), { id: { in: overIds } }];
     // The cards count everyone's logins — for an own-only reader, only their own.
     const all = viewScope(me, 'admin', 'users') === 'all';
 
@@ -130,7 +136,7 @@ userRoutes.get(
           ...publicUser,
           department: { select: { id: true, name: true } },
           supervisor: { select: { id: true, name: true } },
-          roles: { select: { role: { select: { key: true, name: true } } } },
+          roles: { select: { role: { select: { key: true, name: true, rank: true, sortOrder: true } } } },
           employee: { select: { id: true, industry: { select: { id: true, code: true, name: true } }, positionRef: { select: { title: true } }, extraPositions: { orderBy: { sortOrder: 'asc' }, select: { position: { select: { title: true } } } } } },
         },
         orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
@@ -149,11 +155,13 @@ userRoutes.get(
     ]);
 
     res.json({
-      summary: { loginsAlone, employeesAlone, withoutNumber },
+      summary: { loginsAlone, employeesAlone, withoutNumber, moreThanMaxRoles: all ? overIds.length : 0, maxRoles: MAX_ROLES },
       ...listResult(
         rows.map(({ employee, ...r }) => ({
           ...r,
           roles: r.roles.map((x) => x.role),
+          // The title on documents: the highest of the roles (ROLE_REV1).
+          title: titleFromRoles(r.roles.map((x) => x.role)),
           team: employee?.industry ?? null,
           employeeId: employee?.id ?? null,
           ...heldPositions(employee),
@@ -563,6 +571,11 @@ userRoutes.patch(
     });
     if (!before) throw notFound('User not found');
 
+    // Six roles at most (the owner's call, 2026-10-19).
+    if (body.roleIds) {
+      const tooMany = tooManyRoles(new Set(body.roleIds).size);
+      if (tooMany) throw badRequest(tooMany, [{ field: 'roleIds', message: `${MAX_ROLES} roles at most` }]);
+    }
     // A user cannot supervise themselves — that would make an approval step
     // route straight back to the requester, who is then blocked from acting.
     if (body.supervisorId && body.supervisorId === req.params.id) {
@@ -715,7 +728,7 @@ userRoutes.patch(
       if (body.roleIds) {
         await tx.userRole.deleteMany({ where: { userId: req.params.id } });
         await tx.userRole.createMany({
-          data: body.roleIds.map((roleId) => ({ userId: req.params.id, roleId })),
+          data: [...new Set(body.roleIds)].map((roleId) => ({ userId: req.params.id, roleId })),
         });
       }
       if (body.supportTeamIds) {
@@ -737,7 +750,12 @@ userRoutes.patch(
         if (positionTo) await setEmployeePosition(tx, owner.id, positionTo.positionId, positionTo.text);
       }
       if (owner && (numberTyped || personalChanged)) await syncLoginFromEmployee(tx, owner.id);
-      return tx.user.update({ where: { id: req.params.id }, data, select: publicUser });
+      const saved = await tx.user.update({ where: { id: req.params.id }, data, select: publicUser });
+      // The title follows the roles: the highest of them (ROLE_REV1, 2026-10-19).
+      if (body.roleIds && (await refreshUserTitle(tx, req.params.id))) {
+        return tx.user.findUniqueOrThrow({ where: { id: req.params.id }, select: publicUser });
+      }
+      return saved;
     });
 
     const numberCounter = moved.counter;
@@ -874,13 +892,14 @@ roleRoutes.get(
         permissions: { select: { permission: { select: { key: true } } } },
         _count: { select: { users: true } },
       },
-      orderBy: { name: 'asc' },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
     });
     res.json(
       roles.map((r) => ({
         id: r.id,
         key: r.key,
         name: r.name,
+        rank: r.rank,
         description: r.description,
         isSystem: r.isSystem,
         createdById: r.createdById,
@@ -926,6 +945,8 @@ const roleSchema = z.object({
     .regex(/^[a-z0-9_]+$/, 'Use lowercase letters, numbers and underscores'),
   name: z.string().min(2),
   description: z.string().optional().nullable(),
+  /** Its level on the chart (1 the CEO … 6 the skilled trades): a person's title is their highest role. */
+  rank: z.number().int().min(1).max(9).optional().nullable(),
   permissions: z.array(z.string()).default([]),
 });
 
@@ -944,6 +965,8 @@ roleRoutes.post(
         key: body.key,
         name: body.name,
         description: body.description ?? null,
+        rank: body.rank ?? null,
+        sortOrder: 1000,
         // Who made it — Edit Own on Admin › Roles reads it (2026-10-18).
         createdById: currentUser(req).id,
         permissions: { create: permissionIds.map((permissionId) => ({ permissionId })) },
@@ -988,9 +1011,16 @@ roleRoutes.put(
           // A system role keeps its key — its permissions stay editable.
           name: body.name ?? role.name,
           description: body.description !== undefined ? body.description : role.description,
+          rank: body.rank !== undefined ? body.rank : role.rank,
         },
       });
     });
+    // A new name or rank moves its holders' titles, and its Plantilla slot's title.
+    if ((body.name && body.name !== role.name) || (body.rank !== undefined && body.rank !== role.rank)) {
+      if (body.name && body.name !== role.name) await prisma.position.updateMany({ where: { roleId: role.id }, data: { title: body.name } });
+      const holders = await prisma.userRole.findMany({ where: { roleId: role.id }, select: { userId: true } });
+      for (const h of holders) await refreshUserTitle(prisma, h.userId);
+    }
 
     await audit(
       {
