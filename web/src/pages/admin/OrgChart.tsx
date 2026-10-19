@@ -104,6 +104,11 @@ function Card({ node, depth, meId, search }: { node: Node; depth: number; meId?:
     >
       <Avatar name={p.name} photoId={p.photoPath} size={36} />
       <span className="org-card-text">
+        {p.team && (
+          <span className="org-team" title={p.team.name}>
+            {p.team.code}
+          </span>
+        )}
         <span className="org-name">
           {p.name}
           {p.id === meId && <span className="org-you"> (you)</span>}

@@ -445,6 +445,17 @@
   border-radius: 999px;
   color: var(--muted);
 }
+/* The person's team code (KAT, HIT …) over their name. */
+.org-team {
+  align-self: flex-start;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0 var(--s-2);
+  border-radius: 999px;
+  background: rgba(var(--magenta-rgb), 0.12);
+  color: var(--magenta);
+}
 .org-role.is-key {
   border-color: var(--info);
   color: var(--info);
