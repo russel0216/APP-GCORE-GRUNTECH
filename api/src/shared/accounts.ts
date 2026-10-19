@@ -114,7 +114,6 @@ export interface NewLogin {
   name: string;
   roleIds?: string[];
   supervisorId?: string | null;
-  departmentId?: string | null;
   position?: string | null;
   phone?: string | null;
   employeeNo?: string | null;
@@ -134,7 +133,6 @@ export const LOGIN_SELECT = {
   isSuperAdmin: true,
   invitePending: true,
   supervisorId: true,
-  departmentId: true,
   lastLoginAt: true,
   createdAt: true,
 } as const;
@@ -159,7 +157,6 @@ export async function createLogin(tx: Prisma.TransactionClient, input: NewLogin,
       position: input.position || null,
       phone: input.phone || null,
       supervisorId: input.supervisorId || null,
-      departmentId: input.departmentId || null,
       isActive: input.isActive ?? true,
       roles: { create: (input.roleIds ?? []).map((roleId) => ({ roleId })) },
     },
@@ -299,13 +296,13 @@ export const personName = (e: { firstName: string; lastName: string; suffix?: st
  * is where they are kept; Admin › Users shows them and never writes them for
  * a linked login (`PATCH /users/:id` refuses).
  */
-export const MIRRORED_LOGIN_FIELDS = ['name', 'employeeNo', 'phone', 'departmentId', 'position'] as const;
+export const MIRRORED_LOGIN_FIELDS = ['name', 'employeeNo', 'phone', 'position'] as const;
 
 /**
  * Copies the employee's identity onto their login, in the caller's
  * transaction — the ONE writer of the mirrored fields once a login is linked:
  * the name (first, last, suffix), the employee number, the mobile as the
- * login's phone, the department and the position. Deactivating the employee
+ * login's phone and the position (the department went on 2026-10-19). Deactivating the employee
  * deactivates the login; re-activating never re-opens a login by itself (an
  * administrator decides that on Admin › Users).
  *
@@ -324,7 +321,6 @@ export async function syncLoginFromEmployee(tx: Prisma.TransactionClient, employ
       suffix: true,
       employeeNo: true,
       mobile: true,
-      departmentId: true,
       position: true,
       isActive: true,
     },
@@ -332,14 +328,13 @@ export async function syncLoginFromEmployee(tx: Prisma.TransactionClient, employ
   if (!e?.userId) return [];
   const u = await tx.user.findUnique({
     where: { id: e.userId },
-    select: { name: true, employeeNo: true, phone: true, departmentId: true, position: true, isActive: true },
+    select: { name: true, employeeNo: true, phone: true, position: true, isActive: true },
   });
   if (!u) return [];
   const want = {
     name: personName(e),
     employeeNo: e.employeeNo || null,
     phone: e.mobile || null,
-    departmentId: e.departmentId,
     position: e.position || null,
   };
   const data: Prisma.UserUncheckedUpdateInput = {};

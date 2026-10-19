@@ -36,7 +36,6 @@ const PERSONAL_LABELS: Record<string, string> = {
   lastName: 'last name',
   suffix: 'suffix',
   mobile: 'mobile',
-  departmentId: 'department',
   position: 'position',
 };
 
@@ -56,7 +55,6 @@ const publicUser = {
   isSuperAdmin: true,
   invitePending: true,
   supervisorId: true,
-  departmentId: true,
   lastLoginAt: true,
   createdAt: true,
   /** Attachment id of the account picture — the org chart draws it. */
@@ -83,7 +81,6 @@ function userListWhere(q: ListQuery): Prisma.UserWhereInput {
   }
   if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
   if (q.filters.role) where.roles = { some: { role: { key: q.filters.role } } };
-  if (q.filters.departmentId) where.departmentId = q.filters.departmentId;
   // `?linked=no`: a login with no employee record (2026-10-16) — the clean-up
   // the "one person" rule asks for; `yes` the rest.
   if (q.filters.linked === 'no') where.employee = { is: null };
@@ -134,7 +131,6 @@ userRoutes.get(
         where,
         select: {
           ...publicUser,
-          department: { select: { id: true, name: true } },
           supervisor: { select: { id: true, name: true } },
           roles: { select: { role: { select: { key: true, name: true, rank: true, sortOrder: true } } } },
           employee: { select: { id: true, industry: { select: { id: true, code: true, name: true } }, positionRef: { select: { title: true } }, extraPositions: { orderBy: { sortOrder: 'asc' }, select: { position: { select: { title: true } } } } } },
@@ -189,7 +185,7 @@ userRoutes.get(
     const q = listQuery(req);
     const where = ownOnly(me, 'admin', 'users', userListWhere(q), MINE_USERS(me));
     const f = q.filters;
-    const [rows, count, role, department] = await Promise.all([
+    const [rows, count, role] = await Promise.all([
       prisma.user.findMany({
         where,
         select: {
@@ -201,23 +197,21 @@ userRoutes.get(
           isSuperAdmin: true,
           invitePending: true,
           lastLoginAt: true,
-          department: { select: { name: true } },
           supervisor: { select: { name: true } },
-          roles: { select: { role: { select: { name: true } } } },
+          roles: { select: { role: { select: { name: true, rank: true, sortOrder: true } } } },
+          employee: { select: { industry: { select: { code: true } } } },
         },
         orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
         take: LIST_CAP,
       }),
       prisma.user.count({ where }),
       f.role ? prisma.role.findUnique({ where: { key: f.role }, select: { name: true } }) : null,
-      f.departmentId ? prisma.department.findUnique({ where: { id: f.departmentId }, select: { name: true } }) : null,
     ]);
 
     const reference = listReference(count, rows.length, ['user', 'users'], [
       q.search && `search "${q.search}"`,
       f.isActive && (f.isActive === 'true' ? 'active' : 'inactive'),
       f.role && `role ${role?.name ?? 'not found'}`,
-      f.departmentId && `department ${department?.name ?? 'not found'}`,
       f.number && (f.number === 'none' ? 'no employee number yet' : 'with an employee number'),
       f.ids && 'the rows selected',
     ]);
@@ -232,15 +226,18 @@ userRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Name', 'Email', 'Number', 'Roles', 'Department', 'Reports to', 'Last sign-in', 'Status'],
+          head: ['Name', 'Email', 'Number', 'Roles', 'Team', 'Reports to', 'Last sign-in', 'Status'],
           rows: rows.map((u) => {
             const roles = [...(u.isSuperAdmin ? ['Super admin'] : []), ...u.roles.map((r) => r.role.name)];
             return [
-              u.position ? { title: u.name, body: u.position } : u.name,
+              (() => {
+                const title = titleFromRoles(u.roles.map((r) => r.role)) ?? u.position;
+                return title ? { title: u.name, body: title } : u.name;
+              })(),
               u.email,
               u.employeeNo ?? '—',
               roles.length ? roles.join(', ') : '—',
-              u.department?.name ?? '—',
+              u.employee?.industry?.code ?? '—',
               u.supervisor?.name ?? '—',
               u.lastLoginAt ? formatShortDate(u.lastLoginAt) : 'Never',
               !u.isActive ? 'Inactive' : u.invitePending ? 'Invited' : 'Active',
@@ -326,12 +323,13 @@ userRoutes.get(
         position: true,
         // The photo (an attachment id) for a picker that shows faces (the activity form's participants).
         photoPath: true,
-        department: { select: { id: true, name: true } },
+        // The team (2026-10-19: departments retired) — what a picker groups by.
+        employee: { select: { industry: { select: { id: true, code: true, name: true } } } },
       },
-      orderBy: [{ department: { name: 'asc' } }, { name: 'asc' }],
+      orderBy: [{ name: 'asc' }],
       take: 200,
     });
-    res.json(rows);
+    res.json(rows.map(({ employee, ...r }) => ({ ...r, team: employee?.industry ?? null })));
   }),
 );
 
@@ -387,7 +385,6 @@ userRoutes.get(
       where: { id: req.params.id },
       select: {
         ...publicUser,
-        department: { select: { id: true, name: true } },
         supervisor: { select: { id: true, name: true } },
         roles: { select: { role: { select: { id: true, key: true, name: true } } } },
         overrides: { select: { effect: true, permission: { select: { key: true } } } },
@@ -516,7 +513,6 @@ const updateSchema = z.object({
   /** The author's mobile under "Sincerely Yours," on a quotation. */
   phone: z.string().trim().max(40).optional().nullable(),
   supervisorId: z.string().optional().nullable(),
-  departmentId: z.string().optional().nullable(),
   roleIds: z.array(z.string()).optional(),
   /** Where they support in back admin — teams; empty is every team. */
   supportTeamIds: z.array(z.string()).max(50).optional(),
@@ -611,7 +607,7 @@ userRoutes.patch(
     const teamChanged = !!linked && body.teamId !== undefined && (body.teamId || null) !== linked.industryId;
 
     // The employee owns identity (2026-10-16): a login linked to an employee
-    // record takes its name, number, phone, department and position from it
+    // record takes its name, number, phone and position from it
     // (`syncLoginFromEmployee`). Since 2026-10-19 (the owner's call: "edit
     // them here too") those are typed HERE as well and written THROUGH to the
     // employee record — the employee number (2026-10-18) and the Team already
@@ -625,7 +621,6 @@ userRoutes.patch(
         lastName: true,
         suffix: true,
         mobile: true,
-        departmentId: true,
         position: true,
         positionId: true,
       },
@@ -660,12 +655,6 @@ userRoutes.patch(
       if (body.lastName !== undefined) put('lastName', body.lastName);
       put('suffix', body.suffix);
       put('mobile', body.phone);
-      if (body.departmentId !== undefined && (body.departmentId || null) !== owner.departmentId) {
-        if (body.departmentId && !(await prisma.department.count({ where: { id: body.departmentId } }))) {
-          throw badRequest('departmentId: that department was not found');
-        }
-        put('departmentId', body.departmentId);
-      }
       // The position has one writer (`setEmployeePosition`): a title the
       // Plantilla holds puts them on that position; another title is kept as
       // typed only while they hold no plantilla position — taking somebody
@@ -689,12 +678,12 @@ userRoutes.patch(
       }
     }
     const personalChanged = Object.keys(personal).length > 0 || positionTo !== null;
-    if (personalChanged && editScope(me, 'admin', 'users') !== 'all' && (personal.departmentId !== undefined || positionTo)) {
-      throw forbidden('Changing the position or the department needs "admin.users.edit_all" — Edit Own changes only your own details');
+    if (personalChanged && editScope(me, 'admin', 'users') !== 'all' && positionTo) {
+      throw forbidden('Changing the position needs "admin.users.edit_all" — Edit Own changes only your own details');
     }
 
     const data: Prisma.UserUpdateInput = {};
-    // A linked login's name, number, position, phone and department are the
+    // A linked login's name, number, position and phone are the
     // employee's (written below, mirrored back by `syncLoginFromEmployee`).
     if (body.name !== undefined && !owner) data.name = body.name;
     if (body.employeeNo !== undefined && !owner) data.employeeNo = body.employeeNo || null;
@@ -709,11 +698,6 @@ userRoutes.patch(
     if (body.supervisorId !== undefined) {
       data.supervisor = body.supervisorId
         ? { connect: { id: body.supervisorId } }
-        : { disconnect: true };
-    }
-    if (body.departmentId !== undefined && !owner) {
-      data.department = body.departmentId
-        ? { connect: { id: body.departmentId } }
         : { disconnect: true };
     }
 
@@ -776,7 +760,7 @@ userRoutes.patch(
     if (owner && personalChanged) {
       const after = await prisma.employee.findUnique({
         where: { id: owner.id },
-        select: { firstName: true, lastName: true, suffix: true, mobile: true, departmentId: true, position: true },
+        select: { firstName: true, lastName: true, suffix: true, mobile: true, position: true },
       });
       const keys = Object.keys(personalBefore);
       await audit(
@@ -1098,25 +1082,3 @@ async function resolvePermissionIds(keys: string[]): Promise<string[]> {
   if (unknown.length) throw badRequest(`Unknown permissions: ${unknown.slice(0, 5).join(', ')}`);
   return rows.map((r) => r.id);
 }
-
-// ── Departments (needed by the user form) ────────────────────────────────────
-
-export const departmentRoutes = Router();
-departmentRoutes.use(authenticate);
-
-departmentRoutes.get(
-  '/',
-  handler(async (_req, res) => {
-    res.json(await prisma.department.findMany({ orderBy: { name: 'asc' } }));
-  }),
-);
-
-departmentRoutes.post(
-  '/',
-  require_('admin.users.create'),
-  handler(async (req, res) => {
-    const body = parseBody(z.object({ code: z.string().min(1), name: z.string().min(2) }), req.body);
-    const dept = await prisma.department.create({ data: body });
-    res.status(201).json(dept);
-  }),
-);

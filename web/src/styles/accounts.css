@@ -474,3 +474,83 @@
   font-size: var(--fs-xs);
   font-weight: 600;
 }
+
+/*
+  The people hierarchy (Admin › Users › Hierarchy, 2026-10-19): an outline
+  of "Reports to", each level indented under a guide line.
+*/
+.ptree-search {
+  max-width: 28rem;
+  margin-bottom: var(--s-3);
+}
+
+.ptree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ptree-list .ptree-list {
+  margin-left: var(--s-5);
+  padding-left: var(--s-3);
+  border-left: 1px solid var(--line);
+}
+
+.ptree-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  padding: var(--s-1) 0;
+}
+
+.ptree-toggle {
+  width: var(--s-5);
+  height: var(--s-5);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  padding: 0;
+}
+
+.ptree-toggle:disabled {
+  cursor: default;
+}
+
+.ptree-leaf {
+  cursor: default;
+}
+
+.ptree-name {
+  font-weight: 600;
+}
+
+.ptree-title {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.ptree-count {
+  font-size: var(--fs-xs);
+}
+
+/* The role hierarchy on the Access tab and Admin › Roles: roles under their level. */
+.role-levels {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.role-level-head {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: var(--s-1);
+}

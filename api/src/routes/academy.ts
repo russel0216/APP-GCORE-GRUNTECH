@@ -110,10 +110,13 @@ const requirementSelect = {
 
 type RequirementRow = Prisma.CourseRequirementGetPayload<{ select: typeof requirementSelect }>;
 
-/** "Everyone", "Engineering", "Site Safety Officer", "Engineering · Welder". */
+/**
+ * "Everyone", "Site Safety Officer" — or, for a row stored before the
+ * department went (2026-10-19), "Department (retired): Engineering · Welder".
+ */
 function requirementText(r: RequirementRow): string {
   if (!r.department && !r.position) return 'Everyone';
-  return [r.department?.name, r.position?.title].filter(Boolean).join(' · ');
+  return [r.department && `Department (retired): ${r.department.name}`, r.position?.title].filter(Boolean).join(' · ');
 }
 
 /**
@@ -451,8 +454,11 @@ const requirementRow = z.object({
 
 /**
  * Replaces the whole requirement list — the form edits it as one table.
- * Takes `[{ departmentId?, positionId? }]` (or `{ requirements: [...] }`).
- * Both empty on a row means everyone.
+ * Takes `[{ positionId? }]` (or `{ requirements: [...] }`); an empty row
+ * means everyone. The department is gone (2026-10-19, the owner's call): a
+ * row naming one is accepted only when the course already holds that exact
+ * row — the form sends the list back whole — so a requirement stored before
+ * stays until HR removes it, and no new one is made.
  */
 courseRoutes.put(
   '/:id/requirements',
@@ -473,13 +479,19 @@ courseRoutes.put(
       seen.add(key);
       unique.push(row);
     }
-    const deptIds = [...new Set(unique.map((r) => r.departmentId).filter((x): x is string => !!x))];
+    const kept = new Set(
+      (
+        await prisma.courseRequirement.findMany({
+          where: { courseId: before.id, departmentId: { not: null } },
+          select: { departmentId: true, positionId: true },
+        })
+      ).map((r) => `${r.departmentId}|${r.positionId ?? null}`),
+    );
+    if (unique.some((r) => r.departmentId && !kept.has(`${r.departmentId}|${r.positionId}`))) {
+      throw badRequest('A requirement is everyone or a plantilla position — departments are no longer used');
+    }
     const posIds = [...new Set(unique.map((r) => r.positionId).filter((x): x is string => !!x))];
-    const [depts, positions] = await Promise.all([
-      prisma.department.count({ where: { id: { in: deptIds } } }),
-      prisma.position.count({ where: { id: { in: posIds } } }),
-    ]);
-    if (depts !== deptIds.length) throw badRequest('One of the departments no longer exists');
+    const positions = await prisma.position.count({ where: { id: { in: posIds } } });
     if (positions !== posIds.length) throw badRequest('One of the plantilla positions no longer exists');
 
     await prisma.$transaction(async (tx) => {
@@ -674,7 +686,7 @@ const detailSelect = {
           lastName: true,
           position: true,
           userId: true,
-          department: { select: { id: true, name: true } },
+          industry: { select: { id: true, code: true, name: true } },
           user: { select: { email: true } },
         },
       },
@@ -1154,14 +1166,14 @@ sessionRoutes.get(
         // No widths: each column from what it holds, so a head never breaks
         // mid-word ("SCOR / E" did in fixed shares). "No." counts the lines;
         // "Number" is the employee's.
-        head: ['No.', 'Number', 'Name', 'Position', 'Department', 'Result', 'Score'],
+        head: ['No.', 'Number', 'Name', 'Position', 'Team', 'Result', 'Score'],
         align: ['right', 'left', 'left', 'left', 'left', 'left', 'right'],
         rows: s.attendees.map((a, i) => [
           String(i + 1),
           a.employee.employeeNo ?? '—',
           fullName(a.employee),
           a.employee.position ?? '',
-          a.employee.department?.name ?? '',
+          a.employee.industry?.code ?? '',
           // Blank until the trainer records one — "Pending" on every line of
           // a sheet handed round to sign would read as a result.
           a.result === 'PENDING' ? '' : statusLabel(a.result),
@@ -1812,7 +1824,8 @@ async function passportRows(q: ListQuery, me: ResolvedUser) {
   // View Own on the register (2026-10-18): the caller's own passport alone.
   if (viewScope(me, 'ghr', 'passports') !== 'all') and.push({ userId: me.id });
   if (f.active !== 'all') and.push({ isActive: f.active === 'false' ? false : true });
-  if (f.departmentId) and.push({ departmentId: f.departmentId === 'none' ? null : f.departmentId });
+  // The team (2026-10-19 — the department's filter before it went): an id or `none`.
+  if (f.teamId) and.push({ industryId: f.teamId === 'none' ? null : f.teamId });
   if (f.positionId) and.push({ positionId: f.positionId === 'none' ? null : f.positionId });
   if (q.search) {
     and.push({
@@ -1837,7 +1850,7 @@ async function passportRows(q: ListQuery, me: ResolvedUser) {
       isActive: true,
       departmentId: true,
       positionId: true,
-      department: { select: { id: true, name: true } },
+      industry: { select: { id: true, code: true, name: true } },
     },
     orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
   });
@@ -1849,7 +1862,7 @@ async function passportRows(q: ListQuery, me: ResolvedUser) {
       employeeNo: e.employeeNo,
       name: `${e.lastName}, ${e.firstName}`,
       position: e.position,
-      department: e.department,
+      team: e.industry,
       isActive: e.isActive,
       ...r,
     };
@@ -1903,10 +1916,8 @@ passportRoutes.get(
     const f = q.filters;
     const all = await passportRows(q, currentUser(req));
     const rows = all.slice(0, LIST_CAP);
-    const [department, position] = await Promise.all([
-      f.departmentId && f.departmentId !== 'none'
-        ? prisma.department.findUnique({ where: { id: f.departmentId }, select: { name: true } })
-        : null,
+    const [team, position] = await Promise.all([
+      f.teamId && f.teamId !== 'none' ? prisma.industry.findUnique({ where: { id: f.teamId }, select: { name: true } }) : null,
       f.positionId && f.positionId !== 'none'
         ? prisma.position.findUnique({ where: { id: f.positionId }, select: { title: true } })
         : null,
@@ -1914,7 +1925,7 @@ passportRoutes.get(
     const reference = listReference(all.length, rows.length, ['person', 'people'], [
       q.search && `search "${q.search}"`,
       f.state && STANDING_NAMED[f.state],
-      f.departmentId && (f.departmentId === 'none' ? 'no department' : `department ${department?.name ?? 'not found'}`),
+      f.teamId && (f.teamId === 'none' ? 'no team' : `team ${team?.name ?? 'not found'}`),
       f.positionId && (f.positionId === 'none' ? 'no plantilla position' : `position ${position?.title ?? 'not found'}`),
       f.active === 'false' ? 'inactive employees' : f.active === 'all' ? 'active and inactive employees' : null,
       f.ids && 'the rows selected',
@@ -1934,7 +1945,7 @@ passportRoutes.get(
           rows: rows.map((r) => [
             r.employeeNo ?? '—',
             r.isActive ? r.name : { title: r.name, body: 'Inactive' },
-            { title: r.position ?? 'Unclassified', body: r.department?.name ?? 'No department' },
+            { title: r.position ?? 'Unclassified', body: r.team?.code ?? 'No team' },
             r.pct == null ? 'Nothing required' : `${r.pct}%`,
             r.required ? `${r.held} of ${r.required}` : '—',
             String(r.expiring),

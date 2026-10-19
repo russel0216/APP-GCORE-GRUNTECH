@@ -15,7 +15,7 @@ import { kindLabel, type ScheduleRow, type WorkRow } from './MyWork';
  * weight to the four divisions somebody works in every day would be a lie about
  * how the business is shaped.
  *
- * Below the grid is My Work. A launcher tells you where the departments are;
+ * Below the grid is My Work. A launcher tells you where the divisions are;
  * My Work tells you what the business needs from you today, which is the shift
  * from a menu-driven system to a process-driven one (model §8).
  *

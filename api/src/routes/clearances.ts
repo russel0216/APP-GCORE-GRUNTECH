@@ -102,7 +102,7 @@ const headerInclude = {
       employmentType: true,
       dateHired: true,
       userId: true,
-      department: { select: { id: true, name: true } },
+      industry: { select: { id: true, code: true, name: true } },
       user: {
         select: {
           id: true,
@@ -165,7 +165,8 @@ function clearanceListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): P
   if (status) and.push({ status });
   const reason = choice(q.filters.reason, SeparationReason, 'Reason', (r) => REASON_LABEL[r]);
   if (reason) and.push({ reason });
-  if (q.filters.departmentId) and.push({ employee: { departmentId: q.filters.departmentId } });
+  // The leaver's team (2026-10-19 — the department's filter before it went).
+  if (q.filters.teamId) and.push({ employee: { industryId: q.filters.teamId === 'none' ? null : q.filters.teamId } });
   if (q.filters.employeeId) and.push({ employeeId: q.filters.employeeId });
   if (q.search) {
     and.push({
@@ -204,7 +205,7 @@ clearanceRoutes.get(
               firstName: true,
               lastName: true,
               position: true,
-              department: { select: { id: true, name: true } },
+              industry: { select: { id: true, code: true, name: true } },
             },
           },
           raisedBy: { select: { id: true, name: true } },
@@ -251,7 +252,7 @@ clearanceRoutes.get(
     const q = listQuery(req);
     const where = clearanceListWhere(me, q);
     const f = q.filters;
-    const [rows, count, department, employee] = await Promise.all([
+    const [rows, count, team, employee] = await Promise.all([
       prisma.employeeClearance.findMany({
         where,
         include: {
@@ -261,7 +262,7 @@ clearanceRoutes.get(
               firstName: true,
               lastName: true,
               position: true,
-              department: { select: { name: true } },
+              industry: { select: { code: true } },
             },
           },
           raisedBy: { select: { name: true } },
@@ -271,7 +272,7 @@ clearanceRoutes.get(
         take: LIST_CAP,
       }),
       prisma.employeeClearance.count({ where }),
-      f.departmentId ? prisma.department.findUnique({ where: { id: f.departmentId }, select: { name: true } }) : null,
+      f.teamId && f.teamId !== 'none' ? prisma.industry.findUnique({ where: { id: f.teamId }, select: { name: true } }) : null,
       f.employeeId ? prisma.employee.findUnique({ where: { id: f.employeeId }, select: { firstName: true, lastName: true } }) : null,
     ]);
 
@@ -281,7 +282,7 @@ clearanceRoutes.get(
       q.search && `search "${q.search}"`,
       status && `status ${statusLabel(status)}`,
       reason && `reason ${REASON_LABEL[reason].toLowerCase()}`,
-      f.departmentId && `department ${department?.name ?? 'not found'}`,
+      f.teamId && (f.teamId === 'none' ? 'no team' : `team ${team?.name ?? 'not found'}`),
       f.employeeId && `employee ${employee ? fullName(employee) : 'not found'}`,
       (q.scope === 'mine' || !can(me, 'ghr.clearances.view_all')) && 'mine only',
       f.ids && 'the rows selected',
@@ -297,7 +298,7 @@ clearanceRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Employee', 'Department', 'Reason', 'Last day', 'Turnover', 'Raised by', 'Status'],
+          head: ['Number', 'Employee', 'Team', 'Reason', 'Last day', 'Turnover', 'Raised by', 'Status'],
           rows: rows.map((r) => {
             const done = r.items.filter((i) => i.status !== 'PENDING').length;
             return [
@@ -306,7 +307,7 @@ clearanceRoutes.get(
                 title: `${r.employee.lastName}, ${r.employee.firstName}`,
                 body: [r.employee.employeeNo, r.employee.position].filter(Boolean).join(' · '),
               },
-              r.employee.department?.name ?? '—',
+              r.employee.industry?.code ?? '—',
               REASON_LABEL[r.reason],
               formatShortDate(r.lastWorkingDay),
               r.items.length ? `${done} of ${r.items.length} cleared` : 'No items',
@@ -918,7 +919,7 @@ clearanceRoutes.get(
       title: 'Employee Clearance',
       documentNumber: head.number,
       date: head.createdAt,
-      reference: `${e.employeeNo} · ${fullName(e)} · ${e.position ?? '—'} · ${e.department?.name ?? '—'}`,
+      reference: `${e.employeeNo} · ${fullName(e)} · ${e.position ?? '—'} · ${e.industry?.code ?? '—'}`,
       sections,
       signatories,
       footerNote: 'Turnover of accountabilities — an item marked Waived carries its written reason above.',
@@ -1101,7 +1102,8 @@ function reportWindow(req: { query: Record<string, unknown> }) {
   const to = req.query.to ? asDay(String(req.query.to)) : defaults.to;
   if (to < from) throw badRequest('The end of the range is before its start');
   const where: Prisma.EmployeeWhereInput = {};
-  if (req.query.departmentId) where.departmentId = String(req.query.departmentId);
+  // The team (2026-10-19 — the department's narrowing before it went).
+  if (req.query.teamId) where.industryId = req.query.teamId === 'none' ? null : String(req.query.teamId);
   return { from, to, where };
 }
 
@@ -1138,11 +1140,12 @@ turnoverReportRoutes.get(
       ['Month', 'Opening', 'Hires', 'Separations', 'Closing', 'Rate %'],
       ...report.months.map((m) => [m.label, m.opening, m.hires, m.separations, m.closing, m.ratePct]),
       [],
-      ['Employee No', 'Name', 'Department', 'Position', 'Hired', 'Separated', 'Tenure (mo)', 'Reason', 'Clearance No'],
+      // The department's column, now the team: a CSV's columns never move.
+      ['Employee No', 'Name', 'Team', 'Position', 'Hired', 'Separated', 'Tenure (mo)', 'Reason', 'Clearance No'],
       ...report.leavers.map((l) => [
         l.employeeNo,
         l.name,
-        l.department?.name ?? '',
+        l.team?.code ?? '',
         l.position ?? '',
         day(l.dateHired),
         day(l.dateSeparated),

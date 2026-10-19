@@ -85,7 +85,7 @@ interface AttendeeRow {
     lastName: string;
     position: string | null;
     userId: string | null;
-    department: { id: string; name: string } | null;
+    industry: { id: string; code: string; name: string } | null;
   };
   enrolledAt: string;
   selfEnrolled: boolean;
@@ -150,7 +150,7 @@ interface EmployeeLookup {
   firstName: string;
   lastName: string;
   position: string | null;
-  department: { id: string; name: string } | null;
+  industry: { id: string; code: string; name: string } | null;
 }
 
 export function useCourseOptions(): CourseOption[] {
@@ -168,7 +168,7 @@ const toPerson = (e: EmployeeLookup): Person => ({
   id: e.id,
   name: `${e.firstName} ${e.lastName}`,
   sub: [e.employeeNo, e.position].filter(Boolean).join(' · '),
-  group: e.department?.name ?? 'No department',
+  group: e.industry?.code ?? 'No team',
 });
 
 /**
@@ -958,7 +958,7 @@ export function SessionDetail() {
                         <td>
                           <div>{name}</div>
                           <div className="faint">
-                            {[a.employee.employeeNo, a.employee.position, a.employee.department?.name].filter(Boolean).join(' · ')}
+                            {[a.employee.employeeNo, a.employee.position, a.employee.industry?.code].filter(Boolean).join(' · ')}
                             {a.selfEnrolled ? ' · self-enrolled' : ''}
                           </div>
                         </td>

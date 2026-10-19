@@ -76,7 +76,7 @@ export interface BudgetRequest {
   liquidatedAt: string | null;
   createdAt: string;
   requestedBy: { id: string; name: string; email: string; position: string | null };
-  /** The requester's team, else their department. */
+  /** The requester's team. */
   team: { label: string; title: string; teamId: string | null } | null;
   job: { id: string; number: string; name: string; projectManager: { id: string; name: string } | null };
   costCategory: { id: string; name: string };
@@ -147,7 +147,7 @@ interface RequestsSummary {
 /**
  * The register, in two dresses: G-OPS's (every project's requests, as the
  * project side raises them) and G-FIN's — the owner's module 4: BR No.,
- * Requester, Team (else department), Project / Purpose, Amount, Date needed,
+ * Requester, Team, Project / Purpose, Amount, Date needed,
  * Status, under the cards Sum of all budget requests, Approved funds, Pending
  * approval and To release. One query, one component, so the two can never
  * list different sets.

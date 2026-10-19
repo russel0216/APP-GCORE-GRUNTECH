@@ -63,7 +63,8 @@ function baseWhere(me: ResolvedUser, q: ListQuery): Prisma.EmployeeWhereInput {
       ],
     });
   }
-  if (q.filters.departmentId) and.push({ departmentId: q.filters.departmentId });
+  // The team (2026-10-19 — the department's filter before it went): an id or `none`.
+  if (q.filters.teamId) and.push({ industryId: q.filters.teamId === 'none' ? null : q.filters.teamId });
   // A supervisor's own list: the people who report to them, without themself.
   if (choice(q.filters.reports, ['true'], 'Reports', () => 'true')) and.push({ user: { supervisorId: me.id } });
   const ids = idsFilter(q.filters.ids);
@@ -135,7 +136,7 @@ function present({ employee: e, path: p }: Row) {
     employeeNo: e.employeeNo,
     name: fullName(e),
     position: e.position,
-    department: e.department,
+    team: e.industry,
     employmentType: e.employmentType,
     hiredOn: p.hiredOn,
     stage: p.stage,
@@ -171,15 +172,16 @@ peopleFlowRoutes.get(
     const q = listQuery(req);
     const { rows, m } = await flowRows(me, q);
     const printed = rows.slice(0, LIST_CAP);
-    const department = q.filters.departmentId
-      ? await prisma.department.findUnique({ where: { id: q.filters.departmentId }, select: { name: true } })
-      : null;
+    const team =
+      q.filters.teamId && q.filters.teamId !== 'none'
+        ? await prisma.industry.findUnique({ where: { id: q.filters.teamId }, select: { name: true } })
+        : null;
     const reference = listReference(rows.length, printed.length, ['person', 'people'], [
       q.search && `search "${q.search}"`,
       m.stage && `stage ${STAGE_LABEL[m.stage as FlowStage]}`,
       m.overdue && 'with overdue items',
       m.probation && `probation review due within ${DUE_SOON_DAYS} days`,
-      q.filters.departmentId && `department ${department?.name ?? 'not found'}`,
+      q.filters.teamId && (q.filters.teamId === 'none' ? 'no team' : `team ${team?.name ?? 'not found'}`),
       q.filters.reports === 'true' ? 'your direct reports' : !can(me, 'ghr.people_flow.view_all') && 'yourself and your direct reports',
       q.filters.ids && 'the rows selected',
     ]);
@@ -191,10 +193,10 @@ peopleFlowRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Employee', 'Department', 'Hired', 'Stage', 'Open', 'Overdue', 'Next'],
+          head: ['Employee', 'Team', 'Hired', 'Stage', 'Open', 'Overdue', 'Next'],
           rows: printed.map(({ employee: e, path: p }) => [
             { title: `${e.lastName}, ${e.firstName}`, body: [e.employeeNo, e.position].filter(Boolean).join(' · ') },
-            e.department?.name ?? '—',
+            e.industry?.code ?? '—',
             day(p.hiredOn),
             p.stageLabel,
             String(p.open),
@@ -220,7 +222,7 @@ async function pathResponse(me: ResolvedUser, employee: FlowEmployee) {
       employeeNo: employee.employeeNo,
       name: fullName(employee),
       position: employee.position,
-      department: employee.department,
+      team: employee.industry,
       employmentType: employee.employmentType,
       isActive: employee.isActive,
       self: employee.userId === me.id,

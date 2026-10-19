@@ -874,7 +874,7 @@ export function CadRequestModal({
         <Field label="Target date to finish" hint="The design team sets the priority; the date says when you need it">
           <input type="date" value={form.neededBy} onChange={(e) => set('neededBy', e.target.value)} />
         </Field>
-        <Field label="Team / department" hint="Empty takes your own team">
+        <Field label="Team" hint="Empty takes your own team">
           <select value={form.teamId} onChange={(e) => set('teamId', e.target.value)}>
             <option value="">— my team —</option>
             {teams.map((t) => (

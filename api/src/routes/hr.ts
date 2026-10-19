@@ -1395,7 +1395,7 @@ attendanceRoutes.get(
               lastName: true,
               position: true,
               userId: true,
-              department: { select: { name: true } },
+              industry: { select: { code: true } },
             },
           },
         },
@@ -1457,7 +1457,7 @@ attendanceRoutes.get(
         where,
         include: {
           employee: {
-            select: { employeeNo: true, firstName: true, lastName: true, department: { select: { name: true } } },
+            select: { employeeNo: true, firstName: true, lastName: true, industry: { select: { code: true } } },
           },
         },
         orderBy: orderBy(q, ATTENDANCE_SORTS, { date: 'desc' }),
@@ -1492,7 +1492,7 @@ attendanceRoutes.get(
             formatShortDate(r.date),
             {
               title: `${r.employee.lastName}, ${r.employee.firstName}`,
-              body: [r.employee.employeeNo, r.employee.department?.name].filter(Boolean).join(' · '),
+              body: [r.employee.employeeNo, r.employee.industry?.code].filter(Boolean).join(' · '),
             },
             clockText(r.timeIn),
             clockText(r.timeOut),
@@ -1544,7 +1544,7 @@ attendanceRoutes.get(
             firstName: true,
             lastName: true,
             position: true,
-            department: { select: { name: true } },
+            industry: { select: { code: true } },
           },
         },
       },
@@ -1559,7 +1559,9 @@ attendanceRoutes.get(
       'Employee No',
       'Last Name',
       'First Name',
-      'Department',
+      // The department's column, now the team (2026-10-19): the department is
+      // gone, and a column is never moved under a sheet built on the export.
+      'Team',
       'Position',
       'Time In',
       'Time Out',
@@ -1575,7 +1577,7 @@ attendanceRoutes.get(
       r.employee.employeeNo,
       r.employee.lastName,
       r.employee.firstName,
-      r.employee.department?.name ?? '',
+      r.employee.industry?.code ?? '',
       r.employee.position ?? '',
       time(r.timeIn),
       time(r.timeOut),

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
 import { api } from '../../lib/api';
 import { mayEdit, useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../components/ui';
+import { levelLabel, rolesByLevel } from '../../lib/roleLevels';
 
 interface Role {
   id: string;
@@ -86,8 +87,13 @@ export function Roles() {
 
       <ErrorBox error={error} />
 
+      {/* The role hierarchy (2026-10-19): the roles under their level, top first. */}
+      <div className="stack">
+      {rolesByLevel(roles).map((level) => (
+      <section key={level.label} className="role-level">
+      <h2 className="role-level-head">{level.label}</h2>
       <div className="grid grid-3">
-        {roles.map((role) => (
+        {level.roles.map((role) => (
           // A button, not a div: opening a role to modify it was mouse-only (rule 13).
           <button
             type="button"
@@ -103,12 +109,14 @@ export function Roles() {
               {role.description}
             </div>
             <div className="faint mono" style={{ fontSize: 'var(--fs-xs)' }}>
-              {role.rank ? `Level ${role.rank} · ` : ''}
               {role.permissions.length} permissions · {role.userCount} user
               {role.userCount === 1 ? '' : 's'}
             </div>
           </button>
         ))}
+      </div>
+      </section>
+      ))}
       </div>
 
       {editing && catalog && (
@@ -262,13 +270,13 @@ function RoleEditor({
         </Field>
         <Field
           label="Level on the chart"
-          hint="1 CEO / President · 2 Team Leader, department heads · 3 managers, officers · 4 engineers, clerks · 5 leads, technicians · 6 skilled. A person's title on documents is their highest role."
+          hint="Where the role sits in the hierarchy. A person's title on documents is their highest role."
         >
           <select value={rank} onChange={(e) => setRank(e.target.value)}>
             <option value="">— none —</option>
             {[1, 2, 3, 4, 5, 6].map((n) => (
               <option key={n} value={n}>
-                Level {n}
+                {levelLabel(n)}
               </option>
             ))}
           </select>

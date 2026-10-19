@@ -515,7 +515,8 @@ async function main() {
   const hireLogin = hire.body.login as { user: { id: string; name: string; invitePending: boolean }; invite: { link: string } | null } | null;
   check('saving the employee also makes their login, and links it', hire.status === 201 && !!hireLogin && hire.body.userId === hireLogin.user.id, hire.text.slice(0, 200));
   const lizaUser = hireLogin ? await prisma.user.findUniqueOrThrow({ where: { id: hireLogin.user.id }, include: { roles: { include: { role: true } } } }) : null;
-  check('the login carries their name, department, position and mobile from the record', lizaUser?.name === `Liza ${TAG} Soberano` && lizaUser.departmentId === department.id && lizaUser.position === 'Service Engineer' && lizaUser.phone === '0917 111 2222');
+  // The department is gone (2026-10-19): the one sent is ignored, on the record and the login.
+  check('the login carries their name, position and mobile from the record — no department', lizaUser?.name === `Liza ${TAG} Soberano` && lizaUser.departmentId === null && lizaUser.position === 'Service Engineer' && lizaUser.phone === '0917 111 2222');
   check(
     defaultRole ? 'it starts with the self-service Employee role' : 'it starts with no role — the chart\'s roles are given on Admin › Users',
     !!lizaUser && lizaUser.roles.map((r) => r.role.key).join(',') === (defaultRole ? 'employee' : ''),
@@ -690,8 +691,11 @@ async function main() {
     (await prisma.employee.count({ where: { employeeNo: `${TAG}-107` } })) === 0 && (await prisma.user.count({ where: { email: `boss${DOMAIN}` } })) === 0,
   );
   const badDept = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-108`, firstName: 'Dept', lastName: `${TAG} Unknown`, departmentId: 'no-such-dept' });
-  check('an unknown department is a 400 naming departmentId', badDept.status === 400 && fieldsOf(badDept).includes('departmentId'), badDept.text.slice(0, 160));
-  check('and makes no employee', (await prisma.employee.count({ where: { employeeNo: `${TAG}-108` } })) === 0);
+  check('a department sent is ignored — the department is gone (2026-10-19)', badDept.status === 201, badDept.text.slice(0, 160));
+  check(
+    'and the employee is made with none',
+    (await prisma.employee.findFirst({ where: { employeeNo: `${TAG}-108` }, select: { departmentId: true } }))?.departmentId === null,
+  );
   const badUser = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-105`, firstName: 'Link', lastName: `${TAG} Nobody`, userId: 'no-such-user' });
   check('linking a login that does not exist is a 404', badUser.status === 404, badUser.text.slice(0, 160));
   check('and makes no employee', (await prisma.employee.count({ where: { employeeNo: `${TAG}-105` } })) === 0);
@@ -815,7 +819,7 @@ async function main() {
     );
     const otherNo = await http(adminT, 'PATCH', `/users/${kimUser!.id}`, { employeeNo: `${TAG}-009` });
     check('a number already another person\'s is a 409 naming them', otherNo.status === 409 && /Orphan/.test(otherNo.text), `${otherNo.status} ${otherNo.text.slice(0, 100)}`);
-    // Since 2026-10-19 the name, mobile, position and department are typed on
+    // Since 2026-10-19 the name, mobile and position are typed on
     // Admin › Users too, written THROUGH to the employee record and mirrored back.
     const through = await http(adminT, 'PATCH', `/users/${kimUser!.id}`, {
       firstName: 'Kim',

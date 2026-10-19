@@ -184,26 +184,23 @@ export async function fillQuotationTeams(): Promise<number> {
 }
 
 /**
- * A person's TEAM, else their DEPARTMENT (2026-10-15, the owner's call for
- * the money-out registers: budget requests, reimbursements and cash advances
- * name a Team column, and someone outside the five selling teams — finance,
- * HR, the warehouse — shows their department there instead). Select it on a
- * User relation, read it with `teamOrDepartment()`.
+ * A person's TEAM (the money-out registers' Team column: budget requests,
+ * reimbursements, cash advances). It read "team, else department" from
+ * 2026-10-15 until departments were retired (2026-10-19, the owner's call:
+ * "remove the department"); someone with no team now reads as none. Select it
+ * on a User relation, read it with `teamOfUser()`.
  */
-export const TEAM_OR_DEPT_SELECT = {
+export const USER_TEAM_SELECT = {
   select: {
-    department: { select: { name: true } },
-    employee: { select: { industry: { select: { id: true, code: true, name: true } }, department: { select: { name: true } } } },
+    employee: { select: { industry: { select: { id: true, code: true, name: true } } } },
   },
 } as const;
 
-export function teamOrDepartment(
-  user: { department: { name: string } | null; employee: { industry: { id: string; code: string; name: string } | null; department: { name: string } | null } | null } | null | undefined,
+export function teamOfUser(
+  user: { employee: { industry: { id: string; code: string; name: string } | null } | null } | null | undefined,
 ): { label: string; title: string; teamId: string | null } | null {
   const team = user?.employee?.industry;
-  if (team) return { label: team.code, title: team.name, teamId: team.id };
-  const dept = user?.employee?.department?.name ?? user?.department?.name;
-  return dept ? { label: dept, title: dept, teamId: null } : null;
+  return team ? { label: team.code, title: team.name, teamId: team.id } : null;
 }
 
 /** "This person is on that team" as a where-clause on a User relation; `none` is nobody's team. */

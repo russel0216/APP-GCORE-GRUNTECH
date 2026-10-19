@@ -90,7 +90,7 @@ export interface Activity {
 
 /**
  * Somebody who can be booked on or invited to an activity: a row of the one
- * people lookup (`components/People.tsx` — name, position, department and
+ * people lookup (`components/People.tsx` — name, position, team and
  * the photo, an attachment id, for a picker that shows faces). A type only,
  * so this file still carries no React.
  */

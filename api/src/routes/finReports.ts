@@ -9,7 +9,7 @@ import { statusLabel, formatShortDate } from '../shared/pdf';
 import { bucketFor, bucketLabels, claimPayable, financeSettings, LIVE_MONEY } from '../shared/finance';
 import { termsLabel } from '../shared/receivables';
 import { billTermsLabel } from '../shared/payables';
-import { TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
+import { USER_TEAM_SELECT, teamOfUser, userTeamWhere } from '../shared/team';
 import { CashAdvanceStatus, ExpenseStatus, RequestStatus } from '@prisma/client';
 import { Series, byValue, cents, dayOf, mountReports, monthsOf, num, table, tally, type Col, type Report, type ReportContext } from '../shared/reportKit';
 
@@ -470,17 +470,17 @@ const REQUEST_REPORT_SELECT = {
   liquidatedAt: true,
   liquidationDueDate: true,
   job: { select: { number: true, name: true } },
-  requestedBy: { select: { name: true, ...TEAM_OR_DEPT_SELECT.select } },
+  requestedBy: { select: { name: true, ...USER_TEAM_SELECT.select } },
 } satisfies Prisma.BudgetRequestSelect;
 type RequestRow = Prisma.BudgetRequestGetPayload<{ select: typeof REQUEST_REPORT_SELECT }>;
 const APPROVED_ON = ['APPROVED', 'RELEASED', 'REFUND_DUE', 'LIQUIDATED'];
-const unitOf = (r: RequestRow) => teamOrDepartment(r.requestedBy)?.label ?? NO_TEAM;
+const unitOf = (r: RequestRow) => teamOfUser(r.requestedBy)?.label ?? NO_TEAM;
 
 /**
  * The Budget Request Report Generator: the requests NEEDED in the range (a
  * request with no date needed counts on the day it was raised), narrowed by
  * requester, team and status — asked, approved, pending, released — by month,
- * by requester, by team (else department), by project and by status.
+ * by requester, by team, by project and by status.
  */
 async function budgetRequests(range: Range, ctx: ReportContext): Promise<Report> {
   const f = await requestFilter(ctx.query);
@@ -524,7 +524,7 @@ async function budgetRequests(range: Range, ctx: ReportContext): Promise<Report>
     series: series.done(),
     tables: [
       table('By requester', [{ label: 'Requester' }, ...cols], rowsOf(tally(live, (r) => r.requestedBy.name, figures), 1)),
-      table('By team', [{ label: 'Team / department' }, ...cols], rowsOf(tally(live, unitOf, figures), 1)),
+      table('By team', [{ label: 'Team' }, ...cols], rowsOf(tally(live, unitOf, figures), 1)),
       table('By project', [{ label: 'Project' }, ...cols], rowsOf(tally(live, (r) => `${r.job.number} — ${r.job.name}`, figures), 1)),
       table('By status', [{ label: 'Status' }, ...cols], rowsOf(tally(rows, (r) => statusLabel(r.status), figures), 1)),
     ],
@@ -577,7 +577,7 @@ async function liquidations(range: Range, ctx: ReportContext): Promise<Report> {
     series: series.done(),
     tables: [
       table('By requester', [{ label: 'Requester' }, ...cols], rowsOf(tally(rows, (r) => r.requestedBy.name, figures), 1)),
-      table('By team', [{ label: 'Team / department' }, ...cols], rowsOf(tally(rows, unitOf, figures), 1)),
+      table('By team', [{ label: 'Team' }, ...cols], rowsOf(tally(rows, unitOf, figures), 1)),
       table('By project', [{ label: 'Project' }, ...cols], rowsOf(tally(rows, (r) => `${r.job.number} — ${r.job.name}`, figures), 1)),
       table(
         'Liquidations overdue',
@@ -598,7 +598,7 @@ async function liquidations(range: Range, ctx: ReportContext): Promise<Report> {
 /**
  * The Reimbursement Report Generator: expense claims dated in the range
  * (drafts left out), narrowed by requester, team and status — claimed, still
- * to pay, paid — by month, requester, team (else department), kind and
+ * to pay, paid — by month, requester, team, kind and
  * status.
  */
 async function reimbursements(range: Range, ctx: ReportContext): Promise<Report> {
@@ -628,7 +628,7 @@ async function reimbursements(range: Range, ctx: ReportContext): Promise<Report>
       amountPaid: true,
       advanceId: true,
       budgetRequestId: true,
-      claimedBy: { select: { name: true, ...TEAM_OR_DEPT_SELECT.select } },
+      claimedBy: { select: { name: true, ...USER_TEAM_SELECT.select } },
       advance: { select: { amountReleased: true } },
       budgetRequest: { select: { amountReleased: true } },
     },
@@ -648,7 +648,7 @@ async function reimbursements(range: Range, ctx: ReportContext): Promise<Report>
   const cols = [count('Claims'), money('Claimed'), money('Paid')];
   const sum = (xs: Row[], fn: (r: Row) => number) => cents(xs.reduce((s, r) => s + fn(r), 0));
   const pending = live.filter((r) => r.status === 'PENDING_APPROVAL');
-  const unit = (r: Row) => teamOrDepartment(r.claimedBy)?.label ?? NO_TEAM;
+  const unit = (r: Row) => teamOfUser(r.claimedBy)?.label ?? NO_TEAM;
   return {
     kind: 'reimbursements',
     title: 'Reimbursement Report',
@@ -664,7 +664,7 @@ async function reimbursements(range: Range, ctx: ReportContext): Promise<Report>
     series: series.done(),
     tables: [
       table('By requester', [{ label: 'Requester' }, ...cols], rowsOf(tally(live, (r) => r.claimedBy.name, figures), 1)),
-      table('By team', [{ label: 'Team / department' }, ...cols], rowsOf(tally(live, unit, figures), 1)),
+      table('By team', [{ label: 'Team' }, ...cols], rowsOf(tally(live, unit, figures), 1)),
       table('By kind', [{ label: 'Kind' }, ...cols], rowsOf(tally(live, (r) => (r.advanceId || r.budgetRequestId ? 'Liquidation' : 'Reimbursement'), figures), 1)),
       table('By status', [{ label: 'Status' }, ...cols], rowsOf(tally(rows, (r) => statusLabel(r.status), figures), 1)),
     ],
@@ -708,7 +708,7 @@ async function cashAdvances(range: Range, ctx: ReportContext): Promise<Report> {
         amount: true,
         amountReleased: true,
         amountRefunded: true,
-        requestedBy: { select: { name: true, ...TEAM_OR_DEPT_SELECT.select } },
+        requestedBy: { select: { name: true, ...USER_TEAM_SELECT.select } },
       },
     }),
     prisma.paymentAllocation.findMany({
@@ -732,7 +732,7 @@ async function cashAdvances(range: Range, ctx: ReportContext): Promise<Report> {
   const figures = (r: Row) => [1, num(r.amount), repaid(r), owed(r)];
   const cols = [count('Advances'), money('Granted'), money('Repaid'), money('Outstanding')];
   const sum = (fn: (r: Row) => number) => cents(live.reduce((s, r) => s + fn(r), 0));
-  const unit = (r: Row) => teamOrDepartment(r.requestedBy)?.label ?? NO_TEAM;
+  const unit = (r: Row) => teamOfUser(r.requestedBy)?.label ?? NO_TEAM;
   return {
     kind: 'cash-advances',
     title: 'Cash Advance Report',
@@ -748,7 +748,7 @@ async function cashAdvances(range: Range, ctx: ReportContext): Promise<Report> {
     series: series.done(),
     tables: [
       table('By requester', [{ label: 'Requester' }, ...cols], rowsOf(tally(live, (r) => r.requestedBy.name, figures), 1)),
-      table('By team', [{ label: 'Team / department' }, ...cols], rowsOf(tally(live, unit, figures), 1)),
+      table('By team', [{ label: 'Team' }, ...cols], rowsOf(tally(live, unit, figures), 1)),
       table('By status', [{ label: 'Status' }, ...cols], rowsOf(tally(rows, (r) => statusLabel(r.status), figures), 1)),
       table('Repayments in the range, by method', [{ label: 'Method' }, money('Repaid')], rowsOf(tally(repayments, (a) => statusLabel(a.payment.method), (a) => [num(a.amount)]), 0)),
     ],

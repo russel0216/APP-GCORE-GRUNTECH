@@ -17,7 +17,8 @@ import { audit } from '../../shared/audit';
  * created positions would not be a dry run. An unknown title is created in
  * `write`, inside the row's transaction, with 0 authorised: it then shows as
  * over-complement on the Plantilla screen until HR sets the count, rather
- * than failing the row the way an unknown department does.
+ * than failing the row. There is no Department column (2026-10-19: the
+ * department is gone; the Team column is the grouping) — one sent is ignored.
  */
 
 const EMPLOYMENT_TYPES = [
@@ -31,7 +32,7 @@ const EMPLOYMENT_TYPES = [
 
 interface EmployeeImportRecord {
   data: Prisma.EmployeeUncheckedCreateInput;
-  position: { positionId: string | null; newTitle: string | null; departmentId: string | null };
+  position: { positionId: string | null; newTitle: string | null };
   /**
    * The person's login from the Email column (2026-10-16): an existing login
    * with no employee is LINKED (`linkUserId`), an address nobody uses is a new
@@ -53,7 +54,6 @@ const employeeSpec: ImportSpec<EmployeeImportRecord> = {
       example: 'Project Engineer',
       hint: 'Matched to the plantilla by title; an unknown title is added with 0 authorised and shows as over-complement until HR sets the count',
     },
-    { header: 'Department', example: 'Engineering', hint: 'Must match a department name' },
     {
       header: 'Team',
       example: 'UI',
@@ -88,15 +88,6 @@ const employeeSpec: ImportSpec<EmployeeImportRecord> = {
     return found?.id ?? null;
   },
   build: async (row) => {
-    let departmentId: string | null = null;
-    if (row['Department']) {
-      const dept = await prisma.department.findFirst({
-        where: { name: { equals: row['Department'], mode: 'insensitive' } },
-      });
-      if (!dept) throw new Error(`Department "${row['Department']}" does not exist`);
-      departmentId = dept.id;
-    }
-
     // The team is an Industry row, by code or by name. Blank sets nothing, so
     // a sheet made before the column existed never wipes a team on re-import.
     let industryId: string | undefined;
@@ -151,7 +142,6 @@ const employeeSpec: ImportSpec<EmployeeImportRecord> = {
         lastName: required(row, 'Last Name'),
         firstName: required(row, 'First Name'),
         middleName: optional(row, 'Middle Name'),
-        departmentId,
         ...(industryId ? { industryId } : {}),
         employmentType: oneOf(row, 'Employment Type', EMPLOYMENT_TYPES, 'REGULAR'),
         dateHired: date(row, 'Date Hired'),
@@ -164,7 +154,7 @@ const employeeSpec: ImportSpec<EmployeeImportRecord> = {
         emergencyContactPhone: optional(row, 'Emergency Phone'),
         isActive: bool(row, 'Active'),
       },
-      position: { positionId, newTitle, departmentId },
+      position: { positionId, newTitle },
     };
   },
 };
@@ -198,7 +188,6 @@ export const employeesImport: Registered = {
                 data: {
                   code: await nextNumber('position', tx),
                   title: record.position.newTitle,
-                  departmentId: record.position.departmentId,
                   authorisedHeadcount: 0,
                 },
               })
@@ -228,7 +217,6 @@ export const employeesImport: Registered = {
               email: record.login.newLoginEmail,
               name: [e.firstName, e.lastName, e.suffix].filter(Boolean).join(' '),
               roleIds: await defaultRoleIds(tx),
-              departmentId: e.departmentId,
               position: e.position,
               phone: e.mobile,
               employeeNo: e.employeeNo,

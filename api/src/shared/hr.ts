@@ -429,7 +429,8 @@ export interface AttendanceDayRow {
     firstName: string;
     lastName: string;
     position: string | null;
-    department: { id: string; name: string } | null;
+    /** Their team (`Employee.industry`) — the department is gone (2026-10-19). */
+    team: { id: string; code: string; name: string } | null;
   };
   status: string;
   timeIn: Date | null;
@@ -477,7 +478,7 @@ export async function attendanceDay(date: Date): Promise<AttendanceDay> {
         firstName: true,
         lastName: true,
         position: true,
-        department: { select: { id: true, name: true } },
+        industry: { select: { id: true, code: true, name: true } },
       },
       orderBy: { lastName: 'asc' },
     }),
@@ -498,8 +499,9 @@ export async function attendanceDay(date: Date): Promise<AttendanceDay> {
     const a = attendanceBy.get(e.id);
     const l = leaveBy.get(e.id);
     const status = a ? a.status : l ? 'ON_LEAVE' : 'ABSENT';
+    const { industry, ...person } = e;
     return {
-      employee: e,
+      employee: { ...person, team: industry },
       status,
       timeIn: a?.timeIn ?? null,
       timeOut: a?.timeOut ?? null,

@@ -108,7 +108,6 @@ function employeeListWhere(q: ListQuery): Prisma.EmployeeWhereInput {
   }
   const f = q.filters;
   if (f.isActive) where.isActive = f.isActive === 'true';
-  if (f.departmentId) where.departmentId = f.departmentId;
   // The team: an industry id, or `none` for nobody assigned yet.
   if (f.industryId === 'none') where.industryId = null;
   else if (f.industryId) where.industryId = f.industryId;
@@ -157,7 +156,6 @@ employeeRoutes.get(
       prisma.employee.findMany({
         where,
         include: {
-          department: { select: { id: true, name: true } },
           positionRef: { select: { id: true, code: true, title: true } },
         extraPositions: {
           orderBy: { sortOrder: 'asc' },
@@ -212,7 +210,7 @@ employeeRoutes.get(
     const me = currentUser(req);
     const where = ownOnly(me, 'ghr', 'employees', employeeListWhere(q), myRecord(me));
     const f = q.filters;
-    const [rows, count, department, team, position] = await Promise.all([
+    const [rows, count, team, position] = await Promise.all([
       prisma.employee.findMany({
         where,
         select: {
@@ -225,7 +223,6 @@ employeeRoutes.get(
           employmentType: true,
           dateHired: true,
           isActive: true,
-          department: { select: { name: true } },
           positionRef: { select: { title: true } },
           industry: { select: { code: true, name: true } },
           user: { select: { email: true, invitePending: true } },
@@ -234,7 +231,6 @@ employeeRoutes.get(
         take: LIST_CAP,
       }),
       prisma.employee.count({ where }),
-      f.departmentId ? prisma.department.findUnique({ where: { id: f.departmentId }, select: { name: true } }) : null,
       f.industryId && f.industryId !== 'none'
         ? prisma.industry.findUnique({ where: { id: f.industryId }, select: { name: true } })
         : null,
@@ -246,7 +242,6 @@ employeeRoutes.get(
     const reference = listReference(count, rows.length, ['employee', 'employees'], [
       q.search && `search "${q.search}"`,
       f.isActive && (f.isActive === 'true' ? 'active' : 'inactive'),
-      f.departmentId && `department ${department?.name ?? 'not found'}`,
       f.industryId && (f.industryId === 'none' ? 'no team yet' : `team ${team?.name ?? 'not found'}`),
       f.employmentType && `type ${statusLabel(f.employmentType)}`,
       f.positionId && (f.positionId === 'none' ? 'no plantilla position' : `position ${position?.title ?? 'not found'}`),
@@ -255,7 +250,7 @@ employeeRoutes.get(
       f.ids && 'the rows selected',
     ]);
 
-    // Eight columns: landscape (rule 6).
+    // Seven columns: landscape (rule 6).
     const pdf = await renderDocument({
       title: 'Employees',
       date: new Date(),
@@ -264,7 +259,7 @@ employeeRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Name', 'Department', 'Team', 'Type', 'Hired', 'Login', 'Status'],
+          head: ['Number', 'Name', 'Team', 'Type', 'Hired', 'Login', 'Status'],
           rows: rows.map((e) => {
             const initial = e.middleName?.trim()?.[0];
             const post = e.positionRef?.title ?? e.position;
@@ -274,7 +269,6 @@ employeeRoutes.get(
                 title: `${e.lastName}, ${e.firstName}${initial ? ` ${initial}.` : ''}`,
                 body: post ? `${post}${!e.positionId ? ' · unclassified' : ''}` : undefined,
               },
-              e.department?.name ?? '—',
               e.industry?.code ?? '—',
               statusLabel(e.employmentType),
               e.dateHired ? formatShortDate(e.dateHired) : '—',
@@ -357,7 +351,7 @@ employeeRoutes.get(
         position: true,
         employmentType: true,
         userId: true,
-        department: { select: { id: true, name: true } },
+        industry: { select: { id: true, code: true, name: true } },
       },
       orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
       take: 50,
@@ -377,7 +371,6 @@ employeeRoutes.get(
     const employee = await prisma.employee.findUnique({
       where: { id: req.params.id },
       include: {
-        department: { select: { id: true, name: true } },
         positionRef: { select: { id: true, code: true, title: true } },
         extraPositions: {
           orderBy: { sortOrder: 'asc' },
@@ -430,7 +423,8 @@ const employeeSchema = z.object({
   middleName: z.string().trim().optional().nullable(),
   suffix: z.string().trim().optional().nullable(),
   userId: z.string().optional().nullable(),
-  departmentId: z.string().optional().nullable(),
+  // No departmentId (2026-10-19, the owner's call: the department is gone
+  // everywhere — the team is the one grouping). A sent one is stripped.
   /** The industry team (Utilities, Healthcare…) — an Industry row. */
   industryId: z.string().optional().nullable(),
   position: z.string().trim().optional().nullable(),
@@ -547,9 +541,9 @@ async function checkRoleIds(
 
 /**
  * The same rule for the two other references a creation carries (2026-10-10):
- * an unknown "Reports to" or department is a 400 naming the field, checked
- * before the person is written, where the foreign key answered 500. The web
- * cannot send one (PersonSelect, the department select), but a script can.
+ * an unknown "Reports to" is a 400 naming the field, checked before the
+ * person is written, where the foreign key answered 500. The web cannot send
+ * one (PersonSelect), but a script can.
  */
 async function checkSupervisorId(
   tx: Prisma.TransactionClient,
@@ -559,14 +553,6 @@ async function checkSupervisorId(
   if (!id) return null;
   if (!(await tx.user.findUnique({ where: { id }, select: { id: true } }))) {
     throw badRequest('That "Reports to" login does not exist', [{ field, message: 'Choose someone from the list' }]);
-  }
-  return id;
-}
-
-async function checkDepartmentId(tx: Prisma.TransactionClient, id: string | null | undefined): Promise<string | null> {
-  if (!id) return null;
-  if (!(await tx.department.findUnique({ where: { id }, select: { id: true } }))) {
-    throw badRequest('That department does not exist', [{ field: 'departmentId', message: 'Choose a department from the list' }]);
   }
   return id;
 }
@@ -640,7 +626,6 @@ employeeRoutes.post(
           middleName: body.middleName || null,
           suffix: body.suffix || null,
           userId: body.userId || null,
-          departmentId: await checkDepartmentId(tx, body.departmentId),
           industryId: await teamId(tx, body.industryId),
           ...(await positionFields(tx, body.positionId, body.position)),
           employmentType: body.employmentType,
@@ -674,7 +659,6 @@ employeeRoutes.post(
           password: body.login.password,
           roleIds,
           supervisorId,
-          departmentId: created.departmentId,
           position: created.position,
           phone: created.mobile,
           employeeNo: await mirrorEmployeeNo(tx, created.employeeNo),
@@ -780,7 +764,6 @@ employeeRoutes.post(
           password: body.password,
           roleIds: await checkRoleIds(tx, body.roleIds, 'roleIds'),
           supervisorId: await checkSupervisorId(tx, body.supervisorId, 'supervisorId'),
-          departmentId: employee.departmentId,
           position: employee.position,
           phone: employee.mobile,
           employeeNo: await mirrorEmployeeNo(tx, employee.employeeNo),
@@ -881,7 +864,6 @@ employeeRoutes.patch(
       if (body[f] !== undefined) data[f] = body[f] || null;
     }
     if (body.userId !== undefined) data.userId = body.userId || null;
-    if (body.departmentId !== undefined) data.departmentId = await checkDepartmentId(prisma, body.departmentId);
     if (body.industryId !== undefined && body.industryId !== before.industryId) {
       data.industryId = await teamId(prisma, body.industryId);
     }

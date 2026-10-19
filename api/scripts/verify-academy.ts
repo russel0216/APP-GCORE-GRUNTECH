@@ -354,9 +354,21 @@ async function run(rules: AcademySettings) {
 
   const put = async (id: string, rows: unknown) => api(tok.hr, 'PUT', `/courses/${id}/requirements`, rows);
   await put(everyone.id, [{}]);
-  await put(deptOnly.id, [{ departmentId: dept.id }]);
+  // The department is gone (2026-10-19): a NEW requirement naming one is
+  // refused; one stored before keeps matching, and the form sends it back
+  // whole — so the two below are written as rows already on file.
+  const newDept = await put(deptOnly.id, [{ departmentId: dept.id }]);
+  check('a new requirement naming a department is refused', newDept.status === 400, `${newDept.status}`);
+  await prisma.courseRequirement.create({ data: { courseId: deptOnly.id, departmentId: dept.id } });
   const weldReq = await put(weld.id, { requirements: [{ positionId: welder.id }, { positionId: welder.id }] });
-  await put(clerkCourse.id, [{ departmentId: other.id, positionId: clerk.id }]);
+  await prisma.courseRequirement.create({ data: { courseId: clerkCourse.id, departmentId: other.id, positionId: clerk.id } });
+  const keptDept = await put(deptOnly.id, [{ departmentId: dept.id }]);
+  check(
+    'a requirement stored with a department is kept when sent back unchanged, labelled retired',
+    keptDept.status === 200 &&
+      (keptDept.body.requirements as { label: string }[])[0]?.label === `Department (retired): ${dept.name}`,
+    keptDept.text.slice(0, 200),
+  );
   check('requirements dedupe and read back with a label', weldReq.status === 200 && (weldReq.body.requirements as { label: string }[]).length === 1 && (weldReq.body.requirements as { label: string }[])[0].label === `${TAG} Welder`, weldReq.text.slice(0, 200));
   const badReq = await put(deptOnly.id, [{ positionId: 'no-such-position' }]);
   check('a requirement naming an unknown position is refused', badReq.status === 400, `${badReq.status}`);
@@ -755,6 +767,9 @@ async function run(rules: AcademySettings) {
   });
   check('Training sessions: the printed list is refused to anyone the list refuses', (await printed(tok.worker, '/training-sessions/pdf')).status === 403);
 
+  // One person with a team, so "no team" keeps some and drops one (departments retired 2026-10-19).
+  const someTeam = await prisma.industry.findFirst({ where: { isActive: true }, select: { id: true } });
+  if (someTeam) await prisma.employee.update({ where: { id: empClerk.id }, data: { industryId: someTeam.id } });
   await checkListPaper(check, {
     label: 'Training passports',
     token: tok.hr,
@@ -764,7 +779,7 @@ async function run(rules: AcademySettings) {
     named: searchNamed,
     noun: ['person', 'people'],
     mark: (r) => String(r.employeeNo),
-    filter: { query: `${searched}&departmentId=${dept.id}`, named: `department ${dept.name}` },
+    filter: { query: `${searched}&teamId=none`, named: 'no team' },
     entityType: 'training_passport',
   });
   // Each person's readiness on paper is the screen's: held of required.

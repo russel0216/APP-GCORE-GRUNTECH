@@ -3100,7 +3100,7 @@ async function loadSlip(id: string) {
       issuedBy: { select: { id: true, name: true } },
       requestedBy: { select: { id: true, name: true } },
       inspectedBy: { select: { id: true, name: true } },
-      borrower: { select: { id: true, name: true, employeeNo: true, position: true, department: { select: { name: true } } } },
+      borrower: { select: { id: true, name: true, employeeNo: true, position: true, employee: { select: { industry: { select: { code: true } } } } } },
       items: { include: { item: { select: { id: true, code: true, partNumber: true, brand: true, name: true, unit: true } } } },
     },
   });
@@ -3172,7 +3172,7 @@ borrowRoutes.get(
 /**
  * The slip on paper — the EQUIPMENT & TOOL BORROWER'S SLIP (2026-10-15, the
  * owner's form as the guide), in its five sections: the borrower's details
- * (name, employee no., department, contact, the borrowing type), the
+ * (name, employee no., team, contact, the borrowing type), the
  * equipment and tools (each line's serial, condition out and what came
  * back), the reason and destination (project, site, purpose), the people who
  * acted — REQUESTED BY (who asked for it, its first slot's timestamp), the
@@ -3286,7 +3286,7 @@ borrowRoutes.get(
           ['Borrowing type', slip.borrowType ? BORROW_TYPES[slip.borrowType] : '—'],
         ],
         [
-          ['Department / team', slip.borrower?.department?.name ?? '—'],
+          ['Team', slip.borrower?.employee?.industry?.code ?? '—'],
           ['Contact no.', contact ?? '—'],
           ['Warehouse', slip.warehouse.name],
         ],

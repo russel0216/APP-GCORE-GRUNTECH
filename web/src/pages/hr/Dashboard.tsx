@@ -59,7 +59,7 @@ interface DashboardRow {
     firstName: string;
     lastName: string;
     position: string | null;
-    department: { id: string; name: string } | null;
+    team: { id: string; code: string; name: string } | null;
   };
   status: string;
   timeIn: string | null;
@@ -240,7 +240,7 @@ export function HrDashboard() {
                 <thead>
                   <tr>
                     <th>Employee</th>
-                    <th>Department</th>
+                    <th>Team</th>
                     <th>In</th>
                     <th>Out</th>
                     <th className="right">Late</th>
@@ -268,7 +268,7 @@ export function HrDashboard() {
                           {r.employee.position ? ` · ${r.employee.position}` : ''}
                         </div>
                       </td>
-                      <td className="faint">{r.employee.department?.name ?? '—'}</td>
+                      <td className="faint">{r.employee.team?.code ?? '—'}</td>
                       <td className="mono">
                         {formatTime(r.timeIn, { hour12: false })}
                         {r.method && r.method !== 'FACE' && (
@@ -368,7 +368,7 @@ interface AttendanceRow {
     firstName: string;
     lastName: string;
     position: string | null;
-    department: { name: string } | null;
+    industry: { code: string } | null;
   };
 }
 
@@ -461,7 +461,7 @@ export function AttendanceRegister() {
           </div>
           <div className="faint">
             {r.employee.employeeNo}
-            {r.employee.department ? ` · ${r.employee.department.name}` : ''}
+            {r.employee.industry ? ` · ${r.employee.industry.code}` : ''}
           </div>
         </div>
       ),

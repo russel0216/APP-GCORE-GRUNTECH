@@ -41,8 +41,8 @@ interface Turnover extends Figures {
   }[];
   regularOnly: Figures;
   byReason: { reason: string; count: number }[];
-  byDepartment: {
-    department: { id: string; name: string } | null;
+  byTeam: {
+    team: { id: string; code: string; name: string } | null;
     separations: number;
     averageHeadcount: number;
     ratePct: number;
@@ -51,7 +51,7 @@ interface Turnover extends Figures {
     id: string;
     employeeNo: string;
     name: string;
-    department: { id: string; name: string } | null;
+    team: { id: string; code: string; name: string } | null;
     position: string | null;
     employmentType: string;
     dateHired: string | null;
@@ -205,15 +205,15 @@ export function TurnoverReport() {
                 centreLabel="leavers"
               />
             </Panel>
-            <Panel title="By department" blurb="Rate over the whole range; separations out of average headcount.">
+            <Panel title="By team" blurb="Rate over the whole range; separations out of average headcount.">
               <BarList
-                slices={data.byDepartment.map((d) => ({
-                  label: d.department?.name ?? 'No department',
+                slices={data.byTeam.map((d) => ({
+                  label: d.team?.code ?? 'No team',
                   value: d.ratePct,
                   display: `${d.ratePct}% · ${d.separations}/${d.averageHeadcount}`,
                   tone: 'info',
                 }))}
-                caption="Turnover rate per department"
+                caption="Turnover rate per team"
               />
             </Panel>
           </div>
@@ -228,7 +228,7 @@ export function TurnoverReport() {
                   <thead>
                     <tr>
                       <th>Employee</th>
-                      <th>Department</th>
+                      <th>Team</th>
                       <th>Position</th>
                       <th>Hired</th>
                       <th>Separated</th>
@@ -248,7 +248,7 @@ export function TurnoverReport() {
                           )}
                           <div className="faint mono">{l.employeeNo}</div>
                         </td>
-                        <td>{l.department?.name ?? '—'}</td>
+                        <td>{l.team?.code ?? '—'}</td>
                         <td>{l.position ?? '—'}</td>
                         <td>{formatDate(l.dateHired)}</td>
                         <td>{formatDate(l.dateSeparated)}</td>

@@ -24,7 +24,7 @@ import { cents, D, num, dayKey, daysBetween } from '../shared/finance';
 import { cashRequestSections, cashRequestSignatories } from './finance';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
-import { TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
+import { USER_TEAM_SELECT, teamOfUser, userTeamWhere } from '../shared/team';
 import { projectBudgetByLine } from './procurement';
 
 /**
@@ -53,7 +53,7 @@ budgetRequestRoutes.use(authenticate);
 const requestInclude = {
   job: { select: { id: true, number: true, name: true, projectManager: { select: { id: true, name: true } } } },
   costCategory: { select: { id: true, name: true } },
-  requestedBy: { select: { id: true, name: true, email: true, position: true, ...TEAM_OR_DEPT_SELECT.select } },
+  requestedBy: { select: { id: true, name: true, email: true, position: true, ...USER_TEAM_SELECT.select } },
   liquidations: {
     select: { id: true, number: true, status: true, total: true, amountPaid: true, claimDate: true, approvedAt: true },
     orderBy: { createdAt: 'desc' },
@@ -74,12 +74,12 @@ export function presentBudgetRequest(row: RequestRow, today = dayKey(new Date())
   const liquidated = !!row.liquidatedAt;
   const refundDue = liquidated ? cents(Math.max(0, released - spent)) : 0;
   const liquidation = row.liquidations.find((l) => (LIVE_LIQUIDATION as readonly string[]).includes(l.status)) ?? null;
-  const { department: _d, employee: _e, ...requester } = row.requestedBy;
+  const { employee: _e, ...requester } = row.requestedBy;
   return {
     ...row,
     requestedBy: requester,
-    /** The requester's team, else their department — the Team column. */
-    team: teamOrDepartment(row.requestedBy),
+    /** The requester's team — the Team column. */
+    team: teamOfUser(row.requestedBy),
     amount,
     amountReleased: released,
     amountSpent: spent,

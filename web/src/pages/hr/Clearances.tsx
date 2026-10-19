@@ -86,7 +86,7 @@ interface ClearanceRow {
     firstName: string;
     lastName: string;
     position: string | null;
-    department: { id: string; name: string } | null;
+    industry: { id: string; code: string; name: string } | null;
   };
   raisedBy: { id: string; name: string };
   items: { total: number; cleared: number; waived: number; pending: number };
@@ -100,14 +100,17 @@ export function Clearances() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const [raising, setRaising] = useState(false);
-  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
+  const [teams, setTeams] = useState<{ id: string; code: string; name: string }[]>([]);
   const [summary, setSummary] = useState<ClearanceSummary | null>(null);
 
   const seesAll = can('ghr.clearances.view_all');
 
   useEffect(() => {
     if (!seesAll) return;
-    api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
+    api
+      .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
+      .then((rows) => setTeams(rows.filter((t) => t.isActive)))
+      .catch(() => {});
     api.get<ClearanceSummary>('/clearances/summary').then(setSummary).catch(() => {});
   }, [seesAll]);
 
@@ -137,7 +140,7 @@ export function Clearances() {
         </div>
       ),
     },
-    { key: 'department', label: 'Department', render: (c) => c.employee.department?.name ?? '—' },
+    { key: 'team', label: 'Team', render: (c) => c.employee.industry?.code ?? '—' },
     { key: 'reason', label: 'Reason', render: (c) => reasonLabel(c.reason) },
     {
       key: 'lastWorkingDay',
@@ -210,9 +213,9 @@ export function Clearances() {
           ...(seesAll
             ? [
                 {
-                  key: 'departmentId',
-                  label: 'Department',
-                  options: departments.map((d) => ({ value: d.id, label: d.name })),
+                  key: 'teamId',
+                  label: 'Team',
+                  options: [...teams.map((t) => ({ value: t.id, label: t.code })), { value: 'none', label: 'No team' }],
                 },
               ]
             : []),
@@ -297,7 +300,7 @@ interface EmployeeLookup {
   firstName: string;
   lastName: string;
   position: string | null;
-  department: { id: string; name: string } | null;
+  industry: { id: string; code: string; name: string } | null;
   hasUser: boolean;
 }
 
@@ -426,7 +429,7 @@ function RaiseModal({ onClose, onRaised }: { onClose: () => void; onRaised: (id:
               {found.map((e) => (
                 <option key={e.id} value={e.id}>
                   {e.lastName}, {e.firstName} · {e.employeeNo}
-                  {e.department ? ` · ${e.department.name}` : ''}
+                  {e.industry ? ` · ${e.industry.code}` : ''}
                 </option>
               ))}
             </select>
@@ -525,7 +528,7 @@ interface ClearanceDetailData {
     employmentType: string;
     dateHired: string | null;
     userId: string | null;
-    department: { id: string; name: string } | null;
+    industry: { id: string; code: string; name: string } | null;
     user: { id: string; name: string; isActive: boolean; supervisor: { id: string; name: string } | null } | null;
   };
   raisedBy: { id: string; name: string; position: string | null };
@@ -695,8 +698,8 @@ export function ClearanceDetail() {
             </dd>
             <dt>Position</dt>
             <dd>{c.employee.position ?? '—'}</dd>
-            <dt>Department</dt>
-            <dd>{c.employee.department?.name ?? '—'}</dd>
+            <dt>Team</dt>
+            <dd>{c.employee.industry?.name ?? '—'}</dd>
             <dt>Employment</dt>
             <dd>{humanise(c.employee.employmentType)}</dd>
             <dt>Hired</dt>

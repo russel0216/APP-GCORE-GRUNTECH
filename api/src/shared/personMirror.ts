@@ -13,7 +13,7 @@ const BACKFILL_MARK = 'seed.loginMirrorBackfilled';
 const ADMIN_MARK = 'seed.adminEmployeeLinked';
 
 /**
- * Every linked login takes its employee's name, number, phone, department and
+ * Every linked login takes its employee's name, number, phone and
  * position once — what `syncLoginFromEmployee` keeps in step from now on. A
  * login whose number another login already holds is left as it is and named
  * on the audit row, for an administrator to settle on Admin › Users.
@@ -55,7 +55,7 @@ export async function linkAdminEmployees(): Promise<number> {
   if (await prisma.setting.findUnique({ where: { key: ADMIN_MARK } })) return 0;
   const admins = await prisma.user.findMany({
     where: { isSuperAdmin: true, isActive: true, employee: { is: null } },
-    select: { id: true, name: true, departmentId: true, position: true, phone: true },
+    select: { id: true, name: true, position: true, phone: true },
   });
   for (const a of admins) {
     const parts = a.name.trim().split(/\s+/);
@@ -67,7 +67,6 @@ export async function linkAdminEmployees(): Promise<number> {
           employeeNo: await nextNumber('employee', tx),
           firstName,
           lastName,
-          departmentId: a.departmentId,
           position: a.position,
           mobile: a.phone,
           userId: a.id,

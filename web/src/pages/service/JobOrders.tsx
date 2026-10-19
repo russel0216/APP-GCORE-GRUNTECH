@@ -648,7 +648,7 @@ export function JobOrderModal({
         <Field label="Requester">
           <input value={existing?.requestedBy.name ?? 'You'} disabled />
         </Field>
-        <Field label="Team / department" hint="Empty takes the requester's own team">
+        <Field label="Team" hint="Empty takes the requester's own team">
           <select value={form.teamId} onChange={(e) => set('teamId', e.target.value)}>
             <option value="">— the requester's team —</option>
             {teams.map((t) => (

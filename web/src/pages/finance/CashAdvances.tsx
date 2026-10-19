@@ -162,7 +162,7 @@ interface AdvancesSummary {
 
 /**
  * Cash advances — the owner's module 7 (2026-10-15): money LENT to an
- * employee. CA No., Date requested, Requester, Team (else department),
+ * employee. CA No., Date requested, Requester, Team,
  * Project / Purpose, Amount, Status in his words (TL Approval … CEO
  * Approval, For Release, Repaying, Paid), Total payment made and the
  * payment history on the advance's page; the cards Total granted, Less total

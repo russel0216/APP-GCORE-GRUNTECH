@@ -634,7 +634,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,481 assertions across twenty-two scripts** (counted 2026-10-18, after
+**4,483 assertions across twenty-two scripts** (counted 2026-10-18, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -698,11 +698,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement):
 foundation
 419, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
 94, partners 120, delivery 193, chain 361, hr 487, plantilla 129, meetings
-115, evaluations 154, academy 123, finance 432, aftermarket 270, cad 122,
+115, evaluations 154, academy 125, finance 432, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -3975,6 +3975,46 @@ count by role, both check".
   reimbursement's and cash advance's step 3 is "Checking (Account Payable /
   Credit and Collection)": `finance` with `credit_collection` beside it.
 
+### No departments; a hierarchy instead (2026-10-19)
+
+The owner's call, after ROLE_REV1: "remove the department, create a
+hierarchy" — department removed EVERYWHERE, and both hierarchies.
+
+- **Department is retired from every screen, route, report and paper.**
+  The `Department` table and the `departmentId` columns stay (nothing on
+  file is deleted, and `applyOrgChart()`, once-marked history, still needs
+  the rows on a fresh install — the seed keeps writing them), but nothing
+  shows, edits, filters or groups by them: not Admin › Users (its column,
+  filter, paper and the Details field), not the employee form, list or
+  import, not the login mirror (`MIRRORED_LOGIN_FIELDS` lost it,
+  `createLogin` takes none, `ResolvedUser` carries none), not the people
+  pickers. **What grouped by department groups by TEAM** (`Employee.
+  industryId`, "No team" last): `PersonSelect` / `PeoplePicker` (`/users/
+  lookup` sends `team`, `personGroup()` in `components/People.tsx`; a
+  caller's own `group` keeps its order), the money-out registers' Team
+  column (`USER_TEAM_SELECT` / `teamOfUser()` in `shared/team.ts`, team
+  only — it was "team, else department"), the borrower's slip, and the HR
+  breakdowns (turnover, the HR dashboard, passports, people flow,
+  evaluations, clearances). The Plantilla summary groups by role LEVEL.
+  An Academy requirement stored with a department keeps matching but
+  reads "Department (retired)" and can only be removed; new ones are
+  everyone or a plantilla position.
+- **The role hierarchy**: a role's level is `Role.rank`; `web/src/lib/
+  roleLevels.ts` names the six (`levelLabel()`: Level 1 — Executive,
+  2 — Heads, 3 — Managers and officers, 4 — Engineers, staff and clerks,
+  5 — Leads and technicians, 6 — Support and skilled) and `rolesByLevel()`
+  groups. Admin › Users' Access tab ticks roles under their level, and
+  Admin › Roles lists its cards under their level; the role form's "Level
+  on the chart" names them.
+- **The people hierarchy**: Admin › Users › **Hierarchy** (`?view=
+  hierarchy`, `pages/admin/PeopleTree.tsx`) — everyone under the person
+  they report to, as an outline that opens and closes (Open all / Close
+  all, a search that keeps a match's managers on screen), each line the
+  title (highest role), its level, the team and how many report to them.
+  It is the Organizational Chart's forest (`buildForest`, exported) read
+  through `useOrgPeople()` in `OrgChart.tsx` — still the one screen that
+  reads the admin `/users?pageSize` list.
+
 ### The organisation chart of 2026-10-17 — one approver, a hidden stand-in, the requester's follow-up
 
 The owner's `organizational_chart_executive_3.pptx` and `ROLE.xlsx`
@@ -6133,8 +6173,8 @@ operations project), and the liquidation stays itemised with attachments
 "for early approval or checking".
 
 - **The register is the sample's** (`BudgetRequestsList`, both dresses):
-  BR No., Requester, **Team** (the requester's team, else their department —
-  `TEAM_OR_DEPT_SELECT` / `teamOrDepartment()` in `shared/team.ts`, the one
+  BR No., Requester, **Team** (the requester's team — `USER_TEAM_SELECT` /
+  `teamOfUser()` in `shared/team.ts`, the one
   rule for every money-out register, sent as `team` with the person's record
   stripped), Project / Purpose, Amount, Date needed, Status. Filters status,
   pending, approved funds, liquidation overdue, requester, team (`teamId`,
@@ -6236,7 +6276,7 @@ Team Leader.
   (approved, something still to pay), Paid (REIMBURSED), else the status.
   The list's rows carry `stage`; cash advances use the same two.
 - **The list is the sample's**: Reimbursement No., Date of reimburse,
-  Requester, Team (else department — `teamOrDepartment()`), Project /
+  Requester, Team (`teamOfUser()`), Project /
   Purpose (a liquidation names what it accounts for), Amount, Status; Kind
   and Lines under Columns; tick boxes. Filters status, pending (in
   approval), for release, kind, requester (`claimedById`), team, date
@@ -6273,8 +6313,8 @@ by finance; an advance already released keeps its liquidation.
 - **Salary deduction** is a `PaymentMethod` (`SALARY_DEDUCTION`): money in
   on a cash advance only (anything else is a 400), cleared as recorded; the
   repayment form offers it only on an advance.
-- **The register is the sample's**: CA No., Date requested, Requester, Team
-  (else department), Project / Purpose, Amount, Status in the owner's words
+- **The register is the sample's**: CA No., Date requested, Requester, Team,
+  Project / Purpose, Amount, Status in the owner's words
   (`advanceStage()`: the open step's TL Approval … CEO Approval, For
   Release, **Repaying** while a balance is owed, Paid), Total payment made
   (with what is left; "by liquidation" on an older one), Payment history

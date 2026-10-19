@@ -11,7 +11,7 @@ import { errorMiddleware, notFound } from './http/kit';
 import { authRoutes } from './routes/auth';
 import { appearanceRoutes } from './routes/appearance';
 import { pdfTemplateRoutes } from './routes/pdfTemplates';
-import { userRoutes, roleRoutes, departmentRoutes } from './routes/users';
+import { userRoutes, roleRoutes } from './routes/users';
 import {
   companyRoutes,
   numberingRoutes,
@@ -144,7 +144,6 @@ app.get('/api/health', async (_req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/roles', roleRoutes);
-app.use('/api/departments', departmentRoutes);
 app.use('/api/company', companyRoutes);
 app.use('/api/holidays', holidayRoutes);
 app.use('/api/numbering', numberingRoutes);

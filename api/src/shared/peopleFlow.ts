@@ -521,7 +521,7 @@ export const FLOW_EMPLOYEE_SELECT = {
   createdAt: true,
   isActive: true,
   userId: true,
-  department: { select: { id: true, name: true } },
+  industry: { select: { id: true, code: true, name: true } },
   user: { select: { id: true, isActive: true, supervisorId: true } },
 } as const;
 
@@ -539,7 +539,7 @@ export interface FlowEmployee {
   createdAt: Date;
   isActive: boolean;
   userId: string | null;
-  department: { id: string; name: string } | null;
+  industry: { id: string; code: string; name: string } | null;
   user: { id: string; isActive: boolean; supervisorId: string | null } | null;
 }
 

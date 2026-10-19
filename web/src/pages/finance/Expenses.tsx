@@ -93,7 +93,7 @@ export interface Claim {
   postedAt: string | null;
   notes: string | null;
   claimedBy: { id: string; name: string; email: string };
-  /** The claimant's team, else their department. */
+  /** The claimant's team. */
   team?: { label: string; title: string } | null;
   /** Where it stands in the owner's words: TL Approval … For Release, Paid. */
   stage?: string;
@@ -143,7 +143,7 @@ const STAGE_TONES: Record<string, Tone> = {
 
 /**
  * Reimbursements — the owner's module 6 (2026-10-15): Reimbursement No.,
- * Date of reimburse, Requester, Team (else department), Project / Purpose,
+ * Date of reimburse, Requester, Team, Project / Purpose,
  * Amount, Status in his words (TL Approval, Back Support, Checking, FM
  * Approval, CEO Approval, For Release, Paid), under the cards Sum of all
  * reimbursements, Pending process, For release and Total paid out.

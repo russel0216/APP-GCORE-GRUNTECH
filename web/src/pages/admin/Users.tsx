@@ -17,6 +17,8 @@ import {
 import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { OrgChart } from './OrgChart';
+import { PeopleTree } from './PeopleTree';
+import { rolesByLevel } from '../../lib/roleLevels';
 import { NewPersonModal } from '../masters/Employees';
 import { PersonSelect, usePeople } from '../../components/People';
 
@@ -27,10 +29,8 @@ interface Role {
   id: string;
   key: string;
   name: string;
-}
-interface Department {
-  id: string;
-  name: string;
+  /** Its level on the chart (1 the CEO / President) — the Access tab lists roles under it. */
+  rank?: number | null;
 }
 interface UserRow {
   id: string;
@@ -45,7 +45,6 @@ interface UserRow {
   invitePending: boolean;
   lastLoginAt: string | null;
   roles: { key: string; name: string }[];
-  department: { id: string; name: string } | null;
   supervisor: { id: string; name: string } | null;
   /** The team on their employee record (`Employee.industryId`). */
   team?: { code: string; name: string } | null;
@@ -126,13 +125,14 @@ export function Users() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  // ?view=tree shows the organisational chart; it is in the URL so the chart
-  // stays behind a person opened from it, and a link can open it directly.
+  // ?view=tree shows the organisational chart and ?view=hierarchy the people
+  // tree; it is in the URL so the view stays behind a person opened from it,
+  // and a link can open it directly.
   const [params, setParams] = useSearchParams();
-  const view = params.get('view') === 'tree' ? 'tree' : 'list';
-  const showView = (next: 'list' | 'tree') => {
+  const view = params.get('view') === 'tree' ? 'tree' : params.get('view') === 'hierarchy' ? 'hierarchy' : 'list';
+  const showView = (next: 'list' | 'tree' | 'hierarchy') => {
     const p = new URLSearchParams(params);
-    if (next === 'tree') p.set('view', 'tree');
+    if (next !== 'list') p.set('view', next);
     else p.delete('view');
     setParams(p, { replace: true });
   };
@@ -149,11 +149,9 @@ export function Users() {
   const mayAdd = can('admin.users.create') && (can('ghr.employees.create') || can('ghr.employees.edit_all'));
   const [reload, setReload] = useState(0);
   const [roles, setRoles] = useState<Role[]>([]);
-  const [departments, setDepartments] = useState<Department[]>([]);
 
   useEffect(() => {
     api.get<Role[]>('/roles').then(setRoles).catch(() => setRoles([]));
-    api.get<Department[]>('/departments').then(setDepartments).catch(() => setDepartments([]));
   }, []);
 
   const columns: Column<UserRow>[] = [
@@ -193,7 +191,6 @@ export function Users() {
           </div>
         ),
     },
-    { key: 'department', label: 'Department', render: (u) => u.department?.name ?? '—' },
     { key: 'team', label: 'Team', render: (u) => (u.team ? <span title={u.team.name}>{u.team.code}</span> : '—') },
     { key: 'supervisor', label: 'Reports to', render: (u) => u.supervisor?.name ?? '—' },
     {
@@ -235,6 +232,14 @@ export function Users() {
           <button type="button" className={view === 'list' ? 'active' : ''} aria-pressed={view === 'list'} onClick={() => showView('list')}>
             Users
           </button>
+          <button
+            type="button"
+            className={view === 'hierarchy' ? 'active' : ''}
+            aria-pressed={view === 'hierarchy'}
+            onClick={() => showView('hierarchy')}
+          >
+            Hierarchy
+          </button>
           <button type="button" className={view === 'tree' ? 'active' : ''} aria-pressed={view === 'tree'} onClick={() => showView('tree')}>
             Organizational Chart
           </button>
@@ -243,6 +248,8 @@ export function Users() {
 
       {view === 'tree' ? (
         <OrgChart key={reload} />
+      ) : view === 'hierarchy' ? (
+        <PeopleTree key={reload} />
       ) : (
       <DataList<UserRow>
         listKey="admin-users"
@@ -350,7 +357,6 @@ export function Users() {
           key={id}
           id={id}
           roles={roles}
-          departments={departments}
           onClose={close}
           onSaved={() => {
             close();
@@ -370,13 +376,11 @@ export function Users() {
 function UserEditor({
   id,
   roles,
-  departments,
   onClose,
   onSaved,
 }: {
   id: string;
   roles: Role[];
-  departments: Department[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -410,7 +414,6 @@ function UserEditor({
     position: '',
     phone: '',
     supervisorId: '',
-    departmentId: '',
     roleIds: [] as string[],
     supportTeamIds: [] as string[],
     teamId: '',
@@ -420,7 +423,7 @@ function UserEditor({
   const [detail, setDetail] = useState<UserDetail | null>(null);
   /**
    * A login with an employee record mirrors it (2026-10-16): its name,
-   * position, mobile and department are the record's — typed here since
+   * position and mobile are the record's — typed here since
    * 2026-10-19 and written through to the record, which the login follows.
    */
   const kept = !!detail?.employee;
@@ -454,7 +457,6 @@ function UserEditor({
           position: u.mainPosition ?? u.position ?? '',
           phone: u.phone ?? '',
           supervisorId: u.supervisor?.id ?? '',
-          departmentId: u.department?.id ?? '',
           roleIds: u.roles.map((r) => r.id),
           supportTeamIds: (u.supportTeams ?? []).map((t) => t.industryId),
           teamId: u.employee?.industryId ?? '',
@@ -476,7 +478,6 @@ function UserEditor({
           : { name: form.name }),
         // Sent only when changed: the login's title joins every post held.
         phone: form.phone || null,
-        departmentId: form.departmentId || null,
       };
       // Edit Own: their own plain details, nothing else (2026-10-18).
       if (!full) {
@@ -576,8 +577,8 @@ function UserEditor({
         <>
           {detail?.employee && (
             <div className="alert info">
-              This login is {detail.employee.firstName} {detail.employee.lastName}'s — the name, employee number,
-              position, mobile and department typed here are saved onto their{' '}
+              This login is {detail.employee.firstName} {detail.employee.lastName}'s — the name, employee number
+              and mobile typed here are saved onto their{' '}
               <Link to={`/g-hr/employees/${detail.employee.id}`}>employee record ↗</Link>, and the login follows it.
             </div>
           )}
@@ -638,20 +639,6 @@ function UserEditor({
                 people={people.filter((p) => p.id !== id)}
                 current={detail?.supervisor ?? null}
               />
-            </Field>
-            <Field label="Department">
-              <select
-                value={form.departmentId}
-                disabled={kept && !full}
-                onChange={(e) => setForm({ ...form, departmentId: e.target.value })}
-              >
-                <option value="">— none —</option>
-                {departments.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
             </Field>
             <Field
               label="Team"
@@ -716,8 +703,12 @@ function UserEditor({
             label={`Roles — ${form.roleIds.length} of ${MAX_ROLES}`}
             hint={`Roles grant the bulk of access; ${MAX_ROLES} at most. The highest is their title on documents. Adjust individual screens below.`}
           >
-            <div className="row">
-              {roles.map((r) => (
+            <div className="role-levels">
+              {rolesByLevel(roles).map((level) => (
+                <div key={level.label} className="role-level">
+                  <div className="role-level-head">{level.label}</div>
+                  <div className="row">
+              {level.roles.map((r) => (
                 <label key={r.id} className="checkbox">
                   <input
                     type="checkbox"
@@ -734,6 +725,9 @@ function UserEditor({
                   />
                   <span>{r.name}</span>
                 </label>
+              ))}
+                  </div>
+                </div>
               ))}
             </div>
           </Field>

@@ -19,7 +19,7 @@ import { Avatar } from './ui';
 export interface Person {
   id: string;
   name: string;
-  /** Second line — a position, an email, a department. */
+  /** Second line — a position or an email. */
   sub?: string;
   /** Rows are grouped under this heading; absent rows go under "Everyone". */
   group?: string;
@@ -59,8 +59,8 @@ export function PeoplePicker({
     );
   }, [people, excluded, q]);
 
-  // Keep the caller's order of groups: the API already sorts by department
-  // then name, and re-sorting here would undo that.
+  // Groups (teams) in name order, the ungrouped last; people keep the
+  // caller's order (the API sorts by name) inside each.
   const groups = useMemo(() => {
     const map = new Map<string, Person[]>();
     for (const p of visible) {
@@ -69,7 +69,7 @@ export function PeoplePicker({
       list.push(p);
       map.set(key, list);
     }
-    return [...map.entries()];
+    return [...map.entries()].sort(([a], [b]) => (a === UNGROUPED ? 1 : b === UNGROUPED ? -1 : a.localeCompare(b)));
   }, [visible]);
 
   function toggle(id: string) {

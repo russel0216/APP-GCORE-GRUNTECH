@@ -29,7 +29,7 @@ import {
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { requestItemSchema, requestMoney } from '../shared/requestLines';
-import { TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
+import { USER_TEAM_SELECT, teamOfUser, userTeamWhere } from '../shared/team';
 import { registerSearch } from '../shared/search';
 import { renderDocument, companyCurrency, formatAmount, formatMoney, formatQuantity, formatShortDate, statusLabel, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween, financeSettings } from '../shared/finance';
@@ -55,7 +55,7 @@ export const advanceRoutes = Router();
 advanceRoutes.use(authenticate);
 
 const advanceInclude = {
-  requestedBy: { select: { id: true, name: true, email: true, position: true, ...TEAM_OR_DEPT_SELECT.select } },
+  requestedBy: { select: { id: true, name: true, email: true, position: true, ...USER_TEAM_SELECT.select } },
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
   liquidations: {
@@ -79,12 +79,12 @@ function presentAdvance(row: AdvanceRow, today = dayKey(new Date())) {
   const liquidated = !!row.liquidatedAt;
   const refundDue = liquidated ? cents(Math.max(0, released - spent)) : 0;
   const liquidation = row.liquidations.find((l) => (LIVE_LIQUIDATION as readonly string[]).includes(l.status)) ?? null;
-  const { department: _d, employee: _e, ...requester } = row.requestedBy;
+  const { employee: _e, ...requester } = row.requestedBy;
   return {
     ...row,
     requestedBy: requester,
-    /** The requester's team, else their department. */
-    team: teamOrDepartment(row.requestedBy),
+    /** The requester's team. */
+    team: teamOfUser(row.requestedBy),
     /** Money lent: the repayments made and what is still owed (2026-10-15). */
     paymentsMade: row.repayable ? refunded : 0,
     balance: row.repayable && ['RELEASED', 'PAID'].includes(row.status) ? cents(released - refunded) : 0,

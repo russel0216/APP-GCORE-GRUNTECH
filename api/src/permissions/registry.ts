@@ -280,7 +280,7 @@ export const REGISTRY: ModuleDef[] = [
         actions: SETTINGS,
         phase: 2,
         note: 'Controls visibility of daily rate, burden and statutory numbers on the employee record', hidden: true },
-      // The authorised staffing pattern: positions per department, how many of
+      // The authorised staffing pattern: positions by role level, how many of
       // each are approved, who fills them and what is vacant. Filled/vacant are
       // counted off active employees, never stored.
       { key: 'plantilla', own: 'positions you added', group: 'Records', label: 'Plantilla', path: '/g-hr/plantilla', actions: SHARED, phase: 6 },
@@ -297,7 +297,7 @@ export const REGISTRY: ModuleDef[] = [
       // screen opens with the 12-month turnover figures so the label is true.
       { key: 'clearances', group: 'People', label: 'Turnover & Clearance', path: '/g-hr/clearances', actions: OWNED_KEPT, phase: 6 },
       // Gruntech Academy.
-      { key: 'courses', own: 'courses you added', group: 'Academy', label: 'Courses', path: '/g-hr/academy/courses', actions: SHARED, phase: 6, note: 'Course master, and which departments and positions must hold each course' },
+      { key: 'courses', own: 'courses you added', group: 'Academy', label: 'Courses', path: '/g-hr/academy/courses', actions: SHARED, phase: 6, note: 'Course master, and which positions must hold each course' },
       { key: 'training_calendar', group: 'Academy', label: 'Training Calendar', path: '/g-hr/academy/calendar', actions: READ, phase: 6 },
       { key: 'training_sessions', group: 'Academy', label: 'Training Sessions', path: '/g-hr/academy/sessions', actions: OWNED, phase: 6, note: 'Create is the Trainer right — schedule, enrol and complete a session; Edit Own covers sessions you train' },
       { key: 'passport', group: 'Academy', label: 'My Training Passport', path: '/g-hr/academy/passport', actions: ['view_own', 'create'], phase: 6, note: 'Create lets an employee enter an external certification for HR to verify' },

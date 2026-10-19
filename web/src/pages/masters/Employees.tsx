@@ -28,8 +28,8 @@ interface PositionOption {
   id: string;
   code: string;
   title: string;
-  departmentId: string | null;
-  departmentName: string | null;
+  /** The level of the role the position counts (2026-10-19). */
+  level: number | null;
   authorisedHeadcount: number;
   filled: number;
 }
@@ -73,7 +73,6 @@ interface EmployeeRow {
   emergencyContactPhone: string | null;
   isActive: boolean;
   notes: string | null;
-  department: { id: string; name: string } | null;
   /** The industry team they work in — an Industry row. */
   industry: { id: string; code: string; name: string } | null;
   user: {
@@ -116,7 +115,6 @@ export function Employees() {
   const [recordError, setRecordError] = useState<unknown>(null);
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
-  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
   const [teams, setTeams] = useState<TeamOption[]>([]);
   const [positions, setPositions] = useState<PositionOption[]>([]);
 
@@ -126,7 +124,6 @@ export function Employees() {
   const seeUsers = can('admin.users.view_all');
 
   useEffect(() => {
-    api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
     // Every industry, switched-off ones included: a record may still carry one.
     api.get<TeamOption[]>('/reference/industries').then(setTeams).catch(() => {});
   }, []);
@@ -195,7 +192,6 @@ export function Employees() {
         </div>
       ),
     },
-    { key: 'department', label: 'Department', render: (e) => e.department?.name ?? '—' },
     { key: 'industry', label: 'Team', render: (e) => e.industry?.name ?? '—' },
     {
       key: 'employmentType',
@@ -291,11 +287,6 @@ export function Employees() {
             ],
           },
           {
-            key: 'departmentId',
-            label: 'Department',
-            options: departments.map((d) => ({ value: d.id, label: d.name })),
-          },
-          {
             key: 'industryId',
             label: 'Team',
             options: [{ value: 'none', label: 'No team yet' }, ...teams.map((t) => ({ value: t.id, label: t.name }))],
@@ -308,7 +299,7 @@ export function Employees() {
               { value: 'none', label: 'No plantilla position' },
               ...positions.map((p) => ({
                 value: p.id,
-                label: p.departmentName ? `${p.title} · ${p.departmentName}` : p.title,
+                label: p.level != null ? `${p.title} · Level ${p.level}` : p.title,
               })),
             ],
           },
@@ -383,7 +374,6 @@ export function Employees() {
           employee={record}
           initialTab={initialTab}
           flaggedSampleId={flaggedSampleId}
-          departments={departments}
           teams={teams}
           positions={positions}
           onClose={closeRecord}
@@ -456,7 +446,7 @@ interface RegisterOption {
   firstName: string;
   lastName: string;
   position: string | null;
-  department: { id: string; name: string } | null;
+  industry: { id: string; code: string; name: string } | null;
   hasUser: boolean;
 }
 
@@ -465,11 +455,9 @@ interface RegisterOption {
  * from itself, so Admin › Users needs nothing of the register page.
  */
 export function NewPersonModal({ door, onClose, onSaved }: { door: PersonDoor; onClose: () => void; onSaved: () => void }) {
-  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
   const [teams, setTeams] = useState<TeamOption[]>([]);
   const [positions, setPositions] = useState<PositionOption[]>([]);
   useEffect(() => {
-    api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
     api.get<TeamOption[]>('/reference/industries').then(setTeams).catch(() => {});
     // The plantilla is HR's list; an administrator without it types the title.
     api.get<PositionOption[]>('/positions/lookup').then(setPositions).catch(() => {});
@@ -478,7 +466,6 @@ export function NewPersonModal({ door, onClose, onSaved }: { door: PersonDoor; o
     <EmployeeForm
       employee={null}
       door={door}
-      departments={departments}
       teams={teams}
       positions={positions}
       onClose={onClose}
@@ -492,7 +479,6 @@ function EmployeeForm({
   door = 'hr',
   initialTab,
   flaggedSampleId,
-  departments,
   teams,
   positions: _positions,
   onClose,
@@ -505,7 +491,6 @@ function EmployeeForm({
   initialTab?: EmployeeTab;
   /** A face sample Face health flagged (`?sample=`), marked on the Face samples tab. */
   flaggedSampleId?: string | null;
-  departments: { id: string; name: string }[];
   teams: TeamOption[];
   positions: PositionOption[];
   onClose: () => void;
@@ -589,7 +574,6 @@ function EmployeeForm({
     middleName: employee?.middleName ?? '',
     suffix: employee?.suffix ?? '',
     userId: employee?.user?.id ?? '',
-    departmentId: employee?.department?.id ?? '',
     industryId: employee?.industry?.id ?? '',
     position: employee?.position ?? '',
     positionId: employee?.positionId ?? '',
@@ -754,7 +738,6 @@ function EmployeeForm({
         middleName: form.middleName || null,
         suffix: form.suffix || null,
         userId: form.userId || null,
-        departmentId: form.departmentId || null,
         industryId: form.industryId || null,
         employmentType: form.employmentType,
         dateHired: form.dateHired || null,
@@ -1051,19 +1034,6 @@ function EmployeeForm({
                 </p>
               )}
             </div>
-            <Field label="Department">
-              <select
-                value={form.departmentId}
-                onChange={(e) => setForm({ ...form, departmentId: e.target.value })}
-              >
-                <option value="">— none —</option>
-                {departments.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
             <Field label="Team" hint="The sales team they are on — KAT, HIT, UIT, GIB or SIT — shown to them on their invitation and My Account">
               <select value={form.industryId} onChange={(e) => setForm({ ...form, industryId: e.target.value })}>
                 <option value="">— no team yet —</option>
@@ -1176,7 +1146,7 @@ function EmployeeForm({
                           ? registerQ.trim()
                             ? 'No active employee without a login matches'
                             : 'Everyone active on the register already has a login'
-                          : 'Their record gives the login its name, department, position and mobile'
+                          : 'Their record gives the login its name, position and mobile'
                     }
                   >
                     <select value={existingId} onChange={(e) => setExistingId(e.target.value)}>
@@ -1194,7 +1164,7 @@ function EmployeeForm({
               ) : (
                 <p className="muted">
                   One save makes the employee record and the login. Name them on the Person tab; the Employment tab
-                  takes their number, position, department and team.
+                  takes their number, position and team.
                 </p>
               )}
             </>
@@ -1262,7 +1232,7 @@ function EmployeeForm({
               htmlFor={loginField}
               hint={
                 can('admin.users.edit_all')
-                  ? "Who they sign in as — the login takes this record's name, number, mobile, department and position. Reporting line is set on the user account, since that is what approvals route by."
+                  ? "Who they sign in as — the login takes this record's name, number, mobile and position. Reporting line is set on the user account, since that is what approvals route by."
                   : "Who they sign in as. Linking or unlinking a login is an administrator's (admin.users.edit_all)."
               }
             >

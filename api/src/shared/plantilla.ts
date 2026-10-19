@@ -7,7 +7,7 @@ import { titleFromRoles } from './roleRev1';
 /**
  * The plantilla — the authorised staffing pattern (model §4.7).
  *
- * A `Position` is a job title, the department it sits in and how many of it
+ * A `Position` is a job title (since 2026-10-19 counting a role's holders) and how many of it
  * the company has approved. Filled and vacant are DERIVED by counting active
  * employees on the position, never stored: a stored copy can disagree with
  * the employees it counts, and the whole point of the screen is that it is
@@ -194,8 +194,14 @@ export interface PlantillaSummary {
   overComplement: number;
   /** Active employees with no plantilla position at all. */
   unclassified: number;
-  byDepartment: {
-    department: { id: string; name: string } | null;
+  /**
+   * By LEVEL (2026-10-19, the owner's call: the department is gone; the
+   * Plantilla counts by role, so it reads down the levels of the roles its
+   * positions count — `Role.rank`, 1 the CEO / President). A position that
+   * counts no role, or one with no level, is "No level", last.
+   */
+  byLevel: {
+    level: number | null;
     authorised: number;
     filled: number;
     vacant: number;
@@ -215,14 +221,14 @@ export async function plantillaSummary(): Promise<PlantillaSummary> {
       select: {
         id: true,
         authorisedHeadcount: true,
-        department: { select: { id: true, name: true } },
+        role: { select: { rank: true } },
       },
     }),
     filledByPosition(),
     prisma.employee.count({ where: { isActive: true, positionId: null, OR: [{ userId: null }, { user: { roles: { none: {} } } }] } }),
   ]);
 
-  const byDept = new Map<string, PlantillaSummary['byDepartment'][number]>();
+  const byLevelMap = new Map<number | null, PlantillaSummary['byLevel'][number]>();
   let authorised = 0;
   let filledTotal = 0;
   let vacant = 0;
@@ -236,9 +242,9 @@ export async function plantillaSummary(): Promise<PlantillaSummary> {
     if (gap > 0) vacant += gap;
     else over += -gap;
 
-    const key = p.department?.id ?? '';
-    const row = byDept.get(key) ?? {
-      department: p.department,
+    const key = p.role?.rank ?? null;
+    const row = byLevelMap.get(key) ?? {
+      level: key,
       authorised: 0,
       filled: 0,
       vacant: 0,
@@ -248,18 +254,13 @@ export async function plantillaSummary(): Promise<PlantillaSummary> {
     row.filled += f;
     if (gap > 0) row.vacant += gap;
     else row.overComplement += -gap;
-    byDept.set(key, row);
+    byLevelMap.set(key, row);
   }
 
-  // Filled positions that lost their department still count; the "unassigned"
-  // bucket sorts last so the named departments read first.
-  const byDepartment = [...byDept.values()].sort((a, b) => {
-    if (!a.department) return 1;
-    if (!b.department) return -1;
-    return a.department.name.localeCompare(b.department.name);
-  });
+  // Level 1 first; "No level" last.
+  const byLevel = [...byLevelMap.values()].sort((a, b) => (a.level ?? Infinity) - (b.level ?? Infinity));
 
-  return { authorised, filled: filledTotal, vacant, overComplement: over, unclassified, byDepartment };
+  return { authorised, filled: filledTotal, vacant, overComplement: over, unclassified, byLevel };
 }
 
 // ── Backfill ─────────────────────────────────────────────────────────────────
@@ -279,7 +280,7 @@ export async function plantillaSummary(): Promise<PlantillaSummary> {
 export async function backfillPositions(): Promise<{ linked: number; positions: number }> {
   const unlinked = await prisma.employee.findMany({
     where: { positionId: null, position: { not: null } },
-    select: { id: true, position: true, departmentId: true, isActive: true },
+    select: { id: true, position: true, isActive: true },
   });
 
   const byTitle = new Map<string, { title: string; holders: typeof unlinked }>();
@@ -301,12 +302,10 @@ export async function backfillPositions(): Promise<{ linked: number; positions: 
       });
       if (!position) {
         const active = holders.filter((h) => h.isActive);
-        const departments = new Set(active.map((h) => h.departmentId));
         position = await tx.position.create({
           data: {
             code: await nextNumber('position', tx),
             title,
-            departmentId: departments.size === 1 ? [...departments][0] : null,
             authorisedHeadcount: active.length,
           },
         });

@@ -102,7 +102,7 @@ import {
 } from '../shared/finance';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
-import { teamShares, TEAM_REF_SELECT, TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
+import { teamShares, TEAM_REF_SELECT, USER_TEAM_SELECT, teamOfUser, userTeamWhere } from '../shared/team';
 import { BILL_PAYABLE, DUE_SOON_DAYS, billDueDate, billTermsLabel, dueSoonWhere } from '../shared/payables';
 import {
   TERMS_CHOICES,
@@ -2676,7 +2676,7 @@ registerAttachmentGuard('expense_claim', async (user, id, mode: 'read' | 'write'
 });
 
 export const claimInclude = {
-  claimedBy: { select: { id: true, name: true, email: true, ...TEAM_OR_DEPT_SELECT.select } },
+  claimedBy: { select: { id: true, name: true, email: true, ...USER_TEAM_SELECT.select } },
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
   // `amountRefunded`: unspent cash already handed back — the liquidation
@@ -2707,12 +2707,12 @@ export function presentClaim(row: ClaimRow) {
   const payable = claimPayable(row);
   const released = liquidatedReleased(row);
   const liquidates = !!(row.advance || row.budgetRequest);
-  const { department: _d, employee: _e, ...claimant } = row.claimedBy;
+  const { employee: _e, ...claimant } = row.claimedBy;
   return {
     ...row,
     claimedBy: claimant,
-    /** The claimant's team, else their department — the register's Team column. */
-    team: teamOrDepartment(row.claimedBy),
+    /** The claimant's team — the register's Team column. */
+    team: teamOfUser(row.claimedBy),
     total,
     amountPaid: paid,
     payable,

@@ -101,6 +101,12 @@ export interface EmployeeRef {
  * by id, never by title — an unclassified employee (no plantilla position)
  * matches department-only and everyone rules, and nothing that names a
  * position.
+ *
+ * The department is gone (2026-10-19, the owner's call): a NEW requirement is
+ * everyone or a plantilla position only (the course route refuses a
+ * department). A requirement stored with a department before keeps matching
+ * exactly as it did — removing it is HR's call on the course, where it shows
+ * as "Department (retired)" — so nobody's passport changes under them.
  */
 export function requirementMatches(req: RequirementRef, emp: EmployeeRef): boolean {
   if (req.departmentId && req.departmentId !== emp.departmentId) return false;
@@ -388,7 +394,7 @@ export async function passportFor(employeeId: string, asOf = new Date()) {
       userId: true,
       departmentId: true,
       positionId: true,
-      department: { select: { id: true, name: true } },
+      industry: { select: { id: true, code: true, name: true } },
     },
   });
   if (!employee) return null;
@@ -447,7 +453,7 @@ export async function passportFor(employeeId: string, asOf = new Date()) {
       employeeNo: employee.employeeNo,
       name: `${employee.firstName} ${employee.lastName}`,
       position: employee.position,
-      department: employee.department,
+      team: employee.industry,
       isActive: employee.isActive,
       userId: employee.userId,
     },

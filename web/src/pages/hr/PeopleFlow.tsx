@@ -72,7 +72,7 @@ interface FlowPath {
     employeeNo: string;
     name: string;
     position: string | null;
-    department: { id: string; name: string } | null;
+    team: { id: string; code: string; name: string } | null;
     employmentType: string;
     isActive: boolean;
     self: boolean;
@@ -94,7 +94,7 @@ interface FlowRow {
   employeeNo: string;
   name: string;
   position: string | null;
-  department: { id: string; name: string } | null;
+  team: { id: string; code: string; name: string } | null;
   hiredOn: string | null;
   stage: Stage;
   stageLabel: string;
@@ -121,10 +121,14 @@ export function PeopleFlow() {
   const { can } = useAuth();
   const all = can('ghr.people_flow.view_all');
   const supervises = can('ghr.dashboard.view_all');
-  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
+  const [teams, setTeams] = useState<{ id: string; code: string; name: string }[]>([]);
 
   useEffect(() => {
-    if (all) api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
+    if (!all) return;
+    api
+      .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
+      .then((rows) => setTeams(rows.filter((t) => t.isActive)))
+      .catch(() => {});
   }, [all]);
 
   const columns: Column<FlowRow>[] = [
@@ -139,7 +143,7 @@ export function PeopleFlow() {
         </>
       ),
     },
-    { key: 'department', label: 'Department', render: (r) => r.department?.name ?? '—' },
+    { key: 'team', label: 'Team', render: (r) => r.team?.code ?? '—' },
     { key: 'hired', label: 'Hired', sortKey: 'hired', render: (r) => day(r.hiredOn) },
     { key: 'stage', label: 'Stage', sortKey: 'stage', render: (r) => <StatusBadge status={r.stage} extra={FLOW_TONES} label={r.stageLabel} /> },
     { key: 'open', label: 'Open', sortKey: 'open', align: 'right', render: (r) => r.open },
@@ -183,7 +187,9 @@ export function PeopleFlow() {
         { key: 'stage', label: 'Stage', options: STAGES.map((s) => ({ value: s.key, label: s.label })) },
         { key: 'overdue', label: 'Overdue', options: [{ value: 'true', label: 'With an overdue item' }] },
         { key: 'probation', label: 'Probation review', options: [{ value: 'due', label: 'Due within a week, or overdue' }] },
-        ...(all ? [{ key: 'departmentId', label: 'Department', options: departments.map((d) => ({ value: d.id, label: d.name })) }] : []),
+        ...(all
+          ? [{ key: 'teamId', label: 'Team', options: [...teams.map((t) => ({ value: t.id, label: t.code })), { value: 'none', label: 'No team' }] }]
+          : []),
       ]}
       summary={
         all
@@ -277,7 +283,7 @@ export function PeopleFlowPage() {
         statusExtra={FLOW_TONES}
         meta={
           <>
-            {[e.position, e.department?.name, humaniseType(e.employmentType)].filter(Boolean).join(' · ')}
+            {[e.position, e.team?.code, humaniseType(e.employmentType)].filter(Boolean).join(' · ')}
             {' · '}
             {path.hiredOn ? `hired ${day(path.hiredOn)}` : 'no hire date on file'}
             {path.probationEndOn && ` · probation ends ${day(path.probationEndOn)}`}

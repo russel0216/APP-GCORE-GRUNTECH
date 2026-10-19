@@ -296,7 +296,7 @@ async function main() {
   check('its code comes from the POS sequence', /POS-\d{4}-\d{4}$/.test(pos.code ?? ''), pos.code);
 
   const dupe = await http(T.hr, 'POST', '/positions', { title: `${TAG} site engineer`, departmentId: dept.id });
-  check('the same title twice in one department is refused', dupe.status === 409, `${dupe.status}`);
+  check('the same title twice is refused (one position per title, the department gone)', dupe.status === 409, `${dupe.status}`);
 
   const mk = (n: string, first: string, active = true, extra: Record<string, unknown> = {}) =>
     prisma.employee.create({
@@ -439,6 +439,7 @@ async function main() {
   const seqBefore = await prisma.numberSequence.aggregate({ where: { documentType: 'position' }, _sum: { lastNumber: true } });
   const newTitle = `${TAG} Rigger`;
   const csv = [
+    // A Department column from an old sheet is ignored (2026-10-19).
     'Employee No,Last Name,First Name,Position,Department',
     `${TAG}-I1,${TAG}Imp,One,${newTitle},${dept.name}`,
     `${TAG}-I2,${TAG}Imp,Two,${renamed.toUpperCase()},${dept.name}`,
@@ -1118,6 +1119,11 @@ async function main() {
 
   // A position is named by its POS code, or its title where it has none.
   const positionMark = (r: Record<string, unknown>) => String(r.code ?? r.title);
+  // One position counting a ranked role, so "no level" keeps some and drops
+  // one (departments retired 2026-10-19); put back after the paper is read.
+  const levelled = await prisma.position.findFirst({ where: { title: { contains: TAG }, roleId: null }, select: { id: true } });
+  const ranked = await prisma.role.findFirst({ where: { rank: { not: null } }, select: { id: true } });
+  if (levelled && ranked) await prisma.position.update({ where: { id: levelled.id }, data: { roleId: ranked.id } });
   await checkListPaper(check, {
     label: 'Plantilla',
     token: T.hr,
@@ -1127,9 +1133,10 @@ async function main() {
     named: searchNamed,
     noun: ['position', 'positions'],
     mark: positionMark,
-    filter: { query: `${searched}&departmentId=${dept.id}`, named: `department ${dept.name}` },
+    filter: { query: `${searched}&level=none`, named: 'no level' },
     entityType: 'position',
   });
+  if (levelled) await prisma.position.update({ where: { id: levelled.id }, data: { roleId: null } });
   // The headcount under the table adds up the rows the screen lists.
   const posScreen = (await readScreen(T.hr, `/positions?${searched}&pageSize=200`)).rows as { authorisedHeadcount: number; filled: number }[];
   const posPaper = await printed(T.hr, `/positions/pdf?${searched}`);

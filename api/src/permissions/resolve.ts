@@ -9,7 +9,6 @@ export interface ResolvedUser {
   position: string | null;
   isSuperAdmin: boolean;
   supervisorId: string | null;
-  departmentId: string | null;
   roleKeys: string[];
   /** Effective permission keys after roles + per-user overrides. */
   permissions: Set<string>;
@@ -54,7 +53,6 @@ export async function resolveUser(userId: string): Promise<ResolvedUser | null> 
     position: user.position,
     isSuperAdmin: user.isSuperAdmin,
     supervisorId: user.supervisorId,
-    departmentId: user.departmentId,
     roleKeys: user.roles.map((r) => r.role.key),
     permissions: granted,
   };

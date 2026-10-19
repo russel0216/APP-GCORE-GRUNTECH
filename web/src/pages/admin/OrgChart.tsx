@@ -15,26 +15,29 @@ import { Avatar, Empty, ErrorBox, Loading } from '../../components/ui';
   off heads a tree of their own beside it, so nobody silently drops out.
 */
 
-interface Person {
+export interface Person {
   id: string;
   name: string;
   position: string | null;
   isActive: boolean;
   photoPath: string | null;
   supervisor: { id: string; name: string } | null;
-  department: { id: string; name: string } | null;
   /** Their team (the employee record's), and the teams they back-support. */
   team?: { id: string; code: string; name: string } | null;
+  /** Their roles, with each one's level — the Hierarchy view shows them. */
+  roles?: { key: string; name: string; rank?: number | null }[];
+  /** Their highest role — the title on documents. */
+  title?: string | null;
   supportTeams?: { industryId: string; industry?: { code: string } }[];
 }
 
-interface Node {
+export interface Node {
   person: Person;
   reports: Node[];
 }
 
 /** Everyone active, arranged under their manager. A loop in "Reports to" cannot hang the page. */
-function buildForest(people: Person[]): Node[] {
+export function buildForest(people: Person[]): Node[] {
   const active = people.filter((p) => p.isActive);
   const byId = new Map(active.map((p) => [p.id, p]));
   const children = new Map<string, Person[]>();
@@ -88,7 +91,7 @@ function Card({ node, depth, meId, search }: { node: Node; depth: number; meId?:
           {p.name}
           {p.id === meId && <span className="org-you"> (you)</span>}
         </span>
-        <span className="org-position">{p.position || p.department?.name || '—'}</span>
+        <span className="org-position">{p.position || p.team?.name || '—'}</span>
         {supports.length > 0 && <span className="org-supports">Back Support → {supports.join(', ')}</span>}
       </span>
       {node.reports.length > 0 && <span className="visually-hidden">, {node.reports.length} direct reports</span>}
@@ -136,18 +139,27 @@ function Tree({ head, meId, search }: { head: Node; meId?: string; search: strin
   );
 }
 
-export function OrgChart() {
-  const { me } = useAuth();
-  const location = useLocation();
+/**
+ * Everyone active with their "Reports to" — the chart's and the Hierarchy
+ * view's one read of the admin user list (the only screen allowed it: it
+ * needs every Reports to).
+ */
+export function useOrgPeople(): { people: Person[] | null; error: unknown } {
   const [people, setPeople] = useState<Person[] | null>(null);
   const [error, setError] = useState<unknown>(null);
-
   useEffect(() => {
     api
       .get<{ rows: Person[] }>('/users?pageSize=200&isActive=true')
       .then((r) => setPeople(r.rows))
       .catch(setError);
   }, []);
+  return { people, error };
+}
+
+export function OrgChart() {
+  const { me } = useAuth();
+  const location = useLocation();
+  const { people, error } = useOrgPeople();
 
   const forest = useMemo(() => (people ? buildForest(people) : []), [people]);
 
