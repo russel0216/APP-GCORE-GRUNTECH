@@ -825,6 +825,7 @@ roleRoutes.get(
         key: r.key,
         name: r.name,
         rank: r.rank,
+        reportsToRoleId: r.reportsToRoleId,
         description: r.description,
         isSystem: r.isSystem,
         createdById: r.createdById,
@@ -976,6 +977,123 @@ roleRoutes.put(
       );
     }
     res.json({ changed: changes.map((c) => ({ id: c.role.id, added: c.added.length, removed: c.removed.length })) });
+  }),
+);
+
+/**
+ * The role hierarchy (2026-10-19, the owner's call: "a Hierarchy setting
+ * where I can edit report to, based on role only, not by user"). PUT saves
+ * each role's parent role (a cycle is a 400); `?apply=true` then writes every
+ * holder's "Reports to" from it — the parent role's holder on the same team
+ * first, else the only holder; several with no team to tell them apart leave
+ * the person as they are and are named. A dry run answers what would change.
+ */
+const hierarchySchema = z.object({
+  roles: z.array(z.object({ id: z.string(), reportsToRoleId: z.string().nullable() })).max(300),
+});
+
+roleRoutes.put(
+  '/hierarchy',
+  require_('admin.roles.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(hierarchySchema, req.body);
+    const all = await prisma.role.findMany({ select: { id: true, name: true, reportsToRoleId: true, rank: true } });
+    const byId = new Map(all.map((r) => [r.id, r]));
+    const parent = new Map(all.map((r) => [r.id, r.reportsToRoleId]));
+    for (const r of body.roles) {
+      if (!byId.has(r.id)) throw badRequest('A role in the hierarchy was not found');
+      if (r.reportsToRoleId && !byId.has(r.reportsToRoleId)) throw badRequest('A "Reports to" role was not found');
+      parent.set(r.id, r.reportsToRoleId);
+    }
+    for (const r of all) {
+      const seen = new Set<string>();
+      let at: string | null | undefined = r.id;
+      while (at) {
+        if (seen.has(at)) throw badRequest(`${r.name} would end up reporting to itself`);
+        seen.add(at);
+        at = parent.get(at) ?? null;
+      }
+    }
+    const changed = body.roles.filter((r) => (byId.get(r.id)!.reportsToRoleId ?? null) !== r.reportsToRoleId);
+    await prisma.$transaction(
+      changed.map((r) => prisma.role.update({ where: { id: r.id }, data: { reportsToRoleId: r.reportsToRoleId } })),
+    );
+    for (const r of changed) {
+      const role = byId.get(r.id)!;
+      await audit(
+        {
+          entityType: 'role',
+          entityId: r.id,
+          action: 'UPDATED',
+          summary: `Hierarchy: ${role.name} reports to ${r.reportsToRoleId ? byId.get(r.reportsToRoleId)!.name : 'no role'}`,
+          before: { reportsToRoleId: role.reportsToRoleId },
+          after: { reportsToRoleId: r.reportsToRoleId },
+        },
+        req,
+      );
+    }
+    res.json({ changed: changed.length });
+  }),
+);
+
+roleRoutes.post(
+  '/hierarchy/apply',
+  require_('admin.users.edit_all'),
+  handler(async (req, res) => {
+    const apply = req.query.apply === 'true';
+    const roles = await prisma.role.findMany({ select: { id: true, name: true, rank: true, sortOrder: true, reportsToRoleId: true } });
+    const roleById = new Map(roles.map((r) => [r.id, r]));
+    const users = await prisma.user.findMany({
+      where: { isActive: true },
+      select: {
+        id: true, name: true, supervisorId: true,
+        roles: { select: { roleId: true } },
+        employee: { select: { industryId: true } },
+      },
+    });
+    const holders = new Map<string, typeof users>();
+    for (const u of users) for (const r of u.roles) holders.set(r.roleId, [...(holders.get(r.roleId) ?? []), u]);
+    const nameOf = new Map(users.map((u) => [u.id, u.name]));
+
+    const moves: { userId: string; name: string; from: string | null; to: string; via: string }[] = [];
+    const unclear: { name: string; reason: string }[] = [];
+    for (const u of users) {
+      // The person's highest role that has a parent role decides.
+      const own = u.roles.map((r) => roleById.get(r.roleId)!).filter((r) => r?.reportsToRoleId)
+        .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99) || a.sortOrder - b.sortOrder);
+      const role = own[0];
+      if (!role) continue;
+      const parentRole = roleById.get(role.reportsToRoleId!)!;
+      let pool = (holders.get(parentRole.id) ?? []).filter((h) => h.id !== u.id);
+      if (!pool.length) { unclear.push({ name: u.name, reason: `nobody holds ${parentRole.name}` }); continue; }
+      const team = u.employee?.industryId;
+      if (pool.length > 1 && team) {
+        const same = pool.filter((h) => h.employee?.industryId === team);
+        if (same.length) pool = same;
+      }
+      if (pool.length > 1) {
+        unclear.push({ name: u.name, reason: `${pool.length} people hold ${parentRole.name}${team ? ' on their team' : ''}` });
+        continue;
+      }
+      const to = pool[0];
+      if (u.supervisorId === to.id) continue;
+      moves.push({ userId: u.id, name: u.name, from: u.supervisorId ? nameOf.get(u.supervisorId) ?? null : null, to: to.name, via: `${role.name} → ${parentRole.name}` });
+      if (apply) {
+        await prisma.user.update({ where: { id: u.id }, data: { supervisorId: to.id } });
+        await audit(
+          {
+            entityType: 'user',
+            entityId: u.id,
+            action: 'UPDATED',
+            summary: `Reports to ${to.name} (from the role hierarchy: ${role.name} → ${parentRole.name})`,
+            before: { supervisorId: u.supervisorId },
+            after: { supervisorId: to.id },
+          },
+          req,
+        );
+      }
+    }
+    res.json({ applied: apply, moves, unclear });
   }),
 );
 

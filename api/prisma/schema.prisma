@@ -224,6 +224,12 @@ model Role {
   /// their highest role — the lowest rank, then `sortOrder` (the chart's order).
   rank        Int?
   sortOrder   Int     @default(0)
+  /// The role this role reports to (2026-10-19, Admin › Roles › Hierarchy):
+  /// set by role, never by person; "Apply to people" writes each holder's
+  /// "Reports to" from it (the parent role's holder, same team first).
+  reportsToRoleId String?
+  reportsToRole   Role?   @relation("RoleHierarchy", fields: [reportsToRoleId], references: [id], onDelete: SetNull)
+  reportingRoles  Role[]  @relation("RoleHierarchy")
 
   permissions            RolePermission[]
   plantilla              Position[]         @relation("PositionRole")

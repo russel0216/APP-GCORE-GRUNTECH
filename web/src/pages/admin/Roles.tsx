@@ -5,6 +5,7 @@ import { mayEdit, useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../components/ui';
 import { levelLabel, rolesByLevel } from '../../lib/roleLevels';
 import { LevelsTable, PermissionMatrix } from './PermissionMatrix';
+import { RoleHierarchy } from './RoleHierarchy';
 
 interface Role {
   id: string;
@@ -13,6 +14,8 @@ interface Role {
   description: string | null;
   /** Its level on the chart (1 the CEO … 6 the skilled trades): a person's title is their highest role. */
   rank: number | null;
+  /** The role it reports to (Hierarchy). */
+  reportsToRoleId: string | null;
   isSystem: boolean;
   /** Who made it — Edit Own reads it (2026-10-18). */
   createdById: string | null;
@@ -47,10 +50,11 @@ export function Roles() {
   const [editing, setEditing] = useState<Role | 'new' | null>(null);
   // ?view=roles shows the role cards; the matrix is the page (2026-10-19).
   const [params, setParams] = useSearchParams();
-  const view = params.get('view') === 'roles' ? 'roles' : 'matrix';
-  const showView = (next: 'matrix' | 'roles') => {
+  const v = params.get('view');
+  const view = v === 'roles' || v === 'hierarchy' ? v : 'matrix';
+  const showView = (next: 'matrix' | 'roles' | 'hierarchy') => {
     const p = new URLSearchParams(params);
-    if (next === 'roles') p.set('view', 'roles');
+    if (next !== 'matrix') p.set('view', next);
     else p.delete('view');
     setParams(p, { replace: true });
   };
@@ -105,8 +109,13 @@ export function Roles() {
           <button type="button" className={view === 'roles' ? 'active' : ''} aria-pressed={view === 'roles'} onClick={() => showView('roles')}>
             Roles
           </button>
+          <button type="button" className={view === 'hierarchy' ? 'active' : ''} aria-pressed={view === 'hierarchy'} onClick={() => showView('hierarchy')}>
+            Hierarchy
+          </button>
         </div>
       </div>
+
+      {view === 'hierarchy' && <RoleHierarchy key={roles.map((r) => r.reportsToRoleId).join()} roles={roles} onSaved={() => void load()} />}
 
       {view === 'matrix' && catalog && <PermissionMatrix roles={roles} catalog={catalog} onSaved={() => void load()} />}
 

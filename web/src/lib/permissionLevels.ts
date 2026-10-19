@@ -64,4 +64,4 @@ export function actionsFor(actions: readonly string[], view: Level, manage: Leve
   return actions.filter((a) => want.has(a));
 }
 
-export const LEVEL_LABELS: Record<Level, string> = { none: '—', own: 'Own', team: 'Team', all: 'All' };
+export const LEVEL_LABELS: Record<Level, string> = { none: '—', own: 'Own', team: 'Own + Team', all: 'Own + Team + All' };

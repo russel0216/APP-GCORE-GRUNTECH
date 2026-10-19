@@ -4017,6 +4017,22 @@ count by role, both check".
   reimbursement's and cash advance's step 3 is "Checking (Account Payable /
   Credit and Collection)": `finance` with `credit_collection` beside it.
 
+### The role hierarchy and the level labels (2026-10-19)
+
+The owner's call: "sometimes I need both view team and view own" and "a
+Hierarchy setting where I can edit report to, based on role only". The
+matrix's levels already include the ones under them, so the selects now SAY
+so: `LEVEL_LABELS` (both copies) read "Own", "Own + Team", "Own + Team +
+All". **`Role.reportsToRoleId`** (self-relation, SetNull) is edited on Admin
+› Roles › **Hierarchy** (`?view=hierarchy`, `pages/admin/RoleHierarchy.tsx`;
+`PUT /roles/hierarchy`, `admin.roles.edit_all`, a cycle a 400, one audit row
+per role changed). "Apply to people" (`POST /roles/hierarchy/apply`,
+`admin.users.edit_all`; a dry run unless `?apply=true`) writes each active
+login's "Reports to" from their highest role that has a parent: the parent
+role's only holder, or the one on the same team; anyone it cannot decide is
+listed and left alone; each move audited on the user. The engine still reads
+`User.supervisorId` — the role hierarchy feeds it, never replaces it.
+
 ### No departments; a hierarchy instead (2026-10-19)
 
 The owner's call, after ROLE_REV1: "remove the department, create a
