@@ -12,6 +12,7 @@ import {
   badRequest,
   forbidden,
   idsFilter,
+  deleteOrRefuse,
   type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
@@ -39,7 +40,7 @@ import {
   onApprovalReopened,
   type ApprovalOutcome,
 } from '../shared/approvals';
-import { registerAttachmentGuard } from '../shared/attachments';
+import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
 import {
   renderDocument,
@@ -551,6 +552,8 @@ async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
     needsApproval: draft ? !!route : null,
     canWithdraw: receiving.status === 'PENDING_APPROVAL' && handler_,
     canCancel: (draft || receiving.status === 'PENDING_APPROVAL') && handler_,
+    // A draft or a cancelled report posted nothing (2026-10-19): its handler deletes it.
+    canDelete: (draft || receiving.status === 'CANCELLED') && handler_ && can(me, 'gchain.receiving.delete'),
     approvalRoute: draft && route ? await routeBrief(RECEIVING_DOC, value, receiving.receivedById, null, { importation: isImportation(receiving) }) : null,
     order: receiving.order ? { ...receiving.order, total: num(receiving.order.total) } : null,
     items: receiving.items.map((i) => ({
@@ -1204,6 +1207,39 @@ receivingRoutes.post(
     });
     await audit({ entityType: 'receiving', entityId: receiving.id, action: 'CANCELLED', summary: `${receiving.number} cancelled — ${body.reason}` }, req);
     res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
+/**
+ * Deletes a draft or a CANCELLED incoming report (2026-10-19, the owner's
+ * call) — neither posted anything: the delete right, and its receiver or
+ * edit_all; refused while a live supplier bill names it. Its lines cascade,
+ * its files go after the commit, one DELETED row.
+ */
+receivingRoutes.delete(
+  '/:id',
+  require_('gchain.receiving.delete'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const receiving = await prisma.receiving.findUnique({
+      where: { id: req.params.id },
+      include: { bills: { where: { status: { not: 'CANCELLED' } }, select: { number: true } } },
+    });
+    if (!receiving) throw notFound('Incoming report not found');
+    if (!mayHandleReceiving(me, receiving)) throw forbidden('This report is someone else’s');
+    if (receiving.status !== 'DRAFT' && receiving.status !== 'CANCELLED') {
+      throw badRequest(`Only a draft or a cancelled incoming report can be deleted — ${receiving.number} is ${statusLabel(receiving.status).toLowerCase()}`);
+    }
+    if (receiving.bills.length) throw badRequest(`Supplier bill ${receiving.bills.map((b) => b.number).join(', ')} names ${receiving.number} — cancel it first`);
+    await deleteOrRefuse(receiving.number, () =>
+      prisma.receiving.delete({ where: { id: receiving.id, status: { in: ['DRAFT', 'CANCELLED'] } } }),
+    );
+    await deleteAttachmentsOf('receiving', [receiving.id]);
+    await audit(
+      { entityType: 'receiving', entityId: receiving.id, action: 'DELETED', summary: `Deleted ${receiving.status === 'CANCELLED' ? 'cancelled' : 'draft'} ${receiving.number}` },
+      req,
+    );
+    res.json({ ok: true });
   }),
 );
 

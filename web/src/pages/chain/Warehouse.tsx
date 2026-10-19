@@ -142,6 +142,7 @@ export function Receivings() {
 
 export function ReceivingDetail() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const { can } = useAuth();
   const toast = useToast();
   const confirm = useConfirm();
@@ -218,6 +219,11 @@ export function ReceivingDetail() {
     await api.post(`/receivings/${recId}/cancel`, { reason });
     toast('ok', `${String(rec?.number)} cancelled`);
     await load();
+  }
+  async function remove() {
+    await api.del(`/receivings/${recId}`);
+    toast('ok', `${String(rec?.number)} deleted`);
+    navigate('/g-chain/incoming');
   }
 
   const warehouse = rec.warehouse as { name: string } | null;
@@ -333,6 +339,16 @@ export function ReceivingDetail() {
               minReason: 3,
               reasonLabel: 'Why is it cancelled?',
               onConfirm: cancel,
+            },
+          },
+          rec.canDelete === true && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${String(rec.number)}?`,
+              body: `This ${status === 'DRAFT' ? 'draft' : 'cancelled'} incoming report goes for good, with its files. Nothing was received on it. Its number is not reused.`,
+              confirmLabel: 'Delete',
+              onConfirm: remove,
             },
           },
         ]}

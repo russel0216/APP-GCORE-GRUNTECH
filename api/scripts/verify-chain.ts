@@ -4093,7 +4093,7 @@ async function main() {
     // count against what the order can still take, so two reports cannot
     // both receive the last ten.
     console.log('\nIncoming on approval (over HTTP)');
-    const receiverRole = await makeRole('zzchain_receiver', 'ZZ Receiver', ['gchain.receiving.view_all', 'gchain.receiving.create']);
+    const receiverRole = await makeRole('zzchain_receiver', 'ZZ Receiver', ['gchain.receiving.view_all', 'gchain.receiving.create', 'gchain.receiving.delete']);
     const receiver = await mkUser('Verify Receiver', 'receiver@verifyc.local', receiverRole.id);
     await prisma.user.update({ where: { id: receiver.id }, data: { supervisorId: boss.id } });
     // Incoming routes to Back Support, then the Purchasing Manager
@@ -4311,6 +4311,15 @@ async function main() {
     check('a cancelled report gives its quantity back: the last four may be received again', afterCancelIn.status === 201, String(afterCancelIn.status));
     const receivedCancel = await api(receiverToken, 'POST', `/receivings/${firstInId}/cancel`, { reason: `${TAG} too late` });
     check('a received report is not cancelled — the goods are in', receivedCancel.status === 400, String(receivedCancel.status));
+    // A cancelled report posted nothing, so it may be deleted (2026-10-19); a received one may not.
+    const receivedDelete = await api(receiverToken, 'DELETE', `/receivings/${firstInId}`);
+    const cancelledDelete = await api(receiverToken, 'DELETE', `/receivings/${fitsInId}`);
+    const deletedReportAudit = await prisma.auditLog.count({ where: { entityType: 'receiving', entityId: fitsInId, action: 'DELETED' } });
+    check(
+      'a cancelled incoming report is deleted by its receiver, audited; a received one is not',
+      receivedDelete.status === 400 && cancelledDelete.status === 200 && !(await prisma.receiving.findUnique({ where: { id: fitsInId } })) && deletedReportAudit === 1,
+      `${receivedDelete.status} ${cancelledDelete.status} ${deletedReportAudit}`,
+    );
 
     // A supplier's bill is matched to goods RECEIVED, never to a report
     // still waiting for its approval — that one posted nothing.
