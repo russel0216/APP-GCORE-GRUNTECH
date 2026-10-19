@@ -22,9 +22,8 @@ import {
   type Tone,
 } from '../../components/ui';
 import { RecordPaymentModal, paymentLink, useTeams } from './Receivables';
-import { NewClaimModal, CLAIM_TONES } from './Expenses';
-import { todayLocal } from '../../lib/day';
-import { NumberInput } from '../../components/NumberInput';
+import { CLAIM_TONES } from './Expenses';
+import { RequestItemsCard, type RequestItem } from '../../components/RequestLines';
 
 /**
  * Cash advances — money handed to a person BEFORE it is spent.
@@ -115,6 +114,8 @@ export interface Advance {
   daysToLiquidate: number | null;
   liquidation: Liquidation | null;
   liquidations: Liquidation[];
+  /** The breakdown — what the cash buys (2026-10-19); none on an advance from before. */
+  items?: RequestItem[];
   allocations?: {
     id: string;
     amount: number;
@@ -172,7 +173,6 @@ interface AdvancesSummary {
 export function CashAdvances() {
   const { can } = useAuth();
   const navigate = useNavigate();
-  const [filing, setFiling] = useState(false);
   const [paying, setPaying] = useState(false);
   const [reload, setReload] = useState(0);
   const { people } = usePeople('gfin.cash_advances.create');
@@ -310,8 +310,8 @@ export function CashAdvances() {
         actions={
           <>
             {can('gfin.cash_advances.create') && (
-              <button className="btn btn-primary btn-sm" onClick={() => setFiling(true)}>
-                + Cash advance request
+              <button className="btn btn-primary btn-sm" onClick={() => navigate('/g-fin/cash-advances/new')}>
+                + New cash advance
               </button>
             )}
             {can('gfin.ar.create') && (
@@ -323,16 +323,6 @@ export function CashAdvances() {
         }
       />
 
-      {filing && (
-        <NewCashAdvanceModal
-          onClose={() => setFiling(false)}
-          onSaved={(id) => {
-            setFiling(false);
-            setReload((r) => r + 1);
-            navigate(`/g-fin/cash-advances/${id}`);
-          }}
-        />
-      )}
       {paying && (
         <PaymentEntryModal
           onClose={() => setPaying(false)}
@@ -399,167 +389,6 @@ function PaymentEntryModal({ onClose, onSaved }: { onClose: () => void; onSaved:
   );
 }
 
-/**
- * Asking for an advance, or modifying a draft one.
- *
- * Naming a project means naming a budget line: the liquidation that follows
- * charges exactly that line, and it is too late to ask by then.
- */
-export function NewCashAdvanceModal({
-  existing,
-  onClose,
-  onSaved,
-}: {
-  existing?: Advance;
-  onClose: () => void;
-  onSaved: (id: string) => void;
-}) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
-  const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
-  const [form, setForm] = useState({
-    requestDate: existing?.requestDate.slice(0, 10) ?? todayLocal(),
-    neededBy: existing?.neededBy?.slice(0, 10) ?? '',
-    purpose: existing?.purpose ?? '',
-    amount: existing?.amount ?? 0,
-    jobId: existing?.job?.id ?? '',
-    costCategoryId: existing?.costCategory?.id ?? '',
-    notes: existing?.notes ?? '',
-  });
-
-  useEffect(() => {
-    api
-      .get<{ jobs: typeof jobs; categories: typeof categories }>('/expense-claims/chargeable')
-      .then((r) => {
-        setJobs(r.jobs);
-        setCategories(r.categories);
-      })
-      .catch(() => {});
-  }, []);
-
-  async function save(submitNow: boolean) {
-    setBusy(true);
-    setError(null);
-    const body = {
-      requestDate: form.requestDate,
-      neededBy: form.neededBy || null,
-      purpose: form.purpose,
-      amount: form.amount,
-      jobId: form.jobId || null,
-      costCategoryId: form.jobId ? form.costCategoryId || null : null,
-      notes: form.notes || null,
-    };
-    try {
-      const saved = existing
-        ? await api.put<{ id: string }>(`/cash-advances/${existing.id}`, body)
-        : await api.post<{ id: string }>('/cash-advances', body);
-      if (submitNow) await api.post(`/cash-advances/${saved.id}/submit`);
-      toast('ok', submitNow ? 'Submitted for approval' : existing ? 'Saved' : 'Saved as a draft');
-      onSaved(saved.id);
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  const valid = form.purpose.trim().length >= 3 && form.amount > 0 && (!form.jobId || !!form.costCategoryId);
-
-  return (
-    <Modal
-      title={existing ? `Modify cash advance ${existing.number}` : 'New cash advance'}
-      onClose={onClose}
-      footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn" onClick={() => save(false)} disabled={busy || !valid}>
-            {existing ? 'Save' : 'Save draft'}
-          </button>
-          <button className="btn btn-primary" onClick={() => save(true)} disabled={busy || !valid}>
-            {busy ? 'Submitting…' : 'Submit for approval'}
-          </button>
-        </ModalFoot>
-      }
-    >
-      <ErrorBox error={error} />
-
-      <Field label="What is the cash for?" required>
-        <input
-          value={form.purpose}
-          onChange={(e) => setForm({ ...form, purpose: e.target.value })}
-          placeholder="e.g. fuel and tolls for the Batangas commissioning"
-        />
-      </Field>
-
-      <div className="grid grid-2">
-        <Field label="Amount" required>
-          <NumberInput
-            kind="money"
-            step="0.01"
-            min={0}
-            className="fin-amount-input"
-            value={form.amount}
-            onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })}
-          />
-        </Field>
-        <Field label="Needed by" hint="When you need the cash in hand">
-          <input
-            type="date"
-            value={form.neededBy}
-            onChange={(e) => setForm({ ...form, neededBy: e.target.value })}
-          />
-        </Field>
-      </div>
-
-      <div className="grid grid-2">
-        <Field label="Charge to project" hint="Leave empty if it belongs to overheads">
-          <select value={form.jobId} onChange={(e) => setForm({ ...form, jobId: e.target.value })}>
-            <option value="">— none —</option>
-            {jobs.map((j) => (
-              <option key={j.id} value={j.id}>
-                {j.number} — {j.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-        {form.jobId && (
-          <Field label="Budget line" required hint="The liquidation charges exactly this line">
-            <select
-              value={form.costCategoryId}
-              onChange={(e) => setForm({ ...form, costCategoryId: e.target.value })}
-            >
-              <option value="">— choose —</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-        )}
-      </div>
-
-      <Field label="Date of request">
-        <input
-          type="date"
-          value={form.requestDate}
-          onChange={(e) => setForm({ ...form, requestDate: e.target.value })}
-        />
-      </Field>
-
-      <Field label="Notes">
-        <textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-      </Field>
-
-      <p className="fin-note">
-        It goes to your Team Leader, Back Support, Checking (Finance), the Finance Manager and the
-        CEO / President. Once released it is money lent to you: you repay it in instalments, or by
-        salary deduction, until the balance is nil.
-      </p>
-    </Modal>
-  );
-}
-
 // ── One advance ──────────────────────────────────────────────────────────────
 
 export function CashAdvanceDetail() {
@@ -570,7 +399,7 @@ export function CashAdvanceDetail() {
   const [row, setRow] = useState<Advance | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [reload, setReload] = useState(0);
-  const [modal, setModal] = useState<null | 'edit' | 'release' | 'refund' | 'liquidate'>(null);
+  const [modal, setModal] = useState<null | 'release' | 'refund'>(null);
   const confirm = useConfirm();
 
   const load = useCallback(async () => {
@@ -664,7 +493,7 @@ export function CashAdvanceDetail() {
               </button>
             )}
             {canLiquidate && (
-              <button className="btn btn-primary" onClick={() => setModal('liquidate')}>
+              <button className="btn btn-primary" onClick={() => navigate(`/g-fin/expenses/new?advance=${row.id}`)}>
                 Liquidate
               </button>
             )}
@@ -700,7 +529,7 @@ export function CashAdvanceDetail() {
             },
           },
         ]}
-        modify={canModify ? () => setModal('edit') : undefined}
+        modify={canModify ? `/g-fin/cash-advances/${row.id}/edit` : undefined}
         confirm={confirm}
       />
 
@@ -771,6 +600,8 @@ export function CashAdvanceDetail() {
           {row.amountRefunded > 0 && <>; {formatMoney(row.amountRefunded)} of unspent cash came back</>}.
         </div>
       )}
+
+      <RequestItemsCard items={row.items ?? []} total={row.amount} />
 
       <div className="grid grid-2">
         <div className="card">
@@ -890,8 +721,6 @@ export function CashAdvanceDetail() {
         </div>
       </div>
 
-      {modal === 'edit' && <NewCashAdvanceModal existing={row} onClose={() => setModal(null)} onSaved={done} />}
-
       {modal === 'release' && (
         <RecordPaymentModal
           kind="DISBURSEMENT"
@@ -912,20 +741,6 @@ export function CashAdvanceDetail() {
         />
       )}
 
-      {modal === 'liquidate' && (
-        <NewClaimModal
-          advance={{
-            id: row.id,
-            number: row.number,
-            amountReleased: row.amountReleased,
-            purpose: row.purpose,
-            job: row.job,
-            costCategory: row.costCategory,
-          }}
-          onClose={() => setModal(null)}
-          onCreated={(claimId) => navigate(`/g-fin/expenses/${claimId}`)}
-        />
-      )}
     </div>
   );
 }

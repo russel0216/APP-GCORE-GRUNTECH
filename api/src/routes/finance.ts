@@ -35,6 +35,7 @@ import {
   submitForApproval,
   onApprovalSettled,
   onApprovalReopened,
+  routeBrief,
   approvalSlots, preparedAt,
   slotSignatories,
   contactOf,
@@ -2736,6 +2737,25 @@ export function presentClaim(row: ClaimRow) {
  * TURNED_OVER jobs are kept on purpose — a late receipt against a turned-over
  * job is legitimate, and refusing it would push the cost to overheads.
  */
+/**
+ * "Submit for approval sends it to …" — the claim page's preview, at the total
+ * on the page, in the claimant's name (a draft's, else the caller's). Above
+ * `/:id`.
+ */
+expenseRoutes.get(
+  '/route',
+  requireAny('gfin.expenses.create', 'gfin.expenses.edit_own', 'gfin.expenses.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const amount = Number(req.query.amount ?? 0);
+    if (!Number.isFinite(amount) || amount < 0) throw badRequest('The amount is not a number');
+    const claimId = req.query.claimId ? String(req.query.claimId) : null;
+    const row = claimId ? await prisma.expenseClaim.findUnique({ where: { id: claimId }, select: { claimedById: true } }) : null;
+    if (claimId && !row) throw notFound('Claim not found');
+    res.json({ route: await routeBrief('expense', amount, row?.claimedById ?? me.id, null) });
+  }),
+);
+
 expenseRoutes.get(
   '/chargeable',
   requireAny('gfin.expenses.create', 'gfin.cash_advances.create'),

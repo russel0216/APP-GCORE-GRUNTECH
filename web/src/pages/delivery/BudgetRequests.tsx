@@ -12,7 +12,8 @@ import { useBackLink } from '../../components/Navigation';
 import { ApprovalStepper, DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { ErrorBox, Loading, StatusBadge, formatDate, formatMoney, humanise, useToast, type Tone } from '../../components/ui';
 import { RecordPaymentModal, paymentLink } from '../finance/Receivables';
-import { NewClaimModal, CLAIM_TONES } from '../finance/Expenses';
+import { CLAIM_TONES } from '../finance/Expenses';
+import { RequestItemsCard, type RequestItem } from '../../components/RequestLines';
 
 /**
  * Budget requests — PROJECT CASH (2026-10-07, the owner's call).
@@ -89,7 +90,7 @@ export interface BudgetRequest {
   liquidation: Liquidation | null;
   liquidations: Liquidation[];
   /** The breakdown of what the cash buys; the amount is their sum. */
-  items?: { id: string; name: string; description: string | null; quantity: number; unit: string; unitCost: number; amount: number }[];
+  items?: RequestItem[];
   canEdit?: boolean;
   approvalRoute?: { name: string; steps: { name: string; approvers: { id: string; name: string }[] }[] } | null;
   allocations?: {
@@ -599,7 +600,7 @@ export function BudgetRequestDetail() {
   const [row, setRow] = useState<BudgetRequest | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [reload, setReload] = useState(0);
-  const [modal, setModal] = useState<null | 'release' | 'refund' | 'liquidate'>(null);
+  const [modal, setModal] = useState<null | 'release' | 'refund'>(null);
   // `?act=liquidate|refund` — Budget Liquidations' "Actual entry" and
   // "Process" land here with the form open, read once and dropped.
   const [params, setParams] = useSearchParams();
@@ -632,11 +633,13 @@ export function BudgetRequestDetail() {
 
   useEffect(() => {
     if (!row || !act) return;
-    if (act === 'liquidate' || act === 'refund') setModal(act);
+    if (act === 'refund') setModal(act);
+    // The liquidation is a page of its own now (2026-10-19).
+    if (act === 'liquidate') navigate(`/g-fin/expenses/new?budgetRequest=${row.id}`);
     const next = new URLSearchParams(params);
     next.delete('act');
     setParams(next, { replace: true });
-  }, [row, act, params, setParams]);
+  }, [row, act, params, setParams, navigate]);
 
   if (error && !row) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
@@ -717,7 +720,7 @@ export function BudgetRequestDetail() {
               </button>
             )}
             {canLiquidate && (
-              <button className="btn btn-primary" onClick={() => setModal('liquidate')}>
+              <button className="btn btn-primary" onClick={() => navigate(`/g-fin/expenses/new?budgetRequest=${row.id}`)}>
                 Liquidate
               </button>
             )}
@@ -823,40 +826,7 @@ export function BudgetRequestDetail() {
       )}
       {row.status === 'CANCELLED' && row.cancelReason && <div className="alert warn">Cancelled — {row.cancelReason}</div>}
 
-      {row.items && row.items.length > 0 && (
-        <div className="card">
-          <h3 className="card-title">Breakdown</h3>
-          <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Item and description</th>
-                  <th className="right">Qty</th>
-                  <th>Unit</th>
-                  <th className="right">Unit cost</th>
-                  <th className="right">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {row.items.map((i, n) => (
-                  <tr key={i.id}>
-                    <td className="mono">{n + 1}</td>
-                    <td>
-                      <strong>{i.name}</strong>
-                      {i.description && <div className="faint">{i.description}</div>}
-                    </td>
-                    <td className="right mono">{i.quantity.toLocaleString('en-PH', { maximumFractionDigits: 3 })}</td>
-                    <td>{i.unit}</td>
-                    <td className="right mono">{formatMoney(i.unitCost)}</td>
-                    <td className="right mono">{formatMoney(i.amount)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      <RequestItemsCard items={row.items ?? []} total={row.amount} />
 
       <div className="grid grid-2">
         <div className="card">
@@ -981,20 +951,6 @@ export function BudgetRequestDetail() {
         />
       )}
 
-      {modal === 'liquidate' && (
-        <NewClaimModal
-          budgetRequest={{
-            id: row.id,
-            number: row.number,
-            amountReleased: row.amountReleased,
-            purpose: row.reason,
-            job: { id: row.job.id, number: row.job.number, name: row.job.name },
-            costCategory: row.costCategory,
-          }}
-          onClose={() => setModal(null)}
-          onCreated={(claimId) => navigate(`/g-fin/expenses/${claimId}`)}
-        />
-      )}
     </div>
   );
 }

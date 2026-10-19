@@ -3,7 +3,17 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, formatMoney, useToast } from '../../components/ui';
-import { NumberInput } from '../../components/NumberInput';
+import {
+  RequestLinesCard,
+  blankRequestLine,
+  isBlankLine,
+  linesFromItems,
+  linesPayload,
+  linesProblems,
+  linesSnapshot,
+  linesTotal,
+  type RequestLine,
+} from '../../components/RequestLines';
 import { ApprovalStepper, allHeld, previewSteps } from '../../components/ApprovalStepper';
 import { Meter } from '../../components/charts';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
@@ -33,15 +43,6 @@ interface Budget {
   total: { budgeted: number; committed: number; incurred: number; available: number };
 }
 
-interface Line {
-  key: string;
-  name: string;
-  description: string;
-  quantity: string;
-  unit: string;
-  unitCost: string;
-}
-
 interface Header {
   jobId: string;
   costCategoryId: string;
@@ -50,24 +51,7 @@ interface Header {
   notes: string;
 }
 
-let nextKey = 0;
-const newKey = () => `b${++nextKey}`;
-const blankLine = (): Line => ({ key: newKey(), name: '', description: '', quantity: '1', unit: 'pcs', unitCost: '' });
-/**
- * A line's amount, exact: quantity in thousandths × unit cost in centavos ÷
- * 1000, half away from zero — the server's `requestLineAmount()`.
- */
-export function requestLineAmount(quantity: number, unitCost: number): number {
-  const milli = BigInt(Math.round(quantity * 1000));
-  const centavos = BigInt(Math.round(unitCost * 100));
-  const product = milli * centavos;
-  const sign = product < 0n ? -1n : 1n;
-  return Number(((product * sign + 500n) / 1000n) * sign) / 100;
-}
-const amountOf = (l: Line) => requestLineAmount(Number(l.quantity) || 0, Number(l.unitCost) || 0);
-const isBlank = (l: Line) => !l.name.trim() && !l.description.trim() && !l.unitCost;
-const snapshot = (h: Header, lines: Line[]) =>
-  JSON.stringify([h, lines.filter((l) => !isBlank(l)).map(({ key: _key, ...rest }) => rest)]);
+const snapshot = (h: Header, lines: RequestLine[]) => JSON.stringify([h, linesSnapshot(lines)]);
 
 export function BudgetRequestEditor() {
   const { id } = useParams<{ id: string }>();
@@ -87,7 +71,7 @@ export function BudgetRequestEditor() {
   const [busy, setBusy] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const [header, setHeader] = useState<Header>({ jobId: presetJobId ?? '', costCategoryId: '', reason: '', neededBy: '', notes: '' });
-  const [lines, setLines] = useState<Line[]>(() => [blankLine()]);
+  const [lines, setLines] = useState<RequestLine[]>(() => [blankRequestLine()]);
   const [saved, setSaved] = useState<string | null>(null);
 
   useEffect(() => {
@@ -107,17 +91,8 @@ export function BudgetRequestEditor() {
             neededBy: row.neededBy?.slice(0, 10) ?? '',
             notes: row.notes ?? '',
           };
-          ls = row.items?.length
-            ? row.items.map((i) => ({
-                key: newKey(),
-                name: i.name,
-                description: i.description ?? '',
-                quantity: String(i.quantity),
-                unit: i.unit,
-                unitCost: String(i.unitCost),
-              }))
-            : // A request raised before the breakdown: its amount as one line.
-              [{ ...blankLine(), name: row.reason, unitCost: String(row.amount) }];
+          // A request raised before the breakdown: its amount as one line.
+          ls = linesFromItems(row.items, row.reason, row.amount);
           setHeader(h);
           setLines(ls);
         } else if (!presetJobId) {
@@ -152,8 +127,8 @@ export function BudgetRequestEditor() {
     };
   }, [header.jobId]);
 
-  const sent = lines.filter((l) => !isBlank(l));
-  const total = useMemo(() => Math.round(sent.reduce((s, l) => s + amountOf(l) * 100, 0)) / 100, [sent]);
+  const sent = lines.filter((l) => !isBlankLine(l));
+  const total = useMemo(() => linesTotal(lines), [lines]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -174,29 +149,11 @@ export function BudgetRequestEditor() {
     existing ? existing.number : project ? `${project.number} Budget Requests` : null,
   );
 
-  const setLine = (key: string, patch: Partial<Line>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
-  const removeLine = (key: string) =>
-    setLines((ls) => {
-      const rest = ls.filter((l) => l.key !== key);
-      return rest.length ? rest : [blankLine()];
-    });
-
-  const lineProblem = (l: Line): string | null => {
-    if (isBlank(l)) return null;
-    if (!l.name.trim()) return 'Say what the line buys';
-    if (!(Number(l.quantity) > 0)) return 'Quantity must be more than zero';
-    return null;
-  };
   const problems: string[] = [];
   if (!header.jobId) problems.push('Choose the project');
   if (!header.costCategoryId) problems.push('Choose the budget line');
   if (header.reason.trim().length < 3) problems.push('Say what the cash is for');
-  if (!sent.length) problems.push('Add at least one line');
-  else if (!(total > 0)) problems.push('The lines add up to nothing — give them a unit cost');
-  sent.forEach((l, i) => {
-    const p = lineProblem(l);
-    if (p) problems.push(`Line ${i + 1}: ${p}`);
-  });
+  problems.push(...linesProblems(lines));
 
   async function save(submit: boolean) {
     setAttempted(true);
@@ -209,13 +166,7 @@ export function BudgetRequestEditor() {
       reason: header.reason.trim(),
       neededBy: header.neededBy || null,
       notes: header.notes.trim() || null,
-      items: sent.map((l) => ({
-        name: l.name.trim(),
-        description: l.description.trim() || null,
-        quantity: Number(l.quantity),
-        unit: l.unit.trim() || 'pcs',
-        unitCost: Number(l.unitCost) || 0,
-      })),
+      items: linesPayload(lines),
     };
     try {
       const savedId = existing
@@ -362,96 +313,13 @@ export function BudgetRequestEditor() {
             </div>
           </section>
 
-          <section className="card" aria-labelledby="br-lines">
-            <div className="card-head">
-              <h2 id="br-lines" className="card-title">Breakdown</h2>
-              <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls.filter((l) => !isBlank(l)), blankLine()])}>
-                + Add line
-              </button>
-            </div>
-            <div className="table-wrap qe-table-wrap">
-              <table className="data prq-lines">
-                <colgroup>
-                  <col className="prq-col-no" />
-                  <col />
-                  <col className="prq-col-unit" />
-                  <col className="prq-col-qty" />
-                  <col className="prq-col-cost" />
-                  <col className="prq-col-amount" />
-                  <col className="prq-col-remove" />
-                </colgroup>
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Item and description</th>
-                    <th>Unit</th>
-                    <th className="right">Qty</th>
-                    <th className="right">Unit cost</th>
-                    <th className="right">Amount</th>
-                    <th aria-label="Remove" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {lines.map((l, i) => {
-                    const problem = attempted ? lineProblem(l) : null;
-                    return (
-                      <tr key={l.key}>
-                        <td className="mono">{i + 1}</td>
-                        <td>
-                          <input
-                            className="prq-name"
-                            aria-label={`Line ${i + 1} item`}
-                            aria-invalid={problem === 'Say what the line buys' || undefined}
-                            value={l.name}
-                            maxLength={300}
-                            placeholder="What it buys"
-                            onChange={(e) => setLine(l.key, { name: e.target.value })}
-                          />
-                          <input
-                            className="prq-desc"
-                            aria-label={`Line ${i + 1} description`}
-                            value={l.description}
-                            maxLength={2000}
-                            placeholder="Description (optional)"
-                            onChange={(e) => setLine(l.key, { description: e.target.value })}
-                          />
-                          {problem && <div className="field-error">{problem}</div>}
-                        </td>
-                        <td>
-                          <input aria-label={`Line ${i + 1} unit`} value={l.unit} maxLength={40} onChange={(e) => setLine(l.key, { unit: e.target.value })} />
-                        </td>
-                        <td>
-                          <NumberInput
-                            kind="quantity"
-                            aria-label={`Line ${i + 1} quantity`}
-                            aria-invalid={problem === 'Quantity must be more than zero' || undefined}
-                            value={l.quantity}
-                            onChange={(e) => setLine(l.key, { quantity: e.target.value })}
-                          />
-                        </td>
-                        <td>
-                          <NumberInput
-                            kind="money"
-                            aria-label={`Line ${i + 1} unit cost`}
-                            value={l.unitCost}
-                            min={0}
-                            onChange={(e) => setLine(l.key, { unitCost: e.target.value })}
-                          />
-                        </td>
-                        <td className="right mono">{formatMoney(amountOf(l))}</td>
-                        <td>
-                          <button type="button" className="btn btn-sm btn-icon" aria-label={`Remove line ${i + 1}`} title="Remove" onClick={() => removeLine(l.key)}>
-                            ✕
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <p className="prq-hint">The amount requested is the sum of the lines. Receipts for what is actually spent are filed in the liquidation.</p>
-          </section>
+          <RequestLinesCard
+            id="br-lines"
+            lines={lines}
+            onChange={setLines}
+            attempted={attempted}
+            hint="The amount requested is the sum of the lines. Receipts for what is actually spent are filed in the liquidation."
+          />
 
           <section className="card" aria-labelledby="br-summary">
             <h2 id="br-summary" className="card-title">Summary</h2>

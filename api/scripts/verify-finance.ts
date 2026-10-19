@@ -1931,6 +1931,41 @@ async function main() {
         allowed.status === 201 && /^GT-CA-/.test(String(allowed.body.number)),
         `${allowed.status} ${JSON.stringify(allowed.body).slice(0, 140)}`,
       );
+      // The advance as a page (2026-10-19): a breakdown whose lines make the
+      // amount, exact to the centavo (2.5 × 33.33 is 83.33, never 83.32), a
+      // Modify that replaces them, a paper that prints them, and the route
+      // previews the advance and the claim pages read.
+      const lined = await eng('POST', '/cash-advances', {
+        purpose: `${TAG} lined trip`,
+        items: [
+          { name: 'Fuel', quantity: 2.5, unit: 'L', unitCost: 33.33 },
+          { name: 'Tolls', description: 'SLEX both ways', quantity: 2, unitCost: 68.25 },
+        ],
+      });
+      const relined = lined.status === 201
+        ? await eng('PUT', `/cash-advances/${lined.body.id}`, { purpose: `${TAG} lined trip`, items: [{ name: 'Fuel', quantity: 4, unit: 'L', unitCost: 45.5 }] })
+        : lined;
+      const linedPdf = lined.status === 201 ? await eng('GET', `/cash-advances/${lined.body.id}/pdf`) : lined;
+      const linedText = linedPdf.bytes ? pdfText(linedPdf.bytes).replace(/\s+/g, ' ') : '';
+      const caRoute = await eng('GET', '/cash-advances/route?amount=182');
+      const claimRoute = await eng('GET', '/expense-claims/route?amount=182');
+      check(
+        'a cash advance is the sum of its breakdown, replaced on Modify and printed; the advance and claim pages preview their routes',
+        lined.status === 201 &&
+          lined.body.amount === 219.83 &&
+          lined.body.items?.length === 2 &&
+          relined.status === 200 &&
+          relined.body.amount === 182 &&
+          relined.body.items?.length === 1 &&
+          linedText.includes('BREAKDOWN') &&
+          caRoute.status === 200 &&
+          Array.isArray(caRoute.body.route?.steps) &&
+          claimRoute.status === 200 &&
+          Array.isArray(claimRoute.body.route?.steps),
+        `${lined.status} ${lined.body.amount} · ${relined.status} ${relined.body.amount} · ${linedText.includes('BREAKDOWN')} · ${caRoute.status} ${claimRoute.status}`,
+      );
+      if (lined.status === 201) await eng('POST', `/cash-advances/${lined.body.id}/cancel`, { reason: 'verify' });
+
       // A draft prints the route submitting it WOULD take (rule 6): every step
       // by its own name, open, with "Pending" under who may sign it — the
       // engineer's supervisor by name — and no receipt that has not happened.

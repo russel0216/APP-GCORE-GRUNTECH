@@ -12,10 +12,7 @@ import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper
 import { Attachments } from '../../components/Attachments';
 import {
   ErrorBox,
-  Field,
   Loading,
-  Modal,
-  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -24,8 +21,6 @@ import {
   type Tone,
 } from '../../components/ui';
 import { RecordPaymentModal, paymentLink, useTeams } from './Receivables';
-import { todayLocal } from '../../lib/day';
-import { NumberInput } from '../../components/NumberInput';
 
 /**
  * Expense claims — money someone spent out of their own pocket — and
@@ -80,7 +75,7 @@ function liquidationSource(row: { advance: ClaimAdvance | null; budgetRequest: C
   return null;
 }
 
-interface Claim {
+export interface Claim {
   id: string;
   number: string;
   status: string;
@@ -157,8 +152,6 @@ const STAGE_TONES: Record<string, Tone> = {
 export function Expenses() {
   const { can } = useAuth();
   const navigate = useNavigate();
-  const [filing, setFiling] = useState(false);
-  const [reload, setReload] = useState(0);
   const { people } = usePeople('gfin.expenses.create');
   const teams = useTeams();
 
@@ -248,7 +241,6 @@ export function Expenses() {
         rowKey={(r) => r.id}
         scoped
         selectable
-        reloadToken={reload}
         searchPlaceholder="Search number, purpose, requester, advance, budget request…"
         emptyTitle="No reimbursements yet"
         emptyHint="Every line needs a receipt number before a claim can be submitted."
@@ -275,426 +267,14 @@ export function Expenses() {
         }}
         actions={
           can('gfin.expenses.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => setFiling(true)}>
-              + Add reimbursement
+            <button className="btn btn-primary btn-sm" onClick={() => navigate('/g-fin/expenses/new')}>
+              + New reimbursement
             </button>
           ) : null
         }
       />
 
-      {filing && (
-        <NewClaimModal
-          onClose={() => setFiling(false)}
-          onCreated={(id) => {
-            setFiling(false);
-            setReload((r) => r + 1);
-            navigate(`/g-fin/expenses/${id}`);
-          }}
-        />
-      )}
     </div>
-  );
-}
-
-/** The advance a liquidation is filed against — what the modal needs to know. */
-export interface LiquidatingAdvance {
-  id: string;
-  number: string;
-  amountReleased: number;
-  purpose: string;
-  job: { id: string; number: string; name: string } | null;
-  costCategory: { id: string; name: string } | null;
-}
-
-/**
- * Filing a claim, or — with `advance` or `budgetRequest` — liquidating a cash
- * advance or a budget request (project cash). With `existing`, modifying a
- * draft one (`PUT /expense-claims/:id`): the same form, holding the claim.
- *
- * A liquidation takes its project and budget line from what it accounts for
- * and cannot change them: the cost lands where it was approved to land. A
- * modified liquidation keeps what it accounts for — the server refuses
- * anything else.
- */
-export function NewClaimModal({
-  advance: advanceProp,
-  budgetRequest,
-  existing,
-  canSubmit = true,
-  onClose,
-  onCreated,
-}: {
-  advance?: LiquidatingAdvance;
-  budgetRequest?: LiquidatingAdvance;
-  /** A draft claim to modify. */
-  existing?: Claim;
-  /** Only the claimant (or a super admin) submits; finance modifying somebody's draft only saves. */
-  canSubmit?: boolean;
-  onClose: () => void;
-  onCreated: (id: string) => void;
-}) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
-  const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
-  // What the receipts account for, whichever it is; the form reads one thing.
-  // A draft liquidation being modified names it on the claim itself.
-  const existingSource = existing ? existing.advance ?? existing.budgetRequest : null;
-  const advance: LiquidatingAdvance | undefined =
-    advanceProp ??
-    budgetRequest ??
-    (existing && existingSource
-      ? {
-          id: existingSource.id,
-          number: existingSource.number,
-          amountReleased: existingSource.amountReleased,
-          purpose: existing.purpose,
-          job: existing.job,
-          costCategory: existing.costCategory,
-        }
-      : undefined);
-  const liquidating = !!advance;
-  const cashWord = (existing ? !!existing.advance : !!advanceProp) ? 'advance' : 'budget request';
-
-  const today = todayLocal();
-  const [form, setForm] = useState({
-    claimDate: existing?.claimDate.slice(0, 10) ?? today,
-    purpose: existing?.purpose ?? (advance ? `Liquidation of ${advance.number} — ${advance.purpose}` : ''),
-    jobId: existing?.job?.id ?? '',
-    costCategoryId: existing?.costCategory?.id ?? '',
-  });
-  const [lines, setLines] = useState(
-    existing
-      ? existing.lines.map((l) => ({
-          spentOn: l.spentOn.slice(0, 10),
-          description: l.description,
-          category: l.category ?? '',
-          receiptNo: l.receiptNo ?? '',
-          vendor: l.vendor ?? '',
-          amount: l.amount,
-        }))
-      : [{ spentOn: today, description: '', category: '', receiptNo: '', vendor: '', amount: 0 }],
-  );
-
-  useEffect(() => {
-    if (liquidating) return;
-    // Not /jobs/lookup: naming the project you spent money on is not the same
-    // right as project-management access, and the filing roles hold none.
-    api
-      .get<{ jobs: typeof jobs; categories: typeof categories }>('/expense-claims/chargeable')
-      .then((r) => {
-        setJobs(r.jobs);
-        setCategories(r.categories);
-      })
-      .catch(() => {});
-  }, [liquidating]);
-
-  // Receipts and supporting papers, picked here and filed with the save — so
-  // the checker sees them from the first step (the owner's call: "at the
-  // bottom can have an attachment for early approval or checking").
-  const [files, setFiles] = useState<File[]>([]);
-  const total = lines.reduce((s, l) => s + (l.amount || 0), 0);
-  const missingReceipts = lines.filter((l) => l.description.trim() && !l.receiptNo.trim()).length;
-  const difference = advance ? Math.round((total - advance.amountReleased) * 100) / 100 : 0;
-
-  async function create(submitNow: boolean) {
-    setBusy(true);
-    setError(null);
-    const body = {
-      claimDate: form.claimDate,
-      purpose: form.purpose,
-      advanceId: existing ? existing.advance?.id ?? null : advanceProp?.id ?? null,
-      budgetRequestId: existing ? existing.budgetRequest?.id ?? null : budgetRequest?.id ?? null,
-      jobId: advance ? advance.job?.id ?? null : form.jobId || null,
-      costCategoryId: advance ? advance.costCategory?.id ?? null : form.jobId ? form.costCategoryId || null : null,
-      lines: lines
-        .filter((l) => l.description.trim() && l.amount > 0)
-        .map((l) => ({
-          spentOn: l.spentOn,
-          description: l.description,
-          category: l.category || null,
-          receiptNo: l.receiptNo || null,
-          vendor: l.vendor.trim() || null,
-          amount: l.amount,
-        })),
-    };
-    try {
-      const saved = existing
-        ? await api.put<{ id: string }>(`/expense-claims/${existing.id}`, body)
-        : await api.post<{ id: string }>('/expense-claims', body);
-      if (files.length) {
-        const form = new FormData();
-        for (const f of files) form.append('files', f);
-        try {
-          await api.post(`/attachments/expense_claim/${saved.id}`, form);
-        } catch {
-          toast('error', 'Saved, but the attachments could not be filed — add them on the claim');
-        }
-      }
-      if (submitNow) await api.post(`/expense-claims/${saved.id}/submit`);
-      toast('ok', submitNow ? 'Submitted for approval' : existing ? 'Saved' : 'Saved as a draft');
-      onCreated(saved.id);
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  const valid = form.purpose.trim().length >= 3 && total > 0 && (advance || !form.jobId || !!form.costCategoryId);
-
-  return (
-    <Modal
-      title={
-        existing
-          ? `Modify ${liquidating ? 'liquidation' : 'expense claim'} ${existing.number}`
-          : advance
-            ? `Liquidate ${advance.number}`
-            : 'New reimbursement'
-      }
-      onClose={onClose}
-      wide
-      footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
-          <button
-            className={canSubmit ? 'btn' : 'btn btn-primary'}
-            onClick={() => create(false)}
-            disabled={busy || !valid}
-          >
-            {existing ? 'Save' : 'Save draft'}
-          </button>
-          {canSubmit && (
-            <button
-              className="btn btn-primary"
-              onClick={() => create(true)}
-              disabled={busy || !valid || missingReceipts > 0}
-            >
-              {busy ? 'Submitting…' : 'Submit for approval'}
-            </button>
-          )}
-        </ModalFoot>
-      }
-    >
-      <ErrorBox error={error} />
-
-      {advance && (
-        <div className="alert info">
-          {formatMoney(advance.amountReleased)} was released to you. List every receipt against it.
-          It is charged to{' '}
-          {advance.job ? (
-            <>
-              <span className="mono">{advance.job.number}</span> ·{' '}
-              {advance.costCategory?.name ?? 'no budget line'}
-            </>
-          ) : (
-            'overheads'
-          )}{' '}
-          — the project the {cashWord} was approved for.
-        </div>
-      )}
-
-      <div className="grid grid-2">
-        <Field label={advance ? 'Date of liquidation' : 'Date of claim'}>
-          <input
-            type="date"
-            value={form.claimDate}
-            onChange={(e) => setForm({ ...form, claimDate: e.target.value })}
-          />
-        </Field>
-        <Field label="What was it for?">
-          <input
-            value={form.purpose}
-            onChange={(e) => setForm({ ...form, purpose: e.target.value })}
-            placeholder="e.g. site visit to the Cebu plant"
-          />
-        </Field>
-      </div>
-
-      {!advance && (
-        <div className="grid grid-2">
-          <Field label="Charge to project" hint="Leave empty if it belongs to overheads">
-            <select value={form.jobId} onChange={(e) => setForm({ ...form, jobId: e.target.value })}>
-              <option value="">— none —</option>
-              {jobs.map((j) => (
-                <option key={j.id} value={j.id}>
-                  {j.number} — {j.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          {form.jobId && (
-            <Field label="Budget line" hint="Which part of the project's budget this spends">
-              <select
-                value={form.costCategoryId}
-                onChange={(e) => setForm({ ...form, costCategoryId: e.target.value })}
-              >
-                <option value="">— choose —</option>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          )}
-        </div>
-      )}
-
-      <h4 className="fin-section-title">What you spent</h4>
-      <div className="table-wrap">
-        <table className="data">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Company / receipt</th>
-              <th>Item / purpose</th>
-              <th className="right">Amount</th>
-              <th className="fin-col-tight" />
-            </tr>
-          </thead>
-          <tbody>
-            {lines.map((l, i) => {
-              const update = (patch: Partial<typeof l>) => {
-                const next = [...lines];
-                next[i] = { ...l, ...patch };
-                setLines(next);
-              };
-              return (
-                <tr key={i}>
-                  <td>
-                    <input
-                      type="date"
-                      aria-label={`Line ${i + 1} date`}
-                      value={l.spentOn}
-                      onChange={(e) => update({ spentOn: e.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <div className="fin-line-stack">
-                      <input
-                        aria-label={`Line ${i + 1} company`}
-                        value={l.vendor}
-                        onChange={(e) => update({ vendor: e.target.value })}
-                        placeholder="Company / store"
-                      />
-                      <input
-                        aria-label={`Line ${i + 1} receipt number`}
-                        value={l.receiptNo}
-                        onChange={(e) => update({ receiptNo: e.target.value })}
-                        placeholder="OR / SI no."
-                      />
-                    </div>
-                  </td>
-                  <td>
-                    <div className="fin-line-stack">
-                      <input
-                        aria-label={`Line ${i + 1} item or purpose`}
-                        value={l.description}
-                        onChange={(e) => update({ description: e.target.value })}
-                        placeholder="Item bought, or what it was for"
-                      />
-                      <input
-                        aria-label={`Line ${i + 1} kind`}
-                        value={l.category}
-                        onChange={(e) => update({ category: e.target.value })}
-                        placeholder="Kind: fare, meals, materials…"
-                      />
-                    </div>
-                  </td>
-                  <td>
-                    <NumberInput
-                      kind="money"
-                      step="0.01"
-                      min={0}
-                      aria-label={`Line ${i + 1} amount`}
-                      className="fin-amount-input"
-                      value={l.amount}
-                      onChange={(e) => update({ amount: Number(e.target.value) })}
-                    />
-                  </td>
-                  <td className="right">
-                    {lines.length > 1 && (
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        aria-label={`Remove line ${i + 1}`}
-                        onClick={() => setLines(lines.filter((_, j) => j !== i))}
-                      >
-                        Remove
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-          <tfoot>
-            <tr>
-              <th colSpan={3} className="right">
-                Total
-              </th>
-              <th className="right mono">{formatMoney(total)}</th>
-              <th />
-            </tr>
-          </tfoot>
-        </table>
-      </div>
-      <button
-        className="btn btn-sm fin-gap-top-sm"
-        onClick={() =>
-          setLines([...lines, { spentOn: today, description: '', category: '', receiptNo: '', vendor: '', amount: 0 }])
-        }
-      >
-        + Add line
-      </button>
-
-      {advance && total > 0 && (
-        <p className="fin-note">
-          {difference > 0.005
-            ? `You spent ${formatMoney(difference)} more than the ${cashWord} — once approved, finance reimburses the excess.`
-            : difference < -0.005
-              ? `${formatMoney(-difference)} of the ${cashWord} was not spent — once approved, return it to finance.`
-              : `The receipts match the ${cashWord} exactly — nothing will be owed either way.`}
-        </p>
-      )}
-
-      <h4 className="fin-section-title">Attachments</h4>
-      <p className="faint fin-flush">
-        The receipts and anything that supports them — photos or scans, PDF or images. They go with the{' '}
-        {liquidating ? 'liquidation' : 'claim'}, so whoever checks it sees them from the first step.
-        {existing ? ' Files already on it stay; add more here or on its page.' : ''}
-      </p>
-      <input
-        type="file"
-        multiple
-        accept="image/*,application/pdf"
-        aria-label="Attach receipts"
-        onChange={(e) => {
-          const picked = Array.from(e.target.files ?? []);
-          setFiles((cur) => [...cur, ...picked]);
-          e.target.value = '';
-        }}
-      />
-      {files.length > 0 && (
-        <ul className="fin-files">
-          {files.map((f, i) => (
-            <li key={`${f.name}-${i}`}>
-              <span>{f.name}</span>
-              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setFiles(files.filter((_, j) => j !== i))}>
-                Remove
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {missingReceipts > 0 && (
-        <div className="alert warn fin-gap-top fin-flush">
-          {missingReceipts} line{missingReceipts === 1 ? ' has' : 's have'} no receipt number. You
-          can save this as a draft, but it cannot be submitted until every peso has an OR against
-          it.
-        </div>
-      )}
-    </Modal>
   );
 }
 
@@ -708,7 +288,6 @@ export function ExpenseClaimDetail() {
   const [row, setRow] = useState<Claim | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [paying, setPaying] = useState(false);
-  const [editing, setEditing] = useState(false);
   const [reload, setReload] = useState(0);
   const confirm = useConfirm();
 
@@ -766,7 +345,7 @@ export function ExpenseClaimDetail() {
     toast('ok', 'Back to a draft — the approvers were told');
     setReload((r) => r + 1);
     await load();
-    setEditing(true);
+    navigate(`/g-fin/expenses/${id}/edit`);
   }
 
   const open = row.status === 'DRAFT' || row.status === 'PENDING_APPROVAL';
@@ -864,7 +443,7 @@ export function ExpenseClaimDetail() {
               },
             },
         ]}
-        modify={canModify ? () => setEditing(true) : undefined}
+        modify={canModify ? `/g-fin/expenses/${row.id}/edit` : undefined}
         confirm={confirm}
       />
 
@@ -1032,19 +611,6 @@ export function ExpenseClaimDetail() {
         // Receipts change with the claim: on a draft, by whoever may modify it.
         canEdit={canModify}
       />
-
-      {editing && (
-        <NewClaimModal
-          existing={row}
-          canSubmit={mine}
-          onClose={() => setEditing(false)}
-          onCreated={() => {
-            setEditing(false);
-            setReload((r) => r + 1);
-            load();
-          }}
-        />
-      )}
 
       {paying && (
         <RecordPaymentModal

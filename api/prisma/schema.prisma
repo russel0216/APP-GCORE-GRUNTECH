@@ -4574,6 +4574,8 @@ model CashAdvance {
   liquidations         ExpenseClaim[]
   commissionDeductions CommissionShare[]
   allocations          PaymentAllocation[]
+  /// The breakdown of what the cash buys (2026-10-19); the amount is their sum.
+  items                CashAdvanceItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -5601,4 +5603,20 @@ model CommissionShare {
 
   @@index([requestId])
   @@index([userId])
+}
+
+/// One line of a cash advance's breakdown — what the cash buys.
+model CashAdvanceItem {
+  id          String      @id @default(cuid())
+  advanceId   String
+  advance     CashAdvance @relation(fields: [advanceId], references: [id], onDelete: Cascade)
+  sortOrder   Int         @default(0)
+  name        String
+  description String?
+  quantity    Decimal     @db.Decimal(18, 3)
+  unit        String      @default("pcs")
+  unitCost    Decimal     @db.Decimal(18, 2)
+  amount      Decimal     @db.Decimal(18, 2)
+
+  @@index([advanceId])
 }

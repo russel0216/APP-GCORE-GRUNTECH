@@ -25,11 +25,13 @@ import {
   cancelOpenRequest,
   openSteps,
   stageWords,
+  routeBrief,
   type ApprovalOutcome,
 } from '../shared/approvals';
+import { requestItemSchema, requestMoney } from '../shared/requestLines';
 import { TEAM_OR_DEPT_SELECT, teamOrDepartment, userTeamWhere } from '../shared/team';
 import { registerSearch } from '../shared/search';
-import { renderDocument, companyCurrency, formatAmount, formatMoney, formatShortDate, statusLabel, type PdfSection } from '../shared/pdf';
+import { renderDocument, companyCurrency, formatAmount, formatMoney, formatQuantity, formatShortDate, statusLabel, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween, financeSettings } from '../shared/finance';
 import { claimInclude, presentClaim, cashRequestSections, cashRequestSignatories } from './finance';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
@@ -60,6 +62,8 @@ const advanceInclude = {
     select: { id: true, number: true, status: true, total: true, amountPaid: true, claimDate: true, approvedAt: true },
     orderBy: { createdAt: 'desc' },
   },
+  /** The breakdown — what the cash buys, line by line (2026-10-19). */
+  items: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.CashAdvanceInclude;
 
 type AdvanceRow = Prisma.CashAdvanceGetPayload<{ include: typeof advanceInclude }>;
@@ -103,6 +107,7 @@ function presentAdvance(row: AdvanceRow, today = dayKey(new Date())) {
       row.status === 'RELEASED' && row.liquidationDueDate ? -daysBetween(row.liquidationDueDate, today) : null,
     liquidation: liquidation ? { ...liquidation, total: num(liquidation.total), amountPaid: num(liquidation.amountPaid) } : null,
     liquidations: row.liquidations.map((l) => ({ ...l, total: num(l.total), amountPaid: num(l.amountPaid) })),
+    items: row.items.map((i) => ({ ...i, quantity: num(i.quantity), unitCost: num(i.unitCost), amount: num(i.amount) })),
   };
 }
 
@@ -375,6 +380,22 @@ advanceRoutes.get(
   }),
 );
 
+/** "Submit for approval sends it to …" — at the amount on the page, in the requester's name. Above `/:id`. */
+advanceRoutes.get(
+  '/route',
+  requireAny('gfin.cash_advances.create', 'gfin.cash_advances.edit_own', 'gfin.cash_advances.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const amount = Number(req.query.amount ?? 0);
+    if (!Number.isFinite(amount) || amount < 0) throw badRequest('The amount is not a number');
+    const advanceId = req.query.advanceId ? String(req.query.advanceId) : null;
+    const row = advanceId ? await prisma.cashAdvance.findUnique({ where: { id: advanceId }, select: { requestedById: true } }) : null;
+    if (advanceId && !row) throw notFound('Cash advance not found');
+    // The advance's submit names no project: its route has no project step.
+    res.json({ route: await routeBrief('cash_advance', amount, row?.requestedById ?? me.id, null, { jobId: null }) });
+  }),
+);
+
 async function loadAdvance(id: string) {
   return prisma.cashAdvance.findUnique({
     where: { id },
@@ -417,7 +438,9 @@ const advanceSchema = z.object({
   requestDate: z.string().optional(),
   neededBy: z.string().optional().nullable(),
   purpose: z.string().trim().min(3, 'What is the cash for?'),
-  amount: z.number().positive('The advance must be more than zero'),
+  /** Typed only for an advance with no breakdown; with lines, their sum is the amount. */
+  amount: z.number().positive('The advance must be more than zero').optional(),
+  items: z.array(requestItemSchema).max(200).optional(),
   notes: z.string().optional().nullable(),
 });
 
@@ -444,6 +467,7 @@ advanceRoutes.post(
     const me = currentUser(req);
     const body = parseBody(advanceSchema, req.body);
     checkCharging(body);
+    const money = requestMoney(body.items, body.amount);
 
     // One advance at a time: a person still holding unaccounted cash does not
     // get more until the receipts are in. Finance can switch this off.
@@ -473,8 +497,9 @@ advanceRoutes.post(
           requestDate: body.requestDate ? asDate(body.requestDate, 'Request date') : dayKey(new Date()),
           neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
           purpose: body.purpose,
-          amount: D(body.amount),
+          amount: D(money.amount),
           notes: body.notes || null,
+          items: money.lines.length ? { create: money.lines } : undefined,
           // Money lent (2026-10-15): repaid in instalments, never liquidated.
           repayable: true,
         },
@@ -487,7 +512,7 @@ advanceRoutes.post(
         entityType: 'cash_advance',
         entityId: advance.id,
         action: 'CREATED',
-        summary: `${advance.number} — ${cents(body.amount)} requested for ${body.purpose}`,
+        summary: `${advance.number} — ${cents(money.amount)} requested for ${body.purpose}`,
       },
       req,
     );
@@ -508,19 +533,32 @@ advanceRoutes.put(
       throw forbidden('Only the person who asked for this advance can change it');
     }
     if (existing.status !== 'DRAFT') throw badRequest('Only a draft can be changed — this one has been submitted');
+    // Sent without lines, the breakdown on file stays and the typed amount
+    // counts only where there is none.
+    const kept = body.items === undefined ? await prisma.cashAdvanceItem.count({ where: { advanceId: existing.id } }) : 0;
+    const money = kept ? null : requestMoney(body.items, body.amount ?? num(existing.amount));
 
-    const advance = await prisma.cashAdvance.update({
-      where: { id: existing.id },
-      data: {
-        jobId: body.jobId || null,
-        costCategoryId: body.jobId ? body.costCategoryId || null : null,
-        requestDate: body.requestDate ? asDate(body.requestDate, 'Request date') : existing.requestDate,
-        neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
-        purpose: body.purpose,
-        amount: D(body.amount),
-        notes: body.notes || null,
-      },
-      include: advanceInclude,
+    const advance = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.cashAdvance.updateMany({
+        where: { id: existing.id, status: 'DRAFT' },
+        data: {
+          jobId: body.jobId || null,
+          costCategoryId: body.jobId ? body.costCategoryId || null : null,
+          requestDate: body.requestDate ? asDate(body.requestDate, 'Request date') : existing.requestDate,
+          neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
+          purpose: body.purpose,
+          ...(money ? { amount: D(money.amount) } : {}),
+          notes: body.notes || null,
+        },
+      });
+      if (!claimed.count) throw badRequest('It was submitted a moment ago — reload to see it');
+      if (money && body.items !== undefined) {
+        await tx.cashAdvanceItem.deleteMany({ where: { advanceId: existing.id } });
+        if (money.lines.length) {
+          await tx.cashAdvanceItem.createMany({ data: money.lines.map((l) => ({ ...l, advanceId: existing.id })) });
+        }
+      }
+      return tx.cashAdvance.findUniqueOrThrow({ where: { id: existing.id }, include: advanceInclude });
     });
     await audit(
       { entityType: 'cash_advance', entityId: advance.id, action: 'UPDATED', summary: `${advance.number} changed` },
@@ -733,6 +771,24 @@ advanceRoutes.get(
       notes: row.notes,
       currency: await companyCurrency(),
     });
+    if (row.items.length) {
+      const currency = await companyCurrency();
+      // The breakdown under the request's details, before its money.
+      sections.splice(1, 0, {
+        kind: 'table',
+        title: 'Breakdown',
+        head: ['#', 'Item and description', 'Qty', 'Unit', `Unit cost (${currency})`, `Amount (${currency})`],
+        align: ['left', 'left', 'right', 'left', 'right', 'right'],
+        rows: row.items.map((i, n) => [
+          String(n + 1),
+          i.description ? { title: i.name, body: i.description } : i.name,
+          formatQuantity(num(i.quantity)),
+          i.unit,
+          formatAmount(num(i.unitCost)),
+          formatAmount(num(i.amount)),
+        ]),
+      });
+    }
 
     const pdf = await renderDocument({
       title: 'Cash Advance',

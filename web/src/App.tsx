@@ -88,6 +88,8 @@ import { Receivables, InvoiceDetail, Payments, PaymentDetail } from './pages/fin
 import { Payables, BillDetail } from './pages/finance/Payables';
 import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
 import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
+import { CashAdvanceEditor } from './pages/finance/CashAdvanceEditor';
+import { ClaimEditor } from './pages/finance/ClaimEditor';
 import { Commissions, CommissionEditor, CommissionPage } from './pages/finance/Commissions';
 import { BudgetRequests, BudgetRequestDetail, FinanceBudgetRequests, FinanceLiquidations } from './pages/delivery/BudgetRequests';
 import { BudgetRequestEditor } from './pages/delivery/BudgetRequestEditor';
@@ -1250,6 +1252,23 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* The claim page (2026-10-19): a reimbursement, or a liquidation (?advance= / ?budgetRequest=), and Modify. Above `:id`. */}
+        <Route
+          path="/g-fin/expenses/new"
+          element={
+            <Guard permission="gfin.expenses.create">
+              <ClaimEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/expenses/:id/edit"
+          element={
+            <GuardAny permissions={['gfin.expenses.edit_own', 'gfin.expenses.edit_all']}>
+              <ClaimEditor />
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-fin/expenses/:id"
           element={
@@ -1264,6 +1283,23 @@ function Routed() {
           element={
             <GuardAny permissions={['gfin.cash_advances.view_all', 'gfin.cash_advances.view_own']}>
               <CashAdvances />
+            </GuardAny>
+          }
+        />
+        {/* The advance page (2026-10-19): New and Modify, header and breakdown in one save. Above `:id`. */}
+        <Route
+          path="/g-fin/cash-advances/new"
+          element={
+            <Guard permission="gfin.cash_advances.create">
+              <CashAdvanceEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/cash-advances/:id/edit"
+          element={
+            <GuardAny permissions={['gfin.cash_advances.edit_own', 'gfin.cash_advances.edit_all']}>
+              <CashAdvanceEditor />
             </GuardAny>
           }
         />

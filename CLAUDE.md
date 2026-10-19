@@ -596,7 +596,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,434 assertions across twenty-two scripts** (counted 2026-10-18, after
+**4,435 assertions across twenty-two scripts** (counted 2026-10-18, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -616,7 +616,7 @@ a cancelled document, and 2 on chain for cancelling a purchase request, and 4 on
 the routes by who prepared the document, and 5 on sales for the
 quotation's own currency and the order paper's margin %, and a net one on
 foundation for the approvals as a one-row table, and one for the short
-order on one page, and one on sales for a subheading worded in
+order on one page, and one on finance for the cash advance's breakdown and the advance and claim route previews, and one on sales for a subheading worded in
 line_comment, and 24 on workspace for the Help box's tickets and who
 receives them, and one on sales for a row the database refuses, and 2 on
 foundation for the sales lists' year-to-date default, and 5 on sales for
@@ -664,7 +664,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 397, masters 92, sales 638, costing 205, pipeline 121, calendar 101, numbering
 94, partners 120, delivery 188, chain 355, hr 486, plantilla 123, meetings
-115, evaluations 154, academy 123, finance 431, aftermarket 270, cad 122,
+115, evaluations 154, academy 123, finance 432, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 143. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -6007,6 +6007,26 @@ operations project), and the liquidation stays itemised with attachments
   is left), under them the route (`GET /budget-requests/route`). The record
   page shows the Breakdown card and the paper a Breakdown table; an older
   request opens on the page as one line worth its amount.
+- **The cash advance and the reimbursement are pages too** (2026-10-19, the
+  owner's call: "do the same for cash advance and reimbursement").
+  `pages/finance/CashAdvanceEditor.tsx` (`/g-fin/cash-advances/new`,
+  `/:id/edit` on a draft) carries the same breakdown — `CashAdvanceItem`,
+  `requestMoney()` / `requestLineAmount()` in `shared/requestLines.ts` (the
+  one rule for the advance's lines; the PUT claims DRAFT and replaces them
+  whole, keeps them when none are sent), the project optional (overheads),
+  a budget line when one is named, the route from `GET
+  /cash-advances/route`, the Breakdown on the record page and the paper.
+  `pages/finance/ClaimEditor.tsx` is every claim: `/g-fin/expenses/new` (a
+  reimbursement), `?advance=` / `?budgetRequest=` (a liquidation, its
+  project and line taken from what it accounts for), `/:id/edit` on a
+  draft — the receipts table, the attachments filed with the save, the
+  missing-receipt rule (Submit waits for every OR), the liquidation's
+  difference, the route from `GET /expense-claims/route`. The breakdown
+  table and the record's read-only card are `RequestLinesCard` /
+  `RequestItemsCard` (`components/RequestLines.tsx`), shared with the
+  budget request page. `NewCashAdvanceModal` and `NewClaimModal` are gone;
+  Budget Liquidations' "Actual entry" (`?act=liquidate`) and the advance's
+  and request's Liquidate open the claim page.
 - **Budget Liquidations** — G-FIN › Money out, `gfin.budget_liquidations`
   (READ, Finance holds it; it opens the list and every request through
   `seesAll`), `/g-fin/budget-liquidations`, `FinanceLiquidations`: the same
