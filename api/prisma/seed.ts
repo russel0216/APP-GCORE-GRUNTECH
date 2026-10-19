@@ -32,6 +32,7 @@ import { clearRoles, rolesCleared } from '../src/shared/rolesClear';
 import { replaceRolesWithChart } from '../src/shared/rolesFromChart';
 import { applyRoleRev1 } from '../src/shared/roleRev1';
 import { seedSharedPosts } from '../src/shared/teamPosts';
+import { dropOverrides } from '../src/shared/overridesDrop';
 import { applyEmployeeNumberList } from '../src/shared/employeeNumbersFromList';
 import { applyHrAccess } from '../src/shared/hrAccess';
 import { applyFinAccess } from '../src/shared/finAccess';
@@ -1628,6 +1629,12 @@ async function main() {
     }
     const posts = await seedSharedPosts();
     if (posts) console.log(`  ✓ KAT's Technical Manager and Aftermarket Manager shared with GIB, UIT and HIT (${posts} post(s))`);
+  }
+
+  // ── The permission matrix (2026-10-19): per-person overrides go, once ─────
+  {
+    const dropped = await dropOverrides();
+    if (dropped !== null) console.log(`  ✓ Per-person permission overrides removed: ${dropped} (access is the role matrix alone)`);
   }
 
   // ── G-HR's common rights on every role; all of G-HR to the HR Officer ────

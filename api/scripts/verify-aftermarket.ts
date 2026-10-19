@@ -165,6 +165,22 @@ async function makeUser(name: string, email: string, roleKeys: string[]) {
   });
 }
 
+/**
+ * Gives a user these keys through a throwaway role of their own (`zzam_…`,
+ * deleted by cleanup) — roles are the whole of access since 2026-10-19.
+ */
+async function grantKeys(userId: string, keys: string[]) {
+  const permissions = await prisma.permission.findMany({ where: { key: { in: keys } }, select: { id: true } });
+  const role = await prisma.role.create({
+    data: {
+      key: `zzam_grant_${userId}_${keys.join('_').replace(/\./g, '-')}`,
+      name: `${TAG} grant`,
+      permissions: { create: permissions.map((p) => ({ permissionId: p.id })) },
+    },
+  });
+  await prisma.userRole.create({ data: { userId, roleId: role.id } });
+}
+
 /** Walks an approval to settlement, asking the engine who may act at each step. */
 async function settle(approvalId: string, outcome: 'APPROVED' | 'REJECTED' = 'APPROVED') {
   for (let guard = 0; guard < 10; guard++) {
@@ -2230,12 +2246,7 @@ async function main() {
     check('somebody who may only read contracts cannot change one', readerEdit.status === 403, String(readerEdit.status));
 
     const ownPm = await makeUser('ZZ Own Contract PM', 'ownpm@verifya.local', []);
-    const ownKeys = await prisma.permission.findMany({
-      where: { key: { in: ['gops.service_contracts.view_own', 'gops.service_contracts.edit_own'] } },
-    });
-    await prisma.userPermissionOverride.createMany({
-      data: ownKeys.map((p) => ({ userId: ownPm.id, permissionId: p.id, effect: 'ALLOW' as const })),
-    });
+    await grantKeys(ownPm.id, ['gops.service_contracts.view_own', 'gops.service_contracts.edit_own']);
     const ownToken = signToken(ownPm.id, ownPm.email);
     const notTheirs = await api(ownToken, 'PATCH', `/service-contracts/${mcId}`, { responseTime: 'not my job' });
     check(
@@ -3024,10 +3035,7 @@ async function main() {
     // The service manager does not hold the G-OPS dashboard permission by
     // role — which is the right default, and means the actor has to be given
     // it explicitly rather than the assertion being quietly weakened to match.
-    const dash = await prisma.permission.findUnique({ where: { key: 'gops.dashboard.view_all' } });
-    await prisma.userPermissionOverride.create({
-      data: { userId: manager.id, permissionId: dash!.id, effect: 'ALLOW' },
-    });
+    await grantKeys(manager.id, ['gops.dashboard.view_all']);
 
     const overview = await api(managerToken, 'GET', '/gops/overview');
     check('the G-OPS overview runs', overview.status === 200, String(overview.status));

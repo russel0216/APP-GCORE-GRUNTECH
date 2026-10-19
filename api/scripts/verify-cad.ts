@@ -454,7 +454,14 @@ async function main() {
   const cancelByOutsider = await http(outsiderT, 'POST', `/cad-job-orders/${id2}/cancel`, { reason: 'not mine' });
   check('somebody else cannot cancel it', cancelByOutsider.status === 403 || cancelByOutsider.status === 400, String(cancelByOutsider.status));
   const cancelBySupport = await http(supportT, 'POST', `/cad-job-orders/${id2}/cancel`, { reason: 'designer cannot' });
-  check('nor can the support designer — the requestor or the lead do', cancelBySupport.status === 403, String(cancelBySupport.status));
+  // Manage All now includes Manage Own (2026-10-19), so the designer passes the
+  // route's gate and the request's own rule refuses them: 400, nothing cancelled.
+  check(
+    'nor can the support designer — the requestor or the lead do',
+    (cancelBySupport.status === 403 || cancelBySupport.status === 400) &&
+      (await prisma.cadJobOrder.findUnique({ where: { id: id2 } }))?.status !== 'CANCELLED',
+    String(cancelBySupport.status),
+  );
 
   const third = await http(requestorT, 'POST', '/cad-job-orders', { customerId: customer.id, title: `${TAG} As-built`, scope: 'As-built of the piping after commissioning' });
   const id3 = String(third.body.id);

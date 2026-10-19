@@ -49,6 +49,7 @@ import {
 } from '../shared/academy';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit as assertCanEditOwn, mayEdit, viewScope } from '../shared/ownScope';
+import { visibleOwners } from '../shared/team';
 
 /**
  * Gruntech Academy — G-HR › Academy (item 13).
@@ -182,7 +183,7 @@ courseRoutes.get(
   handler(async (req, res) => {
     const q = listQuery(req);
     const me = currentUser(req);
-    const where = ownOnly(me, 'ghr', 'courses', courseListWhere(q), coursesAddedBy(me));
+    const where = ownOnly(me, 'ghr', 'courses', courseListWhere(q), (ids) => ({ createdById: { in: ids } }));
     const [rows, total] = await Promise.all([
       prisma.course.findMany({
         where,
@@ -197,7 +198,7 @@ courseRoutes.get(
       listResult(
         rows.map(({ requirements, _count, hours, createdById, ...c }) => ({
           ...c,
-          canEdit: mayEdit(me, 'ghr', 'courses', createdById === me.id),
+          canEdit: mayEdit(me, 'ghr', 'courses', createdById === me.id, createdById),
           hours: Number(hours),
           requirementCount: requirements.length,
           requiredOf: requirements.map(requirementText),
@@ -224,7 +225,7 @@ courseRoutes.get(
   handler(async (req, res) => {
     const q = listQuery(req);
     const me = currentUser(req);
-    const where = ownOnly(me, 'ghr', 'courses', courseListWhere(q), coursesAddedBy(me));
+    const where = ownOnly(me, 'ghr', 'courses', courseListWhere(q), (ids) => ({ createdById: { in: ids } }));
     const f = q.filters;
     const [rows, count] = await Promise.all([
       prisma.course.findMany({
@@ -343,8 +344,8 @@ courseRoutes.get(
     const me = currentUser(req);
     const course = await loadCourse(req.params.id);
     const isMine = course.createdById === me.id;
-    assertCanView(me, 'ghr', 'courses', isMine);
-    res.json({ ...course, canEdit: mayEdit(me, 'ghr', 'courses', isMine) });
+    assertCanView(me, 'ghr', 'courses', isMine, course.createdById);
+    res.json({ ...course, canEdit: mayEdit(me, 'ghr', 'courses', isMine, course.createdById) });
   }),
 );
 
@@ -443,7 +444,7 @@ courseRoutes.patch(
       },
       req,
     );
-    res.json({ ...after, canEdit: mayEdit(me, 'ghr', 'courses', after.createdById === me.id) });
+    res.json({ ...after, canEdit: mayEdit(me, 'ghr', 'courses', after.createdById === me.id, after.createdById) });
   }),
 );
 
@@ -514,7 +515,7 @@ courseRoutes.put(
       },
       req,
     );
-    res.json({ ...after, canEdit: mayEdit(me, 'ghr', 'courses', after.createdById === me.id) });
+    res.json({ ...after, canEdit: mayEdit(me, 'ghr', 'courses', after.createdById === me.id, after.createdById) });
   }),
 );
 
@@ -1709,7 +1710,7 @@ registerAttachmentGuard('training_record', async (user, id) => {
     where: { id },
     select: { employee: { select: { userId: true } } },
   });
-  return !!rec && rec.employee.userId === user.id;
+  return !!rec && !!rec.employee.userId && visibleOwners(user, 'ghr', 'passports').includes(rec.employee.userId);
 });
 passportRoutes.use(authenticate);
 
@@ -1773,7 +1774,7 @@ passportRoutes.get(
         'ghr',
         'passports',
         { status: status as 'PENDING_VERIFICATION' | 'VERIFIED' | 'REJECTED', source: 'EXTERNAL' },
-        { employee: { userId: me.id } },
+        (ids) => ({ employee: { userId: { in: ids } } }),
       ),
       orderBy: { createdAt: 'asc' },
       take: 100,
@@ -1822,7 +1823,8 @@ async function passportRows(q: ListQuery, me: ResolvedUser) {
   const f = q.filters;
   const and: Prisma.EmployeeWhereInput[] = [];
   // View Own on the register (2026-10-18): the caller's own passport alone.
-  if (viewScope(me, 'ghr', 'passports') !== 'all') and.push({ userId: me.id });
+  // View Team (2026-10-19): the team's passports.
+  if (viewScope(me, 'ghr', 'passports') !== 'all') and.push({ userId: { in: visibleOwners(me, 'ghr', 'passports') } });
   if (f.active !== 'all') and.push({ isActive: f.active === 'false' ? false : true });
   // The team (2026-10-19 — the department's filter before it went): an id or `none`.
   if (f.teamId) and.push({ industryId: f.teamId === 'none' ? null : f.teamId });
@@ -1973,8 +1975,8 @@ passportRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     if (!can(me, 'ghr.passports.view_all')) {
-      const emp = await myEmployee(me.id);
-      if (emp?.id !== req.params.employeeId) throw notFound('Employee not found');
+      const emp = await prisma.employee.findUnique({ where: { id: req.params.employeeId }, select: { userId: true } });
+      if (!emp?.userId || !visibleOwners(me, 'ghr', 'passports').includes(emp.userId)) throw notFound('Employee not found');
     }
     res.json(await presentPassport(req.params.employeeId, me));
   }),

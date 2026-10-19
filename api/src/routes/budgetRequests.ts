@@ -24,7 +24,7 @@ import { cents, D, num, dayKey, daysBetween } from '../shared/finance';
 import { cashRequestSections, cashRequestSignatories } from './finance';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
-import { USER_TEAM_SELECT, teamOfUser, userTeamWhere } from '../shared/team';
+import { USER_TEAM_SELECT, teamOfUser, userTeamWhere, visibleOwners } from '../shared/team';
 import { projectBudgetByLine } from './procurement';
 
 /**
@@ -122,7 +122,7 @@ function seesAll(me: Me): boolean {
  */
 function assertCanSee(me: Me, row: { requestedById: string; job: { projectManager: { id: string } | null } }) {
   if (seesAll(me)) return;
-  if (row.requestedById === me.id) return;
+  if (visibleOwners(me, 'gops', 'budget_requests').includes(row.requestedById)) return;
   if (row.job.projectManager?.id === me.id) return;
   throw forbidden('That is someone else’s budget request');
 }
@@ -136,7 +136,9 @@ export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, 
   // requester who sees only their own, naming somebody else, gets nothing.
   const asked = q.filters.requestedById || undefined;
   const people: Prisma.BudgetRequestWhereInput[] = [];
-  if (mine) people.push({ requestedById: me.id });
+  // View Team reads the team's requests (2026-10-19); "Mine" is one's own.
+  if (q.scope === 'mine') people.push({ requestedById: me.id });
+  else if (mine) people.push({ requestedById: { in: visibleOwners(me, 'gops', 'budget_requests') } });
   if (asked) people.push({ requestedById: asked });
   if (people.length) where.AND = people;
   if (q.filters.jobId) where.jobId = q.filters.jobId;

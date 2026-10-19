@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { mayEdit, useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../components/ui';
 import { levelLabel, rolesByLevel } from '../../lib/roleLevels';
+import { LevelsTable, PermissionMatrix } from './PermissionMatrix';
 
 interface Role {
   id: string;
@@ -43,6 +45,15 @@ export function Roles() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState<Role | 'new' | null>(null);
+  // ?view=roles shows the role cards; the matrix is the page (2026-10-19).
+  const [params, setParams] = useSearchParams();
+  const view = params.get('view') === 'roles' ? 'roles' : 'matrix';
+  const showView = (next: 'matrix' | 'roles') => {
+    const p = new URLSearchParams(params);
+    if (next === 'roles') p.set('view', 'roles');
+    else p.delete('view');
+    setParams(p, { replace: true });
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -73,9 +84,8 @@ export function Roles() {
         <div>
           <h1>Roles &amp; Permissions</h1>
           <p>
-            Permissions read <span className="mono">module.submodule.action</span>. A screen only
-            appears in someone's menu if they hold a view permission for it, so the menu and the
-            access can never drift apart.
+            A person's access is their roles' — View and Manage, each Own, Team or All, per screen. A screen
+            appears in someone's menu only when a role of theirs may view it.
           </p>
         </div>
         {can('admin.roles.create') && (
@@ -87,7 +97,21 @@ export function Roles() {
 
       <ErrorBox error={error} />
 
+      <div className="row org-switch">
+        <div className="scope-switch">
+          <button type="button" className={view === 'matrix' ? 'active' : ''} aria-pressed={view === 'matrix'} onClick={() => showView('matrix')}>
+            Permission matrix
+          </button>
+          <button type="button" className={view === 'roles' ? 'active' : ''} aria-pressed={view === 'roles'} onClick={() => showView('roles')}>
+            Roles
+          </button>
+        </div>
+      </div>
+
+      {view === 'matrix' && catalog && <PermissionMatrix roles={roles} catalog={catalog} onSaved={() => void load()} />}
+
       {/* The role hierarchy (2026-10-19): the roles under their level, top first. */}
+      {view === 'roles' && (
       <div className="stack">
       {rolesByLevel(roles).map((level) => (
       <section key={level.label} className="role-level">
@@ -118,6 +142,7 @@ export function Roles() {
       </section>
       ))}
       </div>
+      )}
 
       {editing && catalog && (
         <RoleEditor
@@ -157,37 +182,8 @@ function RoleEditor({
   const [selected, setSelected] = useState<Set<string>>(new Set(role?.permissions ?? []));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-
-  function toggle(permissionKey: string) {
-    setSelected((s) => {
-      const next = new Set(s);
-      if (next.has(permissionKey)) next.delete(permissionKey);
-      else next.add(permissionKey);
-      return next;
-    });
-  }
-
-  function toggleModule(moduleKey: string) {
-    setCollapsed((c) => {
-      const next = new Set(c);
-      if (next.has(moduleKey)) next.delete(moduleKey);
-      else next.add(moduleKey);
-      return next;
-    });
-  }
-
-  function toggleSubmodule(keys: string[]) {
-    const allOn = keys.every((k) => selected.has(k));
-    setSelected((s) => {
-      const next = new Set(s);
-      for (const k of keys) {
-        if (allOn) next.delete(k);
-        else next.add(k);
-      }
-      return next;
-    });
-  }
+  // A select inside the table is a field, so the Modal's guard hears a change on its own.
+  const [find, setFind] = useState('');
 
   async function save() {
     setBusy(true);
@@ -285,100 +281,17 @@ function RoleEditor({
 
       <hr className="rule" />
 
-      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 'var(--s-3)' }}>
-        <strong>Permissions</strong>
-        <span className="faint" style={{ fontSize: 'var(--fs-sm)' }}>
-          {selected.size} of {catalog.total} · click a screen name to toggle all its actions
-        </span>
-      </div>
-
-      {catalog.modules.map((mod) => {
-        const isCollapsed = collapsed.has(mod.key);
-        const modKeys = mod.submodules.flatMap((s) => s.actions.map((a) => a.key));
-        const on = modKeys.filter((k) => selected.has(k)).length;
-        return (
-          <div key={mod.key} className="perm-module">
-            <header
-              role="button"
-              tabIndex={0}
-              aria-expanded={!isCollapsed}
-              onClick={() => toggleModule(mod.key)}
-              onKeyDown={onActivate(() => toggleModule(mod.key))}
-            >
-              <h4>
-                {isCollapsed ? '▸' : '▾'} {mod.label}
-              </h4>
-              <span className="faint mono" style={{ fontSize: 'var(--fs-xs)' }}>
-                {on}/{modKeys.length}
-              </span>
-            </header>
-
-            {!isCollapsed &&
-              mod.submodules.map((sub) => {
-                const subKeys = sub.actions.map((a) => a.key);
-                return (
-                  <div key={sub.key} className="perm-row">
-                    <div
-                      className="name"
-                      role="button"
-                      tabIndex={0}
-                      style={{ cursor: 'pointer' }}
-                      onClick={(e) => {
-                        toggleSubmodule(subKeys);
-                        markChanged(e.currentTarget);
-                      }}
-                      onKeyDown={onActivate((el) => {
-                        toggleSubmodule(subKeys);
-                        markChanged(el);
-                      })}
-                      title={sub.note}
-                    >
-                      {sub.label}
-                    </div>
-                    <div className="perm-actions">
-                      {sub.actions.map((a) => (
-                        // A button, not a span: a permission could not be ticked from a keyboard (rule 13).
-                        <button
-                          type="button"
-                          key={a.key}
-                          className={`perm-chip${selected.has(a.key) ? ' on' : ''}`}
-                          aria-pressed={selected.has(a.key)}
-                          onClick={(e) => {
-                            toggle(a.key);
-                            markChanged(e.currentTarget);
-                          }}
-                          title={sub.own && (a.action === 'view_own' || a.action === 'edit_own') ? `${a.key} — Own here means ${sub.own}` : a.key}
-                        >
-                          {a.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
-          </div>
-        );
-      })}
+      <Field label="What this role may do" hint="View and Manage (create and edit), each Own, Team or All, on every screen — the same as its column in the permission matrix.">
+        <input type="search" value={find} onChange={(e) => setFind(e.target.value)} placeholder="Find a screen…" />
+      </Field>
+      <LevelsTable
+        catalog={catalog}
+        roles={[{ id: 'this', name: name || 'This role', rank: rank ? Number(rank) : null }]}
+        keysOf={() => selected}
+        canChange={() => maySave}
+        onChange={(_id, next) => setSelected(next)}
+        search={find}
+      />
     </Modal>
   );
-}
-
-/** Enter or Space on something drawn as a button but not one. */
-function onActivate(fn: (el: HTMLElement) => void) {
-  return (e: KeyboardEvent<HTMLElement>) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      fn(e.currentTarget);
-    }
-  };
-}
-
-/**
- * A permission is ticked with a button, and a button sends no `input` event —
- * so the Modal's "Close without saving?" guard never heard about it, and
- * Escape or a click outside threw the ticks away. Tell it, the way a field
- * would. (Collapsing a module changes nothing, so it does not.)
- */
-function markChanged(el: HTMLElement) {
-  el.dispatchEvent(new Event('input', { bubbles: true }));
 }

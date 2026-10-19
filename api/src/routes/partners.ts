@@ -120,7 +120,7 @@ export async function partnerListSummary(base: Prisma.SupplierWhereInput, where:
  */
 function visiblePartners(me: ReturnType<typeof currentUser>, q: ReturnType<typeof listQuery>) {
   const { base, where } = partnerListWhere(me, q);
-  const mine = { createdById: me.id };
+  const mine = (ids: string[]) => ({ createdById: { in: ids } });
   return {
     base: ownOnly(me, 'gops', 'partners', base, mine),
     where: ownOnly(me, 'gops', 'partners', where, mine),
@@ -131,7 +131,7 @@ function visiblePartners(me: ReturnType<typeof currentUser>, q: ReturnType<typeo
 async function readablePartner(me: ReturnType<typeof currentUser>, id: string) {
   const partner = await prisma.supplier.findFirst({ where: { id, isPartner: true }, select: { id: true, createdById: true } });
   if (!partner) throw notFound('Partner not found');
-  assertCanView(me, 'gops', 'partners', partner.createdById === me.id);
+  assertCanView(me, 'gops', 'partners', partner.createdById === me.id, partner.createdById);
   return partner;
 }
 
@@ -139,7 +139,7 @@ async function readablePartner(me: ReturnType<typeof currentUser>, id: string) {
 async function detailFor(me: ReturnType<typeof currentUser>, id: string) {
   const detail = await partnerDetail(id);
   if (!detail) return null;
-  return { ...detail, canEdit: mayEdit(me, 'gops', 'partners', detail.createdById === me.id) };
+  return { ...detail, canEdit: mayEdit(me, 'gops', 'partners', detail.createdById === me.id, detail.createdById) };
 }
 
 const PARTNER_SORTS = ['code', 'name', 'brand', 'createdAt', 'partnerSince'];
@@ -191,7 +191,7 @@ partnerRoutes.get(
           pricedItems: r._count.preferredItems,
           createdAt: r.createdAt,
           createdById: r.createdById,
-          canEdit: mayEdit(me, 'gops', 'partners', r.createdById === me.id),
+          canEdit: mayEdit(me, 'gops', 'partners', r.createdById === me.id, r.createdById),
         })),
         total,
         q,
@@ -345,7 +345,7 @@ partnerRoutes.patch(
     const before = await prisma.supplier.findFirst({ where: { id: req.params.id, isPartner: true } });
     if (!before) throw notFound('Partner not found');
     // Edit Own changes only the partners whose supplier record the caller added (2026-10-18).
-    assertCanEdit(me, 'gops', 'partners', before.createdById === me.id);
+    assertCanEdit(me, 'gops', 'partners', before.createdById === me.id, before.createdById);
 
     const supplier = await prisma.supplier.update({
       where: { id: before.id },
@@ -408,7 +408,7 @@ async function partnerOr404(id: string) {
 /** A partner whose resources the caller may change — a resource is a change to its partner (2026-10-18). */
 async function partnerForEdit(me: ReturnType<typeof currentUser>, id: string) {
   const partner = await partnerOr404(id);
-  assertCanEdit(me, 'gops', 'partners', partner.createdById === me.id);
+  assertCanEdit(me, 'gops', 'partners', partner.createdById === me.id, partner.createdById);
   return partner;
 }
 

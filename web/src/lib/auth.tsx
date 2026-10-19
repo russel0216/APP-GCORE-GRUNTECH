@@ -97,8 +97,10 @@ export function mayView(can: (k: string) => boolean, m: string, s: string): bool
 }
 
 /** Edit All, or Edit Own on a record that is the viewer's own. */
-export function mayEdit(can: (k: string) => boolean, m: string, s: string, isMine: boolean): boolean {
-  return can(`${m}.${s}.edit_all`) || (isMine && can(`${m}.${s}.edit_own`));
+export function mayEdit(can: (k: string) => boolean, m: string, s: string, isMine: boolean, onTeam = false): boolean {
+  // Manage Team (2026-10-19): a record owned by someone on the viewer's team. The
+  // levels include the ones under them (the API sends Own with Team and All).
+  return can(`${m}.${s}.edit_all`) || (isMine && can(`${m}.${s}.edit_own`)) || (onTeam && can(`${m}.${s}.edit_team`));
 }
 
 /** Either key of the edit pair — for a page that keeps no record of anybody's (a settings page). */

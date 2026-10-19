@@ -26,6 +26,7 @@ import { registerSearch } from '../shared/search';
 import { renderDocument, formatDate, formatMoney, formatShortDate, statusLabel, companyCurrency, type PdfSection, type Signatory } from '../shared/pdf';
 import { LIST_CAP, listReference, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { visibleOwners } from '../shared/team';
 
 /**
  * REQUEST FOR APPROVAL (2026-10-13, the owner's call: "replace the Approved
@@ -81,7 +82,7 @@ export function referenceOf(p: { drawingNo: string | null; revision: string }): 
 
 /** view_all, the person who raised it, or — while it waits on them — whoever may decide it. */
 async function mayRead(me: ResolvedUser, row: { id: string; uploadedById: string }, deciderOnly = false): Promise<boolean> {
-  if (!deciderOnly && (me.isSuperAdmin || can(me, 'gops.plans.view_all') || row.uploadedById === me.id)) return true;
+  if (!deciderOnly && (me.isSuperAdmin || can(me, 'gops.plans.view_all') || visibleOwners(me, 'gops', 'plans').includes(row.uploadedById))) return true;
   return mayDecide(me.id, DOC, [row.id]);
 }
 
@@ -139,7 +140,8 @@ export function planListWhere(me: ResolvedUser, q: ReturnType<typeof listQuery>)
   const and: Prisma.ApprovedPlanWhereInput[] = [];
   const seesAll = me.isSuperAdmin || can(me, 'gops.plans.view_all');
   const mine = !seesAll || q.scope === 'mine';
-  if (mine) and.push({ uploadedById: me.id });
+  if (q.scope === 'mine') and.push({ uploadedById: me.id });
+  else if (mine) and.push({ uploadedById: { in: visibleOwners(me, 'gops', 'plans') } });
   if (q.filters.jobId) and.push({ jobId: q.filters.jobId });
   const status = choice(q.filters.status, PlanStatus, 'Status');
   if (status) and.push({ status });

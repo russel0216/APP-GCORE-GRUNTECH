@@ -64,7 +64,7 @@ async function plantillaRows(me: ReturnType<typeof currentUser>, q: ListQuery): 
   if (ids) where.id = { in: ids };
 
   const positions = await prisma.position.findMany({
-    where: ownOnly(me, 'ghr', 'plantilla', where, { createdById: me.id }),
+    where: ownOnly(me, 'ghr', 'plantilla', where, (ids) => ({ createdById: { in: ids } })),
     include: { role: { select: { id: true, name: true, rank: true } } },
     // Level 1 first (Postgres sorts nulls last ascending), then the chart's order.
     orderBy: [{ role: { rank: 'asc' } }, { sortOrder: 'asc' }, { title: 'asc' }],
@@ -135,7 +135,7 @@ positionRoutes.get(
             filled: p.filled,
             vacant: p.vacant,
             createdById: p.createdById,
-            canEdit: mayEdit(me, 'ghr', 'plantilla', p.createdById === me.id),
+            canEdit: mayEdit(me, 'ghr', 'plantilla', p.createdById === me.id, p.createdById),
             holderCount: list.length,
             holders: list.slice(0, HOLDER_PREVIEW).map((h) => ({
               id: h.id,
@@ -314,7 +314,7 @@ positionRoutes.get(
     });
     if (!position) throw notFound('Position not found');
     // View Own reads only the positions the caller added (2026-10-18).
-    assertCanView(me, 'ghr', 'plantilla', position.createdById === me.id);
+    assertCanView(me, 'ghr', 'plantilla', position.createdById === me.id, position.createdById);
     // A slot that counts a role is held by the role's active holders (2026-10-19).
     const employees = position.roleId
       ? await prisma.employee.findMany({
@@ -326,7 +326,7 @@ positionRoutes.get(
     const { employees: _legacy, ...rest } = position;
     res.json({
       ...rest,
-      canEdit: mayEdit(me, 'ghr', 'plantilla', position.createdById === me.id),
+      canEdit: mayEdit(me, 'ghr', 'plantilla', position.createdById === me.id, position.createdById),
       filled: employees.length,
       vacant: position.authorisedHeadcount - employees.length,
       holderCount: employees.length,
@@ -422,7 +422,7 @@ positionRoutes.patch(
     const before = await prisma.position.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Position not found');
     // Edit Own changes only the positions the caller added (2026-10-18).
-    assertCanEdit(me, 'ghr', 'plantilla', before.createdById === me.id);
+    assertCanEdit(me, 'ghr', 'plantilla', before.createdById === me.id, before.createdById);
 
     const position = await prisma.$transaction(async (tx) => {
       const title = body.title ?? before.title;

@@ -31,7 +31,7 @@ import { LIST_CAP, listReference, recordNamed, choice, sendListPdf, rangeNamed, 
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { cents, num, refreshAdvance, settleable } from '../shared/finance';
 import { dayKey, manilaDayStart, manilaDayEnd } from '../shared/day';
-import { quotationTeamOf, reportsTo } from '../shared/team';
+import { quotationTeamOf, reportsTo, visibleOwners } from '../shared/team';
 import { usersHolding } from '../shared/clearance';
 import { orderNet } from '../shared/billingInvoice';
 import { quotationTotals } from '../shared/quotation';
@@ -282,7 +282,7 @@ export async function mayRaiseCommission(me: ResolvedUser, salesOrderId: string)
 /** view_all, the person who raised it, a beneficiary, their supervisor (View Own covers one's direct reports', 2026-10-19), or — while it waits on them — whoever may decide it. */
 async function mayRead(me: ResolvedUser, row: { id: string; requestedById: string; shares?: { userId: string }[] }, deciderOnly = false): Promise<boolean> {
   if (!deciderOnly) {
-    if (me.isSuperAdmin || can(me, 'gfin.commissions.view_all') || row.requestedById === me.id) return true;
+    if (me.isSuperAdmin || can(me, 'gfin.commissions.view_all') || visibleOwners(me, 'gfin', 'commissions').includes(row.requestedById)) return true;
     if (row.shares?.some((s) => s.userId === me.id)) return true;
     if (await reportsTo(row.requestedById, me.id)) return true;
   }
@@ -390,7 +390,10 @@ export function commissionListWhere(me: ResolvedUser, q: ReturnType<typeof listQ
   const mine = !seesAll || q.scope === 'mine';
   // View Own: one's own and one's direct reports' requests; "Mine" is one's own.
   const own = [{ requestedById: me.id }, { shares: { some: { userId: me.id } } }];
-  if (!seesAll && q.scope !== 'mine') base.push({ OR: [...own, { requestedBy: { supervisorId: me.id } }] });
+  // View Team: also what anyone on the team raised.
+  if (!seesAll && q.scope !== 'mine') {
+    base.push({ OR: [...own, { requestedById: { in: visibleOwners(me, 'gfin', 'commissions') } }, { requestedBy: { supervisorId: me.id } }] });
+  }
   else if (mine) base.push({ OR: own });
   if (q.filters.salesOrderId) base.push({ salesOrderId: q.filters.salesOrderId });
   if (q.filters.jobId) base.push({ jobId: q.filters.jobId });

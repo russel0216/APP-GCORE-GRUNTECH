@@ -332,10 +332,10 @@ async function main() {
   const optional = await makeUser(`${TAG} Optional`, `optional${DOMAIN}`, [viewerRole.id]);
   const bystander = await makeUser(`${TAG} Bystander`, `bystander${DOMAIN}`, [viewerRole.id]);
   const hr = await makeUser(`${TAG} HR`, `hr${DOMAIN}`, [hrRole.id]);
-  // A staff member whose create right was taken away by a DENY override.
-  const denied = await makeUser(`${TAG} Denied`, `denied${DOMAIN}`, [staffRole.id]);
-  const createPerm = await prisma.permission.findUniqueOrThrow({ where: { key: 'ghr.meetings.create' } });
-  await prisma.userPermissionOverride.create({ data: { userId: denied.id, permissionId: createPerm.id, effect: 'DENY' } });
+  // A colleague whose role reads and edits meetings but cannot create one
+  // (roles are the whole of access since 2026-10-19 — no overrides).
+  const noCreateRole = await makeRole('zzmt_nocreate', `${TAG} no create`, ['ghr.meetings.view_own', 'ghr.meetings.edit_own']);
+  const denied = await makeUser(`${TAG} Denied`, `denied${DOMAIN}`, [noCreateRole.id]);
 
   const tok = {
     organizer: signToken(organizer.id, organizer.email),
@@ -586,7 +586,7 @@ async function main() {
     lookupRows.every((r) => !('passwordHash' in r) && Object.keys(r).every((k) => ['id', 'name', 'email', 'position', 'team', 'photoPath'].includes(k))));
   const holding = await fetch(`${BASE}/users/lookup?q=${TAG}&holding=ghr.meetings.create`, { headers: { Authorization: `Bearer ${tok.bystander}` } });
   const holders = ((await holding.json()) as { id: string }[]).map((r) => r.id);
-  check('holding= keeps the organiser and drops the DENY-overridden colleague and the viewer',
+  check('holding= keeps the organiser and drops the colleague whose role cannot create and the viewer',
     holders.includes(organizer.id) && !holders.includes(denied.id) && !holders.includes(bystander.id), JSON.stringify(holders.length));
 
   // ══ 16. Cancel and delete ════════════════════════════════════════════════

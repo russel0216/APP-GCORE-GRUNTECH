@@ -2,7 +2,7 @@ import { Prisma, type ApprovalStep, type ClearanceArea } from '@prisma/client';
 import { addDays } from './day';
 import { prisma } from '../prisma';
 import type { ResolvedUser } from '../permissions/resolve';
-import { can } from '../permissions/resolve';
+import { can, impliedBy } from '../permissions/resolve';
 import { approversForStep, pendingFor } from './approvals';
 import { audit, redact } from './audit';
 import { notify } from './notifications';
@@ -402,17 +402,7 @@ export async function usersHolding(permissionKey: string, tx: Tx = prisma): Prom
       isActive: true,
       OR: [
         { isSuperAdmin: true },
-        {
-          AND: [
-            {
-              OR: [
-                { roles: { some: { role: { permissions: { some: { permission: { key: permissionKey } } } } } } },
-                { overrides: { some: { effect: 'ALLOW', permission: { key: permissionKey } } } },
-              ],
-            },
-            { NOT: { overrides: { some: { effect: 'DENY', permission: { key: permissionKey } } } } },
-          ],
-        },
+        { roles: { some: { role: { permissions: { some: { permission: { key: { in: impliedBy(permissionKey) } } } } } } } },
       ],
     },
     select: { id: true },

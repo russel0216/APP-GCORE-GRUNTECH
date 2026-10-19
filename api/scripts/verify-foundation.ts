@@ -21,7 +21,10 @@ import { prisma } from '../src/prisma';
 import { rolesLike } from './lib/roles';
 import type { ApprovalStep, Prisma } from '@prisma/client';
 import { env } from '../src/env';
-import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/resolve';
+import { resolveUser, can, canEditRecord, menuFor, withImpliedLevels, impliedBy } from '../src/permissions/resolve';
+import { actionsFor, levelOptions, levelsOf } from '../src/shared/permissionLevels';
+import { ownOnly, viewScope } from '../src/shared/ownScope';
+import { OVERRIDES_DROPPED_MARK } from '../src/shared/overridesDrop';
 import { REGISTRY, allPermissions, findSubmodule } from '../src/permissions/registry';
 import { ACCESS_SPLIT } from '../src/shared/accessSplit';
 import { ENGINE_ROLE_KEYS, ROLES_CLEARED_MARK } from '../src/shared/rolesClear';
@@ -266,22 +269,93 @@ async function main() {
   check('employee inherits role permissions', can(empResolved, 'ghr.leave.create'));
   check('employee does not inherit what the role lacks', !can(empResolved, 'admin.users.view_all'));
 
-  // A per-person DENY must beat the role grant — that is the whole point of
-  // overrides, and the ordering is easy to get backwards.
+  // ── The permission matrix (2026-10-19): no per-person overrides; View and
+  // Manage each Own / Team / All, a level including the ones under it. ──
   const leaveCreate = await prisma.permission.findUnique({ where: { key: 'ghr.leave.create' } });
-  await prisma.userPermissionOverride.create({
+  const leftover = await prisma.userPermissionOverride.create({
     data: { userId: employee.id, permissionId: leaveCreate!.id, effect: 'DENY' },
   });
-  const denied = (await resolveUser(employee.id))!;
-  check('a per-person DENY beats the role grant', !can(denied, 'ghr.leave.create'));
+  check('an override row left in the table changes nothing — access is the roles alone', can((await resolveUser(employee.id))!, 'ghr.leave.create'));
+  await prisma.userPermissionOverride.delete({ where: { userId_permissionId: { userId: leftover.userId, permissionId: leftover.permissionId } } });
+  check(
+    'the overrides on file were dropped once by the seed (marked)',
+    !!(await prisma.setting.findUnique({ where: { key: OVERRIDES_DROPPED_MARK } })),
+  );
+  const implied = withImpliedLevels(['gops.leads.view_all', 'gops.leads.edit_team']);
+  check(
+    'a level includes the ones under it: All → Team and Own; Team → Own',
+    ['gops.leads.view_team', 'gops.leads.view_own', 'gops.leads.edit_own'].every((k) => implied.has(k)) && !implied.has('gops.leads.edit_all'),
+    [...implied].join(', '),
+  );
+  check(
+    'a holder of a lower level is also found by a higher one (impliedBy)',
+    JSON.stringify(impliedBy('gops.leads.view_own')) === JSON.stringify(['gops.leads.view_own', 'gops.leads.view_team', 'gops.leads.view_all']) &&
+      JSON.stringify(impliedBy('gops.leads.create')) === JSON.stringify(['gops.leads.create']),
+  );
+  // Every screen, every pair of levels it offers, reads back as it was set.
+  const roundTrip: string[] = [];
+  for (const mod of REGISTRY) {
+    for (const sub of mod.submodules) {
+      const opts = levelOptions(sub.actions);
+      for (const v of opts.view) {
+        for (const m of opts.manage) {
+          const back = levelsOf(sub.actions, new Set(actionsFor(sub.actions, v, m)));
+          if (back.view !== v || back.manage !== m) roundTrip.push(`${mod.key}.${sub.key} ${v}/${m} → ${back.view}/${back.manage}`);
+        }
+      }
+    }
+  }
+  check('every screen\'s View and Manage levels read back as they were set', roundTrip.length === 0, roundTrip.slice(0, 4).join('; '));
+  const quotes = findSubmodule('gops', 'quotations')!;
+  check(
+    'Manage Own grants create, edit own and delete; Manage All adds edit team and edit all; View All exports where the screen exports',
+    JSON.stringify(actionsFor(quotes.actions, 'none', 'own')) === JSON.stringify(['create', 'edit_own', 'delete']) &&
+      actionsFor(quotes.actions, 'none', 'all').includes('edit_all') &&
+      actionsFor(quotes.actions, 'none', 'all').includes('edit_team') &&
+      JSON.stringify(actionsFor(['view_all', 'export'], 'all', 'none')) === JSON.stringify(['view_all', 'export']),
+    JSON.stringify(actionsFor(quotes.actions, 'none', 'own')),
+  );
+  const levelSrc = (f: string) => fs.readFileSync(f, 'utf8').replace(/^\s*\(The web copy[^\n]*\n/m, '');
+  check(
+    'the web\'s permission levels are the API\'s, line for line',
+    levelSrc(path.resolve(__dirname, '../src/shared/permissionLevels.ts')) === levelSrc(path.resolve(__dirname, '../../web/src/lib/permissionLevels.ts')),
+  );
 
-  // And an ALLOW grants something no role gave them.
-  const auditView = await prisma.permission.findUnique({ where: { key: 'admin.audit.view_all' } });
-  await prisma.userPermissionOverride.create({
-    data: { userId: employee.id, permissionId: auditView!.id, effect: 'ALLOW' },
+  // Team: the caller's team (Employee.industryId) and its members' records.
+  const teams = await prisma.industry.findMany({ where: { isActive: true }, take: 2, select: { id: true } });
+  const teamRole = await prisma.role.create({
+    data: {
+      key: `${TAG}teamquotes`,
+      name: `${TAG} Team quotes`,
+      permissions: {
+        create: (
+          await prisma.permission.findMany({ where: { key: { in: ['gops.quotations.view_team', 'gops.quotations.edit_team'] } }, select: { id: true } })
+        ).map((p) => ({ permissionId: p.id })),
+      },
+    },
   });
-  const allowed = (await resolveUser(employee.id))!;
-  check('a per-person ALLOW grants beyond the role', can(allowed, 'admin.audit.view_all'));
+  const mkTeamUser = async (n: string, teamId: string) => {
+    const u = await prisma.user.create({
+      data: { name: `Verify ${n}`, email: `${n.toLowerCase()}@verify.local`, passwordHash: 'x', roles: { create: [{ roleId: teamRole.id }] } },
+    });
+    await prisma.employee.create({ data: { firstName: 'Verify', lastName: n, userId: u.id, industryId: teamId } });
+    return u;
+  };
+  const lead = await mkTeamUser('Teamlead', teams[0].id);
+  const mate = await mkTeamUser('Teammate', teams[0].id);
+  const stranger = await mkTeamUser('Stranger', teams[1].id);
+  const leadR = (await resolveUser(lead.id))!;
+  check('the resolved user knows their team and its members, themselves included', leadR.teamMemberIds.includes(lead.id) && leadR.teamMemberIds.includes(mate.id) && !leadR.teamMemberIds.includes(stranger.id));
+  check('View Team is the scope of a Team holder', viewScope(leadR, 'gops', 'quotations') === 'team');
+  check(
+    'Manage Team edits a teammate\'s record, never another team\'s',
+    canEditRecord(leadR, 'gops', 'quotations', mate.id) && !canEditRecord(leadR, 'gops', 'quotations', stranger.id),
+  );
+  const narrowed = ownOnly(leadR, 'gops', 'quotations', {}, (ids: string[]) => ({ ownerId: { in: ids } })) as { AND: [object, { ownerId: { in: string[] } }] };
+  check(
+    'a list narrows a Team holder to the team\'s records',
+    narrowed.AND[1].ownerId.in.includes(mate.id) && !narrowed.AND[1].ownerId.in.includes(stranger.id),
+  );
 
   // Record ownership — "only the author can edit the quotation".
   const salesUser = await makeUser('Verify Sales', 'sales@verify.local', ['sales']);

@@ -75,7 +75,7 @@ function seesRatesOf(me: ResolvedUser, employeeUserId: string | null): boolean {
 
 /** And whose the caller may change — Edit All, or Edit Own on their own record. */
 function setsRatesOf(me: ResolvedUser, employeeUserId: string | null): boolean {
-  return mayEdit(me, 'ghr', 'employee_rates', !!employeeUserId && employeeUserId === me.id);
+  return mayEdit(me, 'ghr', 'employee_rates', !!employeeUserId && employeeUserId === me.id, employeeUserId);
 }
 
 /**
@@ -84,6 +84,8 @@ function setsRatesOf(me: ResolvedUser, employeeUserId: string | null): boolean {
  * opens no other; Edit Own changes that one alone.
  */
 const myRecord = (me: ResolvedUser): Prisma.EmployeeWhereInput => ({ userId: me.id });
+/** The records of these logins — View Own reads one's own, View Team the team's (2026-10-19). */
+const myRecords = (ids: string[]): Prisma.EmployeeWhereInput => ({ userId: { in: ids } });
 
 function decimalsToNumbers(row: Record<string, unknown>): Record<string, unknown> {
   const out = { ...row };
@@ -150,7 +152,7 @@ employeeRoutes.get(
     await sweepSeparations();
     const me = currentUser(req);
     const q = listQuery(req);
-    const where = ownOnly(me, 'ghr', 'employees', employeeListWhere(q), myRecord(me));
+    const where = ownOnly(me, 'ghr', 'employees', employeeListWhere(q), myRecords);
 
     const [rows, total] = await Promise.all([
       prisma.employee.findMany({
@@ -175,7 +177,7 @@ employeeRoutes.get(
     // The people still without a number (the card over the list), under the
     // register as a whole — a tile equals the list it opens (`?number=none`).
     const withoutNumber = await prisma.employee.count({
-      where: ownOnly(me, 'ghr', 'employees', { employeeNo: null, isActive: true }, myRecord(me)),
+      where: ownOnly(me, 'ghr', 'employees', { employeeNo: null, isActive: true }, myRecords),
     });
 
     res.json({
@@ -183,7 +185,7 @@ employeeRoutes.get(
       ...listResult(
         rows.map((r) => ({
           ...stripRates(decimalsToNumbers(r) as typeof r, seesRatesOf(me, r.userId)),
-          canEdit: mayEdit(me, 'ghr', 'employees', r.userId === me.id),
+          canEdit: mayEdit(me, 'ghr', 'employees', r.userId === me.id, r.userId),
         })),
         total,
         q,
@@ -208,7 +210,7 @@ employeeRoutes.get(
     await sweepSeparations();
     const q = listQuery(req);
     const me = currentUser(req);
-    const where = ownOnly(me, 'ghr', 'employees', employeeListWhere(q), myRecord(me));
+    const where = ownOnly(me, 'ghr', 'employees', employeeListWhere(q), myRecords);
     const f = q.filters;
     const [rows, count, team, position] = await Promise.all([
       prisma.employee.findMany({
@@ -390,14 +392,14 @@ employeeRoutes.get(
     });
     if (!employee) throw notFound('Employee not found');
     const isMine = employee.userId === me.id;
-    assertCanView(me, 'ghr', 'employees', isMine);
+    assertCanView(me, 'ghr', 'employees', isMine, employee.userId);
     const seeRates = seesRatesOf(me, employee.userId);
 
     res.json({
       ...stripRates(decimalsToNumbers(employee) as typeof employee, seeRates),
       canSeeRates: seeRates,
       // What the page may offer (2026-10-18): Modify, and the pay fields in it.
-      canEdit: mayEdit(me, 'ghr', 'employees', isMine),
+      canEdit: mayEdit(me, 'ghr', 'employees', isMine, employee.userId),
       canEditRates: setsRatesOf(me, employee.userId),
       // Filled by Phase 6.
       attendance: [],
@@ -815,7 +817,7 @@ employeeRoutes.patch(
     // Edit Own (2026-10-18) changes the caller's own record alone. Every
     // rule below still holds for it — linking a login needs
     // admin.users.edit_all, the login mirrors what is written.
-    assertCanEdit(me, 'ghr', 'employees', before.userId === me.id);
+    assertCanEdit(me, 'ghr', 'employees', before.userId === me.id, before.userId);
     const maySetRates = setsRatesOf(me, before.userId);
     // Edit Own is self-service, never self-promotion: on one's own record it
     // changes the personal and contact details alone (and the pay fields only

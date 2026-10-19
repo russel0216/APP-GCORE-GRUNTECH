@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { LeadStatus, Prisma, QuotationOutcome } from '@prisma/client';
 import { prisma } from '../prisma';
-import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, quotationTeamWhere, teamMembers, teamOf, teamShares, type TeamRef, type TeamShare } from '../shared/team';
+import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, quotationTeamWhere, quotationsReadable, readsQuotation, teamMembers, teamOf, teamShares, visibleOwners, type TeamRef, type TeamShare } from '../shared/team';
 import {
   handler,
   parseBody,
@@ -17,7 +17,7 @@ import {
   idsFilter,
 } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
-import { requireEdit } from '../shared/ownScope';
+import { requireEdit, viewScope } from '../shared/ownScope';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
 import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
@@ -196,7 +196,9 @@ export function leadListWhere(
   const and: Prisma.LeadWhereInput[] = [];
 
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.leads.view_all');
-  if (onlyOwn || q.scope === 'mine') and.push({ assignedToId: me.id });
+  // View Team (2026-10-19) reads the team's leads; View Own and Mine one's own.
+  if (q.scope === 'mine') and.push({ assignedToId: me.id });
+  else if (onlyOwn) and.push({ assignedToId: { in: visibleOwners(me, 'gops', 'leads') } });
   if (q.scope === 'team') and.push(team ? { assignedTo: teamMembers(team) } : { assignedToId: me.id });
 
   if (q.search) {
@@ -1071,8 +1073,9 @@ export function quotationListWhere(
 ): { base: Prisma.QuotationWhereInput; where: Prisma.QuotationWhereInput } {
   const and: Prisma.QuotationWhereInput[] = [];
 
-  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
-  if (onlyOwn || q.scope === 'mine') and.push({ ownerId: me.id });
+  const readable = quotationsReadable(me);
+  if (q.scope === 'mine') and.push({ ownerId: me.id });
+  else if (readable) and.push(readable);
   if (q.scope === 'team') and.push(team ? quotationTeamWhere(team) : { ownerId: me.id });
 
   if (q.search) {
@@ -1606,8 +1609,7 @@ quotationRoutes.get(
     const brand = memoryTerm(req.query.brand);
     const productType = memoryTerm(req.query.productType);
     const partNumber = memoryTerm(req.query.partNumber);
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
-    const mine: Prisma.QuotationWhereInput = onlyOwn ? { ownerId: me.id } : {};
+    const mine: Prisma.QuotationWhereInput = quotationsReadable(me) ?? {};
     const readable = { revision: { quotation: mine } };
     const like = (column: string) => (q ? { [column]: { contains: q, mode: 'insensitive' as const } } : {});
 
@@ -1720,7 +1722,6 @@ quotationRoutes.get(
       res.json([]);
       return;
     }
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
     const past = await prisma.quotationItem.findMany({
       where: {
         isHeading: false,
@@ -1731,7 +1732,7 @@ quotationRoutes.get(
           { brand: { contains: q, mode: 'insensitive' } },
           { description: { contains: q, mode: 'insensitive' } },
         ],
-        revision: { quotation: onlyOwn ? { ownerId: me.id } : {} },
+        revision: { quotation: quotationsReadable(me) ?? {} },
       },
       select: {
         title: true,
@@ -3325,7 +3326,7 @@ type LoadedQuotation = NonNullable<Awaited<ReturnType<typeof loadQuotation>>>;
 export async function printableQuotation(me: ResolvedUser, id: string, deciderOnly = false): Promise<LoadedQuotation> {
   const quotation = await loadQuotation(id);
   if (!quotation) throw notFound('Quotation not found');
-  const visible = !deciderOnly && (me.isSuperAdmin || me.permissions.has('gops.quotations.view_all') || quotation.ownerId === me.id);
+  const visible = !deciderOnly && readsQuotation(me, quotation);
   // A stand-in (or an approver) with no quotation right opens it while it
   // waits on them, and only then (`requireAnyOrDecider`).
   if (!visible && !(await mayDecide(me.id, 'quotation', quotation.revisions.map((r) => r.id)))) {
@@ -3538,10 +3539,10 @@ registerAttachmentGuard(
   {
     write: async (user, id) => {
       if (user.isSuperAdmin) return true;
-      const q = await prisma.quotation.findUnique({ where: { id }, select: { ownerId: true } });
+      const q = await prisma.quotation.findUnique({ where: { id }, select: { ownerId: true, teamId: true } });
       if (!q) return false;
       if (canEditRecord(user, 'gops', 'quotations', q.ownerId)) return true;
-      const reads = user.permissions.has('gops.quotations.view_all') || q.ownerId === user.id;
+      const reads = readsQuotation(user, q);
       return reads && user.permissions.has('gops.sales_orders.create');
     },
   },

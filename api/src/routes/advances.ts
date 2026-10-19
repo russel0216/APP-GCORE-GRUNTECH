@@ -29,7 +29,7 @@ import {
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { requestItemSchema, requestMoney } from '../shared/requestLines';
-import { USER_TEAM_SELECT, teamOfUser, userTeamWhere } from '../shared/team';
+import { USER_TEAM_SELECT, teamOfUser, userTeamWhere, visibleOwners } from '../shared/team';
 import { registerSearch } from '../shared/search';
 import { renderDocument, companyCurrency, formatAmount, formatMoney, formatQuantity, formatShortDate, statusLabel, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween, financeSettings } from '../shared/finance';
@@ -129,7 +129,9 @@ function advanceListWhere(me: ReturnType<typeof currentUser>, q: ListQuery, toda
   // `view_own` holder naming somebody else gets nothing, not their advances.
   const asked = q.filters.requestedById || undefined;
   const people: Prisma.CashAdvanceWhereInput[] = [];
-  if (mine) people.push({ requestedById: me.id });
+  // View Team reads the team's advances (2026-10-19); "Mine" is one's own.
+  if (q.scope === 'mine') people.push({ requestedById: me.id });
+  else if (mine) people.push({ requestedById: { in: visibleOwners(me, 'gfin', 'cash_advances') } });
   if (asked) people.push({ requestedById: asked });
   if (people.length) where.AND = people;
   const status = choice(q.filters.status, CashAdvanceStatus, 'Status');
@@ -414,7 +416,7 @@ async function loadAdvance(id: string) {
 }
 
 function assertCanSee(me: ReturnType<typeof currentUser>, row: { requestedById: string }) {
-  if (row.requestedById !== me.id && ownOnly(me)) throw forbidden('That is someone else’s advance');
+  if (!visibleOwners(me, 'gfin', 'cash_advances').includes(row.requestedById) && ownOnly(me)) throw forbidden('That is someone else’s advance');
 }
 
 advanceRoutes.get(

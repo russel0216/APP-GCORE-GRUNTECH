@@ -34,7 +34,8 @@ type Snapshot = {
     email: string;
     reportsTo: string | null;
     roles: string[];
-    overrides: { permission: string; effect: OverrideEffect }[];
+    /** Older snapshots carried per-person overrides; ignored since 2026-10-19 (the role matrix replaced them). */
+    overrides?: { permission: string; effect: OverrideEffect }[];
     supportsTeams: string[];
     team: string | null;
   }[];
@@ -149,7 +150,7 @@ async function main() {
         }
       }
 
-      // ── People: roles, Reports to, team, Back Support teams, overrides ──
+      // ── People: roles, Reports to, team, Back Support teams ──
       for (const u of snap.users) {
         const userId = userIds.get(u.email.toLowerCase());
         if (!userId) {
@@ -161,7 +162,6 @@ async function main() {
           select: {
             supervisor: { select: { email: true } },
             roles: { select: { role: { select: { key: true } } } },
-            overrides: { select: { effect: true, permission: { select: { key: true } } } },
             supportTeams: { select: { industry: { select: { code: true } } } },
             employee: { select: { id: true, industry: { select: { code: true } } } },
           },
@@ -202,18 +202,7 @@ async function main() {
           }
         }
 
-        const wantOv = u.overrides.filter((o) => permissions.has(o.permission));
-        const haveOv = now.overrides.map((o) => ({ permission: o.permission.key, effect: o.effect }));
-        const key = (xs: { permission: string; effect: string }[]) => xs.map((o) => `${o.permission}:${o.effect}`).sort();
-        if (!same(key(wantOv), key(haveOv))) {
-          say(`User ${u.email}: ${wantOv.length} permission override(s)`);
-          if (apply) {
-            await tx.userPermissionOverride.deleteMany({ where: { userId } });
-            await tx.userPermissionOverride.createMany({
-              data: wantOv.map((o) => ({ userId, permissionId: permissions.get(o.permission)!, effect: o.effect })),
-            });
-          }
-        }
+        if (u.overrides?.length) skipped.push(`User ${u.email}: ${u.overrides.length} permission override(s) ignored — access is the role matrix alone (2026-10-19)`);
       }
 
       // ── Approval workflows (matched by document type and name) ───────

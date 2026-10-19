@@ -99,7 +99,7 @@ export function customerListWhere(
  */
 function visibleCustomers(me: ReturnType<typeof currentUser>, q: ReturnType<typeof listQuery>) {
   const { base, where } = customerListWhere(me, q);
-  const mine = { createdById: me.id };
+  const mine = (ids: string[]) => ({ createdById: { in: ids } });
   return {
     base: ownOnly(me, 'gops', 'customers', base, mine),
     where: ownOnly(me, 'gops', 'customers', where, mine),
@@ -113,7 +113,7 @@ function visibleCustomers(me: ReturnType<typeof currentUser>, q: ReturnType<type
 async function customerForEdit(me: ReturnType<typeof currentUser>, id: string) {
   const customer = await prisma.customer.findUnique({ where: { id } });
   if (!customer) throw notFound('Customer not found');
-  assertCanEdit(me, 'gops', 'customers', customer.createdById === me.id);
+  assertCanEdit(me, 'gops', 'customers', customer.createdById === me.id, customer.createdById);
   return customer;
 }
 
@@ -183,7 +183,7 @@ customerRoutes.get(
           siteCount: r._count.sites,
           openQuoteCount: r._count.quotations,
           projectCount: r._count.jobs,
-          canEdit: mayEdit(me, 'gops', 'customers', r.createdById === me.id),
+          canEdit: mayEdit(me, 'gops', 'customers', r.createdById === me.id, r.createdById),
         })),
         total,
         q,
@@ -351,7 +351,7 @@ customerRoutes.get(
     });
     if (!customer) throw notFound('Customer not found');
     // View Own reads only the customers the caller added (2026-10-18).
-    assertCanView(currentUser(req), 'gops', 'customers', customer.createdById === currentUser(req).id);
+    assertCanView(currentUser(req), 'gops', 'customers', customer.createdById === currentUser(req).id, customer.createdById);
 
     /*
       The commercial history, each collection behind the permission that guards
@@ -546,7 +546,7 @@ customerRoutes.get(
     res.json({
       ...customer,
       creditLimit: customer.creditLimit ? Number(customer.creditLimit) : null,
-      canEdit: mayEdit(me, 'gops', 'customers', customer.createdById === me.id),
+      canEdit: mayEdit(me, 'gops', 'customers', customer.createdById === me.id, customer.createdById),
       quotations: quotations.map((q) => {
         // What the quotation is worth: its latest approved revision, else its
         // latest — the same rule Insights uses, so the two cannot disagree.

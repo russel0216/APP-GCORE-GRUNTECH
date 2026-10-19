@@ -554,3 +554,109 @@
   color: var(--muted);
   margin-bottom: var(--s-1);
 }
+
+/*
+  The permission matrix (Admin › Roles, 2026-10-19): screens down, roles
+  across, each cell the role's View and Manage level. The screen column and
+  the head stay put while the roles scroll sideways.
+*/
+.pm-tools {
+  margin-bottom: var(--s-3);
+}
+
+.pm-scroll {
+  overflow: auto;
+  max-height: 70vh;
+  border: 1px solid var(--line);
+  border-radius: var(--radius, 0.5rem);
+}
+
+.pm-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+}
+
+.pm-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface);
+}
+
+.pm-table thead tr:nth-child(2) th {
+  top: var(--row-h);
+}
+
+.pm-table .pm-screen {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+  min-width: 14rem;
+  text-align: left;
+  font-weight: 600;
+  border-right: 1px solid var(--line);
+}
+
+.pm-table thead .pm-screen {
+  z-index: 3;
+}
+
+.pm-role {
+  text-align: center;
+  white-space: nowrap;
+  border-left: 1px solid var(--line);
+}
+
+.pm-role-level {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+}
+
+.pm-axes {
+  border-left: 1px solid var(--line);
+}
+
+.pm-axes span {
+  display: inline-block;
+  width: 50%;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.pm-module th,
+.pm-module td {
+  background: var(--surface-2, var(--surface));
+  color: var(--accent, inherit);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pm-table td {
+  border-left: 1px solid var(--line);
+}
+
+.pm-cell {
+  display: flex;
+  gap: var(--s-1);
+}
+
+.pm-select {
+  width: 5.5rem;
+}
+
+/* The level is said in words; the tint only helps the eye run down a column. */
+.pm-select.pm-own {
+  border-color: var(--info);
+}
+.pm-select.pm-team {
+  border-color: var(--warn);
+}
+.pm-select.pm-all {
+  border-color: var(--ok);
+}

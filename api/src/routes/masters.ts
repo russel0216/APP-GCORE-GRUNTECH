@@ -139,7 +139,7 @@ export async function supplierListSummary(
  */
 function visibleSuppliers(me: Me, q: ReturnType<typeof listQuery>, mayOrders: boolean) {
   const { base, where } = supplierListWhere(me, q, mayOrders);
-  const mine = { createdById: me.id };
+  const mine = (ids: string[]) => ({ createdById: { in: ids } });
   return {
     base: ownOnly(me, 'gchain', 'suppliers', base, mine),
     where: ownOnly(me, 'gchain', 'suppliers', where, mine),
@@ -150,7 +150,7 @@ function visibleSuppliers(me: Me, q: ReturnType<typeof listQuery>, mayOrders: bo
 async function supplierForEdit(me: Me, id: string) {
   const supplier = await prisma.supplier.findUnique({ where: { id } });
   if (!supplier) throw notFound('Supplier not found');
-  assertCanEdit(me, 'gchain', 'suppliers', supplier.createdById === me.id);
+  assertCanEdit(me, 'gchain', 'suppliers', supplier.createdById === me.id, supplier.createdById);
   return supplier;
 }
 
@@ -195,7 +195,7 @@ supplierRoutes.get(
           contactCount: _count.contacts,
           orderCount: mayOrders ? (_count as { purchaseOrders?: number }).purchaseOrders ?? 0 : null,
           awaitingCount: mayOrders ? (purchaseOrders ?? []).length : null,
-          canEdit: mayEdit(me, 'gchain', 'suppliers', r.createdById === me.id),
+          canEdit: mayEdit(me, 'gchain', 'suppliers', r.createdById === me.id, r.createdById),
         })),
         total,
         q,
@@ -320,7 +320,7 @@ supplierRoutes.get(
     });
     if (!supplier) throw notFound('Supplier not found');
     // View Own reads only the suppliers the caller added (2026-10-18).
-    assertCanView(currentUser(req), 'gchain', 'suppliers', supplier.createdById === currentUser(req).id);
+    assertCanView(currentUser(req), 'gchain', 'suppliers', supplier.createdById === currentUser(req).id, supplier.createdById);
 
     /*
       Supplier 360 — the same rule as the customer page: each collection sits
@@ -404,7 +404,7 @@ supplierRoutes.get(
 
     res.json({
       ...supplier,
-      canEdit: mayEdit(me, 'gchain', 'suppliers', supplier.createdById === me.id),
+      canEdit: mayEdit(me, 'gchain', 'suppliers', supplier.createdById === me.id, supplier.createdById),
       purchaseOrders: purchaseOrders.map((o) => ({ ...o, total: Number(o.total) })),
       receivings: receivings.map((r) => ({ ...r, lineCount: r._count.items })),
       bills: bills.map((b) => ({
@@ -715,7 +715,7 @@ itemRoutes.get(
     const me = currentUser(req);
     const q = listQuery(req);
     // View Own lists the items the caller added (2026-10-18).
-    const where = ownOnly(me, 'gchain', 'items', itemListWhere(q), { createdById: me.id });
+    const where = ownOnly(me, 'gchain', 'items', itemListWhere(q), (ids) => ({ createdById: { in: ids } }));
 
     const [rows, total] = await Promise.all([
       prisma.item.findMany({
@@ -734,7 +734,7 @@ itemRoutes.get(
 
     res.json(
       listResult(
-        rows.map((r) => ({ ...(itemNumbers(r) as typeof r), canEdit: mayEdit(me, 'gchain', 'items', r.createdById === me.id) })),
+        rows.map((r) => ({ ...(itemNumbers(r) as typeof r), canEdit: mayEdit(me, 'gchain', 'items', r.createdById === me.id, r.createdById) })),
         total,
         q,
       ),
@@ -755,7 +755,7 @@ itemRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where = ownOnly(me, 'gchain', 'items', itemListWhere(q), { createdById: me.id });
+    const where = ownOnly(me, 'gchain', 'items', itemListWhere(q), (ids) => ({ createdById: { in: ids } }));
     const f = q.filters;
     const [rows, count, currency, category, costCategory] = await Promise.all([
       prisma.item.findMany({
@@ -869,10 +869,10 @@ itemRoutes.get(
     });
     if (!item) throw notFound('Item not found');
     // View Own reads only the items the caller added (2026-10-18).
-    assertCanView(me, 'gchain', 'items', item.createdById === me.id);
+    assertCanView(me, 'gchain', 'items', item.createdById === me.id, item.createdById);
     res.json({
       ...itemNumbers(item),
-      canEdit: mayEdit(me, 'gchain', 'items', item.createdById === me.id),
+      canEdit: mayEdit(me, 'gchain', 'items', item.createdById === me.id, item.createdById),
       stockBalances: [],
       movements: [],
     });
@@ -975,7 +975,7 @@ itemRoutes.patch(
     const before = await prisma.item.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Item not found');
     // Edit Own changes only the items the caller added (2026-10-18).
-    assertCanEdit(me, 'gchain', 'items', before.createdById === me.id);
+    assertCanEdit(me, 'gchain', 'items', before.createdById === me.id, before.createdById);
 
     if (body.code && body.code !== before.code) {
       if (await prisma.item.findUnique({ where: { code: body.code } })) {
@@ -1057,7 +1057,7 @@ referenceRoutes.use(authenticate);
 */
 const editCategory = requireEdit('admin', 'categories');
 function assertCategoryEdit(me: Me, row: { createdById: string | null }) {
-  assertCanEdit(me, 'admin', 'categories', row.createdById === me.id);
+  assertCanEdit(me, 'admin', 'categories', row.createdById === me.id, row.createdById);
 }
 
 referenceRoutes.get(
@@ -1772,11 +1772,11 @@ warehouseRoutes.get(
     const me = currentUser(req);
     // View Own lists the warehouses the caller added (2026-10-18).
     const rows = await prisma.warehouse.findMany({
-      where: ownOnly(me, 'gchain', 'warehouses', {}, { createdById: me.id }),
+      where: ownOnly(me, 'gchain', 'warehouses', {}, (ids) => ({ createdById: { in: ids } })),
       include: { locations: { orderBy: { code: 'asc' } } },
       orderBy: { name: 'asc' },
     });
-    res.json(rows.map((w) => ({ ...w, canEdit: mayEdit(me, 'gchain', 'warehouses', w.createdById === me.id) })));
+    res.json(rows.map((w) => ({ ...w, canEdit: mayEdit(me, 'gchain', 'warehouses', w.createdById === me.id, w.createdById) })));
   }),
 );
 
@@ -1784,7 +1784,7 @@ warehouseRoutes.get(
 async function warehouseForEdit(me: Me, id: string) {
   const warehouse = await prisma.warehouse.findUnique({ where: { id } });
   if (!warehouse) throw notFound('Warehouse not found');
-  assertCanEdit(me, 'gchain', 'warehouses', warehouse.createdById === me.id);
+  assertCanEdit(me, 'gchain', 'warehouses', warehouse.createdById === me.id, warehouse.createdById);
   return warehouse;
 }
 

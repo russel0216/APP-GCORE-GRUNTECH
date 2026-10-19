@@ -35,6 +35,7 @@ import {
 } from '../shared/pdf';
 import { LIST_CAP, listReference, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { visibleOwners } from '../shared/team';
 
 /**
  * Requests for Quotation (2026-10-14, the owner's call: "Purchase Request,
@@ -76,13 +77,14 @@ function seesAll(me: ResolvedUser) {
 }
 
 async function assertVisible(me: ResolvedUser, rfq: { preparedById: string }) {
-  if (!seesAll(me) && rfq.preparedById !== me.id) throw notFound('RFQ not found');
+  if (!seesAll(me) && !visibleOwners(me, 'gchain', 'rfq').includes(rfq.preparedById)) throw notFound('RFQ not found');
 }
 
 /** Which RFQs a list query means — one rule for the list and its printed twin. */
 function rfqListWhere(me: ResolvedUser, q: ListQuery): Prisma.RfqWhereInput {
   const and: Prisma.RfqWhereInput[] = [];
-  if (!seesAll(me) || q.scope === 'mine') and.push({ preparedById: me.id });
+  if (q.scope === 'mine') and.push({ preparedById: me.id });
+  else if (!seesAll(me)) and.push({ preparedById: { in: visibleOwners(me, 'gchain', 'rfq') } });
   const f = q.filters;
   const status = choice(f.status, RfqStatus, 'Status');
   if (status) and.push({ status });
@@ -965,7 +967,7 @@ registerAttachmentGuard(
   async (user, entityId) => {
     const row = await prisma.rfqSupplier.findUnique({ where: { id: entityId }, select: { rfq: { select: { preparedById: true } } } });
     if (!row) return false;
-    return can(user, 'gchain.rfq.view_all') || (can(user, 'gchain.rfq.view_own') && row.rfq.preparedById === user.id);
+    return can(user, 'gchain.rfq.view_all') || (can(user, 'gchain.rfq.view_own') && visibleOwners(user, 'gchain', 'rfq').includes(row.rfq.preparedById));
   },
   {
     write: async (user, entityId) => {
@@ -983,7 +985,7 @@ registerSearch({
   async search(term, user, limit) {
     const rows = await prisma.rfq.findMany({
       where: {
-        ...(can(user, 'gchain.rfq.view_all') ? {} : { preparedById: user.id }),
+        ...(can(user, 'gchain.rfq.view_all') ? {} : { preparedById: { in: visibleOwners(user, 'gchain', 'rfq') } }),
         OR: [
           { number: { contains: term, mode: 'insensitive' } },
           { request: { number: { contains: term, mode: 'insensitive' } } },

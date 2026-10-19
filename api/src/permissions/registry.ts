@@ -15,9 +15,11 @@
 
 export const ACTIONS = [
   'view_own',
+  'view_team',
   'view_all',
   'create',
   'edit_own',
+  'edit_team',
   'edit_all',
   'delete',
   'approve',
@@ -28,10 +30,12 @@ export type Action = (typeof ACTIONS)[number];
 
 export const ACTION_LABELS: Record<Action, string> = {
   view_own: 'View Own',
+  view_team: 'View Team',
   view_all: 'View All',
   create: 'Create',
-  edit_own: 'Edit Own',
-  edit_all: 'Edit All',
+  edit_own: 'Manage Own',
+  edit_team: 'Manage Team',
+  edit_all: 'Manage All',
   delete: 'Delete',
   approve: 'Approve',
   export: 'Export',
@@ -44,18 +48,18 @@ export const ACTION_LABELS: Record<Action, string> = {
 // action no route or screen checks.
 
 /** A record users own and may only edit if theirs (quotations, costings…). */
-const OWNED: Action[] = ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete'];
+const OWNED: Action[] = ['view_own', 'view_team', 'view_all', 'create', 'edit_own', 'edit_team', 'edit_all', 'delete'];
 /** An owned document that is cancelled or closed, never deleted. */
-const OWNED_KEPT: Action[] = ['view_own', 'view_all', 'create', 'edit_own', 'edit_all'];
+const OWNED_KEPT: Action[] = ['view_own', 'view_team', 'view_all', 'create', 'edit_own', 'edit_team', 'edit_all'];
 /**
  * Shared reference data. Since 2026-10-18 (the owner's call: "every screen
  * with Edit All should have Edit Own and View Own") it carries the own pair
  * too: View Own is the records one ADDED (`createdById` — `own` on the entry
  * says what it is), Edit Own changes only those. Same keys as OWNED.
  */
-const SHARED: Action[] = ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete'];
+const SHARED: Action[] = ['view_own', 'view_team', 'view_all', 'create', 'edit_own', 'edit_team', 'edit_all', 'delete'];
 /** Shared records that are kept once written (a receipt, a login) — with the own pair, as SHARED. */
-const SHARED_KEPT: Action[] = ['view_own', 'view_all', 'create', 'edit_own', 'edit_all'];
+const SHARED_KEPT: Action[] = ['view_own', 'view_team', 'view_all', 'create', 'edit_own', 'edit_team', 'edit_all'];
 /** Registers and calendars: reading is the whole right. */
 const READ: Action[] = ['view_all'];
 /** Dashboards and reports, whose CSV and PDF are a right of their own. */
@@ -65,7 +69,7 @@ const REPORT: Action[] = ['view_all', 'export'];
  * no record anybody owns, "own" opens and saves the page as "all" does — the
  * entry's `own` says so on Admin › Roles.
  */
-const SETTINGS: Action[] = ['view_own', 'view_all', 'edit_own', 'edit_all'];
+const SETTINGS: Action[] = ['view_own', 'view_team', 'view_all', 'edit_own', 'edit_team', 'edit_all'];
 
 export interface SubmoduleDef {
   key: string;
@@ -149,11 +153,11 @@ export const REGISTRY: ModuleDef[] = [
       // drawing, with files, revisions and a comment thread. No approval
       // route — "Approve" here is the Designer Lead's right to dispatch:
       // assign and reassign requests, set priority on any, close any.
-      { key: 'cad_job_orders', group: 'Project Management', label: 'CAD J.O.', path: '/g-ops/cad-job-orders', actions: ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete', 'export', 'approve'], phase: 9,
+      { key: 'cad_job_orders', group: 'Project Management', label: 'CAD J.O.', path: '/g-ops/cad-job-orders', actions: ['view_own', 'view_team', 'view_all', 'create', 'edit_own', 'edit_team', 'edit_all', 'delete', 'export', 'approve'], phase: 9,
         note: 'Requests to the design team: files, revisions (R0, R1…), progress, priority and a comment thread. Edit All = the design team (progress, revisions, priority on what is assigned to them); Approve = the Designer Lead (assigns, reassigns, closes any).' },
       { key: 'plans', group: 'Project Management', label: 'Request for Approval', path: '/g-ops/plans', actions: OWNED, phase: 4, hidden: true, note: 'Raised from a project’s Request for Approval tab; decided through the approval engine' },
       { key: 'budget_monitoring', group: 'Project Management', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4, hidden: true },
-      { key: 'purchase_requests', group: 'Project Management', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: ['view_own', 'view_all', 'edit_own', 'edit_all'], phase: 5, hidden: true },
+      { key: 'purchase_requests', group: 'Project Management', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: ['view_own', 'view_team', 'view_all', 'edit_own', 'edit_team', 'edit_all'], phase: 5, hidden: true },
       { key: 'budget_requests', group: 'Project Management', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED, phase: 4, hidden: true },
       { key: 'progress_billing', group: 'Project Management', label: 'Progress & Billing', path: '/g-ops/progress', actions: OWNED, phase: 4, hidden: true },
       // Aftermarket (Phase 8). The installed base is what turns a finished
@@ -168,7 +172,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'commissioning_reports', group: 'Service reports', label: 'Commissioning Reports', path: '/g-ops/commissioning', actions: OWNED_KEPT, phase: 8 },
       { key: 'pm_reports', group: 'Service reports', label: 'Preventive Maintenance', path: '/g-ops/pm', actions: OWNED_KEPT, phase: 8 },
       { key: 'inspection_reports', group: 'Service reports', label: 'Service Inspections', path: '/g-ops/inspections', actions: OWNED_KEPT, phase: 8 },
-      { key: 'service_costing', group: 'Aftermarket', label: 'Service Costing', path: '/g-ops/service-costing', actions: ['view_own', 'view_all', 'edit_own', 'edit_all'], phase: 8, hidden: true },
+      { key: 'service_costing', group: 'Aftermarket', label: 'Service Costing', path: '/g-ops/service-costing', actions: ['view_own', 'view_team', 'view_all', 'edit_own', 'edit_team', 'edit_all'], phase: 8, hidden: true },
     ],
   },
   {
@@ -290,7 +294,7 @@ export const REGISTRY: ModuleDef[] = [
       // (2026-10-13, the owner's PEOPLE_FLOW file). HR ticks; the person
       // reads their own; a supervisor with the dashboard right their direct
       // reports' — shared/peopleFlow.ts.
-      { key: 'people_flow', own: 'your own path', group: 'People', label: 'People Flow', path: '/g-hr/people-flow', actions: ['view_own', 'view_all', 'edit_own', 'edit_all'], phase: 10, note: 'Edit All ticks the checklist; View Own reads your own path' },
+      { key: 'people_flow', own: 'your own path', group: 'People', label: 'People Flow', path: '/g-hr/people-flow', actions: ['view_own', 'view_team', 'view_all', 'edit_own', 'edit_team', 'edit_all'], phase: 10, note: 'Edit All ticks the checklist; View Own reads your own path' },
       { key: 'evaluations', group: 'People', label: 'Evaluations', path: '/g-hr/evaluations', actions: OWNED_KEPT, phase: 6, note: 'Probationary and trainee evaluations — the evaluator owns the record; the person evaluated reads it once approved' },
       // Turnover of accountabilities before someone leaves, cleared by the area
       // that owns each item and signed off through the approval engine. The
@@ -301,7 +305,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'training_calendar', group: 'Academy', label: 'Training Calendar', path: '/g-hr/academy/calendar', actions: READ, phase: 6 },
       { key: 'training_sessions', group: 'Academy', label: 'Training Sessions', path: '/g-hr/academy/sessions', actions: OWNED, phase: 6, note: 'Create is the Trainer right — schedule, enrol and complete a session; Edit Own covers sessions you train' },
       { key: 'passport', group: 'Academy', label: 'My Training Passport', path: '/g-hr/academy/passport', actions: ['view_own', 'create'], phase: 6, note: 'Create lets an employee enter an external certification for HR to verify' },
-      { key: 'passports', own: 'your own passport', group: 'Academy', label: 'Training Passports', path: '/g-hr/academy/passports', actions: ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete', 'approve'], phase: 6, note: 'Every employee’s passport; verify external certifications; record training directly' },
+      { key: 'passports', own: 'your own passport', group: 'Academy', label: 'Training Passports', path: '/g-hr/academy/passports', actions: ['view_own', 'view_team', 'view_all', 'create', 'edit_own', 'edit_team', 'edit_all', 'delete', 'approve'], phase: 6, note: 'Every employee’s passport; verify external certifications; record training directly' },
       { key: 'reports', group: 'Administration', label: 'HR Reports', path: '/g-hr/reports', actions: REPORT, phase: 6 },
       { key: 'settings', own: 'the page itself — it keeps no record of anybody’s', group: 'Administration', label: 'HR Settings', path: '/g-hr/settings', actions: SETTINGS, phase: 6 },
     ],

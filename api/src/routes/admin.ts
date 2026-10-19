@@ -374,7 +374,7 @@ workflowRoutes.get(
     const me = currentUser(req);
     // View Own: the approval routes they made (`createdById`, 2026-10-18).
     const workflows = await prisma.approvalWorkflow.findMany({
-      where: ownOnly(me, 'admin', 'workflows', {} as Prisma.ApprovalWorkflowWhereInput, { createdById: me.id }),
+      where: ownOnly(me, 'admin', 'workflows', {} as Prisma.ApprovalWorkflowWhereInput, (ids) => ({ createdById: { in: ids } })),
       include: {
         steps: {
           orderBy: { sequence: 'asc' },
@@ -564,7 +564,7 @@ workflowRoutes.put(
     const existing = await prisma.approvalWorkflow.findUnique({ where: { id: req.params.id }, include: { steps: { select: { sequence: true, alsoRoleIds: true } } } });
     if (!existing) throw notFound('Workflow not found');
     // Edit Own: the routes they made (2026-10-18); Edit All any, as before.
-    assertCanEdit(me, 'admin', 'workflows', existing.createdById === me.id);
+    assertCanEdit(me, 'admin', 'workflows', existing.createdById === me.id, existing.createdById);
     await checkAlsoRoles(body.steps);
     const alsoBefore = new Map(existing.steps.map((st) => [st.sequence, st.alsoRoleIds]));
 

@@ -54,6 +54,8 @@ import { SCOPE_PRELOAD } from '../shared/scopePreload';
 import { renderDesigned, type DesignData } from '../shared/pdfDesign';
 import { costingDesign, costingLineRow, costingSubtotalRow } from '../shared/costingTemplate';
 import { appendPdf } from '../shared/pdfAttachments';
+import { visibleOwners } from '../shared/team';
+import { viewScope } from '../shared/ownScope';
 
 /**
  * Costing (model §5.3).
@@ -281,13 +283,18 @@ function onlyOwn(me: ReturnType<typeof currentUser>) {
   return !me.isSuperAdmin && !me.permissions.has('gops.costing.view_all');
 }
 
+/** The costings such a caller reads: their own, or — View Team — the team's (2026-10-19). */
+function readableCostings(me: ReturnType<typeof currentUser>): Prisma.CostingWhereInput {
+  return onlyOwn(me) ? { ownerId: { in: visibleOwners(me, 'gops', 'costing') } } : {};
+}
+
 /**
  * A costing's visibility — `view_all`, or its author — and, for a caller with
  * no costing right at all (`requireAnyOrDecider`) or anyone else, a stand-in
  * or approver while it waits on them (`mayDecide`).
  */
 async function assertCostingVisible(me: ReturnType<typeof currentUser>, costing: { id: string; ownerId: string }, deciderOnly: boolean) {
-  const visible = !deciderOnly && (!onlyOwn(me) || costing.ownerId === me.id);
+  const visible = !deciderOnly && (!onlyOwn(me) || visibleOwners(me, 'gops', 'costing').includes(costing.ownerId));
   if (visible || (await mayDecide(me.id, 'costing', [costing.id]))) return;
   throw forbidden(deciderOnly ? 'You need one of: gops.costing.view_all, gops.costing.view_own' : 'This costing belongs to someone else');
 }
@@ -307,7 +314,8 @@ function costingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Pri
 
   // Someone with only view_own never sees another person's costing, whatever
   // the scope switch says.
-  if (onlyOwn(me) || q.scope === 'mine') where.ownerId = me.id;
+  if (q.scope === 'mine') where.ownerId = me.id;
+  else if (onlyOwn(me)) where.ownerId = { in: visibleOwners(me, 'gops', 'costing') };
 
   if (q.search) {
     where.OR = [
@@ -458,7 +466,7 @@ costingRoutes.get(
           : null,
       customer,
       f.jobType ? (f.jobType === 'SERVICE_CONTRACT' ? 'service contracts only' : 'projects only') : null,
-      onlyOwn(me) || q.scope === 'mine' ? 'mine only' : null,
+      q.scope === 'mine' ? 'mine only' : onlyOwn(me) ? (viewScope(me, 'gops', 'costing') === 'team' ? "my team's only" : 'mine only') : null,
       f.ids ? 'the rows selected' : null,
     ]);
 
@@ -519,7 +527,7 @@ costingRoutes.get(
   requireAny('gops.costing.view_all', 'gops.costing.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const where: Prisma.CostingWhereInput = onlyOwn(me) ? { ownerId: me.id } : {};
+    const where: Prisma.CostingWhereInput = readableCostings(me);
 
     // `?status=FINAL` (or a comma list) lets a picker leave DRAFT costings out —
     // a project is built on a final costing, and a picker that offers drafts
@@ -586,7 +594,7 @@ costingRoutes.get(
           { name: { contains: q, mode: 'insensitive' } },
           { description: { contains: q, mode: 'insensitive' } },
         ],
-        costing: onlyOwn(me) ? { ownerId: me.id } : {},
+        costing: readableCostings(me),
       },
       select: {
         name: true,
@@ -713,7 +721,7 @@ costingRoutes.get(
   requireAny('gops.costing.view_all', 'gops.costing.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const visible: Prisma.CostingWhereInput = onlyOwn(me) ? { ownerId: me.id } : {};
+    const visible: Prisma.CostingWhereInput = readableCostings(me);
     const [units, systems, phases, tasks, lastTerms, company] = await Promise.all([
       prisma.costingLine.groupBy({
         by: ['unit'],
@@ -900,7 +908,7 @@ costingRoutes.post(
         },
       });
       if (!source) throw notFound('Costing not found');
-      if (onlyOwn(me) && source.ownerId !== me.id) throw forbidden('This costing belongs to someone else');
+      if (onlyOwn(me) && !visibleOwners(me, 'gops', 'costing').includes(source.ownerId)) throw forbidden('This costing belongs to someone else');
       content = {
         systemUnit: source.systemUnit,
         marginPct: num(source.marginPct),
@@ -1857,7 +1865,7 @@ costingRoutes.post(
     if (!source) throw notFound('Costing not found');
     // Copying is reading: someone who may only see their own costings may only
     // copy their own.
-    if (onlyOwn(me) && source.ownerId !== me.id) {
+    if (onlyOwn(me) && !visibleOwners(me, 'gops', 'costing').includes(source.ownerId)) {
       throw forbidden('This costing belongs to someone else');
     }
 

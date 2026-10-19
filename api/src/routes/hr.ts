@@ -1415,7 +1415,7 @@ attendanceRoutes.get(
           employee,
           // Whether the row's Modify opens (2026-10-18): Edit All, or Edit
           // Own on the caller's own entry.
-          canEdit: mayEdit(me, 'ghr', 'attendance', userId === me.id),
+          canEdit: mayEdit(me, 'ghr', 'attendance', userId === me.id, userId),
           timeInPhoto: mayOpen(r.employeeId) ? r.timeInPhoto : null,
           timeOutPhoto: mayOpen(r.employeeId) ? r.timeOutPhoto : null,
           timeInScore: r.timeInScore ? num(r.timeInScore) : null,
@@ -1629,7 +1629,8 @@ attendanceRoutes.patch(
 
     const existing = await prisma.attendance.findUnique({ where: { id: req.params.id } });
     if (!existing) throw notFound('Attendance record not found');
-    assertCanEdit(me, 'ghr', 'attendance', await isOwnEmployee(me, existing.employeeId));
+    const attendee = await prisma.employee.findUnique({ where: { id: existing.employeeId }, select: { userId: true } });
+    assertCanEdit(me, 'ghr', 'attendance', await isOwnEmployee(me, existing.employeeId), attendee?.userId);
     // A changed time always carries why (2026-10-16): closing a forgotten
     // clock-out is the commonest correction, and the note is all an audit
     // of it has to go on.

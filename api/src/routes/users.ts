@@ -26,7 +26,7 @@ import { MAX_ROLES, refreshUserTitle, titleFromRoles, tooManyRoles } from '../sh
 import { ENGINE_ROLE_KEYS } from '../shared/rolesClear';
 import { mailConfig, sendMail } from '../shared/mail';
 import { requireView, requireEdit, ownOnly, viewScope, editScope, assertCanView, assertCanEdit } from '../shared/ownScope';
-import type { ResolvedUser } from '../permissions/resolve';
+import { impliedBy, type ResolvedUser } from '../permissions/resolve';
 import { renderDocument, formatShortDate } from '../shared/pdf';
 import { LIST_CAP, listReference, sendListPdf } from '../shared/listPaper';
 
@@ -265,8 +265,8 @@ userRoutes.get(
   reads "lookup" as an id.
 
   `holding=<permission key>` narrows to the people who actually hold that
-  right — through a role or an ALLOW override, and not taken away by a DENY
-  override — which is what the trainer and evaluator pickers ask. Super
+  right — through a role (the levels including the ones under them) — which
+  is what the trainer and evaluator pickers ask. Super
   admins hold everything, as can() says they do.
 
   `role=<role key>` narrows to the active holders of that ROLE (2026-10-15:
@@ -294,17 +294,8 @@ userRoutes.get(
         {
           OR: [
             { isSuperAdmin: true },
-            {
-              AND: [
-                {
-                  OR: [
-                    { roles: { some: { role: { permissions: { some: { permission: { key: holding } } } } } } },
-                    { overrides: { some: { effect: 'ALLOW', permission: { key: holding } } } },
-                  ],
-                },
-                { NOT: { overrides: { some: { effect: 'DENY', permission: { key: holding } } } } },
-              ],
-            },
+            // A level includes the ones under it: holding Own is also held by a Team or All role.
+            { roles: { some: { role: { permissions: { some: { permission: { key: { in: impliedBy(holding) } } } } } } } },
           ],
         },
       ];
@@ -387,7 +378,6 @@ userRoutes.get(
         ...publicUser,
         supervisor: { select: { id: true, name: true } },
         roles: { select: { role: { select: { id: true, key: true, name: true } } } },
-        overrides: { select: { effect: true, permission: { select: { key: true } } } },
       },
     });
     if (!user) throw notFound('User not found');
@@ -408,7 +398,6 @@ userRoutes.get(
     res.json({
       ...user,
       roles: user.roles.map((r) => r.role),
-      overrides: user.overrides.map((o) => ({ key: o.permission.key, effect: o.effect })),
       invite: invite
         ? { sentAt: invite.createdAt, expiresAt: invite.expiresAt, live: !invite.usedAt && invite.expiresAt > new Date() }
         : null,
@@ -806,58 +795,10 @@ userRoutes.patch(
   }),
 );
 
-// ── Per-user permission overrides ────────────────────────────────────────────
-// This is the endpoint behind "the account or user I can customize what they
-// can access ... also until the menu of this access".
-
-const overrideSchema = z.object({
-  overrides: z.array(
-    z.object({ key: z.string(), effect: z.enum(['ALLOW', 'DENY']) }),
-  ),
-});
-
-userRoutes.put(
-  '/:id/overrides',
-  require_('admin.users.edit_all'),
-  handler(async (req, res) => {
-    const { overrides } = parseBody(overrideSchema, req.body);
-
-    const permissions = await prisma.permission.findMany({
-      where: { key: { in: overrides.map((o) => o.key) } },
-      select: { id: true, key: true },
-    });
-    const byKey = new Map(permissions.map((p) => [p.key, p.id]));
-
-    const unknown = overrides.filter((o) => !byKey.has(o.key)).map((o) => o.key);
-    if (unknown.length) throw badRequest(`Unknown permissions: ${unknown.join(', ')}`);
-
-    await prisma.$transaction(async (tx) => {
-      await tx.userPermissionOverride.deleteMany({ where: { userId: req.params.id } });
-      if (overrides.length) {
-        await tx.userPermissionOverride.createMany({
-          data: overrides.map((o) => ({
-            userId: req.params.id,
-            permissionId: byKey.get(o.key)!,
-            effect: o.effect,
-          })),
-        });
-      }
-    });
-
-    await audit(
-      {
-        entityType: 'user',
-        entityId: req.params.id,
-        action: 'UPDATED',
-        summary: `Set ${overrides.length} permission override(s)`,
-        after: overrides,
-      },
-      req,
-    );
-
-    res.json({ ok: true, count: overrides.length });
-  }),
-);
+// ── Per-user permission overrides: gone (2026-10-19) ─────────────────────────
+// The owner's call: access is the role matrix alone (Admin › Roles). The
+// overrides on file were dropped once by the seed (`dropOverrides()`), and
+// `resolveUser()` no longer reads the table.
 
 // ── Roles ────────────────────────────────────────────────────────────────────
 
@@ -871,7 +812,7 @@ roleRoutes.get(
     const me = currentUser(req);
     // View Own: the roles they made (`createdById`, 2026-10-18).
     const roles = await prisma.role.findMany({
-      where: ownOnly(me, 'admin', 'roles', {} as Prisma.RoleWhereInput, { createdById: me.id }),
+      where: ownOnly(me, 'admin', 'roles', {} as Prisma.RoleWhereInput, (ids) => ({ createdById: { in: ids } })),
       include: {
         permissions: { select: { permission: { select: { key: true } } } },
         _count: { select: { users: true } },
@@ -962,6 +903,79 @@ roleRoutes.post(
       req,
     );
     res.status(201).json(role);
+  }),
+);
+
+/**
+ * The permission matrix's save (2026-10-19): several roles' rights at once —
+ * each role's whole set of keys, as its column on Admin › Roles reads. The
+ * same rules as Modify role: Edit Own changes only the roles one made and
+ * never one held. One transaction; one audit row per role that changed,
+ * naming what came and went.
+ */
+const matrixSchema = z.object({
+  roles: z.array(z.object({ id: z.string(), permissions: z.array(z.string()) })).min(1).max(200),
+});
+
+roleRoutes.put(
+  '/matrix',
+  requireEdit('admin', 'roles'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(matrixSchema, req.body);
+    const roles = await prisma.role.findMany({
+      where: { id: { in: body.roles.map((r) => r.id) } },
+      include: { permissions: { select: { permission: { select: { key: true } } } } },
+    });
+    if (roles.length !== new Set(body.roles.map((r) => r.id)).size) throw badRequest('A role in the matrix was not found');
+    const byId = new Map(roles.map((r) => [r.id, r]));
+    const allKeys = [...new Set(body.roles.flatMap((r) => r.permissions))];
+    const known = new Map((await prisma.permission.findMany({ where: { key: { in: allKeys } }, select: { id: true, key: true } })).map((p) => [p.key, p.id]));
+    const unknown = allKeys.filter((k) => !known.has(k));
+    if (unknown.length) throw badRequest(`Unknown permissions: ${unknown.slice(0, 5).join(', ')}`);
+
+    const changes: { role: (typeof roles)[number]; added: string[]; removed: string[] }[] = [];
+    for (const r of body.roles) {
+      const role = byId.get(r.id)!;
+      const before = new Set(role.permissions.map((p) => p.permission.key));
+      const after = new Set(r.permissions);
+      const added = [...after].filter((k) => !before.has(k));
+      const removed = [...before].filter((k) => !after.has(k));
+      if (!added.length && !removed.length) continue;
+      assertCanEdit(me, 'admin', 'roles', role.createdById === me.id);
+      if (editScope(me, 'admin', 'roles') !== 'all' && me.roleKeys.includes(role.key)) {
+        throw forbidden(`You hold ${role.name} — changing its rights needs "admin.roles.edit_all"`);
+      }
+      changes.push({ role, added, removed });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      for (const c of changes) {
+        if (c.removed.length) {
+          await tx.rolePermission.deleteMany({ where: { roleId: c.role.id, permission: { key: { in: c.removed } } } });
+        }
+        if (c.added.length) {
+          await tx.rolePermission.createMany({
+            data: c.added.map((k) => ({ roleId: c.role.id, permissionId: known.get(k)! })),
+            skipDuplicates: true,
+          });
+        }
+      }
+    });
+    for (const c of changes) {
+      await audit(
+        {
+          entityType: 'role',
+          entityId: c.role.id,
+          action: 'UPDATED',
+          summary: `Permission matrix: ${c.role.name} — ${c.added.length} added, ${c.removed.length} removed`,
+          before: { removed: c.removed },
+          after: { added: c.added },
+        },
+        req,
+      );
+    }
+    res.json({ changed: changes.map((c) => ({ id: c.role.id, added: c.added.length, removed: c.removed.length })) });
   }),
 );
 

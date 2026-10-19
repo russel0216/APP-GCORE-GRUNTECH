@@ -27,6 +27,7 @@ import { workingDayDate, workingDaysBetween } from '../shared/day';
 import { planTasks } from '../shared/costingMath';
 import { cleanCostingIds, costingIdsOf } from '../shared/costingSets';
 import { LIST_CAP, listReference, totalLabel, bracketed, bracketNote, listNotes, listDay, namedInFilter, choice, sendListPdf } from '../shared/listPaper';
+import { visibleOwners } from '../shared/team';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -246,7 +247,12 @@ const JOB_SORTS = ['number', 'name', 'contractValue', 'startDate', 'createdAt'];
 export function jobListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobWhereInput {
   const and: Prisma.JobWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.projects.view_all');
-  if (onlyOwn || q.scope === 'mine') and.push({ OR: [{ projectManagerId: me.id }, { createdById: me.id }] });
+  if (q.scope === 'mine') and.push({ OR: [{ projectManagerId: me.id }, { createdById: me.id }] });
+  else if (onlyOwn) {
+    // View Team reads the projects its team manages or opened (2026-10-19).
+    const ids = visibleOwners(me, 'gops', 'projects');
+    and.push({ OR: [{ projectManagerId: { in: ids } }, { createdById: { in: ids } }] });
+  }
   if (q.search) {
     const term = q.search;
     and.push({

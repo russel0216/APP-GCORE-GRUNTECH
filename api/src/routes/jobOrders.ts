@@ -56,6 +56,7 @@ import { costingsForJob, createJobRecord } from './jobs';
 import { jobCostingIds, jobsOnCostingWhere, revisionCostingIds, revisionsCostingIds } from '../shared/costingSets';
 import { LIST_CAP, listReference, totalLabel, rangeNamed, recordNamed, namedInFilter, filterDay, dayOf, choice, bracketed, bracketNote, listNotes, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { viewScope } from '../shared/ownScope';
 
 /**
  * Job orders — the PROJECT WORK ORDER (2026-10-09, the owner's call; a
@@ -171,8 +172,16 @@ function onIt(me: ResolvedUser, row: JobOrderRow): boolean {
   );
 }
 
+/** View Team (2026-10-19): an order of the viewer's team, or one raised by or sending somebody on it. */
+function onTeam(me: ResolvedUser, row: JobOrderRow): boolean {
+  if (viewScope(me, 'gops', 'job_orders') !== 'team') return false;
+  if (me.teamId && row.teamId === me.teamId) return true;
+  const people = [row.requestedById, row.assignedToId, row.projectManagerId, row.projectEngineerId, row.projectLeadId, ...row.support.map((s) => s.user.id)];
+  return people.some((id) => !!id && me.teamMemberIds.includes(id));
+}
+
 function mayOpen(me: ResolvedUser, row: JobOrderRow): boolean {
-  return !onlyOwn(me) || onIt(me, row);
+  return !onlyOwn(me) || onIt(me, row) || onTeam(me, row);
 }
 
 /**
@@ -222,14 +231,17 @@ function crewOf(row: JobOrderRow, except: string | null = null): string[] {
 }
 
 /** Which of a viewer's orders "mine" means: raised by them, or sending them. */
-const mineWhere = (userId: string): Prisma.JobOrderWhereInput => ({
+const mineWhere = (userId: string): Prisma.JobOrderWhereInput => peopleWhere([userId]);
+
+/** Raised by, or sending, any of these people — "mine" for one, the team's for View Team. */
+const peopleWhere = (ids: string[]): Prisma.JobOrderWhereInput => ({
   OR: [
-    { requestedById: userId },
-    { assignedToId: userId },
-    { projectManagerId: userId },
-    { projectEngineerId: userId },
-    { projectLeadId: userId },
-    { support: { some: { userId } } },
+    { requestedById: { in: ids } },
+    { assignedToId: { in: ids } },
+    { projectManagerId: { in: ids } },
+    { projectEngineerId: { in: ids } },
+    { projectLeadId: { in: ids } },
+    { support: { some: { userId: { in: ids } } } },
   ],
 });
 
@@ -249,7 +261,11 @@ async function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma
   const where: Prisma.JobOrderWhereInput = {};
   const and: Prisma.JobOrderWhereInput[] = [];
 
-  if (onlyOwn(me) || q.scope === 'mine') and.push(mineWhere(me.id));
+  if (q.scope === 'mine') and.push(mineWhere(me.id));
+  else if (onlyOwn(me)) {
+    const team = viewScope(me, 'gops', 'job_orders') === 'team';
+    and.push(team ? { OR: [peopleWhere(me.teamMemberIds), ...(me.teamId ? [{ teamId: me.teamId }] : [])] } : mineWhere(me.id));
+  }
   const ids = idsFilter(q.filters.ids);
   if (ids) and.push({ id: { in: ids } });
 

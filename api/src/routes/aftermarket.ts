@@ -49,6 +49,7 @@ import {
   sweepOverdue,
   type TemplateSection,
 } from '../shared/aftermarket';
+import { visibleOwners } from '../shared/team';
 
 const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
 
@@ -77,6 +78,11 @@ export const KIND_LABEL: Record<string, string> = {
 const kindWord = (k: string) => KIND_LABEL[k] ?? statusLabel(k);
 
 /** Which permission covers a report of each kind. */
+/** The registry screen a report kind lives under. */
+function reportSub(kind: string): string {
+  return reportPermission(kind, 'x').split('.')[1];
+}
+
 export function reportPermission(kind: string, action: string): string {
   if (kind === 'COMMISSIONING') return `gops.commissioning_reports.${action}`;
   if (kind === 'PREVENTIVE_MAINTENANCE') return `gops.pm_reports.${action}`;
@@ -107,7 +113,7 @@ function presentAsset(row: AssetRow, warningDays: number, me?: ResolvedUser) {
     warrantyDaysRemaining: warranty.daysRemaining,
     // Modify on the page: Edit All, or Edit Own on a machine the viewer
     // registered (2026-10-18).
-    ...(me ? { canEdit: mayEdit(me, 'gops', 'installed_base', row.createdById === me.id) } : {}),
+    ...(me ? { canEdit: mayEdit(me, 'gops', 'installed_base', row.createdById === me.id, row.createdById) } : {}),
   };
 }
 
@@ -162,7 +168,7 @@ function assetListWhere(me: ResolvedUser, q: ReturnType<typeof listQuery>, expir
       { address: { contains: q.search, mode: 'insensitive' } },
     ];
   }
-  return ownOnly(me, 'gops', 'installed_base', where, assetMine(me));
+  return ownOnly(me, 'gops', 'installed_base', where, (ids) => ({ createdById: { in: ids } }));
 }
 
 assetRoutes.get(
@@ -375,7 +381,7 @@ assetRoutes.get(
       },
     });
     if (!row) throw notFound('Asset not found');
-    assertCanView(me, 'gops', 'installed_base', row.createdById === me.id);
+    assertCanView(me, 'gops', 'installed_base', row.createdById === me.id, row.createdById);
 
     res.json({
       ...presentAsset(row as unknown as AssetRow, settings.expiryWarningDays, me),
@@ -488,7 +494,7 @@ assetRoutes.patch(
     const settings = await aftermarketSettings();
     const existing = await prisma.installedAsset.findUnique({ where: { id: req.params.id } });
     if (!existing) throw notFound('Asset not found');
-    assertCanEdit(me, 'gops', 'installed_base', existing.createdById === me.id);
+    assertCanEdit(me, 'gops', 'installed_base', existing.createdById === me.id, existing.createdById);
 
     const updated = await prisma.installedAsset.update({
       where: { id: existing.id },
@@ -683,7 +689,8 @@ function contractListWhere(me: ResolvedUser, q: ListQuery, expiryWarningDays: nu
   const where: Prisma.ServiceContractWhereInput = {};
   const jobWhere: Prisma.JobWhereInput = {};
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.service_contracts.view_all');
-  if (onlyOwn || q.scope === 'mine') jobWhere.projectManagerId = me.id;
+  if (q.scope === 'mine') jobWhere.projectManagerId = me.id;
+  else if (onlyOwn) jobWhere.projectManagerId = { in: visibleOwners(me, 'gops', 'service_contracts') };
   if (q.filters.customerId) jobWhere.customerId = q.filters.customerId;
   if (Object.keys(jobWhere).length) where.job = jobWhere;
   const ids = idsFilter(q.filters.ids);
@@ -1528,7 +1535,8 @@ function visitWhere(
   const where: Prisma.ServiceVisitWhereInput = {};
   if (filters.assignedToId === 'none') where.assignedToId = null;
   else if (filters.assignedToId) where.assignedToId = filters.assignedToId;
-  if (mine || visitsOnlyOwn(me)) where.assignedToId = me.id;
+  if (mine) where.assignedToId = me.id;
+  else if (visitsOnlyOwn(me)) where.assignedToId = { in: visibleOwners(me, 'gops', 'visits') };
 
   if (filters.contractId) where.contractId = filters.contractId;
   if (filters.customerId) where.customerId = filters.customerId;
@@ -1557,7 +1565,7 @@ function presentVisit<T extends { status: string; dueDate: Date; assignedToId: s
     overdue: row.status === 'SCHEDULED' && row.dueDate < today,
     // Move, assign, cancel: Edit All, or Edit Own on a visit assigned to the
     // viewer (2026-10-18).
-    ...(me ? { canEdit: mayEdit(me, 'gops', 'visits', row.assignedToId === me.id) } : {}),
+    ...(me ? { canEdit: mayEdit(me, 'gops', 'visits', row.assignedToId === me.id, row.assignedToId) } : {}),
   };
 }
 
@@ -1782,7 +1790,7 @@ visitRoutes.get(
     const me = currentUser(req);
     const row = await prisma.serviceVisit.findUnique({ where: { id: req.params.id }, include: visitInclude });
     if (!row) throw notFound('Visit not found');
-    if (visitsOnlyOwn(me) && row.assignedToId !== me.id) {
+    if (visitsOnlyOwn(me) && !(row.assignedToId && visibleOwners(me, 'gops', 'visits').includes(row.assignedToId))) {
       throw forbidden('That is someone else’s visit');
     }
     res.json(presentVisit(row, dayKey(new Date()), me));
@@ -1926,7 +1934,7 @@ visitRoutes.patch(
     const visit = await prisma.serviceVisit.findUnique({ where: { id: req.params.id } });
     if (!visit) throw notFound('Visit not found');
     // Edit Own moves only a visit assigned to the caller (2026-10-18).
-    assertCanEdit(me, 'gops', 'visits', visit.assignedToId === me.id);
+    assertCanEdit(me, 'gops', 'visits', visit.assignedToId === me.id, visit.assignedToId);
     if (visit.status === 'COMPLETED') {
       throw badRequest('This visit has been made and reported. Its record is what happened.');
     }
@@ -2011,7 +2019,7 @@ function templatesOnlyOwn(me: ResolvedUser): boolean {
 
 /** Modify on the screen: Edit All, or Edit Own on a template the viewer made. */
 const templateCanEdit = (me: ResolvedUser, t: { createdById: string | null }) =>
-  mayEdit(me, 'gops', 'report_templates', t.createdById === me.id);
+  mayEdit(me, 'gops', 'report_templates', t.createdById === me.id, t.createdById);
 
 templateRoutes.get(
   '/',
@@ -2024,7 +2032,7 @@ templateRoutes.get(
       where: {
         ...(kind ? { kind } : {}),
         ...(all ? {} : { isCurrent: true, isActive: true }),
-        ...(templatesOnlyOwn(me) ? { createdById: me.id } : {}),
+        ...(templatesOnlyOwn(me) ? { createdById: { in: visibleOwners(me, 'gops', 'report_templates') } } : {}),
       },
       include: {
         createdBy: { select: { id: true, name: true } },
@@ -2046,7 +2054,7 @@ templateRoutes.get(
       include: { _count: { select: { reports: true } } },
     });
     // Somebody else's template reads as an unknown id to a View Own holder.
-    if (!template || (templatesOnlyOwn(me) && template.createdById !== me.id)) throw notFound('Template not found');
+    if (!template || (templatesOnlyOwn(me) && !visibleOwners(me, 'gops', 'report_templates').includes(template.createdById ?? ''))) throw notFound('Template not found');
     res.json({ ...template, canEdit: templateCanEdit(me, template) });
   }),
 );
@@ -2114,7 +2122,7 @@ templateRoutes.put(
     if (!existing) throw notFound('Template not found');
     // Edit Own changes, or publishes a new version of, only a template the
     // caller made (2026-10-18).
-    assertCanEdit(me, 'gops', 'report_templates', existing.createdById === me.id);
+    assertCanEdit(me, 'gops', 'report_templates', existing.createdById === me.id, existing.createdById);
 
     const sections = body.sections ? validateSections(body.sections) : (existing.sections as unknown as TemplateSection[]);
 
@@ -2168,7 +2176,7 @@ templateRoutes.post(
     const body = parseBody(z.object({ name: z.string().trim().min(2) }), req.body);
     const source = await prisma.reportTemplate.findUnique({ where: { id: req.params.id } });
     // A View Own holder copies only what they can read (2026-10-18).
-    if (!source || (templatesOnlyOwn(me) && source.createdById !== me.id)) throw notFound('Template not found');
+    if (!source || (templatesOnlyOwn(me) && !visibleOwners(me, 'gops', 'report_templates').includes(source.createdById ?? ''))) throw notFound('Template not found');
 
     const copy = await prisma.reportTemplate.create({
       data: {
@@ -2253,7 +2261,18 @@ function serviceReportListWhere(me: ResolvedUser, q: ListQuery): Prisma.ServiceR
     me.permissions.has('gops.pm_reports.view_all') ||
     me.permissions.has('gops.commissioning_reports.view_all') ||
     me.permissions.has('gops.inspection_reports.view_all');
-  if (!canSeeAll || q.scope === 'mine') where.performedById = me.id;
+  if (q.scope === 'mine') where.performedById = me.id;
+  // View Team (2026-10-19) reads the team's reports, kind by kind — each under its own menu's level.
+  else if (!canSeeAll) {
+    where.AND = [
+      {
+        OR: Object.values(ServiceKind).map((k) => ({
+          kind: k,
+          performedById: { in: visibleOwners(me, 'gops', reportSub(k)) },
+        })),
+      },
+    ];
+  }
 
   if (q.search) {
     where.OR = [
@@ -2386,7 +2405,7 @@ serviceReportRoutes.get(
     if (!row) throw notFound('Report not found');
 
     if (
-      row.performedById !== me.id &&
+      !visibleOwners(me, 'gops', reportSub(row.kind)).includes(row.performedById) &&
       !me.isSuperAdmin &&
       !me.permissions.has(reportPermission(row.kind, 'view_all'))
     ) {
@@ -2565,7 +2584,7 @@ serviceReportRoutes.patch(
     if (report.status !== 'DRAFT' && report.status !== 'REJECTED') {
       throw badRequest('This report has been submitted. Its content is what was signed.');
     }
-    if (report.performedById !== me.id && !me.isSuperAdmin && !me.permissions.has(reportPermission(report.kind, 'edit_all'))) {
+    if (report.performedById !== me.id && !me.isSuperAdmin && !canEditRecord(me, 'gops', reportSub(report.kind), report.performedById)) {
       throw forbidden('That is someone else’s report');
     }
 

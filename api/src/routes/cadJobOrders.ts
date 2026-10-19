@@ -18,7 +18,7 @@ import {
   deleteOrRefuse,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
-import { can, resolveUser, type ResolvedUser } from '../permissions/resolve';
+import { can, impliedBy, resolveUser, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify, type NotificationType } from '../shared/notifications';
@@ -36,6 +36,8 @@ import { safeHttpUrl } from '../shared/partners';
 import { LIST_CAP, listReference, rangeNamed, namedInFilter, filterDay, dayOf, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { requestFromCad } from './planApprovals';
+import { viewScope } from '../shared/ownScope';
+import { visibleOwners } from '../shared/team';
 
 /**
  * CAD job orders — the design team's queue (2026-10-09, the owner's call:
@@ -131,7 +133,12 @@ const isLead = (me: ResolvedUser) => can(me, P.approve);
 const onlyOwn = (me: ResolvedUser) => !can(me, P.viewAll);
 const onIt = (me: ResolvedUser, row: { requestedById: string; assignedToId: string | null }) =>
   row.requestedById === me.id || row.assignedToId === me.id;
-const mayOpen = (me: ResolvedUser, row: { requestedById: string; assignedToId: string | null }) => !onlyOwn(me) || onIt(me, row);
+/** View Team (2026-10-19): raised by, or on the board of, somebody on the viewer's team. */
+const onTeam = (me: ResolvedUser, row: { requestedById: string; assignedToId: string | null }) =>
+  viewScope(me, 'gops', 'cad_job_orders') === 'team' &&
+  [row.requestedById, row.assignedToId].some((id) => !!id && me.teamMemberIds.includes(id));
+const mayOpen = (me: ResolvedUser, row: { requestedById: string; assignedToId: string | null }) =>
+  !onlyOwn(me) || onIt(me, row) || onTeam(me, row);
 const isRequestor = (me: ResolvedUser, row: { requestedById: string }) => row.requestedById === me.id && can(me, P.editOwn);
 const isAssignee = (me: ResolvedUser, row: { assignedToId: string | null }) => row.assignedToId === me.id && isDesigner(me);
 /** Who works the request: its designer, or the lead on any. */
@@ -170,6 +177,9 @@ function flags(me: ResolvedUser, row: CadRow) {
 const mineWhere = (userId: string): Prisma.CadJobOrderWhereInput => ({
   OR: [{ requestedById: userId }, { assignedToId: userId }],
 });
+const peopleWhere = (ids: string[]): Prisma.CadJobOrderWhereInput => ({
+  OR: [{ requestedById: { in: ids } }, { assignedToId: { in: ids } }],
+});
 
 async function load(id: string): Promise<CadRow> {
   const row = await prisma.cadJobOrder.findUnique({ where: { id }, include: cadInclude });
@@ -184,20 +194,12 @@ const linkOf = (id: string) => `/g-ops/cad-job-orders/${id}`;
 
 /**
  * Everyone on the design team: active logins holding the design right or the
- * lead's, through a role or an allow override — the people picker's rule.
+ * lead's, through a role — the people picker's rule.
  * Super admins hold everything and are not told (they are not designers).
  */
 async function designTeam(): Promise<string[]> {
   const holding = (key: string): Prisma.UserWhereInput => ({
-    AND: [
-      {
-        OR: [
-          { roles: { some: { role: { permissions: { some: { permission: { key } } } } } } },
-          { overrides: { some: { effect: 'ALLOW', permission: { key } } } },
-        ],
-      },
-      { NOT: { overrides: { some: { effect: 'DENY', permission: { key } } } } },
-    ],
+    roles: { some: { role: { permissions: { some: { permission: { key: { in: impliedBy(key) } } } } } } },
   });
   const rows = await prisma.user.findMany({
     where: { isActive: true, OR: [holding(P.editAll), holding(P.approve)] },
@@ -286,7 +288,8 @@ const SORTABLE = ['number', 'neededBy', 'createdAt', 'updatedAt', 'progressPct']
  */
 export function cadListWhere(me: ResolvedUser, q: ReturnType<typeof listQuery>) {
   const and: Prisma.CadJobOrderWhereInput[] = [];
-  if (onlyOwn(me) || q.scope === 'mine') and.push(mineWhere(me.id));
+  if (q.scope === 'mine') and.push(mineWhere(me.id));
+  else if (onlyOwn(me)) and.push(peopleWhere(visibleOwners(me, 'gops', 'cad_job_orders')));
   if (q.search) {
     and.push({
       OR: [

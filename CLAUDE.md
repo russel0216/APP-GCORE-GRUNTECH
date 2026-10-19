@@ -71,7 +71,49 @@ four databases and four copies of "customer".
    holds; Employees' Edit Own changes one's personal and contact details
    only (`OWN_EDITABLE`), the pay fields only with Pay Rates › Edit Own.
    verify-foundation fails on a screen with `own` whose pair no route or
-   screen reads through those helpers. The rest of the grid is
+   screen reads through those helpers. **The permission matrix: View and
+   Manage, each Own / Team / All, roles only** (2026-10-19, the owner's
+   call: "remove the override permission, instead create a table check box
+   for all list of role and permission — Permission View (VIEW OWN / VIEW
+   TEAM / VIEW ALL) and PERMISSION CREATE/EDIT (MANAGE OWN / MANAGE TEAM /
+   MANAGE ALL)"; his answers: one big matrix, Team = the same team (KAT,
+   HIT …), Delete / Approve / Export folded in, overrides dropped). Two
+   new actions, `view_team` and `edit_team`, on every preset that has the
+   own pair (and CAD J.O., G-OPS purchase requests, service costing,
+   People Flow, passports). `shared/permissionLevels.ts` (web copy
+   `lib/permissionLevels.ts`, pinned equal) is the ONE translation between
+   levels and keys: View Own → `view_own`, Team adds `view_team`, All adds
+   `view_all` and `export`; Manage Own → `create`, `edit_own`, `delete`,
+   Team adds `edit_team`, All adds `edit_all` and `approve`; a level is
+   offered only where the screen has its key (`levelOptions`). A level
+   includes the ones under it: `withImpliedLevels()` at resolve (`*_all` ⇒
+   `*_team` ⇒ `*_own`) and `impliedBy(key)` for holder queries
+   (`/users/lookup?holding=`, the CAD design team, clearance areas).
+   **Team is `Employee.industryId`**: `ResolvedUser.teamId` and
+   `teamMemberIds` (the active logins on the same team, oneself included;
+   a login with no team is a team of one). `ownScope.ts` reads it —
+   `viewScope` / `editScope` answer `all | team | own`, `ownOnly`'s `mine`
+   may be `(ids) => where` (every call is), `assertCanView` /
+   `assertCanEdit` / `mayEdit` take the record's owner, `onMyTeam()` —
+   and `canEditRecord` honours `edit_team`; `visibleOwners` /
+   `editableOwners` and the quotation / sales order readers sit in
+   `shared/team.ts`. "Mine" on a list stays one's own. Left Own-only on
+   purpose: leave, overtime, evaluations and clearances (HR-private; the
+   approver and direct-report doors stand), and for now the pull-out
+   slip's single read and the borrow-slip list. **Admin › Roles opens on
+   the matrix** (`pages/admin/PermissionMatrix.tsx`: screens as rows by
+   division, roles as columns by level, a View and a Manage select per
+   cell; division, roles-shown and screen filters; Save sends every
+   changed role to `PUT /roles/matrix` in one transaction, an audit row
+   per role, Edit Own's rules as `PUT /roles/:id`); `?view=roles` is the
+   role cards, whose editor is the same `LevelsTable` for one role.
+   **Per-person overrides are gone**: the panel on Admin › Users and `PUT
+   /users/:id/overrides` went, `resolveUser` reads none, and
+   `dropOverrides()` (`shared/overridesDrop.ts`, the seed, once,
+   `seed.overridesDropped20261019`) deleted every row, audited; the table
+   stays, unread. export/import-settings no longer carry them. A verify
+   script grants a key through a throwaway role, never an override. The
+   rest of the grid is
    deliberate: a dashboard or report is View All and Export, and a document
    that is kept has no Delete — a box there would do nothing. Only three approve rights remain:
    CAD dispatch, progress reports and training certificates. **A cancelled
@@ -634,7 +676,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,483 assertions across twenty-two scripts** (counted 2026-10-18, after
+**4,491 assertions across twenty-two scripts** (counted 2026-10-18, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -698,11 +740,11 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
-419, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
+428, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
 94, partners 120, delivery 193, chain 361, hr 487, plantilla 129, meetings
-115, evaluations 154, academy 125, finance 432, aftermarket 270, cad 122,
+114, evaluations 154, academy 125, finance 432, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -887,7 +929,7 @@ settings in the repository. They are DATABASE rows, so they travel as a
 file, never with a push: `api/scripts/export-settings.ts` (read-only, on the
 server, → `data/settings-snapshot.json`; Settings except `seed.*` and
 `__verify__`, roles and permissions, users' roles / Reports to / team /
-Back Support teams / overrides by email, workflows by document type and
+Back Support teams by email (no overrides since 2026-10-19), workflows by document type and
 name, numbering TEMPLATES — never counters, passwords or tokens) and
 `api/scripts/import-settings.ts [file] [--apply]` (dry run unless
 `--apply`; never creates or deletes a login, role or workflow, never
@@ -3161,8 +3203,7 @@ receive the tickets".
   logins only, 50 at most, audited as `help_ticket` / `receivers`), one
   Setting `helpTickets.receivers` = `{ userIds }` in
   `shared/helpReceivers.ts`. **The people chosen hold both rights whatever
-  their roles**: `resolveUser()` adds `RECEIVER_RIGHTS` for them (a
-  per-user DENY still wins), so the menu, the page's Guard and the routes
+  their roles**: `resolveUser()` adds `RECEIVER_RIGHTS` for them, so the menu, the page's Guard and the routes
   agree with no role edited; the list is cached a minute per process and
   dropped on save. **Nobody chosen is every active super admin** (bell,
   and email where SMTP is set) — holding the view right is not enough to

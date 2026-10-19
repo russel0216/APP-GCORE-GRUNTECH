@@ -59,6 +59,7 @@ import { manilaDate, workingDayDate } from '../shared/day';
 import { planTasks } from '../shared/costingMath';
 import { LIST_CAP, listReference, totalLabel, namedInFilter, choice, bracketed, bracketNote, listNotes, sendListPdf, ratePct } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { visibleOwners } from '../shared/team';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -91,7 +92,8 @@ const REPORT_SORTS = ['number', 'periodTo', 'createdAt'];
 function reportListWhere(me: ResolvedUser, q: ListQuery): Prisma.ProgressReportWhereInput {
   const and: Prisma.ProgressReportWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.progress_billing.view_all');
-  if (onlyOwn || q.scope === 'mine') and.push({ preparedById: me.id });
+  if (q.scope === 'mine') and.push({ preparedById: me.id });
+  else if (onlyOwn) and.push({ preparedById: { in: visibleOwners(me, 'gops', 'progress_billing') } });
   if (q.filters.jobId) and.push({ jobId: q.filters.jobId });
   const status = choice(q.filters.status, ProgressStatus, 'Status');
   if (status) and.push({ status });
@@ -329,7 +331,9 @@ async function readableReport(me: ResolvedUser, id: string, deciderOnly: boolean
   if (!report) throw notFound('Progress report not found');
   const reads =
     !deciderOnly &&
-    (me.isSuperAdmin || can(me, 'gops.progress_billing.view_all') || (report.preparedById === me.id && can(me, 'gops.progress_billing.view_own')));
+    (me.isSuperAdmin ||
+      can(me, 'gops.progress_billing.view_all') ||
+      (can(me, 'gops.progress_billing.view_own') && visibleOwners(me, 'gops', 'progress_billing').includes(report.preparedById)));
   if (!reads && !(await mayDecide(me.id, DOC, [report.id]))) throw notFound('Progress report not found');
   return report;
 }
@@ -516,10 +520,7 @@ async function reportForEdit(req: Parameters<typeof currentUser>[0], id: string)
       `Report ${report.number} is ${report.status.toLowerCase()} and cannot be changed — it is the record of what was reported.`,
     );
   }
-  const mayEdit =
-    me.isSuperAdmin ||
-    me.permissions.has('gops.progress_billing.edit_all') ||
-    (report.preparedById === me.id && me.permissions.has('gops.progress_billing.edit_own'));
+  const mayEdit = me.isSuperAdmin || canEditRecord(me, 'gops', 'progress_billing', report.preparedById);
   if (!mayEdit) throw forbidden('This report belongs to someone else');
   return report;
 }
@@ -735,7 +736,7 @@ registerAttachmentGuard(
   async (user, dayId) => {
     const day = await prisma.progressReportDay.findUnique({ where: { id: dayId }, select: { report: { select: { id: true, preparedById: true } } } });
     if (!day) return false;
-    if (user.isSuperAdmin || can(user, 'gops.progress_billing.view_all') || day.report.preparedById === user.id) return true;
+    if (user.isSuperAdmin || can(user, 'gops.progress_billing.view_all') || visibleOwners(user, 'gops', 'progress_billing').includes(day.report.preparedById)) return true;
     return mayDecide(user.id, DOC, [day.report.id]);
   },
   {
@@ -750,7 +751,7 @@ registerAttachmentGuard(
   async (user, id) => {
     const report = await prisma.progressReport.findUnique({ where: { id }, select: { preparedById: true } });
     if (!report) return false;
-    if (user.isSuperAdmin || can(user, 'gops.progress_billing.view_all') || report.preparedById === user.id) return true;
+    if (user.isSuperAdmin || can(user, 'gops.progress_billing.view_all') || visibleOwners(user, 'gops', 'progress_billing').includes(report.preparedById)) return true;
     return mayDecide(user.id, DOC, [id]);
   },
   {

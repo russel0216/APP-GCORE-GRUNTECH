@@ -20,6 +20,7 @@ import { deleteAttachmentsOf } from '../shared/attachments';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
+import { visibleOwners } from '../shared/team';
 import { registerSearch } from '../shared/search';
 import { nextNumber } from '../shared/numbering';
 import {
@@ -117,7 +118,10 @@ function prListWhere(me: ResolvedUser, q: ListQuery): { where: Prisma.PurchaseRe
   // View Own covers one's DIRECT REPORTS' requests too (2026-10-19), so a
   // Team Leader or Technical Manager sees what their team asked for; the
   // "Mine" switch is one's own alone.
-  if (onlyOwn && q.scope !== 'mine') and.push({ OR: [{ requestedById: me.id }, { requestedBy: { supervisorId: me.id } }] });
+  // View Team reads the whole team's requests the same way.
+  if (onlyOwn && q.scope !== 'mine') {
+    and.push({ OR: [{ requestedById: { in: visibleOwners(me, 'gchain', 'purchase_requests') } }, { requestedBy: { supervisorId: me.id } }] });
+  }
   else if (mine) and.push({ requestedById: me.id });
   const f = q.filters;
   const status = choice(f.status, PrStatus, 'Status');
@@ -1491,7 +1495,8 @@ function seesAllCanvasses(me: ResolvedUser) {
 /** Which canvasses a list query means — one rule for the list and its printed twin. */
 function canvassListWhere(me: ResolvedUser, q: ListQuery): Prisma.CanvassWhereInput {
   const and: Prisma.CanvassWhereInput[] = [];
-  if (!seesAllCanvasses(me) || q.scope === 'mine') and.push({ createdById: me.id });
+  if (q.scope === 'mine') and.push({ createdById: me.id });
+  else if (!seesAllCanvasses(me)) and.push({ createdById: { in: visibleOwners(me, 'gchain', 'canvass') } });
   const f = q.filters;
   const status = choice(f.status, CanvassStatus, 'Status');
   if (status) and.push({ status });
@@ -1712,7 +1717,7 @@ function mayEditCanvass(me: ResolvedUser, canvass: { createdById: string }): boo
 }
 
 function assertCanvassVisible(me: ResolvedUser, canvass: { createdById: string }) {
-  if (!seesAllCanvasses(me) && canvass.createdById !== me.id) throw notFound('Canvass not found');
+  if (!seesAllCanvasses(me) && !visibleOwners(me, 'gchain', 'canvass').includes(canvass.createdById)) throw notFound('Canvass not found');
 }
 
 /** The purchase orders placed on an award: the request's live orders with the winner. */

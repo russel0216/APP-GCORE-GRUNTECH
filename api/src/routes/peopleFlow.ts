@@ -231,7 +231,7 @@ async function pathResponse(me: ResolvedUser, employee: FlowEmployee) {
     stages: FLOW_STAGES,
     sources: SOURCE_LABEL,
     // Edit Own (2026-10-18): the person ticks their own path's items.
-    canEdit: mayEdit(me, 'ghr', 'people_flow', employee.userId === me.id),
+    canEdit: mayEdit(me, 'ghr', 'people_flow', employee.userId === me.id, employee.userId),
   };
 }
 
@@ -284,7 +284,7 @@ peopleFlowRoutes.put(
   handler(async (req, res) => {
     const me = currentUser(req);
     const employee = await readable(me, req.params.employeeId);
-    assertCanEdit(me, 'ghr', 'people_flow', employee.userId === me.id);
+    assertCanEdit(me, 'ghr', 'people_flow', employee.userId === me.id, employee.userId);
     const def = (await flowChecklist()).find((d) => d.key === req.params.key);
     if (!def) throw notFound(`"${req.params.key}" is not on the People Flow checklist`);
     const body = parseBody(itemBody, req.body);

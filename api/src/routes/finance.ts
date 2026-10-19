@@ -102,7 +102,7 @@ import {
 } from '../shared/finance';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
-import { teamShares, TEAM_REF_SELECT, USER_TEAM_SELECT, teamOfUser, userTeamWhere } from '../shared/team';
+import { teamShares, TEAM_REF_SELECT, USER_TEAM_SELECT, teamOfUser, userTeamWhere, visibleOwners } from '../shared/team';
 import { BILL_PAYABLE, DUE_SOON_DAYS, billDueDate, billTermsLabel, dueSoonWhere } from '../shared/payables';
 import {
   TERMS_CHOICES,
@@ -352,7 +352,7 @@ const BILL_OWED: BillStatus[] = ['APPROVED', 'PARTIALLY_PAID'];
  * Own holder reads the invoices they raised (2026-10-18, `ownOnly`).
  */
 function invoiceListWhere(me: ResolvedUser, q: ListQuery): Prisma.InvoiceWhereInput {
-  return ownOnly(me, 'gfin', 'ar', invoiceListWhereAll(q), { createdById: me.id });
+  return ownOnly(me, 'gfin', 'ar', invoiceListWhereAll(q), (ids) => ({ createdById: { in: ids } }));
 }
 
 function invoiceListWhereAll(q: ListQuery): Prisma.InvoiceWhereInput {
@@ -477,7 +477,7 @@ invoiceRoutes.get(
     const [files, summary] = await Promise.all([attachmentCounts(rows.map((r) => r.id)), invoiceListSummary(where)]);
 
     res.json({
-      ...listResult(rows.map((r) => ({ ...presentInvoice(r, files.get(r.id) ?? 0), canEdit: mayEdit(me, 'gfin', 'ar', r.createdById === me.id) })), total, q),
+      ...listResult(rows.map((r) => ({ ...presentInvoice(r, files.get(r.id) ?? 0), canEdit: mayEdit(me, 'gfin', 'ar', r.createdById === me.id, r.createdById) })), total, q),
       summary,
     });
   }),
@@ -725,11 +725,11 @@ invoiceRoutes.get(
     });
     if (!row) throw notFound('Invoice not found');
     // View Own reads the invoices one raised; Edit Own changes them (2026-10-18).
-    assertCanView(me, 'gfin', 'ar', row.createdById === me.id);
+    assertCanView(me, 'gfin', 'ar', row.createdById === me.id, row.createdById);
 
     res.json({
       ...presentInvoice(row),
-      canEdit: mayEdit(me, 'gfin', 'ar', row.createdById === me.id),
+      canEdit: mayEdit(me, 'gfin', 'ar', row.createdById === me.id, row.createdById),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
     });
   }),
@@ -760,7 +760,7 @@ invoiceRoutes.get(
       },
     });
     if (!inv) throw notFound('Invoice not found');
-    assertCanView(currentUser(req), 'gfin', 'ar', inv.createdById === currentUser(req).id);
+    assertCanView(currentUser(req), 'gfin', 'ar', inv.createdById === currentUser(req).id, inv.createdById);
     const currency = await companyCurrency();
 
     const sections: PdfSection[] = [
@@ -1239,7 +1239,7 @@ invoiceRoutes.put(
       },
     });
     if (!existing) throw notFound('Invoice not found');
-    assertCanEdit(currentUser(req), 'gfin', 'ar', existing.createdById === currentUser(req).id);
+    assertCanEdit(currentUser(req), 'gfin', 'ar', existing.createdById === currentUser(req).id, existing.createdById);
     if (existing.status !== 'DRAFT') {
       throw badRequest('Only a draft invoice can be modified — once issued, cancel it and raise another');
     }
@@ -1375,7 +1375,7 @@ invoiceRoutes.post(
   handler(async (req, res) => {
     const invoice = await prisma.invoice.findUnique({ where: { id: req.params.id } });
     if (!invoice) throw notFound('Invoice not found');
-    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id);
+    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id, invoice.createdById);
     if (invoice.status !== 'DRAFT') throw badRequest('This invoice has already been issued');
 
     const updated = await prisma.invoice.update({
@@ -1417,7 +1417,7 @@ invoiceRoutes.post(
     );
     const invoice = await prisma.invoice.findUnique({ where: { id: req.params.id } });
     if (!invoice) throw notFound('Invoice not found');
-    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id);
+    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id, invoice.createdById);
     // "Mark as received" (2026-10-16, the owner's call: no customer is
     // involved in G-CORE's side of it): on a draft it issues the invoice and
     // records the day the customer received it, in one step.
@@ -1470,7 +1470,7 @@ invoiceRoutes.patch(
       select: { id: true, number: true, status: true, salespersonId: true, teamId: true, salesOrderId: true, jobId: true, jobOrderId: true, createdById: true },
     });
     if (!invoice) throw notFound('Invoice not found');
-    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id);
+    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id, invoice.createdById);
     if (invoice.status === 'CANCELLED') throw badRequest('A cancelled invoice keeps the credit it had');
     const credit = await resolveCredit(
       { salespersonId: body.salespersonId === undefined ? invoice.salespersonId : body.salespersonId, teamId: body.teamId },
@@ -1506,7 +1506,7 @@ invoiceRoutes.patch(
     );
     const invoice = await prisma.invoice.findUnique({ where: { id: req.params.id } });
     if (!invoice) throw notFound('Invoice not found');
-    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id);
+    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id, invoice.createdById);
     if (num(invoice.ewtAmount) <= 0) {
       throw badRequest('Nothing was withheld on this invoice, so there is no certificate to record');
     }
@@ -1545,7 +1545,7 @@ invoiceRoutes.post(
       include: { allocations: true },
     });
     if (!invoice) throw notFound('Invoice not found');
-    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id);
+    assertCanEdit(currentUser(req), 'gfin', 'ar', invoice.createdById === currentUser(req).id, invoice.createdById);
     if (invoice.allocations.length) {
       throw badRequest(
         'Payments have been applied to this invoice. Remove the allocations first — cancelling it would leave money pointing at nothing.',
@@ -1686,7 +1686,7 @@ function presentBill(row: BillRow) {
  * View Own holder reads the bills they entered (2026-10-18, `ownOnly`).
  */
 function billListWhere(me: ResolvedUser, q: ListQuery): Prisma.SupplierBillWhereInput {
-  return ownOnly(me, 'gfin', 'ap', billListWhereAll(q), { createdById: me.id });
+  return ownOnly(me, 'gfin', 'ap', billListWhereAll(q), (ids) => ({ createdById: { in: ids } }));
 }
 
 function billListWhereAll(q: ListQuery): Prisma.SupplierBillWhereInput {
@@ -1806,7 +1806,7 @@ billRoutes.get(
     ]);
 
     res.json({
-      ...listResult(rows.map((r) => ({ ...presentBill(r), canEdit: mayEdit(me, 'gfin', 'ap', r.createdById === me.id) })), total, q),
+      ...listResult(rows.map((r) => ({ ...presentBill(r), canEdit: mayEdit(me, 'gfin', 'ap', r.createdById === me.id, r.createdById) })), total, q),
       summary: await billListSummary(where),
     });
   }),
@@ -1966,10 +1966,10 @@ billRoutes.get(
     });
     if (!row) throw notFound('Supplier bill not found');
     // View Own reads the bills one entered; Edit Own changes them (2026-10-18).
-    assertCanView(me, 'gfin', 'ap', row.createdById === me.id);
+    assertCanView(me, 'gfin', 'ap', row.createdById === me.id, row.createdById);
     res.json({
       ...presentBill(row),
-      canEdit: mayEdit(me, 'gfin', 'ap', row.createdById === me.id),
+      canEdit: mayEdit(me, 'gfin', 'ap', row.createdById === me.id, row.createdById),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
     });
   }),
@@ -2223,7 +2223,7 @@ billRoutes.put(
       include: { lines: { select: { amount: true } } },
     });
     if (!existing) throw notFound('Supplier bill not found');
-    assertCanEdit(currentUser(req), 'gfin', 'ap', existing.createdById === currentUser(req).id);
+    assertCanEdit(currentUser(req), 'gfin', 'ap', existing.createdById === currentUser(req).id, existing.createdById);
     if (existing.status !== 'DRAFT') {
       throw badRequest(
         existing.status === 'PENDING_APPROVAL'
@@ -2355,7 +2355,7 @@ billRoutes.post(
     const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Why?') }), req.body ?? {});
     const bill = await prisma.supplierBill.findUnique({ where: { id: req.params.id } });
     if (!bill) throw notFound('Supplier bill not found');
-    assertCanEdit(me, 'gfin', 'ap', bill.createdById === me.id);
+    assertCanEdit(me, 'gfin', 'ap', bill.createdById === me.id, bill.createdById);
     if (bill.status !== 'DRAFT') {
       throw badRequest(
         bill.status === 'CANCELLED'
@@ -2788,7 +2788,9 @@ function claimListWhere(me: ReturnType<typeof currentUser>, q: ListQuery) {
 
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gfin.expenses.view_all');
   const mine = onlyOwn || q.scope === 'mine';
-  if (mine) where.claimedById = me.id;
+  // View Team reads the team's claims (2026-10-19); "Mine" is one's own.
+  if (q.scope === 'mine') where.claimedById = me.id;
+  else if (onlyOwn) where.claimedById = { in: visibleOwners(me, 'gfin', 'expenses') };
 
   const status = choice(q.filters.status, ExpenseStatus, 'Status');
   if (status) where.status = status;
@@ -3022,7 +3024,7 @@ expenseRoutes.get(
     });
     if (!row) throw notFound('Expense claim not found');
     if (
-      row.claimedById !== me.id &&
+      !visibleOwners(me, 'gfin', 'expenses').includes(row.claimedById) &&
       !me.isSuperAdmin &&
       !me.permissions.has('gfin.expenses.view_all')
     ) {
@@ -3647,7 +3649,7 @@ expenseRoutes.post(
       include: { allocations: true },
     });
     if (!claim) throw notFound('Expense claim not found');
-    if (claim.claimedById !== me.id && !me.isSuperAdmin && !me.permissions.has('gfin.expenses.edit_all')) {
+    if (claim.claimedById !== me.id && !me.isSuperAdmin && !canEditRecord(me, 'gfin', 'expenses', claim.claimedById)) {
       throw forbidden('That is someone else’s claim');
     }
     // Cancelling is for a claim nobody has decided on yet. Once approved it has
@@ -3702,7 +3704,7 @@ expenseRoutes.delete(
     const me = currentUser(req);
     const claim = await prisma.expenseClaim.findUnique({ where: { id: req.params.id }, include: { allocations: { select: { id: true } } } });
     if (!claim) throw notFound('Expense claim not found');
-    if (claim.claimedById !== me.id && !me.isSuperAdmin && !me.permissions.has('gfin.expenses.edit_all')) {
+    if (claim.claimedById !== me.id && !me.isSuperAdmin && !canEditRecord(me, 'gfin', 'expenses', claim.claimedById)) {
       throw forbidden('That is someone else’s claim');
     }
     if (claim.status !== 'CANCELLED') throw badRequest('Only a cancelled claim can be deleted — cancel it first');
@@ -3733,7 +3735,7 @@ expenseRoutes.get(
       include: claimInclude,
     });
     if (!claim) throw notFound('Expense claim not found');
-    if (claim.claimedById !== me.id && !me.isSuperAdmin && !me.permissions.has('gfin.expenses.view_all')) {
+    if (!visibleOwners(me, 'gfin', 'expenses').includes(claim.claimedById) && !me.isSuperAdmin && !me.permissions.has('gfin.expenses.view_all')) {
       throw forbidden('That is someone else’s claim');
     }
 

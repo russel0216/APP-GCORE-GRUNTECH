@@ -292,7 +292,7 @@ async function ticketSummary(base: Prisma.HelpTicketWhereInput) {
 
 /** View Own narrows the register to the tickets the caller raised (2026-10-18). */
 const mineOnly = (me: ResolvedUser, where: Prisma.HelpTicketWhereInput) =>
-  ownOnly(me, 'admin', 'help_tickets', where, { createdById: me.id });
+  ownOnly(me, 'admin', 'help_tickets', where, (ids) => ({ createdById: { in: ids } }));
 
 helpTicketRoutes.get(
   '/',
@@ -466,7 +466,7 @@ helpTicketRoutes.get(
       canReply: row.createdById === me.id || manage,
       canManage: manage,
       // Edit Own moves the status of a ticket one raised (2026-10-18).
-      canChangeStatus: mayEdit(me, 'admin', 'help_tickets', row.createdById === me.id),
+      canChangeStatus: mayEdit(me, 'admin', 'help_tickets', row.createdById === me.id, row.createdById),
     });
   }),
 );
@@ -536,7 +536,7 @@ helpTicketRoutes.post(
     const body = parseBody(statusSchema, req.body);
     const row = await load(req.params.id);
     // Edit Own: the tickets they raised (2026-10-18); Edit All any, as before.
-    assertCanEdit(me, 'admin', 'help_tickets', row.createdById === me.id);
+    assertCanEdit(me, 'admin', 'help_tickets', row.createdById === me.id, row.createdById);
     if (row.status === body.status) throw badRequest(`It is already ${STATUS_LABEL[row.status].toLowerCase()}`);
     if (body.status === 'WONT_DO' && !body.note) throw badRequest('Say why it will not be done — the person who raised it reads it');
     const closing = CLOSED.includes(body.status);

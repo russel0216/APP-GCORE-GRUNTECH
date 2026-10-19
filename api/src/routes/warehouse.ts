@@ -142,7 +142,7 @@ function receivedFrom(r: { order: { supplier: { name: string } } | null; supplie
  * (2026-10-18, `ownOnly`).
  */
 function receivingListWhere(me: ResolvedUser, q: ListQuery): Prisma.ReceivingWhereInput {
-  return ownOnly(me, 'gchain', 'receiving', receivingListWhereAll(q), { receivedById: me.id });
+  return ownOnly(me, 'gchain', 'receiving', receivingListWhereAll(q), (ids) => ({ receivedById: { in: ids } }));
 }
 
 function receivingListWhereAll(q: ListQuery): Prisma.ReceivingWhereInput {
@@ -545,7 +545,7 @@ async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
     billsVisible: seesBills,
     // Its references only (PATCH /:id) once it is past a draft — Edit All,
     // or Edit Own on a report one received (2026-10-18).
-    canEdit: mayEdit(me, 'gchain', 'receiving', receiving.receivedById === me.id),
+    canEdit: mayEdit(me, 'gchain', 'receiving', receiving.receivedById === me.id, receiving.receivedById),
     // A draft is modified whole on its page (PUT /:id/sheet).
     canModify: draft && handler_ && can(me, 'gchain.receiving.create'),
     canSubmit: draft && handler_ && can(me, 'gchain.receiving.create'),
@@ -630,7 +630,7 @@ receivingRoutes.patch(
     );
     const existing = await prisma.receiving.findUnique({ where: { id: req.params.id } });
     if (!existing) throw notFound('Receiving report not found');
-    assertCanEdit(currentUser(req), 'gchain', 'receiving', existing.receivedById === currentUser(req).id);
+    assertCanEdit(currentUser(req), 'gchain', 'receiving', existing.receivedById === currentUser(req).id, existing.receivedById);
 
     const next = {
       deliveryRefNo: body.deliveryRefNo !== undefined ? body.deliveryRefNo || null : existing.deliveryRefNo,
@@ -1548,7 +1548,7 @@ const ISSUE_SORTS = ['number', 'issueDate'];
 function issueListWhere(me: ResolvedUser, q: ListQuery): { base: Prisma.StockIssueWhereInput; where: Prisma.StockIssueWhereInput } {
   // View Own reads the slips one issued (2026-10-18) — under the cards too.
   const { base, where } = issueListWhereAll(q);
-  const mine = { issuedById: me.id };
+  const mine = (ids: string[]) => ({ issuedById: { in: ids } });
   return { base: ownOnly(me, 'gchain', 'stock_issuance', base, mine), where: ownOnly(me, 'gchain', 'stock_issuance', where, mine) };
 }
 
@@ -1825,7 +1825,7 @@ async function issueView(issue: NonNullable<Awaited<ReturnType<typeof loadIssue>
     // The receive proof: the person it went to confirms it arrived; the
     // warehouse lead may record a paper signature for them.
     canConfirmReceipt:
-      issue.status === 'ISSUED' && !issue.receivedAt && (issue.issuedToId === me.id || mayEdit(me, 'gchain', 'stock_issuance', issue.issuedById === me.id)),
+      issue.status === 'ISSUED' && !issue.receivedAt && (issue.issuedToId === me.id || mayEdit(me, 'gchain', 'stock_issuance', issue.issuedById === me.id, issue.issuedById)),
   };
 }
 
@@ -2107,7 +2107,7 @@ stockIssueRoutes.post(
     if (!issue) throw notFound('Stock issue not found');
     const forThem = issue.issuedToId !== me.id;
     // Edit All records it for anyone's slip; Edit Own for a slip one issued (2026-10-18).
-    if (forThem && !mayEdit(me, 'gchain', 'stock_issuance', issue.issuedById === me.id)) throw forbidden('Only the person it was issued to confirms receiving it');
+    if (forThem && !mayEdit(me, 'gchain', 'stock_issuance', issue.issuedById === me.id, issue.issuedById)) throw forbidden('Only the person it was issued to confirms receiving it');
     if (issue.status !== 'ISSUED') throw badRequest(`${issue.number} has not been issued yet`);
     const note = [forThem ? `Recorded by ${me.name} for ${issue.issuedTo?.name ?? issue.issuedToName ?? 'the receiver'}` : null, body.note || null].filter(Boolean).join(' — ') || null;
     const claimed = await prisma.stockIssue.updateMany({
@@ -4006,7 +4006,7 @@ function ownStockWhere(me: ResolvedUser): { item: { createdById: string } } | nu
 
 /** May the caller see this item's stock? View All any; View Own the items they added — anybody else's is a 404. */
 function assertStockVisible(me: ResolvedUser, item: { createdById: string | null }) {
-  assertCanView(me, 'gchain', 'inventory', item.createdById === me.id);
+  assertCanView(me, 'gchain', 'inventory', item.createdById === me.id, item.createdById);
 }
 
 /**
@@ -4264,7 +4264,7 @@ inventoryRoutes.patch(
     });
     if (!balance) throw notFound('Stock line not found');
     // Edit Own places the stock of the items one added (2026-10-18).
-    assertCanEdit(currentUser(req), 'gchain', 'inventory', balance.item.createdById === currentUser(req).id);
+    assertCanEdit(currentUser(req), 'gchain', 'inventory', balance.item.createdById === currentUser(req).id, balance.item.createdById);
     let code: string | null = null;
     if (body.locationId) {
       const loc = await prisma.location.findUnique({ where: { id: body.locationId }, select: { warehouseId: true, code: true } });
@@ -4550,7 +4550,7 @@ inventoryRoutes.get(
       if (!item) throw notFound('Item not found');
       assertStockVisible(me, item);
       res.json({
-        canEdit: mayEdit(me, 'gchain', 'inventory', item.createdById === me.id),
+        canEdit: mayEdit(me, 'gchain', 'inventory', item.createdById === me.id, item.createdById),
         item: { ...item, reorderLevel: item.reorderLevel == null ? null : num(item.reorderLevel), minStock: item.minStock == null ? null : num(item.minStock) },
         project: rows[0]?.job ?? (await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, number: true, name: true } })),
         balances: rows.map((b) => ({
@@ -4594,7 +4594,7 @@ inventoryRoutes.get(
 
     res.json({
       // Edit All places any stock line in a bin; Edit Own the items one added (2026-10-18).
-      canEdit: mayEdit(me, 'gchain', 'inventory', item.createdById === me.id),
+      canEdit: mayEdit(me, 'gchain', 'inventory', item.createdById === me.id, item.createdById),
       item: {
         ...item,
         reorderLevel: item.reorderLevel == null ? null : num(item.reorderLevel),

@@ -71,7 +71,6 @@ interface UsersSummary {
 /** The single-user endpoint returns role ids (the list only needs key + name). */
 type UserDetail = Omit<UserRow, 'roles'> & {
   roles: { id: string; key: string; name: string }[];
-  overrides: { key: string; effect: 'ALLOW' | 'DENY' }[];
   /** The teams they support on a team-scoped approval step (Back Support). */
   supportTeams: { industryId: string }[];
   /** The invitation in flight, while it is pending. */
@@ -86,33 +85,10 @@ type UserDetail = Omit<UserRow, 'roles'> & {
   } | null;
 };
 
-/**
- * A permission chip is a button, and a button sends no `input` event — so the
- * Modal's "Close without saving?" guard never heard about a tick. Tell it, the
- * way a field would.
- */
-function markChanged(el: HTMLElement) {
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
 interface MailStatus {
   enabled: boolean;
   host: string | null;
   from: string | null;
-}
-
-interface PermissionCatalog {
-  modules: {
-    key: string;
-    label: string;
-    blurb: string;
-    submodules: {
-      key: string;
-      label: string;
-      phase: number;
-      actions: { action: string; label: string; key: string }[];
-    }[];
-  }[];
 }
 
 /** A person holds six roles at most (the owner's call, 2026-10-19; the API refuses a seventh). */
@@ -369,7 +345,7 @@ export function Users() {
 }
 
 /**
- * Modify of an existing account — details, roles and per-person overrides.
+ * Modify of an existing account — details and roles.
  * It makes nobody: a person is created with their login through
  * `NewPersonModal` (2026-10-10), never as a login alone.
  */
@@ -387,7 +363,7 @@ function UserEditor({
   const toast = useToast();
   /*
     Edit Own on Admin › Users is the viewer's own login, and only its plain
-    details (2026-10-18): roles, overrides, Supports teams, Reports to, the
+    details (2026-10-18): roles, Supports teams, Reports to, the
     team, the employee number, Active and a password stay Edit All's — the
     API refuses them (403) and the form neither offers nor sends them.
   */
@@ -399,8 +375,6 @@ function UserEditor({
   const [error, setError] = useState<unknown>(null);
   // The one people fetch (components/People.tsx, rule 20).
   const { people } = usePeople();
-  const [catalog, setCatalog] = useState<PermissionCatalog | null>(null);
-  const [overrides, setOverrides] = useState<Record<string, 'ALLOW' | 'DENY'>>({});
 
   const [form, setForm] = useState({
     name: '',
@@ -435,10 +409,6 @@ function UserEditor({
       .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
       .then(setTeams)
       .catch(() => setTeams([]));
-    api
-      .get<PermissionCatalog>('/roles/permission-catalog')
-      .then(setCatalog)
-      .catch(() => setCatalog(null));
   }, []);
 
   useEffect(() => {
@@ -462,7 +432,6 @@ function UserEditor({
           teamId: u.employee?.industryId ?? '',
           isActive: u.isActive,
         });
-        setOverrides(Object.fromEntries(u.overrides.map((o) => [o.key, o.effect])));
       })
       .catch(setError);
   }, [id]);
@@ -499,9 +468,6 @@ function UserEditor({
         ...(form.password ? { password: form.password } : {}),
       };
 
-      await api.put(`/users/${id}/overrides`, {
-        overrides: Object.entries(overrides).map(([key, effect]) => ({ key, effect })),
-      });
       await api.patch(`/users/${id}`, payload);
 
       toast('ok', `${kept ? `${form.firstName} ${form.lastName}`.trim() : form.name} updated`);
@@ -510,16 +476,6 @@ function UserEditor({
       setError(err);
       setBusy(false);
     }
-  }
-
-  function cycle(key: string) {
-    setOverrides((o) => {
-      const next = { ...o };
-      if (!next[key]) next[key] = 'ALLOW';
-      else if (next[key] === 'ALLOW') next[key] = 'DENY';
-      else delete next[key];
-      return next;
-    });
   }
 
   async function issue(kind: 'invite' | 'reset') {
@@ -696,12 +652,12 @@ function UserEditor({
         <>
           {!full && (
             <div className="alert info">
-              Roles, Supports teams and overrides are changed by an administrator with Edit All on Users.
+              Roles and Supports teams are changed by an administrator with Manage All on Users.
             </div>
           )}
           <Field
             label={`Roles — ${form.roleIds.length} of ${MAX_ROLES}`}
-            hint={`Roles grant the bulk of access; ${MAX_ROLES} at most. The highest is their title on documents. Adjust individual screens below.`}
+            hint={`Roles are the whole of a person's access; ${MAX_ROLES} at most. The highest is their title on documents.`}
           >
             <div className="role-levels">
               {rolesByLevel(roles).map((level) => (
@@ -762,60 +718,10 @@ function UserEditor({
             </Field>
           )}
 
-          <hr className="rule" />
-
-          <div className="row hraud-spread hraud-below">
-            <strong>Per-person overrides</strong>
-            <span className="faint hraud-small">
-              click to cycle: role default → <span className="hraud-allow">allow</span> →{' '}
-              <span className="hraud-deny">deny</span> — a deny beats a grant from any role
-            </span>
-          </div>
-
-          {!catalog ? (
-            <div className="muted">Loading the permission catalog…</div>
-          ) : (
-            catalog.modules.map((mod) => (
-              <div key={mod.key} className="perm-module">
-                <header>
-                  <h4>{mod.label}</h4>
-                  <span className="faint hraud-small">{mod.blurb}</span>
-                </header>
-                {mod.submodules.map((sub) => (
-                  <div key={sub.key} className="perm-row">
-                    <div className="name">
-                      {sub.label}
-                    </div>
-                    <div className="perm-actions">
-                      {sub.actions.map((a) => {
-                        const state = overrides[a.key];
-                        // A button, not a span: the chips were mouse-only, so an
-                        // override could not be set from a keyboard (rule 13).
-                        return (
-                          <button
-                            type="button"
-                            key={a.key}
-                            className={`perm-chip${state === 'ALLOW' ? ' on' : state === 'DENY' ? ' deny' : ''}`}
-                            disabled={!full}
-                            onClick={(e) => {
-                              cycle(a.key);
-                              markChanged(e.currentTarget);
-                            }}
-                            title={a.key}
-                            aria-label={`${sub.label}: ${a.label} — ${
-                              state === 'ALLOW' ? 'allowed' : state === 'DENY' ? 'denied' : 'role default'
-                            }`}
-                          >
-                            {a.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ))
-          )}
+          <p className="faint">
+            What each role may see and change is set on <Link to="/admin/roles">Admin › Roles</Link> — the permission
+            matrix. There are no per-person exceptions (2026-10-19): give the person a role instead.
+          </p>
         </>
       )}
     </Modal>

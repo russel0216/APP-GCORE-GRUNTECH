@@ -2,6 +2,7 @@ import { prisma } from '../prisma';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { cents } from './finance';
 import { manilaDate } from './day';
+import { visibleOwners } from './team';
 
 /**
  * G-CHAIN figures that more than one screen shows.
@@ -111,7 +112,7 @@ export async function chainOverview(me: ResolvedUser): Promise<ChainOverview> {
   const [requests, orders, borrows, stock] = await Promise.all([
     seesRequests
       ? prisma.purchaseRequest.count({
-          where: { status: 'PENDING_APPROVAL', ...(onlyOwn ? { requestedById: me.id } : {}) },
+          where: { status: 'PENDING_APPROVAL', ...(onlyOwn ? { requestedById: { in: visibleOwners(me, 'gchain', 'purchase_requests') } } : {}) },
         })
       : null,
     can(me, 'gchain.purchase_orders.view_all')
