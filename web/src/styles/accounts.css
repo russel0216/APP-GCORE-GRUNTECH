@@ -282,6 +282,39 @@
 .org-depth-2 { --org-ring: var(--ok); }
 .org-depth-3 { --org-ring: var(--info); }
 
+/* One person: a tile per role they hold, side by side in one box. */
+.org-person {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--s-1);
+  padding: var(--s-1);
+  border-radius: 1.6rem;
+  max-width: 100%;
+  position: relative;
+  z-index: 1;
+}
+.org-person:has(> .org-card + .org-card) {
+  outline: 1px dashed var(--line);
+}
+.org-card.is-key {
+  border-color: var(--info);
+}
+/* A managing role nobody on the team holds. */
+.org-card.is-vacant {
+  border: 1px dashed var(--danger);
+  background: transparent;
+  box-shadow: none;
+  padding-left: var(--s-3);
+}
+.org-card.is-vacant > :first-child {
+  box-shadow: none;
+  border-radius: 0;
+}
+.org-card.is-vacant .org-name {
+  color: var(--danger);
+}
+
 .org-card-text {
   display: flex;
   flex-direction: column;
@@ -498,30 +531,6 @@
 /* Back Support lines (2026-10-19): a dashed arrow from a supporter to the
    head of each team they support, drawn over the chart. */
 .org-scroll { position: relative; }
-.org-links {
-  position: absolute;
-  top: 0;
-  left: 0;
-  pointer-events: none;
-  overflow: visible;
-  z-index: 1;
-}
-.org-link {
-  fill: none;
-  stroke: var(--info);
-  stroke-width: 1.5;
-  stroke-dasharray: 6 4;
-}
-.org-link-head { fill: var(--info); }
-.org-link-label {
-  fill: var(--info);
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  text-anchor: middle;
-  paint-order: stroke;
-  stroke: var(--surface);
-  stroke-width: 4;
-}
 .org-supports {
   color: var(--info);
   font-size: var(--fs-xs);

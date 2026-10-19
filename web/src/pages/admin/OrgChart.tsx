@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -82,52 +82,70 @@ const teamRank = (code?: string) => {
   return i < 0 ? TEAM_ORDER.length : i;
 };
 
-/** Each card registers itself so the Back Support lines can find it. */
-type CardRef = (id: string, el: HTMLElement | null) => void;
-let registerCard: CardRef = () => {};
-
+/*
+  One tile per ROLE, the holder's picture on each (2026-10-19, the owner's
+  call: "scatter their picture per role so it is easy to see what is lacking
+  and who they report to down the line"). A person holding three roles shows
+  three tiles side by side in one box; the box is what reports to its manager.
+*/
 function Card({ node, depth, meId, search }: { node: Node; depth: number; meId?: string; search: string }) {
   const p = node.person;
-  const supports = (p.supportTeams ?? []).map((t) => t.industry?.code).filter(Boolean);
-  // Every role the title does not already name (2026-10-19, the owner's call:
-  // "reflect multiple role in the chart to determine who is the technical
-  // manager and sales manager") — the managing roles marked.
-  const title = ` / ${(p.position ?? '').toLowerCase()} / `;
-  const extra = (p.roles ?? [])
-    .filter((r) => !title.includes(` / ${r.name.trim().toLowerCase()} / `))
-    .sort((a, b) => Number(KEY_ROLES.has(b.key)) - Number(KEY_ROLES.has(a.key)) || (a.rank ?? 99) - (b.rank ?? 99));
+  const roles = [...(p.roles ?? [])].sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99) || a.name.localeCompare(b.name));
+  const tiles = roles.length > 0 ? roles.map((r) => ({ key: r.key, name: r.name })) : [{ key: '', name: p.position || 'No role yet' }];
   return (
-    <Link
-      ref={(el) => registerCard(p.id, el)}
-      to={`/admin/users/${p.id}${search}`}
-      className={`org-card org-depth-${Math.min(depth, 3)}`}
-    >
-      <Avatar name={p.name} photoId={p.photoPath} size={36} />
-      <span className="org-card-text">
-        {p.team && (
-          <span className="org-team" title={p.team.name}>
-            {p.team.code}
-          </span>
-        )}
-        <span className="org-name">
-          {p.name}
-          {p.id === meId && <span className="org-you"> (you)</span>}
-        </span>
-        <span className="org-position">{p.position || p.team?.name || '—'}</span>
-        {extra.length > 0 && (
-          <span className="org-roles" aria-label="Also holds">
-            {extra.map((r) => (
-              <span key={r.key} className={`org-role${KEY_ROLES.has(r.key) ? ' is-key' : ''}`}>
-                {r.name}
+    <span className={`org-person org-depth-${Math.min(depth, 3)}`}>
+      {tiles.map((t) => (
+        <Link key={t.key || 'none'} to={`/admin/users/${p.id}${search}`} className={`org-card${KEY_ROLES.has(t.key) ? ' is-key' : ''}`}>
+          <Avatar name={p.name} photoId={p.photoPath} size={36} />
+          <span className="org-card-text">
+            {p.team && (
+              <span className="org-team" title={p.team.name}>
+                {p.team.code}
               </span>
-            ))}
+            )}
+            <span className="org-position">{t.name}</span>
+            <span className="org-name">
+              {p.name}
+              {p.id === meId && <span className="org-you"> (you)</span>}
+            </span>
           </span>
-        )}
-        {supports.length > 0 && <span className="org-supports">Back Support → {supports.join(', ')}</span>}
-      </span>
+        </Link>
+      ))}
       {node.reports.length > 0 && <span className="visually-hidden">, {node.reports.length} direct reports</span>}
-    </Link>
+    </span>
   );
+}
+
+/** The managing roles nobody on a team holds — drawn as empty tiles. */
+function Vacant({ team, missing }: { team: { code: string; name: string }; missing: string[] }) {
+  if (missing.length === 0) return null;
+  return (
+    <span className="org-person org-vacant-set">
+      {missing.map((name) => (
+        <span key={name} className="org-card is-vacant">
+          <span className="org-card-text">
+            <span className="org-team" title={team.name}>
+              {team.code}
+            </span>
+            <span className="org-position">{name}</span>
+            <span className="org-name">Vacant</span>
+          </span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+const KEY_ROLE_NAMES: Record<string, string> = {
+  team_leader: 'Team Leader',
+  technical_manager: 'Technical Manager',
+  sales_manager: 'Sales Manager',
+  service_manager: 'Aftermarket Manager',
+};
+
+/** Everyone on a branch, the branch head included. */
+function membersOf(node: Node): Person[] {
+  return [node.person, ...node.reports.flatMap(membersOf)];
 }
 
 /** A branch from the third level down: the card, then its people in a column. */
@@ -146,10 +164,21 @@ function Branch({ node, depth, meId, search }: { node: Node; depth: number; meId
   );
 }
 
+function missingFor(node: Node): string[] {
+  const team = node.person.team?.id;
+  const held = new Set(
+    membersOf(node)
+      .filter((m) => m.team?.id === team)
+      .flatMap((m) => (m.roles ?? []).map((r) => r.key)),
+  );
+  return Object.keys(KEY_ROLE_NAMES).filter((k) => !held.has(k)).map((k) => KEY_ROLE_NAMES[k]);
+}
+
 function RowItem({ node, meId, search }: { node: Node; meId?: string; search: string }) {
   return (
     <li className="org-row-item">
       <Card node={node} depth={1} meId={meId} search={search} />
+      {node.person.team && <Vacant team={node.person.team} missing={missingFor(node)} />}
       {node.reports.length > 0 && (
         <ul className="org-column">
           {node.reports.map((c) => (
@@ -220,89 +249,6 @@ export function OrgChart() {
 
   const forest = useMemo(() => (people ? buildForest(people) : []), [people]);
 
-  // Back Support lines (2026-10-19): from each supporter to the head of every
-  // team they support — the team member whose own manager is on no other card
-  // of that team (the Team Leader, as the chart is drawn).
-  // Shared team posts (2026-10-19): KAT's Technical Manager is GIB/UIT/HIT's —
-  // a line from that person to the head of the team they cover, labelled.
-  const [shared, setShared] = useState<{ teamId: string; code: string; label: string; people: { id: string }[] }[]>([]);
-  useEffect(() => {
-    api
-      .get<{ teams: { id: string; code: string; posts: { label: string; mode: string; people: { id: string }[] }[] }[] }>('/reference/team-posts')
-      .then((r) =>
-        setShared(
-          r.teams.flatMap((t) =>
-            t.posts.filter((p) => p.mode !== 'OWN').map((p) => ({ teamId: t.id, code: t.code, label: p.label, people: p.people })),
-          ),
-        ),
-      )
-      .catch(() => setShared([]));
-  }, []);
-
-  const links = useMemo(() => {
-    if (!people) return [];
-    const active = people.filter((p) => p.isActive);
-    const byId = new Map(active.map((p) => [p.id, p]));
-    const heads = new Map<string, Person>();
-    for (const p of active) {
-      if (!p.team) continue;
-      const boss = p.supervisor ? byId.get(p.supervisor.id) : undefined;
-      if (boss?.team?.id === p.team.id) continue;
-      if (!heads.has(p.team.id)) heads.set(p.team.id, p);
-    }
-    const out: { from: string; to: string; code: string }[] = [];
-    for (const p of active) {
-      for (const t of p.supportTeams ?? []) {
-        const head = heads.get(t.industryId);
-        if (head && head.id !== p.id) out.push({ from: p.id, to: head.id, code: t.industry?.code ?? '' });
-      }
-    }
-    for (const s of shared) {
-      const head = heads.get(s.teamId);
-      for (const who of s.people) {
-        if (head && head.id !== who.id && byId.has(who.id)) out.push({ from: who.id, to: head.id, code: `${s.code} ${s.label}` });
-      }
-    }
-    return out;
-  }, [people, shared]);
-  const [showLinks, setShowLinks] = useState(true);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const cards = useRef(new Map<string, HTMLElement>());
-  registerCard = useCallback<CardRef>((id, el) => {
-    if (el) cards.current.set(id, el);
-    else cards.current.delete(id);
-  }, []);
-  const [lines, setLines] = useState<{ d: string; x: number; y: number; code: string; key: string }[]>([]);
-  const [box, setBox] = useState({ w: 0, h: 0 });
-  useLayoutEffect(() => {
-    const root = scrollRef.current;
-    if (!root || !showLinks) return setLines([]);
-    const draw = () => {
-      const base = root.getBoundingClientRect();
-      const at = (el: HTMLElement) => {
-        const r = el.getBoundingClientRect();
-        return { right: r.right - base.left + root.scrollLeft, y: r.top - base.top + r.height / 2 };
-      };
-      // Each line leaves the supporter's right edge and swings out to the
-      // right before entering the team head's — clear of the cards between.
-      const next = links.flatMap((l, i) => {
-        const a = cards.current.get(l.from);
-        const b = cards.current.get(l.to);
-        if (!a || !b) return [];
-        const s = at(a);
-        const e = at(b);
-        const out = Math.max(s.right, e.right) + 48 + i * 28;
-        const d = `M ${s.right} ${s.y} C ${out} ${s.y}, ${out} ${e.y}, ${e.right + 2} ${e.y}`;
-        return [{ d, x: out - 10, y: (s.y + e.y) / 2, code: l.code, key: `${l.from}-${l.to}-${i}` }];
-      });
-      setBox({ w: root.scrollWidth + 240, h: root.scrollHeight });
-      setLines(next);
-    };
-    draw();
-    const ro = new ResizeObserver(draw);
-    ro.observe(root);
-    return () => ro.disconnect();
-  }, [links, showLinks, forest]);
   // The chart itself is a head plus everyone under them; lone accounts (no
   // manager, nobody reporting to them) are listed apart so they read as "not placed yet".
   const trees = forest.filter((t) => t.reports.length > 0);
@@ -318,30 +264,7 @@ export function OrgChart() {
         Drawn from each person's <strong>Reports to</strong> — the same line their leave, overtime and other approvals
         follow. Open anyone to change it.
       </p>
-      {links.length > 0 && (
-        <label className="org-switch">
-          <input type="checkbox" checked={showLinks} onChange={(e) => setShowLinks(e.target.checked)} /> Show Back Support
-          and shared-manager lines
-        </label>
-      )}
-      <div className="org-scroll" ref={scrollRef}>
-        {lines.length > 0 && (
-          <svg className="org-links" width={box.w} height={box.h} aria-hidden="true">
-            <defs>
-              <marker id="org-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-                <path d="M0,0 L10,5 L0,10 z" className="org-link-head" />
-              </marker>
-            </defs>
-            {lines.map((l) => (
-              <g key={l.key}>
-                <path d={l.d} className="org-link" markerEnd="url(#org-arrow)" />
-                <text x={l.x} y={l.y} className="org-link-label">
-                  {l.code}
-                </text>
-              </g>
-            ))}
-          </svg>
-        )}
+      <div className="org-scroll">
         {trees.map((t) => (
           <Tree key={t.person.id} head={t} meId={me?.user.id} search={location.search} />
         ))}

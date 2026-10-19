@@ -4011,8 +4011,7 @@ count by role, both check".
   and `holdsStep` counts them. The seed shared KAT's Technical Manager and
   Aftermarket Manager from GIB, UIT and HIT once
   (`seed.teamPosts20261019`). **When KAT hires one**: give them the role
-  with Team = KAT, then set KAT's post back to "Its own team". The org
-  chart draws a dashed "KAT Technical Manager" line from each sharer.
+  with Team = KAT, then set KAT's post back to "Its own team".
 - **"Both check"**: `ApprovalStep.alsoRoleIds` works on a ROLE step too —
   the holders of either role decide it, and `holdsStep` counts both. The
   reimbursement's and cash advance's step 3 is "Checking (Account Payable /
@@ -4065,7 +4064,14 @@ hierarchy" — department removed EVERYWHERE, and both hierarchies.
   the highest level) and, under it, every OTHER role the person holds as a
   chip, the managing ones (Team Leader, Technical Manager, Sales Manager,
   Aftermarket Manager) marked first — so who is a team's Technical Manager
-  or Sales Manager reads off the chart.
+  or Sales Manager reads off the chart. **Since the same day's second call
+  ("scatter their picture per role so what is lacking is plain"): a card
+  per ROLE**, the holder's picture and team code on each, a person's tiles
+  boxed together (the box is what reports to their manager), and on each
+  team head's branch a dashed red "Vacant" tile for every managing role
+  (Team Leader, Technical Manager, Sales Manager, Aftermarket Manager)
+  nobody on that team holds. The Back Support and shared-manager lines are
+  gone from the chart.
 
 ### The organisation chart of 2026-10-17 — one approver, a hidden stand-in, the requester's follow-up
 
@@ -4367,11 +4373,8 @@ stand-in's door, queue, bell and trail, and both switches off.
   (the owner's call: "apply the same team rule to Back Support") a holder
   with nothing ticked handles their OWN team** (their Team on Admin ›
   Users), the Technical Manager's rule — no longer every team; ticked
-  teams replace their own. **The org chart draws it** (2026-10-19): a dashed
-  arrow labelled with the team's code from each supporter to the head of
-  every team they support (the member whose own manager is on another team),
-  routed to the right of the cards, "Back Support → KAT, HIT" on the
-  supporter's card, and a switch to hide the lines (`OrgChart.tsx`).
+  teams replace their own. (The org chart drew it as dashed lines for a
+  day; the owner had them removed on 2026-10-19.)
 - **A person's TEAM is picked on Admin › Users too** (2026-10-12, the
   owner's call: "on users edit allow selection of Team, particularly in
   Team Leader Role and sales to categorize their quotation and sales order
