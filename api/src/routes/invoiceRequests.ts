@@ -42,7 +42,7 @@ import { contentDisposition, paperFileName } from '../shared/paperName';
 import { cents, num, financeSettings, taxBreakdown, currentRates } from '../shared/finance';
 import { dayKey, manilaDayStart, manilaDayEnd } from '../shared/day';
 import { expectedCollection, invoiceCredit, termsLabel } from '../shared/receivables';
-import { quotationTeamOf, teamOf } from '../shared/team';
+import { quotationTeamOf, reportsTo, teamOf } from '../shared/team';
 import { usersHolding } from '../shared/clearance';
 import { assertOrderLeft, billingForInvoiceInclude, createInvoiceFromBilling, createInvoiceFromOrder, orderInvoiced, orderNet } from '../shared/billingInvoice';
 
@@ -173,9 +173,14 @@ export async function mayRequestInvoice(me: ResolvedUser, source: string | { sal
   return mine?.industryId === team.id;
 }
 
-/** view_all, the person who raised it, or — while it waits on them — whoever may decide it. */
+/**
+ * view_all, the person who raised it, their supervisor (View Own covers one's
+ * direct reports' requests, 2026-10-19), or — while it waits on them —
+ * whoever may decide it.
+ */
 async function mayRead(me: ResolvedUser, row: { id: string; requestedById: string }, deciderOnly = false): Promise<boolean> {
   if (!deciderOnly && (me.isSuperAdmin || can(me, 'gfin.invoice_requests.view_all') || row.requestedById === me.id)) return true;
+  if (!deciderOnly && (await reportsTo(row.requestedById, me.id))) return true;
   return mayDecide(me.id, DOC, [row.id]);
 }
 
@@ -311,7 +316,9 @@ export function requestListWhere(me: ResolvedUser, q: ReturnType<typeof listQuer
   const base: Prisma.InvoiceRequestWhereInput[] = [];
   const seesAll = me.isSuperAdmin || can(me, 'gfin.invoice_requests.view_all');
   const mine = !seesAll || q.scope === 'mine';
-  if (mine) base.push({ requestedById: me.id });
+  // View Own: what one raised, and what one's direct reports raised; "Mine" is one's own.
+  if (!seesAll && q.scope !== 'mine') base.push({ OR: [{ requestedById: me.id }, { requestedBy: { supervisorId: me.id } }] });
+  else if (mine) base.push({ requestedById: me.id });
   if (q.filters.jobId) base.push({ jobId: q.filters.jobId });
   if (q.filters.salesOrderId) base.push({ salesOrderId: q.filters.salesOrderId });
   if (q.filters.requestedById) base.push({ requestedById: q.filters.requestedById });

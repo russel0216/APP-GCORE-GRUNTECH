@@ -210,3 +210,12 @@ export function teamOrDepartment(
 export function userTeamWhere(teamId: string): Prisma.UserWhereInput {
   return teamId === 'none' ? { OR: [{ employee: null }, { employee: { industryId: null } }] } : { employee: { industryId: teamId } };
 }
+
+/**
+ * Does this login report to that one ("Reports to", one level)? View Own on a
+ * request register covers one's direct reports' requests (2026-10-19).
+ */
+export async function reportsTo(userId: string, supervisorId: string): Promise<boolean> {
+  if (userId === supervisorId) return false;
+  return !!(await prisma.user.findFirst({ where: { id: userId, supervisorId }, select: { id: true } }));
+}

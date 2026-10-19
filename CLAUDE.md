@@ -596,7 +596,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,431 assertions across twenty-two scripts** (counted 2026-10-18, after
+**4,432 assertions across twenty-two scripts** (counted 2026-10-18, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -664,7 +664,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 397, masters 92, sales 638, costing 205, pipeline 121, calendar 101, numbering
 94, partners 120, delivery 187, chain 354, hr 486, plantilla 123, meetings
-115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
+115, evaluations 154, academy 123, finance 431, aftermarket 270, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 143. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -1732,7 +1732,15 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   › View Own covers one's DIRECT REPORTS** (the owner's choice over the
   company-wide dashboard right): `attendanceScoped()` reads the holder's own
   days and those of everyone whose "Reports to" is them, and
-  `captureReader()` opens those reports' clock photos; verify-hr pins it. verify-numbering pins the readings, the hire
+  `captureReader()` opens those reports' clock photos; verify-hr pins it.
+- **G-FIN's common access, the same way** (2026-10-19): `applyFinAccess()`
+  in `shared/finAccess.ts`, once (`seed.finAccess20261019`), ADDS to every
+  role `FIN_COMMON` — one's own reimbursements and cash advances (create,
+  View Own, Edit Own); to Team Leader, Sales Manager and Sales Engineer their
+  own Invoice Requests and Commission Requests; to the Finance Manager every
+  G-FIN box. **View Own on invoice and commission requests covers one's
+  DIRECT REPORTS'** (`reportsTo()` in `shared/team.ts`; the list's "Mine"
+  stays one's own); verify-finance pins it. verify-numbering pins the readings, the hire
   year, the raise-only counter and the refusal; verify-accounts the
   write-through.
 - **An existing database keeps its configured pattern.** The seed only creates a

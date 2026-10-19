@@ -32,6 +32,7 @@ import { clearRoles, rolesCleared } from '../src/shared/rolesClear';
 import { replaceRolesWithChart } from '../src/shared/rolesFromChart';
 import { applyEmployeeNumberList } from '../src/shared/employeeNumbersFromList';
 import { applyHrAccess } from '../src/shared/hrAccess';
+import { applyFinAccess } from '../src/shared/finAccess';
 import { backfillOwnAuthors } from '../src/shared/ownBackfill';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
@@ -1618,6 +1619,13 @@ async function main() {
   {
     const hr = await applyHrAccess();
     if (hr) console.log(`  ✓ G-HR access: the common set on ${hr.roles} role(s) (${hr.common} boxes), the HR Officer ${hr.officer} more`);
+  }
+
+  // ── G-FIN's common rights on every role; all of G-FIN to the Finance Manager
+  // Once (shared/finAccess.ts, 2026-10-19).
+  {
+    const fin = await applyFinAccess();
+    if (fin) console.log(`  ✓ G-FIN access: the common set on ${fin.roles} role(s), the selling roles' requests, the Finance Manager ${fin.manager} boxes`);
   }
 
   // ── The employee numbers of the owner's ROLE.xlsx (2026-10-18) ──────────

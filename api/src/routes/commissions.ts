@@ -31,7 +31,7 @@ import { LIST_CAP, listReference, recordNamed, choice, sendListPdf, rangeNamed, 
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { cents, num, refreshAdvance, settleable } from '../shared/finance';
 import { dayKey, manilaDayStart, manilaDayEnd } from '../shared/day';
-import { quotationTeamOf } from '../shared/team';
+import { quotationTeamOf, reportsTo } from '../shared/team';
 import { usersHolding } from '../shared/clearance';
 import { orderNet } from '../shared/billingInvoice';
 import { quotationTotals } from '../shared/quotation';
@@ -279,11 +279,12 @@ export async function mayRaiseCommission(me: ResolvedUser, salesOrderId: string)
   return mine?.industryId === team.id;
 }
 
-/** view_all, the person who raised it, a beneficiary, or — while it waits on them — whoever may decide it. */
+/** view_all, the person who raised it, a beneficiary, their supervisor (View Own covers one's direct reports', 2026-10-19), or — while it waits on them — whoever may decide it. */
 async function mayRead(me: ResolvedUser, row: { id: string; requestedById: string; shares?: { userId: string }[] }, deciderOnly = false): Promise<boolean> {
   if (!deciderOnly) {
     if (me.isSuperAdmin || can(me, 'gfin.commissions.view_all') || row.requestedById === me.id) return true;
     if (row.shares?.some((s) => s.userId === me.id)) return true;
+    if (await reportsTo(row.requestedById, me.id)) return true;
   }
   return mayDecide(me.id, DOC, [row.id]);
 }
@@ -387,7 +388,10 @@ export function commissionListWhere(me: ResolvedUser, q: ReturnType<typeof listQ
   const base: Prisma.CommissionRequestWhereInput[] = [];
   const seesAll = me.isSuperAdmin || can(me, 'gfin.commissions.view_all');
   const mine = !seesAll || q.scope === 'mine';
-  if (mine) base.push({ OR: [{ requestedById: me.id }, { shares: { some: { userId: me.id } } }] });
+  // View Own: one's own and one's direct reports' requests; "Mine" is one's own.
+  const own = [{ requestedById: me.id }, { shares: { some: { userId: me.id } } }];
+  if (!seesAll && q.scope !== 'mine') base.push({ OR: [...own, { requestedBy: { supervisorId: me.id } }] });
+  else if (mine) base.push({ OR: own });
   if (q.filters.salesOrderId) base.push({ salesOrderId: q.filters.salesOrderId });
   if (q.filters.jobId) base.push({ jobId: q.filters.jobId });
   if (q.filters.requestedById) base.push({ requestedById: q.filters.requestedById });

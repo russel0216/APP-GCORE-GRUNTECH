@@ -4338,6 +4338,21 @@ async function main() {
       `${ir4Cancel.status} ${ir4Again.status} ${ir4Delete.status}`,
     );
     const irList = await fin('GET', `/invoice-requests?pageSize=50&jobId=${irJob.id}`);
+    // View Own covers one's DIRECT REPORTS' requests (2026-10-19): the seller's
+    // supervisor, holding only View Own, lists them; a colleague does not; and
+    // "Mine" is the supervisor's own alone.
+    const irBoss = await makeUser('ZZ IR Boss', 'irboss@verifyf.local', ['sales']);
+    await prisma.user.update({ where: { id: irSeller.id }, data: { supervisorId: irBoss.id } });
+    const bossList = await as(irBoss)('GET', `/invoice-requests?pageSize=50&jobId=${irJob.id}`);
+    const bossMine = await as(irBoss)('GET', `/invoice-requests?pageSize=50&jobId=${irJob.id}&scope=mine`);
+    const strangerList = await as(irStranger)('GET', `/invoice-requests?pageSize=50&jobId=${irJob.id}`);
+    const bossOne = await as(irBoss)('GET', `/invoice-requests/${ir4Again.body.id}`);
+    await prisma.user.update({ where: { id: irSeller.id }, data: { supervisorId: null } });
+    check(
+      "View Own reads a direct report's invoice requests, list and record, and a colleague's stay out",
+      bossList.body.total === 2 && bossMine.body.total === 0 && strangerList.body.total === 0 && bossOne.status === 200,
+      `${bossList.body.total} ${bossMine.body.total} ${strangerList.body.total} ${bossOne.status}`,
+    );
     const irListPdf = await fin('GET', `/invoice-requests/pdf?jobId=${irJob.id}`);
     check(
       'the register lists the project’s requests with their cards, and prints',
