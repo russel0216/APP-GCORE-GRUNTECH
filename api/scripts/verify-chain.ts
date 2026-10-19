@@ -1316,6 +1316,22 @@ async function main() {
     });
     const sheetId = String(sheetA.body.id);
     const sheetRead = await api(requesterToken, 'GET', `/purchase-requests/${sheetId}`);
+    // View Own covers one's DIRECT REPORTS' requests (2026-10-19); "Mine" is one's own.
+    {
+      const prBoss = await mkUser('Verify PR Boss', 'prboss@verifyc.local', requesterRole.id);
+      const bossToken = signToken(prBoss.id, prBoss.email);
+      await prisma.user.update({ where: { id: requester.id }, data: { supervisorId: prBoss.id } });
+      const ids = (b: { rows?: { id: string }[] }) => (b.rows ?? []).map((r) => r.id);
+      const bossAll = await api(bossToken, 'GET', '/purchase-requests?pageSize=200');
+      const bossMine = await api(bossToken, 'GET', '/purchase-requests?pageSize=200&scope=mine');
+      const colleague = await api(otherRequesterToken, 'GET', '/purchase-requests?pageSize=200');
+      await prisma.user.update({ where: { id: requester.id }, data: { supervisorId: leader.id } });
+      check(
+        "a View Own holder lists a direct report's purchase requests; \"Mine\" and a colleague do not",
+        ids(bossAll.body).includes(sheetId) && !ids(bossMine.body).includes(sheetId) && !ids(colleague.body).includes(sheetId),
+        `${bossAll.status} ${bossMine.status} ${colleague.status}`,
+      );
+    }
     const sheetItems = (sheetRead.body.items ?? []) as { id: string; name: string | null; partNumber: string | null; description: string; estimatedAmount: number; costCategory: { id: string } | null }[];
     check(
       'POST /purchase-requests takes the header and its lines in one save',

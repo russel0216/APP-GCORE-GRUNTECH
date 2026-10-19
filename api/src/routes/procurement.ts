@@ -113,7 +113,11 @@ function prListWhere(me: ResolvedUser, q: ListQuery): { where: Prisma.PurchaseRe
   const and: Prisma.PurchaseRequestWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gchain.purchase_requests.view_all');
   const mine = onlyOwn || q.scope === 'mine';
-  if (mine) and.push({ requestedById: me.id });
+  // View Own covers one's DIRECT REPORTS' requests too (2026-10-19), so a
+  // Team Leader or Technical Manager sees what their team asked for; the
+  // "Mine" switch is one's own alone.
+  if (onlyOwn && q.scope !== 'mine') and.push({ OR: [{ requestedById: me.id }, { requestedBy: { supervisorId: me.id } }] });
+  else if (mine) and.push({ requestedById: me.id });
   const f = q.filters;
   const status = choice(f.status, PrStatus, 'Status');
   if (status) and.push({ status });
