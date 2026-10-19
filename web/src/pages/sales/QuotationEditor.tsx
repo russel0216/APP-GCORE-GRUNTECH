@@ -2018,6 +2018,30 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
     }
   }
 
+  /*
+    An APPROVED revision the customer has not been sent yet is usually better
+    pulled back to draft than raised again (help ticket GT-HT-2026-0010:
+    "modify without reflecting as R1"): the engine's one reopen path, offered
+    here only when `GET /approvals/history` says `canReopen` — the same test
+    the Approval panel reads, with the module's own refusals (won, booked,
+    built on) said in the bar.
+  */
+  const [canReopen, setCanReopen] = useState(false);
+  useEffect(() => {
+    if (latest?.status !== 'APPROVED') return;
+    api
+      .get<{ status: string; canReopen?: boolean }[]>(`/approvals/history/quotation/${latest.id}`)
+      .then((rows) => setCanReopen(!!rows[0]?.canReopen))
+      .catch(() => {});
+  }, [latest?.id, latest?.status]);
+
+  async function reopenApproved(reason: string) {
+    if (!latest) return;
+    await api.post(`/approvals/reopen/quotation/${latest.id}`, { reason: reason.trim() });
+    toast('ok', `R${latest.revision} pulled back to draft — its lines are ready to change`);
+    onRevisionRaised();
+  }
+
   async function raiseRevision() {
     setBusy(true);
     try {
@@ -2068,6 +2092,26 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
               R{latest.revision} is {latest.status.toLowerCase().replace(/_/g, ' ')}: its lines, prices, terms and tax are
               what the customer was sent, and stay as they are.
             </span>
+            {latest.status === 'APPROVED' && canReopen && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={busy}
+                onClick={() =>
+                  confirm.ask({
+                    title: `Pull R${latest.revision} back to draft?`,
+                    body: `Its approval is undone and R${latest.revision} goes through approval again once you submit it — no new revision number. Raise a new revision instead if the customer already has R${latest.revision}.`,
+                    confirmLabel: `Pull R${latest.revision} back`,
+                    tone: 'primary',
+                    reason: 'required',
+                    reasonLabel: 'Why?',
+                    onConfirm: reopenApproved,
+                  })
+                }
+              >
+                Pull R{latest.revision} back and edit
+              </button>
+            )}
             {latest.status !== 'PENDING_APPROVAL' && (
               <button type="button" className="btn btn-sm" onClick={() => void raiseRevision()} disabled={busy}>
                 Raise a new revision to change them

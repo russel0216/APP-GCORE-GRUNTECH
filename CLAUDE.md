@@ -3678,6 +3678,12 @@ SCORO.
   through `cancelOpenRequest`, telling the approvers. The SAME revision
   returns to draft — no revision number burned on a document the customer
   never saw; raising a new revision stays the path once anything was sent.
+  **An APPROVED revision is offered the same on the Modify page**
+  (2026-10-19, help ticket GT-HT-2026-0010: "modify without reflecting as
+  R1"): "Pull R<n> back and edit", beside "Raise a new revision", wherever
+  `GET /approvals/history` says `canReopen` — the engine's
+  `reopenApproved()` with its reason, the quotation's own refusals (won, a
+  sales order, a project, a job order) said in the bar.
 - **A revision superseded while PENDING_APPROVAL takes its request with it**
   (2026-10-02). `POST /quotations/:id/revisions` calls
   `cancelOpenRequest('quotation', revisionId, tx, reason, actorId)` in the same
