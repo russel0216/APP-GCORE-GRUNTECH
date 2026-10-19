@@ -961,6 +961,7 @@ async function main() {
       'gchain.purchase_orders.view_own',
       'gchain.purchase_orders.create',
       'gchain.purchase_orders.edit_own',
+      'gchain.purchase_orders.delete',
       'gchain.receiving.view_all',
       'gchain.borrow_slips.view_all',
       'gchain.inventory.view_all',
@@ -1232,6 +1233,45 @@ async function main() {
       'a pending order is pulled back to the same draft, its request withdrawn; a second pull has nothing to pull',
       resent.status === 200 && poPulled.status === 200 && pulledAgain.status === 400 && stillOpen === 0 && afterPull.body.status === 'DRAFT' && afterPull.body.canEdit === true,
       `${resent.status} ${poPulled.status} ${pulledAgain.status} open ${stillOpen} ${afterPull.body.status}`,
+    );
+
+    // Cancel, then delete (2026-10-19): a pending order cancelled withdraws its
+    // request; an issued one is refused; only its buyer deletes the cancelled one.
+    const cancelPo = await prisma.purchaseOrder.create({
+      data: {
+        number: await nextNumber('purchase_order'),
+        kind: 'DIRECT_TO_JOB',
+        supplierId: supplier.id,
+        jobId: job.id,
+        createdById: buyer.id,
+        notes: `${TAG} cancel order`,
+        items: { create: [{ description: `${TAG} cancel line`, quantity: D(1), unitPrice: D(100), amount: D(100), costCategoryId: materials.id }] },
+      },
+    });
+    await api(buyerToken, 'POST', `/purchase-orders/${cancelPo.id}/submit`);
+    const delPending = await api(buyerToken, 'DELETE', `/purchase-orders/${cancelPo.id}`);
+    const cancelShort = await api(buyerToken, 'POST', `/purchase-orders/${cancelPo.id}/cancel`, { reason: 'x' });
+    const poCancelled = await api(buyerToken, 'POST', `/purchase-orders/${cancelPo.id}/cancel`, { reason: 'Supplier withdrew the quote' });
+    const openAfterCancel = await prisma.approvalRequest.count({ where: { documentType: 'purchase_order', documentId: cancelPo.id, status: 'PENDING' } });
+    const cancelledRead = await api(buyerToken, 'GET', `/purchase-orders/${cancelPo.id}`);
+    const strangerDel = await api(colleagueToken, 'DELETE', `/purchase-orders/${cancelPo.id}`);
+    const deleted = await api(buyerToken, 'DELETE', `/purchase-orders/${cancelPo.id}`);
+    const goneRow = await prisma.purchaseOrder.findUnique({ where: { id: cancelPo.id } });
+    const deletedRow = await prisma.auditLog.count({ where: { entityType: 'purchase_order', entityId: cancelPo.id, action: 'DELETED' } });
+    check(
+      'a pending order is cancelled with its reason (request withdrawn), then deleted by its buyer alone; a pending one is not deleted',
+      delPending.status === 400 &&
+        cancelShort.status === 400 &&
+        poCancelled.status === 200 &&
+        openAfterCancel === 0 &&
+        cancelledRead.body.status === 'CANCELLED' &&
+        cancelledRead.body.cancelReason === 'Supplier withdrew the quote' &&
+        cancelledRead.body.canDelete === true &&
+        strangerDel.status === 403 &&
+        deleted.status === 200 &&
+        goneRow === null &&
+        deletedRow === 1,
+      `${delPending.status} ${cancelShort.status} ${poCancelled.status} open ${openAfterCancel} ${cancelledRead.body.status} ${strangerDel.status} ${deleted.status} ${deletedRow}`,
     );
 
     // An order placed from an awarded canvass keeps its supplier.

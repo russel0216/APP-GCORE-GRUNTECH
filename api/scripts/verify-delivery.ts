@@ -2145,19 +2145,27 @@ async function main() {
         }),
       ),
     );
+    // …and so does a cancelled order raised from the cancelled request.
+    const deadSupplier = await prisma.supplier.create({ data: { code: `${TAG}-DS-${Date.now()}`, name: `${TAG} dead supplier` } });
+    const deadPo = await prisma.purchaseOrder.create({
+      data: { number: `${TAG}-DEADPO-${Date.now()}`, status: 'CANCELLED', supplierId: deadSupplier.id, requestId: deadPrs[0].id, jobId: cancelledJob.id, createdById: biller.id },
+    });
     await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: true } });
     const delLive = await http(billerToken, 'DELETE', `/jobs/${job.id}`);
     const delCancelled = await http(billerToken, 'DELETE', `/jobs/${cancelledJob.id}`);
     await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: false } });
     check(
-      'a live project is not deleted; a cancelled one is, with its reports, billings and its cancelled and draft purchase requests',
+      'a live project is not deleted; a cancelled one is, with its reports, billings, its cancelled and draft purchase requests and its cancelled order',
       delLive.status === 400 &&
         delCancelled.status === 200 &&
         (await prisma.purchaseRequest.count({ where: { id: { in: deadPrs.map((r) => r.id) } } })) === 0 &&
+        !(await prisma.purchaseOrder.findUnique({ where: { id: deadPo.id } })) &&
         !(await prisma.job.findUnique({ where: { id: cancelledJob.id } })) &&
         !(await prisma.progressReport.findUnique({ where: { id: otherReport.id } })),
       `${delLive.status} / ${delCancelled.status} ${delCancelled.text}`,
     );
+    await prisma.purchaseOrder.deleteMany({ where: { id: deadPo.id } });
+    await prisma.supplier.delete({ where: { id: deadSupplier.id } });
 
     // Budget Monitoring's paper prints cost to date — budget monitoring's
     // figure — so it takes that right as well as the list's.

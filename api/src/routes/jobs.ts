@@ -1131,12 +1131,14 @@ const updateJobSchema = z.object({
  * Deletes a CANCELLED project — the delete right, and the project's manager
  * or edit_all. Its scope, tasks, reports, billings, ledger and budget
  * requests cascade, so it is refused while money stands behind it: an
- * invoice, supplier bill, PO, stock issue, claim or advance filed against
- * it, a purchase request still live (pending, approved, ordered) or with an
- * order raised from it, or a budget request past draft that was not
+ * invoice, supplier bill, live PO, stock issue, claim or advance filed against
+ * it, a purchase request still live (pending, approved, ordered) or with a
+ * live order raised from it, or a budget request past draft that was not
  * cancelled or rejected. Its DRAFT, REJECTED and CANCELLED purchase requests
- * with no order go WITH it (2026-10-19, the owner's call, clearing sample
- * projects: "make delete remove its draft/cancelled PRs") — deleted in the
+ * whose orders all go too, and its DRAFT and CANCELLED purchase orders with
+ * nothing received and no bill, go WITH it (2026-10-19, the owner's call,
+ * clearing sample projects: "make delete remove its draft/cancelled PRs",
+ * "also allow deleting a cancelled purchase order") — deleted in the
  * same transaction, each with its own DELETED row, their files and their
  * cancelled RFQs' quotation files after the commit, as the request's own
  * Delete does. Job orders and approved plans pointing at it keep their place
@@ -1152,16 +1154,23 @@ jobRoutes.delete(
     if (!canEditRecord(me, 'gops', 'projects', job.projectManagerId ?? '')) throw forbidden('Only the project’s manager can delete it');
     if (job.status !== 'CANCELLED') throw badRequest('Only a cancelled project can be deleted — cancel it first');
     const inJob = { jobId: job.id };
-    // Requests that go with the project: nothing live, no order raised.
+    // Orders that go with the project: a draft or cancelled one, nothing
+    // received against it and no bill naming it (2026-10-19).
+    const goingOrders = await prisma.purchaseOrder.findMany({
+      where: { ...inJob, status: { in: ['DRAFT', 'CANCELLED'] }, receivings: { none: {} }, bills: { none: {} } },
+      select: { id: true, number: true },
+    });
+    const goingOrderIds = goingOrders.map((o) => o.id);
+    // Requests that go with it: nothing live, and every order raised from it going too.
     const goingRequests = await prisma.purchaseRequest.findMany({
-      where: { ...inJob, status: { in: ['DRAFT', 'REJECTED', 'CANCELLED'] }, orders: { none: {} } },
+      where: { ...inJob, status: { in: ['DRAFT', 'REJECTED', 'CANCELLED'] }, orders: { every: { id: { in: goingOrderIds } } } },
       select: { id: true, number: true, rfqs: { select: { suppliers: { select: { id: true } } } } },
     });
     const counts: [string, number][] = [
       ['invoice', await prisma.invoice.count({ where: inJob })],
       ['supplier bill', await prisma.supplierBill.count({ where: inJob })],
       ['live purchase request', await prisma.purchaseRequest.count({ where: { ...inJob, id: { notIn: goingRequests.map((r) => r.id) } } })],
-      ['purchase order', await prisma.purchaseOrder.count({ where: inJob })],
+      ['live purchase order', await prisma.purchaseOrder.count({ where: { ...inJob, id: { notIn: goingOrderIds } } })],
       ['stock issue', await prisma.stockIssue.count({ where: inJob })],
       ['expense claim', await prisma.expenseClaim.count({ where: inJob })],
       ['cash advance', await prisma.cashAdvance.count({ where: inJob })],
@@ -1174,11 +1183,18 @@ jobRoutes.delete(
     const goingIds = goingRequests.map((r) => r.id);
     await deleteOrRefuse(job.number, () =>
       prisma.$transaction(async (tx) => {
+        if (goingOrderIds.length) await tx.purchaseOrder.deleteMany({ where: { id: { in: goingOrderIds } } });
         if (goingIds.length) await tx.purchaseRequest.deleteMany({ where: { id: { in: goingIds } } });
         await tx.job.delete({ where: { id: job.id } });
       }),
     );
     await deleteAttachmentsOf('job', [job.id]);
+    if (goingOrderIds.length) {
+      await deleteAttachmentsOf('purchase_order', goingOrderIds);
+      for (const o of goingOrders) {
+        await audit({ entityType: 'purchase_order', entityId: o.id, action: 'DELETED', summary: `Deleted ${o.number} with cancelled project ${job.number}` }, req);
+      }
+    }
     if (goingIds.length) {
       await deleteAttachmentsOf('purchase_request', goingIds);
       await deleteAttachmentsOf('rfq_supplier', goingRequests.flatMap((r) => r.rfqs.flatMap((q) => q.suppliers.map((sup) => sup.id))));
@@ -1191,7 +1207,7 @@ jobRoutes.delete(
         entityType: 'job',
         entityId: job.id,
         action: 'DELETED',
-        summary: `Deleted cancelled project ${job.number} — ${job.name}${goingRequests.length ? ` (and ${goingRequests.map((r) => r.number).join(', ')})` : ''}`,
+        summary: `Deleted cancelled project ${job.number} — ${job.name}${goingOrders.length + goingRequests.length ? ` (and ${[...goingOrders, ...goingRequests].map((r) => r.number).join(', ')})` : ''}`,
       },
       req,
     );

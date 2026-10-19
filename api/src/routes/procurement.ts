@@ -1232,7 +1232,7 @@ purchaseRequestRoutes.post(
     const pr = await prisma.purchaseRequest.findUnique({
       where: { id: req.params.id },
       include: {
-        _count: { select: { orders: true } },
+        _count: { select: { orders: { where: { status: { not: 'CANCELLED' } } } } },
         canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
         rfqs: { where: { status: { in: ['DRAFT', 'SENT', 'QUOTED'] } }, select: { number: true } },
         pulloutSlips: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
@@ -2772,6 +2772,13 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
     billsVisible: seesBills,
     canEdit: !!me && po.status === 'DRAFT' && mayEditPo(me, po),
     canWithdraw: !!me && po.status === 'PENDING_APPROVAL' && mayEditPo(me, po),
+    canCancel: !!me && (po.status === 'DRAFT' || po.status === 'PENDING_APPROVAL') && mayEditPo(me, po),
+    canDelete:
+      !!me &&
+      (po.status === 'DRAFT' || po.status === 'CANCELLED') &&
+      po.receivings.length === 0 &&
+      can(me, 'gchain.purchase_orders.delete') &&
+      mayEditPo(me, po),
     /** What the order page's save claims on (`PUT /:id/sheet`'s `version`). */
     version: po.updatedAt.toISOString(),
     vatRate: num(po.vatRate),
@@ -3702,21 +3709,81 @@ onApprovalReopened('purchase_order', {
   },
 });
 
+/**
+ * Cancels a draft or pending order (2026-10-19, the owner's call: "allow
+ * deleting a cancelled purchase order" — and nothing could cancel one): its
+ * buyer or edit_all, the reason kept. A pending one's approval request is
+ * withdrawn in the same transaction, refused if a decision landed first.
+ * Neither state has committed, ordered or received anything, so nothing is
+ * released. An issued order is pulled back to draft first, which undoes what
+ * issuing did, then cancelled.
+ */
+purchaseOrderRoutes.post(
+  '/:id/cancel',
+  requireAny(...PO_EDIT),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled').max(2000) }), req.body);
+    const po = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } });
+    if (!po) throw notFound('Purchase order not found');
+    if (!mayEditPo(me, po)) throw forbidden('This order belongs to someone else');
+    if (po.status === 'CANCELLED') throw badRequest('This order is already cancelled');
+    if (po.status !== 'DRAFT' && po.status !== 'PENDING_APPROVAL') {
+      throw badRequest(`${po.number} is ${statusLabel(po.status).toLowerCase()} — pull it back to draft first, then cancel it`);
+    }
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.purchaseOrder.updateMany({
+        where: { id: po.id, status: po.status },
+        data: { status: 'CANCELLED', cancelReason: body.reason },
+      });
+      if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+      if (po.status === 'PENDING_APPROVAL') {
+        const withdrawn = await cancelOpenRequest('purchase_order', po.id, tx, `cancelled by ${me.name}: ${body.reason}`, me.id);
+        if (!withdrawn.length) {
+          const last = await tx.approvalRequest.findFirst({
+            where: { documentType: 'purchase_order', documentId: po.id },
+            orderBy: { createdAt: 'desc' },
+            select: { status: true },
+          });
+          if (last && (last.status === 'APPROVED' || last.status === 'REJECTED')) {
+            throw badRequest('It was decided a moment ago — reload to see where it stands');
+          }
+        }
+      }
+    });
+    await audit({ entityType: 'purchase_order', entityId: po.id, action: 'CANCELLED', summary: `${po.number} cancelled — ${body.reason}` }, req);
+    res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
+/**
+ * Deletes a draft or a CANCELLED order (2026-10-19): the delete right, and
+ * its buyer or edit_all; never one with goods received against it (any
+ * incoming report, even a cancelled one) or a live supplier bill. Its lines
+ * cascade; its files go after the commit; one DELETED row.
+ */
 purchaseOrderRoutes.delete(
   '/:id',
   require_('gchain.purchase_orders.delete'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const po = await prisma.purchaseOrder.findUnique({
       where: { id: req.params.id },
-      include: { _count: { select: { receivings: true } } },
+      include: {
+        _count: { select: { receivings: true } },
+        bills: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+      },
     });
     if (!po) throw notFound('Purchase order not found');
+    if (!mayEditPo(me, po)) throw forbidden('This order belongs to someone else');
     if (po._count.receivings > 0) throw badRequest('Goods have been received against this order');
-    if (po.status !== 'DRAFT') throw badRequest('Only a draft order can be deleted');
+    if (po.bills.length) throw badRequest(`Supplier bill ${po.bills.map((b) => b.number).join(', ')} is matched to ${po.number} — cancel it first`);
+    if (po.status !== 'DRAFT' && po.status !== 'CANCELLED') throw badRequest('Only a draft or a cancelled order can be deleted — cancel it first');
 
-    await prisma.purchaseOrder.delete({ where: { id: req.params.id } });
+    await deleteOrRefuse(po.number, () => prisma.purchaseOrder.delete({ where: { id: po.id } }));
+    await deleteAttachmentsOf('purchase_order', [po.id]);
     await audit(
-      { entityType: 'purchase_order', entityId: req.params.id, action: 'DELETED', summary: `Deleted ${po.number}` },
+      { entityType: 'purchase_order', entityId: po.id, action: 'DELETED', summary: `Deleted ${po.status === 'CANCELLED' ? 'cancelled ' : ''}${po.number}` },
       req,
     );
     res.json({ ok: true });

@@ -2845,6 +2845,9 @@ model PurchaseOrder {
 
   issuedAt   DateTime?
   approvedAt DateTime?
+  /// Why it was cancelled (2026-10-19): a draft or pending order only — an
+  /// issued one is pulled back to draft first, which undoes what issue did.
+  cancelReason String?
 
   items      PurchaseOrderItem[]
   receivings Receiving[]

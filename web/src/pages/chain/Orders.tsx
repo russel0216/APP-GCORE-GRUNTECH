@@ -157,6 +157,9 @@ interface PoDetailData {
   /** DRAFT and the caller may change it (edit_all, or its author with edit_own). */
   canEdit: boolean;
   canWithdraw?: boolean;
+  canCancel?: boolean;
+  canDelete?: boolean;
+  cancelReason?: string | null;
   /** Placed from this awarded canvass: the supplier is decided. */
   fromCanvass: { id: string; number: string } | null;
   /** The approver's reason, when the latest submission was rejected back to draft. */
@@ -224,8 +227,8 @@ export function PurchaseOrderDetail() {
   const outstanding = po.items.reduce((s, i) => s + i.outstandingQty, 0);
   const isDraft = po.status === 'DRAFT';
   const billable = ['ISSUED', 'PARTIALLY_RECEIVED', 'RECEIVED'].includes(po.status);
-  // The API's own rule: a draft with nothing received against it.
-  const mayDelete = isDraft && po.receivings.length === 0 && can('gchain.purchase_orders.delete');
+  // The API's own rule: a draft or a cancelled order, nothing received against it.
+  const mayDelete = !!po.canDelete;
 
   /** Asked in the confirm bar, which shows a refusal — so this throws rather than catching. */
   async function remove() {
@@ -308,6 +311,25 @@ export function PurchaseOrderDetail() {
               },
             },
           },
+          po.canCancel && {
+            label: 'Cancel order',
+            danger: true,
+            confirm: {
+              title: `Cancel ${po.number}?`,
+              body:
+                po.status === 'PENDING_APPROVAL'
+                  ? 'The approval request is withdrawn and the approvers are told. A cancelled order can then be deleted.'
+                  : 'It is kept as cancelled, with the reason. A cancelled order can then be deleted.',
+              confirmLabel: 'Cancel order',
+              reason: 'required',
+              minReason: 3,
+              onConfirm: async (reason: string) => {
+                await api.post(`/purchase-orders/${po.id}/cancel`, { reason });
+                toast('ok', `${po.number} cancelled`);
+                await load();
+              },
+            },
+          },
           mayDelete && {
             label: 'Delete',
             danger: true,
@@ -327,6 +349,12 @@ export function PurchaseOrderDetail() {
 
       <ErrorBox error={error} />
 
+      {po.status === 'CANCELLED' && (
+        <div className="alert info" role="status">
+          <strong>Cancelled</strong>
+          {po.cancelReason ? `: ${po.cancelReason}` : '.'}
+        </div>
+      )}
       {isDraft && po.returned && (
         <div className="alert error" role="status">
           <strong>Returned by {po.returned.by ?? 'the approver'}</strong>
