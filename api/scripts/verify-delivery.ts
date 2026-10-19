@@ -2136,14 +2136,24 @@ async function main() {
 
     // A cancelled project may be deleted (2026-10-11), its reports and
     // billings going with it; a live one is cancelled first.
+    // Its own dead purchase requests (a cancelled one, a draft) go with it
+    // (2026-10-19, clearing sample projects).
+    const deadPrs = await Promise.all(
+      (['CANCELLED', 'DRAFT'] as const).map((status, n) =>
+        prisma.purchaseRequest.create({
+          data: { number: `${TAG}-DEADPR-${n}-${Date.now()}`, status, jobId: cancelledJob.id, requestedById: biller.id, purpose: `${TAG} sample` },
+        }),
+      ),
+    );
     await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: true } });
     const delLive = await http(billerToken, 'DELETE', `/jobs/${job.id}`);
     const delCancelled = await http(billerToken, 'DELETE', `/jobs/${cancelledJob.id}`);
     await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: false } });
     check(
-      'a live project is not deleted; a cancelled one is, with its reports and billings',
+      'a live project is not deleted; a cancelled one is, with its reports, billings and its cancelled and draft purchase requests',
       delLive.status === 400 &&
         delCancelled.status === 200 &&
+        (await prisma.purchaseRequest.count({ where: { id: { in: deadPrs.map((r) => r.id) } } })) === 0 &&
         !(await prisma.job.findUnique({ where: { id: cancelledJob.id } })) &&
         !(await prisma.progressReport.findUnique({ where: { id: otherReport.id } })),
       `${delLive.status} / ${delCancelled.status} ${delCancelled.text}`,

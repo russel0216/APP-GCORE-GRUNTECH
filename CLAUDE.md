@@ -83,8 +83,10 @@ four databases and four copies of "customer".
    the holder of the delete right who raised it or may edit all, refuses
    while money stands behind it (an invoice on the job order; payment
    allocations on the claim or the request; for a project an invoice,
-   bill, PR, PO, stock issue, claim, advance or a budget request past
-   draft), runs through `deleteOrRefuse()` in `http/kit.ts` (a foreign key
+   bill, live PR, PO, stock issue, claim, advance or a budget request past
+   draft — a project's own DRAFT, REJECTED or CANCELLED purchase requests
+   with no order go WITH it since 2026-10-19, in the same transaction, each
+   audited, the owner's call for clearing sample projects), runs through `deleteOrRefuse()` in `http/kit.ts` (a foreign key
    that still points at it is a 400, nothing deleted), removes its files
    with `deleteAttachmentsOf()` after the commit, and writes one DELETED
    audit row. On the page it is ⋯ › **Delete**, last and red, asked in

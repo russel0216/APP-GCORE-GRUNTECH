@@ -1131,9 +1131,16 @@ const updateJobSchema = z.object({
  * Deletes a CANCELLED project — the delete right, and the project's manager
  * or edit_all. Its scope, tasks, reports, billings, ledger and budget
  * requests cascade, so it is refused while money stands behind it: an
- * invoice, supplier bill, PR, PO, stock issue, claim or advance filed against
- * it, or a budget request past draft that was not cancelled or rejected. Job
- * orders and approved plans pointing at it keep their place without it.
+ * invoice, supplier bill, PO, stock issue, claim or advance filed against
+ * it, a purchase request still live (pending, approved, ordered) or with an
+ * order raised from it, or a budget request past draft that was not
+ * cancelled or rejected. Its DRAFT, REJECTED and CANCELLED purchase requests
+ * with no order go WITH it (2026-10-19, the owner's call, clearing sample
+ * projects: "make delete remove its draft/cancelled PRs") — deleted in the
+ * same transaction, each with its own DELETED row, their files and their
+ * cancelled RFQs' quotation files after the commit, as the request's own
+ * Delete does. Job orders and approved plans pointing at it keep their place
+ * without it.
  */
 jobRoutes.delete(
   '/:id',
@@ -1145,10 +1152,15 @@ jobRoutes.delete(
     if (!canEditRecord(me, 'gops', 'projects', job.projectManagerId ?? '')) throw forbidden('Only the project’s manager can delete it');
     if (job.status !== 'CANCELLED') throw badRequest('Only a cancelled project can be deleted — cancel it first');
     const inJob = { jobId: job.id };
+    // Requests that go with the project: nothing live, no order raised.
+    const goingRequests = await prisma.purchaseRequest.findMany({
+      where: { ...inJob, status: { in: ['DRAFT', 'REJECTED', 'CANCELLED'] }, orders: { none: {} } },
+      select: { id: true, number: true, rfqs: { select: { suppliers: { select: { id: true } } } } },
+    });
     const counts: [string, number][] = [
       ['invoice', await prisma.invoice.count({ where: inJob })],
       ['supplier bill', await prisma.supplierBill.count({ where: inJob })],
-      ['purchase request', await prisma.purchaseRequest.count({ where: inJob })],
+      ['live purchase request', await prisma.purchaseRequest.count({ where: { ...inJob, id: { notIn: goingRequests.map((r) => r.id) } } })],
       ['purchase order', await prisma.purchaseOrder.count({ where: inJob })],
       ['stock issue', await prisma.stockIssue.count({ where: inJob })],
       ['expense claim', await prisma.expenseClaim.count({ where: inJob })],
@@ -1159,9 +1171,30 @@ jobRoutes.delete(
     if (blockers.length) {
       throw badRequest(`${job.number} has ${blockers.map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`).join(', ')} filed against it — it is kept`);
     }
-    await deleteOrRefuse(job.number, () => prisma.job.delete({ where: { id: job.id } }));
+    const goingIds = goingRequests.map((r) => r.id);
+    await deleteOrRefuse(job.number, () =>
+      prisma.$transaction(async (tx) => {
+        if (goingIds.length) await tx.purchaseRequest.deleteMany({ where: { id: { in: goingIds } } });
+        await tx.job.delete({ where: { id: job.id } });
+      }),
+    );
     await deleteAttachmentsOf('job', [job.id]);
-    await audit({ entityType: 'job', entityId: job.id, action: 'DELETED', summary: `Deleted cancelled project ${job.number} — ${job.name}` }, req);
+    if (goingIds.length) {
+      await deleteAttachmentsOf('purchase_request', goingIds);
+      await deleteAttachmentsOf('rfq_supplier', goingRequests.flatMap((r) => r.rfqs.flatMap((q) => q.suppliers.map((sup) => sup.id))));
+      for (const r of goingRequests) {
+        await audit({ entityType: 'purchase_request', entityId: r.id, action: 'DELETED', summary: `Deleted ${r.number} with cancelled project ${job.number}` }, req);
+      }
+    }
+    await audit(
+      {
+        entityType: 'job',
+        entityId: job.id,
+        action: 'DELETED',
+        summary: `Deleted cancelled project ${job.number} — ${job.name}${goingRequests.length ? ` (and ${goingRequests.map((r) => r.number).join(', ')})` : ''}`,
+      },
+      req,
+    );
     res.json({ ok: true });
   }),
 );

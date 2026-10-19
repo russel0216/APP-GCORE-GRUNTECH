@@ -438,7 +438,7 @@ export function ProjectWorkspace() {
               danger: true,
               confirm: {
                 title: `Delete ${job.number}?`,
-                body: 'This cancelled project goes for good, with its scope, tasks, reports and ledger. Refused while an invoice, bill, PR, PO, stock issue, claim, advance or released budget request is filed against it. Its number is not reused.',
+                body: 'This cancelled project goes for good, with its scope, tasks, reports, ledger and its draft, rejected or cancelled purchase requests. Refused while an invoice, bill, live PR, PO, stock issue, claim, advance or released budget request is filed against it. Its number is not reused.',
                 confirmLabel: 'Delete',
                 onConfirm: async () => {
                   await api.del(`/jobs/${job.id}`);
