@@ -283,9 +283,25 @@
 .org-depth-3 { --org-ring: var(--info); }
 
 /* One person: a tile per role they hold, side by side in one box. */
+.org-zoom {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+.org-zoom-value {
+  min-width: 3.5em;
+  text-align: center;
+  font-size: var(--fs-sm);
+}
+.org-canvas {
+  width: max-content;
+  min-width: 100%;
+}
+
 .org-person {
-  display: inline-flex;
-  flex-wrap: wrap;
+  display: inline-grid;
+  grid-template-columns: repeat(2, auto);
   justify-content: center;
   gap: var(--s-1);
   padding: var(--s-1);
@@ -293,6 +309,9 @@
   max-width: 100%;
   position: relative;
   z-index: 1;
+}
+.org-person:not(:has(> .org-card + .org-card)) {
+  grid-template-columns: auto;
 }
 .org-person:has(> .org-card + .org-card) {
   outline: 1px dashed var(--line);

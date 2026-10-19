@@ -4071,7 +4071,12 @@ hierarchy" — department removed EVERYWHERE, and both hierarchies.
   team head's branch a dashed red "Vacant" tile for every managing role
   (Team Leader, Technical Manager, Sales Manager, Aftermarket Manager)
   nobody on that team holds. The Back Support and shared-manager lines are
-  gone from the chart.
+  gone from the chart. **And the same day's third** ("maximize space; the top only
+  the CEO role; show the whole chart, add zoom"): a person's tiles sit two
+  to a row, the head shows only their highest role and every other role
+  they hold is drawn where it is worked (a managing role on their team's
+  branch, filling its vacancy; the rest on the BOSS side), and the chart
+  opens fitted to the card's width (CSS `zoom`) with −, +, Fit and 100%.
 
 ### The organisation chart of 2026-10-17 — one approver, a hidden stand-in, the requester's follow-up
 

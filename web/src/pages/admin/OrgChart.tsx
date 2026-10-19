@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -88,9 +88,9 @@ const teamRank = (code?: string) => {
   and who they report to down the line"). A person holding three roles shows
   three tiles side by side in one box; the box is what reports to its manager.
 */
-function Card({ node, depth, meId, search }: { node: Node; depth: number; meId?: string; search: string }) {
+function Card({ node, depth, meId, search, only }: { node: Node; depth: number; meId?: string; search: string; only?: Set<string> }) {
   const p = node.person;
-  const roles = [...(p.roles ?? [])].sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99) || a.name.localeCompare(b.name));
+  const roles = [...(p.roles ?? [])].filter((r) => !only || only.has(r.key)).sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99) || a.name.localeCompare(b.name));
   const tiles = roles.length > 0 ? roles.map((r) => ({ key: r.key, name: r.name })) : [{ key: '', name: p.position || 'No role yet' }];
   return (
     <span className={`org-person org-depth-${Math.min(depth, 3)}`}>
@@ -164,21 +164,26 @@ function Branch({ node, depth, meId, search }: { node: Node; depth: number; meId
   );
 }
 
-function missingFor(node: Node): string[] {
+function missingFor(node: Node, extra: string[] = []): string[] {
   const team = node.person.team?.id;
   const held = new Set(
     membersOf(node)
       .filter((m) => m.team?.id === team)
-      .flatMap((m) => (m.roles ?? []).map((r) => r.key)),
+      .flatMap((m) => (m.roles ?? []).map((r) => r.key))
+      .concat(extra),
   );
   return Object.keys(KEY_ROLE_NAMES).filter((k) => !held.has(k)).map((k) => KEY_ROLE_NAMES[k]);
 }
 
-function RowItem({ node, meId, search }: { node: Node; meId?: string; search: string }) {
+/** The head's other roles, drawn where they are worked (a team's, or BOSS). */
+type Lent = { node: Node; keys: Set<string> };
+
+function RowItem({ node, meId, search, lent }: { node: Node; meId?: string; search: string; lent?: Lent }) {
   return (
     <li className="org-row-item">
+      {lent && <Card node={lent.node} depth={1} meId={meId} search={search} only={lent.keys} />}
       <Card node={node} depth={1} meId={meId} search={search} />
-      {node.person.team && <Vacant team={node.person.team} missing={missingFor(node)} />}
+      {node.person.team && <Vacant team={node.person.team} missing={missingFor(node, lent ? [...lent.keys] : [])} />}
       {node.reports.length > 0 && (
         <ul className="org-column">
           {node.reports.map((c) => (
@@ -196,26 +201,54 @@ function RowItem({ node, meId, search }: { node: Node; meId?: string; search: st
   the left, and the Industry Teams (KAT, HIT, UIT, GIB, SIT) on the right.
 */
 function Tree({ head, meId, search }: { head: Node; meId?: string; search: string }) {
+  // Only the head's highest role sits at the top; every other role they hold
+  // is drawn where it is worked — a team role on their team's branch, the
+  // rest on the BOSS side (2026-10-19, the owner's call).
+  const roles = head.person.roles ?? [];
+  const topRank = Math.min(...roles.map((r) => r.rank ?? 99), 99);
+  const topKeys = new Set(roles.filter((r) => (r.rank ?? 99) === topRank).map((r) => r.key));
+  const rest = roles.filter((r) => !topKeys.has(r.key));
+  const teamKeys = new Set(rest.filter((r) => KEY_ROLES.has(r.key)).map((r) => r.key));
+  const bossKeys = new Set(rest.filter((r) => !KEY_ROLES.has(r.key)).map((r) => r.key));
+  const headTeam = head.person.team;
+  const lone = (_keys: Set<string>): Node => ({ person: head.person, reports: [] });
+
   const boss = head.reports.filter((r) => !r.person.team);
   const industry = head.reports
     .filter((r) => r.person.team)
     .sort((a, b) => teamRank(a.person.team?.code) - teamRank(b.person.team?.code) || a.person.name.localeCompare(b.person.name));
+  const teamRow = headTeam && teamKeys.size > 0 ? industry.find((r) => r.person.team?.id === headTeam.id) : undefined;
+  type Item = { key: string; node: Node; lent?: Lent; onlyKeys?: Set<string> };
+  const bossItems: Item[] = [
+    ...(bossKeys.size > 0 ? [{ key: 'head-boss', node: lone(bossKeys), onlyKeys: bossKeys }] : []),
+    ...boss.map((r) => ({ key: r.person.id, node: r })),
+  ];
+  const industryItems: Item[] = industry.map((r) =>
+    r === teamRow ? { key: r.person.id, node: r, lent: { node: lone(teamKeys), keys: teamKeys } } : { key: r.person.id, node: r },
+  );
+  if (teamKeys.size > 0 && !teamRow) industryItems.push({ key: 'head-team', node: lone(teamKeys), onlyKeys: teamKeys });
   const sides = [
-    { key: 'boss', label: 'BOSS — Business and Operation Support Services', nodes: boss },
-    { key: 'industry', label: 'Industry Teams', nodes: industry },
-  ].filter((x) => x.nodes.length > 0);
+    { key: 'boss', label: 'BOSS — Business and Operation Support Services', items: bossItems },
+    { key: 'industry', label: 'Industry Teams', items: industryItems },
+  ].filter((x) => x.items.length > 0);
   return (
     <div className="org-tree">
-      <Card node={head} depth={0} meId={meId} search={search} />
+      <Card node={head} depth={0} meId={meId} search={search} only={topKeys.size ? topKeys : undefined} />
       {sides.length > 0 && (
         <ul className="org-row">
           {sides.map((side) => (
-            <li key={side.key} className="org-row-item org-side" style={{ flexGrow: side.nodes.length }}>
+            <li key={side.key} className="org-row-item org-side" style={{ flexGrow: side.items.length }}>
               <span className="org-side-label">{side.label}</span>
               <ul className="org-row">
-                {side.nodes.map((r) => (
-                  <RowItem key={r.person.id} node={r} meId={meId} search={search} />
-                ))}
+                {side.items.map((it) =>
+                  it.onlyKeys ? (
+                    <li key={it.key} className="org-row-item">
+                      <Card node={it.node} depth={1} meId={meId} search={search} only={it.onlyKeys} />
+                    </li>
+                  ) : (
+                    <RowItem key={it.key} node={it.node} meId={meId} search={search} lent={it.lent} />
+                  ),
+                )}
               </ul>
             </li>
           ))}
@@ -254,6 +287,24 @@ export function OrgChart() {
   const trees = forest.filter((t) => t.reports.length > 0);
   const loose = forest.filter((t) => t.reports.length === 0);
 
+  // The whole chart fits the width on opening, however small; zoom to read.
+  const outer = useRef<HTMLDivElement | null>(null);
+  const inner = useRef<HTMLDivElement | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const fit = useCallback(() => {
+    const o = outer.current;
+    const i = inner.current;
+    if (!o || !i) return;
+    const natural = i.scrollWidth;
+    if (natural > 0) setZoom(Math.max(0.2, Math.min(1, +(o.clientWidth / natural).toFixed(2))));
+  }, []);
+  const fitted = useRef(false);
+  useLayoutEffect(() => {
+    if (fitted.current || !inner.current) return;
+    fitted.current = true;
+    fit();
+  });
+
   if (error) return <ErrorBox error={error} />;
   if (!people) return <Loading />;
   if (forest.length === 0) return <Empty title="Nobody to chart yet" hint="Add users, then set who each reports to." />;
@@ -264,10 +315,27 @@ export function OrgChart() {
         Drawn from each person's <strong>Reports to</strong> — the same line their leave, overtime and other approvals
         follow. Open anyone to change it.
       </p>
-      <div className="org-scroll">
-        {trees.map((t) => (
-          <Tree key={t.person.id} head={t} meId={me?.user.id} search={location.search} />
-        ))}
+      <div className="org-zoom" role="group" aria-label="Zoom">
+        <button type="button" className="btn btn-sm" onClick={() => setZoom((z) => Math.max(0.2, +(z - 0.1).toFixed(2)))} aria-label="Zoom out">
+          −
+        </button>
+        <span className="org-zoom-value">{Math.round(zoom * 100)}%</span>
+        <button type="button" className="btn btn-sm" onClick={() => setZoom((z) => Math.min(2, +(z + 0.1).toFixed(2)))} aria-label="Zoom in">
+          +
+        </button>
+        <button type="button" className="btn btn-sm" onClick={fit}>
+          Fit
+        </button>
+        <button type="button" className="btn btn-sm" onClick={() => setZoom(1)}>
+          100%
+        </button>
+      </div>
+      <div className="org-scroll" ref={outer}>
+        <div className="org-canvas" ref={inner} style={{ zoom }}>
+          {trees.map((t) => (
+            <Tree key={t.person.id} head={t} meId={me?.user.id} search={location.search} />
+          ))}
+        </div>
       </div>
       {loose.length > 0 && (
         <div className="org-loose">
