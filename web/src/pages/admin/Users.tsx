@@ -69,7 +69,14 @@ type UserDetail = Omit<UserRow, 'roles'> & {
   supportTeams: { industryId: string }[];
   /** The invitation in flight, while it is pending. */
   invite: { sentAt: string; expiresAt: string; live: boolean } | null;
-  employee: { id: string; employeeNo: string; firstName: string; lastName: string; industryId: string | null } | null;
+  employee: {
+    id: string;
+    employeeNo: string;
+    firstName: string;
+    lastName: string;
+    suffix: string | null;
+    industryId: string | null;
+  } | null;
 };
 
 /**
@@ -368,6 +375,10 @@ function UserEditor({
 
   const [form, setForm] = useState({
     name: '',
+    /** The employee record's name parts, for a linked login (2026-10-19). */
+    firstName: '',
+    lastName: '',
+    suffix: '',
     email: '',
     password: '',
     employeeNo: '',
@@ -382,7 +393,11 @@ function UserEditor({
   });
   const [teams, setTeams] = useState<{ id: string; code: string; name: string; isActive: boolean }[]>([]);
   const [detail, setDetail] = useState<UserDetail | null>(null);
-  /** A login with an employee record mirrors it: those fields are the record's (2026-10-16). */
+  /**
+   * A login with an employee record mirrors it (2026-10-16): its name,
+   * position, mobile and department are the record's — typed here since
+   * 2026-10-19 and written through to the record, which the login follows.
+   */
   const kept = !!detail?.employee;
   /** The link just issued — shown until the administrator is done with it. */
   const [issued, setIssued] = useState<{ delivery: Delivery; kind: 'invite' | 'reset' } | null>(null);
@@ -405,6 +420,9 @@ function UserEditor({
         setDetail(u);
         setForm({
           name: u.name,
+          firstName: u.employee?.firstName ?? '',
+          lastName: u.employee?.lastName ?? '',
+          suffix: u.employee?.suffix ?? '',
           email: u.email,
           password: '',
           employeeNo: u.employeeNo ?? '',
@@ -426,34 +444,27 @@ function UserEditor({
     setBusy(true);
     setError(null);
     try {
-      const details = kept
-        ? {}
-        : {
-            name: form.name,
-            position: form.position || null,
-            phone: form.phone || null,
-            departmentId: form.departmentId || null,
-          };
+      // A linked login's details are written through to the employee record.
+      const details = {
+        ...(kept
+          ? { firstName: form.firstName.trim(), lastName: form.lastName.trim(), suffix: form.suffix.trim() || null }
+          : { name: form.name }),
+        position: form.position || null,
+        phone: form.phone || null,
+        departmentId: form.departmentId || null,
+      };
       // Edit Own: their own plain details, nothing else (2026-10-18).
       if (!full) {
         await api.patch(`/users/${id}`, details);
-        toast('ok', `${form.name} updated`);
+        toast('ok', `${kept ? `${form.firstName} ${form.lastName}`.trim() : form.name} updated`);
         onSaved();
         return;
       }
       const payload = {
-        // Kept on the employee record when there is one — not sent at all,
-        // except the employee number (2026-10-18), which is typed here and
-        // written through to the record, as the Team is.
+        // Written through to the employee record when there is one, as the
+        // employee number and the Team are; the login follows the record.
         employeeNo: form.employeeNo || null,
-        ...(kept
-          ? {}
-          : {
-              name: form.name,
-              position: form.position || null,
-              phone: form.phone || null,
-              departmentId: form.departmentId || null,
-            }),
+        ...details,
         supervisorId: form.supervisorId || null,
         roleIds: form.roleIds,
         supportTeamIds: form.supportTeamIds,
@@ -467,7 +478,7 @@ function UserEditor({
       });
       await api.patch(`/users/${id}`, payload);
 
-      toast('ok', `${form.name} updated`);
+      toast('ok', `${kept ? `${form.firstName} ${form.lastName}`.trim() : form.name} updated`);
       onSaved();
     } catch (err) {
       setError(err);
@@ -540,16 +551,26 @@ function UserEditor({
         <>
           {detail?.employee && (
             <div className="alert info">
-              This login is {detail.employee.firstName} {detail.employee.lastName}'s — their name, position,
-              mobile and department are kept on the{' '}
-              <Link to={`/g-hr/employees/${detail.employee.id}`}>employee record ↗</Link> and follow it here. The
-              employee number typed here is written onto the record.
+              This login is {detail.employee.firstName} {detail.employee.lastName}'s — the name, employee number,
+              position, mobile and department typed here are saved onto their{' '}
+              <Link to={`/g-hr/employees/${detail.employee.id}`}>employee record ↗</Link>, and the login follows it.
             </div>
           )}
           <div className="grid grid-2">
-            <Field label="Full name">
-              <input value={form.name} disabled={kept} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </Field>
+            {kept ? (
+              <>
+                <Field label="First name">
+                  <input value={form.firstName} onChange={(e) => setForm({ ...form, firstName: e.target.value })} />
+                </Field>
+                <Field label="Last name">
+                  <input value={form.lastName} onChange={(e) => setForm({ ...form, lastName: e.target.value })} />
+                </Field>
+              </>
+            ) : (
+              <Field label="Full name">
+                <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              </Field>
+            )}
             <Field label="Email" hint="The address they sign in with — it stays">
               <input type="email" value={form.email} disabled />
             </Field>
@@ -565,10 +586,18 @@ function UserEditor({
                 onChange={(e) => setForm({ ...form, employeeNo: e.target.value })}
               />
             </Field>
-            <Field label="Position">
+            {kept && (
+              <Field label="Suffix" hint="Jr., Sr., III — leave blank if none">
+                <input value={form.suffix} onChange={(e) => setForm({ ...form, suffix: e.target.value })} />
+              </Field>
+            )}
+            <Field
+              label="Position"
+              hint={kept ? 'A title the Plantilla holds puts them on that position' : undefined}
+            >
               <input
                 value={form.position}
-                disabled={kept}
+                disabled={kept && !full}
                 onChange={(e) => setForm({ ...form, position: e.target.value })}
               />
             </Field>
@@ -577,7 +606,6 @@ function UserEditor({
                 type="tel"
                 autoComplete="off"
                 value={form.phone}
-                disabled={kept}
                 onChange={(e) => setForm({ ...form, phone: e.target.value })}
               />
             </Field>
@@ -596,7 +624,7 @@ function UserEditor({
             <Field label="Department">
               <select
                 value={form.departmentId}
-                disabled={kept}
+                disabled={kept && !full}
                 onChange={(e) => setForm({ ...form, departmentId: e.target.value })}
               >
                 <option value="">— none —</option>

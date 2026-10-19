@@ -21,6 +21,7 @@ import { audit, redact } from '../shared/audit';
 import { allPermissions, REGISTRY, ACTION_LABELS } from '../permissions/registry';
 import { ADMIN_RESET_HOURS, deliverLink, issueToken, syncLoginFromEmployee } from '../shared/accounts';
 import { setCounter, type CounterMove } from '../shared/numbering';
+import { setEmployeePosition } from '../shared/plantilla';
 import { ENGINE_ROLE_KEYS } from '../shared/rolesClear';
 import { mailConfig, sendMail } from '../shared/mail';
 import { requireView, requireEdit, ownOnly, viewScope, editScope, assertCanView, assertCanEdit } from '../shared/ownScope';
@@ -28,13 +29,14 @@ import type { ResolvedUser } from '../permissions/resolve';
 import { renderDocument, formatShortDate } from '../shared/pdf';
 import { LIST_CAP, listReference, sendListPdf } from '../shared/listPaper';
 
-/** How a mirrored login field is named when a change to it is refused. */
-const MIRROR_LABELS: Record<string, string> = {
-  name: 'The name',
-  employeeNo: 'the employee number',
-  position: 'the position',
-  phone: 'the phone',
-  departmentId: 'the department',
+/** How an employee field written from Admin › Users is named in its audit row. */
+const PERSONAL_LABELS: Record<string, string> = {
+  firstName: 'first name',
+  lastName: 'last name',
+  suffix: 'suffix',
+  mobile: 'mobile',
+  departmentId: 'department',
+  position: 'position',
 };
 
 export const userRoutes = Router();
@@ -384,7 +386,7 @@ userRoutes.get(
       : null;
     const employee = await prisma.employee.findUnique({
       where: { userId: user.id },
-      select: { id: true, employeeNo: true, firstName: true, lastName: true, industryId: true },
+      select: { id: true, employeeNo: true, firstName: true, lastName: true, suffix: true, industryId: true },
     });
 
     res.json({
@@ -474,6 +476,14 @@ userRoutes.post(
 /** What Modify may change. The email is the account's identity and stays; a login is only ever made with its employee. */
 const updateSchema = z.object({
   name: z.string().min(2, 'Name is required').optional(),
+  /**
+   * A login linked to an employee: the name as the employee record keeps it
+   * (2026-10-19, the owner's call: its details are edited here too and
+   * written through to the record).
+   */
+  firstName: z.string().trim().min(1, 'First name is required').max(80).optional(),
+  lastName: z.string().trim().min(1, 'Last name is required').max(80).optional(),
+  suffix: z.string().trim().max(20).optional().nullable(),
   employeeNo: z.string().trim().optional().nullable(),
   position: z.string().trim().optional().nullable(),
   /** The author's mobile under "Sincerely Yours," on a quotation. */
@@ -570,14 +580,23 @@ userRoutes.patch(
 
     // The employee owns identity (2026-10-16): a login linked to an employee
     // record takes its name, number, phone, department and position from it
-    // (`syncLoginFromEmployee`), so a CHANGE to one of them here is refused —
-    // the form sends them back unchanged, which is fine. The EMPLOYEE NUMBER
-    // is the one exception (2026-10-18, the owner's call: the numbers are
-    // typed on Admin › Users): it is written THROUGH to the employee record,
-    // as the Team is, and the login mirrors it back.
+    // (`syncLoginFromEmployee`). Since 2026-10-19 (the owner's call: "edit
+    // them here too") those are typed HERE as well and written THROUGH to the
+    // employee record — the employee number (2026-10-18) and the Team already
+    // were — and the login mirrors them back, so the two never disagree.
     const owner = await prisma.employee.findUnique({
       where: { userId: req.params.id },
-      select: { id: true, employeeNo: true, firstName: true, lastName: true },
+      select: {
+        id: true,
+        employeeNo: true,
+        firstName: true,
+        lastName: true,
+        suffix: true,
+        mobile: true,
+        departmentId: true,
+        position: true,
+        positionId: true,
+      },
     });
     const numberTyped = !!owner && body.employeeNo !== undefined && (body.employeeNo || null) !== (owner.employeeNo ?? null);
     if (numberTyped && body.employeeNo) {
@@ -587,34 +606,68 @@ userRoutes.patch(
       });
       if (holder) throw conflict(`Employee number "${body.employeeNo}" is already ${holder.firstName} ${holder.lastName}'s`);
     }
+    /** What this save writes onto the linked employee record (never pay or statutory fields). */
+    const personal: Prisma.EmployeeUncheckedUpdateInput = {};
+    const personalBefore: Record<string, unknown> = {};
+    let positionTo: { positionId: string | null; text: string | null } | null = null;
     if (owner) {
-      const current = await prisma.user.findUnique({
-        where: { id: req.params.id },
-        select: { name: true, position: true, phone: true, departmentId: true },
-      });
-      const asked: Record<string, unknown> = {
-        name: body.name,
-        position: body.position,
-        phone: body.phone,
-        departmentId: body.departmentId,
-      };
-      const moved = Object.entries(asked).filter(
-        ([k, v]) => v !== undefined && (v || null) !== ((current as Record<string, unknown> | null)?.[k] ?? null),
-      );
-      if (moved.length) {
-        throw badRequest(
-          `${moved.map(([k]) => MIRROR_LABELS[k]).join(', ')} come${moved.length === 1 ? 's' : ''} from the employee record — change ${moved.length === 1 ? 'it' : 'them'} there (HR › Employees)`,
-          moved.map(([k]) => ({ field: k, message: 'Kept on the employee record' })),
-        );
+      const current = await prisma.user.findUnique({ where: { id: req.params.id }, select: { name: true } });
+      // A one-box name (an older form) cannot say which part is the surname.
+      if (body.name !== undefined && body.name !== current?.name && body.firstName === undefined && body.lastName === undefined) {
+        throw badRequest('Send the first and last name — this login takes its name from the employee record', [
+          { field: 'name', message: 'Use First name and Last name' },
+        ]);
       }
+      const put = (key: keyof typeof owner, value: string | null | undefined) => {
+        if (value === undefined) return;
+        if ((value || null) === ((owner[key] as string | null) ?? null)) return;
+        personalBefore[key] = owner[key];
+        (personal as Record<string, unknown>)[key] = value || null;
+      };
+      if (body.firstName !== undefined) put('firstName', body.firstName);
+      if (body.lastName !== undefined) put('lastName', body.lastName);
+      put('suffix', body.suffix);
+      put('mobile', body.phone);
+      if (body.departmentId !== undefined && (body.departmentId || null) !== owner.departmentId) {
+        if (body.departmentId && !(await prisma.department.count({ where: { id: body.departmentId } }))) {
+          throw badRequest('departmentId: that department was not found');
+        }
+        put('departmentId', body.departmentId);
+      }
+      // The position has one writer (`setEmployeePosition`): a title the
+      // Plantilla holds puts them on that position; another title is kept as
+      // typed only while they hold no plantilla position — taking somebody
+      // off the Plantilla is HR's call, on the employee record.
+      const typed = body.position === undefined ? undefined : body.position?.trim() || null;
+      if (typed !== undefined && typed !== (owner.position ?? null)) {
+        const match = typed
+          ? await prisma.position.findFirst({
+              where: { title: { equals: typed, mode: 'insensitive' }, isActive: true },
+              select: { id: true },
+            })
+          : null;
+        if (match) positionTo = { positionId: match.id, text: null };
+        else if (owner.positionId) {
+          throw badRequest(
+            `${owner.firstName} ${owner.lastName} holds the Plantilla position "${owner.position}" — pick another position from the Plantilla, or change it on the employee record (HR › Employees)`,
+            [{ field: 'position', message: 'Not a Plantilla position' }],
+          );
+        } else positionTo = { positionId: null, text: typed };
+        personalBefore.position = owner.position;
+      }
+    }
+    const personalChanged = Object.keys(personal).length > 0 || positionTo !== null;
+    if (personalChanged && editScope(me, 'admin', 'users') !== 'all' && (personal.departmentId !== undefined || positionTo)) {
+      throw forbidden('Changing the position or the department needs "admin.users.edit_all" — Edit Own changes only your own details');
     }
 
     const data: Prisma.UserUpdateInput = {};
-    if (body.name !== undefined) data.name = body.name;
-    // A linked login's number is the employee's (written below, mirrored back).
+    // A linked login's name, number, position, phone and department are the
+    // employee's (written below, mirrored back by `syncLoginFromEmployee`).
+    if (body.name !== undefined && !owner) data.name = body.name;
     if (body.employeeNo !== undefined && !owner) data.employeeNo = body.employeeNo || null;
-    if (body.position !== undefined) data.position = body.position || null;
-    if (body.phone !== undefined) data.phone = body.phone || null;
+    if (body.position !== undefined && !owner) data.position = body.position || null;
+    if (body.phone !== undefined && !owner) data.phone = body.phone || null;
     if (body.isActive !== undefined) data.isActive = body.isActive;
     if (body.password) {
       data.passwordHash = await bcrypt.hash(body.password, 10);
@@ -626,7 +679,7 @@ userRoutes.patch(
         ? { connect: { id: body.supervisorId } }
         : { disconnect: true };
     }
-    if (body.departmentId !== undefined) {
+    if (body.departmentId !== undefined && !owner) {
       data.department = body.departmentId
         ? { connect: { id: body.departmentId } }
         : { disconnect: true };
@@ -659,8 +712,12 @@ userRoutes.patch(
         await tx.employee.update({ where: { id: owner.id }, data: { employeeNo: body.employeeNo || null } });
         // A typed number moves the employee series up to it, never down.
         if (body.employeeNo) moved.counter = await setCounter('employee', body.employeeNo, tx, { mode: 'raise' });
-        await syncLoginFromEmployee(tx, owner.id);
       }
+      if (owner && personalChanged) {
+        if (Object.keys(personal).length) await tx.employee.update({ where: { id: owner.id }, data: personal });
+        if (positionTo) await setEmployeePosition(tx, owner.id, positionTo.positionId, positionTo.text);
+      }
+      if (owner && (numberTyped || personalChanged)) await syncLoginFromEmployee(tx, owner.id);
       return tx.user.update({ where: { id: req.params.id }, data, select: publicUser });
     });
 
@@ -674,6 +731,25 @@ userRoutes.patch(
           summary: `Employee number ${owner.employeeNo ?? 'none'} → ${body.employeeNo || 'none'} (from Admin › Users)${numberCounter && numberCounter.after !== numberCounter.before ? ' — the employee series continues from it' : ''}`,
           before: { employeeNo: owner.employeeNo },
           after: { employeeNo: body.employeeNo || null, ...(numberCounter ? { counter: numberCounter } : {}) },
+        },
+        req,
+      );
+    }
+
+    if (owner && personalChanged) {
+      const after = await prisma.employee.findUnique({
+        where: { id: owner.id },
+        select: { firstName: true, lastName: true, suffix: true, mobile: true, departmentId: true, position: true },
+      });
+      const keys = Object.keys(personalBefore);
+      await audit(
+        {
+          entityType: 'employee',
+          entityId: owner.id,
+          action: 'UPDATED',
+          summary: `Updated ${keys.map((k) => PERSONAL_LABELS[k] ?? k).join(', ')} (from Admin › Users)`,
+          before: personalBefore,
+          after: Object.fromEntries(keys.map((k) => [k, (after as Record<string, unknown> | null)?.[k] ?? null])),
         },
         req,
       );

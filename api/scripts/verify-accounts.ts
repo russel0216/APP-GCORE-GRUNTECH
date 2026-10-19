@@ -815,6 +815,34 @@ async function main() {
     );
     const otherNo = await http(adminT, 'PATCH', `/users/${kimUser!.id}`, { employeeNo: `${TAG}-009` });
     check('a number already another person\'s is a 409 naming them', otherNo.status === 409 && /Orphan/.test(otherNo.text), `${otherNo.status} ${otherNo.text.slice(0, 100)}`);
+    // Since 2026-10-19 the name, mobile, position and department are typed on
+    // Admin › Users too, written THROUGH to the employee record and mirrored back.
+    const through = await http(adminT, 'PATCH', `/users/${kimUser!.id}`, {
+      firstName: 'Kim',
+      lastName: `${TAG} Chiu-Reyes`,
+      phone: '+63 917 555 0202',
+      position: `${TAG} Records Clerk`,
+    });
+    const kimEmpThrough = await prisma.employee.findUniqueOrThrow({ where: { id: kimEmpId } });
+    const kimLoginThrough = await prisma.user.findUniqueOrThrow({ where: { id: kimUser!.id } });
+    check(
+      'a name, mobile and position typed on Admin › Users are written onto the employee record, and the login follows',
+      through.status === 200 &&
+        kimEmpThrough.firstName === 'Kim' &&
+        kimEmpThrough.lastName === `${TAG} Chiu-Reyes` &&
+        kimEmpThrough.mobile === '+63 917 555 0202' &&
+        kimEmpThrough.position === `${TAG} Records Clerk` &&
+        kimLoginThrough.name === `Kim ${TAG} Chiu-Reyes` &&
+        kimLoginThrough.phone === '+63 917 555 0202' &&
+        kimLoginThrough.position === `${TAG} Records Clerk`,
+      `${through.status} ${through.text.slice(0, 120)} ${kimLoginThrough.name} ${kimLoginThrough.position}`,
+    );
+    check(
+      'and the record\'s trail names what changed, from Admin › Users',
+      (await prisma.auditLog.count({
+        where: { entityType: 'employee', entityId: kimEmpId, action: 'UPDATED', summary: { contains: 'first name, last name, mobile, position (from Admin › Users)' } },
+      })) === 1,
+    );
     const hrOnly = await http(hrT, 'PATCH', `/employees/${kimEmpId}`, { userId: null });
     check(
       'unlinking a login is an administrator\'s: HR without admin.users.edit_all is refused (403)',
