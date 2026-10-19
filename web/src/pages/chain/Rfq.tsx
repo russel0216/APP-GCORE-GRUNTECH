@@ -207,6 +207,7 @@ interface RfqDetailData {
   canvasses: { id: string; number: string; status: string }[];
   estimatedTotal: number;
   canEdit: boolean;
+  canRemoveQuotes?: boolean;
   canEditLines: boolean;
   canSend: boolean;
   canRecordQuotes: boolean;
@@ -1038,6 +1039,28 @@ export function RfqDetail() {
                             onClick={() => setQuoting(s.id)}
                           >
                             {s.quotedCount ? 'Modify quote' : 'Record quote'}
+                          </button>
+                        )}
+                        {rfq.canRemoveQuotes && s.quotedCount > 0 && (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-danger"
+                            aria-label={`Remove ${s.supplier.name}'s quote`}
+                            onClick={() =>
+                              confirm.ask({
+                                title: `Remove ${s.supplier.name}'s quote?`,
+                                body: 'Its prices, its terms and the paper filed with it go. The supplier stays asked — Modify the RFQ to drop them too. It cannot be undone.',
+                                confirmLabel: 'Remove quote',
+                                reason: 'optional',
+                                reasonLabel: 'Why (optional, kept on the trail)',
+                                onConfirm: async (reason: string) => {
+                                  setRfq(await api.del<RfqDetailData>(`/rfqs/${rfq.id}/suppliers/${s.id}/quote${qs({ reason: reason.trim() || undefined })}`));
+                                  toast('ok', `${s.supplier.name}'s quote removed`);
+                                },
+                              })
+                            }
+                          >
+                            Remove quote
                           </button>
                         )}
                       </div>

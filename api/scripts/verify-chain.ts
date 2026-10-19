@@ -2577,6 +2577,15 @@ async function main() {
       const partial = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/suppliers/${lateRow!.id}/quote`, {
         quotes: [{ requestItemId: trayLine.id, unitPrice: 1_100 }],
       });
+      // A recorded quote is removed (2026-10-19): its prices go, the supplier
+      // stays asked, the RFQ stays QUOTED while another quote stands.
+      const removedQuote = await api(rfqBuyerToken, 'DELETE', `/rfqs/${rfqId}/suppliers/${lateRow!.id}/quote?reason=${encodeURIComponent(`${TAG} wrong file`)}`);
+      const lateQuotesLeft = await prisma.rfqQuote.count({ where: { rfqSupplierId: lateRow!.id } });
+      const rfqAfterRemove = await prisma.rfq.findUniqueOrThrow({ where: { id: rfqId } });
+      const removedAgain = await api(rfqBuyerToken, 'DELETE', `/rfqs/${rfqId}/suppliers/${lateRow!.id}/quote`);
+      const partialAgain = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/suppliers/${lateRow!.id}/quote`, {
+        quotes: [{ requestItemId: trayLine.id, unitPrice: 1_100 }],
+      });
       const draftRfq = await api(rfqBuyerToken, 'POST', '/rfqs', { requestId: rfqPr.id, itemIds: [bracketLine.id] });
       const fromDraftRfq = await api(sheetToken, 'POST', '/canvasses', { rfqId: draftRfq.body.id });
       await api(rfqBuyerToken, 'DELETE', `/rfqs/${String(draftRfq.body.id)}`);
@@ -2592,6 +2601,19 @@ async function main() {
       );
       const sheetId = String(sheetMade.body.id);
       const secondSheet = await api(sheetToken, 'POST', '/canvasses', { rfqId });
+      const removeWhileCompared = await api(rfqBuyerToken, 'DELETE', `/rfqs/${rfqId}/suppliers/${keepRow.id}/quote`);
+      check(
+        'a supplier\'s quote is removed — the supplier stays asked, the RFQ stays quoted — and refused once removed, or while a canvass compares the RFQ',
+        removedQuote.status === 200 &&
+          lateQuotesLeft === 0 &&
+          rfqAfterRemove.status === 'QUOTED' &&
+          (removedQuote.body.suppliers as { id: string; quotedCount: number }[]).some((r) => r.id === lateRow!.id && r.quotedCount === 0) &&
+          removedAgain.status === 400 &&
+          partialAgain.status === 200 &&
+          removeWhileCompared.status === 400 &&
+          /cancel it first/.test(String(removeWhileCompared.body.error)),
+        `${removedQuote.status} ${lateQuotesLeft} ${rfqAfterRemove.status} again ${removedAgain.status} compared ${removeWhileCompared.status} ${String(removeWhileCompared.body.error)}`,
+      );
       const sheetRow = await prisma.canvass.findUniqueOrThrow({ where: { id: sheetId }, include: { suppliers: { include: { quotes: true } } } });
       check(
         'a sheet is raised only from an RFQ that went out, one live at a time, snapshotting its lines and the suppliers that quoted with their quotes',
@@ -2723,8 +2745,8 @@ async function main() {
       const rfqAudits = await prisma.auditLog.groupBy({ by: ['action'], where: { entityType: 'rfq', entityId: rfqId }, _count: true });
       const auditOf = (a: string) => rfqAudits.find((r) => r.action === a)?._count ?? 0;
       check(
-        'prepared, every change, each print, the cancel and the delete are audited',
-        auditOf('CREATED') === 1 && auditOf('UPDATED') >= 4 && auditOf('EXPORTED') >= 2 && auditOf('CANCELLED') === 1 && auditOf('DELETED') === 1,
+        'prepared, every change, each print, the quote removed, the cancel and the delete are audited',
+        auditOf('CREATED') === 1 && auditOf('UPDATED') >= 4 && auditOf('EXPORTED') >= 2 && auditOf('CANCELLED') === 1 && auditOf('DELETED') === 2,
         JSON.stringify(rfqAudits),
       );
       await prisma.auditLog.deleteMany({ where: { entityType: 'rfq', entityId: { in: [rfqId, 'list'] } } });
