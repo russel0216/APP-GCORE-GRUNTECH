@@ -97,7 +97,8 @@ export const assetRoutes = Router();
 assetRoutes.use(authenticate);
 
 const assetInclude = {
-  customer: { select: { id: true, code: true, name: true } },
+  // The customer's team (KAT, HIT …) is the register's "Industry team" column (2026-10-20).
+  customer: { select: { id: true, code: true, name: true, industry: { select: { id: true, code: true, name: true } } } },
   site: { select: { id: true, name: true, city: true } },
   job: { select: { id: true, number: true, name: true } },
   item: { select: { id: true, code: true, name: true } },
@@ -135,6 +136,8 @@ function assetListWhere(me: ResolvedUser, q: ReturnType<typeof listQuery>, expir
   if (q.filters.customerId) where.customerId = q.filters.customerId;
   if (q.filters.siteId) where.siteId = q.filters.siteId;
   if (q.filters.jobId) where.jobId = q.filters.jobId;
+  // The customer's team — an id, or `none` for a customer nobody has handled yet.
+  if (q.filters.teamId) where.customer = { industryId: q.filters.teamId === 'none' ? null : q.filters.teamId };
   // The rows a person ticked (Print selected); the filters still apply.
   const ids = idsFilter(q.filters.ids);
   if (ids) where.id = { in: ids };
@@ -180,7 +183,7 @@ assetRoutes.get(
     const settings = await aftermarketSettings();
     const where = assetListWhere(me, q, settings.expiryWarningDays);
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       prisma.installedAsset.findMany({
         where,
         include: assetInclude,
@@ -191,11 +194,29 @@ assetRoutes.get(
         take: q.pageSize,
       }),
       prisma.installedAsset.count({ where }),
+      assetListSummary(where, settings.expiryWarningDays),
     ]);
 
-    res.json(listResult(rows.map((r) => presentAsset(r, settings.expiryWarningDays, me)), total, q));
+    res.json({ ...listResult(rows.map((r) => presentAsset(r, settings.expiryWarningDays, me)), total, q), summary });
   }),
 );
+
+/**
+ * The cards over the register (2026-10-20): under the list's own query —
+ * how many are in warranty, how many leave it within the warning days, and
+ * how many nothing covers.
+ */
+async function assetListSummary(where: Prisma.InstalledAssetWhereInput, warningDays: number) {
+  const today = dayKey(new Date());
+  const horizon = new Date(today);
+  horizon.setUTCDate(horizon.getUTCDate() + warningDays);
+  const [inWarranty, expiring, uncovered] = await Promise.all([
+    prisma.installedAsset.count({ where: { AND: [where, { warrantyEndsAt: { gt: horizon } }] } }),
+    prisma.installedAsset.count({ where: { AND: [where, { warrantyEndsAt: { gte: today, lte: horizon } }] } }),
+    prisma.installedAsset.count({ where: { AND: [where, { contracts: { none: { contract: { status: 'ACTIVE' } } } }] } }),
+  ]);
+  return { inWarranty, expiring, uncovered, warningDays };
+}
 
 /** The name trimmed, single-spaced and upper-cased: one equipment type per spelling. */
 const typeKey = (name: string) => name.trim().replace(/\s+/g, ' ').toUpperCase();
@@ -242,7 +263,7 @@ assetRoutes.get(
     const settings = await aftermarketSettings();
     const where = assetListWhere(currentUser(req), q, settings.expiryWarningDays);
     const f = q.filters;
-    const [rows, count, named] = await Promise.all([
+    const [rows, count, named, team] = await Promise.all([
       prisma.installedAsset.findMany({
         where,
         include: assetInclude,
@@ -251,6 +272,7 @@ assetRoutes.get(
       }),
       prisma.installedAsset.count({ where }),
       namedInFilter({ customerId: f.customerId, siteId: f.siteId, jobId: f.jobId }),
+      f.teamId && f.teamId !== 'none' ? prisma.industry.findUnique({ where: { id: f.teamId }, select: { code: true } }) : null,
     ]);
     // "12 machines", or "first 1,000 of 1,234 machines printed" when the cap
     // bit — then every filter `assetListWhere` applied, by name, so a
@@ -264,6 +286,7 @@ assetRoutes.get(
       named.customer ? `customer ${named.customer}` : null,
       named.site ? `site ${named.site}` : null,
       named.project ? `project ${named.project}` : null,
+      f.teamId === 'none' ? 'customer with no team' : team ? `team ${team.code}` : null,
       f.ids ? 'the rows selected' : null,
     ]);
 
@@ -271,16 +294,19 @@ assetRoutes.get(
     // code under "Code" — a master's identifier, as the screen heads it
     // (rule 6: a document's number column is "Number", a master's "Code") —
     // and landscape pages with the engine's own column widths, so no head
-    // breaks mid-word.
+    // breaks mid-word. The columns are the screen's (2026-10-20): the
+    // serial on its own, the customer's team beside the location.
     const pdf = await renderDocument({
-      title: 'Installed Base',
+      title: 'Installation Base',
       date: new Date(),
       reference,
       landscape: true,
       sections: [
         {
           kind: 'table',
-          head: ['Code', 'Equipment', 'Customer and address', 'Location', 'Installed', 'Warranty', 'Status'],
+          // "Serial no.", never "Serial number": a master's identifier column is
+          // "Code" and the word NUMBER is a document's (verify-aftermarket pins it).
+          head: ['Code', 'Equipment / model', 'Serial no.', 'Customer and address', 'Installed', 'Team', 'Warranty', 'Status'],
           rows: rows.map((r) => {
             const warranty = expiryState(r.warrantyEndsAt, settings.expiryWarningDays);
             const word = statusLabel(WARRANTY_WORD[warranty.state] ?? warranty.state);
@@ -288,13 +314,15 @@ assetRoutes.get(
               r.code,
               {
                 title: r.name,
-                body: [[r.manufacturer, r.model].filter(Boolean).join(' '), r.serialNo ? `S/N ${r.serialNo}` : null]
-                  .filter(Boolean)
-                  .join(' · ') || undefined,
+                body: [r.manufacturer, r.model].filter(Boolean).join(' ') || undefined,
               },
-              { title: r.customer.name, body: r.address ?? r.site?.name ?? undefined },
-              r.location ?? '',
+              r.serialNo ?? '',
+              {
+                title: r.customer.name,
+                body: [r.address ?? r.site?.name, r.location].filter(Boolean).join(' · ') || undefined,
+              },
               r.installedAt ? formatShortDate(r.installedAt) : '',
+              r.customer.industry?.code ?? '',
               r.warrantyEndsAt ? `${formatShortDate(r.warrantyEndsAt)}${word ? ` (${word})` : ''}` : 'Not recorded',
               statusLabel(r.status),
             ];
@@ -309,11 +337,11 @@ assetRoutes.get(
         entityType: 'installed_asset',
         entityId: 'list',
         action: 'EXPORTED',
-        summary: `Exported the installed base as PDF (${listReference(count, rows.length, ['machine', 'machines'], [])})`,
+        summary: `Exported the installation base as PDF (${listReference(count, rows.length, ['machine', 'machines'], [])})`,
       },
       req,
     );
-    sendListPdf(res, pdf, 'installed-base.pdf');
+    sendListPdf(res, pdf, 'installation-base.pdf');
   }),
 );
 
@@ -662,9 +690,29 @@ const contractInclude = {
     },
   },
   assets: { include: { asset: { select: { id: true, code: true, name: true, serialNo: true } } } },
+  // The renewal notice reads the renewal that follows (2026-10-20).
+  renewedTo: { select: { id: true, number: true, status: true, startsAt: true } },
 } satisfies Prisma.ServiceContractInclude;
 
 type ContractRow = Prisma.ServiceContractGetPayload<{ include: typeof contractInclude }>;
+
+/**
+ * The Renewal notice column (2026-10-20, the owner's spec): on an active
+ * contract, RENEWAL_DRAFT_SENT while a draft renewal stands behind it,
+ * RENEWED once that renewal is active, EXPIRING within the warning days,
+ * LAPSED past the end, else ACTIVE_COVERAGE; null on anything not active.
+ */
+export function renewalNotice(
+  row: { status: ContractStatus; renewedTo: { status: ContractStatus } | null },
+  term: { state: string },
+): 'RENEWAL_DRAFT_SENT' | 'RENEWED' | 'EXPIRING' | 'LAPSED' | 'ACTIVE_COVERAGE' | null {
+  if (row.status !== 'ACTIVE') return null;
+  const renewal = row.renewedTo && row.renewedTo.status !== 'CANCELLED' ? row.renewedTo : null;
+  if (renewal) return renewal.status === 'DRAFT' ? 'RENEWAL_DRAFT_SENT' : 'RENEWED';
+  if (term.state === 'EXPIRING') return 'EXPIRING';
+  if (term.state === 'EXPIRED') return 'LAPSED';
+  return 'ACTIVE_COVERAGE';
+}
 
 function presentContract(row: ContractRow, warningDays: number) {
   const term = expiryState(row.endsAt, warningDays);
@@ -674,10 +722,39 @@ function presentContract(row: ContractRow, warningDays: number) {
     assets: row.assets.map((a) => a.asset),
     expiry: term.state,
     daysRemaining: term.daysRemaining,
+    renewal: renewalNotice(row, term),
   };
 }
 
-const CONTRACT_SORTS = ['number', 'startsAt', 'endsAt', 'createdAt'];
+/**
+ * The cards over the contract list (2026-10-20): under the list's own
+ * query — active, up for renewal within the warning days (no renewal
+ * behind them), renewal drafts sent, expired.
+ */
+async function contractListSummary(where: Prisma.ServiceContractWhereInput, warningDays: number) {
+  const horizon = dayKey(new Date());
+  horizon.setUTCDate(horizon.getUTCDate() + warningDays);
+  const [active, upForRenewal, renewalDrafts, expired] = await Promise.all([
+    prisma.serviceContract.count({ where: { AND: [where, { status: 'ACTIVE' }] } }),
+    prisma.serviceContract.count({
+      where: { AND: [where, { status: 'ACTIVE', endsAt: { lte: horizon }, OR: [{ renewedTo: null }, { renewedTo: { status: 'CANCELLED' } }] }] },
+    }),
+    prisma.serviceContract.count({ where: { AND: [where, { status: 'ACTIVE', renewedTo: { status: 'DRAFT' } }] } }),
+    prisma.serviceContract.count({ where: { AND: [where, { status: 'EXPIRED' }] } }),
+  ]);
+  return { active, upForRenewal, renewalDrafts, expired, warningDays };
+}
+
+const CONTRACT_SORTS = ['number', 'startsAt', 'endsAt', 'createdAt', 'coverageLevel'];
+
+/** The renewal notice as the paper prints it. */
+export const RENEWAL_WORD: Record<NonNullable<ReturnType<typeof renewalNotice>>, string> = {
+  RENEWAL_DRAFT_SENT: 'Renewal draft sent',
+  RENEWED: 'Renewed',
+  EXPIRING: 'Expiring',
+  LAPSED: 'Lapsed',
+  ACTIVE_COVERAGE: 'Active coverage',
+};
 
 /**
  * Which contracts a list query means — one rule for the list and its printed
@@ -704,15 +781,41 @@ function contractListWhere(me: ResolvedUser, q: ListQuery, expiryWarningDays: nu
     where.status = 'ACTIVE';
     where.endsAt = { lte: horizon };
   }
+  // The Renewal notice as a filter (2026-10-20): `draft` — a draft renewal
+  // stands behind it; `due` — ending within the warning days with none.
+  const renewal = choice(q.filters.renewal, RENEWAL_FILTERS, 'Renewal', (r) => RENEWAL_FILTER[r]);
+  if (renewal === 'draft') {
+    where.status = 'ACTIVE';
+    where.renewedTo = { status: 'DRAFT' };
+  }
+  if (renewal === 'due') {
+    const horizon = dayKey(new Date());
+    horizon.setUTCDate(horizon.getUTCDate() + expiryWarningDays);
+    where.status = 'ACTIVE';
+    where.endsAt = { lte: horizon };
+    where.OR = [{ renewedTo: null }, { renewedTo: { status: 'CANCELLED' } }];
+  }
+  if (q.filters.coverageLevel) where.coverageLevel = { equals: q.filters.coverageLevel, mode: 'insensitive' };
   if (q.search) {
-    where.OR = [
+    const search: Prisma.ServiceContractWhereInput[] = [
       { number: { contains: q.search, mode: 'insensitive' } },
+      { coverageLevel: { contains: q.search, mode: 'insensitive' } },
       { job: { name: { contains: q.search, mode: 'insensitive' } } },
       { job: { customer: { name: { contains: q.search, mode: 'insensitive' } } } },
     ];
+    // A search beside the renewal filter's own OR: both must hold.
+    if (where.OR) {
+      where.AND = [{ OR: where.OR }, { OR: search }];
+      delete where.OR;
+    } else {
+      where.OR = search;
+    }
   }
   return where;
 }
+
+const RENEWAL_FILTERS = ['due', 'draft'] as const;
+const RENEWAL_FILTER: Record<(typeof RENEWAL_FILTERS)[number], string> = { due: 'Up for renewal', draft: 'Renewal draft sent' };
 
 contractRoutes.get(
   '/',
@@ -724,7 +827,7 @@ contractRoutes.get(
     const settings = await aftermarketSettings();
     const where = contractListWhere(me, q, settings.expiryWarningDays);
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       prisma.serviceContract.findMany({
         where,
         include: contractInclude,
@@ -733,9 +836,29 @@ contractRoutes.get(
         take: q.pageSize,
       }),
       prisma.serviceContract.count({ where }),
+      contractListSummary(where, settings.expiryWarningDays),
     ]);
 
-    res.json(listResult(rows.map((r) => presentContract(r, settings.expiryWarningDays)), total, q));
+    res.json({ ...listResult(rows.map((r) => presentContract(r, settings.expiryWarningDays)), total, q), summary });
+  }),
+);
+
+/**
+ * The SLA coverage levels on file, for the cover form's suggestions — one
+ * per spelling, the most used first. Above `/:id`, the route-order trap.
+ */
+contractRoutes.get(
+  '/coverage-levels',
+  requireAny('gops.service_contracts.view_all', 'gops.service_contracts.view_own'),
+  handler(async (_req, res) => {
+    const rows = await prisma.serviceContract.groupBy({
+      by: ['coverageLevel'],
+      where: { coverageLevel: { not: null } },
+      _count: { _all: true },
+      orderBy: { _count: { coverageLevel: 'desc' } },
+      take: 50,
+    });
+    res.json(rows.map((r) => r.coverageLevel).filter((v): v is string => !!v));
   }),
 );
 
@@ -768,6 +891,8 @@ contractRoutes.get(
       q.search ? `search "${q.search}"` : null,
       q.filters.status && q.filters.expiring !== 'true' ? `status ${statusLabel(q.filters.status)}` : null,
       q.filters.expiring === 'true' ? `active, ending within ${settings.expiryWarningDays} days` : null,
+      q.filters.renewal ? RENEWAL_FILTER[q.filters.renewal as (typeof RENEWAL_FILTERS)[number]].toLowerCase() : null,
+      q.filters.coverageLevel ? `coverage ${q.filters.coverageLevel}` : null,
       named.customer ? `customer ${named.customer}` : null,
       q.scope === 'mine' ? 'managed by me' : null,
       q.filters.ids ? 'the rows selected' : null,
@@ -781,8 +906,8 @@ contractRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Customer and project', 'Term', 'Covers', 'Visits', `Value (${currency})`, 'Status'],
-          align: ['left', 'left', 'left', 'right', 'right', 'right', 'left'],
+          head: ['Number', 'Customer and project', 'Coverage level', 'Term', 'Renewal', 'Covers', 'Visits', `Value (${currency})`, 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'right', 'left'],
           rows: rows.map((r) => {
             const c = presentContract(r, settings.expiryWarningDays);
             const value = formatAmount(c.job.contractValue);
@@ -795,7 +920,9 @@ contractRoutes.get(
             return [
               r.number,
               { title: r.job.customer.name, body: [r.job.name, r.job.site?.name].filter(Boolean).join(' · ') },
+              r.coverageLevel ?? '',
               `${formatShortDate(r.startsAt)} – ${formatShortDate(r.endsAt)}${left ? `\n${left}` : ''}`,
+              c.renewal ? RENEWAL_WORD[c.renewal] : '',
               `${c.assets.length} machine${c.assets.length === 1 ? '' : 's'}`,
               `${r.plannedVisits}\nevery ${r.frequencyMonths} month${r.frequencyMonths === 1 ? '' : 's'}`,
               bracketed(value, r.status !== 'CANCELLED'),
@@ -880,6 +1007,7 @@ const contractSchema = z.object({
   startsAt: z.string().min(1, 'When does cover start?'),
   endsAt: z.string().min(1, 'When does cover end?'),
   frequencyMonths: z.number().int().min(1).max(24).optional(),
+  coverageLevel: z.string().max(120).optional().nullable(),
   responseTime: z.string().optional().nullable(),
   exclusions: z.string().optional().nullable(),
   coverageNotes: z.string().optional().nullable(),
@@ -926,6 +1054,7 @@ contractRoutes.post(
           endsAt,
           frequencyMonths,
           plannedVisits: planned.length,
+          coverageLevel: body.coverageLevel?.trim() || null,
           responseTime: body.responseTime || null,
           exclusions: body.exclusions || null,
           coverageNotes: body.coverageNotes || null,
@@ -1074,6 +1203,7 @@ function coverSnapshot(c: {
   startsAt: Date;
   endsAt: Date;
   frequencyMonths: number;
+  coverageLevel: string | null;
   responseTime: string | null;
   exclusions: string | null;
   coverageNotes: string | null;
@@ -1083,6 +1213,7 @@ function coverSnapshot(c: {
     startsAt: c.startsAt.toISOString().slice(0, 10),
     endsAt: c.endsAt.toISOString().slice(0, 10),
     frequencyMonths: c.frequencyMonths,
+    coverageLevel: c.coverageLevel,
     responseTime: c.responseTime,
     exclusions: c.exclusions,
     coverageNotes: c.coverageNotes,
@@ -1320,6 +1451,7 @@ contractRoutes.patch(
       startsAt,
       endsAt,
       frequencyMonths,
+      coverageLevel: text(body.coverageLevel, contract.coverageLevel),
       responseTime: text(body.responseTime, contract.responseTime),
       exclusions: text(body.exclusions, contract.exclusions),
       coverageNotes: text(body.coverageNotes, contract.coverageNotes),
@@ -1331,6 +1463,7 @@ contractRoutes.patch(
       changed.push(`term ${after.startsAt} → ${after.endsAt}`);
     }
     if (before.frequencyMonths !== after.frequencyMonths) changed.push(`every ${after.frequencyMonths} month(s)`);
+    if (before.coverageLevel !== after.coverageLevel) changed.push(`coverage level ${after.coverageLevel ?? 'cleared'}`);
     if (before.responseTime !== after.responseTime) changed.push('response time');
     if (before.exclusions !== after.exclusions) changed.push('exclusions');
     if (before.coverageNotes !== after.coverageNotes) changed.push('notes');
@@ -1350,6 +1483,7 @@ contractRoutes.patch(
           startsAt,
           endsAt,
           frequencyMonths,
+          coverageLevel: after.coverageLevel,
           responseTime: after.responseTime,
           exclusions: after.exclusions,
           coverageNotes: after.coverageNotes,
@@ -2822,6 +2956,11 @@ aftermarketRoutes.get(
     const horizon = new Date(today);
     horizon.setUTCDate(horizon.getUTCDate() + settings.expiryWarningDays);
     const monthEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0));
+    // This week is Monday to Sunday of the Manila day (the work week's rule).
+    const weekStart = new Date(today);
+    weekStart.setUTCDate(weekStart.getUTCDate() - ((today.getUTCDay() + 6) % 7));
+    const weekEnd = new Date(weekStart);
+    weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
 
     const [
       assets,
@@ -2834,6 +2973,8 @@ aftermarketRoutes.get(
       visitsThisMonth,
       visitsMissed,
       reportsPending,
+      visitsThisWeek,
+      serviceJobsOpen,
     ] = await Promise.all([
       prisma.installedAsset.count({ where: { status: 'ACTIVE' } }),
       prisma.installedAsset.count({ where: { status: 'ACTIVE', warrantyEndsAt: { gte: today } } }),
@@ -2851,6 +2992,13 @@ aftermarketRoutes.get(
       }),
       prisma.serviceVisit.count({ where: { status: 'MISSED' } }),
       prisma.serviceReport.count({ where: { status: 'PENDING_APPROVAL' } }),
+      prisma.serviceVisit.count({ where: { status: { in: ['SCHEDULED'] }, dueDate: { gte: weekStart, lte: weekEnd } } }),
+      // Active service JOs (2026-10-20): open job orders raised for service
+      // work — on a machine or a contract — awaiting approval or approved
+      // and not yet done.
+      prisma.jobOrder.count({
+        where: { status: { in: ['PENDING_APPROVAL', 'APPROVED'] }, OR: [{ assetId: { not: null } }, { contractId: { not: null } }] },
+      }),
     ]);
 
     res.json({
@@ -2863,7 +3011,8 @@ aftermarketRoutes.get(
         uncovered,
       },
       contracts: { active: activeContracts, expiring: contractsExpiring },
-      visits: { overdue: visitsDue, thisMonth: visitsThisMonth, missed: visitsMissed },
+      visits: { overdue: visitsDue, thisMonth: visitsThisMonth, missed: visitsMissed, thisWeek: visitsThisWeek },
+      serviceJobs: { open: serviceJobsOpen },
       reportsPending,
       warningDays: settings.expiryWarningDays,
     });

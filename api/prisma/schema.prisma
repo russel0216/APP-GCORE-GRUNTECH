@@ -4941,6 +4941,10 @@ model ServiceContract {
   /// later change of frequency does not rewrite a schedule already agreed.
   plannedVisits   Int @default(0)
 
+  /// The SLA coverage level in the customer's words — "24/7 Comprehensive
+  /// PM", "Quarterly Labor & Parts" (2026-10-20, the owner's spec). Free
+  /// text, suggested from the levels on file.
+  coverageLevel String?
   /// Hours promised for a breakdown call. Free text because contracts say
   /// things like "next working day" as often as they say a number.
   responseTime  String?

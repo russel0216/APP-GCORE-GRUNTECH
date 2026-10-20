@@ -494,7 +494,8 @@ interface Dashboard {
     uncovered: number;
   };
   contracts: { active: number; expiring: number };
-  visits: { overdue: number; thisMonth: number; missed: number };
+  visits: { overdue: number; thisMonth: number; missed: number; thisWeek: number };
+  serviceJobs: { open: number };
   reportsPending: number;
   warningDays: number;
 }
@@ -523,34 +524,40 @@ export function AftermarketDashboard() {
     );
   }
 
+  // The owner's cards (2026-10-20): installed equipment, active service JOs,
+  // scheduled this week, contracts up for renewal — each opening the list it
+  // counts (a declared filter, rule 16).
   const tiles = [
     {
-      label: 'Machines installed',
+      label: 'Installed equipment',
       value: data.installedBase.total,
-      sub: `${data.installedBase.inWarranty} still in warranty`,
+      sub: `${data.installedBase.inWarranty} still in warranty · ${data.installedBase.uncovered} not covered`,
       to: '/g-ops/installed-base',
     },
     {
-      label: 'Not covered',
-      value: data.installedBase.uncovered,
-      sub: 'no active service contract',
-      tone: data.installedBase.uncovered > 0 ? 'var(--warn)' : undefined,
-      to: '/g-ops/installed-base?uncovered=true',
+      label: 'Active service JOs',
+      value: data.serviceJobs.open,
+      sub: 'awaiting approval or in progress',
+      tone: data.serviceJobs.open > 0 ? 'var(--warn)' : undefined,
+      // The Service JO register of push 3 will take this link with its own filter.
+      to: '/g-ops/job-orders',
     },
     {
-      label: 'Active contracts',
-      value: data.contracts.active,
-      sub: `${data.contracts.expiring} ending within ${data.warningDays} days`,
-      tone: data.contracts.expiring > 0 ? 'var(--warn)' : 'var(--neon)',
-      to: '/g-ops/service-contracts?status=ACTIVE',
+      label: 'Scheduled this week',
+      value: data.visits.thisWeek,
+      sub:
+        data.visits.overdue > 0
+          ? `${data.visits.overdue} overdue`
+          : `${data.visits.thisMonth} more due this month`,
+      tone: data.visits.overdue > 0 ? 'var(--danger)' : 'var(--neon)',
+      to: '/g-ops/visits?mode=list',
     },
     {
-      label: 'Visits overdue',
-      value: data.visits.overdue,
-      sub: `${data.visits.thisMonth} more due this month`,
-      tone: data.visits.overdue > 0 ? 'var(--danger)' : undefined,
-      // The list, not the month grid: "overdue" is a list of things to chase.
-      to: '/g-ops/visits?mode=list&due=true',
+      label: 'Contracts up for renewal',
+      value: data.contracts.expiring,
+      sub: `of ${data.contracts.active} active, ending within ${data.warningDays} days`,
+      tone: data.contracts.expiring > 0 ? 'var(--danger)' : undefined,
+      to: '/g-ops/service-contracts?expiring=true',
     },
   ];
 
@@ -594,7 +601,8 @@ export function AftermarketDashboard() {
           </dl>
           <p className="faint" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
             A machine leaving warranty with nothing behind it is a customer about to start paying
-            for what they got free. <Link to="/g-ops/renewals">See the renewal pipeline.</Link>
+            for what they got free.{' '}
+            <Link to="/g-ops/installed-base?warranty=EXPIRING&uncovered=true">See the machines leaving warranty uncovered.</Link>
           </p>
         </div>
 

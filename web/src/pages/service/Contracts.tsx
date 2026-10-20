@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -44,6 +44,39 @@ const STATUSES = [
 /** RENEWED reads as information here, not as a settled-well outcome. */
 const CONTRACT_TONES: Record<string, Tone> = { RENEWED: 'info' };
 
+/** The Renewal notice column: a pill in the owner's words (2026-10-20). */
+const RENEWAL_TONE: Record<string, Tone> = {
+  RENEWAL_DRAFT_SENT: 'info',
+  RENEWED: 'ok',
+  EXPIRING: 'warn',
+  LAPSED: 'danger',
+  ACTIVE_COVERAGE: 'ok',
+};
+
+function RenewalNotice({ row }: { row: Pick<Contract, 'renewal' | 'daysRemaining'> }) {
+  if (!row.renewal) return <span className="faint">—</span>;
+  const label =
+    row.renewal === 'EXPIRING' && row.daysRemaining !== null
+      ? `Expiring in ${row.daysRemaining} day${row.daysRemaining === 1 ? '' : 's'}`
+      : row.renewal === 'RENEWAL_DRAFT_SENT'
+        ? 'Renewal draft sent'
+        : row.renewal === 'ACTIVE_COVERAGE'
+          ? 'Active coverage'
+          : row.renewal === 'LAPSED'
+            ? 'Lapsed'
+            : 'Renewed';
+  return <StatusBadge status={row.renewal} extra={RENEWAL_TONE} label={label} />;
+}
+
+/** The cards over the contract list: the list's own query (2026-10-20). */
+interface ContractSummary {
+  active: number;
+  upForRenewal: number;
+  renewalDrafts: number;
+  expired: number;
+  warningDays: number;
+}
+
 interface Contract {
   id: string;
   number: string;
@@ -52,11 +85,15 @@ interface Contract {
   endsAt: string;
   frequencyMonths: number;
   plannedVisits: number;
+  /** The SLA coverage level in the customer's words (2026-10-20). */
+  coverageLevel: string | null;
   responseTime: string | null;
   exclusions: string | null;
   coverageNotes: string | null;
   expiry: string;
   daysRemaining: number | null;
+  /** The Renewal notice, derived by the API; null unless the contract is active. */
+  renewal: 'RENEWAL_DRAFT_SENT' | 'RENEWED' | 'EXPIRING' | 'LAPSED' | 'ACTIVE_COVERAGE' | null;
   job: {
     id: string;
     number: string;
@@ -100,17 +137,19 @@ export function ServiceContracts() {
     loadQueue();
   }, [loadQueue, reload]);
 
+  // The owner's columns (2026-10-20): Contract no., Customer name, SLA
+  // coverage level, Start date, Expiration date, Renewal notice.
   const columns: Column<Contract>[] = [
     {
       key: 'number',
-      label: 'Number',
+      label: 'Contract no.',
       sortKey: 'number',
       width: '150px',
       render: (r) => <span className="mono">{r.number}</span>,
     },
     {
       key: 'customer',
-      label: 'Customer',
+      label: 'Customer name',
       render: (r) => (
         <div>
           <div>{r.job.customer.name}</div>
@@ -122,32 +161,40 @@ export function ServiceContracts() {
       ),
     },
     {
-      key: 'term',
-      label: 'Term',
+      key: 'coverageLevel',
+      label: 'SLA coverage level',
+      sortKey: 'coverageLevel',
+      render: (r) => r.coverageLevel ?? <span className="faint">not stated</span>,
+    },
+    {
+      key: 'startsAt',
+      label: 'Start date',
+      sortKey: 'startsAt',
+      render: (r) => formatDate(r.startsAt),
+    },
+    {
+      key: 'endsAt',
+      label: 'Expiration date',
       sortKey: 'endsAt',
-      render: (r) => (
-        <div>
-          <div>
-            {formatDate(r.startsAt)} → {formatDate(r.endsAt)}
-          </div>
-          {r.status === 'ACTIVE' && r.daysRemaining !== null && (
-            <div className={`faint ${r.expiry === 'EXPIRING' ? 'warn' : ''}`}>
-              {r.daysRemaining < 0 ? 'lapsed' : `${r.daysRemaining} days left`}
-            </div>
-          )}
-        </div>
-      ),
+      render: (r) => <strong>{formatDate(r.endsAt)}</strong>,
+    },
+    {
+      key: 'renewal',
+      label: 'Renewal notice',
+      render: (r) => <RenewalNotice row={r} />,
     },
     {
       key: 'assets',
       label: 'Covers',
       align: 'right',
+      optional: true,
       render: (r) => `${r.assets.length} machine${r.assets.length === 1 ? '' : 's'}`,
     },
     {
       key: 'frequency',
       label: 'Visits',
       align: 'right',
+      optional: true,
       render: (r) => (
         <div>
           <div className="mono">{r.plannedVisits}</div>
@@ -159,6 +206,7 @@ export function ServiceContracts() {
       key: 'value',
       label: 'Value',
       align: 'right',
+      optional: true,
       render: (r) => <span className="mono">{formatMoney(r.job.contractValue)}</span>,
     },
     {
@@ -172,7 +220,7 @@ export function ServiceContracts() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Service Contracts</h1>
+          <h1>Service Contract</h1>
         </div>
       </div>
 
@@ -233,9 +281,35 @@ export function ServiceContracts() {
         emptyTitle="No service contracts yet"
         onRowClick={(r) => navigate(`/g-ops/service-contracts/${r.id}`)}
         printPath="/api/service-contracts/pdf"
+        summary={(raw) => {
+          const sum = raw as unknown as ContractSummary;
+          return (
+            <>
+              <Stat label="Active contracts" value={sum.active} to="/g-ops/service-contracts?status=ACTIVE" />
+              <Stat
+                label="Contracts up for renewal"
+                value={sum.upForRenewal}
+                hint={`ending within ${sum.warningDays} days, no renewal yet`}
+                tone={sum.upForRenewal > 0 ? 'var(--danger)' : undefined}
+                to="/g-ops/service-contracts?renewal=due"
+              />
+              <Stat label="Renewal drafts sent" value={sum.renewalDrafts} to="/g-ops/service-contracts?renewal=draft" />
+              <Stat label="Expired" value={sum.expired} to="/g-ops/service-contracts?status=EXPIRED" />
+            </>
+          );
+        }}
         filters={[
           { key: 'status', label: 'Status', options: STATUSES },
-          { key: 'expiring', label: 'Renewal', options: [{ value: 'true', label: 'Expiring soon' }] },
+          {
+            key: 'renewal',
+            label: 'Renewal notice',
+            options: [
+              { value: 'due', label: 'Up for renewal' },
+              { value: 'draft', label: 'Renewal draft sent' },
+            ],
+          },
+          // The old Renewals screen's link still narrows the list (rule 16).
+          { key: 'expiring', label: 'Expiring', options: [{ value: 'true', label: 'Expiring soon' }] },
         ]}
       />
 
@@ -284,6 +358,15 @@ function CoverModal({
   const [assets, setAssets] = useState<Coverable[]>([]);
   const [chosen, setChosen] = useState<Set<string>>(() => new Set(existing?.assets.map((a) => a.id) ?? []));
   const [settings, setSettings] = useState<{ defaultFrequencyMonths: number } | null>(null);
+  // The coverage levels already on file, offered as the box is typed.
+  const [levels, setLevels] = useState<string[]>([]);
+  const levelsId = useId();
+  useEffect(() => {
+    api
+      .get<string[]>('/service-contracts/coverage-levels')
+      .then(setLevels)
+      .catch(() => setLevels([]));
+  }, []);
 
   const today = todayLocal();
   const oneYear = (() => {
@@ -299,6 +382,7 @@ function CoverModal({
           startsAt: existing.startsAt.slice(0, 10),
           endsAt: existing.endsAt.slice(0, 10),
           frequencyMonths: existing.frequencyMonths,
+          coverageLevel: existing.coverageLevel ?? '',
           responseTime: existing.responseTime ?? '',
           exclusions: existing.exclusions ?? '',
           coverageNotes: existing.coverageNotes ?? '',
@@ -307,6 +391,7 @@ function CoverModal({
           startsAt: today,
           endsAt: oneYear,
           frequencyMonths: 3,
+          coverageLevel: '',
           responseTime: '',
           exclusions: '',
           coverageNotes: '',
@@ -392,6 +477,7 @@ function CoverModal({
       startsAt: form.startsAt,
       endsAt: form.endsAt,
       frequencyMonths: form.frequencyMonths,
+      coverageLevel: form.coverageLevel || null,
       responseTime: form.responseTime || null,
       exclusions: form.exclusions || null,
       coverageNotes: form.coverageNotes || null,
@@ -529,19 +615,33 @@ function CoverModal({
       )}
 
       <div className="grid grid-2">
+        <Field label="SLA coverage level" hint='In the customer’s words — "24/7 Comprehensive PM", "Quarterly Labor & Parts"'>
+          <input
+            list={levelsId}
+            value={form.coverageLevel}
+            maxLength={120}
+            onChange={(e) => setForm({ ...form, coverageLevel: e.target.value })}
+          />
+          <datalist id={levelsId}>
+            {levels.map((l) => (
+              <option key={l} value={l} />
+            ))}
+          </datalist>
+        </Field>
         <Field label="Response time promised" hint='Free text — "next working day" is as common as a number'>
           <input
             value={form.responseTime}
             onChange={(e) => setForm({ ...form, responseTime: e.target.value })}
           />
         </Field>
-        <Field label="What the contract excludes" hint="Consumables, parts, travel…">
-          <input
-            value={form.exclusions}
-            onChange={(e) => setForm({ ...form, exclusions: e.target.value })}
-          />
-        </Field>
       </div>
+
+      <Field label="What the contract excludes" hint="Consumables, parts, travel…">
+        <input
+          value={form.exclusions}
+          onChange={(e) => setForm({ ...form, exclusions: e.target.value })}
+        />
+      </Field>
 
       <Field label="Notes on the cover">
         <textarea
@@ -842,6 +942,12 @@ export function ContractDetail() {
             </dd>
             <dt>Frequency</dt>
             <dd>every {row.frequencyMonths} month(s)</dd>
+            <dt>Coverage level</dt>
+            <dd>{row.coverageLevel ?? <span className="faint">not stated</span>}</dd>
+            <dt>Renewal</dt>
+            <dd>
+              <RenewalNotice row={row} />
+            </dd>
             <dt>Contract value</dt>
             <dd className="mono">{formatMoney(row.job.contractValue)}</dd>
             <dt>Response time</dt>

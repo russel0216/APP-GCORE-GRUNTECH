@@ -510,11 +510,25 @@ async function main() {
   // never deleted. The SCORO Archive, hidden since 2026-10-04, was removed
   // outright on 2026-10-10 (the owner's call) and is no longer a screen.
   const superMenu = menuFor(superUser).flatMap((m) => m.submodules.map((s) => ({ id: `${m.key}.${s.key}`, hidden: s.hidden === true })));
+  // Renewals joined them on 2026-10-20 (the owner's revised Aftermarket UI):
+  // its two halves are the contract list's Renewal notice and the
+  // installation base's warranty filter; the route and keys stay.
   check(
-    'the hidden screens are the five project registers and the three duplicates',
+    'the hidden screens are the five project registers, the three duplicates and Renewals',
     superMenu.filter((s) => s.hidden).map((s) => s.id).sort().join() ===
-      'admin.templates,ghr.employee_rates,gops.budget_monitoring,gops.budget_requests,gops.plans,gops.progress_billing,gops.purchase_requests,gops.service_costing',
+      'admin.templates,ghr.employee_rates,gops.budget_monitoring,gops.budget_requests,gops.plans,gops.progress_billing,gops.purchase_requests,gops.renewals,gops.service_costing',
     superMenu.filter((s) => s.hidden).map((s) => s.id).join(),
+  );
+  // The owner's Aftermarket strip (2026-10-20): the overview, then
+  // Installation Base, Service Schedule, Service Contract.
+  const aftermarketStrip = menuFor(superUser)
+    .find((m) => m.key === 'gops')!
+    .submodules.filter((s) => s.group === 'Aftermarket' && !s.hidden)
+    .map((s) => s.label);
+  check(
+    'Aftermarket shows Aftermarket, Installation Base, Service Schedule, Service Contract in that order',
+    aftermarketStrip.join() === 'Aftermarket,Installation Base,Service Schedule,Service Contract',
+    aftermarketStrip.join(),
   );
   const pmStrip = menuFor(superUser)
     .find((m) => m.key === 'gops')!

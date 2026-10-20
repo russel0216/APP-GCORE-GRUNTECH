@@ -163,11 +163,16 @@ export const REGISTRY: ModuleDef[] = [
       // Aftermarket (Phase 8). The installed base is what turns a finished
       // project into a renewal pipeline — without it nobody can answer "what
       // did we put in that hospital, and when does its warranty run out".
+      // The owner's revised Aftermarket UI (2026-10-20): the overview's cards,
+      // then Installation Base · Service Schedule · Service Contract, in that
+      // order (Service JO and Service Documents follow in later pushes).
+      // Renewals is folded into the contract list's card and filter and the
+      // installation base's warranty filter — hidden, its route and keys kept.
       { key: 'aftermarket', group: 'Aftermarket', label: 'Aftermarket', path: '/g-ops/aftermarket', actions: READ, phase: 8, note: 'Overview and the aftermarket rules' },
-      { key: 'installed_base', own: 'machines you registered', group: 'Aftermarket', label: 'Installed Base', path: '/g-ops/installed-base', actions: SHARED_KEPT, phase: 8 },
-      { key: 'service_contracts', group: 'Aftermarket', label: 'Service Contracts', path: '/g-ops/service-contracts', actions: OWNED_KEPT, phase: 8 },
+      { key: 'installed_base', own: 'machines you registered', group: 'Aftermarket', label: 'Installation Base', path: '/g-ops/installed-base', actions: SHARED_KEPT, phase: 8 },
       { key: 'visits', own: 'visits assigned to you', group: 'Aftermarket', label: 'Service Schedule', path: '/g-ops/visits', actions: SHARED_KEPT, phase: 8, note: 'Every visit on one calendar; Create books a call-out, Edit All moves, assigns or cancels a visit' },
-      { key: 'renewals', group: 'Aftermarket', label: 'Renewals', path: '/g-ops/renewals', actions: READ, phase: 8 },
+      { key: 'service_contracts', group: 'Aftermarket', label: 'Service Contract', path: '/g-ops/service-contracts', actions: OWNED_KEPT, phase: 8 },
+      { key: 'renewals', group: 'Aftermarket', label: 'Renewals', path: '/g-ops/renewals', actions: READ, phase: 8, hidden: true },
       { key: 'report_templates', own: 'templates you made', group: 'Service reports', label: 'Report Templates', path: '/g-ops/report-templates', actions: SHARED_KEPT, phase: 8, note: 'Create starts or duplicates a template; Edit All publishes a new version' },
       { key: 'commissioning_reports', group: 'Service reports', label: 'Commissioning Reports', path: '/g-ops/commissioning', actions: OWNED_KEPT, phase: 8 },
       { key: 'pm_reports', group: 'Service reports', label: 'Preventive Maintenance', path: '/g-ops/pm', actions: OWNED_KEPT, phase: 8 },

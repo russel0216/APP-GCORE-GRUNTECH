@@ -2229,10 +2229,37 @@ async function main() {
       startsAt: iso(coverStart),
       endsAt: iso(inDays(5 + 364)),
       frequencyMonths: 3,
+      coverageLevel: `  ${TAG} 24/7 Comprehensive PM `,
       assetIds: [asset.id],
     });
     check('a draft contract is set up', created.status === 201 && created.body.plannedVisits === 3, `${created.status} ${created.body.plannedVisits ?? created.body.error}`);
     const mcId = created.body.id as string;
+    // The SLA coverage level (2026-10-20): kept trimmed, offered back as a
+    // suggestion, searched and filtered on the list, and the Renewal notice
+    // is null on a draft.
+    check(
+      'the coverage level is kept trimmed, and a draft has no renewal notice',
+      created.body.coverageLevel === `${TAG} 24/7 Comprehensive PM` && created.body.renewal === null,
+      `${created.body.coverageLevel} / ${created.body.renewal}`,
+    );
+    const levels = await api(managerToken, 'GET', '/service-contracts/coverage-levels');
+    check(
+      'the coverage levels on file are offered as suggestions',
+      levels.status === 200 && (levels.body as string[]).includes(`${TAG} 24/7 Comprehensive PM`),
+      `${levels.status} ${JSON.stringify(levels.body).slice(0, 120)}`,
+    );
+    const byLevel = await api(managerToken, 'GET', `/service-contracts?coverageLevel=${encodeURIComponent(`${TAG} 24/7 comprehensive pm`)}`);
+    check(
+      'the list filters on the coverage level case-blind, and its cards come with it',
+      byLevel.status === 200 &&
+        byLevel.body.rows.length === 1 &&
+        byLevel.body.rows[0].id === mcId &&
+        typeof byLevel.body.summary?.upForRenewal === 'number' &&
+        typeof byLevel.body.summary?.renewalDrafts === 'number',
+      `${byLevel.status} ${byLevel.body.rows?.length} ${JSON.stringify(byLevel.body.summary ?? {})}`,
+    );
+    const badRenewal = await api(managerToken, 'GET', '/service-contracts?renewal=soon');
+    check('an unknown renewal filter is refused naming the choices', badRenewal.status === 400, String(badRenewal.status));
 
     const asManager = await api(managerToken, 'GET', `/service-contracts/${mcId}`);
     const asEngineer = await api(engineerToken, 'GET', `/service-contracts/${mcId}`);
@@ -2803,6 +2830,30 @@ async function main() {
         typeof dashboard.body.visits?.overdue === 'number',
       JSON.stringify(dashboard.body).slice(0, 160),
     );
+    // The owner's cards of 2026-10-20: scheduled this week and active service JOs.
+    check(
+      'and the visits scheduled this week and the active service JOs',
+      typeof dashboard.body.visits?.thisWeek === 'number' && typeof dashboard.body.serviceJobs?.open === 'number',
+      JSON.stringify({ thisWeek: dashboard.body.visits?.thisWeek, serviceJobs: dashboard.body.serviceJobs }),
+    );
+    // The installation base's Industry team column and filter (2026-10-20):
+    // the customer's team; `none` lists the machines of customers with none.
+    const teamRow = await prisma.industry.findFirst({ where: { isActive: true }, select: { id: true, code: true } });
+    if (teamRow) {
+      await prisma.customer.update({ where: { id: customer.id }, data: { industryId: teamRow.id } });
+      const byTeam = await api(managerToken, 'GET', `/installed-assets?teamId=${teamRow.id}&customerId=${customer.id}`);
+      check(
+        'the installation base lists a customer’s machines under its team, each row carrying the team',
+        byTeam.status === 200 &&
+          byTeam.body.rows.length > 0 &&
+          byTeam.body.rows.every((r: { customer: { industry: { code: string } | null } }) => r.customer.industry?.code === teamRow.code) &&
+          typeof byTeam.body.summary?.uncovered === 'number',
+        `${byTeam.status} ${byTeam.body.rows?.length} ${JSON.stringify(byTeam.body.summary ?? {})}`,
+      );
+      const noTeam = await api(managerToken, 'GET', `/installed-assets?teamId=none&customerId=${customer.id}`);
+      check('and none of them under "no team"', noTeam.status === 200 && noTeam.body.rows.length === 0, `${noTeam.status} ${noTeam.body.rows?.length}`);
+      await prisma.customer.update({ where: { id: customer.id }, data: { industryId: null } });
+    }
 
     const renewals = await api(managerToken, 'GET', '/aftermarket/renewals?withinDays=90');
     check(
