@@ -129,6 +129,7 @@ async function cleanup() {
   await prisma.jobOrder.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.serviceVisit.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.serviceContract.deleteMany({ where: { job: { name: { startsWith: TAG } } } });
+  await prisma.serviceDocument.deleteMany({ where: { OR: [{ title: { startsWith: TAG } }, { asset: { customer: { name: { startsWith: TAG } } } }] } });
   await prisma.installedAsset.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   // Equipment types the test registrations remembered.
   await prisma.equipmentType.deleteMany({ where: { key: { startsWith: TAG } } });
@@ -1882,6 +1883,92 @@ async function main() {
         'cancelling an approved Service JO cancels the visit it booked',
         sjoCancel.status === 200 && bookedAfter?.status === 'CANCELLED' && (await prisma.jobOrder.findUnique({ where: { id: sjoId } }))?.status === 'CANCELLED',
         `${sjoCancel.status} ${sjoCancel.body.error ?? ''} visit ${bookedAfter?.status}`,
+      );
+    }
+
+    // ── Service Documents and the direct contract (2026-10-20, push 4) ──
+    {
+      const categories = await api(engineerToken, 'GET', '/reference/service-document-categories?active=true');
+      const manual = (categories.body as { id: string; name: string }[]).find((c) => c.name === 'Manual');
+      check('the six service document categories are seeded, Manual among them', categories.status === 200 && !!manual && categories.body.length >= 6, `${categories.status} ${categories.body.length}`);
+      const onMachine = await api(engineerToken, 'POST', '/service-documents', {
+        title: `${TAG} O&M manual`,
+        categoryId: manual!.id,
+        assetId: asset.id,
+        version: 'Rev. B',
+        documentDate: '2026-01-15',
+      });
+      check(
+        'a document is filed against a machine, under its category',
+        onMachine.status === 201 && onMachine.body.asset?.id === asset.id && onMachine.body.category?.name === 'Manual' && onMachine.body.files === 0,
+        `${onMachine.status} ${onMachine.body.error ?? ''}`,
+      );
+      const noCategory = await api(engineerToken, 'POST', '/service-documents', { title: `${TAG} stray`, categoryId: 'nope', assetId: asset.id });
+      check('a category not on the list is refused', noCategory.status === 400, `${noCategory.status}`);
+      // On the model: the machine's item, read by every machine of it.
+      const modelItem = await prisma.item.create({ data: { code: `${TAG}-DRY`, name: `${TAG} Dryer model`, unit: 'unit' } });
+      await prisma.installedAsset.update({ where: { id: asset.id }, data: { itemId: modelItem.id } });
+      const onModel = await api(engineerToken, 'POST', '/service-documents', { title: `${TAG} Dryer datasheet`, categoryId: manual!.id, itemId: modelItem.id });
+      const assetPage = await api(engineerToken, 'GET', `/installed-assets/${asset.id}`);
+      const docs = (assetPage.body.documents ?? []) as { id: string; onModel: boolean }[];
+      check(
+        'the machine’s page lists the documents on it and on its model, the model’s said so',
+        onModel.status === 201 && docs.some((d) => d.id === onMachine.body.id && !d.onModel) && docs.some((d) => d.id === onModel.body.id && d.onModel),
+        `${onModel.status} ${docs.length} document(s): ${JSON.stringify(docs.map((d) => d.onModel))}`,
+      );
+      const docList = await api(engineerToken, 'GET', '/service-documents?scope=all&pageSize=100');
+      const dash2 = await api(managerToken, 'GET', '/aftermarket/dashboard');
+      const allDocs = await api(managerToken, 'GET', '/service-documents?scope=all&pageSize=1');
+      check(
+        'the overview’s Technical documents card equals the register it opens',
+        docList.status === 200 && docList.body.summary.documents >= 2 && dash2.body.documents.total === allDocs.body.total,
+        `card ${dash2.body.documents?.total} list ${allDocs.body.total}`,
+      );
+      const withdrawn = await api(engineerToken, 'PATCH', `/service-documents/${onModel.body.id}`, { isActive: false });
+      const assetPage2 = await api(engineerToken, 'GET', `/installed-assets/${asset.id}`);
+      check(
+        'a withdrawn document leaves the machine’s page and stays on file',
+        withdrawn.status === 200 && withdrawn.body.isActive === false && !(assetPage2.body.documents as { id: string }[]).some((d) => d.id === onModel.body.id),
+        `${withdrawn.status} ${withdrawn.body.error ?? ''}`,
+      );
+      const strangerDoc = await api(signToken(sales.id, sales.email), 'GET', `/service-documents/${onMachine.body.id}`);
+      check('somebody with no right to service documents is kept out', strangerDoc.status === 403, `${strangerDoc.status}`);
+      await prisma.installedAsset.update({ where: { id: asset.id }, data: { itemId: null } });
+      await prisma.serviceDocument.deleteMany({ where: { itemId: modelItem.id } });
+      await prisma.item.delete({ where: { id: modelItem.id } });
+
+      // A contract typed directly: its costing and job made with it, in one transaction.
+      const directContract = await api(managerToken, 'POST', '/service-contracts', {
+        direct: { customerId: customer.id, name: `${TAG} Annual PMS typed directly`, contractValue: 96_000 },
+        startsAt: '2027-01-01',
+        endsAt: '2027-12-31',
+        frequencyMonths: 6,
+        coverageLevel: 'Quarterly Labor & Parts',
+        assetIds: [secondAsset.id],
+      });
+      const directJob = directContract.status === 201 ? await prisma.job.findUnique({ where: { id: directContract.body.job.id }, include: { costing: true } }) : null;
+      check(
+        'a contract typed directly makes its SERVICE_CONTRACT job and a costing carrying the value, in one go',
+        directContract.status === 201 &&
+          directJob?.type === 'SERVICE_CONTRACT' &&
+          Number(directJob.contractValue) === 96_000 &&
+          Number(directJob.costing.contractValue) === 96_000 &&
+          directJob.customerId === customer.id &&
+          directContract.body.status === 'DRAFT' &&
+          directContract.body.assets.length === 1,
+        `${directContract.status} ${directContract.body.error ?? ''} job ${directJob?.type} ${directJob ? Number(directJob.contractValue) : ''}`,
+      );
+      const neither = await api(managerToken, 'POST', '/service-contracts', { startsAt: '2027-01-01', endsAt: '2027-12-31', assetIds: [] });
+      const strangersMachine = await api(managerToken, 'POST', '/service-contracts', {
+        direct: { customerId: customer.id, name: `${TAG} wrong machine`, contractValue: 1 },
+        startsAt: '2027-01-01',
+        endsAt: '2027-12-31',
+        assetIds: [(await prisma.installedAsset.findFirst({ where: { customerId: { not: customer.id } }, select: { id: true } }))?.id ?? 'nope'],
+      });
+      check(
+        'neither a job nor the direct facts is refused, and so is another customer’s machine',
+        neither.status === 400 && strangersMachine.status === 400,
+        `${neither.status} ${strangersMachine.status} ${strangersMachine.body.error ?? ''}`,
       );
     }
 

@@ -106,6 +106,7 @@ import { ServiceReports, ServiceReportDetail, Renewals } from './pages/service/R
 import { ServiceSchedule } from './pages/service/Schedule';
 import { JobOrders, JobOrderDetail } from './pages/service/JobOrders';
 import { ServiceJobOrders, ServiceJobOrderDetail } from './pages/service/ServiceJobOrders';
+import { ServiceDocuments, ServiceDocumentDetail } from './pages/service/ServiceDocuments';
 import { CadJobOrders, CadJobOrderDetail } from './pages/delivery/CadJobOrders';
 import {
   ReportTemplates,
@@ -1485,6 +1486,24 @@ function Routed() {
           }
         />
         <Route path="/g-ops/service-job-orders/:id" element={<ServiceJobOrderDetail />} />
+        {/* Service Documents (2026-10-20): manuals, drawings, test reports
+            filed against a machine or a model. */}
+        <Route
+          path="/g-ops/service-documents"
+          element={
+            <GuardAny permissions={['gops.service_documents.view_all', 'gops.service_documents.view_own']}>
+              <ServiceDocuments />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/service-documents/:id"
+          element={
+            <GuardAny permissions={['gops.service_documents.view_all', 'gops.service_documents.view_own']}>
+              <ServiceDocumentDetail />
+            </GuardAny>
+          }
+        />
         {/* CAD job orders (2026-10-09): the design team's queue — requests,
             revisions, a comment thread. */}
         <Route

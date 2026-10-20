@@ -496,6 +496,7 @@ interface Dashboard {
   contracts: { active: number; expiring: number };
   visits: { overdue: number; thisMonth: number; missed: number; thisWeek: number };
   serviceJobs: { open: number };
+  documents: { total: number };
   reportsPending: number;
   warningDays: number;
 }
@@ -557,6 +558,12 @@ export function AftermarketDashboard() {
       sub: `of ${data.contracts.active} active, ending within ${data.warningDays} days`,
       tone: data.contracts.expiring > 0 ? 'var(--danger)' : undefined,
       to: '/g-ops/service-contracts?expiring=true',
+    },
+    {
+      label: 'Technical documents',
+      value: data.documents.total,
+      sub: 'manuals, drawings, test reports on file',
+      to: '/g-ops/service-documents',
     },
   ];
 

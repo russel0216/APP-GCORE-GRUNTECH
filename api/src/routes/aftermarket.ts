@@ -23,7 +23,7 @@ import {
   type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
-import { canEditRecord, type ResolvedUser } from '../permissions/resolve';
+import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { formatShortDate, formatAmount, formatMoney, companyCurrency, renderDocument, statusLabel } from '../shared/pdf';
 import { registerSearch } from '../shared/search';
@@ -54,6 +54,8 @@ import {
   type TemplateSection,
 } from '../shared/aftermarket';
 import { visibleOwners } from '../shared/team';
+import { documentsForAsset } from './serviceDocuments';
+import { registerAttachmentGuard } from '../shared/attachments';
 
 const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
 
@@ -421,6 +423,8 @@ assetRoutes.get(
       reports: row.reports,
       upcomingVisits: row.visits,
       jobOrders: row.jobOrders,
+      // The technical documents on it and on its model (2026-10-20).
+      documents: await documentsForAsset(row),
     });
   }),
 );
@@ -1007,7 +1011,23 @@ contractRoutes.get(
 );
 
 const contractSchema = z.object({
-  jobId: z.string().min(1, 'Which service job?'),
+  /** The service job the cover is set on — or none, with `direct` instead (2026-10-20). */
+  jobId: z.string().optional().nullable(),
+  /**
+   * A contract typed directly, with no costing behind it (2026-10-20, the
+   * owner's call): its SERVICE_CONTRACT job is made in the same transaction,
+   * on a costing that carries the contract value alone — the job's budget is
+   * costed later if it ever is.
+   */
+  direct: z
+    .object({
+      customerId: z.string().min(1, 'Which customer?'),
+      name: z.string().trim().min(2, 'Name the contract').max(300),
+      contractValue: z.number().min(0),
+      siteId: z.string().optional().nullable(),
+    })
+    .optional()
+    .nullable(),
   startsAt: z.string().min(1, 'When does cover start?'),
   endsAt: z.string().min(1, 'When does cover end?'),
   frequencyMonths: z.number().int().min(1).max(24).optional(),
@@ -1027,21 +1047,39 @@ contractRoutes.post(
     const body = parseBody(contractSchema, req.body);
     const settings = await aftermarketSettings();
 
-    const job = await prisma.job.findUnique({
-      where: { id: body.jobId },
-      include: { serviceContract: { select: { id: true, number: true } } },
-    });
-    if (!job) throw notFound('Job not found');
+    if (!body.jobId && !body.direct) throw badRequest('Which service job — or type the contract directly');
+    const job = body.jobId
+      ? await prisma.job.findUnique({
+          where: { id: body.jobId },
+          include: { serviceContract: { select: { id: true, number: true } } },
+        })
+      : null;
+    if (body.jobId && !job) throw notFound('Job not found');
     // A service contract IS a job of that type (model §4.5). Attaching coverage
     // terms to a delivery project would give it a PM schedule it has no budget
     // to service.
-    if (job.type !== 'SERVICE_CONTRACT') {
+    if (job && job.type !== 'SERVICE_CONTRACT') {
       throw badRequest(
         `${job.number} is a delivery project, not a service contract. Create the job as a service contract first — that is where its costing and budget come from.`,
       );
     }
-    if (job.serviceContract) {
+    if (job?.serviceContract) {
       throw badRequest(`${job.number} already has coverage terms (${job.serviceContract.number})`);
+    }
+    const direct = job ? null : body.direct!;
+    if (direct) {
+      const customer = await prisma.customer.findUnique({ where: { id: direct.customerId }, select: { id: true, isActive: true } });
+      if (!customer) throw badRequest('That customer does not exist');
+      if (direct.siteId) {
+        const site = await prisma.customerSite.findUnique({ where: { id: direct.siteId }, select: { customerId: true } });
+        if (site?.customerId !== direct.customerId) throw badRequest('That site is not this customer’s');
+      }
+    }
+    // Every machine covered is the customer's.
+    const customerId = job?.customerId ?? direct!.customerId;
+    if (body.assetIds.length) {
+      const theirs = await prisma.installedAsset.count({ where: { id: { in: body.assetIds }, customerId } });
+      if (theirs !== new Set(body.assetIds).size) throw badRequest('A machine named is not this customer’s');
     }
 
     const startsAt = asDate(body.startsAt, 'Start date');
@@ -1050,10 +1088,48 @@ contractRoutes.post(
     const planned = planSchedule(startsAt, endsAt, frequencyMonths);
 
     const contract = await prisma.$transaction(async (tx) => {
+      // Typed directly: the costing that carries the value, then the job, then the cover — one transaction.
+      const jobId =
+        job?.id ??
+        (await (async () => {
+          const costing = await tx.costing.create({
+            data: {
+              number: await nextNumber('costing', tx),
+              title: direct!.name,
+              status: 'FINAL',
+              finalAt: new Date(),
+              customerId: direct!.customerId,
+              siteId: direct!.siteId || null,
+              ownerId: me.id,
+              contractValue: new Prisma.Decimal(direct!.contractValue),
+              totalCost: new Prisma.Decimal(0),
+              targetContractValue: new Prisma.Decimal(direct!.contractValue),
+              notes: 'Made with the service contract typed directly — the contract value alone, no cost lines yet.',
+            },
+          });
+          const made = await tx.job.create({
+            data: {
+              number: await nextNumber('project', tx),
+              type: 'SERVICE_CONTRACT',
+              name: direct!.name,
+              customerId: direct!.customerId,
+              siteId: direct!.siteId || null,
+              costingId: costing.id,
+              createdById: me.id,
+              projectManagerId: me.id,
+              contractValue: new Prisma.Decimal(direct!.contractValue),
+              startDate: startsAt,
+              targetEndDate: endsAt,
+              notes: 'Made with the service contract typed directly',
+            },
+          });
+          await audit({ entityType: 'job', entityId: made.id, action: 'CREATED', summary: `Created ${made.number} — ${made.name} with its service contract, typed directly` }, req, tx);
+          return made.id;
+        })());
       const created = await tx.serviceContract.create({
         data: {
           number: await nextNumber('service_contract', tx),
-          jobId: job.id,
+          jobId,
           startsAt,
           endsAt,
           frequencyMonths,
@@ -1076,7 +1152,7 @@ contractRoutes.post(
         entityType: 'service_contract',
         entityId: contract.id,
         action: 'CREATED',
-        summary: `${contract.number} — ${body.assetIds.length} asset(s), ${planned.length} visit(s) planned every ${frequencyMonths} month(s)`,
+        summary: `${contract.number} — ${body.assetIds.length} asset(s), ${planned.length} visit(s) planned every ${frequencyMonths} month(s)${direct ? ' (typed directly, with its job)' : ''}`,
       },
       req,
     );
@@ -1201,6 +1277,23 @@ const CLOSED_CONTRACT: Partial<Record<ContractStatus, string>> = {
 function mayModifyContract(me: ResolvedUser, status: ContractStatus, projectManagerId: string | null): boolean {
   return MODIFIABLE_CONTRACT.has(status) && canEditRecord(me, 'gops', 'service_contracts', projectManagerId);
 }
+
+/**
+ * The contract's own files (2026-10-20, the owner's call: "add also card for
+ * add attachment") — the signed agreement, the customer's PO: read by whoever
+ * may read contracts, added or removed by whoever may modify the contract
+ * (its PM's edit_own, or edit_all) or raise one.
+ */
+registerAttachmentGuard(
+  'service_contract',
+  async (user) => can(user, 'gops.service_contracts.view_all') || can(user, 'gops.service_contracts.view_own'),
+  {
+    write: async (user, id) => {
+      const row = await prisma.serviceContract.findUnique({ where: { id }, select: { status: true, job: { select: { projectManagerId: true } } } });
+      return !!row && (mayModifyContract(user, row.status, row.job.projectManagerId) || can(user, 'gops.service_contracts.create'));
+    },
+  },
+);
 
 /** What the audit trail keeps of a contract's cover, before and after a change. */
 function coverSnapshot(c: {
@@ -3069,6 +3162,7 @@ aftermarketRoutes.get(
       reportsPending,
       visitsThisWeek,
       serviceJobsOpen,
+      documents,
     ] = await Promise.all([
       prisma.installedAsset.count({ where: { status: 'ACTIVE' } }),
       prisma.installedAsset.count({ where: { status: 'ACTIVE', warrantyEndsAt: { gte: today } } }),
@@ -3090,6 +3184,8 @@ aftermarketRoutes.get(
       // Active service JOs (2026-10-20): the Service JO register's open ones
       // — awaiting approval, or approved and not yet done (`?open=true`).
       prisma.jobOrder.count({ where: { category: 'SERVICE', status: { in: ['PENDING_APPROVAL', 'APPROVED'] } } }),
+      // Technical documents (2026-10-20): the current service documents on file.
+      prisma.serviceDocument.count({ where: { isActive: true } }),
     ]);
 
     res.json({
@@ -3104,6 +3200,7 @@ aftermarketRoutes.get(
       contracts: { active: activeContracts, expiring: contractsExpiring },
       visits: { overdue: visitsDue, thisMonth: visitsThisMonth, missed: visitsMissed, thisWeek: visitsThisWeek },
       serviceJobs: { open: serviceJobsOpen },
+      documents: { total: documents },
       reportsPending,
       warningDays: settings.expiryWarningDays,
     });

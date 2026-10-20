@@ -358,6 +358,9 @@ export const ROLE_SEEDS: RoleSeed[] = [
     ],
     only: [
       'gops.service_contracts.view_all',
+      'gops.service_documents.view_all',
+      'gops.service_documents.create',
+      'gops.service_documents.edit_own',
       ...VIEW_OWN_SELF('gops', 'service_costing'),
       'gops.customers.view_all',
       'gchain.inventory.view_all',
@@ -400,6 +403,7 @@ export const ROLE_SEEDS: RoleSeed[] = [
       ['gops', 'pm_reports'],
       ['gops', 'inspection_reports'],
       ['gops', 'service_contracts'],
+      ['gops', 'service_documents'],
       ['gops', 'installed_base'],
       ['gops', 'service_costing'],
       ['gops', 'job_orders'],

@@ -96,6 +96,16 @@ export interface DrawingTypeDef {
   _count?: { requests: number };
 }
 
+/** What a service document is (2026-10-20): Manual, Electrical drawing…, with how many documents carry it. */
+export interface DocumentCategoryDef {
+  id: string;
+  name: string;
+  sortOrder: number;
+  isSystem: boolean;
+  isActive: boolean;
+  _count?: { documents: number };
+}
+
 // ── One card and one modal for every category (2026-10-10) ───────────────────
 //
 // Seven cards used to carry seven near-identical modals — ~690 lines that
@@ -455,6 +465,43 @@ const ACTIVITY_TYPES: CategorySpec<ActivityTypeDef> = {
   },
 };
 
+const DOCUMENT_CATEGORIES: CategorySpec<DocumentCategoryDef> = {
+  noun: 'service document category',
+  title: 'Service document categories',
+  endpoint: '/reference/service-document-categories',
+  columns: [
+    {
+      key: 'name',
+      head: 'Name',
+      render: (t) => (
+        <>
+          {t.name}
+          {t.isSystem && <span className="faint"> · built-in</span>}
+        </>
+      ),
+    },
+    { key: 'documents', head: 'Documents', headClass: 'right', cellClass: 'right', render: (t) => (t._count?.documents ?? 0).toLocaleString('en-US') },
+    { key: 'status', head: 'Status', render: (t) => activeBadge(t.isActive) },
+  ],
+  footnote:
+    'What a service document is — a manual, an electrical drawing, a test report, a datasheet — filed against a machine on the Installation Base or against a model. The six built-ins can be renamed but not deleted; a category in use is deactivated rather than deleted, and the documents under it keep it.',
+  blank: { name: '', sortOrder: 0, isActive: true },
+  fromRow: (t) => ({ name: t.name, sortOrder: t.sortOrder, isActive: t.isActive }),
+  fields: () => [
+    { kind: 'text', key: 'name', label: 'Name', hint: 'e.g. Commissioning report, Calibration certificate', maxLength: 80 },
+    { kind: 'count', key: 'sortOrder', label: 'Sort order' },
+    { kind: 'check', key: 'isActive', label: 'Active — an inactive category stays on its documents but is not offered' },
+  ],
+  canSave: (f) => !!text(f.name).trim(),
+  deletable: (t) => !t.isSystem && (t._count?.documents ?? 0) === 0,
+  notice: (t) => {
+    if (t.isSystem) return 'A built-in category: rename it, or untick Active to stop offering it.';
+    const inUse = t._count?.documents ?? 0;
+    if (inUse === 0) return null;
+    return `${inUse === 1 ? 'One document is' : `${inUse.toLocaleString('en-US')} documents are`} under this category, so it cannot be deleted — untick Active to stop offering it.`;
+  },
+};
+
 const DRAWING_TYPES: CategorySpec<DrawingTypeDef> = {
   noun: 'drawing type',
   title: 'Drawing types',
@@ -770,9 +817,10 @@ interface CategoryLists {
   groups: QuotationGroup[];
   activityTypes: ActivityTypeDef[];
   drawingTypes: DrawingTypeDef[];
+  documentCategories: DocumentCategoryDef[];
 }
 
-const NO_LISTS: CategoryLists = { cost: [], items: [], teams: [], subIndustries: [], groups: [], activityTypes: [], drawingTypes: [] };
+const NO_LISTS: CategoryLists = { cost: [], items: [], teams: [], subIndustries: [], groups: [], activityTypes: [], drawingTypes: [], documentCategories: [] };
 
 export function Categories() {
   const [lists, setLists] = useState<CategoryLists>(NO_LISTS);
@@ -782,7 +830,7 @@ export function Categories() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cost, items, teams, subIndustries, groups, activityTypes, drawingTypes] = await Promise.all([
+      const [cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories] = await Promise.all([
         api.get<CostCategory[]>('/reference/cost-categories'),
         api.get<ItemCategory[]>('/reference/item-categories'),
         api.get<Industry[]>('/reference/industries'),
@@ -790,8 +838,9 @@ export function Categories() {
         api.get<QuotationGroup[]>('/reference/quotation-groups'),
         api.get<ActivityTypeDef[]>('/reference/activity-types'),
         api.get<DrawingTypeDef[]>('/reference/cad-drawing-types'),
+        api.get<DocumentCategoryDef[]>('/reference/service-document-categories'),
       ]);
-      setLists({ cost, items, teams, subIndustries, groups, activityTypes, drawingTypes });
+      setLists({ cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories });
       setError(null);
     } catch (err) {
       setError(err);
@@ -848,6 +897,7 @@ export function Categories() {
       <CategoryCard spec={QUOTATION_GROUPS} rows={lists.groups} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={ACTIVITY_TYPES} rows={lists.activityTypes} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={DRAWING_TYPES} rows={lists.drawingTypes} onChanged={changed} className="card m-industries" />
+      <CategoryCard spec={DOCUMENT_CATEGORIES} rows={lists.documentCategories} onChanged={changed} className="card m-industries" />
     </div>
   );
 }

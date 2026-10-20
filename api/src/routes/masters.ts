@@ -1898,6 +1898,82 @@ warehouseRoutes.delete(
   }),
 );
 
+// ── Service document categories ─────────────────────────────────────────────
+// What a service document is (2026-10-20): Admin › Categories › Service
+// document categories, the drawing types' contract — seeded system rows
+// (renamable, undeletable), anyone signed in may read the list.
+
+referenceRoutes.get(
+  '/service-document-categories',
+  handler(async (req, res) => {
+    const activeOnly = String(req.query.active ?? '') === 'true';
+    res.json(
+      await prisma.serviceDocumentCategory.findMany({
+        where: activeOnly ? { isActive: true } : {},
+        include: { _count: { select: { documents: true } } },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      }),
+    );
+  }),
+);
+
+const documentCategorySchema = z.object({
+  name: z.string().trim().min(2, 'Give it a name').max(80),
+  sortOrder: z.number().int().default(0),
+  isActive: z.boolean().default(true),
+});
+
+async function documentCategoryNameTaken(name: string, exceptId?: string): Promise<boolean> {
+  const clash = await prisma.serviceDocumentCategory.findFirst({
+    where: { name: { equals: name, mode: 'insensitive' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { id: true },
+  });
+  return !!clash;
+}
+
+referenceRoutes.post(
+  '/service-document-categories',
+  require_('admin.categories.create'),
+  handler(async (req, res) => {
+    const body = parseBody(documentCategorySchema, req.body);
+    if (await documentCategoryNameTaken(body.name)) throw conflict(`Service document category "${body.name}" already exists`);
+    const created = await prisma.serviceDocumentCategory.create({ data: { ...body, createdById: currentUser(req).id } });
+    await audit({ entityType: 'service_document_category', entityId: created.id, action: 'CREATED', summary: `Created service document category ${created.name}` }, req);
+    res.status(201).json(created);
+  }),
+);
+
+referenceRoutes.patch(
+  '/service-document-categories/:id',
+  editCategory,
+  handler(async (req, res) => {
+    const body = parseBody(documentCategorySchema.partial(), req.body);
+    const before = await prisma.serviceDocumentCategory.findUnique({ where: { id: req.params.id } });
+    if (!before) throw notFound('Service document category not found');
+    assertCategoryEdit(currentUser(req), before);
+    if (body.name && body.name !== before.name && (await documentCategoryNameTaken(body.name, before.id))) {
+      throw conflict(`Service document category "${body.name}" already exists`);
+    }
+    const updated = await prisma.serviceDocumentCategory.update({ where: { id: before.id }, data: body });
+    await audit({ entityType: 'service_document_category', entityId: updated.id, action: 'UPDATED', summary: `Updated service document category ${updated.name}`, before, after: updated }, req);
+    res.json(updated);
+  }),
+);
+
+referenceRoutes.delete(
+  '/service-document-categories/:id',
+  require_('admin.categories.delete'),
+  handler(async (req, res) => {
+    const row = await prisma.serviceDocumentCategory.findUnique({ where: { id: req.params.id }, include: { _count: { select: { documents: true } } } });
+    if (!row) throw notFound('Service document category not found');
+    if (row.isSystem) throw badRequest('The standard service document categories cannot be deleted — deactivate one instead');
+    if (row._count.documents > 0) throw badRequest(`${row._count.documents} service document(s) still carry this category`);
+    await prisma.serviceDocumentCategory.delete({ where: { id: row.id } });
+    await audit({ entityType: 'service_document_category', entityId: row.id, action: 'DELETED', summary: `Deleted service document category ${row.name}`, before: row }, req);
+    res.json({ ok: true });
+  }),
+);
+
 // ── CAD drawing types ────────────────────────────────────────────────────────
 // What a CAD job order asks for (2026-10-09): Admin › Categories › Drawing
 // types. Same contract as the sub-industries: the seeded rows are system rows

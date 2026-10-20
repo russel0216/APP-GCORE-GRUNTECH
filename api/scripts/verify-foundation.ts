@@ -526,8 +526,8 @@ async function main() {
     .submodules.filter((s) => s.group === 'Aftermarket' && !s.hidden)
     .map((s) => s.label);
   check(
-    'Aftermarket shows Aftermarket, Installation Base, Service JO, Service Schedule, Service Contract in that order',
-    aftermarketStrip.join() === 'Aftermarket,Installation Base,Service JO,Service Schedule,Service Contract',
+    'Aftermarket shows Aftermarket, Installation Base, Service JO, Service Schedule, Service Contract, Service Documents in that order',
+    aftermarketStrip.join() === 'Aftermarket,Installation Base,Service JO,Service Schedule,Service Contract,Service Documents',
     aftermarketStrip.join(),
   );
   const pmStrip = menuFor(superUser)

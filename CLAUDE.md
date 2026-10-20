@@ -676,15 +676,19 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,517 assertions across twenty-two scripts** (counted 2026-10-20, after
-the revised Aftermarket UI's first three pushes — one on foundation for the
+**4,526 assertions across twenty-two scripts** (counted 2026-10-20, after
+the revised Aftermarket UI's four pushes — one on foundation for the
 Aftermarket strip and 7 on aftermarket for the coverage level, the renewal
 filter, the team column and the overview's two new figures, then 9 on
 aftermarket for a visit's slot, its confirmation, the unconfirm on a move
 and the sweep of a stale confirmed visit, then 9 on aftermarket for the
 Service JO — its options, number and cover, the project register refusing
 it, its route, the decider's door, the visit its approval books, the
-overview card's count, Ctrl+K and the cancel — and before it,
+overview card's count, Ctrl+K and the cancel — then 9 on aftermarket for
+the service documents (the seeded categories, filing against a machine
+and a model, the machine's page, the overview card's count, withdrawal,
+the stranger kept out) and the contract typed directly with its job and
+costing — and before it,
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -752,7 +756,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 429, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
 94, partners 120, delivery 193, chain 361, hr 487, plantilla 129, meetings
-114, evaluations 154, academy 125, finance 432, aftermarket 295, cad 122,
+114, evaluations 154, academy 125, finance 432, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -3282,6 +3286,42 @@ buttons keep rule 19's "+ New …". Built push by push:
   My Work and the machine's page ("+ New service JO", `?new=1&assetId=`)
   link by category; `recordLink` maps the new type. A test that settles one
   in-process imports `routes/serviceJobOrders` for its subscriber.
+- **Push 4 — Service Documents, and a contract typed directly.** The strip
+  ends on **Service Documents** (`gops.service_documents`, SHARED_KEPT —
+  own is the documents one filed; `/g-ops/service-documents`,
+  `routes/serviceDocuments.ts` at `/api/service-documents`,
+  `pages/service/ServiceDocuments.tsx`; verify-foundation pins the strip of
+  six). `ServiceDocument` (title, description, version, `documentDate`,
+  `isActive`) is filed under a **category from Admin › Categories ›
+  Service document categories** (`ServiceDocumentCategory`, the drawing
+  types' contract: `shared/serviceDocumentCategories.ts` seeds Manual,
+  Electrical drawing, Test report, Drawing / datasheet, Certificate, Other
+  as system rows; `/reference/service-document-categories`) and **against
+  a MACHINE (`assetId`) or a MODEL (`itemId`) — either**: a machine's page
+  (`GET /installed-assets/:id` → `documents`, `documentsForAsset()`) lists
+  the current documents on it and on its model (`onModel`), with "+ New
+  service document" (`?new=1&assetId=`). The file is the record's
+  Attachments card on `service_document` (a CAD entity — DWG, DXF take the
+  CAD ceiling), read as the document is and written by whoever may edit it
+  (`registerAttachmentGuard`). A document in use is **withdrawn**
+  (`isActive` false — off the machine's page, on file) rather than
+  deleted; Delete takes its files with it. The list's cards are the
+  current documents, machines and models documented, the largest
+  category; the overview's fifth card, **Technical documents**, is the
+  register's count (`documents.total`, verify-aftermarket asserts it).
+  Ctrl+K finds them; `recordLink` maps `service_document` and
+  `service_document_category`. **A service contract may be typed directly**
+  (the owner's call: no costing first): "+ New service contract" on the
+  list opens `CoverModal` with no job — the customer, the contract's name
+  and value, then the cover — and `POST /service-contracts { direct:
+  { customerId, name, contractValue, siteId? } }` makes, in ONE
+  transaction, a FINAL costing carrying the contract value alone (no cost
+  lines — the job's budget is costed later if ever), the SERVICE_CONTRACT
+  job on it (the caller its manager, the cover's dates its dates) and the
+  DRAFT contract; `jobId` still sets cover on a job costed the usual way,
+  and every machine named must be the customer's. **The contract page
+  has an Attachments card** (`service_contract`: read by whoever reads
+  contracts, written by whoever may modify the contract or raise one).
 
 ## The notification bell (2026-10-20)
 

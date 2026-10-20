@@ -145,6 +145,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     service_visit: 'Visits',
     job_order: 'Job orders',
     service_job_order: 'Service JOs',
+    service_document: 'Service documents',
     cad_job_order: 'CAD job orders',
     overtime_request: 'Overtime',
     leave_request: 'Leave',

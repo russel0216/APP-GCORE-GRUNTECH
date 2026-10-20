@@ -136,6 +136,7 @@ model User {
   contractsCreated    ServiceContract[] @relation("ContractCreator")
   visitsAssigned      ServiceVisit[]    @relation("VisitEngineer")
   visitsConfirmed     ServiceVisit[]    @relation("VisitConfirmer")
+  serviceDocumentsFiled ServiceDocument[] @relation("ServiceDocumentFiler")
   templatesAuthored   ReportTemplate[]  @relation("TemplateAuthor")
   reportsPerformed    ServiceReport[]   @relation("ReportAuthor")
   jobOrdersRequested  JobOrder[]        @relation("JobOrderRequester")
@@ -1112,6 +1113,8 @@ model Item {
   pulloutItems         PulloutItem[]
   stockMoves           InventoryTransaction[]
   installedAssets      InstalledAsset[]
+  /// Technical documents filed against the model (2026-10-20) — every machine of it reads them.
+  serviceDocuments     ServiceDocument[]
   receivedWithoutOrder ReceivingItem[]        @relation("ReceivedWithoutOrder")
 
   // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
@@ -4897,6 +4900,8 @@ model InstalledAsset {
   createdBy   User?   @relation("AssetCreator", fields: [createdById], references: [id], onDelete: SetNull)
 
   contracts ServiceContractAsset[]
+  /// Technical documents filed against this machine (2026-10-20).
+  documents ServiceDocument[]
   visits    ServiceVisit[]
   reports   ServiceReport[]
   jobOrders JobOrder[]
@@ -5341,6 +5346,55 @@ enum CadPriority {
 
 /// What kind of drawing is asked for — Layout plan, P&ID, single-line… Admin
 /// › Categories; the seeded rows are system rows (renamable, undeletable).
+/// What a service document is (2026-10-20, the owner's revised Aftermarket
+/// UI): Admin › Categories › Service document categories — Manual, Electrical
+/// drawing, Test report … System rows: renamable, undeletable, switched off
+/// rather than removed; an administrator may add more.
+model ServiceDocumentCategory {
+  id        String   @id @default(cuid())
+  name      String
+  sortOrder Int      @default(0)
+  isSystem  Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  documents   ServiceDocument[]
+  createdById String?
+}
+
+/// A technical document on the Aftermarket side (2026-10-20): a manual, an
+/// electrical drawing, a test report, a datasheet — filed against a MACHINE
+/// on the Installation Base or against a MODEL (an item), either. The file
+/// itself is an attachment on `service_document` (a PDF, a picture, a CAD
+/// file — the CAD ceiling applies).
+model ServiceDocument {
+  id          String  @id @default(cuid())
+  title       String
+  description String?
+
+  categoryId String
+  category   ServiceDocumentCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  assetId String?
+  asset   InstalledAsset? @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  itemId  String?
+  item    Item?           @relation(fields: [itemId], references: [id], onDelete: SetNull)
+
+  /// The document's own version and date, as printed on it.
+  version      String?
+  documentDate DateTime? @db.Date
+  isActive     Boolean   @default(true)
+
+  createdById String
+  createdBy   User     @relation("ServiceDocumentFiler", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([assetId])
+  @@index([itemId])
+  @@index([categoryId])
+}
+
 model CadDrawingType {
   id        String   @id @default(cuid())
   name      String

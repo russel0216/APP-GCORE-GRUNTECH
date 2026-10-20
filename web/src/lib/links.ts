@@ -57,6 +57,7 @@ const DETAIL: Record<string, string> = {
   job_order: '/g-ops/job-orders',
   // The Service JO under Aftermarket (2026-10-20) — the same table, its own register.
   service_job_order: '/g-ops/service-job-orders',
+  service_document: '/g-ops/service-documents',
   cad_job_order: '/g-ops/cad-job-orders',
   // A project's drawing sent for approval (2026-10-13); the engine files it as plan_approval.
   approved_plan: '/g-ops/plans',
@@ -131,6 +132,7 @@ const SCREEN: Record<string, string> = {
   quotation_group: '/admin/categories',
   activity_type: '/admin/categories',
   cad_drawing_type: '/admin/categories',
+  service_document_category: '/admin/categories',
   costing_template: '/g-ops/costing',
   // A report's paper and CSV audit as EXPORTED under its division's type.
   chain_report: '/g-chain/reports',

@@ -555,6 +555,16 @@ interface AssetDetail extends Asset {
     requestedFor: string;
     chargeBasis: string;
   }[];
+  /** The technical documents on it and on its model (2026-10-20). */
+  documents: {
+    id: string;
+    title: string;
+    version: string | null;
+    documentDate: string | null;
+    files: number;
+    category: { id: string; name: string };
+    onModel: boolean;
+  }[];
 }
 
 export function AssetDetailPage() {
@@ -771,6 +781,53 @@ export function AssetDetailPage() {
                       <td>
                         <StatusBadge status={j.status} />
                       </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {canView('gops', 'service_documents') && (
+        <div className="card">
+          <div className="card-head">
+            <h3 className="card-title">Technical documents</h3>
+            {can('gops.service_documents.create') && (
+              <Link
+                className="btn btn-primary btn-sm"
+                to={`/g-ops/service-documents?new=1&assetId=${row.id}&assetName=${encodeURIComponent(`${row.name}${row.serialNo ? ` · ${row.serialNo}` : ''} — ${row.customer.name}`)}`}
+              >
+                + New service document
+              </Link>
+            )}
+          </div>
+          {row.documents.length === 0 ? (
+            <p className="muted">No manual, drawing or report filed against this machine or its model yet.</p>
+          ) : (
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Document</th>
+                    <th>Category</th>
+                    <th>Version</th>
+                    <th>Dated</th>
+                    <th className="right">Files</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {row.documents.map((d) => (
+                    <tr key={d.id}>
+                      <td>
+                        <Link to={`/g-ops/service-documents/${d.id}`}>{d.title}</Link>
+                        {d.onModel && <div className="faint">on the model</div>}
+                      </td>
+                      <td>{d.category.name}</td>
+                      <td>{d.version ?? <span className="faint">—</span>}</td>
+                      <td>{d.documentDate ? formatDate(d.documentDate) : <span className="faint">—</span>}</td>
+                      <td className="right mono">{d.files}</td>
                     </tr>
                   ))}
                 </tbody>

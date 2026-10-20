@@ -22,6 +22,8 @@ import type { Asset } from './InstalledBase';
 import { monthOf, parseDay, todayLocal } from '../../lib/day';
 import { VisitBadge } from './Schedule';
 import { NumberInput } from '../../components/NumberInput';
+import { Attachments } from '../../components/Attachments';
+import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 
 /**
  * Service contracts.
@@ -123,6 +125,8 @@ export function ServiceContracts() {
   const navigate = useNavigate();
   const [queue, setQueue] = useState<UnconfiguredJob[] | null>(null);
   const [configuring, setConfiguring] = useState<UnconfiguredJob | null>(null);
+  // A contract typed directly, with no service job costed first (2026-10-20, the owner's call).
+  const [direct, setDirect] = useState(false);
   const [reload, setReload] = useState(0);
 
   const loadQueue = useCallback(async () => {
@@ -281,6 +285,13 @@ export function ServiceContracts() {
         emptyTitle="No service contracts yet"
         onRowClick={(r) => navigate(`/g-ops/service-contracts/${r.id}`)}
         printPath="/api/service-contracts/pdf"
+        actions={
+          can('gops.service_contracts.create') ? (
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => setDirect(true)}>
+              + New service contract
+            </button>
+          ) : null
+        }
         summary={(raw) => {
           const sum = raw as unknown as ContractSummary;
           return (
@@ -324,6 +335,16 @@ export function ServiceContracts() {
           }}
         />
       )}
+      {direct && (
+        <CoverModal
+          job={null}
+          onClose={() => setDirect(false)}
+          onSaved={(id) => {
+            setDirect(false);
+            navigate(`/g-ops/service-contracts/${id}`);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -347,7 +368,8 @@ function CoverModal({
   onClose,
   onSaved,
 }: {
-  job: UnconfiguredJob;
+  /** The service job the cover is set on — null for a contract typed directly (2026-10-20), whose job is made with it. */
+  job: UnconfiguredJob | null;
   existing?: ContractDetail;
   onClose: () => void;
   onSaved: (id: string) => void;
@@ -355,6 +377,10 @@ function CoverModal({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  // Typed directly: the customer, the contract's name and value — its job and costing are made with it.
+  const [pickedCustomer, setPickedCustomer] = useState<CustomerRef | null>(null);
+  const [direct, setDirect] = useState({ name: '', contractValue: '' });
+  const customerId = job?.customer.id ?? pickedCustomer?.id ?? '';
   const [assets, setAssets] = useState<Coverable[]>([]);
   const [chosen, setChosen] = useState<Set<string>>(() => new Set(existing?.assets.map((a) => a.id) ?? []));
   const [settings, setSettings] = useState<{ defaultFrequencyMonths: number } | null>(null);
@@ -400,8 +426,12 @@ function CoverModal({
 
   const covered = existing?.assets;
   useEffect(() => {
+    if (!customerId) {
+      setAssets(covered ?? []);
+      return;
+    }
     api
-      .get<{ rows: Asset[] }>(`/installed-assets?pageSize=200&customerId=${job.customer.id}&status=ACTIVE`)
+      .get<{ rows: Asset[] }>(`/installed-assets?pageSize=200&customerId=${customerId}&status=ACTIVE`)
       .then((d) => {
         // A machine already covered stays offered even if it has since left
         // the active register, so a modify never drops it unasked.
@@ -417,7 +447,7 @@ function CoverModal({
         setForm((f) => ({ ...f, frequencyMonths: s.defaultFrequencyMonths }));
       })
       .catch(() => {});
-  }, [job.customer.id, covered, existing]);
+  }, [customerId, covered, existing]);
 
   // An active contract's schedule is re-planned when its term or frequency moves.
   const active = existing?.status === 'ACTIVE';
@@ -503,8 +533,13 @@ function CoverModal({
         onSaved(existing.id);
         return;
       }
-      const created = await api.post<{ id: string }>('/service-contracts', { jobId: job.id, ...cover });
-      toast('ok', 'Cover set — activate it to write the schedule');
+      const created = await api.post<{ id: string }>('/service-contracts', {
+        ...(job
+          ? { jobId: job.id }
+          : { direct: { customerId, name: direct.name.trim(), contractValue: Number(direct.contractValue || 0), siteId: null } }),
+        ...cover,
+      });
+      toast('ok', job ? 'Cover set — activate it to write the schedule' : 'Contract made with its service job — activate it to write the schedule');
       onSaved(created.id);
     } catch (err) {
       setError(err);
@@ -514,18 +549,39 @@ function CoverModal({
 
   return (
     <Modal
-      title={existing ? `Modify service contract ${existing.number}` : `New service contract for ${job.number}`}
+      title={existing ? `Modify service contract ${existing.number}` : job ? `New service contract for ${job.number}` : 'New service contract'}
       onClose={onClose}
       wide
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={save} disabled={busy || chosen.size === 0 || endTooEarly}>
+          <button
+            className="btn btn-primary"
+            onClick={save}
+            disabled={busy || chosen.size === 0 || endTooEarly || (!job && !existing && (!customerId || direct.name.trim().length < 2 || !(Number(direct.contractValue) >= 0)))}
+          >
             {busy ? 'Saving…' : 'Save'}
           </button>
         </ModalFoot>
       }
     >
       <ErrorBox error={error} />
+
+      {!job && !existing && (
+        <>
+          <h4 className="svc-subhead">The contract</h4>
+          <div className="grid grid-3">
+            <Field label="Customer" hint="Its machines are offered below">
+              <CustomerPicker value={pickedCustomer} onChange={(c) => { setPickedCustomer(c); setChosen(new Set()); }} onError={setError} allowCreate={false} />
+            </Field>
+            <Field label="Contract name" hint="Names its service job too">
+              <input value={direct.name} placeholder="Annual PMS — oxygen plant" onChange={(e) => setDirect((d) => ({ ...d, name: e.target.value }))} />
+            </Field>
+            <Field label="Contract value (before VAT)" hint="Its job's contract value — costed later, if ever">
+              <NumberInput kind="money" min={0} step="0.01" value={direct.contractValue} onChange={(e) => setDirect((d) => ({ ...d, contractValue: e.target.value }))} />
+            </Field>
+          </div>
+        </>
+      )}
 
       <div className="grid grid-3">
         <Field
@@ -654,9 +710,11 @@ function CoverModal({
       <h4 className="svc-subhead">
         What is covered — {chosen.size} of {assets.length} selected
       </h4>
-      {assets.length === 0 ? (
+      {!customerId ? (
+        <div className="alert info">Pick the customer first — its machines on the Installation Base are offered here.</div>
+      ) : assets.length === 0 ? (
         <div className="alert warn">
-          Nothing is registered against {job.customer.name} in the installed base. Register the
+          Nothing is registered against {job?.customer.name ?? pickedCustomer?.name ?? 'this customer'} in the installed base. Register the
           equipment first — a contract covering nothing cannot be scheduled.
         </div>
       ) : (
@@ -1056,6 +1114,14 @@ export function ContractDetail() {
           or by a job order — is not part of the plan; neither is ever erased.
         </p>
       </div>
+
+      <Attachments
+        entityType="service_contract"
+        entityId={row.id}
+        title="Attachments"
+        hint="The signed agreement, the customer’s PO, the SLA"
+        canEdit={row.canEdit || can('gops.service_contracts.create')}
+      />
     </div>
   );
 }
