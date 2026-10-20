@@ -1732,6 +1732,26 @@ async function main() {
           undoEwt.status === 200 && money(num(fifthBack.ewtAmount), 200) && money(num(fifthBack.netCollectible), 11_000) && fifthBack.ewtAsBilled === null,
         `${tooMuchEwt.status} ${paidWithEwt.status} ${JSON.stringify(paidWithEwt.body).slice(0, 120)} ${fifthAfter.ewtAmount} ${fifthAfter.netCollectible} ${fifthAfter.status} · ${undoEwt.status} ${fifthBack.ewtAmount} ${fifthBack.netCollectible}`,
       );
+
+      // The statement of account (2026-10-20): the customer's open invoices as
+      // of a day, the last ninety days' collections, the total due.
+      const paper = async (path: string) => {
+        const r = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+        const bytes = r.ok ? Buffer.from(await r.arrayBuffer()) : null;
+        return { status: r.status, text: (bytes ? pdfText(bytes) : '').replace(/\s+/g, ' ') };
+      };
+      const soa = await paper(`/invoices/statement/${customer.id}/pdf`);
+      const soaText = soa.text;
+      const soaFuture = await paper(`/invoices/statement/${customer.id}/pdf?asOf=2999-01-01`);
+      const soaBefore = await paper(`/invoices/statement/${customer.id}/pdf?asOf=2000-01-01`);
+      const soaBeforeText = soaBefore.text;
+      check(
+        'the statement of account lists the customer’s open invoices with the balance, the collections of the last ninety days and the total due; as of a day long past it lists none; never a day to come',
+        soa.status === 200 && /STATEMENT OF ACCOUNT/i.test(soaText) && soaText.includes(String(fifth.body.number)) && soaText.includes('11,000.00') &&
+          /OPEN INVOICES/i.test(soaText) && /Total due/i.test(soaText) && /COLLECTIONS/i.test(soaText) &&
+          soaFuture.status === 400 && soaBefore.status === 200 && !soaBeforeText.includes(String(fifth.body.number)),
+        `${soa.status} ${soaFuture.status} ${soaBefore.status} ${soaText.slice(0, 300)}`,
+      );
     }
 
     const badDue = await api('POST', '/invoices', {

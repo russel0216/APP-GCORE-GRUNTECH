@@ -699,6 +699,160 @@ invoiceRoutes.get(
   }),
 );
 
+/**
+ * The STATEMENT OF ACCOUNT (2026-10-20, the owner's call): one customer's
+ * open invoices as of a day — each with what it was billed, the EWT, what is
+ * collectible, what was collected BY that day and the balance, and how late
+ * it is (never late until countered, the A/R rule) — then the collections of
+ * the ninety days to that day, and the total due. `?asOf=` (a day, today by
+ * default; never a day to come). Behind the A/R register's right; audited on
+ * the customer.
+ */
+invoiceRoutes.get(
+  '/statement/:customerId/pdf',
+  requireView('gfin', 'ar'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const customer = await prisma.customer.findUnique({
+      where: { id: req.params.customerId },
+      select: { id: true, code: true, name: true, legalName: true, tin: true, address: true, phone: true, email: true },
+    });
+    if (!customer) throw notFound('Customer not found');
+    const today = dayKey(new Date());
+    const asOf = req.query.asOf ? asDate(String(req.query.asOf), 'As of') : today;
+    if (asOf > today) throw badRequest('A statement is as of today or a day before');
+    const since = addDays(asOf, -90);
+    const currency = await companyCurrency();
+
+    const invoices = await prisma.invoice.findMany({
+      where: { customerId: customer.id, status: { in: ['ISSUED', 'PARTIALLY_PAID', 'PAID'] }, invoiceDate: { lte: asOf } },
+      select: {
+        id: true,
+        number: true,
+        siNumber: true,
+        status: true,
+        invoiceDate: true,
+        counteredDate: true,
+        dueDate: true,
+        invoiceTotal: true,
+        ewtAmount: true,
+        netCollectible: true,
+        allocations: { where: { payment: { paymentDate: { lte: asOf } } }, select: { amount: true } },
+      },
+      orderBy: { invoiceDate: 'asc' },
+    });
+    // What was owed on that day: collected BY it, an invoice countered after it
+    // not yet countered then.
+    const open = invoices
+      .map((i) => {
+        const collected = cents(i.allocations.reduce((t, a) => t + num(a.amount), 0));
+        const balance = cents(num(i.netCollectible) - collected);
+        const countered = i.counteredDate && i.counteredDate <= asOf ? i.counteredDate : null;
+        const late = daysLate({ status: 'ISSUED', counteredDate: countered, dueDate: i.dueDate, outstanding: balance }, asOf);
+        return { ...i, collected, balance, countered, late };
+      })
+      .filter((i) => i.balance > 0.005);
+    const total = cents(open.reduce((t, i) => t + i.balance, 0));
+    const overdue = cents(open.filter((i) => i.late > 0).reduce((t, i) => t + i.balance, 0));
+    const awaiting = cents(open.filter((i) => !i.countered).reduce((t, i) => t + i.balance, 0));
+
+    const collections = await prisma.payment.findMany({
+      where: { customerId: customer.id, kind: 'RECEIPT', paymentDate: { gte: since, lte: asOf } },
+      select: {
+        number: true,
+        orNumber: true,
+        paymentDate: true,
+        method: true,
+        reference: true,
+        amount: true,
+        importedFrom: true,
+        allocations: { select: { invoice: { select: { number: true, siNumber: true } } } },
+      },
+      orderBy: { paymentDate: 'asc' },
+    });
+
+    const sections: PdfSection[] = [
+      {
+        kind: 'blocks',
+        blocks: [
+          {
+            title: 'Statement for',
+            lines: [customer.legalName || customer.name, customer.address ?? '', customer.tin ? `TIN: ${customer.tin}` : '', [customer.phone, customer.email].filter(Boolean).join(' | ')].filter(
+              (l) => l.trim(),
+            ),
+          },
+          {
+            title: 'Summary',
+            lines: [
+              `As of ${formatDate(asOf)}`,
+              `Total due: ${formatMoney(total, currency)}`,
+              `Of it overdue: ${formatMoney(overdue, currency)}`,
+              ...(awaiting > 0.005 ? [`Awaiting countering: ${formatMoney(awaiting, currency)}`] : []),
+            ],
+          },
+        ],
+      },
+      {
+        kind: 'table',
+        title: 'Open invoices',
+        head: ['SI No.', 'Dated', 'Countered', 'Due', 'Days late', `Invoice total (${currency})`, `EWT (${currency})`, `Collected (${currency})`, `Balance (${currency})`],
+        align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'right', 'right'],
+        rows: open.map((i) => [
+          i.siNumber ? { title: i.siNumber, body: i.number } : i.number,
+          formatShortDate(i.invoiceDate),
+          i.countered ? formatShortDate(i.countered) : 'Not yet',
+          i.countered ? formatShortDate(i.dueDate) : 'Once countered',
+          i.late > 0 ? String(i.late) : '',
+          formatAmount(num(i.invoiceTotal)),
+          formatAmount(num(i.ewtAmount)),
+          formatAmount(i.collected),
+          formatAmount(i.balance),
+        ]),
+      },
+      {
+        kind: 'totals',
+        rows: [
+          ...(overdue > 0.005 ? [{ label: 'Of it overdue', value: formatMoney(overdue, currency) }] : []),
+          { label: 'Total due', value: formatMoney(total, currency), bold: true },
+        ],
+      },
+      {
+        kind: 'table',
+        title: `Collections, ${formatDate(since)} to ${formatDate(asOf)}`,
+        head: ['Date', 'OR No.', 'Method / reference', 'Applied to', `Amount (${currency})`],
+        align: ['left', 'left', 'left', 'left', 'right'],
+        rows: collections.map((p) => [
+          formatShortDate(p.paymentDate),
+          p.orNumber ?? (p.importedFrom ? 'SCORO' : p.number),
+          [statusLabel(p.method), p.reference].filter(Boolean).join(' · '),
+          p.allocations.map((a) => a.invoice?.siNumber ?? a.invoice?.number).filter(Boolean).join(', ') || 'On account',
+          formatAmount(num(p.amount)),
+        ]),
+      },
+      {
+        kind: 'text',
+        body: 'Withholding tax (EWT) is deducted from what is collectible: the balance is what is still to be paid after it. Please let us know of any difference.',
+      },
+    ];
+    const pdf = await renderDocument({
+      title: 'Statement of Account',
+      documentNumber: customer.code,
+      date: asOf,
+      reference: customer.name,
+      landscape: true,
+      sections,
+      signatories: [{ role: 'Prepared by', name: me.name, ...(await contactOf(me.id)), at: new Date() }],
+    });
+    await audit(
+      { entityType: 'customer', entityId: customer.id, action: 'EXPORTED', summary: `Printed the statement of account as of ${formatDate(asOf)} (${open.length} open invoice(s))` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Statement of Account', number: customer.code, author: me.name, date: asOf })));
+    res.send(pdf);
+  }),
+);
+
 invoiceRoutes.get(
   '/:id',
   requireView('gfin', 'ar'),

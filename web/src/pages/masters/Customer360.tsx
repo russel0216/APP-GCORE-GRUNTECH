@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ActivityLog } from '../../components/ActivityLog';
 import { useConfirm } from '../../components/Confirm';
@@ -294,6 +294,12 @@ export function Customer360Page() {
             to: `/g-ops/costing/new?customerId=${encodeURIComponent(customer.id)}`,
           },
           can('gops.job_orders.create') && { label: 'Request a job order', to: `/g-ops/job-orders?${forCustomer}` },
+          // Open invoices as of today, with the last ninety days' collections (2026-10-20).
+          can('gfin.ar.view_all') && {
+            label: 'Statement of account',
+            hint: 'Open invoices as of today and the last 90 days’ collections',
+            onSelect: () => openPdf(`/api/invoices/statement/${customer.id}/pdf`, (e) => setError(e)),
+          },
           mayEdit &&
             can('gops.customers.delete') && {
               label: 'Delete',

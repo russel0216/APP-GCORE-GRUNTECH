@@ -676,8 +676,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,556 assertions across twenty-two scripts** (counted 2026-10-20, after
-the owner's batch C of 2026-10-20 — 2 on delivery for the RFA's customer
+**4,557 assertions across twenty-two scripts** (counted 2026-10-20, after
+the owner's batch D of 2026-10-20 — one on finance for the statement of
+account — and before it batch C — 2 on delivery for the RFA's customer
 approval form and its record — and before it batch B — 2 on chain for the canvass reopened on
 a draft order and the Incoming paper's product group, 2 on finance for the
 reserved SI and the EWT a collection states — and before it batch A — 2 on chain for the RFQ paper that
@@ -764,7 +765,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 429, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
 94, partners 120, delivery 195, chain 365, hr 487, plantilla 129, meetings
-114, evaluations 154, academy 145, finance 436, aftermarket 304, cad 122,
+114, evaluations 154, academy 145, finance 437, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -5541,6 +5542,20 @@ but always in Gruntechnology Corporation Warehouse …"), built in batches.
   is held to `other` whatever is asked and gets a 404 on a customer
   collection (`mayReadPayment`). `splitBorrowedRights()` gave the new box
   once to every role holding `gfin.payments.view_all` or `gfin.ap.view_all`.
+
+### Batch D
+
+- **The Statement of Account** (item 9): `GET /invoices/statement/
+  :customerId/pdf?asOf=` (behind the A/R view right, above `/:id`, audited
+  on the customer; never a day to come) — landscape, a "Statement for"
+  block (the registered name, address, TIN, contact) beside a Summary
+  (total due, of it overdue, awaiting countering), **Open invoices** as of
+  the day (issued, partly paid or paid; collected BY that day — a payment
+  dated after it does not count — and the balance; countered only if by
+  that day; days late on the A/R rule, never late until countered), the
+  totals, and **Collections** of the ninety days to that day (OR No.,
+  method, the invoices applied to, "On account"), signed Prepared by.
+  Customer 360's ⋯ and the invoice page's ⋯ print it as of today.
 
 ### Batch C
 

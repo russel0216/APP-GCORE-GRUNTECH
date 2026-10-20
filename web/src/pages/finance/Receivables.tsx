@@ -1205,6 +1205,11 @@ export function InvoiceDetail() {
             label: 'Print without attachments',
             onSelect: () => openPdf(`/api/invoices/${row.id}/pdf?attachments=0`, () => toast('error', 'The invoice could not be printed')),
           },
+          {
+            label: `Statement of account — ${row.customer.name}`,
+            hint: 'The customer’s open invoices as of today and the last 90 days’ collections',
+            onSelect: () => openPdf(`/api/invoices/statement/${row.customer.id}/pdf`, () => toast('error', 'The statement could not be printed')),
+          },
           row.ewtAmount > 0 &&
             editable && {
               label: row.ewtCertificateNo ? 'Modify BIR 2307' : 'Record BIR 2307',
