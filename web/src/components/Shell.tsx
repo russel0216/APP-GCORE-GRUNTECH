@@ -80,22 +80,74 @@ export function Shell() {
     };
   }, [drawerOpen]);
 
-  async function loadNotifications() {
+  /*
+    The drawer pages through every notification, not only the newest 20
+    (help ticket GT-HT-2026-0013: older unread ones could not be reached).
+    "Unread" lists only those; "Load more" asks for the next page. The poll
+    refreshes what is already shown (as many rows as were loaded), so a
+    minute's tick never throws away the pages someone opened.
+  */
+  const NOTIF_PAGE = 20;
+  const [notifView, setNotifView] = useState<'all' | 'unread'>('all');
+  const [notifTotal, setNotifTotal] = useState(0);
+  const [notifLoading, setNotifLoading] = useState(false);
+  const shownRef = useRef(NOTIF_PAGE);
+  const viewRef = useRef(notifView);
+  viewRef.current = notifView;
+
+  async function loadNotifications(view = viewRef.current, count = shownRef.current) {
     try {
       const res = await api.get<ListResult<Notification> & { unread: number }>(
-        `/notifications${qs({ pageSize: 20 })}`,
+        `/notifications${qs({ pageSize: count > 200 ? 1 : count, unread: view === 'unread' ? 'true' : undefined })}`,
       );
-      setNotifications(res.rows);
+      if (view !== viewRef.current) return;
+      // Past 200 shown (the API's page limit) only the counts are refreshed.
+      if (count <= 200) setNotifications(res.rows);
+      setNotifTotal(res.total);
       setUnread(res.unread);
     } catch {
       /* the bell is not worth an error banner */
     }
   }
 
+  async function loadMoreNotifications() {
+    setNotifLoading(true);
+    try {
+      const view = viewRef.current;
+      const page = Math.floor(notifications.length / NOTIF_PAGE) + 1;
+      const res = await api.get<ListResult<Notification> & { unread: number }>(
+        `/notifications${qs({ pageSize: NOTIF_PAGE, page, unread: view === 'unread' ? 'true' : undefined })}`,
+      );
+      if (view !== viewRef.current) return;
+      setNotifications((list) => {
+        const seen = new Set(list.map((n) => n.id));
+        const next = [...list, ...res.rows.filter((n) => !seen.has(n.id))];
+        shownRef.current = Math.max(NOTIF_PAGE, next.length);
+        return next;
+      });
+      setNotifTotal(res.total);
+      setUnread(res.unread);
+    } catch {
+      /* the bell is not worth an error banner */
+    } finally {
+      setNotifLoading(false);
+    }
+  }
+
+  function switchNotifView(view: 'all' | 'unread') {
+    if (view === notifView) return;
+    viewRef.current = view;
+    setNotifView(view);
+    shownRef.current = NOTIF_PAGE;
+    setNotifications([]);
+    void loadNotifications(view, NOTIF_PAGE);
+  }
+
   useEffect(() => {
     void loadNotifications();
     const timer = setInterval(() => void loadNotifications(), 60_000);
     return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function openNotification(n: Notification) {
@@ -381,9 +433,32 @@ export function Shell() {
               Mark all read
             </button>
           </div>
+          <div className="notif-bar">
+            <div className="scope-switch" role="group" aria-label="Show">
+              <button
+                type="button"
+                className={notifView === 'all' ? 'active' : ''}
+                aria-pressed={notifView === 'all'}
+                onClick={() => switchNotifView('all')}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                className={notifView === 'unread' ? 'active' : ''}
+                aria-pressed={notifView === 'unread'}
+                onClick={() => switchNotifView('unread')}
+              >
+                Unread{unread > 0 ? ` (${unread})` : ''}
+              </button>
+            </div>
+            <span className="notif-count">
+              {notifications.length} of {notifTotal}
+            </span>
+          </div>
           {notifications.length === 0 ? (
             <div className="empty" style={{ padding: 'var(--s-7)' }}>
-              Nothing new
+              {notifView === 'unread' ? 'Nothing unread' : 'Nothing yet'}
             </div>
           ) : (
             notifications.map((n) => (
@@ -402,6 +477,18 @@ export function Shell() {
                 </div>
               </button>
             ))
+          )}
+          {notifications.length < notifTotal && (
+            <div className="notif-more">
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={notifLoading}
+                onClick={() => void loadMoreNotifications()}
+              >
+                {notifLoading ? 'Loading…' : `Load more (${notifTotal - notifications.length} older)`}
+              </button>
+            </div>
           )}
         </div>
       )}

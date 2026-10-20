@@ -3162,6 +3162,16 @@ leave the approver deciding on stale figures).
   table sums to the report's own totals — asserted. (It grouped by the
   customer's industry until 2026-10-08, when the industry became the team.)
 
+## The notification bell (2026-10-20)
+
+Help ticket GT-HT-2026-0013: the drawer showed the newest 20 only, so older
+unread notifications could not be reached. The drawer (`Shell.tsx`) now has
+an **All / Unread (n)** switch (`GET /notifications?unread=true`), says
+"n of total", and ends with **Load more (n older)**, the next page of 20.
+The minute's poll refreshes as many rows as were loaded (up to the API's
+200; past that only the counts), so it never discards pages someone opened.
+No API change: the route already paged and filtered.
+
 ## The Help box: help tickets (2026-10-11)
 
 The owner's call: "a help chat box so every user can raise a ticket for

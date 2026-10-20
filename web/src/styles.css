@@ -2109,6 +2109,27 @@ table.data .mono {
   margin-top: 3px;
 }
 
+/* All / Unread and the count over the list; "Load more" under it. */
+.notif-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-4);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.notif-count {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.notif-more {
+  display: flex;
+  justify-content: center;
+  padding: var(--s-3);
+}
+
 /* ─────────────────────────────── Messages ──────────────────────────────── */
 
 .alert {
