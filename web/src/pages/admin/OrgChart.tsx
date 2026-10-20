@@ -276,7 +276,7 @@ export function useOrgPeople(): { people: Person[] | null; error: unknown } {
 }
 
 /** A role as the chart reads it (`GET /roles/chart`). */
-interface ChartRole {
+export interface ChartRole {
   id: string;
   key: string;
   name: string;
@@ -285,7 +285,7 @@ interface ChartRole {
   alsoReportsToRoleIds: string[];
 }
 
-interface RoleNode {
+export interface RoleNode {
   role: ChartRole;
   children: RoleNode[];
 }
@@ -297,7 +297,7 @@ interface RoleNode {
  * (the Warehouse Supervisor to both Purchasing Managers) is drawn under the
  * first and names the others on its tile.
  */
-function roleForest(roles: ChartRole[]): RoleNode[] {
+export function roleForest(roles: ChartRole[]): RoleNode[] {
   const nodes = new Map(roles.map((r) => [r.id, { role: r, children: [] as RoleNode[] }]));
   const roots: RoleNode[] = [];
   for (const r of roles) {

@@ -214,7 +214,7 @@ export function Users() {
             aria-pressed={view === 'hierarchy'}
             onClick={() => showView('hierarchy')}
           >
-            Hierarchy
+            Hierarchy Chart
           </button>
           <button type="button" className={view === 'tree' ? 'active' : ''} aria-pressed={view === 'tree'} onClick={() => showView('tree')}>
             Organizational Chart

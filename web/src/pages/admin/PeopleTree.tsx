@@ -1,27 +1,25 @@
-import { useMemo, useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { levelLabel } from '../../lib/roleLevels';
-import { Avatar, Empty, ErrorBox, Loading } from '../../components/ui';
-import { buildForest, useOrgPeople, type Node } from './OrgChart';
+import { Empty, ErrorBox, Loading } from '../../components/ui';
+import { roleForest, type ChartRole, type RoleNode } from './OrgChart';
 
 /*
-  The people hierarchy (2026-10-19, the owner's call: "remove the department,
-  create a hierarchy"): everyone under whoever they report to, as an outline
-  that opens and closes — the Organizational Chart's own forest (`buildForest`,
-  from "Reports to"), read as a list. Each line says the person's title (their
-  highest role), its level, their team and how many report to them.
+  The Hierarchy Chart (2026-10-20, the owner's call: "it should be Hierarchy
+  Chart, where the Admin › Roles › Hierarchy settings reflect — no name or
+  person"): the ROLES under the roles they report to, as an outline that opens
+  and closes, each with its level and any other role it also reports to. No
+  person is named here; who holds a role is the Organizational Chart's.
 */
 
-/** Everyone in a branch, for the search: a match keeps its managers on screen. */
-function matches(node: Node, term: string): boolean {
-  const p = node.person;
-  const hay = [p.name, p.title ?? p.position ?? '', p.team?.code ?? ''].join(' ').toLowerCase();
-  return hay.includes(term) || node.reports.some((r) => matches(r, term));
+function matches(node: RoleNode, term: string): boolean {
+  return node.role.name.toLowerCase().includes(term) || node.children.some((c) => matches(c, term));
 }
 
-function countAll(node: Node): number {
-  return node.reports.reduce((n, r) => n + 1 + countAll(r), 0);
+function countAll(node: RoleNode): number {
+  return node.children.reduce((n, c) => n + 1 + countAll(c), 0);
 }
 
 function Line({
@@ -30,31 +28,31 @@ function Line({
   open,
   toggle,
   term,
-  meId,
-  search,
+  names,
 }: {
-  node: Node;
+  node: RoleNode;
   depth: number;
   open: Set<string>;
   toggle: (id: string) => void;
   term: string;
-  meId?: string;
-  search: string;
+  names: Map<string, string>;
 }) {
-  const p = node.person;
-  const reports = term ? node.reports.filter((r) => matches(r, term)) : node.reports;
-  const expanded = !!term || open.has(p.id);
-  const rank = (p.roles ?? []).reduce<number | null>((best, r) => (r.rank != null && (best == null || r.rank < best) ? r.rank : best), null);
+  const r = node.role;
+  const children = term ? node.children.filter((c) => matches(c, term)) : node.children;
+  const expanded = !!term || open.has(r.id);
+  const also = (r.reportsToRoleId ? r.alsoReportsToRoleIds : r.alsoReportsToRoleIds.slice(1))
+    .map((id) => names.get(id))
+    .filter(Boolean);
   return (
     <li className="ptree-item" aria-level={depth + 1}>
       <div className="ptree-line">
-        {node.reports.length > 0 ? (
+        {node.children.length > 0 ? (
           <button
             type="button"
             className="ptree-toggle"
             aria-expanded={expanded}
-            aria-label={`${expanded ? 'Close' : 'Open'} ${p.name}'s reports`}
-            onClick={() => toggle(p.id)}
+            aria-label={`${expanded ? 'Close' : 'Open'} the roles under ${r.name}`}
+            onClick={() => toggle(r.id)}
             disabled={!!term}
           >
             {expanded ? '▾' : '▸'}
@@ -62,28 +60,19 @@ function Line({
         ) : (
           <span className="ptree-toggle ptree-leaf" aria-hidden="true" />
         )}
-        <Avatar name={p.name} photoId={p.photoPath} size={28} />
-        <Link to={`/admin/users/${p.id}${search}`} className="ptree-name">
-          {p.name}
-          {p.id === meId && <span className="faint"> (you)</span>}
-        </Link>
-        <span className="ptree-title">{p.title ?? p.position ?? '—'}</span>
-        {rank != null && <span className="badge">{levelLabel(rank)}</span>}
-        {p.team && (
-          <span className="badge info" title={p.team.name}>
-            {p.team.code}
-          </span>
-        )}
-        {node.reports.length > 0 && (
+        <span className="ptree-name">{r.name}</span>
+        {r.rank != null && <span className="badge">{levelLabel(r.rank)}</span>}
+        {also.length > 0 && <span className="ptree-title">Also reports to {also.join(' and ')}</span>}
+        {node.children.length > 0 && (
           <span className="faint ptree-count">
-            {node.reports.length} direct · {countAll(node)} in all
+            {node.children.length} direct · {countAll(node)} in all
           </span>
         )}
       </div>
-      {expanded && reports.length > 0 && (
+      {expanded && children.length > 0 && (
         <ul className="ptree-list">
-          {reports.map((r) => (
-            <Line key={r.person.id} node={r} depth={depth + 1} open={open} toggle={toggle} term={term} meId={meId} search={search} />
+          {children.map((c) => (
+            <Line key={c.role.id} node={c} depth={depth + 1} open={open} toggle={toggle} term={term} names={names} />
           ))}
         </ul>
       )}
@@ -92,28 +81,31 @@ function Line({
 }
 
 export function PeopleTree() {
-  const { me } = useAuth();
-  const location = useLocation();
-  const { people, error } = useOrgPeople();
-  const forest = useMemo(() => (people ? buildForest(people) : []), [people]);
-  // The top two levels open to start with; everything below is a click away.
+  const { can } = useAuth();
+  const [roles, setRoles] = useState<ChartRole[] | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  useEffect(() => {
+    api.get<ChartRole[]>('/roles/chart').then(setRoles).catch(setError);
+  }, []);
+  const forest = useMemo(() => (roles ? roleForest(roles) : []), [roles]);
+  const names = useMemo(() => new Map((roles ?? []).map((r) => [r.id, r.name])), [roles]);
   const [open, setOpen] = useState<Set<string> | null>(null);
   const [q, setQ] = useState('');
-  const initial = useMemo(() => new Set(forest.flatMap((h) => [h.person.id, ...h.reports.map((r) => r.person.id)])), [forest]);
-  const opened = open ?? initial;
   const all = useMemo(() => {
     const ids: string[] = [];
-    const walk = (n: Node) => {
-      if (n.reports.length) ids.push(n.person.id);
-      n.reports.forEach(walk);
+    const walk = (n: RoleNode) => {
+      if (n.children.length) ids.push(n.role.id);
+      n.children.forEach(walk);
     };
     forest.forEach(walk);
     return ids;
   }, [forest]);
+  // Everything open to start with: a role chart is small enough to read whole.
+  const opened = open ?? new Set(all);
 
   if (error) return <ErrorBox error={error} />;
-  if (!people) return <Loading />;
-  if (forest.length === 0) return <Empty title="Nobody to show yet" hint="Add users, then set who each reports to." />;
+  if (!roles) return <Loading />;
+  if (forest.length === 0) return <Empty title="No roles yet" hint="Add roles in Admin › Roles." />;
 
   const term = q.trim().toLowerCase();
   const toggle = (id: string) => {
@@ -127,7 +119,7 @@ export function PeopleTree() {
   return (
     <div className="card">
       <div className="card-head">
-        <h3 className="card-title">Hierarchy</h3>
+        <h3 className="card-title">Hierarchy Chart</h3>
         <div className="row">
           <button type="button" className="btn btn-sm" onClick={() => setOpen(new Set(all))}>
             Open all
@@ -138,23 +130,23 @@ export function PeopleTree() {
         </div>
       </div>
       <p className="muted">
-        Everyone under the person they <strong>Report to</strong> — the line their approvals follow — with their title (the
-        highest of their roles) and its level. Open anyone to change it.
+        Each role under the role it reports to, as set in{' '}
+        {can('admin.roles.view_all') ? <Link to="/admin/roles?view=hierarchy">Roles › Hierarchy</Link> : 'Roles › Hierarchy'}.
       </p>
       <input
         type="search"
         className="ptree-search"
-        placeholder="Find a person, title or team…"
-        aria-label="Find a person, title or team"
+        placeholder="Find a role…"
+        aria-label="Find a role"
         value={q}
         onChange={(e) => setQ(e.target.value)}
       />
       {heads.length === 0 ? (
-        <Empty title="Nobody matches" />
+        <Empty title="No role matches" />
       ) : (
         <ul className="ptree-list ptree-root" role="list">
           {heads.map((h) => (
-            <Line key={h.person.id} node={h} depth={0} open={opened} toggle={toggle} term={term} meId={me?.user.id} search={location.search} />
+            <Line key={h.role.id} node={h} depth={0} open={opened} toggle={toggle} term={term} names={names} />
           ))}
         </ul>
       )}

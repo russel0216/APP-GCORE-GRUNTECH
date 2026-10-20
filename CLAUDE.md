@@ -4079,14 +4079,13 @@ hierarchy" — department removed EVERYWHERE, and both hierarchies.
   groups. Admin › Users' Access tab ticks roles under their level, and
   Admin › Roles lists its cards under their level; the role form's "Level
   on the chart" names them.
-- **The people hierarchy**: Admin › Users › **Hierarchy** (`?view=
-  hierarchy`, `pages/admin/PeopleTree.tsx`) — everyone under the person
-  they report to, as an outline that opens and closes (Open all / Close
-  all, a search that keeps a match's managers on screen), each line the
-  title (highest role), its level, the team and how many report to them.
-  It is the Organizational Chart's forest (`buildForest`, exported) read
-  through `useOrgPeople()` in `OrgChart.tsx` — still the one screen that
-  reads the admin `/users?pageSize` list.
+- **The Hierarchy Chart**: Admin › Users › **Hierarchy Chart** (`?view=
+  hierarchy`, `pages/admin/PeopleTree.tsx`; 2026-10-20, the owner's call:
+  "the Roles › Hierarchy settings reflect — no name or person") — the
+  ROLES under the roles they report to (`GET /roles/chart`, `roleForest`
+  exported from `OrgChart.tsx`), an outline that opens and closes, each
+  line the role, its level and "Also reports to …". No person is named;
+  who holds a role is the Organizational Chart's.
 - **The Organizational Chart has two sides** (2026-10-19, the owner's
   call): under the head, **BOSS — Business and Operation Support
   Services** (the direct reports with no selling team) on the left and the
