@@ -275,10 +275,141 @@ export function useOrgPeople(): { people: Person[] | null; error: unknown } {
   return { people, error };
 }
 
+/** A role as the chart reads it (`GET /roles/chart`). */
+interface ChartRole {
+  id: string;
+  key: string;
+  name: string;
+  rank: number | null;
+  reportsToRoleId: string | null;
+  alsoReportsToRoleIds: string[];
+}
+
+interface RoleNode {
+  role: ChartRole;
+  children: RoleNode[];
+}
+
+/**
+ * The roles as Admin › Roles › Hierarchy arranges them (2026-10-20, the
+ * owner's call): each role's tile under the role it reports to, its holders'
+ * pictures on it, "Vacant" where nobody holds it. A role reporting to two
+ * (the Warehouse Supervisor to both Purchasing Managers) is drawn under the
+ * first and names the others on its tile.
+ */
+function roleForest(roles: ChartRole[]): RoleNode[] {
+  const nodes = new Map(roles.map((r) => [r.id, { role: r, children: [] as RoleNode[] }]));
+  const roots: RoleNode[] = [];
+  for (const r of roles) {
+    const parentId = r.reportsToRoleId ?? r.alsoReportsToRoleIds[0];
+    const parent = parentId ? nodes.get(parentId) : undefined;
+    if (parent && parentId !== r.id) parent.children.push(nodes.get(r.id)!);
+    else roots.push(nodes.get(r.id)!);
+  }
+  // A loop saved before the check existed would hide its roles; break it.
+  const placed = new Set<string>();
+  const walk = (n: RoleNode) => {
+    placed.add(n.role.id);
+    n.children = n.children.filter((c) => !placed.has(c.role.id));
+    n.children.forEach(walk);
+  };
+  roots.forEach(walk);
+  for (const n of nodes.values()) if (!placed.has(n.role.id)) { roots.push(n); walk(n); }
+  return roots;
+}
+
+function RoleTile({ node, holders, names, meId, search }: { node: RoleNode; holders: Person[]; names: Map<string, string>; meId?: string; search: string }) {
+  const r = node.role;
+  const also = [r.reportsToRoleId ? r.alsoReportsToRoleIds : r.alsoReportsToRoleIds.slice(1)]
+    .flat()
+    .map((id) => names.get(id))
+    .filter(Boolean);
+  return (
+    <span className="org-person">
+      {holders.length === 0 ? (
+        <span className="org-card is-vacant">
+          <span className="org-card-text">
+            <span className="org-position">{r.name}</span>
+            <span className="org-name">Vacant</span>
+          </span>
+        </span>
+      ) : (
+        holders.map((p) => (
+          <Link key={p.id} to={`/admin/users/${p.id}${search}`} className={`org-card${KEY_ROLES.has(r.key) ? ' is-key' : ''}`}>
+            <Avatar name={p.name} photoId={p.photoPath} size={36} />
+            <span className="org-card-text">
+              {p.team && (
+                <span className="org-team" title={p.team.name}>
+                  {p.team.code}
+                </span>
+              )}
+              <span className="org-position">{r.name}</span>
+              <span className="org-name">
+                {p.name}
+                {p.id === meId && <span className="org-you"> (you)</span>}
+              </span>
+            </span>
+          </Link>
+        ))
+      )}
+      {also.length > 0 && <span className="org-also">Also reports to {also.join(' and ')}</span>}
+    </span>
+  );
+}
+
+function RoleBranch(props: { node: RoleNode; byRole: Map<string, Person[]>; names: Map<string, string>; meId?: string; search: string }) {
+  const { node, byRole } = props;
+  return (
+    <li className="org-row-item">
+      <RoleTile {...props} holders={byRole.get(node.role.key) ?? []} />
+      {node.children.length > 0 && (
+        <ul className="org-row">
+          {node.children.map((c) => (
+            <RoleBranch key={c.role.id} {...props} node={c} />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+function RoleChart({ people, meId, search, onReady }: { people: Person[]; meId?: string; search: string; onReady: () => void }) {
+  const [roles, setRoles] = useState<ChartRole[] | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  useEffect(() => {
+    api.get<ChartRole[]>('/roles/chart').then(setRoles).catch(setError);
+  }, []);
+  // Fit the canvas once the tiles are on it.
+  useEffect(() => {
+    if (roles) requestAnimationFrame(onReady);
+  }, [roles, onReady]);
+  const byRole = useMemo(() => {
+    const m = new Map<string, Person[]>();
+    for (const p of people) for (const r of p.roles ?? []) m.set(r.key, [...(m.get(r.key) ?? []), p]);
+    for (const list of m.values()) list.sort((a, b) => teamRank(a.team?.code) - teamRank(b.team?.code) || a.name.localeCompare(b.name));
+    return m;
+  }, [people]);
+  if (error) return <ErrorBox error={error} />;
+  if (!roles) return <Loading />;
+  const names = new Map(roles.map((r) => [r.id, r.name]));
+  const forest = roleForest(roles);
+  return (
+    <div className="org-tree">
+      <ul className="org-row">
+        {forest.map((n) => (
+          <RoleBranch key={n.role.id} node={n} byRole={byRole} names={names} meId={meId} search={search} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function OrgChart() {
   const { me } = useAuth();
   const location = useLocation();
   const { people, error } = useOrgPeople();
+  // By role is the chart (2026-10-20); by person is the "Reports to" lines.
+  const [byPerson, setByPerson] = useState(false);
 
   const forest = useMemo(() => (people ? buildForest(people) : []), [people]);
 
@@ -304,6 +435,9 @@ export function OrgChart() {
     fitted.current = true;
     fit();
   });
+  useEffect(() => {
+    requestAnimationFrame(fit);
+  }, [byPerson, fit]);
 
   if (error) return <ErrorBox error={error} />;
   if (!people) return <Loading />;
@@ -311,9 +445,28 @@ export function OrgChart() {
 
   return (
     <div className="card org-card-wrap">
+      <div className="row org-switch">
+        <div className="scope-switch">
+          <button type="button" className={byPerson ? '' : 'active'} aria-pressed={!byPerson} onClick={() => setByPerson(false)}>
+            By role
+          </button>
+          <button type="button" className={byPerson ? 'active' : ''} aria-pressed={byPerson} onClick={() => setByPerson(true)}>
+            By person
+          </button>
+        </div>
+      </div>
       <p className="muted org-lead">
-        Drawn from each person's <strong>Reports to</strong> — the same line their leave, overtime and other approvals
-        follow. Open anyone to change it.
+        {byPerson ? (
+          <>
+            Drawn from each person's <strong>Reports to</strong> — the same line their leave, overtime and other approvals
+            follow. Open anyone to change it.
+          </>
+        ) : (
+          <>
+            Each role under the role it reports to, as set on <strong>Roles &amp; Permissions › Hierarchy</strong>, with
+            the people who hold it. A role nobody holds reads <strong>Vacant</strong>.
+          </>
+        )}
       </p>
       <div className="org-zoom" role="group" aria-label="Zoom">
         <button type="button" className="btn btn-sm" onClick={() => setZoom((z) => Math.max(0.2, +(z - 0.1).toFixed(2)))} aria-label="Zoom out">
@@ -332,12 +485,14 @@ export function OrgChart() {
       </div>
       <div className="org-scroll" ref={outer}>
         <div className="org-canvas" ref={inner} style={{ zoom }}>
-          {trees.map((t) => (
-            <Tree key={t.person.id} head={t} meId={me?.user.id} search={location.search} />
-          ))}
+          {byPerson ? (
+            trees.map((t) => <Tree key={t.person.id} head={t} meId={me?.user.id} search={location.search} />)
+          ) : (
+            <RoleChart people={people} meId={me?.user.id} search={location.search} onReady={fit} />
+          )}
         </div>
       </div>
-      {loose.length > 0 && (
+      {byPerson && loose.length > 0 && (
         <div className="org-loose">
           <h3 className="card-title">Not placed yet</h3>
           <p className="muted">

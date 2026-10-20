@@ -741,3 +741,11 @@
 .pm-select.pm-all {
   border-color: var(--ok);
 }
+
+/* The role chart's note on a role reporting to more than one (2026-10-20). */
+.org-also {
+  grid-column: 1 / -1;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  text-align: center;
+}

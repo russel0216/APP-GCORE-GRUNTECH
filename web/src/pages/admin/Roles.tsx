@@ -16,6 +16,7 @@ interface Role {
   rank: number | null;
   /** The role it reports to (Hierarchy). */
   reportsToRoleId: string | null;
+  alsoReportsToRoleIds?: string[];
   isSystem: boolean;
   /** Who made it — Edit Own reads it (2026-10-18). */
   createdById: string | null;
@@ -115,7 +116,7 @@ export function Roles() {
         </div>
       </div>
 
-      {view === 'hierarchy' && <RoleHierarchy key={roles.map((r) => r.reportsToRoleId).join()} roles={roles} onSaved={() => void load()} />}
+      {view === 'hierarchy' && <RoleHierarchy key={roles.map((r) => `${r.reportsToRoleId}:${(r.alsoReportsToRoleIds ?? []).join('+')}`).join()} roles={roles} onSaved={() => void load()} />}
 
       {view === 'matrix' && catalog && <PermissionMatrix roles={roles} catalog={catalog} onSaved={() => void load()} />}
 

@@ -3,12 +3,14 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ErrorBox, useToast } from '../../components/ui';
 import { rolesByLevel } from '../../lib/roleLevels';
+import { TickPicker } from '../../components/TickPicker';
 
 interface HRole {
   id: string;
   name: string;
   rank: number | null;
   reportsToRoleId: string | null;
+  alsoReportsToRoleIds?: string[];
   userCount: number;
 }
 
@@ -30,17 +32,22 @@ export function RoleHierarchy({ roles, onSaved }: { roles: HRole[]; onSaved: () 
   const [parent, setParent] = useState<Record<string, string>>(() =>
     Object.fromEntries(roles.map((r) => [r.id, r.reportsToRoleId ?? ''])),
   );
+  const [also, setAlso] = useState<Record<string, string[]>>(() =>
+    Object.fromEntries(roles.map((r) => [r.id, r.alsoReportsToRoleIds ?? []])),
+  );
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<ApplyResult | null>(null);
-  const dirty = roles.some((r) => (r.reportsToRoleId ?? '') !== parent[r.id]);
+  const dirty = roles.some(
+    (r) => (r.reportsToRoleId ?? '') !== parent[r.id] || (r.alsoReportsToRoleIds ?? []).join() !== also[r.id].join(),
+  );
   const levels = useMemo(() => rolesByLevel(roles), [roles]);
 
   const save = async () => {
     setBusy(true);
     try {
       await api.put('/roles/hierarchy', {
-        roles: roles.map((r) => ({ id: r.id, reportsToRoleId: parent[r.id] || null })),
+        roles: roles.map((r) => ({ id: r.id, reportsToRoleId: parent[r.id] || null, alsoReportsToRoleIds: also[r.id] })),
       });
       toast('ok', 'Hierarchy saved');
       setError(null);
@@ -91,12 +98,13 @@ export function RoleHierarchy({ roles, onSaved }: { roles: HRole[]; onSaved: () 
               <th>Role</th>
               <th>People</th>
               <th>Reports to (role)</th>
+              <th>Also reports to</th>
             </tr>
           </thead>
           <tbody>
             {levels.flatMap((level) => [
               <tr key={level.label}>
-                <td colSpan={3} className="svc-subhead">{level.label}</td>
+                <td colSpan={4} className="svc-subhead">{level.label}</td>
               </tr>,
               ...level.roles.map((r) => (
                 <tr key={r.id}>
@@ -114,6 +122,20 @@ export function RoleHierarchy({ roles, onSaved }: { roles: HRole[]; onSaved: () 
                         <option key={o.id} value={o.id}>{o.name}</option>
                       ))}
                     </select>
+                  </td>
+                  <td>
+                    {editable ? (
+                      <TickPicker
+                        label={`${r.name} also reports to`}
+                        none="— none —"
+                        noun="roles"
+                        choices={roles.filter((o) => o.id !== r.id && o.id !== parent[r.id]).map((o) => ({ value: o.id, label: o.name }))}
+                        value={also[r.id]}
+                        onChange={(v) => setAlso((a) => ({ ...a, [r.id]: v }))}
+                      />
+                    ) : (
+                      also[r.id].map((id) => roles.find((o) => o.id === id)?.name).filter(Boolean).join(', ') || '—'
+                    )}
                   </td>
                 </tr>
               )),

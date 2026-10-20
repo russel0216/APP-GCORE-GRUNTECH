@@ -230,6 +230,10 @@ model Role {
   reportsToRoleId String?
   reportsToRole   Role?   @relation("RoleHierarchy", fields: [reportsToRoleId], references: [id], onDelete: SetNull)
   reportingRoles  Role[]  @relation("RoleHierarchy")
+  /// Further roles it also reports to (2026-10-20, the owner's call: the
+  /// Warehouse Supervisor reports to both Purchasing Managers). Drawn on the
+  /// role chart; "Apply to people" writes the first parent only.
+  alsoReportsToRoleIds String[] @default([])
 
   permissions            RolePermission[]
   plantilla              Position[]         @relation("PositionRole")

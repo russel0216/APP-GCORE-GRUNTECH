@@ -4032,6 +4032,16 @@ login's "Reports to" from their highest role that has a parent: the parent
 role's only holder, or the one on the same team; anyone it cannot decide is
 listed and left alone; each move audited on the user. The engine still reads
 `User.supervisorId` — the role hierarchy feeds it, never replaces it.
+**A role may report to more than one** (2026-10-20, the owner's call: the
+Warehouse Supervisor reports to both Purchasing Managers):
+`Role.alsoReportsToRoleIds` ("Also reports to", a `TickPicker` on the
+Hierarchy tab, in the same PUT and cycle check); "Apply to people" writes the
+first parent only, since a person has one "Reports to". **The Organizational
+Chart opens By role** (`RoleChart` in `OrgChart.tsx`, `GET /roles/chart`
+behind Admin › Users' view right): each role's tile under its first parent
+role, a tile per holder with picture and team, "Vacant" where nobody holds
+it, "Also reports to …" naming the other parents; "By person" is the
+"Reports to" chart as before.
 
 ### No departments; a hierarchy instead (2026-10-19)
 

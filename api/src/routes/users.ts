@@ -826,6 +826,7 @@ roleRoutes.get(
         name: r.name,
         rank: r.rank,
         reportsToRoleId: r.reportsToRoleId,
+        alsoReportsToRoleIds: r.alsoReportsToRoleIds,
         description: r.description,
         isSystem: r.isSystem,
         createdById: r.createdById,
@@ -989,7 +990,7 @@ roleRoutes.put(
  * the person as they are and are named. A dry run answers what would change.
  */
 const hierarchySchema = z.object({
-  roles: z.array(z.object({ id: z.string(), reportsToRoleId: z.string().nullable() })).max(300),
+  roles: z.array(z.object({ id: z.string(), reportsToRoleId: z.string().nullable(), alsoReportsToRoleIds: z.array(z.string()).max(10).optional() })).max(300),
 });
 
 roleRoutes.put(
@@ -997,26 +998,32 @@ roleRoutes.put(
   require_('admin.roles.edit_all'),
   handler(async (req, res) => {
     const body = parseBody(hierarchySchema, req.body);
-    const all = await prisma.role.findMany({ select: { id: true, name: true, reportsToRoleId: true, rank: true } });
+    const all = await prisma.role.findMany({ select: { id: true, name: true, reportsToRoleId: true, alsoReportsToRoleIds: true, rank: true } });
     const byId = new Map(all.map((r) => [r.id, r]));
-    const parent = new Map(all.map((r) => [r.id, r.reportsToRoleId]));
+    const parents = new Map(all.map((r) => [r.id, [r.reportsToRoleId, ...r.alsoReportsToRoleIds].filter(Boolean) as string[]]));
+    const alsoOf = (r: (typeof body.roles)[number]) =>
+      [...new Set((r.alsoReportsToRoleIds ?? byId.get(r.id)?.alsoReportsToRoleIds ?? []).filter((x) => x !== r.reportsToRoleId && x !== r.id))];
     for (const r of body.roles) {
       if (!byId.has(r.id)) throw badRequest('A role in the hierarchy was not found');
-      if (r.reportsToRoleId && !byId.has(r.reportsToRoleId)) throw badRequest('A "Reports to" role was not found');
-      parent.set(r.id, r.reportsToRoleId);
+      const ps = [r.reportsToRoleId, ...alsoOf(r)].filter(Boolean) as string[];
+      if (ps.some((p) => !byId.has(p))) throw badRequest('A "Reports to" role was not found');
+      parents.set(r.id, ps);
     }
-    for (const r of all) {
-      const seen = new Set<string>();
-      let at: string | null | undefined = r.id;
-      while (at) {
-        if (seen.has(at)) throw badRequest(`${r.name} would end up reporting to itself`);
-        seen.add(at);
-        at = parent.get(at) ?? null;
-      }
-    }
-    const changed = body.roles.filter((r) => (byId.get(r.id)!.reportsToRoleId ?? null) !== r.reportsToRoleId);
+    // No role may reach itself through any of its parents.
+    const visit = (id: string, path: Set<string>): void => {
+      if (path.has(id)) throw badRequest(`${byId.get(id)!.name} would end up reporting to itself`);
+      path.add(id);
+      for (const p of parents.get(id) ?? []) visit(p, path);
+      path.delete(id);
+    };
+    for (const r of all) visit(r.id, new Set());
+    const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+    const changed = body.roles.filter((r) => {
+      const was = byId.get(r.id)!;
+      return (was.reportsToRoleId ?? null) !== r.reportsToRoleId || !same(was.alsoReportsToRoleIds, alsoOf(r));
+    });
     await prisma.$transaction(
-      changed.map((r) => prisma.role.update({ where: { id: r.id }, data: { reportsToRoleId: r.reportsToRoleId } })),
+      changed.map((r) => prisma.role.update({ where: { id: r.id }, data: { reportsToRoleId: r.reportsToRoleId, alsoReportsToRoleIds: alsoOf(r) } })),
     );
     for (const r of changed) {
       const role = byId.get(r.id)!;
@@ -1025,14 +1032,27 @@ roleRoutes.put(
           entityType: 'role',
           entityId: r.id,
           action: 'UPDATED',
-          summary: `Hierarchy: ${role.name} reports to ${r.reportsToRoleId ? byId.get(r.reportsToRoleId)!.name : 'no role'}`,
-          before: { reportsToRoleId: role.reportsToRoleId },
-          after: { reportsToRoleId: r.reportsToRoleId },
+          summary: `Hierarchy: ${role.name} reports to ${[r.reportsToRoleId, ...alsoOf(r)].filter(Boolean).map((p) => byId.get(p!)!.name).join(' and ') || 'no role'}`,
+          before: { reportsToRoleId: role.reportsToRoleId, alsoReportsToRoleIds: role.alsoReportsToRoleIds },
+          after: { reportsToRoleId: r.reportsToRoleId, alsoReportsToRoleIds: alsoOf(r) },
         },
         req,
       );
     }
     res.json({ changed: changed.length });
+  }),
+);
+
+/** The roles for the Organizational Chart (Admin › Users' right, not Roles'). */
+roleRoutes.get(
+  '/chart',
+  requireView('admin', 'users'),
+  handler(async (_req, res) => {
+    const roles = await prisma.role.findMany({
+      select: { id: true, key: true, name: true, rank: true, sortOrder: true, reportsToRoleId: true, alsoReportsToRoleIds: true },
+      orderBy: [{ rank: 'asc' }, { sortOrder: 'asc' }, { name: 'asc' }],
+    });
+    res.json(roles);
   }),
 );
 
