@@ -23,10 +23,11 @@ import {
 import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { attachedFiles, copyAttachments, withAttachments } from '../shared/pdfAttachments';
 import { registerSearch } from '../shared/search';
-import { renderDocument, formatDate, formatMoney, formatShortDate, statusLabel, companyCurrency, type PdfSection, type Signatory } from '../shared/pdf';
+import { renderDocument, formatDate, formatDateTime, formatMoney, formatShortDate, statusLabel, companyCurrency, type PdfSection, type Signatory } from '../shared/pdf';
 import { LIST_CAP, listReference, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { visibleOwners } from '../shared/team';
+import { dayKey } from '../shared/day';
 
 /**
  * REQUEST FOR APPROVAL (2026-10-13, the owner's call: "replace the Approved
@@ -65,8 +66,18 @@ const planInclude = {
     },
   },
   uploadedBy: { select: { id: true, name: true, email: true, position: true } },
+  customerRecordedBy: { select: { id: true, name: true } },
   cadJobOrder: { select: { id: true, number: true, title: true } },
 } satisfies Prisma.ApprovedPlanInclude;
+
+/** The customer's answer to an approved request (2026-10-20). */
+export const CUSTOMER_DECISIONS = ['APPROVED', 'APPROVED_AS_NOTED', 'REVISE'] as const;
+export const CUSTOMER_DECISION_LABEL: Record<(typeof CUSTOMER_DECISIONS)[number], string> = {
+  APPROVED: 'Approved',
+  APPROVED_AS_NOTED: 'Approved as noted',
+  REVISE: 'Revise and resubmit',
+};
+const decisionLabel = (d: string | null) => (d ? (CUSTOMER_DECISION_LABEL[d as keyof typeof CUSTOMER_DECISION_LABEL] ?? d) : null);
 
 type PlanRow = Prisma.ApprovedPlanGetPayload<{ include: typeof planInclude }>;
 
@@ -110,6 +121,9 @@ async function present(me: ResolvedUser, row: PlanRow) {
     canWithdraw: row.status === 'PENDING_APPROVAL' && editor,
     canCancel: (editable || row.status === 'PENDING_APPROVAL') && editor,
     canDelete: (editable || row.status === 'CANCELLED') && editor && can(me, 'gops.plans.delete'),
+    // POST /:id/customer's rule: once the team approved it, its requester or edit_all.
+    canRecordCustomer: row.status === 'APPROVED' && editor,
+    customerDecisionLabel: decisionLabel(row.customerDecision),
     // The route a draft WOULD take, by name — the project's contract value
     // picks the band, as the submit will.
     approvalRoute: editable ? await routeBrief(DOC, contractValue, row.uploadedById, null, { jobId: row.jobId }) : null,
@@ -129,6 +143,23 @@ registerAttachmentGuard(
     write: async (user, id) => {
       const row = await prisma.approvedPlan.findUnique({ where: { id }, select: { status: true, uploadedById: true } });
       return !!row && EDITABLE.includes(row.status) && mayEdit(user, row);
+    },
+  },
+);
+
+// The customer's copy — a scanned page they marked, an email — read as the
+// request is, filed while the request is approved by whoever may record the
+// customer's answer (2026-10-20).
+registerAttachmentGuard(
+  'approved_plan_customer',
+  async (user, id) => {
+    const row = await prisma.approvedPlan.findUnique({ where: { id }, select: { id: true, uploadedById: true } });
+    return !!row && (await mayRead(user, row));
+  },
+  {
+    write: async (user, id) => {
+      const row = await prisma.approvedPlan.findUnique({ where: { id }, select: { status: true, uploadedById: true } });
+      return !!row && row.status === 'APPROVED' && mayEdit(user, row);
     },
   },
 );
@@ -490,6 +521,72 @@ planApprovalRoutes.post(
   }),
 );
 
+/**
+ * The customer's approval (2026-10-20, the owner's call), recorded once the
+ * team has approved the request: the decision, who at the customer made it,
+ * their position, the day and their remarks. No signature is drawn — the
+ * record, stamped with who entered it and when, is the proof (the owner:
+ * "every approval with date/time stamp is the proof digital signature"). It
+ * may be recorded again while the request stands approved (a customer that
+ * changes its answer); `decision: null` clears it. Audited.
+ */
+planApprovalRoutes.post(
+  '/:id/customer',
+  requireAny('gops.plans.create', 'gops.plans.edit_own', 'gops.plans.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(
+      z.object({
+        decision: z.enum(CUSTOMER_DECISIONS).nullable(),
+        name: z.string().trim().max(200).optional().nullable(),
+        position: z.string().trim().max(200).optional().nullable(),
+        decidedOn: z.string().optional().nullable(),
+        remarks: z.string().trim().max(4000).optional().nullable(),
+      }),
+      req.body ?? {},
+    );
+    const row = await loadVisible(me, req.params.id);
+    if (!mayEdit(me, row)) throw forbidden('Only the person who raised this request records the customer’s answer');
+    if (row.status !== 'APPROVED') throw badRequest(`This request is ${statusLabel(row.status).toLowerCase()} — the customer’s answer is recorded once the team has approved it`);
+    let decidedOn: Date | null = null;
+    if (body.decision) {
+      if (!body.name?.trim()) throw badRequest('Say who at the customer decided');
+      decidedOn = body.decidedOn ? new Date(body.decidedOn) : dayKey(new Date());
+      if (Number.isNaN(decidedOn.getTime())) throw badRequest('The day decided is not a valid date');
+      decidedOn = dayKey(decidedOn);
+      if (decidedOn > dayKey(new Date())) throw badRequest('The customer cannot have decided on a day still to come');
+      if (body.decision === 'REVISE' && !body.remarks?.trim()) throw badRequest('Say what the customer asked to revise');
+    }
+    const data = body.decision
+      ? {
+          customerDecision: body.decision,
+          customerName: body.name!.trim(),
+          customerPosition: body.position?.trim() || null,
+          customerDecidedOn: decidedOn,
+          customerRemarks: body.remarks?.trim() || null,
+          customerRecordedAt: new Date(),
+          customerRecordedById: me.id,
+        }
+      : { customerDecision: null, customerName: null, customerPosition: null, customerDecidedOn: null, customerRemarks: null, customerRecordedAt: null, customerRecordedById: null };
+    const claimed = await prisma.approvedPlan.updateMany({ where: { id: row.id, status: 'APPROVED' }, data });
+    if (!claimed.count) throw badRequest('It moved a moment ago — reload to see where it stands');
+    await audit(
+      {
+        entityType: 'approved_plan',
+        entityId: row.id,
+        action: 'UPDATED',
+        summary: body.decision
+          ? `${row.number ?? row.title}: customer's answer recorded — ${decisionLabel(body.decision)} by ${body.name!.trim()}`
+          : `${row.number ?? row.title}: customer's answer cleared`,
+        before: row.customerDecision ? { customerDecision: row.customerDecision, customerName: row.customerName } : null,
+        after: body.decision ? { customerDecision: body.decision, customerName: body.name!.trim(), customerDecidedOn: decidedOn } : null,
+      },
+      req,
+    );
+    res.json(await present(me, await loadVisible(me, row.id)));
+  }),
+);
+
 planApprovalRoutes.delete(
   '/:id',
   require_('gops.plans.delete'),
@@ -508,6 +605,7 @@ planApprovalRoutes.delete(
       }),
     );
     await deleteAttachmentsOf('approved_plan', [row.id]);
+    await deleteAttachmentsOf('approved_plan_customer', [row.id]);
     await audit({ entityType: 'approved_plan', entityId: row.id, action: 'DELETED', summary: `Deleted ${statusLabel(row.status).toLowerCase()} ${row.number ?? row.title}` }, req);
     res.json({ ok: true });
   }),
@@ -587,7 +685,19 @@ onApprovalReopened(DOC, {
     }
     const claimed = await tx.approvedPlan.updateMany({
       where: { id: row.id, status: 'APPROVED' },
-      data: { status: 'DRAFT', approvedAt: null, approvedBy: null },
+      // The customer answered what was approved; changed, it goes to them again.
+      data: {
+        status: 'DRAFT',
+        approvedAt: null,
+        approvedBy: null,
+        customerDecision: null,
+        customerName: null,
+        customerPosition: null,
+        customerDecidedOn: null,
+        customerRemarks: null,
+        customerRecordedAt: null,
+        customerRecordedById: null,
+      },
     });
     if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
   },
@@ -641,6 +751,37 @@ planApprovalRoutes.get(
     ];
     if (row.notes) sections.push({ kind: 'text', title: 'Notes', body: row.notes });
     if (row.cancelReason && row.status === 'CANCELLED') sections.push({ kind: 'text', title: 'Cancelled', body: row.cancelReason });
+    // The customer's approval form (2026-10-20): their answer once recorded,
+    // else the form to fill — no signature line: the record, dated and
+    // stamped with who entered it, is the proof.
+    if (row.status !== 'CANCELLED') {
+      const recorded = !!row.customerDecision;
+      sections.push({
+        kind: 'fields',
+        title: 'Customer approval',
+        columns: 2,
+        fields: [
+          {
+            label: 'Decision',
+            value: recorded ? decisionLabel(row.customerDecision)! : '[  ] Approved     [  ] Approved as noted     [  ] Revise and resubmit',
+          },
+          { label: 'Date', value: recorded && row.customerDecidedOn ? formatDate(row.customerDecidedOn) : '' },
+          { label: 'Name', value: recorded ? (row.customerName ?? '') : '' },
+          { label: 'Position', value: recorded ? (row.customerPosition ?? '') : '' },
+          { label: 'Customer', value: row.job.customer?.name ?? '' },
+          {
+            label: 'Recorded',
+            value:
+              recorded && row.customerRecordedAt
+                ? `${row.customerRecordedBy?.name ?? ''}, ${formatDateTime(row.customerRecordedAt)}`
+                : row.status === 'APPROVED'
+                  ? 'Not yet recorded'
+                  : 'After the team approves it',
+          },
+        ],
+      });
+      if (recorded && row.customerRemarks) sections.push({ kind: 'text', title: 'Customer remarks', body: row.customerRemarks });
+    }
 
     const bare = await renderDocument({
       title: 'Request for Approval',
@@ -649,8 +790,11 @@ planApprovalRoutes.get(
       reference: `${row.job.number} — ${row.job.name}`,
       sections,
       signatories,
+      // The date and time stamps are the signature (2026-10-20, the owner's call).
+      signoffNote: 'The name, date and time are considered a digital signature of approval.',
     });
-    const files = req.query.attachments === '0' ? [] : await attachedFiles('approved_plan', row.id);
+    const files =
+      req.query.attachments === '0' ? [] : [...(await attachedFiles('approved_plan', row.id)), ...(await attachedFiles('approved_plan_customer', row.id))];
     const { pdf, listed } = await withAttachments(bare, files, { title: 'Request for Approval', number: row.number ?? row.title, reference: row.job.name });
     await audit(
       { entityType: 'approved_plan', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.number ?? row.title}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}` },

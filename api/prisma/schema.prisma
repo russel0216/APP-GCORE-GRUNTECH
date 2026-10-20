@@ -100,6 +100,7 @@ model User {
   reportsPrepared ProgressReport[] @relation("ReportPreparer")
   reportsApproved ProgressReport[] @relation("ReportApprover")
   plansUploaded   ApprovedPlan[]   @relation("PlanUploader")
+  plansCustomerRecorded ApprovedPlan[] @relation("PlanCustomerRecorder")
   tasksAssigned   JobTask[]        @relation("TaskAssignee")
 
   prsRequested      PurchaseRequest[]      @relation("PrRequester")
@@ -2478,6 +2479,20 @@ model ApprovedPlan {
 
   uploadedById String
   uploadedBy   User   @relation("PlanUploader", fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  /// The customer's approval (2026-10-20, the owner's call: "include also a
+  /// form for customer approval"), recorded once the team has approved —
+  /// APPROVED, APPROVED_AS_NOTED or REVISE — with who at the customer decided,
+  /// their position, the day and their remarks. No drawn signature: the
+  /// record, dated and stamped with who entered it, is the proof.
+  customerDecision     String?
+  customerName         String?
+  customerPosition     String?
+  customerDecidedOn    DateTime? @db.Date
+  customerRemarks      String?
+  customerRecordedAt   DateTime?
+  customerRecordedById String?
+  customerRecordedBy   User?     @relation("PlanCustomerRecorder", fields: [customerRecordedById], references: [id], onDelete: SetNull)
 
   /// The CAD job order this plan was filed from, when it was (2026-10-09).
   cadJobOrder CadJobOrder?

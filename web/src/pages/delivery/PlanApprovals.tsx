@@ -58,6 +58,16 @@ export interface PlanRequest {
   canWithdraw?: boolean;
   canCancel?: boolean;
   canDelete?: boolean;
+  /** The customer's answer, once the team approved it (2026-10-20). */
+  customerDecision?: string | null;
+  customerDecisionLabel?: string | null;
+  customerName?: string | null;
+  customerPosition?: string | null;
+  customerDecidedOn?: string | null;
+  customerRemarks?: string | null;
+  customerRecordedAt?: string | null;
+  customerRecordedBy?: { id: string; name: string } | null;
+  canRecordCustomer?: boolean;
   approvalRoute?: { name: string; steps: { name: string; held?: boolean; approvers: { id: string; name: string }[] }[] } | null;
 }
 
@@ -503,6 +513,8 @@ export function PlanApprovalPage() {
         hint={draft ? 'The drawing or document to be approved — printed behind the request.' : 'What the approvers were sent. Files change only on a draft.'}
         canEdit={!!row.canEdit}
       />
+
+      {(row.status === 'APPROVED' || row.customerDecision) && <CustomerApprovalCard row={row} onSaved={setRow} />}
       </div>
 
       {editing && (
@@ -517,5 +529,158 @@ export function PlanApprovalPage() {
         />
       )}
     </div>
+  );
+}
+
+const CUSTOMER_DECISIONS = [
+  { value: 'APPROVED', label: 'Approved' },
+  { value: 'APPROVED_AS_NOTED', label: 'Approved as noted' },
+  { value: 'REVISE', label: 'Revise and resubmit' },
+];
+
+/**
+ * The customer's approval (2026-10-20, the owner's call): recorded on the
+ * page once the team has approved the request — the decision, who at the
+ * customer made it, their position, the day and their remarks — in the
+ * card, never a dialog. No signature: the record, stamped with who entered
+ * it and when, is the proof. The customer's own copy (a marked-up scan, an
+ * email) files beside it and prints behind the request.
+ */
+function CustomerApprovalCard({ row, onSaved }: { row: PlanRequest; onSaved: (r: PlanRequest) => void }) {
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+  const [form, setForm] = useState({
+    decision: row.customerDecision ?? 'APPROVED',
+    name: row.customerName ?? '',
+    position: row.customerPosition ?? '',
+    decidedOn: row.customerDecidedOn?.slice(0, 10) ?? today,
+    remarks: row.customerRemarks ?? '',
+  });
+  const recorded = !!row.customerDecision;
+
+  async function save(clear = false) {
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await api.post<PlanRequest>(
+        `/plans/${row.id}/customer`,
+        clear
+          ? { decision: null }
+          : { decision: form.decision, name: form.name.trim(), position: form.position.trim() || null, decidedOn: form.decidedOn, remarks: form.remarks.trim() || null },
+      );
+      onSaved(saved);
+      setOpen(false);
+      toast('ok', clear ? 'The customer’s answer was cleared' : 'The customer’s answer is recorded');
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <section className="card">
+        <div className="card-head">
+          <h3 className="card-title">Customer approval</h3>
+          {row.canRecordCustomer && !open && (
+            <button type="button" className="btn btn-sm" onClick={() => setOpen(true)}>
+              {recorded ? 'Change' : 'Record the customer’s answer'}
+            </button>
+          )}
+        </div>
+        {!open &&
+          (recorded ? (
+            <dl className="kv">
+              <dt>Decision</dt>
+              <dd>
+                <StatusBadge
+                  status={row.customerDecision!}
+                  extra={{ APPROVED: 'ok', APPROVED_AS_NOTED: 'ok', REVISE: 'warn' }}
+                  label={row.customerDecisionLabel ?? row.customerDecision!}
+                />
+              </dd>
+              <dt>Decided by</dt>
+              <dd>
+                {row.customerName}
+                {row.customerPosition ? `, ${row.customerPosition}` : ''}
+              </dd>
+              <dt>Date</dt>
+              <dd>{row.customerDecidedOn ? formatDate(row.customerDecidedOn) : '—'}</dd>
+              {row.customerRemarks && (
+                <>
+                  <dt>Remarks</dt>
+                  <dd className="del-prose">{row.customerRemarks}</dd>
+                </>
+              )}
+              <dt>Recorded</dt>
+              <dd className="faint">
+                {row.customerRecordedBy?.name ?? '—'}
+                {row.customerRecordedAt ? `, ${new Date(row.customerRecordedAt).toLocaleString('en-PH', { timeZone: 'Asia/Manila' })}` : ''}
+              </dd>
+            </dl>
+          ) : (
+            <p className="faint">
+              Pending — send the request to the customer and record their answer here. The name, date and time stand as the signature.
+            </p>
+          ))}
+        {open && (
+          <div className="stack">
+            <ErrorBox error={error} />
+            <div className="grid-2">
+              <Field label="Decision" required>
+                <select value={form.decision} onChange={(e) => setForm((f) => ({ ...f, decision: e.target.value }))}>
+                  {CUSTOMER_DECISIONS.map((d) => (
+                    <option key={d.value} value={d.value}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Date decided" required>
+                <input type="date" value={form.decidedOn} max={today} onChange={(e) => setForm((f) => ({ ...f, decidedOn: e.target.value }))} />
+              </Field>
+              <Field label="Name (at the customer)" required>
+                <input value={form.name} maxLength={200} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
+              </Field>
+              <Field label="Position">
+                <input value={form.position} maxLength={200} onChange={(e) => setForm((f) => ({ ...f, position: e.target.value }))} />
+              </Field>
+            </div>
+            <Field label="Remarks" hint={form.decision === 'REVISE' ? 'Say what the customer asked to revise' : 'What the customer noted, if anything'}>
+              <textarea rows={3} value={form.remarks} onChange={(e) => setForm((f) => ({ ...f, remarks: e.target.value }))} />
+            </Field>
+            <div className="card-foot">
+              {recorded && (
+                <button type="button" className="btn btn-sm btn-danger" disabled={busy} onClick={() => save(true)}>
+                  Clear
+                </button>
+              )}
+              <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setOpen(false)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                disabled={busy || !form.name.trim() || (form.decision === 'REVISE' && !form.remarks.trim())}
+                onClick={() => save()}
+              >
+                {busy ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
+      <Attachments
+        entityType="approved_plan_customer"
+        entityId={row.id}
+        title="Customer’s copy"
+        hint="The page the customer marked, or their email — printed behind the request."
+        canEdit={!!row.canRecordCustomer}
+      />
+    </>
   );
 }

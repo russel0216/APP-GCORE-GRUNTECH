@@ -1199,6 +1199,31 @@ async function main() {
         pendingCount(rfaPaper.text) === 0,
       `${rfaPaper.status} ${signedCount(rfaPaper.text)} signed, ${pendingCount(rfaPaper.text)} pending`,
     );
+    check(
+      'the paper carries the customer’s approval form, not yet recorded, and says the name, date and time stand as the signature (2026-10-20)',
+      /CUSTOMER APPROVAL/i.test(rfaText) && rfaText.includes('Revise and resubmit') && rfaText.includes('Not yet recorded') &&
+        rfaText.includes('considered a digital signature of approval'),
+      rfaText.slice(-700),
+    );
+    // The customer's answer, recorded once the team approved it.
+    const custNoName = await http(rfaEngToken, 'POST', `/plans/${rfaId}/customer`, { decision: 'APPROVED' });
+    const custReviseBare = await http(rfaEngToken, 'POST', `/plans/${rfaId}/customer`, { decision: 'REVISE', name: 'Engr. Ana Cruz' });
+    const custDraftRefused = await http(rfaEngToken, 'POST', `/plans/${String((await http(rfaEngToken, 'POST', '/plans', { jobId: job.id, title: `${TAG} scratch` })).body.id)}/customer`, { decision: 'APPROVED', name: 'X' });
+    const custRecorded = await http(rfaEngToken, 'POST', `/plans/${rfaId}/customer`, {
+      decision: 'APPROVED_AS_NOTED',
+      name: 'Engr. Ana Cruz',
+      position: 'Facilities Head',
+      remarks: 'Move the header 300 mm east',
+    });
+    const custPaper = flat((await printed(rfaEngToken, `/plans/${rfaId}/pdf?attachments=0`)).text);
+    check(
+      'the customer’s answer needs who decided (and a revise its remarks), is refused before the team approves, and once recorded prints with the remarks and who entered it',
+      custNoName.status === 400 && custReviseBare.status === 400 && custDraftRefused.status === 400 &&
+        custRecorded.status === 200 && custRecorded.body.customerDecisionLabel === 'Approved as noted' && custRecorded.body.customerRecordedBy?.name === 'Verify Engineer' &&
+        custPaper.includes('Approved as noted') && custPaper.includes('Engr. Ana Cruz') && custPaper.includes('Facilities Head') &&
+        custPaper.includes('Move the header 300 mm east'),
+      `${custNoName.status} ${custReviseBare.status} ${custDraftRefused.status} ${custRecorded.status} ${String(custRecorded.body.customerDecisionLabel)}`,
+    );
     const rfaWithFiles = await printed(rfaEngToken, `/plans/${rfaId}/pdf`);
     // The merged paper is pdf-lib's (object streams), so its pages are counted by pdf-lib.
     const pagesOf = async (bytes: Buffer | null) => (bytes ? (await PDFDocument.load(bytes)).getPageCount() : 0);
