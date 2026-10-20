@@ -776,3 +776,41 @@
 .org-tree.is-roles .org-row-item {
   min-width: max-content;
 }
+
+/* The chart's area (2026-10-20, the owner's call: "maximize the area, allow
+   grip to view all around"): taller, scrolls both ways, dragged by hand. */
+.org-scroll {
+  overflow: auto;
+  max-height: 78vh;
+  cursor: grab;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  touch-action: none;
+}
+.org-scroll.is-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+.org-scroll.is-dragging a {
+  pointer-events: none;
+}
+.org-grip-hint {
+  font-size: var(--fs-xs);
+}
+.org-card-wrap:fullscreen {
+  background: var(--surface);
+  overflow: auto;
+  padding: var(--s-5);
+}
+.org-card-wrap:fullscreen .org-scroll {
+  max-height: none;
+  height: calc(100vh - 11rem);
+}
+/* The role chart's cards keep their words on one line, never one letter a line. */
+.org-tree.is-roles .org-card {
+  max-width: none;
+}
+.org-tree.is-roles .org-card-text {
+  min-width: max-content;
+  white-space: nowrap;
+}

@@ -416,7 +416,7 @@ function RoleChart({ people, meId, search, onReady, rolesOnly }: { people: Perso
       ].filter((s) => s.items.length > 0)
     : [];
   return (
-    <div className={`org-tree${rolesOnly ? " is-roles" : ""}`}>
+    <div className="org-tree is-roles">
       {head && (
         <>
           <RoleTile {...props} node={head} holders={byRole.get(head.role.key) ?? []} />
@@ -474,6 +474,51 @@ export function OrgChart({ rolesOnly }: { rolesOnly?: boolean } = {}) {
 
   // The whole chart fits the width on opening, however small; zoom to read.
   const outer = useRef<HTMLDivElement | null>(null);
+  const wrap = useRef<HTMLDivElement | null>(null);
+  // Grip: drag the chart to look around it; a drag never opens the card it started on.
+  const drag = useRef<{ x: number; y: number; left: number; top: number; moved: boolean } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || !outer.current) return;
+    drag.current = { x: e.clientX, y: e.clientY, left: outer.current.scrollLeft, top: outer.current.scrollTop, moved: false };
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    const o = outer.current;
+    if (!d || !o) return;
+    const dx = e.clientX - d.x;
+    const dy = e.clientY - d.y;
+    if (!d.moved && Math.abs(dx) + Math.abs(dy) < 5) return;
+    if (!d.moved) {
+      d.moved = true;
+      setDragging(true);
+      o.setPointerCapture(e.pointerId);
+    }
+    o.scrollLeft = d.left - dx;
+    o.scrollTop = d.top - dy;
+  };
+  const endDrag = () => {
+    const d = drag.current;
+    drag.current = null;
+    if (d?.moved) {
+      setDragging(false);
+      // Swallow the click that ends a drag.
+      window.addEventListener('click', (ev) => ev.preventDefault(), { capture: true, once: true });
+    }
+  };
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    const on = () => {
+      setFull(document.fullscreenElement === wrap.current);
+      requestAnimationFrame(() => requestAnimationFrame(() => fitRef.current()));
+    };
+    document.addEventListener('fullscreenchange', on);
+    return () => document.removeEventListener('fullscreenchange', on);
+  }, []);
+  const toggleFull = () => {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void wrap.current?.requestFullscreen?.();
+  };
   const inner = useRef<HTMLDivElement | null>(null);
   const [zoom, setZoom] = useState(1);
   const fit = useCallback(() => {
@@ -483,6 +528,8 @@ export function OrgChart({ rolesOnly }: { rolesOnly?: boolean } = {}) {
     const natural = i.scrollWidth;
     if (natural > 0) setZoom(Math.max(0.2, Math.min(1, +(o.clientWidth / natural).toFixed(2))));
   }, []);
+  const fitRef = useRef(fit);
+  fitRef.current = fit;
   const fitted = useRef(false);
   useLayoutEffect(() => {
     if (fitted.current || !inner.current) return;
@@ -498,7 +545,7 @@ export function OrgChart({ rolesOnly }: { rolesOnly?: boolean } = {}) {
   if (forest.length === 0) return <Empty title="Nobody to chart yet" hint="Add users, then set who each reports to." />;
 
   return (
-    <div className="card org-card-wrap">
+    <div className="card org-card-wrap" ref={wrap}>
       {!rolesOnly && (
       <div className="row org-switch">
         <div className="scope-switch">
@@ -542,8 +589,21 @@ export function OrgChart({ rolesOnly }: { rolesOnly?: boolean } = {}) {
         <button type="button" className="btn btn-sm" onClick={() => setZoom(1)}>
           100%
         </button>
+        {typeof document !== 'undefined' && document.fullscreenEnabled && (
+          <button type="button" className="btn btn-sm" onClick={toggleFull}>
+            {full ? 'Exit full screen' : 'Full screen'}
+          </button>
+        )}
+        <span className="faint org-grip-hint">Drag the chart to move around it.</span>
       </div>
-      <div className="org-scroll" ref={outer}>
+      <div
+        className={`org-scroll${dragging ? ' is-dragging' : ''}`}
+        ref={outer}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+      >
         <div className="org-canvas" ref={inner} style={{ zoom }}>
           {byPerson ? (
             trees.map((t) => <Tree key={t.person.id} head={t} meId={me?.user.id} search={location.search} />)

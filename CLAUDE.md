@@ -4087,6 +4087,13 @@ hierarchy" — department removed EVERYWHERE, and both hierarchies.
   Industry Teams sides, the zoom, and the roles with no parent and nothing
   under them wrapped under "Not placed in the hierarchy yet". No person is
   named; who holds a role is the Organizational Chart's.
+- **Both charts read whole and move by hand** (2026-10-20, the owner's
+  call: "maximize the area, allow grip to view all around"): a role
+  chart's card keeps its words on one line (`.org-tree.is-roles`, its
+  row items never narrower than their content — they had shrunk to a
+  letter a line); the chart sits in a 78vh area that scrolls both ways and
+  is DRAGGED with the pointer (a drag never opens the card it began on),
+  with a Full screen button beside the zoom.
 - **The Organizational Chart has two sides** (2026-10-19, the owner's
   call): under the head, **BOSS — Business and Operation Support
   Services** (the direct reports with no selling team) on the left and the
