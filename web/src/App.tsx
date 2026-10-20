@@ -86,6 +86,7 @@ import { Passport } from './pages/hr/academy/Passport';
 import { Passports } from './pages/hr/academy/Passports';
 import { InvoiceRequests, InvoiceRequestPage } from './pages/finance/InvoiceRequests';
 import { Receivables, InvoiceDetail, Payments, PaymentDetail } from './pages/finance/Receivables';
+import { OperationsBudget } from './pages/finance/OperationsBudget';
 import { Payables, BillDetail } from './pages/finance/Payables';
 import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
 import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
@@ -1407,6 +1408,15 @@ function Routed() {
             <Guard permission="gfin.budget_vs_actual.view_all">
               <BudgetVsActual />
             </Guard>
+          }
+        />
+        {/* The office's own budget, apart from any project's (2026-10-20). */}
+        <Route
+          path="/g-fin/operations-budget"
+          element={
+            <GuardAny permissions={['gfin.operations_budget.view_all', 'gfin.operations_budget.view_own']}>
+              <OperationsBudget />
+            </GuardAny>
           }
         />
         <Route

@@ -33,6 +33,10 @@ export const ACCESS_SPLIT: { key: string; from: string; to: string[] }[] = [
   // their own: whoever read the one register reads the new one.
   { key: 'payments-out', from: 'gfin.payments.view_all', to: ['gfin.payments_out.view_all'] },
   { key: 'payments-out-ap', from: 'gfin.ap.view_all', to: ['gfin.payments_out.view_all'] },
+  // The office's operations budget (2026-10-20): read where Budget vs Actual
+  // is read, set where Finance Settings are.
+  { key: 'operations-budget-view', from: 'gfin.budget_vs_actual.view_all', to: ['gfin.operations_budget.view_all'] },
+  { key: 'operations-budget-edit', from: 'gfin.settings.edit_all', to: ['gfin.operations_budget.view_all', 'gfin.operations_budget.edit_all'] },
 ];
 /** The splits the first version of this step ran under its one mark. */
 const FIRST_RUN = ['calendar', 'attendance', 'visits'];
@@ -79,7 +83,7 @@ export async function splitBorrowedRights(): Promise<number | null> {
     create: {
       key: MARK,
       value,
-      description: 'The Access boxes given, once each, to whoever held the right they replace (calendar, attendance, visits, pullout, payments-out).',
+      description: 'The Access boxes given, once each, to whoever held the right they replace (calendar, attendance, visits, pullout, payments-out, operations-budget).',
     },
     update: { value },
   });

@@ -101,6 +101,7 @@ model User {
   reportsApproved ProgressReport[] @relation("ReportApprover")
   plansUploaded   ApprovedPlan[]   @relation("PlanUploader")
   plansCustomerRecorded ApprovedPlan[] @relation("PlanCustomerRecorder")
+  operationsBudgetsSet  OperationsBudget[] @relation("OperationsBudgetEditor")
   tasksAssigned   JobTask[]        @relation("TaskAssignee")
 
   prsRequested      PurchaseRequest[]      @relation("PrRequester")
@@ -1015,6 +1016,8 @@ model CostCategory {
   isActive  Boolean @default(true)
 
   items          Item[]
+  /// The office's own budget by year (2026-10-20), apart from any project's.
+  operationsBudgets OperationsBudget[]
   costingLines   CostingLine[]
   costEntries    JobCostEntry[]
   budgetRequests BudgetRequest[]
@@ -5895,4 +5898,26 @@ model JobCostingLink {
 
   @@id([jobId, costingId])
   @@index([costingId])
+}
+
+/// The OFFICE OPERATIONS budget (2026-10-20, the owner's call: "a separate
+/// budget monitoring for office operation, different from the project
+/// budget"): an amount per year and cost category, set by finance, no
+/// approval route. What is spent against it is read off the documents that
+/// name NO project — approved expense claims and supplier bills that are not
+/// for goods bought on a purchase order (stock is inventory, not expense) —
+/// never stored here.
+model OperationsBudget {
+  id             String       @id @default(cuid())
+  year           Int
+  costCategoryId String
+  costCategory   CostCategory @relation(fields: [costCategoryId], references: [id], onDelete: Restrict)
+  amount         Decimal      @db.Decimal(18, 2)
+  notes          String?
+  updatedById    String?
+  updatedBy      User?        @relation("OperationsBudgetEditor", fields: [updatedById], references: [id], onDelete: SetNull)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([year, costCategoryId])
 }

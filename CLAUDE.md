@@ -676,9 +676,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,557 assertions across twenty-two scripts** (counted 2026-10-20, after
-the owner's batch D of 2026-10-20 — one on finance for the statement of
-account — and before it batch C — 2 on delivery for the RFA's customer
+**4,559 assertions across twenty-two scripts** (counted 2026-10-20, after
+the owner's batch E of 2026-10-20 — 2 on finance for the operations
+budget — and before it batch D (one on finance for the statement of
+account), batch C — 2 on delivery for the RFA's customer
 approval form and its record — and before it batch B — 2 on chain for the canvass reopened on
 a draft order and the Incoming paper's product group, 2 on finance for the
 reserved SI and the EWT a collection states — and before it batch A — 2 on chain for the RFQ paper that
@@ -765,7 +766,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 429, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
 94, partners 120, delivery 195, chain 365, hr 487, plantilla 129, meetings
-114, evaluations 154, academy 145, finance 437, aftermarket 304, cad 122,
+114, evaluations 154, academy 145, finance 439, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -5542,6 +5543,32 @@ but always in Gruntechnology Corporation Warehouse …"), built in batches.
   is held to `other` whatever is asked and gets a 404 on a customer
   collection (`mayReadPayment`). `splitBorrowedRights()` gave the new box
   once to every role holding `gfin.payments.view_all` or `gfin.ap.view_all`.
+
+### Batch E
+
+- **The Operations Budget** (item 12; the owner's answer: yearly, per cost
+  category, set by finance, no approval route). G-FIN › Analysis ›
+  **Operations Budget** (`gfin.operations_budget`, SETTINGS — the page
+  keeps no record of anybody's, so View Own / Edit Own open it like View
+  All / Edit All; `/g-fin/operations-budget`, `routes/operationsBudget.ts`
+  at `/api/operations-budget`, `pages/finance/OperationsBudget.tsx`).
+  `OperationsBudget` is one amount per year × cost category (plus a note),
+  replaced whole by `PUT /operations-budget/:year { lines }` (a 0 with no
+  note drops the row; one audit row `operations_budget` / the year).
+  **Spent is never stored**: `operationsPosition(year)` reads the
+  documents that name NO project — expense claims (APPROVED, REIMBURSED,
+  SETTLED spent; PENDING_APPROVAL pending; at their total, by claim date)
+  and supplier bills with no order and no receiving (goods on an order are
+  stock or a project's; APPROVED, PARTIALLY_PAID, PAID spent; at the
+  SUBTOTAL, input VAT being recoverable; by bill date) — per category,
+  "Not categorised" apart so the lines add up; left = budget − spent −
+  pending, `over` when under zero. `GET /operations-budget?year=&
+  costCategoryId=` sends the lines, the totals, the years on file and the
+  documents behind the figures (a category's row narrows them);
+  `GET /operations-budget/pdf?year=` prints it. `splitBorrowedRights()`
+  gave View All once to whoever read Budget vs Actual, and View + Edit All
+  to whoever edits Finance Settings. Apart from any PROJECT's budget,
+  which stays `JobCostEntry` and Budget Monitoring.
 
 ### Batch D
 

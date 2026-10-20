@@ -4278,6 +4278,58 @@ async function main() {
       `${outList.status} ${outRows.length} ${outOne.status} ${outCollection.status}`,
     );
 
+    // ══ The operations budget (2026-10-20) ═════════════════════════════════
+    // The office's budget by year and cost category; spent is read off the
+    // claims and bills that name NO project — a project's claim and a bill
+    // for goods on an order are never counted. 2004 is the fixture year.
+    {
+      const OPS_YEAR = 2004;
+      const opsDay = new Date(Date.UTC(OPS_YEAR, 5, 15));
+      const opsClaim = await prisma.expenseClaim.create({
+        data: { number: await nextNumber('expense'), claimedById: engineer.id, costCategoryId: materials.id, claimDate: opsDay, purpose: `${TAG} office supplies`, total: D(1_200), status: 'APPROVED' },
+      });
+      const opsPending = await prisma.expenseClaim.create({
+        data: { number: await nextNumber('expense'), claimedById: engineer.id, costCategoryId: materials.id, claimDate: opsDay, purpose: `${TAG} office pending`, total: D(300), status: 'PENDING_APPROVAL' },
+      });
+      const projectClaim = await prisma.expenseClaim.create({
+        data: { number: await nextNumber('expense'), claimedById: engineer.id, jobId: job.id, costCategoryId: materials.id, claimDate: opsDay, purpose: `${TAG} project trip`, total: D(5_000), status: 'APPROVED' },
+      });
+      const opsBill = await prisma.supplierBill.create({
+        data: {
+          number: await nextNumber('supplier_bill'), supplierId: supplier.id, costCategoryId: null, status: 'APPROVED', billDate: opsDay, dueDate: opsDay,
+          subtotal: D(2_000), vatAmount: D(240), total: D(2_240), ewtRate: D(0), ewtAmount: D(0), netPayable: D(2_240), createdById: finance.id,
+        },
+      });
+      await throwaway('zzfin_opsview', ['gfin.operations_budget.view_all']);
+      await throwaway('zzfin_opsedit', ['gfin.operations_budget.view_all', 'gfin.operations_budget.edit_all']);
+      const opsViewer = as(await makeUser('ZZ Ops Viewer', 'opsview@verifyf.local', ['zzfin_opsview']));
+      const opsEditor = as(await makeUser('ZZ Ops Editor', 'opsedit@verifyf.local', ['zzfin_opsedit']));
+      const viewerSet = await opsViewer('PUT', `/operations-budget/${OPS_YEAR}`, { lines: [{ costCategoryId: materials.id, amount: 10_000 }] });
+      const badYear = await opsEditor('PUT', '/operations-budget/1999', { lines: [] });
+      const set = await opsEditor('PUT', `/operations-budget/${OPS_YEAR}`, { lines: [{ costCategoryId: materials.id, amount: 10_000, notes: `${TAG} supplies` }] });
+      const read = await opsViewer('GET', `/operations-budget?year=${OPS_YEAR}`);
+      const line = (read.body.lines as { costCategory: { id: string }; budget: number; spent: number; pending: number; left: number }[] | undefined)?.find((l) => l.costCategory.id === materials.id);
+      const docs = (read.body.documents as { id: string }[] | undefined) ?? [];
+      check(
+        'the operations budget is set by its editor (a viewer is refused, 1999 is a 400); spent counts the office claim and the uncategorised bill, pending the one waiting, never the project’s claim',
+        viewerSet.status === 403 && badYear.status === 400 && set.status === 200 &&
+          read.status === 200 && read.body.canEdit === false &&
+          money(line?.budget, 10_000) && money(line?.spent, 1_200) && money(line?.pending, 300) && money(line?.left, 8_500) &&
+          money(read.body.uncategorised?.spent, 2_000) && money(read.body.totals?.spent, 3_200) && money(read.body.totals?.left, 6_500) &&
+          docs.some((d) => d.id === opsClaim.id) && docs.some((d) => d.id === opsBill.id) && docs.some((d) => d.id === opsPending.id) && !docs.some((d) => d.id === projectClaim.id),
+        `${viewerSet.status} ${badYear.status} ${set.status} ${read.status} ${JSON.stringify(line)} ${JSON.stringify(read.body.uncategorised)} ${JSON.stringify(read.body.totals)}`,
+      );
+      const opsPaper = await fetch(`${BASE}/operations-budget/pdf?year=${OPS_YEAR}`, { headers: { Authorization: `Bearer ${token}` } });
+      const opsText = (opsPaper.ok ? pdfText(Buffer.from(await opsPaper.arrayBuffer())) : '').replace(/\s+/g, ' ');
+      check(
+        'the operations budget prints: the year, the category with its budget, spent and left, and the uncategorised row',
+        opsPaper.status === 200 && opsText.includes(`OPERATIONS BUDGET ${OPS_YEAR}`) && opsText.includes('10,000.00') && opsText.includes('8,500.00') && opsText.includes('Not categorised'),
+        `${opsPaper.status} ${opsText.slice(0, 300)}`,
+      );
+      await prisma.operationsBudget.deleteMany({ where: { year: OPS_YEAR } });
+      await prisma.auditLog.deleteMany({ where: { entityType: 'operations_budget', entityId: String(OPS_YEAR) } });
+    }
+
     const caRep = await fin('GET', `/fin-reports/cash-advances?from=${todayIso}&to=${todayIso}&requestedById=${engineer.id}`);
     const caCard = (label: string) => (caRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === label)?.value ?? -1;
     check(

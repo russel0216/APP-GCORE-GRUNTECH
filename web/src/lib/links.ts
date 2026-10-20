@@ -113,6 +113,7 @@ const SCREEN: Record<string, string> = {
   // the same record seen from the money-out side.
   payment: '/g-fin/payments',
   disbursement: '/g-fin/payments-out',
+  operations_budget: '/g-fin/operations-budget',
   attendance: '/g-hr/attendance',
   report_template: '/g-ops/report-templates',
   number_sequence: '/admin/numbering',
