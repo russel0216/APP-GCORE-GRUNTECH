@@ -676,12 +676,15 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,508 assertions across twenty-two scripts** (counted 2026-10-20, after
-the revised Aftermarket UI's first two pushes — one on foundation for the
+**4,517 assertions across twenty-two scripts** (counted 2026-10-20, after
+the revised Aftermarket UI's first three pushes — one on foundation for the
 Aftermarket strip and 7 on aftermarket for the coverage level, the renewal
 filter, the team column and the overview's two new figures, then 9 on
 aftermarket for a visit's slot, its confirmation, the unconfirm on a move
-and the sweep of a stale confirmed visit — and before it,
+and the sweep of a stale confirmed visit, then 9 on aftermarket for the
+Service JO — its options, number and cover, the project register refusing
+it, its route, the decider's door, the visit its approval books, the
+overview card's count, Ctrl+K and the cancel — and before it,
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -749,7 +752,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 429, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
 94, partners 120, delivery 193, chain 361, hr 487, plantilla 129, meetings
-114, evaluations 154, academy 125, finance 432, aftermarket 286, cad 122,
+114, evaluations 154, academy 125, finance 432, aftermarket 295, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -3234,6 +3237,51 @@ buttons keep rule 19's "+ New …". Built push by push:
   confirmed, cancelled — a carried visit keeps its status, a moved one is
   rebooked SCHEDULED). verify-aftermarket pins the slot, the confirm's
   door, the unconfirm on a move and the sweep of a stale confirmed visit.
+- **Push 3 — the Service JO.** The service call on a registered machine is
+  its own register under Aftermarket (the strip is Aftermarket ·
+  Installation Base · **Service JO** · Service Schedule · Service Contract;
+  verify-foundation pins it): `gops.service_job_orders` (OWNED),
+  `/g-ops/service-job-orders`, `routes/serviceJobOrders.ts` at
+  `/api/service-job-orders`, `pages/service/ServiceJobOrders.tsx`,
+  numbering type `service_job_order` (SJO), audit and search kind
+  `service_job_order`. **The same `JobOrder` table, told apart by
+  `JobOrder.category`** (PROJECT | SERVICE): the project work order keeps
+  `/g-ops/job-orders` and lists, opens and searches its own category only
+  (`load()` answers a Service JO's id with a 404 naming the register); a
+  Service JO carries the machine (`assetId`, from the Installation Base —
+  `GET /service-job-orders/options?customerId=` lists the customer's
+  machines with the contract covering each), the service type (`kind`),
+  the priority (`urgent`), the day it is needed by (`requestedFor`), the
+  engineer (`assignedToId`), what covers it (`chargeBasis`: the contract,
+  else the warranty on the needed-by day, else chargeable — `coverOf()`,
+  overridable) and the scope. The seed's `seed.serviceJobOrders20261020`
+  marked the orders raised as service calls before 2026-10-09 (on a
+  machine, on a contract, or with no project name) SERVICE once. **The
+  route is "Service JO — aftermarket manager then team leader"**
+  (`service_job_order`: ROLE `service_manager`, in `OWN_TEAM_ROLES`, so
+  the requester's own team's; then the requester's Team Leader;
+  `preparerSigns`, `standIns`); the record and its paper take
+  `requireAnyOrDecider`, so an approver with no right to the register
+  reads it while it waits on them. **Approval BOOKS THE VISIT, never a
+  project** (`settleServiceJobOrder`): one SCHEDULED visit on the
+  needed-by day, of the order's kind, on its machine and contract, for its
+  engineer, `jobOrderId` the order's (unique — a pulled-back and
+  resubmitted order puts its cancelled visit back on the schedule rather
+  than booking a second); the approved report on that visit completes it
+  (`onReportSettled`, which now audits under the order's own type).
+  `/withdraw` pulls a pending one back; `/cancel` takes a draft, returned,
+  pending (its request withdrawn) or approved one and cancels the visit it
+  booked, refused once the visit has a report; the engine's reopen cancels
+  the visit too and is refused once the work was done or the order was
+  invoiced; `DELETE` takes a cancelled one. The status reads Draft, AM
+  Approval / TL Approval, **Dispatch pending** (approved, the visit's day
+  to come), **In progress** (from that day), Missed visit, Done, Returned,
+  Cancelled (`stageOf`); the list's cards are Active, Pending approval,
+  Dispatch pending, Urgent, Done, and the overview's "Active service JOs"
+  card opens `?open=true`, the same count (verify-aftermarket asserts it).
+  My Work and the machine's page ("+ New service JO", `?new=1&assetId=`)
+  link by category; `recordLink` maps the new type. A test that settles one
+  in-process imports `routes/serviceJobOrders` for its subscriber.
 
 ## The notification bell (2026-10-20)
 

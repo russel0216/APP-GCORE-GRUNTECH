@@ -86,6 +86,7 @@ export function kindLabel(kind: string): string {
     visit: 'Visit',
     task: 'Task',
     job_order: 'Job order',
+    service_job_order: 'Service JO',
     cad_job_order: 'CAD J.O.',
     borrow_slip: 'Borrow slip',
     stock_issue: 'Outgoing',

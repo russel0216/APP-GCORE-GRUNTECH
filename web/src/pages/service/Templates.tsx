@@ -539,8 +539,7 @@ export function AftermarketDashboard() {
       value: data.serviceJobs.open,
       sub: 'awaiting approval or in progress',
       tone: data.serviceJobs.open > 0 ? 'var(--warn)' : undefined,
-      // The Service JO register of push 3 will take this link with its own filter.
-      to: '/g-ops/job-orders',
+      to: '/g-ops/service-job-orders?open=true',
     },
     {
       label: 'Scheduled this week',

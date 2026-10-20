@@ -2956,7 +2956,7 @@ function onReportSettled(documentType: string) {
     });
     if (report.visit?.jobOrderId) {
       await audit({
-        entityType: 'job_order',
+        entityType: await jobOrderAuditType(report.visit.jobOrderId),
         entityId: report.visit.jobOrderId,
         action: 'COMPLETED',
         summary: `Completed by ${report.number}, performed ${isoDay(report.performedAt)}`,
@@ -2968,6 +2968,12 @@ function onReportSettled(documentType: string) {
 onReportSettled('commissioning_report');
 onReportSettled('pm_report');
 onReportSettled('inspection_report');
+
+/** The audit type a job order's trail is filed under — its own register's (2026-10-20: a Service JO opens under Aftermarket). */
+async function jobOrderAuditType(jobOrderId: string, tx: Prisma.TransactionClient = prisma): Promise<'job_order' | 'service_job_order'> {
+  const jo = await tx.jobOrder.findUnique({ where: { id: jobOrderId }, select: { category: true } });
+  return jo?.category === 'SERVICE' ? 'service_job_order' : 'job_order';
+}
 
 /**
  * Pulled back after approval (2026-10-16): the report is a draft again, and
@@ -3015,7 +3021,7 @@ function onReportReopened(documentType: string) {
       if (jo && jo.status === 'COMPLETED') {
         await tx.jobOrder.updateMany({ where: { id: jo.id, status: 'COMPLETED' }, data: { status: 'APPROVED', completedAt: null } });
         await audit(
-          { entityType: 'job_order', entityId: jo.id, action: 'UPDATED', summary: `${jo.number} open again — ${report.number} was pulled back to draft` },
+          { entityType: await jobOrderAuditType(jo.id, tx), entityId: jo.id, action: 'UPDATED', summary: `${jo.number} open again — ${report.number} was pulled back to draft` },
           undefined,
           tx,
         );
@@ -3081,12 +3087,9 @@ aftermarketRoutes.get(
       prisma.serviceVisit.count({ where: { status: 'MISSED' } }),
       prisma.serviceReport.count({ where: { status: 'PENDING_APPROVAL' } }),
       prisma.serviceVisit.count({ where: { status: { in: OPEN_VISIT_STATUSES }, dueDate: { gte: weekStart, lte: weekEnd } } }),
-      // Active service JOs (2026-10-20): open job orders raised for service
-      // work — on a machine or a contract — awaiting approval or approved
-      // and not yet done.
-      prisma.jobOrder.count({
-        where: { status: { in: ['PENDING_APPROVAL', 'APPROVED'] }, OR: [{ assetId: { not: null } }, { contractId: { not: null } }] },
-      }),
+      // Active service JOs (2026-10-20): the Service JO register's open ones
+      // — awaiting approval, or approved and not yet done (`?open=true`).
+      prisma.jobOrder.count({ where: { category: 'SERVICE', status: { in: ['PENDING_APPROVAL', 'APPROVED'] } } }),
     ]);
 
     res.json({

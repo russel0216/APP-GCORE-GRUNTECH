@@ -57,6 +57,7 @@ const PROJECT_MANAGER_ONLY: string[] = [
   'gops.visits.view_all',
   'gops.quotations.view_all',
   'gops.job_orders.view_all',
+  'gops.service_job_orders.view_all',
   ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
   'gops.cad_job_orders.view_all',
   'gchain.purchase_requests.view_all',
@@ -120,6 +121,7 @@ export const ROLE_SEEDS: RoleSeed[] = [
       'gchain.suppliers.create',
       // Sales takes the service call and raises the job order for it.
       ...VIEW_OWN_SELF('gops', 'job_orders'),
+      ...VIEW_OWN_SELF('gops', 'service_job_orders'),
       // And asks the design team for a drawing (2026-10-09).
       ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
       // Writes the project's Accomplishment Report and raises its billing
@@ -160,7 +162,9 @@ export const ROLE_SEEDS: RoleSeed[] = [
       'insights.pipeline.view_all',
       'insights.pipeline.export',
       ...VIEW_OWN_SELF('gops', 'job_orders'),
+      ...VIEW_OWN_SELF('gops', 'service_job_orders'),
       'gops.job_orders.view_all',
+      'gops.service_job_orders.view_all',
       ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
       'gops.cad_job_orders.view_all',
       'gops.cad_job_orders.export',
@@ -279,6 +283,7 @@ export const ROLE_SEEDS: RoleSeed[] = [
       'gops.plans.view_all',
       'gops.quotations.view_all',
       'gops.job_orders.view_all',
+      'gops.service_job_orders.view_all',
       'gops.partners.view_all',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
@@ -300,6 +305,7 @@ export const ROLE_SEEDS: RoleSeed[] = [
       'gops.plans.view_all',
       'gops.quotations.view_all',
       'gops.job_orders.view_all',
+      'gops.service_job_orders.view_all',
       'gops.partners.view_all',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
@@ -370,8 +376,11 @@ export const ROLE_SEEDS: RoleSeed[] = [
       // An engineer taking the call raises the job order; the service manager
       // accepts it.
       'gops.job_orders.view_all',
+      'gops.service_job_orders.view_all',
       'gops.job_orders.create',
+      'gops.service_job_orders.create',
       'gops.job_orders.edit_own',
+      'gops.service_job_orders.edit_own',
       ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
@@ -394,6 +403,7 @@ export const ROLE_SEEDS: RoleSeed[] = [
       ['gops', 'installed_base'],
       ['gops', 'service_costing'],
       ['gops', 'job_orders'],
+      ['gops', 'service_job_orders'],
     ],
     only: [
       'gops.aftermarket.view_all',
@@ -502,6 +512,7 @@ export const ROLE_SEEDS: RoleSeed[] = [
       'gops.customers.view_all',
       // A job order is what a service invoice will be raised against.
       'gops.job_orders.view_all',
+      'gops.service_job_orders.view_all',
       'gchain.purchase_orders.view_all',
       'gchain.receiving.view_all',
       // Finance costs labour, so it needs the rates — model §4.4.

@@ -1243,7 +1243,7 @@ export function JobOrderDetail() {
  * order and printed in the customer's slot. It gathers a value (prefilled
  * with the contact), not a yes, so it is a small form rather than a confirm.
  */
-function AcknowledgeModal({
+export function AcknowledgeModal({
   title,
   initial,
   onClose,
@@ -1295,7 +1295,16 @@ function AcknowledgeModal({
  * is not approved and a second invoice. (Orders raised as service calls
  * before 2026-10-09; a project work order is billed through its project.)
  */
-function InvoiceModal({ order, onClose, onRaised }: { order: JobOrderRow; onClose: () => void; onRaised: (invoiceId: string) => void }) {
+/** Shared with the Service JO page (2026-10-20): what it reads of the order is the same on both registers. */
+export function InvoiceModal({
+  order,
+  onClose,
+  onRaised,
+}: {
+  order: Pick<JobOrderRow, 'id' | 'number' | 'title' | 'amount' | 'customer' | 'job' | 'customerPoNumber'>;
+  onClose: () => void;
+  onRaised: (invoiceId: string) => void;
+}) {
   const toast = useToast();
   const [amount, setAmount] = useState(order.amount != null ? String(order.amount) : '');
   const [dueDate, setDueDate] = useState('');

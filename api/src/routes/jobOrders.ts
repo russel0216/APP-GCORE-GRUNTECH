@@ -218,6 +218,8 @@ async function routeSlots(row: JobOrderRow): Promise<ApprovalSlot[]> {
 async function load(id: string): Promise<JobOrderRow> {
   const row = await prisma.jobOrder.findUnique({ where: { id }, include: jobOrderInclude });
   if (!row) throw notFound('Job order not found');
+  // A Service JO has its own register, routes and page under Aftermarket.
+  if (row.category !== 'PROJECT') throw notFound(`${row.number} is a Service JO — open it under Aftermarket › Service JO`);
   return row;
 }
 
@@ -258,7 +260,9 @@ const statusWord = (status: string) => statusLabel(status === 'REJECTED' ? 'RETU
  * `?ids=` (the rows ticked) is ANDed with that.
  */
 async function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma.JobOrderWhereInput> {
-  const where: Prisma.JobOrderWhereInput = {};
+  // The project work order's own register: a Service JO (2026-10-20) is
+  // listed under Aftermarket, at /api/service-job-orders.
+  const where: Prisma.JobOrderWhereInput = { category: 'PROJECT' };
   const and: Prisma.JobOrderWhereInput[] = [];
 
   if (q.scope === 'mine') and.push(mineWhere(me.id));
@@ -809,6 +813,7 @@ jobOrderRoutes.post(
           targetStart,
           targetFinish,
           requestedFor: targetStart,
+          category: 'PROJECT',
           chargeBasis: 'CHARGEABLE',
           customerPoNumber: body.customerPoNumber || null,
           amount: amount == null ? null : new Prisma.Decimal(amount),
@@ -1550,6 +1555,7 @@ registerSearch({
   search: async (term, _user, limit, own) => {
     const rows = await prisma.jobOrder.findMany({
       where: {
+        category: 'PROJECT',
         AND: [
           own ?? {},
           {

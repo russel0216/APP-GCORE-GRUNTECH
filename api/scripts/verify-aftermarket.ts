@@ -57,6 +57,8 @@ import {
 // them an approval here would settle into the void.
 import '../src/routes/aftermarket';
 import { settleJobOrder } from '../src/routes/jobOrders';
+// The Service JO's settle subscriber and search provider (2026-10-20): `act` settles in this process.
+import '../src/routes/serviceJobOrders';
 import { scheduleFor } from '../src/routes/workspace';
 import { resolveUser } from '../src/permissions/resolve';
 import { globalSearch } from '../src/shared/search';
@@ -1795,6 +1797,93 @@ async function main() {
 
     // ── Job orders over HTTP ──────────────────────────────────────────────────
     console.log('\nJob orders (over HTTP)');
+
+    // ── The Service JO (2026-10-20, the owner's revised Aftermarket UI) ──
+    // The service call on a registered machine: its own register under
+    // Aftermarket, routed Aftermarket Manager (own team) › Team Leader, and
+    // approval BOOKS THE VISIT — never a project.
+    {
+      const lead = await makeUser('ZZ Team Leader', 'lead@verifya.local', ['team_leader']);
+      await prisma.user.update({ where: { id: engineer.id }, data: { supervisorId: lead.id } });
+      const sjoOptions = await api(engineerToken, 'GET', `/service-job-orders/options?customerId=${customer.id}`);
+      const offeredAsset = (sjoOptions.body.assets as { id: string; contractId: string | null }[] | undefined)?.find((a) => a.id === asset.id);
+      check(
+        'the form lists the customer’s machines with the contract covering each',
+        sjoOptions.status === 200 && offeredAsset?.contractId === contract.id,
+        `${sjoOptions.status} ${JSON.stringify(offeredAsset)}`,
+      );
+      const neededBy = iso(inDays(7));
+      const sjo = await api(engineerToken, 'POST', '/service-job-orders', {
+        customerId: customer.id,
+        assetId: asset.id,
+        contractId: contract.id,
+        title: `${TAG} Dew point alarm`,
+        scope: 'Dew point alarm on the dryer — check the drain and the desiccant.',
+        kind: 'CORRECTIVE',
+        urgent: true,
+        neededBy,
+        assignedToId: engineer.id,
+      });
+      check(
+        'a Service JO is numbered under its own type, covered by the contract, and starts as a draft',
+        sjo.status === 201 && /^GT-SJO-\d{4}-\d{4}$/.test(sjo.body.number) && sjo.body.chargeBasis === 'CONTRACT' && sjo.body.stageLabel === 'Draft' && sjo.body.urgent === true,
+        `${sjo.status} ${sjo.body.number ?? sjo.body.error} ${sjo.body.chargeBasis} ${sjo.body.stageLabel}`,
+      );
+      const sjoId = sjo.body.id as string;
+      const onProjectRegister = await api(managerToken, 'GET', `/job-orders/${sjoId}`);
+      const projectList = await api(managerToken, 'GET', '/job-orders?scope=all&pageSize=200');
+      check(
+        'the project work order register does not list or open it',
+        onProjectRegister.status === 404 && !(projectList.body.rows as { id: string }[]).some((r) => r.id === sjoId),
+        `${onProjectRegister.status} listed ${(projectList.body.rows as { id: string }[]).some((r) => r.id === sjoId)}`,
+      );
+      const sjoSubmit = await api(engineerToken, 'POST', `/service-job-orders/${sjoId}/submit`);
+      const sjoPending = await api(engineerToken, 'GET', `/service-job-orders/${sjoId}`);
+      const sjoRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'service_job_order', documentId: sjoId, status: 'PENDING' } });
+      check(
+        'submitted, it waits on the Aftermarket Manager first',
+        sjoSubmit.status === 200 && sjoPending.body.status === 'PENDING_APPROVAL' && sjoPending.body.stageLabel === 'AM Approval' && !!sjoRequest,
+        `${sjoSubmit.status} ${sjoSubmit.body.error ?? ''} ${sjoPending.body.stageLabel}`,
+      );
+      // The Team Leader may hold no right to the register: the decider's door lets them in while it waits on them.
+      const leadToken = signToken(lead.id, lead.email);
+      await act({ requestId: sjoRequest!.id, userId: manager.id, action: 'APPROVED' });
+      const leadReads = await api(leadToken, 'GET', `/service-job-orders/${sjoId}`);
+      check('the Team Leader it waits on reads it with no right to the register', leadReads.status === 200 && leadReads.body.stageLabel === 'TL Approval', `${leadReads.status} ${leadReads.body.stageLabel ?? leadReads.body.error}`);
+      await act({ requestId: sjoRequest!.id, userId: lead.id, action: 'APPROVED' });
+      const sjoApproved = await api(engineerToken, 'GET', `/service-job-orders/${sjoId}`);
+      const booked = await prisma.serviceVisit.findUnique({ where: { jobOrderId: sjoId } });
+      check(
+        'the last signature books the visit on the needed-by day, for the engineer, on the machine and contract — no project',
+        sjoApproved.body.status === 'APPROVED' &&
+          sjoApproved.body.stageLabel === 'Dispatch pending' &&
+          !!booked &&
+          booked.status === 'SCHEDULED' &&
+          iso(booked.dueDate) === neededBy &&
+          booked.assignedToId === engineer.id &&
+          booked.assetId === asset.id &&
+          booked.contractId === contract.id &&
+          booked.kind === 'CORRECTIVE' &&
+          sjoApproved.body.job === null,
+        `${sjoApproved.body.status} ${sjoApproved.body.stageLabel} visit ${booked?.status ?? 'none'} ${booked ? iso(booked.dueDate) : ''}`,
+      );
+      const dash = await api(managerToken, 'GET', '/aftermarket/dashboard');
+      const openList = await api(managerToken, 'GET', '/service-job-orders?open=true&scope=all&pageSize=1');
+      check(
+        'the overview’s Active service JOs card equals the register it opens (?open=true)',
+        dash.status === 200 && dash.body.serviceJobs.open >= 1 && openList.body.total === dash.body.serviceJobs.open,
+        `card ${dash.body.serviceJobs?.open} list ${openList.body.total}`,
+      );
+      const sjoHits = await globalSearch(TAG, (await resolveUser(engineer.id))!, 20);
+      check('Ctrl+K finds Service JOs under their own kind', sjoHits.some((h) => h.kind === 'service_job_order' && h.link === `/g-ops/service-job-orders/${sjoId}`), [...new Set(sjoHits.map((h) => h.kind))].join(', '));
+      const sjoCancel = await api(engineerToken, 'POST', `/service-job-orders/${sjoId}/cancel`, { reason: 'Customer cleared the alarm themselves' });
+      const bookedAfter = await prisma.serviceVisit.findUnique({ where: { jobOrderId: sjoId } });
+      check(
+        'cancelling an approved Service JO cancels the visit it booked',
+        sjoCancel.status === 200 && bookedAfter?.status === 'CANCELLED' && (await prisma.jobOrder.findUnique({ where: { id: sjoId } }))?.status === 'CANCELLED',
+        `${sjoCancel.status} ${sjoCancel.body.error ?? ''} visit ${bookedAfter?.status}`,
+      );
+    }
 
     const salesToken = signToken(sales.id, sales.email);
     const raised = await api(salesToken, 'POST', '/job-orders', {

@@ -170,6 +170,7 @@ export const REGISTRY: ModuleDef[] = [
       // installation base's warranty filter — hidden, its route and keys kept.
       { key: 'aftermarket', group: 'Aftermarket', label: 'Aftermarket', path: '/g-ops/aftermarket', actions: READ, phase: 8, note: 'Overview and the aftermarket rules' },
       { key: 'installed_base', own: 'machines you registered', group: 'Aftermarket', label: 'Installation Base', path: '/g-ops/installed-base', actions: SHARED_KEPT, phase: 8 },
+      { key: 'service_job_orders', own: 'service JOs you raised or are sent on', group: 'Aftermarket', label: 'Service JO', path: '/g-ops/service-job-orders', actions: OWNED, phase: 8, note: 'The service call on a registered machine: the Aftermarket Manager and the team leader approve, and approval books the visit' },
       { key: 'visits', own: 'visits assigned to you', group: 'Aftermarket', label: 'Service Schedule', path: '/g-ops/visits', actions: SHARED_KEPT, phase: 8, note: 'Every visit on one calendar; Create books a call-out, Edit All moves, assigns or cancels a visit' },
       { key: 'service_contracts', group: 'Aftermarket', label: 'Service Contract', path: '/g-ops/service-contracts', actions: OWNED_KEPT, phase: 8 },
       { key: 'renewals', group: 'Aftermarket', label: 'Renewals', path: '/g-ops/renewals', actions: READ, phase: 8, hidden: true },

@@ -5058,6 +5058,15 @@ model ServiceVisit {
   @@index([assignedToId, status])
 }
 
+/// Which register a job order belongs to (2026-10-20, the owner's revised
+/// Aftermarket UI): PROJECT is the project work order under Project
+/// Management, whose approval builds the project; SERVICE is the Service JO
+/// under Aftermarket, whose approval books the service visit.
+enum JobOrderCategory {
+  PROJECT
+  SERVICE
+}
+
 enum JobOrderStatus {
   DRAFT
   PENDING_APPROVAL
@@ -5091,6 +5100,7 @@ model JobOrder {
   laborAgreedAt      DateTime?
   number             String         @unique
   status             JobOrderStatus @default(DRAFT)
+  category           JobOrderCategory @default(PROJECT)
   kind               ServiceKind    @default(CORRECTIVE)
   urgent             Boolean        @default(false)
 
@@ -5178,6 +5188,7 @@ model JobOrder {
   updatedAt DateTime @updatedAt
 
   @@index([status, requestedFor])
+  @@index([category, status])
   @@index([customerId])
   @@index([assetId])
   @@index([requestedById])

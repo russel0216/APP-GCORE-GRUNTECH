@@ -512,6 +512,22 @@ const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
+    // The Service JO (2026-10-20, the owner's revised Aftermarket UI): the
+    // service call on a registered machine, routed to the Aftermarket
+    // Manager on the requester's own team (`service_manager`, in
+    // OWN_TEAM_ROLES), then the requester's Team Leader. Approval BOOKS THE
+    // VISIT, never a project. The preparer signs the steps they hold and a
+    // manager may stand in, as on every routing-sheet route.
+    documentType: 'service_job_order',
+    name: 'Service JO — aftermarket manager then team leader',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Aftermarket Manager', approverType: 'ROLE', roleKey: 'service_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+  },
+  {
     // The requester is the LEAVER's own login whenever one exists, so step 1 is
     // their supervisor and the engine's self-approval rule keeps them off their
     // own form. HR raises it only for a login-less employee — then step 1 is
@@ -946,6 +962,35 @@ async function main() {
       await prisma.setting.create({
         data: { key: MARK, value: { at: new Date().toISOString(), flagged: count }, description: 'seed: the job order route lets the preparer sign and managers stand in, once' },
       });
+    }
+  }
+
+  // The Service JO register (2026-10-20): job orders raised as service calls
+  // before the project work order of 2026-10-09 — on a machine, on a
+  // contract, or with no project name (the project shape requires one) —
+  // belong under Aftermarket. Marked SERVICE once; a row raised since is
+  // written with its category.
+  {
+    const MARK = 'seed.serviceJobOrders20261020';
+    if (!(await prisma.setting.findUnique({ where: { key: MARK } }))) {
+      const { count } = await prisma.jobOrder.updateMany({
+        where: { category: 'PROJECT', OR: [{ projectName: null }, { assetId: { not: null } }, { contractId: { not: null } }] },
+        data: { category: 'SERVICE' },
+      });
+      if (count) {
+        await prisma.auditLog.create({
+          data: {
+            entityType: 'service_job_order',
+            entityId: 'list',
+            action: 'UPDATED',
+            summary: `Moved ${count} job order(s) raised as service calls to the Service JO register`,
+          },
+        });
+      }
+      await prisma.setting.create({
+        data: { key: MARK, value: { at: new Date().toISOString(), moved: count }, description: 'seed: service-shaped job orders marked SERVICE once' },
+      });
+      if (count) console.log(`  · ${count} job order(s) raised as service calls moved to the Service JO register`);
     }
   }
 

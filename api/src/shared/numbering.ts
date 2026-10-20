@@ -117,6 +117,8 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   { type: 'service_contract', code: 'SC', label: 'Service Contract' },
   { type: 'service_visit', code: 'SV', label: 'Service Visit' },
   { type: 'job_order', code: 'JO', label: 'Job Order' },
+  // The Service JO under Aftermarket (2026-10-20): GT-SJO-2026-0001 on the stock pattern.
+  { type: 'service_job_order', code: 'SJO', label: 'Service Job Order' },
   // The design team's request (2026-10-09): GT-CJO-2026-0001 on the stock pattern.
   { type: 'cad_job_order', code: 'CJO', label: 'CAD Job Order' },
   { type: 'commissioning_report', code: 'CR', label: 'Commissioning Report' },

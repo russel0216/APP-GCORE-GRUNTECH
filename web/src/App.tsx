@@ -105,6 +105,7 @@ import { ServiceContracts, ContractDetail } from './pages/service/Contracts';
 import { ServiceReports, ServiceReportDetail, Renewals } from './pages/service/Reports';
 import { ServiceSchedule } from './pages/service/Schedule';
 import { JobOrders, JobOrderDetail } from './pages/service/JobOrders';
+import { ServiceJobOrders, ServiceJobOrderDetail } from './pages/service/ServiceJobOrders';
 import { CadJobOrders, CadJobOrderDetail } from './pages/delivery/CadJobOrders';
 import {
   ReportTemplates,
@@ -1472,6 +1473,18 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* Service JOs (2026-10-20): the service call on a registered machine
+            under Aftermarket — approval books the visit. The record page has no
+            Guard: the API lets in the approvers, who may hold no right. */}
+        <Route
+          path="/g-ops/service-job-orders"
+          element={
+            <GuardAny permissions={['gops.service_job_orders.view_all', 'gops.service_job_orders.view_own']}>
+              <ServiceJobOrders />
+            </GuardAny>
+          }
+        />
+        <Route path="/g-ops/service-job-orders/:id" element={<ServiceJobOrderDetail />} />
         {/* CAD job orders (2026-10-09): the design team's queue — requests,
             revisions, a comment thread. */}
         <Route

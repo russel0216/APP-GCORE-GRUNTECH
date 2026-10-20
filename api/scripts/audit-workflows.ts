@@ -58,6 +58,7 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   cad_job_order: ['sales', 'industry_specialist', 'project_engineer', 'technical_manager'],
   cash_advance: ['employee', 'project_engineer', 'service_engineer', 'sales', 'project_manager', 'finance'],
   job_order: ['sales', 'sales_manager', 'service_engineer'],
+  service_job_order: ['service_engineer', 'sales', 'industry_specialist', 'service_manager'],
   // HR raises a clearance for an employee with no login, and an evaluation
   // for one with no supervisor — so HR is a requester on both, and a lone HR
   // holder would be approving their own work.

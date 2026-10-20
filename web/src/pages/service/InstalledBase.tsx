@@ -728,9 +728,16 @@ export function AssetDetailPage() {
         </div>
       </div>
 
-      {(canView('gops', 'job_orders') || can('gops.job_orders.create')) && (
+      {(canView('gops', 'service_job_orders') || can('gops.service_job_orders.create')) && (
         <div className="card">
-          <h3 className="card-title">Job orders</h3>
+          <div className="card-head">
+            <h3 className="card-title">Service JOs</h3>
+            {can('gops.service_job_orders.create') && row.status !== 'DECOMMISSIONED' && (
+              <Link className="btn btn-primary btn-sm" to={`/g-ops/service-job-orders?new=1&customerId=${row.customer.id}&assetId=${row.id}`}>
+                + New service JO
+              </Link>
+            )}
+          </div>
           {row.jobOrders.length === 0 ? (
             <p className="muted">No service requested for this machine yet.</p>
           ) : (
@@ -749,7 +756,7 @@ export function AssetDetailPage() {
                   {row.jobOrders.map((j) => (
                     <tr key={j.id}>
                       <td>
-                        <Link to={`/g-ops/job-orders/${j.id}`} className="mono">
+                        <Link to={`/g-ops/service-job-orders/${j.id}`} className="mono">
                           {j.number}
                         </Link>
                       </td>

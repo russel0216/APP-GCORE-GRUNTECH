@@ -396,6 +396,9 @@ function humanise(value: string): string {
 
 const TAKE = 10;
 
+/** A job order's page is its register's: the project work order's, or the Service JO's under Aftermarket (2026-10-20). */
+const jobOrderLink = (r: { id: string; category: string }) => (r.category === 'SERVICE' ? `/g-ops/service-job-orders/${r.id}` : `/g-ops/job-orders/${r.id}`);
+
 /** Past its date and still open. A missing date is never overdue. */
 function isOverdue(when: Date | null | undefined, today: Date): boolean {
   return when != null && when.getTime() < today.getTime();
@@ -459,7 +462,7 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
       where: { assignedToId: me.id, status: 'APPROVED' },
       orderBy: { requestedFor: 'asc' },
       take: TAKE,
-      select: { id: true, number: true, title: true, urgent: true, requestedFor: true, customer: { select: { name: true } } },
+      select: { id: true, number: true, title: true, urgent: true, requestedFor: true, category: true, customer: { select: { name: true } } },
     }),
     // Planned before today and never marked done — the follow-up that slipped.
     prisma.salesActivity.findMany({
@@ -536,12 +539,12 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
     })),
     ...jobOrders.map((r) => ({
       id: r.id,
-      kind: 'job_order',
+      kind: r.category === 'SERVICE' ? 'service_job_order' : 'job_order',
       title: r.title,
       subtitle: `${r.number} · ${r.customer.name}${r.urgent ? ' · URGENT' : ''}`,
       when: r.requestedFor,
       overdue: isOverdue(r.requestedFor, dayStart),
-      link: `/g-ops/job-orders/${r.id}`,
+      link: jobOrderLink(r),
     })),
     ...slipped.map((r) => ({
       id: r.id,
@@ -702,7 +705,7 @@ async function draftsOf(me: ResolvedUser): Promise<WorkRow[]> {
       where: { requestedById: me.id, status: 'DRAFT' },
       orderBy: { updatedAt: 'desc' },
       take: TAKE,
-      select: { id: true, number: true, title: true, updatedAt: true, customer: { select: { name: true } } },
+      select: { id: true, number: true, title: true, updatedAt: true, category: true, customer: { select: { name: true } } },
     }),
   ]);
 
@@ -749,11 +752,11 @@ async function draftsOf(me: ResolvedUser): Promise<WorkRow[]> {
     })),
     ...jobOrders.map((r) => ({
       id: r.id,
-      kind: 'job_order',
+      kind: r.category === 'SERVICE' ? 'service_job_order' : 'job_order',
       title: r.title,
       subtitle: `${r.number} · ${r.customer.name}`,
       when: r.updatedAt,
-      link: `/g-ops/job-orders/${r.id}`,
+      link: jobOrderLink(r),
     })),
   ];
   // Most recently touched first — the one you were in the middle of.

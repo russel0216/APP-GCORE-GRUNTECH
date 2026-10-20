@@ -1019,7 +1019,7 @@ export function ContractDetail() {
                       ) : v.jobOrder ? (
                         <div className="faint">
                           job order{' '}
-                          <Link to={`/g-ops/job-orders/${v.jobOrder.id}`} className="mono">
+                          <Link to={`/g-ops/service-job-orders/${v.jobOrder.id}`} className="mono">
                             {v.jobOrder.number}
                           </Link>
                         </div>
