@@ -15,6 +15,7 @@
 const DETAIL: Record<string, string> = {
   // Masters
   customer: '/g-ops/customers',
+  course: '/g-hr/academy/courses',
   supplier: '/g-chain/suppliers',
   partner: '/g-ops/partners',
   employee: '/g-hr/employees',
@@ -82,7 +83,6 @@ const QUERY: Record<string, string> = {
   service_visit: '/g-ops/visits?visit=',
   sales_activity: '/g-ops/calendar/activities/',
   activity: '/g-ops/calendar/activities/',
-  course: '/g-hr/academy/courses?course=',
 };
 
 /** Where a QUERY type's printed list (entityId 'list') or a bare row lands. */
@@ -90,7 +90,6 @@ const QUERY_LIST: Record<string, string> = {
   service_visit: '/g-ops/visits',
   sales_activity: '/g-ops/calendar',
   activity: '/g-ops/calendar',
-  course: '/g-hr/academy/courses',
 };
 
 /** Types with a screen but no per-record URL — the list or the settings page. */
@@ -133,6 +132,7 @@ const SCREEN: Record<string, string> = {
   activity_type: '/admin/categories',
   cad_drawing_type: '/admin/categories',
   service_document_category: '/admin/categories',
+  course_category: '/admin/categories',
   costing_template: '/g-ops/costing',
   // A report's paper and CSV audit as EXPORTED under its division's type.
   chain_report: '/g-chain/reports',

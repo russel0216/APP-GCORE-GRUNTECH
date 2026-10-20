@@ -168,6 +168,12 @@ interface Props<T> {
   /** Told each time a fetch brings a summary — for a screen that learns from it (the partners' categories). */
   onSummary?: (summary: ListSummary) => void;
   rowKey: (row: T) => string;
+  /**
+   * Draw the page's rows some other way than the table — the course list's
+   * Cards view (2026-10-20). The toolbar, the summary cards, the empty state
+   * and the pager stay the list's; only the table is replaced.
+   */
+  renderRows?: (rows: T[]) => ReactNode;
 }
 
 export function DataList<T>({
@@ -197,6 +203,7 @@ export function DataList<T>({
   teamScope = false,
   onSummary,
   rowKey,
+  renderRows,
 }: Props<T>) {
   const [data, setData] = useState<ListResult<T> | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1087,6 +1094,8 @@ export function DataList<T>({
             */
             action={anyActive || debounced ? undefined : (emptyAction ?? actions)}
           />
+        ) : renderRows ? (
+          renderRows(data.rows)
         ) : (
           <table className="data">
             <thead>

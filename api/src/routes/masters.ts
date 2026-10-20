@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, ItemType } from '@prisma/client';
 import { prisma } from '../prisma';
+import { categoryKey } from '../shared/courseCategories';
 import { queueReorderCheck } from '../shared/reorder';
 import {
   handler,
@@ -1970,6 +1971,94 @@ referenceRoutes.delete(
     if (row._count.documents > 0) throw badRequest(`${row._count.documents} service document(s) still carry this category`);
     await prisma.serviceDocumentCategory.delete({ where: { id: row.id } });
     await audit({ entityType: 'service_document_category', entityId: row.id, action: 'DELETED', summary: `Deleted service document category ${row.name}`, before: row }, req);
+    res.json({ ok: true });
+  }),
+);
+
+// ── Course categories ───────────────────────────────────────────────────────
+// What a course is filed under (2026-10-20, the owner's Academy UI): Admin ›
+// Categories › Course categories, the service document categories' contract
+// with a colour for the chip. A course carries the NAME; renaming leaves it.
+
+referenceRoutes.get(
+  '/course-categories',
+  handler(async (req, res) => {
+    const activeOnly = String(req.query.active ?? '') === 'true';
+    const rows = await prisma.courseCategory.findMany({
+      where: activeOnly ? { isActive: true } : {},
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    });
+    const counts = await prisma.course.groupBy({ by: ['category'], _count: { _all: true }, where: { category: { not: null } } });
+    const byKey = new Map(counts.map((c) => [categoryKey(c.category!), c._count._all]));
+    res.json(rows.map((r) => ({ ...r, courseCount: byKey.get(categoryKey(r.name)) ?? 0 })));
+  }),
+);
+
+const courseCategorySchema = z.object({
+  name: z.string().trim().min(2, 'Give it a name').max(60),
+  color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, 'A colour is #RRGGBB').nullable().optional(),
+  sortOrder: z.number().int().default(0),
+  isActive: z.boolean().default(true),
+});
+
+async function courseCategoryNameTaken(name: string, exceptId?: string): Promise<boolean> {
+  const clash = await prisma.courseCategory.findFirst({
+    where: { name: { equals: name, mode: 'insensitive' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { id: true },
+  });
+  return !!clash;
+}
+
+referenceRoutes.post(
+  '/course-categories',
+  require_('admin.categories.create'),
+  handler(async (req, res) => {
+    const body = parseBody(courseCategorySchema, req.body);
+    if (await courseCategoryNameTaken(body.name)) throw conflict(`Course category "${body.name}" already exists`);
+    const created = await prisma.courseCategory.create({ data: { ...body, color: body.color ?? null, createdById: currentUser(req).id } });
+    await audit({ entityType: 'course_category', entityId: created.id, action: 'CREATED', summary: `Created course category ${created.name}` }, req);
+    res.status(201).json({ ...created, courseCount: 0 });
+  }),
+);
+
+/**
+ * A rename follows the courses filed under the old name — the course keeps
+ * the NAME, so the list would otherwise lose its chip and its filter.
+ */
+referenceRoutes.patch(
+  '/course-categories/:id',
+  editCategory,
+  handler(async (req, res) => {
+    const body = parseBody(courseCategorySchema.partial(), req.body);
+    const before = await prisma.courseCategory.findUnique({ where: { id: req.params.id } });
+    if (!before) throw notFound('Course category not found');
+    assertCategoryEdit(currentUser(req), before);
+    if (body.name && body.name !== before.name && (await courseCategoryNameTaken(body.name, before.id))) {
+      throw conflict(`Course category "${body.name}" already exists`);
+    }
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.courseCategory.update({ where: { id: before.id }, data: { ...body, color: body.color === undefined ? undefined : body.color } });
+      if (body.name && body.name !== before.name) {
+        await tx.course.updateMany({ where: { category: { equals: before.name, mode: 'insensitive' } }, data: { category: row.name } });
+      }
+      return row;
+    });
+    await audit({ entityType: 'course_category', entityId: updated.id, action: 'UPDATED', summary: `Updated course category ${updated.name}`, before, after: updated }, req);
+    res.json(updated);
+  }),
+);
+
+referenceRoutes.delete(
+  '/course-categories/:id',
+  require_('admin.categories.delete'),
+  handler(async (req, res) => {
+    const row = await prisma.courseCategory.findUnique({ where: { id: req.params.id } });
+    if (!row) throw notFound('Course category not found');
+    if (row.isSystem) throw badRequest('The standard course categories cannot be deleted — deactivate one instead');
+    const inUse = await prisma.course.count({ where: { category: { equals: row.name, mode: 'insensitive' } } });
+    if (inUse > 0) throw badRequest(`${inUse} course(s) still carry this category`);
+    await prisma.courseCategory.delete({ where: { id: row.id } });
+    await audit({ entityType: 'course_category', entityId: row.id, action: 'DELETED', summary: `Deleted course category ${row.name}`, before: row }, req);
     res.json({ ok: true });
   }),
 );

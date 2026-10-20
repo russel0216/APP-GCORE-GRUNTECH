@@ -79,6 +79,7 @@ import { PeopleFlow, PeopleFlowPage } from './pages/hr/PeopleFlow';
 import { Meetings, MeetingDetail } from './pages/hr/Meetings';
 import { Evaluations, EvaluationDetail } from './pages/hr/Evaluations';
 import { Courses } from './pages/hr/academy/Courses';
+import { CoursePage } from './pages/hr/academy/CoursePage';
 import { TrainingCalendar } from './pages/hr/academy/TrainingCalendar';
 import { Sessions, SessionDetail } from './pages/hr/academy/Sessions';
 import { Passport } from './pages/hr/academy/Passport';
@@ -1136,12 +1137,21 @@ function Routed() {
           }
         />
         {/* Gruntech Academy */}
+        {/* The course list is the CATALOGUE for anyone who sees the training calendar (2026-10-20). */}
         <Route
           path="/g-hr/academy/courses"
           element={
-            <Guard permission="ghr.courses.view_all">
+            <GuardAny permissions={['ghr.courses.view_all', 'ghr.training_calendar.view_all', 'ghr.training_sessions.view_all', 'ghr.training_sessions.view_own']}>
               <Courses />
-            </Guard>
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/academy/courses/:id"
+          element={
+            <GuardAny permissions={['ghr.courses.view_all', 'ghr.training_calendar.view_all', 'ghr.training_sessions.view_all', 'ghr.training_sessions.view_own']}>
+              <CoursePage />
+            </GuardAny>
           }
         />
         <Route

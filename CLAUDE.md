@@ -676,8 +676,11 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,526 assertions across twenty-two scripts** (counted 2026-10-20, after
-the revised Aftermarket UI's four pushes — one on foundation for the
+**4,546 assertions across twenty-two scripts** (counted 2026-10-20, after
+the G-HR Academy UI's 20 on academy — the course list's cards, seats and
+trainer, Enroll now on the next session and its refusals, the syllabus, the
+category chip's colour, the catalogue for a staffer and the course paper —
+and before it the revised Aftermarket UI's four pushes — one on foundation for the
 Aftermarket strip and 7 on aftermarket for the coverage level, the renewal
 filter, the team column and the overview's two new figures, then 9 on
 aftermarket for a visit's slot, its confirmation, the unconfirm on a move
@@ -756,7 +759,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 429, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
 94, partners 120, delivery 193, chain 361, hr 487, plantilla 129, meetings
-114, evaluations 154, academy 125, finance 432, aftermarket 304, cad 122,
+114, evaluations 154, academy 145, finance 432, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -3322,6 +3325,94 @@ buttons keep rule 19's "+ New …". Built push by push:
   and every machine named must be the customer's. **The contract page
   has an Attachments card** (`service_contract`: read by whoever reads
   contracts, written by whoever may modify the contract or raise one).
+
+## The G-HR Academy UI (2026-10-20)
+
+The owner's `G-HR_Academy_Module_UI_Specification.pdf` ("Plan for build of
+G-HR module … make no mistake"; the plan's eleven suggestions built as
+proposed): the course list in his dress, a course with a page of its own, a
+Cards view and the categories as an Admin › Categories list. The strip was
+already his (Courses · Training Calendar · Training Sessions · My Training
+Passport · Training Passports); no Academy dashboard entry — the G-HR
+dashboard stands and the four cards sit on the Courses page.
+
+- **The course list** (`pages/hr/academy/Courses.tsx`): four cards from the
+  list's own query (`courseListSummary()` in `routes/academy.ts`) — Active
+  courses; Enrolled (distinct people on SCHEDULED sessions still to come, "on
+  N upcoming sessions"); Upcoming sessions (starting in the next 7 days);
+  Completed hours (VERIFIED records completed this Manila year, each counting
+  its course's hours). Columns: the title with its **category chip**
+  (`CategoryChip`, the colour from the list below), Trainer / instructor
+  (the NEXT open session's trainer login with their position, else the
+  course's own `instructor` / `instructorCredential`), Schedule date (the
+  next session's span), Duration (`durationLabel()`: "16 hours · 2-day
+  Workshop" — the hours, then the next session's Manila days, else the hours
+  at 8 a day, then `Course.format`; 4 hours in a day is "Half-day"), Seats
+  left (`seatsLeft` of the next session, red at two or fewer, "Full", "open"
+  with no cap, "No session scheduled"), and **Action**: `EnrolButton` —
+  "Enroll now" (`btn-primary`), "✓ Enrolled", "Full" or "No session"; Code,
+  Valid for, Required of, Certified and Status under Columns. A row opens
+  the course's page. **List / Cards** (`?view=cards`, the inventory's rule,
+  the choice kept in `gcore_view_courses`): the spec's featured cards —
+  chip, a status dot with its words (Open registration / Almost full / Full
+  / Enrolled / No session scheduled), title, description, Trainer, Date,
+  Duration, and the foot ("Certificate included", "N seats left", "Passport
+  credited on completion") with the same button. `DataList` gained
+  `renderRows` for it: the toolbar, cards, chips, empty state and pager stay
+  the list's, only the table is replaced.
+- **"Enroll now" is the one self-enrolment**: `POST /courses/:id/enrol-me`
+  (`{ sessionId? }`, else the course's NEXT open session — a 409 naming the
+  gap when none is scheduled) runs `selfEnrol()`, the same function
+  `POST /training-sessions/:id/enrol-me` runs — the Academy setting, an
+  active employee record, SCHEDULED and to come, not already on it — and
+  the seat is CLAIMED under `FOR UPDATE` on the session's row, so two people
+  cannot both take the last one; the trainer's bell and the session's trail
+  are as from the calendar. No waitlist: a full session reads Full.
+- **The course list is the CATALOGUE for anyone who sees the calendar**
+  (the owner's rows are engineers, who hold no course-master key):
+  `COURSE_READERS` — the master's View keys OR `ghr.training_calendar.
+  view_all` OR a sessions View key — opens the list, the paper, the course
+  page and Enroll now; `courseScope()` gives a master holder their own
+  scope (`ownOnly`) and anybody else ACTIVE courses only
+  (`assertCourseReadable`: an inactive course is a 404 to them). The web
+  Guards on both routes match. The master's Create / Edit / Delete are
+  untouched, and the menu entry still follows the master's View keys — give
+  Courses › View All to every role on Admin › Roles, or people reach it
+  from the Training Calendar.
+- **A course has a page** (rule 20): `/g-hr/academy/courses/:id`
+  (`pages/hr/academy/CoursePage.tsx`) — `RecordHeader` (COURSE • code, the
+  Active pill, the chip and duration on the meta line, Enroll now as its
+  next step, Print, Modify opening the one `CourseModal`), About (the
+  description, instructor, certificate, passport, required of), the
+  **Syllabus outline**, and Upcoming sessions with Enroll on each (`{
+  sessionId }`). `recordLink('course')` and Ctrl+K land there; an old
+  `?course=` link redirects. **The paper** `GET /courses/:id/pdf` prints
+  the course, the outline, who must hold it and the sessions to come, no
+  sign-offs (a master, not a document), audited EXPORTED.
+- **The course's new fields**: `instructor`, `instructorCredential`,
+  `format` (free text, suggestions Workshop / Intensive / Seminar / Webinar
+  …), `certificateIncluded` (a flag HR ticks; every verified completion is
+  still credited to the passport), and `CourseModule` rows (sequence,
+  title, `topics[]`) — the syllabus as data, replaced whole by `PUT
+  /courses/:id/modules`, the modal's Syllabus tab (`SyllabusEditor`). The
+  import takes Instructor, Instructor Credential, Format and Certificate
+  Included.
+- **Course categories are Admin › Categories › Course categories**
+  (`CourseCategory`, `shared/courseCategories.ts`, `/reference/
+  course-categories`, the service document categories' contract with a
+  `color`): the owner's four seeded as system rows — Pneumatics & Gas,
+  Hydraulics & Flow, Electrical & Control, Compliance & HSE — and, once,
+  the Academy settings' five and every category a course on file carried,
+  as plain rows (`seedCourseCategories()`, the seed, every deploy, adds
+  only what is missing). **A course carries the NAME** (`Course.category`,
+  a list, not a reference — the quotation group's rule): the chip's colour
+  is looked up by `categoryKey()` (case- and space-blind), a RENAME follows
+  its courses (`PATCH /reference/course-categories/:id` rewrites them in
+  the same transaction), a category in use is deactivated, not deleted.
+  `GET /academy-settings` answers `categories` from the list (active names
+  in order), a `PUT` naming categories adds the missing ones and removes
+  none, and HR Settings' Academy card points at Admin › Categories instead
+  of its textarea. Audit type `course_category`, mapped in `links.ts`.
 
 ## The notification bell (2026-10-20)
 

@@ -106,6 +106,16 @@ export interface DocumentCategoryDef {
   _count?: { documents: number };
 }
 
+export interface CourseCategoryDef {
+  id: string;
+  name: string;
+  color: string | null;
+  sortOrder: number;
+  isSystem: boolean;
+  isActive: boolean;
+  courseCount?: number;
+}
+
 // ── One card and one modal for every category (2026-10-10) ───────────────────
 //
 // Seven cards used to carry seven near-identical modals — ~690 lines that
@@ -465,6 +475,47 @@ const ACTIVITY_TYPES: CategorySpec<ActivityTypeDef> = {
   },
 };
 
+const COURSE_CATEGORIES: CategorySpec<CourseCategoryDef> = {
+  noun: 'course category',
+  title: 'Course categories',
+  endpoint: '/reference/course-categories',
+  columns: [
+    {
+      key: 'name',
+      head: 'Name',
+      render: (t) => (
+        <>
+          <span className="tag academy-chip" style={t.color ? ({ '--chip-color': t.color } as React.CSSProperties) : undefined}>
+            {t.name}
+          </span>
+          {t.isSystem && <span className="faint"> · built-in</span>}
+        </>
+      ),
+    },
+    { key: 'courses', head: 'Courses', headClass: 'right', cellClass: 'right', render: (t) => (t.courseCount ?? 0).toLocaleString('en-US') },
+    { key: 'status', head: 'Status', render: (t) => activeBadge(t.isActive) },
+  ],
+  footnote:
+    "What a course is filed under on the Academy's course list, each with the colour its chip wears — Pneumatics & Gas, Hydraulics & Flow, Electrical & Control, Compliance & HSE. A course carries the name, so renaming a category follows its courses; the four built-ins can be renamed but not deleted, and a category in use is deactivated rather than deleted.",
+  blank: { name: '', color: '#2E9A4B', sortOrder: 0, isActive: true },
+  fromRow: (t) => ({ name: t.name, color: t.color ?? '#2E9A4B', sortOrder: t.sortOrder, isActive: t.isActive }),
+  fields: () => [
+    { kind: 'text', key: 'name', label: 'Name', hint: 'e.g. Pneumatics & Gas, Compliance & HSE', maxLength: 60 },
+    { kind: 'color', key: 'color', label: 'Colour', hint: 'The chip on the course list', fallback: '#2E9A4B' },
+    { kind: 'count', key: 'sortOrder', label: 'Sort order' },
+    { kind: 'check', key: 'isActive', label: 'Active — an inactive category stays on its courses but is not offered' },
+  ],
+  payload: (f) => ({ ...f, color: f.color || null }),
+  canSave: (f) => !!text(f.name).trim(),
+  deletable: (t) => !t.isSystem && (t.courseCount ?? 0) === 0,
+  notice: (t) => {
+    if (t.isSystem) return 'A built-in category: rename or recolour it, or untick Active to stop offering it.';
+    const inUse = t.courseCount ?? 0;
+    if (inUse === 0) return null;
+    return `${inUse === 1 ? 'One course is' : `${inUse.toLocaleString('en-US')} courses are`} filed under it, so it cannot be deleted — untick Active to stop offering it.`;
+  },
+};
+
 const DOCUMENT_CATEGORIES: CategorySpec<DocumentCategoryDef> = {
   noun: 'service document category',
   title: 'Service document categories',
@@ -818,9 +869,10 @@ interface CategoryLists {
   activityTypes: ActivityTypeDef[];
   drawingTypes: DrawingTypeDef[];
   documentCategories: DocumentCategoryDef[];
+  courseCategories: CourseCategoryDef[];
 }
 
-const NO_LISTS: CategoryLists = { cost: [], items: [], teams: [], subIndustries: [], groups: [], activityTypes: [], drawingTypes: [], documentCategories: [] };
+const NO_LISTS: CategoryLists = { cost: [], items: [], teams: [], subIndustries: [], groups: [], activityTypes: [], drawingTypes: [], documentCategories: [], courseCategories: [] };
 
 export function Categories() {
   const [lists, setLists] = useState<CategoryLists>(NO_LISTS);
@@ -830,7 +882,7 @@ export function Categories() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories] = await Promise.all([
+      const [cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories, courseCategories] = await Promise.all([
         api.get<CostCategory[]>('/reference/cost-categories'),
         api.get<ItemCategory[]>('/reference/item-categories'),
         api.get<Industry[]>('/reference/industries'),
@@ -839,8 +891,9 @@ export function Categories() {
         api.get<ActivityTypeDef[]>('/reference/activity-types'),
         api.get<DrawingTypeDef[]>('/reference/cad-drawing-types'),
         api.get<DocumentCategoryDef[]>('/reference/service-document-categories'),
+        api.get<CourseCategoryDef[]>('/reference/course-categories'),
       ]);
-      setLists({ cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories });
+      setLists({ cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories, courseCategories });
       setError(null);
     } catch (err) {
       setError(err);
@@ -898,6 +951,7 @@ export function Categories() {
       <CategoryCard spec={ACTIVITY_TYPES} rows={lists.activityTypes} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={DRAWING_TYPES} rows={lists.drawingTypes} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={DOCUMENT_CATEGORIES} rows={lists.documentCategories} onChanged={changed} className="card m-industries" />
+      <CategoryCard spec={COURSE_CATEGORIES} rows={lists.courseCategories} onChanged={changed} className="card m-industries" />
     </div>
   );
 }

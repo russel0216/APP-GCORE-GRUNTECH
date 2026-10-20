@@ -4074,6 +4074,9 @@ model Course {
   /// Human code typed by HR (SAF-01), not nextNumber.
   code               String              @unique
   title              String
+  /// The category's NAME — a list, not a reference (Admin › Categories ›
+  /// Course categories since 2026-10-20): the chip's colour is looked up by
+  /// name, and a renamed category keeps the courses that carry the old name.
   category           String?
   description        String?
   hours              Decimal             @default(0) @db.Decimal(6, 2)
@@ -4090,7 +4093,48 @@ model Course {
   // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
   createdById String?
 
+  // The owner's Academy UI (2026-10-20): the course's default instructor
+  // and their credential ("Grundfos Certified Trainer" — a trainer with no
+  // login), the format its duration is said in ("2-Day Workshop"), whether a
+  // certificate is issued, and the syllabus outline as modules.
+  instructor           String?
+  instructorCredential String?
+  format               String?
+  certificateIncluded  Boolean        @default(false)
+  modules              CourseModule[]
+
   @@index([isActive])
+}
+
+/// The syllabus outline (2026-10-20): "Module 1: Air Generation" with its
+/// topics, one row per module in order. Replaced whole by the course form.
+model CourseModule {
+  id       String   @id @default(cuid())
+  courseId String
+  course   Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  sequence Int
+  title    String
+  topics   String[] @default([])
+
+  @@unique([courseId, sequence])
+}
+
+/// Admin › Categories › Course categories (2026-10-20, the owner's Academy
+/// UI: PNEUMATICS & GAS, HYDRAULICS & FLOW …). The service document
+/// categories' contract — seeded system rows renamable and undeletable, an
+/// administrator may add more — with a colour for the chip on the course
+/// list. A course carries the NAME (`Course.category`), as a quotation line
+/// carries its group.
+model CourseCategory {
+  id        String   @id @default(cuid())
+  name      String
+  color     String?
+  sortOrder Int      @default(0)
+  isSystem  Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  createdById String?
 }
 
 /// Both null = everyone; department only = everyone in it; position only =

@@ -50,6 +50,7 @@ import {
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit as assertCanEditOwn, mayEdit, viewScope } from '../shared/ownScope';
 import { visibleOwners } from '../shared/team';
+import { activeCategoryNames, categoryColors, categoryKey } from '../shared/courseCategories';
 
 /**
  * Gruntech Academy — G-HR › Academy (item 13).
@@ -99,7 +100,29 @@ const courseSchema = z.object({
   validityMonths: z.number().int().min(1).max(240).nullable().optional(),
   requiresAssessment: z.boolean().default(false),
   isActive: z.boolean().default(true),
+  // The owner's Academy UI (2026-10-20).
+  instructor: z.string().trim().max(120).nullable().optional(),
+  instructorCredential: z.string().trim().max(160).nullable().optional(),
+  format: z.string().trim().max(60).nullable().optional(),
+  certificateIncluded: z.boolean().default(false),
 });
+
+/** "16 hours · 2-day workshop": the hours, then the days of the next session (else from the hours, 8 a day) with the course's format. */
+export function durationLabel(hours: number, format: string | null, sessionDays: number | null): string {
+  const h = Number.isInteger(hours) ? String(hours) : hours.toFixed(1);
+  const days = sessionDays ?? (hours > 0 ? Math.max(1, Math.ceil(hours / 8)) : 0);
+  const dayWord = days === 0 ? null : hours > 0 && hours <= 4 && days === 1 ? 'Half-day' : `${days}-day`;
+  const tail = [dayWord, format?.trim() || null].filter(Boolean).join(' ');
+  return tail ? `${h} hours · ${tail}` : `${h} hours`;
+}
+
+/** Days a session spans on the Manila calendar, both ends inclusive. */
+export function sessionDays(startsAt: Date, endsAt: Date): number {
+  const a = manilaDayKey(startsAt);
+  const b = manilaDayKey(endsAt);
+  const ms = Date.UTC(+b.slice(0, 4), +b.slice(5, 7) - 1, +b.slice(8, 10)) - Date.UTC(+a.slice(0, 4), +a.slice(5, 7) - 1, +a.slice(8, 10));
+  return Math.max(1, Math.round(ms / 86_400_000) + 1);
+}
 
 const requirementSelect = {
   id: true,
@@ -138,6 +161,7 @@ function courseListWhere(q: ListQuery): Prisma.CourseWhereInput {
         { code: { contains: q.search, mode: 'insensitive' } },
         { title: { contains: q.search, mode: 'insensitive' } },
         { category: { contains: q.search, mode: 'insensitive' } },
+        { instructor: { contains: q.search, mode: 'insensitive' } },
       ],
     });
   }
@@ -148,6 +172,62 @@ function courseListWhere(q: ListQuery): Prisma.CourseWhereInput {
 
 const COURSE_SORTS = ['code', 'title', 'category', 'hours', 'validityMonths'];
 
+/** The next open session of a course: SCHEDULED and still to come. */
+const nextSessionWhere = (now: Date): Prisma.TrainingSessionWhereInput => ({ status: 'SCHEDULED', startsAt: { gte: now } });
+
+const nextSessionSelect = {
+  id: true,
+  number: true,
+  startsAt: true,
+  endsAt: true,
+  capacity: true,
+  venue: true,
+  meetLink: true,
+  trainer: { select: { id: true, name: true, position: true } },
+  attendees: { select: { employeeId: true } },
+} satisfies Prisma.TrainingSessionSelect;
+
+type NextSession = Prisma.TrainingSessionGetPayload<{ select: typeof nextSessionSelect }>;
+
+/** What the list, the cards and the course page need to say "Enroll now" truthfully. */
+interface EnrolContext {
+  allowSelfEnrolment: boolean;
+  employeeId: string | null;
+  colors: Map<string, { name: string; color: string | null }>;
+}
+
+async function enrolContext(me: ResolvedUser): Promise<EnrolContext> {
+  const [rules, emp, colors] = await Promise.all([academySettings(), myEmployee(me.id), categoryColors()]);
+  return { allowSelfEnrolment: rules.allowSelfEnrolment, employeeId: emp?.isActive ? emp.id : null, colors };
+}
+
+/** A session as the course list and page say it: seats, whether the viewer is on it, whether they may enrol. */
+function sessionSeat(s: NextSession, ctx: EnrolContext) {
+  const enrolledCount = s.attendees.length;
+  const seatsLeft = s.capacity != null ? Math.max(0, s.capacity - enrolledCount) : null;
+  const enrolledMe = !!ctx.employeeId && s.attendees.some((a) => a.employeeId === ctx.employeeId);
+  const full = seatsLeft === 0;
+  return {
+    id: s.id,
+    number: s.number,
+    startsAt: s.startsAt,
+    endsAt: s.endsAt,
+    days: sessionDays(s.startsAt, s.endsAt),
+    venue: s.venue,
+    meetLink: s.meetLink,
+    capacity: s.capacity,
+    enrolledCount,
+    seatsLeft,
+    full,
+    enrolledMe,
+    trainer: s.trainer,
+    canEnrol: ctx.allowSelfEnrolment && !!ctx.employeeId && !enrolledMe && !full,
+  };
+}
+
+/** The chip's colour, by the category's name. */
+const colorOf = (ctx: EnrolContext, category: string | null) => (category ? (ctx.colors.get(categoryKey(category))?.color ?? null) : null);
+
 /**
  * "Own" on the course master (2026-10-18) is a course the caller added
  * (`Course.createdById`, set on create and by the import from that day):
@@ -155,6 +235,37 @@ const COURSE_SORTS = ['code', 'title', 'category', 'hours', 'validityMonths'];
  * course added before carries no author and is View All's / Edit All's.
  */
 const coursesAddedBy = (me: ResolvedUser): Prisma.CourseWhereInput => ({ createdById: me.id });
+
+/**
+ * Who reads the course list (2026-10-20, the owner's Academy UI: every
+ * engineer sees the courses and may "Enroll now"): the course master's own
+ * readers, and anybody who sees the company-wide training calendar or their
+ * own sessions — for them the list is the CATALOGUE, active courses only,
+ * and the master's Edit rights are untouched.
+ */
+const COURSE_READERS = [
+  'ghr.courses.view_all',
+  'ghr.courses.view_team',
+  'ghr.courses.view_own',
+  'ghr.training_calendar.view_all',
+  'ghr.training_sessions.view_all',
+  'ghr.training_sessions.view_own',
+];
+const holdsCourseMaster = (me: ResolvedUser) =>
+  can(me, 'ghr.courses.view_all') || can(me, 'ghr.courses.view_team') || can(me, 'ghr.courses.view_own');
+/** The list as the caller may read it: the master's own scope, else the catalogue. */
+function courseScope(me: ResolvedUser, where: Prisma.CourseWhereInput): Prisma.CourseWhereInput {
+  if (holdsCourseMaster(me)) return ownOnly(me, 'ghr', 'courses', where, (ids) => ({ createdById: { in: ids } }));
+  return { AND: [where, { isActive: true }] };
+}
+/** One course as the caller may open it: the master's own rule, else an active course of the catalogue. */
+function assertCourseReadable(me: ResolvedUser, course: { createdById: string | null; isActive: boolean }): void {
+  if (holdsCourseMaster(me)) {
+    assertCanView(me, 'ghr', 'courses', course.createdById === me.id, course.createdById);
+    return;
+  }
+  if (!course.isActive) throw notFound('Course not found');
+}
 
 /** What the list shows of a course, the screen's and the paper's: the counts are read with it. */
 const courseListSelect = (now: Date) =>
@@ -168,47 +279,111 @@ const courseListSelect = (now: Date) =>
     requiresAssessment: true,
     isActive: true,
     createdById: true,
+    description: true,
+    instructor: true,
+    instructorCredential: true,
+    format: true,
+    certificateIncluded: true,
     requirements: { select: requirementSelect },
+    sessions: { where: nextSessionWhere(now), orderBy: { startsAt: 'asc' }, take: 1, select: nextSessionSelect },
     _count: {
       select: {
-        sessions: { where: { status: 'SCHEDULED', startsAt: { gte: now } } },
+        sessions: { where: nextSessionWhere(now) },
         records: { where: { status: 'VERIFIED' } },
       },
     },
   }) satisfies Prisma.CourseSelect;
 
+type CourseListRow = Prisma.CourseGetPayload<{ select: ReturnType<typeof courseListSelect> }>;
+
+/** A list row as the screen and the paper read it. */
+function presentCourseRow(c: CourseListRow, me: ResolvedUser, ctx: EnrolContext) {
+  const { requirements, _count, hours, createdById, sessions, ...rest } = c;
+  const next = sessions[0] ? sessionSeat(sessions[0], ctx) : null;
+  const h = Number(hours);
+  return {
+    ...rest,
+    hours: h,
+    canEdit: mayEdit(me, 'ghr', 'courses', createdById === me.id, createdById),
+    categoryColor: colorOf(ctx, c.category),
+    requirementCount: requirements.length,
+    requiredOf: requirements.map(requirementText),
+    upcomingSessions: _count.sessions,
+    completions: _count.records,
+    nextSession: next,
+    /** The trainer the list names: the next session's login, else the course's own instructor. */
+    trainerName: next?.trainer.name ?? c.instructor ?? null,
+    trainerCredential: next ? (next.trainer.position ?? null) : (c.instructorCredential ?? null),
+    duration: durationLabel(h, c.format, next?.days ?? null),
+    seatsLeft: next?.seatsLeft ?? null,
+    enrolled: next?.enrolledMe ?? false,
+    canEnrol: next?.canEnrol ?? false,
+  };
+}
+
+/**
+ * The four cards over the course list (2026-10-20, the owner's Academy UI),
+ * under the list's own query: active courses; the people enrolled on sessions
+ * still to come, and how many sessions; sessions starting in the next seven
+ * days; the hours of verified completions this year (each record counts its
+ * course's hours).
+ */
+async function courseListSummary(where: Prisma.CourseWhereInput, now: Date) {
+  const weekAhead = new Date(now.getTime() + 7 * 86_400_000);
+  const yearStart = new Date(`${manilaDayKey(now).slice(0, 4)}-01-01T00:00:00.000Z`);
+  const upcoming = { course: where, ...nextSessionWhere(now) } satisfies Prisma.TrainingSessionWhereInput;
+  const [activeCourses, enrolments, upcomingWeek, completed] = await Promise.all([
+    prisma.course.count({ where: { AND: [where, { isActive: true }] } }),
+    prisma.trainingAttendee.findMany({ where: { session: upcoming }, select: { employeeId: true, sessionId: true } }),
+    prisma.trainingSession.count({ where: { ...upcoming, startsAt: { gte: now, lt: weekAhead } } }),
+    prisma.trainingRecord.groupBy({
+      by: ['courseId'],
+      where: { course: where, status: 'VERIFIED', completedAt: { gte: yearStart } },
+      _count: { _all: true },
+    }),
+  ]);
+  const hoursOf = new Map(
+    (await prisma.course.findMany({ where: { id: { in: completed.map((c) => c.courseId) } }, select: { id: true, hours: true } })).map((c) => [c.id, Number(c.hours)]),
+  );
+  const completedHours = completed.reduce((sum, c) => sum + c._count._all * (hoursOf.get(c.courseId) ?? 0), 0);
+  return {
+    activeCourses,
+    enrolledPeople: new Set(enrolments.map((e) => e.employeeId)).size,
+    enrolledSessions: new Set(enrolments.map((e) => e.sessionId)).size,
+    upcomingWeek,
+    completedHours: Math.round(completedHours * 100) / 100,
+    completedThisYear: completed.reduce((n, c) => n + c._count._all, 0),
+  };
+}
+
 courseRoutes.get(
   '/',
-  requireView('ghr', 'courses'),
+  requireAny(...COURSE_READERS),
   handler(async (req, res) => {
     const q = listQuery(req);
     const me = currentUser(req);
-    const where = ownOnly(me, 'ghr', 'courses', courseListWhere(q), (ids) => ({ createdById: { in: ids } }));
-    const [rows, total] = await Promise.all([
+    const where = courseScope(me, courseListWhere(q));
+    const now = new Date();
+    const [rows, total, ctx, summary] = await Promise.all([
       prisma.course.findMany({
         where,
         orderBy: orderBy(q, COURSE_SORTS, { code: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
-        select: courseListSelect(new Date()),
+        select: courseListSelect(now),
       }),
       prisma.course.count({ where }),
+      enrolContext(me),
+      courseListSummary(where, now),
     ]);
-    res.json(
-      listResult(
-        rows.map(({ requirements, _count, hours, createdById, ...c }) => ({
-          ...c,
-          canEdit: mayEdit(me, 'ghr', 'courses', createdById === me.id, createdById),
-          hours: Number(hours),
-          requirementCount: requirements.length,
-          requiredOf: requirements.map(requirementText),
-          upcomingSessions: _count.sessions,
-          completions: _count.records,
-        })),
+    res.json({
+      ...listResult(
+        rows.map((c) => presentCourseRow(c, me, ctx)),
         total,
         q,
       ),
-    );
+      summary,
+    });
   }),
 );
 
@@ -221,13 +396,13 @@ courseRoutes.get(
  */
 courseRoutes.get(
   '/pdf',
-  requireView('ghr', 'courses'),
+  requireAny(...COURSE_READERS),
   handler(async (req, res) => {
     const q = listQuery(req);
     const me = currentUser(req);
-    const where = ownOnly(me, 'ghr', 'courses', courseListWhere(q), (ids) => ({ createdById: { in: ids } }));
+    const where = courseScope(me, courseListWhere(q));
     const f = q.filters;
-    const [rows, count] = await Promise.all([
+    const [rawRows, count, ctx] = await Promise.all([
       prisma.course.findMany({
         where,
         orderBy: orderBy(q, COURSE_SORTS, { code: 'asc' }),
@@ -235,7 +410,9 @@ courseRoutes.get(
         select: courseListSelect(new Date()),
       }),
       prisma.course.count({ where }),
+      enrolContext(me),
     ]);
+    const rows = rawRows.map((c) => presentCourseRow(c, me, ctx));
     const reference = listReference(count, rows.length, ['course', 'courses'], [
       q.search && `search "${q.search}"`,
       f.active === 'true' && 'active',
@@ -246,7 +423,7 @@ courseRoutes.get(
       f.ids && 'the rows selected',
     ]);
 
-    // Eight columns: landscape (rule 6).
+    // Ten columns: landscape (rule 6) — the screen's columns (2026-10-20).
     const pdf = await renderDocument({
       title: 'Courses',
       date: new Date(),
@@ -255,19 +432,21 @@ courseRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Code', 'Course', 'Hours', 'Valid for', 'Required of', 'Upcoming', 'Certified', 'Status'],
-          align: ['left', 'left', 'right', 'left', 'left', 'right', 'right', 'left'],
+          head: ['Code', 'Course', 'Trainer / instructor', 'Next session', 'Duration', 'Seats left', 'Valid for', 'Required of', 'Certified', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'right', 'left', 'left', 'right', 'left'],
           rows: rows.map((c) => [
             c.code,
             {
               title: c.title,
               body: [c.category ?? 'Uncategorised', c.requiresAssessment ? 'assessed' : null].filter(Boolean).join(' · '),
             },
-            String(Number(c.hours)),
+            c.trainerName ? { title: c.trainerName, body: c.trainerCredential ?? '' } : '—',
+            c.nextSession ? whenText(c.nextSession.startsAt, c.nextSession.endsAt) : 'None scheduled',
+            c.duration,
+            c.nextSession ? (c.seatsLeft == null ? 'Open' : `${c.seatsLeft} / ${c.nextSession.capacity}`) : '—',
             c.validityMonths ? `${c.validityMonths} months` : 'Never expires',
-            c.requirements.length ? c.requirements.map(requirementText).join('; ') : 'Nobody — optional',
-            String(c._count.sessions),
-            String(c._count.records),
+            c.requiredOf.length ? c.requiredOf.join('; ') : 'Nobody — optional',
+            String(c.completions),
             c.isActive ? 'Active' : 'Inactive',
           ]),
         },
@@ -325,7 +504,13 @@ async function loadCourse(id: string) {
       createdById: true,
       createdAt: true,
       updatedAt: true,
+      instructor: true,
+      instructorCredential: true,
+      format: true,
+      certificateIncluded: true,
+      modules: { orderBy: { sequence: 'asc' }, select: { id: true, sequence: true, title: true, topics: true } },
       requirements: { select: requirementSelect, orderBy: { createdAt: 'asc' } },
+      sessions: { where: nextSessionWhere(new Date()), orderBy: { startsAt: 'asc' }, take: 20, select: nextSessionSelect },
       _count: { select: { sessions: true, records: true } },
     },
   });
@@ -337,15 +522,162 @@ async function loadCourse(id: string) {
   };
 }
 
+type CourseDetailRow = Awaited<ReturnType<typeof loadCourse>>;
+
+/** The course page: the record, its chip's colour, each coming session with its seats and the viewer's standing on it. */
+async function presentCourse(course: CourseDetailRow, me: ResolvedUser) {
+  const ctx = await enrolContext(me);
+  const { sessions, ...rest } = course;
+  const upcoming = sessions.map((s) => sessionSeat(s, ctx));
+  const next = upcoming[0] ?? null;
+  return {
+    ...rest,
+    canEdit: mayEdit(me, 'ghr', 'courses', course.createdById === me.id, course.createdById),
+    categoryColor: colorOf(ctx, course.category),
+    upcoming,
+    duration: durationLabel(course.hours, course.format, next?.days ?? null),
+    enrolled: upcoming.some((s) => s.enrolledMe),
+    canEnrol: next?.canEnrol ?? false,
+    selfEnrolment: ctx.allowSelfEnrolment,
+  };
+}
+
 courseRoutes.get(
   '/:id',
-  requireView('ghr', 'courses'),
+  requireAny(...COURSE_READERS),
   handler(async (req, res) => {
     const me = currentUser(req);
     const course = await loadCourse(req.params.id);
-    const isMine = course.createdById === me.id;
-    assertCanView(me, 'ghr', 'courses', isMine, course.createdById);
-    res.json({ ...course, canEdit: mayEdit(me, 'ghr', 'courses', isMine, course.createdById) });
+    assertCourseReadable(me, course);
+    res.json(await presentCourse(course, me));
+  }),
+);
+
+/**
+ * The course on paper (2026-10-20): what it is, who teaches it, the syllabus
+ * outline, who must hold it and the sessions still to come. No sign-offs — a
+ * course is a master, not a document anybody approves.
+ */
+courseRoutes.get(
+  '/:id/pdf',
+  requireAny(...COURSE_READERS),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const raw = await loadCourse(req.params.id);
+    assertCourseReadable(me, raw);
+    const course = await presentCourse(raw, me);
+    const sections: PdfSection[] = [
+      {
+        kind: 'fields',
+        title: 'Course',
+        fields: [
+          { label: 'Category', value: course.category ?? 'Uncategorised' },
+          { label: 'Duration', value: course.duration },
+          { label: 'Valid for', value: course.validityMonths ? `${course.validityMonths} months` : 'Never expires' },
+          { label: 'Assessed', value: course.requiresAssessment ? 'Yes — a pass needs a score' : 'No' },
+          { label: 'Certificate', value: course.certificateIncluded ? 'Included' : 'None' },
+          { label: 'Instructor', value: [course.instructor, course.instructorCredential].filter(Boolean).join(' — ') || '—' },
+          { label: 'Status', value: course.isActive ? 'Active' : 'Inactive' },
+        ],
+      },
+    ];
+    if (course.description) sections.push({ kind: 'text', title: 'Description', body: course.description });
+    if (course.modules.length) {
+      sections.push({
+        kind: 'table',
+        title: 'Syllabus outline',
+        head: ['Module', 'Topics'],
+        widths: [200, 480],
+        rows: course.modules.map((m) => [`Module ${m.sequence}: ${m.title}`, m.topics.join('\n') || '—']),
+      });
+    }
+    sections.push({
+      kind: 'table',
+      title: 'Required of',
+      head: ['Who must hold it'],
+      rows: course.requirements.length ? course.requirements.map((r) => [r.label]) : [['Nobody — optional']],
+    });
+    sections.push({
+      kind: 'table',
+      title: 'Upcoming sessions',
+      head: ['Session', 'When', 'Trainer', 'Venue', 'Seats'],
+      rows: course.upcoming.map((s) => [
+        s.number,
+        whenText(s.startsAt, s.endsAt),
+        s.trainer.name,
+        s.venue ?? (s.meetLink ? 'Google Meet' : '—'),
+        s.capacity == null ? `${s.enrolledCount} enrolled` : `${s.enrolledCount} of ${s.capacity}`,
+      ]),
+    });
+    const pdf = await renderDocument({
+      title: 'Course',
+      documentNumber: course.code,
+      date: course.createdAt,
+      reference: course.title,
+      sections,
+    });
+    await audit({ entityType: 'course', entityId: course.id, action: 'EXPORTED', summary: `Printed course ${course.code}` }, req);
+    const name = paperFileName({ kind: 'Course', number: course.code, author: null, date: course.createdAt });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition(name));
+    res.send(pdf);
+  }),
+);
+
+/**
+ * "Enroll now" on the course list and the course page (2026-10-20): the
+ * viewer joins the course's NEXT open session — the one the row names —
+ * through the same self-enrolment a session has, so there is one path.
+ */
+courseRoutes.post(
+  '/:id/enrol-me',
+  requireAny(...COURSE_READERS),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const course = await loadCourse(req.params.id);
+    assertCourseReadable(me, course);
+    const wanted = typeof req.body?.sessionId === 'string' ? req.body.sessionId : null;
+    const target = wanted ? course.sessions.find((s) => s.id === wanted) : course.sessions[0];
+    if (wanted && !target) throw badRequest('That session is not one of this course’s upcoming sessions');
+    if (!target) throw conflict(`${course.code} has no session scheduled — ask HR or the trainer to schedule one`);
+    await selfEnrol(target.id, me, req);
+    res.json(await presentCourse(await loadCourse(course.id), me));
+  }),
+);
+
+const moduleRow = z.object({
+  title: z.string().trim().min(1, 'A module needs a title').max(200),
+  topics: z.array(z.string().trim().min(1).max(300)).max(50).default([]),
+});
+
+/** The syllabus outline, replaced whole — the form edits it as one list. */
+courseRoutes.put(
+  '/:id/modules',
+  requireEdit('ghr', 'courses'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const before = await loadCourse(req.params.id);
+    assertCanEditOwn(me, 'ghr', 'courses', before.createdById === me.id);
+    const raw = Array.isArray(req.body) ? req.body : (req.body as { modules?: unknown })?.modules;
+    const rows = parseBody(z.array(moduleRow).max(60), raw ?? []);
+    await prisma.$transaction(async (tx) => {
+      await tx.courseModule.deleteMany({ where: { courseId: before.id } });
+      if (rows.length) {
+        await tx.courseModule.createMany({ data: rows.map((m, i) => ({ courseId: before.id, sequence: i + 1, title: m.title, topics: m.topics })) });
+      }
+    });
+    await audit(
+      {
+        entityType: 'course',
+        entityId: before.id,
+        action: 'UPDATED',
+        summary: `${before.code}: syllabus outline — ${rows.length} module(s)`,
+        before: { modules: before.modules.map((m) => m.title) },
+        after: { modules: rows.map((m) => m.title) },
+      },
+      req,
+    );
+    res.json(await presentCourse(await loadCourse(before.id), me));
   }),
 );
 
@@ -359,6 +691,10 @@ function courseData(body: z.infer<typeof courseSchema>) {
     validityMonths: body.validityMonths ?? null,
     requiresAssessment: body.requiresAssessment,
     isActive: body.isActive,
+    instructor: body.instructor || null,
+    instructorCredential: body.instructorCredential || null,
+    format: body.format || null,
+    certificateIncluded: body.certificateIncluded,
   };
 }
 
@@ -391,8 +727,7 @@ courseRoutes.post(
       req,
     );
     // The author may edit what they added — Edit Own's whole meaning here.
-    const created = await loadCourse(course.id);
-    res.status(201).json({ ...created, canEdit: mayEdit(currentUser(req), 'ghr', 'courses', true) });
+    res.status(201).json(await presentCourse(await loadCourse(course.id), currentUser(req)));
   }),
 );
 
@@ -419,6 +754,10 @@ courseRoutes.patch(
     if (body.validityMonths !== undefined) data.validityMonths = body.validityMonths ?? null;
     if (body.requiresAssessment !== undefined) data.requiresAssessment = body.requiresAssessment;
     if (body.isActive !== undefined) data.isActive = body.isActive;
+    if (body.instructor !== undefined) data.instructor = body.instructor || null;
+    if (body.instructorCredential !== undefined) data.instructorCredential = body.instructorCredential || null;
+    if (body.format !== undefined) data.format = body.format || null;
+    if (body.certificateIncluded !== undefined) data.certificateIncluded = body.certificateIncluded;
     await prisma.course.update({ where: { id: before.id }, data });
     const after = await loadCourse(before.id);
     await audit(
@@ -444,7 +783,7 @@ courseRoutes.patch(
       },
       req,
     );
-    res.json({ ...after, canEdit: mayEdit(me, 'ghr', 'courses', after.createdById === me.id, after.createdById) });
+    res.json(await presentCourse(after, me));
   }),
 );
 
@@ -515,7 +854,7 @@ courseRoutes.put(
       },
       req,
     );
-    res.json({ ...after, canEdit: mayEdit(me, 'ghr', 'courses', after.createdById === me.id, after.createdById) });
+    res.json(await presentCourse(after, me));
   }),
 );
 
@@ -550,6 +889,10 @@ interface CourseImportRecord {
   validityMonths: number | null;
   requiresAssessment: boolean;
   isActive: boolean;
+  instructor: string | null;
+  instructorCredential: string | null;
+  format: string | null;
+  certificateIncluded: boolean;
 }
 
 const courseSpec: ImportSpec<CourseImportRecord> = {
@@ -564,6 +907,10 @@ const courseSpec: ImportSpec<CourseImportRecord> = {
     { header: 'Validity Months', example: '24', hint: 'Blank = never expires' },
     { header: 'Requires Assessment', example: 'No' },
     { header: 'Active', example: 'Yes' },
+    { header: 'Instructor', example: 'Engr. Marlon Piscos' },
+    { header: 'Instructor Credential', example: 'Senior Utilities Specialist' },
+    { header: 'Format', example: 'Workshop' },
+    { header: 'Certificate Included', example: 'Yes' },
   ],
   existing: async (row) => {
     if (!row['Code']) return null;
@@ -591,6 +938,10 @@ const courseSpec: ImportSpec<CourseImportRecord> = {
       validityMonths: validity,
       requiresAssessment: bool(row, 'Requires Assessment', false),
       isActive: bool(row, 'Active'),
+      instructor: optional(row, 'Instructor'),
+      instructorCredential: optional(row, 'Instructor Credential'),
+      format: optional(row, 'Format'),
+      certificateIncluded: bool(row, 'Certificate Included', false),
     };
   },
 };
@@ -1506,34 +1857,49 @@ sessionRoutes.delete(
  * is on. Recorded with `enrolledById = null`, which is what lets the same
  * person withdraw again — somebody HR put on a course asks the trainer.
  */
+/**
+ * The one self-enrolment: a session's "Enrol me", and the course list's and
+ * course page's "Enroll now" (2026-10-20), which name the course's next open
+ * session. The seat is CLAIMED under a lock on the session's row, so two
+ * people cannot both take the last one.
+ */
+async function selfEnrol(sessionId: string, me: ResolvedUser, req: Parameters<typeof audit>[1]) {
+  const rules = await academySettings();
+  if (!rules.allowSelfEnrolment) throw forbidden('Self-enrolment is switched off — ask HR or the trainer to enrol you');
+  const s = await loadVisible(sessionId, me);
+  const emp = await myEmployee(me.id);
+  if (!emp || !emp.isActive) throw forbidden('Your login is not linked to an active employee record');
+  if (s.status !== 'SCHEDULED') throw conflict('This session is not open for enrolment');
+  if (s.startsAt <= new Date()) throw conflict('This session has already started');
+  if (s.attendees.some((a) => a.employeeId === emp.id)) throw conflict('You are already enrolled');
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "TrainingSession" WHERE id = ${s.id} FOR UPDATE`;
+    const taken = await tx.trainingAttendee.count({ where: { sessionId: s.id } });
+    if (s.capacity != null && taken >= s.capacity) throw conflict('This session is full');
+    await tx.trainingAttendee.create({ data: { sessionId: s.id, employeeId: emp.id, enrolledById: null } });
+  });
+  await audit(
+    { entityType: 'training_session', entityId: s.id, action: 'UPDATED', summary: `${s.number}: ${me.name} self-enrolled` },
+    req,
+  );
+  if (s.trainerId !== me.id) {
+    await notify({
+      userId: s.trainerId,
+      type: 'training.enrolled',
+      title: `${me.name} enrolled: ${s.course.title}`,
+      body: s.number,
+      link: SESSION_LINK(s.id),
+    });
+  }
+  return s;
+}
+
 sessionRoutes.post(
   '/:id/enrol-me',
   requireAny('ghr.training_calendar.view_all', ...SESSION_VIEW),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const rules = await academySettings();
-    if (!rules.allowSelfEnrolment) throw forbidden('Self-enrolment is switched off — ask HR or the trainer to enrol you');
-    const s = await loadVisible(req.params.id, me);
-    const emp = await myEmployee(me.id);
-    if (!emp || !emp.isActive) throw forbidden('Your login is not linked to an active employee record');
-    if (s.status !== 'SCHEDULED') throw conflict('This session is not open for enrolment');
-    if (s.startsAt <= new Date()) throw conflict('This session has already started');
-    if (s.attendees.some((a) => a.employeeId === emp.id)) throw conflict('You are already enrolled');
-    if (s.capacity != null && s.attendees.length >= s.capacity) throw conflict('This session is full');
-    await prisma.trainingAttendee.create({ data: { sessionId: s.id, employeeId: emp.id, enrolledById: null } });
-    await audit(
-      { entityType: 'training_session', entityId: s.id, action: 'UPDATED', summary: `${s.number}: ${me.name} self-enrolled` },
-      req,
-    );
-    if (s.trainerId !== me.id) {
-      await notify({
-        userId: s.trainerId,
-        type: 'training.enrolled',
-        title: `${me.name} enrolled: ${s.course.title}`,
-        body: s.number,
-        link: SESSION_LINK(s.id),
-      });
-    }
+    const s = await selfEnrol(req.params.id, me, req);
     res.json(await present(await loadVisible(s.id, me), me));
   }),
 );
@@ -2304,7 +2670,8 @@ academySettingsRoutes.use(authenticate);
 academySettingsRoutes.get(
   '/',
   handler(async (_req, res) => {
-    res.json(await academySettings());
+    // The categories are Admin › Categories › Course categories since 2026-10-20.
+    res.json({ ...(await academySettings()), categories: await activeCategoryNames() });
   }),
 );
 
@@ -2329,7 +2696,18 @@ academySettingsRoutes.put(
       }
     }
     const before = await academySettings();
-    const saved = await saveAcademySettings(body);
+    const { categories, ...rules } = body;
+    const saved = await saveAcademySettings(rules);
+    // A category named here joins the Admin › Categories list (an older caller's way in); none is removed.
+    if (categories) {
+      const have = new Set((await prisma.courseCategory.findMany({ select: { name: true } })).map((c) => categoryKey(c.name)));
+      let order = have.size;
+      for (const name of categories) {
+        if (have.has(categoryKey(name))) continue;
+        await prisma.courseCategory.create({ data: { name, sortOrder: order++, createdById: currentUser(req).id } });
+        have.add(categoryKey(name));
+      }
+    }
     await audit(
       {
         entityType: 'setting',
@@ -2341,7 +2719,7 @@ academySettingsRoutes.put(
       },
       req,
     );
-    res.json(saved);
+    res.json({ ...saved, categories: await activeCategoryNames() });
   }),
 );
 
@@ -2374,7 +2752,7 @@ registerSearch({
       id: c.id,
       title: c.title,
       subtitle: [c.code, c.category, c.isActive ? null : 'inactive'].filter(Boolean).join(' · '),
-      link: `/g-hr/academy/courses?course=${c.id}`,
+      link: `/g-hr/academy/courses/${c.id}`,
     }));
   },
 });

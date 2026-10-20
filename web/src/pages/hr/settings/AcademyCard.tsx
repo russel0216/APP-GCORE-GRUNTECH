@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../../lib/api';
+import { Link } from 'react-router-dom';
 import { useAuth, mayEditPage } from '../../../lib/auth';
 import { Checkbox, ErrorBox, Field, Loading, useToast } from '../../../components/ui';
 import { NumberInput } from '../../../components/NumberInput';
@@ -8,7 +9,7 @@ import { NumberInput } from '../../../components/NumberInput';
  * HR Settings › Gruntech Academy — the three rules the Academy keeps in
  * `academy.rules`: how far ahead a certificate counts as expiring (and when
  * its holder is told), whether employees may enrol themselves from the
- * calendar, and the course categories.
+ * calendar. The course categories moved to Admin › Categories (2026-10-20).
  *
  * Mounted by HR Settings; takes no props. Read-only without
  * `ghr.settings.edit_all`.
@@ -25,14 +26,12 @@ export function AcademyCard() {
   const toast = useToast();
   const canEdit = mayEditPage(can, 'ghr', 'settings');
   const [rules, setRules] = useState<AcademyRules | null>(null);
-  const [categories, setCategories] = useState('');
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
   function accept(r: AcademyRules) {
     setRules(r);
-    setCategories(r.categories.join('\n'));
     setDirty(false);
   }
 
@@ -48,12 +47,8 @@ export function AcademyCard() {
     setDirty(true);
   }
 
-  const list = categories
-    .split('\n')
-    .map((c) => c.trim())
-    .filter(Boolean);
   const days = rules?.expiryWarningDays ?? 0;
-  const valid = Number.isInteger(days) && days >= 0 && days <= 365 && list.length <= 30;
+  const valid = Number.isInteger(days) && days >= 0 && days <= 365;
 
   async function save() {
     if (!rules) return;
@@ -64,7 +59,6 @@ export function AcademyCard() {
         await api.put<AcademyRules>('/academy-settings', {
           expiryWarningDays: rules.expiryWarningDays,
           allowSelfEnrolment: rules.allowSelfEnrolment,
-          categories: list,
         }),
       );
       toast('ok', 'Academy rules saved');
@@ -79,8 +73,8 @@ export function AcademyCard() {
     <div className="card">
       <h3 className="card-title">Gruntech Academy</h3>
       <p className="muted">
-        When a certificate counts as expiring, whether people may put themselves on a session, and
-        the categories courses are filed under.
+        When a certificate counts as expiring, and whether people may put themselves on a session.
+        The categories courses are filed under are <Link to="/admin/categories">Admin › Categories</Link>.
       </p>
       <ErrorBox error={error} />
       {!rules ? (
@@ -99,16 +93,6 @@ export function AcademyCard() {
                 step={1}
                 value={rules.expiryWarningDays}
                 onChange={(e) => change({ expiryWarningDays: Number(e.target.value) })}
-              />
-            </Field>
-            <Field label="Course categories" hint="One per line.">
-              <textarea
-                rows={5}
-                value={categories}
-                onChange={(e) => {
-                  setCategories(e.target.value);
-                  setDirty(true);
-                }}
               />
             </Field>
           </div>

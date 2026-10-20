@@ -163,3 +163,168 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ── The owner's Academy UI (2026-10-20): chips, seats, the cards view ─────── */
+
+.academy-course-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  align-items: flex-start;
+}
+
+.academy-course-title {
+  font-weight: 600;
+}
+
+/* The category chip in the category's own colour; without one, the plain tag. */
+.academy-chip {
+  --chip-color: var(--info);
+  color: var(--chip-color);
+  border-color: var(--chip-color);
+}
+
+.academy-low {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.academy-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(18em, 1fr));
+  gap: var(--block-gap);
+  padding: var(--s-4);
+}
+
+.academy-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.academy-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.academy-card-title {
+  margin: 0;
+  font-size: var(--fs-lg);
+}
+
+.academy-card-title a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.academy-card-title a:hover {
+  text-decoration: underline;
+}
+
+.academy-card-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-md);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.academy-card-facts {
+  margin: 0;
+  font-size: var(--fs-sm);
+  /* A card is narrow: the label takes what it needs, the value the rest. */
+  grid-template-columns: 5.5em minmax(0, 1fr);
+}
+
+.academy-card-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: auto;
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-sm);
+}
+
+/* A status dot: readable without colour — the words are beside it. */
+.academy-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.academy-dot::before {
+  content: '';
+  width: var(--s-2);
+  height: var(--s-2);
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.academy-dot.is-ok::before {
+  background: var(--ok);
+}
+
+.academy-dot.is-warn::before {
+  background: var(--warn);
+}
+
+.academy-dot.is-danger::before {
+  background: var(--danger);
+}
+
+/* The syllabus editor: a module and its topics. */
+.academy-module {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: var(--s-3) var(--s-4);
+}
+
+.academy-module-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--s-2);
+}
+
+.academy-module-no {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.academy-module-tools {
+  gap: var(--s-1);
+}
+
+/* The course page's syllabus outline. */
+.academy-syllabus {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+
+.academy-syllabus-title {
+  font-weight: 600;
+  margin-bottom: var(--s-1);
+}
+
+.academy-syllabus ul {
+  margin: 0;
+  padding-left: var(--s-5);
+  color: var(--muted);
+  font-size: var(--fs-md);
+}

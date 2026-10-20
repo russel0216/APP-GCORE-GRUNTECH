@@ -601,6 +601,51 @@ async function run(rules: AcademySettings) {
   const selfWithdraw = await api(tok.worker2, 'DELETE', `/training-sessions/${upId}/enrol-me`);
   check('a self-enrolment can be withdrawn', selfWithdraw.status === 200 && selfWithdraw.body.enrolled === false, `${selfWithdraw.status}`);
 
+  // ── The owner's Academy UI (2026-10-20): the course list's cards, seats,
+  //    "Enroll now" on the course's next session, the course page, the
+  //    syllabus and the categories as an Admin › Categories list. ──────────
+  const listed = await readScreen(tok.worker2, `/courses?search=${TAG}-DEPT`);
+  type Listed = { id: string; nextSession: { id: string; seatsLeft: number | null; enrolledMe: boolean } | null; seatsLeft: number | null; duration: string; canEnrol: boolean; enrolled: boolean; trainerName: string | null; categoryColor: string | null };
+  const deptRow = (listed.rows as unknown as Listed[]).find((r) => r.id === deptOnly.id);
+  check('the course list names the course\'s next open session, its trainer and the duration', !!deptRow?.nextSession && deptRow.nextSession.id === upId && deptRow.trainerName === trainer.name && deptRow.duration === '8 hours · 1-day', JSON.stringify(deptRow));
+  check('with no capacity the seats read open and the viewer may enrol', deptRow?.seatsLeft === null && deptRow?.canEnrol === true && deptRow?.enrolled === false);
+  const listSummary = (await api(tok.hr, 'GET', `/courses?search=${TAG}`)).body.summary as { activeCourses: number; enrolledPeople: number; enrolledSessions: number; upcomingWeek: number; completedHours: number };
+  check('the four cards: active courses, people enrolled on upcoming sessions, sessions in the next 7 days, hours completed this year', listSummary.activeCourses >= 4 && listSummary.enrolledPeople >= 1 && listSummary.enrolledSessions >= 1 && listSummary.upcomingWeek >= 1 && typeof listSummary.completedHours === 'number', JSON.stringify(listSummary));
+
+  const viaCourse = await api(tok.worker2, 'POST', `/courses/${deptOnly.id}/enrol-me`);
+  check('"Enroll now" on the course joins its next open session through the one self-enrolment', viaCourse.status === 200 && viaCourse.body.enrolled === true && viaCourse.body.upcoming?.[0]?.enrolledMe === true, `${viaCourse.status} ${viaCourse.text.slice(0, 160)}`);
+  const viaCourseTwice = await api(tok.worker2, 'POST', `/courses/${deptOnly.id}/enrol-me`);
+  check('a second Enroll now is refused — already enrolled', viaCourseTwice.status === 409, `${viaCourseTwice.status}`);
+  const noSession = await api(tok.worker2, 'POST', `/courses/${clerkCourse.id}/enrol-me`);
+  check('a course with no session scheduled refuses, naming the gap', noSession.status === 409 && /no session/i.test(noSession.text), `${noSession.status} ${noSession.text.slice(0, 120)}`);
+  const selfEnrolTrail = await prisma.auditLog.count({ where: { entityType: 'training_session', entityId: upId, summary: { contains: 'self-enrolled' } } });
+  check('the enrolment is on the session\'s own trail, as from the calendar', selfEnrolTrail >= 2, String(selfEnrolTrail));
+  await api(tok.worker2, 'DELETE', `/training-sessions/${upId}/enrol-me`);
+  const capped = await api(tok.trainer, 'PATCH', `/training-sessions/${upId}`, { capacity: 1 });
+  check('the trainer caps the session at the one person on it', capped.status === 200, `${capped.status} ${capped.text.slice(0, 120)}`);
+  const fullRow = (await readScreen(tok.worker2, `/courses?search=${TAG}-DEPT`)).rows as unknown as Listed[];
+  check('a full session reads 0 seats left and Enroll now is withheld', fullRow[0]?.seatsLeft === 0 && fullRow[0]?.canEnrol === false, JSON.stringify(fullRow[0]?.nextSession));
+  const fullEnrol = await api(tok.worker2, 'POST', `/courses/${deptOnly.id}/enrol-me`);
+  check('and the server refuses it too', fullEnrol.status === 409 && /full/i.test(fullEnrol.text), `${fullEnrol.status}`);
+  await api(tok.trainer, 'PATCH', `/training-sessions/${upId}`, { capacity: null });
+
+  const modules = await api(tok.hr, 'PUT', `/courses/${deptOnly.id}/modules`, [
+    { title: 'Air Generation', topics: ['Rotary Screw vs Reciprocating', 'Pressure Dew Point Controls'] },
+    { title: 'Piping & Storage', topics: ['Ring Main Piping Sizing'] },
+  ]);
+  check('the syllabus outline is modules in order, replaced whole', modules.status === 200 && modules.body.modules?.length === 2 && modules.body.modules[0].sequence === 1 && modules.body.modules[1].title === 'Piping & Storage', `${modules.status} ${modules.text.slice(0, 160)}`);
+  const staffModules = await api(tok.worker, 'PUT', `/courses/${deptOnly.id}/modules`, []);
+  check('only the course master\'s editors write the syllabus', staffModules.status === 403, `${staffModules.status}`);
+  const detailed = await api(tok.hr, 'PATCH', `/courses/${deptOnly.id}`, { instructor: 'Engr. Marlon Piscos', instructorCredential: 'Senior Utilities Specialist', format: 'Workshop', certificateIncluded: true, category: 'Pneumatics & Gas' });
+  const seededColor = (await prisma.courseCategory.findFirst({ where: { name: { equals: 'Pneumatics & Gas', mode: 'insensitive' } } }))?.color ?? null;
+  check('the instructor, credential, format and certificate flag are kept, and the category chip takes the list\'s colour', detailed.status === 200 && detailed.body.instructor === 'Engr. Marlon Piscos' && detailed.body.certificateIncluded === true && /Workshop/.test(detailed.body.duration) && detailed.body.categoryColor === seededColor && seededColor !== null, `${detailed.status} ${detailed.text.slice(0, 200)}`);
+  const clerkDetail = await api(tok.hr, 'GET', `/courses/${clerkCourse.id}`);
+  check('a course with no session names its own instructor on the list', (await readScreen(tok.hr, `/courses?search=${TAG}-DEPT`)).rows.length === 1 && clerkDetail.status === 200 && clerkDetail.body.upcoming?.length === 0 && clerkDetail.body.canEnrol === false, `${clerkDetail.status}`);
+  const coursePaper = await printed(tok.hr, `/courses/${deptOnly.id}/pdf`);
+  check('the course prints — the syllabus and the sessions on it, audited EXPORTED', coursePaper.status === 200 && (await prisma.auditLog.count({ where: { entityType: 'course', entityId: deptOnly.id, action: 'EXPORTED' } })) === 1, `${coursePaper.status}`);
+  const settingsCats = (await api(tok.worker, 'GET', '/academy-settings')).body.categories as string[];
+  check('the Academy settings offer the Admin › Categories list — the owner\'s four among them', settingsCats.includes('Pneumatics & Gas') && settingsCats.includes('Compliance & HSE'), settingsCats.join(','));
+
   const calFrom = new Date(Date.now() - 3 * DAY).toISOString();
   const calTo = new Date(Date.now() + 20 * DAY).toISOString();
   const cal = await api(tok.office, 'GET', `/training-sessions/calendar?from=${calFrom}&to=${calTo}`);
@@ -687,6 +732,7 @@ async function run(rules: AcademySettings) {
   const hits = await globalSearch(`${TAG}-WELD`, hrUser);
   const kinds = new Set(hits.map((h) => h.kind));
   check('Ctrl+K finds the course and its session', kinds.has('course') && kinds.has('training_session'), [...kinds].join(','));
+  check('a course hit opens the course\'s own page', hits.some((h) => h.kind === 'course' && h.link === `/g-hr/academy/courses/${weld.id}`), hits.filter((h) => h.kind === 'course').map((h) => h.link).join(','));
   const nowish = new Date(Date.now() + 60 * 60_000);
   const todays = await api(tok.trainer, 'POST', '/training-sessions', {
     courseId: everyone.id, startsAt: nowish.toISOString(), endsAt: new Date(nowish.getTime() + 3_600_000).toISOString(), employeeIds: [empWelder.id],
@@ -734,7 +780,17 @@ async function run(rules: AcademySettings) {
     filter: { query: `${searched}&required=true`, named: 'required of somebody' },
     entityType: 'course',
   });
-  check('Courses: the printed list is refused to anyone without the course master', (await printed(tok.worker, '/courses/pdf')).status === 403);
+  // The list is the CATALOGUE for anyone who sees the training calendar
+  // (2026-10-20): active courses only, the paper included; an inactive one
+  // is the master's alone, and nobody without an Academy right reads it.
+  const parked = await mk(`${TAG}-OFF`, { isActive: false });
+  const catalogueOff = (await readScreen(tok.worker, `/courses?${searched}&active=false`)).rows as unknown as { id: string }[];
+  check('Courses: a staffer reads the catalogue — active courses only, whatever the filter asks', catalogueOff.length === 0 && (await readScreen(tok.worker, `/courses?${searched}`)).rows.length >= 4);
+  check('an inactive course is a 404 to the catalogue reader and open to HR', (await api(tok.worker, 'GET', `/courses/${parked.id}`)).status === 404 && (await api(tok.hr, 'GET', `/courses/${parked.id}`)).status === 200);
+  check('Courses: the catalogue prints for a staffer', (await printed(tok.worker, '/courses/pdf')).status === 200);
+  const noRightsRole = await makeRole('zzac_none', `${TAG} none`, []);
+  const nobody = await makeUser(`${TAG} Nobody`, `nobody${DOMAIN}`, [noRightsRole.id]);
+  check('Courses: the printed list is refused to anyone without an Academy right', (await printed(signToken(nobody.id, nobody.email), '/courses/pdf')).status === 403);
 
   const sessionRows = (await readScreen(tok.hr, `/training-sessions?${searched}&pageSize=200`)).rows;
   const sessionStatus = splittingValue(sessionRows, 'status');
