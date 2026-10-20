@@ -121,7 +121,7 @@ export function ProjectCostingCard({
   return (
     <div className="stack">
       <div className="card">
-        <div className="pr-card-head">
+        <div className="card-head">
           <h3 className="card-title">
             <Link className="mono" to={`/g-ops/costing/${view.id}`}>
               {view.number}

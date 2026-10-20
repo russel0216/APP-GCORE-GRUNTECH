@@ -144,6 +144,8 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     service_report: 'Service reports',
     service_visit: 'Visits',
     job_order: 'Job orders',
+    service_job_order: 'Service JOs',
+    service_document: 'Service documents',
     cad_job_order: 'CAD job orders',
     overtime_request: 'Overtime',
     leave_request: 'Leave',
@@ -165,29 +167,41 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
           value={term}
           onChange={(e) => setTerm(e.target.value)}
           onKeyDown={onKeyDown}
+          role="combobox"
+          aria-label="Search G-CORE"
+          aria-expanded={all.length > 0}
+          aria-controls="palette-results"
+          aria-activedescendant={all.length ? `palette-hit-${cursor}` : undefined}
         />
-        <div className="palette-results">
+        {/* The input keeps focus; the arrows move the cursor and Enter opens
+            it (onKeyDown). The rows are options of that listbox, never tab
+            stops of their own. */}
+        <div className="palette-results" id="palette-results" role="listbox">
           {term.trim().length < 2 ? (
-            <div className="palette-group" style={{ padding: '18px' }}>
+            <div className="palette-group palette-note" role="status">
               Type at least two characters. Records you cannot open will not appear.
             </div>
           ) : loading && !all.length ? (
-            <div className="palette-group" style={{ padding: '18px' }}>
+            <div className="palette-group palette-note" role="status">
               Searching…
             </div>
           ) : !all.length ? (
-            <div className="palette-group" style={{ padding: '18px' }}>
+            <div className="palette-group palette-note" role="status">
               Nothing matched “{term}”.
             </div>
           ) : (
             grouped.map(([kind, list]) => (
-              <div key={kind}>
-                <div className="palette-group">{labels[kind] ?? kind}</div>
+              <div key={kind} role="group" aria-label={labels[kind] ?? kind}>
+                <div className="palette-group" aria-hidden="true">{labels[kind] ?? kind}</div>
                 {list.map((hit) => {
                   const index = all.indexOf(hit);
                   return (
                     <div
                       key={`${hit.kind}-${hit.id}`}
+                      id={`palette-hit-${index}`}
+                      role="option"
+                      aria-selected={index === cursor}
+                      tabIndex={-1}
                       className={`palette-hit${index === cursor ? ' active' : ''}`}
                       onMouseEnter={() => setCursor(index)}
                       onClick={() => go(hit)}

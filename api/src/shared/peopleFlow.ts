@@ -521,13 +521,13 @@ export const FLOW_EMPLOYEE_SELECT = {
   createdAt: true,
   isActive: true,
   userId: true,
-  department: { select: { id: true, name: true } },
+  industry: { select: { id: true, code: true, name: true } },
   user: { select: { id: true, isActive: true, supervisorId: true } },
 } as const;
 
 export interface FlowEmployee {
   id: string;
-  employeeNo: string;
+  employeeNo: string | null;
   firstName: string;
   lastName: string;
   position: string | null;
@@ -539,7 +539,7 @@ export interface FlowEmployee {
   createdAt: Date;
   isActive: boolean;
   userId: string | null;
-  department: { id: string; name: string } | null;
+  industry: { id: string; code: string; name: string } | null;
   user: { id: string; isActive: boolean; supervisorId: string | null } | null;
 }
 
@@ -719,7 +719,8 @@ export async function peopleFlowWork(me: ResolvedUser): Promise<FlowWorkRow[]> {
             id: `${mine.id}~${i.key}`,
             kind: 'people_flow',
             title: i.title,
-            subtitle: 'Your onboarding · HR ticks it off',
+            // Edit Own (2026-10-18) lets the person tick their own.
+            subtitle: can(me, 'ghr.people_flow.edit_own') ? 'Your onboarding · tick it off when done' : 'Your onboarding · HR ticks it off',
             when: i.dueOn ? asDate(i.dueOn) : null,
             overdue: i.overdue,
             link: `/g-hr/people-flow/${mine.id}`,

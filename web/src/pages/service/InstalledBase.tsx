@@ -19,6 +19,8 @@ import {
 import { KIND_LABEL } from './Reports';
 import { VisitBadge } from './Schedule';
 import { BasisBadge } from './JobOrders';
+import { Stat } from '../../components/charts';
+import { useTeams } from '../finance/Receivables';
 
 /**
  * The installed base — what Gruntech put in, where it stands, and when its
@@ -65,10 +67,18 @@ export interface Asset {
   warranty: string;
   warrantyDaysRemaining: number | null;
   notes: string | null;
-  customer: { id: string; code: string; name: string };
+  customer: { id: string; code: string; name: string; industry?: { id: string; code: string; name: string } | null };
   site: { id: string; name: string; city: string | null } | null;
   job: { id: string; number: string; name: string } | null;
   item: { id: string; code: string; name: string } | null;
+}
+
+/** The cards over the register: the list's own query (2026-10-20). */
+interface AssetSummary {
+  inWarranty: number;
+  expiring: number;
+  uncovered: number;
+  warningDays: number;
 }
 
 export function InstalledBase() {
@@ -77,31 +87,39 @@ export function InstalledBase() {
   const [creating, setCreating] = useState(false);
   const [reload, setReload] = useState(0);
 
+  const teams = useTeams();
+
+  // The owner's columns (2026-10-20): Equipment / Model, Serial number,
+  // Customer & Location, Installed date, Industry team, Warranty status.
   const columns: Column<Asset>[] = [
     {
       key: 'code',
       label: 'Code',
       sortKey: 'code',
       width: '140px',
+      optional: true,
       render: (r) => <span className="mono">{r.code}</span>,
     },
     {
       key: 'name',
-      label: 'Equipment',
+      label: 'Equipment / model',
       sortKey: 'name',
       render: (r) => (
         <div>
           <div>{r.name}</div>
-          <div className="faint">
-            {[r.manufacturer, r.model].filter(Boolean).join(' ') || '—'}
-            {r.serialNo && <span className="mono"> · {r.serialNo}</span>}
-          </div>
+          <div className="faint">{[r.manufacturer, r.model].filter(Boolean).join(' ') || '—'}</div>
         </div>
       ),
     },
     {
+      key: 'serialNo',
+      label: 'Serial number',
+      width: '150px',
+      render: (r) => (r.serialNo ? <span className="mono">{r.serialNo}</span> : <span className="faint">—</span>),
+    },
+    {
       key: 'customer',
-      label: 'Where',
+      label: 'Customer & location',
       render: (r) => (
         <div>
           <div>{r.customer.name}</div>
@@ -125,14 +143,24 @@ export function InstalledBase() {
     },
     {
       key: 'installedAt',
-      label: 'Installed',
+      label: 'Installed date',
       sortKey: 'installedAt',
       render: (r) => formatDate(r.installedAt),
-      optional: true,
+    },
+    {
+      key: 'team',
+      label: 'Industry team',
+      width: '110px',
+      render: (r) =>
+        r.customer.industry ? (
+          <span title={r.customer.industry.name}>{r.customer.industry.code}</span>
+        ) : (
+          <span className="faint">Open</span>
+        ),
     },
     {
       key: 'warranty',
-      label: 'Warranty',
+      label: 'Warranty status',
       sortKey: 'warrantyEndsAt',
       render: (r) => (
         <div>
@@ -159,7 +187,7 @@ export function InstalledBase() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Installed Base</h1>
+          <h1>Installation Base</h1>
         </div>
       </div>
 
@@ -176,7 +204,31 @@ export function InstalledBase() {
         emptyTitle="Nothing registered yet"
         emptyHint="A project registers what it installed when it is turned over, from its workspace. Or add a machine here."
         onRowClick={(r) => navigate(`/g-ops/installed-base/${r.id}`)}
+        summary={(raw, total) => {
+          const sum = raw as unknown as AssetSummary;
+          return (
+            <>
+              <Stat label="Installed equipment" value={total} hint={`${total === 1 ? 'unit' : 'units'} listed`} />
+              <Stat label="In warranty" value={sum.inWarranty} />
+              <Stat
+                label="Warranty expiring"
+                value={sum.expiring}
+                hint={`within ${sum.warningDays} days`}
+                tone={sum.expiring > 0 ? 'var(--warn)' : undefined}
+              />
+              <Stat label="No active contract" value={sum.uncovered} tone={sum.uncovered > 0 ? 'var(--warn)' : undefined} />
+            </>
+          );
+        }}
         filters={[
+          {
+            key: 'teamId',
+            label: 'Industry team',
+            options: [
+              ...teams.map((t) => ({ value: t.id, label: `${t.code} — ${t.name}` })),
+              { value: 'none', label: 'Open (customer has no team yet)' },
+            ],
+          },
           {
             key: 'warranty',
             label: 'Warranty',
@@ -474,6 +526,8 @@ function AssetModal({
 // ── One machine, and everything that ever happened to it ─────────────────────
 
 interface AssetDetail extends Asset {
+  /** Edit All, or Edit Own on a machine the viewer registered (2026-10-18). */
+  canEdit?: boolean;
   contracts: {
     id: string;
     number: string;
@@ -500,6 +554,16 @@ interface AssetDetail extends Asset {
     title: string;
     requestedFor: string;
     chargeBasis: string;
+  }[];
+  /** The technical documents on it and on its model (2026-10-20). */
+  documents: {
+    id: string;
+    title: string;
+    version: string | null;
+    documentDate: string | null;
+    files: number;
+    category: { id: string; name: string };
+    onModel: boolean;
   }[];
 }
 
@@ -552,7 +616,7 @@ export function AssetDetailPage() {
             )}
           </>
         }
-        modify={can('gops.installed_base.edit_all') ? () => setEditing(true) : undefined}
+        modify={row.canEdit ? () => setEditing(true) : undefined}
       />
 
       {row.warranty === 'EXPIRING' && !covered && (
@@ -674,9 +738,16 @@ export function AssetDetailPage() {
         </div>
       </div>
 
-      {(canView('gops', 'job_orders') || can('gops.job_orders.create')) && (
+      {(canView('gops', 'service_job_orders') || can('gops.service_job_orders.create')) && (
         <div className="card">
-          <h3 className="card-title">Job orders</h3>
+          <div className="card-head">
+            <h3 className="card-title">Service JOs</h3>
+            {can('gops.service_job_orders.create') && row.status !== 'DECOMMISSIONED' && (
+              <Link className="btn btn-primary btn-sm" to={`/g-ops/service-job-orders?new=1&customerId=${row.customer.id}&assetId=${row.id}`}>
+                + New service JO
+              </Link>
+            )}
+          </div>
           {row.jobOrders.length === 0 ? (
             <p className="muted">No service requested for this machine yet.</p>
           ) : (
@@ -695,7 +766,7 @@ export function AssetDetailPage() {
                   {row.jobOrders.map((j) => (
                     <tr key={j.id}>
                       <td>
-                        <Link to={`/g-ops/job-orders/${j.id}`} className="mono">
+                        <Link to={`/g-ops/service-job-orders/${j.id}`} className="mono">
                           {j.number}
                         </Link>
                       </td>
@@ -710,6 +781,53 @@ export function AssetDetailPage() {
                       <td>
                         <StatusBadge status={j.status} />
                       </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {canView('gops', 'service_documents') && (
+        <div className="card">
+          <div className="card-head">
+            <h3 className="card-title">Technical documents</h3>
+            {can('gops.service_documents.create') && (
+              <Link
+                className="btn btn-primary btn-sm"
+                to={`/g-ops/service-documents?new=1&assetId=${row.id}&assetName=${encodeURIComponent(`${row.name}${row.serialNo ? ` · ${row.serialNo}` : ''} — ${row.customer.name}`)}`}
+              >
+                + New service document
+              </Link>
+            )}
+          </div>
+          {row.documents.length === 0 ? (
+            <p className="muted">No manual, drawing or report filed against this machine or its model yet.</p>
+          ) : (
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Document</th>
+                    <th>Category</th>
+                    <th>Version</th>
+                    <th>Dated</th>
+                    <th className="right">Files</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {row.documents.map((d) => (
+                    <tr key={d.id}>
+                      <td>
+                        <Link to={`/g-ops/service-documents/${d.id}`}>{d.title}</Link>
+                        {d.onModel && <div className="faint">on the model</div>}
+                      </td>
+                      <td>{d.category.name}</td>
+                      <td>{d.version ?? <span className="faint">—</span>}</td>
+                      <td>{d.documentDate ? formatDate(d.documentDate) : <span className="faint">—</span>}</td>
+                      <td className="right mono">{d.files}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { api, openPdf } from '../../lib/api';
 import { ErrorBox, Field, Loading, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
+import { dropHolidays, type Holiday } from '../../lib/holidays';
+import { mayEditPage, useAuth } from '../../lib/auth';
 
 interface CompanyData {
   name: string;
@@ -24,6 +26,9 @@ interface CompanyData {
   vatRate: number;
   ewtRate: number;
   numberPrefix: string;
+  /** Pesos per unit of each other quotation currency (2026-10-17). */
+  exchangeRates: Record<string, number>;
+  currencies: { code: string; label: string }[];
 }
 
 /**
@@ -33,6 +38,9 @@ interface CompanyData {
  */
 export function Company() {
   const toast = useToast();
+  // Edit Own or Edit All saves the page — it keeps no record of anybody's (2026-10-18).
+  const { can } = useAuth();
+  const canEdit = mayEditPage(can, 'admin', 'company');
   const [data, setData] = useState<CompanyData | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -72,6 +80,7 @@ export function Company() {
         vatRate: data.vatRate,
         ewtRate: data.ewtRate,
         numberPrefix: data.numberPrefix,
+        exchangeRates: Object.fromEntries(data.currencies.map((c) => [c.code, data.exchangeRates[c.code] || null])),
       });
       setData(saved);
       toast('ok', 'Company settings saved');
@@ -106,11 +115,11 @@ export function Company() {
   if (loading) return <Loading />;
   if (!data) return <ErrorBox error={error} />;
 
-  const saveButton = (
+  const saveButton = canEdit ? (
     <button className="btn btn-primary" onClick={save} disabled={busy}>
       {busy ? 'Saving…' : 'Save'}
     </button>
-  );
+  ) : null;
 
   return (
     <div>
@@ -164,9 +173,11 @@ export function Company() {
                   if (f) void uploadLogo(f);
                 }}
               />
-              <button className="btn btn-sm" onClick={() => fileRef.current?.click()} disabled={busy}>
-                {data.logoPath ? 'Replace logo' : 'Upload logo'}
-              </button>
+              {canEdit && (
+                <button className="btn btn-sm" onClick={() => fileRef.current?.click()} disabled={busy}>
+                  {data.logoPath ? 'Replace logo' : 'Upload logo'}
+                </button>
+              )}
               <span className="faint mono company-logo-name">
                 {data.logoPath ? data.logoPath.split(/[\\/]/).pop() : 'none set'}
               </span>
@@ -308,11 +319,188 @@ export function Company() {
             invoiced, collected and withheld separately so withholding never reads as a late payment.
           </div>
         </div>
+
+        <div className="card">
+          <h3 className="card-title">Exchange rates</h3>
+          <p className="muted">
+            Pesos per one unit. A new quotation in another currency starts from its rate here and keeps
+            its own after, and every total that adds quotations — the lists, the board, the forecast,
+            Insights — converts at that rate. Changing a rate here restates nothing already on file.
+          </p>
+          <div className="grid grid-2">
+            {data.currencies.map((c) => (
+              <Field key={c.code} label={c.label} hint={data.exchangeRates[c.code] ? undefined : 'Not set — counted unconverted until it is'}>
+                <NumberInput
+                  kind="decimal"
+                  value={data.exchangeRates[c.code] ?? ''}
+                  onChange={(e) =>
+                    setData({
+                      ...data,
+                      exchangeRates: { ...data.exchangeRates, [c.code]: Number(e.target.value) || 0 },
+                    })
+                  }
+                />
+              </Field>
+            ))}
+          </div>
+        </div>
+
+        <HolidaysCard />
       </div>
 
       {/* The form is long: Save again at its foot, right, as at its head. */}
-      <div className="page-foot company-actions">
-        {saveButton}
+      {saveButton && <div className="page-foot company-actions">{saveButton}</div>}
+    </div>
+  );
+}
+
+/**
+ * Holidays (2026-10-17): days off besides Sunday for every working-day count
+ * — a costing's plan, a project's dates, a job order's working days. The
+ * Philippine holidays for this year and next were added once by the seed;
+ * the moon's (Chinese New Year, the Eids) say "check the proclamation".
+ * Saved on its own — the company form's Save does not carry it.
+ */
+function HolidaysCard() {
+  const toast = useToast();
+  const { can } = useAuth();
+  const canEdit = mayEditPage(can, 'admin', 'company');
+  const thisYear = new Date().getFullYear();
+  const [list, setList] = useState<Holiday[] | null>(null);
+  const [year, setYear] = useState(thisYear);
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    api
+      .get<{ holidays: Holiday[] }>('/holidays')
+      .then((r) => setList(r.holidays))
+      .catch(setError);
+  }, []);
+
+  if (!list) return error ? <ErrorBox error={error} /> : null;
+
+  const years = [...new Set([thisYear, thisYear + 1, ...list.map((h) => Number(h.date.slice(0, 4)))])].sort();
+  const shown = list.map((h, i) => ({ h, i })).filter(({ h }) => h.date.startsWith(`${year}-`));
+  const change = (i: number, patch: Partial<Holiday>) => {
+    setList(list.map((h, k) => (k === i ? { ...h, ...patch } : h)));
+    setDirty(true);
+  };
+  const remove = (i: number) => {
+    setList(list.filter((_, k) => k !== i));
+    setDirty(true);
+  };
+  const add = () => {
+    setList([...list, { date: `${year}-01-01`, name: '', kind: 'SPECIAL' }]);
+    setDirty(true);
+  };
+  async function addPh() {
+    try {
+      const r = await api.get<{ holidays: Holiday[] }>(`/holidays/ph/${year}`);
+      const have = new Set(list!.map((h) => h.date));
+      const fresh = r.holidays.filter((h) => !have.has(h.date));
+      if (!fresh.length) {
+        toast('ok', `Every Philippine holiday of ${year} is already listed`);
+        return;
+      }
+      setList([...list!, ...fresh]);
+      setDirty(true);
+      toast('ok', `Added ${fresh.length} — save to keep them`);
+    } catch (err) {
+      setError(err);
+    }
+  }
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.put<{ holidays: Holiday[] }>('/holidays', { holidays: list!.map((h) => ({ ...h, name: h.name.trim() })) });
+      setList(r.holidays);
+      setDirty(false);
+      dropHolidays();
+      toast('ok', 'Holidays saved');
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h3 className="card-title">Holidays</h3>
+        <div className="row">
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))} aria-label="Year">
+            {years.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
+          {canEdit && (
+            <>
+              <button type="button" className="btn btn-sm" onClick={() => void addPh()}>
+                Add PH holidays for {year}
+              </button>
+              <button type="button" className="btn btn-sm btn-primary" disabled={!dirty || busy} onClick={() => void save()}>
+                {busy ? 'Saving…' : 'Save'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+      <p className="muted">
+        Days off besides Sunday. Costing plans, project dates and job order working days skip them. Dates
+        marked “check the proclamation” follow the moon — correct them when the year’s proclamation is out.
+      </p>
+      {error ? <ErrorBox error={error} /> : null}
+      <table className="data">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Holiday</th>
+            <th>Kind</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {shown.length === 0 ? (
+            <tr>
+              <td colSpan={4} className="faint">
+                No holidays listed for {year}.
+              </td>
+            </tr>
+          ) : (
+            shown.map(({ h, i }) => (
+              <tr key={i}>
+                <td>
+                  <input type="date" value={h.date} aria-label="Date" onChange={(e) => change(i, { date: e.target.value })} />
+                </td>
+                <td>
+                  <input value={h.name} aria-label="Holiday" onChange={(e) => change(i, { name: e.target.value })} />
+                </td>
+                <td>
+                  <select value={h.kind} aria-label="Kind" onChange={(e) => change(i, { kind: e.target.value as Holiday['kind'] })}>
+                    <option value="REGULAR">Regular holiday</option>
+                    <option value="SPECIAL">Special non-working day</option>
+                  </select>
+                </td>
+                <td className="num">
+                  <button type="button" className="btn btn-sm" onClick={() => remove(i)}>
+                    Remove
+                  </button>
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+      <div className="card-foot">
+        <button type="button" className="btn btn-sm" onClick={add}>
+          + Add holiday
+        </button>
       </div>
     </div>
   );

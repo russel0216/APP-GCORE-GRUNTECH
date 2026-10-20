@@ -143,27 +143,65 @@ export async function linkLegacyBookings(): Promise<{ linked: number; summarised
   let linked = 0;
   let summarised = 0;
   for (const order of orders) {
+    const done = await linkLines(prisma, order);
+    linked += done.linked;
+    summarised += done.summarised;
+  }
+  return { linked, summarised };
+}
+
+/**
+ * One order's unlinked lines linked to the quotation lines they book — the
+ * rule above, for one order, in the caller's transaction (the SCORO invoices
+ * import links each order it writes, 2026-10-17).
+ */
+export async function linkOrderBookings(tx: Prisma.TransactionClient, orderId: string): Promise<{ linked: number; summarised: number }> {
+  const order = await tx.salesOrder.findUniqueOrThrow({
+    where: { id: orderId },
+    include: {
+      lines: { where: { isHeading: false, quotationItemId: null, bookedItems: { equals: Prisma.DbNull } }, orderBy: { sortOrder: 'asc' } },
+      quotation: { include: { revisions: { include: { items: { orderBy: { sortOrder: 'asc' } } } } } },
+    },
+  });
+  return linkLines(tx, order);
+}
+
+async function linkLines(
+  tx: Prisma.TransactionClient,
+  order: {
+    lines: { id: string; title: string | null; unit: string; unitPrice: Prisma.Decimal; quantity: Prisma.Decimal }[];
+    quotation: {
+      subject: string;
+      revisions: { status: string; revision: number; items: { id: string; isHeading: boolean; title: string | null; unit: string; unitPrice: Prisma.Decimal; quantity: Prisma.Decimal }[] }[];
+    };
+  },
+): Promise<{ linked: number; summarised: number }> {
+  let linked = 0;
+  let summarised = 0;
+  {
     const revision = valueRevision(order.quotation.revisions);
-    if (!revision) continue;
+    if (!revision) return { linked, summarised };
     const items = revision.items.filter((i) => !i.isHeading);
-    const taken = new Set<string>();
+    // What is left of each quotation line within this order: two half-lot
+    // lines of SCORO's invoice book one lot of the quotation (2026-10-17).
+    const left = new Map(items.map((i) => [i.id, num(i.quantity)]));
     for (const line of order.lines) {
       const match = items.find(
         (i) =>
-          !taken.has(i.id) &&
+          (left.get(i.id) ?? 0) + 0.0005 >= num(line.quantity) &&
           (i.title ?? '').trim() === (line.title ?? '').trim() &&
           i.unit === line.unit &&
           num(i.unitPrice) === num(line.unitPrice),
       );
       if (match) {
-        taken.add(match.id);
-        await prisma.salesOrderLine.update({ where: { id: line.id }, data: { quotationItemId: match.id } });
+        left.set(match.id, (left.get(match.id) ?? 0) - num(line.quantity));
+        await tx.salesOrderLine.update({ where: { id: line.id }, data: { quotationItemId: match.id } });
         linked++;
         continue;
       }
       const isSummary = order.lines.length === 1 && (line.title ?? '').trim() === order.quotation.subject.trim() && num(line.quantity) === 1;
       if (isSummary && items.length) {
-        await prisma.salesOrderLine.update({
+        await tx.salesOrderLine.update({
           where: { id: line.id },
           data: { bookedItems: items.map((i) => ({ quotationItemId: i.id, quantity: num(i.quantity) })) },
         });

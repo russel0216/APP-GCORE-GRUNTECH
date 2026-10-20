@@ -88,8 +88,11 @@ import { Receivables, InvoiceDetail, Payments, PaymentDetail } from './pages/fin
 import { Payables, BillDetail } from './pages/finance/Payables';
 import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
 import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
+import { CashAdvanceEditor } from './pages/finance/CashAdvanceEditor';
+import { ClaimEditor } from './pages/finance/ClaimEditor';
 import { Commissions, CommissionEditor, CommissionPage } from './pages/finance/Commissions';
 import { BudgetRequests, BudgetRequestDetail, FinanceBudgetRequests, FinanceLiquidations } from './pages/delivery/BudgetRequests';
+import { BudgetRequestEditor } from './pages/delivery/BudgetRequestEditor';
 import {
   FinanceDashboard,
   FinanceReports,
@@ -102,6 +105,8 @@ import { ServiceContracts, ContractDetail } from './pages/service/Contracts';
 import { ServiceReports, ServiceReportDetail, Renewals } from './pages/service/Reports';
 import { ServiceSchedule } from './pages/service/Schedule';
 import { JobOrders, JobOrderDetail } from './pages/service/JobOrders';
+import { ServiceJobOrders, ServiceJobOrderDetail } from './pages/service/ServiceJobOrders';
+import { ServiceDocuments, ServiceDocumentDetail } from './pages/service/ServiceDocuments';
 import { CadJobOrders, CadJobOrderDetail } from './pages/delivery/CadJobOrders';
 import {
   ReportTemplates,
@@ -123,7 +128,10 @@ import {
  */
 function Guard({ permission, children }: { permission: string; children: React.ReactNode }) {
   const { can } = useAuth();
-  if (!can(permission)) {
+  // View Own opens a screen as View All does (2026-10-18: every screen with
+  // Edit All gained the own pair); the API narrows what it shows.
+  const ownTwin = permission.endsWith('.view_all') ? permission.replace(/\.view_all$/, '.view_own') : null;
+  if (!can(permission) && !(ownTwin && can(ownTwin))) {
     return (
       <div className="card">
         <h3 className="card-title">No access</h3>
@@ -606,6 +614,23 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* The request page (2026-10-19): New and Modify, header and breakdown in one save. Above `:id`. */}
+        <Route
+          path="/g-ops/budget-requests/new"
+          element={
+            <Guard permission="gops.budget_requests.create">
+              <BudgetRequestEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/budget-requests/:id/edit"
+          element={
+            <GuardAny permissions={['gops.budget_requests.edit_own', 'gops.budget_requests.edit_all']}>
+              <BudgetRequestEditor />
+            </GuardAny>
+          }
+        />
         {/* One request: the project side's page, where finance releases and the team liquidates. */}
         <Route
           path="/g-ops/budget-requests/:id"
@@ -883,7 +908,7 @@ function Routed() {
         <Route
           path="/g-chain/outgoing/:id/edit"
           element={
-            <GuardAny permissions={['gchain.stock_issuance.create', 'gchain.stock_issuance.edit_all']}>
+            <GuardAny permissions={['gchain.stock_issuance.create', 'gchain.stock_issuance.edit_all', 'gchain.stock_issuance.edit_own']}>
               <OutgoingEditor />
             </GuardAny>
           }
@@ -924,9 +949,9 @@ function Routed() {
         <Route
           path="/g-chain/pullout-slips"
           element={
-            <Guard permission="gchain.pullout_slips.view_all">
+            <GuardAny permissions={['gchain.pullout_slips.view_all', 'gchain.pullout_slips.view_own']}>
               <PulloutSlips />
-            </Guard>
+            </GuardAny>
           }
         />
         <Route
@@ -940,7 +965,7 @@ function Routed() {
         <Route
           path="/g-chain/pullout-slips/:id/edit"
           element={
-            <GuardAny permissions={['gchain.pullout_slips.create', 'gchain.pullout_slips.edit_all']}>
+            <GuardAny permissions={['gchain.pullout_slips.edit_own', 'gchain.pullout_slips.edit_all']}>
               <PulloutEditor />
             </GuardAny>
           }
@@ -987,9 +1012,9 @@ function Routed() {
         <Route
           path="/g-hr/attendance"
           element={
-            <Guard permission="ghr.dashboard.view_all">
+            <GuardAny permissions={['ghr.attendance.view_all', 'ghr.dashboard.view_all']}>
               <AttendanceRegister />
-            </Guard>
+            </GuardAny>
           }
         />
         <Route
@@ -1229,6 +1254,23 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* The claim page (2026-10-19): a reimbursement, or a liquidation (?advance= / ?budgetRequest=), and Modify. Above `:id`. */}
+        <Route
+          path="/g-fin/expenses/new"
+          element={
+            <Guard permission="gfin.expenses.create">
+              <ClaimEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/expenses/:id/edit"
+          element={
+            <GuardAny permissions={['gfin.expenses.edit_own', 'gfin.expenses.edit_all']}>
+              <ClaimEditor />
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-fin/expenses/:id"
           element={
@@ -1243,6 +1285,23 @@ function Routed() {
           element={
             <GuardAny permissions={['gfin.cash_advances.view_all', 'gfin.cash_advances.view_own']}>
               <CashAdvances />
+            </GuardAny>
+          }
+        />
+        {/* The advance page (2026-10-19): New and Modify, header and breakdown in one save. Above `:id`. */}
+        <Route
+          path="/g-fin/cash-advances/new"
+          element={
+            <Guard permission="gfin.cash_advances.create">
+              <CashAdvanceEditor />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/cash-advances/:id/edit"
+          element={
+            <GuardAny permissions={['gfin.cash_advances.edit_own', 'gfin.cash_advances.edit_all']}>
+              <CashAdvanceEditor />
             </GuardAny>
           }
         />
@@ -1412,6 +1471,36 @@ function Routed() {
           element={
             <GuardAny permissions={['gops.job_orders.view_all', 'gops.job_orders.view_own']}>
               <JobOrderDetail />
+            </GuardAny>
+          }
+        />
+        {/* Service JOs (2026-10-20): the service call on a registered machine
+            under Aftermarket — approval books the visit. The record page has no
+            Guard: the API lets in the approvers, who may hold no right. */}
+        <Route
+          path="/g-ops/service-job-orders"
+          element={
+            <GuardAny permissions={['gops.service_job_orders.view_all', 'gops.service_job_orders.view_own']}>
+              <ServiceJobOrders />
+            </GuardAny>
+          }
+        />
+        <Route path="/g-ops/service-job-orders/:id" element={<ServiceJobOrderDetail />} />
+        {/* Service Documents (2026-10-20): manuals, drawings, test reports
+            filed against a machine or a model. */}
+        <Route
+          path="/g-ops/service-documents"
+          element={
+            <GuardAny permissions={['gops.service_documents.view_all', 'gops.service_documents.view_own']}>
+              <ServiceDocuments />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/service-documents/:id"
+          element={
+            <GuardAny permissions={['gops.service_documents.view_all', 'gops.service_documents.view_own']}>
+              <ServiceDocumentDetail />
             </GuardAny>
           }
         />
@@ -1589,6 +1678,7 @@ function Routed() {
         <Route path="/g-hr/*" element={<NotFound />} />
         <Route path="/g-fin/*" element={<NotFound />} />
         <Route path="/g-chain/*" element={<NotFound />} />
+        <Route path="/admin/*" element={<NotFound />} />
 
         {/* The warehouse's old addresses (Receiving and Stock Issuance, renamed
             Incoming and Outgoing on 2026-10-14) still land, query and all. */}

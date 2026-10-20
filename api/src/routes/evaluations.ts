@@ -103,7 +103,7 @@ const employeeSelect = {
   dateRegularized: true,
   periodEndDate: true,
   userId: true,
-  department: { select: { id: true, name: true } },
+  industry: { select: { id: true, code: true, name: true } },
 } satisfies Prisma.EmployeeSelect;
 
 const personSelect = { id: true, name: true, position: true } satisfies Prisma.UserSelect;
@@ -271,7 +271,7 @@ evaluationRoutes.get(
               lastName: true,
               position: true,
               employmentType: true,
-              department: { select: { id: true, name: true } },
+              industry: { select: { id: true, code: true, name: true } },
             },
           },
           evaluator: { select: { id: true, name: true } },
@@ -314,7 +314,7 @@ evaluationRoutes.get(
       prisma.employeeEvaluation.findMany({
         where,
         include: {
-          employee: { select: { employeeNo: true, firstName: true, lastName: true, position: true, department: { select: { name: true } } } },
+          employee: { select: { employeeNo: true, firstName: true, lastName: true, position: true, industry: { select: { code: true } } } },
           evaluator: { select: { name: true } },
         },
         orderBy: orderBy(q, EVALUATION_SORTS, { createdAt: 'desc' }),
@@ -353,7 +353,7 @@ evaluationRoutes.get(
             r.number,
             {
               title: `${r.employee.lastName}, ${r.employee.firstName}`,
-              body: [r.employee.employeeNo, r.employee.position, r.employee.department?.name].filter(Boolean).join(' · '),
+              body: [r.employee.employeeNo, r.employee.position, r.employee.industry?.code].filter(Boolean).join(' · '),
             },
             { title: milestoneLabel(r.milestone), body: `${statusLabel(r.kind)} evaluation` },
             r.dueDate ? formatShortDate(r.dueDate) : '—',
@@ -1060,9 +1060,9 @@ evaluationRoutes.get(
         columns: 3,
         fields: [
           { label: 'Employee', value: fullName(ev.employee) },
-          { label: 'Employee number', value: ev.employee.employeeNo },
+          { label: 'Employee number', value: ev.employee.employeeNo ?? '—' },
           { label: 'Position', value: ev.employee.position ?? '—' },
-          { label: 'Department', value: ev.employee.department?.name ?? '—' },
+          { label: 'Team', value: ev.employee.industry?.name ?? '—' },
           { label: 'Kind', value: ev.kind === 'TRAINEE' ? 'Trainee evaluation' : 'Probationary evaluation' },
           { label: 'Milestone', value: milestoneLabel(ev.milestone) },
           { label: 'Date hired', value: ev.employee.dateHired ? formatDate(ev.employee.dateHired) : '—' },

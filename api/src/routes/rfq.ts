@@ -35,6 +35,7 @@ import {
 } from '../shared/pdf';
 import { LIST_CAP, listReference, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { visibleOwners } from '../shared/team';
 
 /**
  * Requests for Quotation (2026-10-14, the owner's call: "Purchase Request,
@@ -76,13 +77,14 @@ function seesAll(me: ResolvedUser) {
 }
 
 async function assertVisible(me: ResolvedUser, rfq: { preparedById: string }) {
-  if (!seesAll(me) && rfq.preparedById !== me.id) throw notFound('RFQ not found');
+  if (!seesAll(me) && !visibleOwners(me, 'gchain', 'rfq').includes(rfq.preparedById)) throw notFound('RFQ not found');
 }
 
 /** Which RFQs a list query means — one rule for the list and its printed twin. */
 function rfqListWhere(me: ResolvedUser, q: ListQuery): Prisma.RfqWhereInput {
   const and: Prisma.RfqWhereInput[] = [];
-  if (!seesAll(me) || q.scope === 'mine') and.push({ preparedById: me.id });
+  if (q.scope === 'mine') and.push({ preparedById: me.id });
+  else if (!seesAll(me)) and.push({ preparedById: { in: visibleOwners(me, 'gchain', 'rfq') } });
   const f = q.filters;
   const status = choice(f.status, RfqStatus, 'Status');
   if (status) and.push({ status });
@@ -465,6 +467,8 @@ function presentRfq(rfq: LoadedRfq, me: ResolvedUser) {
     canEditLines: editable && rfq.status === 'DRAFT',
     canSend: editable && rfq.status === 'DRAFT' && rfq.suppliers.length > 0,
     canRecordQuotes: editable && rfq.status !== 'DRAFT',
+    // A quote is removed while no live canvass compares the RFQ (2026-10-19).
+    canRemoveQuotes: editable && rfq.status !== 'DRAFT' && !liveCanvass,
     canCancel: editable && !liveCanvass,
     liveCanvass,
     // The next step once quotes are in: the comparison sheet (one live at a time).
@@ -644,6 +648,7 @@ rfqRoutes.put(
         else await tx.rfqSupplier.create({ data: { rfqId: rfq.id, supplierId: r.supplierId, ...rowData(r), sentAt: rfq.status === 'DRAFT' ? null : new Date() } });
       }
     });
+    if (dropped.length) await deleteAttachmentsOf('rfq_supplier', dropped.map((s) => s.id));
     await audit({ entityType: 'rfq', entityId: rfq.id, action: 'UPDATED', summary: `Modified ${rfq.number}` }, req);
     res.json(presentRfq((await loadRfq(rfq.id))!, me));
   }),
@@ -730,6 +735,58 @@ rfqRoutes.put(
     });
     await audit(
       { entityType: 'rfq', entityId: row.rfqId, action: 'UPDATED', summary: `Recorded ${row.supplier.name}'s quote on ${row.rfq.number} (${body.quotes.length} of ${asked.size} line(s))` },
+      req,
+    );
+    res.json(presentRfq((await loadRfq(row.rfqId))!, me));
+  }),
+);
+
+/**
+ * Removes a supplier's recorded quote (2026-10-19, the owner's call): its
+ * prices, its terms and the supplier's paper filed on the row go; the
+ * supplier stays asked, and may then be dropped from the RFQ like one who
+ * never quoted. Refused while a live canvass compares the RFQ — cancel it
+ * first. The last quote gone, the RFQ is SENT again.
+ */
+rfqRoutes.delete(
+  '/:id/suppliers/:rowId/quote',
+  requireAny('gchain.rfq.edit_own', 'gchain.rfq.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const reason = typeof req.query.reason === 'string' ? req.query.reason.trim().slice(0, 2000) : '';
+    const row = await prisma.rfqSupplier.findFirst({
+      where: { id: req.params.rowId, rfqId: req.params.id },
+      include: {
+        rfq: { include: { canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } } } },
+        supplier: { select: { name: true } },
+        _count: { select: { quotes: true } },
+      },
+    });
+    if (!row) throw notFound('Supplier not on this RFQ');
+    if (!mayEditRfq(me, row.rfq)) throw forbidden('This RFQ belongs to someone else');
+    if (!OPEN.includes(row.rfq.status)) throw badRequest(`${row.rfq.number} is ${statusLabel(row.rfq.status).toLowerCase()} — its quotes stand as they were`);
+    if (row.rfq.canvasses.length) throw badRequest(`Canvass ${row.rfq.canvasses.map((c) => c.number).join(', ')} compares this RFQ — cancel it first`);
+    if (!row._count.quotes && !row.quoteRef && !row.quoteReceivedAt) throw badRequest(`${row.supplier.name} has no quote on file`);
+
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.rfq.updateMany({ where: { id: row.rfqId, status: row.rfq.status }, data: { updatedAt: new Date() } });
+      if (!claimed.count) throw badRequest(`${row.rfq.number} changed a moment ago — reload to see it`);
+      await tx.rfqQuote.deleteMany({ where: { rfqSupplierId: row.id } });
+      await tx.rfqSupplier.update({
+        where: { id: row.id },
+        data: { quoteRef: null, quoteReceivedAt: null, leadTimeDays: null, terms: null, validUntil: null, remarks: null },
+      });
+      const left = await tx.rfqQuote.count({ where: { rfqSupplier: { rfqId: row.rfqId } } });
+      if (!left) await tx.rfq.updateMany({ where: { id: row.rfqId, status: 'QUOTED' }, data: { status: 'SENT' } });
+    });
+    await deleteAttachmentsOf('rfq_supplier', [row.id]);
+    await audit(
+      {
+        entityType: 'rfq',
+        entityId: row.rfqId,
+        action: 'DELETED',
+        summary: `Removed ${row.supplier.name}'s quote from ${row.rfq.number}${reason ? ` — ${reason}` : ''}`,
+      },
       req,
     );
     res.json(presentRfq((await loadRfq(row.rfqId))!, me));
@@ -910,7 +967,7 @@ registerAttachmentGuard(
   async (user, entityId) => {
     const row = await prisma.rfqSupplier.findUnique({ where: { id: entityId }, select: { rfq: { select: { preparedById: true } } } });
     if (!row) return false;
-    return can(user, 'gchain.rfq.view_all') || (can(user, 'gchain.rfq.view_own') && row.rfq.preparedById === user.id);
+    return can(user, 'gchain.rfq.view_all') || (can(user, 'gchain.rfq.view_own') && visibleOwners(user, 'gchain', 'rfq').includes(row.rfq.preparedById));
   },
   {
     write: async (user, entityId) => {
@@ -928,7 +985,7 @@ registerSearch({
   async search(term, user, limit) {
     const rows = await prisma.rfq.findMany({
       where: {
-        ...(can(user, 'gchain.rfq.view_all') ? {} : { preparedById: user.id }),
+        ...(can(user, 'gchain.rfq.view_all') ? {} : { preparedById: { in: visibleOwners(user, 'gchain', 'rfq') } }),
         OR: [
           { number: { contains: term, mode: 'insensitive' } },
           { request: { number: { contains: term, mode: 'insensitive' } } },

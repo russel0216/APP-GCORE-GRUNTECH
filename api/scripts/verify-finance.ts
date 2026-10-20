@@ -23,6 +23,7 @@
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act, approversForStep, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
@@ -267,7 +268,8 @@ async function settle(approvalId: string, outcome: 'APPROVED' | 'REJECTED' = 'AP
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[], supervisorId?: string) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzfin_', roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -417,6 +419,8 @@ async function main() {
   await makeUser('ZZ Director', 'exec@verifyf.local', ['executive']);
   // Reimbursements and cash advances (2026-10-15) end with the CEO / President.
   await makeUser('ZZ CEO', 'ceo@verifyf.local', ['ceo']);
+  // The supplier bill routes' first step (2026-10-15); the install's own holders are nobody's business.
+  await makeUser('ZZ Fin TM', 'tm@verifyf.local', ['technical_manager']);
   // Throwaway roles for the route guards: nothing at all, project access
   // without budget monitoring, and the right to file a claim and nothing else.
   const throwaway = async (key: string, permissionKeys: string[]) => {
@@ -1927,6 +1931,41 @@ async function main() {
         allowed.status === 201 && /^GT-CA-/.test(String(allowed.body.number)),
         `${allowed.status} ${JSON.stringify(allowed.body).slice(0, 140)}`,
       );
+      // The advance as a page (2026-10-19): a breakdown whose lines make the
+      // amount, exact to the centavo (2.5 × 33.33 is 83.33, never 83.32), a
+      // Modify that replaces them, a paper that prints them, and the route
+      // previews the advance and the claim pages read.
+      const lined = await eng('POST', '/cash-advances', {
+        purpose: `${TAG} lined trip`,
+        items: [
+          { name: 'Fuel', quantity: 2.5, unit: 'L', unitCost: 33.33 },
+          { name: 'Tolls', description: 'SLEX both ways', quantity: 2, unitCost: 68.25 },
+        ],
+      });
+      const relined = lined.status === 201
+        ? await eng('PUT', `/cash-advances/${lined.body.id}`, { purpose: `${TAG} lined trip`, items: [{ name: 'Fuel', quantity: 4, unit: 'L', unitCost: 45.5 }] })
+        : lined;
+      const linedPdf = lined.status === 201 ? await eng('GET', `/cash-advances/${lined.body.id}/pdf`) : lined;
+      const linedText = linedPdf.bytes ? pdfText(linedPdf.bytes).replace(/\s+/g, ' ') : '';
+      const caRoute = await eng('GET', '/cash-advances/route?amount=182');
+      const claimRoute = await eng('GET', '/expense-claims/route?amount=182');
+      check(
+        'a cash advance is the sum of its breakdown, replaced on Modify and printed; the advance and claim pages preview their routes',
+        lined.status === 201 &&
+          lined.body.amount === 219.83 &&
+          lined.body.items?.length === 2 &&
+          relined.status === 200 &&
+          relined.body.amount === 182 &&
+          relined.body.items?.length === 1 &&
+          linedText.includes('BREAKDOWN') &&
+          caRoute.status === 200 &&
+          Array.isArray(caRoute.body.route?.steps) &&
+          claimRoute.status === 200 &&
+          Array.isArray(claimRoute.body.route?.steps),
+        `${lined.status} ${lined.body.amount} · ${relined.status} ${relined.body.amount} · ${linedText.includes('BREAKDOWN')} · ${caRoute.status} ${claimRoute.status}`,
+      );
+      if (lined.status === 201) await eng('POST', `/cash-advances/${lined.body.id}/cancel`, { reason: 'verify' });
+
       // A draft prints the route submitting it WOULD take (rule 6): every step
       // by its own name, open, with "Pending" under who may sign it — the
       // engineer's supervisor by name — and no receipt that has not happened.
@@ -4012,10 +4051,10 @@ async function main() {
       include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } } },
     });
     check(
-      'a reimbursement goes Team Leader › Back Support › Checking (Finance Staff) › Finance Manager › CEO / President',
+      'a reimbursement goes Team Leader › Back Support › Checking (Account Payable / Credit and Collection) › Finance Manager › CEO / President',
       rmbSubmit.status === 200 &&
         JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)) ===
-          JSON.stringify(['Team Leader', 'Back Support', 'Checking (Finance Staff)', 'Finance Manager', 'CEO / President']),
+          JSON.stringify(['Team Leader', 'Back Support', 'Checking (Account Payable / Credit and Collection)', 'Finance Manager', 'CEO / President']),
       JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)),
     );
     const stageOf = async () =>
@@ -4087,7 +4126,7 @@ async function main() {
     check(
       'a new advance is money lent: five signatures, released, then RELEASED with no liquidation deadline',
       loan.body.repayable === true &&
-        JSON.stringify(loanRoute) === JSON.stringify(['TEAM LEADER', 'BACK SUPPORT', 'CHECKING (FINANCE STAFF)', 'FINANCE MANAGER', 'CEO / PRESIDENT']) &&
+        JSON.stringify(loanRoute) === JSON.stringify(['TEAM LEADER', 'BACK SUPPORT', 'CHECKING (ACCOUNT PAYABLE / CREDIT AND COLLECTION)', 'FINANCE MANAGER', 'CEO / PRESIDENT']) &&
         loanRelease.status === 201 &&
         loanOut?.status === 'RELEASED' &&
         loanOut.liquidationDueDate === null,
@@ -4334,6 +4373,21 @@ async function main() {
       `${ir4Cancel.status} ${ir4Again.status} ${ir4Delete.status}`,
     );
     const irList = await fin('GET', `/invoice-requests?pageSize=50&jobId=${irJob.id}`);
+    // View Own covers one's DIRECT REPORTS' requests (2026-10-19): the seller's
+    // supervisor, holding only View Own, lists them; a colleague does not; and
+    // "Mine" is the supervisor's own alone.
+    const irBoss = await makeUser('ZZ IR Boss', 'irboss@verifyf.local', ['sales']);
+    await prisma.user.update({ where: { id: irSeller.id }, data: { supervisorId: irBoss.id } });
+    const bossList = await as(irBoss)('GET', `/invoice-requests?pageSize=50&jobId=${irJob.id}`);
+    const bossMine = await as(irBoss)('GET', `/invoice-requests?pageSize=50&jobId=${irJob.id}&scope=mine`);
+    const strangerList = await as(irStranger)('GET', `/invoice-requests?pageSize=50&jobId=${irJob.id}`);
+    const bossOne = await as(irBoss)('GET', `/invoice-requests/${ir4Again.body.id}`);
+    await prisma.user.update({ where: { id: irSeller.id }, data: { supervisorId: null } });
+    check(
+      "View Own reads a direct report's invoice requests, list and record, and a colleague's stay out",
+      bossList.body.total === 2 && bossMine.body.total === 0 && strangerList.body.total === 0 && bossOne.status === 200,
+      `${bossList.body.total} ${bossMine.body.total} ${strangerList.body.total} ${bossOne.status}`,
+    );
     const irListPdf = await fin('GET', `/invoice-requests/pdf?jobId=${irJob.id}`);
     check(
       'the register lists the project’s requests with their cards, and prints',

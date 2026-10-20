@@ -13,12 +13,15 @@
 import net from 'node:net';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { addressOf, buildMessage, encodeHeader, sendMail, type SmtpConfig } from '../src/shared/mail';
 import { hashToken, linkEmail, linkFor } from '../src/shared/accounts';
 import { statusLabel } from '../src/shared/pdf';
 import { moveAdminEmail } from '../src/shared/adminEmail';
+import { runImport } from '../src/shared/csv';
+import { employeesImport } from '../src/routes/imports/employees';
 import {
   checkListPaper,
   flat,
@@ -61,11 +64,13 @@ async function cleanup() {
     await prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
   await prisma.department.deleteMany({ where: { code: { startsWith: TAG } } });
+  await prisma.role.deleteMany({ where: { key: { startsWith: 'zzacct_' } } });
   await prisma.industry.deleteMany({ where: { name: { startsWith: TAG } } });
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[], superAdmin = false) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzacct_', roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -377,7 +382,10 @@ async function main() {
   const adminT = signToken(admin.id, admin.email);
   const hrT = signToken(hr.id, hr.email);
   const department = await prisma.department.create({ data: { code: `${TAG}-D`, name: `${TAG} Operations` } });
-  const employeeRole = await prisma.role.findUniqueOrThrow({ where: { key: 'employee' } });
+  // Any role on file stands in for "a role the form picked": since the roles
+  // became the organisation chart's (2026-10-18) there is no Employee role.
+  const employeeRole = await prisma.role.findUniqueOrThrow({ where: { key: 'project_support' } });
+  const defaultRole = await prisma.role.findUnique({ where: { key: 'employee' }, select: { key: true } });
 
   const options = await http(null, 'GET', '/auth/options');
   const mailOn = options.body.mail === true;
@@ -507,8 +515,12 @@ async function main() {
   const hireLogin = hire.body.login as { user: { id: string; name: string; invitePending: boolean }; invite: { link: string } | null } | null;
   check('saving the employee also makes their login, and links it', hire.status === 201 && !!hireLogin && hire.body.userId === hireLogin.user.id, hire.text.slice(0, 200));
   const lizaUser = hireLogin ? await prisma.user.findUniqueOrThrow({ where: { id: hireLogin.user.id }, include: { roles: { include: { role: true } } } }) : null;
-  check('the login carries their name, department, position and mobile from the record', lizaUser?.name === `Liza ${TAG} Soberano` && lizaUser.departmentId === department.id && lizaUser.position === 'Service Engineer' && lizaUser.phone === '0917 111 2222');
-  check('it starts with the self-service Employee role', !!lizaUser && lizaUser.roles.map((r) => r.role.key).join(',') === 'employee');
+  // The department is gone (2026-10-19): the one sent is ignored, on the record and the login.
+  check('the login carries their name, position and mobile from the record — no department', lizaUser?.name === `Liza ${TAG} Soberano` && lizaUser.departmentId === null && lizaUser.position === 'Service Engineer' && lizaUser.phone === '0917 111 2222');
+  check(
+    defaultRole ? 'it starts with the self-service Employee role' : 'it starts with no role — the chart\'s roles are given on Admin › Users',
+    !!lizaUser && lizaUser.roles.map((r) => r.role.key).join(',') === (defaultRole ? 'employee' : ''),
+  );
   check('and carries their employee number, for the face clock and the {EMP} in their quotation numbers', lizaUser?.employeeNo === `${TAG}-001`);
   check('and the invitation is ready to go', !!hireLogin?.invite?.link && hireLogin.user.invitePending === true);
   const lizaToken = tokenOf(hireLogin?.invite?.link);
@@ -679,22 +691,28 @@ async function main() {
     (await prisma.employee.count({ where: { employeeNo: `${TAG}-107` } })) === 0 && (await prisma.user.count({ where: { email: `boss${DOMAIN}` } })) === 0,
   );
   const badDept = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-108`, firstName: 'Dept', lastName: `${TAG} Unknown`, departmentId: 'no-such-dept' });
-  check('an unknown department is a 400 naming departmentId', badDept.status === 400 && fieldsOf(badDept).includes('departmentId'), badDept.text.slice(0, 160));
-  check('and makes no employee', (await prisma.employee.count({ where: { employeeNo: `${TAG}-108` } })) === 0);
+  check('a department sent is ignored — the department is gone (2026-10-19)', badDept.status === 201, badDept.text.slice(0, 160));
+  check(
+    'and the employee is made with none',
+    (await prisma.employee.findFirst({ where: { employeeNo: `${TAG}-108` }, select: { departmentId: true } }))?.departmentId === null,
+  );
   const badUser = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-105`, firstName: 'Link', lastName: `${TAG} Nobody`, userId: 'no-such-user' });
   check('linking a login that does not exist is a 404', badUser.status === 404, badUser.text.slice(0, 160));
   check('and makes no employee', (await prisma.employee.count({ where: { employeeNo: `${TAG}-105` } })) === 0);
-  // The number is unique on User too: one an older login still carries stays
-  // there, and the new login goes without rather than the save failing.
+  // The number is unique on User too. Since 2026-10-16 a number an older
+  // login still carries is a 409 naming that login — the new login used to go
+  // without it silently, and its quotation numbers read 000.
   const older = await makeUser(`${TAG} Older Login`, `older${DOMAIN}`, []);
   await prisma.user.update({ where: { id: older.id }, data: { employeeNo: `${TAG}-106` } });
   const clash = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-106`, firstName: 'Same', lastName: `${TAG} Number`, login: { email: `same${DOMAIN}` } });
   check(
-    'a number an older login carries is left there; the new login goes without, and the save stands',
-    clash.status === 201 &&
-      (clash.body.login as MadeLogin).user.employeeNo === null &&
+    'a number an older login carries is a 409 naming that login — nothing is made, the older login keeps it',
+    clash.status === 409 &&
+      clash.text.includes(`older${DOMAIN}`) &&
+      (await prisma.employee.count({ where: { employeeNo: `${TAG}-106` } })) === 0 &&
+      (await prisma.user.count({ where: { email: `same${DOMAIN}` } })) === 0 &&
       (await prisma.user.findUniqueOrThrow({ where: { id: older.id } })).employeeNo === `${TAG}-106`,
-    clash.text.slice(0, 160),
+    clash.text.slice(0, 200),
   );
 
   console.log('\nInviting someone already on the register');
@@ -766,6 +784,131 @@ async function main() {
   check('the account page says when the invitation went and until when', !!(detail.body.invite as { sentAt?: string } | null)?.sentAt && (detail.body.invite as { live?: boolean }).live === true);
   check('and which employee it belongs to', (detail.body.employee as { employeeNo?: string } | null)?.employeeNo === `${TAG}-004`);
 
+
+  // ── One person: the employee owns identity (2026-10-16) ───────────────────
+  console.log('\nOne person: the login mirrors its employee record');
+  {
+    const kimEmpId = String(loose.body.id);
+    const edit = await http(adminT, 'PATCH', `/employees/${kimEmpId}`, { firstName: 'Kimberly', mobile: '+63 917 555 0101' });
+    const kimNow = await prisma.user.findUniqueOrThrow({ where: { id: kimUser!.id } });
+    check(
+      "a change on the employee record reaches the login: the name and the mobile follow, in the same save",
+      edit.status === 200 && kimNow.name === `Kimberly ${TAG} Chiu` && kimNow.phone === '+63 917 555 0101',
+      `${edit.status} ${kimNow.name} ${kimNow.phone}`,
+    );
+    const renamed = await http(adminT, 'PATCH', `/users/${kimUser!.id}`, { name: 'Somebody Else' });
+    const sameName = await http(adminT, 'PATCH', `/users/${kimUser!.id}`, { name: kimNow.name, phone: kimNow.phone });
+    check(
+      'Admin › Users refuses to change a linked login\'s name (400, "from the employee record") — sending it back unchanged is fine',
+      renamed.status === 400 && /employee record/.test(renamed.text) && sameName.status === 200,
+      `${renamed.status} ${sameName.status} ${renamed.text.slice(0, 120)}`,
+    );
+    // The employee number is the one mirrored field that writes THROUGH
+    // (2026-10-18, the owner's call: the numbers are typed on Admin › Users).
+    const typedNo = await http(adminT, 'PATCH', `/users/${kimUser!.id}`, { employeeNo: `${TAG}-GTC-0004-26` });
+    const kimEmpNow = await prisma.employee.findUniqueOrThrow({ where: { id: kimEmpId } });
+    const kimLoginNow = await prisma.user.findUniqueOrThrow({ where: { id: kimUser!.id } });
+    check(
+      'an employee number typed on Admin › Users is written onto the employee record and mirrored back to the login',
+      typedNo.status === 200 && kimEmpNow.employeeNo === `${TAG}-GTC-0004-26` && kimLoginNow.employeeNo === `${TAG}-GTC-0004-26`,
+      `${typedNo.status} ${kimEmpNow.employeeNo} / ${kimLoginNow.employeeNo} ${typedNo.text.slice(0, 120)}`,
+    );
+    check(
+      'and the record\'s own trail says so',
+      (await prisma.auditLog.count({ where: { entityType: 'employee', entityId: kimEmpId, action: 'UPDATED', summary: { contains: '(from Admin › Users)' } } })) === 1,
+    );
+    const otherNo = await http(adminT, 'PATCH', `/users/${kimUser!.id}`, { employeeNo: `${TAG}-009` });
+    check('a number already another person\'s is a 409 naming them', otherNo.status === 409 && /Orphan/.test(otherNo.text), `${otherNo.status} ${otherNo.text.slice(0, 100)}`);
+    // Since 2026-10-19 the name, mobile and position are typed on
+    // Admin › Users too, written THROUGH to the employee record and mirrored back.
+    const through = await http(adminT, 'PATCH', `/users/${kimUser!.id}`, {
+      firstName: 'Kim',
+      lastName: `${TAG} Chiu-Reyes`,
+      phone: '+63 917 555 0202',
+      position: `${TAG} Records Clerk`,
+    });
+    const kimEmpThrough = await prisma.employee.findUniqueOrThrow({ where: { id: kimEmpId } });
+    const kimLoginThrough = await prisma.user.findUniqueOrThrow({ where: { id: kimUser!.id } });
+    check(
+      'a name, mobile and position typed on Admin › Users are written onto the employee record, and the login follows',
+      through.status === 200 &&
+        kimEmpThrough.firstName === 'Kim' &&
+        kimEmpThrough.lastName === `${TAG} Chiu-Reyes` &&
+        kimEmpThrough.mobile === '+63 917 555 0202' &&
+        kimEmpThrough.position === `${TAG} Records Clerk` &&
+        kimLoginThrough.name === `Kim ${TAG} Chiu-Reyes` &&
+        kimLoginThrough.phone === '+63 917 555 0202' &&
+        kimLoginThrough.position === `${TAG} Records Clerk`,
+      `${through.status} ${through.text.slice(0, 120)} ${kimLoginThrough.name} ${kimLoginThrough.position}`,
+    );
+    check(
+      'and the record\'s trail names what changed, from Admin › Users',
+      (await prisma.auditLog.count({
+        where: { entityType: 'employee', entityId: kimEmpId, action: 'UPDATED', summary: { contains: 'first name, last name, mobile, position (from Admin › Users)' } },
+      })) === 1,
+    );
+    const hrOnly = await http(hrT, 'PATCH', `/employees/${kimEmpId}`, { userId: null });
+    check(
+      'unlinking a login is an administrator\'s: HR without admin.users.edit_all is refused (403)',
+      hrOnly.status === 403 && (await prisma.employee.findUniqueOrThrow({ where: { id: kimEmpId } })).userId === kimUser!.id,
+      `${hrOnly.status}`,
+    );
+    const offNow = await http(adminT, 'PATCH', `/employees/${kimEmpId}`, { isActive: false });
+    const kimOff = await prisma.user.findUniqueOrThrow({ where: { id: kimUser!.id } });
+    const onAgain = await http(adminT, 'PATCH', `/employees/${kimEmpId}`, { isActive: true });
+    const kimStill = await prisma.user.findUniqueOrThrow({ where: { id: kimUser!.id } });
+    check(
+      'deactivating the employee deactivates the login; re-activating the employee leaves the login for an administrator to open',
+      offNow.status === 200 && kimOff.isActive === false && onAgain.status === 200 && kimStill.isActive === false,
+    );
+    const alone = await http(adminT, 'GET', `/users?linked=no&search=${encodeURIComponent(DOMAIN.slice(1))}&pageSize=200`);
+    const aloneRows = (alone.body.rows ?? []) as { id: string; employeeId: string | null }[];
+    const aloneSum = (alone.body.summary ?? {}) as { loginsAlone?: number; employeesAlone?: number };
+    check(
+      'the user list filters the logins with no employee record (?linked=no), and its cards count both halves still apart',
+      alone.status === 200 &&
+        aloneRows.some((r) => r.id === older.id) &&
+        !aloneRows.some((r) => r.id === kimUser!.id) &&
+        aloneRows.every((r) => r.employeeId === null) &&
+        (aloneSum.loginsAlone ?? 0) >= 1 &&
+        typeof aloneSum.employeesAlone === 'number',
+      `${alone.status} ${aloneRows.length} ${JSON.stringify(aloneSum)}`,
+    );
+    const noLogin = await http(adminT, 'GET', `/employees?login=none&search=${TAG}&pageSize=200`);
+    check(
+      "HR › Employees lists who has no login yet (?login=none), and an unknown value is a 400",
+      noLogin.status === 200 &&
+        ((noLogin.body.rows ?? []) as { hasUser: boolean }[]).every((r) => !r.hasUser) &&
+        (await http(adminT, 'GET', '/employees?login=maybe')).status === 400,
+    );
+
+    // The employee import's Email column: an address nobody uses is a new
+    // invited login, one with no employee is linked — never on a dry run.
+    const orphanForImport = await makeUser(`${TAG} Import Orphan`, `imporphan${DOMAIN}`, []);
+    const csv = [
+      'Employee No,Last Name,First Name,Email',
+      `${TAG}-301,${TAG} Imported,Ivy,ivy${DOMAIN}`,
+      `${TAG}-302,${TAG} Imported,Odin,imporphan${DOMAIN}`,
+    ].join('\n');
+    const actor = { id: admin.id, name: admin.name };
+    const dry = await runImport(csv, employeesImport.spec as never, false, (r) => employeesImport.write(r as never, actor));
+    const madeOnDry = await prisma.user.count({ where: { email: `ivy${DOMAIN}` } });
+    const done = await runImport(csv, employeesImport.spec as never, true, (r) => employeesImport.write(r as never, actor));
+    const ivyEmp = await prisma.employee.findUnique({ where: { employeeNo: `${TAG}-301` }, include: { user: true } });
+    const odinEmp = await prisma.employee.findUnique({ where: { employeeNo: `${TAG}-302` }, include: { user: true } });
+    check(
+      "the employee import's Email column invites a new login and links an orphan login — and a dry run makes neither",
+      dry.errors === 0 &&
+        madeOnDry === 0 &&
+        done.committed &&
+        ivyEmp?.user?.email === `ivy${DOMAIN}` &&
+        ivyEmp.user.invitePending === true &&
+        ivyEmp.user.employeeNo === `${TAG}-301` &&
+        odinEmp?.userId === orphanForImport.id &&
+        odinEmp.user?.name === `Odin ${TAG} Imported`,
+      JSON.stringify({ dryErrors: dry.errors, madeOnDry, committed: done.committed, ivy: ivyEmp?.user?.email, odin: odinEmp?.userId }),
+    );
+  }
 
   // ── The lists on paper ─────────────────────────────────────────────────────
   console.log('\nThe user list and the audit trail on paper');

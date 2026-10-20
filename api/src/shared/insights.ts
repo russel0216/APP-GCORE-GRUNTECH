@@ -5,7 +5,7 @@ import type { ResolvedUser } from '../permissions/resolve';
 import { gopsOverview } from './gops';
 import { chainOverview } from './chain';
 import { attendanceDay, dayKey as hrDayKey } from './hr';
-import { financePosition } from './finance';
+import { financePosition, LIVE_MONEY } from './finance';
 import { dayKey, manilaDate, manilaDayEnd, manilaDayStart, manilaMonthKey } from './day';
 
 /**
@@ -689,7 +689,7 @@ async function finLine(range: Range, today: Date): Promise<SummaryLine> {
     financePosition(today),
     // Customer receipts only — an advance refund is cash in, never a collection.
     prisma.payment.aggregate({
-      where: { kind: 'RECEIPT', customerId: { not: null }, clearedAt: { gte: range.from, lte: range.to } },
+      where: { kind: 'RECEIPT', customerId: { not: null }, ...LIVE_MONEY, clearedAt: { gte: range.from, lte: range.to } },
       _sum: { amount: true },
     }),
     prisma.progressBilling.count({ where: { status: 'APPROVED', invoice: null } }),

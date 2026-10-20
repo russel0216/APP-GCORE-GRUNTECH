@@ -316,12 +316,12 @@ export function PurchaseOrderEditor() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       api
-        .get<{ route: Route | null }>(`/purchase-orders/route${qs({ amount: String(money.total), orderId: id ?? '' })}`)
+        .get<{ route: Route | null }>(`/purchase-orders/route${qs({ amount: String(money.total), orderId: id ?? '', importation: header.applyVat ? '' : '1' })}`)
         .then((r) => setRoute(r.route))
         .catch(() => setRoute(null));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [money.total, id]);
+  }, [money.total, id, header.applyVat]);
 
   const dirty = saved !== null && snapshot(header, lines) !== saved;
   useUnsavedChanges(dirty && !busy);
@@ -639,7 +639,7 @@ export function PurchaseOrderEditor() {
 
           {/* ── Lines ───────────────────────────────────────────────────────── */}
           <section className="card" aria-labelledby="poe-lines">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="poe-lines" className="card-title">Lines</h2>
               <button type="button" className="btn btn-sm" onClick={() => fileRef.current?.click()}>
                 Import CSV
@@ -834,7 +834,7 @@ export function PurchaseOrderEditor() {
         {/* ── Budget, as issuing would leave it ──────────────────────────────── */}
         {direct && job && (
           <aside className="card prq-budget" aria-labelledby="poe-budget">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="poe-budget" className="card-title">Budget — on issue</h2>
               <span className="muted prq-source">as you type</span>
             </div>

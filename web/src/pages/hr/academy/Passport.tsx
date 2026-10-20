@@ -113,7 +113,7 @@ export interface PassportData {
     employeeNo: string;
     name: string;
     position: string | null;
-    department: { id: string; name: string } | null;
+    team: { id: string; code: string; name: string } | null;
     isActive: boolean;
   };
   expiryWarningDays: number;
@@ -268,7 +268,7 @@ export function PassportView({
           <>
             {p.own ? `${p.employee.name} · ` : ''}
             {p.employee.position ?? 'no plantilla position'}
-            {p.employee.department ? ` · ${p.employee.department.name}` : ''}
+            {p.employee.team ? ` · ${p.employee.team.code}` : ''}
             {!p.employee.isActive ? ' · inactive' : ''}
           </>
         }
@@ -320,7 +320,7 @@ export function PassportView({
         {p.lines.length === 0 ? (
           <Empty
             title="Nothing required"
-            hint="No course is required of this department or plantilla position yet. HR sets requirements on each course."
+            hint="No course is required of this plantilla position yet. HR sets requirements on each course."
           />
         ) : (
           <div className="table-wrap">

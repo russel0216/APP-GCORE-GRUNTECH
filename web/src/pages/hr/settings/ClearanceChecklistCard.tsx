@@ -1,4 +1,4 @@
-import { useAuth } from '../../../lib/auth';
+import { useAuth, mayEditPage } from '../../../lib/auth';
 import { SettingListCard } from '../../../components/SettingListCard';
 
 /**
@@ -30,7 +30,7 @@ export function ClearanceChecklistCard() {
         { key: 'description', label: 'Item', kind: 'text' },
       ]}
       newRow={() => ({ area: 'ADMIN', description: '' })}
-      canEdit={can('ghr.settings.edit_all')}
+      canEdit={mayEditPage(can, 'ghr', 'settings')}
     />
   );
 }

@@ -55,10 +55,11 @@ model User {
   savedFilters           SavedFilter[]
   attachments            Attachment[]
   auditLogs              AuditLog[]
-  approvalsRaised        ApprovalRequest[] @relation("Requester")
-  approvalActions        ApprovalAction[]  @relation("ApprovalActor")
-  stoodInFor             ApprovalAction[]  @relation("StoodInFor")
-  workflowStepsTargeting ApprovalStep[]    @relation("StepUser")
+  approvalsRaised        ApprovalRequest[]  @relation("Requester")
+  approvalActions        ApprovalAction[]   @relation("ApprovalActor")
+  followUpsRaised        ApprovalFollowUp[] @relation("FollowUpBy")
+  stoodInFor             ApprovalAction[]   @relation("StoodInFor")
+  workflowStepsTargeting ApprovalStep[]     @relation("StepUser")
 
   employee         Employee?
   customersCreated Customer[]        @relation("CustomerCreator")
@@ -134,6 +135,8 @@ model User {
   assetsCreated       InstalledAsset[]  @relation("AssetCreator")
   contractsCreated    ServiceContract[] @relation("ContractCreator")
   visitsAssigned      ServiceVisit[]    @relation("VisitEngineer")
+  visitsConfirmed     ServiceVisit[]    @relation("VisitConfirmer")
+  serviceDocumentsFiled ServiceDocument[] @relation("ServiceDocumentFiler")
   templatesAuthored   ReportTemplate[]  @relation("TemplateAuthor")
   reportsPerformed    ServiceReport[]   @relation("ReportAuthor")
   jobOrdersRequested  JobOrder[]        @relation("JobOrderRequester")
@@ -218,14 +221,32 @@ model Role {
   // System roles cannot be deleted, but their permissions remain editable —
   // "Roles should be customizable" (requirements §14).
   isSystem    Boolean @default(false)
+  /// Its level on the organisation chart (2026-10-19, ROLE_REV1): 1 is the
+  /// CEO / President, 6 the skilled trades. A person's title on documents is
+  /// their highest role — the lowest rank, then `sortOrder` (the chart's order).
+  rank        Int?
+  sortOrder   Int     @default(0)
+  /// The role this role reports to (2026-10-19, Admin › Roles › Hierarchy):
+  /// set by role, never by person; "Apply to people" writes each holder's
+  /// "Reports to" from it (the parent role's holder, same team first).
+  reportsToRoleId String?
+  reportsToRole   Role?   @relation("RoleHierarchy", fields: [reportsToRoleId], references: [id], onDelete: SetNull)
+  reportingRoles  Role[]  @relation("RoleHierarchy")
+  /// Further roles it also reports to (2026-10-20, the owner's call: the
+  /// Warehouse Supervisor reports to both Purchasing Managers). Drawn on the
+  /// role chart; "Apply to people" writes the first parent only.
+  alsoReportsToRoleIds String[] @default([])
 
   permissions            RolePermission[]
+  plantilla              Position[]         @relation("PositionRole")
   users                  UserRole[]
   workflowStepsTargeting ApprovalStep[]     @relation("StepRole")
   workflowsForRequester  ApprovalWorkflow[] @relation("WorkflowRequesterRole")
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 /// One row per `module.submodule.action` triple. Seeded from
@@ -431,6 +452,9 @@ model ApprovalWorkflow {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
+
   @@index([documentType, isActive])
 }
 
@@ -490,9 +514,15 @@ model ApprovalRequest {
   reopenedAt      DateTime?
   reopenedById    String?
   reopenReason    String?
+  /// An importation (2026-10-17, the owner's chart: Purchasing Manager Local
+  /// and Importation are two people): a Purchasing Manager step on such a
+  /// document goes to the Importation manager. Set at submit from the
+  /// document (a purchase order or incoming report with no VAT).
+  importation     Boolean        @default(false)
 
   actions   ApprovalAction[]
-  createdAt DateTime         @default(now())
+  followUps ApprovalFollowUp[]
+  createdAt DateTime           @default(now())
   closedAt  DateTime?
 
   @@index([documentType, documentId])
@@ -525,6 +555,25 @@ model ApprovalAction {
   /// (their direct report). `approverId` is who really acted.
   onBehalfOfId String?
   onBehalfOf   User?              @relation("StoodInFor", fields: [onBehalfOfId], references: [id], onDelete: SetNull)
+
+  @@index([requestId])
+}
+
+/// The requester's follow-up to the managers of an absent approver
+/// (2026-10-17, the owner's call): a stand-in is never listed or queued
+/// until the requester asks — then the managers named here are told and see
+/// the request in their queue. One row per follow-up; the step it was at.
+model ApprovalFollowUp {
+  id        String          @id @default(cuid())
+  requestId String
+  request   ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  sequence  Int
+  byId      String
+  by        User            @relation("FollowUpBy", fields: [byId], references: [id], onDelete: Cascade)
+  /// The managers told — the "Reports to" of each approver of the step.
+  toIds     String[]
+  note      String?
+  createdAt DateTime        @default(now())
 
   @@index([requestId])
 }
@@ -733,6 +782,9 @@ model Industry {
   invoiceRequests    InvoiceRequest[]
   jobOrders          JobOrder[]          @relation("JobOrderTeam")
   cadJobOrders       CadJobOrder[]       @relation("CadJobOrderTeam")
+  posts              TeamPost[]
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById        String?
 }
 
 /// A customer's sub-industry (2026-10-08, the owner's eleven): Enterprise,
@@ -741,14 +793,16 @@ model Industry {
 /// contract as the cost categories — seeded system rows undeletable, names
 /// editable — and OPTIONAL on the customer: typed in by hand, later.
 model SubIndustry {
-  id        String     @id @default(cuid())
-  name      String     @unique
-  sortOrder Int        @default(0)
-  isSystem  Boolean    @default(false)
-  isActive  Boolean    @default(true)
-  customers Customer[]
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  id          String     @id @default(cuid())
+  name        String     @unique
+  sortOrder   Int        @default(0)
+  isSystem    Boolean    @default(false)
+  isActive    Boolean    @default(true)
+  customers   Customer[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 model Supplier {
@@ -867,7 +921,9 @@ enum EmploymentType {
 /// too many. An employee with no user account files nothing, so has no route.
 model Employee {
   id         String  @id @default(cuid())
-  employeeNo String  @unique
+  /// Nullable since 2026-10-18: every number was cleared once for the owner's
+  /// `GTC-0001-14` scheme, and a person without one is issued no `{EMP}` number.
+  employeeNo String? @unique
   firstName  String
   lastName   String
   middleName String?
@@ -884,6 +940,9 @@ model Employee {
   /// text only for an employee with no plantilla position (unclassified).
   positionId   String?
   positionRef  Position?   @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  /// Positions held beside the main one (2026-10-19: one person, two
+  /// managers' posts). Each counts as filled; `position` joins the titles.
+  extraPositions EmployeeExtraPosition[]
   /// The industry team the person works in (Utilities, Healthcare…), from the
   /// same Industry rows customers are classified by. Set by HR; shown to the
   /// person on their invitation and My Account, never edited by them.
@@ -966,8 +1025,10 @@ model CostCategory {
   expenseClaims  ExpenseClaim[]        @relation("ExpenseCategory")
   cashAdvances   CashAdvance[]         @relation("AdvanceCategory")
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 model ItemCategory {
@@ -984,8 +1045,10 @@ model ItemCategory {
 
   items Item[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 enum ItemType {
@@ -1046,10 +1109,16 @@ model Item {
   issueItems           StockIssueItem[]
   borrowItems          BorrowSlipItem[]
   balances             InventoryBalance[]
+  projectStock         ProjectStock[]
   pulloutItems         PulloutItem[]
   stockMoves           InventoryTransaction[]
   installedAssets      InstalledAsset[]
+  /// Technical documents filed against the model (2026-10-20) — every machine of it reads them.
+  serviceDocuments     ServiceDocument[]
   receivedWithoutOrder ReceivingItem[]        @relation("ReceivedWithoutOrder")
+
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 
   @@index([isActive])
   @@index([name])
@@ -1073,10 +1142,13 @@ model Warehouse {
   borrowSlips      BorrowSlip[]
   pulloutSlips     PulloutSlip[]
   balances         InventoryBalance[]
+  projectStock     ProjectStock[]
   stockMoves       InventoryTransaction[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 /// Bin / rack / shelf within a warehouse.
@@ -1091,8 +1163,12 @@ model Location {
   receivingItems ReceivingItem[]
   issueItems     StockIssueItem[]
   balances       InventoryBalance[]
+  projectStock   ProjectStock[]
 
   createdAt DateTime @default(now())
+
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 
   @@unique([warehouseId, code])
 }
@@ -1256,6 +1332,10 @@ model Costing {
   scopeSections      ScopeSection[]
   quotationRevisions QuotationRevision[]
   jobs               Job[]
+  /// Where this costing is quoted or built as a second (third…) costing of a
+  /// revision or a project (2026-10-19) — `costingId` names the first.
+  revisionLinks      QuotationRevisionCosting[]
+  jobLinks           JobCostingLink[]
 
   /// When it last became FINAL (approval, "Mark final", or a job built on
   /// it); cleared when reopened. The Costing page's "Final this month" tile.
@@ -1464,6 +1544,12 @@ model Quotation {
   /// owner's call: "interchangeable, by default PHP"). One of
   /// QUOTATION_CURRENCIES; its sales orders print in it too.
   currency        String    @default("PHP")
+  /// Pesos per one unit of `currency` (2026-10-17, the owner's call): null
+  /// for a PHP quotation. Filled from Settings' rate when the quotation is
+  /// saved and changeable on it; every summary that ADDS quotations converts
+  /// through it (`inBase()` in shared/exchangeRates.ts) — nothing on the
+  /// quotation's own page or paper is converted.
+  exchangeRate    Decimal?  @db.Decimal(14, 6)
   /// The team a quotation is counted under when somebody tagged it (the
   /// SCORO import's "Tag with team", 2026-10-12); null follows the owner's
   /// team — `quotationTeamWhere()` / `quotationTeamOf()` in shared/team.ts.
@@ -1535,8 +1621,10 @@ model QuotationRevision {
   approvedBy   User?     @relation("RevisionApprover", fields: [approvedById], references: [id], onDelete: SetNull)
   approvedAt   DateTime?
 
-  items QuotationItem[]
-  jobs  Job[]
+  items         QuotationItem[]
+  jobs          Job[]
+  /// The other costings this revision is quoted from — see QuotationRevisionCosting.
+  otherCostings QuotationRevisionCosting[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1723,6 +1811,8 @@ model QuotationGroup {
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 // ── Sales calendar ───────────────────────────────────────────────────────────
@@ -1763,18 +1853,20 @@ model Greeting {
 /// Admin › Categories › Activity types. The six built-ins are seeded with the
 /// enum's own keys, so every activity written before this maps 1:1.
 model SalesActivityType {
-  id        String   @id @default(cuid())
+  id          String   @id @default(cuid())
   /// CALL, SITE_VISIT … or a key derived from a typed name (DEMO_WALK). Never changes.
-  key       String   @unique
-  name      String
+  key         String   @unique
+  name        String
   /// #RRGGBB, the chip's edge on the calendar; null takes the default.
-  color     String?
-  sortOrder Int      @default(0)
+  color       String?
+  sortOrder   Int      @default(0)
   /// The six built-ins: renamed and recoloured freely, never deleted; OTHER is the fallback and stays active.
-  isSystem  Boolean  @default(false)
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  isSystem    Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 model SalesActivity {
@@ -1943,6 +2035,8 @@ model Job {
   notes String?
 
   scopeItems      JobScopeItem[]
+  /// The other costings the project was built from — see JobCostingLink.
+  otherCostings   JobCostingLink[]
   costEntries     JobCostEntry[]
   budgetRequests  BudgetRequest[]
   progressReports ProgressReport[]
@@ -1968,10 +2062,13 @@ model Job {
   salesActivities  SalesActivity[]
   cadJobOrders     CadJobOrder[]
 
-  createdAt          DateTime            @default(now())
-  updatedAt          DateTime            @updatedAt
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
   commissionRequests CommissionRequest[]
   invoiceRequests    InvoiceRequest[]
+  /// Goods bought for the project and received into a warehouse (2026-10-18).
+  projectStock       ProjectStock[]
+  projectStockMoves  InventoryTransaction[] @relation("ProjectStockMoves")
 
   @@index([status])
   @@index([customerId])
@@ -2112,6 +2209,10 @@ model BudgetRequest {
 
   liquidations ExpenseClaim[]
   allocations  PaymentAllocation[]
+  /// The breakdown of what the cash buys (2026-10-19, the owner's call: a full
+  /// form). When there are lines, `amount` is their sum; one budget line still
+  /// covers the whole request, so the liquidation rule is unchanged.
+  items        BudgetRequestItem[]
 
   approvedAt DateTime?
   createdAt  DateTime  @default(now())
@@ -2120,6 +2221,22 @@ model BudgetRequest {
   @@index([jobId, status])
   @@index([requestedById, status])
   @@index([status])
+}
+
+/// One line of a budget request's breakdown — what the cash buys.
+model BudgetRequestItem {
+  id          String        @id @default(cuid())
+  requestId   String
+  request     BudgetRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  sortOrder   Int           @default(0)
+  name        String
+  description String?
+  quantity    Decimal       @db.Decimal(18, 3)
+  unit        String        @default("pcs")
+  unitCost    Decimal       @db.Decimal(18, 2)
+  amount      Decimal       @db.Decimal(18, 2)
+
+  @@index([requestId])
 }
 
 enum ProgressStatus {
@@ -2758,8 +2875,11 @@ model PurchaseOrder {
   vatAmount    Decimal @default(0) @db.Decimal(18, 2)
   total        Decimal @default(0) @db.Decimal(18, 2)
 
-  issuedAt   DateTime?
-  approvedAt DateTime?
+  issuedAt     DateTime?
+  approvedAt   DateTime?
+  /// Why it was cancelled (2026-10-19): a draft or pending order only — an
+  /// issued one is pulled back to draft first, which undoes what issue did.
+  cancelReason String?
 
   items      PurchaseOrderItem[]
   receivings Receiving[]
@@ -2916,10 +3036,12 @@ model StockIssue {
   issuedTo     User?   @relation("IssuedTo", fields: [issuedToId], references: [id], onDelete: SetNull)
   issuedToName String?
 
-  issueDate DateTime  @default(now()) @db.Date
-  purpose   String
-  notes     String?
-  issuedAt  DateTime?
+  issueDate    DateTime  @default(now()) @db.Date
+  purpose      String
+  notes        String?
+  /// Why a draft or pending slip was cancelled (2026-10-19).
+  cancelReason String?
+  issuedAt     DateTime?
 
   /// The internal receive proof (2026-10-15, the owner's call: "Outgoing =
   /// internal receive proof to the requestor"): where it goes, how, and the
@@ -2959,15 +3081,18 @@ model StockIssueItem {
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
-  quantity  Decimal @db.Decimal(18, 3)
+  quantity     Decimal @db.Decimal(18, 3)
   /// Moving-average cost at the moment of issue, snapshotted.
-  unitCost  Decimal @default(0) @db.Decimal(18, 2)
-  amount    Decimal @default(0) @db.Decimal(18, 2)
-  remarks   String?
+  unitCost     Decimal @default(0) @db.Decimal(18, 2)
+  amount       Decimal @default(0) @db.Decimal(18, 2)
+  /// Drawn from the slip's project's own stock (2026-10-18): already charged
+  /// to the project at receiving, so issuing it posts no cost again.
+  projectStock Boolean @default(false)
+  remarks      String?
   /// Serial or batch, and its condition as it left (2026-10-15).
-  serialNo  String?
-  condition String?
-  sortOrder Int     @default(0)
+  serialNo     String?
+  condition    String?
+  sortOrder    Int     @default(0)
 
   @@index([issueId])
 }
@@ -2980,6 +3105,10 @@ enum PulloutKind {
   /// No source document (2026-10-15, the owner's call): a supplier return,
   /// testing, a repair — the reason is kept on the slip.
   OTHER
+  /// A project's own stock (2026-10-18): goods bought for it and received
+  /// into a warehouse, released to its site. Charged at receiving, so the
+  /// release posts no cost again.
+  PROJECT_STOCK
 }
 
 /// What a pull-out is for (2026-10-15, the owner's pull-out slip: the
@@ -3226,6 +3355,36 @@ model InventoryBalance {
   @@index([warehouseId])
 }
 
+/// Goods bought for a project (a direct-to-job order) and received into a
+/// warehouse rather than to site (2026-10-18, the owner's call: "project goods
+/// received into the warehouse should show in inventory"). The project was
+/// charged at receiving, so this is the project's stock, kept apart from the
+/// company's: it never mixes into a balance's moving average, never counts in
+/// the company's stock value, and leaving the warehouse — an Outgoing line
+/// marked project stock or a PROJECT_STOCK pull-out — posts no cost again.
+model ProjectStock {
+  id          String    @id @default(cuid())
+  jobId       String
+  job         Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  quantity    Decimal @default(0) @db.Decimal(18, 3)
+  /// Moving average of what the project paid for it, as the company stock's.
+  averageCost Decimal @default(0) @db.Decimal(18, 4)
+
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([jobId, itemId, warehouseId])
+  @@index([warehouseId])
+  @@index([itemId])
+}
+
 enum StockMoveType {
   RECEIPT
   ISSUE
@@ -3254,11 +3413,17 @@ model InventoryTransaction {
   sourceNumber String?
   notes        String?
 
+  /// A movement of a project's own stock (ProjectStock) — never of the
+  /// company's. Null for company stock.
+  jobId String?
+  job   Job?    @relation("ProjectStockMoves", fields: [jobId], references: [id], onDelete: SetNull)
+
   createdById String?
   createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
 
   occurredAt DateTime @default(now())
 
+  @@index([jobId])
   @@index([itemId, warehouseId, occurredAt])
   @@index([sourceType, sourceId])
 }
@@ -3347,10 +3512,13 @@ model Attendance {
   timeOutPhoto  String?
   timeOutScore  Decimal?     @db.Decimal(6, 4)
 
-  status        AttendanceStatus @default(PRESENT)
-  lateMinutes   Int              @default(0)
+  status           AttendanceStatus @default(PRESENT)
+  lateMinutes      Int              @default(0)
   /// Net of the unpaid break, so it is hours actually worked.
-  workedMinutes Int              @default(0)
+  workedMinutes    Int              @default(0)
+  /// Left before the working day's end (HR Settings' workEnd), at clock-out
+  /// on the same Manila day; 0 for a day closed after midnight (2026-10-16).
+  undertimeMinutes Int              @default(0)
 
   /// The clock-in fallback's written reason (or HR's note on a correction).
   notes        String?
@@ -3530,11 +3698,61 @@ model Position {
   sortOrder           Int                 @default(0)
   isActive            Boolean             @default(true)
   employees           Employee[]
+  extraHolders        EmployeeExtraPosition[]
+  /// The role this slot counts (2026-10-19: "keep plantilla, count by role") —
+  /// filled is the active employees whose login holds it.
+  roleId              String?
+  role                Role?               @relation("PositionRole", fields: [roleId], references: [id], onDelete: SetNull)
   courseRequirements  CourseRequirement[]
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
+
   @@index([departmentId])
+  @@index([roleId])
+}
+
+/// Who holds a team's management post (2026-10-19, the owner's call: "KAT's
+/// Technical Manager and Aftermarket Manager are shared with GIB, UIT, HIT's;
+/// later prepare the setting if someone is hired"). No row is OWN: the
+/// holders of the role on the team, as before. Read by the approval engine
+/// before its own-team rule (`teamPostHolders` in shared/teamPosts.ts).
+model TeamPost {
+  teamId        String
+  team          Industry     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  roleKey       String
+  mode          TeamPostMode @default(OWN)
+  /// SHARED: the holders of the role on these teams decide for this one.
+  sharedTeamIds String[]     @default([])
+  /// PEOPLE: these logins decide.
+  userIds       String[]     @default([])
+  updatedAt     DateTime     @updatedAt
+  updatedById   String?
+
+  @@id([teamId, roleKey])
+}
+
+enum TeamPostMode {
+  OWN
+  SHARED
+  PEOPLE
+}
+
+/// A plantilla position an employee ALSO holds (2026-10-19, the owner's call:
+/// "Karen is Accounting and HR Manager"). The main one stays on
+/// Employee.positionId; these count as filled too, and the mirrored title
+/// reads "Main / Extra". Roles, not positions, decide what one approves.
+model EmployeeExtraPosition {
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  positionId String
+  position   Position @relation(fields: [positionId], references: [id], onDelete: Cascade)
+  sortOrder  Int      @default(0)
+
+  @@id([employeeId, positionId])
+  @@index([positionId])
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -3869,6 +4087,9 @@ model Course {
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
 
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
+
   @@index([isActive])
 }
 
@@ -4124,6 +4345,10 @@ model Invoice {
   /// credit — worth chasing, and invisible unless it is recorded.
   ewtCertificateNo String?
   ewtCertificateAt DateTime? @db.Date
+
+  /// 'SCORO' on an invoice the SCORO invoices import raised (2026-10-17):
+  /// a real receivable, its paper and number G-CORE's, its origin kept.
+  importedFrom String?
 
   notes      String?
   issuedAt   DateTime?
@@ -4433,6 +4658,8 @@ model CashAdvance {
   liquidations         ExpenseClaim[]
   commissionDeductions CommissionShare[]
   allocations          PaymentAllocation[]
+  /// The breakdown of what the cash buys (2026-10-19); the amount is their sum.
+  items                CashAdvanceItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4499,6 +4726,12 @@ model Payment {
   bank      String?
   /// A cheque is not cash until it clears; until then it is a promise.
   clearedAt DateTime? @db.Date
+
+  /// 'SCORO' on a collection the SCORO invoices import recorded (2026-10-17,
+  /// the owner's call: "keep them out as history"). It settles its invoice,
+  /// but no collection total, cash-flow actual or dashboard figure counts it
+  /// (`LIVE_MONEY` in shared/finance.ts).
+  importedFrom String?
 
   notes String?
 
@@ -4667,6 +4900,8 @@ model InstalledAsset {
   createdBy   User?   @relation("AssetCreator", fields: [createdById], references: [id], onDelete: SetNull)
 
   contracts ServiceContractAsset[]
+  /// Technical documents filed against this machine (2026-10-20).
+  documents ServiceDocument[]
   visits    ServiceVisit[]
   reports   ServiceReport[]
   jobOrders JobOrder[]
@@ -4712,6 +4947,10 @@ model ServiceContract {
   /// later change of frequency does not rewrite a schedule already agreed.
   plannedVisits   Int @default(0)
 
+  /// The SLA coverage level in the customer's words — "24/7 Comprehensive
+  /// PM", "Quarterly Labor & Parts" (2026-10-20, the owner's spec). Free
+  /// text, suggested from the levels on file.
+  coverageLevel String?
   /// Hours promised for a breakdown call. Free text because contracts say
   /// things like "next working day" as often as they say a number.
   responseTime  String?
@@ -4759,6 +4998,9 @@ enum ServiceKind {
 
 enum VisitStatus {
   SCHEDULED
+  /// Booked AND agreed with the customer (2026-10-20): still open — overdue,
+  /// missed and due read it as SCHEDULED — only confirmed.
+  CONFIRMED
   COMPLETED
   MISSED
   CANCELLED
@@ -4791,6 +5033,14 @@ model ServiceVisit {
   sequence    Int?
   dueDate     DateTime  @db.Date
   performedAt DateTime? @db.Date
+  /// The slot on the day (2026-10-20, the owner's spec): "HH:MM" both, or
+  /// neither for a full-day site visit — `visitSlot()` is the one rule.
+  startTime   String?
+  endTime     String?
+  /// Confirmed with the customer — by the engineer on it or Edit All.
+  confirmedAt   DateTime?
+  confirmedById String?
+  confirmedBy   User?     @relation("VisitConfirmer", fields: [confirmedById], references: [id], onDelete: SetNull)
 
   assignedToId String?
   assignedTo   User?   @relation("VisitEngineer", fields: [assignedToId], references: [id], onDelete: SetNull)
@@ -4811,6 +5061,15 @@ model ServiceVisit {
   @@index([status, dueDate])
   @@index([contractId])
   @@index([assignedToId, status])
+}
+
+/// Which register a job order belongs to (2026-10-20, the owner's revised
+/// Aftermarket UI): PROJECT is the project work order under Project
+/// Management, whose approval builds the project; SERVICE is the Service JO
+/// under Aftermarket, whose approval books the service visit.
+enum JobOrderCategory {
+  PROJECT
+  SERVICE
 }
 
 enum JobOrderStatus {
@@ -4846,6 +5105,7 @@ model JobOrder {
   laborAgreedAt      DateTime?
   number             String         @unique
   status             JobOrderStatus @default(DRAFT)
+  category           JobOrderCategory @default(PROJECT)
   kind               ServiceKind    @default(CORRECTIVE)
   urgent             Boolean        @default(false)
 
@@ -4933,6 +5193,7 @@ model JobOrder {
   updatedAt DateTime @updatedAt
 
   @@index([status, requestedFor])
+  @@index([category, status])
   @@index([customerId])
   @@index([assetId])
   @@index([requestedById])
@@ -5085,6 +5346,55 @@ enum CadPriority {
 
 /// What kind of drawing is asked for — Layout plan, P&ID, single-line… Admin
 /// › Categories; the seeded rows are system rows (renamable, undeletable).
+/// What a service document is (2026-10-20, the owner's revised Aftermarket
+/// UI): Admin › Categories › Service document categories — Manual, Electrical
+/// drawing, Test report … System rows: renamable, undeletable, switched off
+/// rather than removed; an administrator may add more.
+model ServiceDocumentCategory {
+  id        String   @id @default(cuid())
+  name      String
+  sortOrder Int      @default(0)
+  isSystem  Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  documents   ServiceDocument[]
+  createdById String?
+}
+
+/// A technical document on the Aftermarket side (2026-10-20): a manual, an
+/// electrical drawing, a test report, a datasheet — filed against a MACHINE
+/// on the Installation Base or against a MODEL (an item), either. The file
+/// itself is an attachment on `service_document` (a PDF, a picture, a CAD
+/// file — the CAD ceiling applies).
+model ServiceDocument {
+  id          String  @id @default(cuid())
+  title       String
+  description String?
+
+  categoryId String
+  category   ServiceDocumentCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  assetId String?
+  asset   InstalledAsset? @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  itemId  String?
+  item    Item?           @relation(fields: [itemId], references: [id], onDelete: SetNull)
+
+  /// The document's own version and date, as printed on it.
+  version      String?
+  documentDate DateTime? @db.Date
+  isActive     Boolean   @default(true)
+
+  createdById String
+  createdBy   User     @relation("ServiceDocumentFiler", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([assetId])
+  @@index([itemId])
+  @@index([categoryId])
+}
+
 model CadDrawingType {
   id        String   @id @default(cuid())
   name      String
@@ -5093,7 +5403,9 @@ model CadDrawingType {
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
 
-  requests CadJobOrder[]
+  requests    CadJobOrder[]
+  // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
+  createdById String?
 }
 
 /// A request to the design team for a drawing: the design team's one queue.
@@ -5452,4 +5764,52 @@ model CommissionShare {
 
   @@index([requestId])
   @@index([userId])
+}
+
+/// One line of a cash advance's breakdown — what the cash buys.
+model CashAdvanceItem {
+  id          String      @id @default(cuid())
+  advanceId   String
+  advance     CashAdvance @relation(fields: [advanceId], references: [id], onDelete: Cascade)
+  sortOrder   Int         @default(0)
+  name        String
+  description String?
+  quantity    Decimal     @db.Decimal(18, 3)
+  unit        String      @default("pcs")
+  unitCost    Decimal     @db.Decimal(18, 2)
+  amount      Decimal     @db.Decimal(18, 2)
+
+  @@index([advanceId])
+}
+
+/// A quotation revision quoted from more than one costing (2026-10-19, the
+/// owner's call: "sometimes there will be 2 costings to generate the quotation
+/// or project"). `QuotationRevision.costingId` stays the FIRST costing; these
+/// rows are the others, in order — `revisionCostingIds()` in
+/// `shared/costingSets.ts` reads both as one list.
+model QuotationRevisionCosting {
+  revisionId String
+  revision   QuotationRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+  costingId  String
+  costing    Costing           @relation(fields: [costingId], references: [id], onDelete: Cascade)
+  sortOrder  Int               @default(0)
+
+  @@id([revisionId, costingId])
+  @@index([costingId])
+}
+
+/// A project built from more than one costing (2026-10-19). `Job.costingId`
+/// stays the FIRST; these are the others, in order. Each one's scope is
+/// snapshotted into the project's scope items, its buckets into the opening
+/// budget, and it is marked FINAL — a costing that produced a project is a
+/// commercial record, so the link restricts its deletion as the first does.
+model JobCostingLink {
+  jobId     String
+  job       Job     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  costingId String
+  costing   Costing @relation(fields: [costingId], references: [id], onDelete: Restrict)
+  sortOrder Int     @default(0)
+
+  @@id([jobId, costingId])
+  @@index([costingId])
 }

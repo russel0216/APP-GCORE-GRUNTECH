@@ -26,6 +26,8 @@
  * All of it is checked over HTTP, because the guards live in the routes.
  */
 
+import { holidaysAside, holidaysBack, putHolidays } from './lib/holidays';
+import { phHolidays } from '../src/shared/holidays';
 import bcrypt from 'bcryptjs';
 import { PDFDocument } from 'pdf-lib';
 import { Prisma } from '@prisma/client';
@@ -121,6 +123,8 @@ async function restoreCostingLayout() {
 }
 
 async function cleanup() {
+  // The holidays this run set aside (scripts/lib/holidays.ts) go back first.
+  await holidaysBack();
   await restoreCostingLayout();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
@@ -228,6 +232,9 @@ async function main() {
   }
 
   await cleanup();
+  // The dates below were chosen for a Mon–Sat week: the stored holidays
+  // are set aside for the run, and the holiday checks bring their own.
+  await holidaysAside();
 
   const ownRole = await makeRole('zzcost_own', `${TAG} own-scope costing`, [
     'gops.costing.view_own',
@@ -812,6 +819,35 @@ async function main() {
         webWorkingDaysBetween('2026-10-12', '2026-10-18') === 6,
     );
   }
+
+  // ── Holidays (2026-10-17): days off besides Sunday, the PH calendar prefilled.
+  {
+    const ph26 = phHolidays(2026).map((h) => h.date);
+    const ph27 = phHolidays(2027).map((h) => h.date);
+    check(
+      'the Philippine holidays are worked out: Holy Week from Easter (2 and 3 April 2026, 25 and 26 March 2027), National Heroes Day the last Monday of August (31 August 2026), Bonifacio Day and Rizal Day',
+      ['2026-04-02', '2026-04-03', '2026-08-31', '2026-11-30', '2026-12-30', '2026-01-01', '2026-12-25'].every((d) => ph26.includes(d)) &&
+        ['2027-03-25', '2027-03-26', '2027-08-30'].every((d) => ph27.includes(d)),
+      `${ph26.join(',')}`,
+    );
+    const hol = new Set(['2026-11-02', '2026-11-30']);
+    const start = new Date('2026-10-14T00:00:00Z');
+    const server = workingDayDate(start, 20, hol).toISOString().slice(0, 10);
+    const web = workingDayKey('2026-10-14', 20, hol);
+    check(
+      'a holiday is a day off on the server and in the page alike: 20 working days from 14 October end on 6 November with All Souls\u2019 Day out',
+      server === '2026-11-06' && web === '2026-11-06' &&
+        workingDaysBetween(new Date('2026-11-02T00:00:00Z'), new Date('2026-11-07T00:00:00Z'), hol) === 5 &&
+        webWorkingDaysBetween('2026-11-02', '2026-11-07', hol) === 5,
+      `${server} / ${web}`,
+    );
+    let agrees = true;
+    for (let n = 1; n <= 60 && agrees; n++) {
+      const sv = workingDayDate(start, n, hol).toISOString().slice(0, 10);
+      if (sv !== workingDayKey('2026-10-14', n, hol) || hol.has(sv)) agrees = false;
+    }
+    check('no working day falls on a holiday, and the two rules agree for sixty days', agrees);
+  }
   check(
     'a phase with no tasks but a duration takes its place in the sequence; one with neither is unplanned and moves nothing',
     serverPlan.sections[1].start === 13 &&
@@ -1131,6 +1167,21 @@ async function main() {
       planned[2]?.endDate === '2026-11-05',
     planned.map((x) => `${x.startDate}–${x.endDate}`).join(' | '),
   );
+  {
+    // A holiday saved on Company Settings moves the finish at once (the API
+    // reloads the list on save): All Souls' Day out, the 20th day is 6 November.
+    const saved = await putHolidays([{ date: '2026-11-02', name: `${TAG} All Souls`, kind: 'SPECIAL' }]);
+    const after = saved ? await api(tEstimator, 'GET', `/costings/${created.body.id}`) : null;
+    const anyone = saved ? await api(tReader, 'GET', '/holidays') : null;
+    await putHolidays([]);
+    check(
+      'a holiday saved moves the costing\u2019s finish to 6 November, and anyone signed in reads the list',
+      saved && after?.body.plannedFinish === '2026-11-06' && rows(anyone?.body.holidays).length === 1,
+      `${after?.body.plannedFinish} / ${anyone?.status}`,
+    );
+    const refused = await api(tReader, 'PUT', '/holidays', { holidays: [] });
+    check('only whoever edits company settings saves the holidays (403)', refused.status === 403, String(refused.status));
+  }
   check(
     'spread: the schedule of values adds up to the contract value exactly',
     money(stored!.scopeSections.reduce((n, x) => n + num(x.value), 0), num(stored?.contractValue)),

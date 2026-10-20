@@ -25,9 +25,10 @@ import { KINDS, KIND_LABEL, reportPermission } from './Reports';
 /**
  * The Service Schedule — every visit, of every kind, on one calendar.
  *
- * A month grid by default, because PM is planned by the month and a visit
- * carries a date rather than a time; a list beside it for sorting, searching
- * and exporting. Both read the same filters from the URL, so a link from a
+ * A list by default (2026-10-20, the owner's revised Aftermarket UI: the
+ * dispatch timetable — date, slot, service type, engineer and team, status)
+ * and a month grid beside it (`?mode=month`), because PM is planned by the
+ * month. Both read the same filters from the URL, so a link from a
  * contract, a machine, a notification or a dashboard tile opens exactly what
  * it names, and back/forward undo a change of view.
  *
@@ -40,9 +41,14 @@ import { KINDS, KIND_LABEL, reportPermission } from './Reports';
 /** Visit statuses the global map does not already colour the way this screen means. */
 export const VISIT_TONES: Record<string, Tone> = {
   SCHEDULED: 'info',
+  // Agreed with the customer (2026-10-20) — the spec's green beside a scheduled visit's yellow.
+  CONFIRMED: 'ok',
   MISSED: 'danger',
   CANCELLED: '',
 };
+
+/** A visit still to be made: booked, or booked and confirmed with the customer. */
+const isOpenVisit = (status: string) => status === 'SCHEDULED' || status === 'CONFIRMED';
 
 export interface ScheduleVisit {
   id: string;
@@ -51,6 +57,13 @@ export interface ScheduleVisit {
   status: string;
   sequence: number | null;
   dueDate: string;
+  /** The slot on the day: "HH:MM" both, or null for a full-day visit (2026-10-20). */
+  startTime: string | null;
+  endTime: string | null;
+  /** The slot in words — "8:00 AM – 12:00 PM", "Full day" — the API's. */
+  slot: string;
+  confirmedAt: string | null;
+  confirmedBy: { id: string; name: string } | null;
   performedAt: string | null;
   daysUntilDue: number;
   overdue: boolean;
@@ -64,9 +77,13 @@ export interface ScheduleVisit {
   customer: { id: string; name: string };
   site: { id: string; name: string; city: string | null } | null;
   asset: { id: string; code: string; name: string; serialNo: string | null } | null;
-  assignedTo: { id: string; name: string } | null;
+  assignedTo: { id: string; name: string; employee?: { industry: { id: string; code: string; name: string } | null } | null } | null;
   report: { id: string; number: string; status: string; performedAt: string } | null;
   jobOrder: { id: string; number: string; status: string } | null;
+  /** Move, assign, cancel — Edit All, or Edit Own on a visit assigned to you (2026-10-18). */
+  canEdit?: boolean;
+  /** Confirm with the customer — the engineer it is booked on, or Edit All (2026-10-20). */
+  canConfirm?: boolean;
 }
 
 interface LooseReport {
@@ -95,6 +112,7 @@ function statusWord(v: ScheduleVisit): string {
   if (v.status === 'MISSED') return 'missed';
   if (v.status === 'COMPLETED') return 'done';
   if (v.status === 'CANCELLED') return 'cancelled';
+  if (v.status === 'CONFIRMED') return 'confirmed';
   return 'due';
 }
 
@@ -111,7 +129,7 @@ export function VisitBadge({ visit }: { visit: Pick<ScheduleVisit, 'status' | 'o
 
 /** "in 3 days" / "5 days overdue" — only while a visit is still open. */
 function dueNote(v: Pick<ScheduleVisit, 'status' | 'daysUntilDue'>): string | null {
-  if (v.status !== 'SCHEDULED' && v.status !== 'MISSED') return null;
+  if (!isOpenVisit(v.status) && v.status !== 'MISSED') return null;
   if (v.daysUntilDue === 0) return 'today';
   return v.daysUntilDue < 0 ? `${-v.daysUntilDue} days late` : `in ${v.daysUntilDue} days`;
 }
@@ -121,6 +139,7 @@ const FILTER_KEYS = ['assignedToId', 'contractId', 'customerId', 'assetId', 'kin
 
 const STATUS_OPTIONS = [
   { value: 'SCHEDULED', label: 'Scheduled' },
+  { value: 'CONFIRMED', label: 'Confirmed' },
   { value: 'COMPLETED', label: 'Completed' },
   { value: 'MISSED', label: 'Missed' },
   { value: 'CANCELLED', label: 'Cancelled' },
@@ -131,7 +150,9 @@ export function ServiceSchedule() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const nav = useCalendarNav({ defaultView: 'month', views: ['month'] });
-  const mode = params.get('mode') === 'list' ? 'list' : 'month';
+  // The list opens first (2026-10-20); `?mode=month`, or a `?month=` a
+  // contract or a machine links with, opens the grid. `?mode=list` still reads.
+  const mode = params.get('mode') === 'month' || (params.get('mode') !== 'list' && params.has('month')) ? 'month' : 'list';
   const visitId = params.get('visit');
   const showReports = params.get('reports') !== '0';
 
@@ -269,23 +290,23 @@ export function ServiceSchedule() {
             <button
               type="button"
               role="tab"
-              aria-selected={mode === 'month'}
-              className={mode === 'month' ? 'active' : ''}
-              onClick={() => patch({ mode: null, from: null, to: null, page: null }, true)}
+              aria-selected={mode === 'list'}
+              className={mode === 'list' ? 'active' : ''}
+              onClick={() => patch({ mode: null, month: null }, true)}
             >
-              Month
+              List
             </button>
             <button
               type="button"
               role="tab"
-              aria-selected={mode === 'list'}
-              className={mode === 'list' ? 'active' : ''}
-              onClick={() => patch({ mode: 'list' }, true)}
+              aria-selected={mode === 'month'}
+              className={mode === 'month' ? 'active' : ''}
+              onClick={() => patch({ mode: 'month', from: null, to: null, page: null }, true)}
             >
-              List
+              Month
             </button>
           </div>
-          {can('gops.pm_reports.create') && (
+          {can('gops.visits.create') && (
             <button type="button" className="btn btn-primary" onClick={() => setCreating(true)}>
               + New call-out
             </button>
@@ -410,6 +431,10 @@ export function ServiceSchedule() {
               due
             </li>
             <li>
+              <span className="svc-swatch ok" aria-hidden="true" />
+              confirmed with the customer
+            </li>
+            <li>
               <span className="svc-swatch warn" aria-hidden="true" />
               overdue — still open{feed ? `, missed after ${feed.missedAfterDays} days` : ''}
             </li>
@@ -457,7 +482,7 @@ export function ServiceSchedule() {
                 <button
                   type="button"
                   className="btn btn-sm"
-                  onClick={() => patch({ mode: null, from: null, to: null, page: null, month: monthOf(dayFrom) }, true)}
+                  onClick={() => patch({ mode: 'month', from: null, to: null, page: null, month: monthOf(dayFrom) }, true)}
                 >
                   Back to the month
                 </button>
@@ -516,11 +541,60 @@ function VisitList({
     Object.entries(filters).filter(([key]) => key !== 'status' && key !== 'kind' && key !== 'scope'),
   );
 
+  // The owner's dispatch timetable (2026-10-20): Scheduled date, Service
+  // type, Equipment / customer, Assigned engineer / team, Slot / duration,
+  // Status; the visit number, who booked it and the report under Columns.
   const columns: Column<ScheduleVisit>[] = [
+    {
+      key: 'dueDate',
+      label: 'Scheduled date',
+      sortKey: 'dueDate',
+      render: (r) => (
+        <div>
+          <div>{formatDate(r.dueDate)}</div>
+          {dueNote(r) && <div className="faint">{dueNote(r)}</div>}
+        </div>
+      ),
+    },
+    {
+      key: 'kind',
+      label: 'Service type',
+      render: (r) => <span className="badge">{KIND_LABEL[r.kind] ?? r.kind}</span>,
+    },
+    {
+      key: 'customer',
+      label: 'Equipment / customer',
+      render: (r) => (
+        <div>
+          <div>{r.asset?.name ?? r.site?.name ?? r.customer.name}</div>
+          <div className="faint">{r.asset || r.site ? r.customer.name : '—'}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'assignedTo',
+      label: 'Assigned engineer / team',
+      render: (r) =>
+        r.assignedTo ? (
+          <div>
+            <div>{r.assignedTo.name}</div>
+            <div className="faint">{r.assignedTo.employee?.industry ? r.assignedTo.employee.industry.code : 'no team'}</div>
+          </div>
+        ) : (
+          <span className="badge warn">unassigned</span>
+        ),
+    },
+    {
+      key: 'slot',
+      label: 'Slot / duration',
+      width: '150px',
+      render: (r) => (r.startTime ? r.slot : <span className="faint">Full day site visit</span>),
+    },
     {
       key: 'number',
       label: 'Visit',
       sortKey: 'number',
+      optional: true,
       render: (r) => (
         <div>
           <span className="mono">{r.number}</span>
@@ -533,35 +607,9 @@ function VisitList({
       ),
     },
     {
-      key: 'dueDate',
-      label: 'Due',
-      sortKey: 'dueDate',
-      render: (r) => (
-        <div>
-          <div>{formatDate(r.dueDate)}</div>
-          {dueNote(r) && <div className="faint">{dueNote(r)}</div>}
-        </div>
-      ),
-    },
-    {
-      key: 'customer',
-      label: 'Customer',
-      render: (r) => (
-        <div>
-          <div>{r.customer.name}</div>
-          <div className="faint">{r.asset?.name ?? r.site?.name ?? '—'}</div>
-        </div>
-      ),
-    },
-    {
-      key: 'kind',
-      label: 'Kind',
-      optional: true,
-      render: (r) => <span className="badge">{KIND_LABEL[r.kind] ?? r.kind}</span>,
-    },
-    {
       key: 'why',
       label: 'Booked by',
+      optional: true,
       render: (r) =>
         r.contract ? (
           <Link to={`/g-ops/service-contracts/${r.contract.id}`} className="mono">
@@ -576,13 +624,9 @@ function VisitList({
         ),
     },
     {
-      key: 'assignedTo',
-      label: 'Engineer',
-      render: (r) => (r.assignedTo ? r.assignedTo.name : <span className="badge warn">unassigned</span>),
-    },
-    {
       key: 'report',
       label: 'Report',
+      optional: true,
       render: (r) =>
         r.report ? (
           <Link to={`/g-ops/service-reports/${r.report.id}`} className="mono">
@@ -640,7 +684,7 @@ function VisitSheet({
   onClose: () => void;
   onChanged: () => void;
 }) {
-  const { can } = useAuth();
+  const { can, canView } = useAuth();
   const navigate = useNavigate();
   const toast = useToast();
   const [visit, setVisit] = useState<ScheduleVisit | null>(initial);
@@ -648,7 +692,7 @@ function VisitSheet({
   const [busy, setBusy] = useState(false);
   const [engineers, setEngineers] = useState<PersonRow[]>([]);
   const engineerId = useId();
-  const [form, setForm] = useState({ dueDate: '', assignedToId: '', notes: '' });
+  const [form, setForm] = useState({ dueDate: '', startTime: '', endTime: '', assignedToId: '', notes: '' });
 
   const load = useCallback(async () => {
     try {
@@ -656,6 +700,8 @@ function VisitSheet({
       setVisit(row);
       setForm({
         dueDate: row.dueDate.slice(0, 10),
+        startTime: row.startTime ?? '',
+        endTime: row.endTime ?? '',
         assignedToId: row.assignedTo?.id ?? '',
         notes: row.notes ?? '',
       });
@@ -669,7 +715,8 @@ function VisitSheet({
     void load();
   }, [load]);
 
-  const canSchedule = can('gops.pm_reports.create');
+  // The API's flag: Edit All, or Edit Own on a visit assigned to the viewer (2026-10-18).
+  const canSchedule = visit?.canEdit ?? can('gops.visits.edit_all');
   useEffect(() => {
     if (!canSchedule) return;
     loadPeople('gops.pm_reports.create')
@@ -687,6 +734,8 @@ function VisitSheet({
     if (!visit) return;
     await api.patch(`/service-visits/${visit.id}`, {
       dueDate: form.dueDate,
+      startTime: form.startTime || null,
+      endTime: form.endTime || null,
       assignedToId: form.assignedToId || null,
       notes: form.notes || null,
       ...extra,
@@ -708,7 +757,24 @@ function VisitSheet({
     }
   }
 
-  const open = visit && (visit.status === 'SCHEDULED' || visit.status === 'MISSED');
+  /** Confirmed with the customer (2026-10-20): the API's own door, open to the engineer booked on it. */
+  async function confirmVisit() {
+    if (!visit) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post(`/service-visits/${visit.id}/confirm`);
+      toast('ok', `${visit.number} confirmed with ${visit.customer.name}`);
+      onChanged();
+      onClose();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const open = visit && (isOpenVisit(visit.status) || visit.status === 'MISSED');
   const editable = !!visit && canSchedule && visit.status !== 'COMPLETED';
   /** The date, the engineer and the notes can be changed — the sheet is a form. */
   const formOpen = editable && visit!.status !== 'CANCELLED';
@@ -755,6 +821,11 @@ function VisitSheet({
               onClick={() => navigate(`/g-ops/service-reports?new=1&visitId=${visit!.id}`)}
             >
               Write report
+            </button>
+          )}
+          {visit?.canConfirm && (
+            <button type="button" className={formOpen ? 'btn' : 'btn btn-primary'} onClick={confirmVisit} disabled={busy}>
+              Confirm with customer
             </button>
           )}
           {formOpen && (
@@ -811,6 +882,13 @@ function VisitSheet({
               date.
             </div>
           )}
+          {visit.status === 'CONFIRMED' && (
+            <div className="alert ok">
+              Confirmed with the customer{visit.confirmedBy ? ` by ${visit.confirmedBy.name}` : ''}
+              {visit.confirmedAt ? ` on ${formatDate(visit.confirmedAt)}` : ''}. Moving the day or the slot
+              puts it back to scheduled, to be confirmed again.
+            </div>
+          )}
           {visit.report && visit.report.status === 'REJECTED' && (
             <div className="alert warn">
               Its report was returned. Open it, correct it and submit it again — the visit closes when
@@ -831,7 +909,7 @@ function VisitSheet({
             <dt>Machine</dt>
             <dd>
               {visit.asset ? (
-                can('gops.installed_base.view_all') ? (
+                canView('gops', 'installed_base') ? (
                   <Link to={`/g-ops/installed-base/${visit.asset.id}`}>{visit.asset.name}</Link>
                 ) : (
                   visit.asset.name
@@ -866,8 +944,10 @@ function VisitSheet({
             </dd>
             {!editable && (
               <>
-                <dt>Due</dt>
-                <dd>{formatDate(visit.dueDate)}</dd>
+                <dt>Scheduled</dt>
+                <dd>
+                  {formatDate(visit.dueDate)} · {visit.slot}
+                </dd>
               </>
             )}
             {visit.performedAt && (
@@ -888,14 +968,22 @@ function VisitSheet({
 
           {formOpen && (
             <>
-              <div className="grid grid-2">
-                <Field label={visit.status === 'MISSED' ? 'New date' : 'Due'}>
+              <div className="grid grid-3">
+                <Field label={visit.status === 'MISSED' ? 'New date' : 'Scheduled date'}>
                   <input
                     type="date"
                     value={form.dueDate}
                     onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
                   />
                 </Field>
+                <Field label="Slot starts" hint="Both empty: a full-day site visit">
+                  <input type="time" value={form.startTime} onChange={(e) => setForm({ ...form, startTime: e.target.value })} />
+                </Field>
+                <Field label="Slot ends">
+                  <input type="time" value={form.endTime} onChange={(e) => setForm({ ...form, endTime: e.target.value })} />
+                </Field>
+              </div>
+              <div className="grid grid-2">
                 <Field label="Engineer" htmlFor={engineerId}>
                   <PersonSelect
                     id={engineerId}
@@ -941,6 +1029,8 @@ function NewVisitModal({ onClose, onCreated }: { onClose: () => void; onCreated:
     assetId: '',
     contractId: '',
     dueDate: todayLocal(),
+    startTime: '',
+    endTime: '',
     assignedToId: '',
     notes: '',
   });
@@ -980,6 +1070,8 @@ function NewVisitModal({ onClose, onCreated }: { onClose: () => void; onCreated:
         assetId: form.assetId || null,
         contractId: form.contractId || null,
         dueDate: form.dueDate,
+        startTime: form.startTime || null,
+        endTime: form.endTime || null,
         assignedToId: form.assignedToId || null,
         notes: form.notes || null,
       });
@@ -1019,8 +1111,16 @@ function NewVisitModal({ onClose, onCreated }: { onClose: () => void; onCreated:
             ))}
           </select>
         </Field>
-        <Field label="Due">
+        <Field label="Scheduled date">
           <input type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} />
+        </Field>
+      </div>
+      <div className="grid grid-2">
+        <Field label="Slot starts" hint="Both empty: a full-day site visit">
+          <input type="time" value={form.startTime} onChange={(e) => setForm({ ...form, startTime: e.target.value })} />
+        </Field>
+        <Field label="Slot ends">
+          <input type="time" value={form.endTime} onChange={(e) => setForm({ ...form, endTime: e.target.value })} />
         </Field>
       </div>
       <Field label="Customer" htmlFor={`${ids}-customer`}>

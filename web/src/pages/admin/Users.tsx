@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEdit, useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
+import { Stat } from '../../components/charts';
 import {
   Checkbox,
   ErrorBox,
@@ -16,7 +17,9 @@ import {
 import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { OrgChart } from './OrgChart';
+import { rolesByLevel } from '../../lib/roleLevels';
 import { NewPersonModal } from '../masters/Employees';
+import { PersonSelect, usePeople } from '../../components/People';
 
 /** Roles whose approval step goes by the teams a holder supports — `TEAM_SCOPED_ROLES` in shared/approvals.ts. */
 const TEAM_SCOPED_ROLES = ['back_support'];
@@ -25,10 +28,8 @@ interface Role {
   id: string;
   key: string;
   name: string;
-}
-interface Department {
-  id: string;
-  name: string;
+  /** Its level on the chart (1 the CEO / President) — the Access tab lists roles under it. */
+  rank?: number | null;
 }
 interface UserRow {
   id: string;
@@ -43,31 +44,45 @@ interface UserRow {
   invitePending: boolean;
   lastLoginAt: string | null;
   roles: { key: string; name: string }[];
-  department: { id: string; name: string } | null;
   supervisor: { id: string; name: string } | null;
   /** The team on their employee record (`Employee.industryId`). */
   team?: { code: string; name: string } | null;
+  /** Their employee record, when the login has one — the person (2026-10-16). */
+  employeeId?: string | null;
+  /** The main plantilla post and the others held (2026-10-19). */
+  mainPosition?: string | null;
+  alsoHolds?: string[];
+  /** The title on documents: the highest of the roles (ROLE_REV1, 2026-10-19). */
+  title?: string | null;
+}
+
+/** The halves of a person still apart (GET /users summary, 2026-10-16). */
+interface UsersSummary {
+  loginsAlone: number;
+  employeesAlone: number;
+  /** Active logins with no employee number yet (2026-10-18). */
+  withoutNumber: number;
+  /** Logins holding more than six roles — listed, never trimmed (2026-10-19). */
+  moreThanMaxRoles?: number;
+  maxRoles?: number;
 }
 
 /** The single-user endpoint returns role ids (the list only needs key + name). */
 type UserDetail = Omit<UserRow, 'roles'> & {
   roles: { id: string; key: string; name: string }[];
-  overrides: { key: string; effect: 'ALLOW' | 'DENY' }[];
   /** The teams they support on a team-scoped approval step (Back Support). */
   supportTeams: { industryId: string }[];
   /** The invitation in flight, while it is pending. */
   invite: { sentAt: string; expiresAt: string; live: boolean } | null;
-  employee: { id: string; employeeNo: string; firstName: string; lastName: string; industryId: string | null } | null;
+  employee: {
+    id: string;
+    employeeNo: string;
+    firstName: string;
+    lastName: string;
+    suffix: string | null;
+    industryId: string | null;
+  } | null;
 };
-
-/**
- * A permission chip is a button, and a button sends no `input` event — so the
- * Modal's "Close without saving?" guard never heard about a tick. Tell it, the
- * way a field would.
- */
-function markChanged(el: HTMLElement) {
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-}
 
 interface MailStatus {
   enabled: boolean;
@@ -75,19 +90,8 @@ interface MailStatus {
   from: string | null;
 }
 
-interface PermissionCatalog {
-  modules: {
-    key: string;
-    label: string;
-    blurb: string;
-    submodules: {
-      key: string;
-      label: string;
-      phase: number;
-      actions: { action: string; label: string; key: string }[];
-    }[];
-  }[];
-}
+/** A person holds six roles at most (the owner's call, 2026-10-19; the API refuses a seventh). */
+const MAX_ROLES = 6;
 
 const BASE = '/admin/users';
 
@@ -96,13 +100,14 @@ export function Users() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  // ?view=tree shows the organisational chart; it is in the URL so the chart
-  // stays behind a person opened from it, and a link can open it directly.
+  // ?view=tree shows the organisational chart and ?view=hierarchy the people
+  // tree; it is in the URL so the view stays behind a person opened from it,
+  // and a link can open it directly.
   const [params, setParams] = useSearchParams();
-  const view = params.get('view') === 'tree' ? 'tree' : 'list';
-  const showView = (next: 'list' | 'tree') => {
+  const view = params.get('view') === 'tree' ? 'tree' : params.get('view') === 'hierarchy' ? 'hierarchy' : 'list';
+  const showView = (next: 'list' | 'tree' | 'hierarchy') => {
     const p = new URLSearchParams(params);
-    if (next === 'tree') p.set('view', 'tree');
+    if (next !== 'list') p.set('view', next);
     else p.delete('view');
     setParams(p, { replace: true });
   };
@@ -119,11 +124,9 @@ export function Users() {
   const mayAdd = can('admin.users.create') && (can('ghr.employees.create') || can('ghr.employees.edit_all'));
   const [reload, setReload] = useState(0);
   const [roles, setRoles] = useState<Role[]>([]);
-  const [departments, setDepartments] = useState<Department[]>([]);
 
   useEffect(() => {
     api.get<Role[]>('/roles').then(setRoles).catch(() => setRoles([]));
-    api.get<Department[]>('/departments').then(setDepartments).catch(() => setDepartments([]));
   }, []);
 
   const columns: Column<UserRow>[] = [
@@ -141,7 +144,7 @@ export function Users() {
               </span>
             )}
           </div>
-          <div className="faint">{u.position ?? '—'}</div>
+          <div className="faint">{u.title ?? u.position ?? '—'}</div>
         </div>
       ),
     },
@@ -163,7 +166,6 @@ export function Users() {
           </div>
         ),
     },
-    { key: 'department', label: 'Department', render: (u) => u.department?.name ?? '—' },
     { key: 'team', label: 'Team', render: (u) => (u.team ? <span title={u.team.name}>{u.team.code}</span> : '—') },
     { key: 'supervisor', label: 'Reports to', render: (u) => u.supervisor?.name ?? '—' },
     {
@@ -205,6 +207,14 @@ export function Users() {
           <button type="button" className={view === 'list' ? 'active' : ''} aria-pressed={view === 'list'} onClick={() => showView('list')}>
             Users
           </button>
+          <button
+            type="button"
+            className={view === 'hierarchy' ? 'active' : ''}
+            aria-pressed={view === 'hierarchy'}
+            onClick={() => showView('hierarchy')}
+          >
+            Hierarchy Chart
+          </button>
           <button type="button" className={view === 'tree' ? 'active' : ''} aria-pressed={view === 'tree'} onClick={() => showView('tree')}>
             Organizational Chart
           </button>
@@ -213,6 +223,8 @@ export function Users() {
 
       {view === 'tree' ? (
         <OrgChart key={reload} />
+      ) : view === 'hierarchy' ? (
+        <OrgChart key={`h${reload}`} rolesOnly />
       ) : (
       <DataList<UserRow>
         listKey="admin-users"
@@ -234,7 +246,61 @@ export function Users() {
             ],
           },
           { key: 'role', label: 'Role', options: roles.map((r) => ({ value: r.key, label: r.name })) },
+          {
+            key: 'linked',
+            label: 'Employee record',
+            options: [
+              { value: 'no', label: 'No employee record' },
+              { value: 'yes', label: 'Linked to an employee' },
+            ],
+          },
+          {
+            key: 'number',
+            label: 'Employee number',
+            options: [
+              { value: 'none', label: 'No employee number yet' },
+              { value: 'yes', label: 'Has an employee number' },
+            ],
+          },
         ]}
+        summary={(raw) => {
+          const sum = raw as unknown as UsersSummary | undefined;
+          if (!sum) return null;
+          return (
+            <>
+              <Stat
+                label="Logins with no employee"
+                value={sum.loginsAlone}
+                accent={sum.loginsAlone > 0 ? 'warn' : undefined}
+                sub="open one and link it, or add the person in HR › Employees"
+                to={`${BASE}?linked=no`}
+              />
+              <Stat
+                label="Employees with no login"
+                value={sum.employeesAlone}
+                accent={sum.employeesAlone > 0 ? 'warn' : undefined}
+                sub="active people who cannot sign in yet"
+                to="/g-hr/employees?login=none&isActive=true"
+              />
+              <Stat
+                label="Without an employee number"
+                value={sum.withoutNumber}
+                accent={sum.withoutNumber > 0 ? 'warn' : undefined}
+                sub="type it on the login (GTC-0001-14) — no quotation number is issued without one"
+                to={`${BASE}?number=none`}
+              />
+              {!!sum.moreThanMaxRoles && (
+                <Stat
+                  label={`More than ${MAX_ROLES} roles`}
+                  value={sum.moreThanMaxRoles}
+                  accent="warn"
+                  sub={`a person holds ${MAX_ROLES} roles at most — their next save needs it trimmed`}
+                  to={`${BASE}?roles=over`}
+                />
+              )}
+            </>
+          );
+        }}
         actions={
           mayAdd ? (
             <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
@@ -261,7 +327,6 @@ export function Users() {
           key={id}
           id={id}
           roles={roles}
-          departments={departments}
           onClose={close}
           onSaved={() => {
             close();
@@ -274,40 +339,49 @@ export function Users() {
 }
 
 /**
- * Modify of an existing account — details, roles and per-person overrides.
+ * Modify of an existing account — details and roles.
  * It makes nobody: a person is created with their login through
  * `NewPersonModal` (2026-10-10), never as a login alone.
  */
 function UserEditor({
   id,
   roles,
-  departments,
   onClose,
   onSaved,
 }: {
   id: string;
   roles: Role[];
-  departments: Department[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const toast = useToast();
+  /*
+    Edit Own on Admin › Users is the viewer's own login, and only its plain
+    details (2026-10-18): roles, Supports teams, Reports to, the
+    team, the employee number, Active and a password stay Edit All's — the
+    API refuses them (403) and the form neither offers nor sends them.
+  */
+  const { can, me } = useAuth();
+  const full = can('admin.users.edit_all');
+  const maySave = mayEdit(can, 'admin', 'users', !!me && me.user.id === id);
   const [tab, setTab] = useState<'details' | 'access'>('details');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [people, setPeople] = useState<UserRow[]>([]);
-  const [catalog, setCatalog] = useState<PermissionCatalog | null>(null);
-  const [overrides, setOverrides] = useState<Record<string, 'ALLOW' | 'DENY'>>({});
+  // The one people fetch (components/People.tsx, rule 20).
+  const { people } = usePeople();
 
   const [form, setForm] = useState({
     name: '',
+    /** The employee record's name parts, for a linked login (2026-10-19). */
+    firstName: '',
+    lastName: '',
+    suffix: '',
     email: '',
     password: '',
     employeeNo: '',
     position: '',
     phone: '',
     supervisorId: '',
-    departmentId: '',
     roleIds: [] as string[],
     supportTeamIds: [] as string[],
     teamId: '',
@@ -315,22 +389,20 @@ function UserEditor({
   });
   const [teams, setTeams] = useState<{ id: string; code: string; name: string; isActive: boolean }[]>([]);
   const [detail, setDetail] = useState<UserDetail | null>(null);
+  /**
+   * A login with an employee record mirrors it (2026-10-16): its name,
+   * position and mobile are the record's — typed here since
+   * 2026-10-19 and written through to the record, which the login follows.
+   */
+  const kept = !!detail?.employee;
   /** The link just issued — shown until the administrator is done with it. */
   const [issued, setIssued] = useState<{ delivery: Delivery; kind: 'invite' | 'reset' } | null>(null);
 
   useEffect(() => {
     api
-      .get<{ rows: UserRow[] }>('/users?pageSize=200')
-      .then((r) => setPeople(r.rows))
-      .catch(() => setPeople([]));
-    api
       .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
       .then(setTeams)
       .catch(() => setTeams([]));
-    api
-      .get<PermissionCatalog>('/roles/permission-catalog')
-      .then(setCatalog)
-      .catch(() => setCatalog(null));
   }, []);
 
   useEffect(() => {
@@ -340,19 +412,20 @@ function UserEditor({
         setDetail(u);
         setForm({
           name: u.name,
+          firstName: u.employee?.firstName ?? '',
+          lastName: u.employee?.lastName ?? '',
+          suffix: u.employee?.suffix ?? '',
           email: u.email,
           password: '',
           employeeNo: u.employeeNo ?? '',
-          position: u.position ?? '',
+          position: u.mainPosition ?? u.position ?? '',
           phone: u.phone ?? '',
           supervisorId: u.supervisor?.id ?? '',
-          departmentId: u.department?.id ?? '',
           roleIds: u.roles.map((r) => r.id),
           supportTeamIds: (u.supportTeams ?? []).map((t) => t.industryId),
           teamId: u.employee?.industryId ?? '',
           isActive: u.isActive,
         });
-        setOverrides(Object.fromEntries(u.overrides.map((o) => [o.key, o.effect])));
       })
       .catch(setError);
   }, [id]);
@@ -361,13 +434,27 @@ function UserEditor({
     setBusy(true);
     setError(null);
     try {
-      const payload = {
-        name: form.name,
-        employeeNo: form.employeeNo || null,
-        position: form.position || null,
+      // A linked login's details are written through to the employee record.
+      const details = {
+        ...(kept
+          ? { firstName: form.firstName.trim(), lastName: form.lastName.trim(), suffix: form.suffix.trim() || null }
+          : { name: form.name }),
+        // Sent only when changed: the login's title joins every post held.
         phone: form.phone || null,
+      };
+      // Edit Own: their own plain details, nothing else (2026-10-18).
+      if (!full) {
+        await api.patch(`/users/${id}`, details);
+        toast('ok', `${kept ? `${form.firstName} ${form.lastName}`.trim() : form.name} updated`);
+        onSaved();
+        return;
+      }
+      const payload = {
+        // Written through to the employee record when there is one, as the
+        // employee number and the Team are; the login follows the record.
+        employeeNo: form.employeeNo || null,
+        ...details,
         supervisorId: form.supervisorId || null,
-        departmentId: form.departmentId || null,
         roleIds: form.roleIds,
         supportTeamIds: form.supportTeamIds,
         ...(detail?.employee ? { teamId: form.teamId || null } : {}),
@@ -375,27 +462,14 @@ function UserEditor({
         ...(form.password ? { password: form.password } : {}),
       };
 
-      await api.put(`/users/${id}/overrides`, {
-        overrides: Object.entries(overrides).map(([key, effect]) => ({ key, effect })),
-      });
       await api.patch(`/users/${id}`, payload);
 
-      toast('ok', `${form.name} updated`);
+      toast('ok', `${kept ? `${form.firstName} ${form.lastName}`.trim() : form.name} updated`);
       onSaved();
     } catch (err) {
       setError(err);
       setBusy(false);
     }
-  }
-
-  function cycle(key: string) {
-    setOverrides((o) => {
-      const next = { ...o };
-      if (!next[key]) next[key] = 'ALLOW';
-      else if (next[key] === 'ALLOW') next[key] = 'DENY';
-      else delete next[key];
-      return next;
-    });
   }
 
   async function issue(kind: 'invite' | 'reset') {
@@ -417,10 +491,12 @@ function UserEditor({
       title={`Modify user ${detail?.name ?? form.name}`.trim()}
       onClose={onClose}
       footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy} cancelLabel={maySave ? undefined : 'Close'}>
+          {maySave && (
+            <button className="btn btn-primary" onClick={save} disabled={busy}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          )}
         </ModalFoot>
       }
     >
@@ -449,24 +525,50 @@ function UserEditor({
 
       {tab === 'details' ? (
         <>
+          {detail?.employee && (
+            <div className="alert info">
+              This login is {detail.employee.firstName} {detail.employee.lastName}'s — the name, employee number
+              and mobile typed here are saved onto their{' '}
+              <Link to={`/g-hr/employees/${detail.employee.id}`}>employee record ↗</Link>, and the login follows it.
+            </div>
+          )}
           <div className="grid grid-2">
-            <Field label="Full name">
-              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </Field>
+            {kept ? (
+              <>
+                <Field label="First name">
+                  <input value={form.firstName} onChange={(e) => setForm({ ...form, firstName: e.target.value })} />
+                </Field>
+                <Field label="Last name">
+                  <input value={form.lastName} onChange={(e) => setForm({ ...form, lastName: e.target.value })} />
+                </Field>
+              </>
+            ) : (
+              <Field label="Full name">
+                <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              </Field>
+            )}
             <Field label="Email" hint="The address they sign in with — it stays">
               <input type="email" value={form.email} disabled />
             </Field>
-            <Field label="Employee number">
+            <Field
+              label="Employee number"
+              hint="GTC-0001-14: the person's sequence, then the year hired. The {EMP} in their quotation numbers is the sequence (001)."
+            >
               <input
+                className="mono"
                 value={form.employeeNo}
+                placeholder="GTC-0001-14"
+                disabled={!full}
                 onChange={(e) => setForm({ ...form, employeeNo: e.target.value })}
               />
             </Field>
-            <Field label="Position">
-              <input
-                value={form.position}
-                onChange={(e) => setForm({ ...form, position: e.target.value })}
-              />
+            {kept && (
+              <Field label="Suffix" hint="Jr., Sr., III — leave blank if none">
+                <input value={form.suffix} onChange={(e) => setForm({ ...form, suffix: e.target.value })} />
+              </Field>
+            )}
+            <Field label="Title" hint="Their highest role (Access tab) — what documents print">
+              <input readOnly value={detail?.position ?? ''} placeholder="— no role yet —" />
             </Field>
             <Field label="Mobile" hint="Printed under the author's name on the quotations they raise">
               <input
@@ -480,32 +582,13 @@ function UserEditor({
               label="Reports to"
               hint="Used by every approval step that routes to the supervisor. With none set, those steps fall through to HR."
             >
-              <select
+              <PersonSelect
+                disabled={!full}
                 value={form.supervisorId}
-                onChange={(e) => setForm({ ...form, supervisorId: e.target.value })}
-              >
-                <option value="">— none —</option>
-                {people
-                  .filter((p) => p.id !== id)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-              </select>
-            </Field>
-            <Field label="Department">
-              <select
-                value={form.departmentId}
-                onChange={(e) => setForm({ ...form, departmentId: e.target.value })}
-              >
-                <option value="">— none —</option>
-                {departments.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
+                onChange={(pid) => setForm({ ...form, supervisorId: pid })}
+                people={people.filter((p) => p.id !== id)}
+                current={detail?.supervisor ?? null}
+              />
             </Field>
             <Field
               label="Team"
@@ -517,7 +600,7 @@ function UserEditor({
             >
               <select
                 value={form.teamId}
-                disabled={!detail?.employee}
+                disabled={!detail?.employee || !full}
                 onChange={(e) => setForm({ ...form, teamId: e.target.value })}
               >
                 <option value="">— no team —</option>
@@ -530,14 +613,16 @@ function UserEditor({
                   ))}
               </select>
             </Field>
-            <Field label="New password" htmlFor="user-password" hint="Leave blank to keep the current password">
-              <PasswordInput
-                id="user-password"
-                value={form.password}
-                autoComplete="new-password"
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-              />
-            </Field>
+            {full && (
+              <Field label="New password" htmlFor="user-password" hint="Leave blank to keep the current password">
+                <PasswordInput
+                  id="user-password"
+                  value={form.password}
+                  autoComplete="new-password"
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                />
+              </Field>
+            )}
           </div>
 
           {detail && (
@@ -549,21 +634,36 @@ function UserEditor({
             />
           )}
 
-          <Checkbox
-            checked={form.isActive}
-            onChange={(v) => setForm({ ...form, isActive: v })}
-            label="Active — inactive users cannot sign in and drop out of approval routing"
-          />
+          {full && (
+            <Checkbox
+              checked={form.isActive}
+              onChange={(v) => setForm({ ...form, isActive: v })}
+              label="Active — inactive users cannot sign in and drop out of approval routing"
+            />
+          )}
         </>
       ) : (
         <>
-          <Field label="Roles" hint="Roles grant the bulk of access. Adjust individual screens below.">
-            <div className="row">
-              {roles.map((r) => (
+          {!full && (
+            <div className="alert info">
+              Roles and Supports teams are changed by an administrator with Manage All on Users.
+            </div>
+          )}
+          <Field
+            label={`Roles — ${form.roleIds.length}`}
+            hint="Roles are the whole of a person's access. The highest is their title on documents."
+          >
+            <div className="role-levels">
+              {rolesByLevel(roles).map((level) => (
+                <div key={level.label} className="role-level">
+                  <div className="role-level-head">{level.label}</div>
+                  <div className="row">
+              {level.roles.map((r) => (
                 <label key={r.id} className="checkbox">
                   <input
                     type="checkbox"
                     checked={form.roleIds.includes(r.id)}
+                    disabled={!full}
                     onChange={(e) =>
                       setForm({
                         ...form,
@@ -575,6 +675,9 @@ function UserEditor({
                   />
                   <span>{r.name}</span>
                 </label>
+              ))}
+                  </div>
+                </div>
               ))}
             </div>
           </Field>
@@ -592,6 +695,7 @@ function UserEditor({
                       <input
                         type="checkbox"
                         checked={form.supportTeamIds.includes(t.id)}
+                        disabled={!full}
                         onChange={(e) =>
                           setForm({
                             ...form,
@@ -608,59 +712,10 @@ function UserEditor({
             </Field>
           )}
 
-          <hr className="rule" />
-
-          <div className="row hraud-spread hraud-below">
-            <strong>Per-person overrides</strong>
-            <span className="faint hraud-small">
-              click to cycle: role default → <span className="hraud-allow">allow</span> →{' '}
-              <span className="hraud-deny">deny</span> — a deny beats a grant from any role
-            </span>
-          </div>
-
-          {!catalog ? (
-            <div className="muted">Loading the permission catalog…</div>
-          ) : (
-            catalog.modules.map((mod) => (
-              <div key={mod.key} className="perm-module">
-                <header>
-                  <h4>{mod.label}</h4>
-                  <span className="faint hraud-small">{mod.blurb}</span>
-                </header>
-                {mod.submodules.map((sub) => (
-                  <div key={sub.key} className="perm-row">
-                    <div className="name">
-                      {sub.label}
-                    </div>
-                    <div className="perm-actions">
-                      {sub.actions.map((a) => {
-                        const state = overrides[a.key];
-                        // A button, not a span: the chips were mouse-only, so an
-                        // override could not be set from a keyboard (rule 13).
-                        return (
-                          <button
-                            type="button"
-                            key={a.key}
-                            className={`perm-chip${state === 'ALLOW' ? ' on' : state === 'DENY' ? ' deny' : ''}`}
-                            onClick={(e) => {
-                              cycle(a.key);
-                              markChanged(e.currentTarget);
-                            }}
-                            title={a.key}
-                            aria-label={`${sub.label}: ${a.label} — ${
-                              state === 'ALLOW' ? 'allowed' : state === 'DENY' ? 'denied' : 'role default'
-                            }`}
-                          >
-                            {a.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ))
-          )}
+          <p className="faint">
+            What each role may see and change is set on <Link to="/admin/roles">Admin › Roles</Link> — the permission
+            matrix. There are no per-person exceptions (2026-10-19): give the person a role instead.
+          </p>
         </>
       )}
     </Modal>
@@ -723,7 +778,7 @@ function SignInPanel({
             {detail.lastLoginAt ? `Last signed in ${formatDateTime(detail.lastLoginAt)}.` : 'Has not signed in yet.'} If
             they are locked out, send them a link to choose a new password.
           </p>
-          {detail.isActive && (
+          {detail.isActive && can('admin.users.edit_all') && (
             <button type="button" className="btn btn-sm" disabled={busy} onClick={() => onIssue('reset')}>
               Send a password reset link
             </button>

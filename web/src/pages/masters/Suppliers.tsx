@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEditPage, useAuth } from '../../lib/auth';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { Stat } from '../../components/charts';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
@@ -50,6 +50,8 @@ interface SupplierRow {
   orderCount: number | null;
   /** Orders awaiting delivery — null likewise. */
   awaitingCount: number | null;
+  /** Whether the viewer may change it — Edit All, or Edit Own on a supplier they added (2026-10-18). */
+  canEdit?: boolean;
 }
 
 /*
@@ -435,7 +437,8 @@ export function Suppliers() {
         selectable
         rowLabel={(s) => `${s.code} ${s.name}`}
         bulkActions={
-          can('gchain.suppliers.edit_all') ? (ctx) => <SupplierBulkActions ctx={ctx} known={knownCategories} /> : undefined
+          // Edit All or Edit Own (2026-10-18): the PATCH per row refuses a supplier somebody else added.
+          mayEditPage(can, 'gchain', 'suppliers') ? (ctx) => <SupplierBulkActions ctx={ctx} known={knownCategories} /> : undefined
         }
         menuItems={
           can('gchain.suppliers.create')
@@ -528,7 +531,8 @@ export function SupplierDetail() {
   if (loading) return <Loading />;
   if (!supplier) return <ErrorBox error={error ?? new Error('Supplier not found')} />;
 
-  const mayEdit = can('gchain.suppliers.edit_all');
+  // Edit All, or Edit Own on a supplier the viewer added — the API says which (2026-10-18).
+  const mayEdit = supplier.canEdit ?? can('gchain.suppliers.edit_all');
 
   /** Asked in the confirm bar, which shows a refusal — so this throws rather than catching. */
   async function remove() {
@@ -613,7 +617,7 @@ export function SupplierDetail() {
         </div>
 
         <div className="card m-span-all">
-          <div className="m-card-head">
+          <div className="card-head">
             <h3 className="card-title">People</h3>
             {mayEdit && (
               <button className="btn btn-sm" onClick={() => setContactModal('new')}>

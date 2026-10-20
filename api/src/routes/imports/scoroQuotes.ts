@@ -9,6 +9,7 @@ import { pipelineStages, stageProbability } from '../../shared/pipelineStages';
 import { audit } from '../../shared/audit';
 import { lineData, QUOTE_NUMBER, type QuotationLineInput } from '../sales';
 import type { Registered } from '../imports';
+import { exchangeRates, storedRate } from '../../shared/exchangeRates';
 
 /**
  * SCORO's "quotes export", as SCORO writes it (2026-10-11, the owner's file:
@@ -41,7 +42,7 @@ import type { Registered } from '../imports';
 type Tx = Prisma.TransactionClient;
 
 /** SCORO's null date. Treated as empty everywhere. */
-const SCORO_NULL_DATE = /^0000-00-00/;
+export const SCORO_NULL_DATE = /^0000-00-00/;
 
 /** The import's own name on every audit row it files. */
 const SOURCE = 'the SCORO quotes import';
@@ -64,8 +65,8 @@ const STATUS_OUTCOME: Record<string, QuotationOutcome> = {
 };
 
 /** A name as it is compared: trimmed, single-spaced, case-blind. */
-const collapse = (s: string) => s.trim().replace(/\s+/g, ' ');
-const sameName = (a: string, b: string) => collapse(a).toLowerCase() === collapse(b).toLowerCase();
+export const collapse = (s: string) => s.trim().replace(/\s+/g, ' ');
+export const sameName = (a: string, b: string) => collapse(a).toLowerCase() === collapse(b).toLowerCase();
 
 /** `(SCORO id 4798)` as the company import wrote it — whole tokens, several ids in one note. */
 const SCORO_IDS = /SCORO id\s+(\d+(?:\s*,\s*\d+)*)/gi;
@@ -78,7 +79,7 @@ function scoroIdsIn(notes: string | null | undefined): string[] {
 }
 
 /** A SCORO date cell: `YYYY-MM-DD` or `YYYY-MM-DD hh:mm:ss`, as the DATE at UTC midnight; the null date and blank are none. */
-function scoroDate(row: Record<string, string>, header: string): Date | null {
+export function scoroDate(row: Record<string, string>, header: string): Date | null {
   const v = (row[header] ?? '').trim();
   if (!v || SCORO_NULL_DATE.test(v)) return null;
   const m = v.match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -88,7 +89,7 @@ function scoroDate(row: Record<string, string>, header: string): Date | null {
   return date;
 }
 
-function scoroDecimal(row: Record<string, string>, header: string): Prisma.Decimal | null {
+export function scoroDecimal(row: Record<string, string>, header: string): Prisma.Decimal | null {
   const v = (row[header] ?? '').trim();
   if (!v) return null;
   const n = v.replace(/,/g, '');
@@ -97,7 +98,7 @@ function scoroDecimal(row: Record<string, string>, header: string): Prisma.Decim
 }
 
 /** The whole days from one DATE to another; both at UTC midnight already. */
-const daysApart = (from: Date, to: Date) => Math.round((to.getTime() - from.getTime()) / 86_400_000);
+export const daysApart = (from: Date, to: Date) => Math.round((to.getTime() - from.getTime()) / 86_400_000);
 
 /**
  * The customer a payer names: by SCORO id first (a customer whose notes carry
@@ -128,7 +129,7 @@ async function findCustomer(tx: Tx | typeof prisma, name: string, scoroId: strin
 }
 
 /** One of the customer's contacts by name, case-blind with spaces collapsed. */
-async function findContact(tx: Tx | typeof prisma, customerId: string, name: string): Promise<{ id: string } | null> {
+export async function findContact(tx: Tx | typeof prisma, customerId: string, name: string): Promise<{ id: string } | null> {
   const contacts = await tx.customerContact.findMany({ where: { customerId }, select: { id: true, name: true }, orderBy: { createdAt: 'asc' } });
   return contacts.find((c) => sameName(c.name, name)) ?? null;
 }
@@ -171,7 +172,7 @@ interface ScoroQuoteRecord {
 }
 
 /** Whether a row of the export carries a line: the lines export names a product, a comment or a line id on every row. */
-const hasLineContent = (row: Record<string, string>) => !!(row['product_name'] || row['line_comment'] || row['line_id']);
+export const hasLineContent = (row: Record<string, string>) => !!(row['product_name'] || row['line_comment'] || row['line_id']);
 
 /**
  * The lines of one quotation's rows, each resolved in the shape `lineData`
@@ -184,7 +185,7 @@ const hasLineContent = (row: Record<string, string>) => !!(row['product_name'] |
  * not divide evenly. A supplier or a person SCORO names is matched by name
  * and never created; one not on file is kept in `costNote` so nothing is lost.
  */
-async function scoroLines(rows: Record<string, string>[], firstRowNumber: number): Promise<QuotationLineInput[]> {
+export async function scoroLines(rows: Record<string, string>[], firstRowNumber: number): Promise<QuotationLineInput[]> {
   const lines: QuotationLineInput[] = [];
   for (const [i, row] of rows.entries()) {
     const where = `line ${i + 1} (row ${firstRowNumber + i}): `;
@@ -431,7 +432,7 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
 };
 
 /** The groups the quotation editor's dropdown offers: the active ones, in their order. */
-async function listedGroups(): Promise<{ name: string; key: string }[]> {
+export async function listedGroups(): Promise<{ name: string; key: string }[]> {
   return prisma.quotationGroup.findMany({
     where: { isActive: true },
     orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
@@ -471,7 +472,7 @@ export async function unlistedScoroGroups(
  * (`options.groups`, keyed by the SCORO group's key), else OTHERS. A choice
  * that is not a group on the list is refused before anything is written.
  */
-async function groupResolver(options?: Record<string, unknown>) {
+export async function groupResolver(options?: Record<string, unknown>) {
   const listed = new Map((await listedGroups()).map((g) => [g.key, g.name]));
   const fallback = listed.get(groupKey(FALLBACK_GROUP)) ?? FALLBACK_GROUP;
   const chosen = new Map<string, string>();
@@ -514,7 +515,7 @@ export const summaryLineDescription = (number: string) =>
  * quotation of forty lines with its customer, contact, recalc, counter and
  * audit rows ran past Prisma's 5-second default there.
  */
-const ROW_TRANSACTION = { maxWait: 15_000, timeout: 60_000 } as const;
+export const ROW_TRANSACTION = { maxWait: 15_000, timeout: 60_000 } as const;
 
 /**
  * Why a row could not be written, in words the importer can act on — a
@@ -710,6 +711,7 @@ async function writeScoroQuotes(
           lostKind: record.lostKind,
           expectedClosing: record.expectedClosing,
           currency: record.currency,
+          exchangeRate: storedRate(record.currency, null, await exchangeRates(tx)),
           // The team the importer chose; none follows the owner's team.
           teamId: team?.id ?? null,
           createdAt: record.issuedAt,

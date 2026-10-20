@@ -10,7 +10,8 @@ import { NumberInput } from '../../components/NumberInput';
 /**
  * The plantilla — the authorised staffing pattern.
  *
- * Positions per department, how many of each the company has approved, who
+ * Positions — each counting a role (2026-10-19) and read by the role's LEVEL,
+ * the department being gone — how many of each the company has approved, who
  * fills them and what is vacant. Filled and vacant are counted off ACTIVE
  * employees by the API on every read; this screen never stores or adds a
  * number of its own, so it is right the moment someone is hired or cleared.
@@ -22,8 +23,9 @@ export interface PlantillaSummary {
   vacant: number;
   overComplement: number;
   unclassified: number;
-  byDepartment: {
-    department: { id: string; name: string } | null;
+  /** By the level of the role each position counts; "No level" last. */
+  byLevel: {
+    level: number | null;
     authorised: number;
     filled: number;
     vacant: number;
@@ -40,13 +42,18 @@ interface Holder {
 
 interface PositionRow {
   id: string;
+  /** Whether the viewer may change it — Edit All, or Edit Own on a position they added (2026-10-18). */
+  canEdit?: boolean;
   code: string;
   title: string;
   description: string | null;
   isActive: boolean;
   sortOrder: number;
   authorisedHeadcount: number;
-  department: { id: string; name: string } | null;
+  /** The role this slot counts (2026-10-19): filled = its active holders. */
+  role?: { id: string; name: string; rank?: number | null } | null;
+  /** The role's level (1 the CEO / President), null when none. */
+  level?: number | null;
   filled: number;
   /** Authorised − filled. Negative is over-complement. */
   vacant: number;
@@ -67,7 +74,6 @@ export function Plantilla() {
   const { can } = useAuth();
   const [summary, setSummary] = useState<PlantillaSummary | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
   const [editing, setEditing] = useState<PositionRow | 'new' | null>(null);
   const [reload, setReload] = useState(0);
 
@@ -85,10 +91,6 @@ export function Plantilla() {
     loadSummary();
   }, [loadSummary, reload]);
 
-  useEffect(() => {
-    api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
-  }, []);
-
   const columns: Column<PositionRow>[] = [
     {
       key: 'title',
@@ -98,14 +100,15 @@ export function Plantilla() {
         <div>
           <strong>{p.title}</strong>
           <div className="faint mono">{p.code}</div>
+          {p.role && <div className="faint">Counts the {p.role.name} role</div>}
         </div>
       ),
     },
     {
-      key: 'department',
-      label: 'Department',
-      sortKey: 'department',
-      render: (p) => p.department?.name ?? <span className="faint">No department</span>,
+      key: 'level',
+      label: 'Level',
+      sortKey: 'level',
+      render: (p) => (p.level != null ? `Level ${p.level}` : <span className="faint">No level</span>),
     },
     {
       key: 'authorised',
@@ -229,18 +232,18 @@ export function Plantilla() {
           </div>
 
           <Panel
-            title="By department"
-            blurb="Filled against authorised. Positions with no department are grouped last."
+            title="By level"
+            blurb="Filled against authorised, down the levels of the roles the positions count. Positions with no level are grouped last."
           >
             <BarList
-              slices={summary.byDepartment.map((d) => ({
-                label: d.department?.name ?? 'No department',
+              slices={summary.byLevel.map((d) => ({
+                label: d.level != null ? `Level ${d.level}` : 'No level',
                 value: d.filled,
                 display: `${d.filled}/${d.authorised}`,
                 tone: d.overComplement > 0 ? 'danger' : d.vacant > 0 ? 'warn' : 'neon',
-                to: d.department ? `/g-hr/plantilla?departmentId=${d.department.id}` : undefined,
+                to: `/g-hr/plantilla?level=${d.level ?? 'none'}`,
               }))}
-              caption="Active employees on a position, per department"
+              caption="Active holders of each position, per level"
             />
           </Panel>
         </>
@@ -259,9 +262,12 @@ export function Plantilla() {
         emptyHint="Add each job title the company employs, and how many of it are authorised."
         filters={[
           {
-            key: 'departmentId',
-            label: 'Department',
-            options: departments.map((d) => ({ value: d.id, label: d.name })),
+            key: 'level',
+            label: 'Level',
+            options: [
+              ...[1, 2, 3, 4, 5, 6].map((n) => ({ value: String(n), label: `Level ${n}` })),
+              { value: 'none', label: 'No level' },
+            ],
           },
           { key: 'vacant', label: 'Vacancies', options: [{ value: 'true', label: 'With vacancies' }] },
           { key: 'over', label: 'Over-complement', options: [{ value: 'true', label: 'Over-complement' }] },
@@ -286,7 +292,6 @@ export function Plantilla() {
       {editing && (
         <PositionModal
           position={editing === 'new' ? null : editing}
-          departments={departments}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -300,25 +305,27 @@ export function Plantilla() {
 
 function PositionModal({
   position,
-  departments,
   onClose,
   onSaved,
 }: {
   position: PositionRow | null;
-  departments: { id: string; name: string }[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const { can } = useAuth();
   const toast = useToast();
-  const mayEdit = position ? can('ghr.plantilla.edit_all') : can('ghr.plantilla.create');
+  const mayEdit = position ? (position.canEdit ?? can('ghr.plantilla.edit_all')) : can('ghr.plantilla.create');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [holders, setHolders] = useState<Holder[] | null>(position ? null : []);
+  const [roles, setRoles] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    api.get<{ id: string; name: string }[]>('/positions/roles').then(setRoles).catch(() => setRoles([]));
+  }, []);
   const [form, setForm] = useState({
     title: position?.title ?? '',
     code: position?.code ?? '',
-    departmentId: position?.department?.id ?? '',
+    roleId: position?.role?.id ?? '',
     authorisedHeadcount: String(position?.authorisedHeadcount ?? 1),
     description: position?.description ?? '',
     isActive: position?.isActive ?? true,
@@ -343,7 +350,7 @@ function PositionModal({
       const payload = {
         title: form.title.trim(),
         code: form.code.trim() || null,
-        departmentId: form.departmentId || null,
+        roleId: form.roleId || null,
         authorisedHeadcount: headcount,
         description: form.description.trim() || null,
         isActive: form.isActive,
@@ -423,16 +430,19 @@ function PositionModal({
             onChange={(e) => setForm({ ...form, code: e.target.value })}
           />
         </Field>
-        <Field label="Department">
+        <Field label="Counts the role" hint="Filled is the active people holding this role on Admin › Users">
           <select
-            value={form.departmentId}
+            value={form.roleId}
             disabled={!mayEdit}
-            onChange={(e) => setForm({ ...form, departmentId: e.target.value })}
+            onChange={(e) => {
+              const role = roles.find((r) => r.id === e.target.value);
+              setForm({ ...form, roleId: e.target.value, title: form.title.trim() ? form.title : (role?.name ?? '') });
+            }}
           >
             <option value="">— none —</option>
-            {departments.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
+            {roles.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name}
               </option>
             ))}
           </select>

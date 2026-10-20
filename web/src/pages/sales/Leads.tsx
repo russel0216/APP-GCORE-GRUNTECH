@@ -1177,10 +1177,10 @@ export function LeadForm({
   const sales = people.filter((p) => p.isSales);
   const others = people.filter((p) => !p.isSales);
   // The one single-person control (components/People.tsx), grouped Sales /
-  // everyone else here rather than by department — Sales first, as above.
+  // everyone else here rather than by team — Sales first, as above.
   const assignable: PersonRow[] = [
-    ...sales.map((p) => ({ ...p, department: { id: 'sales', name: 'Sales' } })),
-    ...others.map((p) => ({ ...p, department: { id: 'others', name: sales.length ? 'Everyone else' : 'Everyone' } })),
+    ...sales.map((p) => ({ ...p, group: 'Sales' })),
+    ...others.map((p) => ({ ...p, group: sales.length ? 'Everyone else' : 'Everyone' })),
   ];
 
   const [matches, setMatches] = useState<{ id: string; name: string }[]>([]);

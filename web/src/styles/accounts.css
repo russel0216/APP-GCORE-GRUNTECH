@@ -282,6 +282,58 @@
 .org-depth-2 { --org-ring: var(--ok); }
 .org-depth-3 { --org-ring: var(--info); }
 
+/* One person: a tile per role they hold, side by side in one box. */
+.org-zoom {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+.org-zoom-value {
+  min-width: 3.5em;
+  text-align: center;
+  font-size: var(--fs-sm);
+}
+.org-canvas {
+  width: max-content;
+  min-width: 100%;
+}
+
+.org-person {
+  display: inline-grid;
+  grid-template-columns: repeat(2, auto);
+  justify-content: center;
+  gap: var(--s-1);
+  padding: var(--s-1);
+  border-radius: 1.6rem;
+  max-width: 100%;
+  position: relative;
+  z-index: 1;
+}
+.org-person:not(:has(> .org-card + .org-card)) {
+  grid-template-columns: auto;
+}
+.org-person:has(> .org-card + .org-card) {
+  outline: 1px dashed var(--line);
+}
+.org-card.is-key {
+  border-color: var(--info);
+}
+/* A managing role nobody on the team holds. */
+.org-card.is-vacant {
+  border: 1px dashed var(--danger);
+  background: transparent;
+  box-shadow: none;
+  padding-left: var(--s-3);
+}
+.org-card.is-vacant > :first-child {
+  box-shadow: none;
+  border-radius: 0;
+}
+.org-card.is-vacant .org-name {
+  color: var(--danger);
+}
+
 .org-card-text {
   display: flex;
   flex-direction: column;
@@ -409,6 +461,59 @@
   height: calc(var(--s-2) + var(--org-hook));
 }
 
+/* The two sides under the head: BOSS on the left, the Industry Teams on the right. */
+.org-side {
+  flex-basis: 0;
+}
+.org-side-label {
+  position: relative;
+  z-index: 1;
+  padding: var(--s-1) var(--s-3);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-align: center;
+}
+.org-side > .org-row {
+  padding-top: var(--s-4) !important;
+}
+
+/* The roles a card's title does not name; the managing ones stand out. */
+.org-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin-top: var(--s-1);
+}
+.org-role {
+  font-size: var(--fs-xs);
+  padding: 0 var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+}
+/* The person's team code (KAT, HIT …) over their name. */
+.org-team {
+  align-self: flex-start;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0 var(--s-2);
+  border-radius: 999px;
+  background: rgba(var(--magenta-rgb), 0.12);
+  color: var(--magenta);
+}
+.org-role.is-key {
+  border-color: var(--info);
+  color: var(--info);
+  font-weight: 600;
+}
+
 /* A deeper column nests inside its own item and so inherits the hook. */
 .org-column .org-column {
   margin-left: var(--s-2) !important;
@@ -440,4 +545,272 @@
   border-radius: var(--radius-sm);
   background: var(--surface-2);
   overflow-wrap: anywhere;
+}
+
+/* Back Support lines (2026-10-19): a dashed arrow from a supporter to the
+   head of each team they support, drawn over the chart. */
+.org-scroll { position: relative; }
+.org-supports {
+  color: var(--info);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+/*
+  The people hierarchy (Admin › Users › Hierarchy, 2026-10-19): an outline
+  of "Reports to", each level indented under a guide line.
+*/
+.ptree-search {
+  max-width: 28rem;
+  margin-bottom: var(--s-3);
+}
+
+.ptree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ptree-list .ptree-list {
+  margin-left: var(--s-5);
+  padding-left: var(--s-3);
+  border-left: 1px solid var(--line);
+}
+
+.ptree-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  padding: var(--s-1) 0;
+}
+
+.ptree-toggle {
+  width: var(--s-5);
+  height: var(--s-5);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  padding: 0;
+}
+
+.ptree-toggle:disabled {
+  cursor: default;
+}
+
+.ptree-leaf {
+  cursor: default;
+}
+
+.ptree-name {
+  font-weight: 600;
+}
+
+.ptree-title {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.ptree-count {
+  font-size: var(--fs-xs);
+}
+
+/* The role hierarchy on the Access tab and Admin › Roles: roles under their level. */
+.role-levels {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.role-level-head {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: var(--s-1);
+}
+
+/*
+  The permission matrix (Admin › Roles, 2026-10-19): screens down, roles
+  across, each cell the role's View and Manage level. The screen column and
+  the head stay put while the roles scroll sideways.
+*/
+.pm-tools {
+  margin-bottom: var(--s-3);
+}
+
+.pm-scroll {
+  overflow: auto;
+  max-height: 70vh;
+  border: 1px solid var(--line);
+  border-radius: var(--radius, 0.5rem);
+}
+
+.pm-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+}
+
+.pm-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface);
+}
+
+.pm-table thead tr:nth-child(2) th {
+  top: var(--row-h);
+}
+
+.pm-table .pm-screen {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+  min-width: 14rem;
+  text-align: left;
+  font-weight: 600;
+  border-right: 1px solid var(--line);
+}
+
+.pm-table thead .pm-screen {
+  z-index: 3;
+}
+
+.pm-role {
+  text-align: center;
+  white-space: nowrap;
+  border-left: 1px solid var(--line);
+}
+
+.pm-role-level {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+}
+
+.pm-axes {
+  border-left: 1px solid var(--line);
+}
+
+.pm-axes span {
+  display: inline-block;
+  width: 50%;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.pm-module th,
+.pm-module td {
+  background: var(--surface-2, var(--surface));
+  color: var(--accent, inherit);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pm-table td {
+  border-left: 1px solid var(--line);
+}
+
+.pm-cell {
+  display: flex;
+  gap: var(--s-1);
+}
+
+.pm-select {
+  width: 5.5rem;
+}
+
+/* The level is said in words; the tint only helps the eye run down a column. */
+.pm-select.pm-own {
+  border-color: var(--info);
+}
+.pm-select.pm-team {
+  border-color: var(--warn);
+}
+.pm-select.pm-all {
+  border-color: var(--ok);
+}
+
+/* The role chart's note on a role reporting to more than one (2026-10-20). */
+.org-also {
+  grid-column: 1 / -1;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  text-align: center;
+}
+
+/* The Hierarchy Chart's role-only boxes (2026-10-20): no picture, so no ring. */
+.org-card.is-role {
+  padding: var(--s-1) var(--s-3);
+  white-space: nowrap;
+  max-width: none;
+}
+.org-card.is-role .org-card-text {
+  min-width: max-content;
+}
+.org-card.is-role > :first-child {
+  box-shadow: none;
+  border-radius: 0;
+}
+/* Roles not placed yet wrap in rows under the chart, never one column. */
+.org-tree .org-loose-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--s-2);
+  width: 72rem;
+  margin: 0 auto;
+}
+/* A role box never shrinks under its words; the canvas widens and Fit zooms out. */
+.org-tree.is-roles .org-row-item {
+  min-width: max-content;
+}
+
+/* The chart's area (2026-10-20, the owner's call: "maximize the area, allow
+   grip to view all around"): taller, scrolls both ways, dragged by hand. */
+.org-scroll {
+  overflow: auto;
+  max-height: 78vh;
+  cursor: grab;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  touch-action: none;
+}
+.org-scroll.is-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+.org-scroll.is-dragging a {
+  pointer-events: none;
+}
+.org-grip-hint {
+  font-size: var(--fs-xs);
+}
+.org-card-wrap:fullscreen {
+  background: var(--surface);
+  overflow: auto;
+  padding: var(--s-5);
+}
+.org-card-wrap:fullscreen .org-scroll {
+  max-height: none;
+  height: calc(100vh - 11rem);
+}
+/* The role chart's cards keep their words on one line, never one letter a line. */
+.org-tree.is-roles .org-card {
+  max-width: none;
+}
+.org-tree.is-roles .org-card-text {
+  min-width: max-content;
+  white-space: nowrap;
 }

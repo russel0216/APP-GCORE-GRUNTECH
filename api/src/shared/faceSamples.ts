@@ -414,7 +414,7 @@ export type FaceRefusalReason = keyof typeof FACE_REFUSAL_REASONS;
 /** Every reason an enrolment refuses a sample for whose face it is (the quality gate is the person's to fix). */
 export const ENROL_REFUSAL_REASONS = {
   inconsistent: "Unlike the person's own samples",
-  collision: "Too close to another employee's enrolled face",
+  collision: "Same face as another employee's enrolled face",
   liveness: 'Liveness check failed',
 } as const;
 

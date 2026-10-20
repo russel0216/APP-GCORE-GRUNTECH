@@ -5,6 +5,7 @@ import { MemoryInput, ORDER_MEMORY } from '../../components/MemoryInput';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, openPdf, qs } from '../../lib/api';
 import { Attachments } from '../../components/Attachments';
+import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { useAuth } from '../../lib/auth';
 import { ApprovalStepper, DocumentApproval, DecisionNote, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
@@ -191,6 +192,9 @@ export function SalesOrders() {
   const [owners, setOwners] = useState<{ value: string; label: string }[]>([]);
   /** "+ New sales order": which quotation it books, asked in the page (2026-10-09, the owner's call). */
   const [picking, setPicking] = useState(false);
+  /** SCORO's invoices export, as sales orders on their quotations (2026-10-17). */
+  const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
+  const [reload, setReload] = useState(0);
 
   const seesAll = can('gops.sales_orders.view_all');
   // Whoever may edit sales orders opens on their own; a reader — finance,
@@ -334,6 +338,22 @@ export function SalesOrders() {
         printPath="/api/sales-orders/pdf"
         selectable
         rowLabel={(r) => `${r.number} ${r.quotation.subject}`}
+        reloadToken={reload}
+        menuItems={
+          can('gops.sales_orders.create')
+            ? [
+                {
+                  label: 'Import from SCORO…',
+                  hint: 'SCORO’s invoices export, as it comes — each invoice a sales order on its quotation; checked before anything is saved',
+                  onSelect: () => {
+                    void loadImportSpec('scoro_invoices').then((spec) => {
+                      if (spec) setImporting(spec as { label: string; columns: never[] });
+                    });
+                  },
+                },
+              ]
+            : []
+        }
         teamScope={!!me?.user.team && can('gops.sales_orders.view_all')}
         summary={(raw, total) => {
           const s = raw as SalesOrderSummary;
@@ -358,6 +378,16 @@ export function SalesOrders() {
           );
         }}
       />
+
+      {importing && (
+        <ImportModal
+          entity="scoro_invoices"
+          label={importing.label}
+          columns={importing.columns}
+          onClose={() => setImporting(null)}
+          onImported={() => setReload((r) => r + 1)}
+        />
+      )}
     </div>
   );
 }

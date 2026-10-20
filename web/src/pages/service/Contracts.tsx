@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -22,6 +22,8 @@ import type { Asset } from './InstalledBase';
 import { monthOf, parseDay, todayLocal } from '../../lib/day';
 import { VisitBadge } from './Schedule';
 import { NumberInput } from '../../components/NumberInput';
+import { Attachments } from '../../components/Attachments';
+import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 
 /**
  * Service contracts.
@@ -44,6 +46,39 @@ const STATUSES = [
 /** RENEWED reads as information here, not as a settled-well outcome. */
 const CONTRACT_TONES: Record<string, Tone> = { RENEWED: 'info' };
 
+/** The Renewal notice column: a pill in the owner's words (2026-10-20). */
+const RENEWAL_TONE: Record<string, Tone> = {
+  RENEWAL_DRAFT_SENT: 'info',
+  RENEWED: 'ok',
+  EXPIRING: 'warn',
+  LAPSED: 'danger',
+  ACTIVE_COVERAGE: 'ok',
+};
+
+function RenewalNotice({ row }: { row: Pick<Contract, 'renewal' | 'daysRemaining'> }) {
+  if (!row.renewal) return <span className="faint">—</span>;
+  const label =
+    row.renewal === 'EXPIRING' && row.daysRemaining !== null
+      ? `Expiring in ${row.daysRemaining} day${row.daysRemaining === 1 ? '' : 's'}`
+      : row.renewal === 'RENEWAL_DRAFT_SENT'
+        ? 'Renewal draft sent'
+        : row.renewal === 'ACTIVE_COVERAGE'
+          ? 'Active coverage'
+          : row.renewal === 'LAPSED'
+            ? 'Lapsed'
+            : 'Renewed';
+  return <StatusBadge status={row.renewal} extra={RENEWAL_TONE} label={label} />;
+}
+
+/** The cards over the contract list: the list's own query (2026-10-20). */
+interface ContractSummary {
+  active: number;
+  upForRenewal: number;
+  renewalDrafts: number;
+  expired: number;
+  warningDays: number;
+}
+
 interface Contract {
   id: string;
   number: string;
@@ -52,11 +87,15 @@ interface Contract {
   endsAt: string;
   frequencyMonths: number;
   plannedVisits: number;
+  /** The SLA coverage level in the customer's words (2026-10-20). */
+  coverageLevel: string | null;
   responseTime: string | null;
   exclusions: string | null;
   coverageNotes: string | null;
   expiry: string;
   daysRemaining: number | null;
+  /** The Renewal notice, derived by the API; null unless the contract is active. */
+  renewal: 'RENEWAL_DRAFT_SENT' | 'RENEWED' | 'EXPIRING' | 'LAPSED' | 'ACTIVE_COVERAGE' | null;
   job: {
     id: string;
     number: string;
@@ -86,6 +125,8 @@ export function ServiceContracts() {
   const navigate = useNavigate();
   const [queue, setQueue] = useState<UnconfiguredJob[] | null>(null);
   const [configuring, setConfiguring] = useState<UnconfiguredJob | null>(null);
+  // A contract typed directly, with no service job costed first (2026-10-20, the owner's call).
+  const [direct, setDirect] = useState(false);
   const [reload, setReload] = useState(0);
 
   const loadQueue = useCallback(async () => {
@@ -100,17 +141,19 @@ export function ServiceContracts() {
     loadQueue();
   }, [loadQueue, reload]);
 
+  // The owner's columns (2026-10-20): Contract no., Customer name, SLA
+  // coverage level, Start date, Expiration date, Renewal notice.
   const columns: Column<Contract>[] = [
     {
       key: 'number',
-      label: 'Number',
+      label: 'Contract no.',
       sortKey: 'number',
       width: '150px',
       render: (r) => <span className="mono">{r.number}</span>,
     },
     {
       key: 'customer',
-      label: 'Customer',
+      label: 'Customer name',
       render: (r) => (
         <div>
           <div>{r.job.customer.name}</div>
@@ -122,32 +165,40 @@ export function ServiceContracts() {
       ),
     },
     {
-      key: 'term',
-      label: 'Term',
+      key: 'coverageLevel',
+      label: 'SLA coverage level',
+      sortKey: 'coverageLevel',
+      render: (r) => r.coverageLevel ?? <span className="faint">not stated</span>,
+    },
+    {
+      key: 'startsAt',
+      label: 'Start date',
+      sortKey: 'startsAt',
+      render: (r) => formatDate(r.startsAt),
+    },
+    {
+      key: 'endsAt',
+      label: 'Expiration date',
       sortKey: 'endsAt',
-      render: (r) => (
-        <div>
-          <div>
-            {formatDate(r.startsAt)} → {formatDate(r.endsAt)}
-          </div>
-          {r.status === 'ACTIVE' && r.daysRemaining !== null && (
-            <div className={`faint ${r.expiry === 'EXPIRING' ? 'warn' : ''}`}>
-              {r.daysRemaining < 0 ? 'lapsed' : `${r.daysRemaining} days left`}
-            </div>
-          )}
-        </div>
-      ),
+      render: (r) => <strong>{formatDate(r.endsAt)}</strong>,
+    },
+    {
+      key: 'renewal',
+      label: 'Renewal notice',
+      render: (r) => <RenewalNotice row={r} />,
     },
     {
       key: 'assets',
       label: 'Covers',
       align: 'right',
+      optional: true,
       render: (r) => `${r.assets.length} machine${r.assets.length === 1 ? '' : 's'}`,
     },
     {
       key: 'frequency',
       label: 'Visits',
       align: 'right',
+      optional: true,
       render: (r) => (
         <div>
           <div className="mono">{r.plannedVisits}</div>
@@ -159,6 +210,7 @@ export function ServiceContracts() {
       key: 'value',
       label: 'Value',
       align: 'right',
+      optional: true,
       render: (r) => <span className="mono">{formatMoney(r.job.contractValue)}</span>,
     },
     {
@@ -172,7 +224,7 @@ export function ServiceContracts() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Service Contracts</h1>
+          <h1>Service Contract</h1>
         </div>
       </div>
 
@@ -233,9 +285,42 @@ export function ServiceContracts() {
         emptyTitle="No service contracts yet"
         onRowClick={(r) => navigate(`/g-ops/service-contracts/${r.id}`)}
         printPath="/api/service-contracts/pdf"
+        actions={
+          can('gops.service_contracts.create') ? (
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => setDirect(true)}>
+              + New service contract
+            </button>
+          ) : null
+        }
+        summary={(raw) => {
+          const sum = raw as unknown as ContractSummary;
+          return (
+            <>
+              <Stat label="Active contracts" value={sum.active} to="/g-ops/service-contracts?status=ACTIVE" />
+              <Stat
+                label="Contracts up for renewal"
+                value={sum.upForRenewal}
+                hint={`ending within ${sum.warningDays} days, no renewal yet`}
+                tone={sum.upForRenewal > 0 ? 'var(--danger)' : undefined}
+                to="/g-ops/service-contracts?renewal=due"
+              />
+              <Stat label="Renewal drafts sent" value={sum.renewalDrafts} to="/g-ops/service-contracts?renewal=draft" />
+              <Stat label="Expired" value={sum.expired} to="/g-ops/service-contracts?status=EXPIRED" />
+            </>
+          );
+        }}
         filters={[
           { key: 'status', label: 'Status', options: STATUSES },
-          { key: 'expiring', label: 'Renewal', options: [{ value: 'true', label: 'Expiring soon' }] },
+          {
+            key: 'renewal',
+            label: 'Renewal notice',
+            options: [
+              { value: 'due', label: 'Up for renewal' },
+              { value: 'draft', label: 'Renewal draft sent' },
+            ],
+          },
+          // The old Renewals screen's link still narrows the list (rule 16).
+          { key: 'expiring', label: 'Expiring', options: [{ value: 'true', label: 'Expiring soon' }] },
         ]}
       />
 
@@ -246,6 +331,16 @@ export function ServiceContracts() {
           onSaved={(id) => {
             setConfiguring(null);
             setReload((r) => r + 1);
+            navigate(`/g-ops/service-contracts/${id}`);
+          }}
+        />
+      )}
+      {direct && (
+        <CoverModal
+          job={null}
+          onClose={() => setDirect(false)}
+          onSaved={(id) => {
+            setDirect(false);
             navigate(`/g-ops/service-contracts/${id}`);
           }}
         />
@@ -273,7 +368,8 @@ function CoverModal({
   onClose,
   onSaved,
 }: {
-  job: UnconfiguredJob;
+  /** The service job the cover is set on — null for a contract typed directly (2026-10-20), whose job is made with it. */
+  job: UnconfiguredJob | null;
   existing?: ContractDetail;
   onClose: () => void;
   onSaved: (id: string) => void;
@@ -281,9 +377,22 @@ function CoverModal({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  // Typed directly: the customer, the contract's name and value — its job and costing are made with it.
+  const [pickedCustomer, setPickedCustomer] = useState<CustomerRef | null>(null);
+  const [direct, setDirect] = useState({ name: '', contractValue: '' });
+  const customerId = job?.customer.id ?? pickedCustomer?.id ?? '';
   const [assets, setAssets] = useState<Coverable[]>([]);
   const [chosen, setChosen] = useState<Set<string>>(() => new Set(existing?.assets.map((a) => a.id) ?? []));
   const [settings, setSettings] = useState<{ defaultFrequencyMonths: number } | null>(null);
+  // The coverage levels already on file, offered as the box is typed.
+  const [levels, setLevels] = useState<string[]>([]);
+  const levelsId = useId();
+  useEffect(() => {
+    api
+      .get<string[]>('/service-contracts/coverage-levels')
+      .then(setLevels)
+      .catch(() => setLevels([]));
+  }, []);
 
   const today = todayLocal();
   const oneYear = (() => {
@@ -299,6 +408,7 @@ function CoverModal({
           startsAt: existing.startsAt.slice(0, 10),
           endsAt: existing.endsAt.slice(0, 10),
           frequencyMonths: existing.frequencyMonths,
+          coverageLevel: existing.coverageLevel ?? '',
           responseTime: existing.responseTime ?? '',
           exclusions: existing.exclusions ?? '',
           coverageNotes: existing.coverageNotes ?? '',
@@ -307,6 +417,7 @@ function CoverModal({
           startsAt: today,
           endsAt: oneYear,
           frequencyMonths: 3,
+          coverageLevel: '',
           responseTime: '',
           exclusions: '',
           coverageNotes: '',
@@ -315,8 +426,12 @@ function CoverModal({
 
   const covered = existing?.assets;
   useEffect(() => {
+    if (!customerId) {
+      setAssets(covered ?? []);
+      return;
+    }
     api
-      .get<{ rows: Asset[] }>(`/installed-assets?pageSize=200&customerId=${job.customer.id}&status=ACTIVE`)
+      .get<{ rows: Asset[] }>(`/installed-assets?pageSize=200&customerId=${customerId}&status=ACTIVE`)
       .then((d) => {
         // A machine already covered stays offered even if it has since left
         // the active register, so a modify never drops it unasked.
@@ -332,7 +447,7 @@ function CoverModal({
         setForm((f) => ({ ...f, frequencyMonths: s.defaultFrequencyMonths }));
       })
       .catch(() => {});
-  }, [job.customer.id, covered, existing]);
+  }, [customerId, covered, existing]);
 
   // An active contract's schedule is re-planned when its term or frequency moves.
   const active = existing?.status === 'ACTIVE';
@@ -392,6 +507,7 @@ function CoverModal({
       startsAt: form.startsAt,
       endsAt: form.endsAt,
       frequencyMonths: form.frequencyMonths,
+      coverageLevel: form.coverageLevel || null,
       responseTime: form.responseTime || null,
       exclusions: form.exclusions || null,
       coverageNotes: form.coverageNotes || null,
@@ -417,8 +533,13 @@ function CoverModal({
         onSaved(existing.id);
         return;
       }
-      const created = await api.post<{ id: string }>('/service-contracts', { jobId: job.id, ...cover });
-      toast('ok', 'Cover set — activate it to write the schedule');
+      const created = await api.post<{ id: string }>('/service-contracts', {
+        ...(job
+          ? { jobId: job.id }
+          : { direct: { customerId, name: direct.name.trim(), contractValue: Number(direct.contractValue || 0), siteId: null } }),
+        ...cover,
+      });
+      toast('ok', job ? 'Cover set — activate it to write the schedule' : 'Contract made with its service job — activate it to write the schedule');
       onSaved(created.id);
     } catch (err) {
       setError(err);
@@ -428,18 +549,39 @@ function CoverModal({
 
   return (
     <Modal
-      title={existing ? `Modify service contract ${existing.number}` : `New service contract for ${job.number}`}
+      title={existing ? `Modify service contract ${existing.number}` : job ? `New service contract for ${job.number}` : 'New service contract'}
       onClose={onClose}
       wide
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={save} disabled={busy || chosen.size === 0 || endTooEarly}>
+          <button
+            className="btn btn-primary"
+            onClick={save}
+            disabled={busy || chosen.size === 0 || endTooEarly || (!job && !existing && (!customerId || direct.name.trim().length < 2 || !(Number(direct.contractValue) >= 0)))}
+          >
             {busy ? 'Saving…' : 'Save'}
           </button>
         </ModalFoot>
       }
     >
       <ErrorBox error={error} />
+
+      {!job && !existing && (
+        <>
+          <h4 className="svc-subhead">The contract</h4>
+          <div className="grid grid-3">
+            <Field label="Customer" hint="Its machines are offered below">
+              <CustomerPicker value={pickedCustomer} onChange={(c) => { setPickedCustomer(c); setChosen(new Set()); }} onError={setError} allowCreate={false} />
+            </Field>
+            <Field label="Contract name" hint="Names its service job too">
+              <input value={direct.name} placeholder="Annual PMS — oxygen plant" onChange={(e) => setDirect((d) => ({ ...d, name: e.target.value }))} />
+            </Field>
+            <Field label="Contract value (before VAT)" hint="Its job's contract value — costed later, if ever">
+              <NumberInput kind="money" min={0} step="0.01" value={direct.contractValue} onChange={(e) => setDirect((d) => ({ ...d, contractValue: e.target.value }))} />
+            </Field>
+          </div>
+        </>
+      )}
 
       <div className="grid grid-3">
         <Field
@@ -529,19 +671,33 @@ function CoverModal({
       )}
 
       <div className="grid grid-2">
+        <Field label="SLA coverage level" hint='In the customer’s words — "24/7 Comprehensive PM", "Quarterly Labor & Parts"'>
+          <input
+            list={levelsId}
+            value={form.coverageLevel}
+            maxLength={120}
+            onChange={(e) => setForm({ ...form, coverageLevel: e.target.value })}
+          />
+          <datalist id={levelsId}>
+            {levels.map((l) => (
+              <option key={l} value={l} />
+            ))}
+          </datalist>
+        </Field>
         <Field label="Response time promised" hint='Free text — "next working day" is as common as a number'>
           <input
             value={form.responseTime}
             onChange={(e) => setForm({ ...form, responseTime: e.target.value })}
           />
         </Field>
-        <Field label="What the contract excludes" hint="Consumables, parts, travel…">
-          <input
-            value={form.exclusions}
-            onChange={(e) => setForm({ ...form, exclusions: e.target.value })}
-          />
-        </Field>
       </div>
+
+      <Field label="What the contract excludes" hint="Consumables, parts, travel…">
+        <input
+          value={form.exclusions}
+          onChange={(e) => setForm({ ...form, exclusions: e.target.value })}
+        />
+      </Field>
 
       <Field label="Notes on the cover">
         <textarea
@@ -554,9 +710,11 @@ function CoverModal({
       <h4 className="svc-subhead">
         What is covered — {chosen.size} of {assets.length} selected
       </h4>
-      {assets.length === 0 ? (
+      {!customerId ? (
+        <div className="alert info">Pick the customer first — its machines on the Installation Base are offered here.</div>
+      ) : assets.length === 0 ? (
         <div className="alert warn">
-          Nothing is registered against {job.customer.name} in the installed base. Register the
+          Nothing is registered against {job?.customer.name ?? pickedCustomer?.name ?? 'this customer'} in the installed base. Register the
           equipment first — a contract covering nothing cannot be scheduled.
         </div>
       ) : (
@@ -698,7 +856,7 @@ export function ContractDetail() {
   }
 
   const today = todayLocal();
-  const nextDue = row.visits.find((v) => v.status === 'SCHEDULED' && v.dueDate.slice(0, 10) >= today);
+  const nextDue = row.visits.find((v) => (v.status === 'SCHEDULED' || v.status === 'CONFIRMED') && v.dueDate.slice(0, 10) >= today);
   const calendarHref = `/g-ops/visits?contractId=${row.id}&month=${monthOf(nextDue ? nextDue.dueDate.slice(0, 10) : today)}`;
   const canRenew =
     !row.renewedTo &&
@@ -842,6 +1000,12 @@ export function ContractDetail() {
             </dd>
             <dt>Frequency</dt>
             <dd>every {row.frequencyMonths} month(s)</dd>
+            <dt>Coverage level</dt>
+            <dd>{row.coverageLevel ?? <span className="faint">not stated</span>}</dd>
+            <dt>Renewal</dt>
+            <dd>
+              <RenewalNotice row={row} />
+            </dd>
             <dt>Contract value</dt>
             <dd className="mono">{formatMoney(row.job.contractValue)}</dd>
             <dt>Response time</dt>
@@ -913,7 +1077,7 @@ export function ContractDetail() {
                       ) : v.jobOrder ? (
                         <div className="faint">
                           job order{' '}
-                          <Link to={`/g-ops/job-orders/${v.jobOrder.id}`} className="mono">
+                          <Link to={`/g-ops/service-job-orders/${v.jobOrder.id}`} className="mono">
                             {v.jobOrder.number}
                           </Link>
                         </div>
@@ -935,7 +1099,7 @@ export function ContractDetail() {
                     </td>
                     <td>
                       <VisitBadge
-                        visit={{ status: v.status, overdue: v.status === 'SCHEDULED' && v.dueDate.slice(0, 10) < today }}
+                        visit={{ status: v.status, overdue: (v.status === 'SCHEDULED' || v.status === 'CONFIRMED') && v.dueDate.slice(0, 10) < today }}
                       />
                     </td>
                   </tr>
@@ -950,6 +1114,14 @@ export function ContractDetail() {
           or by a job order — is not part of the plan; neither is ever erased.
         </p>
       </div>
+
+      <Attachments
+        entityType="service_contract"
+        entityId={row.id}
+        title="Attachments"
+        hint="The signed agreement, the customer’s PO, the SLA"
+        canEdit={row.canEdit || can('gops.service_contracts.create')}
+      />
     </div>
   );
 }

@@ -14,7 +14,7 @@ import type { Person } from './PeoplePicker';
   `toPerson()` feeds the multi-person `PeoplePicker` from the same rows.
 
   `/users/lookup` is open to anyone signed in and returns names, positions,
-  departments and photos only — never the admin-gated `/users` (CLAUDE.md,
+  teams and photos only — never the admin-gated `/users` (CLAUDE.md,
   "the people picker").
 */
 
@@ -24,7 +24,15 @@ export interface PersonRow {
   email?: string | null;
   position?: string | null;
   photoPath?: string | null;
-  department?: { id: string; name: string } | null;
+  /** The person's team (KAT, HIT …) — what a picker groups by (departments retired 2026-10-19). */
+  team?: { id: string; code: string; name: string } | null;
+  /** A group the caller sets instead (the lead form's "Sales" / "Everyone else"), kept in the caller's order. */
+  group?: string;
+}
+
+/** The group a person is listed under: the caller's, else their team, else none. */
+export function personGroup(row: PersonRow): string {
+  return row.group ?? (row.team ? `${row.team.code} — ${row.team.name}` : '');
 }
 
 const cache = new Map<string, { at: number; rows: Promise<PersonRow[]> }>();
@@ -72,14 +80,14 @@ export function toPerson(row: PersonRow): Person {
     id: row.id,
     name: row.name,
     sub: row.position ?? row.email ?? undefined,
-    group: row.department?.name,
+    group: personGroup(row) || undefined,
     photoId: row.photoPath ?? null,
   };
 }
 
 /**
  * One person, from a list: a native select (the keyboard and the phone know
- * it), grouped by department when the people carry one, with "— none —"
+ * it), grouped by team when the people carry one, with "— none —"
  * unless the choice is required. A person already chosen who is no longer in
  * the list (left the role, deactivated) stays as an option, so opening an old
  * record never silently clears it — named through `current`, or, when the
@@ -124,9 +132,13 @@ export function PersonSelect({
   const autoId = useId();
   const groups = new Map<string, PersonRow[]>();
   for (const p of people) {
-    const g = p.department?.name ?? '';
+    const g = personGroup(p);
     groups.set(g, [...(groups.get(g) ?? []), p]);
   }
+  // Teams in name order with "No team" last — unless the caller named its own groups, which keep its order.
+  const ordered = people.some((p) => p.group !== undefined)
+    ? [...groups.entries()]
+    : [...groups.entries()].sort(([a], [b]) => (!a ? 1 : !b ? -1 : a.localeCompare(b)));
   const grouped = groups.size > 1 || (groups.size === 1 && !groups.has(''));
   const listed = (pid: string) => people.some((p) => p.id === pid);
   const missing = current && !listed(current.id) ? current : null;
@@ -161,8 +173,8 @@ export function PersonSelect({
       )}
       {unnamed && <option value={unnamed}>{people.length ? 'Someone not on this list' : '…'}</option>}
       {grouped
-        ? [...groups.entries()].map(([g, rows]) => (
-            <optgroup key={g || '—'} label={g || 'No department'}>
+        ? ordered.map(([g, rows]) => (
+            <optgroup key={g || '—'} label={g || 'No team'}>
               {rows.map(option)}
             </optgroup>
           ))

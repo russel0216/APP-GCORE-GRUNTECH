@@ -12,7 +12,7 @@ import {
 } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, ApiError, getToken, qs } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEditPage, useAuth } from '../../lib/auth';
 import { dayKeyOf } from '../../lib/day';
 import { Checkbox, ErrorBox, Field, Loading, formatDateTime, useToast } from '../../components/ui';
 import {
@@ -363,7 +363,8 @@ export function PdfTemplates() {
 function PdfTemplateEditor({ docType }: { docType: DocType }) {
   const toast = useToast();
   const { can } = useAuth();
-  const canEdit = can('admin.pdf_templates.edit_all');
+  // Edit Own or Edit All saves the layouts — the page keeps no record of anybody's (2026-10-18).
+  const canEdit = mayEditPage(can, 'admin', 'pdf_templates');
   const canCompany = can('admin.company.view_all');
   const [, setParams] = useSearchParams();
   const doc = DOCS.find((x) => x.type === docType)!;

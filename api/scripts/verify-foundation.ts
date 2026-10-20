@@ -13,14 +13,23 @@
  * against a development database; it refuses to run against production.
  */
 
+import { MAX_ROLES, ROLE_REV1, ROLE_REV1_MARK, SUCCESSOR_REV1, titleFromRoles, tooManyRoles } from '../src/shared/roleRev1';
 import fs from 'node:fs';
 import path from 'node:path';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import type { ApprovalStep, Prisma } from '@prisma/client';
 import { env } from '../src/env';
-import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/resolve';
-import { allPermissions } from '../src/permissions/registry';
+import { resolveUser, can, canEditRecord, menuFor, withImpliedLevels, impliedBy } from '../src/permissions/resolve';
+import { actionsFor, levelOptions, levelsOf } from '../src/shared/permissionLevels';
+import { ownOnly, viewScope } from '../src/shared/ownScope';
+import { OVERRIDES_DROPPED_MARK } from '../src/shared/overridesDrop';
+import { REGISTRY, allPermissions, findSubmodule } from '../src/permissions/registry';
+import { ACCESS_SPLIT } from '../src/shared/accessSplit';
+import { ENGINE_ROLE_KEYS, ROLES_CLEARED_MARK } from '../src/shared/rolesClear';
+import { CHART_ROLES, ROLES_FROM_CHART_MARK, SUCCESSOR } from '../src/shared/rolesFromChart';
+import { CLEARED_MARK as NUMBERS_CLEARED_MARK } from '../src/shared/employeeNumbers';
 import {
   nextNumber,
   previewNext,
@@ -44,6 +53,9 @@ import {
   historyFor,
   cancelOpenRequest,
   approversForStep,
+  followUp,
+  holdsStep,
+  OWN_TEAM_ROLES,
   supportersFor,
   leadersFor,
   deciderFor,
@@ -51,6 +63,7 @@ import {
   slotSignatories,
   contactOf,
   contactsOf,
+  PROJECT_MANAGER_FALLBACK_ROLE,
 } from '../src/shared/approvals';
 import {
   renderDocument,
@@ -146,7 +159,8 @@ async function expectRejection(label: string, fn: () => Promise<unknown>, expect
 const TAG = '__verify__';
 /** G-CHAIN's two flows (the owner's order of 2026-10-14), as built so far. */
 const PROCUREMENT_STRIP = 'Purchase Requests,RFQ,Canvass,Purchase Orders';
-const WAREHOUSE_STRIP = 'Incoming,Inventory,Outgoing,Borrow Slips,Pull-out Slips';
+// The owner's order of 2026-10-18: Incoming, Inventory, Pull-out Slips, Borrow Slips, Outgoing.
+const WAREHOUSE_STRIP = 'Incoming,Inventory,Pull-out Slips,Borrow Slips,Outgoing';
 /**
  * What every approval this script submits is about. A seeded workflow routes
  * to whoever really holds the role, so its notifications reach real people;
@@ -227,7 +241,8 @@ async function cleanup() {
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[], supervisorId?: string) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike(TAG, roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -254,22 +269,93 @@ async function main() {
   check('employee inherits role permissions', can(empResolved, 'ghr.leave.create'));
   check('employee does not inherit what the role lacks', !can(empResolved, 'admin.users.view_all'));
 
-  // A per-person DENY must beat the role grant — that is the whole point of
-  // overrides, and the ordering is easy to get backwards.
+  // ── The permission matrix (2026-10-19): no per-person overrides; View and
+  // Manage each Own / Team / All, a level including the ones under it. ──
   const leaveCreate = await prisma.permission.findUnique({ where: { key: 'ghr.leave.create' } });
-  await prisma.userPermissionOverride.create({
+  const leftover = await prisma.userPermissionOverride.create({
     data: { userId: employee.id, permissionId: leaveCreate!.id, effect: 'DENY' },
   });
-  const denied = (await resolveUser(employee.id))!;
-  check('a per-person DENY beats the role grant', !can(denied, 'ghr.leave.create'));
+  check('an override row left in the table changes nothing — access is the roles alone', can((await resolveUser(employee.id))!, 'ghr.leave.create'));
+  await prisma.userPermissionOverride.delete({ where: { userId_permissionId: { userId: leftover.userId, permissionId: leftover.permissionId } } });
+  check(
+    'the overrides on file were dropped once by the seed (marked)',
+    !!(await prisma.setting.findUnique({ where: { key: OVERRIDES_DROPPED_MARK } })),
+  );
+  const implied = withImpliedLevels(['gops.leads.view_all', 'gops.leads.edit_team']);
+  check(
+    'a level includes the ones under it: All → Team and Own; Team → Own',
+    ['gops.leads.view_team', 'gops.leads.view_own', 'gops.leads.edit_own'].every((k) => implied.has(k)) && !implied.has('gops.leads.edit_all'),
+    [...implied].join(', '),
+  );
+  check(
+    'a holder of a lower level is also found by a higher one (impliedBy)',
+    JSON.stringify(impliedBy('gops.leads.view_own')) === JSON.stringify(['gops.leads.view_own', 'gops.leads.view_team', 'gops.leads.view_all']) &&
+      JSON.stringify(impliedBy('gops.leads.create')) === JSON.stringify(['gops.leads.create']),
+  );
+  // Every screen, every pair of levels it offers, reads back as it was set.
+  const roundTrip: string[] = [];
+  for (const mod of REGISTRY) {
+    for (const sub of mod.submodules) {
+      const opts = levelOptions(sub.actions);
+      for (const v of opts.view) {
+        for (const m of opts.manage) {
+          const back = levelsOf(sub.actions, new Set(actionsFor(sub.actions, v, m)));
+          if (back.view !== v || back.manage !== m) roundTrip.push(`${mod.key}.${sub.key} ${v}/${m} → ${back.view}/${back.manage}`);
+        }
+      }
+    }
+  }
+  check('every screen\'s View and Manage levels read back as they were set', roundTrip.length === 0, roundTrip.slice(0, 4).join('; '));
+  const quotes = findSubmodule('gops', 'quotations')!;
+  check(
+    'Manage Own grants create, edit own and delete; Manage All adds edit team and edit all; View All exports where the screen exports',
+    JSON.stringify(actionsFor(quotes.actions, 'none', 'own')) === JSON.stringify(['create', 'edit_own', 'delete']) &&
+      actionsFor(quotes.actions, 'none', 'all').includes('edit_all') &&
+      actionsFor(quotes.actions, 'none', 'all').includes('edit_team') &&
+      JSON.stringify(actionsFor(['view_all', 'export'], 'all', 'none')) === JSON.stringify(['view_all', 'export']),
+    JSON.stringify(actionsFor(quotes.actions, 'none', 'own')),
+  );
+  const levelSrc = (f: string) => fs.readFileSync(f, 'utf8').replace(/^\s*\(The web copy[^\n]*\n/m, '');
+  check(
+    'the web\'s permission levels are the API\'s, line for line',
+    levelSrc(path.resolve(__dirname, '../src/shared/permissionLevels.ts')) === levelSrc(path.resolve(__dirname, '../../web/src/lib/permissionLevels.ts')),
+  );
 
-  // And an ALLOW grants something no role gave them.
-  const auditView = await prisma.permission.findUnique({ where: { key: 'admin.audit.view_all' } });
-  await prisma.userPermissionOverride.create({
-    data: { userId: employee.id, permissionId: auditView!.id, effect: 'ALLOW' },
+  // Team: the caller's team (Employee.industryId) and its members' records.
+  const teams = await prisma.industry.findMany({ where: { isActive: true }, take: 2, select: { id: true } });
+  const teamRole = await prisma.role.create({
+    data: {
+      key: `${TAG}teamquotes`,
+      name: `${TAG} Team quotes`,
+      permissions: {
+        create: (
+          await prisma.permission.findMany({ where: { key: { in: ['gops.quotations.view_team', 'gops.quotations.edit_team'] } }, select: { id: true } })
+        ).map((p) => ({ permissionId: p.id })),
+      },
+    },
   });
-  const allowed = (await resolveUser(employee.id))!;
-  check('a per-person ALLOW grants beyond the role', can(allowed, 'admin.audit.view_all'));
+  const mkTeamUser = async (n: string, teamId: string) => {
+    const u = await prisma.user.create({
+      data: { name: `Verify ${n}`, email: `${n.toLowerCase()}@verify.local`, passwordHash: 'x', roles: { create: [{ roleId: teamRole.id }] } },
+    });
+    await prisma.employee.create({ data: { firstName: 'Verify', lastName: n, userId: u.id, industryId: teamId } });
+    return u;
+  };
+  const lead = await mkTeamUser('Teamlead', teams[0].id);
+  const mate = await mkTeamUser('Teammate', teams[0].id);
+  const stranger = await mkTeamUser('Stranger', teams[1].id);
+  const leadR = (await resolveUser(lead.id))!;
+  check('the resolved user knows their team and its members, themselves included', leadR.teamMemberIds.includes(lead.id) && leadR.teamMemberIds.includes(mate.id) && !leadR.teamMemberIds.includes(stranger.id));
+  check('View Team is the scope of a Team holder', viewScope(leadR, 'gops', 'quotations') === 'team');
+  check(
+    'Manage Team edits a teammate\'s record, never another team\'s',
+    canEditRecord(leadR, 'gops', 'quotations', mate.id) && !canEditRecord(leadR, 'gops', 'quotations', stranger.id),
+  );
+  const narrowed = ownOnly(leadR, 'gops', 'quotations', {}, (ids: string[]) => ({ ownerId: { in: ids } })) as { AND: [object, { ownerId: { in: string[] } }] };
+  check(
+    'a list narrows a Team holder to the team\'s records',
+    narrowed.AND[1].ownerId.in.includes(mate.id) && !narrowed.AND[1].ownerId.in.includes(stranger.id),
+  );
 
   // Record ownership — "only the author can edit the quotation".
   const salesUser = await makeUser('Verify Sales', 'sales@verify.local', ['sales']);
@@ -316,12 +402,21 @@ async function main() {
   {
     const roots = [path.resolve(__dirname, '../src'), path.resolve(__dirname, '../../web/src')];
     const registryFile = path.resolve(__dirname, '../src/permissions/registry.ts');
+    // The seed step that hands the boxes of 2026-10-18 out names keys; naming
+    // one is not checking it.
+    const splitFile = path.resolve(__dirname, '../src/shared/accessSplit.ts');
     let corpus = '';
+    let checking = '';
     const walk = (dir: string) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (/\.tsx?$/.test(entry.name) && full !== registryFile) corpus += fs.readFileSync(full, 'utf8') + '\n';
+        else if (/\.tsx?$/.test(entry.name) && full !== registryFile && full !== splitFile) {
+          const text = fs.readFileSync(full, 'utf8') + '\n';
+          corpus += text;
+          // The role definitions name keys without checking them.
+          if (!full.endsWith('roleSeeds.ts')) checking += text;
+        }
       }
     };
     roots.forEach(walk);
@@ -331,6 +426,71 @@ async function main() {
       .filter((p) => !corpus.includes(p.key) && !(templated.has(p.action) && corpus.includes(`${p.module}.${p.submodule}`)))
       .map((p) => p.key);
     check('every permission the registry mints is checked by a route or a screen', unchecked.length === 0, unchecked.join(', '));
+    // The own pair of 2026-10-18: a screen that gained View Own and Edit Own
+    // reads each through the one rule (shared/ownScope.ts on the API,
+    // lib/auth.tsx on the web) — the generic scan above cannot tell, since
+    // canEditRecord's template already names every edit_own.
+    // A screen reads its pair through the helpers, by naming the key itself
+    // (a route's requireAny), or — for View Own — through the page's Guard on
+    // its View All, which admits the twin.
+    const reads = (fns: string, m: string, sub: string, action: string) =>
+      new RegExp(`(${fns})\\([^)]*'${m}',\\s*'${sub}'`).test(corpus) ||
+      checking.includes(`'${m}.${sub}.${action}'`) ||
+      (action === 'view_own' && corpus.includes(`permission="${m}.${sub}.view_all"`));
+    const ownScreens = REGISTRY.flatMap((m) => m.submodules.filter((s) => s.own).map((s) => ({ m: m.key, s: s.key })));
+    const noView = ownScreens.filter(({ m, s }) => !reads('requireView|ownOnly|assertCanView|viewScope|mayView', m, s, 'view_own')).map(({ m, s }) => `${m}.${s}`);
+    const noEdit = ownScreens
+      .filter(({ m, s }) => findSubmodule(m, s)?.actions.includes('edit_own'))
+      .filter(({ m, s }) => !reads('requireEdit|assertCanEdit|editScope|mayEdit|mayEditPage', m, s, 'edit_own')).map(({ m, s }) => `${m}.${s}`);
+    check(`every screen that gained View Own reads it through the one rule (${ownScreens.length} screens)`, ownScreens.length >= 34 && noView.length === 0, noView.join(', '));
+    check('every screen that gained Edit Own reads it through the one rule', noEdit.length === 0, noEdit.join(', '));
+  }
+  check(
+    'every key the once-only Access split hands out, and every key it copies from, is in the registry',
+    ACCESS_SPLIT.every(({ from, to }) => permissionKeys.has(from) && to.every((k) => permissionKeys.has(k))),
+    ACCESS_SPLIT.flatMap(({ from, to }) => [from, ...to]).filter((k) => !permissionKeys.has(k)).join(', '),
+  );
+  // The roles emptied for the owner's own (2026-10-18, shared/rolesClear.ts):
+  // the keys the engine reads are each read somewhere in the API's source,
+  // every such role row stands (Delete refuses them), and once the mark is
+  // down no role is built-in any more — the grid is the owner's.
+  {
+    let apiSource = '';
+    const walkApi = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walkApi(full);
+        else if (/\.ts$/.test(entry.name) && !full.endsWith('rolesClear.ts') && !full.endsWith('roleSeeds.ts')) apiSource += fs.readFileSync(full, 'utf8') + '\n';
+      }
+    };
+    walkApi(path.resolve(__dirname, '../src'));
+    const unread = ENGINE_ROLE_KEYS.filter((k) => !apiSource.includes(`'${k.key}'`)).map((k) => k.key);
+    check('every role key the engine is said to read is read somewhere in the API', unread.length === 0, unread.join(', '));
+    const rows = await prisma.role.findMany({ where: { key: { in: ENGINE_ROLE_KEYS.map((k) => k.key) } }, select: { key: true } });
+    check('every role the engine reads by key is on file', rows.length === ENGINE_ROLE_KEYS.length, ENGINE_ROLE_KEYS.map((k) => k.key).filter((k) => !rows.some((r) => r.key === k)).join(', '));
+    const cleared = await prisma.setting.findUnique({ where: { key: ROLES_CLEARED_MARK } });
+    const builtIn = await prisma.role.count({ where: { isSystem: true } });
+    check('once the roles were emptied, none is built-in any more — the owner renames, fills or deletes each', !cleared || builtIn === 0, `${builtIn} built-in with the mark ${cleared ? 'down' : 'absent'}`);
+    // The roles are the organisation chart's (2026-10-18): every title is a
+    // role, and the roles the chart does not name are gone for good.
+    if (await prisma.setting.findUnique({ where: { key: ROLES_FROM_CHART_MARK } })) {
+      const keys = new Set((await prisma.role.findMany({ select: { key: true } })).map((r) => r.key));
+      // ROLE_REV1 (2026-10-19) retired Welder, Electrician and Collection.
+      const missing = CHART_ROLES.filter((r) => !keys.has(r.key) && !SUCCESSOR_REV1[r.key]).map((r) => r.title);
+      check('every title on the organisation chart is a role', missing.length === 0, missing.join(', '));
+      const back = [...Object.keys(SUCCESSOR), 'employee'].filter((k) => keys.has(k));
+      check('the roles the chart does not name (Executive, Employee, Supervisor …) are not on file', back.length === 0, back.join(', '));
+      const titles = new Map(CHART_ROLES.map((r) => [r.key, r.title]));
+      const named = await prisma.role.findMany({ where: { key: { in: [...titles.keys()] } }, select: { key: true, name: true } });
+      check('the keys the engine reads sit on the chart titles that own them (Purchasing Officer is back_support)', named.find((r) => r.key === 'back_support')?.name !== undefined && CHART_ROLES.some((r) => r.key === 'back_support' && r.title === 'Purchasing Officer'));
+    } else {
+      check('the roles become the chart\'s on the next seed (no mark yet)', true);
+    }
+    const nullSteps = await prisma.approvalStep.count({ where: { approverType: 'ROLE', roleId: null, workflow: { isActive: true, documentType: { not: { startsWith: TAG } } } } });
+    check('no active route has a role step naming no role', nullSteps === 0, String(nullSteps));
+    check('a project manager step with no manager falls back to the CEO / President', PROJECT_MANAGER_FALLBACK_ROLE === 'ceo');
+    const numbersCleared = await prisma.setting.findUnique({ where: { key: NUMBERS_CLEARED_MARK } });
+    check('the employee numbers were cleared once (the mark stands), and the seed will not clear them again', !!numbersCleared);
   }
   check('approval goes to the workflow, not to a key: no ghr.clearances.approve, no gops.quotations.approve', !permissionKeys.has('ghr.clearances.approve') && !permissionKeys.has('gops.quotations.approve'));
   check(
@@ -350,11 +510,25 @@ async function main() {
   // never deleted. The SCORO Archive, hidden since 2026-10-04, was removed
   // outright on 2026-10-10 (the owner's call) and is no longer a screen.
   const superMenu = menuFor(superUser).flatMap((m) => m.submodules.map((s) => ({ id: `${m.key}.${s.key}`, hidden: s.hidden === true })));
+  // Renewals joined them on 2026-10-20 (the owner's revised Aftermarket UI):
+  // its two halves are the contract list's Renewal notice and the
+  // installation base's warranty filter; the route and keys stay.
   check(
-    'the hidden screens are the five project registers and the three duplicates',
+    'the hidden screens are the five project registers, the three duplicates and Renewals',
     superMenu.filter((s) => s.hidden).map((s) => s.id).sort().join() ===
-      'admin.templates,ghr.employee_rates,gops.budget_monitoring,gops.budget_requests,gops.plans,gops.progress_billing,gops.purchase_requests,gops.service_costing',
+      'admin.templates,ghr.employee_rates,gops.budget_monitoring,gops.budget_requests,gops.plans,gops.progress_billing,gops.purchase_requests,gops.renewals,gops.service_costing',
     superMenu.filter((s) => s.hidden).map((s) => s.id).join(),
+  );
+  // The owner's Aftermarket strip (2026-10-20): the overview, then
+  // Installation Base, Service Schedule, Service Contract.
+  const aftermarketStrip = menuFor(superUser)
+    .find((m) => m.key === 'gops')!
+    .submodules.filter((s) => s.group === 'Aftermarket' && !s.hidden)
+    .map((s) => s.label);
+  check(
+    'Aftermarket shows Aftermarket, Installation Base, Service JO, Service Schedule, Service Contract, Service Documents in that order',
+    aftermarketStrip.join() === 'Aftermarket,Installation Base,Service JO,Service Schedule,Service Contract,Service Documents',
+    aftermarketStrip.join(),
   );
   const pmStrip = menuFor(superUser)
     .find((m) => m.key === 'gops')!
@@ -815,6 +989,10 @@ async function main() {
   const tmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'technical_manager' } });
   await prisma.userRole.createMany({ data: [{ userId: leadKat.id, roleId: tmRole.id }, { userId: leadHit.id, roleId: tmRole.id }] });
   const tmStep = { approverType: 'ROLE', roleId: tmRole.id, userId: null } as unknown as ApprovalStep;
+  // KAT's post may be shared on this install (2026-10-19): set aside for the
+  // own-team checks, put back after.
+  const katPost = await prisma.teamPost.findUnique({ where: { teamId_roleKey: { teamId: kat.id, roleKey: 'technical_manager' } } });
+  await prisma.teamPost.deleteMany({ where: { teamId: kat.id, roleKey: 'technical_manager' } });
   const tmForKat = await approversForStep(tmStep, katSeller.id);
   const tmForLoner = await approversForStep(tmStep, loner.id);
   check(
@@ -823,7 +1001,53 @@ async function main() {
     JSON.stringify(tmForKat),
   );
   check('a preparer with no team goes to every Technical Manager', tmForLoner.includes(leadKat.id) && tmForLoner.includes(leadHit.id));
+
+  // Team managers (2026-10-19): KAT's post shared from HIT goes to HIT's holder,
+  // named people go to them, and OWN goes back to the team's own.
+  await prisma.teamPost.create({ data: { teamId: kat.id, roleKey: 'technical_manager', mode: 'SHARED', sharedTeamIds: [hit.id] } });
+  const shared = await approversForStep(tmStep, katSeller.id);
+  check('a team post shared from another team goes to that team’s holder of the role', shared.includes(leadHit.id) && !shared.includes(leadKat.id), JSON.stringify(shared));
+  check('…and the holder of the shared post signs it at submit as the role’s holder', await holdsStep(tmStep, leadHit.id));
+  await prisma.teamPost.update({ where: { teamId_roleKey: { teamId: kat.id, roleKey: 'technical_manager' } }, data: { mode: 'PEOPLE', sharedTeamIds: [], userIds: [loner.id] } });
+  check('a team post naming people goes to them', JSON.stringify(await approversForStep(tmStep, katSeller.id)) === JSON.stringify([loner.id]));
+  await prisma.teamPost.update({ where: { teamId_roleKey: { teamId: kat.id, roleKey: 'technical_manager' } }, data: { mode: 'OWN', userIds: [] } });
+  const own = await approversForStep(tmStep, katSeller.id);
+  check('set back to its own team (a hire), the post goes to the team’s own holder again', own.includes(leadKat.id) && !own.includes(leadHit.id), JSON.stringify(own));
+  await prisma.teamPost.deleteMany({ where: { teamId: kat.id, roleKey: 'technical_manager' } });
+  if (katPost) await prisma.teamPost.create({ data: katPost });
   await prisma.userRole.deleteMany({ where: { roleId: tmRole.id, userId: { in: [leadKat.id, leadHit.id] } } });
+
+  // ROLE_REV1 (2026-10-19): a person's title is their highest role; a ROLE
+  // step's other roles decide it too ("Checking" by either finance role).
+  check(
+    'a title is the highest role; several at that level all show, in the chart’s order',
+    titleFromRoles([
+      { name: 'Sales Manager', rank: 3, sortOrder: 4 },
+      { name: 'Team Leader', rank: 2, sortOrder: 2 },
+      { name: 'Technical Manager', rank: 3, sortOrder: 3 },
+    ]) === 'Team Leader' &&
+      titleFromRoles([
+        { name: 'Sales Manager', rank: 3, sortOrder: 4 },
+        { name: 'Technical Manager', rank: 3, sortOrder: 3 },
+      ]) === 'Technical Manager / Sales Manager' &&
+      titleFromRoles([{ name: 'Unranked', rank: null, sortOrder: 0 }]) === null,
+  );
+  check('a person may hold many roles', tooManyRoles(30) === null);
+  {
+    const alsoStep = { approverType: 'ROLE', roleId: roleA.id, userId: null, alsoRoleIds: [roleB.id] } as unknown as ApprovalStep;
+    await prisma.userRole.createMany({ data: [{ userId: leadKat.id, roleId: roleA.id }, { userId: leadHit.id, roleId: roleB.id }] });
+    const either = await approversForStep(alsoStep, loner.id);
+    check('a ROLE step with another role is decided by the holders of either', either.includes(leadKat.id) && either.includes(leadHit.id), JSON.stringify(either));
+    check('…and the other role’s holder signs it at submit', await holdsStep(alsoStep, leadHit.id));
+    await prisma.userRole.deleteMany({ where: { userId: { in: [leadKat.id, leadHit.id] }, roleId: { in: [roleA.id, roleB.id] } } });
+  }
+  if (await prisma.setting.findUnique({ where: { key: ROLE_REV1_MARK } })) {
+    const rev1 = await prisma.role.findMany({ where: { key: { in: ROLE_REV1.map((r) => r.key) } }, select: { key: true, rank: true } });
+    const off = ROLE_REV1.filter((r) => !rev1.some((x) => x.key === r.key && x.rank === r.rank)).map((r) => r.name);
+    check('every ROLE_REV1 role is on file at its level', off.length === 0, off.join(', '));
+    const unlinked = await prisma.role.count({ where: { key: { in: ROLE_REV1.map((r) => r.key) }, plantilla: { none: {} } } });
+    check('every ROLE_REV1 role has a Plantilla slot that counts it', unlinked === 0, `${unlinked} without`);
+  }
 
   // The preparer signs, at submit, the steps whose role they hold — only
   // where the route says so — and a manager may stand in only where it says so.
@@ -899,6 +1123,69 @@ async function main() {
     'not yours',
   );
   await expectRejection('nobody stands in for their own document', () => act({ requestId: plainReq.id, userId: signer.id, action: 'APPROVED' }), 'raised yourself');
+
+  // ── The organisation chart of 2026-10-17 ──────────────────────────────
+  console.log('\nThe follow-up, the team’s Team Leader first, the importation twin');
+  // The requester follows an unanswered step up to the approver's manager:
+  // the manager is never queued before, is queued after, is told, and the
+  // approver too; once a day per step; only on a route with stand-ins.
+  const fuReq = await submitForApproval({ documentType: `${TAG}_sign_doc`, documentId: `${TAG}-followup`, subject: `${SUBJECT} follow-up`, requesterId: reviewer.id });
+  // The reviewer holds step 1 and signs it at submit; the request waits on Approver B.
+  check('before a follow-up the approver’s manager is not queued', fuReq.currentSequence === 2 && !(await pendingFor(bossOf.id)).some((r) => r.id === fuReq.id));
+  await expectRejection('only the requester follows up', () => followUp(fuReq.id, signer.id, 'please'), 'raised it');
+  const sent = await followUp(fuReq.id, reviewer.id, 'Approver B is on leave');
+  check('the follow-up goes to the approver’s "Reports to"', sent.to.map((t) => t.id).join() === bossOf.id && sent.step === 'Approver', JSON.stringify(sent.to));
+  const queued = (await pendingFor(bossOf.id)).find((r) => r.id === fuReq.id);
+  check('after it the manager is queued, told who followed up', queued?.followedUpBy === reviewer.name, JSON.stringify(queued?.followedUpBy));
+  check(
+    'the manager and the approver are both told',
+    (await prisma.notification.count({ where: { userId: { in: [bossOf.id, approverB.id] }, type: 'approval.follow_up', title: { contains: SUBJECT } } })) === 2,
+  );
+  await expectRejection('once a day per step', () => followUp(fuReq.id, reviewer.id), 'Already followed up');
+  const fuHistory = await historyFor(`${TAG}_sign_doc`, `${TAG}-followup`);
+  check(
+    'the history carries the follow-up by name, and the approver list still names only the approver',
+    fuHistory[0]?.followUps?.[0]?.to?.[0]?.name === bossOf.name && fuHistory[0]?.followUps?.[0]?.note === 'Approver B is on leave' && !JSON.stringify(fuHistory[0]?.workflow?.steps ?? []).includes(bossOf.id),
+  );
+  await act({ requestId: fuReq.id, userId: bossOf.id, action: 'APPROVED' });
+  check('the manager’s decision settles it, standing in', (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: fuReq.id } })).status === 'APPROVED');
+  const noStandIn = await submitForApproval({ documentType: `${TAG}_nosign_doc`, documentId: `${TAG}-followup-none`, subject: `${SUBJECT} no stand-in`, requesterId: reviewer.id });
+  await expectRejection('no follow-up on a route that lets nobody stand in', () => followUp(noStandIn.id, reviewer.id), 'nobody stand in');
+
+  // "Always the Team Leader" (2026-10-17): a Team Leader SUPERVISOR step goes
+  // to the team's holders before the requester's "Reports to"; a requester
+  // with no team, or a team with no leader, keeps the "Reports to".
+  const tlRole = await prisma.role.findUniqueOrThrow({ where: { key: 'team_leader' } });
+  await prisma.userRole.create({ data: { userId: leadKat.id, roleId: tlRole.id } });
+  const katCrew = await makeUser('Verify KAT Crew', 'katcrew@verify.local', [], katSeller.id);
+  await prisma.employee.create({ data: { employeeNo: `${TAG}EMP9`, firstName: 'Verify', lastName: 'KAT Crew', userId: katCrew.id, industryId: kat.id } });
+  const tlStep = { approverType: 'SUPERVISOR', roleId: tlRole.id, userId: null, alsoRoleIds: [] } as unknown as ApprovalStep;
+  check('a Team Leader step goes to the team’s Team Leader, not to the crew member’s own superior', (await approversForStep(tlStep, katCrew.id)).join() === leadKat.id, JSON.stringify(await approversForStep(tlStep, katCrew.id)));
+  check('a requester with no team keeps their "Reports to"', (await approversForStep(tlStep, approverB.id)).join() === bossOf.id);
+  const plainStep = { approverType: 'SUPERVISOR', roleId: null, userId: null, alsoRoleIds: [] } as unknown as ApprovalStep;
+  check('a step naming no role (leave, overtime) stays the direct superior’s', (await approversForStep(plainStep, katCrew.id)).join() === katSeller.id);
+  await prisma.userRole.deleteMany({ where: { roleId: tlRole.id, userId: leadKat.id } });
+
+  // The importation twin: a Purchasing Manager step on an importation goes
+  // to the Purchasing Manager (Importation) where somebody holds it.
+  const pmLocalRole = await prisma.role.findUniqueOrThrow({ where: { key: 'purchasing_manager' } });
+  const pmImport = await prisma.role.findUniqueOrThrow({ where: { key: 'purchasing_manager_import' } });
+  const local = await makeUser('Verify PM Local', 'pmlocal@verify.local', ['purchasing_manager']);
+  const importer = await makeUser('Verify PM Import', 'pmimport@verify.local', ['purchasing_manager_import']);
+  const pmStep = { approverType: 'ROLE', roleId: pmLocalRole.id, userId: null, alsoRoleIds: [] } as unknown as ApprovalStep;
+  const localOnes = await approversForStep(pmStep, katSeller.id, prisma, { importation: false });
+  const importOnes = await approversForStep(pmStep, katSeller.id, prisma, { importation: true });
+  check('a Purchasing Manager step goes to the local manager, never the importation one', localOnes.includes(local.id) && !localOnes.includes(importer.id));
+  check('on an importation it goes to the Purchasing Manager (Importation), never the local one', importOnes.includes(importer.id) && !importOnes.includes(local.id), JSON.stringify(importOnes));
+  check('the importation manager holds the step on an importation, the local one does not', (await holdsStep(pmStep, importer.id, prisma, { importation: true })) && !(await holdsStep(pmStep, local.id, prisma, { importation: true })));
+  await prisma.userRole.deleteMany({ where: { userId: importer.id, roleId: pmImport.id } });
+  // Only where the install has no real Importation manager (a check never depends on what the database holds).
+  const otherImporters = await prisma.userRole.count({ where: { roleId: pmImport.id, user: { isActive: true } } });
+  check(
+    otherImporters ? 'with nobody holding the twin, the local manager decides the importation too (skipped: somebody holds it here)' : 'with nobody holding the twin, the local manager decides the importation too',
+    otherImporters > 0 || (await approversForStep(pmStep, katSeller.id, prisma, { importation: true })).includes(local.id),
+  );
+  check('Service Manager is team-scoped like the Technical Manager', OWN_TEAM_ROLES.includes('service_manager') && OWN_TEAM_ROLES.includes('technical_manager'));
 
   // Every step the preparer's own: approved on submit, settled once.
   await prisma.approvalWorkflow.create({
@@ -1124,7 +1411,7 @@ async function main() {
   // ── 5b. An optional route, taken only when the submitter asks ─────────────
   console.log('\nOptional routes (the CEO on a quotation over ₱1,000,000)');
 
-  const pmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'project_manager' } });
+  const pmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'technical_manager' } });
   const standardRoute = await prisma.approvalWorkflow.create({
     data: {
       documentType: `${TAG}_opt_doc`,
@@ -2663,6 +2950,26 @@ async function main() {
       browserAsks.length === 0,
       browserAsks.join(', '),
     );
+    // The review of 2026-10-16: seven module copies of a card's head, a
+    // btn-ok nobody else drew, and admin-gated /users fetches feeding forms.
+    const cssFiles = [path.join(webSrc, 'styles.css'), ...fs.readdirSync(path.join(webSrc, 'styles')).map((f) => path.join(webSrc, 'styles', f))];
+    const headCopies = [
+      ...offenders(/[a-z]+-card-head\b/),
+      ...cssFiles.flatMap((f) =>
+        code(f)
+          .filter(({ text }) => /\.[a-z]+-card-head\b/.test(text))
+          .map(({ line }) => `${path.relative(webSrc, f)}:${line}`),
+      ),
+    ];
+    check('one card head: no module writes its own *-card-head (.card-head, rule 19)', headCopies.length === 0, headCopies.join(', '));
+    const okButtons = offenders(/\bbtn-ok\b/);
+    check('no btn-ok: the next step is btn-primary (rule 19)', okButtons.length === 0, okButtons.join(', '));
+    const userLists = offenders(/[`'"]\/users\?pageSize/, ['pages/admin/OrgChart.tsx']);
+    check(
+      'no form reads the admin-gated /users list for its people (PersonSelect / usePeople; the org chart alone needs Reports to)',
+      userLists.length === 0,
+      userLists.join(', '),
+    );
     check('the source scan found the web app', files.length > 100, `${files.length} files`);
   }
 
@@ -2674,6 +2981,68 @@ async function main() {
     recordLink('lead', 'list') === '/g-ops/leads' && recordLink('lead', 'abc') === '/g-ops/leads/abc' && recordLink('customer', 'list') === '/g-ops/customers',
     `${recordLink('lead', 'list')} ${recordLink('lead', 'abc')}`,
   );
+
+  // Every type the API audits under has a screen (2026-10-16, the review's
+  // link check): a row in the audit log or on Home with no link reads as a
+  // dead end. Read off the source — every `entityType: '…'` literal in
+  // api/src, plus the commission's constant — and every link must land on a
+  // path App.tsx declares. Parts of a record (a CAD revision, a report's
+  // day, a People Flow item, a partner's resource) carry composite ids and
+  // live on their record's page: deliberately unlinked.
+  {
+    const srcRoot = path.resolve(__dirname, '../src');
+    const walk = (dir: string): string[] =>
+      fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory() ? walk(path.join(dir, e.name)) : e.name.endsWith('.ts') ? [path.join(dir, e.name)] : [],
+      );
+    const audited = new Set<string>(['commission']);
+    for (const file of walk(srcRoot)) {
+      for (const m of fs.readFileSync(file, 'utf8').matchAll(/entityType:\s*'([a-z_]+)'/g)) audited.add(m[1]);
+    }
+    const PARTS = new Set(['cad_comment', 'cad_revision', 'employee_flow_item', 'progress_report_day', 'partner_resource']);
+    const unlinked = [...audited].filter((t) => !PARTS.has(t) && recordLink(t, 'list') === null).sort();
+    check(
+      `every type the API audits under links to a screen (${audited.size} types read off the source)`,
+      unlinked.length === 0,
+      unlinked.join(', '),
+    );
+    const appSource = fs.readFileSync(path.resolve(__dirname, '../../web/src/App.tsx'), 'utf8');
+    const routes = [...appSource.matchAll(/path="([^"]+)"/g)].map((m) => m[1]);
+    const routed = (link: string) => {
+      const bare = link.split('?')[0].replace(/\/$/, '');
+      const segs = bare.split('/');
+      return routes.some((r) => {
+        const rs = r.split('/');
+        return rs.length === segs.length && rs.every((x, i) => x.startsWith(':') || x === segs[i]);
+      });
+    };
+    const misrouted = [...audited]
+      .filter((t) => !PARTS.has(t))
+      .flatMap((t) => [recordLink(t, 'list'), recordLink(t, 'r1')])
+      .filter((l): l is string => !!l && !routed(l));
+    check(
+      'and every such link — the list and a record — is a path App.tsx declares (no "No screen at this address")',
+      misrouted.length === 0,
+      [...new Set(misrouted)].join(', '),
+    );
+    // A report's "Open the list" (G-CHAIN's RFQ and Canvass pointed at
+    // /g-chain/rfqs and /g-chain/canvasses, which no route answers).
+    const reportLists = ['web/src/pages/chain/ChainReports.tsx', 'web/src/pages/finance/Reports.tsx'].flatMap((f) =>
+      [...fs.readFileSync(path.resolve(__dirname, '../..', f), 'utf8').matchAll(/list: '(\/[^']+)'/g)].map((m) => m[1]),
+    );
+    const deadReports = reportLists.filter((l) => !routed(l));
+    check(
+      `every report's "Open the list" is a path App.tsx declares (${reportLists.length} read)`,
+      reportLists.length > 0 && deadReports.length === 0,
+      deadReports.join(', '),
+    );
+    check(
+      "a progress billing's printed list opens the Progress & Billing register; a PDF layout's setting opens Admin › PDF Templates",
+      recordLink('progress_billing', 'list') === '/g-ops/progress' &&
+        recordLink('setting', 'pdfTemplate.quotation') === '/admin/pdf-templates' &&
+        recordLink('setting', 'pipeline.stages') === '/admin/pipeline-stages',
+    );
+  }
 
   // ── The list pattern's URL (web/src/lib/listUrl.ts, rule 16) ───────────────
   console.log('\nList URLs, filters and saved views');

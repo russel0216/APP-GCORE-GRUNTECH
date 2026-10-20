@@ -1,10 +1,10 @@
 import { useEffect, useId, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { useAuth, mayView } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
-import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, formatDate, formatMoney, useToast } from '../../components/ui';
+import { ActiveBadge, Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, formatDate, formatMoney, useToast } from '../../components/ui';
 import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { EmployeeEvaluationsTab } from '../hr/EmployeeEvaluationsTab';
@@ -12,6 +12,7 @@ import { EmployeeFlowTab } from '../hr/PeopleFlow';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople, type PersonRow } from '../../components/People';
 import { FaceSamplesPanel } from '../hr/FaceSamples';
+import { Stat } from '../../components/charts';
 
 const EMPLOYMENT_TYPES = [
   { value: 'REGULAR', label: 'Regular' },
@@ -27,8 +28,8 @@ interface PositionOption {
   id: string;
   code: string;
   title: string;
-  departmentId: string | null;
-  departmentName: string | null;
+  /** The level of the role the position counts (2026-10-19). */
+  level: number | null;
   authorisedHeadcount: number;
   filled: number;
 }
@@ -43,7 +44,7 @@ interface TeamOption {
 
 interface EmployeeRow {
   id: string;
-  employeeNo: string;
+  employeeNo: string | null;
   firstName: string;
   lastName: string;
   middleName: string | null;
@@ -56,6 +57,8 @@ interface EmployeeRow {
   position: string | null;
   positionId: string | null;
   positionRef: { id: string; code: string; title: string } | null;
+  /** Positions held beside the main one (2026-10-19). */
+  extraPositions?: { position: { id: string; code: string; title: string } }[];
   employmentType: string;
   dateHired: string | null;
   dateRegularized: string | null;
@@ -70,7 +73,6 @@ interface EmployeeRow {
   emergencyContactPhone: string | null;
   isActive: boolean;
   notes: string | null;
-  department: { id: string; name: string } | null;
   /** The industry team they work in — an Industry row. */
   industry: { id: string; code: string; name: string } | null;
   user: {
@@ -81,7 +83,17 @@ interface EmployeeRow {
     invitePending?: boolean;
     supervisor?: { id: string; name: string } | null;
   } | null;
-  // Only present when the caller holds ghr.employee_rates.view_all
+  /*
+    What the viewer may do with this record, from `GET /employees/:id`
+    (2026-10-18): Modify (Edit All, or Edit Own on their own record), and
+    the pay fields — read and changed with the rates' View/Edit All, or
+    View/Edit Own on their own record alone.
+  */
+  canEdit?: boolean;
+  canSeeRates?: boolean;
+  canEditRates?: boolean;
+  // Only present when the caller may see this record's pay data
+  // (ghr.employee_rates.view_all, or view_own on their own record)
   dailyRate?: number | null;
   burdenMultiplier?: number | null;
   sssNo?: string | null;
@@ -103,15 +115,15 @@ export function Employees() {
   const [recordError, setRecordError] = useState<unknown>(null);
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
-  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
   const [teams, setTeams] = useState<TeamOption[]>([]);
   const [positions, setPositions] = useState<PositionOption[]>([]);
 
-  const seeRates = can('ghr.employee_rates.view_all');
+  // The pay columns: View All fills every row, View Own the viewer's own
+  // (2026-10-18) — the API strips every other row's rates.
+  const seeRates = mayView(can, 'ghr', 'employee_rates');
   const seeUsers = can('admin.users.view_all');
 
   useEffect(() => {
-    api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
     // Every industry, switched-off ones included: a record may still carry one.
     api.get<TeamOption[]>('/reference/industries').then(setTeams).catch(() => {});
   }, []);
@@ -159,7 +171,7 @@ export function Employees() {
       label: 'Employee No.',
       sortKey: 'employeeNo',
       width: '12rem',
-      render: (e) => <span className="mono">{e.employeeNo}</span>,
+      render: (e) => (e.employeeNo ? <span className="mono">{e.employeeNo}</span> : <span className="faint">none yet</span>),
     },
     {
       key: 'name',
@@ -174,10 +186,12 @@ export function Employees() {
             {e.positionRef?.title ?? e.position ?? '—'}
             {!e.positionId && e.position ? ' · unclassified' : ''}
           </div>
+          {!!e.extraPositions?.length && (
+            <div className="faint">Also holds: {e.extraPositions.map((x) => x.position.title).join(', ')}</div>
+          )}
         </div>
       ),
     },
-    { key: 'department', label: 'Department', render: (e) => e.department?.name ?? '—' },
     { key: 'industry', label: 'Team', render: (e) => e.industry?.name ?? '—' },
     {
       key: 'employmentType',
@@ -239,7 +253,7 @@ export function Employees() {
       key: 'isActive',
       label: 'Status',
       render: (e) => (
-        <span className={`badge ${e.isActive ? 'ok' : ''}`}>{e.isActive ? 'Active' : 'Inactive'}</span>
+        <ActiveBadge active={e.isActive} />
       ),
     },
   ];
@@ -273,11 +287,6 @@ export function Employees() {
             ],
           },
           {
-            key: 'departmentId',
-            label: 'Department',
-            options: departments.map((d) => ({ value: d.id, label: d.name })),
-          },
-          {
             key: 'industryId',
             label: 'Team',
             options: [{ value: 'none', label: 'No team yet' }, ...teams.map((t) => ({ value: t.id, label: t.name }))],
@@ -290,11 +299,40 @@ export function Employees() {
               { value: 'none', label: 'No plantilla position' },
               ...positions.map((p) => ({
                 value: p.id,
-                label: p.departmentName ? `${p.title} · ${p.departmentName}` : p.title,
+                label: p.level != null ? `${p.title} · Level ${p.level}` : p.title,
               })),
             ],
           },
+          {
+            key: 'login',
+            label: 'Login',
+            options: [
+              { value: 'none', label: 'No login yet' },
+              { value: 'yes', label: 'Has a login' },
+            ],
+          },
+          {
+            key: 'number',
+            label: 'Employee number',
+            options: [
+              { value: 'none', label: 'No employee number yet' },
+              { value: 'yes', label: 'Has an employee number' },
+            ],
+          },
         ]}
+        summary={(raw) => {
+          const sum = raw as unknown as { withoutNumber: number } | undefined;
+          if (!sum) return null;
+          return (
+            <Stat
+              label="Without an employee number"
+              value={sum.withoutNumber}
+              accent={sum.withoutNumber > 0 ? 'warn' : undefined}
+              sub="GTC-0001-14 — the sequence, then the year hired; no quotation number is issued without one"
+              to="/g-hr/employees?number=none&isActive=true"
+            />
+          );
+        }}
         menuItems={
           can('ghr.employees.create')
             ? [
@@ -336,7 +374,6 @@ export function Employees() {
           employee={record}
           initialTab={initialTab}
           flaggedSampleId={flaggedSampleId}
-          departments={departments}
           teams={teams}
           positions={positions}
           onClose={closeRecord}
@@ -409,7 +446,7 @@ interface RegisterOption {
   firstName: string;
   lastName: string;
   position: string | null;
-  department: { id: string; name: string } | null;
+  industry: { id: string; code: string; name: string } | null;
   hasUser: boolean;
 }
 
@@ -418,11 +455,9 @@ interface RegisterOption {
  * from itself, so Admin › Users needs nothing of the register page.
  */
 export function NewPersonModal({ door, onClose, onSaved }: { door: PersonDoor; onClose: () => void; onSaved: () => void }) {
-  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
   const [teams, setTeams] = useState<TeamOption[]>([]);
   const [positions, setPositions] = useState<PositionOption[]>([]);
   useEffect(() => {
-    api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
     api.get<TeamOption[]>('/reference/industries').then(setTeams).catch(() => {});
     // The plantilla is HR's list; an administrator without it types the title.
     api.get<PositionOption[]>('/positions/lookup').then(setPositions).catch(() => {});
@@ -431,7 +466,6 @@ export function NewPersonModal({ door, onClose, onSaved }: { door: PersonDoor; o
     <EmployeeForm
       employee={null}
       door={door}
-      departments={departments}
       teams={teams}
       positions={positions}
       onClose={onClose}
@@ -445,9 +479,8 @@ function EmployeeForm({
   door = 'hr',
   initialTab,
   flaggedSampleId,
-  departments,
   teams,
-  positions,
+  positions: _positions,
   onClose,
   onSaved,
 }: {
@@ -458,7 +491,6 @@ function EmployeeForm({
   initialTab?: EmployeeTab;
   /** A face sample Face health flagged (`?sample=`), marked on the Face samples tab. */
   flaggedSampleId?: string | null;
-  departments: { id: string; name: string }[];
   teams: TeamOption[];
   positions: PositionOption[];
   onClose: () => void;
@@ -466,8 +498,9 @@ function EmployeeForm({
 }) {
   const { can } = useAuth();
   const toast = useToast();
-  const seeRates = can('ghr.employee_rates.view_all');
-  const setRates = can('ghr.employee_rates.edit_all');
+  // Per record, as the API decides it (2026-10-18: own rates for an Own holder).
+  const seeRates = employee?.canSeeRates ?? can('ghr.employee_rates.view_all');
+  const setRates = employee?.canEditRates ?? can('ghr.employee_rates.edit_all');
   const seeEvaluations = !!employee && can('ghr.evaluations.view_all');
   const seeFlow = !!employee && can('ghr.people_flow.view_all');
   // The samples the clock matches this person against: HR's to look at and
@@ -511,7 +544,7 @@ function EmployeeForm({
     the right `POST /employees/:id/login` itself checks — so an administrator
     holding only the second is not shown the branch with nothing to save it.
   */
-  const mayEdit = employee ? can('ghr.employees.edit_all') : forExisting ? mayLinkExisting : mayNewPerson;
+  const mayEdit = employee ? (employee.canEdit ?? can('ghr.employees.edit_all')) : forExisting ? mayLinkExisting : mayNewPerson;
   const [existingId, setExistingId] = useState('');
   const [registerQ, setRegisterQ] = useState('');
   /** null while loading, 'failed' when the lookup refused (the viewer cannot read the register). */
@@ -541,10 +574,10 @@ function EmployeeForm({
     middleName: employee?.middleName ?? '',
     suffix: employee?.suffix ?? '',
     userId: employee?.user?.id ?? '',
-    departmentId: employee?.department?.id ?? '',
     industryId: employee?.industry?.id ?? '',
     position: employee?.position ?? '',
     positionId: employee?.positionId ?? '',
+    extraPositionIds: (employee?.extraPositions ?? []).map((x) => x.position.id),
     employmentType: employee?.employmentType ?? 'REGULAR',
     dateHired: employee?.dateHired?.slice(0, 10) ?? '',
     dateRegularized: employee?.dateRegularized?.slice(0, 10) ?? '',
@@ -602,22 +635,6 @@ function EmployeeForm({
   // A login is told apart by the email it signs in with, so that is what the
   // choice shows beside the name.
   const loginOptions: PersonRow[] = users.map((u) => ({ ...u, position: u.email ?? u.position }));
-  const held = employee?.positionRef ?? null;
-  const positionOptions: PositionOption[] =
-    held && !positions.some((p) => p.id === held.id)
-      ? [
-          ...positions,
-          {
-            id: held.id,
-            code: held.code,
-            title: `${held.title} (inactive)`,
-            departmentId: null,
-            departmentName: null,
-            authorisedHeadcount: 0,
-            filled: 0,
-          },
-        ]
-      : positions;
 
   // The list never carries pay data — fetch the full record when editing so the
   // rate fields are populated for someone allowed to see them.
@@ -721,7 +738,6 @@ function EmployeeForm({
         middleName: form.middleName || null,
         suffix: form.suffix || null,
         userId: form.userId || null,
-        departmentId: form.departmentId || null,
         industryId: form.industryId || null,
         employmentType: form.employmentType,
         dateHired: form.dateHired || null,
@@ -746,10 +762,9 @@ function EmployeeForm({
       // The position goes through the server's one writer of the mirror. Sent
       // only when it changed, so an employee on a since-deactivated position
       // can still be saved for something else.
-      if (!employee || form.positionId !== (employee.positionId ?? '')) {
-        payload.positionId = form.positionId || null;
-      }
-      if (!form.positionId) payload.position = form.position.trim() || null;
+      // The title is the highest role once there is a login (ROLE_REV1, 2026-10-19);
+      // until then it is free text.
+      if (!employee?.user && !form.positionId) payload.position = form.position.trim() || null;
 
       if (setRates) {
         payload.dailyRate = form.dailyRate === '' ? null : Number(form.dailyRate);
@@ -995,76 +1010,30 @@ function EmployeeForm({
       {tab === 'employment' && (
         <>
           <div className="grid grid-2">
-            <Field label="Employee number" hint="Leave blank to auto-generate">
+            <Field label="Employee number" hint="GTC-0001-14 — the sequence, then the year hired. Leave blank for the next number (the year hired from the date below).">
               <input
                 className="mono"
                 value={form.employeeNo}
+                placeholder="GTC-0001-14"
                 onChange={(e) => setForm({ ...form, employeeNo: e.target.value })}
               />
             </Field>
             <div>
-              <Field
-                label="Position"
-                hint="From the plantilla. Pick none to type a title that has no authorised slot yet."
-              >
-                <select
-                  value={form.positionId}
-                  onChange={(e) => {
-                    const next = positions.find((p) => p.id === e.target.value);
-                    setForm({
-                      ...form,
-                      positionId: e.target.value,
-                      // A position that sits in a department suggests it.
-                      departmentId:
-                        next?.departmentId && !form.departmentId ? next.departmentId : form.departmentId,
-                    });
-                  }}
-                >
-                  <option value="">— none (unclassified) —</option>
-                  {positionOptions.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.title}
-                      {p.departmentName ? ` · ${p.departmentName}` : ''} ({p.filled}/{p.authorisedHeadcount})
-                    </option>
-                  ))}
-                </select>
-              </Field>
+              {employee?.user ? (
+                <Field label="Title" hint="Their highest role on Admin › Users — what documents print">
+                  <input readOnly value={employee.position ?? ''} placeholder="— no role yet —" />
+                </Field>
+              ) : (
+                <Field label="Title" hint="Free text until they have a login and roles — then the highest role is their title">
+                  <input value={form.position} onChange={(e) => setForm({ ...form, position: e.target.value })} />
+                </Field>
+              )}
               {employee && can('ghr.passports.view_all') && (
                 <p className="muted">
                   <Link to={`/g-hr/academy/passports/${employee.id}`}>Training passport →</Link>
                 </p>
               )}
             </div>
-            {form.positionId ? (
-              <Field label="Title" hint="Set by the plantilla — rename it there">
-                <input
-                  readOnly
-                  value={
-                    positionOptions.find((p) => p.id === form.positionId)?.title ?? held?.title ?? ''
-                  }
-                />
-              </Field>
-            ) : (
-              <Field label="Title (unclassified)" hint="Free text, until HR adds it to the plantilla">
-                <input
-                  value={form.position}
-                  onChange={(e) => setForm({ ...form, position: e.target.value })}
-                />
-              </Field>
-            )}
-            <Field label="Department">
-              <select
-                value={form.departmentId}
-                onChange={(e) => setForm({ ...form, departmentId: e.target.value })}
-              >
-                <option value="">— none —</option>
-                {departments.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
             <Field label="Team" hint="The sales team they are on — KAT, HIT, UIT, GIB or SIT — shown to them on their invitation and My Account">
               <select value={form.industryId} onChange={(e) => setForm({ ...form, industryId: e.target.value })}>
                 <option value="">— no team yet —</option>
@@ -1177,7 +1146,7 @@ function EmployeeForm({
                           ? registerQ.trim()
                             ? 'No active employee without a login matches'
                             : 'Everyone active on the register already has a login'
-                          : 'Their record gives the login its name, department, position and mobile'
+                          : 'Their record gives the login its name, position and mobile'
                     }
                   >
                     <select value={existingId} onChange={(e) => setExistingId(e.target.value)}>
@@ -1195,7 +1164,7 @@ function EmployeeForm({
               ) : (
                 <p className="muted">
                   One save makes the employee record and the login. Name them on the Person tab; the Employment tab
-                  takes their number, position, department and team.
+                  takes their number, position and team.
                 </p>
               )}
             </>
@@ -1261,10 +1230,15 @@ function EmployeeForm({
             <Field
               label={linked ? 'Login account' : 'Or link a login that already exists'}
               htmlFor={loginField}
-              hint="Who they sign in as. Reporting line is set on the user account, since that is what approvals route by."
+              hint={
+                can('admin.users.edit_all')
+                  ? "Who they sign in as — the login takes this record's name, number, mobile and position. Reporting line is set on the user account, since that is what approvals route by."
+                  : "Who they sign in as. Linking or unlinking a login is an administrator's (admin.users.edit_all)."
+              }
             >
               <PersonSelect
                 id={loginField}
+                disabled={!can('admin.users.edit_all')}
                 value={form.userId}
                 onChange={(id) => setForm({ ...form, userId: id })}
                 people={loginOptions}

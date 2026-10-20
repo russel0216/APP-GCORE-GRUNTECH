@@ -48,6 +48,8 @@ import {
   teamReadiness,
 } from '../shared/academy';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit as assertCanEditOwn, mayEdit, viewScope } from '../shared/ownScope';
+import { visibleOwners } from '../shared/team';
 
 /**
  * Gruntech Academy — G-HR › Academy (item 13).
@@ -109,10 +111,13 @@ const requirementSelect = {
 
 type RequirementRow = Prisma.CourseRequirementGetPayload<{ select: typeof requirementSelect }>;
 
-/** "Everyone", "Engineering", "Site Safety Officer", "Engineering · Welder". */
+/**
+ * "Everyone", "Site Safety Officer" — or, for a row stored before the
+ * department went (2026-10-19), "Department (retired): Engineering · Welder".
+ */
 function requirementText(r: RequirementRow): string {
   if (!r.department && !r.position) return 'Everyone';
-  return [r.department?.name, r.position?.title].filter(Boolean).join(' · ');
+  return [r.department && `Department (retired): ${r.department.name}`, r.position?.title].filter(Boolean).join(' · ');
 }
 
 /**
@@ -143,6 +148,14 @@ function courseListWhere(q: ListQuery): Prisma.CourseWhereInput {
 
 const COURSE_SORTS = ['code', 'title', 'category', 'hours', 'validityMonths'];
 
+/**
+ * "Own" on the course master (2026-10-18) is a course the caller added
+ * (`Course.createdById`, set on create and by the import from that day):
+ * View Own lists and opens those alone, Edit Own changes those alone. A
+ * course added before carries no author and is View All's / Edit All's.
+ */
+const coursesAddedBy = (me: ResolvedUser): Prisma.CourseWhereInput => ({ createdById: me.id });
+
 /** What the list shows of a course, the screen's and the paper's: the counts are read with it. */
 const courseListSelect = (now: Date) =>
   ({
@@ -154,6 +167,7 @@ const courseListSelect = (now: Date) =>
     validityMonths: true,
     requiresAssessment: true,
     isActive: true,
+    createdById: true,
     requirements: { select: requirementSelect },
     _count: {
       select: {
@@ -165,10 +179,11 @@ const courseListSelect = (now: Date) =>
 
 courseRoutes.get(
   '/',
-  require_('ghr.courses.view_all'),
+  requireView('ghr', 'courses'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = courseListWhere(q);
+    const me = currentUser(req);
+    const where = ownOnly(me, 'ghr', 'courses', courseListWhere(q), (ids) => ({ createdById: { in: ids } }));
     const [rows, total] = await Promise.all([
       prisma.course.findMany({
         where,
@@ -181,8 +196,9 @@ courseRoutes.get(
     ]);
     res.json(
       listResult(
-        rows.map(({ requirements, _count, hours, ...c }) => ({
+        rows.map(({ requirements, _count, hours, createdById, ...c }) => ({
           ...c,
+          canEdit: mayEdit(me, 'ghr', 'courses', createdById === me.id, createdById),
           hours: Number(hours),
           requirementCount: requirements.length,
           requiredOf: requirements.map(requirementText),
@@ -205,10 +221,11 @@ courseRoutes.get(
  */
 courseRoutes.get(
   '/pdf',
-  require_('ghr.courses.view_all'),
+  requireView('ghr', 'courses'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = courseListWhere(q);
+    const me = currentUser(req);
+    const where = ownOnly(me, 'ghr', 'courses', courseListWhere(q), (ids) => ({ createdById: { in: ids } }));
     const f = q.filters;
     const [rows, count] = await Promise.all([
       prisma.course.findMany({
@@ -305,6 +322,7 @@ async function loadCourse(id: string) {
       validityMonths: true,
       requiresAssessment: true,
       isActive: true,
+      createdById: true,
       createdAt: true,
       updatedAt: true,
       requirements: { select: requirementSelect, orderBy: { createdAt: 'asc' } },
@@ -321,9 +339,13 @@ async function loadCourse(id: string) {
 
 courseRoutes.get(
   '/:id',
-  require_('ghr.courses.view_all'),
+  requireView('ghr', 'courses'),
   handler(async (req, res) => {
-    res.json(await loadCourse(req.params.id));
+    const me = currentUser(req);
+    const course = await loadCourse(req.params.id);
+    const isMine = course.createdById === me.id;
+    assertCanView(me, 'ghr', 'courses', isMine, course.createdById);
+    res.json({ ...course, canEdit: mayEdit(me, 'ghr', 'courses', isMine, course.createdById) });
   }),
 );
 
@@ -354,7 +376,10 @@ courseRoutes.post(
   handler(async (req, res) => {
     const body = parseBody(courseSchema, req.body);
     await assertCodeFree(body.code);
-    const course = await prisma.course.create({ data: courseData(body), select: { id: true, code: true, title: true } });
+    const course = await prisma.course.create({
+      data: { ...courseData(body), createdById: currentUser(req).id },
+      select: { id: true, code: true, title: true },
+    });
     await audit(
       {
         entityType: 'course',
@@ -365,7 +390,9 @@ courseRoutes.post(
       },
       req,
     );
-    res.status(201).json(await loadCourse(course.id));
+    // The author may edit what they added — Edit Own's whole meaning here.
+    const created = await loadCourse(course.id);
+    res.status(201).json({ ...created, canEdit: mayEdit(currentUser(req), 'ghr', 'courses', true) });
   }),
 );
 
@@ -376,9 +403,11 @@ courseRoutes.post(
  */
 courseRoutes.patch(
   '/:id',
-  require_('ghr.courses.edit_all'),
+  requireEdit('ghr', 'courses'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const before = await loadCourse(req.params.id);
+    assertCanEditOwn(me, 'ghr', 'courses', before.createdById === me.id);
     const body = parseBody(courseSchema.partial(), req.body);
     if (body.code) await assertCodeFree(body.code, before.id);
     const data: Prisma.CourseUpdateInput = {};
@@ -415,7 +444,7 @@ courseRoutes.patch(
       },
       req,
     );
-    res.json(after);
+    res.json({ ...after, canEdit: mayEdit(me, 'ghr', 'courses', after.createdById === me.id, after.createdById) });
   }),
 );
 
@@ -426,14 +455,19 @@ const requirementRow = z.object({
 
 /**
  * Replaces the whole requirement list — the form edits it as one table.
- * Takes `[{ departmentId?, positionId? }]` (or `{ requirements: [...] }`).
- * Both empty on a row means everyone.
+ * Takes `[{ positionId? }]` (or `{ requirements: [...] }`); an empty row
+ * means everyone. The department is gone (2026-10-19, the owner's call): a
+ * row naming one is accepted only when the course already holds that exact
+ * row — the form sends the list back whole — so a requirement stored before
+ * stays until HR removes it, and no new one is made.
  */
 courseRoutes.put(
   '/:id/requirements',
-  require_('ghr.courses.edit_all'),
+  requireEdit('ghr', 'courses'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const before = await loadCourse(req.params.id);
+    assertCanEditOwn(me, 'ghr', 'courses', before.createdById === me.id);
     const raw = Array.isArray(req.body) ? req.body : (req.body as { requirements?: unknown })?.requirements;
     const rows = parseBody(z.array(requirementRow).max(100), raw ?? []);
 
@@ -446,13 +480,19 @@ courseRoutes.put(
       seen.add(key);
       unique.push(row);
     }
-    const deptIds = [...new Set(unique.map((r) => r.departmentId).filter((x): x is string => !!x))];
+    const kept = new Set(
+      (
+        await prisma.courseRequirement.findMany({
+          where: { courseId: before.id, departmentId: { not: null } },
+          select: { departmentId: true, positionId: true },
+        })
+      ).map((r) => `${r.departmentId}|${r.positionId ?? null}`),
+    );
+    if (unique.some((r) => r.departmentId && !kept.has(`${r.departmentId}|${r.positionId}`))) {
+      throw badRequest('A requirement is everyone or a plantilla position — departments are no longer used');
+    }
     const posIds = [...new Set(unique.map((r) => r.positionId).filter((x): x is string => !!x))];
-    const [depts, positions] = await Promise.all([
-      prisma.department.count({ where: { id: { in: deptIds } } }),
-      prisma.position.count({ where: { id: { in: posIds } } }),
-    ]);
-    if (depts !== deptIds.length) throw badRequest('One of the departments no longer exists');
+    const positions = await prisma.position.count({ where: { id: { in: posIds } } });
     if (positions !== posIds.length) throw badRequest('One of the plantilla positions no longer exists');
 
     await prisma.$transaction(async (tx) => {
@@ -475,7 +515,7 @@ courseRoutes.put(
       },
       req,
     );
-    res.json(after);
+    res.json({ ...after, canEdit: mayEdit(me, 'ghr', 'courses', after.createdById === me.id, after.createdById) });
   }),
 );
 
@@ -558,14 +598,15 @@ const courseSpec: ImportSpec<CourseImportRecord> = {
 export const courseImport: Registered = {
   spec: courseSpec as unknown as ImportSpec<never>,
   permission: 'ghr.courses.create',
-  write: async (records) => {
+  write: async (records, actor) => {
     for (const { record, existingId } of records as unknown as {
       record: CourseImportRecord;
       existingId: string | null;
     }[]) {
       const data = { ...record, hours: new Prisma.Decimal(record.hours) };
       if (existingId) await prisma.course.update({ where: { id: existingId }, data });
-      else await prisma.course.create({ data });
+      // Who added it (2026-10-18): the importer, as on "+ New course".
+      else await prisma.course.create({ data: { ...data, createdById: actor?.id ?? null } });
     }
   },
 };
@@ -646,7 +687,7 @@ const detailSelect = {
           lastName: true,
           position: true,
           userId: true,
-          department: { select: { id: true, name: true } },
+          industry: { select: { id: true, code: true, name: true } },
           user: { select: { email: true } },
         },
       },
@@ -1126,14 +1167,14 @@ sessionRoutes.get(
         // No widths: each column from what it holds, so a head never breaks
         // mid-word ("SCOR / E" did in fixed shares). "No." counts the lines;
         // "Number" is the employee's.
-        head: ['No.', 'Number', 'Name', 'Position', 'Department', 'Result', 'Score'],
+        head: ['No.', 'Number', 'Name', 'Position', 'Team', 'Result', 'Score'],
         align: ['right', 'left', 'left', 'left', 'left', 'left', 'right'],
         rows: s.attendees.map((a, i) => [
           String(i + 1),
-          a.employee.employeeNo,
+          a.employee.employeeNo ?? '—',
           fullName(a.employee),
           a.employee.position ?? '',
-          a.employee.department?.name ?? '',
+          a.employee.industry?.code ?? '',
           // Blank until the trainer records one — "Pending" on every line of
           // a sheet handed round to sign would read as a result.
           a.result === 'PENDING' ? '' : statusLabel(a.result),
@@ -1669,7 +1710,7 @@ registerAttachmentGuard('training_record', async (user, id) => {
     where: { id },
     select: { employee: { select: { userId: true } } },
   });
-  return !!rec && rec.employee.userId === user.id;
+  return !!rec && !!rec.employee.userId && visibleOwners(user, 'ghr', 'passports').includes(rec.employee.userId);
 });
 passportRoutes.use(authenticate);
 
@@ -1721,12 +1762,20 @@ passportRoutes.get(
 /** The verification queue: external certificates waiting on HR. */
 passportRoutes.get(
   '/records',
-  require_('ghr.passports.view_all'),
+  requireView('ghr', 'passports'),
   handler(async (req, res) => {
     const status = typeof req.query.status === 'string' ? req.query.status : 'PENDING_VERIFICATION';
     if (!['PENDING_VERIFICATION', 'VERIFIED', 'REJECTED'].includes(status)) throw badRequest('Unknown status');
+    const me = currentUser(req);
     const rows = await prisma.trainingRecord.findMany({
-      where: { status: status as 'PENDING_VERIFICATION' | 'VERIFIED' | 'REJECTED', source: 'EXTERNAL' },
+      // View Own (2026-10-18): the caller's own certificates alone.
+      where: ownOnly<Prisma.TrainingRecordWhereInput>(
+        me,
+        'ghr',
+        'passports',
+        { status: status as 'PENDING_VERIFICATION' | 'VERIFIED' | 'REJECTED', source: 'EXTERNAL' },
+        (ids) => ({ employee: { userId: { in: ids } } }),
+      ),
       orderBy: { createdAt: 'asc' },
       take: 100,
       select: {
@@ -1755,7 +1804,7 @@ passportRoutes.get(
 
 passportRoutes.get(
   '/me',
-  requireAny('ghr.passport.view_own', 'ghr.passports.view_all'),
+  requireAny('ghr.passport.view_own', 'ghr.passports.view_all', 'ghr.passports.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const emp = await myEmployee(me.id);
@@ -1770,11 +1819,15 @@ passportRoutes.get(
  * over the computed rows: a few hundred people at most, which is cheaper
  * than a second copy of the numbers. `?ids=` narrows to the rows ticked.
  */
-async function passportRows(q: ListQuery) {
+async function passportRows(q: ListQuery, me: ResolvedUser) {
   const f = q.filters;
   const and: Prisma.EmployeeWhereInput[] = [];
+  // View Own on the register (2026-10-18): the caller's own passport alone.
+  // View Team (2026-10-19): the team's passports.
+  if (viewScope(me, 'ghr', 'passports') !== 'all') and.push({ userId: { in: visibleOwners(me, 'ghr', 'passports') } });
   if (f.active !== 'all') and.push({ isActive: f.active === 'false' ? false : true });
-  if (f.departmentId) and.push({ departmentId: f.departmentId === 'none' ? null : f.departmentId });
+  // The team (2026-10-19 — the department's filter before it went): an id or `none`.
+  if (f.teamId) and.push({ industryId: f.teamId === 'none' ? null : f.teamId });
   if (f.positionId) and.push({ positionId: f.positionId === 'none' ? null : f.positionId });
   if (q.search) {
     and.push({
@@ -1799,7 +1852,7 @@ async function passportRows(q: ListQuery) {
       isActive: true,
       departmentId: true,
       positionId: true,
-      department: { select: { id: true, name: true } },
+      industry: { select: { id: true, code: true, name: true } },
     },
     orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
   });
@@ -1811,7 +1864,7 @@ async function passportRows(q: ListQuery) {
       employeeNo: e.employeeNo,
       name: `${e.lastName}, ${e.firstName}`,
       position: e.position,
-      department: e.department,
+      team: e.industry,
       isActive: e.isActive,
       ...r,
     };
@@ -1826,17 +1879,17 @@ async function passportRows(q: ListQuery) {
   if (q.sort === 'pct') rows.sort((a, b) => ((a.pct ?? 101) - (b.pct ?? 101)) * dir);
   else if (q.sort === 'required') rows.sort((a, b) => (a.required - b.required) * dir);
   else if (q.sort === 'name') rows.sort((a, b) => a.name.localeCompare(b.name) * dir);
-  else if (q.sort === 'employeeNo') rows.sort((a, b) => a.employeeNo.localeCompare(b.employeeNo) * dir);
+  else if (q.sort === 'employeeNo') rows.sort((a, b) => (a.employeeNo ?? '').localeCompare(b.employeeNo ?? '') * dir);
   return rows;
 }
 
 /** The register: every employee with their readiness (`passportRows`). */
 passportRoutes.get(
   '/',
-  require_('ghr.passports.view_all'),
+  requireView('ghr', 'passports'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const rows = await passportRows(q);
+    const rows = await passportRows(q, currentUser(req));
     res.json(listResult(rows.slice((q.page - 1) * q.pageSize, q.page * q.pageSize), rows.length, q));
   }),
 );
@@ -1859,16 +1912,14 @@ const STANDING_NAMED: Record<string, string> = {
  */
 passportRoutes.get(
   '/pdf',
-  require_('ghr.passports.view_all'),
+  requireView('ghr', 'passports'),
   handler(async (req, res) => {
     const q = listQuery(req);
     const f = q.filters;
-    const all = await passportRows(q);
+    const all = await passportRows(q, currentUser(req));
     const rows = all.slice(0, LIST_CAP);
-    const [department, position] = await Promise.all([
-      f.departmentId && f.departmentId !== 'none'
-        ? prisma.department.findUnique({ where: { id: f.departmentId }, select: { name: true } })
-        : null,
+    const [team, position] = await Promise.all([
+      f.teamId && f.teamId !== 'none' ? prisma.industry.findUnique({ where: { id: f.teamId }, select: { name: true } }) : null,
       f.positionId && f.positionId !== 'none'
         ? prisma.position.findUnique({ where: { id: f.positionId }, select: { title: true } })
         : null,
@@ -1876,7 +1927,7 @@ passportRoutes.get(
     const reference = listReference(all.length, rows.length, ['person', 'people'], [
       q.search && `search "${q.search}"`,
       f.state && STANDING_NAMED[f.state],
-      f.departmentId && (f.departmentId === 'none' ? 'no department' : `department ${department?.name ?? 'not found'}`),
+      f.teamId && (f.teamId === 'none' ? 'no team' : `team ${team?.name ?? 'not found'}`),
       f.positionId && (f.positionId === 'none' ? 'no plantilla position' : `position ${position?.title ?? 'not found'}`),
       f.active === 'false' ? 'inactive employees' : f.active === 'all' ? 'active and inactive employees' : null,
       f.ids && 'the rows selected',
@@ -1894,9 +1945,9 @@ passportRoutes.get(
           head: ['Number', 'Employee', 'Position', 'Readiness', 'Held', 'Expiring', 'Gaps', 'Awaiting HR'],
           align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'right'],
           rows: rows.map((r) => [
-            r.employeeNo,
+            r.employeeNo ?? '—',
             r.isActive ? r.name : { title: r.name, body: 'Inactive' },
-            { title: r.position ?? 'Unclassified', body: r.department?.name ?? 'No department' },
+            { title: r.position ?? 'Unclassified', body: r.team?.code ?? 'No team' },
             r.pct == null ? 'Nothing required' : `${r.pct}%`,
             r.required ? `${r.held} of ${r.required}` : '—',
             String(r.expiring),
@@ -1918,12 +1969,14 @@ passportRoutes.get(
 
 passportRoutes.get(
   '/:employeeId',
-  requireAny('ghr.passports.view_all', 'ghr.passport.view_own'),
+  // Training Passports › View Own (2026-10-18) opens the caller's own, as
+  // My Training Passport's View Own always did.
+  requireAny('ghr.passports.view_all', 'ghr.passports.view_own', 'ghr.passport.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     if (!can(me, 'ghr.passports.view_all')) {
-      const emp = await myEmployee(me.id);
-      if (emp?.id !== req.params.employeeId) throw notFound('Employee not found');
+      const emp = await prisma.employee.findUnique({ where: { id: req.params.employeeId }, select: { userId: true } });
+      if (!emp?.userId || !visibleOwners(me, 'ghr', 'passports').includes(emp.userId)) throw notFound('Employee not found');
     }
     res.json(await presentPassport(req.params.employeeId, me));
   }),
@@ -2083,7 +2136,10 @@ const recordPatchSchema = externalSchema.omit({ courseId: true }).partial();
 /** HR corrects a verified or rejected external certificate. Session records are the session's. */
 passportRoutes.patch(
   '/records/:id',
-  require_('ghr.passports.edit_all'),
+  // Edit Own (2026-10-18) reaches only the caller's own passport — and a
+  // correction of one's own record is refused below, as it always was for
+  // Edit All: HR never corrects their own.
+  requireEdit('ghr', 'passports'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const before = await prisma.trainingRecord.findUnique({
@@ -2104,6 +2160,7 @@ passportRoutes.patch(
     if (!before) throw notFound('Training record not found');
     if (before.source !== 'EXTERNAL') throw conflict('A session record is the session’s result — it cannot be edited');
     if (before.status === 'PENDING_VERIFICATION') throw conflict('This certificate is waiting on HR — decide it first');
+    assertCanEditOwn(me, 'ghr', 'passports', before.employee.userId === me.id);
     if (before.employee.userId === me.id) throw forbidden('You cannot correct your own training record');
     const body = parseBody(recordPatchSchema, req.body);
     const data: Prisma.TrainingRecordUpdateInput = {};
@@ -2210,7 +2267,9 @@ onApprovalReopened('training_certification', {
     });
     if (!rec || rec.status !== 'VERIFIED' || rec.source !== 'EXTERNAL') return false;
     if (can(actor, 'ghr.passports.edit_all')) return true;
-    return rec.employee.userId === actor.id && can(actor, 'ghr.passport.create');
+    // Training Passports › Edit Own (2026-10-18) pulls back one's own, as
+    // the right to file it does.
+    return rec.employee.userId === actor.id && (can(actor, 'ghr.passport.create') || can(actor, 'ghr.passports.edit_own'));
   },
   reopen: async ({ documentId, tx }) => {
     const rec = await tx.trainingRecord.findUnique({ where: { id: documentId }, select: { id: true, number: true, source: true } });
@@ -2251,7 +2310,7 @@ academySettingsRoutes.get(
 
 academySettingsRoutes.put(
   '/',
-  require_('ghr.settings.edit_all'),
+  requireEdit('ghr', 'settings'),
   handler(async (req, res) => {
     const body = parseBody(
       z.object({
@@ -2293,8 +2352,10 @@ academySettingsRoutes.put(
 registerSearch({
   kind: 'course',
   label: 'Courses',
-  permission: 'ghr.courses.view_all',
-  search: async (term, _user, limit) => {
+  // View Own finds the courses the caller added (2026-10-18), as its list does.
+  permission: ['ghr.courses.view_all', 'ghr.courses.view_own'],
+  ownWhere: (user) => coursesAddedBy(user),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.course.findMany({
       where: {
         OR: [
@@ -2302,6 +2363,7 @@ registerSearch({
           { title: { contains: term, mode: 'insensitive' } },
           { category: { contains: term, mode: 'insensitive' } },
         ],
+        ...((own as Prisma.CourseWhereInput | undefined) ?? {}),
       },
       orderBy: { code: 'asc' },
       take: limit,

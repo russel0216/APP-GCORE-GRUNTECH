@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, PulloutKind, PulloutPurpose, PulloutStatus } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, type ListQuery } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -24,11 +24,12 @@ import {
   onApprovalReopened,
   type ApprovalOutcome,
 } from '../shared/approvals';
-import { registerAttachmentGuard } from '../shared/attachments';
+import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
 import { renderDocument, formatDate, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { manilaDate } from '../shared/day';
 import { LIST_CAP, listReference, recordNamed, choice, sendListPdf } from '../shared/listPaper';
+import { issueProjectStock, projectHoldings, receiveProjectStock } from '../shared/projectStock';
 import { issueStock, postJobCost, releaseCommitment, returnIssuedStock, reverseJobCost } from '../shared/inventory';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 
@@ -71,7 +72,14 @@ pulloutRoutes.use(authenticate);
 
 const DOC = 'pullout_slip';
 const VIEW = 'gchain.pullout_slips.view_all';
+/** Anyone may raise a pull-out (2026-10-18): View Own reads the slips one prepared or asked for. */
+const VIEW_OWN = 'gchain.pullout_slips.view_own';
+const EDIT_OWN = 'gchain.pullout_slips.edit_own';
 const EDIT_ALL = 'gchain.pullout_slips.edit_all';
+
+/** A View Own holder's slips: the ones they prepared or asked for. */
+const ownSlips = (me: ResolvedUser): Prisma.PulloutSlipWhereInput =>
+  can(me, VIEW) ? {} : { OR: [{ preparedById: me.id }, { requestedById: me.id }] };
 const SORTS = ['number', 'pulloutDate', 'createdAt'];
 
 const D = (v: number | string | null | undefined) => (v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v));
@@ -97,7 +105,8 @@ export const PULLOUT_PURPOSES: Record<PulloutPurpose, string> = {
 const OTHER_PURPOSES: PulloutPurpose[] = ['SITE_INSTALLATION', 'TESTING_AUDIT', 'REPAIR_SERVICE', 'SUPPLIER_RETURN', 'OTHER'];
 /** A slip's purpose: its own, else what its kind means (a slip from before the purposes). */
 export const purposeOf = (slip: { purpose: PulloutPurpose | null; kind: PulloutKind }): PulloutPurpose =>
-  slip.purpose ?? (slip.kind === 'SALES_ORDER' ? 'SALES_ORDER' : slip.kind === 'PURCHASE_REQUEST' ? 'PROJECT_USE' : 'OTHER');
+  slip.purpose ??
+  (slip.kind === 'SALES_ORDER' ? 'SALES_ORDER' : slip.kind === 'PURCHASE_REQUEST' || slip.kind === 'PROJECT_STOCK' ? 'PROJECT_USE' : 'OTHER');
 
 // ── The source document ──────────────────────────────────────────────────────
 
@@ -169,6 +178,37 @@ async function pulledBySource(lineIds: string[], exceptSlipId?: string, statuses
 /** The source a slip pulls against, with what is left on each line. Refuses one that cannot be pulled against. */
 async function loadSource(kind: PulloutKind, id: string, exceptSlipId?: string): Promise<Source> {
   if (kind === 'OTHER') return NO_SOURCE;
+  if (kind === 'PROJECT_STOCK') {
+    // A project's own stock (2026-10-18): the project is the source; its lines
+    // are whatever it holds at the warehouse, checked in checkSheet.
+    const job = await prisma.job.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        number: true,
+        name: true,
+        status: true,
+        customer: { select: { name: true } },
+        projectManager: { select: { id: true, name: true } },
+      },
+    });
+    if (!job) throw badRequest('That project does not exist');
+    if (job.status === 'CANCELLED') throw badRequest(`${job.number} was cancelled`);
+    return {
+      kind,
+      salesOrderId: null,
+      requestId: null,
+      number: job.number,
+      label: `${job.number} · ${job.name} — project stock`,
+      jobId: job.id,
+      job: { id: job.id, number: job.number, name: job.name },
+      customerName: job.customer?.name ?? null,
+      owner: job.projectManager,
+      poReference: null,
+      drReference: null,
+      lines: [],
+    };
+  }
   if (kind === 'SALES_ORDER') {
     const so = await prisma.salesOrder.findUnique({
       where: { id },
@@ -286,6 +326,8 @@ const sheetSchema = z
     kind: z.nativeEnum(PulloutKind),
     salesOrderId: z.string().optional().nullable(),
     requestId: z.string().optional().nullable(),
+    /** The project whose own stock a PROJECT_STOCK slip releases. */
+    jobId: z.string().optional().nullable(),
     warehouseId: z.string().min(1, 'Which warehouse?'),
     pulloutDate: z.string().optional().nullable(),
     purpose: z.nativeEnum(PulloutPurpose).optional().nullable(),
@@ -302,9 +344,11 @@ const sheetSchema = z
     notes: z.string().max(4000).optional().nullable(),
     lines: z.array(lineSchema).min(1, 'Pull out at least one line'),
   })
-  .refine((b) => (b.kind === 'SALES_ORDER' ? !!b.salesOrderId : b.kind === 'PURCHASE_REQUEST' ? !!b.requestId : true), {
-    message: 'Name the sales order or the request it pulls against',
-  })
+  .refine(
+    (b) =>
+      b.kind === 'SALES_ORDER' ? !!b.salesOrderId : b.kind === 'PURCHASE_REQUEST' ? !!b.requestId : b.kind === 'PROJECT_STOCK' ? !!b.jobId : true,
+    { message: 'Name the sales order, the request or the project it pulls against' },
+  )
   .refine((b) => b.kind !== 'OTHER' || (b.reason ?? '').trim().length >= 3, { message: 'Say why there is no source document', path: ['reason'] })
   .refine((b) => b.kind !== 'OTHER' || (!!b.purpose && OTHER_PURPOSES.includes(b.purpose)), {
     message: 'Say what it is for — site installation, testing, a repair, a supplier return or other',
@@ -326,9 +370,10 @@ function asDate(v: string | null | undefined): Date | null {
  * line (the request line's, else the item's) — refused naming the item.
  */
 async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: string) {
-  const sourceId = body.kind === 'SALES_ORDER' ? body.salesOrderId! : body.kind === 'PURCHASE_REQUEST' ? body.requestId! : '';
+  const sourceId =
+    body.kind === 'SALES_ORDER' ? body.salesOrderId! : body.kind === 'PURCHASE_REQUEST' ? body.requestId! : body.kind === 'PROJECT_STOCK' ? body.jobId! : '';
   const source = await loadSource(body.kind, sourceId, exceptSlipId);
-  const free = body.kind === 'OTHER';
+  const free = body.kind === 'OTHER' || body.kind === 'PROJECT_STOCK';
   if (body.requestedById && !(await prisma.user.findUnique({ where: { id: body.requestedById }, select: { id: true } }))) {
     throw badRequest('The person who asked for it is not on file');
   }
@@ -344,7 +389,7 @@ async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: stri
   const perItem = new Map<string, number>();
   for (const l of body.lines) {
     if (free) {
-      if (l.sourceLineId) throw badRequest('A slip with no source document answers no source line');
+      if (l.sourceLineId) throw badRequest('This slip answers no source line');
       const item = itemById.get(l.itemId);
       if (!item || !item.isActive) throw badRequest('One of the items is not in the item master');
       perItem.set(item.id, (perItem.get(item.id) ?? 0) + l.quantity);
@@ -367,6 +412,19 @@ async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: stri
     const src = byLine.get(lineId)!;
     if (q > src.left + 0.0005) throw badRequest(`Only ${qty(src.left)} ${src.unit} of "${src.title}" is left to pull out`);
   }
+  if (body.kind === 'PROJECT_STOCK') {
+    // What the project holds at that warehouse — its own goods, at their own average.
+    const own = await projectHoldings(prisma, source.jobId!, body.warehouseId);
+    for (const [itemId, q] of perItem) {
+      const held = own.get(itemId);
+      const onHand = held ? num(held.quantity) : 0;
+      if (onHand < q - 0.0005) {
+        throw badRequest(`${source.job!.number} holds only ${qty(onHand)} of ${itemById.get(itemId)!.name} in ${warehouse.name}`);
+      }
+    }
+    const balByItem = new Map([...own].map(([k, v]) => [k, { averageCost: v.averageCost }]));
+    return { source, balByItem, pulloutDate: asDate(body.pulloutDate) ?? today(), returnBy: asDate(body.returnBy) };
+  }
   const balances = await prisma.inventoryBalance.findMany({
     where: { warehouseId: body.warehouseId, itemId: { in: [...perItem.keys()] } },
     include: { item: { select: { name: true } } },
@@ -384,7 +442,9 @@ async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: stri
 function headerData(body: z.infer<typeof sheetSchema>, returnBy: Date | null) {
   const t = (v: string | null | undefined) => v?.trim() || null;
   return {
-    purpose: body.purpose ?? (body.kind === 'SALES_ORDER' ? ('SALES_ORDER' as const) : body.kind === 'PURCHASE_REQUEST' ? ('PROJECT_USE' as const) : null),
+    purpose:
+      body.purpose ??
+      (body.kind === 'SALES_ORDER' ? ('SALES_ORDER' as const) : body.kind === 'PURCHASE_REQUEST' || body.kind === 'PROJECT_STOCK' ? ('PROJECT_USE' as const) : null),
     receivedByName: t(body.receivedByName),
     courierCompany: t(body.courierCompany),
     courierContact: t(body.courierContact),
@@ -427,8 +487,8 @@ async function writeLines(
 // ── Reading ──────────────────────────────────────────────────────────────────
 
 /** Which slips a list query means — one rule for the list, its cards and its paper. */
-function listWhere(q: ListQuery) {
-  const base: Prisma.PulloutSlipWhereInput[] = [];
+function listWhere(q: ListQuery, me: ResolvedUser) {
+  const base: Prisma.PulloutSlipWhereInput[] = [ownSlips(me)];
   const f = q.filters;
   if (f.salesOrderId) base.push({ salesOrderId: f.salesOrderId });
   if (f.requestId) base.push({ requestId: f.requestId });
@@ -478,10 +538,10 @@ const LIST_INCLUDE = {
 
 pulloutRoutes.get(
   '/',
-  require_(VIEW),
+  requireAny(VIEW, VIEW_OWN),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const { base, where } = listWhere(q);
+    const { base, where } = listWhere(q, currentUser(req));
     const count = (extra: Prisma.PulloutSlipWhereInput) => prisma.pulloutSlip.count({ where: { AND: [base, extra] } });
     const [rows, total, pending, pulledOut, drafts] = await Promise.all([
       prisma.pulloutSlip.findMany({
@@ -530,10 +590,10 @@ pulloutRoutes.get(
 /** The list on paper, through `listWhere` (`?ids=` for the rows ticked). Above `/:id`. */
 pulloutRoutes.get(
   '/pdf',
-  require_(VIEW),
+  requireAny(VIEW, VIEW_OWN),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const { where } = listWhere(q);
+    const { where } = listWhere(q, currentUser(req));
     const f = q.filters;
     const [rows, count, so, pr, project] = await Promise.all([
       prisma.pulloutSlip.findMany({ where, include: LIST_INCLUDE, orderBy: orderBy(q, SORTS, { createdAt: 'desc' }), take: LIST_CAP }),
@@ -545,7 +605,7 @@ pulloutRoutes.get(
     const reference = listReference(count, rows.length, ['pull-out slip', 'pull-out slips'], [
       q.search && `search "${q.search}"`,
       f.status && `status ${statusLabel(f.status)}`,
-      f.kind && (f.kind === 'SALES_ORDER' ? 'against sales orders' : f.kind === 'PURCHASE_REQUEST' ? 'against purchase requests' : 'with no source document'),
+      f.kind && (f.kind === 'SALES_ORDER' ? 'against sales orders' : f.kind === 'PURCHASE_REQUEST' ? 'against purchase requests' : f.kind === 'PROJECT_STOCK' ? 'from project stock' : 'with no source document'),
       f.purpose && `for ${PULLOUT_PURPOSES[f.purpose as PulloutPurpose].toLowerCase()}`,
       so,
       pr,
@@ -564,7 +624,13 @@ pulloutRoutes.get(
           align: ['left', 'left', 'left', 'left', 'left', 'left', 'right', 'left', 'left', 'left'],
           rows: rows.map((r) => [
             r.number,
-            r.salesOrder ? { title: r.salesOrder.number, body: r.job?.number } : r.request ? { title: r.request.number, body: r.job?.number } : 'No source document',
+            r.salesOrder
+              ? { title: r.salesOrder.number, body: r.job?.number }
+              : r.request
+                ? { title: r.request.number, body: r.job?.number }
+                : r.kind === 'PROJECT_STOCK' && r.job
+                  ? { title: r.job.number, body: 'Project stock' }
+                  : 'No source document',
             PULLOUT_PURPOSES[purposeOf(r)],
             r.destination ?? '',
             r.warehouse.name,
@@ -591,8 +657,22 @@ pulloutRoutes.get(
   '/sources',
   require_('gchain.pullout_slips.create'),
   handler(async (req, res) => {
-    const kind = req.query.kind === 'PURCHASE_REQUEST' ? 'PURCHASE_REQUEST' : 'SALES_ORDER';
+    const kind = req.query.kind === 'PURCHASE_REQUEST' ? 'PURCHASE_REQUEST' : req.query.kind === 'PROJECT_STOCK' ? 'PROJECT_STOCK' : 'SALES_ORDER';
     const term = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (kind === 'PROJECT_STOCK') {
+      // Projects holding goods of their own in a warehouse.
+      const rows = await prisma.job.findMany({
+        where: {
+          projectStock: { some: { quantity: { gt: 0 } } },
+          ...(term ? { OR: [{ number: { contains: term, mode: 'insensitive' } }, { name: { contains: term, mode: 'insensitive' } }] } : {}),
+        },
+        select: { id: true, number: true, name: true, createdAt: true },
+        orderBy: { createdAt: 'desc' },
+        take: 30,
+      });
+      res.json(rows.map((r) => ({ id: r.id, number: r.number, label: r.name, date: r.createdAt })));
+      return;
+    }
     if (kind === 'SALES_ORDER') {
       const rows = await prisma.salesOrder.findMany({
         where: {
@@ -635,11 +715,44 @@ pulloutRoutes.get(
   handler(async (req, res) => {
     const salesOrderId = typeof req.query.salesOrderId === 'string' ? req.query.salesOrderId : '';
     const requestId = typeof req.query.requestId === 'string' ? req.query.requestId : '';
+    const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : '';
     const warehouseId = typeof req.query.warehouseId === 'string' ? req.query.warehouseId : '';
     const exceptSlipId = typeof req.query.slipId === 'string' ? req.query.slipId : undefined;
     const none = req.query.kind === 'OTHER';
-    if (!none && !salesOrderId && !requestId) throw badRequest('Name the sales order or the request');
-    const source = none ? NO_SOURCE : await loadSource(salesOrderId ? 'SALES_ORDER' : 'PURCHASE_REQUEST', salesOrderId || requestId, exceptSlipId);
+    const ownStock = req.query.kind === 'PROJECT_STOCK';
+    if (ownStock && !jobId) throw badRequest('Name the project');
+    if (!none && !ownStock && !salesOrderId && !requestId) throw badRequest('Name the sales order or the request');
+    const source = none
+      ? NO_SOURCE
+      : ownStock
+        ? await loadSource('PROJECT_STOCK', jobId)
+        : await loadSource(salesOrderId ? 'SALES_ORDER' : 'PURCHASE_REQUEST', salesOrderId || requestId, exceptSlipId);
+    if (ownStock) {
+      // The project's own goods: which warehouses hold any, and what it holds at the one asked.
+      const [held, warehouses] = await Promise.all([
+        warehouseId ? projectHoldings(prisma, jobId, warehouseId) : Promise.resolve(new Map()),
+        prisma.warehouse.findMany({
+          where: { isActive: true, projectStock: { some: { jobId, quantity: { gt: 0 } } } },
+          select: { id: true, code: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+      ]);
+      res.json({
+        source,
+        purposes: Object.entries(PULLOUT_PURPOSES).map(([key, label]) => ({ key, label, noSource: OTHER_PURPOSES.includes(key as PulloutPurpose) })),
+        warehouses,
+        items: [...held.values()].map((r) => ({
+          id: r.item.id,
+          code: r.item.code,
+          partNumber: r.item.partNumber,
+          brand: null,
+          name: r.item.name,
+          unit: r.item.unit,
+          available: num(r.quantity),
+        })),
+      });
+      return;
+    }
     const [warehouses, stock] = await Promise.all([
       prisma.warehouse.findMany({ where: { isActive: true }, select: { id: true, code: true, name: true }, orderBy: { name: 'asc' } }),
       warehouseId
@@ -681,7 +794,11 @@ async function visibleSlip(me: ResolvedUser, id: string, deciderOnly: boolean): 
   const slip = await loadSlip(id);
   if (!slip) throw notFound('Pull-out slip not found');
   // Who asked for it reads it — sales or the project, who may hold no warehouse right.
-  if (deciderOnly && slip.requestedById !== me.id && !(await mayDecide(me.id, DOC, [slip.id]))) throw notFound('Pull-out slip not found');
+  // View Own reads the slips one prepared or asked for.
+  const ownOnly = deciderOnly || !can(me, VIEW);
+  if (ownOnly && slip.requestedById !== me.id && slip.preparedById !== me.id && !(await mayDecide(me.id, DOC, [slip.id]))) {
+    throw notFound('Pull-out slip not found');
+  }
   return slip;
 }
 
@@ -690,7 +807,7 @@ const requesterOf = (slip: { requestedById: string | null; preparedById: string 
 
 /** Whoever may move a slip on — modify, submit, pull back, cancel, pull out: who prepared it, or edit_all. */
 const mayHandle = (me: ResolvedUser, slip: { preparedById: string }) =>
-  can(me, EDIT_ALL) || (can(me, 'gchain.pullout_slips.create') && slip.preparedById === me.id);
+  can(me, EDIT_ALL) || (can(me, EDIT_OWN) && slip.preparedById === me.id);
 
 /** What each source line says, for the record page and the paper. */
 async function sourceLinesOf(slip: LoadedSlip) {
@@ -720,6 +837,7 @@ async function presentSlip(slip: LoadedSlip, me: ResolvedUser) {
     canPullOut: draft && handles && !route && slip.items.length > 0,
     canWithdraw: slip.status === 'PENDING_APPROVAL' && handles,
     canCancel: (draft || slip.status === 'PENDING_APPROVAL') && handles,
+    canDelete: (draft || slip.status === 'CANCELLED') && handles && can(me, 'gchain.pullout_slips.delete'),
     approvalRoute: draft && route ? await routeBrief(DOC, null, requesterOf(slip)) : null,
     items: slip.items.map((i) => ({
       ...i,
@@ -733,7 +851,7 @@ async function presentSlip(slip: LoadedSlip, me: ResolvedUser) {
 
 pulloutRoutes.get(
   '/:id',
-  requireAnyOrDecider(VIEW),
+  requireAnyOrDecider(VIEW, VIEW_OWN),
   handler(async (req, res) => {
     const me = currentUser(req);
     res.json(await presentSlip(await visibleSlip(me, req.params.id, res.locals.deciderOnly === true), me));
@@ -754,7 +872,7 @@ pulloutRoutes.get(
  */
 pulloutRoutes.get(
   '/:id/pdf',
-  requireAnyOrDecider(VIEW),
+  requireAnyOrDecider(VIEW, VIEW_OWN),
   handler(async (req, res) => {
     const me = currentUser(req);
     const slip = await visibleSlip(me, req.params.id, res.locals.deciderOnly === true);
@@ -902,7 +1020,7 @@ pulloutRoutes.post(
 /** Modify a draft whole — header and lines in one save, claimed on DRAFT and the `version` read. */
 pulloutRoutes.put(
   '/:id/sheet',
-  requireAny('gchain.pullout_slips.create', EDIT_ALL),
+  requireAny(EDIT_OWN, EDIT_ALL),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(sheetSchema.and(z.object({ version: z.string().optional() })), req.body);
@@ -910,7 +1028,12 @@ pulloutRoutes.put(
     if (!slip) throw notFound('Pull-out slip not found');
     if (!mayHandle(me, slip)) throw forbidden('This slip is someone else’s');
     if (slip.status !== 'DRAFT') throw badRequest(`${slip.number} is ${statusLabel(slip.status).toLowerCase()}${slip.status === 'PENDING_APPROVAL' ? ' — pull it back first' : ''}`);
-    if (body.kind !== slip.kind || (body.salesOrderId ?? null) !== slip.salesOrderId || (body.requestId ?? null) !== slip.requestId) {
+    if (
+      body.kind !== slip.kind ||
+      (body.salesOrderId ?? null) !== slip.salesOrderId ||
+      (body.requestId ?? null) !== slip.requestId ||
+      (slip.kind === 'PROJECT_STOCK' && (body.jobId ?? null) !== slip.jobId)
+    ) {
       throw badRequest('A slip keeps the document it pulls against — raise another for a different one');
     }
     if (body.version && new Date(body.version).getTime() !== slip.updatedAt.getTime()) throw badRequest(`${slip.number} changed a moment ago — reload to see it`);
@@ -935,6 +1058,7 @@ async function recheck(slip: LoadedSlip) {
       kind: slip.kind,
       salesOrderId: slip.salesOrderId,
       requestId: slip.requestId,
+      jobId: slip.jobId,
       warehouseId: slip.warehouseId,
       pulloutDate: slip.pulloutDate.toISOString().slice(0, 10),
       purpose: slip.purpose,
@@ -955,7 +1079,7 @@ async function recheck(slip: LoadedSlip) {
  */
 pulloutRoutes.post(
   '/:id/submit',
-  requireAny('gchain.pullout_slips.create', EDIT_ALL),
+  requireAny(EDIT_OWN, EDIT_ALL),
   handler(async (req, res) => {
     const me = currentUser(req);
     const slip = await loadSlip(req.params.id);
@@ -987,7 +1111,7 @@ pulloutRoutes.post(
 
 pulloutRoutes.post(
   '/:id/withdraw',
-  requireAny('gchain.pullout_slips.create', EDIT_ALL),
+  requireAny(EDIT_OWN, EDIT_ALL),
   handler(async (req, res) => {
     const me = currentUser(req);
     const slip = await prisma.pulloutSlip.findUnique({ where: { id: req.params.id } });
@@ -1008,7 +1132,7 @@ pulloutRoutes.post(
 /** Cancels a draft or a pending slip, the reason kept — nothing had gone out; its open request is withdrawn. */
 pulloutRoutes.post(
   '/:id/cancel',
-  requireAny('gchain.pullout_slips.create', EDIT_ALL),
+  requireAny(EDIT_OWN, EDIT_ALL),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled').max(2000) }), req.body);
@@ -1029,6 +1153,35 @@ pulloutRoutes.post(
 );
 
 /**
+ * A draft or a CANCELLED slip is deleted (2026-10-19, the owner's call):
+ * nothing went out on either. The delete right, and whoever may change it;
+ * its files go after the commit.
+ */
+pulloutRoutes.delete(
+  '/:id',
+  require_('gchain.pullout_slips.delete'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const slip = await prisma.pulloutSlip.findUnique({ where: { id: req.params.id } });
+    if (!slip) throw notFound('Pull-out slip not found');
+    if (!mayHandle(me, slip)) throw forbidden('This slip is someone else’s');
+    if (slip.status !== 'DRAFT' && slip.status !== 'CANCELLED') {
+      throw badRequest(`Only a draft or a cancelled slip can be deleted — ${slip.number} is ${statusLabel(slip.status).toLowerCase()}`);
+    }
+    const gone = await deleteOrRefuse(slip.number, () =>
+      prisma.pulloutSlip.deleteMany({ where: { id: slip.id, status: { in: ['DRAFT', 'CANCELLED'] } } }),
+    );
+    if (!gone.count) throw badRequest(`${slip.number} changed a moment ago — it stays on record`);
+    await deleteAttachmentsOf(DOC, [slip.id]);
+    await audit(
+      { entityType: 'pullout_slip', entityId: slip.id, action: 'DELETED', summary: `Deleted ${slip.status === 'CANCELLED' ? 'cancelled' : 'draft'} ${slip.number}` },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);
+
+/**
  * The stock goes out, inside the caller's transaction (the slip already
  * claimed): every line at the warehouse's average as it stands, re-checked
  * against what is left on its source. A request's lines take their pulled
@@ -1044,8 +1197,10 @@ async function postPullout(tx: Prisma.TransactionClient, slipId: string, actorId
   const prLines = new Map((slip.request?.items ?? []).map((i) => [i.id, i]));
   const incurred = new Map<string, number>();
   const release = new Map<string, number>();
+  // The project's own stock: charged at receiving, so only CONSUMED is posted.
+  const own = slip.kind === 'PROJECT_STOCK';
   for (const line of slip.items) {
-    const moved = await issueStock(tx, {
+    const move = {
       itemId: line.itemId,
       warehouseId: slip.warehouseId,
       quantity: num(line.quantity),
@@ -1053,7 +1208,9 @@ async function postPullout(tx: Prisma.TransactionClient, slipId: string, actorId
       sourceId: slip.id,
       sourceNumber: slip.number,
       createdById: actorId,
-    });
+    };
+    if (own && !slip.jobId) throw badRequest(`${slip.number} names no project`);
+    const moved = own ? await issueProjectStock(tx, { ...move, jobId: slip.jobId! }) : await issueStock(tx, move);
     await tx.pulloutItem.update({ where: { id: line.id }, data: { unitCost: D(moved.unitCost), amount: D(moved.amount) } });
     let category = line.item.costCategoryId;
     if (slip.kind === 'PURCHASE_REQUEST' && line.sourceLineId) {
@@ -1085,7 +1242,7 @@ async function postPullout(tx: Prisma.TransactionClient, slipId: string, actorId
       }
     }
     for (const [costCategoryId, amount] of incurred) {
-      for (const state of ['INCURRED', 'CONSUMED'] as const) {
+      for (const state of own ? (['CONSUMED'] as const) : (['INCURRED', 'CONSUMED'] as const)) {
         await postJobCost(tx, {
           jobId: slip.jobId,
           costCategoryId,
@@ -1094,7 +1251,7 @@ async function postPullout(tx: Prisma.TransactionClient, slipId: string, actorId
           sourceType: DOC,
           sourceId: slip.id,
           sourceNumber: slip.number,
-          description: `Pulled out from stock — ${slip.number}`,
+          description: own ? `Pulled out from the project's own stock — ${slip.number}` : `Pulled out from stock — ${slip.number}`,
           createdById: actorId,
         });
       }
@@ -1127,7 +1284,7 @@ async function tellPulledOut(slipId: string, actorId: string | null) {
 /** Without a route (switched off), the preparer pulls it out at once — the Outgoing rule. */
 pulloutRoutes.post(
   '/:id/pull-out',
-  requireAny('gchain.pullout_slips.create', EDIT_ALL),
+  requireAny(EDIT_OWN, EDIT_ALL),
   handler(async (req, res) => {
     const me = currentUser(req);
     const slip = await loadSlip(req.params.id);
@@ -1243,7 +1400,7 @@ onApprovalReopened(DOC, {
     const why = `${slip.number} pulled back to draft by ${actor.name}: ${reason}`;
     const prLines = new Map((slip.request?.items ?? []).map((i) => [i.id, i]));
     for (const line of slip.items) {
-      await returnIssuedStock(tx, {
+      const back = {
         itemId: line.itemId,
         warehouseId: slip.warehouseId,
         quantity: num(line.quantity),
@@ -1253,7 +1410,9 @@ onApprovalReopened(DOC, {
         sourceNumber: slip.number,
         notes: why,
         createdById: actor.id,
-      });
+      };
+      if (slip.kind === 'PROJECT_STOCK' && slip.jobId) await receiveProjectStock(tx, { ...back, jobId: slip.jobId });
+      else await returnIssuedStock(tx, back);
       const pr = slip.kind === 'PURCHASE_REQUEST' && line.sourceLineId ? prLines.get(line.sourceLineId) : undefined;
       if (pr) {
         const left = Math.max(0, Math.round((num(pr.pulledQty) - num(line.quantity)) * 1000) / 1000);
@@ -1285,7 +1444,7 @@ registerAttachmentGuard(
   'pullout_slip',
   async (user, id) => {
     if (can(user, VIEW)) return !!(await prisma.pulloutSlip.findUnique({ where: { id }, select: { id: true } }));
-    if ((await prisma.pulloutSlip.count({ where: { id, requestedById: user.id } })) > 0) return true;
+    if ((await prisma.pulloutSlip.count({ where: { id, OR: [{ requestedById: user.id }, { preparedById: user.id }] } })) > 0) return true;
     return mayDecide(user.id, DOC, [id]);
   },
   {
@@ -1327,7 +1486,7 @@ registerSearch({
       kind: 'pullout_slip',
       id: r.id,
       title: `${r.number} — ${r.salesOrder ? r.salesOrder.customer.name : (r.request?.number ?? PULLOUT_PURPOSES[purposeOf(r)])}`,
-      subtitle: `${r.salesOrder ? `Against ${r.salesOrder.number}` : r.request ? `Against ${r.request.number}` : `No source document${r.destination ? ` · ${r.destination}` : ''}`} · ${statusLabel(r.status)}`,
+      subtitle: `${r.salesOrder ? `Against ${r.salesOrder.number}` : r.request ? `Against ${r.request.number}` : r.kind === 'PROJECT_STOCK' ? `Project stock` : `No source document${r.destination ? ` · ${r.destination}` : ''}`} · ${statusLabel(r.status)}`,
       link: `/g-chain/pullout-slips/${r.id}`,
     }));
   },

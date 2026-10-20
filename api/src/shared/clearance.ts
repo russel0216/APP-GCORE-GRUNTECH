@@ -2,7 +2,7 @@ import { Prisma, type ApprovalStep, type ClearanceArea } from '@prisma/client';
 import { addDays } from './day';
 import { prisma } from '../prisma';
 import type { ResolvedUser } from '../permissions/resolve';
-import { can } from '../permissions/resolve';
+import { can, impliedBy } from '../permissions/resolve';
 import { approversForStep, pendingFor } from './approvals';
 import { audit, redact } from './audit';
 import { notify } from './notifications';
@@ -230,7 +230,7 @@ export async function scanAccountabilities(employee: {
       prisma.jobTask.count({ where: { assignedToId: userId, status: { notIn: ['DONE'] } } }),
       prisma.lead.count({ where: { assignedToId: userId, status: { notIn: ['WON', 'LOST'] } } }),
       prisma.quotation.count({ where: { ownerId: userId, outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'ON_HOLD'] } } }),
-      prisma.serviceVisit.count({ where: { assignedToId: userId, status: 'SCHEDULED' } }),
+      prisma.serviceVisit.count({ where: { assignedToId: userId, status: { in: ['SCHEDULED', 'CONFIRMED'] } } }),
       prisma.salesActivity.count({ where: { assignedToId: userId, status: 'PLANNED', startsAt: { gte: today } } }),
       prisma.trainingSession.count({ where: { trainerId: userId, status: 'SCHEDULED' } }),
       prisma.user.count({ where: { supervisorId: userId, isActive: true } }),
@@ -402,17 +402,7 @@ export async function usersHolding(permissionKey: string, tx: Tx = prisma): Prom
       isActive: true,
       OR: [
         { isSuperAdmin: true },
-        {
-          AND: [
-            {
-              OR: [
-                { roles: { some: { role: { permissions: { some: { permission: { key: permissionKey } } } } } } },
-                { overrides: { some: { effect: 'ALLOW', permission: { key: permissionKey } } } },
-              ],
-            },
-            { NOT: { overrides: { some: { effect: 'DENY', permission: { key: permissionKey } } } } },
-          ],
-        },
+        { roles: { some: { role: { permissions: { some: { permission: { key: { in: impliedBy(permissionKey) } } } } } } } },
       ],
     },
     select: { id: true },
@@ -510,7 +500,7 @@ const round1 = (n: number) => Math.round(n * 10) / 10;
 
 interface TurnoverEmployee {
   id: string;
-  employeeNo: string;
+  employeeNo: string | null;
   firstName: string;
   lastName: string;
   position: string | null;
@@ -518,7 +508,7 @@ interface TurnoverEmployee {
   dateHired: Date | null;
   dateSeparated: Date | null;
   createdAt: Date;
-  department: { id: string; name: string } | null;
+  industry: { id: string; code: string; name: string } | null;
 }
 
 export interface TurnoverMonth {
@@ -548,17 +538,18 @@ export interface TurnoverReport extends TurnoverFigures {
   months: TurnoverMonth[];
   regularOnly: TurnoverFigures;
   byReason: { reason: string; count: number }[];
-  byDepartment: {
-    department: { id: string; name: string } | null;
+  /** By the leaver's TEAM (2026-10-19 — by department before it went), "No team" last. */
+  byTeam: {
+    team: { id: string; code: string; name: string } | null;
     separations: number;
     averageHeadcount: number;
     ratePct: number;
   }[];
   leavers: {
     id: string;
-    employeeNo: string;
+    employeeNo: string | null;
     name: string;
-    department: { id: string; name: string } | null;
+    team: { id: string; code: string; name: string } | null;
     position: string | null;
     employmentType: string;
     dateHired: Date | null;
@@ -679,7 +670,7 @@ export async function turnover(
       dateHired: true,
       dateSeparated: true,
       createdAt: true,
-      department: { select: { id: true, name: true } },
+      industry: { select: { id: true, code: true, name: true } },
     },
   });
 
@@ -712,7 +703,7 @@ export async function turnover(
       id: e.id,
       employeeNo: e.employeeNo,
       name: `${e.firstName} ${e.lastName}`,
-      department: e.department,
+      team: e.industry,
       position: e.position,
       employmentType: e.employmentType,
       dateHired: e.dateHired,
@@ -723,18 +714,19 @@ export async function turnover(
     };
   });
 
-  const deptKeys = new Map<string, { id: string; name: string } | null>();
-  for (const e of emps) deptKeys.set(e.department?.id ?? '', e.department);
-  const byDepartment = [...deptKeys.entries()]
-    .map(([k, department]) => {
+  const teamKeys = new Map<string, TurnoverEmployee['industry']>();
+  for (const e of emps) teamKeys.set(e.industry?.id ?? '', e.industry);
+  const byTeam = [...teamKeys.entries()]
+    .map(([k, team]) => {
       const f = figuresFor(
-        emps.filter((e) => (e.department?.id ?? '') === k),
+        emps.filter((e) => (e.industry?.id ?? '') === k),
         windows,
       ).totals;
-      return { department, separations: f.separations, averageHeadcount: f.averageHeadcount, ratePct: f.ratePct };
+      return { team, separations: f.separations, averageHeadcount: f.averageHeadcount, ratePct: f.ratePct };
     })
     .filter((d) => d.averageHeadcount > 0 || d.separations > 0)
-    .sort((a, b) => b.ratePct - a.ratePct || (a.department?.name ?? 'zz').localeCompare(b.department?.name ?? 'zz'));
+    // Highest rate first; "No team" last among equals.
+    .sort((a, b) => b.ratePct - a.ratePct || (a.team?.code ?? '~').localeCompare(b.team?.code ?? '~'));
 
   return {
     from: fromDay,
@@ -743,7 +735,7 @@ export async function turnover(
     months: all.months,
     regularOnly: regular.totals,
     byReason: [...byReason.entries()].map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count),
-    byDepartment,
+    byTeam,
     leavers: rows,
     averageTenureMonths: rows.length ? round1(rows.reduce((s, r) => s + r.tenureMonths, 0) / rows.length) : 0,
   };

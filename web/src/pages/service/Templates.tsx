@@ -71,7 +71,11 @@ export function ReportTemplates() {
     load();
   }, [load]);
 
-  const editable = can('gops.pm_reports.create');
+  // Their own rights since 2026-10-18 (they borrowed Preventive Maintenance's Create).
+  const mayCreate = can('gops.report_templates.create');
+  // Modify per template: the API's flag — Edit All, or Edit Own on a
+  // template the viewer made (2026-10-18).
+  const editable = (t: Template) => !!(t as Template & { canEdit?: boolean }).canEdit;
 
   if (error) return <ErrorBox error={error} />;
   if (!templates) return <Loading />;
@@ -89,7 +93,7 @@ export function ReportTemplates() {
         </div>
         <div className="row">
           <Checkbox checked={showAll} onChange={setShowAll} label="Show old versions" />
-          {editable && (
+          {mayCreate && (
             <button className="btn btn-primary" onClick={() => setEditing('new')}>
               + New template
             </button>
@@ -137,7 +141,7 @@ export function ReportTemplates() {
                       </td>
                       <td className="right">
                         <button className="btn btn-sm" onClick={() => setEditing(t)}>
-                          {editable && t.isCurrent ? 'Modify' : 'View'}
+                          {editable(t) && t.isCurrent ? 'Modify' : 'View'}
                         </button>
                       </td>
                     </tr>
@@ -152,7 +156,8 @@ export function ReportTemplates() {
       {editing && (
         <TemplateEditor
           template={editing === 'new' ? null : editing}
-          readOnly={editing !== 'new' && (!editable || !editing.isCurrent)}
+          readOnly={editing !== 'new' && (!editable(editing) || !editing.isCurrent)}
+          mayDuplicate={mayCreate}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -167,11 +172,13 @@ export function ReportTemplates() {
 function TemplateEditor({
   template,
   readOnly,
+  mayDuplicate,
   onClose,
   onSaved,
 }: {
   template: Template | null;
   readOnly: boolean;
+  mayDuplicate: boolean;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -252,7 +259,7 @@ function TemplateEditor({
       wide
       footer={
         <ModalFoot onCancel={onClose} cancelLabel={readOnly ? 'Close' : 'Cancel'} busy={busy}>
-          {template && (
+          {template && mayDuplicate && (
             <button className="btn" onClick={duplicate} disabled={busy}>
               Duplicate
             </button>
@@ -306,8 +313,8 @@ function TemplateEditor({
         </Field>
 
         {sections.map((section, si) => (
-          <div key={si} className="card" style={{ marginTop: 14 }}>
-            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
+          <div key={si} className="card" style={{ marginTop: 'var(--s-4)' }}>
+            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 'var(--s-3)' }}>
               <input
                 value={section.title}
                 onChange={(e) =>
@@ -316,7 +323,7 @@ function TemplateEditor({
                     key: template ? section.key : slug(e.target.value, new Set(sections.filter((_, j) => j !== si).map((s) => s.key))),
                   })
                 }
-                style={{ fontWeight: 600, maxWidth: 320 }}
+                style={{ fontWeight: 600, maxWidth: '20rem' }}
               />
               <div className="row">
                 <Checkbox
@@ -340,10 +347,10 @@ function TemplateEditor({
                 <thead>
                   <tr>
                     <th>Field</th>
-                    <th style={{ width: 150 }}>Type</th>
-                    <th style={{ width: 150 }}>Options / unit</th>
-                    <th style={{ width: 90 }}>Required</th>
-                    <th style={{ width: 40 }} />
+                    <th style={{ width: '9.375rem' }}>Type</th>
+                    <th style={{ width: '9.375rem' }}>Options / unit</th>
+                    <th style={{ width: '5.625rem' }}>Required</th>
+                    <th style={{ width: '2.5rem' }} />
                   </tr>
                 </thead>
                 <tbody>
@@ -433,7 +440,7 @@ function TemplateEditor({
             {!readOnly && (
               <button
                 className="btn btn-sm"
-                style={{ marginTop: 8 }}
+                style={{ marginTop: 'var(--s-2)' }}
                 onClick={() => {
                   const taken = new Set(section.fields.map((f) => f.key));
                   patchSection(si, {
@@ -448,7 +455,7 @@ function TemplateEditor({
               </button>
             )}
             {section.fields.length === 0 && (
-              <div className="alert warn" style={{ marginTop: 10, marginBottom: 0 }}>
+              <div className="alert warn" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
                 A section with no fields cannot be saved.
               </div>
             )}
@@ -458,7 +465,7 @@ function TemplateEditor({
         {!readOnly && (
           <button
             className="btn btn-sm"
-            style={{ marginTop: 14 }}
+            style={{ marginTop: 'var(--s-4)' }}
             onClick={() => {
               const taken = new Set(sections.map((s) => s.key));
               setSections([
@@ -487,7 +494,9 @@ interface Dashboard {
     uncovered: number;
   };
   contracts: { active: number; expiring: number };
-  visits: { overdue: number; thisMonth: number; missed: number };
+  visits: { overdue: number; thisMonth: number; missed: number; thisWeek: number };
+  serviceJobs: { open: number };
+  documents: { total: number };
   reportsPending: number;
   warningDays: number;
 }
@@ -507,7 +516,7 @@ export function AftermarketDashboard() {
   if (tab === 'rules') {
     return (
       <div>
-        <div className="scope-switch" style={{ marginBottom: 16 }}>
+        <div className="scope-switch" style={{ marginBottom: 'var(--s-4)' }}>
           <button onClick={() => setTab('overview')}>Overview</button>
           <button className="active">Rules</button>
         </div>
@@ -516,40 +525,51 @@ export function AftermarketDashboard() {
     );
   }
 
+  // The owner's cards (2026-10-20): installed equipment, active service JOs,
+  // scheduled this week, contracts up for renewal — each opening the list it
+  // counts (a declared filter, rule 16).
   const tiles = [
     {
-      label: 'Machines installed',
+      label: 'Installed equipment',
       value: data.installedBase.total,
-      sub: `${data.installedBase.inWarranty} still in warranty`,
+      sub: `${data.installedBase.inWarranty} still in warranty · ${data.installedBase.uncovered} not covered`,
       to: '/g-ops/installed-base',
     },
     {
-      label: 'Not covered',
-      value: data.installedBase.uncovered,
-      sub: 'no active service contract',
-      tone: data.installedBase.uncovered > 0 ? 'var(--warn)' : undefined,
-      to: '/g-ops/installed-base?uncovered=true',
+      label: 'Active service JOs',
+      value: data.serviceJobs.open,
+      sub: 'awaiting approval or in progress',
+      tone: data.serviceJobs.open > 0 ? 'var(--warn)' : undefined,
+      to: '/g-ops/service-job-orders?open=true',
     },
     {
-      label: 'Active contracts',
-      value: data.contracts.active,
-      sub: `${data.contracts.expiring} ending within ${data.warningDays} days`,
-      tone: data.contracts.expiring > 0 ? 'var(--warn)' : 'var(--neon)',
-      to: '/g-ops/service-contracts?status=ACTIVE',
+      label: 'Scheduled this week',
+      value: data.visits.thisWeek,
+      sub:
+        data.visits.overdue > 0
+          ? `${data.visits.overdue} overdue`
+          : `${data.visits.thisMonth} more due this month`,
+      tone: data.visits.overdue > 0 ? 'var(--danger)' : 'var(--neon)',
+      to: '/g-ops/visits?mode=list',
     },
     {
-      label: 'Visits overdue',
-      value: data.visits.overdue,
-      sub: `${data.visits.thisMonth} more due this month`,
-      tone: data.visits.overdue > 0 ? 'var(--danger)' : undefined,
-      // The list, not the month grid: "overdue" is a list of things to chase.
-      to: '/g-ops/visits?mode=list&due=true',
+      label: 'Contracts up for renewal',
+      value: data.contracts.expiring,
+      sub: `of ${data.contracts.active} active, ending within ${data.warningDays} days`,
+      tone: data.contracts.expiring > 0 ? 'var(--danger)' : undefined,
+      to: '/g-ops/service-contracts?expiring=true',
+    },
+    {
+      label: 'Technical documents',
+      value: data.documents.total,
+      sub: 'manuals, drawings, test reports on file',
+      to: '/g-ops/service-documents',
     },
   ];
 
   return (
     <div>
-      <div className="scope-switch" style={{ marginBottom: 16 }}>
+      <div className="scope-switch" style={{ marginBottom: 'var(--s-4)' }}>
         <button className="active">Overview</button>
         <button onClick={() => setTab('rules')}>Rules</button>
       </div>
@@ -585,9 +605,10 @@ export function AftermarketDashboard() {
             <dt>Out of warranty</dt>
             <dd className="mono">{data.installedBase.outOfWarranty}</dd>
           </dl>
-          <p className="faint" style={{ marginTop: 12, marginBottom: 0 }}>
+          <p className="faint" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
             A machine leaving warranty with nothing behind it is a customer about to start paying
-            for what they got free. <Link to="/g-ops/renewals">See the renewal pipeline.</Link>
+            for what they got free.{' '}
+            <Link to="/g-ops/installed-base?warranty=EXPIRING&uncovered=true">See the machines leaving warranty uncovered.</Link>
           </p>
         </div>
 

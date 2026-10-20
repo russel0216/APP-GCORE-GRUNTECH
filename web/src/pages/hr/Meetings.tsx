@@ -962,7 +962,7 @@ export function MeetingDetail() {
         </div>
 
         <div className="card">
-          <div className="row meeting-split meeting-card-head">
+          <div className="card-head">
             <h3 className="card-title meeting-flush">
               People{' '}
               <span className="faint">
@@ -1149,7 +1149,7 @@ function MinutesCard({ meeting: m, onSaved }: { meeting: Meeting; onSaved: () =>
 
   return (
     <div className="card">
-      <div className="row meeting-split meeting-card-head">
+      <div className="card-head">
         <h3 className="card-title meeting-flush">
           Minutes of meeting{' '}
           {m.minutes && <StatusBadge status={m.minutesStatus} extra={MINUTES_TONES} label={MINUTES_LABEL[m.minutesStatus]} />}

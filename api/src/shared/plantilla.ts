@@ -2,11 +2,12 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest, notFound } from '../http/kit';
 import { nextNumber } from './numbering';
+import { titleFromRoles } from './roleRev1';
 
 /**
  * The plantilla — the authorised staffing pattern (model §4.7).
  *
- * A `Position` is a job title, the department it sits in and how many of it
+ * A `Position` is a job title (since 2026-10-19 counting a role's holders) and how many of it
  * the company has approved. Filled and vacant are DERIVED by counting active
  * employees on the position, never stored: a stored copy can disagree with
  * the employees it counts, and the whole point of the screen is that it is
@@ -63,7 +64,61 @@ export async function setEmployeePosition(
   freeText: string | null | undefined,
 ) {
   const data = await positionFields(tx, positionId, freeText);
-  return tx.employee.update({ where: { id: employeeId }, data });
+  // Off the plantilla, nothing else is held beside it.
+  if (!data.positionId) await tx.employeeExtraPosition.deleteMany({ where: { employeeId } });
+  else await tx.employeeExtraPosition.deleteMany({ where: { employeeId, positionId: data.positionId } });
+  await tx.employee.update({ where: { id: employeeId }, data });
+  return refreshPositionTitle(tx, employeeId);
+}
+
+/** The joined title: the main position's, then each one also held, " / " between. */
+export const POSITION_JOIN = ' / ';
+
+/**
+ * Re-derives an employee's mirrored title (and their login's) from the main
+ * position and the ones also held. Free text on an unlinked employee is left.
+ */
+export async function refreshPositionTitle(tx: Tx, employeeId: string) {
+  const e = await tx.employee.findUniqueOrThrow({
+    where: { id: employeeId },
+    select: {
+      positionId: true,
+      positionRef: { select: { title: true } },
+      extraPositions: { orderBy: { sortOrder: 'asc' }, select: { position: { select: { title: true } } } },
+      user: { select: { id: true, roles: { select: { role: { select: { name: true, rank: true, sortOrder: true } } } } } },
+    },
+  });
+  // A person with roles is titled by the highest of them (ROLE_REV1, 2026-10-19).
+  const byRole = e.user ? titleFromRoles(e.user.roles.map((r) => r.role)) : null;
+  if (byRole) {
+    await tx.user.update({ where: { id: e.user!.id }, data: { position: byRole } });
+    return tx.employee.update({ where: { id: employeeId }, data: { position: byRole } });
+  }
+  if (!e.positionId || !e.positionRef) return tx.employee.findUniqueOrThrow({ where: { id: employeeId } });
+  const title = [e.positionRef.title, ...e.extraPositions.map((x) => x.position.title)].join(POSITION_JOIN);
+  await tx.user.updateMany({ where: { employee: { id: employeeId } }, data: { position: title } });
+  return tx.employee.update({ where: { id: employeeId }, data: { position: title } });
+}
+
+/**
+ * Sets the positions an employee ALSO holds, replaced whole, in order. Needs a
+ * main position; each must be active; the main one and repeats are dropped.
+ */
+export async function setExtraPositions(tx: Tx, employeeId: string, positionIds: string[]) {
+  const e = await tx.employee.findUniqueOrThrow({ where: { id: employeeId }, select: { positionId: true } });
+  const ids = [...new Set(positionIds.map((x) => x.trim()).filter(Boolean))].filter((x) => x !== e.positionId);
+  if (ids.length && !e.positionId) throw badRequest('Choose the main plantilla position first');
+  if (ids.length) {
+    const found = await tx.position.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, isActive: true } });
+    if (found.length !== ids.length) throw notFound('One of those plantilla positions does not exist');
+    const off = found.find((p) => !p.isActive);
+    if (off) throw badRequest(`"${off.title}" is an inactive position — reactivate it in the Plantilla first`);
+  }
+  await tx.employeeExtraPosition.deleteMany({ where: { employeeId } });
+  if (ids.length) {
+    await tx.employeeExtraPosition.createMany({ data: ids.map((positionId, sortOrder) => ({ employeeId, positionId, sortOrder })) });
+  }
+  return refreshPositionTitle(tx, employeeId);
 }
 
 /**
@@ -72,10 +127,19 @@ export async function setEmployeePosition(
  */
 export async function mirrorPositionTitle(tx: Tx, positionId: string, title: string): Promise<number> {
   const { count } = await tx.employee.updateMany({
-    where: { positionId },
+    where: { positionId, extraPositions: { none: {} } },
     data: { position: title },
   });
-  return count;
+  // And their logins, which mirror the employee (shared/accounts.ts,
+  // `syncLoginFromEmployee` — 2026-10-16).
+  await tx.user.updateMany({ where: { employee: { positionId, extraPositions: { none: {} } } }, data: { position: title } });
+  // Anyone holding it beside another has a joined title to work out again.
+  const joined = await tx.employee.findMany({
+    where: { OR: [{ positionId, extraPositions: { some: {} } }, { extraPositions: { some: { positionId } } }] },
+    select: { id: true },
+  });
+  for (const j of joined) await refreshPositionTitle(tx, j.id);
+  return count + joined.length;
 }
 
 // ── Derived figures ──────────────────────────────────────────────────────────
@@ -95,6 +159,29 @@ export async function filledByPosition(
   });
   const out = new Map<string, number>();
   for (const g of groups) if (g.positionId) out.set(g.positionId, g._count._all);
+  // A slot that counts a role (ROLE_REV1, 2026-10-19: "keep plantilla, count
+  // by role") is filled by the active employees whose login holds the role.
+  const byRole = await tx.position.findMany({
+    where: { roleId: { not: null }, ...(positionIds ? { id: { in: positionIds } } : {}) },
+    select: { id: true, roleId: true },
+  });
+  if (byRole.length) {
+    const holders = await tx.userRole.groupBy({
+      by: ['roleId'],
+      where: { roleId: { in: byRole.map((p) => p.roleId!) }, user: { isActive: true, employee: { isActive: true } } },
+      _count: { _all: true },
+    });
+    const n = new Map(holders.map((h) => [h.roleId, h._count._all]));
+    for (const p of byRole) out.set(p.id, n.get(p.roleId!) ?? 0);
+    return out;
+  }
+  // A position also held counts its holder as filling it.
+  const extra = await tx.employeeExtraPosition.groupBy({
+    by: ['positionId'],
+    where: { employee: { isActive: true }, ...(positionIds ? { positionId: { in: positionIds } } : {}) },
+    _count: { _all: true },
+  });
+  for (const g of extra) out.set(g.positionId, (out.get(g.positionId) ?? 0) + g._count._all);
   return out;
 }
 
@@ -107,8 +194,14 @@ export interface PlantillaSummary {
   overComplement: number;
   /** Active employees with no plantilla position at all. */
   unclassified: number;
-  byDepartment: {
-    department: { id: string; name: string } | null;
+  /**
+   * By LEVEL (2026-10-19, the owner's call: the department is gone; the
+   * Plantilla counts by role, so it reads down the levels of the roles its
+   * positions count — `Role.rank`, 1 the CEO / President). A position that
+   * counts no role, or one with no level, is "No level", last.
+   */
+  byLevel: {
+    level: number | null;
     authorised: number;
     filled: number;
     vacant: number;
@@ -128,14 +221,14 @@ export async function plantillaSummary(): Promise<PlantillaSummary> {
       select: {
         id: true,
         authorisedHeadcount: true,
-        department: { select: { id: true, name: true } },
+        role: { select: { rank: true } },
       },
     }),
     filledByPosition(),
-    prisma.employee.count({ where: { isActive: true, positionId: null } }),
+    prisma.employee.count({ where: { isActive: true, positionId: null, OR: [{ userId: null }, { user: { roles: { none: {} } } }] } }),
   ]);
 
-  const byDept = new Map<string, PlantillaSummary['byDepartment'][number]>();
+  const byLevelMap = new Map<number | null, PlantillaSummary['byLevel'][number]>();
   let authorised = 0;
   let filledTotal = 0;
   let vacant = 0;
@@ -149,9 +242,9 @@ export async function plantillaSummary(): Promise<PlantillaSummary> {
     if (gap > 0) vacant += gap;
     else over += -gap;
 
-    const key = p.department?.id ?? '';
-    const row = byDept.get(key) ?? {
-      department: p.department,
+    const key = p.role?.rank ?? null;
+    const row = byLevelMap.get(key) ?? {
+      level: key,
       authorised: 0,
       filled: 0,
       vacant: 0,
@@ -161,18 +254,13 @@ export async function plantillaSummary(): Promise<PlantillaSummary> {
     row.filled += f;
     if (gap > 0) row.vacant += gap;
     else row.overComplement += -gap;
-    byDept.set(key, row);
+    byLevelMap.set(key, row);
   }
 
-  // Filled positions that lost their department still count; the "unassigned"
-  // bucket sorts last so the named departments read first.
-  const byDepartment = [...byDept.values()].sort((a, b) => {
-    if (!a.department) return 1;
-    if (!b.department) return -1;
-    return a.department.name.localeCompare(b.department.name);
-  });
+  // Level 1 first; "No level" last.
+  const byLevel = [...byLevelMap.values()].sort((a, b) => (a.level ?? Infinity) - (b.level ?? Infinity));
 
-  return { authorised, filled: filledTotal, vacant, overComplement: over, unclassified, byDepartment };
+  return { authorised, filled: filledTotal, vacant, overComplement: over, unclassified, byLevel };
 }
 
 // ── Backfill ─────────────────────────────────────────────────────────────────
@@ -192,7 +280,7 @@ export async function plantillaSummary(): Promise<PlantillaSummary> {
 export async function backfillPositions(): Promise<{ linked: number; positions: number }> {
   const unlinked = await prisma.employee.findMany({
     where: { positionId: null, position: { not: null } },
-    select: { id: true, position: true, departmentId: true, isActive: true },
+    select: { id: true, position: true, isActive: true },
   });
 
   const byTitle = new Map<string, { title: string; holders: typeof unlinked }>();
@@ -214,12 +302,10 @@ export async function backfillPositions(): Promise<{ linked: number; positions: 
       });
       if (!position) {
         const active = holders.filter((h) => h.isActive);
-        const departments = new Set(active.map((h) => h.departmentId));
         position = await tx.position.create({
           data: {
             code: await nextNumber('position', tx),
             title,
-            departmentId: departments.size === 1 ? [...departments][0] : null,
             authorisedHeadcount: active.length,
           },
         });

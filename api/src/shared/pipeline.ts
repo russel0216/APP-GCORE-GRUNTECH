@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { badRequest } from '../http/kit';
 import { canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { manilaDayKey, manilaMonthKey } from './day';
+import { inBase } from './exchangeRates';
 
 /**
  * Pipeline rules shared by the sales board and Insights.
@@ -435,6 +436,8 @@ export interface BoardRevision {
     contractValue: Prisma.Decimal | number;
     totalCost: Prisma.Decimal | number;
   } | null;
+  /** The revision's other costings (2026-10-19), counted with the first. */
+  otherCostings?: { costing: { contractValue: Prisma.Decimal | number; totalCost: Prisma.Decimal | number } }[];
   jobs: { id: string; number: string }[];
 }
 
@@ -459,6 +462,9 @@ export interface BoardQuotation {
   activities: { subject: string; startsAt: Date }[];
   /** Orders booked from it — a won quotation with one is SCORO's Completed. */
   salesOrderCount: number;
+  /** Its currency and rate to PHP (2026-10-17): the board adds pesos. */
+  currency?: string | null;
+  exchangeRate?: Prisma.Decimal | number | null;
 }
 
 export interface Card {
@@ -606,7 +612,9 @@ function leadCard(lead: BoardLead, now: Date, me: ResolvedUser): Card | null {
 function quotationCard(q: BoardQuotation, now: Date, me: ResolvedUser): Card | null {
   const column = columnFor({ kind: 'quotation', outcome: q.outcome });
   if (!column) return null;
-  const value = quotationValue(q.revisions);
+  // In pesos: the board adds cards, so a quotation in another currency
+  // counts at its own rate (2026-10-17).
+  const value = inBase(quotationValue(q.revisions), q);
   const rev = valuedRevision(q.revisions);
   const latest = q.revisions.reduce<BoardRevision | null>(
     (best, r) => (best === null || r.revision > best.revision ? r : best),
@@ -856,8 +864,10 @@ export function buildBoard(input: {
     discounts.push(num(rev.discountPct) / 100);
     if (!rev.costing) continue;
     withCosting++;
-    contract += num(rev.costing.contractValue);
-    cost += num(rev.costing.totalCost);
+    for (const c of [rev.costing, ...(rev.otherCostings ?? []).map((o) => o.costing)]) {
+      contract += num(c.contractValue);
+      cost += num(c.totalCost);
+    }
   }
 
   const won = cards.filter((c) => c.column === 'WON');

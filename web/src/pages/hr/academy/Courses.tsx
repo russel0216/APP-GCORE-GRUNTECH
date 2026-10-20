@@ -4,7 +4,7 @@ import { api } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
 import { DataList, type Column } from '../../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../../components/ImportModal';
-import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../../components/ui';
+import { ActiveBadge, Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../../components/ui';
 import { NumberInput } from '../../../components/NumberInput';
 
 /**
@@ -12,9 +12,11 @@ import { NumberInput } from '../../../components/NumberInput';
  *
  * A course says what it is, how long it lasts, whether it is assessed and
  * how long a completion stays valid. Its Requirements say who must hold it:
- * a department, a plantilla position, both (the intersection), or — with
- * both left as "any" — everyone. Requirements name a position by id, which
- * is why a course can only be required of a position the plantilla has.
+ * a plantilla position, or — left as "any" — everyone. Requirements name a
+ * position by id, which is why a course can only be required of a position
+ * the plantilla has. The department is gone (2026-10-19): a requirement
+ * stored with one before keeps applying and shows as "Department
+ * (retired)", read-only, until HR removes it — no new one names a department.
  */
 
 interface CourseRow {
@@ -34,7 +36,9 @@ interface CourseRow {
 
 interface Requirement {
   id?: string;
+  /** Only on a requirement stored before the department went — kept as it is, or removed. */
   departmentId: string | null;
+  department?: { id: string; name: string } | null;
   positionId: string | null;
   label?: string;
 }
@@ -51,17 +55,17 @@ interface CourseDetail {
   isActive: boolean;
   requirements: Requirement[];
   _count: { sessions: number; records: number };
+  /** Edit All, or Edit Own on a course the viewer added (2026-10-18) — the API says. */
+  canEdit?: boolean;
 }
 
 interface PositionOption {
   id: string;
   code: string;
   title: string;
-  departmentId: string | null;
-  departmentName: string | null;
+  level: number | null;
 }
 
-const ACTIVE_TONES = { ACTIVE: 'ok', INACTIVE: '' } as const;
 
 export function Courses() {
   const { can } = useAuth();
@@ -152,7 +156,7 @@ export function Courses() {
       key: 'active',
       label: 'Status',
       render: (r) => (
-        <StatusBadge status={r.isActive ? 'ACTIVE' : 'INACTIVE'} extra={ACTIVE_TONES} label={r.isActive ? 'Active' : 'Inactive'} />
+        <ActiveBadge active={r.isActive} />
       ),
     },
   ];
@@ -272,7 +276,7 @@ function CourseModal({
   const [loading, setLoading] = useState(Boolean(id));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const editable = courseId ? can('ghr.courses.edit_all') : can('ghr.courses.create');
+  const editable = courseId ? !!course?.canEdit : can('ghr.courses.create');
 
   const [form, setForm] = useState(BLANK_COURSE);
   /** The details as last loaded or saved: the form is "changed" only against these. */
@@ -301,7 +305,9 @@ function CourseModal({
     };
     setForm(next);
     setSavedForm(next);
-    setReqs(c.requirements.map((r) => ({ departmentId: r.departmentId, positionId: r.positionId, label: r.label })));
+    setReqs(
+      c.requirements.map((r) => ({ departmentId: r.departmentId, department: r.department, positionId: r.positionId, label: r.label })),
+    );
     setReqsDirty(false);
   }, []);
 
@@ -520,10 +526,8 @@ function RequirementsEditor({
   editable: boolean;
   onChange: (rows: Requirement[]) => void;
 }) {
-  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
   const [positions, setPositions] = useState<PositionOption[]>([]);
   useEffect(() => {
-    api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
     api.get<PositionOption[]>('/positions/lookup').then(setPositions).catch(() => {});
   }, []);
 
@@ -534,15 +538,14 @@ function RequirementsEditor({
   return (
     <div className="stack">
       <p className="muted">
-        Each row names who must hold this course. A department alone means everyone in it; a
-        position alone means every holder of it; both means holders of that position in that
-        department. Leave both as “Any” to require it of everyone.
+        Each row names who must hold this course: every holder of a plantilla position, or —
+        left as “Any” — everyone. A row from before the department was retired keeps applying
+        until it is removed.
       </p>
       <div className="table-wrap">
         <table className="data">
           <thead>
             <tr>
-              <th>Department</th>
               <th>Plantilla position</th>
               {editable && <th aria-label="Remove" />}
             </tr>
@@ -550,32 +553,37 @@ function RequirementsEditor({
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={editable ? 3 : 2} className="faint">
+                <td colSpan={editable ? 2 : 1} className="faint">
                   Nobody is required to hold this course — it is optional.
                 </td>
               </tr>
             )}
             {rows.map((r, i) => {
-              const choices = r.departmentId
-                ? positions.filter((p) => !p.departmentId || p.departmentId === r.departmentId || p.id === r.positionId)
-                : positions;
+              // A row from before the department went is shown as it is and
+              // can only be removed: the API takes it back unchanged, never edited.
+              if (r.departmentId) {
+                return (
+                  <tr key={i}>
+                    <td>
+                      {r.label ?? `Department (retired): ${r.department?.name ?? '—'}`}
+                    </td>
+                    {editable && (
+                      <td>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          aria-label={`Remove row ${i + 1}`}
+                          onClick={() => onChange(rows.filter((_, j) => j !== i))}
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                );
+              }
               return (
                 <tr key={i}>
-                  <td>
-                    <select
-                      aria-label={`Department for row ${i + 1}`}
-                      value={r.departmentId ?? ''}
-                      disabled={!editable}
-                      onChange={(e) => update(i, { departmentId: e.target.value || null })}
-                    >
-                      <option value="">Any department</option>
-                      {departments.map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {d.name}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
                   <td>
                     <select
                       aria-label={`Position for row ${i + 1}`}
@@ -583,11 +591,11 @@ function RequirementsEditor({
                       disabled={!editable}
                       onChange={(e) => update(i, { positionId: e.target.value || null })}
                     >
-                      <option value="">Any position</option>
-                      {choices.map((p) => (
+                      <option value="">Any position (everyone)</option>
+                      {positions.map((p) => (
                         <option key={p.id} value={p.id}>
                           {p.title}
-                          {p.departmentName ? ` — ${p.departmentName}` : ''}
+                          {p.level != null ? ` — Level ${p.level}` : ''}
                         </option>
                       ))}
                     </select>

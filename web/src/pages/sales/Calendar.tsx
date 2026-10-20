@@ -130,7 +130,8 @@ export function SalesCalendar() {
   const [visits, setVisits] = useState<ServiceVisitChip[]>([]);
   // On by default for anyone who may see the schedule; `?visits=0` hides it,
   // in the URL like the view, so a shared link shows what its sender saw.
-  const canVisits = can('gops.visits.view_all');
+  // View Own too (2026-10-18): the feed narrows such a viewer to their own visits.
+  const canVisits = can('gops.visits.view_all') || can('gops.visits.view_own');
   const showVisits = canVisits && params.get('visits') !== '0';
   // Only people who can open this calendar can be booked on it.
   const { people } = usePeople('gops.calendar.view_all');
@@ -325,9 +326,11 @@ export function SalesCalendar() {
             a reminder goes to everyone on it.
           </p>
         </div>
-        <button type="button" className="btn btn-primary" onClick={() => setEditing('new')}>
-          + New activity
-        </button>
+        {can('gops.calendar.create') && (
+          <button type="button" className="btn btn-primary" onClick={() => setEditing('new')}>
+            + New activity
+          </button>
+        )}
       </div>
 
       <CalendarToolbar nav={nav}>
@@ -371,12 +374,12 @@ export function SalesCalendar() {
           onFocusDay={nav.setFocus}
           onOpenDay={nav.view === 'week' ? nav.goToDay : undefined}
           onEventClick={openEvent}
-          onSlotClick={(day, minutes) => {
+          onSlotClick={can('gops.calendar.create') ? (day, minutes) => {
             const d = parseDay(day);
             d.setMinutes(minutes);
             setNewStart(d);
             setEditing('new');
-          }}
+          } : undefined}
         />
       )}
 
@@ -430,7 +433,8 @@ function TimeGrid({
   /** In the week view a day's head opens that day; the day view has none. */
   onOpenDay?: (day: string) => void;
   onEventClick: (id: string) => void;
-  onSlotClick: (day: string, minutes: number) => void;
+  /** Absent without the Create right: the half-hours are not buttons then. */
+  onSlotClick?: (day: string, minutes: number) => void;
 }) {
   const body = useRef<HTMLDivElement>(null);
   const daysKey = days.join(',');
@@ -526,6 +530,7 @@ function TimeGrid({
             {HOURS.flatMap((h) =>
               [0, 30].map((m) => {
                 const minutes = h * 60 + m;
+                if (!onSlotClick) return <div key={minutes} className={`tg-slot is-static${m === 0 ? ' hour' : ''}`} />;
                 return (
                   <button
                     key={minutes}

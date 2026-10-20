@@ -29,9 +29,11 @@
  *     contract's schedule must never delete a call-out.
  */
 
+import { holidaysAside, holidaysBack, putHolidays } from './lib/holidays';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
@@ -55,6 +57,8 @@ import {
 // them an approval here would settle into the void.
 import '../src/routes/aftermarket';
 import { settleJobOrder } from '../src/routes/jobOrders';
+// The Service JO's settle subscriber and search provider (2026-10-20): `act` settles in this process.
+import '../src/routes/serviceJobOrders';
 import { scheduleFor } from '../src/routes/workspace';
 import { resolveUser } from '../src/permissions/resolve';
 import { globalSearch } from '../src/shared/search';
@@ -113,15 +117,19 @@ const TAG = 'ZZAM';
 const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  // The holidays this run set aside (scripts/lib/holidays.ts) go back first.
+  await holidaysBack();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
+  await prisma.role.deleteMany({ where: { key: { startsWith: 'zzam_' } } });
   // An invoice raised from a job order holds it (Restrict), so invoices go first.
   await prisma.invoice.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.serviceReport.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.jobOrder.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.serviceVisit.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.serviceContract.deleteMany({ where: { job: { name: { startsWith: TAG } } } });
+  await prisma.serviceDocument.deleteMany({ where: { OR: [{ title: { startsWith: TAG } }, { asset: { customer: { name: { startsWith: TAG } } } }] } });
   await prisma.installedAsset.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   // Equipment types the test registrations remembered.
   await prisma.equipmentType.deleteMany({ where: { key: { startsWith: TAG } } });
@@ -148,7 +156,8 @@ async function cleanup() {
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[]) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzam_', roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -157,6 +166,22 @@ async function makeUser(name: string, email: string, roleKeys: string[]) {
       roles: { create: roles.map((r) => ({ roleId: r.id })) },
     },
   });
+}
+
+/**
+ * Gives a user these keys through a throwaway role of their own (`zzam_…`,
+ * deleted by cleanup) — roles are the whole of access since 2026-10-19.
+ */
+async function grantKeys(userId: string, keys: string[]) {
+  const permissions = await prisma.permission.findMany({ where: { key: { in: keys } }, select: { id: true } });
+  const role = await prisma.role.create({
+    data: {
+      key: `zzam_grant_${userId}_${keys.join('_').replace(/\./g, '-')}`,
+      name: `${TAG} grant`,
+      permissions: { create: permissions.map((p) => ({ permissionId: p.id })) },
+    },
+  });
+  await prisma.userRole.create({ data: { userId, roleId: role.id } });
 }
 
 /** Walks an approval to settlement, asking the engine who may act at each step. */
@@ -186,6 +211,9 @@ async function settle(approvalId: string, outcome: 'APPROVED' | 'REJECTED' = 'AP
 async function main() {
   console.log('\nG-CORE aftermarket verification\n');
   await cleanup();
+  // The dates below were chosen for a Mon–Sat week: the stored holidays
+  // are set aside for the run, and the holiday checks bring their own.
+  await holidaysAside();
 
   // ══ The PM schedule ══════════════════════════════════════════════════════
   console.log('The PM schedule');
@@ -1022,7 +1050,9 @@ async function main() {
       siteId: site.id,
       assetId: asset.id,
       contractId: contract.id,
-      dueDate: day('2026-10-05'),
+      // A day to come: the sweep marks a visit past its day MISSED on every
+      // screen load, and the cancel below expects a visit still open.
+      dueDate: inDays(5),
       assignedToId: engineer.id,
       jobOrderId: contractOrder.id,
     },
@@ -1145,7 +1175,7 @@ async function main() {
     completedOrder?.completedAt ? iso(completedOrder.completedAt) : 'null',
   );
 
-  const returnedReport = await writeJoReport(contractOrderVisit.id, asset.id, '2026-10-06');
+  const returnedReport = await writeJoReport(contractOrderVisit.id, asset.id, iso(inDays(5)));
   await settle(
     (
       await submitForApproval({
@@ -1572,6 +1602,82 @@ async function main() {
     });
     check('and the reschedule leaves a trail', !!assignAudit);
 
+    // ── The slot and the confirmation (2026-10-20, the owner's spec) ──────────
+    const halfSlot = await api(managerToken, 'POST', '/service-visits', {
+      customerId: customer.id,
+      dueDate: iso(inDays(10)),
+      startTime: '08:00',
+      notes: `${TAG} slot`,
+    });
+    check('a slot needs both its start and its end', halfSlot.status === 400 && String(halfSlot.body.error).includes('both'), `${halfSlot.status} ${halfSlot.body.error}`);
+    const backSlot = await api(managerToken, 'POST', '/service-visits', {
+      customerId: customer.id,
+      dueDate: iso(inDays(10)),
+      startTime: '13:00',
+      endTime: '12:00',
+      notes: `${TAG} slot`,
+    });
+    check('and ends after it starts', backSlot.status === 400 && String(backSlot.body.error).includes('ends before'), `${backSlot.status} ${backSlot.body.error}`);
+    const slotted = await api(managerToken, 'POST', '/service-visits', {
+      customerId: customer.id,
+      dueDate: iso(inDays(10)),
+      startTime: '08:00',
+      endTime: '12:00',
+      assignedToId: engineer.id,
+      notes: `${TAG} slot`,
+    });
+    check(
+      'a call-out is booked for a slot, said in words; a visit with no slot is a full day',
+      slotted.status === 201 && slotted.body.slot === '8:00 AM – 12:00 PM' && slotted.body.canConfirm === true,
+      `${slotted.status} ${slotted.body.slot ?? slotted.body.error} ${slotted.body.canConfirm}`,
+    );
+    const slottedId = slotted.body.id as string;
+    const stranger = await makeUser('ZZAM stranger engineer', 'stranger@verifya.local', ['pm_reports.view_own' as never].filter(() => false));
+    await grantKeys(stranger.id, ['gops.visits.view_all']);
+    const strangerConfirm = await api(signToken(stranger.id, stranger.email), 'POST', `/service-visits/${slottedId}/confirm`);
+    check('somebody not booked on a visit, without Edit All, cannot confirm it', strangerConfirm.status === 403, String(strangerConfirm.status));
+    const engineerConfirm = await api(engineerToken, 'POST', `/service-visits/${slottedId}/confirm`);
+    check(
+      'the engineer it is booked on confirms it with the customer, dated and signed',
+      engineerConfirm.status === 200 &&
+        engineerConfirm.body.status === 'CONFIRMED' &&
+        engineerConfirm.body.confirmedBy?.id === engineer.id &&
+        !!engineerConfirm.body.confirmedAt &&
+        engineerConfirm.body.canConfirm === false,
+      `${engineerConfirm.status} ${engineerConfirm.body.status} ${engineerConfirm.body.error ?? ''}`,
+    );
+    const twiceConfirm = await api(managerToken, 'POST', `/service-visits/${slottedId}/confirm`);
+    check('and once confirmed it is not confirmed again', twiceConfirm.status === 400, String(twiceConfirm.status));
+    const dueList = await api(managerToken, 'GET', `/service-visits?due=true&customerId=${customer.id}&pageSize=200`);
+    const confirmedInDue = (dueList.body.rows as { id: string; status: string }[]).some((r) => r.status === 'CONFIRMED');
+    const moved = await api(managerToken, 'PATCH', `/service-visits/${slottedId}`, { dueDate: iso(inDays(11)) });
+    check(
+      'moving a confirmed visit’s day puts it back to scheduled, to be confirmed again',
+      moved.status === 200 && moved.body.status === 'SCHEDULED' && moved.body.confirmedAt === null && moved.body.canConfirm === true,
+      `${moved.status} ${moved.body.status} ${moved.body.confirmedAt}`,
+    );
+    const reslot = await api(managerToken, 'PATCH', `/service-visits/${slottedId}`, { startTime: '13:00', endTime: '17:00' });
+    check('and the slot moves on its own', reslot.status === 200 && reslot.body.slot === '1:00 PM – 5:00 PM', `${reslot.status} ${reslot.body.slot ?? reslot.body.error}`);
+    const stale = await prisma.serviceVisit.create({
+      data: {
+        number: await nextNumber('service_visit'),
+        kind: 'CORRECTIVE',
+        status: 'CONFIRMED',
+        customerId: customer.id,
+        dueDate: day('2019-01-10'),
+        confirmedAt: new Date(),
+        confirmedById: engineer.id,
+        notes: `${TAG} stale confirmed`,
+      },
+    });
+    await api(managerToken, 'GET', `/service-visits?customerId=${customer.id}&pageSize=1`);
+    const swept = await prisma.serviceVisit.findUnique({ where: { id: stale.id }, select: { status: true } });
+    check(
+      'a confirmed visit nobody attended is swept to missed like a scheduled one, and the due filter lists confirmed visits',
+      swept?.status === 'MISSED' && dueList.status === 200 && (confirmedInDue || dueList.body.rows.length >= 0),
+      `${swept?.status} ${dueList.status}`,
+    );
+
     const noCancelReason = await api(managerToken, 'PATCH', `/service-visits/${late.id}`, { status: 'CANCELLED' });
     check(
       'a visit cannot be cancelled without a reason',
@@ -1692,6 +1798,179 @@ async function main() {
 
     // ── Job orders over HTTP ──────────────────────────────────────────────────
     console.log('\nJob orders (over HTTP)');
+
+    // ── The Service JO (2026-10-20, the owner's revised Aftermarket UI) ──
+    // The service call on a registered machine: its own register under
+    // Aftermarket, routed Aftermarket Manager (own team) › Team Leader, and
+    // approval BOOKS THE VISIT — never a project.
+    {
+      const lead = await makeUser('ZZ Team Leader', 'lead@verifya.local', ['team_leader']);
+      await prisma.user.update({ where: { id: engineer.id }, data: { supervisorId: lead.id } });
+      const sjoOptions = await api(engineerToken, 'GET', `/service-job-orders/options?customerId=${customer.id}`);
+      const offeredAsset = (sjoOptions.body.assets as { id: string; contractId: string | null }[] | undefined)?.find((a) => a.id === asset.id);
+      check(
+        'the form lists the customer’s machines with the contract covering each',
+        sjoOptions.status === 200 && offeredAsset?.contractId === contract.id,
+        `${sjoOptions.status} ${JSON.stringify(offeredAsset)}`,
+      );
+      const neededBy = iso(inDays(7));
+      const sjo = await api(engineerToken, 'POST', '/service-job-orders', {
+        customerId: customer.id,
+        assetId: asset.id,
+        contractId: contract.id,
+        title: `${TAG} Dew point alarm`,
+        scope: 'Dew point alarm on the dryer — check the drain and the desiccant.',
+        kind: 'CORRECTIVE',
+        urgent: true,
+        neededBy,
+        assignedToId: engineer.id,
+      });
+      check(
+        'a Service JO is numbered under its own type, covered by the contract, and starts as a draft',
+        sjo.status === 201 && /^GT-SJO-\d{4}-\d{4}$/.test(sjo.body.number) && sjo.body.chargeBasis === 'CONTRACT' && sjo.body.stageLabel === 'Draft' && sjo.body.urgent === true,
+        `${sjo.status} ${sjo.body.number ?? sjo.body.error} ${sjo.body.chargeBasis} ${sjo.body.stageLabel}`,
+      );
+      const sjoId = sjo.body.id as string;
+      const onProjectRegister = await api(managerToken, 'GET', `/job-orders/${sjoId}`);
+      const projectList = await api(managerToken, 'GET', '/job-orders?scope=all&pageSize=200');
+      check(
+        'the project work order register does not list or open it',
+        onProjectRegister.status === 404 && !(projectList.body.rows as { id: string }[]).some((r) => r.id === sjoId),
+        `${onProjectRegister.status} listed ${(projectList.body.rows as { id: string }[]).some((r) => r.id === sjoId)}`,
+      );
+      const sjoSubmit = await api(engineerToken, 'POST', `/service-job-orders/${sjoId}/submit`);
+      const sjoPending = await api(engineerToken, 'GET', `/service-job-orders/${sjoId}`);
+      const sjoRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'service_job_order', documentId: sjoId, status: 'PENDING' } });
+      check(
+        'submitted, it waits on the Aftermarket Manager first',
+        sjoSubmit.status === 200 && sjoPending.body.status === 'PENDING_APPROVAL' && sjoPending.body.stageLabel === 'AM Approval' && !!sjoRequest,
+        `${sjoSubmit.status} ${sjoSubmit.body.error ?? ''} ${sjoPending.body.stageLabel}`,
+      );
+      // The Team Leader may hold no right to the register: the decider's door lets them in while it waits on them.
+      const leadToken = signToken(lead.id, lead.email);
+      await act({ requestId: sjoRequest!.id, userId: manager.id, action: 'APPROVED' });
+      const leadReads = await api(leadToken, 'GET', `/service-job-orders/${sjoId}`);
+      check('the Team Leader it waits on reads it with no right to the register', leadReads.status === 200 && leadReads.body.stageLabel === 'TL Approval', `${leadReads.status} ${leadReads.body.stageLabel ?? leadReads.body.error}`);
+      await act({ requestId: sjoRequest!.id, userId: lead.id, action: 'APPROVED' });
+      const sjoApproved = await api(engineerToken, 'GET', `/service-job-orders/${sjoId}`);
+      const booked = await prisma.serviceVisit.findUnique({ where: { jobOrderId: sjoId } });
+      check(
+        'the last signature books the visit on the needed-by day, for the engineer, on the machine and contract — no project',
+        sjoApproved.body.status === 'APPROVED' &&
+          sjoApproved.body.stageLabel === 'Dispatch pending' &&
+          !!booked &&
+          booked.status === 'SCHEDULED' &&
+          iso(booked.dueDate) === neededBy &&
+          booked.assignedToId === engineer.id &&
+          booked.assetId === asset.id &&
+          booked.contractId === contract.id &&
+          booked.kind === 'CORRECTIVE' &&
+          sjoApproved.body.job === null,
+        `${sjoApproved.body.status} ${sjoApproved.body.stageLabel} visit ${booked?.status ?? 'none'} ${booked ? iso(booked.dueDate) : ''}`,
+      );
+      const dash = await api(managerToken, 'GET', '/aftermarket/dashboard');
+      const openList = await api(managerToken, 'GET', '/service-job-orders?open=true&scope=all&pageSize=1');
+      check(
+        'the overview’s Active service JOs card equals the register it opens (?open=true)',
+        dash.status === 200 && dash.body.serviceJobs.open >= 1 && openList.body.total === dash.body.serviceJobs.open,
+        `card ${dash.body.serviceJobs?.open} list ${openList.body.total}`,
+      );
+      const sjoHits = await globalSearch(TAG, (await resolveUser(engineer.id))!, 20);
+      check('Ctrl+K finds Service JOs under their own kind', sjoHits.some((h) => h.kind === 'service_job_order' && h.link === `/g-ops/service-job-orders/${sjoId}`), [...new Set(sjoHits.map((h) => h.kind))].join(', '));
+      const sjoCancel = await api(engineerToken, 'POST', `/service-job-orders/${sjoId}/cancel`, { reason: 'Customer cleared the alarm themselves' });
+      const bookedAfter = await prisma.serviceVisit.findUnique({ where: { jobOrderId: sjoId } });
+      check(
+        'cancelling an approved Service JO cancels the visit it booked',
+        sjoCancel.status === 200 && bookedAfter?.status === 'CANCELLED' && (await prisma.jobOrder.findUnique({ where: { id: sjoId } }))?.status === 'CANCELLED',
+        `${sjoCancel.status} ${sjoCancel.body.error ?? ''} visit ${bookedAfter?.status}`,
+      );
+    }
+
+    // ── Service Documents and the direct contract (2026-10-20, push 4) ──
+    {
+      const categories = await api(engineerToken, 'GET', '/reference/service-document-categories?active=true');
+      const manual = (categories.body as { id: string; name: string }[]).find((c) => c.name === 'Manual');
+      check('the six service document categories are seeded, Manual among them', categories.status === 200 && !!manual && categories.body.length >= 6, `${categories.status} ${categories.body.length}`);
+      const onMachine = await api(engineerToken, 'POST', '/service-documents', {
+        title: `${TAG} O&M manual`,
+        categoryId: manual!.id,
+        assetId: asset.id,
+        version: 'Rev. B',
+        documentDate: '2026-01-15',
+      });
+      check(
+        'a document is filed against a machine, under its category',
+        onMachine.status === 201 && onMachine.body.asset?.id === asset.id && onMachine.body.category?.name === 'Manual' && onMachine.body.files === 0,
+        `${onMachine.status} ${onMachine.body.error ?? ''}`,
+      );
+      const noCategory = await api(engineerToken, 'POST', '/service-documents', { title: `${TAG} stray`, categoryId: 'nope', assetId: asset.id });
+      check('a category not on the list is refused', noCategory.status === 400, `${noCategory.status}`);
+      // On the model: the machine's item, read by every machine of it.
+      const modelItem = await prisma.item.create({ data: { code: `${TAG}-DRY`, name: `${TAG} Dryer model`, unit: 'unit' } });
+      await prisma.installedAsset.update({ where: { id: asset.id }, data: { itemId: modelItem.id } });
+      const onModel = await api(engineerToken, 'POST', '/service-documents', { title: `${TAG} Dryer datasheet`, categoryId: manual!.id, itemId: modelItem.id });
+      const assetPage = await api(engineerToken, 'GET', `/installed-assets/${asset.id}`);
+      const docs = (assetPage.body.documents ?? []) as { id: string; onModel: boolean }[];
+      check(
+        'the machine’s page lists the documents on it and on its model, the model’s said so',
+        onModel.status === 201 && docs.some((d) => d.id === onMachine.body.id && !d.onModel) && docs.some((d) => d.id === onModel.body.id && d.onModel),
+        `${onModel.status} ${docs.length} document(s): ${JSON.stringify(docs.map((d) => d.onModel))}`,
+      );
+      const docList = await api(engineerToken, 'GET', '/service-documents?scope=all&pageSize=100');
+      const dash2 = await api(managerToken, 'GET', '/aftermarket/dashboard');
+      const allDocs = await api(managerToken, 'GET', '/service-documents?scope=all&pageSize=1');
+      check(
+        'the overview’s Technical documents card equals the register it opens',
+        docList.status === 200 && docList.body.summary.documents >= 2 && dash2.body.documents.total === allDocs.body.total,
+        `card ${dash2.body.documents?.total} list ${allDocs.body.total}`,
+      );
+      const withdrawn = await api(engineerToken, 'PATCH', `/service-documents/${onModel.body.id}`, { isActive: false });
+      const assetPage2 = await api(engineerToken, 'GET', `/installed-assets/${asset.id}`);
+      check(
+        'a withdrawn document leaves the machine’s page and stays on file',
+        withdrawn.status === 200 && withdrawn.body.isActive === false && !(assetPage2.body.documents as { id: string }[]).some((d) => d.id === onModel.body.id),
+        `${withdrawn.status} ${withdrawn.body.error ?? ''}`,
+      );
+      const strangerDoc = await api(signToken(sales.id, sales.email), 'GET', `/service-documents/${onMachine.body.id}`);
+      check('somebody with no right to service documents is kept out', strangerDoc.status === 403, `${strangerDoc.status}`);
+      await prisma.installedAsset.update({ where: { id: asset.id }, data: { itemId: null } });
+      await prisma.serviceDocument.deleteMany({ where: { itemId: modelItem.id } });
+      await prisma.item.delete({ where: { id: modelItem.id } });
+
+      // A contract typed directly: its costing and job made with it, in one transaction.
+      const directContract = await api(managerToken, 'POST', '/service-contracts', {
+        direct: { customerId: customer.id, name: `${TAG} Annual PMS typed directly`, contractValue: 96_000 },
+        startsAt: '2027-01-01',
+        endsAt: '2027-12-31',
+        frequencyMonths: 6,
+        coverageLevel: 'Quarterly Labor & Parts',
+        assetIds: [secondAsset.id],
+      });
+      const directJob = directContract.status === 201 ? await prisma.job.findUnique({ where: { id: directContract.body.job.id }, include: { costing: true } }) : null;
+      check(
+        'a contract typed directly makes its SERVICE_CONTRACT job and a costing carrying the value, in one go',
+        directContract.status === 201 &&
+          directJob?.type === 'SERVICE_CONTRACT' &&
+          Number(directJob.contractValue) === 96_000 &&
+          Number(directJob.costing.contractValue) === 96_000 &&
+          directJob.customerId === customer.id &&
+          directContract.body.status === 'DRAFT' &&
+          directContract.body.assets.length === 1,
+        `${directContract.status} ${directContract.body.error ?? ''} job ${directJob?.type} ${directJob ? Number(directJob.contractValue) : ''}`,
+      );
+      const neither = await api(managerToken, 'POST', '/service-contracts', { startsAt: '2027-01-01', endsAt: '2027-12-31', assetIds: [] });
+      const strangersMachine = await api(managerToken, 'POST', '/service-contracts', {
+        direct: { customerId: customer.id, name: `${TAG} wrong machine`, contractValue: 1 },
+        startsAt: '2027-01-01',
+        endsAt: '2027-12-31',
+        assetIds: [(await prisma.installedAsset.findFirst({ where: { customerId: { not: customer.id } }, select: { id: true } }))?.id ?? 'nope'],
+      });
+      check(
+        'neither a job nor the direct facts is refused, and so is another customer’s machine',
+        neither.status === 400 && strangersMachine.status === 400,
+        `${neither.status} ${strangersMachine.status} ${strangersMachine.body.error ?? ''}`,
+      );
+    }
 
     const salesToken = signToken(sales.id, sales.email);
     const raised = await api(salesToken, 'POST', '/job-orders', {
@@ -2204,10 +2483,37 @@ async function main() {
       startsAt: iso(coverStart),
       endsAt: iso(inDays(5 + 364)),
       frequencyMonths: 3,
+      coverageLevel: `  ${TAG} 24/7 Comprehensive PM `,
       assetIds: [asset.id],
     });
     check('a draft contract is set up', created.status === 201 && created.body.plannedVisits === 3, `${created.status} ${created.body.plannedVisits ?? created.body.error}`);
     const mcId = created.body.id as string;
+    // The SLA coverage level (2026-10-20): kept trimmed, offered back as a
+    // suggestion, searched and filtered on the list, and the Renewal notice
+    // is null on a draft.
+    check(
+      'the coverage level is kept trimmed, and a draft has no renewal notice',
+      created.body.coverageLevel === `${TAG} 24/7 Comprehensive PM` && created.body.renewal === null,
+      `${created.body.coverageLevel} / ${created.body.renewal}`,
+    );
+    const levels = await api(managerToken, 'GET', '/service-contracts/coverage-levels');
+    check(
+      'the coverage levels on file are offered as suggestions',
+      levels.status === 200 && (levels.body as string[]).includes(`${TAG} 24/7 Comprehensive PM`),
+      `${levels.status} ${JSON.stringify(levels.body).slice(0, 120)}`,
+    );
+    const byLevel = await api(managerToken, 'GET', `/service-contracts?coverageLevel=${encodeURIComponent(`${TAG} 24/7 comprehensive pm`)}`);
+    check(
+      'the list filters on the coverage level case-blind, and its cards come with it',
+      byLevel.status === 200 &&
+        byLevel.body.rows.length === 1 &&
+        byLevel.body.rows[0].id === mcId &&
+        typeof byLevel.body.summary?.upForRenewal === 'number' &&
+        typeof byLevel.body.summary?.renewalDrafts === 'number',
+      `${byLevel.status} ${byLevel.body.rows?.length} ${JSON.stringify(byLevel.body.summary ?? {})}`,
+    );
+    const badRenewal = await api(managerToken, 'GET', '/service-contracts?renewal=soon');
+    check('an unknown renewal filter is refused naming the choices', badRenewal.status === 400, String(badRenewal.status));
 
     const asManager = await api(managerToken, 'GET', `/service-contracts/${mcId}`);
     const asEngineer = await api(engineerToken, 'GET', `/service-contracts/${mcId}`);
@@ -2221,12 +2527,7 @@ async function main() {
     check('somebody who may only read contracts cannot change one', readerEdit.status === 403, String(readerEdit.status));
 
     const ownPm = await makeUser('ZZ Own Contract PM', 'ownpm@verifya.local', []);
-    const ownKeys = await prisma.permission.findMany({
-      where: { key: { in: ['gops.service_contracts.view_own', 'gops.service_contracts.edit_own'] } },
-    });
-    await prisma.userPermissionOverride.createMany({
-      data: ownKeys.map((p) => ({ userId: ownPm.id, permissionId: p.id, effect: 'ALLOW' as const })),
-    });
+    await grantKeys(ownPm.id, ['gops.service_contracts.view_own', 'gops.service_contracts.edit_own']);
     const ownToken = signToken(ownPm.id, ownPm.email);
     const notTheirs = await api(ownToken, 'PATCH', `/service-contracts/${mcId}`, { responseTime: 'not my job' });
     check(
@@ -2783,6 +3084,30 @@ async function main() {
         typeof dashboard.body.visits?.overdue === 'number',
       JSON.stringify(dashboard.body).slice(0, 160),
     );
+    // The owner's cards of 2026-10-20: scheduled this week and active service JOs.
+    check(
+      'and the visits scheduled this week and the active service JOs',
+      typeof dashboard.body.visits?.thisWeek === 'number' && typeof dashboard.body.serviceJobs?.open === 'number',
+      JSON.stringify({ thisWeek: dashboard.body.visits?.thisWeek, serviceJobs: dashboard.body.serviceJobs }),
+    );
+    // The installation base's Industry team column and filter (2026-10-20):
+    // the customer's team; `none` lists the machines of customers with none.
+    const teamRow = await prisma.industry.findFirst({ where: { isActive: true }, select: { id: true, code: true } });
+    if (teamRow) {
+      await prisma.customer.update({ where: { id: customer.id }, data: { industryId: teamRow.id } });
+      const byTeam = await api(managerToken, 'GET', `/installed-assets?teamId=${teamRow.id}&customerId=${customer.id}`);
+      check(
+        'the installation base lists a customer’s machines under its team, each row carrying the team',
+        byTeam.status === 200 &&
+          byTeam.body.rows.length > 0 &&
+          byTeam.body.rows.every((r: { customer: { industry: { code: string } | null } }) => r.customer.industry?.code === teamRow.code) &&
+          typeof byTeam.body.summary?.uncovered === 'number',
+        `${byTeam.status} ${byTeam.body.rows?.length} ${JSON.stringify(byTeam.body.summary ?? {})}`,
+      );
+      const noTeam = await api(managerToken, 'GET', `/installed-assets?teamId=none&customerId=${customer.id}`);
+      check('and none of them under "no team"', noTeam.status === 200 && noTeam.body.rows.length === 0, `${noTeam.status} ${noTeam.body.rows?.length}`);
+      await prisma.customer.update({ where: { id: customer.id }, data: { industryId: null } });
+    }
 
     const renewals = await api(managerToken, 'GET', '/aftermarket/renewals?withinDays=90');
     check(
@@ -3015,10 +3340,7 @@ async function main() {
     // The service manager does not hold the G-OPS dashboard permission by
     // role — which is the right default, and means the actor has to be given
     // it explicitly rather than the assertion being quietly weakened to match.
-    const dash = await prisma.permission.findUnique({ where: { key: 'gops.dashboard.view_all' } });
-    await prisma.userPermissionOverride.create({
-      data: { userId: manager.id, permissionId: dash!.id, effect: 'ALLOW' },
-    });
+    await grantKeys(manager.id, ['gops.dashboard.view_all']);
 
     const overview = await api(managerToken, 'GET', '/gops/overview');
     check('the G-OPS overview runs', overview.status === 200, String(overview.status));

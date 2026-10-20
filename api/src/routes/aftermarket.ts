@@ -23,7 +23,7 @@ import {
   type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
-import { canEditRecord, type ResolvedUser } from '../permissions/resolve';
+import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { formatShortDate, formatAmount, formatMoney, companyCurrency, renderDocument, statusLabel } from '../shared/pdf';
 import { registerSearch } from '../shared/search';
@@ -32,6 +32,7 @@ import { LIST_CAP, listReference, totalLabel, listDay, namedInFilter, choice, br
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { submitForApproval, onApprovalSettled, onApprovalReopened } from '../shared/approvals';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
 import {
   aftermarketSettings,
   saveAftermarketSettings,
@@ -46,8 +47,15 @@ import {
   currentTemplate,
   renewalPipeline,
   sweepOverdue,
+  OPEN_VISIT_STATUSES,
+  UNATTENDED_VISIT_STATUSES,
+  visitSlot,
+  slotLabel,
   type TemplateSection,
 } from '../shared/aftermarket';
+import { visibleOwners } from '../shared/team';
+import { documentsForAsset } from './serviceDocuments';
+import { registerAttachmentGuard } from '../shared/attachments';
 
 const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
 
@@ -76,6 +84,11 @@ export const KIND_LABEL: Record<string, string> = {
 const kindWord = (k: string) => KIND_LABEL[k] ?? statusLabel(k);
 
 /** Which permission covers a report of each kind. */
+/** The registry screen a report kind lives under. */
+function reportSub(kind: string): string {
+  return reportPermission(kind, 'x').split('.')[1];
+}
+
 export function reportPermission(kind: string, action: string): string {
   if (kind === 'COMMISSIONING') return `gops.commissioning_reports.${action}`;
   if (kind === 'PREVENTIVE_MAINTENANCE') return `gops.pm_reports.${action}`;
@@ -90,7 +103,8 @@ export const assetRoutes = Router();
 assetRoutes.use(authenticate);
 
 const assetInclude = {
-  customer: { select: { id: true, code: true, name: true } },
+  // The customer's team (KAT, HIT …) is the register's "Industry team" column (2026-10-20).
+  customer: { select: { id: true, code: true, name: true, industry: { select: { id: true, code: true, name: true } } } },
   site: { select: { id: true, name: true, city: true } },
   job: { select: { id: true, number: true, name: true } },
   item: { select: { id: true, code: true, name: true } },
@@ -98,20 +112,29 @@ const assetInclude = {
 
 type AssetRow = Prisma.InstalledAssetGetPayload<{ include: typeof assetInclude }>;
 
-function presentAsset(row: AssetRow, warningDays: number) {
+function presentAsset(row: AssetRow, warningDays: number, me?: ResolvedUser) {
   const warranty = expiryState(row.warrantyEndsAt, warningDays);
   return {
     ...row,
     warranty: warranty.state,
     warrantyDaysRemaining: warranty.daysRemaining,
+    // Modify on the page: Edit All, or Edit Own on a machine the viewer
+    // registered (2026-10-18).
+    ...(me ? { canEdit: mayEdit(me, 'gops', 'installed_base', row.createdById === me.id, row.createdById) } : {}),
   };
 }
+
+/**
+ * "Own" on the Installed Base is the machines you registered (2026-10-18):
+ * a View Own holder's register, paper and record are narrowed to those.
+ */
+const assetMine = (me: ResolvedUser): Prisma.InstalledAssetWhereInput => ({ createdById: me.id });
 
 /**
  * Which assets a register query means — one rule for the list AND its PDF
  * export, so the paper matches the screen it was printed off.
  */
-function assetListWhere(q: ReturnType<typeof listQuery>, expiryWarningDays: number): Prisma.InstalledAssetWhereInput {
+function assetListWhere(me: ResolvedUser, q: ReturnType<typeof listQuery>, expiryWarningDays: number): Prisma.InstalledAssetWhereInput {
   const where: Prisma.InstalledAssetWhereInput = {};
 
   const status = choice(q.filters.status, AssetStatus, 'Status');
@@ -119,6 +142,8 @@ function assetListWhere(q: ReturnType<typeof listQuery>, expiryWarningDays: numb
   if (q.filters.customerId) where.customerId = q.filters.customerId;
   if (q.filters.siteId) where.siteId = q.filters.siteId;
   if (q.filters.jobId) where.jobId = q.filters.jobId;
+  // The customer's team — an id, or `none` for a customer nobody has handled yet.
+  if (q.filters.teamId) where.customer = { industryId: q.filters.teamId === 'none' ? null : q.filters.teamId };
   // The rows a person ticked (Print selected); the filters still apply.
   const ids = idsFilter(q.filters.ids);
   if (ids) where.id = { in: ids };
@@ -152,18 +177,19 @@ function assetListWhere(q: ReturnType<typeof listQuery>, expiryWarningDays: numb
       { address: { contains: q.search, mode: 'insensitive' } },
     ];
   }
-  return where;
+  return ownOnly(me, 'gops', 'installed_base', where, (ids) => ({ createdById: { in: ids } }));
 }
 
 assetRoutes.get(
   '/',
-  require_('gops.installed_base.view_all'),
+  requireView('gops', 'installed_base'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const q = listQuery(req);
     const settings = await aftermarketSettings();
-    const where = assetListWhere(q, settings.expiryWarningDays);
+    const where = assetListWhere(me, q, settings.expiryWarningDays);
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       prisma.installedAsset.findMany({
         where,
         include: assetInclude,
@@ -174,11 +200,29 @@ assetRoutes.get(
         take: q.pageSize,
       }),
       prisma.installedAsset.count({ where }),
+      assetListSummary(where, settings.expiryWarningDays),
     ]);
 
-    res.json(listResult(rows.map((r) => presentAsset(r, settings.expiryWarningDays)), total, q));
+    res.json({ ...listResult(rows.map((r) => presentAsset(r, settings.expiryWarningDays, me)), total, q), summary });
   }),
 );
+
+/**
+ * The cards over the register (2026-10-20): under the list's own query —
+ * how many are in warranty, how many leave it within the warning days, and
+ * how many nothing covers.
+ */
+async function assetListSummary(where: Prisma.InstalledAssetWhereInput, warningDays: number) {
+  const today = dayKey(new Date());
+  const horizon = new Date(today);
+  horizon.setUTCDate(horizon.getUTCDate() + warningDays);
+  const [inWarranty, expiring, uncovered] = await Promise.all([
+    prisma.installedAsset.count({ where: { AND: [where, { warrantyEndsAt: { gt: horizon } }] } }),
+    prisma.installedAsset.count({ where: { AND: [where, { warrantyEndsAt: { gte: today, lte: horizon } }] } }),
+    prisma.installedAsset.count({ where: { AND: [where, { contracts: { none: { contract: { status: 'ACTIVE' } } } }] } }),
+  ]);
+  return { inWarranty, expiring, uncovered, warningDays };
+}
 
 /** The name trimmed, single-spaced and upper-cased: one equipment type per spelling. */
 const typeKey = (name: string) => name.trim().replace(/\s+/g, ' ').toUpperCase();
@@ -205,7 +249,7 @@ async function rememberEquipmentTypes(names: (string | null | undefined)[]): Pro
 /** What the register's Equipment type field suggests. Above `/:id`, the route-order trap. */
 assetRoutes.get(
   '/types',
-  require_('gops.installed_base.view_all'),
+  requireView('gops', 'installed_base'),
   handler(async (_req, res) => {
     const rows = await prisma.equipmentType.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { name: true } });
     res.json(rows.map((r) => r.name));
@@ -219,13 +263,13 @@ assetRoutes.get(
  */
 assetRoutes.get(
   '/pdf',
-  require_('gops.installed_base.view_all'),
+  requireView('gops', 'installed_base'),
   handler(async (req, res) => {
     const q = listQuery(req);
     const settings = await aftermarketSettings();
-    const where = assetListWhere(q, settings.expiryWarningDays);
+    const where = assetListWhere(currentUser(req), q, settings.expiryWarningDays);
     const f = q.filters;
-    const [rows, count, named] = await Promise.all([
+    const [rows, count, named, team] = await Promise.all([
       prisma.installedAsset.findMany({
         where,
         include: assetInclude,
@@ -234,6 +278,7 @@ assetRoutes.get(
       }),
       prisma.installedAsset.count({ where }),
       namedInFilter({ customerId: f.customerId, siteId: f.siteId, jobId: f.jobId }),
+      f.teamId && f.teamId !== 'none' ? prisma.industry.findUnique({ where: { id: f.teamId }, select: { code: true } }) : null,
     ]);
     // "12 machines", or "first 1,000 of 1,234 machines printed" when the cap
     // bit — then every filter `assetListWhere` applied, by name, so a
@@ -247,6 +292,7 @@ assetRoutes.get(
       named.customer ? `customer ${named.customer}` : null,
       named.site ? `site ${named.site}` : null,
       named.project ? `project ${named.project}` : null,
+      f.teamId === 'none' ? 'customer with no team' : team ? `team ${team.code}` : null,
       f.ids ? 'the rows selected' : null,
     ]);
 
@@ -254,16 +300,19 @@ assetRoutes.get(
     // code under "Code" — a master's identifier, as the screen heads it
     // (rule 6: a document's number column is "Number", a master's "Code") —
     // and landscape pages with the engine's own column widths, so no head
-    // breaks mid-word.
+    // breaks mid-word. The columns are the screen's (2026-10-20): the
+    // serial on its own, the customer's team beside the location.
     const pdf = await renderDocument({
-      title: 'Installed Base',
+      title: 'Installation Base',
       date: new Date(),
       reference,
       landscape: true,
       sections: [
         {
           kind: 'table',
-          head: ['Code', 'Equipment', 'Customer and address', 'Location', 'Installed', 'Warranty', 'Status'],
+          // "Serial no.", never "Serial number": a master's identifier column is
+          // "Code" and the word NUMBER is a document's (verify-aftermarket pins it).
+          head: ['Code', 'Equipment / model', 'Serial no.', 'Customer and address', 'Installed', 'Team', 'Warranty', 'Status'],
           rows: rows.map((r) => {
             const warranty = expiryState(r.warrantyEndsAt, settings.expiryWarningDays);
             const word = statusLabel(WARRANTY_WORD[warranty.state] ?? warranty.state);
@@ -271,13 +320,15 @@ assetRoutes.get(
               r.code,
               {
                 title: r.name,
-                body: [[r.manufacturer, r.model].filter(Boolean).join(' '), r.serialNo ? `S/N ${r.serialNo}` : null]
-                  .filter(Boolean)
-                  .join(' · ') || undefined,
+                body: [r.manufacturer, r.model].filter(Boolean).join(' ') || undefined,
               },
-              { title: r.customer.name, body: r.address ?? r.site?.name ?? undefined },
-              r.location ?? '',
+              r.serialNo ?? '',
+              {
+                title: r.customer.name,
+                body: [r.address ?? r.site?.name, r.location].filter(Boolean).join(' · ') || undefined,
+              },
               r.installedAt ? formatShortDate(r.installedAt) : '',
+              r.customer.industry?.code ?? '',
               r.warrantyEndsAt ? `${formatShortDate(r.warrantyEndsAt)}${word ? ` (${word})` : ''}` : 'Not recorded',
               statusLabel(r.status),
             ];
@@ -292,11 +343,11 @@ assetRoutes.get(
         entityType: 'installed_asset',
         entityId: 'list',
         action: 'EXPORTED',
-        summary: `Exported the installed base as PDF (${listReference(count, rows.length, ['machine', 'machines'], [])})`,
+        summary: `Exported the installation base as PDF (${listReference(count, rows.length, ['machine', 'machines'], [])})`,
       },
       req,
     );
-    sendListPdf(res, pdf, 'installed-base.pdf');
+    sendListPdf(res, pdf, 'installation-base.pdf');
   }),
 );
 
@@ -307,8 +358,9 @@ const WARRANTY_FILTER: Record<(typeof WARRANTY_FILTERS)[number], string> = { ACT
 
 assetRoutes.get(
   '/:id',
-  require_('gops.installed_base.view_all'),
+  requireView('gops', 'installed_base'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const settings = await aftermarketSettings();
     const row = await prisma.installedAsset.findUnique({
       where: { id: req.params.id },
@@ -342,8 +394,8 @@ assetRoutes.get(
           take: 50,
         },
         visits: {
-          where: { status: { in: ['SCHEDULED', 'MISSED'] } },
-          select: { id: true, number: true, dueDate: true, kind: true, status: true },
+          where: { status: { in: [...OPEN_VISIT_STATUSES, 'MISSED'] } },
+          select: { id: true, number: true, dueDate: true, kind: true, status: true, startTime: true, endTime: true },
           orderBy: { dueDate: 'asc' },
           take: 10,
         },
@@ -363,13 +415,16 @@ assetRoutes.get(
       },
     });
     if (!row) throw notFound('Asset not found');
+    assertCanView(me, 'gops', 'installed_base', row.createdById === me.id, row.createdById);
 
     res.json({
-      ...presentAsset(row as unknown as AssetRow, settings.expiryWarningDays),
+      ...presentAsset(row as unknown as AssetRow, settings.expiryWarningDays, me),
       contracts: row.contracts.map((c) => c.contract),
       reports: row.reports,
       upcomingVisits: row.visits,
       jobOrders: row.jobOrders,
+      // The technical documents on it and on its model (2026-10-20).
+      documents: await documentsForAsset(row),
     });
   }),
 );
@@ -462,18 +517,20 @@ assetRoutes.post(
       },
       req,
     );
-    res.status(201).json(presentAsset(asset, settings.expiryWarningDays));
+    res.status(201).json(presentAsset(asset, settings.expiryWarningDays, me));
   }),
 );
 
 assetRoutes.patch(
   '/:id',
-  require_('gops.installed_base.edit_all'),
+  requireEdit('gops', 'installed_base'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(assetSchema.partial(), req.body);
     const settings = await aftermarketSettings();
     const existing = await prisma.installedAsset.findUnique({ where: { id: req.params.id } });
     if (!existing) throw notFound('Asset not found');
+    assertCanEdit(me, 'gops', 'installed_base', existing.createdById === me.id, existing.createdById);
 
     const updated = await prisma.installedAsset.update({
       where: { id: existing.id },
@@ -516,7 +573,7 @@ assetRoutes.patch(
       },
       req,
     );
-    res.json(presentAsset(updated, settings.expiryWarningDays));
+    res.json(presentAsset(updated, settings.expiryWarningDays, me));
   }),
 );
 
@@ -641,9 +698,29 @@ const contractInclude = {
     },
   },
   assets: { include: { asset: { select: { id: true, code: true, name: true, serialNo: true } } } },
+  // The renewal notice reads the renewal that follows (2026-10-20).
+  renewedTo: { select: { id: true, number: true, status: true, startsAt: true } },
 } satisfies Prisma.ServiceContractInclude;
 
 type ContractRow = Prisma.ServiceContractGetPayload<{ include: typeof contractInclude }>;
+
+/**
+ * The Renewal notice column (2026-10-20, the owner's spec): on an active
+ * contract, RENEWAL_DRAFT_SENT while a draft renewal stands behind it,
+ * RENEWED once that renewal is active, EXPIRING within the warning days,
+ * LAPSED past the end, else ACTIVE_COVERAGE; null on anything not active.
+ */
+export function renewalNotice(
+  row: { status: ContractStatus; renewedTo: { status: ContractStatus } | null },
+  term: { state: string },
+): 'RENEWAL_DRAFT_SENT' | 'RENEWED' | 'EXPIRING' | 'LAPSED' | 'ACTIVE_COVERAGE' | null {
+  if (row.status !== 'ACTIVE') return null;
+  const renewal = row.renewedTo && row.renewedTo.status !== 'CANCELLED' ? row.renewedTo : null;
+  if (renewal) return renewal.status === 'DRAFT' ? 'RENEWAL_DRAFT_SENT' : 'RENEWED';
+  if (term.state === 'EXPIRING') return 'EXPIRING';
+  if (term.state === 'EXPIRED') return 'LAPSED';
+  return 'ACTIVE_COVERAGE';
+}
 
 function presentContract(row: ContractRow, warningDays: number) {
   const term = expiryState(row.endsAt, warningDays);
@@ -653,10 +730,39 @@ function presentContract(row: ContractRow, warningDays: number) {
     assets: row.assets.map((a) => a.asset),
     expiry: term.state,
     daysRemaining: term.daysRemaining,
+    renewal: renewalNotice(row, term),
   };
 }
 
-const CONTRACT_SORTS = ['number', 'startsAt', 'endsAt', 'createdAt'];
+/**
+ * The cards over the contract list (2026-10-20): under the list's own
+ * query — active, up for renewal within the warning days (no renewal
+ * behind them), renewal drafts sent, expired.
+ */
+async function contractListSummary(where: Prisma.ServiceContractWhereInput, warningDays: number) {
+  const horizon = dayKey(new Date());
+  horizon.setUTCDate(horizon.getUTCDate() + warningDays);
+  const [active, upForRenewal, renewalDrafts, expired] = await Promise.all([
+    prisma.serviceContract.count({ where: { AND: [where, { status: 'ACTIVE' }] } }),
+    prisma.serviceContract.count({
+      where: { AND: [where, { status: 'ACTIVE', endsAt: { lte: horizon }, OR: [{ renewedTo: null }, { renewedTo: { status: 'CANCELLED' } }] }] },
+    }),
+    prisma.serviceContract.count({ where: { AND: [where, { status: 'ACTIVE', renewedTo: { status: 'DRAFT' } }] } }),
+    prisma.serviceContract.count({ where: { AND: [where, { status: 'EXPIRED' }] } }),
+  ]);
+  return { active, upForRenewal, renewalDrafts, expired, warningDays };
+}
+
+const CONTRACT_SORTS = ['number', 'startsAt', 'endsAt', 'createdAt', 'coverageLevel'];
+
+/** The renewal notice as the paper prints it. */
+export const RENEWAL_WORD: Record<NonNullable<ReturnType<typeof renewalNotice>>, string> = {
+  RENEWAL_DRAFT_SENT: 'Renewal draft sent',
+  RENEWED: 'Renewed',
+  EXPIRING: 'Expiring',
+  LAPSED: 'Lapsed',
+  ACTIVE_COVERAGE: 'Active coverage',
+};
 
 /**
  * Which contracts a list query means — one rule for the list and its printed
@@ -668,7 +774,8 @@ function contractListWhere(me: ResolvedUser, q: ListQuery, expiryWarningDays: nu
   const where: Prisma.ServiceContractWhereInput = {};
   const jobWhere: Prisma.JobWhereInput = {};
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.service_contracts.view_all');
-  if (onlyOwn || q.scope === 'mine') jobWhere.projectManagerId = me.id;
+  if (q.scope === 'mine') jobWhere.projectManagerId = me.id;
+  else if (onlyOwn) jobWhere.projectManagerId = { in: visibleOwners(me, 'gops', 'service_contracts') };
   if (q.filters.customerId) jobWhere.customerId = q.filters.customerId;
   if (Object.keys(jobWhere).length) where.job = jobWhere;
   const ids = idsFilter(q.filters.ids);
@@ -682,15 +789,41 @@ function contractListWhere(me: ResolvedUser, q: ListQuery, expiryWarningDays: nu
     where.status = 'ACTIVE';
     where.endsAt = { lte: horizon };
   }
+  // The Renewal notice as a filter (2026-10-20): `draft` — a draft renewal
+  // stands behind it; `due` — ending within the warning days with none.
+  const renewal = choice(q.filters.renewal, RENEWAL_FILTERS, 'Renewal', (r) => RENEWAL_FILTER[r]);
+  if (renewal === 'draft') {
+    where.status = 'ACTIVE';
+    where.renewedTo = { status: 'DRAFT' };
+  }
+  if (renewal === 'due') {
+    const horizon = dayKey(new Date());
+    horizon.setUTCDate(horizon.getUTCDate() + expiryWarningDays);
+    where.status = 'ACTIVE';
+    where.endsAt = { lte: horizon };
+    where.OR = [{ renewedTo: null }, { renewedTo: { status: 'CANCELLED' } }];
+  }
+  if (q.filters.coverageLevel) where.coverageLevel = { equals: q.filters.coverageLevel, mode: 'insensitive' };
   if (q.search) {
-    where.OR = [
+    const search: Prisma.ServiceContractWhereInput[] = [
       { number: { contains: q.search, mode: 'insensitive' } },
+      { coverageLevel: { contains: q.search, mode: 'insensitive' } },
       { job: { name: { contains: q.search, mode: 'insensitive' } } },
       { job: { customer: { name: { contains: q.search, mode: 'insensitive' } } } },
     ];
+    // A search beside the renewal filter's own OR: both must hold.
+    if (where.OR) {
+      where.AND = [{ OR: where.OR }, { OR: search }];
+      delete where.OR;
+    } else {
+      where.OR = search;
+    }
   }
   return where;
 }
+
+const RENEWAL_FILTERS = ['due', 'draft'] as const;
+const RENEWAL_FILTER: Record<(typeof RENEWAL_FILTERS)[number], string> = { due: 'Up for renewal', draft: 'Renewal draft sent' };
 
 contractRoutes.get(
   '/',
@@ -702,7 +835,7 @@ contractRoutes.get(
     const settings = await aftermarketSettings();
     const where = contractListWhere(me, q, settings.expiryWarningDays);
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       prisma.serviceContract.findMany({
         where,
         include: contractInclude,
@@ -711,9 +844,29 @@ contractRoutes.get(
         take: q.pageSize,
       }),
       prisma.serviceContract.count({ where }),
+      contractListSummary(where, settings.expiryWarningDays),
     ]);
 
-    res.json(listResult(rows.map((r) => presentContract(r, settings.expiryWarningDays)), total, q));
+    res.json({ ...listResult(rows.map((r) => presentContract(r, settings.expiryWarningDays)), total, q), summary });
+  }),
+);
+
+/**
+ * The SLA coverage levels on file, for the cover form's suggestions — one
+ * per spelling, the most used first. Above `/:id`, the route-order trap.
+ */
+contractRoutes.get(
+  '/coverage-levels',
+  requireAny('gops.service_contracts.view_all', 'gops.service_contracts.view_own'),
+  handler(async (_req, res) => {
+    const rows = await prisma.serviceContract.groupBy({
+      by: ['coverageLevel'],
+      where: { coverageLevel: { not: null } },
+      _count: { _all: true },
+      orderBy: { _count: { coverageLevel: 'desc' } },
+      take: 50,
+    });
+    res.json(rows.map((r) => r.coverageLevel).filter((v): v is string => !!v));
   }),
 );
 
@@ -746,6 +899,8 @@ contractRoutes.get(
       q.search ? `search "${q.search}"` : null,
       q.filters.status && q.filters.expiring !== 'true' ? `status ${statusLabel(q.filters.status)}` : null,
       q.filters.expiring === 'true' ? `active, ending within ${settings.expiryWarningDays} days` : null,
+      q.filters.renewal ? RENEWAL_FILTER[q.filters.renewal as (typeof RENEWAL_FILTERS)[number]].toLowerCase() : null,
+      q.filters.coverageLevel ? `coverage ${q.filters.coverageLevel}` : null,
       named.customer ? `customer ${named.customer}` : null,
       q.scope === 'mine' ? 'managed by me' : null,
       q.filters.ids ? 'the rows selected' : null,
@@ -759,8 +914,8 @@ contractRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Customer and project', 'Term', 'Covers', 'Visits', `Value (${currency})`, 'Status'],
-          align: ['left', 'left', 'left', 'right', 'right', 'right', 'left'],
+          head: ['Number', 'Customer and project', 'Coverage level', 'Term', 'Renewal', 'Covers', 'Visits', `Value (${currency})`, 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'right', 'left'],
           rows: rows.map((r) => {
             const c = presentContract(r, settings.expiryWarningDays);
             const value = formatAmount(c.job.contractValue);
@@ -773,7 +928,9 @@ contractRoutes.get(
             return [
               r.number,
               { title: r.job.customer.name, body: [r.job.name, r.job.site?.name].filter(Boolean).join(' · ') },
+              r.coverageLevel ?? '',
               `${formatShortDate(r.startsAt)} – ${formatShortDate(r.endsAt)}${left ? `\n${left}` : ''}`,
+              c.renewal ? RENEWAL_WORD[c.renewal] : '',
               `${c.assets.length} machine${c.assets.length === 1 ? '' : 's'}`,
               `${r.plannedVisits}\nevery ${r.frequencyMonths} month${r.frequencyMonths === 1 ? '' : 's'}`,
               bracketed(value, r.status !== 'CANCELLED'),
@@ -847,17 +1004,34 @@ contractRoutes.get(
         planned: row.plannedVisits,
         completed,
         missed: row.visits.filter((v) => v.status === 'MISSED').length,
-        remaining: row.visits.filter((v) => v.status === 'SCHEDULED').length,
+        remaining: row.visits.filter((v) => OPEN_VISIT_STATUSES.includes(v.status)).length,
       },
     });
   }),
 );
 
 const contractSchema = z.object({
-  jobId: z.string().min(1, 'Which service job?'),
+  /** The service job the cover is set on — or none, with `direct` instead (2026-10-20). */
+  jobId: z.string().optional().nullable(),
+  /**
+   * A contract typed directly, with no costing behind it (2026-10-20, the
+   * owner's call): its SERVICE_CONTRACT job is made in the same transaction,
+   * on a costing that carries the contract value alone — the job's budget is
+   * costed later if it ever is.
+   */
+  direct: z
+    .object({
+      customerId: z.string().min(1, 'Which customer?'),
+      name: z.string().trim().min(2, 'Name the contract').max(300),
+      contractValue: z.number().min(0),
+      siteId: z.string().optional().nullable(),
+    })
+    .optional()
+    .nullable(),
   startsAt: z.string().min(1, 'When does cover start?'),
   endsAt: z.string().min(1, 'When does cover end?'),
   frequencyMonths: z.number().int().min(1).max(24).optional(),
+  coverageLevel: z.string().max(120).optional().nullable(),
   responseTime: z.string().optional().nullable(),
   exclusions: z.string().optional().nullable(),
   coverageNotes: z.string().optional().nullable(),
@@ -873,21 +1047,39 @@ contractRoutes.post(
     const body = parseBody(contractSchema, req.body);
     const settings = await aftermarketSettings();
 
-    const job = await prisma.job.findUnique({
-      where: { id: body.jobId },
-      include: { serviceContract: { select: { id: true, number: true } } },
-    });
-    if (!job) throw notFound('Job not found');
+    if (!body.jobId && !body.direct) throw badRequest('Which service job — or type the contract directly');
+    const job = body.jobId
+      ? await prisma.job.findUnique({
+          where: { id: body.jobId },
+          include: { serviceContract: { select: { id: true, number: true } } },
+        })
+      : null;
+    if (body.jobId && !job) throw notFound('Job not found');
     // A service contract IS a job of that type (model §4.5). Attaching coverage
     // terms to a delivery project would give it a PM schedule it has no budget
     // to service.
-    if (job.type !== 'SERVICE_CONTRACT') {
+    if (job && job.type !== 'SERVICE_CONTRACT') {
       throw badRequest(
         `${job.number} is a delivery project, not a service contract. Create the job as a service contract first — that is where its costing and budget come from.`,
       );
     }
-    if (job.serviceContract) {
+    if (job?.serviceContract) {
       throw badRequest(`${job.number} already has coverage terms (${job.serviceContract.number})`);
+    }
+    const direct = job ? null : body.direct!;
+    if (direct) {
+      const customer = await prisma.customer.findUnique({ where: { id: direct.customerId }, select: { id: true, isActive: true } });
+      if (!customer) throw badRequest('That customer does not exist');
+      if (direct.siteId) {
+        const site = await prisma.customerSite.findUnique({ where: { id: direct.siteId }, select: { customerId: true } });
+        if (site?.customerId !== direct.customerId) throw badRequest('That site is not this customer’s');
+      }
+    }
+    // Every machine covered is the customer's.
+    const customerId = job?.customerId ?? direct!.customerId;
+    if (body.assetIds.length) {
+      const theirs = await prisma.installedAsset.count({ where: { id: { in: body.assetIds }, customerId } });
+      if (theirs !== new Set(body.assetIds).size) throw badRequest('A machine named is not this customer’s');
     }
 
     const startsAt = asDate(body.startsAt, 'Start date');
@@ -896,14 +1088,53 @@ contractRoutes.post(
     const planned = planSchedule(startsAt, endsAt, frequencyMonths);
 
     const contract = await prisma.$transaction(async (tx) => {
+      // Typed directly: the costing that carries the value, then the job, then the cover — one transaction.
+      const jobId =
+        job?.id ??
+        (await (async () => {
+          const costing = await tx.costing.create({
+            data: {
+              number: await nextNumber('costing', tx),
+              title: direct!.name,
+              status: 'FINAL',
+              finalAt: new Date(),
+              customerId: direct!.customerId,
+              siteId: direct!.siteId || null,
+              ownerId: me.id,
+              contractValue: new Prisma.Decimal(direct!.contractValue),
+              totalCost: new Prisma.Decimal(0),
+              targetContractValue: new Prisma.Decimal(direct!.contractValue),
+              notes: 'Made with the service contract typed directly — the contract value alone, no cost lines yet.',
+            },
+          });
+          const made = await tx.job.create({
+            data: {
+              number: await nextNumber('project', tx),
+              type: 'SERVICE_CONTRACT',
+              name: direct!.name,
+              customerId: direct!.customerId,
+              siteId: direct!.siteId || null,
+              costingId: costing.id,
+              createdById: me.id,
+              projectManagerId: me.id,
+              contractValue: new Prisma.Decimal(direct!.contractValue),
+              startDate: startsAt,
+              targetEndDate: endsAt,
+              notes: 'Made with the service contract typed directly',
+            },
+          });
+          await audit({ entityType: 'job', entityId: made.id, action: 'CREATED', summary: `Created ${made.number} — ${made.name} with its service contract, typed directly` }, req, tx);
+          return made.id;
+        })());
       const created = await tx.serviceContract.create({
         data: {
           number: await nextNumber('service_contract', tx),
-          jobId: job.id,
+          jobId,
           startsAt,
           endsAt,
           frequencyMonths,
           plannedVisits: planned.length,
+          coverageLevel: body.coverageLevel?.trim() || null,
           responseTime: body.responseTime || null,
           exclusions: body.exclusions || null,
           coverageNotes: body.coverageNotes || null,
@@ -921,7 +1152,7 @@ contractRoutes.post(
         entityType: 'service_contract',
         entityId: contract.id,
         action: 'CREATED',
-        summary: `${contract.number} — ${body.assetIds.length} asset(s), ${planned.length} visit(s) planned every ${frequencyMonths} month(s)`,
+        summary: `${contract.number} — ${body.assetIds.length} asset(s), ${planned.length} visit(s) planned every ${frequencyMonths} month(s)${direct ? ' (typed directly, with its job)' : ''}`,
       },
       req,
     );
@@ -1012,7 +1243,7 @@ async function assertNoReportOnReplannedVisits(tx: Prisma.TransactionClient, con
     where: {
       contractId,
       sequence: { not: null },
-      status: { in: ['SCHEDULED', 'CANCELLED'] },
+      status: { in: UNATTENDED_VISIT_STATUSES },
       report: { isNot: null },
     },
     select: { number: true, report: { select: { number: true } } },
@@ -1047,11 +1278,29 @@ function mayModifyContract(me: ResolvedUser, status: ContractStatus, projectMana
   return MODIFIABLE_CONTRACT.has(status) && canEditRecord(me, 'gops', 'service_contracts', projectManagerId);
 }
 
+/**
+ * The contract's own files (2026-10-20, the owner's call: "add also card for
+ * add attachment") — the signed agreement, the customer's PO: read by whoever
+ * may read contracts, added or removed by whoever may modify the contract
+ * (its PM's edit_own, or edit_all) or raise one.
+ */
+registerAttachmentGuard(
+  'service_contract',
+  async (user) => can(user, 'gops.service_contracts.view_all') || can(user, 'gops.service_contracts.view_own'),
+  {
+    write: async (user, id) => {
+      const row = await prisma.serviceContract.findUnique({ where: { id }, select: { status: true, job: { select: { projectManagerId: true } } } });
+      return !!row && (mayModifyContract(user, row.status, row.job.projectManagerId) || can(user, 'gops.service_contracts.create'));
+    },
+  },
+);
+
 /** What the audit trail keeps of a contract's cover, before and after a change. */
 function coverSnapshot(c: {
   startsAt: Date;
   endsAt: Date;
   frequencyMonths: number;
+  coverageLevel: string | null;
   responseTime: string | null;
   exclusions: string | null;
   coverageNotes: string | null;
@@ -1061,6 +1310,7 @@ function coverSnapshot(c: {
     startsAt: c.startsAt.toISOString().slice(0, 10),
     endsAt: c.endsAt.toISOString().slice(0, 10),
     frequencyMonths: c.frequencyMonths,
+    coverageLevel: c.coverageLevel,
     responseTime: c.responseTime,
     exclusions: c.exclusions,
     coverageNotes: c.coverageNotes,
@@ -1298,6 +1548,7 @@ contractRoutes.patch(
       startsAt,
       endsAt,
       frequencyMonths,
+      coverageLevel: text(body.coverageLevel, contract.coverageLevel),
       responseTime: text(body.responseTime, contract.responseTime),
       exclusions: text(body.exclusions, contract.exclusions),
       coverageNotes: text(body.coverageNotes, contract.coverageNotes),
@@ -1309,6 +1560,7 @@ contractRoutes.patch(
       changed.push(`term ${after.startsAt} → ${after.endsAt}`);
     }
     if (before.frequencyMonths !== after.frequencyMonths) changed.push(`every ${after.frequencyMonths} month(s)`);
+    if (before.coverageLevel !== after.coverageLevel) changed.push(`coverage level ${after.coverageLevel ?? 'cleared'}`);
     if (before.responseTime !== after.responseTime) changed.push('response time');
     if (before.exclusions !== after.exclusions) changed.push('exclusions');
     if (before.coverageNotes !== after.coverageNotes) changed.push('notes');
@@ -1328,6 +1580,7 @@ contractRoutes.patch(
           startsAt,
           endsAt,
           frequencyMonths,
+          coverageLevel: after.coverageLevel,
           responseTime: after.responseTime,
           exclusions: after.exclusions,
           coverageNotes: after.coverageNotes,
@@ -1377,8 +1630,10 @@ contractRoutes.patch(
         // one gets back what it was — status, day, engineer, notes.
         for (const visit of carried) {
           const restored = await tx.serviceVisit.updateMany({
-            where: { contractId: contract.id, sequence: visit.sequence, status: { in: ['SCHEDULED', 'CANCELLED'] } },
+            where: { contractId: contract.id, sequence: visit.sequence, status: { in: UNATTENDED_VISIT_STATUSES } },
             data: {
+              // A confirmed visit left on its day stays confirmed; one the
+              // plan moved was written afresh and waits to be confirmed again.
               status: visit.status,
               dueDate: visit.dueDate,
               assignedToId: visit.assignedToId,
@@ -1391,7 +1646,7 @@ contractRoutes.patch(
         }
         regenerated = { ...result, carried: carried.length };
         written = await tx.serviceVisit.findMany({
-          where: { contractId: contract.id, sequence: { not: null }, status: { in: ['SCHEDULED', 'CANCELLED'] } },
+          where: { contractId: contract.id, sequence: { not: null }, status: { in: UNATTENDED_VISIT_STATUSES } },
           select: visitFields,
           orderBy: { sequence: 'asc' },
         });
@@ -1468,7 +1723,9 @@ const visitInclude = {
   customer: { select: { id: true, name: true } },
   site: { select: { id: true, name: true, city: true } },
   asset: { select: { id: true, code: true, name: true, serialNo: true } },
-  assignedTo: { select: { id: true, name: true } },
+  // The engineer's team (KAT, HIT …) is the schedule's "Engineer / team" column (2026-10-20).
+  assignedTo: { select: { id: true, name: true, employee: { select: { industry: { select: { id: true, code: true, name: true } } } } } },
+  confirmedBy: { select: { id: true, name: true } },
   report: { select: { id: true, number: true, status: true, performedAt: true } },
   // Why a visit with no contract sequence exists: the job order that asked for it.
   jobOrder: { select: { id: true, number: true, status: true } },
@@ -1484,6 +1741,10 @@ const VISIT_VIEW = [
   'gops.pm_reports.view_own',
   'gops.service_contracts.view_all',
   'gops.visits.view_all',
+  // View Own on the Service Schedule (2026-10-18): the visits assigned to
+  // you — `visitsOnlyOwn()` already narrows anyone without a whole-schedule
+  // key to exactly those, in the list, its paper and the calendar feed.
+  'gops.visits.view_own',
 ] as const;
 
 /**
@@ -1509,7 +1770,8 @@ function visitWhere(
   const where: Prisma.ServiceVisitWhereInput = {};
   if (filters.assignedToId === 'none') where.assignedToId = null;
   else if (filters.assignedToId) where.assignedToId = filters.assignedToId;
-  if (mine || visitsOnlyOwn(me)) where.assignedToId = me.id;
+  if (mine) where.assignedToId = me.id;
+  else if (visitsOnlyOwn(me)) where.assignedToId = { in: visibleOwners(me, 'gops', 'visits') };
 
   if (filters.contractId) where.contractId = filters.contractId;
   if (filters.customerId) where.customerId = filters.customerId;
@@ -1531,13 +1793,27 @@ function visitWhere(
 }
 
 /** Derived on read, never stored: a stored flag is wrong the moment midnight passes. */
-function presentVisit<T extends { status: string; dueDate: Date }>(row: T, today: Date) {
+function presentVisit<T extends { status: string; dueDate: Date; assignedToId: string | null; startTime?: string | null; endTime?: string | null }>(
+  row: T,
+  today: Date,
+  me?: ResolvedUser,
+) {
   return {
     ...row,
     daysUntilDue: daysBetween(today, row.dueDate),
-    overdue: row.status === 'SCHEDULED' && row.dueDate < today,
+    overdue: OPEN_VISIT_STATUSES.includes(row.status as VisitStatus) && row.dueDate < today,
+    slot: slotLabel(row.startTime ?? null, row.endTime ?? null),
+    // Move, assign, cancel: Edit All, or Edit Own on a visit assigned to the
+    // viewer (2026-10-18).
+    ...(me ? { canEdit: mayEdit(me, 'gops', 'visits', row.assignedToId === me.id, row.assignedToId) } : {}),
+    // Confirm with the customer (2026-10-20): the engineer it is booked on, or Edit All.
+    ...(me ? { canConfirm: row.status === 'SCHEDULED' && mayConfirmVisit(me, row.assignedToId) } : {}),
   };
 }
+
+/** Who confirms a visit with the customer: the engineer booked on it, or Edit All. */
+const mayConfirmVisit = (me: ResolvedUser, assignedToId: string | null) =>
+  me.isSuperAdmin || me.permissions.has('gops.visits.edit_all') || (!!assignedToId && assignedToId === me.id);
 
 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
 
@@ -1658,7 +1934,7 @@ visitRoutes.get(
       from: isoDay(from),
       to: isoDay(to),
       asOf: isoDay(today),
-      visits: visits.map((v) => presentVisit(v, today)),
+      visits: visits.map((v) => presentVisit(v, today, me)),
       reports,
       engineers: engineers
         .map((e) => e.assignedTo)
@@ -1723,19 +1999,22 @@ visitRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Due', 'Customer and machine', 'Kind', 'Booked by', 'Engineer', 'Report', 'Status'],
+          // The screen's columns (2026-10-20): the slot beside the date, the
+          // engineer's team under their name.
+          head: ['Number', 'Scheduled', 'Slot', 'Customer and machine', 'Service type', 'Booked by', 'Engineer / team', 'Report', 'Status'],
           rows: rows.map((r) => {
             const v = presentVisit(r, today);
-            const open = r.status === 'SCHEDULED' || r.status === 'MISSED';
+            const open = OPEN_VISIT_STATUSES.includes(r.status) || r.status === 'MISSED';
             const due =
               !open ? undefined : v.daysUntilDue === 0 ? 'Today' : v.daysUntilDue < 0 ? `${-v.daysUntilDue} day${v.daysUntilDue === -1 ? '' : 's'} late` : `In ${v.daysUntilDue} day${v.daysUntilDue === 1 ? '' : 's'}`;
             return [
               r.sequence && r.contract ? `${r.number}\nVisit ${r.sequence} of ${r.contract.plannedVisits}` : r.number,
               due ? `${formatShortDate(r.dueDate)}\n${due}` : formatShortDate(r.dueDate),
+              v.slot,
               { title: r.customer.name, body: r.asset ? `${r.asset.code} ${r.asset.name}` : (r.site?.name ?? undefined) },
               KIND_LABEL[r.kind] ?? statusLabel(r.kind),
               r.contract?.number ?? r.jobOrder?.number ?? 'Call-out',
-              r.assignedTo?.name ?? 'Unassigned',
+              r.assignedTo ? { title: r.assignedTo.name, body: r.assignedTo.employee?.industry?.code ?? undefined } : 'Unassigned',
               r.report?.number ?? '',
               v.overdue ? 'Overdue' : statusLabel(r.status),
             ];
@@ -1760,10 +2039,10 @@ visitRoutes.get(
     const me = currentUser(req);
     const row = await prisma.serviceVisit.findUnique({ where: { id: req.params.id }, include: visitInclude });
     if (!row) throw notFound('Visit not found');
-    if (visitsOnlyOwn(me) && row.assignedToId !== me.id) {
+    if (visitsOnlyOwn(me) && !(row.assignedToId && visibleOwners(me, 'gops', 'visits').includes(row.assignedToId))) {
       throw forbidden('That is someone else’s visit');
     }
-    res.json(presentVisit(row, dayKey(new Date())));
+    res.json(presentVisit(row, dayKey(new Date()), me));
   }),
 );
 
@@ -1783,7 +2062,7 @@ function visitListWhere(me: ResolvedUser, q: ListQuery): Prisma.ServiceVisitWher
   const to = filterDay(q.filters.to, 'To');
   if (from || to) where.dueDate = { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) };
   if (q.filters.due === 'true') {
-    where.status = 'SCHEDULED';
+    where.status = { in: OPEN_VISIT_STATUSES };
     where.dueDate = { lte: dayKey(new Date()) };
   }
   if (q.search) {
@@ -1817,7 +2096,7 @@ visitRoutes.get(
     ]);
 
     const today = dayKey(new Date());
-    res.json(listResult(rows.map((r) => presentVisit(r, today)), total, q));
+    res.json(listResult(rows.map((r) => presentVisit(r, today, me)), total, q));
   }),
 );
 
@@ -1828,18 +2107,26 @@ const visitSchema = z.object({
   assetId: z.string().optional().nullable(),
   contractId: z.string().optional().nullable(),
   dueDate: z.string().min(1, 'When?'),
+  /** The slot on the day: both "HH:MM", or neither for a full-day visit. */
+  startTime: z.string().max(5).optional().nullable(),
+  endTime: z.string().max(5).optional().nullable(),
   assignedToId: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
 });
 
 const visitLink = (id: string) => `/g-ops/visits?visit=${id}`;
+/** "due 2026-10-22, 8:00 AM – 12:00 PM" — what a bell about a visit says. */
+const visitWhen = (v: { dueDate: Date; startTime: string | null; endTime: string | null }) =>
+  `due ${isoDay(v.dueDate)}${v.startTime ? `, ${slotLabel(v.startTime, v.endTime)}` : ''}`;
 
 /** An unscheduled call — a breakdown does not appear on a PM schedule. */
 visitRoutes.post(
   '/',
-  require_('gops.pm_reports.create'),
+  require_('gops.visits.create'),
   handler(async (req, res) => {
+    const me = req.user!;
     const body = parseBody(visitSchema, req.body);
+    const slot = visitSlot(body.startTime, body.endTime);
     const visit = await prisma.$transaction(async (tx) =>
       tx.serviceVisit.create({
         data: {
@@ -1850,6 +2137,7 @@ visitRoutes.post(
           assetId: body.assetId || null,
           contractId: body.contractId || null,
           dueDate: asDate(body.dueDate, 'Due date'),
+          ...slot,
           assignedToId: body.assignedToId || null,
           notes: body.notes || null,
         },
@@ -1862,7 +2150,7 @@ visitRoutes.post(
         userId: visit.assignedToId,
         type: 'pm.due',
         title: `${KIND_LABEL[visit.kind]} visit assigned`,
-        body: `${visit.customer.name} — due ${isoDay(visit.dueDate)}`,
+        body: `${visit.customer.name} — ${visitWhen(visit)}`,
         link: visitLink(visit.id),
       });
     }
@@ -1876,7 +2164,7 @@ visitRoutes.post(
       },
       req,
     );
-    res.status(201).json(presentVisit(visit, dayKey(new Date())));
+    res.status(201).json(presentVisit(visit, dayKey(new Date()), me));
   }),
 );
 
@@ -1887,11 +2175,15 @@ visitRoutes.post(
  */
 visitRoutes.patch(
   '/:id',
-  require_('gops.pm_reports.create'),
+  requireEdit('gops', 'visits'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(
       z.object({
         dueDate: z.string().optional(),
+        /** The slot on the day; sent together, both "HH:MM" or both empty. */
+        startTime: z.string().max(5).optional().nullable(),
+        endTime: z.string().max(5).optional().nullable(),
         assignedToId: z.string().optional().nullable(),
         status: z.enum(['SCHEDULED', 'CANCELLED']).optional(),
         notes: z.string().optional().nullable(),
@@ -1902,6 +2194,8 @@ visitRoutes.patch(
     );
     const visit = await prisma.serviceVisit.findUnique({ where: { id: req.params.id } });
     if (!visit) throw notFound('Visit not found');
+    // Edit Own moves only a visit assigned to the caller (2026-10-18).
+    assertCanEdit(me, 'gops', 'visits', visit.assignedToId === me.id, visit.assignedToId);
     if (visit.status === 'COMPLETED') {
       throw badRequest('This visit has been made and reported. Its record is what happened.');
     }
@@ -1915,12 +2209,22 @@ visitRoutes.patch(
       ? [baseNotes, `Cancelled ${isoDay(new Date())}: ${body.reason}`].filter(Boolean).join('\n')
       : baseNotes;
 
+    const slot = body.startTime !== undefined || body.endTime !== undefined ? visitSlot(body.startTime ?? visit.startTime, body.endTime ?? visit.endTime) : null;
+    const dueDate = body.dueDate ? asDate(body.dueDate, 'Due date') : visit.dueDate;
+    const slotMoved = !!slot && (slot.startTime !== visit.startTime || slot.endTime !== visit.endTime);
+    // A confirmed visit whose day or slot moves is an appointment the
+    // customer has not agreed to: it goes back to SCHEDULED, to be confirmed
+    // again (2026-10-20).
+    const unconfirm = visit.status === 'CONFIRMED' && !body.status && (dueDate.getTime() !== visit.dueDate.getTime() || slotMoved);
+
     const updated = await prisma.serviceVisit.update({
       where: { id: visit.id },
       data: {
-        ...(body.dueDate ? { dueDate: asDate(body.dueDate, 'Due date') } : {}),
+        ...(body.dueDate ? { dueDate } : {}),
+        ...(slot ?? {}),
         ...(body.assignedToId !== undefined ? { assignedToId: body.assignedToId || null } : {}),
         ...(body.status ? { status: body.status } : {}),
+        ...(unconfirm || body.status ? { status: body.status ?? 'SCHEDULED', confirmedAt: null, confirmedById: null } : {}),
         notes,
       },
       include: visitInclude,
@@ -1931,7 +2235,7 @@ visitRoutes.patch(
         userId: body.assignedToId,
         type: 'pm.due',
         title: `${KIND_LABEL[updated.kind]} visit assigned`,
-        body: `${updated.customer.name} — due ${isoDay(updated.dueDate)}`,
+        body: `${updated.customer.name} — ${visitWhen(updated)}`,
         link: visitLink(updated.id),
       });
     }
@@ -1940,10 +2244,12 @@ visitRoutes.patch(
       body.dueDate && isoDay(visit.dueDate) !== isoDay(updated.dueDate)
         ? `due ${isoDay(visit.dueDate)} → ${isoDay(updated.dueDate)}`
         : null,
+      slotMoved ? `slot ${slotLabel(updated.startTime, updated.endTime)}` : null,
       body.assignedToId !== undefined && body.assignedToId !== visit.assignedToId
         ? `engineer ${updated.assignedTo?.name ?? 'unassigned'}`
         : null,
       body.status && body.status !== visit.status ? `status ${visit.status} → ${body.status}` : null,
+      unconfirm ? 'to be confirmed again' : null,
     ].filter(Boolean);
     await audit(
       {
@@ -1956,7 +2262,49 @@ visitRoutes.patch(
       },
       req,
     );
-    res.json(presentVisit(updated, dayKey(new Date())));
+    res.json(presentVisit(updated, dayKey(new Date()), me));
+  }),
+);
+
+/**
+ * Confirmed with the customer (2026-10-20, the owner's spec): the engineer
+ * the visit is booked on, or Edit All — a reader on the schedule may hold
+ * no edit right and still be the one who phoned. Claimed on SCHEDULED, so
+ * two taps confirm it once; moving the day or the slot afterwards puts it
+ * back to SCHEDULED (the PATCH's rule).
+ */
+visitRoutes.post(
+  '/:id/confirm',
+  requireAny(...VISIT_VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const visit = await prisma.serviceVisit.findUnique({ where: { id: req.params.id }, include: visitInclude });
+    if (!visit) throw notFound('Visit not found');
+    if (!mayConfirmVisit(me, visit.assignedToId)) {
+      throw forbidden('Only the engineer this visit is booked on, or whoever manages the schedule, confirms it with the customer');
+    }
+    if (visit.status !== 'SCHEDULED') {
+      throw badRequest(visit.status === 'CONFIRMED' ? 'This visit is already confirmed' : `A ${statusLabel(visit.status).toLowerCase()} visit cannot be confirmed`);
+    }
+    const now = new Date();
+    const claimed = await prisma.serviceVisit.updateMany({
+      where: { id: visit.id, status: 'SCHEDULED' },
+      data: { status: 'CONFIRMED', confirmedAt: now, confirmedById: me.id },
+    });
+    if (!claimed.count) throw conflict('This visit changed a moment ago — reload it');
+    await audit(
+      {
+        entityType: 'service_visit',
+        entityId: visit.id,
+        action: 'UPDATED',
+        summary: `${visit.number} confirmed with ${visit.customer.name} — ${visitWhen(visit)}`,
+        before: { status: visit.status },
+        after: { status: 'CONFIRMED', confirmedAt: now, confirmedById: me.id },
+      },
+      req,
+    );
+    const updated = await prisma.serviceVisit.findUniqueOrThrow({ where: { id: visit.id }, include: visitInclude });
+    res.json(presentVisit(updated, dayKey(new Date()), me));
   }),
 );
 
@@ -1967,20 +2315,39 @@ visitRoutes.patch(
 export const templateRoutes = Router();
 templateRoutes.use(authenticate);
 
+/**
+ * Who reads the templates (2026-10-18). A report writer picks from every
+ * template, so the report rights still read them all, as does Report
+ * Templates › View All; Report Templates › View Own alone reads the
+ * templates the caller made (`createdById` — "own" on the screen).
+ */
+const TEMPLATE_READ_ALL = [
+  'gops.pm_reports.view_all',
+  'gops.commissioning_reports.view_all',
+  'gops.inspection_reports.view_all',
+  'gops.report_templates.view_all',
+] as const;
+
+function templatesOnlyOwn(me: ResolvedUser): boolean {
+  return !(me.isSuperAdmin || TEMPLATE_READ_ALL.some((k) => me.permissions.has(k)));
+}
+
+/** Modify on the screen: Edit All, or Edit Own on a template the viewer made. */
+const templateCanEdit = (me: ResolvedUser, t: { createdById: string | null }) =>
+  mayEdit(me, 'gops', 'report_templates', t.createdById === me.id, t.createdById);
+
 templateRoutes.get(
   '/',
-  requireAny(
-    'gops.pm_reports.view_all',
-    'gops.commissioning_reports.view_all',
-    'gops.inspection_reports.view_all',
-  ),
+  requireAny(...TEMPLATE_READ_ALL, 'gops.report_templates.view_own'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const kind = choice(req.query.kind ? String(req.query.kind) : undefined, ServiceKind, 'Kind', kindWord);
     const all = req.query.all === 'true';
     const templates = await prisma.reportTemplate.findMany({
       where: {
         ...(kind ? { kind } : {}),
         ...(all ? {} : { isCurrent: true, isActive: true }),
+        ...(templatesOnlyOwn(me) ? { createdById: { in: visibleOwners(me, 'gops', 'report_templates') } } : {}),
       },
       include: {
         createdBy: { select: { id: true, name: true } },
@@ -1988,24 +2355,22 @@ templateRoutes.get(
       },
       orderBy: [{ kind: 'asc' }, { name: 'asc' }, { version: 'desc' }],
     });
-    res.json(templates);
+    res.json(templates.map((t) => ({ ...t, canEdit: templateCanEdit(me, t) })));
   }),
 );
 
 templateRoutes.get(
   '/:id',
-  requireAny(
-    'gops.pm_reports.view_all',
-    'gops.commissioning_reports.view_all',
-    'gops.inspection_reports.view_all',
-  ),
+  requireAny(...TEMPLATE_READ_ALL, 'gops.report_templates.view_own'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const template = await prisma.reportTemplate.findUnique({
       where: { id: req.params.id },
       include: { _count: { select: { reports: true } } },
     });
-    if (!template) throw notFound('Template not found');
-    res.json(template);
+    // Somebody else's template reads as an unknown id to a View Own holder.
+    if (!template || (templatesOnlyOwn(me) && !visibleOwners(me, 'gops', 'report_templates').includes(template.createdById ?? ''))) throw notFound('Template not found');
+    res.json({ ...template, canEdit: templateCanEdit(me, template) });
   }),
 );
 
@@ -2018,7 +2383,7 @@ const templateSchema = z.object({
 
 templateRoutes.post(
   '/',
-  require_('gops.pm_reports.create'),
+  require_('gops.report_templates.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(templateSchema, req.body);
@@ -2061,7 +2426,7 @@ templateRoutes.post(
  */
 templateRoutes.put(
   '/:id',
-  require_('gops.pm_reports.create'),
+  requireEdit('gops', 'report_templates'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(templateSchema.partial({ kind: true }), req.body);
@@ -2070,6 +2435,9 @@ templateRoutes.put(
       include: { _count: { select: { reports: true } } },
     });
     if (!existing) throw notFound('Template not found');
+    // Edit Own changes, or publishes a new version of, only a template the
+    // caller made (2026-10-18).
+    assertCanEdit(me, 'gops', 'report_templates', existing.createdById === me.id, existing.createdById);
 
     const sections = body.sections ? validateSections(body.sections) : (existing.sections as unknown as TemplateSection[]);
 
@@ -2117,12 +2485,13 @@ templateRoutes.put(
 /** Copying a template to start a new one — "duplicate and save as new". */
 templateRoutes.post(
   '/:id/duplicate',
-  require_('gops.pm_reports.create'),
+  require_('gops.report_templates.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(z.object({ name: z.string().trim().min(2) }), req.body);
     const source = await prisma.reportTemplate.findUnique({ where: { id: req.params.id } });
-    if (!source) throw notFound('Template not found');
+    // A View Own holder copies only what they can read (2026-10-18).
+    if (!source || (templatesOnlyOwn(me) && !visibleOwners(me, 'gops', 'report_templates').includes(source.createdById ?? ''))) throw notFound('Template not found');
 
     const copy = await prisma.reportTemplate.create({
       data: {
@@ -2207,7 +2576,18 @@ function serviceReportListWhere(me: ResolvedUser, q: ListQuery): Prisma.ServiceR
     me.permissions.has('gops.pm_reports.view_all') ||
     me.permissions.has('gops.commissioning_reports.view_all') ||
     me.permissions.has('gops.inspection_reports.view_all');
-  if (!canSeeAll || q.scope === 'mine') where.performedById = me.id;
+  if (q.scope === 'mine') where.performedById = me.id;
+  // View Team (2026-10-19) reads the team's reports, kind by kind — each under its own menu's level.
+  else if (!canSeeAll) {
+    where.AND = [
+      {
+        OR: Object.values(ServiceKind).map((k) => ({
+          kind: k,
+          performedById: { in: visibleOwners(me, 'gops', reportSub(k)) },
+        })),
+      },
+    ];
+  }
 
   if (q.search) {
     where.OR = [
@@ -2340,7 +2720,7 @@ serviceReportRoutes.get(
     if (!row) throw notFound('Report not found');
 
     if (
-      row.performedById !== me.id &&
+      !visibleOwners(me, 'gops', reportSub(row.kind)).includes(row.performedById) &&
       !me.isSuperAdmin &&
       !me.permissions.has(reportPermission(row.kind, 'view_all'))
     ) {
@@ -2519,7 +2899,7 @@ serviceReportRoutes.patch(
     if (report.status !== 'DRAFT' && report.status !== 'REJECTED') {
       throw badRequest('This report has been submitted. Its content is what was signed.');
     }
-    if (report.performedById !== me.id && !me.isSuperAdmin && !me.permissions.has(reportPermission(report.kind, 'edit_all'))) {
+    if (report.performedById !== me.id && !me.isSuperAdmin && !canEditRecord(me, 'gops', reportSub(report.kind), report.performedById)) {
       throw forbidden('That is someone else’s report');
     }
 
@@ -2669,7 +3049,7 @@ function onReportSettled(documentType: string) {
     });
     if (report.visit?.jobOrderId) {
       await audit({
-        entityType: 'job_order',
+        entityType: await jobOrderAuditType(report.visit.jobOrderId),
         entityId: report.visit.jobOrderId,
         action: 'COMPLETED',
         summary: `Completed by ${report.number}, performed ${isoDay(report.performedAt)}`,
@@ -2681,6 +3061,12 @@ function onReportSettled(documentType: string) {
 onReportSettled('commissioning_report');
 onReportSettled('pm_report');
 onReportSettled('inspection_report');
+
+/** The audit type a job order's trail is filed under — its own register's (2026-10-20: a Service JO opens under Aftermarket). */
+async function jobOrderAuditType(jobOrderId: string, tx: Prisma.TransactionClient = prisma): Promise<'job_order' | 'service_job_order'> {
+  const jo = await tx.jobOrder.findUnique({ where: { id: jobOrderId }, select: { category: true } });
+  return jo?.category === 'SERVICE' ? 'service_job_order' : 'job_order';
+}
 
 /**
  * Pulled back after approval (2026-10-16): the report is a draft again, and
@@ -2728,7 +3114,7 @@ function onReportReopened(documentType: string) {
       if (jo && jo.status === 'COMPLETED') {
         await tx.jobOrder.updateMany({ where: { id: jo.id, status: 'COMPLETED' }, data: { status: 'APPROVED', completedAt: null } });
         await audit(
-          { entityType: 'job_order', entityId: jo.id, action: 'UPDATED', summary: `${jo.number} open again — ${report.number} was pulled back to draft` },
+          { entityType: await jobOrderAuditType(jo.id, tx), entityId: jo.id, action: 'UPDATED', summary: `${jo.number} open again — ${report.number} was pulled back to draft` },
           undefined,
           tx,
         );
@@ -2757,6 +3143,11 @@ aftermarketRoutes.get(
     const horizon = new Date(today);
     horizon.setUTCDate(horizon.getUTCDate() + settings.expiryWarningDays);
     const monthEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0));
+    // This week is Monday to Sunday of the Manila day (the work week's rule).
+    const weekStart = new Date(today);
+    weekStart.setUTCDate(weekStart.getUTCDate() - ((today.getUTCDay() + 6) % 7));
+    const weekEnd = new Date(weekStart);
+    weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
 
     const [
       assets,
@@ -2769,6 +3160,9 @@ aftermarketRoutes.get(
       visitsThisMonth,
       visitsMissed,
       reportsPending,
+      visitsThisWeek,
+      serviceJobsOpen,
+      documents,
     ] = await Promise.all([
       prisma.installedAsset.count({ where: { status: 'ACTIVE' } }),
       prisma.installedAsset.count({ where: { status: 'ACTIVE', warrantyEndsAt: { gte: today } } }),
@@ -2780,12 +3174,18 @@ aftermarketRoutes.get(
       }),
       prisma.serviceContract.count({ where: { status: 'ACTIVE' } }),
       prisma.serviceContract.count({ where: { status: 'ACTIVE', endsAt: { lte: horizon } } }),
-      prisma.serviceVisit.count({ where: { status: 'SCHEDULED', dueDate: { lte: today } } }),
+      prisma.serviceVisit.count({ where: { status: { in: OPEN_VISIT_STATUSES }, dueDate: { lte: today } } }),
       prisma.serviceVisit.count({
-        where: { status: 'SCHEDULED', dueDate: { gt: today, lte: monthEnd } },
+        where: { status: { in: OPEN_VISIT_STATUSES }, dueDate: { gt: today, lte: monthEnd } },
       }),
       prisma.serviceVisit.count({ where: { status: 'MISSED' } }),
       prisma.serviceReport.count({ where: { status: 'PENDING_APPROVAL' } }),
+      prisma.serviceVisit.count({ where: { status: { in: OPEN_VISIT_STATUSES }, dueDate: { gte: weekStart, lte: weekEnd } } }),
+      // Active service JOs (2026-10-20): the Service JO register's open ones
+      // — awaiting approval, or approved and not yet done (`?open=true`).
+      prisma.jobOrder.count({ where: { category: 'SERVICE', status: { in: ['PENDING_APPROVAL', 'APPROVED'] } } }),
+      // Technical documents (2026-10-20): the current service documents on file.
+      prisma.serviceDocument.count({ where: { isActive: true } }),
     ]);
 
     res.json({
@@ -2798,7 +3198,9 @@ aftermarketRoutes.get(
         uncovered,
       },
       contracts: { active: activeContracts, expiring: contractsExpiring },
-      visits: { overdue: visitsDue, thisMonth: visitsThisMonth, missed: visitsMissed },
+      visits: { overdue: visitsDue, thisMonth: visitsThisMonth, missed: visitsMissed, thisWeek: visitsThisWeek },
+      serviceJobs: { open: serviceJobsOpen },
+      documents: { total: documents },
       reportsPending,
       warningDays: settings.expiryWarningDays,
     });
@@ -2876,10 +3278,13 @@ aftermarketRoutes.put(
 registerSearch({
   kind: 'installed_asset',
   label: 'Installed base',
-  permission: 'gops.installed_base.view_all',
-  search: async (term, _user, limit) => {
+  permission: ['gops.installed_base.view_all', 'gops.installed_base.view_own'],
+  // View Own: the machines the caller registered (2026-10-18).
+  ownWhere: (user) => ({ createdById: user.id }),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.installedAsset.findMany({
       where: {
+        ...(own ?? {}),
         OR: [
           { code: { contains: term, mode: 'insensitive' } },
           { name: { contains: term, mode: 'insensitive' } },
@@ -2980,10 +3385,13 @@ registerReportSearch('inspection_reports', 'Inspection reports', ['INSPECTION', 
 registerSearch({
   kind: 'service_visit',
   label: 'Service visits',
-  permission: 'gops.visits.view_all',
-  search: async (term, _user, limit) => {
+  permission: ['gops.visits.view_all', 'gops.visits.view_own'],
+  // View Own: the visits assigned to the caller (2026-10-18).
+  ownWhere: (user) => ({ assignedToId: user.id }),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.serviceVisit.findMany({
       where: {
+        ...(own ?? {}),
         OR: [
           { number: { contains: term, mode: 'insensitive' } },
           { customer: { name: { contains: term, mode: 'insensitive' } } },
@@ -3016,7 +3424,7 @@ registerSchedule(async (user, window) => {
   const rows = await prisma.serviceVisit.findMany({
     where: {
       assignedToId: user.id,
-      status: 'SCHEDULED',
+      status: { in: OPEN_VISIT_STATUSES },
       dueDate: { gte: new Date(window.from.getTime() - pad), lte: new Date(window.to.getTime() + pad) },
     },
     orderBy: { dueDate: 'asc' },

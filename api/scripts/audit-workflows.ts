@@ -12,6 +12,7 @@
  */
 
 import { prisma } from '../src/prisma';
+import { IMPORTATION_ROLES, TEAM_FIRST_ROLES } from '../src/shared/approvals';
 
 /**
  * Who normally raises each document type. Not a rule the system enforces —
@@ -24,10 +25,10 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   overtime_request: ['employee', 'project_engineer', 'service_engineer'],
   // The routing sheet of 2026-10-13: Project Engineers, Industry
   // Specialists, Technical Managers and Team Leaders prepare requisitions.
-  purchase_request: ['project_engineer', 'industry_specialist', 'technical_manager', 'team_leader', 'project_manager', 'service_engineer', 'procurement'],
+  purchase_request: ['project_engineer', 'industry_specialist', 'technical_manager', 'team_leader', 'project_manager', 'service_engineer', 'procurement', 'project_lead'],
   // Project cash: the team asks — engineers, specialists, Back Support,
   // Team Leaders and the Finance Manager (the sheet of 2026-10-13).
-  budget_request: ['project_engineer', 'industry_specialist', 'back_support', 'team_leader', 'finance_manager', 'project_manager'],
+  budget_request: ['project_engineer', 'industry_specialist', 'back_support', 'team_leader', 'finance_manager', 'project_manager', 'project_lead'],
   // The routing sheet (2026-10-12): Industry Specialists, Team Leaders and
   // the CEO / President all prepare them, on the one route.
   quotation: ['industry_specialist', 'sales', 'team_leader', 'ceo', 'sales_manager'],
@@ -35,13 +36,14 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   // The costing route starts with an engineer (2026-10-09); sales and the
   // project managers still cost work too, and a Technical Manager may.
   costing: ['project_engineer', 'sales', 'sales_manager', 'project_manager', 'technical_manager', 'team_leader'],
-  progress_report: ['project_engineer', 'sales', 'industry_specialist', 'team_leader', 'project_manager', 'technical_manager'],
+  progress_report: ['project_engineer', 'sales', 'industry_specialist', 'team_leader', 'project_manager', 'technical_manager', 'project_lead'],
   progress_billing: ['project_engineer', 'sales', 'industry_specialist', 'team_leader', 'project_manager', 'technical_manager'],
   // A project's drawings sent for internal approval (2026-10-13): the
   // engineers and managers on the project raise them, a Technical Manager may.
   plan_approval: ['project_engineer', 'project_manager', 'technical_manager'],
   // Admin Back Support and the Purchasing Manager prepare them (2026-10-13).
-  purchase_order: ['back_support', 'purchasing_manager', 'procurement'],
+  // The Purchasing Manager (Importation) signs the no-VAT orders (2026-10-17).
+  purchase_order: ['back_support', 'purchasing_manager', 'purchasing_manager_import', 'procurement'],
   receiving: ['warehouse', 'warehouse_supervisor'],
   stock_issue: ['warehouse', 'warehouse_supervisor'],
   // Anyone may ask to borrow a tool (2026-10-14); the warehouse writes a walk-in's.
@@ -56,6 +58,7 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   cad_job_order: ['sales', 'industry_specialist', 'project_engineer', 'technical_manager'],
   cash_advance: ['employee', 'project_engineer', 'service_engineer', 'sales', 'project_manager', 'finance'],
   job_order: ['sales', 'sales_manager', 'service_engineer'],
+  service_job_order: ['service_engineer', 'sales', 'industry_specialist', 'service_manager'],
   // HR raises a clearance for an employee with no login, and an evaluation
   // for one with no supervisor — so HR is a requester on both, and a lone HR
   // holder would be approving their own work.
@@ -97,6 +100,7 @@ async function main() {
 
   for (const wf of workflows) {
     const issues: string[] = [];
+    const notes: string[] = [];
     // On a route where the preparer signs the steps they hold
     // (`preparerSigns`, 2026-10-12), a step routed to the role that raises
     // the document is not a stall: its holder signs it on submitting.
@@ -128,6 +132,13 @@ async function main() {
             `step 1 routes to ${step.role?.name}, which is the only role that raises this document — nobody could ever approve it`,
           );
         }
+      }
+
+      // A Purchasing Manager step on an importation goes to the Purchasing
+      // Manager (Importation) (2026-10-17); unheld, the local manager decides
+      // importations too — said, not a problem.
+      if (step.approverType === 'ROLE' && step.role?.key && IMPORTATION_ROLES[step.role.key] && !(roleMembers.get(IMPORTATION_ROLES[step.role.key]) ?? []).length) {
+        notes.push(`step ${step.sequence} "${step.name}": nobody holds ${IMPORTATION_ROLES[step.role.key]}, so the local ${step.role.name} decides importations too`);
       }
 
       if (step.approverType === 'USER' && !step.user) {
@@ -166,11 +177,11 @@ async function main() {
       }
       // A PROJECT_MANAGER step resolves to the manager the document names (a
       // job order's own), else the project's, and falls back to its role
-      // (Executive unless another is named) when there is none or the manager
+      // (the CEO / President unless another is named) when there is none or the manager
       // raised the document. The fallback has to be held: a PM's own request,
       // or one on an unmanaged project, goes there.
       if (step.approverType === 'PROJECT_MANAGER') {
-        const fallbackKey = step.role?.key ?? 'executive';
+        const fallbackKey = step.role?.key ?? 'ceo';
         const fallback = roleMembers.get(fallbackKey) ?? [];
         if (fallback.length === 0) {
           issues.push(
@@ -192,11 +203,11 @@ async function main() {
     const route = wf.steps
       .map((s) =>
         s.approverType === 'SUPERVISOR'
-          ? `${s.sequence}. supervisor, else ${s.role?.key ?? 'hr'}${
+          ? `${s.sequence}. ${s.role && TEAM_FIRST_ROLES.includes(s.role.key) ? `the team's ${s.role.key}, else ` : ''}supervisor, else ${s.role?.key ?? 'hr'}${
               s.alsoRoleIds.length ? ` (also ${s.alsoRoleIds.map((id) => roleKeyById.get(id) ?? '?').join(', ')} on the team)` : ''
             }`
           : s.approverType === 'PROJECT_MANAGER'
-            ? `${s.sequence}. the project's manager, else ${s.role?.key ?? 'executive'}`
+            ? `${s.sequence}. the project's manager, else ${s.role?.key ?? 'ceo'}`
             : `${s.sequence}. ${s.role?.key ?? s.user?.name ?? s.approverType.toLowerCase()}`,
       )
       .join(' → ');
@@ -210,6 +221,7 @@ async function main() {
       console.log(`  ✓ ${wf.documentType} — ${wf.name}`);
       console.log(`      ${route}`);
     }
+    for (const n of notes) console.log(`      · ${n}`);
   }
 
   console.log(

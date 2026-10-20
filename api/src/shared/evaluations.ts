@@ -243,11 +243,11 @@ export function visibleTo(user: ResolvedUser, ev: VisibilitySubject): boolean {
 export interface DueRow {
   employee: {
     id: string;
-    employeeNo: string;
+    employeeNo: string | null;
     firstName: string;
     lastName: string;
     position: string | null;
-    department: { id: string; name: string } | null;
+    industry: { id: string; code: string; name: string } | null;
     employmentType: string;
     dateHired: Date | null;
   };
@@ -299,7 +299,7 @@ export async function dueEvaluations(
       employmentType: true,
       dateHired: true,
       periodEndDate: true,
-      department: { select: { id: true, name: true } },
+      industry: { select: { id: true, code: true, name: true } },
     },
     orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
   });
@@ -339,7 +339,7 @@ export async function dueEvaluations(
           firstName: employee.firstName,
           lastName: employee.lastName,
           position: employee.position,
-          department: employee.department,
+          industry: employee.industry,
           employmentType: employee.employmentType,
           dateHired: employee.dateHired,
         },

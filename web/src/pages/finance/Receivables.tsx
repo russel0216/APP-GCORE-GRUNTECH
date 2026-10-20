@@ -44,6 +44,8 @@ export const INVOICE_STATUSES = [
 
 export interface Invoice {
   id: string;
+  /** Edit All, or Edit Own on an invoice the viewer raised (2026-10-18) — the API's word. */
+  canEdit?: boolean;
   number: string;
   status: string;
   invoiceDate: string;
@@ -1103,12 +1105,14 @@ export function InvoiceDetail() {
   }
 
   // Mirror the routes: Modify a draft; cancel anything not cancelled with no
-  // money applied to it — both for whoever may edit every invoice.
-  const canModify = row.status === 'DRAFT' && can('gfin.ar.edit_all');
+  // money applied to it — both for whoever may edit this invoice: Edit All,
+  // or Edit Own on one the viewer raised (2026-10-18, `canEdit` from the API).
+  const editable = row.canEdit ?? false;
+  const canModify = row.status === 'DRAFT' && editable;
   const owed = row.status === 'ISSUED' || row.status === 'PARTIALLY_PAID';
-  const canCounter = (owed || row.status === 'PAID') && can('gfin.ar.edit_all');
+  const canCounter = (owed || row.status === 'PAID') && editable;
   const canCollect = owed && can('gfin.ar.create');
-  const canCancel = row.status !== 'CANCELLED' && !row.allocations?.length && can('gfin.ar.edit_all');
+  const canCancel = row.status !== 'CANCELLED' && !row.allocations?.length && editable;
   const releases = row.progressBilling
     ? ` ${row.progressBilling.number} goes back to be invoiced again.`
     : row.jobOrder
@@ -1169,7 +1173,7 @@ export function InvoiceDetail() {
             {/* One primary: until the customer has it, "Mark as received"
                 (issues a draft and records the day it was received); after
                 that, collecting is. G-CORE sends nothing to the customer. */}
-            {(row.status === 'DRAFT' ? can('gfin.ar.edit_all') : row.awaitingCounter && canCounter) && (
+            {(row.status === 'DRAFT' ? editable : row.awaitingCounter && canCounter) && (
               <button className="btn btn-primary" onClick={() => setPanel('counter')}>
                 Mark as received
               </button>
@@ -1191,7 +1195,7 @@ export function InvoiceDetail() {
               onSelect: () => setPanel('counter'),
             },
           row.status !== 'CANCELLED' &&
-            can('gfin.ar.edit_all') && {
+            editable && {
               label: 'Change salesperson or team',
               onSelect: () => setPanel('credit'),
             },
@@ -1200,7 +1204,7 @@ export function InvoiceDetail() {
             onSelect: () => openPdf(`/api/invoices/${row.id}/pdf?attachments=0`, () => toast('error', 'The invoice could not be printed')),
           },
           row.ewtAmount > 0 &&
-            can('gfin.ar.edit_all') && {
+            editable && {
               label: row.ewtCertificateNo ? 'Modify BIR 2307' : 'Record BIR 2307',
               hint: 'The certificate for the EWT withheld at source',
               onSelect: () => setCertificate(true),
@@ -1409,7 +1413,7 @@ export function InvoiceDetail() {
         entityId={row.id}
         title="Invoice copy and files"
         hint="The customer's countered copy, the signed delivery — printed behind the invoice"
-        canEdit={can('gfin.ar.create') || can('gfin.ar.edit_all')}
+        canEdit={can('gfin.ar.create') || editable}
       />
 
       {paying && (
@@ -2003,6 +2007,7 @@ interface PaymentRow {
   lines?: { id: string; reference: string; amount: number }[];
   /** The official receipt a collection was given (G-CORE's numbering). */
   orNumber: string | null;
+  importedFrom?: string | null;
   /** Read off the invoices it settled. */
   salespeople: { id: string; name: string }[];
   teams: { id: string; code: string; name: string }[];
@@ -2072,6 +2077,7 @@ interface PaymentsSummary {
   chequesCleared: number;
   chequesClearedPct: number | null;
   teams: TeamShare[];
+  history?: { count: number; amount: number };
 }
 
 /**
@@ -2145,7 +2151,14 @@ export function Payments() {
       key: 'orNumber',
       label: 'OR No.',
       width: '160px',
-      render: (r) => (r.orNumber ? <span className="mono">{r.orNumber}</span> : <span className="faint">—</span>),
+      render: (r) =>
+        r.orNumber ? (
+          <span className="mono">{r.orNumber}</span>
+        ) : r.importedFrom ? (
+          <span className="faint">SCORO history</span>
+        ) : (
+          <span className="faint">—</span>
+        ),
     },
     {
       key: 'salesperson',
@@ -2261,7 +2274,13 @@ export function Payments() {
                 value={formatMoney(sum.collected)}
                 figure
                 accent="ok"
-                sub={[`${sum.collections} collection${sum.collections === 1 ? '' : 's'}`, noTeamNote(sum.teams)].filter(Boolean).join(' · ')}
+                sub={[
+                  `${sum.collections} collection${sum.collections === 1 ? '' : 's'}`,
+                  noTeamNote(sum.teams),
+                  sum.history?.count ? `${sum.history.count} from SCORO kept as history, not counted` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
               />
               <Stat
                 label="Uncleared cheques"

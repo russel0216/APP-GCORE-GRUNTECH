@@ -600,6 +600,22 @@ export function StatusBadge({
   return <span className={`badge${tone ? ` ${tone}` : ''}`}>{label ?? humanise(status)}</span>;
 }
 
+/** Active / Inactive on a master or a setting — one pill, not a ternary per screen. */
+export function ActiveBadge({ active }: { active: boolean }) {
+  return <StatusBadge status={active ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} label={active ? 'Active' : 'Inactive'} />;
+}
+
+/**
+ * A margin's tone — one rule for every margin pill and tile (2026-10-16:
+ * the project list, the progress register, the costing list and the project
+ * overview each wrote it inline, and the costing list's read a fraction):
+ * below zero is a loss, under 10% is thin, anything else is fine. `pct` is a
+ * percentage (12.5), never a fraction.
+ */
+export function marginTone(pct: number): 'ok' | 'warn' | 'danger' {
+  return pct < 0 ? 'danger' : pct < 10 ? 'warn' : 'ok';
+}
+
 // ── Formatting ───────────────────────────────────────────────────────────────
 
 export function formatDateTime(value: string | Date | null | undefined): string {

@@ -481,7 +481,7 @@ export function PurchaseRequestDetail() {
       )}
 
       <div className="card proc-card">
-        <div className="proc-card-head">
+        <div className="card-head">
           <h3 className="card-title">Items requested</h3>
         </div>
 

@@ -341,6 +341,68 @@ export function costingScopeSections(costingId: string, tx: Prisma.TransactionCl
   });
 }
 
+/** A costing as the several-costings mapping reads it. */
+export interface CostingForQuote {
+  number: string;
+  title: string;
+  sections: ScopeSectionForQuote[];
+}
+
+/**
+ * Several costings behind one quotation (2026-10-19, the owner's call:
+ * "sometimes there will be 2 costings to generate the quotation"): each
+ * costing's scope as `quotationLinesFromSections` maps it, one after another,
+ * and — only where there is more than one — a subheading naming each costing
+ * (its title, else its number) over its own lines, so the customer sees two
+ * scopes rather than one long list. One costing maps exactly as before.
+ */
+export function quotationLinesFromCostings(costings: CostingForQuote[]) {
+  const several = costings.length > 1;
+  const out: {
+    title: string;
+    description: string;
+    isHeading: boolean;
+    quantity: Prisma.Decimal;
+    unit: string;
+    unitPrice: Prisma.Decimal;
+    amount: Prisma.Decimal;
+    sortOrder: number;
+  }[] = [];
+  for (const c of costings) {
+    if (several) {
+      out.push({
+        title: c.title.trim() || c.number,
+        description: '',
+        isHeading: true,
+        quantity: new Prisma.Decimal(0),
+        unit: 'lot',
+        unitPrice: new Prisma.Decimal(0),
+        amount: new Prisma.Decimal(0),
+        sortOrder: out.length,
+      });
+    }
+    for (const line of quotationLinesFromSections(c.sections)) out.push({ ...line, isHeading: false, sortOrder: out.length });
+  }
+  return out;
+}
+
+/** The costings named, in the order given, with their scope sections — what the mapping above reads. */
+export async function costingsForQuote(costingIds: string[], tx: Prisma.TransactionClient = prisma): Promise<CostingForQuote[]> {
+  const rows = await tx.costing.findMany({
+    where: { id: { in: costingIds } },
+    select: {
+      id: true,
+      number: true,
+      title: true,
+      scopeSections: { orderBy: { sortOrder: 'asc' }, select: { name: true, description: true, value: true } },
+    },
+  });
+  return costingIds
+    .map((id) => rows.find((r) => r.id === id))
+    .filter((r): r is NonNullable<typeof r> => !!r)
+    .map((r) => ({ number: r.number, title: r.title, sections: r.scopeSections }));
+}
+
 // ── Who may see cost ─────────────────────────────────────────────────────────
 
 /**

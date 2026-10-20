@@ -1,5 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
+import type { ResolvedUser } from '../permissions/resolve';
+import { editScope, viewScope } from './ownScope';
 
 /**
  * "My team" (2026-10-08, the owner's call — SCORO's team view on the list
@@ -184,29 +186,95 @@ export async function fillQuotationTeams(): Promise<number> {
 }
 
 /**
- * A person's TEAM, else their DEPARTMENT (2026-10-15, the owner's call for
- * the money-out registers: budget requests, reimbursements and cash advances
- * name a Team column, and someone outside the five selling teams — finance,
- * HR, the warehouse — shows their department there instead). Select it on a
- * User relation, read it with `teamOrDepartment()`.
+ * A person's TEAM (the money-out registers' Team column: budget requests,
+ * reimbursements, cash advances). It read "team, else department" from
+ * 2026-10-15 until departments were retired (2026-10-19, the owner's call:
+ * "remove the department"); someone with no team now reads as none. Select it
+ * on a User relation, read it with `teamOfUser()`.
  */
-export const TEAM_OR_DEPT_SELECT = {
+export const USER_TEAM_SELECT = {
   select: {
-    department: { select: { name: true } },
-    employee: { select: { industry: { select: { id: true, code: true, name: true } }, department: { select: { name: true } } } },
+    employee: { select: { industry: { select: { id: true, code: true, name: true } } } },
   },
 } as const;
 
-export function teamOrDepartment(
-  user: { department: { name: string } | null; employee: { industry: { id: string; code: string; name: string } | null; department: { name: string } | null } | null } | null | undefined,
+export function teamOfUser(
+  user: { employee: { industry: { id: string; code: string; name: string } | null } | null } | null | undefined,
 ): { label: string; title: string; teamId: string | null } | null {
   const team = user?.employee?.industry;
-  if (team) return { label: team.code, title: team.name, teamId: team.id };
-  const dept = user?.employee?.department?.name ?? user?.department?.name;
-  return dept ? { label: dept, title: dept, teamId: null } : null;
+  return team ? { label: team.code, title: team.name, teamId: team.id } : null;
 }
 
 /** "This person is on that team" as a where-clause on a User relation; `none` is nobody's team. */
 export function userTeamWhere(teamId: string): Prisma.UserWhereInput {
   return teamId === 'none' ? { OR: [{ employee: null }, { employee: { industryId: null } }] } : { employee: { industryId: teamId } };
+}
+
+/**
+ * Does this login report to that one ("Reports to", one level)? View Own on a
+ * request register covers one's direct reports' requests (2026-10-19).
+ */
+export async function reportsTo(userId: string, supervisorId: string): Promise<boolean> {
+  if (userId === supervisorId) return false;
+  return !!(await prisma.user.findFirst({ where: { id: userId, supervisorId }, select: { id: true } }));
+}
+
+/**
+ * Whose records a caller reads on a screen they cannot read all of
+ * (2026-10-19, the permission matrix): View Team reads the team's logins
+ * (`me.teamMemberIds`, themselves included), View Own their own. Use it as
+ * `{ ownerId: { in: visibleOwners(me, 'gops', 'quotations') } }` where the
+ * list narrowed to `ownerId: me.id` before.
+ */
+export function visibleOwners(me: ResolvedUser, m: string, s: string): string[] {
+  return viewScope(me, m, s) === 'team' ? me.teamMemberIds : [me.id];
+}
+
+/** Whose records a caller may change on a screen they cannot manage all of: Manage Team the team's, else their own. */
+export function editableOwners(me: ResolvedUser, m: string, s: string): string[] {
+  return editScope(me, m, s) === 'team' ? me.teamMemberIds : [me.id];
+}
+
+/**
+ * The quotations a caller reads without View All (2026-10-19, the matrix):
+ * View Team the team's — tagged with it, else owned on it (`quotationTeamWhere`,
+ * the Team view's own rule) — and their own; View Own their own. Null for View All.
+ */
+export function quotationsReadable(me: ResolvedUser): Prisma.QuotationWhereInput | null {
+  const scope = viewScope(me, 'gops', 'quotations');
+  if (scope === 'all') return null;
+  if (scope === 'team' && me.teamId) return { OR: [{ ownerId: me.id }, quotationTeamWhere(me.teamId)] };
+  return { ownerId: me.id };
+}
+
+/** A quotation's single-record read without View All: its owner, or — View Team — one of the team's. */
+export function readsQuotation(me: ResolvedUser, q: { ownerId: string; teamId?: string | null }): boolean {
+  const scope = viewScope(me, 'gops', 'quotations');
+  if (scope === 'all' || q.ownerId === me.id) return true;
+  return scope === 'team' && (q.teamId ? q.teamId === me.teamId : me.teamMemberIds.includes(q.ownerId));
+}
+
+/**
+ * The sales orders a caller reads without View All: their own, and — View
+ * Team — those booked on a quotation of their team (an order counts under
+ * its QUOTATION's team, 2026-10-12). Null for View All.
+ */
+export function salesOrdersReadable(me: ResolvedUser): Prisma.SalesOrderWhereInput | null {
+  const scope = viewScope(me, 'gops', 'sales_orders');
+  if (scope === 'all') return null;
+  if (scope === 'team' && me.teamId) return { OR: [{ ownerId: me.id }, { quotation: quotationTeamWhere(me.teamId) }] };
+  return { ownerId: me.id };
+}
+
+/** A sales order's single-record read without View All: its author, or — View Team — one on the team's quotation. */
+export function readsSalesOrder(
+  me: ResolvedUser,
+  o: { ownerId: string; quotation?: { ownerId: string; teamId: string | null } | null },
+): boolean {
+  const scope = viewScope(me, 'gops', 'sales_orders');
+  if (scope === 'all' || o.ownerId === me.id) return true;
+  if (scope !== 'team' || !me.teamId) return false;
+  const q = o.quotation;
+  if (!q) return me.teamMemberIds.includes(o.ownerId);
+  return q.teamId ? q.teamId === me.teamId : me.teamMemberIds.includes(q.ownerId);
 }

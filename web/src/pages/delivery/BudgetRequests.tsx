@@ -10,10 +10,10 @@ import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
 import { ApprovalStepper, DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
-import { ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, humanise, useToast, type Tone } from '../../components/ui';
-import { NumberInput } from '../../components/NumberInput';
+import { ErrorBox, Loading, StatusBadge, formatDate, formatMoney, humanise, useToast, type Tone } from '../../components/ui';
 import { RecordPaymentModal, paymentLink } from '../finance/Receivables';
-import { NewClaimModal, CLAIM_TONES } from '../finance/Expenses';
+import { CLAIM_TONES } from '../finance/Expenses';
+import { RequestItemsCard, type RequestItem } from '../../components/RequestLines';
 
 /**
  * Budget requests — PROJECT CASH (2026-10-07, the owner's call).
@@ -76,7 +76,7 @@ export interface BudgetRequest {
   liquidatedAt: string | null;
   createdAt: string;
   requestedBy: { id: string; name: string; email: string; position: string | null };
-  /** The requester's team, else their department. */
+  /** The requester's team. */
   team: { label: string; title: string; teamId: string | null } | null;
   job: { id: string; number: string; name: string; projectManager: { id: string; name: string } | null };
   costCategory: { id: string; name: string };
@@ -89,6 +89,8 @@ export interface BudgetRequest {
   daysToLiquidate: number | null;
   liquidation: Liquidation | null;
   liquidations: Liquidation[];
+  /** The breakdown of what the cash buys; the amount is their sum. */
+  items?: RequestItem[];
   canEdit?: boolean;
   approvalRoute?: { name: string; steps: { name: string; approvers: { id: string; name: string }[] }[] } | null;
   allocations?: {
@@ -145,7 +147,7 @@ interface RequestsSummary {
 /**
  * The register, in two dresses: G-OPS's (every project's requests, as the
  * project side raises them) and G-FIN's — the owner's module 4: BR No.,
- * Requester, Team (else department), Project / Purpose, Amount, Date needed,
+ * Requester, Team, Project / Purpose, Amount, Date needed,
  * Status, under the cards Sum of all budget requests, Approved funds, Pending
  * approval and To release. One query, one component, so the two can never
  * list different sets.
@@ -153,8 +155,6 @@ interface RequestsSummary {
 export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
   const navigate = useNavigate();
   const { can } = useAuth();
-  const [adding, setAdding] = useState(false);
-  const [reload, setReload] = useState(0);
   const { people } = usePeople('gops.budget_requests.create');
   const teams = useTeams();
 
@@ -227,7 +227,6 @@ export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
         reportPath={finance ? '/g-fin/reports?kind=budget-requests' : undefined}
         columns={columns}
         rowKey={(r) => r.id}
-        reloadToken={reload}
         scoped={!finance}
         selectable
         searchPlaceholder="Search BR no., purpose, project, requester…"
@@ -262,23 +261,13 @@ export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
         }}
         actions={
           can('gops.budget_requests.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
+            <button className="btn btn-primary btn-sm" onClick={() => navigate('/g-ops/budget-requests/new')}>
               + Add budget request
             </button>
           ) : null
         }
       />
 
-      {adding && (
-        <BudgetRequestModal
-          onClose={() => setAdding(false)}
-          onSaved={(id) => {
-            setAdding(false);
-            setReload((r) => r + 1);
-            navigate(`/g-ops/budget-requests/${id}`);
-          }}
-        />
-      )}
     </div>
   );
 }
@@ -444,183 +433,6 @@ export function FinanceLiquidations() {
   );
 }
 
-// ── Raising one ──────────────────────────────────────────────────────────────
-
-export interface RequestProject {
-  id: string;
-  number: string;
-  /** The project's budget lines, when the caller already has them. */
-  position?: { costCategoryId: string; name: string }[];
-}
-
-/**
- * Asking for project cash, or modifying a draft. A budget line is required:
- * the liquidation that follows charges exactly that line, and it is too late
- * to ask by then.
- */
-export function BudgetRequestModal({
-  job: jobProp,
-  existing,
-  onClose,
-  onSaved,
-}: {
-  /** The project it is for; G-FIN's "+ Add budget request" leaves it to be picked. */
-  job?: RequestProject;
-  existing?: BudgetRequest;
-  onClose: () => void;
-  onSaved: (id: string) => void;
-}) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [projects, setProjects] = useState<{ id: string; number: string; name: string }[]>([]);
-  const [pickedJob, setPickedJob] = useState('');
-  const job: RequestProject | null = jobProp ?? (pickedJob ? { id: pickedJob, number: projects.find((p) => p.id === pickedJob)?.number ?? '' } : null);
-  const [categories, setCategories] = useState<{ id: string; name: string }[]>(
-    (jobProp?.position ?? []).map((p) => ({ id: p.costCategoryId, name: p.name })),
-  );
-  const [form, setForm] = useState({
-    costCategoryId: existing?.costCategory.id ?? '',
-    amount: existing?.amount ?? 0,
-    reason: existing?.reason ?? '',
-    neededBy: existing?.neededBy?.slice(0, 10) ?? '',
-    notes: existing?.notes ?? '',
-  });
-
-  useEffect(() => {
-    if (jobProp) return;
-    api
-      .get<typeof projects>('/budget-requests/projects')
-      .then(setProjects)
-      .catch(() => setProjects([]));
-  }, [jobProp]);
-
-  const jobId = job?.id ?? '';
-  useEffect(() => {
-    if (!jobId || jobProp?.position) return;
-    // The project's own budget lines — the same list its Budget tab shows;
-    // a reader who may not open projects is offered every active line.
-    api
-      .get<{ position: { costCategoryId: string; name: string }[] }>(`/jobs/${jobId}`)
-      .then((j) => setCategories(j.position.map((p) => ({ id: p.costCategoryId, name: p.name }))))
-      .catch(() =>
-        api
-          .get<{ id: string; name: string }[]>('/reference/cost-categories')
-          .then(setCategories)
-          .catch(() => {}),
-      );
-  }, [jobId, jobProp?.position]);
-
-  async function save(submitNow: boolean) {
-    setBusy(true);
-    setError(null);
-    if (!job) return;
-    const body = {
-      jobId: job.id,
-      costCategoryId: form.costCategoryId,
-      amount: form.amount,
-      reason: form.reason,
-      neededBy: form.neededBy || null,
-      notes: form.notes || null,
-    };
-    try {
-      const saved = existing
-        ? await api.put<{ id: string }>(`/budget-requests/${existing.id}`, body)
-        : await api.post<{ id: string }>('/budget-requests', body);
-      if (submitNow) await api.post(`/budget-requests/${saved.id}/submit`);
-      toast('ok', submitNow ? 'Sent for approval' : existing ? 'Saved' : 'Saved as a draft');
-      onSaved(saved.id);
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  const valid = !!job && form.reason.trim().length >= 3 && form.amount > 0 && !!form.costCategoryId;
-
-  return (
-    <Modal
-      title={existing ? `Modify budget request ${existing.number}` : 'New budget request'}
-      onClose={onClose}
-      footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn" onClick={() => save(false)} disabled={busy || !valid}>
-            Save draft
-          </button>
-          <button className="btn btn-primary" onClick={() => save(true)} disabled={busy || !valid}>
-            {busy ? 'Sending…' : 'Submit for approval'}
-          </button>
-        </ModalFoot>
-      }
-    >
-      <ErrorBox error={error} />
-      <p className="muted del-lede">
-        Cash for the project team to buy what it needs without a purchase requisition. It goes to
-        the team leader, back support and the finance manager (and the CEO / President above
-        ₱100,000), then finance releases it in one voucher. It is accounted for
-        afterwards with receipts, in Expenses — and only what was spent reaches the project.
-      </p>
-
-      {!jobProp && (
-        <Field label="Project" required hint="Every request names a project — office or operations cash goes against the operations budget's project">
-          <select
-            value={pickedJob}
-            onChange={(e) => {
-              setPickedJob(e.target.value);
-              setForm((f) => ({ ...f, costCategoryId: '' }));
-            }}
-          >
-            <option value="">— choose —</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.number} — {p.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
-
-      <Field label="What is the cash for?" required>
-        <input
-          value={form.reason}
-          onChange={(e) => setForm({ ...form, reason: e.target.value })}
-          placeholder="e.g. consumables and fittings for the Batangas tie-in"
-        />
-      </Field>
-
-      <div className="grid grid-2">
-        <Field label="Amount" required>
-          <NumberInput
-            kind="money"
-            step="0.01"
-            min={0}
-            value={form.amount}
-            onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })}
-          />
-        </Field>
-        <Field label="Needed by" hint="When the team needs the cash in hand">
-          <input type="date" value={form.neededBy} onChange={(e) => setForm({ ...form, neededBy: e.target.value })} />
-        </Field>
-      </div>
-
-      <Field label="Budget line" required hint="The liquidation charges exactly this line">
-        <select value={form.costCategoryId} onChange={(e) => setForm({ ...form, costCategoryId: e.target.value })}>
-          <option value="">— choose —</option>
-          {categories.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-      </Field>
-
-      <Field label="Notes">
-        <textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-      </Field>
-    </Modal>
-  );
-}
-
 // ── The project's tab ────────────────────────────────────────────────────────
 
 /**
@@ -653,7 +465,7 @@ export function ProjectBudgetRequestsCard({
 
   return (
     <section className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">Budget requests{rows && rows.length ? ` (${rows.length})` : ''}</h3>
         {onRaise && (
           <button className="btn btn-primary btn-sm" onClick={onRaise}>
@@ -788,7 +600,7 @@ export function BudgetRequestDetail() {
   const [row, setRow] = useState<BudgetRequest | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [reload, setReload] = useState(0);
-  const [modal, setModal] = useState<null | 'edit' | 'release' | 'refund' | 'liquidate'>(null);
+  const [modal, setModal] = useState<null | 'release' | 'refund'>(null);
   // `?act=liquidate|refund` — Budget Liquidations' "Actual entry" and
   // "Process" land here with the form open, read once and dropped.
   const [params, setParams] = useSearchParams();
@@ -821,11 +633,13 @@ export function BudgetRequestDetail() {
 
   useEffect(() => {
     if (!row || !act) return;
-    if (act === 'liquidate' || act === 'refund') setModal(act);
+    if (act === 'refund') setModal(act);
+    // The liquidation is a page of its own now (2026-10-19).
+    if (act === 'liquidate') navigate(`/g-fin/expenses/new?budgetRequest=${row.id}`);
     const next = new URLSearchParams(params);
     next.delete('act');
     setParams(next, { replace: true });
-  }, [row, act, params, setParams]);
+  }, [row, act, params, setParams, navigate]);
 
   if (error && !row) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
@@ -906,7 +720,7 @@ export function BudgetRequestDetail() {
               </button>
             )}
             {canLiquidate && (
-              <button className="btn btn-primary" onClick={() => setModal('liquidate')}>
+              <button className="btn btn-primary" onClick={() => navigate(`/g-fin/expenses/new?budgetRequest=${row.id}`)}>
                 Liquidate
               </button>
             )}
@@ -948,7 +762,7 @@ export function BudgetRequestDetail() {
               },
             },
         ]}
-        modify={canModify ? () => setModal('edit') : undefined}
+        modify={canModify ? `/g-ops/budget-requests/${row.id}/edit` : undefined}
         confirm={confirm}
       />
 
@@ -1011,6 +825,8 @@ export function BudgetRequestDetail() {
         </div>
       )}
       {row.status === 'CANCELLED' && row.cancelReason && <div className="alert warn">Cancelled — {row.cancelReason}</div>}
+
+      <RequestItemsCard items={row.items ?? []} total={row.amount} />
 
       <div className="grid grid-2">
         <div className="card">
@@ -1115,10 +931,6 @@ export function BudgetRequestDetail() {
         </div>
       </div>
 
-      {modal === 'edit' && (
-        <BudgetRequestModal job={{ id: row.job.id, number: row.job.number }} existing={row} onClose={() => setModal(null)} onSaved={done} />
-      )}
-
       {modal === 'release' && (
         <RecordPaymentModal
           kind="DISBURSEMENT"
@@ -1139,20 +951,6 @@ export function BudgetRequestDetail() {
         />
       )}
 
-      {modal === 'liquidate' && (
-        <NewClaimModal
-          budgetRequest={{
-            id: row.id,
-            number: row.number,
-            amountReleased: row.amountReleased,
-            purpose: row.reason,
-            job: { id: row.job.id, number: row.job.number, name: row.job.name },
-            costCategory: row.costCategory,
-          }}
-          onClose={() => setModal(null)}
-          onCreated={(claimId) => navigate(`/g-fin/expenses/${claimId}`)}
-        />
-      )}
     </div>
   );
 }

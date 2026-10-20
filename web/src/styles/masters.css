@@ -3,18 +3,7 @@
 /* ── Record pages: head actions, card heads, detail lists ───────────────── */
 
 /* The header of a card that carries its own action — "+ Add contact". */
-.m-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-2);
-  flex-wrap: wrap;
-  margin-bottom: var(--card-gap);
-}
 
-.m-card-head .card-title {
-  margin: 0;
-}
 
 /* .m-details is the read-only grammar in styles.css (.kv). */
 

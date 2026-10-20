@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { useAuth, mayEditPage } from '../../lib/auth';
 import {
   Empty,
   ErrorBox,
@@ -12,7 +12,7 @@ import {
   humanise,
   useToast,
 } from '../../components/ui';
-import { BarList, Donut, Meter, Panel, Stat, type Slice } from '../../components/charts';
+import { BarList, Donut, Meter, MiniBar, Panel, Stat, type Slice } from '../../components/charts';
 import { IconBadge } from '../../components/Icon';
 import { NumberInput } from '../../components/NumberInput';
 import { ReportPage, type ReportKind } from '../../components/ReportPage';
@@ -728,8 +728,8 @@ export function CashFlow() {
                     {/* In above the line, out below — the shape tells the story
                         faster than the figures do. */}
                     <div className="flow-bars">
-                      <div className="flow-in" style={{ width: `${(m.in / peak) * 50}%` }} />
-                      <div className="flow-out" style={{ width: `${(m.out / peak) * 50}%` }} />
+                      <MiniBar value={m.in} peak={peak} />
+                      <MiniBar value={m.out} peak={peak} tone="rgb(var(--warn-rgb) / 0.5)" />
                     </div>
                   </td>
                 </tr>
@@ -960,7 +960,8 @@ interface FinSettings {
 export function FinanceSettings() {
   const { can } = useAuth();
   const toast = useToast();
-  const editable = can('gfin.settings.edit_all');
+  // Either key of the edit pair saves it: the page keeps no record of anybody's (2026-10-18).
+  const editable = mayEditPage(can, 'gfin', 'settings');
   const [settings, setSettings] = useState<FinSettings | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);

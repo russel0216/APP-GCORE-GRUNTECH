@@ -453,16 +453,6 @@
   margin-bottom: var(--block-gap);
 }
 
-.sales-card-head {
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--card-gap);
-}
-
-.sales-card-head .card-title {
-  margin: 0;
-}
-
 .sales-col-num {
   width: 2.5rem;
 }

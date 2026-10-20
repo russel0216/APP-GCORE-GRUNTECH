@@ -15,6 +15,7 @@ import {
   formatDateTime,
   formatMoney,
   useToast,
+  marginTone,
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
@@ -27,7 +28,7 @@ import { JOB_STATUSES, JOB_TONES, ProgressBar } from './Projects';
 import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
-import { ProjectBudgetRequestsCard, BudgetRequestModal } from './BudgetRequests';
+import { ProjectBudgetRequestsCard } from './BudgetRequests';
 import { ProjectPlanApprovalsCard } from './PlanApprovals';
 import { ProjectCostingCard } from './ProjectCosting';
 import { ProjectJobOrders } from '../service/JobOrders';
@@ -94,6 +95,8 @@ interface Job {
   projectManager: { id: string; name: string } | null;
   createdBy: { id: string; name: string };
   costing: { id: string; number: string; title: string; totalCost: number; contractValue: number } | null;
+  /** Every costing the project was built from, the first first (2026-10-19). */
+  costings?: { id: string; number: string; title: string; totalCost: number; contractValue: number }[];
   quotationRevision: {
     id: string;
     revision: number;
@@ -218,7 +221,6 @@ export function ProjectWorkspace() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
-  const [budgetRequest, setBudgetRequest] = useState(false);
   const [newReport, setNewReport] = useState(false);
   const [turnover, setTurnover] = useState<'turnover' | 'register' | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
@@ -329,9 +331,14 @@ export function ProjectWorkspace() {
               <>
                 {' '}
                 · from{' '}
-                <Link className="mono" to={`/g-ops/costing/${job.costing.id}`}>
-                  {job.costing.number}
-                </Link>
+                {(job.costings?.length ? job.costings : [job.costing]).map((c, i) => (
+                  <span key={c.id}>
+                    {i > 0 && ' + '}
+                    <Link className="mono" to={`/g-ops/costing/${c.id}`}>
+                      {c.number}
+                    </Link>
+                  </span>
+                ))}
               </>
             )}
             {job.quotationRevision && (
@@ -438,7 +445,7 @@ export function ProjectWorkspace() {
               danger: true,
               confirm: {
                 title: `Delete ${job.number}?`,
-                body: 'This cancelled project goes for good, with its scope, tasks, reports and ledger. Refused while an invoice, bill, PR, PO, stock issue, claim, advance or released budget request is filed against it. Its number is not reused.',
+                body: 'This cancelled project goes for good, with its scope, tasks, reports, ledger and its draft, rejected or cancelled purchase requests. Refused while an invoice, bill, live PR, PO, stock issue, claim, advance or released budget request is filed against it. Its number is not reused.',
                 confirmLabel: 'Delete',
                 onConfirm: async () => {
                   await api.del(`/jobs/${job.id}`);
@@ -497,7 +504,7 @@ export function ProjectWorkspace() {
           label="Expected margin"
           value={`${s.expectedMarginPct.toFixed(1)}%`}
           hint={`${formatMoney(s.expectedProfit)} if delivered to budget`}
-          accent={s.expectedMarginPct < 0 ? 'danger' : s.expectedMarginPct < 10 ? 'warn' : 'ok'}
+          accent={marginTone(s.expectedMarginPct)}
         />
       </div>
 
@@ -550,7 +557,14 @@ export function ProjectWorkspace() {
               <Row label="Type" value={job.type === 'PROJECT' ? 'Project' : 'Service contract'} />
               <Row label="Customer P.O." value={job.customerPoNumber} />
               <Row label="P.O. date" value={job.customerPoDate ? formatDate(job.customerPoDate) : null} />
-              <Row label="Estimated cost" value={job.costing ? formatMoney(job.costing.totalCost) : null} />
+              <Row
+                label="Estimated cost"
+                value={
+                  job.costing
+                    ? formatMoney((job.costings?.length ? job.costings : [job.costing]).reduce((sum, c) => sum + c.totalCost, 0))
+                    : null
+                }
+              />
               {job.serviceContract && (
                 <Row
                   label="Coverage terms"
@@ -631,7 +645,17 @@ export function ProjectWorkspace() {
         </div>
       )}
 
-      {current === 'costing' && <ProjectCostingCard costing={job.costing} />}
+      {current === 'costing' &&
+        (job.costings && job.costings.length > 1 ? (
+          // Built from several costings (2026-10-19): a card each, in order.
+          <div className="stack">
+            {job.costings.map((c) => (
+              <ProjectCostingCard key={c.id} costing={c} />
+            ))}
+          </div>
+        ) : (
+          <ProjectCostingCard costing={job.costing} />
+        ))}
 
       {current === 'joborders' && (
         <ProjectJobOrders jobId={job.id} customerId={job.customer.id} quotationId={job.quotationRevision?.quotation.id ?? null} />
@@ -643,7 +667,7 @@ export function ProjectWorkspace() {
         <ProjectBudgetRequestsCard
           job={job}
           reloadToken={reloadToken}
-          onRaise={can('gops.budget_requests.create') ? () => setBudgetRequest(true) : undefined}
+          onRaise={can('gops.budget_requests.create') ? () => navigate(`/g-ops/budget-requests/new?jobId=${job.id}`) : undefined}
         />
       )}
 
@@ -719,7 +743,7 @@ export function ProjectWorkspace() {
       {current === 'progress' && (
         <div className="stack">
         <div className="card">
-          <div className="del-card-head">
+          <div className="card-head">
             <h3 className="card-title">Progress reports</h3>
             {can('gops.progress_billing.create') && (
               <button className="btn btn-primary btn-sm" onClick={() => setNewReport(true)}>
@@ -827,17 +851,6 @@ export function ProjectWorkspace() {
         />
       )}
 
-      {budgetRequest && (
-        <BudgetRequestModal
-          job={job}
-          onClose={() => setBudgetRequest(false)}
-          onSaved={() => {
-            setBudgetRequest(false);
-            setReloadToken((t) => t + 1);
-            void load();
-          }}
-        />
-      )}
 
       {newReport && (
         <NewReportModal
@@ -897,7 +910,7 @@ function ProgressBillingsCard({ job, totalBilled, onChanged }: { job: Job; total
 
   return (
     <div className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">Progress billings</h3>
         {can('gops.progress_billing.create') && (
           <button
@@ -1083,7 +1096,7 @@ function RelatedCard<T extends { id: string }>({
 
   return (
     <section className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">
           {title}
           {rows && rows.length > 0 ? ` (${total})` : ''}
@@ -1428,7 +1441,7 @@ function LedgerCard({ job, reloadToken }: { job: Job; reloadToken: number }) {
 
   return (
     <section className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">Cost ledger{total ? ` (${total})` : ''}</h3>
         <label className="row">
           <span className="faint del-small">Show</span>
@@ -1539,7 +1552,7 @@ function ProjectMeetingsCard({ job }: { job: Job }) {
   if (!sees) return null;
   return (
     <section className="card">
-      <div className="del-card-head">
+      <div className="card-head">
         <h3 className="card-title">Meetings{rows && rows.length ? ` (${rows.length})` : ''}</h3>
         {can('ghr.meetings.create') && (
           <Link className="btn btn-primary btn-sm" to={`/g-hr/meetings?new=1&job=${job.id}`}>

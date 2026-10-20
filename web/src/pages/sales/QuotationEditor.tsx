@@ -94,6 +94,8 @@ interface Header {
   expectedClosing: string;
   leadId: string;
   costingId: string;
+  /** The other costings, after the first (2026-10-19: a quotation may come from two costings). */
+  otherCostingIds: string[];
   prNumber: string;
   delivery: string;
   paymentTerms: string;
@@ -105,6 +107,8 @@ interface Header {
   hideTotal: boolean;
   /** Every figure's currency: PHP unless another is picked (2026-10-11). */
   currency: string;
+  /** Pesos per unit of the currency (2026-10-17) — what the lists' totals convert at. '' for PHP. */
+  exchangeRate: string;
   /** The team it counts under — the author's unless picked (2026-10-12). '' follows the author's. */
   teamId: string;
   discountPct: string;
@@ -120,10 +124,14 @@ interface Preview {
   taxOptions: TaxOption[];
   employeeNo: string | null;
   linked: boolean;
+  /** A person on the register with no employee number yet — the save is refused until one is set (2026-10-18). */
+  missingNumber: string | null;
   usesEmployeeDigits: boolean;
   vatRate: number;
   currency: string;
   currencies: { code: string; label: string }[];
+  /** Settings' rates, pesos per unit — a new quotation's default. */
+  exchangeRates?: Record<string, number>;
   /** The author's own team — what a new quotation counts under unless another is picked. */
   ownerTeamId: string | null;
   teams: { id: string; code: string; name: string }[];
@@ -142,6 +150,8 @@ interface LeadForQuote {
 }
 
 interface CostingLine {
+  /** A subheading naming its costing, where the lines come from more than one. */
+  isHeading?: boolean;
   title: string;
   description: string;
   quantity: number;
@@ -183,6 +193,7 @@ export function linesFromItems(items: Item[]): Line[] {
 }
 
 function fromCostingLine(c: CostingLine): Line {
+  if (c.isHeading) return { ...blankLine(true), title: c.title };
   return { ...blankLine(), productType: c.title, title: c.title, description: c.description, quantity: String(c.quantity), unit: c.unit, unitPrice: String(c.unitPrice) };
 }
 
@@ -260,6 +271,7 @@ export function QuotationEditor() {
     expectedClosing: addDays(today, 30),
     leadId: preset.leadId,
     costingId: preset.costingId,
+    otherCostingIds: [],
     prNumber: '',
     delivery: '',
     paymentTerms: '',
@@ -268,6 +280,7 @@ export function QuotationEditor() {
     vatRate: 0.12,
     hideTotal: false,
     currency: 'PHP',
+    exchangeRate: '',
     teamId: '',
     discountPct: '0',
     outcome: 'OPEN',
@@ -316,6 +329,8 @@ export function QuotationEditor() {
     const listed = (editing ? quotation?.currencies : preview?.currencies) ?? [{ code: 'PHP', label: 'PHP — Philippine peso' }];
     return listed.some((c) => c.code === currency) ? listed : [...listed, { code: currency, label: currency }];
   })();
+  /** Settings' rates (pesos per unit): what a change of currency starts from. */
+  const settingsRates = (editing ? quotation?.exchangeRates : preview?.exchangeRates) ?? {};
 
   /** A change somebody made — as opposed to a prefill — marks the page dirty. */
   const set = useCallback(<K extends keyof Header>(key: K, value: Header[K]) => {
@@ -358,6 +373,7 @@ export function QuotationEditor() {
             expectedClosing: q.expectedClosing?.slice(0, 10) ?? '',
             leadId: q.lead?.id ?? '',
             costingId: draft.costing?.id ?? '',
+            otherCostingIds: (draft.costings ?? []).slice(1).map((c) => c.id),
             prNumber: draft.prNumber ?? '',
             delivery: draft.delivery ?? '',
             paymentTerms: draft.paymentTerms ?? '',
@@ -366,13 +382,14 @@ export function QuotationEditor() {
             vatRate: draft.vatRate,
             hideTotal: draft.hideTotal ?? false,
             currency: q.currency ?? 'PHP',
+            exchangeRate: q.exchangeRate ? String(q.exchangeRate) : '',
             teamId: q.team?.id ?? '',
             discountPct: String(draft.discountPct ?? 0),
             outcome: q.outcome,
             lostReason: q.lostReason ?? '',
           });
           vatTouched.current = true;
-          if (draft.costing) setPinnedCostings([draft.costing]);
+          if (draft.costing) setPinnedCostings(draft.costings?.length ? draft.costings : [draft.costing]);
           setLines(draft.items.length ? linesFromItems(draft.items) : [blankLine()]);
           linesTouched.current = draft.items.length > 0;
         }
@@ -528,6 +545,7 @@ export function QuotationEditor() {
           ...(src.vatRate === 0 ? { vatRate: 0 } : {}),
           hideTotal: src.hideTotal ?? false,
           currency: q.currency ?? 'PHP',
+          exchangeRate: q.exchangeRate ? String(q.exchangeRate) : '',
           discountPct: String(src.discountPct ?? 0),
         }));
         if (src.vatRate === 0) vatTouched.current = true;
@@ -615,15 +633,19 @@ export function QuotationEditor() {
     scope of work as the lines — the same mapping "Fill from costing" writes.
     Once the table has been touched, only the button replaces it.
   */
-  const loadCostingLines = useCallback(async (costingId: string) => {
-    const rows = await api.get<CostingLine[]>(`/quotations/costing-lines${qs({ costingId })}`);
+  const loadCostingLines = useCallback(async (costingIds: string) => {
+    const rows = await api.get<CostingLine[]>(`/quotations/costing-lines${qs({ costingIds })}`);
     return rows.map(fromCostingLine);
   }, []);
 
+  /** Every costing chosen, the first first, as the API takes them. */
+  const costingIds = [header.costingId, ...header.otherCostingIds].filter(Boolean);
+  const costingKey = costingIds.join(',');
+
   useEffect(() => {
-    if (editing || !header.costingId || linesTouched.current) return;
+    if (editing || !costingKey || linesTouched.current) return;
     let live = true;
-    loadCostingLines(header.costingId)
+    loadCostingLines(costingKey)
       .then((filled) => {
         if (!live || linesTouched.current || filled.length === 0) return;
         setLines((prev) => (prev.every(isBlank) ? filled : prev));
@@ -632,11 +654,11 @@ export function QuotationEditor() {
     return () => {
       live = false;
     };
-  }, [editing, header.costingId, loadCostingLines]);
+  }, [editing, costingKey, loadCostingLines]);
 
   /** The table becomes the costing's scope of work. Throws, so the confirm bar can say why not. */
   async function fillLines() {
-    const filled = await loadCostingLines(header.costingId);
+    const filled = await loadCostingLines(costingKey);
     if (!filled.length) throw new Error('That costing has no scope of work yet — add sections to it first');
     setLines(filled);
     linesTouched.current = true;
@@ -647,7 +669,7 @@ export function QuotationEditor() {
     if (!header.costingId) return;
     if (lines.some((l) => !isBlank(l))) {
       confirm.ask({
-        title: 'Replace the lines with the costing’s scope of work?',
+        title: costingIds.length > 1 ? 'Replace the lines with the costings’ scope of work?' : 'Replace the lines with the costing’s scope of work?',
         body: 'What is in the table now is replaced. Nothing is saved until you press Save.',
         confirmLabel: 'Replace',
         tone: 'primary',
@@ -661,7 +683,7 @@ export function QuotationEditor() {
   // The question is about the costing chosen when it was asked: choosing another
   // (or none) withdraws it, as the old in-line question went with the button.
   const closeConfirm = confirm.close;
-  useEffect(() => closeConfirm(), [header.costingId, closeConfirm]);
+  useEffect(() => closeConfirm(), [costingKey, closeConfirm]);
 
   // ── Lines ─────────────────────────────────────────────────────────────────
   function updateLine(key: string, patch: Partial<Line>) {
@@ -854,7 +876,7 @@ export function QuotationEditor() {
           contactId: header.contactId || null,
           siteId: header.siteId || null,
           leadId: header.leadId || null,
-          costingId: header.costingId || null,
+          costingIds,
           subject: upperText(header.subject.trim()),
           // Sent only when it is not the suggestion: otherwise the next free
           // number is issued as the quotation is saved.
@@ -870,6 +892,7 @@ export function QuotationEditor() {
           vatRate: header.vatRate,
           hideTotal: header.hideTotal,
           currency: header.currency,
+          ...(header.currency !== 'PHP' && Number(header.exchangeRate) > 0 ? { exchangeRate: Number(header.exchangeRate) } : {}),
           ...(header.teamId ? { teamId: header.teamId } : {}),
           discountPct: Number(header.discountPct || 0),
           ...(canPickAuthor && header.ownerId && header.ownerId !== myId ? { ownerId: header.ownerId } : {}),
@@ -887,7 +910,7 @@ export function QuotationEditor() {
       const base = `/quotations/${quotation!.id}/revisions/${revision!.id}`;
       await api.put(`${base}/lines`, { lines: payloadLines });
       await api.patch(base, {
-        costingId: header.costingId || null,
+        costingIds,
         validityDays,
         notes: header.notes || null,
         terms: header.terms || null,
@@ -909,6 +932,9 @@ export function QuotationEditor() {
         contactId: header.contactId || null,
         siteId: header.siteId || null,
         ...(header.currency !== quotation!.currency ? { currency: header.currency } : {}),
+        ...(header.currency !== 'PHP' && Number(header.exchangeRate) > 0 && Number(header.exchangeRate) !== (quotation!.exchangeRate ?? 0)
+          ? { exchangeRate: Number(header.exchangeRate) }
+          : {}),
         ...((header.teamId || null) !== (quotation!.team?.id ?? null) ? { teamId: header.teamId || null } : {}),
         ...(moved ? { outcome: header.outcome } : {}),
         ...(moved && header.outcome === 'LOST' ? { lostReason: header.lostReason.trim() } : {}),
@@ -995,7 +1021,13 @@ export function QuotationEditor() {
           and pick or add the company first.
         </div>
       )}
-      {!editing && preview && preview.usesEmployeeDigits && !preview.linked && (
+      {!editing && preview && preview.usesEmployeeDigits && preview.missingNumber && (
+        <div className="alert warn">
+          {preview.missingNumber} has no employee number yet, and the quotation number carries it — Save will be
+          refused until one is typed on their login (Admin › Users) or their employee record (G-HR › Employees).
+        </div>
+      )}
+      {!editing && preview && preview.usesEmployeeDigits && !preview.linked && !preview.missingNumber && (
         <div className="alert info">
           {header.ownerId === myId ? 'Your account is' : 'That author’s account is'} not linked to an
           employee record, so this number carries 000 where the employee digits would be. HR can link it
@@ -1198,7 +1230,16 @@ export function QuotationEditor() {
               </select>
             </Field>
             <Field label="Currency" hint="Every figure on this quotation is in it — nothing is converted">
-              <select id="qe-currency" value={currency} onChange={(e) => set('currency', e.target.value)}>
+              <select
+                id="qe-currency"
+                value={currency}
+                onChange={(e) => {
+                  set('currency', e.target.value);
+                  // A new currency starts from the rate Settings keep for it.
+                  const r = settingsRates[e.target.value];
+                  set('exchangeRate', e.target.value === 'PHP' || !r ? '' : String(r));
+                }}
+              >
                 {currencyOptions.map((c) => (
                   <option key={c.code} value={c.code}>
                     {c.label}
@@ -1206,6 +1247,14 @@ export function QuotationEditor() {
                 ))}
               </select>
             </Field>
+            {currency !== 'PHP' && (
+              <Field
+                label={`Rate to PHP`}
+                hint={`Pesos per 1 ${currency} — the lists, the board and the forecast add this quotation at it. The quotation itself stays in ${currency}.`}
+              >
+                <NumberInput kind="decimal" min={0} value={header.exchangeRate} onChange={(e) => set('exchangeRate', e.target.value)} />
+              </Field>
+            )}
             {editing ? (
               <Field
                 label="Status"
@@ -1307,7 +1356,15 @@ export function QuotationEditor() {
               )
             )}
             <Field label="Costing" hint="Links the pricing to what you estimated; its scope of work can fill the lines">
-              <select value={header.costingId} onChange={(e) => set('costingId', e.target.value)}>
+              <select
+                value={header.costingId}
+                onChange={(e) => {
+                  const first = e.target.value;
+                  // No first costing, no others; the others never repeat the first.
+                  setHeader((h) => ({ ...h, costingId: first, otherCostingIds: first ? h.otherCostingIds.filter((x) => x !== first) : [] }));
+                  setDirty(true);
+                }}
+              >
                 <option value="">— none yet —</option>
                 {costingOptions.map((c) => (
                   <option key={c.id} value={c.id}>
@@ -1316,6 +1373,50 @@ export function QuotationEditor() {
                 ))}
               </select>
             </Field>
+            {/* A second (third…) costing, 2026-10-19: its scope follows the first's, under a subheading each. */}
+            {header.costingId &&
+              header.otherCostingIds.map((cid, i) => {
+                const c = costingOptions.find((o) => o.id === cid);
+                return (
+                  <Field key={cid} label={`Costing ${i + 2}`}>
+                    <div className="row">
+                      <span>{c ? `${c.number} — ${c.title}` : 'A costing'}</span>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => {
+                          setHeader((h) => ({ ...h, otherCostingIds: h.otherCostingIds.filter((x) => x !== cid) }));
+                          setDirty(true);
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </Field>
+                );
+              })}
+            {header.costingId && costingOptions.some((c) => !costingIds.includes(c.id)) && (
+              <Field label="Another costing" hint="When the work was costed in two (or more) costings — the quotation takes them all">
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const add = e.target.value;
+                    if (!add) return;
+                    setHeader((h) => ({ ...h, otherCostingIds: [...h.otherCostingIds, add] }));
+                    setDirty(true);
+                  }}
+                >
+                  <option value="">+ Add another costing</option>
+                  {costingOptions
+                    .filter((c) => !costingIds.includes(c.id))
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.number} — {c.title}
+                      </option>
+                    ))}
+                </select>
+              </Field>
+            )}
           </div>
         </div>
 
@@ -1980,6 +2081,30 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
     }
   }
 
+  /*
+    An APPROVED revision the customer has not been sent yet is usually better
+    pulled back to draft than raised again (help ticket GT-HT-2026-0010:
+    "modify without reflecting as R1"): the engine's one reopen path, offered
+    here only when `GET /approvals/history` says `canReopen` — the same test
+    the Approval panel reads, with the module's own refusals (won, booked,
+    built on) said in the bar.
+  */
+  const [canReopen, setCanReopen] = useState(false);
+  useEffect(() => {
+    if (latest?.status !== 'APPROVED') return;
+    api
+      .get<{ status: string; canReopen?: boolean }[]>(`/approvals/history/quotation/${latest.id}`)
+      .then((rows) => setCanReopen(!!rows[0]?.canReopen))
+      .catch(() => {});
+  }, [latest?.id, latest?.status]);
+
+  async function reopenApproved(reason: string) {
+    if (!latest) return;
+    await api.post(`/approvals/reopen/quotation/${latest.id}`, { reason: reason.trim() });
+    toast('ok', `R${latest.revision} pulled back to draft — its lines are ready to change`);
+    onRevisionRaised();
+  }
+
   async function raiseRevision() {
     setBusy(true);
     try {
@@ -2030,6 +2155,26 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
               R{latest.revision} is {latest.status.toLowerCase().replace(/_/g, ' ')}: its lines, prices, terms and tax are
               what the customer was sent, and stay as they are.
             </span>
+            {latest.status === 'APPROVED' && canReopen && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={busy}
+                onClick={() =>
+                  confirm.ask({
+                    title: `Pull R${latest.revision} back to draft?`,
+                    body: `Its approval is undone and R${latest.revision} goes through approval again once you submit it — no new revision number. Raise a new revision instead if the customer already has R${latest.revision}.`,
+                    confirmLabel: `Pull R${latest.revision} back`,
+                    tone: 'primary',
+                    reason: 'required',
+                    reasonLabel: 'Why?',
+                    onConfirm: reopenApproved,
+                  })
+                }
+              >
+                Pull R{latest.revision} back and edit
+              </button>
+            )}
             {latest.status !== 'PENDING_APPROVAL' && (
               <button type="button" className="btn btn-sm" onClick={() => void raiseRevision()} disabled={busy}>
                 Raise a new revision to change them

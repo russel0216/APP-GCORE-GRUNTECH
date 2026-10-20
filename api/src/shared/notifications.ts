@@ -15,6 +15,8 @@ export type NotificationType =
   | 'approval.rejected'
   | 'approval.returned'
   | 'approval.withdrawn'
+  /** The requester followed up an unanswered step to the approver's manager (2026-10-17). */
+  | 'approval.follow_up'
   | 'quotation.awaiting'
   | 'project.behind_schedule'
   | 'po.received'

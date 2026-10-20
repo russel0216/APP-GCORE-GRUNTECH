@@ -590,7 +590,7 @@ export function PurchaseRequisitionEditor() {
 
           {/* ── Lines ───────────────────────────────────────────────────────── */}
           <section className="card" aria-labelledby="prq-lines">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="prq-lines" className="card-title">Lines</h2>
               {direct && costing && costing.length > 0 && (
                 <span className="muted prq-source">From this project's costing · {costing.length} lines</span>
@@ -811,7 +811,7 @@ export function PurchaseRequisitionEditor() {
         {/* ── Budget, live ──────────────────────────────────────────────────── */}
         {direct && (
           <aside className="card prq-budget" aria-labelledby="prq-budget">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="prq-budget" className="card-title">Budget — live</h2>
               <span className="muted prq-source">as you type</span>
             </div>

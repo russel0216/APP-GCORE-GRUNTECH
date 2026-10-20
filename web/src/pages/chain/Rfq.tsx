@@ -207,6 +207,7 @@ interface RfqDetailData {
   canvasses: { id: string; number: string; status: string }[];
   estimatedTotal: number;
   canEdit: boolean;
+  canRemoveQuotes?: boolean;
   canEditLines: boolean;
   canSend: boolean;
   canRecordQuotes: boolean;
@@ -527,7 +528,7 @@ export function RfqEditor() {
           </section>
 
           <section className="card" aria-labelledby="rfq-lines">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="rfq-lines" className="card-title">Lines asked</h2>
               <span className="muted prq-source">
                 {picked.size} of {lines.length} · estimated {formatMoney(estimate)}
@@ -591,7 +592,7 @@ export function RfqEditor() {
           </section>
 
           <section className="card" aria-labelledby="rfq-suppliers">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="rfq-suppliers" className="card-title">Suppliers asked</h2>
               <button type="button" className="btn btn-sm" onClick={() => setRows((rs) => [...rs, blankRow()])}>
                 + Add supplier
@@ -969,7 +970,7 @@ export function RfqDetail() {
       </div>
 
       <section className="card" aria-labelledby="rfq-sups">
-        <div className="proc-card-head">
+        <div className="card-head">
           <h3 id="rfq-sups" className="card-title">Suppliers asked</h3>
           <span className="faint">
             {quoted.length} of {rfq.suppliers.length} quoted
@@ -1038,6 +1039,28 @@ export function RfqDetail() {
                             onClick={() => setQuoting(s.id)}
                           >
                             {s.quotedCount ? 'Modify quote' : 'Record quote'}
+                          </button>
+                        )}
+                        {rfq.canRemoveQuotes && s.quotedCount > 0 && (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-danger"
+                            aria-label={`Remove ${s.supplier.name}'s quote`}
+                            onClick={() =>
+                              confirm.ask({
+                                title: `Remove ${s.supplier.name}'s quote?`,
+                                body: 'Its prices, its terms and the paper filed with it go. The supplier stays asked — Modify the RFQ to drop them too. It cannot be undone.',
+                                confirmLabel: 'Remove quote',
+                                reason: 'optional',
+                                reasonLabel: 'Why (optional, kept on the trail)',
+                                onConfirm: async (reason: string) => {
+                                  setRfq(await api.del<RfqDetailData>(`/rfqs/${rfq.id}/suppliers/${s.id}/quote${qs({ reason: reason.trim() || undefined })}`));
+                                  toast('ok', `${s.supplier.name}'s quote removed`);
+                                },
+                              })
+                            }
+                          >
+                            Remove quote
                           </button>
                         )}
                       </div>
@@ -1215,7 +1238,7 @@ function QuotePanel({
   return (
     <>
     <section className="card rfq-quote" aria-labelledby="rfq-quote-head">
-      <div className="proc-card-head">
+      <div className="card-head">
         <h3 id="rfq-quote-head" className="card-title">
           {row.supplier.name}’s quote
         </h3>
@@ -1317,7 +1340,7 @@ function ChooseSuppliers({ rfq, onClose, onStart }: { rfq: RfqDetailData; onClos
   const [error, setError] = useState<unknown>(null);
   return (
     <section className="card" aria-labelledby="rfq-choose">
-      <div className="proc-card-head">
+      <div className="card-head">
         <h3 id="rfq-choose" className="card-title">
           Start canvass — choose six suppliers
         </h3>

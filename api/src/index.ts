@@ -11,7 +11,7 @@ import { errorMiddleware, notFound } from './http/kit';
 import { authRoutes } from './routes/auth';
 import { appearanceRoutes } from './routes/appearance';
 import { pdfTemplateRoutes } from './routes/pdfTemplates';
-import { userRoutes, roleRoutes, departmentRoutes } from './routes/users';
+import { userRoutes, roleRoutes } from './routes/users';
 import {
   companyRoutes,
   numberingRoutes,
@@ -98,6 +98,8 @@ import { chainRoutes } from './routes/chain';
 import { partnerRoutes } from './routes/partners';
 import { advanceRoutes } from './routes/advances';
 import { jobOrderRoutes } from './routes/jobOrders';
+import { serviceJobOrderRoutes } from './routes/serviceJobOrders';
+import { serviceDocumentRoutes } from './routes/serviceDocuments';
 import { cadJobOrderRoutes } from './routes/cadJobOrders';
 import { helpTicketRoutes } from './routes/helpTickets';
 import { positionRoutes } from './routes/positions';
@@ -112,6 +114,8 @@ import {
 } from './routes/academy';
 import { salesOrderRoutes } from './routes/salesOrders';
 import { startActivityReminders } from './shared/activities';
+import { loadHolidays } from './shared/holidays';
+import { holidayRoutes } from './routes/holidays';
 
 const app = express();
 
@@ -142,8 +146,8 @@ app.get('/api/health', async (_req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/roles', roleRoutes);
-app.use('/api/departments', departmentRoutes);
 app.use('/api/company', companyRoutes);
+app.use('/api/holidays', holidayRoutes);
 app.use('/api/numbering', numberingRoutes);
 app.use('/api/workflows', workflowRoutes);
 app.use('/api/audit', auditRoutes);
@@ -234,6 +238,8 @@ app.use('/api/installed-assets', assetRoutes);
 app.use('/api/service-contracts', contractRoutes);
 app.use('/api/service-visits', visitRoutes);
 app.use('/api/job-orders', jobOrderRoutes);
+app.use('/api/service-job-orders', serviceJobOrderRoutes);
+app.use('/api/service-documents', serviceDocumentRoutes);
 app.use('/api/cad-job-orders', cadJobOrderRoutes);
 app.use('/api/help-tickets', helpTicketRoutes);
 app.use('/api/report-templates', templateRoutes);
@@ -257,6 +263,11 @@ if (fs.existsSync(webDist)) {
 app.use(errorMiddleware);
 
 async function start() {
+  // Holidays are days off for every working-day count (shared/holidays.ts):
+  // loaded before the first request, then every five minutes, so a list
+  // saved by another process (the seed) reaches this one.
+  await loadHolidays().catch((err) => console.error('Loading holidays failed:', err));
+  setInterval(() => void loadHolidays().catch(() => undefined), 5 * 60_000).unref();
   await connectDb();
   app.listen(env.port, () => {
     console.log(`G-CORE API listening on http://localhost:${env.port}`);

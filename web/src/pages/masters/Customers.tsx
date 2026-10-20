@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ApiError, api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEditPage, useAuth } from '../../lib/auth';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { Stat } from '../../components/charts';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
@@ -36,6 +36,8 @@ export interface CustomerRow {
   /** Quotations still in play (open, submitted, in negotiation), and projects — list rows only. */
   openQuoteCount?: number;
   projectCount?: number;
+  /** Whether the viewer may change it — Edit All, or Edit Own on a customer they added (2026-10-18). */
+  canEdit?: boolean;
   createdBy: { id: string; name: string } | null;
   createdAt?: string;
 }
@@ -248,7 +250,9 @@ export function Customers() {
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
   const [people, setPeople] = useState<{ value: string; label: string }[]>([]);
-  const mayEdit = can('gops.customers.edit_all');
+  // Mass actions for Edit All or Edit Own (2026-10-18): each runs the
+  // ordinary PATCH per row, which refuses a customer somebody else added.
+  const mayEdit = mayEditPage(can, 'gops', 'customers');
 
   useEffect(() => {
     loadPeople('gops.customers.create')

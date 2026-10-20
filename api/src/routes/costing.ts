@@ -1,3 +1,4 @@
+import { jobsOnCostingWhere } from '../shared/costingSets';
 import { Router } from 'express';
 import { z } from 'zod';
 import { JobType, Prisma } from '@prisma/client';
@@ -53,6 +54,8 @@ import { SCOPE_PRELOAD } from '../shared/scopePreload';
 import { renderDesigned, type DesignData } from '../shared/pdfDesign';
 import { costingDesign, costingLineRow, costingSubtotalRow } from '../shared/costingTemplate';
 import { appendPdf } from '../shared/pdfAttachments';
+import { visibleOwners } from '../shared/team';
+import { viewScope } from '../shared/ownScope';
 
 /**
  * Costing (model §5.3).
@@ -280,13 +283,18 @@ function onlyOwn(me: ReturnType<typeof currentUser>) {
   return !me.isSuperAdmin && !me.permissions.has('gops.costing.view_all');
 }
 
+/** The costings such a caller reads: their own, or — View Team — the team's (2026-10-19). */
+function readableCostings(me: ReturnType<typeof currentUser>): Prisma.CostingWhereInput {
+  return onlyOwn(me) ? { ownerId: { in: visibleOwners(me, 'gops', 'costing') } } : {};
+}
+
 /**
  * A costing's visibility — `view_all`, or its author — and, for a caller with
  * no costing right at all (`requireAnyOrDecider`) or anyone else, a stand-in
  * or approver while it waits on them (`mayDecide`).
  */
 async function assertCostingVisible(me: ReturnType<typeof currentUser>, costing: { id: string; ownerId: string }, deciderOnly: boolean) {
-  const visible = !deciderOnly && (!onlyOwn(me) || costing.ownerId === me.id);
+  const visible = !deciderOnly && (!onlyOwn(me) || visibleOwners(me, 'gops', 'costing').includes(costing.ownerId));
   if (visible || (await mayDecide(me.id, 'costing', [costing.id]))) return;
   throw forbidden(deciderOnly ? 'You need one of: gops.costing.view_all, gops.costing.view_own' : 'This costing belongs to someone else');
 }
@@ -306,7 +314,8 @@ function costingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Pri
 
   // Someone with only view_own never sees another person's costing, whatever
   // the scope switch says.
-  if (onlyOwn(me) || q.scope === 'mine') where.ownerId = me.id;
+  if (q.scope === 'mine') where.ownerId = me.id;
+  else if (onlyOwn(me)) where.ownerId = { in: visibleOwners(me, 'gops', 'costing') };
 
   if (q.search) {
     where.OR = [
@@ -328,7 +337,9 @@ function costingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Pri
   // it is a costing whose job happens to be a contract (model §4.5) — so it
   // would be a mistake to give it a second table to drift out of step with.
   const jobType = choice(q.filters.jobType, JobType, 'Project type');
-  if (jobType) where.jobs = { some: { type: jobType } };
+  if (jobType) {
+    where.AND = [{ OR: [{ jobs: { some: { type: jobType } } }, { jobLinks: { some: { job: { type: jobType } } } }] }];
+  }
   // The rows a person ticked (Print selected); the rules above still apply,
   // so an id never prints a costing the caller could not see in the list.
   const ids = idsFilter(q.filters.ids);
@@ -355,6 +366,8 @@ costingRoutes.get(
           // The project the costing became (2026-10-15, the owner's call: the
           // list says when a costing has been converted).
           jobs: { select: { id: true, number: true, name: true, status: true }, orderBy: { createdAt: 'asc' } },
+          // …or one it was built into beside another costing (2026-10-19).
+          jobLinks: { select: { job: { select: { id: true, number: true, name: true, status: true } } } },
           _count: { select: { lines: true, scopeSections: true } },
         },
         orderBy: orderBy(q, COSTING_SORTS, { createdAt: 'desc' }),
@@ -366,8 +379,8 @@ costingRoutes.get(
 
     res.json(
       listResult(
-        rows.map((r) => ({
-          ...present(r as unknown as Record<string, unknown>),
+        rows.map(({ jobLinks, ...r }) => ({
+          ...present({ ...r, jobs: [...r.jobs, ...jobLinks.map((l) => l.job)] } as unknown as Record<string, unknown>),
           lineCount: r._count.lines,
           sectionCount: r._count.scopeSections,
         })),
@@ -453,7 +466,7 @@ costingRoutes.get(
           : null,
       customer,
       f.jobType ? (f.jobType === 'SERVICE_CONTRACT' ? 'service contracts only' : 'projects only') : null,
-      onlyOwn(me) || q.scope === 'mine' ? 'mine only' : null,
+      q.scope === 'mine' ? 'mine only' : onlyOwn(me) ? (viewScope(me, 'gops', 'costing') === 'team' ? "my team's only" : 'mine only') : null,
       f.ids ? 'the rows selected' : null,
     ]);
 
@@ -514,7 +527,7 @@ costingRoutes.get(
   requireAny('gops.costing.view_all', 'gops.costing.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const where: Prisma.CostingWhereInput = onlyOwn(me) ? { ownerId: me.id } : {};
+    const where: Prisma.CostingWhereInput = readableCostings(me);
 
     // `?status=FINAL` (or a comma list) lets a picker leave DRAFT costings out —
     // a project is built on a final costing, and a picker that offers drafts
@@ -581,7 +594,7 @@ costingRoutes.get(
           { name: { contains: q, mode: 'insensitive' } },
           { description: { contains: q, mode: 'insensitive' } },
         ],
-        costing: onlyOwn(me) ? { ownerId: me.id } : {},
+        costing: readableCostings(me),
       },
       select: {
         name: true,
@@ -708,7 +721,7 @@ costingRoutes.get(
   requireAny('gops.costing.view_all', 'gops.costing.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const visible: Prisma.CostingWhereInput = onlyOwn(me) ? { ownerId: me.id } : {};
+    const visible: Prisma.CostingWhereInput = readableCostings(me);
     const [units, systems, phases, tasks, lastTerms, company] = await Promise.all([
       prisma.costingLine.groupBy({
         by: ['unit'],
@@ -895,7 +908,7 @@ costingRoutes.post(
         },
       });
       if (!source) throw notFound('Costing not found');
-      if (onlyOwn(me) && source.ownerId !== me.id) throw forbidden('This costing belongs to someone else');
+      if (onlyOwn(me) && !visibleOwners(me, 'gops', 'costing').includes(source.ownerId)) throw forbidden('This costing belongs to someone else');
       content = {
         systemUnit: source.systemUnit,
         marginPct: num(source.marginPct),
@@ -1025,7 +1038,7 @@ costingRoutes.delete(
 // ── Read one ─────────────────────────────────────────────────────────────────
 
 async function loadFull(id: string, tx: Tx = prisma) {
-  return tx.costing.findUnique({
+  const costing = await tx.costing.findUnique({
     where: { id },
     include: {
       customer: { select: { id: true, name: true, code: true } },
@@ -1060,8 +1073,24 @@ async function loadFull(id: string, tx: Tx = prisma) {
         select: { id: true, number: true, name: true, status: true, type: true },
         orderBy: { createdAt: 'desc' },
       },
+      // The quotations and projects it went into beside another costing (2026-10-19).
+      revisionLinks: {
+        select: {
+          revision: {
+            select: { id: true, revision: true, status: true, quotation: { select: { id: true, number: true, subject: true } } },
+          },
+        },
+      },
+      jobLinks: { select: { job: { select: { id: true, number: true, name: true, status: true, type: true } } } },
     },
   });
+  if (!costing) return null;
+  const { revisionLinks, jobLinks, ...rest } = costing;
+  return {
+    ...rest,
+    quotationRevisions: [...rest.quotationRevisions, ...revisionLinks.map((l) => l.revision)],
+    jobs: [...rest.jobs, ...jobLinks.map((l) => l.job)],
+  };
 }
 
 /** Whether costings go through the approval engine here, i.e. a costing workflow is active. */
@@ -1667,7 +1696,7 @@ costingRoutes.delete(
     const me = currentUser(req);
     const costing = await prisma.costing.findUnique({
       where: { id: req.params.id },
-      include: { _count: { select: { quotationRevisions: true, jobs: true } } },
+      include: { _count: { select: { quotationRevisions: true, jobs: true, revisionLinks: true, jobLinks: true } } },
     });
     if (!costing) throw notFound('Costing not found');
     if (!canEditRecord(me, 'gops', 'costing', costing.ownerId)) {
@@ -1676,10 +1705,14 @@ costingRoutes.delete(
     if (costing.status === 'PENDING_APPROVAL') {
       throw badRequest('This costing is with the approver and cannot be deleted while they decide.');
     }
-    if (costing._count.quotationRevisions > 0) {
-      throw badRequest(
-        `${costing._count.quotationRevisions} quotation revision(s) are built on this costing`,
-      );
+    // As the first costing or one of several (2026-10-19).
+    const onRevisions = costing._count.quotationRevisions + costing._count.revisionLinks;
+    if (onRevisions > 0) {
+      throw badRequest(`${onRevisions} quotation revision(s) are built on this costing`);
+    }
+    const onJobs = costing._count.jobs + costing._count.jobLinks;
+    if (onJobs > 0) {
+      throw badRequest(`${onJobs} project(s) are built on this costing`);
     }
 
     await prisma.costing.delete({ where: { id: req.params.id } });
@@ -1784,7 +1817,7 @@ onApprovalReopened('costing', {
   reopen: async ({ documentId, tx }) => {
     const costing = await tx.costing.findUnique({ where: { id: documentId }, select: { number: true } });
     if (!costing) throw notFound('Costing not found');
-    const jobs = await tx.job.findMany({ where: { costingId: documentId, status: { not: 'CANCELLED' } }, select: { number: true } });
+    const jobs = await tx.job.findMany({ where: { ...jobsOnCostingWhere(documentId), status: { not: 'CANCELLED' } }, select: { number: true } });
     if (jobs.length) {
       throw badRequest(`${costing.number} cannot be pulled back — project ${jobs.map((j) => j.number).join(', ')} is built on it`);
     }
@@ -1832,7 +1865,7 @@ costingRoutes.post(
     if (!source) throw notFound('Costing not found');
     // Copying is reading: someone who may only see their own costings may only
     // copy their own.
-    if (onlyOwn(me) && source.ownerId !== me.id) {
+    if (onlyOwn(me) && !visibleOwners(me, 'gops', 'costing').includes(source.ownerId)) {
       throw forbidden('This costing belongs to someone else');
     }
 

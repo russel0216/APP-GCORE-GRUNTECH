@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { refreshUserTitle } from './roleRev1';
 import bcrypt from 'bcryptjs';
 import type { AccountTokenPurpose, Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -113,7 +114,6 @@ export interface NewLogin {
   name: string;
   roleIds?: string[];
   supervisorId?: string | null;
-  departmentId?: string | null;
   position?: string | null;
   phone?: string | null;
   employeeNo?: string | null;
@@ -133,7 +133,6 @@ export const LOGIN_SELECT = {
   isSuperAdmin: true,
   invitePending: true,
   supervisorId: true,
-  departmentId: true,
   lastLoginAt: true,
   createdAt: true,
 } as const;
@@ -158,13 +157,16 @@ export async function createLogin(tx: Prisma.TransactionClient, input: NewLogin,
       position: input.position || null,
       phone: input.phone || null,
       supervisorId: input.supervisorId || null,
-      departmentId: input.departmentId || null,
       isActive: input.isActive ?? true,
       roles: { create: (input.roleIds ?? []).map((roleId) => ({ roleId })) },
     },
     select: LOGIN_SELECT,
   });
   const invite = invited ? await issueToken(tx, user.id, 'INVITE', { createdById: actorId }) : null;
+  // Its title is the highest of its roles (ROLE_REV1).
+  if (input.roleIds?.length && (await refreshUserTitle(tx, user.id))) {
+    return { user: await tx.user.findUniqueOrThrow({ where: { id: user.id }, select: LOGIN_SELECT }), invite };
+  }
   return { user, invite };
 }
 
@@ -280,4 +282,81 @@ export async function deliverLink(
   } catch (err) {
     return { ...base, emailed: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+// ── The employee owns identity (2026-10-16) ──────────────────────────────────
+
+/** A person's name as their login shows it: first, last, suffix. */
+export const personName = (e: { firstName: string; lastName: string; suffix?: string | null }) =>
+  [e.firstName, e.lastName, e.suffix].filter(Boolean).join(' ');
+
+/**
+ * The login fields that MIRROR the employee record (2026-10-16, the owner's
+ * call: "employee creation and user login should be one only"). The employee
+ * is where they are kept; Admin › Users shows them and never writes them for
+ * a linked login (`PATCH /users/:id` refuses).
+ */
+export const MIRRORED_LOGIN_FIELDS = ['name', 'employeeNo', 'phone', 'position'] as const;
+
+/**
+ * Copies the employee's identity onto their login, in the caller's
+ * transaction — the ONE writer of the mirrored fields once a login is linked:
+ * the name (first, last, suffix), the employee number, the mobile as the
+ * login's phone and the position (the department went on 2026-10-19). Deactivating the employee
+ * deactivates the login; re-activating never re-opens a login by itself (an
+ * administrator decides that on Admin › Users).
+ *
+ * An employee number another login already carries is a 409 naming it — the
+ * mirror used to drop it silently, leaving `{EMP}` and the face clock's link
+ * hint to read nothing. Returns the fields that changed (empty when none, or
+ * when the employee has no login).
+ */
+export async function syncLoginFromEmployee(tx: Prisma.TransactionClient, employeeId: string): Promise<string[]> {
+  const e = await tx.employee.findUnique({
+    where: { id: employeeId },
+    select: {
+      userId: true,
+      firstName: true,
+      lastName: true,
+      suffix: true,
+      employeeNo: true,
+      mobile: true,
+      position: true,
+      isActive: true,
+    },
+  });
+  if (!e?.userId) return [];
+  const u = await tx.user.findUnique({
+    where: { id: e.userId },
+    select: { name: true, employeeNo: true, phone: true, position: true, isActive: true },
+  });
+  if (!u) return [];
+  const want = {
+    name: personName(e),
+    employeeNo: e.employeeNo || null,
+    phone: e.mobile || null,
+    position: e.position || null,
+  };
+  const data: Prisma.UserUncheckedUpdateInput = {};
+  const changed: string[] = [];
+  for (const key of MIRRORED_LOGIN_FIELDS) {
+    if ((u[key] ?? null) !== (want[key] ?? null)) {
+      (data as Record<string, unknown>)[key] = want[key];
+      changed.push(key);
+    }
+  }
+  if (!e.isActive && u.isActive) {
+    data.isActive = false;
+    changed.push('isActive');
+  }
+  if (!changed.length) return [];
+  if (data.employeeNo) {
+    const holder = await tx.user.findFirst({
+      where: { employeeNo: want.employeeNo, id: { not: e.userId } },
+      select: { email: true },
+    });
+    if (holder) throw conflict(`Employee number "${want.employeeNo}" is on another login (${holder.email}) — change it there first`);
+  }
+  await tx.user.update({ where: { id: e.userId }, data });
+  return changed;
 }

@@ -21,6 +21,7 @@ import {
   DOCUMENT_TYPES,
   previewNext,
   employeeNoFor,
+  authorNumber,
   periodKeyFor,
   type Period,
 } from '../shared/numbering';
@@ -29,6 +30,9 @@ import { currentUser } from '../auth/middleware';
 import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { LIST_CAP, listReference, rangeNamed, sendListPdf, filterDay } from '../shared/listPaper';
+import { EXCHANGE_RATES_KEY, exchangeRates, type RateTable } from '../shared/exchangeRates';
+import { QUOTATION_CURRENCIES } from '../shared/quotation';
+import { requireView, requireEdit, ownOnly, assertCanEdit } from '../shared/ownScope';
 
 // ════════════════════════════════════════════════════════════════════
 //  COMPANY SETTINGS  — drives every PDF header
@@ -37,13 +41,22 @@ import { LIST_CAP, listReference, rangeNamed, sendListPdf, filterDay } from '../
 export const companyRoutes = Router();
 companyRoutes.use(authenticate);
 
+// Company Settings keeps no record of anybody's (2026-10-18): either key of
+// each pair opens and saves the page — no narrowing.
 companyRoutes.get(
   '/',
-  require_('admin.company.view_all'),
+  requireView('admin', 'company'),
   handler(async (_req, res) => {
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
     if (!company) throw notFound('Company settings have not been seeded');
-    res.json({ ...company, vatRate: Number(company.vatRate), ewtRate: Number(company.ewtRate) });
+    res.json({
+      ...company,
+      vatRate: Number(company.vatRate),
+      ewtRate: Number(company.ewtRate),
+      // Pesos per unit of each other quotation currency (2026-10-17).
+      exchangeRates: await exchangeRates(),
+      currencies: QUOTATION_CURRENCIES.filter((c) => c.code !== 'PHP'),
+    });
   }),
 );
 
@@ -74,14 +87,31 @@ const companySchema = z.object({
     .max(6)
     .regex(/^[A-Z0-9]+$/, 'Use capital letters and numbers only')
     .optional(),
+  /**
+   * Pesos per unit of each other currency a quotation may be in (2026-10-17):
+   * the rate a NEW quotation in it starts from. A quotation keeps its own
+   * after, so changing one here restates nothing on file. Blank removes it.
+   */
+  exchangeRates: z
+    .record(z.string(), z.number().positive('An exchange rate must be above zero').max(1_000_000).nullable())
+    .optional(),
 });
 
 companyRoutes.put(
   '/',
-  require_('admin.company.edit_all'),
+  requireEdit('admin', 'company'),
   handler(async (req, res) => {
-    const body = parseBody(companySchema, req.body);
+    const { exchangeRates: rates, ...body } = parseBody(companySchema, req.body);
     const before = await prisma.company.findUnique({ where: { id: 'company' } });
+    const ratesBefore = await exchangeRates();
+    let ratesAfter: RateTable = ratesBefore;
+    if (rates) {
+      const known = new Set(QUOTATION_CURRENCIES.map((c) => c.code).filter((c) => c !== 'PHP'));
+      const unknown = Object.keys(rates).filter((c) => !known.has(c));
+      if (unknown.length) throw badRequest(`Not a quotation currency: ${unknown.join(', ')}`);
+      ratesAfter = {};
+      for (const [code, rate] of Object.entries(rates)) if (rate) ratesAfter[code] = rate;
+    }
 
     // A blank box means "not set", never an empty string: the PDF engine
     // prints a line only when its value is there, and "" would print a label
@@ -100,26 +130,41 @@ companyRoutes.put(
       ewtRate: body.ewtRate !== undefined ? new Prisma.Decimal(body.ewtRate) : undefined,
     };
 
-    const company = await prisma.company.update({ where: { id: 'company' }, data });
+    const company = await prisma.$transaction(async (tx) => {
+      if (rates) {
+        await tx.setting.upsert({
+          where: { key: EXCHANGE_RATES_KEY },
+          create: { key: EXCHANGE_RATES_KEY, value: ratesAfter },
+          update: { value: ratesAfter },
+        });
+      }
+      return tx.company.update({ where: { id: 'company' }, data });
+    });
     await audit(
       {
         entityType: 'company',
         entityId: 'company',
         action: 'UPDATED',
         summary: 'Updated company settings',
-        before,
-        after: company,
+        before: { ...before, exchangeRates: ratesBefore },
+        after: { ...company, exchangeRates: ratesAfter },
       },
       req,
     );
-    res.json({ ...company, vatRate: Number(company.vatRate), ewtRate: Number(company.ewtRate) });
+    res.json({
+      ...company,
+      vatRate: Number(company.vatRate),
+      ewtRate: Number(company.ewtRate),
+      exchangeRates: ratesAfter,
+      currencies: QUOTATION_CURRENCIES.filter((c) => c.code !== 'PHP'),
+    });
   }),
 );
 
 /** The logo used by every PDF header. */
 companyRoutes.post(
   '/logo',
-  require_('admin.company.edit_all'),
+  requireEdit('admin', 'company'),
   upload.single('file'),
   handler(async (req, res) => {
     if (!req.file) throw badRequest('Choose an image file');
@@ -175,9 +220,10 @@ export function issuedThisPeriod(rows: CounterRow[], documentType: string, curre
     .reduce((sum, r) => sum + r.lastNumber, 0);
 }
 
+// Numbering, like Company Settings, opens and saves on either key (2026-10-18).
 numberingRoutes.get(
   '/',
-  require_('admin.numbering.view_all'),
+  requireView('admin', 'numbering'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
@@ -231,7 +277,7 @@ numberingRoutes.get(
 
     res.json({
       prefix,
-      previewFor: { employeeNo, linked: employeeNo !== null },
+      previewFor: { employeeNo, linked: employeeNo !== null, missingNumber: (await authorNumber(me.id)).person },
       rows,
     });
   }),
@@ -284,7 +330,7 @@ const numberingSchema = z
 
 numberingRoutes.put(
   '/:documentType',
-  require_('admin.numbering.edit_all'),
+  requireEdit('admin', 'numbering'),
   handler(async (req, res) => {
     const body = parseBody(numberingSchema, req.body);
     const existing = await prisma.numberSequence.findMany({
@@ -323,9 +369,12 @@ workflowRoutes.use(authenticate);
 
 workflowRoutes.get(
   '/',
-  require_('admin.workflows.view_all'),
-  handler(async (_req, res) => {
+  requireView('admin', 'workflows'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    // View Own: the approval routes they made (`createdById`, 2026-10-18).
     const workflows = await prisma.approvalWorkflow.findMany({
+      where: ownOnly(me, 'admin', 'workflows', {} as Prisma.ApprovalWorkflowWhereInput, (ids) => ({ createdById: { in: ids } })),
       include: {
         steps: {
           orderBy: { sequence: 'asc' },
@@ -379,7 +428,7 @@ workflowRoutes.get(
 
 workflowRoutes.get(
   '/document-types',
-  require_('admin.workflows.view_all'),
+  requireView('admin', 'workflows'),
   handler(async (_req, res) => {
     res.json(DOCUMENT_TYPES);
   }),
@@ -473,6 +522,8 @@ workflowRoutes.post(
         requesterRoleId: body.requesterRoleId || null,
         preparerSigns: body.preparerSigns ?? false,
         standIns: body.standIns ?? false,
+        // Who made it — Edit Own on Admin › Approval Workflows reads it (2026-10-18).
+        createdById: currentUser(req).id,
         steps: {
           create: body.steps.map((s) => ({
             sequence: s.sequence,
@@ -503,14 +554,17 @@ workflowRoutes.post(
 
 workflowRoutes.put(
   '/:id',
-  require_('admin.workflows.edit_all'),
+  requireEdit('admin', 'workflows'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(workflowSchema, req.body);
     validateSteps(body.steps);
     await checkPreparer(body);
 
     const existing = await prisma.approvalWorkflow.findUnique({ where: { id: req.params.id }, include: { steps: { select: { sequence: true, alsoRoleIds: true } } } });
     if (!existing) throw notFound('Workflow not found');
+    // Edit Own: the routes they made (2026-10-18); Edit All any, as before.
+    assertCanEdit(me, 'admin', 'workflows', existing.createdById === me.id, existing.createdById);
     await checkAlsoRoles(body.steps);
     const alsoBefore = new Map(existing.steps.map((st) => [st.sequence, st.alsoRoleIds]));
 
@@ -750,7 +804,7 @@ settingRoutes.use(authenticate);
 
 settingRoutes.get(
   '/',
-  require_('admin.settings.view_all'),
+  requireView('admin', 'settings'),
   handler(async (_req, res) => {
     res.json(await prisma.setting.findMany({ orderBy: { key: 'asc' } }));
   }),

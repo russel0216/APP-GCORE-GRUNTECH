@@ -26,12 +26,13 @@
 
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { dayKey } from '../src/shared/hr';
 import { runImport } from '../src/shared/csv';
 import { employeesImport } from '../src/routes/imports/employees';
-import { plantillaSummary } from '../src/shared/plantilla';
+import { filledByPosition, plantillaSummary } from '../src/shared/plantilla';
 import { hrSignsOwnWork, sweepSeparations, turnover, tenureMonths } from '../src/shared/clearance';
 import { pendingFor, pickWorkflow } from '../src/shared/approvals';
 import { statusLabel } from '../src/shared/pdf';
@@ -150,8 +151,9 @@ async function makeRole(key: string, permissionKeys: string[]) {
 
 /** A user in the named roles — seeded ones (hr, finance, warehouse) or this script's own. */
 async function makeUser(name: string, local: string, roleKeys: string[], supervisorId?: string) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
-  if (roles.length !== roleKeys.length) throw new Error(`Missing role(s) among ${roleKeys.join(', ')} — run the seed first`);
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzpl_', roleKeys);
+  if (roles.length < roleKeys.length) throw new Error(`Missing role(s) among ${roleKeys.join(', ')} — run the seed first`);
   return prisma.user.create({
     data: {
       name,
@@ -294,7 +296,7 @@ async function main() {
   check('its code comes from the POS sequence', /POS-\d{4}-\d{4}$/.test(pos.code ?? ''), pos.code);
 
   const dupe = await http(T.hr, 'POST', '/positions', { title: `${TAG} site engineer`, departmentId: dept.id });
-  check('the same title twice in one department is refused', dupe.status === 409, `${dupe.status}`);
+  check('the same title twice is refused (one position per title, the department gone)', dupe.status === 409, `${dupe.status}`);
 
   const mk = (n: string, first: string, active = true, extra: Record<string, unknown> = {}) =>
     prisma.employee.create({
@@ -409,12 +411,35 @@ async function main() {
   const ontoDead = await http(T.hr, 'PATCH', `/employees/${viaCreate.body.id}`, { positionId: dead.id });
   check('an inactive position cannot be given to anyone', ontoDead.status === 400, `${ontoDead.status}`);
 
+  // A second post held beside the main one (2026-10-19: one person, two managers' posts).
+  const alsoPos = await prisma.position.create({
+    data: { code: `${TAG}-POS-HR`, title: `${TAG} HR Manager`, authorisedHeadcount: 1 },
+  });
+  const filledBefore = (await filledByPosition([alsoPos.id])).get(alsoPos.id) ?? 0;
+  const both = await http(T.hr, 'PATCH', `/employees/${free.body.id}`, { extraPositionIds: [alsoPos.id, pos.id] });
+  check(
+    'a position also held joins the title, main first',
+    both.status === 200 && both.body.position === `${renamed} / ${TAG} HR Manager`,
+    `${both.status} ${both.body.position}`,
+  );
+  check('…and counts its holder as filled', ((await filledByPosition([alsoPos.id])).get(alsoPos.id) ?? 0) === filledBefore + 1);
+  const viaExtra = await http(T.hr, 'GET', `/employees?positionId=${alsoPos.id}&search=${TAG}Free`);
+  check('…and the list filtered to it finds them', (viaExtra.body.rows as { id: string }[]).some((e) => e.id === free.body.id));
+  await http(T.hr, 'PATCH', `/positions/${alsoPos.id}`, { title: `${TAG} HR Head` });
+  const afterRename = await prisma.employee.findUnique({ where: { id: free.body.id }, select: { position: true } });
+  check('renaming the extra post rewrites the joined title', afterRename?.position === `${renamed} / ${TAG} HR Head`, `${afterRename?.position}`);
+  const offAgain = await http(T.hr, 'PATCH', `/employees/${free.body.id}`, { extraPositionIds: [] });
+  check('clearing them leaves the main title alone', offAgain.status === 200 && offAgain.body.position === renamed, `${offAgain.body.position}`);
+  const noMain = await http(T.hr, 'PATCH', `/employees/${viaCreate.body.id}`, { positionId: null, extraPositionIds: [alsoPos.id] });
+  check('a post also held needs a main one', noMain.status === 400, `${noMain.status}`);
+
   // ══ 5. Import: a dry run writes nothing ══════════════════════════════════
   console.log('\nImport — resolve in build, create in write');
   const posCount = await prisma.position.count();
   const seqBefore = await prisma.numberSequence.aggregate({ where: { documentType: 'position' }, _sum: { lastNumber: true } });
   const newTitle = `${TAG} Rigger`;
   const csv = [
+    // A Department column from an old sheet is ignored (2026-10-19).
     'Employee No,Last Name,First Name,Position,Department',
     `${TAG}-I1,${TAG}Imp,One,${newTitle},${dept.name}`,
     `${TAG}-I2,${TAG}Imp,Two,${renamed.toUpperCase()},${dept.name}`,
@@ -1016,18 +1041,33 @@ async function main() {
   check('the clearance strip counts open clearances as the table does', clrSummary.body.open === openDirect, `${clrSummary.body.open} vs ${openDirect}`);
 
   const drift = await prisma.employee.findMany({
-    where: { positionId: { not: null } },
-    select: { employeeNo: true, position: true, positionRef: { select: { title: true } } },
+    // A person with roles is titled by them (ROLE_REV1), not by a position.
+    where: { positionId: { not: null }, OR: [{ userId: null }, { user: { roles: { none: { role: { rank: { not: null } } } } } }] },
+    select: {
+      employeeNo: true,
+      position: true,
+      positionRef: { select: { title: true } },
+      extraPositions: { orderBy: { sortOrder: 'asc' }, select: { position: { select: { title: true } } } },
+    },
   });
-  const bad = drift.filter((e) => e.position !== e.positionRef?.title);
+  const bad = drift.filter(
+    (e) => e.position !== [e.positionRef?.title, ...e.extraPositions.map((x) => x.position.title)].join(' / '),
+  );
   check(
     'every linked employee’s title equals its position’s title (the mirror holds everywhere)',
     bad.length === 0,
     bad.slice(0, 5).map((e) => `${e.employeeNo}: ${e.position} ≠ ${e.positionRef?.title}`).join('; '),
   );
 
-  const active = await prisma.position.findMany({ where: { isActive: true }, select: { id: true } });
-  const filledDirect = await prisma.employee.count({ where: { isActive: true, positionId: { in: active.map((p) => p.id) } } });
+  const active = await prisma.position.findMany({ where: { isActive: true }, select: { id: true, roleId: true } });
+  // A slot that counts a role is filled by the role's active holders; any other by its employees.
+  const legacy = active.filter((p) => !p.roleId).map((p) => p.id);
+  let filledDirect =
+    (await prisma.employee.count({ where: { isActive: true, positionId: { in: legacy } } })) +
+    (await prisma.employeeExtraPosition.count({ where: { employee: { isActive: true }, positionId: { in: legacy } } }));
+  for (const p of active.filter((x) => x.roleId)) {
+    filledDirect += await prisma.userRole.count({ where: { roleId: p.roleId!, user: { isActive: true, employee: { isActive: true } } } });
+  }
   const summaryNow = await http(T.hr, 'GET', '/positions/summary');
   check(
     'the plantilla summary’s filled equals a direct count of active holders',
@@ -1079,6 +1119,11 @@ async function main() {
 
   // A position is named by its POS code, or its title where it has none.
   const positionMark = (r: Record<string, unknown>) => String(r.code ?? r.title);
+  // One position counting a ranked role, so "no level" keeps some and drops
+  // one (departments retired 2026-10-19); put back after the paper is read.
+  const levelled = await prisma.position.findFirst({ where: { title: { contains: TAG }, roleId: null }, select: { id: true } });
+  const ranked = await prisma.role.findFirst({ where: { rank: { not: null } }, select: { id: true } });
+  if (levelled && ranked) await prisma.position.update({ where: { id: levelled.id }, data: { roleId: ranked.id } });
   await checkListPaper(check, {
     label: 'Plantilla',
     token: T.hr,
@@ -1088,9 +1133,10 @@ async function main() {
     named: searchNamed,
     noun: ['position', 'positions'],
     mark: positionMark,
-    filter: { query: `${searched}&departmentId=${dept.id}`, named: `department ${dept.name}` },
+    filter: { query: `${searched}&level=none`, named: 'no level' },
     entityType: 'position',
   });
+  if (levelled) await prisma.position.update({ where: { id: levelled.id }, data: { roleId: null } });
   // The headcount under the table adds up the rows the screen lists.
   const posScreen = (await readScreen(T.hr, `/positions?${searched}&pageSize=200`)).rows as { authorisedHeadcount: number; filled: number }[];
   const posPaper = await printed(T.hr, `/positions/pdf?${searched}`);

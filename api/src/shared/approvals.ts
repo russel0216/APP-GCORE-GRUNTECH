@@ -1,8 +1,11 @@
 import { Prisma, type ApprovalRequest, type ApprovalStep } from '@prisma/client';
 import { prisma } from '../prisma';
-import { badRequest, forbidden, notFound } from '../http/kit';
+import { teamOfRequester, teamPostHolders } from './teamPosts';
+import { badRequest, conflict, forbidden, notFound } from '../http/kit';
 import { notify } from './notifications';
 import { audit } from './audit';
+import { mailConfig, sendMail } from './mail';
+import { env } from '../env';
 import type { Signatory } from './pdf';
 import type { ResolvedUser } from '../permissions/resolve';
 
@@ -151,16 +154,42 @@ export interface ApprovalContext {
   jobId?: string | null;
   /** The manager the document names itself (a job order's), read before the job's. */
   projectManagerId?: string | null;
+  /**
+   * An importation (2026-10-17, the owner's chart): a purchase order or an
+   * incoming report with no VAT. A step naming a role in `IMPORTATION_ROLES`
+   * goes to that role's importation twin instead.
+   */
+  importation?: boolean;
 }
 
 /** The context a stored request carries. */
-export const ctxOf = (r: { jobId: string | null; projectManagerId?: string | null }): ApprovalContext => ({
+export const ctxOf = (r: { jobId: string | null; projectManagerId?: string | null; importation?: boolean }): ApprovalContext => ({
   jobId: r.jobId,
   projectManagerId: r.projectManagerId ?? null,
+  importation: r.importation ?? false,
 });
 
+/**
+ * Roles with an IMPORTATION twin (2026-10-17, the owner's chart: Dina is the
+ * Purchasing Manager (Local), Carter the Purchasing Manager (Importation)).
+ * On an importation (`ApprovalContext.importation`) a step naming the key
+ * goes to the twin's holders — never to both, so the paper and the panel
+ * name one person; with nobody holding the twin, the local manager decides.
+ */
+export const IMPORTATION_ROLES: Record<string, string> = { purchasing_manager: 'purchasing_manager_import' };
+
+/** The role id a ROLE step resolves to under this context — the importation twin's where one is held. */
+async function stepRoleId(step: ApprovalStep, ctx: ApprovalContext, tx: Prisma.TransactionClient): Promise<string | null> {
+  if (!step.roleId || !ctx.importation) return step.roleId;
+  const role = await tx.role.findUnique({ where: { id: step.roleId }, select: { key: true } });
+  const twinKey = role && IMPORTATION_ROLES[role.key];
+  if (!twinKey) return step.roleId;
+  const twin = await tx.role.findUnique({ where: { key: twinKey }, select: { id: true, users: { where: { user: { isActive: true } }, select: { userId: true }, take: 1 } } });
+  return twin && twin.users.length ? twin.id : step.roleId;
+}
+
 /** The role a PROJECT_MANAGER step falls back to when it names none. */
-export const PROJECT_MANAGER_FALLBACK_ROLE = 'executive';
+export const PROJECT_MANAGER_FALLBACK_ROLE = 'ceo';
 
 /**
  * The set of user ids allowed to act on one step.
@@ -174,7 +203,7 @@ export const PROJECT_MANAGER_FALLBACK_ROLE = 'executive';
  * for every step that names none (leave, overtime, claims…).
  *
  * PROJECT_MANAGER is the manager of the project the document names (a budget
- * request's), and falls back to the step's role — Executive unless the step
+ * request's), and falls back to the step's role — the CEO / President unless the step
  * names another — when the project has no manager, the document names no
  * project, or the manager IS the requester (2026-10-07, the owner's call: a
  * PM's own request goes up to management, never to nobody). The project's
@@ -207,7 +236,10 @@ export async function approversForStep(
         // The Technical Manager fallback (2026-10-15: the project's manager IS
         // its Technical Manager) is the one on the requester's own team, as a
         // ROLE step naming that role is — never a Technical Manager of another team.
-        if (rows.length && OWN_TEAM_ROLES.includes(rows[0].role.key)) return leadersFor(holders, requesterId, tx);
+        if (rows.length && OWN_TEAM_ROLES.includes(rows[0].role.key)) {
+          const post = await teamPostHolders(rows[0].role.key, await teamOfRequester(requesterId, tx), requesterId, tx);
+          return post ?? leadersFor(holders, requesterId, tx);
+        }
         return holders;
       }
       return usersInRole(PROJECT_MANAGER_FALLBACK_ROLE, tx);
@@ -217,15 +249,30 @@ export async function approversForStep(
       return step.userId ? [step.userId] : [];
 
     case 'ROLE': {
-      if (!step.roleId) return [];
+      const roleId = await stepRoleId(step, ctx, tx);
+      if (!roleId) return [];
       const rows = await tx.userRole.findMany({
-        where: { roleId: step.roleId, user: { isActive: true } },
+        where: { roleId, user: { isActive: true } },
         select: { userId: true, role: { select: { key: true } } },
       });
-      const holders = rows.map((r) => r.userId);
+      let holders = rows.map((r) => r.userId);
+      // A ROLE step's other roles decide it too (2026-10-19, "Checking" by the
+      // Account Payable Officer or the Credit and Collection Officer).
+      if (step.alsoRoleIds?.length) {
+        const also = await tx.userRole.findMany({
+          where: { roleId: { in: step.alsoRoleIds }, user: { isActive: true } },
+          select: { userId: true },
+        });
+        holders = [...new Set([...holders, ...also.map((a) => a.userId)])];
+        return holders;
+      }
       if (!rows.length) return holders;
-      if (TEAM_SCOPED_ROLES.includes(rows[0].role.key)) return supportersFor(holders, requesterId, tx);
-      if (OWN_TEAM_ROLES.includes(rows[0].role.key)) return leadersFor(holders, requesterId, tx);
+      const key = rows[0].role.key;
+      // A team's post set on Admin › Categories › Teams (shared or named) first.
+      const post = await teamPostHolders(key, await teamOfRequester(requesterId, tx), requesterId, tx);
+      if (post) return post;
+      if (TEAM_SCOPED_ROLES.includes(key)) return supportersFor(holders, requesterId, tx);
+      if (OWN_TEAM_ROLES.includes(key)) return leadersFor(holders, requesterId, tx);
       return holders;
     }
 
@@ -235,8 +282,31 @@ export async function approversForStep(
         select: { supervisorId: true },
       });
       let base: string[];
-      if (requester?.supervisorId) base = [requester.supervisorId];
-      else if (step.roleId) {
+      // A step naming a TEAM_FIRST role (Team Leader) goes to the holders on
+      // the requester's own team before their "Reports to" (2026-10-17, the
+      // owner's call: "always the Team Leader" — a welder reports to a Project
+      // Lead, an engineer to the Technical Manager, and their documents still
+      // go to the team's leader). Department staff with no team, and a team
+      // with no leader, keep the "Reports to".
+      const onTeam = step.roleId ? await teamFirstHolders(step.roleId, requesterId, tx) : [];
+      if (onTeam.length) base = onTeam;
+      else if (requester?.supervisorId) {
+        // A role that ALSO reports to other roles (Admin › Roles › Hierarchy,
+        // 2026-10-20 — the Warehouse Supervisor to both Purchasing Managers)
+        // sends the step to those roles' holders beside the "Reports to".
+        const mine = await tx.userRole.findMany({
+          where: { userId: requesterId },
+          select: { role: { select: { alsoReportsToRoleIds: true } } },
+        });
+        const extraRoles = [...new Set(mine.flatMap((r) => r.role.alsoReportsToRoleIds))];
+        const extra = extraRoles.length
+          ? await tx.userRole.findMany({
+              where: { roleId: { in: extraRoles }, user: { isActive: true }, userId: { not: requesterId } },
+              select: { userId: true },
+            })
+          : [];
+        base = [...new Set([requester.supervisorId, ...extra.map((r) => r.userId)])];
+      } else if (step.roleId) {
         const rows = await tx.userRole.findMany({
           where: { roleId: step.roleId, user: { isActive: true } },
           select: { userId: true },
@@ -275,7 +345,24 @@ export const TEAM_SCOPED_ROLES = ['back_support'];
  * Ricardo alone handles HIT). A preparer with no team, or a team with no
  * Technical Manager, goes to every holder — never to nobody.
  */
-export const OWN_TEAM_ROLES = ['technical_manager'];
+export const OWN_TEAM_ROLES = ['technical_manager', 'service_manager'];
+
+/**
+ * Roles a SUPERVISOR step names whose holders on the requester's TEAM decide
+ * it before the requester's "Reports to" (2026-10-17, the owner's call:
+ * "always the Team Leader"). Only Team Leader: a leave or overtime step names
+ * no role and stays the direct superior's.
+ */
+export const TEAM_FIRST_ROLES = ['team_leader'];
+
+/** The TEAM_FIRST holders of `roleId` on the requester's own team, never the requester; empty for any other role. */
+async function teamFirstHolders(roleId: string, requesterId: string, tx: Prisma.TransactionClient): Promise<string[]> {
+  const role = await tx.role.findUnique({ where: { id: roleId }, select: { key: true } });
+  if (!role || !TEAM_FIRST_ROLES.includes(role.key)) return [];
+  const post = await teamPostHolders(role.key, await teamOfRequester(requesterId, tx), requesterId, tx);
+  if (post) return post;
+  return teamHoldersOf([roleId], requesterId, tx);
+}
 
 /**
  * The holders of a team-scoped role (Back Support) who decide for this
@@ -383,8 +470,10 @@ export async function holdsStep(
   }
   if (step.approverType === 'ROLE' || step.approverType === 'SUPERVISOR') {
     // A SUPERVISOR step's other roles count too: a Technical Manager's own
-    // borrow request is signed at submit as a Team Leader's is.
-    const roleIds = [step.roleId, ...(step.approverType === 'SUPERVISOR' ? (step.alsoRoleIds ?? []) : [])].filter((r): r is string => !!r);
+    // borrow request is signed at submit as a Team Leader's is. A ROLE step
+    // on an importation is its importation twin's.
+    const own = step.approverType === 'ROLE' ? await stepRoleId(step, ctx, tx) : step.roleId;
+    const roleIds = [own, ...(step.alsoRoleIds ?? [])].filter((r): r is string => !!r);
     if (!roleIds.length) return false;
     return !!(await tx.userRole.findFirst({
       where: { userId: requesterId, roleId: { in: roleIds }, user: { isActive: true } },
@@ -599,6 +688,8 @@ export interface SubmitInput {
   jobId?: string | null;
   /** The manager the document names itself (a job order's), for a PROJECT_MANAGER step before any project exists. */
   projectManagerId?: string | null;
+  /** An importation (no VAT): a Purchasing Manager step goes to the Importation manager. */
+  importation?: boolean;
 }
 
 export async function submitForApproval(input: SubmitInput): Promise<ApprovalRequest> {
@@ -630,6 +721,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
         requesterId: input.requesterId,
         jobId: input.jobId ?? null,
         projectManagerId: input.projectManagerId ?? null,
+        importation: input.importation ?? false,
         workflowId: workflow.id,
         currentSequence: 1,
         status: 'APPROVED',
@@ -656,7 +748,8 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
   // (`preparerSigns`): signed at submit, dated the request's own instant, so
   // "Prepared by" and those steps print one timestamp. The document waits
   // only on the steps other people hold.
-  const held = await heldSequences(workflow, input.requesterId, prisma, { jobId: input.jobId ?? null, projectManagerId: input.projectManagerId ?? null });
+  const submitCtx: ApprovalContext = { jobId: input.jobId ?? null, projectManagerId: input.projectManagerId ?? null, importation: input.importation ?? false };
+  const held = await heldSequences(workflow, input.requesterId, prisma, submitCtx);
   const open = workflow.steps.filter((st) => !held.has(st.sequence));
 
   // A step whose only eligible approver is the requester can never be acted on:
@@ -668,10 +761,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
   // (A step the preparer signs themselves is not waiting on anybody.)
   const firstStep = open[0];
   if (firstStep) {
-    const firstApprovers = await approversForStep(firstStep, input.requesterId, prisma, {
-      jobId: input.jobId,
-      projectManagerId: input.projectManagerId,
-    });
+    const firstApprovers = await approversForStep(firstStep, input.requesterId, prisma, submitCtx);
     if (firstApprovers.length && firstApprovers.every((id) => id === input.requesterId)) {
       throw badRequest(
         `"${workflow.name}" routes step ${firstStep.sequence} ("${firstStep.name}") only to you, and nobody may approve a document they raised. ` +
@@ -698,6 +788,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
         requesterId: input.requesterId,
         jobId: input.jobId ?? null,
         projectManagerId: input.projectManagerId ?? null,
+        importation: input.importation ?? false,
         workflowId: workflow.id,
         currentSequence: (firstStep ?? workflow.steps[workflow.steps.length - 1]).sequence,
         status: firstStep ? 'PENDING' : 'APPROVED',
@@ -1116,22 +1207,125 @@ export async function reopenApproved(documentType: string, documentId: string, a
  */
 export async function pendingFor(
   userId: string,
-): Promise<(ApprovalRequest & { requester: { name: string } })[]> {
+): Promise<(ApprovalRequest & { requester: { name: string }; followedUpBy?: string })[]> {
   const pending = await prisma.approvalRequest.findMany({
     where: { status: 'PENDING' },
     include: { workflow: { include: { steps: true } }, requester: { select: { name: true } } },
     orderBy: { createdAt: 'asc' },
   });
 
-  const mine: (ApprovalRequest & { requester: { name: string } })[] = [];
+  const mine: (ApprovalRequest & { requester: { name: string }; followedUpBy?: string })[] = [];
+  // A stand-in is never queued — until the requester follows up to them
+  // (2026-10-17): then the request sits in their queue too, saying so.
+  const followed = await prisma.approvalFollowUp.findMany({
+    where: { toIds: { has: userId }, request: { status: 'PENDING' } },
+    select: { requestId: true, sequence: true, by: { select: { name: true } } },
+    orderBy: { createdAt: 'desc' },
+  });
   for (const request of pending) {
     if (request.requesterId === userId) continue; // never your own
     const step = request.workflow?.steps.find((s) => s.sequence === request.currentSequence);
     if (!step) continue;
     const eligible = await approversForStep(step, request.requesterId, prisma, ctxOf(request));
-    if (eligible.includes(userId)) mine.push(request);
+    if (eligible.includes(userId)) {
+      mine.push(request);
+      continue;
+    }
+    const asked = followed.find((f) => f.requestId === request.id && f.sequence === request.currentSequence);
+    if (asked) mine.push({ ...request, followedUpBy: asked.by.name });
   }
   return mine;
+}
+
+/**
+ * The requester's follow-up (2026-10-17, the owner's call: "the manager
+ * should not appear … if the purchasing officer is absent, the purchasing
+ * manager can approve, but don't show them initially; the requestor can
+ * raise a follow-up to the purchasing manager"). On a route with
+ * `standIns`, the managers ("Reports to") of the open step's approvers are
+ * told and from then on see the request in their queue; the approvers are
+ * told too. The request itself does not move — whoever acts first claims it.
+ * Only the requester (a super admin too), only while PENDING, once per step
+ * a day; a 400 names the approver when nobody stands above them.
+ */
+export const FOLLOW_UP_EVERY_MS = 24 * 60 * 60 * 1000;
+
+export async function followUp(requestId: string, userId: string, note?: string | null) {
+  const request = await prisma.approvalRequest.findUnique({
+    where: { id: requestId },
+    include: { workflow: { include: { steps: true } }, requester: { select: { name: true } } },
+  });
+  if (!request) throw notFound('Approval request not found');
+  if (request.status !== 'PENDING') throw badRequest('This request is no longer waiting on anybody');
+  if (request.requesterId !== userId) {
+    const actor = await prisma.user.findUnique({ where: { id: userId }, select: { isSuperAdmin: true } });
+    if (!actor?.isSuperAdmin) throw forbidden('Only the person who raised it may follow up');
+  }
+  if (!request.workflow?.standIns) throw badRequest('This route lets nobody stand in for its approvers — the approver has to decide it');
+  const step = request.workflow.steps.find((s) => s.sequence === request.currentSequence);
+  if (!step) throw badRequest('The request is at a step its route no longer has');
+  const eligible = (await approversForStep(step, request.requesterId, prisma, ctxOf(request))).filter((id) => id !== request.requesterId);
+  if (!eligible.length) throw badRequest(`Nobody can decide "${step.name}" — ask an administrator to check the route`);
+  const approvers = await prisma.user.findMany({ where: { id: { in: eligible } }, select: { id: true, name: true, supervisorId: true } });
+  const managerIds = [...new Set(approvers.map((a) => a.supervisorId).filter((id): id is string => !!id && id !== request.requesterId))];
+  const managers = managerIds.length
+    ? await prisma.user.findMany({ where: { id: { in: managerIds }, isActive: true }, select: { id: true, name: true } })
+    : [];
+  if (!managers.length) {
+    throw badRequest(`${approvers.map((a) => a.name).join(' and ')} report${approvers.length === 1 ? 's' : ''} to nobody in G-CORE — set "Reports to" on Admin › Users, or ask an administrator to decide it`);
+  }
+  const last = await prisma.approvalFollowUp.findFirst({
+    where: { requestId, sequence: step.sequence },
+    orderBy: { createdAt: 'desc' },
+    select: { createdAt: true },
+  });
+  if (last && Date.now() - last.createdAt.getTime() < FOLLOW_UP_EVERY_MS) {
+    const again = new Date(last.createdAt.getTime() + FOLLOW_UP_EVERY_MS);
+    throw conflict(`Already followed up on ${step.name} today — it may be sent again after ${again.toISOString()}`, { again: again.toISOString() });
+  }
+  const row = await prisma.approvalFollowUp.create({
+    data: { requestId, sequence: step.sequence, byId: userId, toIds: managers.map((m) => m.id), note: note?.trim() || null },
+  });
+  const by = userId === request.requesterId ? request.requester.name : ((await prisma.user.findUnique({ where: { id: userId }, select: { name: true } }))?.name ?? 'an administrator');
+  const names = approvers.map((a) => a.name).join(' or ');
+  await audit({
+    entityType: request.documentType,
+    entityId: request.documentId,
+    action: 'SUBMITTED',
+    summary: `Followed up on ${step.name} to ${managers.map((m) => m.name).join(' and ')} — ${names} has not acted${row.note ? `: ${row.note}` : ''}`,
+    actorId: userId,
+  });
+  const link = request.link ?? undefined;
+  await notify([
+    ...managers.map((m) => ({
+      userId: m.id,
+      type: 'approval.follow_up' as const,
+      title: `Follow-up: ${request.subject}`,
+      body: `${names} has not acted on ${step.name}${request.documentNumber ? ` of ${request.documentNumber}` : ''} — you may decide it in their place.${row.note ? ` ${by} says: ${row.note}` : ''}`,
+      link,
+    })),
+    ...approvers.map((a) => ({
+      userId: a.id,
+      type: 'approval.follow_up' as const,
+      title: `Followed up: ${request.subject}`,
+      body: `${by} followed up ${step.name} to ${managers.map((m) => m.name).join(' and ')}.`,
+      link,
+    })),
+  ]);
+  // An email where SMTP is set, never allowed to fail the follow-up.
+  const cfg = mailConfig();
+  if (cfg) {
+    const people = await prisma.user.findMany({ where: { id: { in: managers.map((m) => m.id) } }, select: { email: true, name: true } });
+    const url = `${env.appUrl.replace(/\/+$/, '')}${request.link ?? ''}`;
+    for (const p of people) {
+      try {
+        await sendMail({ to: p.email, toName: p.name, subject: `Follow-up: ${request.subject}`, text: `${names} has not acted on ${step.name}${request.documentNumber ? ` of ${request.documentNumber}` : ''} — you may decide it in their place.${row.note ? `\n\n${by} says: ${row.note}` : ''}\n\n${url}` }, cfg);
+      } catch (err) {
+        console.error(`Follow-up email to ${p.email} failed:`, err instanceof Error ? err.message : err);
+      }
+    }
+  }
+  return { ...row, to: managers, step: step.name };
 }
 
 /**
@@ -1150,11 +1344,21 @@ export async function historyFor(documentType: string, documentId: string) {
         include: { approver: { select: { id: true, name: true } }, onBehalfOf: { select: { id: true, name: true } } },
         orderBy: [{ actedAt: 'asc' }, { sequence: 'asc' }],
       },
+      followUps: { include: { by: { select: { id: true, name: true } } }, orderBy: { createdAt: 'asc' } },
     },
     orderBy: { createdAt: 'desc' },
   });
+  // The managers a follow-up went to, by name.
+  const toIds = [...new Set(rows.flatMap((r) => r.followUps.flatMap((f) => f.toIds)))];
+  const toNames = new Map(
+    toIds.length ? (await prisma.user.findMany({ where: { id: { in: toIds } }, select: { id: true, name: true } })).map((u) => [u.id, u.name]) : [],
+  );
+  const named = rows.map((r) => ({
+    ...r,
+    followUps: r.followUps.map((f) => ({ ...f, to: f.toIds.map((id) => ({ id, name: toNames.get(id) ?? 'a manager' })) })),
+  }));
   return Promise.all(
-    rows.map(async (r) => {
+    named.map(async (r) => {
       if (r.status !== 'PENDING' || !r.workflow) return r;
       const taken = new Set(r.actions.map((a) => a.sequence));
       const steps = await Promise.all(
@@ -1288,6 +1492,8 @@ export interface DraftRoute {
   optionId?: string | null;
   jobId?: string | null;
   projectManagerId?: string | null;
+  /** An importation: a Purchasing Manager step previews as the Importation manager's. */
+  importation?: boolean;
 }
 
 /**
@@ -1333,7 +1539,7 @@ export async function approvalSlots(documentType: string, documentId: string, dr
   const open = request?.status === 'PENDING';
   if (draft && !open) {
     // An option the document no longer qualifies for falls back to the standard route.
-    const ctx: ApprovalContext = { jobId: draft.jobId, projectManagerId: draft.projectManagerId };
+    const ctx: ApprovalContext = { jobId: draft.jobId, projectManagerId: draft.projectManagerId, importation: draft.importation ?? false };
     const route =
       (draft.optionId ? await routePreview(documentType, draft.amount, draft.requesterId, draft.optionId, ctx) : null) ??
       (await routePreview(documentType, draft.amount, draft.requesterId, null, ctx));

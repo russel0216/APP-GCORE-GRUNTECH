@@ -22,7 +22,8 @@ import {
   useToast,
   type Tone,
 } from '../../components/ui';
-import { todayLocal, workingDaysBetween } from '../../lib/day';
+import { todayLocal, workingDaysBetween, type HolidayKeys } from '../../lib/day';
+import { useHolidayKeys } from '../../lib/holidays';
 import { NewReportModal, reportPermission } from './Reports';
 import { VisitBadge } from './Schedule';
 import { NumberInput } from '../../components/NumberInput';
@@ -137,8 +138,8 @@ interface JobOrderDetailRow extends JobOrderRow {
   route: { step: string; names: string[] }[];
 }
 
-/** Working days (Mon–Sat) from one day to another, both counted; the API's `workingDaysBetween`. */
-const workingDays = (from: string, to: string): number => (from && to ? workingDaysBetween(from, to) : 0);
+/** Working days (Mon–Sat, holidays out) from one day to another, both counted; the API's `workingDaysBetween`. */
+const workingDays = (from: string, to: string, holidays: HolidayKeys): number => (from && to ? workingDaysBetween(from, to, holidays) : 0);
 
 const daysLabel = (n: number) => `${n} working day${n === 1 ? '' : 's'}`;
 
@@ -403,6 +404,7 @@ export function JobOrderModal({
   onSaved: (id: string) => void;
 }) {
   const toast = useToast();
+  const holidayKeys = useHolidayKeys();
   const { can } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -513,7 +515,7 @@ export function JobOrderModal({
     setForm((f) => ({ ...f, contactId: id, contactNumber: f.contactNumber || c?.phone || '' }));
   }
 
-  const duration = workingDays(form.targetStart, form.targetFinish);
+  const duration = workingDays(form.targetStart, form.targetFinish, holidayKeys);
   const finishBeforeStart = !!form.targetStart && !!form.targetFinish && form.targetFinish < form.targetStart;
   const salesOrdersOffered = form.quotationId ? options.salesOrders.filter((o) => o.quotationId === form.quotationId) : options.salesOrders;
   const linkedQuotation = options.quotations.find((q) => q.id === form.quotationId);
@@ -646,7 +648,7 @@ export function JobOrderModal({
         <Field label="Requester">
           <input value={existing?.requestedBy.name ?? 'You'} disabled />
         </Field>
-        <Field label="Team / department" hint="Empty takes the requester's own team">
+        <Field label="Team" hint="Empty takes the requester's own team">
           <select value={form.teamId} onChange={(e) => set('teamId', e.target.value)}>
             <option value="">— the requester's team —</option>
             {teams.map((t) => (
@@ -787,7 +789,7 @@ export function JobOrderModal({
         </Field>
         <Field
           label="Target finish"
-          hint={finishBeforeStart ? 'Before the start' : form.targetStart && form.targetFinish ? `${daysLabel(duration)} (Mon–Sat)` : undefined}
+          hint={finishBeforeStart ? 'Before the start' : form.targetStart && form.targetFinish ? `${daysLabel(duration)} (Mon–Sat, holidays out)` : undefined}
         >
           <input type="date" value={form.targetFinish} min={form.targetStart || undefined} onChange={(e) => set('targetFinish', e.target.value)} />
         </Field>
@@ -1241,7 +1243,7 @@ export function JobOrderDetail() {
  * order and printed in the customer's slot. It gathers a value (prefilled
  * with the contact), not a yes, so it is a small form rather than a confirm.
  */
-function AcknowledgeModal({
+export function AcknowledgeModal({
   title,
   initial,
   onClose,
@@ -1293,7 +1295,16 @@ function AcknowledgeModal({
  * is not approved and a second invoice. (Orders raised as service calls
  * before 2026-10-09; a project work order is billed through its project.)
  */
-function InvoiceModal({ order, onClose, onRaised }: { order: JobOrderRow; onClose: () => void; onRaised: (invoiceId: string) => void }) {
+/** Shared with the Service JO page (2026-10-20): what it reads of the order is the same on both registers. */
+export function InvoiceModal({
+  order,
+  onClose,
+  onRaised,
+}: {
+  order: Pick<JobOrderRow, 'id' | 'number' | 'title' | 'amount' | 'customer' | 'job' | 'customerPoNumber'>;
+  onClose: () => void;
+  onRaised: (invoiceId: string) => void;
+}) {
   const toast = useToast();
   const [amount, setAmount] = useState(order.amount != null ? String(order.amount) : '');
   const [dueDate, setDueDate] = useState('');

@@ -8,10 +8,12 @@
  * billed. All three are easy to get subtly wrong and invisible when they are.
  */
 
+import { holidaysAside, holidaysBack, putHolidays } from './lib/holidays';
 import bcrypt from 'bcryptjs';
 import { PDFDocument } from 'pdf-lib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act, approversForStep, routePreview, pickWorkflow } from '../src/shared/approvals';
@@ -24,7 +26,7 @@ import { curveTicks } from '../../web/src/lib/sCurve';
 import '../src/routes/budgetRequests';
 // …and the Request for Approval's (2026-10-13), whose settle is called directly too.
 import { settlePlanApproval } from '../src/routes/planApprovals';
-import '../src/routes/progress';
+import { projectVatRate } from '../src/routes/progress';
 import { deleteAttachmentsOf } from '../src/shared/attachments';
 import {
   flat,
@@ -63,6 +65,8 @@ const ROLE_PREFIX = 'zzdeliv-';
 const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  // The holidays this run set aside (scripts/lib/holidays.ts) go back first.
+  await holidaysBack();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
@@ -185,7 +189,8 @@ async function readyCosting(title: string, ownerId: string, customerId: string, 
 const iso = (dt: Date | string) => new Date(dt).toISOString().slice(0, 10);
 
 async function makeUser(name: string, email: string, roleKeys: string[]) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike(ROLE_PREFIX, roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -199,6 +204,9 @@ async function makeUser(name: string, email: string, roleKeys: string[]) {
 async function main() {
   console.log('\nG-CORE delivery verification\n');
   await cleanup();
+  // The dates below were chosen for a Mon–Sat week: the stored holidays
+  // are set aside for the run, and the holiday checks bring their own.
+  await holidaysAside();
 
   const pm = await makeUser('Verify PM', 'pm@verifyd.local', ['project_manager']);
   const exec = await makeUser('Verify Exec', 'exec@verifyd.local', ['executive']);
@@ -994,6 +1002,31 @@ async function main() {
     );
     check('a plain project answers serviceContractId null', created.body.serviceContractId === null);
 
+    // (a1) Progress billing takes the VAT the work was SOLD at (2026-10-17):
+    //      the quotation revision's rate, else the costing's, else the
+    //      company's — a zero-rated (PEZA/BOI, export) quotation is never
+    //      billed 12%.
+    if (quotedJobId) {
+      await prisma.quotationRevision.update({ where: { id: quotation.revisions[0].id }, data: { vatRate: d(0) } });
+      await prisma.costing.update({ where: { id: qCosting.id }, data: { vatRate: d(0.12) } });
+      const fromQuote = await projectVatRate(quotedJobId, 0.12);
+      check(
+        'a project won from a zero-rated quotation is billed at 0%, read from its quotation revision',
+        fromQuote.rate === 0 && fromQuote.source === 'quotation',
+        JSON.stringify(fromQuote),
+      );
+      await prisma.costing.update({ where: { id: costing.id }, data: { vatRate: d(0) } });
+      const fromCosting = await projectVatRate(job.id, 0.12);
+      check(
+        'a project with no approved quotation linked is billed at its costing\'s snapshotted rate',
+        fromCosting.rate === 0 && fromCosting.source === 'costing',
+        JSON.stringify(fromCosting),
+      );
+      await prisma.costing.update({ where: { id: costing.id }, data: { vatRate: costing.vatRate } });
+      const noJobRate = await projectVatRate('no-such-job', 0.12);
+      check('with neither, the company rate', noJobRate.rate === 0.12 && noJobRate.source === 'company', JSON.stringify(noJobRate));
+    }
+
     // (a2) The project's dates tally with its scope (2026-10-13, the owner's
     //      call): a costing that starts on Monday 2 November with a 30-day
     //      plan finishes on Saturday 5 December — five Mon–Sat weeks, the
@@ -1029,6 +1062,60 @@ async function main() {
         JSON.stringify(moved.body.schedule ?? null),
       );
     }
+
+    // (a2b) Two costings, one project (2026-10-19, the owner's call:
+    //       "sometimes there will be 2 costings to generate the quotation or
+    //       project"): the contract value their sum, the scope both of them,
+    //       each plan from the project's start, the target end the later
+    //       finish, one opening budget row per costing, both read back.
+    const twoA = await readyCosting('Two A', pm.id, customer.id, 100_000);
+    const twoB = await readyCosting('Two B', pm.id, customer.id, 50_000);
+    await prisma.scopeSection.updateMany({ where: { costingId: twoB.id }, data: { durationDays: 10 } });
+    await prisma.costing.update({ where: { id: twoA.id }, data: { plannedStart: new Date('2026-11-02T00:00:00Z') } });
+    const two = await http(leadToken, 'POST', '/jobs', { costingIds: [twoA.id, twoB.id], name: `${TAG} Two costings`, customerId: customer.id });
+    const twoRead = two.body.id ? await http(leadToken, 'GET', `/jobs/${two.body.id}`) : null;
+    const twoItems: { name: string; value: number; plannedStart: string; plannedEnd: string }[] = twoRead?.body?.scopeItems ?? [];
+    check(
+      'a project built from two costings is worth both (₱150,000), carries both scopes and names both costings, the first first',
+      two.status === 201 &&
+        twoRead?.body?.contractValue === 150_000 &&
+        twoItems.length === 2 &&
+        twoItems[0].value === 100_000 &&
+        twoItems[1].value === 50_000 &&
+        (twoRead?.body?.costings ?? []).map((c: { id: string }) => c.id).join(',') === `${twoA.id},${twoB.id}`,
+      `${two.status} ${JSON.stringify(two.body).slice(0, 160)} ${twoRead?.body?.contractValue} ${twoItems.length}`,
+    );
+    check(
+      "each costing's plan runs from the project's start (2 November); the target end is the later finish (5 December)",
+      iso(twoItems[1]?.plannedStart ?? 0) === '2026-11-02' &&
+        iso(twoItems[1]?.plannedEnd ?? 0) === '2026-11-12' &&
+        iso(twoRead?.body?.targetEndDate ?? 0) === '2026-12-05',
+      `${twoItems[1]?.plannedStart} → ${twoItems[1]?.plannedEnd}; target ${twoRead?.body?.targetEndDate}`,
+    );
+    const twoBudget = two.body.id
+      ? await prisma.jobCostEntry.findMany({ where: { jobId: two.body.id, state: 'BUDGETED' }, select: { sourceId: true, amount: true } })
+      : [];
+    check(
+      'the opening budget is one row per costing — ₱80,000 from the first, ₱40,000 from the second',
+      twoBudget.length === 2 &&
+        Number(twoBudget.find((b) => b.sourceId === twoA.id)?.amount) === 80_000 &&
+        Number(twoBudget.find((b) => b.sourceId === twoB.id)?.amount) === 40_000,
+      JSON.stringify(twoBudget),
+    );
+    const secondRead = await http(leadToken, 'GET', `/costings/${twoB.id}`);
+    check(
+      'the second costing lists the project built on it too',
+      Array.isArray(secondRead.body.jobs) && secondRead.body.jobs.some((j: { id: string }) => j.id === two.body.id),
+      JSON.stringify(secondRead.body.jobs ?? null).slice(0, 160),
+    );
+    const strayCustomer = await prisma.customer.create({ data: { code: `${TAG}-C3`, name: `${TAG} Other customer` } });
+    const strayCosting = await readyCosting('Two stray', pm.id, strayCustomer.id, 10_000);
+    const mixed = await http(leadToken, 'POST', '/jobs', { costingIds: [twoA.id, strayCosting.id], name: `${TAG} Mixed`, customerId: customer.id });
+    check(
+      "a costing for another customer among them is refused, naming it",
+      mixed.status === 400 && String(mixed.body.error ?? mixed.body.message ?? '').includes(strayCosting.number),
+      `${mixed.status} ${JSON.stringify(mixed.body)}`,
+    );
 
     // (a3) Request for Approval (2026-10-13, the owner's call: "replace the
     //      Approved Plans with Request for Approval … Technical Manager, Team
@@ -1297,6 +1384,13 @@ async function main() {
     const billerToken = signToken(biller.id, biller.email);
     const approverToken = signToken(progTm.id, progTm.email);
     const raised = await http(billerToken, 'POST', '/billings', { progressReportId: r2.id });
+    const raisedRow = await prisma.auditLog.findFirst({ where: { entityType: 'progress_billing', entityId: raised.body.id ?? '', action: 'CREATED' } });
+    check(
+      'a billing keeps the rate it was raised at, and its trail says where the rate came from',
+      Number(raised.body.vatRate) === num(costing.vatRate) &&
+        (raisedRow?.after as { vatFrom?: string } | null)?.vatFrom === 'costing',
+      `${raised.body.vatRate} ${JSON.stringify(raisedRow?.after)}`,
+    );
     const draftBill = await printed(billerToken, `/billings/${raised.body.id}/pdf`);
     const draftBillText = draftBill.text;
     check(
@@ -1705,6 +1799,50 @@ async function main() {
     );
     await prisma.budgetRequest.delete({ where: { id: pmRequest.id } });
 
+    // The request page's breakdown (2026-10-19): lines, the amount their sum
+    // (qty × unit cost to the centavo), replaced whole by a Modify, printed;
+    // the page's budget panel and route answer for the project.
+    const lined = await http(engToken, 'POST', '/budget-requests', {
+      jobId: job.id,
+      costCategoryId: br.costCategoryId,
+      reason: 'ZZDELIVERY breakdown',
+      amount: 1, // ignored: the lines decide
+      items: [
+        { name: 'Teflon tape', quantity: 3, unit: 'roll', unitCost: 45.5 },
+        { name: 'Elbow 1/2"', description: 'GI, threaded', quantity: 2.5, unit: 'pcs', unitCost: 33.33 },
+      ],
+    });
+    const linedId = lined.body?.id as string | undefined;
+    const modified = linedId
+      ? await http(engToken, 'PUT', `/budget-requests/${linedId}`, {
+          jobId: job.id,
+          costCategoryId: br.costCategoryId,
+          reason: 'ZZDELIVERY breakdown',
+          items: [{ name: 'Teflon tape', quantity: 4, unit: 'roll', unitCost: 45.5 }],
+        })
+      : null;
+    const linedPdf = linedId ? await printed(engToken, `/budget-requests/${linedId}/pdf`) : null;
+    const panel = await http(engToken, 'GET', `/budget-requests/budget?jobId=${job.id}`);
+    const routeAnswer = await http(engToken, 'GET', `/budget-requests/route?amount=182&jobId=${job.id}`);
+    check(
+      'a budget request with a breakdown is the sum of its lines, a Modify replaces them, and the paper prints them',
+      lined.status === 201 &&
+        lined.body.amount === 219.83 && // 3 × 45.50 + 2.5 × 33.33 (83.325 → 83.33)
+        lined.body.items?.length === 2 &&
+        modified?.status === 200 &&
+        modified.body.amount === 182 &&
+        modified.body.items?.length === 1 &&
+        linedPdf?.status === 200 &&
+        flat(linedPdf.text).includes('BREAKDOWN') &&
+        flat(linedPdf.text).includes('Teflon tape') &&
+        panel.status === 200 &&
+        Array.isArray(panel.body.lines) &&
+        routeAnswer.status === 200 &&
+        'route' in routeAnswer.body,
+      `${lined.status} ${lined.body?.amount} ${lined.body?.items?.length} · ${modified?.status} ${modified?.body?.amount} · pdf ${linedPdf?.status} · ${panel.status} · ${routeAnswer.status}`,
+    );
+    if (linedId) await prisma.budgetRequest.delete({ where: { id: linedId } });
+
     // (f) The receiving register narrows to the job (PROC's jobId filter):
     //     every row it returns must belong to the job asked about.
     const receivings = await http(leadToken, 'GET', `/receivings?jobId=${job.id}&pageSize=200`);
@@ -2052,18 +2190,36 @@ async function main() {
 
     // A cancelled project may be deleted (2026-10-11), its reports and
     // billings going with it; a live one is cancelled first.
+    // Its own dead purchase requests (a cancelled one, a draft) go with it
+    // (2026-10-19, clearing sample projects).
+    const deadPrs = await Promise.all(
+      (['CANCELLED', 'DRAFT'] as const).map((status, n) =>
+        prisma.purchaseRequest.create({
+          data: { number: `${TAG}-DEADPR-${n}-${Date.now()}`, status, jobId: cancelledJob.id, requestedById: biller.id, purpose: `${TAG} sample` },
+        }),
+      ),
+    );
+    // …and so does a cancelled order raised from the cancelled request.
+    const deadSupplier = await prisma.supplier.create({ data: { code: `${TAG}-DS-${Date.now()}`, name: `${TAG} dead supplier` } });
+    const deadPo = await prisma.purchaseOrder.create({
+      data: { number: `${TAG}-DEADPO-${Date.now()}`, status: 'CANCELLED', supplierId: deadSupplier.id, requestId: deadPrs[0].id, jobId: cancelledJob.id, createdById: biller.id },
+    });
     await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: true } });
     const delLive = await http(billerToken, 'DELETE', `/jobs/${job.id}`);
     const delCancelled = await http(billerToken, 'DELETE', `/jobs/${cancelledJob.id}`);
     await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: false } });
     check(
-      'a live project is not deleted; a cancelled one is, with its reports and billings',
+      'a live project is not deleted; a cancelled one is, with its reports, billings, its cancelled and draft purchase requests and its cancelled order',
       delLive.status === 400 &&
         delCancelled.status === 200 &&
+        (await prisma.purchaseRequest.count({ where: { id: { in: deadPrs.map((r) => r.id) } } })) === 0 &&
+        !(await prisma.purchaseOrder.findUnique({ where: { id: deadPo.id } })) &&
         !(await prisma.job.findUnique({ where: { id: cancelledJob.id } })) &&
         !(await prisma.progressReport.findUnique({ where: { id: otherReport.id } })),
       `${delLive.status} / ${delCancelled.status} ${delCancelled.text}`,
     );
+    await prisma.purchaseOrder.deleteMany({ where: { id: deadPo.id } });
+    await prisma.supplier.delete({ where: { id: deadSupplier.id } });
 
     // Budget Monitoring's paper prints cost to date — budget monitoring's
     // figure — so it takes that right as well as the list's.

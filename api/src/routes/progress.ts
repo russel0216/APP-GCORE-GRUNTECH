@@ -59,6 +59,7 @@ import { manilaDate, workingDayDate } from '../shared/day';
 import { planTasks } from '../shared/costingMath';
 import { LIST_CAP, listReference, totalLabel, namedInFilter, choice, bracketed, bracketNote, listNotes, sendListPdf, ratePct } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { visibleOwners } from '../shared/team';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -91,7 +92,8 @@ const REPORT_SORTS = ['number', 'periodTo', 'createdAt'];
 function reportListWhere(me: ResolvedUser, q: ListQuery): Prisma.ProgressReportWhereInput {
   const and: Prisma.ProgressReportWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.progress_billing.view_all');
-  if (onlyOwn || q.scope === 'mine') and.push({ preparedById: me.id });
+  if (q.scope === 'mine') and.push({ preparedById: me.id });
+  else if (onlyOwn) and.push({ preparedById: { in: visibleOwners(me, 'gops', 'progress_billing') } });
   if (q.filters.jobId) and.push({ jobId: q.filters.jobId });
   const status = choice(q.filters.status, ProgressStatus, 'Status');
   if (status) and.push({ status });
@@ -329,7 +331,9 @@ async function readableReport(me: ResolvedUser, id: string, deciderOnly: boolean
   if (!report) throw notFound('Progress report not found');
   const reads =
     !deciderOnly &&
-    (me.isSuperAdmin || can(me, 'gops.progress_billing.view_all') || (report.preparedById === me.id && can(me, 'gops.progress_billing.view_own')));
+    (me.isSuperAdmin ||
+      can(me, 'gops.progress_billing.view_all') ||
+      (can(me, 'gops.progress_billing.view_own') && visibleOwners(me, 'gops', 'progress_billing').includes(report.preparedById)));
   if (!reads && !(await mayDecide(me.id, DOC, [report.id]))) throw notFound('Progress report not found');
   return report;
 }
@@ -516,10 +520,7 @@ async function reportForEdit(req: Parameters<typeof currentUser>[0], id: string)
       `Report ${report.number} is ${report.status.toLowerCase()} and cannot be changed — it is the record of what was reported.`,
     );
   }
-  const mayEdit =
-    me.isSuperAdmin ||
-    me.permissions.has('gops.progress_billing.edit_all') ||
-    (report.preparedById === me.id && me.permissions.has('gops.progress_billing.edit_own'));
+  const mayEdit = me.isSuperAdmin || canEditRecord(me, 'gops', 'progress_billing', report.preparedById);
   if (!mayEdit) throw forbidden('This report belongs to someone else');
   return report;
 }
@@ -735,7 +736,7 @@ registerAttachmentGuard(
   async (user, dayId) => {
     const day = await prisma.progressReportDay.findUnique({ where: { id: dayId }, select: { report: { select: { id: true, preparedById: true } } } });
     if (!day) return false;
-    if (user.isSuperAdmin || can(user, 'gops.progress_billing.view_all') || day.report.preparedById === user.id) return true;
+    if (user.isSuperAdmin || can(user, 'gops.progress_billing.view_all') || visibleOwners(user, 'gops', 'progress_billing').includes(day.report.preparedById)) return true;
     return mayDecide(user.id, DOC, [day.report.id]);
   },
   {
@@ -750,7 +751,7 @@ registerAttachmentGuard(
   async (user, id) => {
     const report = await prisma.progressReport.findUnique({ where: { id }, select: { preparedById: true } });
     if (!report) return false;
-    if (user.isSuperAdmin || can(user, 'gops.progress_billing.view_all') || report.preparedById === user.id) return true;
+    if (user.isSuperAdmin || can(user, 'gops.progress_billing.view_all') || visibleOwners(user, 'gops', 'progress_billing').includes(report.preparedById)) return true;
     return mayDecide(user.id, DOC, [id]);
   },
   {
@@ -1228,6 +1229,30 @@ billingRoutes.get(
 );
 
 /**
+ * The VAT rate a project is billed at: the rate of the quotation revision it
+ * was won from (snapshotted on the revision — 12%, 8%, 6% or 0%), else its
+ * costing's own snapshotted rate (a project built before its quotation was
+ * approved links no revision), else the company's rate. Read once, when a
+ * billing is raised; the billing then keeps it, as an invoice keeps the
+ * billing's.
+ */
+export async function projectVatRate(
+  jobId: string,
+  companyRate: number,
+): Promise<{ rate: number; source: 'quotation' | 'costing' | 'company' }> {
+  const job = await prisma.job.findUnique({
+    where: { id: jobId },
+    select: {
+      quotationRevision: { select: { vatRate: true } },
+      costing: { select: { vatRate: true } },
+    },
+  });
+  if (job?.quotationRevision) return { rate: num(job.quotationRevision.vatRate), source: 'quotation' };
+  if (job?.costing) return { rate: num(job.costing.vatRate), source: 'costing' };
+  return { rate: companyRate, source: 'company' };
+}
+
+/**
  * Raising a billing from an approved progress report.
  *
  * The amount is computed here, from the schedule of values and what has already
@@ -1268,7 +1293,10 @@ billingRoutes.post(
     }
 
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
-    const vatRate = num(company?.vatRate ?? d(0.12));
+    // The VAT the work was SOLD at: a project won from a zero-rated (PEZA/BOI,
+    // export) or government quotation is billed at that quotation's rate, never
+    // the company's 12% (`projectVatRate`). EWT stays the company's rule.
+    const { rate: vatRate, source: vatSource } = await projectVatRate(report.jobId, num(company?.vatRate ?? d(0.12)));
     const ewtRate = num(company?.ewtRate ?? d(0.02));
 
     const lines = report.lines.map((l) => {
@@ -1338,6 +1366,7 @@ billingRoutes.post(
         entityId: billing.id,
         action: 'CREATED',
         summary: `Raised ${billing.number} from ${report.number} — ${formatMoney(gross)}`,
+        after: { vatRate, vatFrom: vatSource },
         actorId: me.id,
       },
       req,
@@ -1819,10 +1848,18 @@ planRoutes.post(
     const sectionIds = job.scopeItems.map((s) => s.sourceSectionId).filter((id): id is string => !!id);
     const sections = await prisma.scopeSection.findMany({
       where: { id: { in: sectionIds } },
-      select: { id: true, durationDays: true, tasks: { orderBy: { sortOrder: 'asc' } } },
+      orderBy: { sortOrder: 'asc' },
+      select: { id: true, costingId: true, durationDays: true, tasks: { orderBy: { sortOrder: 'asc' } } },
     });
-    const plan = planTasks(sections.map((s) => ({ durationDays: s.durationDays, tasks: s.tasks })));
-    const bySection = new Map(sections.map((s, i) => [s.id, { tasks: s.tasks, planned: plan.sections[i] }]));
+    // Each costing's own plan, all from the project's start (2026-10-19: a
+    // project built from several costings works their scopes side by side,
+    // as createJobRecord placed them).
+    const bySection = new Map<string, { tasks: (typeof sections)[number]['tasks']; planned: ReturnType<typeof planTasks>['sections'][number] }>();
+    for (const costingId of [...new Set(sections.map((s) => s.costingId))]) {
+      const own = sections.filter((s) => s.costingId === costingId);
+      const plan = planTasks(own.map((s) => ({ durationDays: s.durationDays, tasks: s.tasks })));
+      own.forEach((s, i) => bySection.set(s.id, { tasks: s.tasks, planned: plan.sections[i] }));
+    }
 
     let created = 0;
     let skipped = 0;

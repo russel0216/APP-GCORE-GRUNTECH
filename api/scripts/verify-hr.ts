@@ -32,6 +32,7 @@ import bcrypt from 'bcryptjs';
 import sharp from 'sharp';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
@@ -40,6 +41,7 @@ import { resolveUser } from '../src/permissions/resolve';
 import {
   hrSettings,
   classifyArrival,
+  undertimeMinutes,
   workedMinutes,
   overtimeHours,
   overtimeRate,
@@ -49,6 +51,7 @@ import {
   faceDistance,
   matchFace,
   decideFace,
+  enrolCollision,
   FACE_MARGIN,
   MIN_FACE_SAMPLES,
   MAX_FACE_SAMPLES,
@@ -61,6 +64,7 @@ import { describeFace, faceQualityProblem, FACE_ENGINE, type FaceCapture, type F
 import { migrateFaceThreshold, rederiveFaceSamples, separateAccountPhotos } from '../src/shared/faceSamples';
 import {
   CHALLENGE_KINDS,
+  ISSUED_KINDS,
   CHALLENGE_MESSAGES,
   CHALLENGE_SECONDS,
   CHALLENGE_TTL_MS,
@@ -404,10 +408,7 @@ async function pastedFace(frame: Buffer, capture: { box: FaceCapture['box']; ima
  * prove the two agree.
  */
 function challengeOf(userId: string, kind: ChallengeKind, now = new Date()): string {
-  for (;;) {
-    const c = issueChallenge(userId, now);
-    if (c.kind === kind) return c.challenge;
-  }
+  return issueChallenge(userId, now, kind).challenge;
 }
 
 interface HttpResult {
@@ -486,11 +487,10 @@ async function main() {
   // ══ The working day ══════════════════════════════════════════════════════
   console.log('The working day');
 
-  const on = (hhmm: string) => {
-    const [h, m] = hhmm.split(':').map(Number);
-    const d = new Date(2026, 8, 21, h, m, 0, 0);
-    return d;
-  };
+  // An instant on a Manila wall clock — the business's day, whatever the
+  // host is set to (until 2026-10-16 this was the host's own clock, and so
+  // was the lateness it tested).
+  const on = (hhmm: string) => new Date(`2026-09-21T${hhmm}:00+08:00`);
 
   check('arriving at 08:00 is on time', classifyArrival(on('08:00'), settings).status === 'PRESENT');
   check(
@@ -513,6 +513,18 @@ async function main() {
     workedMinutes(on('08:00'), on('09:30'), settings) === 90,
   );
   check('clocking out before clocking in is zero, not negative', workedMinutes(on('17:00'), on('08:00'), settings) === 0);
+  check(
+    "lateness is read on Manila's clock, not the host's: 08:45 in Manila is 00:45 UTC and still 30 minutes late",
+    on('08:45').toISOString() === '2026-09-21T00:45:00.000Z' && classifyArrival(on('08:45'), settings).lateMinutes === 30,
+    `${on('08:45').toISOString()} → ${classifyArrival(on('08:45'), settings).lateMinutes} (host offset ${new Date().getTimezoneOffset()})`,
+  );
+  check(
+    `undertime is the minutes before ${settings.workEnd} on the same Manila day, and none for a clock-out after midnight`,
+    undertimeMinutes(on('16:30'), '2026-09-21', settings) === toMinutes(settings.workEnd) - toMinutes('16:30') &&
+      undertimeMinutes(on('17:30'), '2026-09-21', settings) === 0 &&
+      undertimeMinutes(new Date('2026-09-22T01:00:00+08:00'), '2026-09-21', settings) === 0,
+    `${undertimeMinutes(on('16:30'), '2026-09-21', settings)}`,
+  );
 
   check('a time round-trips through minutes', fromMinutes(toMinutes('17:45')) === '17:45');
   await expectRejection('a malformed time is refused', async () => toMinutes('25:00'), 'not a valid time');
@@ -583,7 +595,8 @@ async function main() {
 
   const supervisor = await makeUser('ZZ Supervisor', 'sup@verifyhr.local', []);
   const worker = await makeUser('ZZ Worker', 'worker@verifyhr.local', [workerRole.id], supervisor.id);
-  const hrOfficer = await makeUser('ZZ HR Officer', 'hr@verifyhr.local', [hrRole.id]);
+  // The seeded key (the HR step reads it) and a throwaway copy of HR's rights.
+  const hrOfficer = await makeUser('ZZ HR Officer', 'hr@verifyhr.local', (await rolesLike('zzhr_', ['hr'])).map((r) => r.id));
 
   const employee = await prisma.employee.create({
     data: {
@@ -654,6 +667,21 @@ async function main() {
   const decide = (m: { own: number | null; nearestOther: { employeeId: string; name: string; distance: number } | null; threshold: number }) =>
     decideFace({ own: m.own, nearestOther: m.nearestOther, threshold: m.threshold, margin: FACE_MARGIN });
   const verdict = (d: ReturnType<typeof decideFace>) => (d.ok ? 'ok' : d.reason);
+
+  // Enrolment against another employee's face (2026-10-19): the same face is
+  // refused; a look-alike (a relative) is taken as a first sample or when it
+  // sits the margin nearer its owner's samples, refused when it does not.
+  check(
+    'enrolment refuses the same face, takes a look-alike, and refuses a look-alike sample that sits nearer the colleague',
+    enrolCollision(null, 0.3, 0.55) === 'same_face' &&
+      enrolCollision(0.1, 0.5, 0.55) === 'same_face' &&
+      enrolCollision(null, 0.52, 0.55) === 'lookalike' &&
+      enrolCollision(0.3, 0.58, 0.55) === 'lookalike' &&
+      enrolCollision(0.55, 0.58, 0.55) === 'too_close' &&
+      enrolCollision(null, 0.61, 0.55) === null &&
+      enrolCollision(null, null, 0.55) === null,
+    [enrolCollision(null, 0.3, 0.55), enrolCollision(null, 0.52, 0.55), enrolCollision(0.55, 0.58, 0.55)].join(' '),
+  );
 
   await currentSample(employee.id, descriptor(1));
 
@@ -1256,12 +1284,13 @@ async function main() {
     const issued = issueChallenge('user-one', now);
     const kinds = new Set(Array.from({ length: 40 }, () => issueChallenge('user-one').kind));
     check(
-      `a challenge is a signed token of one of the kinds, ${CHALLENGE_SECONDS} seconds of ring, good for ${CHALLENGE_TTL_MS / 1000} seconds — and the kind is random`,
+      `a challenge is a signed token, ${CHALLENGE_SECONDS} seconds of ring, good for ${CHALLENGE_TTL_MS / 1000} seconds — and only a head turn is issued (a blink is too quick for the camera's frames)`,
       /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(issued.challenge) &&
-        CHALLENGE_KINDS.includes(issued.kind) &&
+        issued.kind === 'turn' &&
         issued.seconds === CHALLENGE_SECONDS &&
         issued.expiresAt.getTime() === now.getTime() + CHALLENGE_TTL_MS &&
-        kinds.size === CHALLENGE_KINDS.length,
+        kinds.size === ISSUED_KINDS.length &&
+        [...kinds].every((k) => ISSUED_KINDS.includes(k)),
       `${issued.kind} ${issued.seconds} ${[...kinds].join(',')}`,
     );
     check('it verifies once, for its owner, giving back its kind', verifyChallenge(issued.challenge, 'user-one', now).kind === issued.kind);
@@ -1334,7 +1363,7 @@ async function main() {
     const input = { box: cap.box, stillWidth: cap.image.width, descriptor: cap.descriptor };
     const whole = await checkLiveness(turning, 'turn', input);
     check(
-      `checkLiveness: the turn passes whole — twenty usable, the first and last frames' faces within ${SAME_FACE_DISTANCE} of the still's`,
+      `checkLiveness: the turn passes whole — twenty usable, the first frame's face and the last quarter's most frontal within ${SAME_FACE_DISTANCE} of the still's`,
       whole.verdict.ok &&
         whole.frames === 20 &&
         whole.usable === 20 &&
@@ -1347,7 +1376,7 @@ async function main() {
     const swapped = await pastedFace(turning[0], cap, await personBPhoto());
     const swap = await checkLiveness([...turning.slice(0, 14), ...stillFrames(swapped, 6)], 'turn', input);
     check(
-      'another face over the last six frames is not_live — the last frame is further from the still than the same-face limit, whatever the movement',
+      'another face over the last six frames is not_live — the last quarter\'s most frontal frame is further from the still than the same-face limit, whatever the movement',
       !swap.verdict.ok && swap.verdict.reason === 'not_live' && swap.sameFace.last != null && swap.sameFace.last > SAME_FACE_DISTANCE,
       JSON.stringify({ ...swap, ms: undefined }),
     );
@@ -2149,8 +2178,8 @@ async function main() {
           'This does not look like the samples already on your account. Retake facing the camera in good light — if ' +
           'those samples are of someone else, remove them first.',
         collision:
-          "This face is too close to another employee's enrolled face for the clock to tell you apart. Use the " +
-          'fallback and tell HR.',
+          "This face is already enrolled on another employee's account. Use the fallback and ask HR to check Face " +
+          'health in HR Settings — the samples on that account may be yours.',
       };
       const needsSamples = (n: number) =>
         `Face clock-in needs ${MIN_FACE_SAMPLES} samples of your face — you have ${n}. Add them on this page, or use the fallback.`;
@@ -2340,6 +2369,21 @@ async function main() {
             otherBossRow.timeInPhoto === null &&
             typeof otherBossRow.timeInScore === 'number',
           `${bossRow?.timeInPhoto} / ${otherBossRow?.timeInPhoto}`,
+        );
+        // Attendance › View Own covers one's DIRECT REPORTS' days (2026-10-18):
+        // a manager holding only it reads Faye's entry and photo while she
+        // reports to them; a holder she does not report to reads nothing of hers.
+        const ownRole = await makeRole('zzhr_att_own', `${TAG} Attendance own`, ['ghr.attendance.view_own']);
+        const ownBoss = await makeUser('ZZ Own Boss', 'ownboss@verifyhr.local', [ownRole.id]);
+        const ownStranger = await makeUser('ZZ Own Stranger', 'ownstranger@verifyhr.local', [ownRole.id]);
+        await prisma.user.update({ where: { id: faye.user.id }, data: { supervisorId: ownBoss.id } });
+        const ownBossRow = await registerRow(signToken(ownBoss.id, ownBoss.email));
+        const strangerRow = await registerRow(signToken(ownStranger.id, ownStranger.email));
+        await prisma.user.update({ where: { id: faye.user.id }, data: { supervisorId: boss.id } });
+        check(
+          "Attendance › View Own reads a direct report's days and photo, and nobody else's",
+          ownBossRow?.timeInPhoto === inPhoto.id && strangerRow === undefined,
+          `${ownBossRow?.timeInPhoto} / ${strangerRow ? 'stranger saw a row' : 'none'}`,
         );
         const dropEvidence = await api(faye.token, 'DELETE', `/attachments/${inPhoto.id}`);
         check(
@@ -2839,15 +2883,34 @@ async function main() {
       await api(pia.token, 'DELETE', '/clock/enrollments');
 
       // ── The brake ──
+      // Only a FACE capture counts against the face brake (2026-10-16): the
+      // fallback is the way in when the face fails, so it stays open, and
+      // the challenge fetch has a bucket of its own.
+      const braker = await person('braker', 'Bea', 'Braker', '023');
       const brakeFiles = uploadedFiles();
-      const knocks: number[] = [];
+      const knocks: { status: number; error: string }[] = [];
       for (let i = 0; i < 13; i++) {
-        knocks.push((await apiForm(tomas.token, '/clock', bDim, { action: 'IN', method: 'PIN' })).status);
+        const r = await apiForm(braker.token, '/clock', bDim, { action: 'IN', method: 'FACE' });
+        knocks.push({ status: r.status, error: String(r.body.error ?? '') });
       }
       check(
-        'one person knocking on the clock more than twelve times a minute is told to wait (429), and no capture is kept',
-        knocks.slice(0, 12).every((st) => st === 400) && knocks[12] === 429 && leftBehind(brakeFiles, bDim) === 0,
-        knocks.join(','),
+        'one person knocking on the face clock more than twelve times a minute is told how long to wait (429), and no capture is kept',
+        knocks.slice(0, 12).every((k) => k.status === 400) &&
+          knocks[12].status === 429 &&
+          /wait \d+ seconds?/.test(knocks[12].error) &&
+          leftBehind(brakeFiles, bDim) === 0,
+        knocks.map((k) => k.status).join(','),
+      );
+      const challengesAfter = await api(braker.token, 'GET', '/clock/challenge');
+      const fallbackAfter = await apiForm(braker.token, '/clock', bDim, {
+        action: 'IN',
+        method: 'PIN',
+        fallbackReason: 'The face clock kept refusing me',
+      });
+      check(
+        'and the brake holds back neither a liveness challenge nor the fallback: both still answer',
+        challengesAfter.status === 200 && fallbackAfter.status === 200,
+        `${challengesAfter.status} ${fallbackAfter.status} ${String(fallbackAfter.body.error ?? '')}`,
       );
 
       // ── A fallback at both ends of the day ──
@@ -2866,6 +2929,66 @@ async function main() {
           fbRow.timeOutMethod === 'BIOMETRIC' &&
           fbRow.timeOutNotes === 'Used the reader at the gate',
         `${fbIn.status} ${fbOut.status} ${fbRow?.notes} / ${fbRow?.timeOutNotes}`,
+      );
+
+      // ── A shift past midnight, and a clock-out forgotten for good ──
+      // (2026-10-16) A clock-out closes YESTERDAY's open day within
+      // OVERNIGHT_CLOSE_HOURS; an older open day waits for HR, listed on the
+      // register as a missing clock-out.
+      const yesterdayKey = new Date(dayKey(new Date()).getTime() - 86_400_000);
+      const nightOwl = await person('nightowl', 'Nina', 'Night', '024');
+      const owlRow = await prisma.attendance.create({
+        data: {
+          employeeId: nightOwl.employee.id,
+          date: yesterdayKey,
+          timeIn: new Date(Date.now() - 10 * 3_600_000),
+          timeInMethod: 'PIN',
+          notes: `${TAG} night shift`,
+        },
+      });
+      const owlMe = await api(nightOwl.token, 'GET', '/clock/me');
+      const owlOut = await apiForm(nightOwl.token, '/clock', plainOne, {
+        action: 'OUT',
+        method: 'PIN',
+        fallbackReason: 'Night shift, camera off',
+      });
+      const owlAfter = await prisma.attendance.findUnique({ where: { id: owlRow.id } });
+      check(
+        "a clock-out ten hours after a clock-in begun yesterday closes yesterday's day — /clock/me shows it as carried over first",
+        (owlMe.body.today as { carriedOver?: boolean } | null)?.carriedOver === true &&
+          owlOut.status === 200 &&
+          /yesterday/.test(String(owlOut.body.message)) &&
+          owlAfter?.timeOut != null &&
+          (owlAfter?.workedMinutes ?? 0) > 0 &&
+          (await prisma.attendance.count({ where: { employeeId: nightOwl.employee.id } })) === 1,
+        `${owlOut.status} ${String(owlOut.body.message ?? owlOut.body.error)}`,
+      );
+      const forgetful = await person('forgetful', 'Fred', 'Forgot', '025');
+      const lostRow = await prisma.attendance.create({
+        data: {
+          employeeId: forgetful.employee.id,
+          date: yesterdayKey,
+          timeIn: new Date(Date.now() - 20 * 3_600_000),
+          timeInMethod: 'PIN',
+          notes: `${TAG} forgot to clock out`,
+        },
+      });
+      const lostOut = await apiForm(forgetful.token, '/clock', plainTwo, {
+        action: 'OUT',
+        method: 'PIN',
+        fallbackReason: 'Forgot yesterday',
+      });
+      const missing = await api(bossToken, 'GET', `/attendance?missingOut=true&pageSize=200`);
+      const missingRows = (missing.body.rows ?? []) as { id: string }[];
+      const missingSum = (missing.body.summary ?? {}) as { missingOut?: number };
+      check(
+        'twenty hours on, it is not closed by an ordinary clock-out — the register lists it as a missing clock-out, its card counting it',
+        lostOut.status === 400 &&
+          missing.status === 200 &&
+          missingRows.some((r) => r.id === lostRow.id) &&
+          !missingRows.some((r) => r.id === owlRow.id) &&
+          (missingSum.missingOut ?? 0) >= 1,
+        `${lostOut.status} ${missing.status} ${missingRows.length} ${JSON.stringify(missingSum)}`,
       );
 
       // A double tap: the entry is claimed before its photo is filed, so the
@@ -3163,7 +3286,7 @@ async function main() {
           { challenge: challengeOf(lia.user.id, 'turn') },
           await fresh(),
           clockTurn.slice(0, MIN_FRAMES - 1),
-          /Hold still/,
+          /come a little closer/,
           'too_few_frames',
           null,
         );
@@ -4377,7 +4500,8 @@ async function main() {
         email: 'unlinked@verifyhr.local',
         employeeNo: `${TAG}-004`,
         passwordHash: await bcrypt.hash('x', 10),
-        roles: { create: [{ roleId: hrRole.id }] },
+        // HR's rights as the seed defines them (the install's own hr role may hold nothing).
+        roles: { create: (await rolesLike('zzhr_', ['hr'])).map((r) => ({ roleId: r.id })) },
       },
     });
     const orphan = await prisma.employee.create({

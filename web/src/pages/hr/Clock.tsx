@@ -3,8 +3,9 @@ import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { frameSharpness, scoringSize, sharpestIndex } from '../../lib/frameSharpness';
-import { ErrorBox, Field, Loading, formatDateTime, formatTime, useToast } from '../../components/ui';
+import { ErrorBox, Field, Loading, StatusBadge, formatDateTime, formatTime, useToast } from '../../components/ui';
 import { FaceSamplesPanel } from './FaceSamples';
+import { ATTENDANCE_TONES } from './Dashboard';
 
 /**
  * The time clock.
@@ -30,11 +31,11 @@ import { FaceSamplesPanel } from './FaceSamples';
  * With the liveness check on (`liveness` from /clock/me; HR Settings ›
  * "Ask for a blink or a head turn"), one press of Capture sample / Clock In /
  * Clock Out is one sequence: a fresh challenge is fetched FIRST
- * (GET /clock/challenge — blink or turn, 2.5 s, single use), then the settle
+ * (GET /clock/challenge — a head turn since 2026-10-16, 3.5 s, single use), then the settle
  * and burst as before for the still, then the challenge itself — the prompt
- * under the oval says what to do, a ring around it drains over the 2.5 s
+ * under the oval says what to do, a ring around it drains over the 3.5 s
  * (a plain countdown under prefers-reduced-motion) while a frame is grabbed
- * every ~125 ms at 480 px wide — and the still, the frames and the token go
+ * every ~150 ms at 640 px wide — and the still, the frames and the token go
  * up together. The server decides whether the movement was seen; its refusal
  * shows verbatim, as every other does. Off, nothing of this happens.
  */
@@ -71,6 +72,8 @@ interface ClockState {
     notes: string | null;
     /** The clock-out fallback's reason. */
     timeOutNotes?: string | null;
+    /** Yesterday's day, still open: the next clock-out closes it (2026-10-16). */
+    carriedOver?: boolean;
   } | null;
   settings: { workStart: string; workEnd: string; graceMinutes: number };
 }
@@ -89,10 +92,15 @@ const JPEG_QUALITY = 0.92;
  * twenty over 2.5 s, never more than the server's 24), 480 px wide at a
  * lighter JPEG quality — the server reads landmarks off them, nothing more.
  */
-const CHALLENGE_FRAME_GAP_MS = 125;
+const CHALLENGE_FRAME_GAP_MS = 150;
 const CHALLENGE_MAX_FRAMES = 24;
-const CHALLENGE_FRAME_WIDTH = 480;
-const CHALLENGE_JPEG_QUALITY = 0.7;
+/**
+ * 640 wide at 0.8 since 2026-10-16: at 480 / 0.7 a person standing back from
+ * a site laptop left the landmark net a face a few dozen pixels across, and
+ * the burst was refused for too few readable frames.
+ */
+const CHALLENGE_FRAME_WIDTH = 640;
+const CHALLENGE_JPEG_QUALITY = 0.8;
 
 /** The defaults the server sends (shared/hr.ts), for a /clock/me that predates them. */
 const DEFAULT_SAMPLES_NEEDED = 3;
@@ -113,7 +121,7 @@ interface Challenge {
 /** What the prompt under the oval says while the ring runs. */
 const CHALLENGE_PROMPT: Record<ChallengeKind, string> = {
   blink: 'Blink once, clearly',
-  turn: 'Turn your head slightly left, then right',
+  turn: 'Turn slowly left, then right, then back to the camera',
 };
 
 /** What the button says while the ring runs. */
@@ -142,6 +150,8 @@ function useCamera() {
    */
   const generation = useRef(0);
   const starting = useRef(false);
+  /** The latest `start`, for a restart from an event listener. */
+  const startRef = useRef<(() => Promise<void>) | null>(null);
   const [mode, setMode] = useState<Mode>('idle');
   const [detail, setDetail] = useState<string>('');
   /** The picture has run long enough to be worth capturing. */
@@ -173,7 +183,13 @@ function useCamera() {
   const start = useCallback(async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
       setMode('unsupported');
-      setDetail('This browser cannot open a camera. Use the fallback below.');
+      // Browsers give the camera to secure pages only: on plain http (a LAN
+      // address) mediaDevices is simply missing.
+      setDetail(
+        window.isSecureContext
+          ? 'This browser cannot open a camera. Use the fallback below.'
+          : 'The camera opens only on a secure page — open G-CORE through its https:// address. Meanwhile use the fallback below.',
+      );
       return;
     }
     if (streamRef.current || starting.current) return;
@@ -182,16 +198,36 @@ function useCamera() {
     setMode('starting');
     setSettled(false);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false,
-      });
+      const stream = await navigator.mediaDevices
+        .getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        })
+        // A camera that cannot give the size asked for gives what it has.
+        .catch((err: unknown) => {
+          if (err instanceof Error && err.name === 'OverconstrainedError') {
+            return navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          }
+          throw err;
+        });
       if (run !== generation.current) {
         stream.getTracks().forEach((t) => t.stop());
         return;
       }
       starting.current = false;
       streamRef.current = stream;
+      // A camera cut off underneath the page (unplugged, taken by another
+      // app, a phone locking its screen) ends its track; the page used to
+      // keep sending frozen frames. Start again.
+      stream.getVideoTracks().forEach((track) => {
+        track.addEventListener('ended', () => {
+          if (streamRef.current !== stream) return;
+          streamRef.current = null;
+          setSettled(false);
+          setMode('idle');
+          window.setTimeout(() => void startRef.current?.(), 300);
+        });
+      });
       if (videoRef.current) {
         // A phone turned mid-session sends frames of the other shape: the
         // video says so with 'resize' (React has no prop for it).
@@ -208,10 +244,13 @@ function useCamera() {
       if (run !== generation.current) return;
       starting.current = false;
       setMode('denied');
+      const name = err instanceof Error ? err.name : '';
       setDetail(
-        err instanceof Error && err.name === 'NotAllowedError'
+        name === 'NotAllowedError' || name === 'SecurityError'
           ? 'The camera was blocked. Allow it in the address bar, or use the fallback below.'
-          : 'No camera is available on this device. Use the fallback below.',
+          : name === 'NotReadableError' || name === 'AbortError'
+            ? 'The camera is in use by another app or tab. Close it there, then press Start camera — or use the fallback below.'
+            : 'No camera is available on this device. Use the fallback below.',
       );
     }
   }, [onMetadata]);
@@ -291,6 +330,26 @@ function useCamera() {
     onTick?.(0);
     return (await Promise.all(pending)).filter((b): b is Blob => b !== null);
   }, []);
+
+  useEffect(() => {
+    startRef.current = start;
+  }, [start]);
+
+  // A phone that locked its screen or a tab sent to the back may have its
+  // camera taken away silently: back in view, a picture that is no longer
+  // live is started again.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      const track = streamRef.current?.getVideoTracks()[0];
+      if (streamRef.current && (!track || track.readyState === 'ended' || track.muted)) {
+        stop();
+        window.setTimeout(() => void startRef.current?.(), 300);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [stop]);
 
   useEffect(() => stop, [stop]);
 
@@ -756,7 +815,10 @@ export function Clock() {
 
         <div className="stack">
           <div className="card">
-            <h3 className="card-title">Today</h3>
+            <h3 className="card-title">{today?.carriedOver ? 'Still open from yesterday' : 'Today'}</h3>
+            {today?.carriedOver && (
+              <p className="muted">You clocked in yesterday and did not clock out — Clock Out now closes that day.</p>
+            )}
             {today ? (
               <dl className="kv">
                 <dt>Clocked in</dt>
@@ -765,15 +827,19 @@ export function Clock() {
                 <dd>{today.timeOut ? formatDateTime(today.timeOut) : <span className="faint">— still in —</span>}</dd>
                 <dt>Status</dt>
                 <dd>
-                  <span className={`badge ${today.status === 'LATE' ? 'warn' : 'ok'}`}>
-                    {today.status.toLowerCase().replace(/_/g, ' ')}
-                  </span>
+                  <StatusBadge status={today.status} extra={ATTENDANCE_TONES} label={today.status.toLowerCase().replace(/_/g, ' ')} />
                   {today.lateMinutes > 0 && (
                     <span className="faint"> · {today.lateMinutes} minutes late</span>
                   )}
                 </dd>
                 <dt>Hours so far</dt>
-                <dd className="mono">{(today.workedMinutes / 60).toFixed(2)}</dd>
+                <dd className="mono">
+                  {/* Live while the day is open: the stored figure is written at clock-out. */}
+                  {(today.timeIn && !today.timeOut
+                    ? Math.max(0, now.getTime() - new Date(today.timeIn).getTime()) / 3_600_000
+                    : today.workedMinutes / 60
+                  ).toFixed(2)}
+                </dd>
                 <dt>Identified by</dt>
                 <dd>{today.timeInMethod?.toLowerCase() ?? '—'}</dd>
                 {today.notes && (

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
-import { Checkbox, Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../components/ui';
+import { mayEdit as mayEditRecord, mayEditPage, useAuth } from '../../lib/auth';
+import { ActiveBadge, Checkbox, Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../components/ui';
 import { useConfirm } from '../../components/Confirm';
 import { NumberInput } from '../../components/NumberInput';
+import { TeamPostsCard } from './TeamPosts';
 
 // ════════════════════════════════════════════════════════════════════
 //  CATEGORIES — cost categories, item categories, teams, sub-industries,
@@ -95,6 +96,16 @@ export interface DrawingTypeDef {
   _count?: { requests: number };
 }
 
+/** What a service document is (2026-10-20): Manual, Electrical drawing…, with how many documents carry it. */
+export interface DocumentCategoryDef {
+  id: string;
+  name: string;
+  sortOrder: number;
+  isSystem: boolean;
+  isActive: boolean;
+  _count?: { documents: number };
+}
+
 // ── One card and one modal for every category (2026-10-10) ───────────────────
 //
 // Seven cards used to carry seven near-identical modals — ~690 lines that
@@ -108,6 +119,8 @@ export interface DrawingTypeDef {
 interface CategoryRow {
   id: string;
   name: string;
+  /** Who added it — what "own" means on Admin › Categories (2026-10-18); null on a seeded row. */
+  createdById?: string | null;
 }
 
 /** A modal's form: text, number and tick values by field key. */
@@ -452,6 +465,43 @@ const ACTIVITY_TYPES: CategorySpec<ActivityTypeDef> = {
   },
 };
 
+const DOCUMENT_CATEGORIES: CategorySpec<DocumentCategoryDef> = {
+  noun: 'service document category',
+  title: 'Service document categories',
+  endpoint: '/reference/service-document-categories',
+  columns: [
+    {
+      key: 'name',
+      head: 'Name',
+      render: (t) => (
+        <>
+          {t.name}
+          {t.isSystem && <span className="faint"> · built-in</span>}
+        </>
+      ),
+    },
+    { key: 'documents', head: 'Documents', headClass: 'right', cellClass: 'right', render: (t) => (t._count?.documents ?? 0).toLocaleString('en-US') },
+    { key: 'status', head: 'Status', render: (t) => activeBadge(t.isActive) },
+  ],
+  footnote:
+    'What a service document is — a manual, an electrical drawing, a test report, a datasheet — filed against a machine on the Installation Base or against a model. The six built-ins can be renamed but not deleted; a category in use is deactivated rather than deleted, and the documents under it keep it.',
+  blank: { name: '', sortOrder: 0, isActive: true },
+  fromRow: (t) => ({ name: t.name, sortOrder: t.sortOrder, isActive: t.isActive }),
+  fields: () => [
+    { kind: 'text', key: 'name', label: 'Name', hint: 'e.g. Commissioning report, Calibration certificate', maxLength: 80 },
+    { kind: 'count', key: 'sortOrder', label: 'Sort order' },
+    { kind: 'check', key: 'isActive', label: 'Active — an inactive category stays on its documents but is not offered' },
+  ],
+  canSave: (f) => !!text(f.name).trim(),
+  deletable: (t) => !t.isSystem && (t._count?.documents ?? 0) === 0,
+  notice: (t) => {
+    if (t.isSystem) return 'A built-in category: rename it, or untick Active to stop offering it.';
+    const inUse = t._count?.documents ?? 0;
+    if (inUse === 0) return null;
+    return `${inUse === 1 ? 'One document is' : `${inUse.toLocaleString('en-US')} documents are`} under this category, so it cannot be deleted — untick Active to stop offering it.`;
+  },
+};
+
 const DRAWING_TYPES: CategorySpec<DrawingTypeDef> = {
   noun: 'drawing type',
   title: 'Drawing types',
@@ -546,14 +596,17 @@ function CategoryCard<T extends CategoryRow>({
   onChanged: () => void;
   className?: string;
 }) {
-  const { can } = useAuth();
+  const { can, me } = useAuth();
   const toast = useToast();
-  const mayEdit = can('admin.categories.edit_all');
+  // The Modify column shows for Edit All or Edit Own; each row opens only
+  // where the viewer may change it — Edit Own, the entries they added (2026-10-18).
+  const mayEdit = mayEditPage(can, 'admin', 'categories');
+  const mayEditRow = (row: T) => mayEditRecord(can, 'admin', 'categories', !!me && row.createdById === me.user.id);
   const [editing, setEditing] = useState<T | 'new' | null>(null);
 
   return (
     <div className={className}>
-      <div className="m-card-head">
+      <div className="card-head">
         <h3 className="card-title">{spec.title}</h3>
         {can('admin.categories.create') && (
           <button className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
@@ -579,13 +632,13 @@ function CategoryCard<T extends CategoryRow>({
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={row.id} {...opensModify(mayEdit ? () => setEditing(row) : null)}>
+                <tr key={row.id} {...opensModify(mayEditRow(row) ? () => setEditing(row) : null)}>
                   {spec.columns.map((c) => (
                     <td key={c.key} className={c.cellClass}>
                       {c.render(row)}
                     </td>
                   ))}
-                  {mayEdit && <ModifyCell onClick={() => setEditing(row)} />}
+                  {mayEdit && (mayEditRow(row) ? <ModifyCell onClick={() => setEditing(row)} /> : <td className="m-col-action" />)}
                 </tr>
               ))}
             </tbody>
@@ -764,9 +817,10 @@ interface CategoryLists {
   groups: QuotationGroup[];
   activityTypes: ActivityTypeDef[];
   drawingTypes: DrawingTypeDef[];
+  documentCategories: DocumentCategoryDef[];
 }
 
-const NO_LISTS: CategoryLists = { cost: [], items: [], teams: [], subIndustries: [], groups: [], activityTypes: [], drawingTypes: [] };
+const NO_LISTS: CategoryLists = { cost: [], items: [], teams: [], subIndustries: [], groups: [], activityTypes: [], drawingTypes: [], documentCategories: [] };
 
 export function Categories() {
   const [lists, setLists] = useState<CategoryLists>(NO_LISTS);
@@ -776,7 +830,7 @@ export function Categories() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cost, items, teams, subIndustries, groups, activityTypes, drawingTypes] = await Promise.all([
+      const [cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories] = await Promise.all([
         api.get<CostCategory[]>('/reference/cost-categories'),
         api.get<ItemCategory[]>('/reference/item-categories'),
         api.get<Industry[]>('/reference/industries'),
@@ -784,8 +838,9 @@ export function Categories() {
         api.get<QuotationGroup[]>('/reference/quotation-groups'),
         api.get<ActivityTypeDef[]>('/reference/activity-types'),
         api.get<DrawingTypeDef[]>('/reference/cad-drawing-types'),
+        api.get<DocumentCategoryDef[]>('/reference/service-document-categories'),
       ]);
-      setLists({ cost, items, teams, subIndustries, groups, activityTypes, drawingTypes });
+      setLists({ cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories });
       setError(null);
     } catch (err) {
       setError(err);
@@ -837,10 +892,12 @@ export function Categories() {
         types: what a CAD job order asks for; the output is always a PDF.
       */}
       <CategoryCard spec={TEAMS} rows={lists.teams} onChanged={changed} className="card m-industries" />
+      <TeamPostsCard />
       <CategoryCard spec={SUB_INDUSTRIES} rows={lists.subIndustries} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={QUOTATION_GROUPS} rows={lists.groups} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={ACTIVITY_TYPES} rows={lists.activityTypes} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={DRAWING_TYPES} rows={lists.drawingTypes} onChanged={changed} className="card m-industries" />
+      <CategoryCard spec={DOCUMENT_CATEGORIES} rows={lists.documentCategories} onChanged={changed} className="card m-industries" />
     </div>
   );
 }
@@ -857,6 +914,8 @@ interface Location {
 
 interface Warehouse {
   id: string;
+  /** Whether the viewer may change it — Edit All, or Edit Own on a warehouse they added (2026-10-18). */
+  canEdit?: boolean;
   code: string;
   name: string;
   address: string | null;
@@ -894,7 +953,8 @@ export function Warehouses() {
     void load();
   }, [load]);
 
-  const mayEdit = can('gchain.warehouses.edit_all');
+  // Per warehouse: Edit All, or Edit Own on one the viewer added — the API says which (2026-10-18).
+  const mayEdit = (w: Warehouse) => w.canEdit ?? can('gchain.warehouses.edit_all');
 
   /** Asked in the confirm bar first; a refusal is shown there, so it throws. */
   async function removeLocation(w: Warehouse, l: Location) {
@@ -934,15 +994,13 @@ export function Warehouses() {
           {rows.map((w) => (
             <div key={w.id} className="card">
               {/* The card's head: what it is on the left; + Add location, then Modify right-most. */}
-              <div className="m-card-head">
+              <div className="card-head">
                 <div className="row">
                   <strong>{w.name}</strong>
                   <span className="mono faint">{w.code}</span>
-                  <span className={`badge ${w.isActive ? 'ok' : ''}`}>
-                    {w.isActive ? 'Active' : 'Inactive'}
-                  </span>
+                  <ActiveBadge active={w.isActive} />
                 </div>
-                {mayEdit && (
+                {mayEdit(w) && (
                   <div className="row">
                     <button className="btn btn-sm" onClick={() => setAddingLocation(w)}>
                       + Add location
@@ -954,16 +1012,16 @@ export function Warehouses() {
                 )}
               </div>
 
-              <div className="muted" style={{ fontSize: 12, margin: '6px 0 12px' }}>
+              <div className="muted" style={{ fontSize: 'var(--fs-sm)', margin: 'var(--s-2) 0 var(--s-3)' }}>
                 {[w.address, w.city].filter(Boolean).join(', ') || 'No address recorded'}
               </div>
 
-              <div className="row" style={{ gap: 5 }}>
+              <div className="row" style={{ gap: 'var(--s-1)' }}>
                 {w.locations.length === 0 ? (
                   <span className="faint">No locations</span>
                 ) : (
                   w.locations.map((l) =>
-                    mayEdit ? (
+                    mayEdit(w) ? (
                       // Removed from its chip, asking first: a location has nothing to modify.
                       <span key={l.id} className="list-chip" title={l.name ?? undefined}>
                         {l.code}

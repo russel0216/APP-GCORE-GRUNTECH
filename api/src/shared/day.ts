@@ -41,6 +41,22 @@ export function manilaDate(at: Date): Date {
 }
 
 /**
+ * Minutes since Manila midnight of an instant — what "arrived at 08:05" means
+ * whatever the host clock is set to (Manila keeps UTC+8 all year, so the
+ * offset is fixed). `getHours()` read the HOST's hour: on a server set to UTC
+ * an 08:05 arrival read as 00:05 and was never late.
+ */
+export function manilaMinutesOfDay(at: Date): number {
+  const minutes = Math.floor(at.getTime() / 60_000) + 8 * 60;
+  return ((minutes % 1440) + 1440) % 1440;
+}
+
+/** An instant's time of day in Manila, as people read it ("8:05:12 AM"). */
+export function manilaTime(at: Date): string {
+  return at.toLocaleTimeString('en-PH', { timeZone: 'Asia/Manila' });
+}
+
+/**
  * The first and last instants of a Manila day ('YYYY-MM-DD'): the edges of a
  * range over a TIMESTAMP column (`createdAt`, `decidedAt`). UTC midnight is
  * 08:00 here, and a range that started there left out the night before it.
@@ -62,35 +78,52 @@ export function manilaDayEnd(key: string): Date {
 /**
  * The work week (2026-10-13, the owner's call: "Mon–Sat"): every day but
  * Sunday is a working day — for a costing's plan, a project's dates and a
- * job order's duration alike. One rule; `web/src/lib/day.ts` mirrors it and
- * verify-costing pins the two equal. No holidays yet.
+ * job order's duration alike. **Holidays are days off too** (2026-10-17, the
+ * owner's call: the Philippine holidays prefilled, edited on Company
+ * Settings): the list lives in `shared/holidays.ts` and is held here as a
+ * set of 'YYYY-MM-DD' keys (`setHolidayKeys`), loaded at boot and on every
+ * save. One rule; `web/src/lib/day.ts` mirrors it (the page passes the same
+ * keys) and verify-costing pins the two equal.
  */
 export const DAY_OFF = 0; // Sunday
 export const isWorkingDow = (dow: number): boolean => dow !== DAY_OFF;
 
-/** Working days (Mon–Sat) from one DATE to another, both days counted; 0 when `to` is before `from`. */
-export function workingDaysBetween(from: Date, to: Date): number {
+let HOLIDAY_KEYS: ReadonlySet<string> = new Set();
+/** The holidays every working-day count skips, as 'YYYY-MM-DD' keys. */
+export function setHolidayKeys(keys: Iterable<string>): void {
+  HOLIDAY_KEYS = new Set(keys);
+}
+export function holidayKeys(): ReadonlySet<string> {
+  return HOLIDAY_KEYS;
+}
+const isoKey = (d: Date) => d.toISOString().slice(0, 10);
+/** A working day: not Sunday and not a holiday (a DATE at UTC midnight). */
+export const isWorkingDay = (d: Date, holidays: ReadonlySet<string> = HOLIDAY_KEYS): boolean =>
+  isWorkingDow(d.getUTCDay()) && !holidays.has(isoKey(d));
+
+/** Working days (Mon–Sat, holidays out) from one DATE to another, both days counted; 0 when `to` is before `from`. */
+export function workingDaysBetween(from: Date, to: Date, holidays: ReadonlySet<string> = HOLIDAY_KEYS): number {
   const d = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()));
   const end = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
   let days = 0;
   while (d.getTime() <= end) {
-    if (isWorkingDow(d.getUTCDay())) days++;
+    if (isWorkingDay(d, holidays)) days++;
     d.setUTCDate(d.getUTCDate() + 1);
   }
   return days;
 }
 
 /**
- * The calendar date of working day `day` (Mon–Sat, day 1 = the first) counted
- * from `start` — a costing's scope of work, planned in working days, put on a
- * project's real dates. A start on a Sunday counts from the Monday after it.
- * Returns a DATE (UTC midnight) like every @db.Date value.
+ * The calendar date of working day `day` (Mon–Sat, holidays out, day 1 = the
+ * first) counted from `start` — a costing's scope of work, planned in working
+ * days, put on a project's real dates. A start on a day off counts from the
+ * next working day. Returns a DATE (UTC midnight) like every @db.Date value.
  */
-export function workingDayDate(start: Date, day: number): Date {
+export function workingDayDate(start: Date, day: number, holidays: ReadonlySet<string> = HOLIDAY_KEYS): Date {
   const d = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
   let left = Math.max(1, Math.floor(day));
   for (;;) {
-    if (isWorkingDow(d.getUTCDay())) {
+    if (isWorkingDay(d, holidays)) {
       left--;
       if (left === 0) return d;
     }

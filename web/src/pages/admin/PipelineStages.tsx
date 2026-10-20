@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEditPage, useAuth } from '../../lib/auth';
 import { Checkbox, ErrorBox, Loading, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { useConfirm } from '../../components/Confirm';
@@ -50,7 +50,8 @@ function rowsOf(stages: StageDef[]): Record<string, Row> {
 export function PipelineStages() {
   const toast = useToast();
   const { can } = useAuth();
-  const canEdit = can('admin.pipeline_stages.edit_all');
+  // Edit Own or Edit All saves the stages — the page keeps no record of anybody's (2026-10-18).
+  const canEdit = mayEditPage(can, 'admin', 'pipeline_stages');
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [rows, setRows] = useState<Record<string, Row>>({});
   const [savedJson, setSavedJson] = useState('');

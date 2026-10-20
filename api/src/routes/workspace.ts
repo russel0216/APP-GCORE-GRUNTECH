@@ -8,7 +8,7 @@ import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, notFound, badRequest, forbidden } from '../http/kit';
 import { authenticate, currentUser } from '../auth/middleware';
 import { globalSearch, searchProviders, canSearch } from '../shared/search';
-import { act, contactOf, deciderFor, historyFor, mayReopen, pendingFor, reopenApproved } from '../shared/approvals';
+import { act, contactOf, deciderFor, followUp, historyFor, mayReopen, pendingFor, reopenApproved } from '../shared/approvals';
 import { audit } from '../shared/audit';
 import {
   upload,
@@ -123,6 +123,9 @@ approvalRoutes.get(
         amount: r.amount ? Number(r.amount) : null,
         // Who raised it, so the approver decides on more than a subject line.
         requester: { name: r.requester.name },
+        // The requester followed it up to the viewer (2026-10-17), who is
+        // otherwise never queued: the approver's manager, standing in.
+        followedUpBy: r.followedUpBy ?? null,
       })),
     );
   }),
@@ -171,7 +174,14 @@ approvalRoutes.get(
             const by = await prisma.user.findUnique({ where: { id: r.reopenedById }, select: { name: true } });
             return { ...r, canAct: false, reopenedBy: by?.name ?? null };
           }
-          if (r.status !== 'PENDING' || r.requesterId === me.id) return { ...r, canAct: false };
+          // `canFollowUp`: the requester, on a route with stand-ins, may send
+          // the open step to the approver's manager (2026-10-17).
+          if (r.status !== 'PENDING' || r.requesterId === me.id) {
+            const standIns = r.status === 'PENDING' && r.workflowId
+              ? (await prisma.approvalWorkflow.findUnique({ where: { id: r.workflowId }, select: { standIns: true } }))?.standIns
+              : false;
+            return { ...r, canAct: false, canFollowUp: r.status === 'PENDING' && r.requesterId === me.id && !!standIns };
+          }
           const step = await prisma.approvalStep.findFirst({
             where: { workflowId: r.workflowId ?? '', sequence: r.currentSequence },
           });
@@ -183,6 +193,19 @@ approvalRoutes.get(
         }),
       ),
     );
+  }),
+);
+
+/**
+ * The requester's follow-up to the approver's manager (2026-10-17): the
+ * engine's `followUp`, every rule in it.
+ */
+approvalRoutes.post(
+  '/:id/follow-up',
+  handler(async (req, res) => {
+    const body = parseBody(z.object({ note: z.string().trim().max(1000).optional() }), req.body);
+    const row = await followUp(req.params.id, currentUser(req).id, body.note);
+    res.json({ ok: true, id: row.id, to: row.to, step: row.step });
   }),
 );
 
@@ -373,6 +396,9 @@ function humanise(value: string): string {
 
 const TAKE = 10;
 
+/** A job order's page is its register's: the project work order's, or the Service JO's under Aftermarket (2026-10-20). */
+const jobOrderLink = (r: { id: string; category: string }) => (r.category === 'SERVICE' ? `/g-ops/service-job-orders/${r.id}` : `/g-ops/job-orders/${r.id}`);
+
 /** Past its date and still open. A missing date is never overdue. */
 function isOverdue(when: Date | null | undefined, today: Date): boolean {
   return when != null && when.getTime() < today.getTime();
@@ -413,7 +439,8 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
       select: { id: true, number: true, name: true, status: true, targetEndDate: true, customer: { select: { name: true } } },
     }),
     prisma.serviceVisit.findMany({
-      where: { assignedToId: me.id, status: 'SCHEDULED' },
+      // Booked or confirmed with the customer: both still to be made (2026-10-20).
+      where: { assignedToId: me.id, status: { in: ['SCHEDULED', 'CONFIRMED'] } },
       orderBy: { dueDate: 'asc' },
       take: TAKE,
       select: {
@@ -435,7 +462,7 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
       where: { assignedToId: me.id, status: 'APPROVED' },
       orderBy: { requestedFor: 'asc' },
       take: TAKE,
-      select: { id: true, number: true, title: true, urgent: true, requestedFor: true, customer: { select: { name: true } } },
+      select: { id: true, number: true, title: true, urgent: true, requestedFor: true, category: true, customer: { select: { name: true } } },
     }),
     // Planned before today and never marked done — the follow-up that slipped.
     prisma.salesActivity.findMany({
@@ -512,12 +539,12 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
     })),
     ...jobOrders.map((r) => ({
       id: r.id,
-      kind: 'job_order',
+      kind: r.category === 'SERVICE' ? 'service_job_order' : 'job_order',
       title: r.title,
       subtitle: `${r.number} · ${r.customer.name}${r.urgent ? ' · URGENT' : ''}`,
       when: r.requestedFor,
       overdue: isOverdue(r.requestedFor, dayStart),
-      link: `/g-ops/job-orders/${r.id}`,
+      link: jobOrderLink(r),
     })),
     ...slipped.map((r) => ({
       id: r.id,
@@ -678,7 +705,7 @@ async function draftsOf(me: ResolvedUser): Promise<WorkRow[]> {
       where: { requestedById: me.id, status: 'DRAFT' },
       orderBy: { updatedAt: 'desc' },
       take: TAKE,
-      select: { id: true, number: true, title: true, updatedAt: true, customer: { select: { name: true } } },
+      select: { id: true, number: true, title: true, updatedAt: true, category: true, customer: { select: { name: true } } },
     }),
   ]);
 
@@ -725,11 +752,11 @@ async function draftsOf(me: ResolvedUser): Promise<WorkRow[]> {
     })),
     ...jobOrders.map((r) => ({
       id: r.id,
-      kind: 'job_order',
+      kind: r.category === 'SERVICE' ? 'service_job_order' : 'job_order',
       title: r.title,
       subtitle: `${r.number} · ${r.customer.name}`,
       when: r.updatedAt,
-      link: `/g-ops/job-orders/${r.id}`,
+      link: jobOrderLink(r),
     })),
   ];
   // Most recently touched first — the one you were in the middle of.
@@ -803,6 +830,9 @@ myWorkRoutes.get(
         link: a.link,
         createdAt: a.createdAt,
         requester: { name: a.requester.name },
+        // Followed up to the viewer by the requester (2026-10-17): the
+        // approver's manager, who is otherwise never queued.
+        followedUpBy: a.followedUpBy ?? null,
       })),
       myPendingSubmissions: submitted.map((s) => ({
         id: s.id,

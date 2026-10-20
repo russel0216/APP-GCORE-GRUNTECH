@@ -1,8 +1,9 @@
+import { assertCostingsExist, cleanCostingIds, costingIdsOf, revisionCostingIds, setRevisionCostings } from '../shared/costingSets';
 import { Router } from 'express';
 import { z } from 'zod';
 import { LeadStatus, Prisma, QuotationOutcome } from '@prisma/client';
 import { prisma } from '../prisma';
-import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, quotationTeamWhere, teamMembers, teamOf, teamShares, type TeamRef, type TeamShare } from '../shared/team';
+import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, quotationTeamWhere, quotationsReadable, readsQuotation, teamMembers, teamOf, teamShares, visibleOwners, type TeamRef, type TeamShare } from '../shared/team';
 import {
   handler,
   parseBody,
@@ -16,6 +17,7 @@ import {
   idsFilter,
 } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
+import { requireEdit, viewScope } from '../shared/ownScope';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
 import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
@@ -134,8 +136,8 @@ import {
   recalcQuotationRevision,
   canSeeQuotationCost,
   stripLineCost,
-  quotationLinesFromSections,
-  costingScopeSections,
+  quotationLinesFromCostings,
+  costingsForQuote,
   quotationTaxOptions,
   QUOTATION_EXTRA_TAX_RATES,
   QUOTATION_CURRENCIES,
@@ -146,6 +148,7 @@ import {
   capsParts,
 } from '../shared/quotation';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { exchangeRates, inBase, RATE_SELECT, rateOf, storedRate } from '../shared/exchangeRates';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -193,7 +196,9 @@ export function leadListWhere(
   const and: Prisma.LeadWhereInput[] = [];
 
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.leads.view_all');
-  if (onlyOwn || q.scope === 'mine') and.push({ assignedToId: me.id });
+  // View Team (2026-10-19) reads the team's leads; View Own and Mine one's own.
+  if (q.scope === 'mine') and.push({ assignedToId: me.id });
+  else if (onlyOwn) and.push({ assignedToId: { in: visibleOwners(me, 'gops', 'leads') } });
   if (q.scope === 'team') and.push(team ? { assignedTo: teamMembers(team) } : { assignedToId: me.id });
 
   if (q.search) {
@@ -919,11 +924,15 @@ function presentRevision(rev: Record<string, unknown>, showCost: boolean) {
   if (showCost && totals) presented.costPanel = totals.cost;
 
   if (costing !== undefined) {
-    presented.costing = costing
-      ? showCost
-        ? { ...costing, contractValue: num(costing.contractValue as Prisma.Decimal), totalCost: num(costing.totalCost as Prisma.Decimal) }
-        : { id: costing.id, number: costing.number, title: costing.title, contractValue: num(costing.contractValue as Prisma.Decimal) }
-      : null;
+    const show = (c: Record<string, unknown>) =>
+      showCost
+        ? { ...c, contractValue: num(c.contractValue as Prisma.Decimal), totalCost: num(c.totalCost as Prisma.Decimal) }
+        : { id: c.id, number: c.number, title: c.title, contractValue: num(c.contractValue as Prisma.Decimal) };
+    presented.costing = costing ? show(costing) : null;
+    // Every costing the revision is quoted from, the first first (2026-10-19).
+    const others = ((rev.otherCostings ?? []) as { costing: Record<string, unknown> }[]).map((o) => o.costing);
+    presented.costings = costing ? [costing, ...others].map(show) : [];
+    delete presented.otherCostings;
   }
   return presented;
 }
@@ -1024,6 +1033,10 @@ async function loadQuotation(id: string) {
         include: {
           items: { orderBy: { sortOrder: 'asc' }, include: LINE_PROVIDERS },
           costing: { select: { id: true, number: true, title: true, contractValue: true, totalCost: true } },
+          otherCostings: {
+            orderBy: { sortOrder: 'asc' },
+            select: { costing: { select: { id: true, number: true, title: true, contractValue: true, totalCost: true } } },
+          },
           approvedBy: { select: { id: true, name: true } },
           // The project a revision became. Without it a WON quotation still
           // waiting to be a project looks the same as one already delivered.
@@ -1060,8 +1073,9 @@ export function quotationListWhere(
 ): { base: Prisma.QuotationWhereInput; where: Prisma.QuotationWhereInput } {
   const and: Prisma.QuotationWhereInput[] = [];
 
-  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
-  if (onlyOwn || q.scope === 'mine') and.push({ ownerId: me.id });
+  const readable = quotationsReadable(me);
+  if (q.scope === 'mine') and.push({ ownerId: me.id });
+  else if (readable) and.push(readable);
   if (q.scope === 'team') and.push(team ? quotationTeamWhere(team) : { ownerId: me.id });
 
   if (q.search) {
@@ -1169,13 +1183,17 @@ export async function quotationListSummary(
     prisma.quotation.findMany({
       where,
       select: {
+        ...RATE_SELECT,
         revisions: { select: LIST_REVISION_SELECT },
         owner: OWNER_TEAM_SELECT,
         team: TEAM_REF_SELECT,
       },
     }),
     opts.teamWhere
-      ? prisma.quotation.findMany({ where: { AND: [where, opts.teamWhere] }, select: { revisions: { select: { status: true, total: true, revision: true } } } })
+      ? prisma.quotation.findMany({
+          where: { AND: [where, opts.teamWhere] },
+          select: { ...RATE_SELECT, revisions: { select: { status: true, total: true, revision: true } } },
+        })
       : null,
   ]);
   const flat = (rows: { outcome: string; _count: { _all: number } }[]) =>
@@ -1184,10 +1202,12 @@ export async function quotationListSummary(
   tabCounts[''] = perOutcome.reduce((t, r) => t + r._count._all, 0);
 
   // The set split by the owner's team (shared/team.ts), the lists' team cards.
+  // Every figure in pesos: a quotation in another currency counts at its own
+  // rate (shared/exchangeRates.ts, 2026-10-17).
   let valueCents = 0;
   const shares: { team: TeamRef; cents: number }[] = [];
   for (const r of valued) {
-    const cents = toCents(quotationValue(r.revisions));
+    const cents = toCents(inBase(quotationValue(r.revisions), r));
     valueCents += cents;
     // The tag the SCORO import gave it, else its owner's team.
     shares.push({ team: quotationTeamOf(r), cents });
@@ -1197,9 +1217,14 @@ export async function quotationListSummary(
   // The stages, as Admin › Pipeline Stages names and colours them — sent with
   // the counts so a list reader needs no pipeline right to filter by them.
   const tabs = quotationStages(stages).map((st) => ({ value: st.key, label: st.label, color: st.color }));
-  const team = teamRows ? { count: teamRows.length, value: teamRows.reduce((t, r) => t + toCents(quotationValue(r.revisions)), 0) / 100 } : undefined;
+  const team = teamRows ? { count: teamRows.length, value: teamRows.reduce((t, r) => t + toCents(inBase(quotationValue(r.revisions), r)), 0) / 100 } : undefined;
   const margin = opts.margin
-    ? await revisionsMargin(valued.map((r) => valueRevision(r.revisions)).filter((r): r is NonNullable<typeof r> => !!r))
+    ? await revisionsMargin(
+        valued.flatMap((r) => {
+          const rev = valueRevision(r.revisions);
+          return rev ? [{ ...rev, rate: rateOf(r) }] : [];
+        }),
+      )
     : undefined;
   return { tabs, tabCounts, count: valued.length, value: valueCents / 100, teams, ...(team ? { team } : {}), ...(margin ? { margin } : {}) };
 }
@@ -1213,7 +1238,8 @@ export async function quotationListSummary(
  * Only computed where the caller may see every listed quotation's cost.
  */
 export async function revisionsMargin(
-  revisions: { id: string; discountPct: Prisma.Decimal; vatRate: Prisma.Decimal; vatInclusive: boolean }[],
+  /** `rate`: pesos per unit of the quotation's currency (1 when left out). */
+  revisions: { id: string; discountPct: Prisma.Decimal; vatRate: Prisma.Decimal; vatInclusive: boolean; rate?: number }[],
 ): Promise<{ amount: number; pct: number | null; costed: number }> {
   const sums = revisions.length
     ? await prisma.quotationItem.groupBy({
@@ -1235,8 +1261,9 @@ export async function revisionsMargin(
       vatRate: rev.vatRate,
       vatInclusive: rev.vatInclusive,
     });
-    marginCents += toCents(t.cost.totalMargin);
-    netCents += toCents(t.netOfTax);
+    const rate = rev.rate ?? 1;
+    marginCents += toCents(t.cost.totalMargin * rate);
+    netCents += toCents(t.netOfTax * rate);
     costed++;
   }
   return { amount: marginCents / 100, pct: netCents > 0 ? Math.round((marginCents / netCents) * 1000) / 10 : null, costed };
@@ -1488,6 +1515,9 @@ quotationRoutes.get(
       lastNumber: last?.number ?? null,
       employeeNo: preview.employeeNo,
       linked: preview.linked,
+      // The person on the register with no employee number yet, whose
+      // quotation number the save will refuse until one is set (2026-10-18).
+      missingNumber: preview.missingNumber,
       // Whether the pattern prints the author's digits at all — an unlinked
       // account only matters when it does.
       usesEmployeeDigits: (template?.pattern ?? '').includes('{EMP}'),
@@ -1497,6 +1527,8 @@ quotationRoutes.get(
       // A new quotation is in PHP unless the author picks another (2026-10-11).
       currency: DEFAULT_QUOTATION_CURRENCY,
       currencies: QUOTATION_CURRENCIES,
+      // Pesos per unit, as Settings keep them (2026-10-17): the editor's default rate.
+      exchangeRates: await exchangeRates(),
       // The team the quotation counts under (2026-10-12): the author's, unless picked.
       ownerTeamId: ownerTeam?.id ?? null,
       teams,
@@ -1577,8 +1609,7 @@ quotationRoutes.get(
     const brand = memoryTerm(req.query.brand);
     const productType = memoryTerm(req.query.productType);
     const partNumber = memoryTerm(req.query.partNumber);
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
-    const mine: Prisma.QuotationWhereInput = onlyOwn ? { ownerId: me.id } : {};
+    const mine: Prisma.QuotationWhereInput = quotationsReadable(me) ?? {};
     const readable = { revision: { quotation: mine } };
     const like = (column: string) => (q ? { [column]: { contains: q, mode: 'insensitive' as const } } : {});
 
@@ -1691,7 +1722,6 @@ quotationRoutes.get(
       res.json([]);
       return;
     }
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
     const past = await prisma.quotationItem.findMany({
       where: {
         isHeading: false,
@@ -1702,7 +1732,7 @@ quotationRoutes.get(
           { brand: { contains: q, mode: 'insensitive' } },
           { description: { contains: q, mode: 'insensitive' } },
         ],
-        revision: { quotation: onlyOwn ? { ownerId: me.id } : {} },
+        revision: { quotation: quotationsReadable(me) ?? {} },
       },
       select: {
         title: true,
@@ -1796,7 +1826,7 @@ quotationRoutes.get(
 /**
  * The lines a costing's scope of work would give a quotation — the editor's
  * preview before anything is saved. The same mapping `from-costing` writes
- * (`quotationLinesFromSections`), so what the page shows is what is stored.
+ * (`quotationLinesFromCostings`), so what the page shows is what is stored.
  * Prices only: a section's value is its share of the contract, not a cost.
  * Declared above `/:id` or that route swallows it.
  */
@@ -1805,13 +1835,16 @@ quotationRoutes.get(
   // The create form and the edit page both preview it.
   requireAny('gops.quotations.create', 'gops.quotations.edit_own', 'gops.quotations.edit_all'),
   handler(async (req, res) => {
-    const costingId = typeof req.query.costingId === 'string' ? req.query.costingId.trim() : '';
-    if (!costingId) throw badRequest('Say which costing — ?costingId=');
-    const costing = await prisma.costing.findUnique({ where: { id: costingId }, select: { id: true } });
-    if (!costing) throw notFound('Costing not found');
-    const lines = quotationLinesFromSections(await costingScopeSections(costingId));
+    // One costing (`?costingId=`) or several, comma-separated, the first first (2026-10-19).
+    const raw = typeof req.query.costingIds === 'string' ? req.query.costingIds : typeof req.query.costingId === 'string' ? req.query.costingId : '';
+    const costingIds = cleanCostingIds(raw.split(','));
+    if (!costingIds.length) throw badRequest('Say which costing — ?costingId=');
+    const costings = await costingsForQuote(costingIds);
+    if (costings.length !== costingIds.length) throw notFound(costingIds.length === 1 ? 'Costing not found' : 'One of the costings was not found');
+    const lines = quotationLinesFromCostings(costings);
     res.json(
       lines.map((l) => ({
+        isHeading: l.isHeading,
         title: l.title,
         description: l.description,
         quantity: num(l.quantity),
@@ -1955,6 +1988,8 @@ quotationRoutes.get(
       companyVatRate: companyRate,
       taxOptions: quotationTaxOptions(companyRate),
       currencies: QUOTATION_CURRENCIES,
+      exchangeRate: quotation.exchangeRate == null ? null : Number(quotation.exchangeRate),
+      exchangeRates: await exchangeRates(),
       approvalOptions: options,
       approvalRoutes,
       // The customer's own address — what the quotation prints unless a site is chosen (2026-10-11).
@@ -2119,11 +2154,15 @@ const quotationSchema = z.object({
   /** No longer asked for on the page; a quotation takes its lead's, else 50. */
   probability: z.number().int().min(0).max(100).optional(),
   costingId: z.string().optional().nullable(),
+  /** Several costings, the first first (2026-10-19); wins over `costingId`. */
+  costingIds: z.array(z.string()).max(10, 'A quotation takes at most ten costings').optional().nullable(),
   terms: z.string().optional().nullable(),
   validityDays: z.number().int().min(1).optional(),
   expectedClosing: z.string().optional().nullable(),
   /** PHP unless another is picked (2026-10-11); one of QUOTATION_CURRENCIES. */
   currency: z.enum(QUOTATION_CURRENCY_CODES, { message: 'Choose a currency from the list' }).optional(),
+  /** Pesos per unit of `currency` (2026-10-17); Settings' rate when left out. Ignored for PHP. */
+  exchangeRate: z.number().positive('The exchange rate must be above zero').max(1_000_000).optional().nullable(),
   // SCORO's header fields. Payment terms default to the customer's own.
   prNumber: z.string().trim().max(120).optional().nullable(),
   delivery: z.string().trim().max(500).optional().nullable(),
@@ -2179,6 +2218,9 @@ quotationRoutes.post(
     const me = currentUser(req);
     const body = parseBody(createQuotationSchema, req.body);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
+    // One costing or several (2026-10-19), checked before a number is issued.
+    const createCostings = costingIdsOf(body) ?? [];
+    await assertCostingsExist(createCostings);
 
     /*
       The author. Their employee digits go into the number, and "only the
@@ -2262,13 +2304,17 @@ quotationRoutes.post(
           probability: body.probability ?? (lead?.probability ? lead.probability : 50),
           expectedClosing,
           currency: body.currency ?? DEFAULT_QUOTATION_CURRENCY,
+          exchangeRate: storedRate(body.currency ?? DEFAULT_QUOTATION_CURRENCY, body.exchangeRate, await exchangeRates(tx)),
           teamId,
           revisions: {
             create: [
               {
                 revision: 0,
                 status: 'DRAFT',
-                costingId: body.costingId || null,
+                costingId: createCostings[0] ?? null,
+                ...(createCostings.length > 1
+                  ? { otherCostings: { create: createCostings.slice(1).map((costingId, i) => ({ costingId, sortOrder: i })) } }
+                  : {}),
                 validityDays: body.validityDays ?? 30,
                 terms: body.terms || null,
                 notes: body.notes || null,
@@ -2425,6 +2471,14 @@ quotationRoutes.patch(
         throw badRequest(`The currency cannot change — sales order ${before.salesOrders[0].number} was booked in ${before.currency}`);
       }
       data.currency = body.currency;
+    }
+    // The rate is the quotation's own: changed with its currency (Settings'
+    // rate unless one is typed), or on its own — a summary's conversion, never
+    // a figure on the quotation, so it moves at any stage.
+    const nextCurrency = (data.currency as string | undefined) ?? before.currency;
+    if (data.currency !== undefined || body.exchangeRate !== undefined) {
+      const typed = body.exchangeRate ?? (data.currency !== undefined ? null : Number(before.exchangeRate ?? 0) || null);
+      data.exchangeRate = storedRate(nextCurrency, typed, await exchangeRates());
     }
     if (body.contactId !== undefined) {
       data.contact = body.contactId ? { connect: { id: body.contactId } } : { disconnect: true };
@@ -2760,6 +2814,7 @@ quotationRoutes.post(
       );
     }
     const nextRevision = (latest?.revision ?? -1) + 1;
+    const latestCostings = latest ? await revisionCostingIds(latest) : [];
 
     const { created, withdrawn } = await prisma.$transaction(async (tx) => {
       let withdrawn = false;
@@ -2777,6 +2832,10 @@ quotationRoutes.post(
           revision: nextRevision,
           status: 'DRAFT',
           costingId: latest?.costingId ?? null,
+          // The other costings come along too (2026-10-19).
+          ...(latestCostings.length > 1
+            ? { otherCostings: { create: latestCostings.slice(1).map((costingId, i) => ({ costingId, sortOrder: i })) } }
+            : {}),
           validityDays: latest?.validityDays ?? 30,
           terms: latest?.terms ?? null,
           notes: latest?.notes ?? null,
@@ -2834,6 +2893,8 @@ quotationRoutes.post(
 
 const revisionSchema = z.object({
   costingId: z.string().optional().nullable(),
+  /** Several costings, the first first (2026-10-19); wins over `costingId`. */
+  costingIds: z.array(z.string()).max(10, 'A quotation takes at most ten costings').optional().nullable(),
   validityDays: z.number().int().min(1).optional(),
   terms: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
@@ -2873,11 +2934,15 @@ quotationRoutes.patch(
     const { revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
     const body = parseBody(revisionSchema, req.body);
     await checkVatRate(body.vatRate, revision.vatRate);
+    const costingIds = costingIdsOf(body);
+    if (costingIds) await assertCostingsExist(costingIds);
 
+    if (costingIds) {
+      await prisma.$transaction((tx) => setRevisionCostings(tx, req.params.revisionId, costingIds));
+    }
     await prisma.quotationRevision.update({
       where: { id: req.params.revisionId },
       data: {
-        ...(body.costingId !== undefined ? { costingId: body.costingId || null } : {}),
         ...(body.validityDays !== undefined ? { validityDays: body.validityDays } : {}),
         ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
@@ -2929,17 +2994,25 @@ quotationRoutes.post(
     const { revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
     if (!revision.costingId) throw badRequest('Link a costing to this revision first');
 
-    const sections = await costingScopeSections(revision.costingId);
-    if (!sections.length) {
-      throw badRequest('That costing has no scope of work yet — add sections to it first');
+    // Every costing the revision names (2026-10-19), the first first.
+    const costings = await costingsForQuote(await revisionCostingIds(revision));
+    const empty = costings.find((c) => !c.sections.length);
+    if (empty) {
+      throw badRequest(
+        costings.length > 1
+          ? `${empty.number} has no scope of work yet — add sections to it first`
+          : 'That costing has no scope of work yet — add sections to it first',
+      );
     }
+    const lines = quotationLinesFromCostings(costings);
+    const sections = lines.filter((l) => !l.isHeading);
 
     await prisma.$transaction(async (tx) => {
       await tx.quotationItem.deleteMany({ where: { revisionId: req.params.revisionId } });
       await tx.quotationRevision.update({ where: { id: req.params.revisionId }, data: { importedUnchanged: false } });
       await tx.quotationItem.createMany({
         // The one mapping (shared/quotation.ts) — the editor previews the same.
-        data: quotationLinesFromSections(sections).map((line) => ({
+        data: lines.map((line) => ({
           revisionId: req.params.revisionId,
           ...line,
         })),
@@ -2952,7 +3025,10 @@ quotationRoutes.post(
         entityType: 'quotation',
         entityId: req.params.id,
         action: 'UPDATED',
-        summary: `Filled revision ${revision.revision} from the costing's scope of work (${sections.length} lines)`,
+        summary:
+          costings.length > 1
+            ? `Filled revision ${revision.revision} from the scope of work of ${costings.map((c) => c.number).join(' and ')} (${sections.length} lines)`
+            : `Filled revision ${revision.revision} from the costing's scope of work (${sections.length} lines)`,
       },
       req,
     );
@@ -3250,7 +3326,7 @@ type LoadedQuotation = NonNullable<Awaited<ReturnType<typeof loadQuotation>>>;
 export async function printableQuotation(me: ResolvedUser, id: string, deciderOnly = false): Promise<LoadedQuotation> {
   const quotation = await loadQuotation(id);
   if (!quotation) throw notFound('Quotation not found');
-  const visible = !deciderOnly && (me.isSuperAdmin || me.permissions.has('gops.quotations.view_all') || quotation.ownerId === me.id);
+  const visible = !deciderOnly && readsQuotation(me, quotation);
   // A stand-in (or an approver) with no quotation right opens it while it
   // waits on them, and only then (`requireAnyOrDecider`).
   if (!visible && !(await mayDecide(me.id, 'quotation', quotation.revisions.map((r) => r.id)))) {
@@ -3463,10 +3539,10 @@ registerAttachmentGuard(
   {
     write: async (user, id) => {
       if (user.isSuperAdmin) return true;
-      const q = await prisma.quotation.findUnique({ where: { id }, select: { ownerId: true } });
+      const q = await prisma.quotation.findUnique({ where: { id }, select: { ownerId: true, teamId: true } });
       if (!q) return false;
       if (canEditRecord(user, 'gops', 'quotations', q.ownerId)) return true;
-      const reads = user.permissions.has('gops.quotations.view_all') || q.ownerId === user.id;
+      const reads = readsQuotation(user, q);
       return reads && user.permissions.has('gops.sales_orders.create');
     },
   },
@@ -3793,9 +3869,25 @@ async function checkInvitees(ids: string[], assignedToId: string, keep: string[]
   return wanted;
 }
 
+/**
+ * Who may change or remove an activity (2026-10-18): Edit All anyone's, Edit
+ * Own (or, for a removal, Delete) the ones they are on — booked for, invited
+ * or booked by them. `can()` gives a super admin everything.
+ */
+function mayChangeActivity(
+  me: ReturnType<typeof currentUser>,
+  a: { assignedToId: string; createdById?: string | null; invitees?: { userId: string }[] },
+  removing = false,
+): boolean {
+  if (can(me, 'gops.calendar.edit_all')) return true;
+  if (!removing && !can(me, 'gops.calendar.edit_own')) return false;
+  return isOnActivity(a, me.id);
+}
+
 activityRoutes.post(
   '/',
   require_('gops.calendar.view_all'),
+  require_('gops.calendar.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(activitySchema, req.body);
@@ -3905,6 +3997,7 @@ activityRoutes.post(
 activityRoutes.patch(
   '/:id',
   require_('gops.calendar.view_all'),
+  requireAny('gops.calendar.edit_own', 'gops.calendar.edit_all'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(activitySchema.partial(), req.body);
@@ -3913,6 +4006,8 @@ activityRoutes.patch(
       include: { invitees: { select: { userId: true } } },
     });
     if (!existing) throw notFound('Activity not found');
+    // Edit Own is the activities you are on; Edit All anyone's (2026-10-18).
+    if (!mayChangeActivity(me, existing)) throw forbidden('You may change only the activities you are on');
     // A private activity is changed only by the people on it.
     if (existing.isPrivate && !me.isSuperAdmin && !isOnActivity(existing, me.id)) {
       throw forbidden('A private activity is changed only by the people on it');
@@ -4039,6 +4134,7 @@ activityRoutes.patch(
 activityRoutes.delete(
   '/:id',
   require_('gops.calendar.view_all'),
+  require_('gops.calendar.delete'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const existing = await prisma.salesActivity.findUnique({
@@ -4046,6 +4142,7 @@ activityRoutes.delete(
       include: { invitees: { select: { userId: true } } },
     });
     if (!existing) throw notFound('Activity not found');
+    if (!mayChangeActivity(me, existing, true)) throw forbidden('You may remove only the activities you are on');
     if (existing.isPrivate && !me.isSuperAdmin && !isOnActivity(existing, me.id)) {
       throw forbidden('A private activity is removed only by the people on it');
     }
@@ -4153,6 +4250,7 @@ async function loadBoard(req: Parameters<typeof currentUser>[0]): Promise<BoardR
             discountPct: true,
             importedUnchanged: true,
             costing: { select: { contractValue: true, totalCost: true } },
+            otherCostings: { select: { costing: { select: { contractValue: true, totalCost: true } } } },
             jobs: { select: { id: true, number: true }, take: 1 },
           },
         },
@@ -4185,7 +4283,7 @@ async function loadBoard(req: Parameters<typeof currentUser>[0]): Promise<BoardR
 /** Anyone who sees the board reads the stages; the admin page reads them too. */
 pipelineRoutes.get(
   '/stages',
-  requireAny('gops.pipeline.view_all', 'admin.pipeline_stages.view_all'),
+  requireAny('gops.pipeline.view_all', 'admin.pipeline_stages.view_all', 'admin.pipeline_stages.view_own'),
   handler(async (_req, res) => {
     res.json({ stages: await pipelineStages(), overrides: await pipelineStageOverrides(), defaults: DEFAULT_STAGES });
   }),
@@ -4199,7 +4297,8 @@ pipelineRoutes.get(
  */
 pipelineRoutes.put(
   '/stages',
-  require_('admin.pipeline_stages.edit_all'),
+  // Either key of the pair saves the page — it keeps no record of anybody's (2026-10-18).
+  requireEdit('admin', 'pipeline_stages'),
   handler(async (req, res) => {
     const overrides = parseBody(stageSettingsSchema, req.body);
     const before = await prisma.setting.findUnique({ where: { key: STAGE_SETTING_KEY } });
@@ -4226,7 +4325,8 @@ pipelineRoutes.put(
 
 pipelineRoutes.delete(
   '/stages',
-  require_('admin.pipeline_stages.edit_all'),
+  // Either key of the pair saves the page — it keeps no record of anybody's (2026-10-18).
+  requireEdit('admin', 'pipeline_stages'),
   handler(async (req, res) => {
     const before = await prisma.setting.findUnique({ where: { key: STAGE_SETTING_KEY } });
     if (before) {
@@ -4487,7 +4587,8 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
       : q.expectedClosing
         ? q.expectedClosing.toISOString().slice(0, 10)
         : null;
-    const value = quotationValue(q.revisions);
+    // In pesos: the forecast adds quotations (2026-10-17, shared/exchangeRates.ts).
+    const value = inBase(quotationValue(q.revisions), q);
     const stage = quotationStage(q.outcome, false, stages);
     const probability = outcomeOdds(q.outcome, q.probability);
     return {

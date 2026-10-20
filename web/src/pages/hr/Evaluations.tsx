@@ -90,7 +90,8 @@ interface EmployeeRef {
   lastName: string;
   position: string | null;
   employmentType: string;
-  department: { id: string; name: string } | null;
+  /** Their team (the department is gone, 2026-10-19). */
+  industry: { id: string; code: string; name: string } | null;
 }
 
 export interface EvaluationRow {
@@ -254,7 +255,7 @@ export function DueTable({
                 <div className="faint">
                   <span className="mono">{r.employee.employeeNo}</span>
                   {r.employee.position ? ` · ${r.employee.position}` : ''}
-                  {r.employee.department ? ` · ${r.employee.department.name}` : ''}
+                  {r.employee.industry ? ` · ${r.employee.industry.code}` : ''}
                 </div>
               </td>
               <td>
@@ -363,7 +364,7 @@ export function Evaluations() {
           </div>
           <div className="faint">
             {r.employee.position ?? humanise(r.employee.employmentType)}
-            {r.employee.department ? ` · ${r.employee.department.name}` : ''}
+            {r.employee.industry ? ` · ${r.employee.industry.code}` : ''}
           </div>
         </div>
       ),
@@ -501,7 +502,8 @@ interface EmployeeLookup {
   lastName: string;
   position: string | null;
   employmentType: string;
-  department: { id: string; name: string } | null;
+  /** Their team (the department is gone, 2026-10-19). */
+  industry: { id: string; code: string; name: string } | null;
   hasUser: boolean;
 }
 
@@ -656,7 +658,7 @@ export function ScheduleModal({
               {people.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.lastName}, {p.firstName} · {p.employeeNo} · {humanise(p.employmentType)}
-                  {p.department ? ` · ${p.department.name}` : ''}
+                  {p.industry ? ` · ${p.industry.code}` : ''}
                 </option>
               ))}
             </select>
@@ -870,7 +872,7 @@ export function EvaluationDetail() {
           <>
             <strong>{humanise(ev.kind)}</strong> evaluation · <span className="mono">{ev.employee.employeeNo}</span>
             {ev.employee.position ? ` · ${ev.employee.position}` : ''}
-            {ev.employee.department ? ` · ${ev.employee.department.name}` : ''} · hired{' '}
+            {ev.employee.industry ? ` · ${ev.employee.industry.code}` : ''} · hired{' '}
             {formatDate(ev.employee.dateHired)} · due {formatDate(ev.dueDate)} · evaluator{' '}
             <strong>{ev.evaluator.name}</strong>
             {ev.scheduledBy && ev.scheduledBy.id !== ev.evaluator.id ? ` · scheduled by ${ev.scheduledBy.name}` : ''}

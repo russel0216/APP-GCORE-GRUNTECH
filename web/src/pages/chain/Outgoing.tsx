@@ -145,6 +145,7 @@ export function StockIssues() {
               { value: 'DRAFT', label: 'Draft' },
               { value: 'PENDING_APPROVAL', label: 'Pending approval' },
               { value: 'ISSUED', label: 'Issued' },
+              { value: 'CANCELLED', label: 'Cancelled' },
             ],
           },
           {
@@ -174,7 +175,10 @@ export function StockIssues() {
 // ════════════════════════════════════════════════════════════════════
 
 interface StockOption {
+  /** The item's id — or `p:<id>` for the slip's project's own stock (2026-10-18). */
   itemId: string;
+  /** The project's own goods: charged to it when they arrived, so issuing them charges nothing again. */
+  projectStock?: boolean;
   code: string;
   partNumber: string | null;
   brand: string | null;
@@ -211,8 +215,12 @@ interface Existing {
   carrier: string | null;
   driverName: string | null;
   instructions: string | null;
-  items: { itemId: string; quantity: number; serialNo: string | null; condition: string | null; remarks: string | null }[];
+  items: { itemId: string; projectStock?: boolean; quantity: number; serialNo: string | null; condition: string | null; remarks: string | null }[];
 }
+
+/** A line's pick: the item, or `p:<item>` from the project's own stock. */
+const OWN = 'p:';
+const pickOf = (itemId: string, projectStock?: boolean) => (projectStock ? `${OWN}${itemId}` : itemId);
 
 /** The conditions a line usually leaves in; anything else may be typed. */
 const CONDITIONS = ['New', 'Good', 'Used — good', 'Refurbished', 'For repair'];
@@ -288,7 +296,7 @@ export function OutgoingEditor() {
           };
           const ls = r.items.map((i) => ({
             key: newKey(),
-            itemId: i.itemId,
+            itemId: pickOf(i.itemId, i.projectStock),
             serialNo: i.serialNo ?? '',
             quantity: String(i.quantity),
             condition: i.condition ?? '',
@@ -327,13 +335,23 @@ export function OutgoingEditor() {
     }
     let live = true;
     api
-      .get<{ stock: StockOption[] }>(`/stock-issues/options${qs({ warehouseId: header.warehouseId })}`)
-      .then((r) => live && setStock(r.stock))
+      .get<{ stock: StockOption[]; projectStock: StockOption[] }>(
+        `/stock-issues/options${qs({ warehouseId: header.warehouseId, jobId: header.jobId || undefined })}`,
+      )
+      .then(
+        (r) =>
+          live &&
+          setStock([
+            // The project's own goods first, then the company's stock.
+            ...(r.projectStock ?? []).map((o) => ({ ...o, itemId: pickOf(o.itemId, true), projectStock: true })),
+            ...r.stock,
+          ]),
+      )
       .catch(() => live && setStock([]));
     return () => {
       live = false;
     };
-  }, [header.warehouseId]);
+  }, [header.warehouseId, header.jobId]);
 
   const stockOf = useMemo(() => new Map(stock.map((s) => [s.itemId, s])), [stock]);
   const sent = lines.filter((l) => l.itemId || l.quantity);
@@ -384,7 +402,8 @@ export function OutgoingEditor() {
       instructions: header.instructions.trim() || null,
       notes: header.notes.trim() || null,
       lines: sent.map((l) => ({
-        itemId: l.itemId,
+        itemId: l.itemId.startsWith(OWN) ? l.itemId.slice(OWN.length) : l.itemId,
+        projectStock: l.itemId.startsWith(OWN),
         quantity: Number(l.quantity),
         serialNo: l.serialNo.trim() || null,
         condition: l.condition.trim() || null,
@@ -565,7 +584,7 @@ export function OutgoingEditor() {
           </section>
 
           <section className="card" aria-labelledby="out-lines">
-            <div className="prq-card-head">
+            <div className="card-head">
               <h2 id="out-lines" className="card-title">Outgoing items</h2>
               <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls, blankLine()])}>
                 + Add line
@@ -660,7 +679,8 @@ export function OutgoingEditor() {
             )}
             <p className="prq-hint">
               Only what this warehouse holds available can go out. The amount is at the warehouse's average cost — what a project is charged; the
-              printed receipt shows no prices.
+              printed receipt shows no prices. With a project chosen, its own goods (bought for it and received here) are listed first: they were
+              charged to the project when they arrived, so issuing them charges nothing again.
             </p>
           </section>
 
@@ -715,7 +735,7 @@ export function OutgoingEditor() {
 /** What the warehouse holds, searched by code, part number, brand or name. */
 function StockLookup({ stock, value, onPick }: { stock: StockOption[]; value: string; onPick: (itemId: string) => void }) {
   const chosen = stock.find((s) => s.itemId === value) ?? null;
-  const label = (s: StockOption) => `${s.partNumber ?? s.code} — ${s.name}`;
+  const label = (s: StockOption) => `${s.partNumber ?? s.code} — ${s.name}${s.projectStock ? ' (project stock)' : ''}`;
   const [term, setTerm] = useState(chosen ? label(chosen) : '');
   const [open, setOpen] = useState(false);
   const shown = useRef(value);
@@ -767,6 +787,7 @@ function StockLookup({ stock, value, onPick }: { stock: StockOption[]; value: st
               >
                 <span className="mono">{s.partNumber ?? s.code}</span> — {s.name}
                 <span className="muted">
+                  {s.projectStock ? ' · the project’s own stock' : ''}
                   {s.brand ? ` · ${s.brand}` : ''} · {qtyText(s.available)} {s.unit} available
                 </span>
               </button>
@@ -820,6 +841,8 @@ interface IssueRecord {
   }[];
   canEdit: boolean;
   canDelete: boolean;
+  canCancel: boolean;
+  cancelReason?: string | null;
   needsApproval: boolean | null;
   canSubmit: boolean;
   canIssue: boolean;
@@ -862,7 +885,9 @@ export function StockIssueDetail() {
   const isDraft = status === 'DRAFT';
   const receiver = issue.issuedTo?.name ?? issue.issuedToName;
   const mine = !!me && issue.issuedToId === me.user.id;
-  const showCost = can('gchain.stock_issuance.view_all');
+  // The register's readers see the cost — View All, or View Own on a slip the
+  // viewer issued (2026-10-18); the person it went to reads it without.
+  const showCost = can('gchain.stock_issuance.view_all') || (can('gchain.stock_issuance.view_own') && !!me && issue.issuedBy.id === me.user.id);
 
   /** Asked in the confirm bar, which shows a refusal — so these throw rather than catching. */
   async function commit() {
@@ -879,6 +904,11 @@ export function StockIssueDetail() {
     setIssue(await api.post<IssueRecord>(`/stock-issues/${id}/withdraw`));
     setReload((n) => n + 1);
     toast('ok', `${number} pulled back to a draft`);
+  }
+  async function cancel(reason: string) {
+    setIssue(await api.post<IssueRecord>(`/stock-issues/${id}/cancel`, { reason }));
+    setReload((n) => n + 1);
+    toast('ok', `${number} cancelled`);
   }
   async function remove() {
     await api.del(`/stock-issues/${id}`);
@@ -986,12 +1016,27 @@ export function StockIssueDetail() {
               onConfirm: withdraw,
             },
           },
+          issue.canCancel && {
+            label: 'Cancel slip',
+            danger: true,
+            confirm: {
+              title: `Cancel ${number}?`,
+              body:
+                status === 'PENDING_APPROVAL'
+                  ? 'Its approval is withdrawn and the approver is told. Nothing has left the store. A cancelled slip can then be deleted.'
+                  : 'Nothing has left the store. A cancelled slip can then be deleted.',
+              confirmLabel: 'Cancel slip',
+              reason: 'required',
+              minReason: 3,
+              onConfirm: cancel,
+            },
+          },
           issue.canDelete && {
             label: 'Delete',
             danger: true,
             confirm: {
               title: `Delete ${number}?`,
-              body: 'Nothing has left the store yet. It cannot be undone.',
+              body: status === 'CANCELLED' ? 'Nothing left the store on it. It cannot be undone.' : 'Nothing has left the store yet. It cannot be undone.',
               confirmLabel: 'Delete',
               onConfirm: remove,
             },
@@ -1005,6 +1050,12 @@ export function StockIssueDetail() {
         <div className="qd-route">
           <span className="qd-route-label">{allHeld(issue.approvalRoute) ? 'No one else’s approval needed' : 'Submit for approval sends it to'}</span>
           <ApprovalStepper steps={previewSteps(issue.approvalRoute)} />
+        </div>
+      )}
+      {status === 'CANCELLED' && (
+        <div className="alert info" role="status">
+          <strong>Cancelled</strong>
+          {issue.cancelReason ? `: ${issue.cancelReason}` : '.'}
         </div>
       )}
       <DecisionNote documentType="stock_issue" documentId={String(id)} reloadToken={reload} />

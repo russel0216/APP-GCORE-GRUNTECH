@@ -25,3 +25,11 @@ export function throttled(key: string, limit: number, windowMs: number): boolean
   recent.set(key, hits);
   return over;
 }
+
+/** Whole seconds until the oldest attempt under `key` leaves the window — what a refusal tells the person to wait. */
+export function retryAfterSeconds(key: string, windowMs: number): number {
+  const now = Date.now();
+  const hits = (recent.get(key) ?? []).filter((t) => now - t < windowMs);
+  if (!hits.length) return 0;
+  return Math.max(1, Math.ceil((Math.min(...hits) + windowMs - now) / 1000));
+}

@@ -20,6 +20,7 @@ import { deleteAttachmentsOf } from '../shared/attachments';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
+import { visibleOwners } from '../shared/team';
 import { registerSearch } from '../shared/search';
 import { nextNumber } from '../shared/numbering';
 import {
@@ -58,6 +59,7 @@ import {
 } from '../shared/inventory';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { canvassFigures, MAX_SHEET_SUPPLIERS, type SheetLine } from '../shared/canvassMath';
+import { jobCostingIds } from '../shared/costingSets';
 
 const D = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -113,7 +115,14 @@ function prListWhere(me: ResolvedUser, q: ListQuery): { where: Prisma.PurchaseRe
   const and: Prisma.PurchaseRequestWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gchain.purchase_requests.view_all');
   const mine = onlyOwn || q.scope === 'mine';
-  if (mine) and.push({ requestedById: me.id });
+  // View Own covers one's DIRECT REPORTS' requests too (2026-10-19), so a
+  // Team Leader or Technical Manager sees what their team asked for; the
+  // "Mine" switch is one's own alone.
+  // View Team reads the whole team's requests the same way.
+  if (onlyOwn && q.scope !== 'mine') {
+    and.push({ OR: [{ requestedById: { in: visibleOwners(me, 'gchain', 'purchase_requests') } }, { requestedBy: { supervisorId: me.id } }] });
+  }
+  else if (mine) and.push({ requestedById: me.id });
   const f = q.filters;
   const status = choice(f.status, PrStatus, 'Status');
   if (status) and.push({ status });
@@ -282,7 +291,7 @@ purchaseRequestRoutes.get(
 //
 // The owner's call: "Purchase request in Project should not be popup window,
 // it should be a full form with line item and budget allocation". The page
-// (`/g-ops/projects/:jobId/purchase-requests/new`, `/…/:id/edit`) reads three
+// (`/g-ops/purchase-requests/new?jobId=`, `/…/:id/edit`) reads three
 // things before anything is saved, each declared above `/:id`: the project's
 // budget by budget line, what a line may be filled from (the project's
 // costing and the item master), and the route submitting would take.
@@ -356,8 +365,10 @@ purchaseRequestRoutes.get(
  */
 export async function lineSuggestions(me: ResolvedUser, term: string, jobId: string) {
   const job = jobId
-    ? await prisma.job.findUnique({ where: { id: jobId }, select: { costingId: true, projectManagerId: true } })
+    ? await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, costingId: true, projectManagerId: true } })
     : null;
+  // Every costing the project was built from (2026-10-19), the first first.
+  const costingIds = job ? await jobCostingIds(job) : [];
   const seesCostingCost =
     can(me, 'gops.costing.view_all') ||
     can(me, 'gops.budget_monitoring.view_all') ||
@@ -374,7 +385,7 @@ export async function lineSuggestions(me: ResolvedUser, term: string, jobId: str
   const [costing, items] = await Promise.all([
     job
       ? prisma.costingLine.findMany({
-          where: { costingId: job.costingId, isHeading: false, ...words },
+          where: { costingId: { in: costingIds }, isHeading: false, ...words },
           orderBy: [{ costCategory: { sortOrder: 'asc' } }, { sortOrder: 'asc' }],
           take: term ? 25 : 500,
           select: {
@@ -1228,7 +1239,7 @@ purchaseRequestRoutes.post(
     const pr = await prisma.purchaseRequest.findUnique({
       where: { id: req.params.id },
       include: {
-        _count: { select: { orders: true } },
+        _count: { select: { orders: { where: { status: { not: 'CANCELLED' } } } } },
         canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
         rfqs: { where: { status: { in: ['DRAFT', 'SENT', 'QUOTED'] } }, select: { number: true } },
         pulloutSlips: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
@@ -1484,7 +1495,8 @@ function seesAllCanvasses(me: ResolvedUser) {
 /** Which canvasses a list query means — one rule for the list and its printed twin. */
 function canvassListWhere(me: ResolvedUser, q: ListQuery): Prisma.CanvassWhereInput {
   const and: Prisma.CanvassWhereInput[] = [];
-  if (!seesAllCanvasses(me) || q.scope === 'mine') and.push({ createdById: me.id });
+  if (q.scope === 'mine') and.push({ createdById: me.id });
+  else if (!seesAllCanvasses(me)) and.push({ createdById: { in: visibleOwners(me, 'gchain', 'canvass') } });
   const f = q.filters;
   const status = choice(f.status, CanvassStatus, 'Status');
   if (status) and.push({ status });
@@ -1705,7 +1717,7 @@ function mayEditCanvass(me: ResolvedUser, canvass: { createdById: string }): boo
 }
 
 function assertCanvassVisible(me: ResolvedUser, canvass: { createdById: string }) {
-  if (!seesAllCanvasses(me) && canvass.createdById !== me.id) throw notFound('Canvass not found');
+  if (!seesAllCanvasses(me) && !visibleOwners(me, 'gchain', 'canvass').includes(canvass.createdById)) throw notFound('Canvass not found');
 }
 
 /** The purchase orders placed on an award: the request's live orders with the winner. */
@@ -2768,6 +2780,13 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
     billsVisible: seesBills,
     canEdit: !!me && po.status === 'DRAFT' && mayEditPo(me, po),
     canWithdraw: !!me && po.status === 'PENDING_APPROVAL' && mayEditPo(me, po),
+    canCancel: !!me && (po.status === 'DRAFT' || po.status === 'PENDING_APPROVAL') && mayEditPo(me, po),
+    canDelete:
+      !!me &&
+      (po.status === 'DRAFT' || po.status === 'CANCELLED') &&
+      po.receivings.every((r) => r.status === 'CANCELLED') &&
+      can(me, 'gchain.purchase_orders.delete') &&
+      mayEditPo(me, po),
     /** What the order page's save claims on (`PUT /:id/sheet`'s `version`). */
     version: po.updatedAt.toISOString(),
     vatRate: num(po.vatRate),
@@ -2881,7 +2900,9 @@ purchaseOrderRoutes.get(
     const orderId = req.query.orderId ? String(req.query.orderId) : null;
     const po = orderId ? await prisma.purchaseOrder.findUnique({ where: { id: orderId }, select: { createdById: true } }) : null;
     if (orderId && !po) throw notFound('Purchase order not found');
-    res.json({ route: await routeBrief('purchase_order', amount, po?.createdById ?? me.id) });
+    // An importation (the page's Apply VAT off) goes to the Purchasing Manager (Importation).
+    const importation = String(req.query.importation ?? '') === '1';
+    res.json({ route: await routeBrief('purchase_order', amount, po?.createdById ?? me.id, null, { importation }) });
   }),
 );
 
@@ -3436,6 +3457,9 @@ purchaseOrderRoutes.post(
         subject: `${po.supplier.name}${po.job ? ` — ${po.job.number}` : ''}`,
         amount: num(po.total),
         link: `/g-chain/purchase-orders/${po.id}`,
+        // An importation (no VAT, 2026-10-16) goes to the Purchasing Manager
+        // (Importation), the owner's chart of 2026-10-17.
+        importation: num(po.vatRate) === 0,
         // Filed in the BUYER's name whoever presses Submit, as a purchase
         // request is in its requester's: the self-approval rule then keeps
         // the person who raised the order off its route, and the route the
@@ -3693,21 +3717,97 @@ onApprovalReopened('purchase_order', {
   },
 });
 
+/**
+ * Cancels a draft or pending order (2026-10-19, the owner's call: "allow
+ * deleting a cancelled purchase order" — and nothing could cancel one): its
+ * buyer or edit_all, the reason kept. A pending one's approval request is
+ * withdrawn in the same transaction, refused if a decision landed first.
+ * Neither state has committed, ordered or received anything, so nothing is
+ * released. An issued order is pulled back to draft first, which undoes what
+ * issuing did, then cancelled.
+ */
+purchaseOrderRoutes.post(
+  '/:id/cancel',
+  requireAny(...PO_EDIT),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled').max(2000) }), req.body);
+    const po = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } });
+    if (!po) throw notFound('Purchase order not found');
+    if (!mayEditPo(me, po)) throw forbidden('This order belongs to someone else');
+    if (po.status === 'CANCELLED') throw badRequest('This order is already cancelled');
+    if (po.status !== 'DRAFT' && po.status !== 'PENDING_APPROVAL') {
+      throw badRequest(`${po.number} is ${statusLabel(po.status).toLowerCase()} — pull it back to draft first, then cancel it`);
+    }
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.purchaseOrder.updateMany({
+        where: { id: po.id, status: po.status },
+        data: { status: 'CANCELLED', cancelReason: body.reason },
+      });
+      if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+      if (po.status === 'PENDING_APPROVAL') {
+        const withdrawn = await cancelOpenRequest('purchase_order', po.id, tx, `cancelled by ${me.name}: ${body.reason}`, me.id);
+        if (!withdrawn.length) {
+          const last = await tx.approvalRequest.findFirst({
+            where: { documentType: 'purchase_order', documentId: po.id },
+            orderBy: { createdAt: 'desc' },
+            select: { status: true },
+          });
+          if (last && (last.status === 'APPROVED' || last.status === 'REJECTED')) {
+            throw badRequest('It was decided a moment ago — reload to see where it stands');
+          }
+        }
+      }
+    });
+    await audit({ entityType: 'purchase_order', entityId: po.id, action: 'CANCELLED', summary: `${po.number} cancelled — ${body.reason}` }, req);
+    res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
+/**
+ * Deletes a draft or a CANCELLED order (2026-10-19): the delete right, and
+ * its buyer or edit_all; never one with a live incoming report (draft,
+ * pending or received) or a live supplier bill. Its lines cascade; its
+ * CANCELLED incoming reports — which posted nothing — go with it in the
+ * same transaction, each audited; the files go after the commit.
+ */
 purchaseOrderRoutes.delete(
   '/:id',
   require_('gchain.purchase_orders.delete'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const po = await prisma.purchaseOrder.findUnique({
       where: { id: req.params.id },
-      include: { _count: { select: { receivings: true } } },
+      include: {
+        receivings: { select: { id: true, number: true, status: true } },
+        bills: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
+      },
     });
     if (!po) throw notFound('Purchase order not found');
-    if (po._count.receivings > 0) throw badRequest('Goods have been received against this order');
-    if (po.status !== 'DRAFT') throw badRequest('Only a draft order can be deleted');
+    if (!mayEditPo(me, po)) throw forbidden('This order belongs to someone else');
+    const liveReports = po.receivings.filter((r) => r.status !== 'CANCELLED');
+    if (liveReports.length) {
+      throw badRequest(`Incoming report ${liveReports.map((r) => r.number).join(', ')} stands on ${po.number} — cancel it first`);
+    }
+    const goneReports = po.receivings;
+    if (po.bills.length) throw badRequest(`Supplier bill ${po.bills.map((b) => b.number).join(', ')} is matched to ${po.number} — cancel it first`);
+    if (po.status !== 'DRAFT' && po.status !== 'CANCELLED') throw badRequest('Only a draft or a cancelled order can be deleted — cancel it first');
 
-    await prisma.purchaseOrder.delete({ where: { id: req.params.id } });
+    await deleteOrRefuse(po.number, () =>
+      prisma.$transaction(async (tx) => {
+        if (goneReports.length) await tx.receiving.deleteMany({ where: { id: { in: goneReports.map((r) => r.id) }, status: 'CANCELLED' } });
+        await tx.purchaseOrder.delete({ where: { id: po.id } });
+      }),
+    );
+    await deleteAttachmentsOf('purchase_order', [po.id]);
+    if (goneReports.length) {
+      await deleteAttachmentsOf('receiving', goneReports.map((r) => r.id));
+      for (const r of goneReports) {
+        await audit({ entityType: 'receiving', entityId: r.id, action: 'DELETED', summary: `Deleted cancelled ${r.number} with ${po.number}` }, req);
+      }
+    }
     await audit(
-      { entityType: 'purchase_order', entityId: req.params.id, action: 'DELETED', summary: `Deleted ${po.number}` },
+      { entityType: 'purchase_order', entityId: po.id, action: 'DELETED', summary: `Deleted ${po.status === 'CANCELLED' ? 'cancelled ' : ''}${po.number}` },
       req,
     );
     res.json({ ok: true });
@@ -3824,7 +3924,7 @@ purchaseOrderRoutes.get(
     const slots = await approvalSlots(
       'purchase_order',
       po.id,
-      po.status === 'DRAFT' ? { amount: view.total, requesterId: po.createdById } : undefined,
+      po.status === 'DRAFT' ? { amount: view.total, requesterId: po.createdById, importation: num(po.vatRate) === 0 } : undefined,
     );
     const signatories: Signatory[] = [
       // A Purchasing Manager's own order: step 1 signed at submit, one timestamp.

@@ -25,7 +25,97 @@ four databases and four copies of "customer".
    `OWNED`, `OWNED_KEPT`, `SHARED`, `SHARED_KEPT`, `READ`, `REPORT` and
    `SETTINGS`, and verify-foundation reads the source and fails on a key no
    route or screen checks (the two view keys always count — `canView()`
-   puts the screen in the menu with them). Only three approve rights remain:
+   puts the screen in the menu with them). **No screen writes with another screen's
+   right** (2026-10-18, the owner's call: "check menu of Access, appear all
+   needed"): the Calendar is `OWNED` (Create books, Edit Own / Delete the
+   activities you are on — booked for, invited or booked by you —
+   `mayChangeActivity()` in routes/sales.ts, `activityRights()` on the web;
+   Edit All anyone's), Attendance is `SETTINGS` (View All opens the
+   register beside the HR dashboard right, Edit All corrects an entry — it
+   borrowed Employees › Edit All), and the Service Schedule and Report
+   Templates are `SHARED_KEPT` (Create books a call-out / starts or
+   duplicates a template, Edit All moves a visit / publishes a version —
+   they borrowed Preventive Maintenance › Create). `splitBorrowedRights()`
+   (`shared/accessSplit.ts`, the seed, once, `seed.accessSplit20261018`)
+   gave the new boxes to every role and ALLOW override holding the
+   borrowed right, so nobody lost anything (each split once, by key in
+   `done`; Pull-out Slips' View Own / Edit Own followed the same day, to
+   whoever held its Create, when anyone was let raise one); verify-foundation leaves that
+   file out of the "something checks it" corpus. **Every screen with Edit
+   All has View Own and Edit Own** (2026-10-18, the owner's call: "every
+   setting on Access should have Edit Own, View Own"): `SHARED`,
+   `SHARED_KEPT` and `SETTINGS` carry the pair, and each such entry's `own`
+   says what it means there (Admin › Roles shows it on the two boxes) —
+   the records one ADDED (`createdById`, new on Item, Warehouse, Position,
+   Course, Role, ApprovalWorkflow and the reference lists, filled once from
+   each row's CREATED audit row by `backfillOwnAuthors()`,
+   `seed.ownAuthorsBackfilled20261018`), one's own employee record, login,
+   attendance, pay rate, passport or path, the visits assigned to one, the
+   incoming reports one received and outgoing slips one issued, the stock
+   of items one added; a page that keeps no record of anybody's (Company,
+   Numbering, PDF Templates, Pipeline Stages, Appearance, HR / Finance
+   Settings) opens and saves on either key. System Settings and Document
+   Templates have View Own and View All alone: nothing on either ever read
+   their Edit All (one is read-only, the other edits under Report
+   Templates' rights), so those boxes went rather than gain a twin. ONE rule reads it:
+   `shared/ownScope.ts` — `requireView` / `requireEdit` (either key),
+   `ownOnly(me, m, s, where, mine)` narrows a list, its summary cards and its
+   paper alike, `assertCanView` (someone else's is a 404) and
+   `assertCanEdit` — and `mayView` / `mayEdit` / `mayEditPage` in
+   `web/src/lib/auth.tsx`; the web `Guard` on a `.view_all` admits the
+   matching `.view_own`. Pickers other screens use (`/customers/lookup` …)
+   and windows on other screens keep their View All. **Own is never
+   self-promotion**: Admin › Users' Edit Own changes one's own plain details
+   only (never roles, overrides, Active, Reports to, Supports teams, team,
+   number or password); Admin › Roles' Edit Own never changes a role one
+   holds; Employees' Edit Own changes one's personal and contact details
+   only (`OWN_EDITABLE`), the pay fields only with Pay Rates › Edit Own.
+   verify-foundation fails on a screen with `own` whose pair no route or
+   screen reads through those helpers. **The permission matrix: View and
+   Manage, each Own / Team / All, roles only** (2026-10-19, the owner's
+   call: "remove the override permission, instead create a table check box
+   for all list of role and permission — Permission View (VIEW OWN / VIEW
+   TEAM / VIEW ALL) and PERMISSION CREATE/EDIT (MANAGE OWN / MANAGE TEAM /
+   MANAGE ALL)"; his answers: one big matrix, Team = the same team (KAT,
+   HIT …), Delete / Approve / Export folded in, overrides dropped). Two
+   new actions, `view_team` and `edit_team`, on every preset that has the
+   own pair (and CAD J.O., G-OPS purchase requests, service costing,
+   People Flow, passports). `shared/permissionLevels.ts` (web copy
+   `lib/permissionLevels.ts`, pinned equal) is the ONE translation between
+   levels and keys: View Own → `view_own`, Team adds `view_team`, All adds
+   `view_all` and `export`; Manage Own → `create`, `edit_own`, `delete`,
+   Team adds `edit_team`, All adds `edit_all` and `approve`; a level is
+   offered only where the screen has its key (`levelOptions`). A level
+   includes the ones under it: `withImpliedLevels()` at resolve (`*_all` ⇒
+   `*_team` ⇒ `*_own`) and `impliedBy(key)` for holder queries
+   (`/users/lookup?holding=`, the CAD design team, clearance areas).
+   **Team is `Employee.industryId`**: `ResolvedUser.teamId` and
+   `teamMemberIds` (the active logins on the same team, oneself included;
+   a login with no team is a team of one). `ownScope.ts` reads it —
+   `viewScope` / `editScope` answer `all | team | own`, `ownOnly`'s `mine`
+   may be `(ids) => where` (every call is), `assertCanView` /
+   `assertCanEdit` / `mayEdit` take the record's owner, `onMyTeam()` —
+   and `canEditRecord` honours `edit_team`; `visibleOwners` /
+   `editableOwners` and the quotation / sales order readers sit in
+   `shared/team.ts`. "Mine" on a list stays one's own. Left Own-only on
+   purpose: leave, overtime, evaluations and clearances (HR-private; the
+   approver and direct-report doors stand), and for now the pull-out
+   slip's single read and the borrow-slip list. **Admin › Roles opens on
+   the matrix** (`pages/admin/PermissionMatrix.tsx`: screens as rows by
+   division, roles as columns by level, a View and a Manage select per
+   cell; division, roles-shown and screen filters; Save sends every
+   changed role to `PUT /roles/matrix` in one transaction, an audit row
+   per role, Edit Own's rules as `PUT /roles/:id`); `?view=roles` is the
+   role cards, whose editor is the same `LevelsTable` for one role.
+   **Per-person overrides are gone**: the panel on Admin › Users and `PUT
+   /users/:id/overrides` went, `resolveUser` reads none, and
+   `dropOverrides()` (`shared/overridesDrop.ts`, the seed, once,
+   `seed.overridesDropped20261019`) deleted every row, audited; the table
+   stays, unread. export/import-settings no longer carry them. A verify
+   script grants a key through a throwaway role, never an override. The
+   rest of the grid is
+   deliberate: a dashboard or report is View All and Export, and a document
+   that is kept has no Delete — a box there would do nothing. Only three approve rights remain:
    CAD dispatch, progress reports and training certificates. **A cancelled
    document may be deleted** (2026-10-11, the owner's call, reversing the
    trim for five of them): job orders, CAD J.O., projects and expenses
@@ -35,12 +125,50 @@ four databases and four copies of "customer".
    the holder of the delete right who raised it or may edit all, refuses
    while money stands behind it (an invoice on the job order; payment
    allocations on the claim or the request; for a project an invoice,
-   bill, PR, PO, stock issue, claim, advance or a budget request past
-   draft), runs through `deleteOrRefuse()` in `http/kit.ts` (a foreign key
+   bill, live PR, live PO, stock issue, claim, advance or a budget request
+   past draft — a project's own DRAFT, REJECTED or CANCELLED purchase
+   requests and its DRAFT or CANCELLED purchase orders with no live
+   incoming report and no bill go WITH it since 2026-10-19, in the same
+   transaction, each audited, the owner's call for clearing sample
+   projects), runs through `deleteOrRefuse()` in `http/kit.ts` (a foreign key
    that still points at it is a 400, nothing deleted), removes its files
    with `deleteAttachmentsOf()` after the commit, and writes one DELETED
    audit row. On the page it is ⋯ › **Delete**, last and red, asked in
    the confirm bar — the sales order's item, word for word. **A purchase
+   order is cancelled and deleted too** (2026-10-19, the owner's call):
+   `POST /purchase-orders/:id/cancel { reason }` — its buyer or edit_all,
+   a draft or a pending one (withdrawn through `cancelOpenRequest`; an
+   issued one is pulled back to draft first, which undoes what issue
+   did), `PurchaseOrder.cancelReason` kept — and `DELETE` takes a draft
+   or a cancelled one, its buyer or edit_all with the delete right,
+   refused while a live incoming report (draft, pending, received) or a
+   live supplier bill names it — its CANCELLED incoming reports, which
+   posted nothing, go with it, each audited; a cancelled order no longer
+   blocks its request's cancel. **An incoming report is deleted too**
+   (2026-10-19): Incoming carries `delete` (`[...SHARED_KEPT, 'delete']`);
+   `DELETE /receivings/:id` takes a DRAFT or CANCELLED one — neither posted
+   anything — its receiver or edit_all with the right, refused while a live
+   supplier bill names it; ⋯ › Delete on its page. **So is an outgoing
+   slip** (2026-10-19): `POST /stock-issues/:id/cancel { reason }` — whoever
+   may change it, a draft or a pending one (withdrawn through
+   `cancelOpenRequest`; an issued one is pulled back to draft first),
+   `StockIssue.cancelReason` kept — and `DELETE /stock-issues/:id` takes a
+   draft or a cancelled one, its files with it; ⋯ › Cancel slip and Delete
+   on its page. **And a pull-out slip** (2026-10-19): Pull-out Slips carries
+   `delete` (`[...OWNED_KEPT, 'delete']`); `DELETE /pullout-slips/:id` takes
+   a draft or a cancelled one — nothing went out on either — its preparer
+   or edit_all with the right, its files with it; ⋯ › Delete on its page.
+   **And a borrow slip** (2026-10-19): Borrow Slips carries `delete`
+   (`[...OWNED_KEPT, 'delete']`); `DELETE /borrow-slips/:id` takes a draft
+   or a cancelled request — nothing left the shelf — whoever asked for it or
+   the warehouse, with the right; a slip on loan or returned is kept. **A
+   supplier's quote on an RFQ is removed** (2026-10-19): `DELETE /rfqs/:id/
+   suppliers/:rowId/quote` (`?reason=`, kept on the DELETED audit row) — the
+   RFQ's preparer or edit_all while it is open, refused while a live canvass
+   compares it; the prices, terms and the paper filed on the row go, the
+   supplier stays asked (then droppable on Modify, whose dropped rows now
+   take their files too), and the last quote gone puts the RFQ back to
+   SENT; "Remove quote" on the supplier's row. **A purchase
    request is cancelled too** (2026-10-11): `POST /purchase-requests/:id/
    cancel { reason }` — its requester or edit_all, a draft, a pending one
    (withdrawn through `cancelOpenRequest`, refused if a decision landed
@@ -372,6 +500,28 @@ four databases and four copies of "customer".
       server shows in the bar. A ⋯ item with `confirm` opens it; a page
       passes the same `confirm` to `RecordHeader` for its own buttons. Never
       `window.confirm`/`prompt`, a cancel modal or a hand-built confirm bar.
+      The Approval panel asks through it too (2026-10-16): Approve takes an
+      optional comment, Return and Reject a required one (the requester is
+      owed the why), and "Pull back to draft" its reason.
+    - **One card head** (2026-10-16, the review): a card's title and its own
+      buttons sit in `.card-head` (`styles.css`) — the module copies
+      (`del-`, `m-`, `proc-`, `prq-`, `pr-`, `meeting-`, `sales-card-head`)
+      are gone, and verify-foundation fails on a `*-card-head` again, on
+      `btn-ok`, and on a screen reading the admin-gated `/users?pageSize`
+      list (the org chart alone, which needs every Reports to). An
+      Active / Inactive pill is `ActiveBadge`, a margin's tone
+      `marginTone(pct)` (a percentage: below 0 danger, under 10 warn) —
+      both in `components/ui.tsx`.
+    - **One gap between blocks** (2026-10-16, the owner's report: "some
+      card spacing that aren't uniform"; a crawl measured 110 screens): every
+      card, KPI row, toolbar and alert on a page sits `--block-gap` (16) from
+      the next. A `.stack` or `.grid` spaces its children itself; a classless
+      wrapper `<div>` holding a card or a KPI row now does too (the
+      `:has()` rule in `styles.css`, which also names `.forecast` and
+      `.costing-page`) — cards had sat flush on the reports, Insights,
+      Report Templates and the costing record. Wrap a page's blocks in a
+      plain `<div>` or a `.stack`; never space a card with a margin of its
+      own. A `.card-button` (a clickable card) is a column from the top.
     - **Every modal footer is `ModalFoot`** (`components/ui.tsx`):
       [Delete] … [Cancel] [Save] — Delete only on a record edited in that
       modal with no page of its own, and it asks in the foot. Titles say
@@ -526,7 +676,19 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,401 assertions across twenty-two scripts** (counted 2026-10-13, after
+**4,526 assertions across twenty-two scripts** (counted 2026-10-20, after
+the revised Aftermarket UI's four pushes — one on foundation for the
+Aftermarket strip and 7 on aftermarket for the coverage level, the renewal
+filter, the team column and the overview's two new figures, then 9 on
+aftermarket for a visit's slot, its confirmation, the unconfirm on a move
+and the sweep of a stale confirmed visit, then 9 on aftermarket for the
+Service JO — its options, number and cover, the project register refusing
+it, its route, the decider's door, the visit its approval books, the
+overview card's count, Ctrl+K and the cancel — then 9 on aftermarket for
+the service documents (the seeded categories, filing against a machine
+and a model, the machine's page, the overview card's count, withdrawal,
+the stranger kept out) and the contract typed directly with its job and
+costing — and before it,
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -546,7 +708,7 @@ a cancelled document, and 2 on chain for cancelling a purchase request, and 4 on
 the routes by who prepared the document, and 5 on sales for the
 quotation's own currency and the order paper's margin %, and a net one on
 foundation for the approvals as a one-row table, and one for the short
-order on one page, and one on sales for a subheading worded in
+order on one page, and one on finance for the cash advance's breakdown and the advance and claim route previews, and one on sales for a subheading worded in
 line_comment, and 24 on workspace for the Help box's tickets and who
 receives them, and one on sales for a row the database refuses, and 2 on
 foundation for the sales lists' year-to-date default, and 5 on sales for
@@ -590,12 +752,12 @@ divisions and G-CHAIN's strips, and 20 on chain for the Request for
 Quotation, and 8 on chain and one on foundation for the canvass sheet,
 and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
-inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction):
+inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
-373, masters 92, sales 617, costing 200, pipeline 121, calendar 98, numbering
-79, partners 120, delivery 183, chain 340, hr 480, plantilla 123, meetings
-115, evaluations 154, academy 123, finance 430, aftermarket 270, cad 122,
-insights 98, insights-brief 50, workspace 82, accounts 133. The
+429, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
+94, partners 120, delivery 193, chain 361, hr 487, plantilla 129, meetings
+114, evaluations 154, academy 125, finance 432, aftermarket 304, cad 122,
+insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -624,7 +786,11 @@ service — the services have no click-path to test them, which is exactly why
 these scripts exist. A script that needs a module's `onApprovalSettled`,
 `registerSearch` or `registerSchedule` side effect imports that route module
 (`verify-academy` imports `routes/academy`, `verify-numbering` imports
-`issuedThisPeriod` from `routes/admin`).
+`issuedThisPeriod` from `routes/admin`). **A test user never leans on what
+the install's roles hold** (2026-10-18, every role emptied for the owner's
+own): `rolesLike(prefix, keys)` in `scripts/lib/roles.ts` gives them the
+real role (its KEY, for the engine) and a throwaway copy of the seed's
+rights for it (`src/shared/roleSeeds.ts`), deleted by the script's cleanup.
 
 **Cleaning up includes what a script told real people.** A document submitted
 through a seeded workflow notifies whoever really holds the role, and deleting
@@ -768,6 +934,24 @@ Two traps worth knowing before you edit those scripts:
   matches on the *command line*, which is why `start-api.cmd` launches with an
   absolute script path. Do not "simplify" either half.
 
+## Carrying the administrators' settings (2026-10-16)
+
+The owner asked for the server's card positions, PDF templates, roles and
+settings in the repository. They are DATABASE rows, so they travel as a
+file, never with a push: `api/scripts/export-settings.ts` (read-only, on the
+server, → `data/settings-snapshot.json`; Settings except `seed.*` and
+`__verify__`, roles and permissions, users' roles / Reports to / team /
+Back Support teams by email (no overrides since 2026-10-19), workflows by document type and
+name, numbering TEMPLATES — never counters, passwords or tokens) and
+`api/scripts/import-settings.ts [file] [--apply]` (dry run unless
+`--apply`; never creates or deletes a login, role or workflow, never
+removes a signed step; one audit row; `helpTickets.receivers` travels with
+the logins' emails and is turned into this install's ids, an unknown one
+dropped). The kept copy is
+`deploy/settings/snapshot.json` (`deploy/settings/README.md`). Never commit
+on the server (the deploy is `--ff-only`), and never apply a snapshot from
+the seed.
+
 ## Known advisory
 
 `npm audit` flags `deepmerge-ts` (high) reached through the Prisma **CLI**'s
@@ -886,11 +1070,35 @@ launcher as the way out) — never a stale phase sentence.
   overdue.
 ## Phase 5 notes worth carrying forward
 
-- **The two purchase kinds must stay disjoint.** DIRECT_TO_JOB charges the job
-  at receiving and does NOT build stock. STOCK_REPLENISHMENT builds stock and
-  charges a job only at issuance. Adding a direct-to-job receipt to inventory
-  would let the same material be charged twice — a bug that shipped briefly and
-  is now covered by a test.
+- **The two purchase kinds must stay disjoint IN MONEY.** DIRECT_TO_JOB charges
+  the job at receiving and never builds the COMPANY's stock. STOCK_REPLENISHMENT
+  builds stock and charges a job only at issuance. Adding a direct-to-job
+  receipt to the company's inventory would let the same material be charged
+  twice — a bug that shipped briefly and is now covered by a test.
+  **Project goods received into a WAREHOUSE are the project's own stock**
+  (2026-10-18, the owner's call: "project goods received into the warehouse
+  should also show in inventory so that the warehouse officer can create an
+  outgoing; project management or anyone should create a pull-out slip").
+  `ProjectStock` (project × item × warehouse, its own moving average) in
+  `shared/projectStock.ts`: `postReceiving` charges the job as ever AND, when
+  the report names a warehouse (not site), puts the goods there as the
+  project's stock (a typed line gets its item through `itemForTypedLine`);
+  every movement is an `InventoryTransaction` carrying `jobId`. It never mixes
+  into an `InventoryBalance`, its average or the company's stock value. It
+  leaves by an **Outgoing line marked `projectStock`** (the slip names the
+  project; the editor lists the project's own goods first, `GET
+  /stock-issues/options?jobId=` → `projectStock`) or a **PROJECT_STOCK
+  pull-out** (`PulloutKind.PROJECT_STOCK`, the project as its source, lines
+  from what it holds at the warehouse) — either posts CONSUMED only, never a
+  second INCURRED; pulling one back puts the goods back on the project's shelf,
+  and pulling the receipt back takes them off (refused once some left).
+  Inventory shows them under the **Stock** filter (`?stock=project`:
+  `projectStockList()`, rows with their Project, the paper "Project Stock"),
+  a "Project stock" card on the company list, and a stock card per project
+  (`/:itemId/card?jobId=`; the company's card leaves project moves out).
+  `backfillProjectStock()` (the seed, once, `seed.projectStockBackfilled`)
+  shelved what was received into a warehouse before, posting nothing.
+  verify-chain pins it.
 - **Every handover releases what came before.** PR approval commits at estimate
   → PO issue releases that and commits the agreed price → receiving releases
   that and incurs. Use `releaseCommitment()`; it posts a negative row rather
@@ -987,9 +1195,18 @@ launcher as the way out) — never a stale phase sentence.
 - **A sample must look like its owner and like nobody else.**
   `POST /clock/enroll` takes the strict gate, refuses a sixth current sample,
   refuses one further than threshold + margin from the person's own samples
-  (consistency: someone else's face on this account) and one within threshold
-  + margin of ANY other active employee's (collision: the fault that let one
-  face open two accounts). Only a `ghr.employees.edit_all` holder is told
+  (consistency: someone else's face on this account) and one that is the
+  SAME FACE as any other active employee's (collision: the fault that let one
+  face open two accounts). **Since 2026-10-19 (Karen Gasiong's ticket: a
+  relative could never enrol) `enrolCollision()` in `shared/hr.ts` is the
+  rule**: within threshold − margin (0.50) of a colleague's samples is the
+  same face, refused; up to threshold + margin (0.60) is a LOOK-ALIKE, taken
+  as a first sample or when it sits the margin nearer the person's own
+  samples (refused otherwise), its audit row's `after.faceEnrolLookalike`
+  naming the colleague for HR and Face health listing the pair — the clock's
+  `decideFace` margin still tells two enrolled look-alikes apart. The refused
+  person is told the face is already enrolled on another account and to ask
+  HR to check Face health; HR is told whose and how near. Only a `ghr.employees.edit_all` holder is told
   whose face it came close to (and, enrolling somebody else, "the samples
   already on <name>'s record"); anyone else is told to use the fallback and
   tell HR. Both refusals are audited (`employee`, REJECTED), the name and the
@@ -1079,6 +1296,40 @@ launcher as the way out) — never a stale phase sentence.
   are not about it (`hr.rules.__verify__`), and its challenges are issued in
   the script with the same secret, since each ask at the route is one of
   the person's twelve knocks.
+- **The clock as relaxed on 2026-10-16** (the owner's review: "clock in/out
+  still have problem"; his call: "turn only, relaxed"). **Only a head turn is
+  issued** (`ISSUED_KINDS` in `shared/liveness.ts`; a blink closes the eye for
+  100–150 ms and the frames came 125 ms apart, so real people were refused
+  "No blink was seen"; a blink token is still READ, and `issueChallenge`
+  takes a `kind` for the verify script alone). The ring runs **3.5 s** —
+  "turn slowly left, then right, then back to the camera" — and the frames
+  go up at **640 px, quality 0.8**, one every 150 ms. The same-face check
+  compares the still with the first frame and the **most frontal frame of
+  the last quarter** (yaw nearest the first frame's), so a person who ends a
+  little turned is not refused as "not live", while a face pasted over the
+  burst's end still is. `TURN_RANGE` STAYS 0.1: at 0.08 the sheared-photo
+  fixture passed on an enrolment still. **The brake counts face captures
+  only**: `POST /clock` and `/clock/enroll` take a 30-a-minute request brake
+  before the upload, a FACE capture then counts against the twelve
+  (`faceAttempt`), the challenge has its own 30, the fallback is never held
+  back by failed face attempts, and the 429 says how many seconds to wait
+  (`retryAfterSeconds`, `shared/throttle.ts`). The liveness burst waits its
+  turn in the face queue (`alwaysWait`) — a capture already admitted is never
+  refused "busy" halfway. **Manila's clock, not the host's**: lateness is
+  `manilaMinutesOfDay()` and the messages `manilaTime()` (`shared/day.ts`) —
+  on a host set to UTC an 08:05 arrival read 00:05 and was never late.
+  **Overnight**: a clock-out closes YESTERDAY's open day when today has no
+  time in and it was clocked in within `OVERNIGHT_CLOSE_HOURS` (16)
+  (`rowToClose()` in `routes/hr.ts`; `/clock/me` sends it as `today` with
+  `carriedOver`, the page saying "Still open from yesterday"); older, it is a
+  **missing clock-out** — the register's `?missingOut=true` and its card —
+  closed by HR's correction (`PATCH /attendance/:id`), which now needs a note
+  whenever a time changes. `Attendance.undertimeMinutes` is set at a
+  same-day clock-out (`undertimeMinutes()`, before `workEnd`; 0 after
+  midnight) and shown on the register. The Clock page restarts a camera whose
+  track ended or that went dark behind a hidden tab, says "in use by another
+  app" and "open G-CORE through https://" in words, and counts "Hours so
+  far" live.
 - **The owner's three decisions of 2026-10-10 on the face clock**: (1) face
   SAMPLES are readable only by the person and HR with
   `ghr.employees.edit_all`, and a supervisor sees their DIRECT REPORTS' clock
@@ -1319,7 +1570,30 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   working days alike — `workingDaysBetween()` and `workingDayDate()` read it,
   and `web/src/lib/day.ts` mirrors them on day keys (`workingDaysBetween`,
   `workingDayKey`), pinned equal on every start in a month by verify-costing.
-  No holidays yet. Leave days (`leaveDays()` in `shared/hr.ts`) are HR's
+  **Holidays are days off too** (2026-10-17, the owner's call: "prefill
+  PH holidays"): `shared/holidays.ts` keeps one Setting,
+  `calendar.holidays` (`{ date, name, kind: REGULAR | SPECIAL }`), edited
+  on Company Settings › Holidays (`GET /holidays` for anyone signed in,
+  `PUT /holidays` and `GET /holidays/ph/:year` behind
+  `admin.company.edit_all`, audited as `setting` / `calendar.holidays`).
+  The API holds the dates as keys in `shared/day.ts` (`setHolidayKeys`,
+  `isWorkingDay`; `loadHolidays()` before listen, after a save and every
+  five minutes), and every working-day count reads them — the costing's
+  dates, a project's plan, "Plan from costing", the job order's working
+  days and the paper's Gantt; the web's mirrors take the same keys
+  (`useHolidayKeys()` in `lib/holidays.ts`, passed to `workingDayKey` /
+  `workingDaysBetween`), and the project Gantt shades a holiday like
+  Sunday. The seed's `prefillHolidays()` adds the Philippine regular
+  holidays and special non-working days for this year and next, ONCE per
+  year (`seed.holidaysPrefilled`) so a removed one never comes back: fixed
+  dates, Holy Week from Easter (`easter()`), National Heroes Day (the last
+  Monday of August), and Chinese New Year and the two Eids from a short
+  table marked "check the proclamation". Dates already stored are never
+  moved. verify-costing, verify-delivery and verify-aftermarket set the
+  stored list aside for their run (`scripts/lib/holidays.ts`, through the
+  API so its cache drops at once; `calendar.holidays.__verify__`) and
+  verify-costing pins the PH dates, the two rules agreeing with holidays
+  and a saved holiday moving a costing's finish. Leave days (`leaveDays()` in `shared/hr.ts`) are HR's
   own rule and still skip both weekend days. The project Gantt shades
   Sunday alone (`.gantt-day.is-off`).
 - **A project's dates tally with its scope** (2026-10-13): `createJobRecord()`
@@ -1390,6 +1664,18 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   printed lists' EXPORTED audit rows) opens the list itself, never a record
   page that would ask the API for a record called "list" (found by the link
   crawl of 2026-10-10; verify-foundation pins it).
+- **Every type the API audits under has a screen** (2026-10-16, the
+  review's link check): `recordLink()` in `web/src/lib/links.ts` maps each
+  `entityType` to its record page, its list, or the screen that edits it
+  (a quotation group, an activity type and a drawing type open Admin ›
+  Categories; a report export opens its division's Reports; a setting
+  opens the page that keeps it). verify-foundation reads every
+  `entityType: '…'` literal in api/src and fails on one with no link, or
+  a link — the list's or a record's — that no `path=` in App.tsx answers,
+  and on a report kind whose "Open the list" is not a declared path. Parts
+  of a record (a CAD revision or comment, a report's day, a People Flow
+  item, a partner's resource) stay unlinked. `/admin/*` has its NotFound
+  like the four modules.
 - **`openAttachment()` in `components/Attachments.tsx` is the one way to open a
   stored file** outside the Attachments card (bearer token → blob; a
   spreadsheet opens the viewer, see "Spreadsheet attachments"). The
@@ -1484,9 +1770,91 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 ### Numbering
 
 - **An OWNER-scoped counter keys its rows `2026-09@007`**; the template row is
-  `periodKey ''`. `{EMP}` is the last run of digits in the employee number padded
-  to three, `000` for an unlinked login; `Employee.employeeNo` wins over
-  `User.employeeNo`.
+  `periodKey ''`. `Employee.employeeNo` wins over `User.employeeNo`.
+- **The employee number is `GTC-0001-14` — the person's SEQUENCE, then the
+  year HIRED — and `{EMP}` is that sequence** (2026-10-18, the owner's
+  ruling: "the existing number is manual, GTC-0001-14 for Carter Gasiong;
+  update the ruling, particularly in quotation numbering"). The employee
+  pattern is `GTC-{SEQ}-{YY}` (`EMPLOYEE_NUMBERING` in `shared/numbering.ts`:
+  padding 4, period NONE — one running count through the years — GLOBAL),
+  set ONCE by the seed where the stock pattern still stood
+  (`applyEmployeeNumbering()` in `shared/employeeNumbers.ts`,
+  `seed.employeeNumbering20261018`; an administrator's own pattern stays, and
+  Admin › Numbering may change it). `{YY}` / `{YYYY}` in that pattern is the
+  year hired: `POST /employees` issues the automatic number with `{ at:
+  dateHired }`. **`employeeToken(employeeNo, template, prefix)` reads the
+  number THROUGH the employee pattern** (`parseNumber`, the one parser) and
+  pads its `{SEQ}` to three — `GTC-0001-14` → `001`, so Carter's quotations
+  read `0012610…`; `GTC-1234-26` → `1234`, never truncated; a number outside
+  the pattern (`GT-EMP-095`, `12`) falls back to the rule before, the last
+  run of digits, so nothing issued earlier changes series;
+  `employeeDigits(employeeNo, tx)` is the call with the stored template.
+  **A typed employee number RAISES the employee series to its sequence,
+  never lowers it** (`setCounter('employee', …, { mode: 'raise' })` on
+  `POST /employees`, `PATCH /employees/:id`, the employee import and the
+  Admin › Users write-through), so the next automatic number never repeats
+  one typed in any order. **A person on the register with no number is
+  refused a `{EMP}` number**, never issued one in the `000` series: `nextNumber`
+  throws `missingNumberMessage()` ("Set an employee number on X's employee
+  record first — the quotation number carries it"), `previewNext` answers
+  `missingNumber` (the person), the quotation editor shows it as a warning
+  and Admin › Numbering's samples say so; a login with no employee record at
+  all still numbers under `000`. **Every number was cleared once**
+  (`clearEmployeeNumbers()`, `seed.employeeNumbersCleared20261018`, the
+  owner's call: "delete all existing employee numbers in the user"):
+  `Employee.employeeNo` is nullable since, the employee's and the login's
+  number both null, one audited row per person with the old number in
+  `before`; the counter was not lowered. The numbers are typed on **Admin ›
+  Users** — the Employee number box is the one mirrored field that WRITES
+  THROUGH to the employee record (`PATCH /users/:id { employeeNo }`, a 409
+  naming whoever already has it, an `employee` UPDATED audit row "(from Admin
+  › Users)") — or on HR › Employees; both lists show "none yet", filter
+  `?number=none|yes` and carry a "Without an employee number" card
+  (`summary.withoutNumber`).
+  **The owner's list then set them once** (2026-10-18, `ROLE.xlsx`: "update
+  the employee number of the people / user from this list"):
+  `applyEmployeeNumberList()` in `shared/employeeNumbersFromList.ts`
+  (`EMPLOYEE_NUMBER_LIST`, sixty names and numbers), the seed's step after
+  the chart's roles, marked `seed.employeeNumbersFromList20261018` — each
+  person found as the chart finds them (the chart's email, else the name),
+  the number on the employee record, mirrored through
+  `syncLoginFromEmployee()`, the series raised to it (`mode: 'raise'`), one
+  audit row each; a number another record or login holds is left and named,
+  never a failed seed. `npx tsx scripts/employee-numbers.ts` is its dry run
+  (`--apply`, `--force`). A number changed afterwards stays.
+- **G-HR's common access on the owner's roles** (2026-10-18, the owner's
+  call: "modify G-HR common access, particularly clock in clock out; the
+  Human Resources Officer has higher access for G-HR"): `applyHrAccess()` in
+  `shared/hrAccess.ts`, the seed, once (`seed.hrAccess20261018`), ADDS to
+  every role `HR_COMMON` — Clock In/Out, Attendance › View Own, own leave,
+  overtime and meetings, evaluation and people flow to read, the passport,
+  the training calendar, raising one's own clearance (the old Employee
+  role's G-HR set) — and to the HR Officer (`hr`) every G-HR box. **Attendance
+  › View Own covers one's DIRECT REPORTS** (the owner's choice over the
+  company-wide dashboard right): `attendanceScoped()` reads the holder's own
+  days and those of everyone whose "Reports to" is them, and
+  `captureReader()` opens those reports' clock photos; verify-hr pins it.
+- **G-FIN's common access, the same way** (2026-10-19): `applyFinAccess()`
+  in `shared/finAccess.ts`, once (`seed.finAccess20261019`), ADDS to every
+  role `FIN_COMMON` — one's own reimbursements and cash advances (create,
+  View Own, Edit Own); to Team Leader, Sales Manager and Sales Engineer their
+  own Invoice Requests and Commission Requests; to the Finance Manager every
+  G-FIN box. **View Own on invoice and commission requests covers one's
+  DIRECT REPORTS'** (`reportsTo()` in `shared/team.ts`; the list's "Mine"
+  stays one's own); verify-finance pins it.
+- **G-CHAIN's common access, the same way** (2026-10-19): `applyChainAccess()`
+  in `shared/chainAccess.ts`, once (`seed.chainAccess20261019`), ADDS to
+  every role `CHAIN_COMMON` — one's own borrow slips and pull-out slips
+  (create, View Own, Edit Own; an Outgoing slip addressed to someone opens
+  for them with no right); to Technical Manager, Team Leader, Sales
+  Engineer, Project Engineer and Project Lead their own purchase requests
+  (G-CHAIN's keys, which the API reads, and G-OPS's View Own / Edit Own,
+  which guard the project's Purchase Requisition tab); to BOTH Purchasing
+  Managers (Local and Importation) every G-CHAIN box. **View Own on the
+  purchase request list covers one's DIRECT REPORTS'** (`prListWhere()`;
+  "Mine" stays one's own); verify-chain pins it. verify-numbering pins the readings, the hire
+  year, the raise-only counter and the refusal; verify-accounts the
+  write-through.
 - **An existing database keeps its configured pattern.** The seed only creates a
   missing template; `PUT /numbering/:type` is the only thing that changes one. A
   dev database older than the house scheme still issues `GT-QT-…` until an
@@ -2123,6 +2491,40 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   The lead page lists each costing with whose it is and who assigned it,
   when; the costing page shows "Assigned by". The picker is
   `/users/lookup?holding=gops.costing.create`.
+- **A quotation or a project may come from SEVERAL costings** (2026-10-19,
+  the owner's call: "sometimes there will be 2 costings to generate the
+  quotation or project"). The first stays on the record's own `costingId`
+  (`QuotationRevision.costingId`, `Job.costingId`); the others are
+  `QuotationRevisionCosting` / `JobCostingLink` rows, in order — and
+  `shared/costingSets.ts` is the only reader and writer of that split
+  (`revisionCostingIds`, `jobCostingIds`, `setRevisionCostings`,
+  `costingIdsOf(body)` — `costingIds` beats the old single `costingId`,
+  which every caller may still send). **The quotation**: `POST /quotations`,
+  `PATCH …/revisions/:id` take `costingIds`; "Fill from costing" and
+  `GET /quotations/costing-lines?costingIds=a,b` write / preview
+  `quotationLinesFromCostings()` — each costing's scope as before, one after
+  another, a SUBHEADING naming each costing only where there is more than
+  one; a new revision keeps them all; `GET /quotations/:id` sends each
+  revision's `costings`. The editor has "+ Add another costing" under
+  Costing. **The project**: `POST /jobs { costingIds }` and a job order's
+  approval (the value revision's costings) go through `costingsForJob()`
+  (each one `costingForJob`'s checks: decided, the project's customer, a
+  scope adding up to its own contract value) and `createJobRecord(tx,
+  costings[])`: the contract value their sum, the scope items both scopes
+  in order, EACH costing's plan from the project's start (two scopes worked
+  side by side) and the target end the later finish, one BUDGETED row per
+  costing and bucket (`sourceId` names the costing), every one FINAL;
+  "Plan from costing" plans each costing's own sections the same way.
+  `GET /jobs/:id` sends `costings`; the list's expected margin, the
+  pipeline board's margin, a purchase requisition's costing suggestions
+  and a job order's Labor (`costingLabor(ids)`, `laborTally` naming
+  "A + B") read them all. A costing on either list counts as built on: it
+  is not deleted (a 400 naming the revisions or projects), not pulled back
+  while a project stands on it, and its page lists them; a job order
+  pulled back puts each costing its build finalised back to draft. The new
+  project form has "+ Add another costing" too (`?costingIds=a,b` from the
+  quotation's Create project), and the project's Costing tab draws a card
+  per costing.
 - **A duplicated costing copies the numbers and not the history** — DRAFT, owned
   by the copier, no lead, revisions or jobs, totals recomputed through
   `recalc(tx)` rather than copied, so it can never carry a figure its own lines
@@ -2598,7 +3000,18 @@ leave the approver deciding on stale figures).
   one definition; `Position` must never get a filled or vacant column.
   Over-complement is shown, not refused — refusing would block a real hire.
 - **`Employee.position` is a mirror with one writer** — `positionFields()` /
-  `setEmployeePosition()` and `mirrorPositionTitle()`. `verify-plantilla.ts`
+  `setEmployeePosition()`, `setExtraPositions()`, `refreshPositionTitle()`
+  and `mirrorPositionTitle()`. **A person may ALSO hold other posts**
+  (2026-10-19, the owner's call: "Karen is Accounting and HR Manager"):
+  `EmployeeExtraPosition` beside the one main `positionId`, set by `PATCH
+  /employees/:id { extraPositionIds }` (needs a main one; active posts;
+  audited) and the employee form's "Also holds"; each counts its holder as
+  filled (`filledByPosition`), the list's `?positionId=` finds them, and the
+  title (and the login's) reads "Main / Extra". HR › Employees and Admin › Users
+  show the main post with "Also holds: …" under it (`GET /users` sends
+  `mainPosition` and `alsoHolds`; the user editor shows them read-only and
+  sends Position only when changed). Roles, not posts, decide
+  what they approve. `verify-plantilla.ts`
   asserts the mirror for every linked employee in the database. A position anyone
   has held is deactivated, not deleted.
 - **The import resolves in `build` and creates in `write`**, because `runImport`
@@ -2761,6 +3174,165 @@ leave the approver deciding on stale figures).
   table sums to the report's own totals — asserted. (It grouped by the
   customer's industry until 2026-10-08, when the industry became the team.)
 
+## The revised Aftermarket UI (2026-10-20)
+
+The owner's `G-OPS_Aftermarket_Module_Revised_UI_Specification.pdf`: five
+cards over the module, then Installation Base · Service JO · Service
+Schedule · Service Contract · Service Documents as the section's strip
+(rule 14 — the strip IS the spec's tabs). His answers: a Service JO is a
+service call routed Aftermarket Manager › Team Leader whose approval books
+the visit, never a project; a contract may be typed directly with no
+costing behind it, with an Attachments card; Renewals is hidden; the five
+cards sit on the Aftermarket overview; the schedule opens on the list and
+the assigned engineer or Edit All confirms a visit; document categories are
+a seeded Admin › Categories list and a document links to a machine or a
+model; the names are "Installation Base" and "Service Contract" and the
+buttons keep rule 19's "+ New …". Built push by push:
+
+- **Push 1 — the strip, the columns, the cards.** The Aftermarket strip is
+  Aftermarket · Installation Base · Service Schedule · Service Contract
+  (registry labels and order; the keys and paths stay; verify-foundation
+  pins it) and **Renewals is `hidden`** — its contracts half is the
+  contract list's Renewal notice, card and `?renewal=` filter, its
+  warranties half the installation base's `?warranty=EXPIRING&uncovered=
+  true`; `/g-ops/renewals` and `GET /aftermarket/renewals` still answer.
+  **Installation Base** lists Equipment / model, Serial no., Customer &
+  location, Installed date, **Industry team** (the customer's team —
+  `assetInclude` carries `customer.industry`; filter `?teamId=` an id or
+  `none`; on the paper) and Warranty status, Code under Columns, with
+  cards (`assetListSummary()`: in warranty, expiring, no active contract —
+  the list's own query). **Service Contract** carries
+  `ServiceContract.coverageLevel` (the SLA coverage level in the
+  customer's words, free text trimmed, suggested from
+  `GET /service-contracts/coverage-levels` — above `/:id` — searched and
+  filtered `?coverageLevel=` case-blind) and a derived **Renewal notice**
+  (`renewalNotice()`: on an ACTIVE contract RENEWAL_DRAFT_SENT while a
+  DRAFT renewal stands behind it, RENEWED once it is active, EXPIRING
+  within the warning days, LAPSED past the end, else ACTIVE_COVERAGE;
+  null otherwise); the list is Contract no., Customer name, SLA coverage
+  level, Start date, Expiration date, Renewal notice, with cards
+  (`contractListSummary()`: active, up for renewal — no renewal yet —
+  renewal drafts, expired) and the `?renewal=due|draft` filter
+  (`RENEWAL_FILTERS`, an unknown value a 400). The overview's cards are
+  Installed equipment, Active service JOs (`serviceJobs.open` — open job
+  orders on a machine or a contract, until push 3's register), Scheduled
+  this week (`visits.thisWeek`, Monday to Sunday of the Manila day) and
+  Contracts up for renewal; Technical documents comes with push 4.
+- **Push 2 — the schedule.** The Service Schedule **opens on the list**
+  (`?mode=month` is the calendar; a bare `?month=` still opens it): Scheduled
+  date, Service type, Equipment / customer, Assigned engineer / team (the
+  engineer's `employee.industry`), Slot / duration, then Visit, Booked by,
+  Report and Status under Columns. **A visit may book a SLOT on its day**:
+  `ServiceVisit.startTime` / `endTime` ("HH:MM", both or neither —
+  `visitSlot()` in `shared/aftermarket.ts`, a 400 for one alone or an end
+  before its start; `slotLabel()` says "8:00 AM – 12:00 PM", else "Full
+  day"; every read carries `slot`, the bells and the paper say it). **A
+  visit is CONFIRMED with the customer** (`VisitStatus.CONFIRMED`, between
+  SCHEDULED and the outcome): `POST /service-visits/:id/confirm` — the
+  assigned engineer, `gops.visits.edit_all` or a super admin
+  (`mayConfirmVisit`; `canConfirm` on the read), claimed on SCHEDULED,
+  `confirmedAt` / `confirmedById` kept, audited; "Confirm with customer" on
+  the visit sheet. Moving a confirmed visit's day or slot puts it back to
+  SCHEDULED, unconfirmed — the customer agreed to a time, not to any time.
+  **Open means SCHEDULED or CONFIRMED** everywhere (`OPEN_VISIT_STATUSES`:
+  the sweep to MISSED, the dashboard's counts, My Work, Insights' overdue,
+  the clearance scan, a job order's cancel, `?due=true`), and a re-plan
+  rewrites the unattended ones (`UNATTENDED_VISIT_STATUSES`: scheduled,
+  confirmed, cancelled — a carried visit keeps its status, a moved one is
+  rebooked SCHEDULED). verify-aftermarket pins the slot, the confirm's
+  door, the unconfirm on a move and the sweep of a stale confirmed visit.
+- **Push 3 — the Service JO.** The service call on a registered machine is
+  its own register under Aftermarket (the strip is Aftermarket ·
+  Installation Base · **Service JO** · Service Schedule · Service Contract;
+  verify-foundation pins it): `gops.service_job_orders` (OWNED),
+  `/g-ops/service-job-orders`, `routes/serviceJobOrders.ts` at
+  `/api/service-job-orders`, `pages/service/ServiceJobOrders.tsx`,
+  numbering type `service_job_order` (SJO), audit and search kind
+  `service_job_order`. **The same `JobOrder` table, told apart by
+  `JobOrder.category`** (PROJECT | SERVICE): the project work order keeps
+  `/g-ops/job-orders` and lists, opens and searches its own category only
+  (`load()` answers a Service JO's id with a 404 naming the register); a
+  Service JO carries the machine (`assetId`, from the Installation Base —
+  `GET /service-job-orders/options?customerId=` lists the customer's
+  machines with the contract covering each), the service type (`kind`),
+  the priority (`urgent`), the day it is needed by (`requestedFor`), the
+  engineer (`assignedToId`), what covers it (`chargeBasis`: the contract,
+  else the warranty on the needed-by day, else chargeable — `coverOf()`,
+  overridable) and the scope. The seed's `seed.serviceJobOrders20261020`
+  marked the orders raised as service calls before 2026-10-09 (on a
+  machine, on a contract, or with no project name) SERVICE once. **The
+  route is "Service JO — aftermarket manager then team leader"**
+  (`service_job_order`: ROLE `service_manager`, in `OWN_TEAM_ROLES`, so
+  the requester's own team's; then the requester's Team Leader;
+  `preparerSigns`, `standIns`); the record and its paper take
+  `requireAnyOrDecider`, so an approver with no right to the register
+  reads it while it waits on them. **Approval BOOKS THE VISIT, never a
+  project** (`settleServiceJobOrder`): one SCHEDULED visit on the
+  needed-by day, of the order's kind, on its machine and contract, for its
+  engineer, `jobOrderId` the order's (unique — a pulled-back and
+  resubmitted order puts its cancelled visit back on the schedule rather
+  than booking a second); the approved report on that visit completes it
+  (`onReportSettled`, which now audits under the order's own type).
+  `/withdraw` pulls a pending one back; `/cancel` takes a draft, returned,
+  pending (its request withdrawn) or approved one and cancels the visit it
+  booked, refused once the visit has a report; the engine's reopen cancels
+  the visit too and is refused once the work was done or the order was
+  invoiced; `DELETE` takes a cancelled one. The status reads Draft, AM
+  Approval / TL Approval, **Dispatch pending** (approved, the visit's day
+  to come), **In progress** (from that day), Missed visit, Done, Returned,
+  Cancelled (`stageOf`); the list's cards are Active, Pending approval,
+  Dispatch pending, Urgent, Done, and the overview's "Active service JOs"
+  card opens `?open=true`, the same count (verify-aftermarket asserts it).
+  My Work and the machine's page ("+ New service JO", `?new=1&assetId=`)
+  link by category; `recordLink` maps the new type. A test that settles one
+  in-process imports `routes/serviceJobOrders` for its subscriber.
+- **Push 4 — Service Documents, and a contract typed directly.** The strip
+  ends on **Service Documents** (`gops.service_documents`, SHARED_KEPT —
+  own is the documents one filed; `/g-ops/service-documents`,
+  `routes/serviceDocuments.ts` at `/api/service-documents`,
+  `pages/service/ServiceDocuments.tsx`; verify-foundation pins the strip of
+  six). `ServiceDocument` (title, description, version, `documentDate`,
+  `isActive`) is filed under a **category from Admin › Categories ›
+  Service document categories** (`ServiceDocumentCategory`, the drawing
+  types' contract: `shared/serviceDocumentCategories.ts` seeds Manual,
+  Electrical drawing, Test report, Drawing / datasheet, Certificate, Other
+  as system rows; `/reference/service-document-categories`) and **against
+  a MACHINE (`assetId`) or a MODEL (`itemId`) — either**: a machine's page
+  (`GET /installed-assets/:id` → `documents`, `documentsForAsset()`) lists
+  the current documents on it and on its model (`onModel`), with "+ New
+  service document" (`?new=1&assetId=`). The file is the record's
+  Attachments card on `service_document` (a CAD entity — DWG, DXF take the
+  CAD ceiling), read as the document is and written by whoever may edit it
+  (`registerAttachmentGuard`). A document in use is **withdrawn**
+  (`isActive` false — off the machine's page, on file) rather than
+  deleted; Delete takes its files with it. The list's cards are the
+  current documents, machines and models documented, the largest
+  category; the overview's fifth card, **Technical documents**, is the
+  register's count (`documents.total`, verify-aftermarket asserts it).
+  Ctrl+K finds them; `recordLink` maps `service_document` and
+  `service_document_category`. **A service contract may be typed directly**
+  (the owner's call: no costing first): "+ New service contract" on the
+  list opens `CoverModal` with no job — the customer, the contract's name
+  and value, then the cover — and `POST /service-contracts { direct:
+  { customerId, name, contractValue, siteId? } }` makes, in ONE
+  transaction, a FINAL costing carrying the contract value alone (no cost
+  lines — the job's budget is costed later if ever), the SERVICE_CONTRACT
+  job on it (the caller its manager, the cover's dates its dates) and the
+  DRAFT contract; `jobId` still sets cover on a job costed the usual way,
+  and every machine named must be the customer's. **The contract page
+  has an Attachments card** (`service_contract`: read by whoever reads
+  contracts, written by whoever may modify the contract or raise one).
+
+## The notification bell (2026-10-20)
+
+Help ticket GT-HT-2026-0013: the drawer showed the newest 20 only, so older
+unread notifications could not be reached. The drawer (`Shell.tsx`) now has
+an **All / Unread (n)** switch (`GET /notifications?unread=true`), says
+"n of total", and ends with **Load more (n older)**, the next page of 20.
+The minute's poll refreshes as many rows as were loaded (up to the API's
+200; past that only the counts), so it never discards pages someone opened.
+No API change: the route already paged and filtered.
+
 ## The Help box: help tickets (2026-10-11)
 
 The owner's call: "a help chat box so every user can raise a ticket for
@@ -2802,8 +3374,7 @@ receive the tickets".
   logins only, 50 at most, audited as `help_ticket` / `receivers`), one
   Setting `helpTickets.receivers` = `{ userIds }` in
   `shared/helpReceivers.ts`. **The people chosen hold both rights whatever
-  their roles**: `resolveUser()` adds `RECEIVER_RIGHTS` for them (a
-  per-user DENY still wins), so the menu, the page's Guard and the routes
+  their roles**: `resolveUser()` adds `RECEIVER_RIGHTS` for them, so the menu, the page's Guard and the routes
   agree with no role edited; the list is cached a minute per process and
   dropped on save. **Nobody chosen is every active super admin** (bell,
   and email where SMTP is set) — holding the view right is not enough to
@@ -2859,6 +3430,46 @@ receive the tickets".
   new record's Save follows the branch — `create` for a new person,
   `edit_all` for one on the register); `UserEditor` in
   `pages/admin/Users.tsx` only modifies.
+- **The employee owns identity; the login mirrors it** (2026-10-16, the
+  owner's call: "employee creation and user login should be one only").
+  `syncLoginFromEmployee(tx, employeeId)` in `shared/accounts.ts` is the ONE
+  writer of the login's name (first, last, suffix — `personName()`),
+  employee number, phone (the employee's mobile), department and position
+  (`MIRRORED_LOGIN_FIELDS`), called in the same transaction by `PATCH
+  /employees/:id` (its audit row's `after.loginSynced` says what moved),
+  linking an existing login (`POST /employees { userId }`), the employee
+  import, `/auth/profile` and `/auth/welcome` (a phone typed there is the
+  record's mobile) and `mirrorPositionTitle()` (a position's new title
+  reaches its holders' logins). Deactivating the employee deactivates the
+  login; re-activating never re-opens a login by itself. **An employee
+  number another login carries is a 409 naming it** — at creation
+  (`mirrorEmployeeNo()`) and on every sync — where it used to be dropped
+  silently. **Admin › Users writes THROUGH** (2026-10-19, the owner's call:
+  "edit them here too"): on a linked login `PATCH /users/:id` takes
+  `firstName`, `lastName`, `suffix`, `phone` (the employee's mobile),
+  `position` and `departmentId`, writes them onto the EMPLOYEE record in the
+  save's transaction and lets `syncLoginFromEmployee` mirror them back, with
+  one `employee` UPDATED row naming what changed "(from Admin › Users)" —
+  as the employee number (2026-10-18) and the Team already did. A one-box
+  `name` change on a linked login is still a 400 (it cannot say which part
+  is the surname). A position the Plantilla holds (title, case-blind) puts
+  them on it through `setEmployeePosition`; another title is kept as typed
+  only while they hold no plantilla position (else a 400 — taking someone
+  off the Plantilla is HR's call on the record). Edit Own changes one's own
+  name and mobile, never the position or department (403). `UserEditor`
+  shows First name / Last name / Suffix for a linked login. Linking or unlinking a login on the employee record
+  needs `admin.users.edit_all`. **The halves still apart**: `GET /users`
+  takes `?linked=no|yes` and sends `summary.loginsAlone` / `employeesAlone`
+  (Admin › Users' two cards, the second linking to HR › Employees
+  `?login=none`, a declared filter). The employee import takes an optional
+  **Email** column: a login with no employee is linked, a new address is an
+  invited login (`createLogin`, the `employee` role; needs
+  `admin.users.create`, checked before any row) — resolved in `build`,
+  made in `write`, never on a dry run. The seed, once each
+  (`shared/personMirror.ts`): `linkAdminEmployees()` gives a super admin
+  with no employee record one (`seed.adminEmployeeLinked`) and
+  `backfillLoginMirrors()` brings every linked login in step
+  (`seed.loginMirrorBackfilled`, a number clash left and named).
 - **A login email already in use says whose it is** (2026-10-13, the
   owner's report: "i can't add employee in the user" — Karen's login had
   been made before her employee record, and the form only said "Someone
@@ -2917,8 +3528,8 @@ never installed on the server), and new work starts in G-CORE. SCORO's
 quotations come across the same way, as REAL quotations (2026-10-10: "later
 I will upload data of SCORO Quotation, it will act as part of the G-CORE;
 also the invoices from SCORO which will become a Sales Order in G-CORE"):
-the quotes export is built (below, 2026-10-11); the quote-lines export and
-the invoices, which become sales orders, are still to come.
+the quotes export with its lines is built (below, 2026-10-11), and so is
+the invoices export, as sales orders (below, 2026-10-17).
 `docs/notes/{S,C,Q,R}-*.md` carry the detail of what was patterned on
 SCORO.
 
@@ -3037,7 +3648,58 @@ SCORO.
   verify-sales builds both files as SCORO writes them (UTF-16, tabs) and
   drives the spec and writer by name — the lines file's totals come out as
   SCORO's own; verify-masters pins the decoding, the delimiter and the
-  grouping. SCORO's invoices, which become sales orders, are still to come.
+  grouping.
+- **SCORO's invoices arrive as SALES ORDERS** (2026-10-17, the owner's
+  invoices export): entity `scoro_invoices` (`routes/imports/
+  scoroInvoices.ts`, `gops.sales_orders.create`; the sales order list's ⋯
+  "Import from SCORO…"), the same file shape as the quotes export (UTF-16,
+  tabs, SCORO's headers, one row per line grouped by `doc_no`, the helpers
+  exported from `scoroQuotes.ts`). **Import the quotes first**: an
+  invoice's `quote_no` must be a quotation in G-CORE — none is an error
+  naming it — and the order is booked ON that quotation (its customer,
+  currency, team), never a customer of its own. The order takes SCORO's
+  `doc_no` as its number (`setCounter('sales_order', …, { mode: 'raise'
+  })`, which moves nothing for a number outside the pattern), `doc_date`,
+  the PO from `c_purchaseordernumber` ("Purchase Order No.:" stripped,
+  `scoroPoNumber`), the terms (`doc_deadline` − `doc_date`), the payment
+  method in words, `doc_description` as its comment, the contact on the
+  quotation's customer, and the owner the login `owner_name` names, else
+  the quotation's owner (SCORO's name kept on the trail). Lines as the
+  quotes import writes them (group by the importer's choice, else OTHERS;
+  a doer with `is_internal` 1 as the provider), the VAT from the first
+  line's `line_vat_percent`, totals through `recalcOrder`, and the lines
+  linked to the quotation's (`linkOrderBookings()` in
+  `shared/salesOrderBooking.ts` — title, unit and price, while the line
+  still has quantity left, so two half-lots both book one line). **Status**:
+  Draft → DRAFT; Unpaid, Sent, Overdue, Partially paid, Paid → ISSUED with
+  no approval (issued in SCORO; a COMPLETED audit row in the owner's name
+  is the paper's "Issued by"); Cancelled, Void, Credited → CANCELLED with
+  "SCORO status: …". **An issued one is an INVOICE in A/R too, and what
+  SCORO says was paid is a collection KEPT AS HISTORY** (2026-10-17, the
+  owner's call: "keep them out as history"). `writeReceivable()` in the
+  same transaction: G-CORE's invoice number, SCORO's `doc_no` as the
+  invoice no. (`siNumber`, unless another live invoice holds it), dated and
+  countered on `doc_date`, due on `doc_deadline`, the order's money and
+  credit (`invoiceCredit`), `Invoice.importedFrom` 'SCORO'; a FULLY PAID
+  one withholds what SCORO's payment left short (`total − paid_sum`, up to
+  15% of the gross) so it closes exactly, anything else the company's EWT.
+  `paid_sum` > 0 is one RECEIPT on `latest_receipt_date` (else the invoice
+  date), cleared that day, SCORO's `payment_type` as its method, no OR
+  number, `Payment.importedFrom` 'SCORO', allocated to the invoice and
+  settled through `refreshSettlement` — so the invoice reads Paid and
+  commissions see the order collected. **No collection figure counts it**:
+  `LIVE_MONEY` (`{ importedFrom: null }`, `shared/finance.ts`) is ANDed
+  into the Collections cards (whose Total collections card says how many
+  SCORO ones are kept as history), the collections report, cash flow, the
+  G-FIN dashboard and Insights' collected figures — add it to any new
+  collection or cash total. The register still lists them, "SCORO history"
+  in the OR column. A number already on file is skipped, so a re-run
+  changes nothing — except that an ISSUED order this import made before
+  invoices came across (its CREATED row says "Imported from SCORO
+  invoice") takes its invoice and collection on the next run of the same
+  file, once (an order with a live invoice is left alone). One transaction
+  per invoice, a refusal stopping the import naming it. The quotation's
+  outcome and attachments are left as they are.
 - **A SCORO group not on the list is the importer's call, else OTHERS**
   (2026-10-11, the owner's call: "let me decide or set it as OTHER"). The
   import never adds a group to the master: a file's group matched by
@@ -3157,9 +3819,14 @@ SCORO.
   checked by `checkVatRate()`
   before anything is written so a refused rate burns no number; a draft may
   keep the rate it was snapshotted with. A new revision copies it. **Progress
-  billing still takes the company rate** (`routes/progress.ts`), so a job won
-  from a zero-rated quotation is billed VAT — an open item: billing should
-  read the rate of the revision the job came from.
+  billing takes the rate the work was sold at** (2026-10-17, closing the
+  open item): `projectVatRate()` in `routes/progress.ts` reads the project's
+  quotation revision's `vatRate`, else its costing's snapshotted one (a
+  project built before its quotation was approved links no revision), else
+  the company's — so a job won from a zero-rated quotation is billed 0%,
+  never 12%. The billing keeps the rate (its CREATED audit row's
+  `after.vatFrom` names the source) and the invoice keeps the billing's;
+  EWT stays the company's rule.
 - **The discount is to six decimals** (2026-10-08): `discountPct` is
   `Decimal(9,6)` on the revision and the sales order;
   `quotationTotals` and its mirror return it to six. **SCORO's discount
@@ -3182,11 +3849,24 @@ SCORO.
   quotation's currency (`order.quotation.currency`). The PATCH refuses a
   change once a revision is APPROVED or PENDING_APPROVAL, or a live sales
   order booked it. The SCORO import takes the file's `currency` when it is
-  listed (blank is PHP). **The open item**: summaries that ADD quotations —
-  the list's Sum and team cards, the board, the forecast, Sales Analytics —
-  still add figures as they stand, so a USD quotation counts as that many
-  pesos there; the printed lists name a foreign currency beside its figure.
-  Converting needs exchange rates the owner has not decided on.
+  listed (blank is PHP). **Summaries that ADD quotations convert to PHP**
+  (2026-10-17): each foreign quotation stores its own rate,
+  `Quotation.exchangeRate` (pesos per unit, null for PHP), typed in the
+  editor's "Rate to PHP" box or taken at save from Company Settings ›
+  Exchange rates (one `quotation.exchangeRates` Setting, `exchangeRates()`
+  / `storedRate()` in `shared/exchangeRates.ts`; the SCORO import takes it
+  too, and the seed's `fillQuotationRates()` gives a rateless one Settings'
+  rate on every deploy). A rate changed in Settings restates nothing on
+  file. `inBase(value, q)` (with `RATE_SELECT` in the query) converts —
+  the quotation list's Sum, team cards, My team and margin
+  (`revisionsMargin`'s `rate`), the sales order list's booked value, team
+  cards and margin (at its quotation's rate), the board's cards, the
+  Forecast and its breakdowns, and Insights' pipeline, won and Sales
+  Analytics figures and CSV, and the amount a job order takes from a
+  quotation or sales order (a job order's amount is in pesos). Customer
+  360 prints each quotation in its own currency. A foreign quotation with no rate yet counts
+  unconverted. The quotation's page, paper, rows and sales orders stay in
+  its own currency; the printed lists still name it beside a row's figure.
 - **`hideTotal` ("Hide total") only changes the paper**: the PDF prints the
   lines and prices without the totals block; the stored totals are computed
   as always, and a new revision copies the flag.
@@ -3312,6 +3992,12 @@ SCORO.
   through `cancelOpenRequest`, telling the approvers. The SAME revision
   returns to draft — no revision number burned on a document the customer
   never saw; raising a new revision stays the path once anything was sent.
+  **An APPROVED revision is offered the same on the Modify page**
+  (2026-10-19, help ticket GT-HT-2026-0010: "modify without reflecting as
+  R1"): "Pull R<n> back and edit", beside "Raise a new revision", wherever
+  `GET /approvals/history` says `canReopen` — the engine's
+  `reopenApproved()` with its reason, the quotation's own refusals (won, a
+  sales order, a project, a job order) said in the bar.
 - **A revision superseded while PENDING_APPROVAL takes its request with it**
   (2026-10-02). `POST /quotations/:id/revisions` calls
   `cancelOpenRequest('quotation', revisionId, tx, reason, actorId)` in the same
@@ -3449,6 +4135,251 @@ SCORO.
 
 The owner's routing sheets ("APPROVAL ROUTER — SALES ORDER AND QUOTATION", then
 `APPROVAL_ROUTE.xlsx` for six documents).
+
+### ROLE_REV1 — roles, not positions; the highest role is the title (2026-10-19)
+
+The owner's `ROLE_REV1.xlsx` and `organizational_chart_roles.pptx`: "remove the
+position in the setting, a person can hold multiple roles, but the documents show
+the highest role"; KAT's Technical Manager and Aftermarket Manager shared with
+GIB, UIT and HIT's until KAT hires; a Warehouse Supervisor over Local and
+Import with Warehouse Staff under them; six roles at most; "keep plantilla
+count by role, both check".
+
+- **`applyRoleRev1()`** (`shared/roleRev1.ts`, the seed after the chart's
+  roles, once, `seed.roleRev1_20261019`): the roles of `ROLE_REV1` by key,
+  name and LEVEL (`Role.rank`, 1 the CEO / President; `sortOrder` breaks a
+  tie). Renamed in place, keys kept (the engine reads them): Aftermarket
+  Manager (`service_manager`), Technician, Account Payable Officer
+  (`finance`), Accountant, HR Officer, Design Supervisor / Specialist.
+  New, their rights COPIED from the nearest old role (trim them in Admin ›
+  Roles): Local / Import Purchaser, Warehouse Staff, Credit and Collection
+  Officer, Liaison Officer, HR Manager, HR Clerk, Office Manager, Office
+  Admin, Admin Staff, Marketing Officer, Design Manager. Welder and
+  Electrician go to Project Support, Collection to Credit and Collection
+  (`SUCCESSOR_REV1`) — holders and route steps moved first, then deleted.
+  Everyone keeps their roles under the new names; Back Support and its
+  "Supports teams" stay as they were.
+- **The title is the highest role** — `titleFromRoles()` (lowest rank;
+  EVERY role at that level, joined " / " in the chart's order — 2026-10-19,
+  the owner's call: Dina's "Finance Manager / Purchasing Manager (Local)";
+  the seed refreshes every title on each deploy), written onto `User.position` and the employee's `position` by
+  `refreshUserTitle()` after every role change (PATCH /users, a login made,
+  a role renamed or re-levelled). The Position box is gone from Admin ›
+  Users and the employee form (a read-only Title; an employee with no
+  login keeps a typed one); every paper and list printing a position
+  prints it. The Plantilla stays as HEADCOUNT BY ROLE: `Position.roleId`
+  ("Counts the role"), a slot per REV1 role, filled = the role's active
+  holders (`filledByPosition`).
+- **No cap on roles since 2026-10-19** (the owner's call: "don't limit the role for 6"; `MAX_ROLES` is 1000, the box counts without a limit). Before: **Six roles at most** (`MAX_ROLES`): PATCH /users, a login made from the
+  employee record and `--roles-by-name` refuse a seventh (`tooManyRoles`);
+  Admin › Users shows "Roles — n of 6", a "More than 6 roles" card and
+  `?roles=over` for anyone over it from before.
+- **Team managers** (`TeamPost`, team × role key, OWN | SHARED | PEOPLE;
+  `shared/teamPosts.ts`; Admin › Categories › Team managers, `GET/PUT
+  /reference/team-posts`): `teamPostHolders()` is read by the engine FIRST
+  for Team Leader, Technical Manager, Sales Manager and Aftermarket Manager
+  steps (ROLE, the team-first SUPERVISOR and the PROJECT_MANAGER fallback),
+  and `holdsStep` counts them. The seed shared KAT's Technical Manager and
+  Aftermarket Manager from GIB, UIT and HIT once
+  (`seed.teamPosts20261019`). **When KAT hires one**: give them the role
+  with Team = KAT, then set KAT's post back to "Its own team".
+- **"Both check"**: `ApprovalStep.alsoRoleIds` works on a ROLE step too —
+  the holders of either role decide it, and `holdsStep` counts both. The
+  reimbursement's and cash advance's step 3 is "Checking (Account Payable /
+  Credit and Collection)": `finance` with `credit_collection` beside it.
+
+### The role hierarchy and the level labels (2026-10-19)
+
+The owner's call: "sometimes I need both view team and view own" and "a
+Hierarchy setting where I can edit report to, based on role only". The
+matrix's levels already include the ones under them, so the selects now SAY
+so: `LEVEL_LABELS` (both copies) read "Own", "Own + Team", "Own + Team +
+All". **`Role.reportsToRoleId`** (self-relation, SetNull) is edited on Admin
+› Roles › **Hierarchy** (`?view=hierarchy`, `pages/admin/RoleHierarchy.tsx`;
+`PUT /roles/hierarchy`, `admin.roles.edit_all`, a cycle a 400, one audit row
+per role changed). "Apply to people" (`POST /roles/hierarchy/apply`,
+`admin.users.edit_all`; a dry run unless `?apply=true`) writes each active
+login's "Reports to" from their highest role that has a parent: the parent
+role's only holder, or the one on the same team; anyone it cannot decide is
+listed and left alone; each move audited on the user. The engine still reads
+`User.supervisorId` — the role hierarchy feeds it, never replaces it.
+**A role may report to more than one** (2026-10-20, the owner's call: the
+Warehouse Supervisor reports to both Purchasing Managers):
+`Role.alsoReportsToRoleIds` ("Also reports to", a `TickPicker` on the
+Hierarchy tab, in the same PUT and cycle check); "Apply to people" writes the
+first parent only, since a person has one "Reports to" — but a SUPERVISOR
+step that goes to the requester's "Reports to" ALSO goes to the active
+holders of their roles' `alsoReportsToRoleIds` (`approversForStep`), so a
+Warehouse Supervisor's documents reach both Purchasing Managers. The By-role
+chart keeps the head's two sides: Industry Teams for a branch holding a
+team-managing role (Team Leader, Technical / Sales / Aftermarket Manager —
+`KEY_ROLES`), BOSS for every other — decided by the ROLE, never by its
+holders' teams, so the CEO's Purchasing and Design Manager roles sit on BOSS. **The Organizational
+Chart opens By role** (`RoleChart` in `OrgChart.tsx`, `GET /roles/chart`
+behind Admin › Users' view right): each role's tile under its first parent
+role, a tile per holder with picture and team, "Vacant" where nobody holds
+it, "Also reports to …" naming the other parents; "By person" is the
+"Reports to" chart as before.
+
+### No departments; a hierarchy instead (2026-10-19)
+
+The owner's call, after ROLE_REV1: "remove the department, create a
+hierarchy" — department removed EVERYWHERE, and both hierarchies.
+
+- **Department is retired from every screen, route, report and paper.**
+  The `Department` table and the `departmentId` columns stay (nothing on
+  file is deleted, and `applyOrgChart()`, once-marked history, still needs
+  the rows on a fresh install — the seed keeps writing them), but nothing
+  shows, edits, filters or groups by them: not Admin › Users (its column,
+  filter, paper and the Details field), not the employee form, list or
+  import, not the login mirror (`MIRRORED_LOGIN_FIELDS` lost it,
+  `createLogin` takes none, `ResolvedUser` carries none), not the people
+  pickers. **What grouped by department groups by TEAM** (`Employee.
+  industryId`, "No team" last): `PersonSelect` / `PeoplePicker` (`/users/
+  lookup` sends `team`, `personGroup()` in `components/People.tsx`; a
+  caller's own `group` keeps its order), the money-out registers' Team
+  column (`USER_TEAM_SELECT` / `teamOfUser()` in `shared/team.ts`, team
+  only — it was "team, else department"), the borrower's slip, and the HR
+  breakdowns (turnover, the HR dashboard, passports, people flow,
+  evaluations, clearances). The Plantilla summary groups by role LEVEL.
+  An Academy requirement stored with a department keeps matching but
+  reads "Department (retired)" and can only be removed; new ones are
+  everyone or a plantilla position.
+- **The role hierarchy**: a role's level is `Role.rank`; `web/src/lib/
+  roleLevels.ts` names the six (`levelLabel()`: Level 1 — Executive,
+  2 — Heads, 3 — Managers and officers, 4 — Engineers, staff and clerks,
+  5 — Leads and technicians, 6 — Support and skilled) and `rolesByLevel()`
+  groups. Admin › Users' Access tab ticks roles under their level, and
+  Admin › Roles lists its cards under their level; the role form's "Level
+  on the chart" names them.
+- **The Hierarchy Chart**: Admin › Users › **Hierarchy Chart** (`?view=
+  hierarchy`; 2026-10-20, the owner's call: "the Roles › Hierarchy settings
+  reflect — no name or person", "boxes like the org chart") — the
+  Organizational Chart's By-role drawing with `rolesOnly`: a box per role
+  (its level over its name, "Also reports to …" under it), the BOSS and
+  Industry Teams sides, the zoom, and the roles with no parent and nothing
+  under them wrapped under "Not placed in the hierarchy yet". No person is
+  named; who holds a role is the Organizational Chart's.
+- **Both charts read whole and move by hand** (2026-10-20, the owner's
+  call: "maximize the area, allow grip to view all around"): a role
+  chart's card keeps its words on one line (`.org-tree.is-roles`, its
+  row items never narrower than their content — they had shrunk to a
+  letter a line); the chart sits in a 78vh area that scrolls both ways and
+  is DRAGGED with the pointer (a drag never opens the card it began on),
+  with a Full screen button beside the zoom.
+- **The Organizational Chart has two sides** (2026-10-19, the owner's
+  call): under the head, **BOSS — Business and Operation Support
+  Services** (the direct reports with no selling team) on the left and the
+  **Industry Teams** (KAT, HIT, UIT, GIB, SIT, in that order) on the
+  right, each under its own label. A card shows the title (every role at
+  the highest level) and, under it, every OTHER role the person holds as a
+  chip, the managing ones (Team Leader, Technical Manager, Sales Manager,
+  Aftermarket Manager) marked first — so who is a team's Technical Manager
+  or Sales Manager reads off the chart. **Since the same day's second call
+  ("scatter their picture per role so what is lacking is plain"): a card
+  per ROLE**, the holder's picture and team code on each, a person's tiles
+  boxed together (the box is what reports to their manager), and on each
+  team head's branch a dashed red "Vacant" tile for every managing role
+  (Team Leader, Technical Manager, Sales Manager, Aftermarket Manager)
+  nobody on that team holds. The Back Support and shared-manager lines are
+  gone from the chart. **And the same day's third** ("maximize space; the top only
+  the CEO role; show the whole chart, add zoom"): a person's tiles sit two
+  to a row, the head shows only their highest role and every other role
+  they hold is drawn where it is worked (a managing role on their team's
+  branch, filling its vacancy; the rest on the BOSS side), and the chart
+  opens fitted to the card's width (CSS `zoom`) with −, +, Fit and 100%.
+
+### The organisation chart of 2026-10-17 — one approver, a hidden stand-in, the requester's follow-up
+
+The owner's `organizational_chart_executive_3.pptx` and `ROLE.xlsx`
+(`docs/notes/P-org-chart-2026-10-17.md`, with his eight answers), and his
+rule: "on approval their manager should not appear as OR … if the
+purchasing officer is absent, the purchasing manager can approve, but don't
+show them initially; the requestor can raise a follow-up to the purchasing
+manager."
+
+- **The chart is data, applied ONCE**: `ORG_CHART` in `shared/orgChart.ts`
+  (sixty people — name, the live login's email, team or department, the
+  teams they back-support, who they report to, their titles) and
+  `applyOrgChart()`, run by the seed and marked `seed.orgChart20261017`:
+  every login's roles RESET to its titles' (`TITLE_ROLES`, plus Employee,
+  plus Supervisor for anyone with a direct report), "Reports to", team
+  (`Employee.industryId`; department staff have none), department (the five
+  chart departments SCF, ACC, MKT, DSN, CCD seeded beside the old eight),
+  position and Supports teams (Dina SIT, Karen KAT, Mylin UIT, Joy GIB,
+  Wenchie HIT), audited per person; a person with no login becomes an
+  EMPLOYEE record (position, team or department) for the owner to invite
+  from the record — a "Reports to" waits until the login exists (the line
+  lives on `User`). A login not on the chart (Jhon Russel Balicas, Julian
+  Gasiong, the administrator) is untouched. `npx tsx scripts/org-chart.ts`
+  is the dry run (`--apply`, `--force`). The four ambiguous lines are the
+  first named (Reagan and Rey → Rolando; HIT's crew → Reagan; Arnel →
+  Renielle). `grantSupervisorRole()` (every deploy, offered once per login
+  in `seed.supervisorOffered`) gives Supervisor to anyone with a report.
+- **Titles → roles**: CEO / President `ceo`+`executive`; Team Leader,
+  Technical Manager, Sales Manager, Service Manager their roles (the same
+  four men on HIT, UIT, GIB, SIT; KAT has a Team Leader only); Sales
+  Engineer = `industry_specialist` (RENAMED "Sales Engineer"); Project
+  Engineer; **Project Lead** (new `project_lead`: the project to read,
+  progress reports, requisitions, drawing and budget requests of their
+  own); Welder, Electrician, Project Support and Service Technician are
+  POSITIONS with the `employee` role alone; Purchasing Officer =
+  `procurement` (RENAMED "Purchasing Officer") + `back_support` — the three
+  officers ARE their teams' Back Support; Finance Officer, Finance Clerk
+  and Collection all `finance` (RENAMED "Finance Officer"; any of the four
+  is "Checking", the owner's call); Warehouse Officer `warehouse` +
+  `warehouse_supervisor`; Accounting Manager / Officer / Clerk
+  `accounting`; Marketing Manager / Assistant new `marketing` (the sales
+  side to read, leads, calendar, no approvals); HR Officer `hr` (one
+  holder); CAD Supervisor / Operator `designer_lead` / `designer` (RENAMED
+  "CAD Supervisor" / "CAD Operator"); Cost Controller.
+- **Purchasing Manager, Local and Importation**: `purchasing_manager`
+  (Dina) and the new `purchasing_manager_import` (Carter).
+  `IMPORTATION_ROLES` in `shared/approvals.ts` is the twin map; a ROLE
+  step naming the local role goes to the twin's holders when the request
+  is an importation (`ApprovalRequest.importation`, set at submit from the
+  document: a purchase order or incoming report with no VAT —
+  `SubmitInput.importation`), and to the local manager when nobody holds
+  the twin. `holdsStep` reads the same, so Carter's own importation order
+  is signed at submit. Never both: one name on the paper and the panel.
+- **No "A or B" on any step**: the ORs came from roles handed out
+  wholesale (fourteen HR holders, Dina and Karen with twenty roles each),
+  never from the stand-in, which `namedApprovers` never lists. After the
+  reset every step names one person; `service_manager` joined
+  `OWN_TEAM_ROLES` (the service reports go to the requester's team's
+  Service Manager), and "Management approval" on the commissioning
+  report, the supplier bill ≥ ₱50,000 and the evaluation is the CEO /
+  President (`ceo`), corrected in place through `previously` — which now
+  takes several earlier shapes (`SeedStep[][]`).
+- **"Always the Team Leader"** (the owner's call): a SUPERVISOR step
+  naming a `TEAM_FIRST_ROLES` role (`team_leader`) goes to that role's
+  holders on the requester's own TEAM before their "Reports to"
+  (`teamFirstHolders`) — a welder reports to a Project Lead and an engineer
+  to the Technical Manager, and their documents still go to the team's
+  leader; a requester with no team (department staff) and a team with no
+  leader keep the "Reports to"; a step naming no role (leave, overtime)
+  stays the direct superior's.
+- **The follow-up** (`followUp()` in `shared/approvals.ts`; `POST
+  /approvals/:id/follow-up { note? }`; "Follow up" in the Approval panel
+  for the requester while PENDING on a route with `standIns`, asked in the
+  confirm bar with an optional note): the "Reports to" of EVERY approver of
+  the open step is told (bell `approval.follow_up` and email where SMTP is
+  set) and so is the approver; an `ApprovalFollowUp` row (request, step,
+  by, `toIds`, note) and one SUBMITTED audit row; once per step per 24
+  hours (`FOLLOW_UP_EVERY_MS`, a 409 saying when); a 400 naming the
+  approver when nobody is above them, or on a route without stand-ins.
+  From then on the manager is QUEUED (`pendingFor` adds a request followed
+  up to them, `followedUpBy` on My Work and the launcher: "Followed up to
+  you by …") and may decide it — `deciderFor` always could; the request
+  itself never moves. `GET /approvals/history` carries `followUps` (to, by
+  name) and `canFollowUp`; the route preview, the paper's "Pending" names
+  and the step's approver list still name the approver alone.
+  verify-foundation pins the queue before and after, the two bells, the
+  once-a-day rule, the stand-in's decision after, the refusal without
+  stand-ins, the team-first Team Leader and the importation twin.
+- **Assign in Admin › Users what the chart leaves open**: a login for each
+  employee record made (invite from the record), and their "Reports to"
+  once it exists.
 
 ### The routing sheet of 2026-10-13 — six documents, one signature per person
 
@@ -3658,7 +4589,8 @@ stand-in's door, queue, bell and trail, and both switches off.
   (the owner's call: "apply the same team rule to Back Support") a holder
   with nothing ticked handles their OWN team** (their Team on Admin ›
   Users), the Technical Manager's rule — no longer every team; ticked
-  teams replace their own.
+  teams replace their own. (The org chart drew it as dashed lines for a
+  day; the owner had them removed on 2026-10-19.)
 - **A person's TEAM is picked on Admin › Users too** (2026-10-12, the
   owner's call: "on users edit allow selection of Team, particularly in
   Team Leader Role and sales to categorize their quotation and sales order
@@ -3698,10 +4630,82 @@ stand-in's door, queue, bell and trail, and both switches off.
   (`admin.roles.delete`, the Delete in the role modal's foot) takes it off
   everybody holding it in the same transaction — the question says how
   many — and audits who lost it. Refused: a seeded (`isSystem`) role, which
-  the seed would make again and its routes name (the modal says so), and a
+  the seed would make again and its routes name (the modal says so), a
   role any approval route still names, as a step or as "Prepared by" — the
   400 names the routes, because deleting it would leave a step routing to
-  nobody.
+  nobody — and, since 2026-10-18, a role whose KEY the engine reads
+  (`ENGINE_ROLE_KEYS` in `shared/rolesClear.ts`: rename or empty it instead).
+- **Every role was EMPTIED once, and the roles are the owner's**
+  (2026-10-18, the owner's call: "delete all roles, I will create the roles
+  later"; his choice between deleting the rows and emptying them: empty).
+  `clearRoles()` in `shared/rolesClear.ts`, the seed's LAST step, marked
+  `seed.rolesCleared20261018`: every permission off every role, every role
+  off every person ("Supports teams" and the overrides stay — they are the
+  person's), the built-in mark (`isSystem`) lifted from all, the ROWS kept
+  so the 47 routes keep their steps and the keys the engine reads keep
+  their meaning — `team_leader` (team-first), `technical_manager` and
+  `service_manager` (own team), `back_support` (supports teams),
+  `purchasing_manager` / `purchasing_manager_import`, `hr` (the HR approver
+  type), `ceo`, `executive`, `employee` (every new login),
+  `supervisor` (every boss), `warehouse_supervisor` — whatever the owner
+  calls them; the New role form's Key hint lists them. **From then on the
+  seed neither recreates a role nor offers it a permission**: the role
+  definitions moved to `src/shared/roleSeeds.ts` (`ROLE_SEEDS`,
+  `roleSeedPermissionKeys`) and the seed's loop runs only while the mark is
+  absent (a fresh install gets the 29 and has them emptied in the same
+  run). Only the super admin can open anything until the owner builds and
+  assigns his roles (sign in as `gcore@gruntechnology.com`). **A verify
+  script never leans on what the install's roles hold**: `rolesLike(prefix,
+  keys)` in `scripts/lib/roles.ts` gives a test user the real role (its
+  KEY, for the engine) AND a throwaway `<prefix>like_<key>` role carrying
+  the seed definition's rights, refilled each run and deleted by the
+  script's cleanup — every `makeUser` that took seeded keys goes through it.
+  **The chart's titles reach the owner's roles BY NAME**: `npx tsx
+  scripts/org-chart.ts --roles-by-name` (dry run; `--apply` writes)
+  matches each title on `ORG_CHART` ("Team Leader", "Purchasing Officer",
+  "Employee" …) to a role of that name, case- and space-blind, ADDS it to
+  each person with a login (never removes one), lists the titles with no
+  role of that name and the people with no login, audits per login and is
+  never marked — run it again as the roles grow (`applyChartRolesByName()`
+  in `shared/orgChart.ts`). verify-foundation pins the engine keys (each
+  read in the API's source, each role on file), no built-in role once the
+  mark is down, and the numbers' clearing mark.
+- **Then every role was REPLACED by the chart's titles** (2026-10-18, the
+  owner's call, after Admin › Roles refused to delete "Executive /
+  Management": "delete all and create all from the list of roles I sent
+  from the organizational chart; I'll edit their access per role later").
+  `replaceRolesWithChart()` in `shared/rolesFromChart.ts`, run by the seed
+  after the emptying, ONCE (`seed.rolesFromChart20261018`): one role per
+  title on the chart (`CHART_ROLES`, thirty: CEO / President, Team Leader,
+  Technical Manager, Sales Manager, Service Manager, Sales Engineer,
+  Project Engineer, Project Lead, Welder, Electrician, Project Support,
+  Service Engineer, Service Technician, both Purchasing Managers,
+  Purchasing Officer, Finance Manager / Officer / Clerk, Collection,
+  Warehouse Officer, Accounting Manager / Officer / Clerk, Marketing
+  Manager / Assistant, Human Resources Officer, CAD Supervisor / Operator,
+  Cost Controller), EMPTY of rights. A title the engine reads by key keeps
+  the key on its renamed row — Purchasing Officer is `back_support` (the
+  chart's officers ARE their teams' Back Support), Warehouse Officer
+  `warehouse_supervisor`, Finance Officer `finance` (so "Checking" is the
+  Finance Officer alone now; Finance Clerk and Collection are roles of
+  their own), Human Resources Officer `hr`, Sales Engineer
+  `industry_specialist`. Every other role is DELETED — Executive,
+  Employee, Supervisor, Sales, Project Manager, Trainer, Warehouse,
+  Procurement and any made since — after the steps naming one are pointed
+  at its successor (`SUCCESSOR`: Executive → CEO / President, Project
+  Manager → Technical Manager, Procurement → Purchasing Officer …), so no
+  active step routes to nobody. Every role comes off every person, then
+  each person on the chart with a login is given their titles' roles (by
+  email, else name; audited); "Reports to", Supports teams and overrides
+  stay. **What changed in code with it**: a project-manager step with no
+  manager falls back to `ceo` (`PROJECT_MANAGER_FALLBACK_ROLE`, was
+  `executive`); `ENGINE_ROLE_KEYS` no longer lists `executive`, `employee`
+  or `supervisor` — a new login starts with no role (`defaultRoleIds()`
+  finds no Employee), and `grantSupervisorRole()` finds no Supervisor;
+  `rolesLike` makes the real role only for a chart key, so a verify run
+  never puts a deleted role back; `--roles-by-name` no longer looks for
+  "Employee". `TITLE_ROLES` stays as the 2026-10-17 history
+  `applyOrgChart()` assigned.
 - **Assign the roles in Admin › Users**: until somebody holds Team Leader
   (for anyone with no "Reports to") and CEO / President, those steps route
   to nobody and `audit-workflows.ts` says so.
@@ -4668,8 +5672,8 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   module order (the launcher's `DIVISIONS` in `pages/Home.tsx`, the top
   bar and Ctrl+K follow it); verify-foundation pins it with the strips.
 - **Procurement** is Purchase Requests, RFQ, Canvass, Purchase Orders and
-  **Warehouse** is Incoming, Inventory, Outgoing, Borrow Slips, Pull-out
-  Slips (`PROCUREMENT_STRIP` / `WAREHOUSE_STRIP` in verify-foundation, the
+  **Warehouse** is Incoming, Inventory, Pull-out Slips, Borrow Slips,
+  Outgoing (the owner's order of 2026-10-18) (`PROCUREMENT_STRIP` / `WAREHOUSE_STRIP` in verify-foundation, the
   strips as built so far). **Incoming and Outgoing are Receiving and Stock
   Issuance renamed**: the registry KEYS (`receiving`, `stock_issuance`) and
   every permission string stay, so no right moved; the paths are
@@ -4854,8 +5858,13 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   (`InventoryBalance.locationId`, set on the stock card by
   `gchain.inventory.edit_all` through `PATCH /inventory/balances/:id`, or
   by a receipt into a named bin while empty), Stock qty, Unit cost, Reorder
-  pt, Status; a "Stock value by category" bar chart; the movement log and
-  Quick operations under it. **`stockState()` in `shared/chain.ts` is the
+  pt, Status (the six cards one row of six equal columns, the eight tiles
+  two even rows of four at one height — `.kpi-grid.list-summary:has(>
+  .inv-cats)` in `styles/procurement.css`, 2026-10-18, the owner: "card size
+  are not standard"); a "Stock value by category" bar chart; the movement log
+  under it, and "+ New incoming" in the list's toolbar (the Quick
+  operations card went on 2026-10-18, rule 9: the stock report is the
+  Report button and ⋯ › Print). **`stockState()` in `shared/chain.ts` is the
   one rule**: CRITICAL (nothing available, or at/under `minStock`),
   LOW_STOCK (at/under the reorder level), ON_ORDER (either, with an issued
   PO still to arrive), IN_STOCK — the column, the filter, the cards, the
@@ -5021,7 +6030,7 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   sales order is enough"). `PulloutSlip` + `PulloutItem` (new tables;
   numbering `pullout_slip`, GT-PS-2026-0001; `gchain.pullout_slips`
   SHARED_KEPT, held by the warehouse roles; Warehouse › **Pull-out Slips**,
-  last on the strip — verify-foundation pins it), `routes/pullouts.ts` at
+  third on the strip since 2026-10-18 — verify-foundation pins it), `routes/pullouts.ts` at
   `/api/pullout-slips`, `pages/chain/PulloutSlips.tsx`. `kind` SALES_ORDER
   (an ISSUED order — the customer's delivery) or PURCHASE_REQUEST (an
   APPROVED or partly ordered DIRECT_TO_JOB request — the project takes from
@@ -5056,7 +6065,11 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
   reopened or cancelled (`refuseWhilePulledOut`), while a slip stands on it.
   The sales order page's ⋯ "Pull out stock…" and the request page's ⋯ "Pull
   out from stock…" open `/g-chain/pullout-slips/new?salesOrder=` /
-  `?request=`; both pages show a **Pulled out** card (`PulloutCard`, the
+  `?request=` (and Inventory's project stock list "+ New pull-out slip" →
+  `?kind=project`, a project's own stock — see Phase 5's project stock);
+  **anyone may raise one** (2026-10-18: OWNED_KEPT, the `employee` role holds
+  Create, View Own and Edit Own — View Own reads what one prepared or asked
+  for, Edit Own moves one's own draft); both pages show a **Pulled out** card (`PulloutCard`, the
   register's own list, hidden without its right) and the request's lines
   say what came from stock. The list (`listWhere` → `{ base, where }`,
   cards Waiting for approval / Pulled out / Drafts) prints; Ctrl+K finds
@@ -5431,8 +6444,8 @@ operations project), and the liquidation stays itemised with attachments
 "for early approval or checking".
 
 - **The register is the sample's** (`BudgetRequestsList`, both dresses):
-  BR No., Requester, **Team** (the requester's team, else their department —
-  `TEAM_OR_DEPT_SELECT` / `teamOrDepartment()` in `shared/team.ts`, the one
+  BR No., Requester, **Team** (the requester's team — `USER_TEAM_SELECT` /
+  `teamOfUser()` in `shared/team.ts`, the one
   rule for every money-out register, sent as `team` with the person's record
   stripped), Project / Purpose, Amount, Date needed, Status. Filters status,
   pending, approved funds, liquidation overdue, requester, team (`teamId`,
@@ -5441,9 +6454,47 @@ operations project), and the liquidation stays itemised with attachments
   requests (rejected and cancelled left out), Approved funds (approved and
   every state after), Pending approval, To release — each linking to its
   filter (verify-finance asserts the counts). **"+ Add budget request"** on
-  the list (`gops.budget_requests.create`): `BudgetRequestModal` with no
-  `job` asks the project from `GET /budget-requests/projects` (above `/:id`,
-  running projects, numbers and names only, the create right).
+  the list (`gops.budget_requests.create`) opens the request PAGE, which asks
+  the project from `GET /budget-requests/projects` (above `/:id`, running
+  projects, numbers and names only, the create right).
+- **The budget request is a full page with a breakdown** (2026-10-19, the
+  owner's call: "complete form, not a popup window"; his choice: itemised
+  lines, ONE budget line). `pages/delivery/BudgetRequestEditor.tsx`, in the
+  purchase requisition page's dress: `/g-ops/budget-requests/new?jobId=`
+  (the project's tab), `/g-ops/budget-requests/new` (the registers, the
+  project picked) and `/:id/edit` on a draft; `BudgetRequestModal` is gone.
+  `BudgetRequestItem` (name, description, quantity 3 dp, unit, unit cost,
+  amount) — the request's `amount` is the sum of its lines, each
+  `requestLineAmount()` (exact: thousandths × centavos, half away from zero;
+  the page's copy is the same), `POST` / `PUT /budget-requests` take
+  `items[]` and replace them whole (a typed `amount` counts only with no
+  lines; a PUT without `items` keeps them). One budget line still covers the
+  request, so the liquidation rule is unchanged. Beside the lines the
+  project's budget (`GET /budget-requests/budget?jobId=`,
+  `projectBudgetByLine()`; a request commits nothing, so the panel says what
+  is left), under them the route (`GET /budget-requests/route`). The record
+  page shows the Breakdown card and the paper a Breakdown table; an older
+  request opens on the page as one line worth its amount.
+- **The cash advance and the reimbursement are pages too** (2026-10-19, the
+  owner's call: "do the same for cash advance and reimbursement").
+  `pages/finance/CashAdvanceEditor.tsx` (`/g-fin/cash-advances/new`,
+  `/:id/edit` on a draft) carries the same breakdown — `CashAdvanceItem`,
+  `requestMoney()` / `requestLineAmount()` in `shared/requestLines.ts` (the
+  one rule for the advance's lines; the PUT claims DRAFT and replaces them
+  whole, keeps them when none are sent), the project optional (overheads),
+  a budget line when one is named, the route from `GET
+  /cash-advances/route`, the Breakdown on the record page and the paper.
+  `pages/finance/ClaimEditor.tsx` is every claim: `/g-fin/expenses/new` (a
+  reimbursement), `?advance=` / `?budgetRequest=` (a liquidation, its
+  project and line taken from what it accounts for), `/:id/edit` on a
+  draft — the receipts table, the attachments filed with the save, the
+  missing-receipt rule (Submit waits for every OR), the liquidation's
+  difference, the route from `GET /expense-claims/route`. The breakdown
+  table and the record's read-only card are `RequestLinesCard` /
+  `RequestItemsCard` (`components/RequestLines.tsx`), shared with the
+  budget request page. `NewCashAdvanceModal` and `NewClaimModal` are gone;
+  Budget Liquidations' "Actual entry" (`?act=liquidate`) and the advance's
+  and request's Liquidate open the claim page.
 - **Budget Liquidations** — G-FIN › Money out, `gfin.budget_liquidations`
   (READ, Finance holds it; it opens the list and every request through
   `seesAll`), `/g-fin/budget-liquidations`, `FinanceLiquidations`: the same
@@ -5496,7 +6547,7 @@ Team Leader.
   (approved, something still to pay), Paid (REIMBURSED), else the status.
   The list's rows carry `stage`; cash advances use the same two.
 - **The list is the sample's**: Reimbursement No., Date of reimburse,
-  Requester, Team (else department — `teamOrDepartment()`), Project /
+  Requester, Team (`teamOfUser()`), Project /
   Purpose (a liquidation names what it accounts for), Amount, Status; Kind
   and Lines under Columns; tick boxes. Filters status, pending (in
   approval), for release, kind, requester (`claimedById`), team, date
@@ -5533,8 +6584,8 @@ by finance; an advance already released keeps its liquidation.
 - **Salary deduction** is a `PaymentMethod` (`SALARY_DEDUCTION`): money in
   on a cash advance only (anything else is a 400), cleared as recorded; the
   repayment form offers it only on an advance.
-- **The register is the sample's**: CA No., Date requested, Requester, Team
-  (else department), Project / Purpose, Amount, Status in the owner's words
+- **The register is the sample's**: CA No., Date requested, Requester, Team,
+  Project / Purpose, Amount, Status in the owner's words
   (`advanceStage()`: the open step's TL Approval … CEO Approval, For
   Release, **Repaying** while a balance is owed, Paid), Total payment made
   (with what is left; "by liquidation" on an older one), Payment history
@@ -5568,6 +6619,10 @@ The owner's "Commission Request System" spec: G-FIN › Money out ›
   it withheld at source (withheld is paid to the government on our account,
   never short-paid). One STANDING request per order (anything but
   CANCELLED, PAID included), decided under a lock on the order's row.
+  **Never on a deal invoiced in SCORO** (2026-10-17): an order with a live
+  invoice `importedFrom` 'SCORO' is refused ("… was invoiced in SCORO —
+  commissions are raised on deals booked in G-CORE") and left off the
+  eligible orders — its collection is history, not G-CORE's money.
 - **One arithmetic: `shared/commission.ts`** (exact in BigInt centavos,
   half away from zero; `web/src/lib/commission.ts` its copy, pinned equal on
   300 random requests by verify-finance): actual margin = collected − VAT −

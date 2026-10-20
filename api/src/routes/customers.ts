@@ -20,6 +20,7 @@ import { nextNumber, previewNext, setCounter } from '../shared/numbering';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { formatShortDate, renderDocument } from '../shared/pdf';
 import { LIST_CAP, listReference, rangeNamed, recordNamed, sendListPdf, filterDay } from '../shared/listPaper';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
 
 export const customerRoutes = Router();
 customerRoutes.use(authenticate);
@@ -91,6 +92,32 @@ export function customerListWhere(
 }
 
 /**
+ * The list as THIS caller may read it (2026-10-18): a View Own holder sees the
+ * customers they added and nothing else — the rows, the summary cards and the
+ * paper alike, since all three read this. `customerListWhere` itself stays the
+ * filters' rule.
+ */
+function visibleCustomers(me: ReturnType<typeof currentUser>, q: ReturnType<typeof listQuery>) {
+  const { base, where } = customerListWhere(me, q);
+  const mine = (ids: string[]) => ({ createdById: { in: ids } });
+  return {
+    base: ownOnly(me, 'gops', 'customers', base, mine),
+    where: ownOnly(me, 'gops', 'customers', where, mine),
+  };
+}
+
+/**
+ * One customer for a change (2026-10-18): Edit All changes any, Edit Own only
+ * the customers the caller added. A contact or a site is a change to its customer.
+ */
+async function customerForEdit(me: ReturnType<typeof currentUser>, id: string) {
+  const customer = await prisma.customer.findUnique({ where: { id } });
+  if (!customer) throw notFound('Customer not found');
+  assertCanEdit(me, 'gops', 'customers', customer.createdById === me.id, customer.createdById);
+  return customer;
+}
+
+/**
  * The sub-industry choices — every active one, any inactive one still
  * holding a customer here, and "Not stated" when somebody is — with their
  * counts under `base` ('' is All), and the count and inactive count under
@@ -124,11 +151,11 @@ export async function customerListSummary(base: Prisma.CustomerWhereInput, where
 
 customerRoutes.get(
   '/',
-  require_('gops.customers.view_all'),
+  requireView('gops', 'customers'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const { base, where } = customerListWhere(me, q);
+    const { base, where } = visibleCustomers(me, q);
 
     const [rows, total, summary] = await Promise.all([
       prisma.customer.findMany({
@@ -156,6 +183,7 @@ customerRoutes.get(
           siteCount: r._count.sites,
           openQuoteCount: r._count.quotations,
           projectCount: r._count.jobs,
+          canEdit: mayEdit(me, 'gops', 'customers', r.createdById === me.id, r.createdById),
         })),
         total,
         q,
@@ -173,11 +201,11 @@ customerRoutes.get(
  */
 customerRoutes.get(
   '/pdf',
-  require_('gops.customers.view_all'),
+  requireView('gops', 'customers'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const { base, where } = customerListWhere(me, q);
+    const { base, where } = visibleCustomers(me, q);
     const f = q.filters;
     const [rows, summary, adder, team] = await Promise.all([
       prisma.customer.findMany({
@@ -306,7 +334,7 @@ customerRoutes.get(
  */
 customerRoutes.get(
   '/:id',
-  require_('gops.customers.view_all'),
+  requireView('gops', 'customers'),
   handler(async (req, res) => {
     const customer = await prisma.customer.findUnique({
       where: { id: req.params.id },
@@ -322,6 +350,8 @@ customerRoutes.get(
       },
     });
     if (!customer) throw notFound('Customer not found');
+    // View Own reads only the customers the caller added (2026-10-18).
+    assertCanView(currentUser(req), 'gops', 'customers', customer.createdById === currentUser(req).id, customer.createdById);
 
     /*
       The commercial history, each collection behind the permission that guards
@@ -365,6 +395,7 @@ customerRoutes.get(
               subject: true,
               outcome: true,
               createdAt: true,
+              currency: true,
               revisions: {
                 orderBy: { revision: 'desc' },
                 select: { revision: true, status: true, total: true },
@@ -515,6 +546,7 @@ customerRoutes.get(
     res.json({
       ...customer,
       creditLimit: customer.creditLimit ? Number(customer.creditLimit) : null,
+      canEdit: mayEdit(me, 'gops', 'customers', customer.createdById === me.id, customer.createdById),
       quotations: quotations.map((q) => {
         // What the quotation is worth: its latest approved revision, else its
         // latest — the same rule Insights uses, so the two cannot disagree.
@@ -528,6 +560,8 @@ customerRoutes.get(
           revisionNo: best?.revision ?? null,
           revisionStatus: best?.status ?? null,
           total: best ? Number(best.total) : null,
+          // The figure is in the quotation's own currency (2026-10-17).
+          currency: q.currency,
         };
       }),
       projects: projects.map((j) => ({ ...j, contractValue: Number(j.contractValue) })),
@@ -646,11 +680,10 @@ customerRoutes.post(
 
 customerRoutes.patch(
   '/:id',
-  require_('gops.customers.edit_all'),
+  requireEdit('gops', 'customers'),
   handler(async (req, res) => {
     const body = parseBody(customerSchema.partial(), req.body);
-    const before = await prisma.customer.findUnique({ where: { id: req.params.id } });
-    if (!before) throw notFound('Customer not found');
+    const before = await customerForEdit(currentUser(req), req.params.id);
 
     if (body.code && body.code !== before.code) {
       const clash = await prisma.customer.findUnique({ where: { code: body.code } });
@@ -737,11 +770,10 @@ const contactSchema = z.object({
 
 customerRoutes.post(
   '/:id/contacts',
-  require_('gops.customers.edit_all'),
+  requireEdit('gops', 'customers'),
   handler(async (req, res) => {
     const body = parseBody(contactSchema, req.body);
-    const customer = await prisma.customer.findUnique({ where: { id: req.params.id } });
-    if (!customer) throw notFound('Customer not found');
+    const customer = await customerForEdit(currentUser(req), req.params.id);
 
     const contact = await prisma.$transaction(async (tx) => {
       // One person once per customer (2026-10-12): the quotation editor files
@@ -791,8 +823,9 @@ customerRoutes.post(
 
 customerRoutes.patch(
   '/:id/contacts/:contactId',
-  require_('gops.customers.edit_all'),
+  requireEdit('gops', 'customers'),
   handler(async (req, res) => {
+    await customerForEdit(currentUser(req), req.params.id);
     const body = parseBody(contactSchema.partial(), req.body);
 
     const contact = await prisma.$transaction(async (tx) => {
@@ -836,8 +869,9 @@ customerRoutes.patch(
 
 customerRoutes.delete(
   '/:id/contacts/:contactId',
-  require_('gops.customers.edit_all'),
+  requireEdit('gops', 'customers'),
   handler(async (req, res) => {
+    await customerForEdit(currentUser(req), req.params.id);
     const contact = await prisma.customerContact.findFirst({
       where: { id: req.params.contactId, customerId: req.params.id },
     });
@@ -871,11 +905,10 @@ const siteSchema = z.object({
 
 customerRoutes.post(
   '/:id/sites',
-  require_('gops.customers.edit_all'),
+  requireEdit('gops', 'customers'),
   handler(async (req, res) => {
     const body = parseBody(siteSchema, req.body);
-    const customer = await prisma.customer.findUnique({ where: { id: req.params.id } });
-    if (!customer) throw notFound('Customer not found');
+    await customerForEdit(currentUser(req), req.params.id);
 
     if (body.contactId) {
       const belongs = await prisma.customerContact.findFirst({
@@ -912,8 +945,9 @@ customerRoutes.post(
 
 customerRoutes.patch(
   '/:id/sites/:siteId',
-  require_('gops.customers.edit_all'),
+  requireEdit('gops', 'customers'),
   handler(async (req, res) => {
+    await customerForEdit(currentUser(req), req.params.id);
     const body = parseBody(siteSchema.partial(), req.body);
     const existing = await prisma.customerSite.findFirst({
       where: { id: req.params.siteId, customerId: req.params.id },
@@ -950,8 +984,9 @@ customerRoutes.patch(
 
 customerRoutes.delete(
   '/:id/sites/:siteId',
-  require_('gops.customers.edit_all'),
+  requireEdit('gops', 'customers'),
   handler(async (req, res) => {
+    await customerForEdit(currentUser(req), req.params.id);
     const site = await prisma.customerSite.findFirst({
       where: { id: req.params.siteId, customerId: req.params.id },
     });

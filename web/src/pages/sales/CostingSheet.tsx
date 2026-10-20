@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, isDayKey, parseDay, todayLocal, workingDayKey } from '../../lib/day';
+import { useHolidayKeys } from '../../lib/holidays';
 import { costingFigures, lineAmount, lineCodes, planTasks, scheduleOfValues, type ValueSource } from '../../lib/costingMath';
 import { TickPicker } from '../../components/TickPicker';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
@@ -295,6 +296,8 @@ function priceTo(
 
 export function CostingSheet() {
   const { id } = useParams<{ id: string }>();
+  // Holidays are days off too (2026-10-17) — the server's `present()` counts the same.
+  const holidayKeys = useHolidayKeys();
   const editing = !!id;
   const [params] = useSearchParams();
   const navigate = useNavigate();
@@ -574,7 +577,7 @@ export function CostingSheet() {
   // The plan on the calendar (2026-10-13): working day n from the start date,
   // Mon–Sat — the server's `present()` derives the same dates.
   const startKey = isDayKey(header.plannedStart) ? header.plannedStart : null;
-  const onDay = (day: number | null): string | null => (startKey && day ? workingDayKey(startKey, day) : null);
+  const onDay = (day: number | null): string | null => (startKey && day ? workingDayKey(startKey, day, holidayKeys) : null);
   const finishKey = onDay(plan.totalDays || null);
   const showDay = (key: string) => formatDate(parseDay(key));
   const shortDay = (key: string) => parseDay(key).toLocaleDateString('en-PH', { month: 'short', day: 'numeric' });
@@ -1051,7 +1054,7 @@ export function CostingSheet() {
             <Field label="Valid until">
               <input type="date" value={header.validUntil} onChange={(e) => setH('validUntil', e.target.value)} />
             </Field>
-            <Field label="Start date" hint="The day the scope of work starts — the finish date follows from its working days (Mon–Sat)">
+            <Field label="Start date" hint="The day the scope of work starts — the finish date follows from its working days (Mon–Sat, holidays out)">
               <input type="date" value={header.plannedStart} onChange={(e) => setH('plannedStart', e.target.value)} />
             </Field>
             {startKey && (
@@ -1364,7 +1367,7 @@ export function CostingSheet() {
         <div className="row cs-block-head">
           <h2 className="cs-section-title">Scope of work</h2>
           <p className="faint cs-paste-hint">
-            Duration: {plan.totalDays} working day{plan.totalDays === 1 ? '' : 's'} (Mon–Sat)
+            Duration: {plan.totalDays} working day{plan.totalDays === 1 ? '' : 's'} (Mon–Sat, holidays out)
             {startKey && finishKey ? ` · ${showDay(startKey)} – ${showDay(finishKey)}` : ''}. A task with no start day follows the one
             before it.
           </p>

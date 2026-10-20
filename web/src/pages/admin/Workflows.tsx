@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
-import { ErrorBox, Field, Loading, Modal, ModalFoot, formatMoney, useToast } from '../../components/ui';
+import { mayEdit, useAuth } from '../../lib/auth';
+import { ActiveBadge, ErrorBox, Field, Loading, Modal, ModalFoot, formatMoney, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { TickPicker } from '../../components/TickPicker';
+import { PersonSelect, usePeople, type PersonRow } from '../../components/People';
 
 interface Step {
   id?: string;
@@ -35,6 +36,8 @@ interface Workflow {
   standIns: boolean;
   steps: Step[];
   requestCount: number;
+  /** Who made it — Edit Own reads it (2026-10-18). */
+  createdById: string | null;
 }
 
 interface DocType {
@@ -56,7 +59,8 @@ export function Workflows() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [docTypes, setDocTypes] = useState<DocType[]>([]);
   const [roles, setRoles] = useState<{ id: string; name: string }[]>([]);
-  const [people, setPeople] = useState<{ id: string; name: string }[]>([]);
+  // The one people fetch (components/People.tsx, rule 20).
+  const { people } = usePeople();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState<Workflow | 'new' | null>(null);
@@ -64,16 +68,14 @@ export function Workflows() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [w, d, r, u] = await Promise.all([
+      const [w, d, r] = await Promise.all([
         api.get<Workflow[]>('/workflows'),
         api.get<DocType[]>('/workflows/document-types'),
         api.get<{ id: string; name: string }[]>('/roles'),
-        api.get<{ rows: { id: string; name: string }[] }>('/users?pageSize=200'),
       ]);
       setWorkflows(w);
       setDocTypes(d);
       setRoles(r);
-      setPeople(u.rows);
       setError(null);
     } catch (err) {
       setError(err);
@@ -116,7 +118,7 @@ export function Workflows() {
       <ErrorBox error={error} />
 
       {[...grouped.entries()].map(([docType, list]) => (
-        <div key={docType} style={{ marginBottom: 18 }}>
+        <div key={docType} style={{ marginBottom: 'var(--s-4)' }}>
           <h3 className="card-title">{docTypes.find((d) => d.type === docType)?.label ?? docType}</h3>
           <div className="grid grid-2">
             {list.map((w) => (
@@ -132,9 +134,7 @@ export function Workflows() {
                   <strong>{w.name}</strong>
                   <span className="row" style={{ gap: 'var(--s-1)' }}>
                     {w.optionLabel && <span className="badge info">option</span>}
-                    <span className={`badge ${w.isActive ? 'ok' : ''}`}>
-                      {w.isActive ? 'active' : 'inactive'}
-                    </span>
+                    <ActiveBadge active={w.isActive} />
                   </span>
                 </div>
                 {w.optionLabel && <div className="faint">Offered as “{w.optionLabel}”</div>}
@@ -151,17 +151,17 @@ export function Workflows() {
                     {w.steps.length === 0 ? ' — no approval, approved on submit' : ''}
                   </div>
                 )}
-                <div className="muted" style={{ fontSize: 12, margin: '6px 0 10px' }}>
+                <div className="muted" style={{ fontSize: 'var(--fs-sm)', margin: 'var(--s-2) 0 var(--s-3)' }}>
                   {w.minAmount === null && w.maxAmount === null
                     ? 'Any amount'
                     : `${w.minAmount !== null ? formatMoney(w.minAmount) : 'Up to'} ${
                         w.minAmount !== null && w.maxAmount !== null ? '–' : ''
                       } ${w.maxAmount !== null ? formatMoney(w.maxAmount) : 'and above'}`}
                 </div>
-                <div className="stack" style={{ gap: 5 }}>
+                <div className="stack" style={{ gap: 'var(--s-1)' }}>
                   {w.steps.map((s) => (
-                    <div key={s.sequence} className="row" style={{ gap: 8, fontSize: 12 }}>
-                      <span className="step-num" style={{ width: 22, height: 22, fontSize: 11 }}>
+                    <div key={s.sequence} className="row" style={{ gap: 'var(--s-2)', fontSize: 'var(--fs-sm)' }}>
+                      <span className="step-num" style={{ width: '1.375rem', height: '1.375rem', fontSize: 'var(--fs-xs)' }}>
                         {s.sequence}
                       </span>
                       <span>{s.name}</span>
@@ -187,13 +187,13 @@ export function Workflows() {
                 </div>
 
                 {w.steps.some((s) => s.approverCount === 0) && (
-                  <div className="alert error" style={{ marginTop: 10, marginBottom: 0, fontSize: 12 }}>
+                  <div className="alert error" style={{ marginTop: 'var(--s-3)', marginBottom: 0, fontSize: 'var(--fs-sm)' }}>
                     A step routes to nobody. Documents reaching it will stall until someone is given
                     that role.
                   </div>
                 )}
 
-                <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
+                <div className="faint" style={{ fontSize: 'var(--fs-xs)', marginTop: 'var(--s-3)' }}>
                   {w.requestCount} request{w.requestCount === 1 ? '' : 's'} routed
                 </div>
               </button>
@@ -230,12 +230,17 @@ function WorkflowEditor({
   workflow: Workflow | null;
   docTypes: DocType[];
   roles: { id: string; name: string }[];
-  people: { id: string; name: string }[];
+  people: PersonRow[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const toast = useToast();
-  const { can } = useAuth();
+  const { can, me } = useAuth();
+  // A new route is the create right's; an existing one Edit All's, or Edit
+  // Own's on a route the viewer made (2026-10-18). The API decides for real.
+  const maySave = workflow
+    ? mayEdit(can, 'admin', 'workflows', !!me && workflow.createdById === me.user.id)
+    : can('admin.workflows.create');
   const [documentType, setDocumentType] = useState(workflow?.documentType ?? docTypes[0]?.type ?? '');
   const [name, setName] = useState(workflow?.name ?? '');
   const [isActive, setIsActive] = useState(workflow?.isActive ?? true);
@@ -337,9 +342,11 @@ function WorkflowEditor({
               : undefined
           }
         >
-          <button className="btn btn-primary" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
+          {maySave && (
+            <button className="btn btn-primary" onClick={save} disabled={busy}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          )}
         </ModalFoot>
       }
     >
@@ -403,14 +410,14 @@ function WorkflowEditor({
           <span className="faint"> — whoever an approver reports to may decide the step from the document, without being listed or told</span>
         </span>
       </label>
-      <label className="checkbox" style={{ marginBottom: 16 }}>
+      <label className="checkbox" style={{ marginBottom: 'var(--s-4)' }}>
         <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
         <span>Active</span>
       </label>
 
       <hr className="rule" />
 
-      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 'var(--s-2)' }}>
         <strong>Steps</strong>
         <button className="btn btn-sm" onClick={addStep}>
           + Add step
@@ -451,13 +458,12 @@ function WorkflowEditor({
               ))}
             </select>
           ) : step.approverType === 'USER' ? (
-            <select value={step.userId ?? ''} onChange={(e) => update(i, { userId: e.target.value })}>
-              {people.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
+            <PersonSelect
+              value={step.userId ?? ''}
+              onChange={(id) => update(i, { userId: id })}
+              people={people}
+              required
+            />
           ) : step.approverType === 'SUPERVISOR' ? (
             <div className="step-supervisor">
               {/* Who decides when the requester has no "Reports to" — HR unless a role is named. */}
@@ -498,7 +504,7 @@ function WorkflowEditor({
               ))}
             </select>
           ) : (
-            <span className="faint" style={{ fontSize: 12 }}>
+            <span className="faint" style={{ fontSize: 'var(--fs-sm)' }}>
               Everyone holding the HR role
             </span>
           )}
@@ -514,7 +520,7 @@ function WorkflowEditor({
         </div>
       ))}
 
-      <div className="alert info" style={{ marginTop: 16, marginBottom: 0 }}>
+      <div className="alert info" style={{ marginTop: 'var(--s-4)', marginBottom: 0 }}>
         Steps run in order — the document only moves on once the current step approves. Overtime uses
         two steps (supervisor, then HR) because the cost must not reach a project budget until both
         have signed off.

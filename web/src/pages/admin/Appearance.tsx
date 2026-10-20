@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { mayEditPage, useAuth } from '../../lib/auth';
 import { ErrorBox, Loading, useToast } from '../../components/ui';
 import { useConfirm } from '../../components/Confirm';
 import {
@@ -48,7 +48,7 @@ type Draft = Appearance;
 const ALL_NAMES = TOKEN_GROUPS.flatMap((g) => g.tokens.map((t) => t.name));
 
 export function Appearance_() {
-  const { me, refresh } = useAuth();
+  const { refresh, can } = useAuth();
   const toast = useToast();
 
   const saved = useRef<Draft>(EMPTY_APPEARANCE);
@@ -187,7 +187,8 @@ export function Appearance_() {
     [draft],
   );
 
-  const canEdit = !!me?.user.isSuperAdmin || !!me?.permissions.includes('admin.appearance.edit_all');
+  // Edit Own or Edit All saves the page — it keeps no record of anybody's (2026-10-18).
+  const canEdit = mayEditPage(can, 'admin', 'appearance');
 
   if (error && !draft) return <ErrorBox error={error} />;
   if (!draft) return <Loading label="Reading the design system…" />;
@@ -235,7 +236,7 @@ export function Appearance_() {
       {!canEdit && (
         <div className="alert warn">
           You can try changes here and see them, but you do not have permission to save them for
-          everyone. Ask an administrator for <span className="mono">admin.appearance.edit_all</span>.
+          everyone. Ask an administrator for <span className="mono">admin.appearance.edit_all</span> or <span className="mono">edit_own</span>.
         </div>
       )}
 

@@ -25,7 +25,9 @@ import { notify } from '../shared/notifications';
 import { addMonths, dayKey, planSchedule } from '../shared/aftermarket';
 import { workingDayDate, workingDaysBetween } from '../shared/day';
 import { planTasks } from '../shared/costingMath';
+import { cleanCostingIds, costingIdsOf } from '../shared/costingSets';
 import { LIST_CAP, listReference, totalLabel, bracketed, bracketNote, listNotes, listDay, namedInFilter, choice, sendListPdf } from '../shared/listPaper';
+import { visibleOwners } from '../shared/team';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -245,7 +247,12 @@ const JOB_SORTS = ['number', 'name', 'contractValue', 'startDate', 'createdAt'];
 export function jobListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobWhereInput {
   const and: Prisma.JobWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.projects.view_all');
-  if (onlyOwn || q.scope === 'mine') and.push({ OR: [{ projectManagerId: me.id }, { createdById: me.id }] });
+  if (q.scope === 'mine') and.push({ OR: [{ projectManagerId: me.id }, { createdById: me.id }] });
+  else if (onlyOwn) {
+    // View Team reads the projects its team manages or opened (2026-10-19).
+    const ids = visibleOwners(me, 'gops', 'projects');
+    and.push({ OR: [{ projectManagerId: { in: ids } }, { createdById: { in: ids } }] });
+  }
   if (q.search) {
     const term = q.search;
     and.push({
@@ -286,6 +293,7 @@ const jobListInclude = {
   site: { select: { id: true, name: true } },
   projectManager: { select: { id: true, name: true } },
   costing: { select: { id: true, number: true, totalCost: true } },
+  otherCostings: { select: { costing: { select: { totalCost: true } } } },
   progressReports: {
     where: { status: 'APPROVED' },
     orderBy: { reportNo: 'desc' },
@@ -329,7 +337,8 @@ async function presentJobRows(rows: Prisma.JobGetPayload<{ include: typeof jobLi
       progressPct = cents((earned / scopeTotal) * 100);
     }
     const spent = spentBy.get(r.id) ?? 0;
-    const estimatedCost = num(r.costing?.totalCost);
+    // Every costing behind the project (2026-10-19), the first and the others.
+    const estimatedCost = num(r.costing?.totalCost) + r.otherCostings.reduce((sum, o) => sum + num(o.costing.totalCost), 0);
     return {
       id: r.id,
       number: r.number,
@@ -588,7 +597,10 @@ jobRoutes.get(
  */
 const createJobSchema = z.object({
   quotationRevisionId: z.string().optional().nullable(),
-  costingId: z.string().min(1, 'A job needs a costing'),
+  /** The first costing — one alone, as every caller before 2026-10-19 sent. */
+  costingId: z.string().optional().nullable(),
+  /** Several costings, the first first (2026-10-19); wins over `costingId`. */
+  costingIds: z.array(z.string()).max(10, 'A project takes at most ten costings').optional().nullable(),
   name: z.string().trim().min(2, 'Name the job'),
   type: z.enum(['PROJECT', 'SERVICE_CONTRACT']).default('PROJECT'),
   customerId: z.string().min(1, 'Choose a customer'),
@@ -670,7 +682,7 @@ export async function costingForJob(costingId: string, customerId: string): Prom
   }
   if (!costing.scopeSections.length) {
     throw badRequest(
-      'That costing has no scope of work. The scope sections become the schedule of values, which progress and billing are measured against.',
+      `${costing.number} has no scope of work. The scope sections become the schedule of values, which progress and billing are measured against.`,
     );
   }
 
@@ -678,10 +690,25 @@ export async function costingForJob(costingId: string, customerId: string): Prom
   const contractValue = num(costing.contractValue);
   if (Math.abs(scopeTotal - contractValue) > 0.01) {
     throw badRequest(
-      `The costing's scope sections total ${scopeTotal.toFixed(2)} but its contract value is ${contractValue.toFixed(2)}. Reconcile them first — otherwise progress billing cannot add up.`,
+      `${costing.number}'s scope sections total ${scopeTotal.toFixed(2)} but its contract value is ${contractValue.toFixed(2)}. Reconcile them first — otherwise progress billing cannot add up.`,
     );
   }
   return costing;
+}
+
+/**
+ * Several costings behind one project (2026-10-19, the owner's call:
+ * "sometimes there will be 2 costings to generate the quotation or
+ * project"): each checked by `costingForJob`, the first first. Each one's
+ * scope adds up to its own contract value, so together they add up to the
+ * project's — the schedule of values stays exact.
+ */
+export async function costingsForJob(costingIds: string[], customerId: string): Promise<JobCosting[]> {
+  const ids = cleanCostingIds(costingIds);
+  if (!ids.length) throw badRequest('A project needs a costing');
+  const out: JobCosting[] = [];
+  for (const id of ids) out.push(await costingForJob(id, customerId));
+  return out;
 }
 
 /**
@@ -749,24 +776,46 @@ export function scopeDates(
  * start date, `scopeDates`), the opening budget as BUDGETED ledger rows per
  * category, and the costing marked FINAL — a costing that has produced a job
  * is a commercial record.
+ *
+ * Given several costings (2026-10-19) the project is all of them: their
+ * scope items one after another (each costing's own phases in its order),
+ * each costing's plan running from the same start — they are separate
+ * scopes of one job, worked side by side — and the target end the latest
+ * finish; the contract value their sum; one opening budget row per costing
+ * and category, so the ledger still says which costing each peso came from;
+ * every one marked FINAL. The first stays `Job.costingId`, the others are
+ * `JobCostingLink` rows.
  */
-export async function createJobRecord(tx: Prisma.TransactionClient, costing: JobCosting, input: NewJobInput) {
+export async function createJobRecord(
+  tx: Prisma.TransactionClient,
+  costingOrCostings: JobCosting | JobCosting[],
+  input: NewJobInput,
+) {
+  const costings = Array.isArray(costingOrCostings) ? costingOrCostings : [costingOrCostings];
+  if (!costings.length) throw badRequest('A project needs a costing');
   const number = await nextNumber('project', tx);
-  const dates = scopeDates(costing.scopeSections, input.startDate);
-  const scopeData = costing.scopeSections.map((s, i) => {
-    const { plannedStart, plannedEnd } = dates.items[i];
-    return {
-      sourceSectionId: s.id,
-      kind: s.kind,
-      name: s.name,
-      description: s.description,
-      value: s.value,
-      durationDays: s.durationDays,
-      plannedStart,
-      plannedEnd,
-      sortOrder: i,
-    };
-  });
+
+  let finish: Date | null = null;
+  const scopeData: Prisma.JobScopeItemCreateWithoutJobInput[] = [];
+  for (const costing of costings) {
+    const dates = scopeDates(costing.scopeSections, input.startDate);
+    if (!finish || dates.finish.getTime() > finish.getTime()) finish = dates.finish;
+    costing.scopeSections.forEach((s, i) => {
+      const { plannedStart, plannedEnd } = dates.items[i];
+      scopeData.push({
+        sourceSectionId: s.id,
+        kind: s.kind,
+        name: s.name,
+        description: s.description,
+        value: s.value,
+        durationDays: s.durationDays,
+        plannedStart,
+        plannedEnd,
+        sortOrder: scopeData.length,
+      });
+    });
+  }
+  const contractValue = costings.reduce((sum, c) => sum.add(c.contractValue), new Prisma.Decimal(0));
 
   const created = await tx.job.create({
     data: {
@@ -776,28 +825,32 @@ export async function createJobRecord(tx: Prisma.TransactionClient, costing: Job
       customerId: input.customerId,
       siteId: input.siteId || null,
       contactId: input.contactId || null,
-      costingId: costing.id,
+      costingId: costings[0].id,
       quotationRevisionId: input.quotationRevisionId || null,
       projectManagerId: input.projectManagerId || null,
       createdById: input.createdById,
-      contractValue: costing.contractValue,
+      contractValue,
       customerPoNumber: input.customerPoNumber || null,
       customerPoDate: input.customerPoDate ?? null,
       contractDate: input.contractDate ?? null,
       startDate: input.startDate,
-      targetEndDate: input.targetEndDate ?? dates.finish,
+      targetEndDate: input.targetEndDate ?? finish,
       notes: input.notes || null,
       scopeItems: { create: scopeData },
+      ...(costings.length > 1
+        ? { otherCostings: { create: costings.slice(1).map((c, i) => ({ costingId: c.id, sortOrder: i })) } }
+        : {}),
     },
   });
 
-  const byCategory = new Map<string, number>();
-  for (const line of costing.lines) {
-    byCategory.set(line.costCategoryId, (byCategory.get(line.costCategoryId) ?? 0) + num(line.amount));
-  }
-  if (byCategory.size) {
-    await tx.jobCostEntry.createMany({
-      data: [...byCategory.entries()].map(([costCategoryId, amount]) => ({
+  const budget: Prisma.JobCostEntryCreateManyInput[] = [];
+  for (const costing of costings) {
+    const byCategory = new Map<string, number>();
+    for (const line of costing.lines) {
+      byCategory.set(line.costCategoryId, (byCategory.get(line.costCategoryId) ?? 0) + num(line.amount));
+    }
+    for (const [costCategoryId, amount] of byCategory) {
+      budget.push({
         jobId: created.id,
         costCategoryId,
         state: 'BUDGETED' as const,
@@ -807,12 +860,15 @@ export async function createJobRecord(tx: Prisma.TransactionClient, costing: Job
         sourceNumber: costing.number,
         description: 'Opening budget from costing',
         createdById: input.createdById,
-      })),
-    });
+      });
+    }
   }
+  if (budget.length) await tx.jobCostEntry.createMany({ data: budget });
 
-  if (costing.status !== 'FINAL') {
-    await tx.costing.update({ where: { id: costing.id }, data: { status: 'FINAL', finalAt: new Date() } });
+  for (const costing of costings) {
+    if (costing.status !== 'FINAL') {
+      await tx.costing.update({ where: { id: costing.id }, data: { status: 'FINAL', finalAt: new Date() } });
+    }
   }
   return created;
 }
@@ -824,7 +880,8 @@ jobRoutes.post(
     const me = currentUser(req);
     const body = parseBody(createJobSchema, req.body);
 
-    const costing = await costingForJob(body.costingId, body.customerId);
+    const costings = await costingsForJob(costingIdsOf(body) ?? [], body.customerId);
+    const costing = costings[0];
 
     if (body.quotationRevisionId) {
       const revision = await prisma.quotationRevision.findUnique({
@@ -871,10 +928,14 @@ jobRoutes.post(
 
     // The costing's planned start when the form names none (2026-10-13), else
     // Manila's date: a bare new Date() is stored as the UTC date, yesterday's until 08:00.
-    const start = asDate(body.startDate) ?? costing.plannedStart ?? dayKey(new Date());
+    const plannedStarts = costings.map((c) => c.plannedStart).filter((v): v is Date => !!v);
+    const start =
+      asDate(body.startDate) ??
+      (plannedStarts.length ? new Date(Math.min(...plannedStarts.map((v) => v.getTime()))) : null) ??
+      dayKey(new Date());
 
     const job = await prisma.$transaction(async (tx) => {
-      const created = await createJobRecord(tx, costing, {
+      const created = await createJobRecord(tx, costings, {
         name: body.name,
         type,
         customerId: body.customerId,
@@ -934,7 +995,7 @@ jobRoutes.post(
         entityType: 'job',
         entityId: job.id,
         action: 'CONVERTED',
-        summary: `Created ${job.number} — ${job.name} from costing ${costing.number}`,
+        summary: `Created ${job.number} — ${job.name} from costing${costings.length > 1 ? "s" : ""} ${costings.map((c) => c.number).join(", ")}`,
       },
       req,
     );
@@ -969,6 +1030,10 @@ async function loadJob(id: string) {
       projectManager: { select: { id: true, name: true } },
       createdBy: { select: { id: true, name: true } },
       costing: { select: { id: true, number: true, title: true, totalCost: true, contractValue: true } },
+      otherCostings: {
+        orderBy: { sortOrder: 'asc' },
+        select: { costing: { select: { id: true, number: true, title: true, totalCost: true, contractValue: true } } },
+      },
       quotationRevision: {
         select: {
           id: true,
@@ -1066,6 +1131,11 @@ jobRoutes.get(
             contractValue: num(job.costing.contractValue),
           }
         : null,
+      // Every costing the project was built from, the first first (2026-10-19).
+      costings: [job.costing, ...job.otherCostings.map((o) => o.costing)]
+        .filter((c): c is NonNullable<typeof c> => !!c)
+        .map((c) => ({ ...c, totalCost: num(c.totalCost), contractValue: num(c.contractValue) })),
+      otherCostings: undefined,
       scopeItems: job.scopeItems.map((i) => ({ ...i, value: num(i.value) })),
       billings: job.billings.map((b) => ({
         ...b,
@@ -1131,9 +1201,18 @@ const updateJobSchema = z.object({
  * Deletes a CANCELLED project — the delete right, and the project's manager
  * or edit_all. Its scope, tasks, reports, billings, ledger and budget
  * requests cascade, so it is refused while money stands behind it: an
- * invoice, supplier bill, PR, PO, stock issue, claim or advance filed against
- * it, or a budget request past draft that was not cancelled or rejected. Job
- * orders and approved plans pointing at it keep their place without it.
+ * invoice, supplier bill, live PO, stock issue, claim or advance filed against
+ * it, a purchase request still live (pending, approved, ordered) or with a
+ * live order raised from it, or a budget request past draft that was not
+ * cancelled or rejected. Its DRAFT, REJECTED and CANCELLED purchase requests
+ * whose orders all go too, and its DRAFT and CANCELLED purchase orders with
+ * no live incoming report and no bill (their cancelled reports too), go WITH it (2026-10-19, the owner's call,
+ * clearing sample projects: "make delete remove its draft/cancelled PRs",
+ * "also allow deleting a cancelled purchase order") — deleted in the
+ * same transaction, each with its own DELETED row, their files and their
+ * cancelled RFQs' quotation files after the commit, as the request's own
+ * Delete does. Job orders and approved plans pointing at it keep their place
+ * without it.
  */
 jobRoutes.delete(
   '/:id',
@@ -1145,11 +1224,23 @@ jobRoutes.delete(
     if (!canEditRecord(me, 'gops', 'projects', job.projectManagerId ?? '')) throw forbidden('Only the project’s manager can delete it');
     if (job.status !== 'CANCELLED') throw badRequest('Only a cancelled project can be deleted — cancel it first');
     const inJob = { jobId: job.id };
+    // Orders that go with the project: a draft or cancelled one, nothing
+    // received against it and no bill naming it (2026-10-19).
+    const goingOrders = await prisma.purchaseOrder.findMany({
+      where: { ...inJob, status: { in: ['DRAFT', 'CANCELLED'] }, receivings: { every: { status: 'CANCELLED' } }, bills: { none: {} } },
+      select: { id: true, number: true, receivings: { select: { id: true } } },
+    });
+    const goingOrderIds = goingOrders.map((o) => o.id);
+    // Requests that go with it: nothing live, and every order raised from it going too.
+    const goingRequests = await prisma.purchaseRequest.findMany({
+      where: { ...inJob, status: { in: ['DRAFT', 'REJECTED', 'CANCELLED'] }, orders: { every: { id: { in: goingOrderIds } } } },
+      select: { id: true, number: true, rfqs: { select: { suppliers: { select: { id: true } } } } },
+    });
     const counts: [string, number][] = [
       ['invoice', await prisma.invoice.count({ where: inJob })],
       ['supplier bill', await prisma.supplierBill.count({ where: inJob })],
-      ['purchase request', await prisma.purchaseRequest.count({ where: inJob })],
-      ['purchase order', await prisma.purchaseOrder.count({ where: inJob })],
+      ['live purchase request', await prisma.purchaseRequest.count({ where: { ...inJob, id: { notIn: goingRequests.map((r) => r.id) } } })],
+      ['live purchase order', await prisma.purchaseOrder.count({ where: { ...inJob, id: { notIn: goingOrderIds } } })],
       ['stock issue', await prisma.stockIssue.count({ where: inJob })],
       ['expense claim', await prisma.expenseClaim.count({ where: inJob })],
       ['cash advance', await prisma.cashAdvance.count({ where: inJob })],
@@ -1159,9 +1250,40 @@ jobRoutes.delete(
     if (blockers.length) {
       throw badRequest(`${job.number} has ${blockers.map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`).join(', ')} filed against it — it is kept`);
     }
-    await deleteOrRefuse(job.number, () => prisma.job.delete({ where: { id: job.id } }));
+    const goingIds = goingRequests.map((r) => r.id);
+    await deleteOrRefuse(job.number, () =>
+      prisma.$transaction(async (tx) => {
+        const goingReports = goingOrders.flatMap((o) => o.receivings.map((r) => r.id));
+        if (goingReports.length) await tx.receiving.deleteMany({ where: { id: { in: goingReports }, status: 'CANCELLED' } });
+        if (goingOrderIds.length) await tx.purchaseOrder.deleteMany({ where: { id: { in: goingOrderIds } } });
+        if (goingIds.length) await tx.purchaseRequest.deleteMany({ where: { id: { in: goingIds } } });
+        await tx.job.delete({ where: { id: job.id } });
+      }),
+    );
     await deleteAttachmentsOf('job', [job.id]);
-    await audit({ entityType: 'job', entityId: job.id, action: 'DELETED', summary: `Deleted cancelled project ${job.number} — ${job.name}` }, req);
+    if (goingOrderIds.length) {
+      await deleteAttachmentsOf('purchase_order', goingOrderIds);
+      await deleteAttachmentsOf('receiving', goingOrders.flatMap((o) => o.receivings.map((r) => r.id)));
+      for (const o of goingOrders) {
+        await audit({ entityType: 'purchase_order', entityId: o.id, action: 'DELETED', summary: `Deleted ${o.number} with cancelled project ${job.number}` }, req);
+      }
+    }
+    if (goingIds.length) {
+      await deleteAttachmentsOf('purchase_request', goingIds);
+      await deleteAttachmentsOf('rfq_supplier', goingRequests.flatMap((r) => r.rfqs.flatMap((q) => q.suppliers.map((sup) => sup.id))));
+      for (const r of goingRequests) {
+        await audit({ entityType: 'purchase_request', entityId: r.id, action: 'DELETED', summary: `Deleted ${r.number} with cancelled project ${job.number}` }, req);
+      }
+    }
+    await audit(
+      {
+        entityType: 'job',
+        entityId: job.id,
+        action: 'DELETED',
+        summary: `Deleted cancelled project ${job.number} — ${job.name}${goingOrders.length + goingRequests.length ? ` (and ${[...goingOrders, ...goingRequests].map((r) => r.number).join(', ')})` : ''}`,
+      },
+      req,
+    );
     res.json({ ok: true });
   }),
 );

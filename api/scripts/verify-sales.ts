@@ -16,6 +16,8 @@ import { PDFDocument } from 'pdf-lib';
 import { deleteAttachment } from '../src/shared/attachments';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
+import { roleSeedPermissionKeys } from '../src/shared/roleSeeds';
 import { env } from '../src/env';
 import { nextNumber, previewNext, employeeToken, parseNumber, renderPattern, FREE_NUMBER_TRIES } from '../src/shared/numbering';
 import { submitForApproval, act, pendingFor, pickWorkflow, routePreview, reopenApproved } from '../src/shared/approvals';
@@ -98,6 +100,11 @@ import { decodeCsv, parseCsv, runImport, toCsv } from '../src/shared/csv';
 import { pipelineStages, stageProbability } from '../src/shared/pipelineStages';
 // The SCORO quotes import's spec and writer by name — what the route runs.
 import { scoroQuoteSpec, writeScoroQuotes, SUMMARY_LINE_TITLE } from '../src/routes/imports/scoroQuotes';
+import { LIVE_MONEY } from '../src/shared/finance';
+import { orderSource as commissionSource } from '../src/routes/commissions';
+import { inBase, storedRate } from '../src/shared/exchangeRates';
+import { scoroInvoiceSpec, writeScoroInvoices, scoroPoNumber } from '../src/routes/imports/scoroInvoices';
+import { bookingFor } from '../src/shared/salesOrderBooking';
 import {
   flat,
   pdfText,
@@ -245,6 +252,18 @@ async function cleanup() {
   if (quoteTrail.length) {
     await prisma.auditLog.deleteMany({ where: { entityType: 'quotation', entityId: { in: quoteTrail } } });
   }
+  // The SCORO invoices import raises invoices (and SCORO's collections) on
+  // its orders, which hold the orders (Restrict): payments first — their
+  // allocations cascade — then the invoices.
+  const tagInvoiceIds = (
+    await prisma.invoice.findMany({ where: { salesOrder: { quotation: { subject: { startsWith: TAG } } } }, select: { id: true } })
+  ).map((i) => i.id);
+  if (tagInvoiceIds.length) {
+    const tagPayments = await prisma.payment.findMany({ where: { allocations: { some: { invoiceId: { in: tagInvoiceIds } } } }, select: { id: true } });
+    await prisma.auditLog.deleteMany({ where: { entityType: { in: ['invoice', 'payment'] }, entityId: { in: [...tagInvoiceIds, ...tagPayments.map((p) => p.id)] } } });
+    await prisma.payment.deleteMany({ where: { id: { in: tagPayments.map((p) => p.id) } } });
+    await prisma.invoice.deleteMany({ where: { id: { in: tagInvoiceIds } } });
+  }
   // Sales orders hold their quotation (Restrict), so they go first.
   await prisma.salesOrder.deleteMany({ where: { quotation: { subject: { startsWith: TAG } } } });
   await prisma.employee.deleteMany({ where: { employeeNo: { startsWith: TAG } } });
@@ -273,7 +292,8 @@ async function cleanup() {
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[]) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike(`${TAG.toLowerCase()}_`, roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -2596,6 +2616,34 @@ async function main() {
         counted.join() === tagTeam.code && tagSummary.team?.count === 1 && inTagView === 1 && inOwnerView === 0,
         JSON.stringify({ counted, team: tagSummary.team, inTagView, inOwnerView }),
       );
+
+      // Foreign currency (2026-10-17): a summary converts at the quotation's own rate.
+      {
+        const usd = { currency: 'USD', exchangeRate: 56.25 };
+        check(
+          'inBase converts a figure at the quotation’s rate, to the centavo; PHP and a rateless one stay as they are',
+          inBase(1000.01, usd) === 56250.56 && inBase(1000, { currency: 'PHP', exchangeRate: null }) === 1000 && inBase(1000, { currency: 'EUR', exchangeRate: null }) === 1000,
+          `${inBase(1000.01, usd)}`,
+        );
+        check(
+          'storedRate: nothing for PHP, the one typed, else Settings’',
+          storedRate('PHP', 50, { USD: 56 }) === null &&
+            Number(storedRate('USD', 57.5, { USD: 56 })) === 57.5 &&
+            Number(storedRate('USD', null, { USD: 56 })) === 56 &&
+            storedRate('EUR', null, { USD: 56 }) === null,
+        );
+        const php = await quotationListSummary({ id: taggedQ!.id }, { id: taggedQ!.id }, tagStages);
+        await prisma.quotation.update({ where: { id: taggedQ!.id }, data: { currency: 'USD', exchangeRate: 56.25 } });
+        const asUsd = await quotationListSummary({ id: taggedQ!.id }, { id: taggedQ!.id }, tagStages, { teamWhere: quotationTeamWhere(tagTeam.id) });
+        await prisma.quotation.update({ where: { id: taggedQ!.id }, data: { currency: 'PHP', exchangeRate: null } });
+        const want = Math.round(php.value * 56.25 * 100) / 100;
+        const teamSum = asUsd.teams.reduce((t, x) => t + x.value, 0);
+        check(
+          'a USD quotation counts in the list’s Sum, team cards and My team at its rate to PHP',
+          php.value > 0 && asUsd.value === want && Math.abs(teamSum - want) < 0.005 && asUsd.team?.value === want,
+          JSON.stringify({ php: php.value, usd: asUsd.value, want, teamSum, team: asUsd.team }),
+        );
+      }
       const retagged = await importScoro([tagRow], true, { team: retagTeam.id });
       const retaggedQ = await quoteByNumber(scoroNumber(57));
       const retagTrail = await prisma.auditLog.findFirst({ where: { entityType: 'quotation', entityId: taggedQ!.id, action: 'UPDATED' }, orderBy: { at: 'desc' } });
@@ -2632,6 +2680,178 @@ async function main() {
       );
       deletedKeys.delete(groupKey(`${TAG} Doomed`));
       await prisma.$transaction((tx) => setDeletedGroupKeys(tx, deletedKeys));
+
+      // ── SCORO invoices → sales orders (2026-10-17, the owner's file) ─────
+      console.log('\nSCORO invoices as sales orders');
+      // The quotation the invoice books, from the quotes import: one VFD and
+      // one lot of JOB ORDER, as the owner's quote 0022605106 had them.
+      const invQuoteNo = scoroNumber(60);
+      await importScoro(
+        [
+          pricedLine({ id: '9008', doc_no: invQuoteNo, quote_name: `${TAG} VFD supply and installation`, status_name: 'Confirmed', product_name: 'SCHNEIDER ELECTRIC, VARIABLE FREQUENCY DRIVE, ATV320U75N4C', amount: '1', unit: 'unit', price: '84000.000000', line_cost: '37256.8300', line_id: '9101', total_sum: '94000.00', total_vat: '11280.00' }),
+          pricedLine({ id: '9008', doc_no: invQuoteNo, quote_name: `${TAG} VFD supply and installation`, status_name: 'Confirmed', product_name: 'JOB ORDER', amount: '1', unit: 'lot', price: '10000.000000', line_cost: '10600.0000', line_id: '9102', supplier_name: '', line_comment: 'VFD installation and programming', total_sum: '94000.00', total_vat: '11280.00' }),
+        ],
+        true,
+      );
+      const invQuote = await quoteByNumber(invQuoteNo);
+      // The owner's invoices export, its columns as SCORO wrote them.
+      const INV_HEADERS = [
+        'id', 'doc_no', 'reference_no', 'doc_date', 'owner_name', 'doc_deadline', 'payer', 'payer_id', 'contact_person', 'quote_no',
+        'quote_id', 'doc_description', 'payment_type', 'currency', 'status_name', 'discount', 'total_sum', 'total_vat',
+        'total_sum_vat', 'total_cost', 'paid_sum', 'c_purchaseordernumber', 'line_id', 'product_group', 'product_code',
+        'product_name', 'amount', 'unit', 'price', 'line_sum', 'line_vat_percent', 'is_subheading', 'line_comment', 'line_cost',
+        'cost_comment', 'supplier_name', 'doer_id', 'doer_name', 'is_internal', 'latest_receipt_date',
+      ] as const;
+      type InvRow = Record<(typeof INV_HEADERS)[number], string>;
+      const invFile = (rows: InvRow[]) =>
+        Buffer.concat([
+          Buffer.from([0xff, 0xfe]),
+          Buffer.from(
+            [INV_HEADERS as readonly string[], ...rows.map((r) => INV_HEADERS.map((h) => r[h]))].map((r) => r.map((v) => `"${v.replace(/"/g, '""')}"`).join('\t')).join('\r\n'),
+            'utf16le',
+          ),
+        ]);
+      const invRow = (over: Partial<InvRow>): InvRow => ({
+        id: '4587', doc_no: `${TAG}4899`, reference_no: '', doc_date: '2026-09-30', owner_name: 'Nobody By This Name', doc_deadline: '2026-10-30',
+        payer: 'MONDE M.Y SAN CORPORATION - CALAMBA', payer_id: '78', contact_person: 'Leo Solis', quote_no: invQuoteNo, quote_id: '9008',
+        doc_description: 'Warranty : 12 Months', payment_type: 'banktransfer', currency: 'PHP', status_name: 'unpaid', discount: '0.000000',
+        total_sum: '94000.00', total_vat: '11280.00', total_sum_vat: '105280.00', total_cost: '47856.8300', paid_sum: '0.00',
+        c_purchaseordernumber: 'Purchase Order No.: 2600012384', line_id: '17564', product_group: 'Schneider Electric', product_code: 'SVD-ATV320U75N4C',
+        product_name: 'SCHNEIDER ELECTRIC, VARIABLE FREQUENCY DRIVE, ATV320U75N4C', amount: '1.000000000000', unit: 'unit', price: '84000.000000',
+        line_sum: '84000.00', line_vat_percent: '12.000', is_subheading: '0', line_comment: 'VFD', line_cost: '37256.8300',
+        cost_comment: 'ATV320U75N4C 33,265.02 X 1.12 37,256.83', supplier_name: 'SCHNEIDER ELECTRIC PHILIPPINES', doer_id: '', doer_name: '', is_internal: '0',
+        latest_receipt_date: '',
+        ...over,
+      });
+      const invRows = [
+        invRow({}),
+        invRow({ line_id: '17565', product_group: 'Gruntech Services', product_code: 'GSV - SERVICES', product_name: 'JOB ORDER', amount: '0.500000000000', unit: 'lot', price: '10000.000000', line_sum: '5000.00', line_comment: 'VFD INSTALLATION', line_cost: '5600.0000', cost_comment: '', supplier_name: '', doer_name: sales.name, is_internal: '1' }),
+        invRow({ line_id: '17566', product_group: 'Gruntech Services', product_code: 'GSV - SERVICES', product_name: 'JOB ORDER', amount: '0.500000000000', unit: 'lot', price: '10000.000000', line_sum: '5000.00', line_comment: 'GAS ION PROGRAMING', line_cost: '5000.0000', cost_comment: '', supplier_name: '', doer_name: sales.name, is_internal: '1' }),
+      ];
+      const importInvoices = (rows: InvRow[], commit: boolean) =>
+        runImport(decodeCsv(invFile(rows)), scoroInvoiceSpec, commit, (records) => writeScoroInvoices(records as never, actor));
+      check('scoroPoNumber takes SCORO’s "Purchase Order No.:" off, and keeps anything else as written', scoroPoNumber('Purchase Order No.: 2600012384') === '2600012384' && scoroPoNumber('PO# 77-A') === '77-A' && scoroPoNumber('Project Alpha') === 'Project Alpha' && scoroPoNumber('') === null);
+      const invCheck = await importInvoices(invRows, false);
+      check(
+        'the check reads the invoice’s three rows as one sales order to create, and writes nothing',
+        invCheck.created === 1 && invCheck.errors === 0 && !(await prisma.salesOrder.findFirst({ where: { number: `${TAG}4899` } })),
+        JSON.stringify(invCheck.rows),
+      );
+      const invDone = await importInvoices(invRows, true);
+      const order = await prisma.salesOrder.findFirst({ where: { number: `${TAG}4899` }, include: { lines: { orderBy: { sortOrder: 'asc' } } } });
+      check(
+        'committed, the invoice is an ISSUED sales order on its quotation, its customer the quotation’s, owned by the quotation’s owner where no login carries SCORO’s name',
+        invDone.created === 1 && order?.status === 'ISSUED' && order.quotationId === invQuote?.id && order.customerId === invQuote?.customerId && order.ownerId === invQuote?.ownerId,
+        JSON.stringify({ status: order?.status, created: invDone.created }),
+      );
+      check(
+        'the PO, terms, payment method, comment and date are SCORO’s',
+        order?.poNumber === '2600012384' && order.termsDays === 30 && order.paymentMethod === 'Bank transfer' && order.comment === 'Warranty : 12 Months' &&
+          order.orderDate.toISOString().slice(0, 10) === '2026-09-30',
+        JSON.stringify({ po: order?.poNumber, terms: order?.termsDays, pay: order?.paymentMethod }),
+      );
+      check(
+        'its money is SCORO’s: 94,000 before VAT, 11,280 VAT, 105,280 in all',
+        Number(order?.subtotal) === 94000 && Number(order?.vatAmount) === 11280 && Number(order?.total) === 105280,
+        `${order?.subtotal} / ${order?.vatAmount} / ${order?.total}`,
+      );
+      const vfdItem = invQuote?.revisions[0].items.find((i) => i.title?.includes('ATV320U75N4C'));
+      const joItem = invQuote?.revisions[0].items.find((i) => i.title === 'JOB ORDER');
+      check(
+        'every line books its quotation line — the two half lots of JOB ORDER both book the one lot — and the in-house cost names the person',
+        order?.lines.length === 3 && order.lines[0].quotationItemId === vfdItem?.id && order.lines[1].quotationItemId === joItem?.id &&
+          order.lines[2].quotationItemId === joItem?.id && order.lines[1].providerUserId === sales.id,
+        JSON.stringify(order?.lines.map((l) => [l.title, l.quotationItemId === vfdItem?.id ? 'vfd' : l.quotationItemId === joItem?.id ? 'jo' : l.quotationItemId])),
+      );
+      const booked = await bookingFor((await prisma.quotation.findUniqueOrThrow({ where: { id: invQuote!.id }, include: { revisions: { include: { items: true } } } })) as never);
+      check('the quotation reads fully booked: nothing left to book on it', !!booked && booked.lines.filter((l) => !l.isHeading).every((l) => l.available === 0), JSON.stringify(booked?.lines.map((l) => l.available)));
+      const issuedRow = await prisma.auditLog.findFirst({ where: { entityType: 'sales_order', entityId: order?.id ?? '', action: 'COMPLETED' } });
+      const createdRow = await prisma.auditLog.findFirst({ where: { entityType: 'sales_order', entityId: order?.id ?? '', action: 'CREATED' } });
+      check(
+        'its trail says it was issued in SCORO, and keeps SCORO’s status, payer and the owner SCORO named',
+        issuedRow?.actorId === invQuote?.ownerId && (createdRow?.after as { scoroStatus?: string; scoroOwner?: string } | null)?.scoroStatus === 'unpaid' &&
+          (createdRow?.after as { scoroOwner?: string } | null)?.scoroOwner === 'Nobody By This Name',
+        JSON.stringify(createdRow?.after).slice(0, 200),
+      );
+      // A/R holds it too (2026-10-17, the owner's call): a real invoice,
+      // SCORO's number as its invoice no., countered on SCORO's date and due
+      // on SCORO's deadline; nothing paid, so nothing collected.
+      const ewtCompany = Number((await prisma.company.findUniqueOrThrow({ where: { id: 'company' }, select: { ewtRate: true } })).ewtRate);
+      const orderInvoices = () => prisma.invoice.findMany({ where: { salesOrderId: order?.id ?? '', status: { not: 'CANCELLED' } }, include: { allocations: true } });
+      const unpaidInv = (await orderInvoices())[0];
+      check(
+        'an issued SCORO invoice is an ISSUED invoice in A/R: its number the invoice no., countered on its date, due on its deadline, the order’s money, marked SCORO',
+        !!unpaidInv && unpaidInv.status === 'ISSUED' && unpaidInv.siNumber === `${TAG}4899` && unpaidInv.importedFrom === 'SCORO' &&
+          unpaidInv.counteredDate?.toISOString().slice(0, 10) === '2026-09-30' && unpaidInv.dueDate.toISOString().slice(0, 10) === '2026-10-30' &&
+          Number(unpaidInv.grossAmount) === 94000 && Number(unpaidInv.vatAmount) === 11280 && Number(unpaidInv.invoiceTotal) === 105280 &&
+          Number(unpaidInv.ewtRate) === ewtCompany && unpaidInv.allocations.length === 0 && unpaidInv.salespersonId === invQuote?.ownerId,
+        JSON.stringify(unpaidInv && { status: unpaidInv.status, si: unpaidInv.siNumber, due: unpaidInv.dueDate, gross: unpaidInv.grossAmount, ewt: unpaidInv.ewtRate }),
+      );
+      const invAgain = await importInvoices(invRows, true);
+      check(
+        'the same file again changes nothing: the order is already on file, and it raises no second invoice',
+        invAgain.created === 0 && invAgain.updated === 1 && (await prisma.salesOrder.count({ where: { number: { startsWith: `${TAG}4899` } } })) === 1 &&
+          (await orderInvoices()).length === 1,
+      );
+      // An order imported before invoices came across catches up, once.
+      await prisma.invoice.delete({ where: { id: unpaidInv!.id } });
+      await importInvoices(invRows, true);
+      await importInvoices(invRows, true);
+      check('an order this import made before takes its invoice on the next run of the same file — once', (await orderInvoices()).length === 1);
+
+      // A PAID SCORO invoice: the invoice closes exactly — what the payment
+      // left short is the customer's withholding — and SCORO's collection
+      // settles it but is kept as history, out of every collection figure.
+      const paidQuoteNo = scoroNumber(61);
+      await importScoro(
+        [
+          pricedLine({ id: '9009', doc_no: paidQuoteNo, quote_name: `${TAG} VFD paid in SCORO`, status_name: 'Confirmed', product_name: 'SCHNEIDER ELECTRIC, VARIABLE FREQUENCY DRIVE, ATV320U75N4C', amount: '1', unit: 'unit', price: '84000.000000', line_cost: '37256.8300', line_id: '9201', total_sum: '94000.00', total_vat: '11280.00' }),
+          pricedLine({ id: '9009', doc_no: paidQuoteNo, quote_name: `${TAG} VFD paid in SCORO`, status_name: 'Confirmed', product_name: 'JOB ORDER', amount: '1', unit: 'lot', price: '10000.000000', line_cost: '10600.0000', line_id: '9202', supplier_name: '', total_sum: '94000.00', total_vat: '11280.00' }),
+        ],
+        true,
+      );
+      const paidRows = invRows.map((r) => ({ ...r, id: '4588', doc_no: `${TAG}4900`, quote_no: paidQuoteNo, status_name: 'Paid', paid_sum: '103400.00', latest_receipt_date: '2026-10-20', payment_type: 'cheque' }));
+      await importInvoices(paidRows, true);
+      const paidOrder = await prisma.salesOrder.findFirst({ where: { number: `${TAG}4900` }, select: { id: true } });
+      const paidInv = await prisma.invoice.findFirst({ where: { salesOrderId: paidOrder?.id ?? '' }, include: { allocations: { include: { payment: true } } } });
+      const scoroPay = paidInv?.allocations[0]?.payment;
+      check(
+        'a paid SCORO invoice reads PAID: 103,400 collected, the 1,880 SCORO’s payment left short taken as the 2% withheld',
+        paidInv?.status === 'PAID' && Number(paidInv.amountCollected) === 103400 && Number(paidInv.ewtAmount) === 1880 && Number(paidInv.ewtRate) === 0.02 &&
+          Number(paidInv.netCollectible) === 103400,
+        JSON.stringify(paidInv && { status: paidInv.status, collected: paidInv.amountCollected, ewt: paidInv.ewtAmount }),
+      );
+      check(
+        'its collection is SCORO’s: cheque, dated and cleared on the last receipt, no OR number, marked SCORO',
+        scoroPay?.importedFrom === 'SCORO' && scoroPay.method === 'CHECK' && scoroPay.kind === 'RECEIPT' && scoroPay.orNumber === null &&
+          scoroPay.paymentDate.toISOString().slice(0, 10) === '2026-10-20' && scoroPay.clearedAt?.toISOString().slice(0, 10) === '2026-10-20',
+        JSON.stringify(scoroPay && { method: scoroPay.method, date: scoroPay.paymentDate, from: scoroPay.importedFrom }),
+      );
+      const scoroCounted = await prisma.payment.count({ where: { id: scoroPay?.id ?? '', kind: 'RECEIPT', customerId: { not: null }, ...LIVE_MONEY } });
+      check('no collection figure counts it: the live-money rule leaves it out', !!scoroPay && scoroCounted === 0);
+      const paidSource = paidOrder ? await commissionSource(paidOrder.id) : null;
+      check(
+        'a deal paid in SCORO raises no commission — commissions start with deals booked in G-CORE',
+        !!paidSource && paidSource.fully && (paidSource.problem ?? '').includes('invoiced in SCORO'),
+        paidSource?.problem ?? 'no source',
+      );
+      const cancelled = await importInvoices([invRow({ doc_no: `${TAG}4899.1`, status_name: 'Cancelled', owner_name: sales.name })], true);
+      const cancelledOrder = await prisma.salesOrder.findFirst({ where: { number: `${TAG}4899.1` } });
+      check(
+        'a cancelled SCORO invoice is a CANCELLED order with SCORO’s status as its reason, owned by the login SCORO names',
+        cancelled.created === 1 && cancelledOrder?.status === 'CANCELLED' && cancelledOrder.cancelReason === 'SCORO status: Cancelled' && cancelledOrder.ownerId === sales.id,
+        JSON.stringify(cancelledOrder),
+      );
+      check(
+        'a cancelled SCORO invoice raises no invoice',
+        (await prisma.invoice.count({ where: { salesOrder: { number: `${TAG}4899.1` } } })) === 0,
+      );
+      const noQuote = await importInvoices([invRow({ doc_no: `${TAG}5000`, quote_no: 'ZZ-NOT-A-QUOTE' })], false);
+      check(
+        'an invoice whose quotation is not in G-CORE is refused, naming it and the way out',
+        noQuote.errors === 1 && (noQuote.rows[0]?.message ?? '').includes('Quotation ZZ-NOT-A-QUOTE is not in G-CORE'),
+        JSON.stringify(noQuote.rows),
+      );
     } finally {
       // The series as it stood before the section, whatever happened.
       await setSeries(seriesWas);
@@ -2656,10 +2876,12 @@ async function main() {
         withSupplierNote('freight extra', 'Acme Pumps') === 'Supplier: Acme Pumps — freight extra' &&
         withSupplierNote('Supplier: Acme Pumps — freight extra', 'acme pumps') === 'Supplier: Acme Pumps — freight extra',
     );
-    const sellingRoles = await prisma.role.findMany({
-      where: { key: { in: ['sales', 'sales_manager', 'team_leader', 'industry_specialist'] } },
-      select: { key: true, permissions: { select: { permission: { select: { key: true } } } } },
-    });
+    // The seed's DEFINITION of the selling roles — the install's own roles
+    // were emptied for the owner's (2026-10-18) and may hold anything.
+    const sellingRoles = ['sales', 'sales_manager', 'team_leader', 'industry_specialist'].map((key) => ({
+      key,
+      permissions: roleSeedPermissionKeys(key).map((k) => ({ permission: { key: k } })),
+    }));
     check(
       'the selling roles may add a supplier from a quotation line (gchain.suppliers.create; run the seed if this fails)',
       sellingRoles.length === 4 && sellingRoles.every((r) => r.permissions.some((p) => p.permission.key === 'gchain.suppliers.create')),
@@ -3482,6 +3704,7 @@ async function main() {
         same(
           costingPreview.body,
           written.map((i) => ({
+            isHeading: i.isHeading,
             title: i.title,
             description: i.description,
             quantity: Number(i.quantity),
@@ -3493,6 +3716,76 @@ async function main() {
         ),
       `${costingPreview.text.slice(0, 160)} / ${written.length} written`,
     );
+    // Two costings behind one quotation (2026-10-19, the owner's call): the
+    // lines are both scopes, each under a subheading naming its costing, the
+    // first first; the revision names both, and a new revision keeps both.
+    const second = await prisma.costing.create({
+      data: {
+        number: await nextNumber('costing'),
+        title: `${TAG} Second scope`,
+        ownerId: sales.id,
+        customerId: customer.id,
+        scopeSections: { create: [{ kind: 'MAIN_WORK', name: `${TAG} second section`, value: d(50_000), sortOrder: 0 }] },
+      },
+    });
+    const twoMade = await http(salesToken, 'POST', '/quotations', {
+      customerId: customer.id,
+      subject: `${TAG} Editor two costings`,
+      costingIds: [costing.id, second.id],
+    });
+    const twoRev = (twoMade.body.revisions as { id: string }[] | undefined)?.[0];
+    const twoPreview = await http(salesToken, 'GET', `/quotations/costing-lines?costingIds=${costing.id},${second.id}`);
+    const twoFilled = twoRev ? await http(salesToken, 'POST', `/quotations/${twoMade.body.id}/revisions/${twoRev.id}/from-costing`) : null;
+    const twoWritten = twoRev ? await prisma.quotationItem.findMany({ where: { revisionId: twoRev.id }, orderBy: { sortOrder: 'asc' } }) : [];
+    const headings = twoWritten.filter((i) => i.isHeading).map((i) => i.title);
+    check(
+      'a quotation from two costings takes both scopes, each under a subheading naming its costing, the first first',
+      twoMade.status === 201 &&
+        twoFilled?.status === 200 &&
+        headings.length === 2 &&
+        headings[0] === costing.title &&
+        headings[1] === second.title &&
+        twoWritten[twoWritten.length - 1].title === `${TAG} second section` &&
+        Number(twoWritten[twoWritten.length - 1].amount) === 50_000,
+      `${twoMade.status} ${twoFilled?.status} ${JSON.stringify(headings)} ${twoWritten.length}`,
+    );
+    check(
+      'and the preview is exactly what it writes',
+      twoPreview.status === 200 &&
+        same(
+          twoPreview.body,
+          twoWritten.map((i) => ({
+            isHeading: i.isHeading,
+            title: i.title,
+            description: i.description,
+            quantity: Number(i.quantity),
+            unit: i.unit,
+            unitPrice: Number(i.unitPrice),
+            amount: Number(i.amount),
+            sortOrder: i.sortOrder,
+          })),
+        ),
+      twoPreview.text.slice(0, 160),
+    );
+    const twoRead = await http(salesToken, 'GET', `/quotations/${twoMade.body.id}`);
+    const readCostings = (twoRead.body.revisions?.[0]?.costings ?? []).map((c: { id: string }) => c.id).join(',');
+    // A draft is finished first; a new revision is raised over a sent one.
+    if (twoRev) await prisma.quotationRevision.update({ where: { id: twoRev.id }, data: { status: 'APPROVED' } });
+    const twoNext = await http(salesToken, 'POST', `/quotations/${twoMade.body.id}/revisions`);
+    const nextLinks = twoNext.body.id
+      ? await prisma.quotationRevisionCosting.findMany({ where: { revisionId: twoNext.body.id }, select: { costingId: true } })
+      : [];
+    check(
+      'the revision reads back both costings, and a new revision keeps both',
+      readCostings === `${costing.id},${second.id}` && nextLinks.length === 1 && nextLinks[0].costingId === second.id,
+      `${readCostings} / ${JSON.stringify(nextLinks)} / ${twoNext.status}`,
+    );
+    if (twoNext.body.id) {
+      const backToOne = await http(salesToken, 'PATCH', `/quotations/${twoMade.body.id}/revisions/${twoNext.body.id}`, { costingIds: [costing.id] });
+      const left = await prisma.quotationRevisionCosting.count({ where: { revisionId: twoNext.body.id } });
+      check('naming one costing again drops the second', backToOne.status === 200 && left === 0, `${backToOne.status} ${left}`);
+    }
+
     const noCosting = await http(salesToken, 'GET', '/quotations/costing-lines');
     const unknownCosting = await http(salesToken, 'GET', '/quotations/costing-lines?costingId=nope');
     check(
@@ -3826,7 +4119,9 @@ async function main() {
       ),
     );
     check('halfway, the PDF dates the team leader and says the CEO is pending', halfway.includes(manager.name) && halfway.includes('Pending') && halfway.includes(ceoStep));
-    check('naming the CEO who will sign', halfway.includes(ceo.name));
+    // flat(): a real CEO on the install shares the step ("A or B"), and the
+    // names wrap inside the sign-off column.
+    check('naming the CEO who will sign', flat(halfway).includes(ceo.name));
     const waiting = await http(salesToken, 'GET', `/approvals/history/quotation/${bigRev.id}`);
     const openStep = ((waiting.body as unknown as { workflow: { steps: { sequence: number; approvers?: { id: string }[] }[] } }[])[0]?.workflow.steps ?? []).find(
       (st) => st.sequence === 2,
@@ -3976,7 +4271,7 @@ async function main() {
         !ceoHalf.includes('CEO / PRESIDENT') &&
         ceoHalf.includes('TEAM LEADER') &&
         ceoHalf.includes('Pending') &&
-        ceoHalf.includes(sitLeader.name),
+        flat(ceoHalf).includes(sitLeader.name),
       `${formatDateTime(ceoReq.createdAt)} ×${timesIn(ceoHalf, ceoReq.createdAt)}`,
     );
     const ceoCanAct = async (token: string) =>

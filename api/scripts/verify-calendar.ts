@@ -273,7 +273,24 @@ async function main() {
   );
 
   // Fixtures on the boundary between two weeks.
-  const role = await makeRole('zzcal_sales', `${TAG} sales`, ['gops.calendar.view_all']);
+  const role = await makeRole('zzcal_sales', `${TAG} sales`, [
+    'gops.calendar.view_all',
+    'gops.calendar.create',
+    'gops.calendar.edit_own',
+    'gops.calendar.edit_all',
+    'gops.calendar.delete',
+  ]);
+  // The calendar's own boxes (2026-10-18): a reader books nothing; Edit Own
+  // and Delete reach only the activities a person is on.
+  const readerRole = await makeRole('zzcal_reader', `${TAG} reader`, ['gops.calendar.view_all']);
+  const ownRole = await makeRole('zzcal_own', `${TAG} own`, [
+    'gops.calendar.view_all',
+    'gops.calendar.create',
+    'gops.calendar.edit_own',
+    'gops.calendar.delete',
+  ]);
+  const reader = await makeUser(`${TAG} Reader`, 'reader@verifycal.local', [readerRole.id]);
+  const ownOnly = await makeUser(`${TAG} Own`, 'own@verifycal.local', [ownRole.id]);
   const bystanderRole = await makeRole('zzcal_bystander', `${TAG} bystander`, ['gops.leads.view_own']);
   const sales = await makeUser(`${TAG} Sales`, 'sales@verifycal.local', [role.id]);
   const bystander = await makeUser(`${TAG} Bystander`, 'bystander@verifycal.local', [bystanderRole.id]);
@@ -369,6 +386,41 @@ async function main() {
     check('GET /activities/:id is behind the same permission', oneDenied.status === 403, String(oneDenied.status));
     const missing = await apiGet(salesToken, '/activities/does-not-exist');
     check('an activity that is gone is a 404, which the page reports rather than hanging', missing.status === 404, String(missing.status));
+
+    const readerToken = signToken(reader.id, reader.email);
+    const ownToken = signToken(ownOnly.id, ownOnly.email);
+    const readerBook = await apiSend(readerToken, 'POST', '/activities', {
+      subject: `${TAG} reader booking`,
+      startsAt: new Date(2026, 8, 24, 9, 0).toISOString(),
+      durationMinutes: 30,
+    });
+    const readerMove = await apiSend(readerToken, 'PATCH', `/activities/${first.id}`, { notes: 'reader' });
+    const readerDrop = await apiSend(readerToken, 'DELETE', `/activities/${first.id}`);
+    check(
+      'View All alone books, changes and removes nothing (403 each)',
+      readerBook.status === 403 && readerMove.status === 403 && readerDrop.status === 403,
+      `${readerBook.status} ${readerMove.status} ${readerDrop.status}`,
+    );
+    const ownMove = await apiSend(ownToken, 'PATCH', `/activities/${first.id}`, { notes: 'not mine' });
+    const ownDrop = await apiSend(ownToken, 'DELETE', `/activities/${first.id}`);
+    check(
+      'Edit Own and Delete reach only the activities the person is on (403 on a colleague\'s)',
+      ownMove.status === 403 && ownDrop.status === 403,
+      `${ownMove.status} ${ownDrop.status}`,
+    );
+    const ownBook = await apiSend(ownToken, 'POST', '/activities', {
+      subject: `${TAG} own booking`,
+      startsAt: new Date(2026, 8, 24, 9, 0).toISOString(),
+      durationMinutes: 30,
+    });
+    const ownId = (ownBook.body as { id?: string }).id;
+    const ownEdit = ownId ? await apiSend(ownToken, 'PATCH', `/activities/${ownId}`, { notes: 'mine' }) : { status: 0 };
+    const ownGone = ownId ? await apiSend(ownToken, 'DELETE', `/activities/${ownId}`) : { status: 0 };
+    check(
+      'and on their own booking Create, Edit Own and Delete all work',
+      ownBook.status === 201 && ownEdit.status === 200 && ownGone.status === 200,
+      `${ownBook.status} ${ownEdit.status} ${ownGone.status}`,
+    );
 
     // ══ Starts and Ends, invitees, reminders ════════════════════════════════
     console.log('\nStarts and Ends, invitees, reminders');

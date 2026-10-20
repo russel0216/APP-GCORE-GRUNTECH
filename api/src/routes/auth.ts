@@ -10,7 +10,7 @@ import { audit } from '../shared/audit';
 import { unreadCount } from '../shared/notifications';
 import { upload, saveAttachment } from '../shared/attachments';
 import { setAccountPhoto } from '../shared/faceSamples';
-import { consumeToken, deliverLink, issueToken, liveToken } from '../shared/accounts';
+import { consumeToken, deliverLink, issueToken, liveToken, syncLoginFromEmployee } from '../shared/accounts';
 import { throttled } from '../shared/throttle';
 import { mailEnabled } from '../shared/mail';
 import { currentAppearance } from './appearance';
@@ -215,7 +215,7 @@ const FACTS_SELECT = {
 function hrFacts(u: {
   position: string | null;
   employeeNo: string | null;
-  employee: { employeeNo: string; position: string | null; industry: { name: string } | null } | null;
+  employee: { employeeNo: string | null; position: string | null; industry: { name: string } | null } | null;
 }) {
   return {
     team: u.employee?.industry?.name ?? null,
@@ -262,12 +262,19 @@ authRoutes.patch(
       throw badRequest('Your account has no employee record to keep personal details on — HR can link one');
     }
     const row = await prisma.$transaction(async (tx) => {
-      if (body.personal && before.employee) {
-        await tx.employee.update({ where: { id: before.employee.id }, data: personalData(body.personal) });
+      if (before.employee) {
+        // The employee keeps the number (2026-10-16): a phone typed here is
+        // the record's mobile, and the login mirrors it.
+        const data = body.personal ? personalData(body.personal) : {};
+        if (body.phone !== undefined && body.personal?.mobile === undefined) {
+          (data as { mobile?: string | null }).mobile = body.phone || null;
+        }
+        if (Object.keys(data).length) await tx.employee.update({ where: { id: before.employee.id }, data });
+        await syncLoginFromEmployee(tx, before.employee.id);
       }
       return tx.user.update({
         where: { id: me.id },
-        data: body.phone !== undefined ? { phone: body.phone || null } : {},
+        data: body.phone !== undefined && !before.employee ? { phone: body.phone || null } : {},
         select: { name: true, email: true, position: true, phone: true, employee: { select: PERSONAL_SELECT } },
       });
     });
@@ -461,8 +468,14 @@ authRoutes.post(
       });
       // Every other link this person holds dies with this one.
       await tx.accountToken.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: new Date() } });
-      if (body.personal && user.employee) {
-        await tx.employee.update({ where: { id: user.employee.id }, data: personalData(body.personal) });
+      if (user.employee) {
+        // The phone typed here is the record's mobile; the login mirrors it.
+        const data = body.personal ? personalData(body.personal) : {};
+        if (body.phone !== undefined && body.personal?.mobile === undefined) {
+          (data as { mobile?: string | null }).mobile = body.phone || null;
+        }
+        if (Object.keys(data).length) await tx.employee.update({ where: { id: user.employee.id }, data });
+        await syncLoginFromEmployee(tx, user.employee.id);
       }
       return true;
     });

@@ -4,8 +4,11 @@ import path from 'node:path';
 import { z } from 'zod';
 import { prisma } from '../prisma';
 import { handler, parseBody, badRequest, notFound, forbidden } from '../http/kit';
-import { authenticate, require_, currentUser } from '../auth/middleware';
+import { authenticate, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
+// PDF Templates keeps no record of anybody's: either key of each pair opens
+// and saves the layouts (2026-10-18).
+import { requireView, requireEdit } from '../shared/ownScope';
 import {
   COMPANY_FIELDS,
   ITEM_COLUMNS,
@@ -165,7 +168,7 @@ function checkedDesign(doc: TemplateDoc, body: unknown): PdfDesign {
 // The company logo, for the editor's page. Above /:type, which would take "logo" for a document.
 pdfTemplateRoutes.get(
   '/logo',
-  require_('admin.pdf_templates.view_all'),
+  requireView('admin', 'pdf_templates'),
   handler(async (_req, res) => {
     const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { logoPath: true } });
     if (!company?.logoPath || !fs.existsSync(company.logoPath)) throw notFound('No logo is set in Company Settings');
@@ -175,7 +178,7 @@ pdfTemplateRoutes.get(
 
 pdfTemplateRoutes.get(
   '/:type',
-  require_('admin.pdf_templates.view_all'),
+  requireView('admin', 'pdf_templates'),
   handler(async (req, res) => {
     const doc = documentType(req.params.type);
     const { design, saved, unreadable } = await doc.design();
@@ -200,7 +203,7 @@ pdfTemplateRoutes.get(
 
 pdfTemplateRoutes.put(
   '/:type',
-  require_('admin.pdf_templates.edit_all'),
+  requireEdit('admin', 'pdf_templates'),
   handler(async (req, res) => {
     const doc = documentType(req.params.type);
     const design = checkedDesign(doc, req.body);
@@ -231,7 +234,7 @@ pdfTemplateRoutes.put(
 
 pdfTemplateRoutes.delete(
   '/:type',
-  require_('admin.pdf_templates.edit_all'),
+  requireEdit('admin', 'pdf_templates'),
   handler(async (req, res) => {
     const doc = documentType(req.params.type);
     const before = await prisma.setting.findUnique({ where: { key: doc.settingKey } });
@@ -258,7 +261,7 @@ pdfTemplateRoutes.delete(
 // the editor can show it before anything is saved. Nothing is stored here.
 pdfTemplateRoutes.post(
   '/:type/check',
-  require_('admin.pdf_templates.edit_all'),
+  requireEdit('admin', 'pdf_templates'),
   handler(async (req, res) => {
     const doc = documentType(req.params.type);
     res.json({ layout: checkedDesign(doc, req.body) });
@@ -279,7 +282,7 @@ const previewSchema = z.object({
 
 pdfTemplateRoutes.post(
   '/:type/preview',
-  require_('admin.pdf_templates.view_all'),
+  requireView('admin', 'pdf_templates'),
   handler(async (req, res) => {
     const doc = documentType(req.params.type);
     const body = parseBody(previewSchema, req.body);

@@ -90,7 +90,7 @@ export interface Activity {
 
 /**
  * Somebody who can be booked on or invited to an activity: a row of the one
- * people lookup (`components/People.tsx` — name, position, department and
+ * people lookup (`components/People.tsx` — name, position, team and
  * the photo, an attachment id, for a picker that shows faces). A type only,
  * so this file still carries no React.
  */
@@ -112,3 +112,18 @@ export const REPEATS = [
   { value: 'WEEK', label: 'Every week' },
   { value: 'MONTH', label: 'Every month' },
 ];
+
+/**
+ * What the viewer may do to an activity (2026-10-18): the API's own rule
+ * (`mayChangeActivity()` in routes/sales.ts) — Edit All anyone's; Edit Own and
+ * Delete the ones they are on (booked for, invited or booked by them).
+ */
+export function activityRights(
+  a: Pick<Activity, 'assignedTo' | 'invitees'> & { createdBy?: { id: string } | null },
+  meId: string | undefined,
+  can: (key: string) => boolean,
+): { edit: boolean; remove: boolean } {
+  const all = can('gops.calendar.edit_all');
+  const onIt = !!meId && (a.assignedTo.id === meId || a.createdBy?.id === meId || a.invitees.some((i) => i.userId === meId));
+  return { edit: all || (onIt && can('gops.calendar.edit_own')), remove: can('gops.calendar.delete') && (all || onIt) };
+}

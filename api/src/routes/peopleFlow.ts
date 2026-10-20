@@ -3,8 +3,9 @@ import { z } from 'zod';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, idsFilter, notFound, badRequest, type ListQuery } from '../http/kit';
-import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { authenticate, requireAny, currentUser } from '../auth/middleware';
 import { can, type ResolvedUser } from '../permissions/resolve';
+import { requireEdit, assertCanEdit, mayEdit } from '../shared/ownScope';
 import { audit } from '../shared/audit';
 import { registerAttachmentGuard } from '../shared/attachments';
 import { renderDocument, formatDate, formatShortDate } from '../shared/pdf';
@@ -62,7 +63,8 @@ function baseWhere(me: ResolvedUser, q: ListQuery): Prisma.EmployeeWhereInput {
       ],
     });
   }
-  if (q.filters.departmentId) and.push({ departmentId: q.filters.departmentId });
+  // The team (2026-10-19 — the department's filter before it went): an id or `none`.
+  if (q.filters.teamId) and.push({ industryId: q.filters.teamId === 'none' ? null : q.filters.teamId });
   // A supervisor's own list: the people who report to them, without themself.
   if (choice(q.filters.reports, ['true'], 'Reports', () => 'true')) and.push({ user: { supervisorId: me.id } });
   const ids = idsFilter(q.filters.ids);
@@ -94,7 +96,7 @@ function matches(q: ListQuery, today: string) {
 
 const SORTS: Record<string, (a: Row, b: Row) => number> = {
   name: (a, b) => fullName(a.employee).localeCompare(fullName(b.employee)),
-  employeeNo: (a, b) => a.employee.employeeNo.localeCompare(b.employee.employeeNo),
+  employeeNo: (a, b) => (a.employee.employeeNo ?? '').localeCompare(b.employee.employeeNo ?? ''),
   stage: (a, b) => STAGE_KEYS.indexOf(a.path.stage) - STAGE_KEYS.indexOf(b.path.stage),
   open: (a, b) => a.path.open - b.path.open,
   overdue: (a, b) => a.path.overdue - b.path.overdue,
@@ -134,7 +136,7 @@ function present({ employee: e, path: p }: Row) {
     employeeNo: e.employeeNo,
     name: fullName(e),
     position: e.position,
-    department: e.department,
+    team: e.industry,
     employmentType: e.employmentType,
     hiredOn: p.hiredOn,
     stage: p.stage,
@@ -170,15 +172,16 @@ peopleFlowRoutes.get(
     const q = listQuery(req);
     const { rows, m } = await flowRows(me, q);
     const printed = rows.slice(0, LIST_CAP);
-    const department = q.filters.departmentId
-      ? await prisma.department.findUnique({ where: { id: q.filters.departmentId }, select: { name: true } })
-      : null;
+    const team =
+      q.filters.teamId && q.filters.teamId !== 'none'
+        ? await prisma.industry.findUnique({ where: { id: q.filters.teamId }, select: { name: true } })
+        : null;
     const reference = listReference(rows.length, printed.length, ['person', 'people'], [
       q.search && `search "${q.search}"`,
       m.stage && `stage ${STAGE_LABEL[m.stage as FlowStage]}`,
       m.overdue && 'with overdue items',
       m.probation && `probation review due within ${DUE_SOON_DAYS} days`,
-      q.filters.departmentId && `department ${department?.name ?? 'not found'}`,
+      q.filters.teamId && (q.filters.teamId === 'none' ? 'no team' : `team ${team?.name ?? 'not found'}`),
       q.filters.reports === 'true' ? 'your direct reports' : !can(me, 'ghr.people_flow.view_all') && 'yourself and your direct reports',
       q.filters.ids && 'the rows selected',
     ]);
@@ -190,10 +193,10 @@ peopleFlowRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Employee', 'Department', 'Hired', 'Stage', 'Open', 'Overdue', 'Next'],
+          head: ['Employee', 'Team', 'Hired', 'Stage', 'Open', 'Overdue', 'Next'],
           rows: printed.map(({ employee: e, path: p }) => [
             { title: `${e.lastName}, ${e.firstName}`, body: [e.employeeNo, e.position].filter(Boolean).join(' · ') },
-            e.department?.name ?? '—',
+            e.industry?.code ?? '—',
             day(p.hiredOn),
             p.stageLabel,
             String(p.open),
@@ -219,7 +222,7 @@ async function pathResponse(me: ResolvedUser, employee: FlowEmployee) {
       employeeNo: employee.employeeNo,
       name: fullName(employee),
       position: employee.position,
-      department: employee.department,
+      team: employee.industry,
       employmentType: employee.employmentType,
       isActive: employee.isActive,
       self: employee.userId === me.id,
@@ -227,7 +230,8 @@ async function pathResponse(me: ResolvedUser, employee: FlowEmployee) {
     ...path,
     stages: FLOW_STAGES,
     sources: SOURCE_LABEL,
-    canEdit: can(me, 'ghr.people_flow.edit_all'),
+    // Edit Own (2026-10-18): the person ticks their own path's items.
+    canEdit: mayEdit(me, 'ghr', 'people_flow', employee.userId === me.id, employee.userId),
   };
 }
 
@@ -267,17 +271,20 @@ const itemBody = z.object({
 const STATUS_WORDS = { PENDING: 'open', DONE: 'done', WAIVED: 'waived', NA: 'not applicable' } as const;
 
 /**
- * HR records one item. A derived item follows its record and can only be
+ * HR records one item — and, with Edit Own (2026-10-18), the person on
+ * their own path; an item that follows a record is never ticked by hand by
+ * either. A derived item follows its record and can only be
  * WAIVED (with a reason) or put back to follow it (PENDING); everything else
  * is a 400 naming the record. A manual item is DONE on a day (today by
  * default, never a day to come), WAIVED with a reason, NA, or reopened.
  */
 peopleFlowRoutes.put(
   '/:employeeId/items/:key',
-  require_('ghr.people_flow.edit_all'),
+  requireEdit('ghr', 'people_flow'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const employee = await readable(me, req.params.employeeId);
+    assertCanEdit(me, 'ghr', 'people_flow', employee.userId === me.id, employee.userId);
     const def = (await flowChecklist()).find((d) => d.key === req.params.key);
     if (!def) throw notFound(`"${req.params.key}" is not on the People Flow checklist`);
     const body = parseBody(itemBody, req.body);
@@ -328,7 +335,8 @@ peopleFlowRoutes.put(
 
 // Files on an item (the exit interview's form, the 30-60-90 plan) are
 // attachments on `employee_flow_item` with entityId `<employeeId>~<itemKey>`:
-// read by whoever reads the path, added and removed by HR alone.
+// read by whoever reads the path, added and removed by HR — and by the
+// person on their own path with Edit Own (2026-10-18).
 registerAttachmentGuard(
   'employee_flow_item',
   async (user, entityId) => {
@@ -339,5 +347,12 @@ registerAttachmentGuard(
     });
     return !!employee && mayReadFlow(user, employee);
   },
-  { write: async (user) => can(user, 'ghr.people_flow.edit_all') },
+  {
+    write: async (user, entityId) => {
+      if (can(user, 'ghr.people_flow.edit_all')) return true;
+      if (!can(user, 'ghr.people_flow.edit_own')) return false;
+      const employee = await prisma.employee.findUnique({ where: { id: entityId.split('~')[0] }, select: { userId: true } });
+      return !!employee?.userId && employee.userId === user.id;
+    },
+  },
 );

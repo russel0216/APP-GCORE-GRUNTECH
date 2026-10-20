@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { dayKey } from './day';
+import { dayKey, manilaDayKey, manilaMinutesOfDay } from './day';
 import { badRequest } from '../http/kit';
 import { FACE_ENGINE } from './faceEngine';
 
@@ -211,6 +211,28 @@ export const FACE_MARGIN = 0.05;
 export const MIN_FACE_SAMPLES = 3;
 
 /**
+ * Whether a new enrolment sample collides with another employee's face
+ * (2026-10-19). Within the threshold less the margin of their samples it is
+ * the same face — refused, whatever the person's own samples say. Up to the
+ * threshold plus the margin it is a look-alike (a relative): taken when it
+ * sits clearly with the person's own samples (the margin nearer to them) or
+ * is their first, refused otherwise. Further away nothing is said. The
+ * clock's `decideFace` still tells two enrolled look-alikes apart capture by
+ * capture.
+ */
+export function enrolCollision(
+  own: number | null,
+  nearestOther: number | null,
+  threshold: number,
+): 'same_face' | 'too_close' | 'lookalike' | null {
+  if (nearestOther == null) return null;
+  if (nearestOther <= threshold - FACE_MARGIN + 1e-9) return 'same_face';
+  if (nearestOther > threshold + FACE_MARGIN + 1e-9) return null;
+  if (own != null && own + FACE_MARGIN > nearestOther + 1e-9) return 'too_close';
+  return 'lookalike';
+}
+
+/**
  * The most a person may keep. More samples only widen the net a stranger can
  * fall into; a person whose face has changed removes an old one first.
  */
@@ -371,7 +393,7 @@ export interface DayResult {
 }
 
 export function classifyArrival(timeIn: Date, settings: HrSettings): DayResult {
-  const arrived = timeIn.getHours() * 60 + timeIn.getMinutes();
+  const arrived = manilaMinutesOfDay(timeIn);
   const expected = toMinutes(settings.workStart);
   const late = arrived - expected - settings.graceMinutes;
   return late > 0
@@ -387,16 +409,28 @@ export function workedMinutes(timeIn: Date, timeOut: Date, settings: HrSettings)
   return gross > settings.breakMinutes + 60 ? gross - settings.breakMinutes : gross;
 }
 
+/**
+ * Minutes left before the working day's end (`workEnd`), read in Manila — 0
+ * when the person stayed, and 0 for a clock-out on a later Manila day than
+ * the attendance row's (a shift closed after midnight left late, not early).
+ */
+export function undertimeMinutes(timeOut: Date, dateKey: string, settings: HrSettings): number {
+  if (manilaDayKey(timeOut) !== dateKey) return 0;
+  const early = toMinutes(settings.workEnd) - manilaMinutesOfDay(timeOut);
+  return early > 0 ? early : 0;
+}
+
 // ── One day of attendance ────────────────────────────────────────────────────
 
 export interface AttendanceDayRow {
   employee: {
     id: string;
-    employeeNo: string;
+    employeeNo: string | null;
     firstName: string;
     lastName: string;
     position: string | null;
-    department: { id: string; name: string } | null;
+    /** Their team (`Employee.industry`) — the department is gone (2026-10-19). */
+    team: { id: string; code: string; name: string } | null;
   };
   status: string;
   timeIn: Date | null;
@@ -444,7 +478,7 @@ export async function attendanceDay(date: Date): Promise<AttendanceDay> {
         firstName: true,
         lastName: true,
         position: true,
-        department: { select: { id: true, name: true } },
+        industry: { select: { id: true, code: true, name: true } },
       },
       orderBy: { lastName: 'asc' },
     }),
@@ -465,8 +499,9 @@ export async function attendanceDay(date: Date): Promise<AttendanceDay> {
     const a = attendanceBy.get(e.id);
     const l = leaveBy.get(e.id);
     const status = a ? a.status : l ? 'ON_LEAVE' : 'ABSENT';
+    const { industry, ...person } = e;
     return {
-      employee: e,
+      employee: { ...person, team: industry },
       status,
       timeIn: a?.timeIn ?? null,
       timeOut: a?.timeOut ?? null,

@@ -1,8 +1,20 @@
 import { Router } from 'express';
+import { inBase, RATE_SELECT, rateOf } from '../shared/exchangeRates';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, quotationTeamWhere, teamOf, teamShares } from '../shared/team';
+import {
+  OWNER_TEAM_SELECT,
+  TEAM_REF_SELECT,
+  quotationTeamOf,
+  quotationTeamWhere,
+  quotationsReadable,
+  readsQuotation,
+  readsSalesOrder,
+  salesOrdersReadable,
+  teamOf,
+  teamShares,
+} from '../shared/team';
 import {
   handler,
   parseBody,
@@ -16,6 +28,7 @@ import {
 } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord } from '../permissions/resolve';
+import { viewScope } from '../shared/ownScope';
 import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
@@ -116,7 +129,7 @@ async function bookableQuotation(me: ReturnType<typeof currentUser>, quotationId
     include: { revisions: { include: { items: { orderBy: { sortOrder: 'asc' } } } } },
   });
   if (!quotation) throw notFound('Quotation not found');
-  if (!me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all') && quotation.ownerId !== me.id) {
+  if (!readsQuotation(me, quotation)) {
     throw forbidden('That quotation is someone else’s');
   }
   return quotation;
@@ -239,8 +252,9 @@ export function salesOrderListWhere(
   team: string | null = null,
 ): { base: Prisma.SalesOrderWhereInput; where: Prisma.SalesOrderWhereInput } {
   const and: Prisma.SalesOrderWhereInput[] = [];
-  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all');
-  if (onlyOwn || q.scope === 'mine') and.push({ ownerId: me.id });
+  const readable = salesOrdersReadable(me);
+  if (q.scope === 'mine') and.push({ ownerId: me.id });
+  else if (readable) and.push(readable);
   // An order counts under its QUOTATION's team (2026-10-12): the team picked on the quotation, else its author's.
   if (q.scope === 'team') and.push(team ? { quotation: quotationTeamWhere(team) } : { ownerId: me.id });
   const f = q.filters;
@@ -300,18 +314,30 @@ export async function salesOrderListSummary(
   const LIVE: Prisma.SalesOrderWhereInput = { status: { not: 'CANCELLED' } };
   const [perStatus, live, cancelled, team, liveOrders, owned] = await Promise.all([
     prisma.salesOrder.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
-    prisma.salesOrder.aggregate({ where: { AND: [where, LIVE] }, _sum: { total: true }, _count: { _all: true } }),
+    prisma.salesOrder.count({ where: { AND: [where, LIVE] } }),
     prisma.salesOrder.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
-    opts.teamWhere ? prisma.salesOrder.aggregate({ where: { AND: [where, LIVE, opts.teamWhere] }, _sum: { total: true }, _count: { _all: true } }) : null,
-    opts.margin ? prisma.salesOrder.findMany({ where: { AND: [where, LIVE] }, select: { id: true, discountPct: true, vatRate: true, vatInclusive: true } }) : null,
+    opts.teamWhere
+      ? prisma.salesOrder.findMany({ where: { AND: [where, LIVE, opts.teamWhere] }, select: { total: true, quotation: { select: RATE_SELECT } } })
+      : null,
+    opts.margin
+      ? prisma.salesOrder.findMany({
+          where: { AND: [where, LIVE] },
+          select: { id: true, discountPct: true, vatRate: true, vatInclusive: true, quotation: { select: RATE_SELECT } },
+        })
+      : null,
     // A card per team (2026-10-09): the booked value split by the team of the
     // quotation it books (2026-10-12) — picked there, else its author's.
     prisma.salesOrder.findMany({
       where: { AND: [where, LIVE] },
-      select: { total: true, quotation: { select: { team: TEAM_REF_SELECT, owner: OWNER_TEAM_SELECT } } },
+      select: { total: true, quotation: { select: { ...RATE_SELECT, team: TEAM_REF_SELECT, owner: OWNER_TEAM_SELECT } } },
     }),
   ]);
-  const teams = await teamShares(owned.map((o) => ({ team: quotationTeamOf(o.quotation), cents: Math.round(num(o.total) * 100) })));
+  // In pesos: an order is in its quotation's currency, converted at the
+  // quotation's own rate (shared/exchangeRates.ts, 2026-10-17).
+  const centsOf = (o: { total: Prisma.Decimal; quotation: { currency: string; exchangeRate: Prisma.Decimal | null } }) =>
+    Math.round(inBase(num(o.total), o.quotation) * 100);
+  const liveCents = owned.reduce((t, o) => t + centsOf(o), 0);
+  const teams = await teamShares(owned.map((o) => ({ team: quotationTeamOf(o.quotation), cents: centsOf(o) })));
   // The totals row's margin: every live order with a costed line, the row's
   // own figure summed, against the orders' sums without tax (the quotation
   // list's rule, over SalesOrderLine).
@@ -337,8 +363,9 @@ export async function salesOrderListSummary(
         vatRate: o.vatRate,
         vatInclusive: o.vatInclusive,
       });
-      marginCents += Math.round(t.cost.totalMargin * 100);
-      netCents += Math.round(t.netOfTax * 100);
+      const rate = rateOf(o.quotation);
+      marginCents += Math.round(t.cost.totalMargin * rate * 100);
+      netCents += Math.round(t.netOfTax * rate * 100);
       costed++;
     }
     margin = { amount: marginCents / 100, pct: netCents > 0 ? Math.round((marginCents / netCents) * 1000) / 10 : null, costed };
@@ -351,11 +378,11 @@ export async function salesOrderListSummary(
   }
   return {
     tabCounts,
-    count: live._count._all + cancelled,
-    value: num(live._sum.total),
+    count: live + cancelled,
+    value: liveCents / 100,
     cancelledCount: cancelled,
     teams,
-    ...(team ? { team: { count: team._count._all, value: num(team._sum.total) } } : {}),
+    ...(team ? { team: { count: team.length, value: team.reduce((t, o) => t + centsOf(o), 0) / 100 } } : {}),
     ...(margin ? { margin } : {}),
   };
 }
@@ -553,10 +580,8 @@ salesOrderRoutes.get(
     const field = choice(String(req.query.field ?? '') || undefined, ORDER_MEMORY_FIELDS, 'Field', (f) => f);
     if (!field) throw badRequest(`Field is one of ${ORDER_MEMORY_FIELDS.join(', ')}`);
     const q = memoryTerm(req.query.q);
-    const orders: Prisma.SalesOrderWhereInput =
-      me.isSuperAdmin || me.permissions.has('gops.sales_orders.view_all') ? {} : { ownerId: me.id };
-    const quotations: Prisma.QuotationWhereInput =
-      me.isSuperAdmin || me.permissions.has('gops.quotations.view_all') ? {} : { ownerId: me.id };
+    const orders: Prisma.SalesOrderWhereInput = salesOrdersReadable(me) ?? {};
+    const quotations: Prisma.QuotationWhereInput = quotationsReadable(me) ?? {};
     const contains = q ? { contains: q, mode: 'insensitive' as const } : {};
 
     if (field === 'comment' || field === 'paymentMethod') {
@@ -1333,7 +1358,7 @@ export type PrintableSalesOrder = Prisma.SalesOrderGetPayload<{ include: typeof 
 registerAttachmentGuard(
   'sales_order',
   async (user, id) => {
-    const order = await prisma.salesOrder.findUnique({ where: { id }, select: { id: true, ownerId: true } });
+    const order = await prisma.salesOrder.findUnique({ where: { id }, select: { id: true, ownerId: true, quotationId: true } });
     if (!order) return false;
     try {
       await assertOrderVisible(user, order, false);
@@ -1363,8 +1388,17 @@ export async function printableSalesOrder(me: ReturnType<typeof currentUser>, id
  * caller with no order right at all (`requireAnyOrDecider`) or anyone else, a
  * stand-in or approver while the order waits on them (`mayDecide`).
  */
-async function assertOrderVisible(me: ReturnType<typeof currentUser>, order: { id: string; ownerId: string }, deciderOnly: boolean) {
-  const visible = !deciderOnly && (me.isSuperAdmin || me.permissions.has('gops.sales_orders.view_all') || order.ownerId === me.id);
+async function assertOrderVisible(
+  me: ReturnType<typeof currentUser>,
+  order: { id: string; ownerId: string; quotationId: string },
+  deciderOnly: boolean,
+) {
+  // View Team reads an order on the team's quotation — fetched only when that is the question.
+  const quotation =
+    !deciderOnly && order.ownerId !== me.id && viewScope(me, 'gops', 'sales_orders') === 'team'
+      ? await prisma.quotation.findUnique({ where: { id: order.quotationId }, select: { ownerId: true, teamId: true } })
+      : null;
+  const visible = !deciderOnly && (me.isSuperAdmin || readsSalesOrder(me, { ownerId: order.ownerId, quotation }));
   if (visible || (await mayDecide(me.id, 'sales_order', [order.id]))) return;
   throw forbidden(deciderOnly ? 'You need one of: gops.sales_orders.view_all, gops.sales_orders.view_own' : 'This sales order is someone else\u2019s');
 }

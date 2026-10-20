@@ -526,7 +526,7 @@ export function CanvassDetail() {
       )}
 
       <section className="card" aria-labelledby="cvs-sheet">
-        <div className="proc-card-head">
+        <div className="card-head">
           <h3 id="cvs-sheet" className="card-title">
             Comparison sheet
           </h3>

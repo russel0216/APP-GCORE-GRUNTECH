@@ -49,6 +49,8 @@ const BILL_STATUSES = [
 
 interface Bill {
   id: string;
+  /** Edit All, or Edit Own on a bill the viewer entered (2026-10-18) — the API's word. */
+  canEdit?: boolean;
   number: string;
   status: string;
   supplierInvoiceNo: string | null;
@@ -938,9 +940,10 @@ export function BillDetail() {
     await load();
   }
 
-  // Both mirror the routes: a draft, by whoever may edit every bill.
-  const canModify = row.status === 'DRAFT' && can('gfin.ap.edit_all');
-  const canCancel = row.status === 'DRAFT' && can('gfin.ap.edit_all');
+  // Both mirror the routes: a draft, by whoever may edit this bill — Edit
+  // All, or Edit Own on one the viewer entered (2026-10-18, `canEdit`).
+  const canModify = row.status === 'DRAFT' && !!row.canEdit;
+  const canCancel = row.status === 'DRAFT' && !!row.canEdit;
 
   return (
     <div>

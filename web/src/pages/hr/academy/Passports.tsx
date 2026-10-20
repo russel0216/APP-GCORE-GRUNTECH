@@ -33,7 +33,7 @@ interface PassportRow {
   employeeNo: string;
   name: string;
   position: string | null;
-  department: { id: string; name: string } | null;
+  team: { id: string; code: string; name: string } | null;
   isActive: boolean;
   required: number;
   held: number;
@@ -60,12 +60,15 @@ export function Passports() {
   const navigate = useNavigate();
   const [summary, setSummary] = useState<TeamReadiness | null>(null);
   const [queue, setQueue] = useState<QueueRow[] | null>(null);
-  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
+  const [teams, setTeams] = useState<{ id: string; code: string; name: string }[]>([]);
 
   useEffect(() => {
     api.get<TeamReadiness>('/passports/summary').then(setSummary).catch(() => {});
     api.get<QueueRow[]>('/passports/records?status=PENDING_VERIFICATION').then(setQueue).catch(() => setQueue([]));
-    api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
+    api
+      .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
+      .then((rows) => setTeams(rows.filter((t) => t.isActive)))
+      .catch(() => {});
   }, []);
 
   const columns: Column<PassportRow>[] = [
@@ -89,7 +92,7 @@ export function Passports() {
       render: (r) => (
         <div>
           <div>{r.position ?? <span className="faint">Unclassified</span>}</div>
-          <div className="faint">{r.department?.name ?? 'No department'}</div>
+          <div className="faint">{r.team?.code ?? 'No team'}</div>
         </div>
       ),
     },
@@ -238,7 +241,7 @@ export function Passports() {
         rowKey={(r) => r.id}
         searchPlaceholder="Search name, employee no., position…"
         emptyTitle="Nobody matches"
-        emptyHint="Change the filters, or check that employees are linked to departments and plantilla positions."
+        emptyHint="Change the filters, or check that employees are on plantilla positions."
         onRowClick={(r) => navigate(`/g-hr/academy/passports/${r.id}`)}
         filters={[
           {
@@ -253,9 +256,9 @@ export function Passports() {
             ],
           },
           {
-            key: 'departmentId',
-            label: 'Department',
-            options: [{ value: 'none', label: 'No department' }, ...departments.map((d) => ({ value: d.id, label: d.name }))],
+            key: 'teamId',
+            label: 'Team',
+            options: [...teams.map((t) => ({ value: t.id, label: t.code })), { value: 'none', label: 'No team' }],
           },
           {
             key: 'active',

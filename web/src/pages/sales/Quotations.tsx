@@ -663,6 +663,11 @@ export interface Item {
   costNote?: string | null;
 }
 
+/** Every costing a revision is quoted from, the first first (2026-10-19: one or several). */
+export function costingsOf(rev: Pick<Revision, 'costing' | 'costings'>) {
+  return rev.costings?.length ? rev.costings : rev.costing ? [rev.costing] : [];
+}
+
 export interface Revision {
   id: string;
   revision: number;
@@ -695,6 +700,8 @@ export interface Revision {
   costPanel?: CostPanel;
   /** totalCost is absent when this viewer may not see cost. */
   costing: { id: string; number: string; title: string; contractValue: number; totalCost?: number } | null;
+  /** Every costing the revision is quoted from, the first first (2026-10-19). */
+  costings?: { id: string; number: string; title: string; contractValue: number; totalCost?: number }[];
   approvedBy: { id: string; name: string } | null;
   /** The project this revision became, if any (Job.quotationRevisionId). */
   jobs: { id: string; number: string; name: string; status: string }[];
@@ -731,6 +738,10 @@ export interface QuotationDetail {
   /** Every figure's currency — PHP unless another was picked (2026-10-11). */
   currency: string;
   currencies?: { code: string; label: string }[];
+  /** Pesos per unit of `currency` (2026-10-17): what summaries convert at. Null for PHP. */
+  exchangeRate?: number | null;
+  /** Settings' rates, the default when the currency changes. */
+  exchangeRates?: Record<string, number>;
   canEdit: boolean;
   /** Whether the server sent the cost half of each line. */
   canSeeCost: boolean;
@@ -996,7 +1007,13 @@ export function QuotationDetail() {
             {revision?.costing && (
               <>
                 {' '}
-                · costing <Link to={`/g-ops/costing/${revision.costing.id}`}>{revision.costing.number}</Link>
+                · costing{costingsOf(revision).length > 1 ? 's' : ''}{' '}
+                {costingsOf(revision).map((c, i) => (
+                  <span key={c.id}>
+                    {i > 0 && ', '}
+                    <Link to={`/g-ops/costing/${c.id}`}>{c.number}</Link>
+                  </span>
+                ))}
               </>
             )}
             {jobs.map((j) => (
@@ -1059,7 +1076,7 @@ export function QuotationDetail() {
             {canCreateProject && approved && (
               <Link
                 className="btn"
-                to={`/g-ops/projects${qs({ new: 1, costingId: approved.costing?.id, quotationRevisionId: approved.id })}`}
+                to={`/g-ops/projects${qs({ new: 1, costingIds: costingsOf(approved).map((c) => c.id).join(',') || undefined, quotationRevisionId: approved.id })}`}
                 title={`R${approved.revision} is the approved revision — its costing carries the budget and the schedule of values into the project`}
               >
                 Create project
@@ -1118,11 +1135,11 @@ export function QuotationDetail() {
           editable &&
             revision?.costing && {
               label: 'Fill lines from costing',
-              hint: `Replace the lines with ${revision.costing.number}'s scope of work`,
+              hint: `Replace the lines with ${costingsOf(revision).map((c) => c.number).join(' and ')}'s scope of work`,
               ...(revision.items.length
                 ? {
                     confirm: {
-                      title: `Replace R${revision.revision}'s lines with ${revision.costing.number}'s scope of work?`,
+                      title: `Replace R${revision.revision}'s lines with ${costingsOf(revision).map((c) => c.number).join(' and ')}'s scope of work?`,
                       body: `The ${revision.items.length} line${revision.items.length === 1 ? '' : 's'} there now are deleted. The costing is not changed.`,
                       confirmLabel: 'Replace lines',
                       onConfirm: fillFromCosting,
@@ -1302,13 +1319,14 @@ export function QuotationDetail() {
                   </Link>
                 </Detail>
               )}
-              {revision?.costing && (
-                <Detail label="Costing">
-                  <Link to={`/g-ops/costing/${revision.costing.id}`}>
-                    {revision.costing.number} — {revision.costing.title}
-                  </Link>
-                </Detail>
-              )}
+              {revision?.costing &&
+                costingsOf(revision).map((c, i, all) => (
+                  <Detail key={c.id} label={all.length > 1 ? `Costing ${i + 1}` : 'Costing'}>
+                    <Link to={`/g-ops/costing/${c.id}`}>
+                      {c.number} — {c.title}
+                    </Link>
+                  </Detail>
+                ))}
             </dl>
 
             <dl className="qd-group">
@@ -1465,7 +1483,7 @@ export function QuotationDetail() {
           <DocumentApproval documentType="quotation" documentId={revision.id} reloadToken={reload} />
 
           <div className="card sales-card-gap">
-            <div className="row sales-card-head">
+            <div className="card-head">
               <h2 className="card-title">Lines</h2>
             </div>
 
@@ -1614,7 +1632,7 @@ function QuotationSalesOrders({
 
   return (
     <div className="card sales-card-gap">
-      <div className="row sales-card-head">
+      <div className="card-head">
         <h2 className="card-title">Sales orders</h2>
       </div>
       {rows && rows.length > 0 && (

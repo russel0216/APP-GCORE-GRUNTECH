@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, type VisitStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
 import { dayKey, daysBetween, manilaDate } from './day';
@@ -151,6 +151,45 @@ export function planSchedule(startsAt: Date, endsAt: Date, frequencyMonths: numb
  * the one place such a visit could be destroyed silently — do not "simplify"
  * the sequence guard away.
  */
+/**
+ * A visit still to be made: booked, or booked and CONFIRMED with the
+ * customer (2026-10-20, the owner's spec). Everything that asks "is it
+ * still open" — overdue, missed, due, My Work, the dashboard — reads this;
+ * a confirmed visit is as open as a scheduled one, only agreed.
+ */
+export const OPEN_VISIT_STATUSES: VisitStatus[] = ['SCHEDULED', 'CONFIRMED'];
+/** What a re-plan may delete and write again: nobody attended these. */
+export const UNATTENDED_VISIT_STATUSES: VisitStatus[] = ['SCHEDULED', 'CONFIRMED', 'CANCELLED'];
+
+/** "HH:MM", 24-hour, the slot a visit is booked for. */
+export const TIME_OF_DAY = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/**
+ * The slot a visit takes (2026-10-20): both times, or neither — a visit
+ * with no times is a full-day site visit. Refuses one time alone, a
+ * malformed time, and an end at or before the start.
+ */
+export function visitSlot(startTime: string | null | undefined, endTime: string | null | undefined): { startTime: string | null; endTime: string | null } {
+  const start = startTime?.trim() || null;
+  const end = endTime?.trim() || null;
+  if (!start && !end) return { startTime: null, endTime: null };
+  if (!start || !end) throw badRequest('A time slot needs both a start and an end — leave both empty for a full-day visit');
+  if (!TIME_OF_DAY.test(start) || !TIME_OF_DAY.test(end)) throw badRequest('A time is HH:MM, 24-hour — 08:00, 13:30');
+  if (end <= start) throw badRequest('The slot ends before it starts');
+  return { startTime: start, endTime: end };
+}
+
+/** "8:00 AM – 12:00 PM", or "Full day" (the paper's and the bell's words). */
+export function slotLabel(startTime: string | null, endTime: string | null): string {
+  if (!startTime || !endTime) return 'Full day';
+  const h12 = (t: string) => {
+    const [h, m] = t.split(':').map(Number);
+    const hour = h % 12 === 0 ? 12 : h % 12;
+    return `${hour}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
+  };
+  return `${h12(startTime)} – ${h12(endTime)}`;
+}
+
 export async function regenerateSchedule(
   tx: Tx,
   contractId: string,
@@ -166,7 +205,7 @@ export async function regenerateSchedule(
     where: { contractId, sequence: { not: null }, status: { in: ['COMPLETED', 'MISSED'] } },
   });
   await tx.serviceVisit.deleteMany({
-    where: { contractId, sequence: { not: null }, status: { in: ['SCHEDULED', 'CANCELLED'] } },
+    where: { contractId, sequence: { not: null }, status: { in: UNATTENDED_VISIT_STATUSES } },
   });
 
   const keptVisits = await tx.serviceVisit.findMany({
@@ -417,7 +456,7 @@ export async function sweepOverdue(): Promise<{ expired: number; missed: number 
       data: { status: 'EXPIRED' },
     }),
     prisma.serviceVisit.updateMany({
-      where: { status: 'SCHEDULED', dueDate: { lt: missedCutoff } },
+      where: { status: { in: OPEN_VISIT_STATUSES }, dueDate: { lt: missedCutoff } },
       data: { status: 'MISSED' },
     }),
   ]);

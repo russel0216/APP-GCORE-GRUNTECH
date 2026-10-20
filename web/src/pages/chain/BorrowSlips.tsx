@@ -513,7 +513,7 @@ export function BorrowRequestEditor() {
               maxLength={300}
               required
               autoFocus={!editing}
-              placeholder="e.g. Pressure test at the client's plant"
+              placeholder="e.g. Pressure test at the customer's plant"
               onChange={(e) => set({ purpose: e.target.value })}
             />
           </Field>
@@ -526,7 +526,7 @@ export function BorrowRequestEditor() {
       </section>
 
       <section className="card" aria-labelledby="bs-items">
-        <div className="prq-card-head">
+        <div className="card-head">
           <h2 id="bs-items" className="card-title">
             Items
           </h2>
@@ -643,6 +643,7 @@ interface SlipItem {
 
 export function BorrowSlipDetail() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const toast = useToast();
   const confirm = useConfirm();
   const [slip, setSlip] = useState<Record<string, unknown> | null>(null);
@@ -708,6 +709,11 @@ export function BorrowSlipDetail() {
     await api.post(`/borrow-slips/${id}/cancel`, { reason });
     toast('ok', `${number} cancelled`);
     await load();
+  }
+  async function remove() {
+    await api.del(`/borrow-slips/${id}`);
+    toast('ok', `${number} deleted`);
+    navigate('/g-chain/borrow-slips');
   }
   async function release() {
     setSlip(await api.post<Record<string, unknown>>(`/borrow-slips/${id}/release`, {}));
@@ -812,6 +818,16 @@ export function BorrowSlipDetail() {
               reason: 'required',
               minReason: 3,
               onConfirm: cancel,
+            },
+          },
+          slip.canDelete === true && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${number}?`,
+              body: 'Nothing left the shelf on it. It cannot be undone.',
+              confirmLabel: 'Delete',
+              onConfirm: remove,
             },
           },
         ]}

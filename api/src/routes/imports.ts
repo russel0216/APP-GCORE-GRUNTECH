@@ -21,6 +21,7 @@ import {
 } from '../shared/csv';
 import { employeesImport } from './imports/employees';
 import { scoroQuotesImport } from './imports/scoroQuotes';
+import { scoroInvoicesImport } from './imports/scoroInvoices';
 import { courseImport } from './academy';
 import { makePartner, safeHttpUrl, type ResourceKind } from '../shared/partners';
 
@@ -562,6 +563,8 @@ const REGISTRY: Record<string, Registered> = {
   courses: courseImport,
   // SCORO's own quotes export, as it comes (2026-10-11): a real quotation per row.
   scoro_quotes: scoroQuotesImport,
+  // SCORO's invoices export (2026-10-17): a real sales order per invoice, on its quotation.
+  scoro_invoices: scoroInvoicesImport,
 };
 
 importRoutes.get(

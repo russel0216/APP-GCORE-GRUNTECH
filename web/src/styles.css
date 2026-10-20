@@ -578,12 +578,6 @@ textarea {
   border-color: #d33ae4;
 }
 
-.btn-ok {
-  background: rgb(var(--neon-rgb) / 0.12);
-  border-color: rgb(var(--neon-rgb) / 0.5);
-  color: var(--neon);
-}
-
 .btn-danger {
   background: rgb(var(--danger-rgb) / 0.1);
   border-color: rgb(var(--danger-rgb) / 0.45);
@@ -994,9 +988,14 @@ textarea {
   margin-bottom: 0;
 }
 
-/* A card that is really a button has to be reset back to looking like a card. */
+/* A card that is really a button has to be reset back to looking like a card.
+   A column from the top: a button centres its content, so in a row of
+   stretched cards the shorter ones floated mid-card (Approval Workflows,
+   2026-10-16). */
 .card-button {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
   width: 100%;
   text-align: left;
   font: inherit;
@@ -1107,6 +1106,26 @@ a.card:hover {
   display: flex;
   flex-direction: column;
   gap: var(--block-gap);
+}
+
+/*
+  A plain wrapper that holds cards is a stack too (2026-10-16, the owner's
+  report: "some card spacing that aren't uniform"). A page or a tab often
+  wraps its blocks in a classless <div>, and in block flow nothing spaced
+  them: measured across 110 screens, cards sat flush (0 px) on the G-CHAIN
+  and G-FIN reports, every Insights report, Report Templates, the costing
+  record, the forecast and the plantilla, where every other screen reads
+  --block-gap. The Forecast's and the costing page's roots carry a class of
+  their own and are named. The children's own margins go, the gap spaces them.
+*/
+.content :is(div:not([class]), .forecast, .costing-page):has(> .card, > .kpi-grid) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--block-gap);
+}
+
+.content :is(div:not([class]), .forecast, .costing-page):has(> .card, > .kpi-grid) > * {
+  margin-block: 0;
 }
 
 /* A stack spaces its children itself: a child that carries its own bottom
@@ -2009,6 +2028,15 @@ table.data .mono {
   color: var(--faint);
 }
 
+/* "Type at least two characters", "Searching…", "Nothing matched": a line of
+   its own, not a group heading. */
+.palette-note {
+  padding: var(--s-4);
+  font-size: var(--fs-sm);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 .palette-hit {
   display: flex;
   align-items: center;
@@ -2079,6 +2107,27 @@ table.data .mono {
   font-size: 11px;
   color: var(--muted);
   margin-top: 3px;
+}
+
+/* All / Unread and the count over the list; "Load more" under it. */
+.notif-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-4);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.notif-count {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.notif-more {
+  display: flex;
+  justify-content: center;
+  padding: var(--s-3);
 }
 
 /* ─────────────────────────────── Messages ──────────────────────────────── */
@@ -2884,21 +2933,6 @@ hr.rule {
   min-width: 80px;
 }
 
-.flow-in,
-.flow-out {
-  height: 7px;
-  border-radius: 2px;
-  min-width: 1px;
-}
-
-.flow-in {
-  background: rgb(var(--neon-rgb) / 0.55);
-}
-
-.flow-out {
-  background: rgb(var(--warn-rgb) / 0.5);
-}
-
 /* ─────────────────────── Aftermarket: report read-back ─────────────────── */
 
 /* A submitted report is read, not edited. Rendering its answers as plain text
@@ -3219,6 +3253,22 @@ hr.rule {
 .card.panel-block > * {
   margin-top: 0;
   margin-bottom: 0;
+}
+
+/* A card's head (2026-10-16, the review): its title on the left, the card's
+   own buttons (.btn-sm) on the right, wrapping on a phone. One rule for every
+   card — the module copies (del-, m-, proc-, prq-, pr-, meeting-, sales-card-head) are gone. */
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--card-gap);
+}
+
+.card-head .card-title {
+  margin: 0;
 }
 
 .panel-head {
@@ -5584,4 +5634,26 @@ a.icon-row:hover {
 }
 .import-groups .faint {
   margin-block: var(--s-1) var(--s-2);
+}
+
+/* The import dialog (components/ImportModal.tsx). */
+.import-lede {
+  margin-top: 0;
+}
+.import-report,
+.import-columns {
+  margin-top: var(--s-3);
+}
+.import-columns summary {
+  cursor: pointer;
+}
+.import-rows {
+  max-height: 17.5rem;
+  margin-top: var(--s-2);
+}
+.import-col-row {
+  width: 4rem;
+}
+.import-col-action {
+  width: 6rem;
 }

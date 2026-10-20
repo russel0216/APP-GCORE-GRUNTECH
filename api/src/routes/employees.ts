@@ -19,11 +19,13 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { audit } from '../shared/audit';
 import { deletePhotoIfUnused, dropAccountPhotoFromSamples } from '../shared/faceSamples';
 import { deleteAttachment } from '../shared/attachments';
-import { nextNumber } from '../shared/numbering';
-import { can } from '../permissions/resolve';
-import { positionFields, setEmployeePosition } from '../shared/plantilla';
+import { nextNumber, setCounter, type CounterMove } from '../shared/numbering';
+import { can, type ResolvedUser } from '../permissions/resolve';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit, editScope } from '../shared/ownScope';
+import { positionFields, setEmployeePosition, setExtraPositions } from '../shared/plantilla';
+import { MAX_ROLES, tooManyRoles } from '../shared/roleRev1';
 import { sweepSeparations } from '../shared/clearance';
-import { createLogin, defaultRoleIds, deliverLink } from '../shared/accounts';
+import { createLogin, defaultRoleIds, deliverLink, personName, syncLoginFromEmployee } from '../shared/accounts';
 import { celebrationsBetween } from '../shared/celebrations';
 import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
 import { LIST_CAP, choice, listReference, sendListPdf } from '../shared/listPaper';
@@ -42,6 +44,9 @@ employeeRoutes.use(authenticate);
  * project manager listing employees must not receive salaries in the JSON and
  * simply not see them rendered.
  */
+/** What Employees › Edit Own changes on one's own record (2026-10-18). */
+const OWN_EDITABLE = ['firstName', 'lastName', 'middleName', 'suffix', 'mobile', 'personalEmail', 'address', 'birthDate', 'emergencyContactName', 'emergencyContactPhone'];
+
 const RATE_FIELDS = [
   'dailyRate',
   'burdenMultiplier',
@@ -57,6 +62,30 @@ function stripRates<T extends Record<string, unknown>>(row: T, allowed: boolean)
   for (const f of RATE_FIELDS) delete out[f];
   return out;
 }
+
+/**
+ * Whose pay data the caller may read (2026-10-18): View All reads every
+ * employee's; View Own only the employee record linked to their own login —
+ * never a colleague's, whatever else they hold.
+ */
+function seesRatesOf(me: ResolvedUser, employeeUserId: string | null): boolean {
+  if (can(me, 'ghr.employee_rates.view_all')) return true;
+  return !!employeeUserId && employeeUserId === me.id && can(me, 'ghr.employee_rates.view_own');
+}
+
+/** And whose the caller may change — Edit All, or Edit Own on their own record. */
+function setsRatesOf(me: ResolvedUser, employeeUserId: string | null): boolean {
+  return mayEdit(me, 'ghr', 'employee_rates', !!employeeUserId && employeeUserId === me.id, employeeUserId);
+}
+
+/**
+ * "Own" on the employee register (2026-10-18) is the caller's own employee
+ * record — the one linked to their login. View Own lists that one row and
+ * opens no other; Edit Own changes that one alone.
+ */
+const myRecord = (me: ResolvedUser): Prisma.EmployeeWhereInput => ({ userId: me.id });
+/** The records of these logins — View Own reads one's own, View Team the team's (2026-10-19). */
+const myRecords = (ids: string[]): Prisma.EmployeeWhereInput => ({ userId: { in: ids } });
 
 function decimalsToNumbers(row: Record<string, unknown>): Record<string, unknown> {
   const out = { ...row };
@@ -81,7 +110,6 @@ function employeeListWhere(q: ListQuery): Prisma.EmployeeWhereInput {
   }
   const f = q.filters;
   if (f.isActive) where.isActive = f.isActive === 'true';
-  if (f.departmentId) where.departmentId = f.departmentId;
   // The team: an industry id, or `none` for nobody assigned yet.
   if (f.industryId === 'none') where.industryId = null;
   else if (f.industryId) where.industryId = f.industryId;
@@ -91,7 +119,24 @@ function employeeListWhere(q: ListQuery): Prisma.EmployeeWhereInput {
   if (employmentType) where.employmentType = employmentType;
   // `none` = unclassified: an active employee with no plantilla position.
   if (f.positionId === 'none') where.positionId = null;
-  else if (f.positionId) where.positionId = f.positionId;
+  // A position also held counts as held (2026-10-19).
+  else if (f.positionId) {
+    where.AND = [
+      ...((where.AND as Prisma.EmployeeWhereInput[] | undefined) ?? []),
+      { OR: [{ positionId: f.positionId }, { extraPositions: { some: { positionId: f.positionId } } }] },
+    ];
+  }
+  // `?login=none`: an active employee with no G-CORE login yet (2026-10-16,
+  // Admin › Users' Unlinked card links here); `yes` the rest.
+  const login = choice(f.login, { none: 'none', yes: 'yes' }, 'Login');
+  if (login === 'none') where.userId = null;
+  if (login === 'yes') where.userId = { not: null };
+  // `?number=none`: a person with no employee number yet (2026-10-18, the
+  // numbers cleared for the owner's scheme) — no `{EMP}` number is issued
+  // in their name until one is typed; `yes` the rest.
+  const number = choice(f.number, { none: 'none', yes: 'yes' }, 'Employee number');
+  if (number === 'none') where.employeeNo = null;
+  if (number === 'yes') where.employeeNo = { not: null };
   const ids = idsFilter(f.ids);
   if (ids) where.id = { in: ids };
   return where;
@@ -101,21 +146,23 @@ const EMPLOYEE_SORTS = ['employeeNo', 'lastName', 'dateHired', 'createdAt'];
 
 employeeRoutes.get(
   '/',
-  require_('ghr.employees.view_all'),
+  requireView('ghr', 'employees'),
   handler(async (req, res) => {
     // Sweep-on-read: anyone past their separation date drops out here.
     await sweepSeparations();
     const me = currentUser(req);
-    const seeRates = can(me, 'ghr.employee_rates.view_all');
     const q = listQuery(req);
-    const where = employeeListWhere(q);
+    const where = ownOnly(me, 'ghr', 'employees', employeeListWhere(q), myRecords);
 
     const [rows, total] = await Promise.all([
       prisma.employee.findMany({
         where,
         include: {
-          department: { select: { id: true, name: true } },
           positionRef: { select: { id: true, code: true, title: true } },
+        extraPositions: {
+          orderBy: { sortOrder: 'asc' },
+          select: { position: { select: { id: true, code: true, title: true } } },
+        },
           industry: { select: { id: true, code: true, name: true } },
           user: { select: { id: true, email: true, isActive: true, invitePending: true } },
         },
@@ -127,14 +174,23 @@ employeeRoutes.get(
       }),
       prisma.employee.count({ where }),
     ]);
+    // The people still without a number (the card over the list), under the
+    // register as a whole — a tile equals the list it opens (`?number=none`).
+    const withoutNumber = await prisma.employee.count({
+      where: ownOnly(me, 'ghr', 'employees', { employeeNo: null, isActive: true }, myRecords),
+    });
 
-    res.json(
-      listResult(
-        rows.map((r) => stripRates(decimalsToNumbers(r) as typeof r, seeRates)),
+    res.json({
+      summary: { withoutNumber },
+      ...listResult(
+        rows.map((r) => ({
+          ...stripRates(decimalsToNumbers(r) as typeof r, seesRatesOf(me, r.userId)),
+          canEdit: mayEdit(me, 'ghr', 'employees', r.userId === me.id, r.userId),
+        })),
         total,
         q,
       ),
-    );
+    });
   }),
 );
 
@@ -149,13 +205,14 @@ employeeRoutes.get(
  */
 employeeRoutes.get(
   '/pdf',
-  require_('ghr.employees.view_all'),
+  requireView('ghr', 'employees'),
   handler(async (req, res) => {
     await sweepSeparations();
     const q = listQuery(req);
-    const where = employeeListWhere(q);
+    const me = currentUser(req);
+    const where = ownOnly(me, 'ghr', 'employees', employeeListWhere(q), myRecords);
     const f = q.filters;
-    const [rows, count, department, team, position] = await Promise.all([
+    const [rows, count, team, position] = await Promise.all([
       prisma.employee.findMany({
         where,
         select: {
@@ -168,7 +225,6 @@ employeeRoutes.get(
           employmentType: true,
           dateHired: true,
           isActive: true,
-          department: { select: { name: true } },
           positionRef: { select: { title: true } },
           industry: { select: { code: true, name: true } },
           user: { select: { email: true, invitePending: true } },
@@ -177,7 +233,6 @@ employeeRoutes.get(
         take: LIST_CAP,
       }),
       prisma.employee.count({ where }),
-      f.departmentId ? prisma.department.findUnique({ where: { id: f.departmentId }, select: { name: true } }) : null,
       f.industryId && f.industryId !== 'none'
         ? prisma.industry.findUnique({ where: { id: f.industryId }, select: { name: true } })
         : null,
@@ -189,14 +244,15 @@ employeeRoutes.get(
     const reference = listReference(count, rows.length, ['employee', 'employees'], [
       q.search && `search "${q.search}"`,
       f.isActive && (f.isActive === 'true' ? 'active' : 'inactive'),
-      f.departmentId && `department ${department?.name ?? 'not found'}`,
       f.industryId && (f.industryId === 'none' ? 'no team yet' : `team ${team?.name ?? 'not found'}`),
       f.employmentType && `type ${statusLabel(f.employmentType)}`,
       f.positionId && (f.positionId === 'none' ? 'no plantilla position' : `position ${position?.title ?? 'not found'}`),
+      f.number && (f.number === 'none' ? 'no employee number yet' : 'with an employee number'),
+      f.login && (f.login === 'none' ? 'no login yet' : 'with a login'),
       f.ids && 'the rows selected',
     ]);
 
-    // Eight columns: landscape (rule 6).
+    // Seven columns: landscape (rule 6).
     const pdf = await renderDocument({
       title: 'Employees',
       date: new Date(),
@@ -205,17 +261,16 @@ employeeRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Name', 'Department', 'Team', 'Type', 'Hired', 'Login', 'Status'],
+          head: ['Number', 'Name', 'Team', 'Type', 'Hired', 'Login', 'Status'],
           rows: rows.map((e) => {
             const initial = e.middleName?.trim()?.[0];
             const post = e.positionRef?.title ?? e.position;
             return [
-              e.employeeNo,
+              e.employeeNo ?? '—',
               {
                 title: `${e.lastName}, ${e.firstName}${initial ? ` ${initial}.` : ''}`,
                 body: post ? `${post}${!e.positionId ? ' · unclassified' : ''}` : undefined,
               },
-              e.department?.name ?? '—',
               e.industry?.code ?? '—',
               statusLabel(e.employmentType),
               e.dateHired ? formatShortDate(e.dateHired) : '—',
@@ -298,7 +353,7 @@ employeeRoutes.get(
         position: true,
         employmentType: true,
         userId: true,
-        department: { select: { id: true, name: true } },
+        industry: { select: { id: true, code: true, name: true } },
       },
       orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
       take: 50,
@@ -312,14 +367,17 @@ employeeRoutes.get(
 
 employeeRoutes.get(
   '/:id',
-  require_('ghr.employees.view_all'),
+  requireView('ghr', 'employees'),
   handler(async (req, res) => {
-    const seeRates = can(currentUser(req), 'ghr.employee_rates.view_all');
+    const me = currentUser(req);
     const employee = await prisma.employee.findUnique({
       where: { id: req.params.id },
       include: {
-        department: { select: { id: true, name: true } },
         positionRef: { select: { id: true, code: true, title: true } },
+        extraPositions: {
+          orderBy: { sortOrder: 'asc' },
+          select: { position: { select: { id: true, code: true, title: true } } },
+        },
         industry: { select: { id: true, code: true, name: true } },
         user: {
           select: {
@@ -333,10 +391,16 @@ employeeRoutes.get(
       },
     });
     if (!employee) throw notFound('Employee not found');
+    const isMine = employee.userId === me.id;
+    assertCanView(me, 'ghr', 'employees', isMine, employee.userId);
+    const seeRates = seesRatesOf(me, employee.userId);
 
     res.json({
       ...stripRates(decimalsToNumbers(employee) as typeof employee, seeRates),
       canSeeRates: seeRates,
+      // What the page may offer (2026-10-18): Modify, and the pay fields in it.
+      canEdit: mayEdit(me, 'ghr', 'employees', isMine, employee.userId),
+      canEditRates: setsRatesOf(me, employee.userId),
       // Filled by Phase 6.
       attendance: [],
       leaveRequests: [],
@@ -361,12 +425,15 @@ const employeeSchema = z.object({
   middleName: z.string().trim().optional().nullable(),
   suffix: z.string().trim().optional().nullable(),
   userId: z.string().optional().nullable(),
-  departmentId: z.string().optional().nullable(),
+  // No departmentId (2026-10-19, the owner's call: the department is gone
+  // everywhere — the team is the one grouping). A sent one is stripped.
   /** The industry team (Utilities, Healthcare…) — an Industry row. */
   industryId: z.string().optional().nullable(),
   position: z.string().trim().optional().nullable(),
   /** The plantilla slot; when set, `position` mirrors its title (shared/plantilla.ts). */
   positionId: z.string().optional().nullable(),
+  /** Positions also held beside the main one (2026-10-19), replaced whole. */
+  extraPositionIds: z.array(z.string()).max(10).optional(),
   employmentType: z.enum(EMPLOYMENT_TYPES).default('REGULAR'),
   dateHired: z.string().optional().nullable(),
   dateRegularized: z.string().optional().nullable(),
@@ -406,8 +473,7 @@ const loginSchema = z.object({
 
 const createEmployeeSchema = employeeSchema.extend({ login: loginSchema.optional().nullable() });
 
-const fullName = (e: { firstName: string; lastName: string; suffix?: string | null }) =>
-  [e.firstName, e.lastName, e.suffix].filter(Boolean).join(' ');
+const fullName = personName;
 
 function asDate(value: string | null | undefined): Date | null {
   if (!value) return null;
@@ -462,6 +528,8 @@ async function checkRoleIds(
 ): Promise<string[]> {
   const ids = [...new Set(roleIds ?? [])];
   if (!ids.length) return defaultRoleIds(tx);
+  const tooMany = tooManyRoles(ids.length);
+  if (tooMany) throw badRequest(tooMany, [{ field, message: `${MAX_ROLES} roles at most` }]);
   const found = await tx.role.findMany({ where: { id: { in: ids } }, select: { id: true } });
   const known = new Set(found.map((r) => r.id));
   const unknown = ids.filter((id) => !known.has(id));
@@ -475,9 +543,9 @@ async function checkRoleIds(
 
 /**
  * The same rule for the two other references a creation carries (2026-10-10):
- * an unknown "Reports to" or department is a 400 naming the field, checked
- * before the person is written, where the foreign key answered 500. The web
- * cannot send one (PersonSelect, the department select), but a script can.
+ * an unknown "Reports to" is a 400 naming the field, checked before the
+ * person is written, where the foreign key answered 500. The web cannot send
+ * one (PersonSelect), but a script can.
  */
 async function checkSupervisorId(
   tx: Prisma.TransactionClient,
@@ -491,23 +559,23 @@ async function checkSupervisorId(
   return id;
 }
 
-async function checkDepartmentId(tx: Prisma.TransactionClient, id: string | null | undefined): Promise<string | null> {
-  if (!id) return null;
-  if (!(await tx.department.findUnique({ where: { id }, select: { id: true } }))) {
-    throw badRequest('That department does not exist', [{ field: 'departmentId', message: 'Choose a department from the list' }]);
-  }
-  return id;
-}
-
 /**
  * The login mirrors its employee's number (`User.employeeNo` — the `{EMP}`
  * in their quotation numbers, and what the face clock reads). The column is
- * unique on User too, so a number an older login still carries is left on
- * that login and this one goes without, rather than the save failing.
+ * unique on User too. Until 2026-10-16 a number an older login still carried
+ * was silently left off the new login; now it is a 409 naming that login, so
+ * somebody links or fixes it — a login without its number reads `000` in
+ * every quotation number it raises.
  */
-async function mirrorEmployeeNo(tx: Prisma.TransactionClient, employeeNo: string): Promise<string | null> {
-  const taken = await tx.user.findUnique({ where: { employeeNo }, select: { id: true } });
-  return taken ? null : employeeNo;
+async function mirrorEmployeeNo(tx: Prisma.TransactionClient, employeeNo: string | null): Promise<string | null> {
+  if (!employeeNo) return null;
+  const taken = await tx.user.findUnique({ where: { employeeNo }, select: { email: true } });
+  if (taken) {
+    throw conflict(
+      `Employee number "${employeeNo}" is already on the login ${taken.email} — link that login to this person instead, or change its number first`,
+    );
+  }
+  return employeeNo;
 }
 
 employeeRoutes.post(
@@ -530,11 +598,16 @@ employeeRoutes.post(
       ]);
     }
 
-    const { employee, login } = await prisma.$transaction(async (tx) => {
-      const employeeNo = body.employeeNo || (await nextNumber('employee', tx));
+    const { employee, login, counter } = await prisma.$transaction(async (tx) => {
+      // The automatic number carries the year HIRED (`GTC-{SEQ}-{YY}`, the
+      // owner's scheme of 2026-10-18); a number typed by hand moves the
+      // series up to it, never down, so the next automatic one never repeats
+      // a typed one (`setCounter`, raise — the quotation's rule).
+      const employeeNo = body.employeeNo || (await nextNumber('employee', tx, { at: asDate(body.dateHired) ?? undefined }));
       if (await tx.employee.findUnique({ where: { employeeNo } })) {
         throw conflict(`Employee number "${employeeNo}" is already in use`);
       }
+      const counter: CounterMove | null = body.employeeNo ? await setCounter('employee', employeeNo, tx, { mode: 'raise' }) : null;
       if (body.userId) {
         if (!(await tx.user.findUnique({ where: { id: body.userId }, select: { id: true } }))) {
           throw notFound('User not found');
@@ -555,7 +628,6 @@ employeeRoutes.post(
           middleName: body.middleName || null,
           suffix: body.suffix || null,
           userId: body.userId || null,
-          departmentId: await checkDepartmentId(tx, body.departmentId),
           industryId: await teamId(tx, body.industryId),
           ...(await positionFields(tx, body.positionId, body.position)),
           employmentType: body.employmentType,
@@ -574,7 +646,11 @@ employeeRoutes.post(
           ...rateData(body, maySetRates),
         },
       });
-      if (!body.login) return { employee: created, login: null };
+      // An existing login linked here takes the record's identity (2026-10-16).
+      if (!body.login) {
+        if (created.userId) await syncLoginFromEmployee(tx, created.id);
+        return { employee: created, login: null, counter };
+      }
 
       // The login, in the same transaction: a refused email leaves no person behind.
       const login = await createLogin(
@@ -585,7 +661,6 @@ employeeRoutes.post(
           password: body.login.password,
           roleIds,
           supervisorId,
-          departmentId: created.departmentId,
           position: created.position,
           phone: created.mobile,
           employeeNo: await mirrorEmployeeNo(tx, created.employeeNo),
@@ -593,7 +668,7 @@ employeeRoutes.post(
         me.id,
       );
       const linked = await tx.employee.update({ where: { id: created.id }, data: { userId: login.user.id } });
-      return { employee: linked, login };
+      return { employee: linked, login, counter };
     });
 
     await audit(
@@ -601,7 +676,8 @@ employeeRoutes.post(
         entityType: 'employee',
         entityId: employee.id,
         action: 'CREATED',
-        summary: `Created employee ${employee.employeeNo} — ${employee.firstName} ${employee.lastName}${login ? `, with the login ${login.user.email}` : ''}`,
+        summary: `Created employee ${employee.employeeNo} — ${employee.firstName} ${employee.lastName}${login ? `, with the login ${login.user.email}` : ''}${counter && counter.after !== counter.before ? ' (the employee series continues from the typed number)' : ''}`,
+        ...(counter ? { after: { counter } } : {}),
       },
       req,
     );
@@ -690,7 +766,6 @@ employeeRoutes.post(
           password: body.password,
           roleIds: await checkRoleIds(tx, body.roleIds, 'roleIds'),
           supervisorId: await checkSupervisorId(tx, body.supervisorId, 'supervisorId'),
-          departmentId: employee.departmentId,
           position: employee.position,
           phone: employee.mobile,
           employeeNo: await mirrorEmployeeNo(tx, employee.employeeNo),
@@ -732,14 +807,29 @@ employeeRoutes.post(
 
 employeeRoutes.patch(
   '/:id',
-  require_('ghr.employees.edit_all'),
+  requireEdit('ghr', 'employees'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(employeeSchema.partial(), req.body);
-    const maySetRates = can(me, 'ghr.employee_rates.edit_all');
 
     const before = await prisma.employee.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Employee not found');
+    // Edit Own (2026-10-18) changes the caller's own record alone. Every
+    // rule below still holds for it — linking a login needs
+    // admin.users.edit_all, the login mirrors what is written.
+    assertCanEdit(me, 'ghr', 'employees', before.userId === me.id, before.userId);
+    const maySetRates = setsRatesOf(me, before.userId);
+    // Edit Own is self-service, never self-promotion: on one's own record it
+    // changes the personal and contact details alone (and the pay fields only
+    // where Employee Pay Rates › Edit Own lets them). The employment facts —
+    // number, position, team, dates, status, login — stay HR's (Edit All).
+    if (editScope(me, 'ghr', 'employees') !== 'all') {
+      const allowed = new Set<string>([...OWN_EDITABLE, ...(maySetRates ? RATE_FIELDS : [])]);
+      const refused = Object.keys(body).filter((k) => (body as Record<string, unknown>)[k] !== undefined && !allowed.has(k));
+      if (refused.length) {
+        throw forbidden(`On your own record you may change your personal and contact details only — not ${refused.join(', ')}`);
+      }
+    }
 
     if (body.employeeNo && body.employeeNo !== before.employeeNo) {
       if (await prisma.employee.findUnique({ where: { employeeNo: body.employeeNo } })) {
@@ -751,6 +841,12 @@ employeeRoutes.patch(
       if (taken && taken.id !== req.params.id) {
         throw conflict('That user account is already linked to another employee');
       }
+    }
+    // Linking or unlinking a login is an account decision as well as HR's
+    // (2026-10-16): an unlinked login keeps no employee, and a linked one
+    // takes the record's identity.
+    if (body.userId !== undefined && (body.userId || null) !== before.userId && !can(me, 'admin.users.edit_all')) {
+      throw forbidden('Linking or unlinking a login needs admin.users.edit_all');
     }
 
     const data: Record<string, unknown> = { ...rateData(body, maySetRates) };
@@ -770,7 +866,6 @@ employeeRoutes.patch(
       if (body[f] !== undefined) data[f] = body[f] || null;
     }
     if (body.userId !== undefined) data.userId = body.userId || null;
-    if (body.departmentId !== undefined) data.departmentId = await checkDepartmentId(prisma, body.departmentId);
     if (body.industryId !== undefined && body.industryId !== before.industryId) {
       data.industryId = await teamId(prisma, body.industryId);
     }
@@ -786,29 +881,52 @@ employeeRoutes.patch(
       if (body[f] !== undefined) data[f] = asDate(body[f]);
     }
 
+    let loginSynced: string[] = [];
+    let extrasBefore: string[] | null = null;
+    let counter: CounterMove | null = null;
     const employee = await prisma.$transaction(async (tx) => {
       const updated = await tx.employee.update({ where: { id: req.params.id }, data });
+      // A number typed by hand moves the employee series up to it (never down).
+      if (body.employeeNo && body.employeeNo !== before.employeeNo) {
+        counter = await setCounter('employee', body.employeeNo, tx, { mode: 'raise' });
+      }
       // The position goes through the one writer of the mirror. A free-text
       // title on an employee who holds a plantilla position is ignored: the
       // title belongs to the position, and is changed there.
+      let result = updated;
       if (body.positionId !== undefined) {
-        return setEmployeePosition(tx, updated.id, body.positionId || null, body.position ?? before.position);
+        result = await setEmployeePosition(tx, updated.id, body.positionId || null, body.position ?? before.position);
+      } else if (body.position !== undefined && !before.positionId) {
+        result = await setEmployeePosition(tx, updated.id, null, body.position);
       }
-      if (body.position !== undefined && !before.positionId) {
-        return setEmployeePosition(tx, updated.id, null, body.position);
+      if (body.extraPositionIds !== undefined) {
+        const was = await tx.employeeExtraPosition.findMany({
+          where: { employeeId: updated.id },
+          orderBy: { sortOrder: 'asc' },
+          select: { positionId: true },
+        });
+        extrasBefore = was.map((x) => x.positionId);
+        result = await setExtraPositions(tx, updated.id, body.extraPositionIds);
       }
-      return updated;
+      // The login mirrors what was just written (`syncLoginFromEmployee`).
+      loginSynced = await syncLoginFromEmployee(tx, updated.id);
+      return result;
     });
     await audit(
       {
         entityType: 'employee',
         entityId: employee.id,
         action: 'UPDATED',
-        summary: `Updated employee ${employee.employeeNo} — ${employee.firstName} ${employee.lastName}`,
+        summary: `Updated employee ${employee.employeeNo ?? '(no number)'} — ${employee.firstName} ${employee.lastName}`,
         // `redact()` in the audit service strips costRate/salary; the explicit
         // field list here keeps the statutory numbers out too.
         before: stripRates(before as Record<string, unknown>, false),
-        after: stripRates(employee as Record<string, unknown>, false),
+        after: {
+          ...stripRates(employee as Record<string, unknown>, false),
+          ...(loginSynced.length ? { loginSynced } : {}),
+          ...(counter ? { counter } : {}),
+          ...(extrasBefore ? { extraPositionsBefore: extrasBefore, extraPositionIds: body.extraPositionIds } : {}),
+        },
       },
       req,
     );

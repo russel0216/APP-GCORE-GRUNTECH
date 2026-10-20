@@ -25,6 +25,7 @@
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
@@ -124,7 +125,7 @@ async function makeRole(key: string, name: string, permissionKeys: string[]) {
 
 async function makeUser(name: string, email: string, opts: { roleKeys?: string[]; roleIds?: string[] }) {
   const seeded = opts.roleKeys?.length
-    ? await prisma.role.findMany({ where: { key: { in: opts.roleKeys } }, select: { id: true } })
+    ? await rolesLike('zzinb_', opts.roleKeys)
     : [];
   const roleIds = [...seeded.map((r) => r.id), ...(opts.roleIds ?? [])];
   return prisma.user.create({

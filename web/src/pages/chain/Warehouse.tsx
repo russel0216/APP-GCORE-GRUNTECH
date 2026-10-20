@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, openPdf, qs } from '../../lib/api';
+import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
@@ -142,6 +142,7 @@ export function Receivings() {
 
 export function ReceivingDetail() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const { can } = useAuth();
   const toast = useToast();
   const confirm = useConfirm();
@@ -218,6 +219,11 @@ export function ReceivingDetail() {
     await api.post(`/receivings/${recId}/cancel`, { reason });
     toast('ok', `${String(rec?.number)} cancelled`);
     await load();
+  }
+  async function remove() {
+    await api.del(`/receivings/${recId}`);
+    toast('ok', `${String(rec?.number)} deleted`);
+    navigate('/g-chain/incoming');
   }
 
   const warehouse = rec.warehouse as { name: string } | null;
@@ -335,6 +341,16 @@ export function ReceivingDetail() {
               onConfirm: cancel,
             },
           },
+          rec.canDelete === true && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${String(rec.number)}?`,
+              body: `This ${status === 'DRAFT' ? 'draft' : 'cancelled'} incoming report goes for good, with its files. Nothing was received on it. Its number is not reused.`,
+              confirmLabel: 'Delete',
+              onConfirm: remove,
+            },
+          },
         ]}
         // A draft is modified whole on its page; past a draft, its references only.
         modify={rec.canModify === true ? `/g-chain/incoming/${recId}/edit` : rec.canEdit === true ? () => setModifying(true) : undefined}
@@ -355,7 +371,7 @@ export function ReceivingDetail() {
       {received ? (
         <div className={`alert ${order?.kind === 'DIRECT_TO_JOB' ? 'ok' : 'info'}`}>
           {order?.kind === 'DIRECT_TO_JOB'
-            ? `${formatMoney(Number(rec.value))} charged to ${order.job?.number ?? 'the project'}, and the same released from committed.`
+            ? `${formatMoney(Number(rec.value))} charged to ${order.job?.number ?? 'the project'}, and the same released from committed.${warehouse ? ` The goods are in ${warehouse.name} as the project's own stock.` : ''}`
             : `${formatMoney(Number(rec.value))} added to stock. No project has been charged — that happens at issuance.`}
         </div>
       ) : status === 'CANCELLED' ? (
@@ -363,8 +379,14 @@ export function ReceivingDetail() {
       ) : (
         <div className="alert info">
           {status === 'PENDING_APPROVAL'
-            ? 'Waiting for approval. Nothing has moved yet: the approval puts the goods into stock or onto the project.'
-            : 'A draft. Nothing has moved yet — attach the packing list or delivery receipt below, then submit it for approval.'}
+            ? 'Waiting for approval. Nothing has moved yet.'
+            : 'A draft — nothing has moved yet, and nothing will until it is submitted and approved. Attach the packing list or delivery receipt below, then submit it for approval.'}{' '}
+          {/* Where the goods land once approved — the two purchase kinds stay disjoint (Phase 5). */}
+          {order?.kind === 'DIRECT_TO_JOB'
+            ? warehouse
+              ? `Approved, it is charged to ${order.job?.number ?? 'the project'} and the goods sit in ${warehouse.name} as the project's own stock (Inventory › Stock: Project stock), released by Outgoing or a pull-out slip without being charged again.`
+              : `Approved, it is charged to ${order.job?.number ?? 'the project'}. Delivered to site, nothing enters a warehouse — receive it into a warehouse to keep it as the project's stock.`
+            : 'Approved, the goods are added to the warehouse’s stock and show on Inventory.'}
         </div>
       )}
 
@@ -556,11 +578,14 @@ interface StockRow {
   warehouse: { id: string; name: string };
   /** Its bin or rack. */
   location: { id: string; code: string; name: string | null } | null;
+  /** A project's own stock (`?stock=project`, 2026-10-18): whose it is. */
+  project?: { id: string; number: string; name: string };
 }
 
-type StockState = 'IN_STOCK' | 'LOW_STOCK' | 'CRITICAL' | 'ON_ORDER';
-const STOCK_STATE_LABEL: Record<StockState, string> = { IN_STOCK: 'In stock', LOW_STOCK: 'Low stock', CRITICAL: 'Critical', ON_ORDER: 'On order' };
-const STOCK_STATE_TONES = { IN_STOCK: 'ok', LOW_STOCK: 'warn', CRITICAL: 'danger', ON_ORDER: 'info' } as const;
+type StockState = 'IN_STOCK' | 'LOW_STOCK' | 'CRITICAL' | 'ON_ORDER' | 'PROJECT_STOCK';
+const STOCK_STATE_LABEL: Record<Exclude<StockState, 'PROJECT_STOCK'>, string> = { IN_STOCK: 'In stock', LOW_STOCK: 'Low stock', CRITICAL: 'Critical', ON_ORDER: 'On order' };
+const stateLabel = (st: StockState) => (st === 'PROJECT_STOCK' ? 'Project stock' : STOCK_STATE_LABEL[st]);
+const STOCK_STATE_TONES = { IN_STOCK: 'ok', LOW_STOCK: 'warn', CRITICAL: 'danger', ON_ORDER: 'info', PROJECT_STOCK: 'info' } as const;
 
 /** A category tile (2026-10-15, the owner's inventory screen): its items, their value, how many need reordering. */
 interface CategoryTile {
@@ -581,6 +606,11 @@ interface InventorySummary {
   onOrder?: number;
   pendingOrders?: number;
   categories?: CategoryTile[];
+  /** On the company list: the projects' own goods on the shelves. */
+  projectStock?: { lines: number; projects: number; value: number };
+  /** On the project list (`?stock=project`). */
+  stock?: 'project';
+  projects?: number;
 }
 
 interface Movement {
@@ -592,6 +622,8 @@ interface Movement {
   link: string | null;
   item: { id: string; code: string; name: string; unit: string };
   warehouse: { id: string; name: string };
+  /** A move of a project's own stock. */
+  job?: { id: string; number: string } | null;
 }
 
 /** "2h ago", "Yesterday", "Oct 9" — how long since a movement. */
@@ -606,11 +638,11 @@ function since(at: string) {
 
 /**
  * Under the stock (2026-10-14, the owner's inventory screen): the latest
- * movements in and out, each linking to its document, and the quick
- * operations — receive new stock, and the stock report.
+ * movements in and out, each linking to its document. Receiving is the
+ * list's "+ New incoming" and the stock report its Report button and ⋯ ›
+ * Print (2026-10-18, rule 9) — the "Quick operations" card is gone.
  */
 function InventoryFoot() {
-  const { can } = useAuth();
   const [rows, setRows] = useState<Movement[] | null>(null);
   useEffect(() => {
     api.get<Movement[]>('/inventory/movements?limit=8').then(setRows).catch(() => setRows([]));
@@ -634,7 +666,8 @@ function InventoryFoot() {
                     {Math.abs(m.quantity)} {m.item.unit} {m.item.name} <span className="faint mono">({m.item.code})</span>
                   </span>
                   <span className="inv-move-where faint">
-                    {m.sourceNumber ?? m.type.toLowerCase()} · {m.warehouse.name} · {since(m.occurredAt)}
+                    {m.sourceNumber ?? m.type.toLowerCase()} · {m.warehouse.name}
+                    {m.job ? ` · ${m.job.number}'s stock` : ''} · {since(m.occurredAt)}
                   </span>
                 </>
               );
@@ -642,19 +675,6 @@ function InventoryFoot() {
             })}
           </ul>
         )}
-      </section>
-      <section className="card" aria-labelledby="inv-quick">
-        <h2 id="inv-quick" className="card-title">Quick operations</h2>
-        <div className="stack">
-          {can('gchain.receiving.create') && (
-            <Link className="btn btn-sm btn-primary" to="/g-chain/incoming/new">
-              + Receive new stock
-            </Link>
-          )}
-          <button type="button" className="btn btn-sm" onClick={() => openPdf('/api/inventory/pdf', () => {})}>
-            Generate stock report
-          </button>
-        </div>
       </section>
     </div>
   );
@@ -672,6 +692,7 @@ function storedInventoryView(): 'list' | 'kanban' {
 
 export function Inventory() {
   const navigate = useNavigate();
+  const { can } = useAuth();
   const [params, setParams] = useSearchParams();
   const asked = params.get('view');
   const view: 'list' | 'kanban' = asked === 'kanban' || asked === 'list' ? asked : storedInventoryView();
@@ -695,6 +716,8 @@ export function Inventory() {
   // The category tiles and the chart come with the list's summary.
   const [categories, setCategories] = useState<CategoryTile[]>([]);
   const chosenCategory = params.get('categoryId') ?? '';
+  // The projects' own goods (2026-10-18) — the same list on `?stock=project`.
+  const projectStock = params.get('stock') === 'project';
   /** The list's own URL with the category set (or cleared, when it is the one chosen). */
   const categoryLink = (id: string) => {
     const p = new URLSearchParams(params);
@@ -705,6 +728,23 @@ export function Inventory() {
   };
 
   const columns: Column<StockRow>[] = [
+    ...(projectStock
+      ? [
+          {
+            key: 'project',
+            label: 'Project',
+            render: (s: StockRow) =>
+              s.project ? (
+                <div>
+                  <Link to={`/g-ops/projects/${s.project.id}`} onClick={(e) => e.stopPropagation()} className="mono">
+                    {s.project.number}
+                  </Link>
+                  <div className="faint">{s.project.name}</div>
+                </div>
+              ) : null,
+          } as Column<StockRow>,
+        ]
+      : []),
     {
       key: 'code',
       label: 'Part number',
@@ -758,7 +798,7 @@ export function Inventory() {
     {
       key: 'status',
       label: 'Status',
-      render: (s) => <StatusBadge status={s.state} extra={STOCK_STATE_TONES} label={STOCK_STATE_LABEL[s.state]} />,
+      render: (s) => <StatusBadge status={s.state} extra={STOCK_STATE_TONES} label={stateLabel(s.state)} />,
     },
   ];
 
@@ -790,13 +830,41 @@ export function Inventory() {
           columns={columns}
           rowKey={(s) => s.id}
           searchPlaceholder="Search item name, code, part number…"
-          onRowClick={(s) => navigate(`/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}`)}
-          emptyTitle="No stock yet"
-          emptyHint="Stock appears once goods are received into a warehouse."
+          onRowClick={(s) =>
+            navigate(`/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}${s.project ? `&jobId=${s.project.id}` : ''}`)
+          }
+          emptyTitle={projectStock ? 'No project stock' : 'No stock yet'}
+          emptyHint={
+            projectStock
+              ? 'Goods bought for a project appear here once their incoming report into a warehouse is approved.'
+              : 'Stock appears once an incoming report into a warehouse is approved. Goods bought for a project show under Stock › Project stock.'
+          }
+          actions={
+            projectStock ? (
+              can('gchain.pullout_slips.create') ? (
+                <Link className="btn btn-primary btn-sm" to="/g-chain/pullout-slips/new?kind=project">
+                  + New pull-out slip
+                </Link>
+              ) : undefined
+            ) : can('gchain.receiving.create') ? (
+              <Link className="btn btn-primary btn-sm" to="/g-chain/incoming/new">
+                + New incoming
+              </Link>
+            ) : undefined
+          }
           onSummary={(raw) => setCategories(((raw as InventorySummary).categories ?? []) as CategoryTile[])}
           summary={(raw) => {
             const sum = raw as InventorySummary;
             const tiles = sum.categories ?? [];
+            if (sum.stock === 'project') {
+              return (
+                <>
+                  <Stat label="Project stock" value={sum.items ?? 0} sub="Items held for projects" />
+                  <Stat label="Projects" value={sum.projects ?? 0} sub="With goods on the shelves" />
+                  <Stat label="Value" value={formatMoney(sum.valuation ?? 0)} sub="Already charged to the projects" />
+                </>
+              );
+            }
             return (
               <>
                 <Stat label="Total items" value={sum.items ?? 0} sub="Stocked items" />
@@ -804,6 +872,12 @@ export function Inventory() {
                 <Stat label="Reorder warning" value={sum.lowStock ?? 0} sub="Below reorder level" accent="warn" to="/g-chain/inventory?state=LOW_STOCK" />
                 <Stat label="Critical" value={sum.critical ?? 0} sub="Nothing left, or under the minimum" accent="danger" to="/g-chain/inventory?state=CRITICAL" />
                 <Stat label="Pending POs" value={sum.pendingOrders ?? 0} sub={`In transit${sum.onOrder ? ` · ${sum.onOrder} low items on order` : ''}`} to="/g-chain/purchase-orders?awaiting=true" />
+                <Stat
+                  label="Project stock"
+                  value={sum.projectStock?.lines ?? 0}
+                  sub={`${sum.projectStock?.projects ?? 0} project(s) · ${formatMoney(sum.projectStock?.value ?? 0)}, charged to them`}
+                  to="/g-chain/inventory?stock=project"
+                />
                 {tiles.length > 0 && (
                   <div className="inv-cats">
                     <div className="inv-cats-head">
@@ -832,6 +906,14 @@ export function Inventory() {
           }}
           filters={[
             {
+              key: 'stock',
+              label: 'Stock',
+              options: [
+                { value: 'company', label: 'Company stock' },
+                { value: 'project', label: 'Project stock' },
+              ],
+            },
+            {
               key: 'categoryId',
               label: 'Category',
               options: [...categories.filter((c) => c.id !== 'none').map((c) => ({ value: c.id, label: c.name })), { value: 'none', label: 'Not categorised' }],
@@ -839,7 +921,7 @@ export function Inventory() {
             {
               key: 'state',
               label: 'Stock status',
-              options: (Object.keys(STOCK_STATE_LABEL) as StockState[]).map((k) => ({ value: k, label: STOCK_STATE_LABEL[k] })),
+              options: (Object.keys(STOCK_STATE_LABEL) as (keyof typeof STOCK_STATE_LABEL)[]).map((k) => ({ value: k, label: STOCK_STATE_LABEL[k] })),
             },
             {
               key: 'warehouseId',
@@ -1027,10 +1109,11 @@ function InventoryBoard({ warehouses }: { warehouses: { id: string; name: string
 
 export function StockCard() {
   const { itemId } = useParams<{ itemId: string }>();
-  const { can } = useAuth();
   const toast = useToast();
   const [params] = useSearchParams();
   const warehouseId = params.get('warehouseId');
+  // A project's own stock of the item (2026-10-18): its card alone.
+  const jobId = params.get('jobId');
   const [data, setData] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
@@ -1038,11 +1121,11 @@ export function StockCard() {
   useEffect(() => {
     if (!itemId) return;
     api
-      .get<Record<string, unknown>>(`/inventory/${itemId}/card${qs({ warehouseId })}`)
+      .get<Record<string, unknown>>(`/inventory/${itemId}/card${qs({ warehouseId, jobId })}`)
       .then(setData)
       .catch(setError)
       .finally(() => setLoading(false));
-  }, [itemId, warehouseId]);
+  }, [itemId, warehouseId, jobId]);
 
   if (loading) return <Loading />;
   if (!data) return <ErrorBox error={error ?? new Error('Not found')} />;
@@ -1057,7 +1140,9 @@ export function StockCard() {
     warehouse: { name: string; locations: { id: string; code: string; name: string | null }[] };
     location: { id: string; code: string } | null;
   }[];
-  const mayPlace = can('gchain.inventory.edit_all');
+  const project = data.project as { id: string; number: string; name: string } | null | undefined;
+  // Edit All places any stock line; Edit Own the items the viewer added (2026-10-18, the card's `canEdit`).
+  const mayPlace = data.canEdit === true && !jobId;
   /** Files the stock line in a bin (2026-10-15). */
   async function placeIn(balanceId: string, locationId: string) {
     try {
@@ -1088,7 +1173,18 @@ export function StockCard() {
         code={item.code}
         title={item.name}
         meta={
-          warehouseId ? (
+          jobId ? (
+            <>
+              {project ? (
+                <>
+                  <Link to={`/g-ops/projects/${project.id}`}>{project.number}</Link>'s own stock — charged to the project when it arrived
+                </>
+              ) : (
+                'A project’s own stock'
+              )}{' '}
+              · <Link to={`/g-chain/inventory/${itemId}`}>The company’s stock of it</Link>
+            </>
+          ) : warehouseId ? (
             <>
               One warehouse only · <Link to={`/g-chain/inventory/${itemId}`}>Show every warehouse</Link>
             </>

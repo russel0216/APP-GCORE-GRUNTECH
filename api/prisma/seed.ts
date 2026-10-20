@@ -1,6 +1,9 @@
+import { splitBorrowedRights } from '../src/shared/accessSplit';
+import { backfillProjectStock } from '../src/shared/projectStock';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { allPermissions, permissionsFor } from '../src/permissions/registry';
+import { ROLE_SEEDS as ROLES } from '../src/shared/roleSeeds';
 import { DOCUMENT_TYPES } from '../src/shared/numbering';
 import { moveCanvassCode } from '../src/shared/canvassCode';
 import { backfillPositions } from '../src/shared/plantilla';
@@ -11,8 +14,11 @@ import { migrateCostingMargins } from '../src/shared/costingLegacy';
 import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGroups';
 import { seedActivityTypes } from '../src/shared/activityTypes';
 import { TEAMS, fillQuotationTeams, retireFirstIndustries } from '../src/shared/team';
+import { fillQuotationRates } from '../src/shared/exchangeRates';
+import { prefillHolidays } from '../src/shared/holidays';
 import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
 import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawingTypes';
+import { SERVICE_DOCUMENT_CATEGORIES, seedServiceDocumentCategories } from '../src/shared/serviceDocumentCategories';
 import { migrateFaceThreshold } from '../src/shared/faceSamples';
 import { removeScoroArchive } from '../src/shared/scoroArchive';
 import { backfillCustomerAddresses } from '../src/shared/customerAddress';
@@ -20,6 +26,19 @@ import { backfillInvoiceCountering, fillInvoiceCredit } from '../src/shared/rece
 import { fillBillTerms } from '../src/shared/payables';
 import { renumberProgressDocs } from '../src/shared/progressReport';
 import { repairTypedStockReceipts } from '../src/shared/typedItems';
+import { backfillLoginMirrors, linkAdminEmployees } from '../src/shared/personMirror';
+import { CHART_DEPARTMENTS, applyOrgChart, grantSupervisorRole } from '../src/shared/orgChart';
+import { applyEmployeeNumbering, clearEmployeeNumbers } from '../src/shared/employeeNumbers';
+import { clearRoles, rolesCleared } from '../src/shared/rolesClear';
+import { replaceRolesWithChart } from '../src/shared/rolesFromChart';
+import { applyRoleRev1, refreshUserTitle } from '../src/shared/roleRev1';
+import { seedSharedPosts } from '../src/shared/teamPosts';
+import { dropOverrides } from '../src/shared/overridesDrop';
+import { applyEmployeeNumberList } from '../src/shared/employeeNumbersFromList';
+import { applyHrAccess } from '../src/shared/hrAccess';
+import { applyFinAccess } from '../src/shared/finAccess';
+import { applyChainAccess } from '../src/shared/chainAccess';
+import { backfillOwnAuthors } from '../src/shared/ownBackfill';
 import { prisma as sharedPrisma } from '../src/prisma';
 import { ADMIN_EMAIL as SEEDED_ADMIN_EMAIL, OLD_ADMIN_EMAIL, moveAdminEmail } from '../src/shared/adminEmail';
 
@@ -28,744 +47,10 @@ const prisma = new PrismaClient();
 const ADMIN_EMAIL = process.env.SEED_ADMIN_EMAIL ?? SEEDED_ADMIN_EMAIL;
 const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD ?? 'ChangeMe!2026';
 
-/**
- * Role definitions.
- *
- * `grants` are (module, submodule?) pairs granting every action on that scope;
- * `only` grants specific permission keys. Roles are seeded once and then become
- * the customer's to edit — "Roles should be customizable" — so this is a
- * starting point, not a constraint.
- */
-interface RoleSeed {
-  key: string;
-  name: string;
-  description: string;
-  grants?: [string, string?][];
-  only?: string[];
-}
+// The role definitions live in src/shared/roleSeeds.ts (2026-10-18), so the
+// verify scripts can give a throwaway role a seeded role's rights now that the
+// install's own roles are the owner's and may hold anything or nothing.
 
-const VIEW_OWN_SELF = (mod: string, sub: string) => [
-  `${mod}.${sub}.view_own`,
-  `${mod}.${sub}.create`,
-  `${mod}.${sub}.edit_own`,
-];
-
-/**
- * What a project's manager does (2026-10-15, the owner's call: "project
- * manager is the technical manager"): the `project_manager` role keeps these,
- * and the `technical_manager` role holds them too, since that is who manages
- * projects now.
- */
-const PROJECT_MANAGER_GRANTS: [string, string?][] = [
-  ['gops', 'projects'],
-  ['gops', 'plans'],
-  ['gops', 'budget_monitoring'],
-  ['gops', 'purchase_requests'],
-  ['gops', 'budget_requests'],
-  ['gops', 'progress_billing'],
-  ['gops', 'costing'],
-];
-const PROJECT_MANAGER_ONLY: string[] = [
-  'gops.dashboard.view_all',
-  'gops.customers.view_all',
-  // Margin on the projects they run.
-  'insights.profitability.view_all',
-  'insights.profitability.export',
-  'gops.installed_base.view_all',
-  'gops.visits.view_all',
-  'gops.quotations.view_all',
-  'gops.job_orders.view_all',
-  ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
-  'gops.cad_job_orders.view_all',
-  'gchain.purchase_requests.view_all',
-  // A PM raises stock-replenishment requests too, not only direct-to-job
-  // ones from the project workspace.
-  'gchain.purchase_requests.create',
-  'gchain.purchase_requests.edit_own',
-  'gchain.purchase_requests.view_own',
-  'gchain.purchase_orders.view_all',
-  'gchain.inventory.view_all',
-  'gfin.budget_vs_actual.view_all',
-  ...VIEW_OWN_SELF('gfin', 'expenses'),
-  ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-  ...VIEW_OWN_SELF('ghr', 'evaluations'),
-  ...VIEW_OWN_SELF('ghr', 'meetings'),
-];
-
-
-const ROLES: RoleSeed[] = [
-  {
-    key: 'executive',
-    name: 'Executive / Management',
-    description: 'Sees everything across the business, approves at the top band, changes nothing operationally',
-    only: [
-      ...allPermissions()
-        .filter((p) => ['view_all', 'export', 'approve'].includes(p.action))
-        .map((p) => p.key)
-        .filter((k) => !k.startsWith('admin.')),
-      // The one thing management does operationally: call a meeting.
-      'ghr.meetings.create',
-      'ghr.meetings.edit_own',
-    ],
-  },
-  {
-    key: 'sales',
-    name: 'Sales',
-    description: 'Works own leads and quotations; sees the shared customer master',
-    grants: [['gops', 'leads'], ['gops', 'customers'], ['gops', 'calendar']],
-    only: [
-      ...VIEW_OWN_SELF('gops', 'quotations'),
-      'gops.quotations.view_all',
-      // Their own only: the route also requires authorship (canEditRecord),
-      // and refuses a won, delivered or pending quotation.
-      'gops.quotations.delete',
-      ...VIEW_OWN_SELF('gops', 'costing'),
-      // Books their own quotations as sales orders, and sees everyone's.
-      ...VIEW_OWN_SELF('gops', 'sales_orders'),
-      'gops.sales_orders.view_all',
-      'gops.sales_orders.delete',
-      'gops.dashboard.view_all',
-      'gops.pipeline.view_all',
-      // The Forecast: their own closing dates, and the team's.
-      'gops.forecast.view_all',
-      'gops.forecast.export',
-      'gops.projects.view_all',
-      // A partner's catalogue and price list are what a salesperson sells from.
-      'gops.partners.view_all',
-      // "Add … as a new supplier" from a quotation line's cost cell
-      // (2026-10-13, the owner's call): the supplier is filed by name, the
-      // rest filled on its page by procurement later.
-      'gchain.suppliers.create',
-      // Sales takes the service call and raises the job order for it.
-      ...VIEW_OWN_SELF('gops', 'job_orders'),
-      // And asks the design team for a drawing (2026-10-09).
-      ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
-      // Writes the project's Accomplishment Report and raises its billing
-      // (2026-10-15, the owner's call: "creator (Project Engineer) or Sales").
-      ...VIEW_OWN_SELF('gops', 'progress_billing'),
-      // Asks for an approved billing to be invoiced against the project's
-      // sales order (2026-10-15) — Back Support approves it.
-      ...VIEW_OWN_SELF('gfin', 'invoice_requests'),
-      'gfin.invoice_requests.delete',
-      // Raises the commission on a fully collected sales order (2026-10-16).
-      ...VIEW_OWN_SELF('gfin', 'commissions'),
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    key: 'sales_manager',
-    name: 'Sales Manager',
-    description: 'Everything Sales can do, plus approval of quotations and visibility over the whole pipeline',
-    grants: [
-      ['gops', 'leads'],
-      ['gops', 'customers'],
-      ['gops', 'calendar'],
-      ['gops', 'quotations'],
-      ['gops', 'sales_orders'],
-      ['gops', 'pipeline'],
-      ['gops', 'forecast'],
-      ['gops', 'costing'],
-      ['gops', 'partners'],
-    ],
-    only: [
-      'gops.dashboard.view_all',
-      'gops.projects.view_all',
-      // A supplier not on file, added from a quotation line (2026-10-13).
-      'gchain.suppliers.create',
-      // The pipeline analytics are their own numbers, seen whole.
-      'insights.pipeline.view_all',
-      'insights.pipeline.export',
-      ...VIEW_OWN_SELF('gops', 'job_orders'),
-      'gops.job_orders.view_all',
-      ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
-      'gops.cad_job_orders.view_all',
-      'gops.cad_job_orders.export',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'evaluations'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    // The sales order's second signature (2026-10-08, the owner's route:
-    // Sales creates › Team Leader › Back Support / Admin › Cost Controller ›
-    // CEO). Reads the order and the quotation behind it; changes nothing.
-    // Assign it in Admin › Users — until somebody holds it, sales orders
-    // stall at step 2, and audit-workflows.ts says so.
-    key: 'back_support',
-    name: 'Back Support / Admin',
-    description: 'Checks a sales order and a budget request after the team leader; prepares purchase orders',
-    only: [
-      'gops.dashboard.view_all',
-      'gops.sales_orders.view_all',
-      // Approves a billing's invoice request (2026-10-15), so reads them all.
-      'gfin.invoice_requests.view_all',
-      // The routing sheet of 2026-10-13: Back Support prepares purchase
-      // orders (from the requisitions and canvasses it reads) and budget
-      // requests, and is the second signature on every budget request.
-      ...VIEW_OWN_SELF('gchain', 'purchase_orders'),
-      'gchain.purchase_requests.view_all',
-      'gchain.rfq.view_all',
-      'gchain.canvass.view_all',
-      'gchain.suppliers.view_all',
-      ...VIEW_OWN_SELF('gops', 'budget_requests'),
-      'gops.budget_requests.view_all',
-      'gops.projects.view_all',
-      'gops.quotations.view_all',
-      'gops.customers.view_all',
-      'gops.partners.view_all',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    // The third signature: checks the cost and the margin, so it holds the
-    // right that shows them (gops.costing.view_all — the quotation's and the
-    // sales order's cost rule).
-    key: 'cost_controller',
-    name: 'Cost Controller',
-    description: 'Checks the cost and margin of a sales order — the third signature on the sales order route',
-    only: [
-      'gops.dashboard.view_all',
-      'gops.sales_orders.view_all',
-      'gops.quotations.view_all',
-      'gops.costing.view_all',
-      'gops.customers.view_all',
-      'gops.partners.view_all',
-      'gops.projects.view_all',
-      'gops.budget_monitoring.view_all',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    // The costing's reviewer (2026-10-09, the owner's route: an engineer
-    // creates › Technical Manager reviews › Team Leader approves › CTG second
-    // approval). Reads every costing — the cost and the margin are what they
-    // check — and changes nothing. Assign it in Admin › Users; until somebody
-    // holds it, costings stall at step 1 and audit-workflows.ts says so.
-    key: 'technical_manager',
-    name: 'Technical Manager',
-    description: 'Manages projects (the project manager is the Technical Manager) and is the first signature on costings, requisitions, job orders and supplier bills',
-    grants: PROJECT_MANAGER_GRANTS,
-    only: [
-      ...PROJECT_MANAGER_ONLY,
-      // The first signature on a supplier bill (2026-10-15), so reads them.
-      'gfin.ap.view_all',
-      'gops.dashboard.view_all',
-      'gops.costing.view_all',
-      // The routing sheet of 2026-10-13: a Technical Manager prepares
-      // costings and purchase requisitions too, and is the first signature on
-      // every requisition, so reads them all.
-      ...VIEW_OWN_SELF('gops', 'costing'),
-      ...VIEW_OWN_SELF('gops', 'purchase_requests'),
-      ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
-      'gops.purchase_requests.view_all',
-      'gchain.purchase_requests.view_all',
-      'gops.quotations.view_all',
-      'gops.customers.view_all',
-      'gops.projects.view_all',
-      'gops.plans.view_all',
-      // The first signature on every Request for Approval, and a preparer of
-      // them too (2026-10-13).
-      ...VIEW_OWN_SELF('gops', 'plans'),
-      // The first signature on every progress report and billing (2026-10-15).
-      'gops.progress_billing.view_all',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    // The design team (2026-10-09, the owner's call: "there is Designer Lead,
-    // Designer Support"). The lead dispatches the CAD job orders — assigns and
-    // reassigns them, sets priority on any, closes any — which is what
-    // "Approve" on CAD J.O. means; both roles do the work on what is assigned
-    // to them: progress, revisions, priority. Assign both in Admin › Users.
-    key: 'designer_lead',
-    name: 'Designer Lead',
-    description: 'Runs the design team’s queue: assigns CAD job orders, sets priority, submits and closes drawings',
-    grants: [['gops', 'cad_job_orders']],
-    only: [
-      'gops.dashboard.view_all',
-      'gops.customers.view_all',
-      'gops.projects.view_all',
-      'gops.plans.view_all',
-      'gops.quotations.view_all',
-      'gops.job_orders.view_all',
-      'gops.partners.view_all',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    key: 'designer',
-    name: 'Designer Support',
-    description: 'Draws what the CAD job orders ask for: takes a request, reports progress, submits revisions',
-    only: [
-      'gops.dashboard.view_all',
-      'gops.cad_job_orders.view_own',
-      'gops.cad_job_orders.view_all',
-      'gops.cad_job_orders.edit_all',
-      'gops.cad_job_orders.export',
-      'gops.customers.view_all',
-      'gops.projects.view_all',
-      'gops.plans.view_all',
-      'gops.quotations.view_all',
-      'gops.job_orders.view_all',
-      'gops.partners.view_all',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    key: 'project_manager',
-    name: 'Project Manager',
-    description: 'Runs projects — budget, procurement requests, progress and billing. Technical Managers now hold the same rights; this role is kept for those who already have it',
-    grants: PROJECT_MANAGER_GRANTS,
-    only: PROJECT_MANAGER_ONLY,
-  },
-  {
-    key: 'project_engineer',
-    name: 'Project Engineer',
-    description: 'Executes the work: progress reports, purchase requests, requests for approval — and costs the work (the costing route starts with an engineer)',
-    only: [
-      'gops.projects.view_all',
-      'gops.plans.view_all',
-      // Sends the project's drawings for approval (2026-10-13).
-      ...VIEW_OWN_SELF('gops', 'plans'),
-      // The costing route's creator (2026-10-09, the owner's call): an
-      // engineer raises and edits their own costings.
-      ...VIEW_OWN_SELF('gops', 'costing'),
-      ...VIEW_OWN_SELF('gops', 'progress_billing'),
-      ...VIEW_OWN_SELF('gops', 'purchase_requests'),
-      ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
-      // Project cash: the team asks for it, so an engineer raises a budget
-      // request on their project and sees their own.
-      ...VIEW_OWN_SELF('gops', 'budget_requests'),
-      // Asks the design team for a drawing (2026-10-09).
-      ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
-      'gops.budget_monitoring.view_all',
-      'gops.customers.view_all',
-      'gchain.inventory.view_all',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    key: 'service_engineer',
-    name: 'Service Engineer',
-    description: 'After-market: commissioning, preventive maintenance and inspection reports',
-    grants: [
-      ['gops', 'commissioning_reports'],
-      ['gops', 'pm_reports'],
-      ['gops', 'inspection_reports'],
-    ],
-    only: [
-      'gops.service_contracts.view_all',
-      ...VIEW_OWN_SELF('gops', 'service_costing'),
-      'gops.customers.view_all',
-      'gchain.inventory.view_all',
-      ...VIEW_OWN_SELF('gops', 'purchase_requests'),
-      ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
-      // They are the ones on site, so they are the ones who can say what is
-      // actually installed and what its serial number is.
-      'gops.aftermarket.view_all',
-      'gops.installed_base.view_all',
-      'gops.installed_base.create',
-      'gops.installed_base.edit_all',
-      'gops.visits.view_all',
-      'gops.report_templates.view_all',
-      'gops.renewals.view_all',
-      'gops.partners.view_all',
-      // An engineer taking the call raises the job order; the service manager
-      // accepts it.
-      'gops.job_orders.view_all',
-      'gops.job_orders.create',
-      'gops.job_orders.edit_own',
-      ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    // Runs the aftermarket side: owns the contracts, the schedule and the
-    // renewal pipeline, and signs off the reports the engineers write. A
-    // separate role from Service Engineer on purpose — nobody approves their
-    // own work, and the approval engine refuses it anyway.
-    key: 'service_manager',
-    name: 'Service Manager',
-    description: 'Owns service contracts, the PM schedule and renewals; approves service reports',
-    grants: [
-      ['gops', 'commissioning_reports'],
-      ['gops', 'pm_reports'],
-      ['gops', 'inspection_reports'],
-      ['gops', 'service_contracts'],
-      ['gops', 'installed_base'],
-      ['gops', 'service_costing'],
-      ['gops', 'job_orders'],
-    ],
-    only: [
-      'gops.aftermarket.view_all',
-      'gops.visits.view_all',
-      'gops.renewals.view_all',
-      'gops.report_templates.view_all',
-      'gops.customers.view_all',
-      'gops.quotations.view_all',
-      'gops.costing.view_all',
-      'gops.partners.view_all',
-      'gchain.inventory.view_all',
-      ...VIEW_OWN_SELF('gops', 'purchase_requests'),
-      ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'evaluations'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    key: 'procurement',
-    name: 'Procurement',
-    description: 'Canvasses suppliers and issues purchase orders — does not receive and does not pay',
-    grants: [
-      ['gchain', 'rfq'],
-      ['gchain', 'canvass'],
-      ['gchain', 'purchase_orders'],
-      ['gchain', 'suppliers'],
-      ['gchain', 'reports'],
-    ],
-    only: [
-      'insights.inventory.view_all',
-      'gchain.dashboard.view_all',
-      'gchain.purchase_requests.view_all',
-      'gchain.purchase_requests.edit_all',
-      'gchain.inventory.view_all',
-      'gops.projects.view_all',
-      'gops.partners.view_all',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    key: 'warehouse',
-    name: 'Warehouse',
-    description: 'Receives goods, issues stock, manages borrow slips — does not issue POs',
-    grants: [
-      ['gchain', 'receiving'],
-      ['gchain', 'stock_issuance'],
-      ['gchain', 'borrow_slips'],
-      ['gchain', 'pullout_slips'],
-      ['gchain', 'inventory'],
-    ],
-    only: [
-      'insights.inventory.view_all',
-      'insights.inventory.export',
-      'gchain.dashboard.view_all',
-      'gchain.purchase_orders.view_all',
-      'gchain.reports.view_all',
-      // The warehouse clears a leaver's tools and borrow slips.
-      'ghr.clearances.view_all',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    key: 'finance',
-    name: 'Finance',
-    description: 'Receivables, payables, expenses and cash — approves disbursements',
-    grants: [
-      ['gfin', 'ar'],
-      ['gfin', 'ap'],
-      ['gfin', 'expenses'],
-      ['gfin', 'cashflow'],
-      ['gfin', 'budget_vs_actual'],
-      ['gfin', 'reports'],
-      ['gfin', 'dashboard'],
-      ['gfin', 'settings'],
-      ['gfin', 'payments'],
-      ['gfin', 'cash_advances'],
-      // Project cash: every project's budget requests, to release and to chase.
-      ['gfin', 'budget_requests'],
-      ['gfin', 'budget_liquidations'],
-    ],
-    only: [
-      'insights.dashboard.view_all',
-      'insights.profitability.view_all',
-      'insights.profitability.export',
-      'insights.cash.view_all',
-      'insights.cash.export',
-      'gops.projects.view_all',
-      'gops.progress_billing.view_all',
-      // The invoice requests whose approval lands a draft invoice in A/R (2026-10-15).
-      'gfin.invoice_requests.view_all',
-      // Pays the approved commissions (2026-10-16) — the payout is A/P's right.
-      'gfin.commissions.view_all',
-      // Finance raises the supplier bill (Phase 7 notes), so it must find the
-      // supplier on the bill form (SupplierPicker reads /suppliers/lookup).
-      'gchain.suppliers.view_all',
-      'gops.customers.view_all',
-      // A job order is what a service invoice will be raised against.
-      'gops.job_orders.view_all',
-      'gchain.purchase_orders.view_all',
-      'gchain.receiving.view_all',
-      // Finance costs labour, so it needs the rates — model §4.4.
-      'ghr.employees.view_all',
-      'ghr.employee_rates.view_all',
-      // Finance clears a leaver's unpaid claims and advances.
-      'ghr.clearances.view_all',
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    key: 'accounting',
-    name: 'Accounting',
-    description: 'Books the transactions; reads operations, does not change them',
-    only: [
-      'gfin.ar.view_all',
-      'gfin.ar.create',
-      'gfin.ar.edit_all',
-      'gfin.invoice_requests.view_all',
-      'gfin.ap.view_all',
-      'gfin.ap.create',
-      'gfin.ap.edit_all',
-      'gchain.suppliers.view_all',
-      'gfin.expenses.view_all',
-      'gfin.cash_advances.view_all',
-      'gfin.reports.view_all',
-      'gops.projects.view_all',
-      'gchain.receiving.view_all',
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
-    key: 'hr',
-    name: 'HR',
-    description: 'Employees, attendance, leave and overtime — the second approval on overtime',
-    grants: [
-      ['ghr', 'leave'],
-      ['ghr', 'overtime'],
-      ['ghr', 'employees'],
-      ['ghr', 'employee_rates'],
-      ['ghr', 'reports'],
-      ['ghr', 'settings'],
-      ['ghr', 'dashboard'],
-      ['ghr', 'plantilla'],
-      ['ghr', 'clearances'],
-      ['ghr', 'evaluations'],
-      ['ghr', 'meetings'],
-      ['ghr', 'courses'],
-      ['ghr', 'training_calendar'],
-      ['ghr', 'training_sessions'],
-      ['ghr', 'passports'],
-      ['ghr', 'people_flow'],
-    ],
-    only: [
-      'ghr.clock.view_own',
-      'ghr.passport.view_own',
-      'ghr.passport.create',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-    ],
-  },
-  {
-    key: 'supervisor',
-    name: 'Supervisor',
-    description: 'Approves leave and overtime for their direct reports',
-    only: [
-      'ghr.clock.view_own',
-      'ghr.dashboard.view_all',
-      // Their own path, and through the dashboard right their reports'.
-      'ghr.people_flow.view_own',
-      ...VIEW_OWN_SELF('ghr', 'leave'),
-      'ghr.leave.view_all',
-      ...VIEW_OWN_SELF('ghr', 'overtime'),
-      'ghr.overtime.view_all',
-      // First sign-off on a leaver's clearance; writes the evaluations of
-      // their own probationers.
-      'ghr.clearances.view_all',
-      ...VIEW_OWN_SELF('ghr', 'evaluations'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-      'ghr.training_calendar.view_all',
-      'ghr.passports.view_all',
-      'ghr.passport.view_own',
-      'ghr.passport.create',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-    ],
-  },
-  {
-    key: 'employee',
-    name: 'Employee',
-    description: 'Clocks in, files leave and overtime, sees their own records',
-    only: [
-      'ghr.clock.view_own',
-      ...VIEW_OWN_SELF('ghr', 'leave'),
-      ...VIEW_OWN_SELF('ghr', 'overtime'),
-      // A leaver raises their own clearance; an evaluation is read once
-      // approved, never written by its subject.
-      'ghr.clearances.view_own',
-      'ghr.clearances.create',
-      'ghr.evaluations.view_own',
-      'ghr.people_flow.view_own',
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-      'ghr.training_calendar.view_all',
-      'ghr.passport.view_own',
-      'ghr.passport.create',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      // Anyone may ask to borrow a tool (2026-10-14); the warehouse releases it.
-      ...VIEW_OWN_SELF('gchain', 'borrow_slips'),
-    ],
-  },
-  {
-    // Runs Gruntech Academy sessions. A role of its own because the people
-    // who train are engineers and managers first — the right to schedule a
-    // session and mark who passed is added to whatever else they hold.
-    key: 'trainer',
-    name: 'Trainer',
-    description: 'Schedules and runs Gruntech Academy sessions, records attendance and results',
-    only: [
-      'ghr.courses.view_all',
-      'ghr.training_calendar.view_all',
-      'ghr.training_sessions.view_own',
-      'ghr.training_sessions.view_all',
-      'ghr.training_sessions.create',
-      'ghr.training_sessions.edit_own',
-      'ghr.passports.view_all',
-      'ghr.passport.view_own',
-      'ghr.passport.create',
-      'ghr.clock.view_own',
-      ...VIEW_OWN_SELF('ghr', 'leave'),
-      ...VIEW_OWN_SELF('ghr', 'overtime'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-];
-
-// The owner's routing sheet (2026-10-11, "APPROVAL ROUTER — SALES ORDER AND
-// QUOTATION"): who PREPARED a quotation or a sales order decides its route.
-// Three preparer roles; each starts from the nearest existing role's
-// permissions and is edited in Admin › Roles from there. The CEO / President
-// is its own role (the owner's call), apart from Executive, which stays the
-// read-everything management role and the CEO step of every other route.
-{
-  const like = (key: string) => ROLES.find((r) => r.key === key)!;
-  const exec = like('executive');
-  ROLES.push(
-    {
-      key: 'ceo',
-      name: 'CEO / President',
-      description: 'The Chief Executive Officer / President — prepares quotations needing no approval, and is the CEO step on the quotation and sales order routes',
-      only: [
-        ...(exec.only ?? []),
-        ...VIEW_OWN_SELF('gops', 'quotations'),
-        'gops.quotations.edit_all',
-        ...VIEW_OWN_SELF('gops', 'sales_orders'),
-        'gops.sales_orders.edit_all',
-      ],
-    },
-    {
-      key: 'team_leader',
-      name: 'Team Leader',
-      description: 'Leads a sales team — approves its quotations, sales orders, costings, purchase requisitions and budget requests',
-      grants: like('sales_manager').grants,
-      only: [
-        ...(like('sales_manager').only ?? []),
-        // The routing sheet of 2026-10-13: a Team Leader prepares purchase
-        // requisitions and budget requests, and is a signature on both, so
-        // reads every one.
-        ...VIEW_OWN_SELF('gops', 'purchase_requests'),
-        ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
-        'gops.purchase_requests.view_all',
-        'gchain.purchase_requests.view_all',
-        ...VIEW_OWN_SELF('gops', 'budget_requests'),
-        'gops.budget_requests.view_all',
-        // The second signature on every progress report and billing (2026-10-15).
-        'gops.progress_billing.view_all',
-        // Raises a billing's invoice request for the team's projects, and
-        // reads every one (2026-10-15).
-        ...VIEW_OWN_SELF('gfin', 'invoice_requests'),
-        'gfin.invoice_requests.view_all',
-        'gfin.invoice_requests.delete',
-        // Raises the team's commissions (2026-10-16).
-        ...VIEW_OWN_SELF('gfin', 'commissions'),
-      ],
-    },
-    {
-      key: 'industry_specialist',
-      name: 'Industry Specialist',
-      description: 'Prepares quotations, sales orders, purchase requisitions and budget requests — the team leader approves first',
-      grants: like('sales').grants,
-      only: [
-        ...(like('sales').only ?? []),
-        ...VIEW_OWN_SELF('gops', 'purchase_requests'),
-        ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
-        ...VIEW_OWN_SELF('gops', 'budget_requests'),
-      ],
-    },
-  );
-}
-
-// The routing sheet of 2026-10-13 (APPROVAL_ROUTE.xlsx): two managers the
-// purchase order and the budget request route to. Each starts from the role
-// whose work it manages — Procurement's, Finance's — and is edited in Admin ›
-// Roles from there; Procurement and Finance stay for the staff who are not
-// the manager. Assign both in Admin › Users: until somebody holds them,
-// purchase orders and budget requests stall at their steps, and
-// audit-workflows.ts says so.
-{
-  const like = (key: string) => ROLES.find((r) => r.key === key)!;
-  ROLES.push(
-    {
-      key: 'purchasing_manager',
-      name: 'Purchasing Manager',
-      description: 'Approves every purchase order — the first signature; the CEO / President follows above ₱100,000',
-      grants: like('procurement').grants,
-      only: like('procurement').only,
-    },
-    {
-      key: 'finance_manager',
-      name: 'Finance Manager',
-      description: 'Approves budget requests after the team leader and back support; the CEO / President follows above ₱100,000',
-      grants: like('finance').grants,
-      // The first signature on a commission, and its keeper (2026-10-16).
-      only: [...(like('finance').only ?? []), ...VIEW_OWN_SELF('gops', 'budget_requests'), 'gfin.commissions.edit_all', 'gfin.commissions.delete'],
-    },
-    // The warehouse flow (2026-10-14): Incoming and Outgoing go to the
-    // warehouse person's "Reports to", else a Warehouse Supervisor — who
-    // starts from the Warehouse role's rights (all four registers in full).
-    // Assign in Admin › Users; until somebody holds it, a receiving or an
-    // issue raised by someone with no "Reports to" cannot be submitted.
-    {
-      key: 'warehouse_supervisor',
-      name: 'Warehouse Supervisor',
-      description: 'Approves incoming and outgoing for warehouse staff who report to nobody else; runs the warehouse',
-      grants: like('warehouse').grants,
-      // The automatic reorder's requisitions are raised in the supervisor's
-      // name (2026-10-15): they check, modify and submit their own.
-      only: [...like('warehouse').only, ...VIEW_OWN_SELF('gchain', 'purchase_requests'), 'gchain.purchase_requests.delete'],
-    },
-  );
-}
-
-/**
- * Default approval workflows.
- *
- * Purchase Requests are banded by amount — the configurable threshold from the
- * requirements. Overtime deliberately has TWO steps: the supervisor who
- * directed the work, then HR. Cost only posts to a project when both exist
- * (model §4.4), and that rule lives in the workflow shape rather than in code.
- */
 interface WorkflowSeed {
   documentType: string;
   name: string;
@@ -787,7 +72,7 @@ interface WorkflowSeed {
    * applied to it in place — step rows updated by sequence, never deleted, so
    * past decisions keep their step and an open request stays at its step.
    */
-  previously?: SeedStep[];
+  previously?: SeedStep[] | SeedStep[][];
 }
 
 interface SeedStep {
@@ -800,7 +85,7 @@ interface SeedStep {
    * the project has no manager or the manager raised the document.
    */
   roleKey?: string;
-  /** SUPERVISOR only: roles whose holders on the requester's team decide it too (`ApprovalStep.alsoRoleIds`). */
+  /** Roles whose holders decide it too (`ApprovalStep.alsoRoleIds`): on a SUPERVISOR step those on the requester's team, on a ROLE step every holder. */
   alsoRoleKeys?: string[];
 }
 
@@ -1100,7 +385,13 @@ const WORKFLOWS: WorkflowSeed[] = [
     // commissioning report, which starts a warranty running — management too.
     documentType: 'commissioning_report',
     name: 'Commissioning report — service manager then management',
+    // The Service Manager is the preparer's team's (OWN_TEAM_ROLES) and
+    // management is the CEO / President (2026-10-17, the owner's chart).
     steps: [
+      { sequence: 1, name: 'Service Manager', approverType: 'ROLE', roleKey: 'service_manager' },
+      { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+    previously: [
       { sequence: 1, name: 'Service Manager', approverType: 'ROLE', roleKey: 'service_manager' },
       { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
     ],
@@ -1134,11 +425,18 @@ const WORKFLOWS: WorkflowSeed[] = [
     minAmount: 50_000,
     steps: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
-      { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+      { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
+    // Two earlier shapes: as first seeded, and as corrected on 2026-10-15.
     previously: [
-      { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
-      { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+      [
+        { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
+        { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+      ],
+      [
+        { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+        { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+      ],
     ],
   },
   {
@@ -1153,7 +451,7 @@ const WORKFLOWS: WorkflowSeed[] = [
     steps: [
       { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
       { sequence: 2, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
-      { sequence: 3, name: 'Checking (Finance Staff)', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 3, name: 'Checking (Account Payable / Credit and Collection)', approverType: 'ROLE', roleKey: 'finance', alsoRoleKeys: ['credit_collection'] },
       { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
       { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
@@ -1180,7 +478,7 @@ const WORKFLOWS: WorkflowSeed[] = [
     steps: [
       { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
       { sequence: 2, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
-      { sequence: 3, name: 'Checking (Finance Staff)', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 3, name: 'Checking (Account Payable / Credit and Collection)', approverType: 'ROLE', roleKey: 'finance', alsoRoleKeys: ['credit_collection'] },
       { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
       { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
@@ -1215,6 +513,22 @@ const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
+    // The Service JO (2026-10-20, the owner's revised Aftermarket UI): the
+    // service call on a registered machine, routed to the Aftermarket
+    // Manager on the requester's own team (`service_manager`, in
+    // OWN_TEAM_ROLES), then the requester's Team Leader. Approval BOOKS THE
+    // VISIT, never a project. The preparer signs the steps they hold and a
+    // manager may stand in, as on every routing-sheet route.
+    documentType: 'service_job_order',
+    name: 'Service JO — aftermarket manager then team leader',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Aftermarket Manager', approverType: 'ROLE', roleKey: 'service_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+  },
+  {
     // The requester is the LEAVER's own login whenever one exists, so step 1 is
     // their supervisor and the engine's self-approval rule keeps them off their
     // own form. HR raises it only for a login-less employee — then step 1 is
@@ -1235,6 +549,10 @@ const WORKFLOWS: WorkflowSeed[] = [
     documentType: 'evaluation',
     name: 'Employee evaluation — HR then management',
     steps: [
+      { sequence: 1, name: 'HR review', approverType: 'HR' },
+      { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+    previously: [
       { sequence: 1, name: 'HR review', approverType: 'HR' },
       { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
     ],
@@ -1319,13 +637,19 @@ async function main() {
   // already offered. A pair it has never offered is granted; a pair it has
   // offered before is left alone, because its absence now means someone
   // revoked it on purpose.
+  //
+  // Since 2026-10-18 (the owner's call: "delete all roles, I will create the
+  // roles later" — shared/rolesClear.ts) the loop runs only until the roles
+  // have been emptied once: from then on the grid is the owner's, and the
+  // seed neither recreates a role nor offers one a permission.
   const OFFER_KEY = 'seed.offeredRolePermissions';
   const offeredSetting = await prisma.setting.findUnique({ where: { key: OFFER_KEY } });
   const offered = new Set<string>((offeredSetting?.value as string[] | undefined) ?? []);
   const isFirstEverRun = offeredSetting === null;
+  const rolesAreOwners = await rolesCleared();
 
   let grantedLater = 0;
-  for (const seed of ROLES) {
+  for (const seed of rolesAreOwners ? [] : ROLES) {
     const keys = new Set<string>(seed.only ?? []);
     for (const [mod, sub] of seed.grants ?? []) {
       for (const key of permissionsFor(mod, sub)) keys.add(key);
@@ -1365,9 +689,26 @@ async function main() {
     update: { value: [...offered] },
   });
 
-  console.log(
-    `  ✓ Roles (${ROLES.length})${grantedLater ? ` — granted ${grantedLater} newly introduced permission(s)` : ''}`,
-  );
+  if (rolesAreOwners) {
+    console.log("  ✓ Roles — the owner's (emptied once on 2026-10-18; the seed makes and fills none)");
+  } else {
+    console.log(
+      `  ✓ Roles (${ROLES.length})${grantedLater ? ` — granted ${grantedLater} newly introduced permission(s)` : ''}`,
+    );
+  }
+  // The boxes of 2026-10-18: Calendar, Attendance, Service Schedule and
+  // Report Templates got their own write rights, given once to whoever held
+  // the right they borrowed (shared/accessSplit.ts).
+  {
+    // Project goods received into a warehouse before they were kept as the
+    // project's own stock (2026-10-18) go on the shelf, once — no cost posted.
+    const stocked = await backfillProjectStock(prisma);
+    if (stocked) console.log(`  · Put ${stocked} earlier project receipt line(s) on the shelf as project stock`);
+  }
+  {
+    const split = await splitBorrowedRights();
+    if (split) console.log(`  · Gave ${split} new Access box(es) to the roles that held the rights they replace`);
+  }
   // A "CTG" role was seeded for the costing route's last step for a few
   // minutes on 2026-10-09 before the owner said CTG is the CEO: that step is
   // the executive role, and the role goes — unless somebody was given it.
@@ -1410,6 +751,16 @@ async function main() {
       ownDefault.length ? `; own default on ${ownDefault.join(', ')}` : ''
     })`,
   );
+  // The employee number's own pattern (2026-10-18): GTC-{SEQ}-{YY}, the year
+  // hired, once, where the stock pattern still stood; then every number
+  // cleared once for the owner to type the real ones (shared/employeeNumbers.ts).
+  {
+    const numbering = await applyEmployeeNumbering();
+    if (numbering === 'applied') console.log('  · Employee numbering set to GTC-{SEQ}-{YY} (the sequence, then the year hired)');
+    else if (numbering === 'kept') console.log("  · Employee numbering left as the administrator set it (the owner's GTC-{SEQ}-{YY} is Admin › Numbering's to apply)");
+    const cleared = await clearEmployeeNumbers();
+    if (cleared) console.log(`  · Cleared ${cleared.employees} employee number(s) and ${cleared.logins} login mirror(s) — to be typed under the GTC-0001-14 scheme`);
+  }
   // The RFQ took the canvass's code on 2026-10-14; a stored canvass template
   // still on it moves to CVS, once.
   if ((await moveCanvassCode()).moved) console.log('  · Canvass numbering code moved from RFQ to CVS');
@@ -1509,7 +860,8 @@ async function main() {
             a[i].userId === null &&
             a[i].roleId === (s.roleKey ? (roleByKey.get(s.roleKey) ?? null) : null),
         );
-      if (same(current, seed.previously) && seed.steps.length === current.length) {
+      const priors: SeedStep[][] = Array.isArray(seed.previously[0]) ? (seed.previously as SeedStep[][]) : [seed.previously as SeedStep[]];
+      if (priors.some((prior) => same(current, prior)) && seed.steps.length === current.length) {
         await prisma.$transaction(
           seed.steps.map((s, i) =>
             prisma.approvalStep.update({
@@ -1614,6 +966,35 @@ async function main() {
     }
   }
 
+  // The Service JO register (2026-10-20): job orders raised as service calls
+  // before the project work order of 2026-10-09 — on a machine, on a
+  // contract, or with no project name (the project shape requires one) —
+  // belong under Aftermarket. Marked SERVICE once; a row raised since is
+  // written with its category.
+  {
+    const MARK = 'seed.serviceJobOrders20261020';
+    if (!(await prisma.setting.findUnique({ where: { key: MARK } }))) {
+      const { count } = await prisma.jobOrder.updateMany({
+        where: { category: 'PROJECT', OR: [{ projectName: null }, { assetId: { not: null } }, { contractId: { not: null } }] },
+        data: { category: 'SERVICE' },
+      });
+      if (count) {
+        await prisma.auditLog.create({
+          data: {
+            entityType: 'service_job_order',
+            entityId: 'list',
+            action: 'UPDATED',
+            summary: `Moved ${count} job order(s) raised as service calls to the Service JO register`,
+          },
+        });
+      }
+      await prisma.setting.create({
+        data: { key: MARK, value: { at: new Date().toISOString(), moved: count }, description: 'seed: service-shaped job orders marked SERVICE once' },
+      });
+      if (count) console.log(`  · ${count} job order(s) raised as service calls moved to the Service JO register`);
+    }
+  }
+
   // Raising a quotation revision once superseded the last one without
   // withdrawing its approval request, which then sat in the approver's queue
   // for good. Any still open is withdrawn — CANCELLED, never deleted. One
@@ -1627,6 +1008,14 @@ async function main() {
     // 2026-10-07) are closed, so they do not read as cash finance still owes.
     // Stock order lines typed without an item built no stock when received
     // (until 2026-10-16); each now takes its item and its stock, once.
+    // The employee owns identity (2026-10-16): every super admin is a person on
+    // the register, and every linked login is brought in step with its record.
+    const admins = await linkAdminEmployees();
+    if (admins) console.log(`  · Gave ${admins} administrator login(s) an employee record`);
+    const mirrors = await backfillLoginMirrors();
+    if (mirrors.changed || mirrors.refused.length) {
+      console.log(`  · Brought ${mirrors.changed} login(s) in step with their employee records${mirrors.refused.length ? `; ${mirrors.refused.length} left (number clash)` : ''}`);
+    }
     const typedReceipts = await repairTypedStockReceipts();
     if (typedReceipts) console.log(`  · Posted the stock of ${typedReceipts} received line(s) typed without an item`);
     const closedIncreases = await closeLegacyBudgetIncreases();
@@ -1699,6 +1088,20 @@ async function main() {
     if (filled) console.log(`  · Set the team of ${filled} older quotation(s) to their author's team`);
   }
 
+  // A quotation in another currency with no rate takes Settings' rate for it
+  // (2026-10-17), once Settings has one; a rate on the quotation is never touched.
+  {
+    const rated = await fillQuotationRates();
+    if (rated) console.log(`  · Gave ${rated} foreign-currency quotation(s) the exchange rate in Company Settings`);
+  }
+
+  // The Philippine holidays for this year and next (2026-10-17), once per
+  // year, so a holiday an administrator removed is never put back.
+  {
+    const years = await prefillHolidays();
+    if (years.length) console.log(`  · Added the Philippine holidays for ${years.join(' and ')}`);
+  }
+
   // Accounts Receivable per the owner's sample (2026-10-15): invoices issued
   // before countering existed are taken as countered on their invoice date
   // (once), and every invoice with no salesperson takes its source's.
@@ -1751,6 +1154,8 @@ async function main() {
     { code: 'WHS', name: 'Warehouse' },
     { code: 'FIN', name: 'Finance & Accounting' },
     { code: 'HR', name: 'Human Resources' },
+    // The owner's chart of 2026-10-17: five departments beside the teams.
+    ...CHART_DEPARTMENTS,
   ]) {
     await prisma.department.upsert({ where: { code: d.code }, create: d, update: {} });
   }
@@ -1845,6 +1250,24 @@ async function main() {
   }
   console.log(`  ✓ Teams (${TEAMS.length})`);
   const retiredIndustries = await retireFirstIndustries();
+
+  // The organisation chart of 2026-10-17, applied ONCE (shared/orgChart.ts),
+  // after the teams and the departments it names: every login's roles,
+  // Reports to, team and Supports teams as the chart has them, and an
+  // employee record for everyone on it with no login. Then Supervisor for
+  // anyone with a direct report, offered once each. Never fatal: a chart
+  // that cannot be applied is said, and the rest of the seed runs.
+  try {
+    const org = await applyOrgChart();
+    if (org.applied) {
+      console.log(`  · Applied the organisation chart: ${org.people.length} people changed, ${org.unmatched.length} employee record(s) created`);
+      for (const p of org.people) console.log(`      ${p.name}: ${p.changes.join('; ')}`);
+    }
+    const bosses = await grantSupervisorRole();
+    if (bosses) console.log(`  · Gave Supervisor to ${bosses} login(s) with direct reports`);
+  } catch (err) {
+    console.error('  ✗ The organisation chart could not be applied:', err instanceof Error ? err.message : err);
+  }
   if (retiredIndustries) {
     console.log(`  ✓ Retired the first industries (${retiredIndustries.retired} switched off, ${retiredIndustries.moved} record(s) moved to their teams)`);
   }
@@ -1858,6 +1281,10 @@ async function main() {
   // What a CAD job order asks for (2026-10-09): the seven, system rows.
   const drawingTypesAdded = await seedCadDrawingTypes();
   console.log(`  ✓ Drawing types (${CAD_DRAWING_TYPES.length}${drawingTypesAdded ? `, ${drawingTypesAdded} added` : ''})`);
+
+  // What a service document is (2026-10-20): the six, system rows.
+  const documentCategoriesAdded = await seedServiceDocumentCategories();
+  console.log(`  ✓ Service document categories (${SERVICE_DOCUMENT_CATEGORIES.length}${documentCategoriesAdded ? `, ${documentCategoriesAdded} added` : ''})`);
 
   // ── Warehouse ──────────────────────────────────────────────────────────────
   await prisma.warehouse.upsert({
@@ -2215,6 +1642,98 @@ async function main() {
   const adminMove = await moveAdminEmail([OLD_ADMIN_EMAIL, process.env.SEED_ADMIN_EMAIL ?? OLD_ADMIN_EMAIL]);
   if (adminMove.moved) console.log(`  ✓ Super admin's sign-in email moved: ${adminMove.from} → ${adminMove.to}`);
   else if (adminMove.reason === 'taken') console.log(`  ⚠  ${adminMove.to} is already another login's email — the admin's address was left as it is`);
+
+  // Last, once (2026-10-18, the owner's call: "delete all roles, I will create
+  // the roles later"): every role emptied — no permissions, nobody holding
+  // it, the built-in mark lifted — the rows kept so the routes and the
+  // engine's keys keep working (shared/rolesClear.ts). After everything
+  // above, so a fresh install's chart and grants are emptied with the rest.
+  {
+    const emptied = await clearRoles();
+    if (emptied) {
+      console.log(`  ✓ Emptied ${emptied.roles} role(s) — ${emptied.permissions} permission(s) and ${emptied.holders} holder(s) removed; the Access grid is the owner's to fill (sign in as the super admin to build the roles)`);
+    }
+  }
+
+  // ── Every role replaced by the organisation chart's titles (2026-10-18) ──
+  // Once, after the emptying: one role per title, empty of rights, the keys
+  // the engine reads kept on the renamed rows, every other role deleted and
+  // each person given their titles (shared/rolesFromChart.ts).
+  {
+    const replaced = await replaceRolesWithChart();
+    if (replaced) {
+      console.log(
+        `  ✓ Roles replaced by the organisation chart: ${replaced.created.length} created, ${replaced.renamed.length} renamed, ${replaced.deleted.length} deleted, ${replaced.assigned} login(s) given their titles`,
+      );
+    }
+  }
+
+  // ── ROLE_REV1 (2026-10-19): ranks, renames, new roles, Plantilla by role ─
+  // Once, after the chart's roles (shared/roleRev1.ts); then KAT's shared posts.
+  {
+    const rev1 = await applyRoleRev1();
+    if (rev1) {
+      console.log(
+        `  ✓ ROLE_REV1: ${rev1.created.length} role(s) created, ${rev1.renamed.length} renamed, ${rev1.deleted.length} deleted, ${rev1.positions} Plantilla slot(s) by role, ${rev1.titles} title(s) from roles`,
+      );
+    }
+    // Every deploy: a title is ALL the roles at a person's highest level
+    // (2026-10-19, the owner's call), so titles written before are refreshed.
+    let retitled = 0;
+    for (const u of await prisma.userRole.findMany({ distinct: ['userId'], select: { userId: true } })) {
+      if (await refreshUserTitle(prisma as never, u.userId)) retitled++;
+    }
+    if (retitled) console.log(`  ✓ Titles refreshed from roles: ${retitled}`);
+    const posts = await seedSharedPosts();
+    if (posts) console.log(`  ✓ KAT's Technical Manager and Aftermarket Manager shared with GIB, UIT and HIT (${posts} post(s))`);
+  }
+
+  // ── The permission matrix (2026-10-19): per-person overrides go, once ─────
+  {
+    const dropped = await dropOverrides();
+    if (dropped !== null) console.log(`  ✓ Per-person permission overrides removed: ${dropped} (access is the role matrix alone)`);
+  }
+
+  // ── G-HR's common rights on every role; all of G-HR to the HR Officer ────
+  // Once, after the chart's roles (shared/hrAccess.ts, 2026-10-18).
+  {
+    const hr = await applyHrAccess();
+    if (hr) console.log(`  ✓ G-HR access: the common set on ${hr.roles} role(s) (${hr.common} boxes), the HR Officer ${hr.officer} more`);
+  }
+
+  // ── G-FIN's common rights on every role; all of G-FIN to the Finance Manager
+  // Once (shared/finAccess.ts, 2026-10-19).
+  {
+    const fin = await applyFinAccess();
+    if (fin) console.log(`  ✓ G-FIN access: the common set on ${fin.roles} role(s), the selling roles' requests, the Finance Manager ${fin.manager} boxes`);
+  }
+
+  // ── G-CHAIN's common rights on every role; all of G-CHAIN to both
+  // Purchasing Managers. Once (shared/chainAccess.ts, 2026-10-19).
+  {
+    const chain = await applyChainAccess();
+    if (chain) console.log(`  ✓ G-CHAIN access: the common set on ${chain.roles} role(s), the requisition roles' own requests, both Purchasing Managers ${chain.managers} boxes`);
+  }
+
+  // ── The employee numbers of the owner's ROLE.xlsx (2026-10-18) ──────────
+  // Once, after the clearing and the chart's employee records: each number on
+  // the employee record, mirrored to the login, the series raised to it.
+  {
+    const numbered = await applyEmployeeNumberList();
+    if (numbered) {
+      console.log(`  ✓ Employee numbers from the owner's list: ${numbered.changed.length} set, ${numbered.unchanged} already so`);
+      if (numbered.notFound.length) console.log(`    not on file: ${numbered.notFound.join(', ')}`);
+      if (numbered.clashes.length) console.log(`    left (number in use): ${numbered.clashes.join('; ')}`);
+    }
+  }
+
+  // ── "Who added it", for Edit Own (2026-10-18) ─────────────────────────────
+  {
+    const filled = await backfillOwnAuthors();
+    if (filled && Object.keys(filled).length) {
+      console.log(`  ✓ "Who added it" filled from the audit trail: ${Object.entries(filled).map(([t, n]) => `${t} ${n}`).join(', ')}`);
+    }
+  }
 
   console.log('Seed complete.');
 }

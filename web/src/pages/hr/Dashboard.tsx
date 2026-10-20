@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, downloadBlob, qs } from '../../lib/api';
-import { useAuth } from '../../lib/auth';
+import { useAuth, mayEditPage } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
   ErrorBox,
@@ -37,7 +37,7 @@ import { EvaluationsDuePanel, EvaluationsDueStat } from './dashboard/Evaluations
  */
 
 /** The day's attendance words, as `extra` to the one `statusTone` — none of them is a document status. */
-const ATTENDANCE_TONES: Record<string, Tone> = {
+export const ATTENDANCE_TONES: Record<string, Tone> = {
   PRESENT: 'ok',
   LATE: 'warn',
   ON_LEAVE: 'info',
@@ -59,7 +59,7 @@ interface DashboardRow {
     firstName: string;
     lastName: string;
     position: string | null;
-    department: { id: string; name: string } | null;
+    team: { id: string; code: string; name: string } | null;
   };
   status: string;
   timeIn: string | null;
@@ -240,7 +240,7 @@ export function HrDashboard() {
                 <thead>
                   <tr>
                     <th>Employee</th>
-                    <th>Department</th>
+                    <th>Team</th>
                     <th>In</th>
                     <th>Out</th>
                     <th className="right">Late</th>
@@ -268,7 +268,7 @@ export function HrDashboard() {
                           {r.employee.position ? ` · ${r.employee.position}` : ''}
                         </div>
                       </td>
-                      <td className="faint">{r.employee.department?.name ?? '—'}</td>
+                      <td className="faint">{r.employee.team?.code ?? '—'}</td>
                       <td className="mono">
                         {formatTime(r.timeIn, { hour12: false })}
                         {r.method && r.method !== 'FACE' && (
@@ -340,11 +340,15 @@ export function HrDashboard() {
 
 interface AttendanceRow {
   id: string;
+  /** Edit All, or Edit Own on the viewer's own entry (2026-10-18) — the API says. */
+  canEdit?: boolean;
   date: string;
   timeIn: string | null;
   timeOut: string | null;
   status: string;
   lateMinutes: number;
+  /** Left before the day's end, at a same-day clock-out. */
+  undertimeMinutes?: number;
   workedHours: number;
   timeInMethod: string | null;
   /** The capture kept as evidence (an attachment id), whatever the method. */
@@ -364,7 +368,7 @@ interface AttendanceRow {
     firstName: string;
     lastName: string;
     position: string | null;
-    department: { name: string } | null;
+    industry: { code: string } | null;
   };
 }
 
@@ -457,7 +461,7 @@ export function AttendanceRegister() {
           </div>
           <div className="faint">
             {r.employee.employeeNo}
-            {r.employee.department ? ` · ${r.employee.department.name}` : ''}
+            {r.employee.industry ? ` · ${r.employee.industry.code}` : ''}
           </div>
         </div>
       ),
@@ -474,6 +478,19 @@ export function AttendanceRegister() {
       label: 'Late',
       align: 'right',
       render: (r) => (r.lateMinutes > 0 ? <span className="mono warn">{r.lateMinutes}m</span> : <span className="faint">—</span>),
+    },
+    {
+      key: 'undertimeMinutes',
+      label: 'Undertime',
+      align: 'right',
+      render: (r) =>
+        r.timeIn && !r.timeOut ? (
+          <span className="faint">open</span>
+        ) : (r.undertimeMinutes ?? 0) > 0 ? (
+          <span className="mono warn">{r.undertimeMinutes}m</span>
+        ) : (
+          <span className="faint">—</span>
+        ),
     },
     {
       key: 'workedHours',
@@ -526,9 +543,27 @@ export function AttendanceRegister() {
         rowKey={(r) => r.id}
         reloadToken={reload}
         searchPlaceholder="Search employee name or number…"
-        onRowClick={can('ghr.employees.edit_all') ? (r) => setEditing(r) : undefined}
+        onRowClick={mayEditPage(can, 'ghr', 'attendance') ? (r) => r.canEdit && setEditing(r) : undefined}
         emptyTitle="No attendance recorded for this range"
+        summary={(raw) => {
+          const sum = raw as unknown as { missingOut: number } | undefined;
+          if (!sum) return null;
+          return (
+            <Stat
+              label="Missing clock-out"
+              value={sum.missingOut}
+              accent={sum.missingOut > 0 ? 'warn' : undefined}
+              sub="clocked in and never out — modify the row to close it"
+              to="/g-hr/attendance?missingOut=true"
+            />
+          );
+        }}
         filters={[
+          {
+            key: 'missingOut',
+            label: 'Clock-out',
+            options: [{ value: 'true', label: 'Missing clock-out' }],
+          },
           {
             key: 'status',
             label: 'Status',

@@ -9,43 +9,75 @@ export interface ResolvedUser {
   position: string | null;
   isSuperAdmin: boolean;
   supervisorId: string | null;
-  departmentId: string | null;
   roleKeys: string[];
-  /** Effective permission keys after roles + per-user overrides. */
+  /** Effective permission keys: the roles' (no per-person overrides since 2026-10-19). */
   permissions: Set<string>;
+  /** Their team (`Employee.industryId`), and its active members' logins, themselves included — View / Manage Team. */
+  teamId: string | null;
+  teamMemberIds: string[];
 }
 
 /**
- * Effective permissions = union of role permissions, plus per-user ALLOW,
- * minus per-user DENY.
- *
- * DENY wins over everything except super admin. That ordering matters: it lets
- * you hand someone a broad role and then close one door, which is how access is
- * actually administered in practice.
+ * A level includes the ones under it (2026-10-19, the owner's permission
+ * matrix: View Own / Team / All, Manage Own / Team / All): All counts as
+ * Team and Own, Team as Own — so a role ticked "All" passes every gate a
+ * Team or Own holder passes.
+ */
+export function withImpliedLevels(keys: Iterable<string>): Set<string> {
+  const out = new Set(keys);
+  for (const k of [...out]) {
+    const m = /^(.*)\.(view|edit)_(all|team)$/.exec(k);
+    if (!m) continue;
+    out.add(`${m[1]}.${m[2]}_own`);
+    if (m[3] === 'all') out.add(`${m[1]}.${m[2]}_team`);
+  }
+  return out;
+}
+
+/** The keys that grant this one: itself, and the levels above it (`impliedBy('x.y.view_own')` → own, team, all). */
+export function impliedBy(key: string): string[] {
+  const m = /^(.*)\.(view|edit)_(own|team)$/.exec(key);
+  if (!m) return [key];
+  return m[3] === 'own'
+    ? [key, `${m[1]}.${m[2]}_team`, `${m[1]}.${m[2]}_all`]
+    : [key, `${m[1]}.${m[2]}_all`];
+}
+
+/**
+ * Effective permissions = the union of the person's roles' permissions, each
+ * level including the ones under it. Per-person ALLOW / DENY overrides were
+ * removed on 2026-10-19 (the owner's call: access is the role matrix alone);
+ * the help-ticket receivers keep their two rights (shared/helpReceivers.ts).
  */
 export async function resolveUser(userId: string): Promise<ResolvedUser | null> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     include: {
       roles: { include: { role: { include: { permissions: { include: { permission: true } } } } } },
-      overrides: { include: { permission: true } },
+      employee: { select: { industryId: true } },
     },
   });
   if (!user || !user.isActive) return null;
 
-  const granted = new Set<string>();
+  const keys: string[] = [];
   for (const ur of user.roles) {
-    for (const rp of ur.role.permissions) granted.add(rp.permission.key);
-  }
-  for (const o of user.overrides) {
-    if (o.effect === 'ALLOW') granted.add(o.permission.key);
+    for (const rp of ur.role.permissions) keys.push(rp.permission.key);
   }
   // Whoever a super admin chose to receive the Help box's tickets holds the
   // screen's two rights, whatever their roles (shared/helpReceivers.ts).
-  if (await isChosenReceiver(user.id)) for (const key of RECEIVER_RIGHTS) granted.add(key);
-  for (const o of user.overrides) {
-    if (o.effect === 'DENY') granted.delete(o.permission.key);
-  }
+  if (await isChosenReceiver(user.id)) keys.push(...RECEIVER_RIGHTS);
+  const granted = withImpliedLevels(keys);
+
+  const teamId = user.employee?.industryId ?? null;
+  const teamMemberIds = teamId
+    ? (
+        await prisma.user.findMany({
+          where: { isActive: true, employee: { industryId: teamId } },
+          select: { id: true },
+        })
+      ).map((u) => u.id)
+    : [];
+  if (!teamMemberIds.includes(user.id)) teamMemberIds.push(user.id);
 
   return {
     id: user.id,
@@ -54,9 +86,10 @@ export async function resolveUser(userId: string): Promise<ResolvedUser | null> 
     position: user.position,
     isSuperAdmin: user.isSuperAdmin,
     supervisorId: user.supervisorId,
-    departmentId: user.departmentId,
     roleKeys: user.roles.map((r) => r.role.key),
     permissions: granted,
+    teamId,
+    teamMemberIds,
   };
 }
 
@@ -69,6 +102,7 @@ export function can(user: ResolvedUser, permissionKey: string): boolean {
 export function canView(user: ResolvedUser, moduleKey: string, submoduleKey: string): boolean {
   return (
     can(user, `${moduleKey}.${submoduleKey}.view_all`) ||
+    can(user, `${moduleKey}.${submoduleKey}.view_team`) ||
     can(user, `${moduleKey}.${submoduleKey}.view_own`)
   );
 }
@@ -87,6 +121,9 @@ export function canEditRecord(
   ownerId: string | null,
 ): boolean {
   if (can(user, `${moduleKey}.${submoduleKey}.edit_all`)) return true;
+  if (!ownerId) return false;
+  // Manage Team (2026-10-19): a record owned by anyone on the caller's team.
+  if (can(user, `${moduleKey}.${submoduleKey}.edit_team`) && user.teamMemberIds.includes(ownerId)) return true;
   return ownerId === user.id && can(user, `${moduleKey}.${submoduleKey}.edit_own`);
 }
 

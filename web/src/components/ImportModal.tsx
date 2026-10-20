@@ -1,6 +1,9 @@
 import { useRef, useState } from 'react';
 import { api, downloadBlob } from '../lib/api';
-import { ErrorBox, Field, Modal, useToast } from './ui';
+import { ErrorBox, Field, Modal, ModalFoot, StatusBadge, useToast, type Tone } from './ui';
+
+/** What the check says it would do with a row. */
+const IMPORT_TONES: Record<string, Tone> = { error: 'danger', create: 'ok', update: 'info' };
 
 /**
  * CSV import, shared by every master screen.
@@ -128,14 +131,7 @@ export function ImportModal({
       title={`Import ${label}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={downloadTemplate} disabled={busy}>
-            Download template
-          </button>
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            {report?.committed ? 'Close' : 'Cancel'}
-          </button>
+        <ModalFoot onCancel={onClose} cancelLabel={report?.committed ? 'Close' : 'Cancel'} busy={busy}>
           {!report?.committed && (
             <button
               className="btn btn-primary"
@@ -151,16 +147,19 @@ export function ImportModal({
                     : 'Fix the errors first'}
             </button>
           )}
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
 
       {!report?.committed && (
         <>
-          <p className="muted" style={{ marginTop: 0 }}>
+          <p className="muted import-lede">
             Download the template, fill it in, and upload it. Nothing is saved until you have seen
-            what the file would do and confirmed it.
+            what the file would do and confirmed it.{' '}
+            <button type="button" className="btn btn-sm" onClick={downloadTemplate} disabled={busy}>
+              Download template
+            </button>
           </p>
 
           <div className="field">
@@ -187,7 +186,7 @@ export function ImportModal({
       )}
 
       {report && (
-        <div style={{ marginTop: 12 }}>
+        <div className="import-report">
           <div
             className={`alert ${report.errors ? 'error' : report.committed ? 'ok' : 'info'}`}
           >
@@ -275,12 +274,12 @@ export function ImportModal({
             </section>
           )}
 
-          <div className="table-wrap" style={{ maxHeight: 280 }}>
+          <div className="table-wrap import-rows">
             <table className="data">
               <thead>
                 <tr>
-                  <th style={{ width: 60 }}>Row</th>
-                  <th style={{ width: 90 }}>Action</th>
+                  <th className="import-col-row">Row</th>
+                  <th className="import-col-action">Action</th>
                   <th>Record</th>
                   <th>Detail</th>
                 </tr>
@@ -290,13 +289,7 @@ export function ImportModal({
                   <tr key={r.row}>
                     <td className="mono">{r.row}</td>
                     <td>
-                      <span
-                        className={`badge ${
-                          r.action === 'error' ? 'danger' : r.action === 'create' ? 'ok' : 'info'
-                        }`}
-                      >
-                        {r.action}
-                      </span>
+                      <StatusBadge status={r.action} extra={IMPORT_TONES} label={r.action} />
                     </td>
                     <td>{r.key}</td>
                     <td className={r.action === 'error' ? '' : 'muted'}>{r.message ?? '—'}</td>
@@ -309,16 +302,16 @@ export function ImportModal({
       )}
 
       {!report && (
-        <details style={{ marginTop: 14 }}>
-          <summary className="muted" style={{ cursor: 'pointer' }}>
+        <details className="import-columns">
+          <summary className="muted">
             Expected columns ({columns.length})
           </summary>
-          <div className="table-wrap" style={{ marginTop: 10, maxHeight: 260 }}>
+          <div className="table-wrap import-rows">
             <table className="data">
               <thead>
                 <tr>
                   <th>Column</th>
-                  <th style={{ width: 80 }}>Required</th>
+                  <th className="import-col-action">Required</th>
                   <th>Example</th>
                   <th>Notes</th>
                 </tr>

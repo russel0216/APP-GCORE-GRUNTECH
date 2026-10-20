@@ -31,7 +31,7 @@ import { LIST_CAP, listReference, recordNamed, choice, sendListPdf, rangeNamed, 
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { cents, num, refreshAdvance, settleable } from '../shared/finance';
 import { dayKey, manilaDayStart, manilaDayEnd } from '../shared/day';
-import { quotationTeamOf } from '../shared/team';
+import { quotationTeamOf, reportsTo, visibleOwners } from '../shared/team';
 import { usersHolding } from '../shared/clearance';
 import { orderNet } from '../shared/billingInvoice';
 import { quotationTotals } from '../shared/quotation';
@@ -102,7 +102,7 @@ type RequestRow = Prisma.CommissionRequestGetPayload<{ include: typeof requestIn
  * the government on our account, not lost (Phase 7: invoiced ≠ collectible,
  * but EWT is never short-paid).
  */
-async function orderSource(salesOrderId: string) {
+export async function orderSource(salesOrderId: string) {
   const order = await prisma.salesOrder.findUnique({
     where: { id: salesOrderId },
     include: {
@@ -133,6 +133,7 @@ async function orderSource(salesOrderId: string) {
           ewtAmount: true,
           netCollectible: true,
           amountCollected: true,
+          importedFrom: true,
           allocations: { where: { payment: { kind: 'RECEIPT' } }, select: { amount: true, payment: { select: { id: true, number: true, orNumber: true, paymentDate: true } } } },
         },
       },
@@ -148,8 +149,13 @@ async function orderSource(salesOrderId: string) {
   const collectedOn = collections.reduce<Date | null>((d, c) => (!d || c.paymentDate > d ? c.paymentDate : d), null);
   const unpaid = order.invoices.filter((i) => i.status !== 'PAID');
   const fully = order.invoices.length > 0 && invoiced + 0.005 >= net && unpaid.length === 0;
+  // A deal invoiced in SCORO was paid — and its commission settled — there
+  // (2026-10-17, the owner's call): commissions start with deals G-CORE booked.
+  const fromScoro = order.invoices.some((i) => i.importedFrom === 'SCORO');
   const problem =
-    order.status !== 'ISSUED'
+    fromScoro
+      ? `${order.number} was invoiced in SCORO — commissions are raised on deals booked in G-CORE`
+      : order.status !== 'ISSUED'
       ? `${order.number} is ${statusLabel(order.status).toLowerCase()} — a commission is raised on an issued sales order`
       : !order.invoices.length
         ? `${order.number} has not been invoiced yet — a commission is raised once the order is fully collected`
@@ -175,7 +181,7 @@ async function orderSource(salesOrderId: string) {
       invoiced,
     },
     fully,
-    problem: fully ? null : problem,
+    problem: fully && !fromScoro ? null : problem,
     orNumbers,
     collectedOn,
     collections,
@@ -273,11 +279,12 @@ export async function mayRaiseCommission(me: ResolvedUser, salesOrderId: string)
   return mine?.industryId === team.id;
 }
 
-/** view_all, the person who raised it, a beneficiary, or — while it waits on them — whoever may decide it. */
+/** view_all, the person who raised it, a beneficiary, their supervisor (View Own covers one's direct reports', 2026-10-19), or — while it waits on them — whoever may decide it. */
 async function mayRead(me: ResolvedUser, row: { id: string; requestedById: string; shares?: { userId: string }[] }, deciderOnly = false): Promise<boolean> {
   if (!deciderOnly) {
-    if (me.isSuperAdmin || can(me, 'gfin.commissions.view_all') || row.requestedById === me.id) return true;
+    if (me.isSuperAdmin || can(me, 'gfin.commissions.view_all') || visibleOwners(me, 'gfin', 'commissions').includes(row.requestedById)) return true;
     if (row.shares?.some((s) => s.userId === me.id)) return true;
+    if (await reportsTo(row.requestedById, me.id)) return true;
   }
   return mayDecide(me.id, DOC, [row.id]);
 }
@@ -381,7 +388,13 @@ export function commissionListWhere(me: ResolvedUser, q: ReturnType<typeof listQ
   const base: Prisma.CommissionRequestWhereInput[] = [];
   const seesAll = me.isSuperAdmin || can(me, 'gfin.commissions.view_all');
   const mine = !seesAll || q.scope === 'mine';
-  if (mine) base.push({ OR: [{ requestedById: me.id }, { shares: { some: { userId: me.id } } }] });
+  // View Own: one's own and one's direct reports' requests; "Mine" is one's own.
+  const own = [{ requestedById: me.id }, { shares: { some: { userId: me.id } } }];
+  // View Team: also what anyone on the team raised.
+  if (!seesAll && q.scope !== 'mine') {
+    base.push({ OR: [...own, { requestedById: { in: visibleOwners(me, 'gfin', 'commissions') } }, { requestedBy: { supervisorId: me.id } }] });
+  }
+  else if (mine) base.push({ OR: own });
   if (q.filters.salesOrderId) base.push({ salesOrderId: q.filters.salesOrderId });
   if (q.filters.jobId) base.push({ jobId: q.filters.jobId });
   if (q.filters.requestedById) base.push({ requestedById: q.filters.requestedById });
@@ -543,7 +556,7 @@ commissionRoutes.get(
       where: {
         status: 'ISSUED',
         commissionRequests: { none: { status: { in: STANDING } } },
-        invoices: { some: { status: 'PAID' }, none: { status: { in: ['DRAFT', 'ISSUED', 'PARTIALLY_PAID'] } } },
+        invoices: { some: { status: 'PAID' }, none: { OR: [{ status: { in: ['DRAFT', 'ISSUED', 'PARTIALLY_PAID'] } }, { importedFrom: 'SCORO', status: { not: 'CANCELLED' } }] } },
         ...(q ? { OR: [{ number: { contains: q, mode: 'insensitive' } }, { customer: { name: { contains: q, mode: 'insensitive' } } }] } : {}),
       },
       orderBy: { orderDate: 'desc' },

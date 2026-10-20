@@ -14,6 +14,8 @@ import { repairTypedStockReceipts } from '../src/shared/typedItems';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { rolesLike } from './lib/roles';
+import { roleSeedPermissionKeys } from '../src/shared/roleSeeds';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { resolveUser } from '../src/permissions/resolve';
@@ -243,7 +245,8 @@ async function cleanup() {
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[]) {
-  const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
+  // A seeded role's KEY and a throwaway copy of its rights (scripts/lib/roles.ts).
+  const roles = await rolesLike('zzchain_', roleKeys);
   return prisma.user.create({
     data: {
       name,
@@ -811,11 +814,11 @@ async function main() {
   // gchain keys. Without these grants the create button never appears.
   // The routing sheet of 2026-10-13 adds Industry Specialists, Technical
   // Managers and Team Leaders as preparers.
+  // The seed's DEFINITION — the install's own roles were emptied for the
+  // owner's (2026-10-18) and may hold anything.
   for (const roleKey of ['project_engineer', 'project_manager', 'industry_specialist', 'technical_manager', 'team_leader']) {
-    const holds = await prisma.rolePermission.count({
-      where: { role: { key: roleKey }, permission: { key: 'gchain.purchase_requests.create' } },
-    });
-    check(`the seeded ${roleKey} holds gchain.purchase_requests.create`, holds === 1);
+    const holds = roleSeedPermissionKeys(roleKey).includes('gchain.purchase_requests.create');
+    check(`the seeded ${roleKey} holds gchain.purchase_requests.create`, holds);
   }
 
   // ── 10. Search ─────────────────────────────────────────────────────────────
@@ -857,6 +860,90 @@ async function main() {
     prHits.some((h) => h.kind === 'purchase_request' && h.id === pr.id),
   );
 
+  // ── 10b. A project's own stock (2026-10-18) ───────────────────────────────
+  // Project goods received into a warehouse sit on its shelf as the project's
+  // stock: charged once at receiving, never again when they go out, and never
+  // in the company's balance or its average.
+  console.log('\nProject stock');
+  {
+    const { receiveProjectStock, issueProjectStock } = await import('../src/shared/projectStock');
+    const companyBefore = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+    await prisma.$transaction((tx) =>
+      receiveProjectStock(tx, { jobId: job.id, itemId: item.id, warehouseId: warehouse.id, quantity: 10, unitCost: 200, sourceType: 'test', createdById: procurement.id }),
+    );
+    const own = await prisma.projectStock.findUnique({ where: { jobId_itemId_warehouseId: { jobId: job.id, itemId: item.id, warehouseId: warehouse.id } } });
+    const companyAfter = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+    check('a project receipt into a warehouse is the project\'s own stock (10 at 200)', !!own && money(num(own.quantity), 10) && money(num(own.averageCost), 200));
+    check(
+      'and leaves the company\'s balance and its average alone',
+      num(companyAfter?.quantity) === num(companyBefore?.quantity) && num(companyAfter?.averageCost) === num(companyBefore?.averageCost),
+    );
+    check(
+      'its movement carries the project',
+      (await prisma.inventoryTransaction.count({ where: { jobId: job.id, itemId: item.id, sourceType: 'test', type: 'RECEIPT' } })) === 1,
+    );
+
+    // An Outgoing slip drawing the project's stock, approved.
+    const issue = await prisma.stockIssue.create({
+      data: {
+        number: await nextNumber('stock_issue'),
+        status: 'PENDING_APPROVAL',
+        jobId: job.id,
+        warehouseId: warehouse.id,
+        issuedById: procurement.id,
+        purpose: `${TAG} project stock to site`,
+        items: { create: [{ itemId: item.id, costCategoryId: materials.id, quantity: D(4), unitCost: D(200), amount: D(800), projectStock: true }] },
+      },
+    });
+    const incurredBefore = (await position()).incurred;
+    await settleStockIssue(issue.id, 'APPROVED');
+    const issued = await prisma.stockIssue.findUnique({ where: { id: issue.id } });
+    const ownAfterIssue = await prisma.projectStock.findUnique({ where: { id: own!.id } });
+    const issueCost = await prisma.jobCostEntry.findMany({ where: { sourceType: 'stock_issue', sourceId: issue.id } });
+    check('an Outgoing slip of project stock is issued on approval', issued?.status === 'ISSUED', issued?.status);
+    check('and takes it off the project\'s shelf (6 left)', money(num(ownAfterIssue!.quantity), 6), String(num(ownAfterIssue!.quantity)));
+    check(
+      'posting CONSUMED only — no second INCURRED',
+      issueCost.length === 1 && issueCost[0].state === 'CONSUMED' && money(num(issueCost[0].amount), 800),
+      issueCost.map((c) => `${c.state} ${num(c.amount)}`).join(', '),
+    );
+    check('so the project\'s incurred cost does not move', money((await position()).incurred, incurredBefore));
+    const companyAfterIssue = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+    check('and the company\'s stock is untouched', num(companyAfterIssue?.quantity) === num(companyBefore?.quantity));
+
+    await expectRejection(
+      'more than the project holds is refused',
+      () => prisma.$transaction((tx) => issueProjectStock(tx, { jobId: job.id, itemId: item.id, warehouseId: warehouse.id, quantity: 7, sourceType: 'test' })),
+      'Not enough',
+    );
+
+    // A pull-out slip of the project's stock, approved.
+    const slip = await prisma.pulloutSlip.create({
+      data: {
+        number: await nextNumber('pullout_slip'),
+        kind: 'PROJECT_STOCK',
+        status: 'PENDING_APPROVAL',
+        jobId: job.id,
+        warehouseId: warehouse.id,
+        preparedById: pm.id,
+        pulloutDate: new Date(),
+        notes: `${TAG} project stock pull-out`,
+        items: { create: [{ itemId: item.id, quantity: D(2), unitCost: D(200), amount: D(400) }] },
+      },
+    });
+    await settlePullout(slip.id, 'APPROVED');
+    const pulled = await prisma.pulloutSlip.findUnique({ where: { id: slip.id } });
+    const ownAfterPull = await prisma.projectStock.findUnique({ where: { id: own!.id } });
+    const pullCost = await prisma.jobCostEntry.findMany({ where: { sourceType: 'pullout_slip', sourceId: slip.id } });
+    check('a PROJECT_STOCK pull-out goes out on approval', pulled?.status === 'PULLED_OUT', pulled?.status);
+    check('from the project\'s shelf (4 left)', money(num(ownAfterPull!.quantity), 4), String(num(ownAfterPull!.quantity)));
+    check(
+      'posting CONSUMED only',
+      pullCost.length === 1 && pullCost[0].state === 'CONSUMED' && money(num(pullCost[0].amount), 400),
+      pullCost.map((c) => `${c.state} ${num(c.amount)}`).join(', '),
+    );
+  }
+
   // ── 11. Over HTTP: links, editing, the dashboard ───────────────────────────
   console.log('\nRoutes (over HTTP)');
 
@@ -874,6 +961,7 @@ async function main() {
       'gchain.purchase_orders.view_own',
       'gchain.purchase_orders.create',
       'gchain.purchase_orders.edit_own',
+      'gchain.purchase_orders.delete',
       'gchain.receiving.view_all',
       'gchain.borrow_slips.view_all',
       'gchain.inventory.view_all',
@@ -891,6 +979,20 @@ async function main() {
     const buyerToken = signToken(buyer.id, buyer.email);
     const colleagueToken = signToken(colleague.id, colleague.email);
     const apToken = signToken(apClerk.id, apClerk.email);
+
+    // The project's own stock on the inventory list (2026-10-18).
+    {
+      const ownList = await api(buyerToken, 'GET', `/inventory?stock=project&jobId=${job.id}`);
+      const ownBody = ownList.body as { rows?: { project?: { id: string }; quantity: number }[]; summary?: { stock?: string; valuation?: number } };
+      check(
+        'GET /inventory?stock=project lists the project\'s own goods (4 at 200)',
+        ownList.status === 200 && ownBody.summary?.stock === 'project' && ownBody.rows?.length === 1 && ownBody.rows[0].project?.id === job.id && ownBody.rows[0].quantity === 4 && ownBody.summary?.valuation === 800,
+        `${ownList.status} ${JSON.stringify(ownBody.summary)}`,
+      );
+      const company = await api(buyerToken, 'GET', `/inventory?warehouseId=${warehouse.id}`);
+      const companyBody = company.body as { summary?: { projectStock?: { lines: number } } };
+      check('and the company list counts it on its Project stock card', (companyBody.summary?.projectStock?.lines ?? 0) >= 1, JSON.stringify(companyBody.summary?.projectStock));
+    }
 
     // A bill against the order and the goods received on it.
     const bill = await prisma.supplierBill.create({
@@ -1133,6 +1235,53 @@ async function main() {
       `${resent.status} ${poPulled.status} ${pulledAgain.status} open ${stillOpen} ${afterPull.body.status}`,
     );
 
+    // Cancel, then delete (2026-10-19): a pending order cancelled withdraws its
+    // request; an issued one is refused; only its buyer deletes the cancelled one.
+    const cancelPo = await prisma.purchaseOrder.create({
+      data: {
+        number: await nextNumber('purchase_order'),
+        kind: 'DIRECT_TO_JOB',
+        supplierId: supplier.id,
+        jobId: job.id,
+        createdById: buyer.id,
+        notes: `${TAG} cancel order`,
+        items: { create: [{ description: `${TAG} cancel line`, quantity: D(1), unitPrice: D(100), amount: D(100), costCategoryId: materials.id }] },
+      },
+    });
+    await api(buyerToken, 'POST', `/purchase-orders/${cancelPo.id}/submit`);
+    const delPending = await api(buyerToken, 'DELETE', `/purchase-orders/${cancelPo.id}`);
+    const cancelShort = await api(buyerToken, 'POST', `/purchase-orders/${cancelPo.id}/cancel`, { reason: 'x' });
+    const poCancelled = await api(buyerToken, 'POST', `/purchase-orders/${cancelPo.id}/cancel`, { reason: 'Supplier withdrew the quote' });
+    const openAfterCancel = await prisma.approvalRequest.count({ where: { documentType: 'purchase_order', documentId: cancelPo.id, status: 'PENDING' } });
+    const cancelledRead = await api(buyerToken, 'GET', `/purchase-orders/${cancelPo.id}`);
+    // A cancelled incoming report on it posted nothing, and goes with it; a live one refuses the delete.
+    const deadReport = await prisma.receiving.create({
+      data: { number: `${TAG}-DEADRR-${Date.now()}`, orderId: cancelPo.id, receivedById: buyer.id, status: 'DRAFT', notes: `${TAG} dead report` },
+    });
+    const delWithLive = await api(buyerToken, 'DELETE', `/purchase-orders/${cancelPo.id}`);
+    await prisma.receiving.update({ where: { id: deadReport.id }, data: { status: 'CANCELLED', cancelReason: 'sample' } });
+    const strangerDel = await api(colleagueToken, 'DELETE', `/purchase-orders/${cancelPo.id}`);
+    const deleted = await api(buyerToken, 'DELETE', `/purchase-orders/${cancelPo.id}`);
+    const goneRow = await prisma.purchaseOrder.findUnique({ where: { id: cancelPo.id } });
+    const deletedRow = await prisma.auditLog.count({ where: { entityType: 'purchase_order', entityId: cancelPo.id, action: 'DELETED' } });
+    check(
+      'a pending order is cancelled with its reason (request withdrawn), then deleted by its buyer alone with its cancelled incoming report; a pending one, or one a live report stands on, is not deleted',
+      delPending.status === 400 &&
+        cancelShort.status === 400 &&
+        poCancelled.status === 200 &&
+        openAfterCancel === 0 &&
+        cancelledRead.body.status === 'CANCELLED' &&
+        cancelledRead.body.cancelReason === 'Supplier withdrew the quote' &&
+        cancelledRead.body.canDelete === true &&
+        strangerDel.status === 403 &&
+        delWithLive.status === 400 &&
+        deleted.status === 200 &&
+        goneRow === null &&
+        !(await prisma.receiving.findUnique({ where: { id: deadReport.id } })) &&
+        deletedRow === 1,
+      `${delPending.status} ${delWithLive.status} ${cancelShort.status} ${poCancelled.status} open ${openAfterCancel} ${cancelledRead.body.status} ${strangerDel.status} ${deleted.status} ${deletedRow}`,
+    );
+
     // An order placed from an awarded canvass keeps its supplier.
     const otherSupplier = await prisma.supplier.create({
       data: { code: `${TAG}-S2`, name: `${TAG} Other Supply` },
@@ -1215,6 +1364,22 @@ async function main() {
     });
     const sheetId = String(sheetA.body.id);
     const sheetRead = await api(requesterToken, 'GET', `/purchase-requests/${sheetId}`);
+    // View Own covers one's DIRECT REPORTS' requests (2026-10-19); "Mine" is one's own.
+    {
+      const prBoss = await mkUser('Verify PR Boss', 'prboss@verifyc.local', requesterRole.id);
+      const bossToken = signToken(prBoss.id, prBoss.email);
+      await prisma.user.update({ where: { id: requester.id }, data: { supervisorId: prBoss.id } });
+      const ids = (b: { rows?: { id: string }[] }) => (b.rows ?? []).map((r) => r.id);
+      const bossAll = await api(bossToken, 'GET', '/purchase-requests?pageSize=200');
+      const bossMine = await api(bossToken, 'GET', '/purchase-requests?pageSize=200&scope=mine');
+      const colleague = await api(otherRequesterToken, 'GET', '/purchase-requests?pageSize=200');
+      await prisma.user.update({ where: { id: requester.id }, data: { supervisorId: leader.id } });
+      check(
+        "a View Own holder lists a direct report's purchase requests; \"Mine\" and a colleague do not",
+        ids(bossAll.body).includes(sheetId) && !ids(bossMine.body).includes(sheetId) && !ids(colleague.body).includes(sheetId),
+        `${bossAll.status} ${bossMine.status} ${colleague.status}`,
+      );
+    }
     const sheetItems = (sheetRead.body.items ?? []) as { id: string; name: string | null; partNumber: string | null; description: string; estimatedAmount: number; costCategory: { id: string } | null }[];
     check(
       'POST /purchase-requests takes the header and its lines in one save',
@@ -1780,7 +1945,7 @@ async function main() {
       bigPulled.status === 200 &&
         draftPdf.status === 200 &&
         signedCount(draftText) === 1 &&
-        draftText.includes('Verify PM') &&
+        flat(draftText).includes('Verify PM') &&
         flat(draftText).includes('Status: Draft') &&
         pendingCount(draftText) === bigSteps.length &&
         bigSteps.every((st) => flat(draftText).includes(st.name.toUpperCase())),
@@ -2412,6 +2577,15 @@ async function main() {
       const partial = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/suppliers/${lateRow!.id}/quote`, {
         quotes: [{ requestItemId: trayLine.id, unitPrice: 1_100 }],
       });
+      // A recorded quote is removed (2026-10-19): its prices go, the supplier
+      // stays asked, the RFQ stays QUOTED while another quote stands.
+      const removedQuote = await api(rfqBuyerToken, 'DELETE', `/rfqs/${rfqId}/suppliers/${lateRow!.id}/quote?reason=${encodeURIComponent(`${TAG} wrong file`)}`);
+      const lateQuotesLeft = await prisma.rfqQuote.count({ where: { rfqSupplierId: lateRow!.id } });
+      const rfqAfterRemove = await prisma.rfq.findUniqueOrThrow({ where: { id: rfqId } });
+      const removedAgain = await api(rfqBuyerToken, 'DELETE', `/rfqs/${rfqId}/suppliers/${lateRow!.id}/quote`);
+      const partialAgain = await api(rfqBuyerToken, 'PUT', `/rfqs/${rfqId}/suppliers/${lateRow!.id}/quote`, {
+        quotes: [{ requestItemId: trayLine.id, unitPrice: 1_100 }],
+      });
       const draftRfq = await api(rfqBuyerToken, 'POST', '/rfqs', { requestId: rfqPr.id, itemIds: [bracketLine.id] });
       const fromDraftRfq = await api(sheetToken, 'POST', '/canvasses', { rfqId: draftRfq.body.id });
       await api(rfqBuyerToken, 'DELETE', `/rfqs/${String(draftRfq.body.id)}`);
@@ -2427,6 +2601,19 @@ async function main() {
       );
       const sheetId = String(sheetMade.body.id);
       const secondSheet = await api(sheetToken, 'POST', '/canvasses', { rfqId });
+      const removeWhileCompared = await api(rfqBuyerToken, 'DELETE', `/rfqs/${rfqId}/suppliers/${keepRow.id}/quote`);
+      check(
+        'a supplier\'s quote is removed — the supplier stays asked, the RFQ stays quoted — and refused once removed, or while a canvass compares the RFQ',
+        removedQuote.status === 200 &&
+          lateQuotesLeft === 0 &&
+          rfqAfterRemove.status === 'QUOTED' &&
+          (removedQuote.body.suppliers as { id: string; quotedCount: number }[]).some((r) => r.id === lateRow!.id && r.quotedCount === 0) &&
+          removedAgain.status === 400 &&
+          partialAgain.status === 200 &&
+          removeWhileCompared.status === 400 &&
+          /cancel it first/.test(String(removeWhileCompared.body.error)),
+        `${removedQuote.status} ${lateQuotesLeft} ${rfqAfterRemove.status} again ${removedAgain.status} compared ${removeWhileCompared.status} ${String(removeWhileCompared.body.error)}`,
+      );
       const sheetRow = await prisma.canvass.findUniqueOrThrow({ where: { id: sheetId }, include: { suppliers: { include: { quotes: true } } } });
       check(
         'a sheet is raised only from an RFQ that went out, one live at a time, snapshotting its lines and the suppliers that quoted with their quotes',
@@ -2558,8 +2745,8 @@ async function main() {
       const rfqAudits = await prisma.auditLog.groupBy({ by: ['action'], where: { entityType: 'rfq', entityId: rfqId }, _count: true });
       const auditOf = (a: string) => rfqAudits.find((r) => r.action === a)?._count ?? 0;
       check(
-        'prepared, every change, each print, the cancel and the delete are audited',
-        auditOf('CREATED') === 1 && auditOf('UPDATED') >= 4 && auditOf('EXPORTED') >= 2 && auditOf('CANCELLED') === 1 && auditOf('DELETED') === 1,
+        'prepared, every change, each print, the quote removed, the cancel and the delete are audited',
+        auditOf('CREATED') === 1 && auditOf('UPDATED') >= 4 && auditOf('EXPORTED') >= 2 && auditOf('CANCELLED') === 1 && auditOf('DELETED') === 2,
         JSON.stringify(rfqAudits),
       );
       await prisma.auditLog.deleteMany({ where: { entityType: 'rfq', entityId: { in: [rfqId, 'list'] } } });
@@ -2990,6 +3177,37 @@ async function main() {
       issuedEdit.status === 400 && issuedDelete.status === 400 && issuedFlags.body.canEdit === false && issuedFlags.body.canDelete === false,
       `${issuedEdit.status} ${issuedDelete.status}`,
     );
+    // A draft or pending slip is cancelled with its reason (a pending one's
+    // request withdrawn), and a cancelled slip deleted; an issued one is
+    // refused both (2026-10-19, the owner's call).
+    {
+      const made = await api(keeperToken, 'POST', '/stock-issues', { warehouseId: warehouse.id, purpose: `${TAG} issue to cancel` });
+      const goneId = String(made.body.id);
+      await api(keeperToken, 'POST', `/stock-issues/${goneId}/items`, { itemId: item.id, quantity: 1 });
+      const sent = await api(keeperToken, 'POST', `/stock-issues/${goneId}/submit`);
+      const noReason = await api(keeperToken, 'POST', `/stock-issues/${goneId}/cancel`, { reason: '' });
+      const cancelled = await api(keeperToken, 'POST', `/stock-issues/${goneId}/cancel`, { reason: `${TAG} not needed` });
+      const request = await prisma.approvalRequest.findFirst({ where: { documentType: 'stock_issue', documentId: goneId }, orderBy: { createdAt: 'desc' } });
+      const issuedCancel = await api(bossToken, 'POST', `/stock-issues/${draftIssueId}/cancel`, { reason: `${TAG} too late` });
+      const flags = await api(bossToken, 'GET', `/stock-issues/${goneId}`);
+      const deleted = await api(bossToken, 'DELETE', `/stock-issues/${goneId}`);
+      const row = await prisma.stockIssue.findUnique({ where: { id: goneId } });
+      check(
+        'a pending outgoing slip is cancelled with its reason, its request withdrawn, then deleted; an issued one cannot be cancelled',
+        sent.status === 200 &&
+          noReason.status === 400 &&
+          cancelled.status === 200 &&
+          cancelled.body.status === 'CANCELLED' &&
+          cancelled.body.cancelReason === `${TAG} not needed` &&
+          request?.status === 'CANCELLED' &&
+          issuedCancel.status === 400 &&
+          flags.body.canDelete === true &&
+          flags.body.canCancel === false &&
+          deleted.status === 200 &&
+          row === null,
+        `submit ${sent.status}; ${noReason.status} ${cancelled.status} ${cancelled.body.status}; request ${request?.status}; issued ${issuedCancel.status}; flags ${flags.body.canDelete}/${flags.body.canCancel}; delete ${deleted.status} ${JSON.stringify(deleted.body).slice(0, 120)}`,
+      );
+    }
     // Issued, the paper dates who prepared it and the supervisor who approved
     // it; "Received in good order by" waits for the receiver to confirm it
     // (2026-10-15, the owner's call: Outgoing is the internal receive proof).
@@ -3519,6 +3737,29 @@ async function main() {
       );
       const outCancel = await api(keeperToken, 'POST', `/borrow-slips/${dueId}/cancel`, { reason: `${TAG} too late` });
       check('a slip already out is not cancelled — its items are taken back instead', outCancel.status === 400, String(outCancel.status));
+      // A cancelled request is deleted by a delete holder (2026-10-19, the
+      // owner's call); a slip on loan is the record of what went out.
+      const borrowDelRole = await makeRole('zzchain_borrowdel', 'ZZ Borrow deleter', [
+        'gchain.borrow_slips.view_all',
+        'gchain.borrow_slips.edit_all',
+        'gchain.borrow_slips.delete',
+      ]);
+      const borrowDeleter = await mkUser('Verify Borrow Deleter', 'borrowdel@verifyc.local', borrowDelRole.id);
+      const borrowDelToken = signToken(borrowDeleter.id, borrowDeleter.email);
+      const noRight = await api(borrowerToken, 'DELETE', `/borrow-slips/${thirdId}`);
+      const delFlags = await api(borrowDelToken, 'GET', `/borrow-slips/${thirdId}`);
+      const outDelete = await api(borrowDelToken, 'DELETE', `/borrow-slips/${dueId}`);
+      const goneDelete = await api(borrowDelToken, 'DELETE', `/borrow-slips/${thirdId}`);
+      check(
+        'a cancelled borrow request is deleted by a delete holder; without the right, or once on loan, it is refused',
+        noRight.status === 403 &&
+          delFlags.body.canDelete === true &&
+          outDelete.status === 400 &&
+          goneDelete.status === 200 &&
+          (await prisma.borrowSlip.findUnique({ where: { id: thirdId } })) === null &&
+          (await prisma.borrowSlip.findUnique({ where: { id: dueId } })) !== null,
+        `${noRight.status}; flags ${delFlags.body.canDelete}; out ${outDelete.status}; delete ${goneDelete.status} ${JSON.stringify(goneDelete.body).slice(0, 120)}`,
+      );
     }
 
     // ── Pull-out slips (2026-10-14) ──────────────────────────────────────
@@ -3527,7 +3768,7 @@ async function main() {
     // approved by the preparer's "Reports to"; nothing moves before.
     console.log('\nPull-out slips (over HTTP)');
     {
-      const pullerRole = await makeRole('zzchain_puller', 'ZZ Puller', ['gchain.pullout_slips.view_all', 'gchain.pullout_slips.create']);
+      const pullerRole = await makeRole('zzchain_puller', 'ZZ Puller', ['gchain.pullout_slips.view_all', 'gchain.pullout_slips.create', 'gchain.pullout_slips.edit_own']);
       const puller = await mkUser('Verify Puller', 'puller@verifyc.local', pullerRole.id);
       await prisma.user.update({ where: { id: puller.id }, data: { supervisorId: boss.id } });
       const pullerToken = signToken(puller.id, puller.email);
@@ -3681,6 +3922,31 @@ async function main() {
           !!(await prisma.auditLog.findFirst({ where: { entityType: 'pullout_slip', entityId: secondId, summary: { contains: 'not applied' } } })),
         `${secondCancel.status} ${secondRow.status}`,
       );
+      // A cancelled slip is deleted by a delete holder (2026-10-19, the
+      // owner's call); a pulled-out one is the record of stock that left.
+      {
+        const deleterRole = await makeRole('zzchain_pulldel', 'ZZ Pull-out deleter', [
+          'gchain.pullout_slips.view_all',
+          'gchain.pullout_slips.edit_all',
+          'gchain.pullout_slips.delete',
+        ]);
+        const deleter = await mkUser('Verify Pull Deleter', 'pulldel@verifyc.local', deleterRole.id);
+        const deleterToken = signToken(deleter.id, deleter.email);
+        const noRight = await api(pullerToken, 'DELETE', `/pullout-slips/${secondId}`);
+        const flags = await api(deleterToken, 'GET', `/pullout-slips/${secondId}`);
+        const pulledDelete = await api(deleterToken, 'DELETE', `/pullout-slips/${slipId}`);
+        const gone = await api(deleterToken, 'DELETE', `/pullout-slips/${secondId}`);
+        check(
+          'a cancelled pull-out slip is deleted by a delete holder; without the right, or once pulled out, it is refused',
+          noRight.status === 403 &&
+            flags.body.canDelete === true &&
+            pulledDelete.status === 400 &&
+            gone.status === 200 &&
+            (await prisma.pulloutSlip.findUnique({ where: { id: secondId } })) === null &&
+            (await prisma.pulloutSlip.findUnique({ where: { id: slipId } })) !== null,
+          `${noRight.status}; flags ${flags.body.canDelete}; pulled ${pulledDelete.status}; delete ${gone.status} ${JSON.stringify(gone.body).slice(0, 120)}`,
+        );
+      }
 
       // A sales order: the customer's delivery. No project was built from
       // its quotation, so the order is the whole reference and no job pays.
@@ -3928,7 +4194,7 @@ async function main() {
     // count against what the order can still take, so two reports cannot
     // both receive the last ten.
     console.log('\nIncoming on approval (over HTTP)');
-    const receiverRole = await makeRole('zzchain_receiver', 'ZZ Receiver', ['gchain.receiving.view_all', 'gchain.receiving.create']);
+    const receiverRole = await makeRole('zzchain_receiver', 'ZZ Receiver', ['gchain.receiving.view_all', 'gchain.receiving.create', 'gchain.receiving.delete']);
     const receiver = await mkUser('Verify Receiver', 'receiver@verifyc.local', receiverRole.id);
     await prisma.user.update({ where: { id: receiver.id }, data: { supervisorId: boss.id } });
     // Incoming routes to Back Support, then the Purchasing Manager
@@ -4146,6 +4412,15 @@ async function main() {
     check('a cancelled report gives its quantity back: the last four may be received again', afterCancelIn.status === 201, String(afterCancelIn.status));
     const receivedCancel = await api(receiverToken, 'POST', `/receivings/${firstInId}/cancel`, { reason: `${TAG} too late` });
     check('a received report is not cancelled — the goods are in', receivedCancel.status === 400, String(receivedCancel.status));
+    // A cancelled report posted nothing, so it may be deleted (2026-10-19); a received one may not.
+    const receivedDelete = await api(receiverToken, 'DELETE', `/receivings/${firstInId}`);
+    const cancelledDelete = await api(receiverToken, 'DELETE', `/receivings/${fitsInId}`);
+    const deletedReportAudit = await prisma.auditLog.count({ where: { entityType: 'receiving', entityId: fitsInId, action: 'DELETED' } });
+    check(
+      'a cancelled incoming report is deleted by its receiver, audited; a received one is not',
+      receivedDelete.status === 400 && cancelledDelete.status === 200 && !(await prisma.receiving.findUnique({ where: { id: fitsInId } })) && deletedReportAudit === 1,
+      `${receivedDelete.status} ${cancelledDelete.status} ${deletedReportAudit}`,
+    );
 
     // A supplier's bill is matched to goods RECEIVED, never to a report
     // still waiting for its approval — that one posted nothing.
