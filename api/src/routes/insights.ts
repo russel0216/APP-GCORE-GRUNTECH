@@ -169,7 +169,7 @@ insightRoutes.get(
       }),
       stockOnHand(),
       prisma.serviceContract.count({ where: { status: 'ACTIVE' } }),
-      prisma.serviceVisit.count({ where: { status: 'SCHEDULED', dueDate: { lte: today } } }),
+      prisma.serviceVisit.count({ where: { status: { in: ['SCHEDULED', 'CONFIRMED'] }, dueDate: { lte: today } } }),
       prisma.approvalRequest.count({ where: { status: 'PENDING' } }),
       prisma.employee.count({ where: { isActive: true } }),
       companySummary(me, req.query, asOf),

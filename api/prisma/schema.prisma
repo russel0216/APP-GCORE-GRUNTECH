@@ -135,6 +135,7 @@ model User {
   assetsCreated       InstalledAsset[]  @relation("AssetCreator")
   contractsCreated    ServiceContract[] @relation("ContractCreator")
   visitsAssigned      ServiceVisit[]    @relation("VisitEngineer")
+  visitsConfirmed     ServiceVisit[]    @relation("VisitConfirmer")
   templatesAuthored   ReportTemplate[]  @relation("TemplateAuthor")
   reportsPerformed    ServiceReport[]   @relation("ReportAuthor")
   jobOrdersRequested  JobOrder[]        @relation("JobOrderRequester")
@@ -4992,6 +4993,9 @@ enum ServiceKind {
 
 enum VisitStatus {
   SCHEDULED
+  /// Booked AND agreed with the customer (2026-10-20): still open — overdue,
+  /// missed and due read it as SCHEDULED — only confirmed.
+  CONFIRMED
   COMPLETED
   MISSED
   CANCELLED
@@ -5024,6 +5028,14 @@ model ServiceVisit {
   sequence    Int?
   dueDate     DateTime  @db.Date
   performedAt DateTime? @db.Date
+  /// The slot on the day (2026-10-20, the owner's spec): "HH:MM" both, or
+  /// neither for a full-day site visit — `visitSlot()` is the one rule.
+  startTime   String?
+  endTime     String?
+  /// Confirmed with the customer — by the engineer on it or Edit All.
+  confirmedAt   DateTime?
+  confirmedById String?
+  confirmedBy   User?     @relation("VisitConfirmer", fields: [confirmedById], references: [id], onDelete: SetNull)
 
   assignedToId String?
   assignedTo   User?   @relation("VisitEngineer", fields: [assignedToId], references: [id], onDelete: SetNull)

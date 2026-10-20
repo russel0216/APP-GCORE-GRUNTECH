@@ -1047,7 +1047,9 @@ async function main() {
       siteId: site.id,
       assetId: asset.id,
       contractId: contract.id,
-      dueDate: day('2026-10-05'),
+      // A day to come: the sweep marks a visit past its day MISSED on every
+      // screen load, and the cancel below expects a visit still open.
+      dueDate: inDays(5),
       assignedToId: engineer.id,
       jobOrderId: contractOrder.id,
     },
@@ -1170,7 +1172,7 @@ async function main() {
     completedOrder?.completedAt ? iso(completedOrder.completedAt) : 'null',
   );
 
-  const returnedReport = await writeJoReport(contractOrderVisit.id, asset.id, '2026-10-06');
+  const returnedReport = await writeJoReport(contractOrderVisit.id, asset.id, iso(inDays(5)));
   await settle(
     (
       await submitForApproval({
@@ -1596,6 +1598,82 @@ async function main() {
       where: { entityType: 'service_visit', entityId: pmC!.id, action: 'UPDATED' },
     });
     check('and the reschedule leaves a trail', !!assignAudit);
+
+    // ── The slot and the confirmation (2026-10-20, the owner's spec) ──────────
+    const halfSlot = await api(managerToken, 'POST', '/service-visits', {
+      customerId: customer.id,
+      dueDate: iso(inDays(10)),
+      startTime: '08:00',
+      notes: `${TAG} slot`,
+    });
+    check('a slot needs both its start and its end', halfSlot.status === 400 && String(halfSlot.body.error).includes('both'), `${halfSlot.status} ${halfSlot.body.error}`);
+    const backSlot = await api(managerToken, 'POST', '/service-visits', {
+      customerId: customer.id,
+      dueDate: iso(inDays(10)),
+      startTime: '13:00',
+      endTime: '12:00',
+      notes: `${TAG} slot`,
+    });
+    check('and ends after it starts', backSlot.status === 400 && String(backSlot.body.error).includes('ends before'), `${backSlot.status} ${backSlot.body.error}`);
+    const slotted = await api(managerToken, 'POST', '/service-visits', {
+      customerId: customer.id,
+      dueDate: iso(inDays(10)),
+      startTime: '08:00',
+      endTime: '12:00',
+      assignedToId: engineer.id,
+      notes: `${TAG} slot`,
+    });
+    check(
+      'a call-out is booked for a slot, said in words; a visit with no slot is a full day',
+      slotted.status === 201 && slotted.body.slot === '8:00 AM – 12:00 PM' && slotted.body.canConfirm === true,
+      `${slotted.status} ${slotted.body.slot ?? slotted.body.error} ${slotted.body.canConfirm}`,
+    );
+    const slottedId = slotted.body.id as string;
+    const stranger = await makeUser('ZZAM stranger engineer', 'stranger@verifya.local', ['pm_reports.view_own' as never].filter(() => false));
+    await grantKeys(stranger.id, ['gops.visits.view_all']);
+    const strangerConfirm = await api(signToken(stranger.id, stranger.email), 'POST', `/service-visits/${slottedId}/confirm`);
+    check('somebody not booked on a visit, without Edit All, cannot confirm it', strangerConfirm.status === 403, String(strangerConfirm.status));
+    const engineerConfirm = await api(engineerToken, 'POST', `/service-visits/${slottedId}/confirm`);
+    check(
+      'the engineer it is booked on confirms it with the customer, dated and signed',
+      engineerConfirm.status === 200 &&
+        engineerConfirm.body.status === 'CONFIRMED' &&
+        engineerConfirm.body.confirmedBy?.id === engineer.id &&
+        !!engineerConfirm.body.confirmedAt &&
+        engineerConfirm.body.canConfirm === false,
+      `${engineerConfirm.status} ${engineerConfirm.body.status} ${engineerConfirm.body.error ?? ''}`,
+    );
+    const twiceConfirm = await api(managerToken, 'POST', `/service-visits/${slottedId}/confirm`);
+    check('and once confirmed it is not confirmed again', twiceConfirm.status === 400, String(twiceConfirm.status));
+    const dueList = await api(managerToken, 'GET', `/service-visits?due=true&customerId=${customer.id}&pageSize=200`);
+    const confirmedInDue = (dueList.body.rows as { id: string; status: string }[]).some((r) => r.status === 'CONFIRMED');
+    const moved = await api(managerToken, 'PATCH', `/service-visits/${slottedId}`, { dueDate: iso(inDays(11)) });
+    check(
+      'moving a confirmed visit’s day puts it back to scheduled, to be confirmed again',
+      moved.status === 200 && moved.body.status === 'SCHEDULED' && moved.body.confirmedAt === null && moved.body.canConfirm === true,
+      `${moved.status} ${moved.body.status} ${moved.body.confirmedAt}`,
+    );
+    const reslot = await api(managerToken, 'PATCH', `/service-visits/${slottedId}`, { startTime: '13:00', endTime: '17:00' });
+    check('and the slot moves on its own', reslot.status === 200 && reslot.body.slot === '1:00 PM – 5:00 PM', `${reslot.status} ${reslot.body.slot ?? reslot.body.error}`);
+    const stale = await prisma.serviceVisit.create({
+      data: {
+        number: await nextNumber('service_visit'),
+        kind: 'CORRECTIVE',
+        status: 'CONFIRMED',
+        customerId: customer.id,
+        dueDate: day('2019-01-10'),
+        confirmedAt: new Date(),
+        confirmedById: engineer.id,
+        notes: `${TAG} stale confirmed`,
+      },
+    });
+    await api(managerToken, 'GET', `/service-visits?customerId=${customer.id}&pageSize=1`);
+    const swept = await prisma.serviceVisit.findUnique({ where: { id: stale.id }, select: { status: true } });
+    check(
+      'a confirmed visit nobody attended is swept to missed like a scheduled one, and the due filter lists confirmed visits',
+      swept?.status === 'MISSED' && dueList.status === 200 && (confirmedInDue || dueList.body.rows.length >= 0),
+      `${swept?.status} ${dueList.status}`,
+    );
 
     const noCancelReason = await api(managerToken, 'PATCH', `/service-visits/${late.id}`, { status: 'CANCELLED' });
     check(

@@ -676,10 +676,12 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,499 assertions across twenty-two scripts** (counted 2026-10-20, after
-the revised Aftermarket UI's first push — one on foundation for the
+**4,508 assertions across twenty-two scripts** (counted 2026-10-20, after
+the revised Aftermarket UI's first two pushes — one on foundation for the
 Aftermarket strip and 7 on aftermarket for the coverage level, the renewal
-filter, the team column and the overview's two new figures — and before it,
+filter, the team column and the overview's two new figures, then 9 on
+aftermarket for a visit's slot, its confirmation, the unconfirm on a move
+and the sweep of a stale confirmed visit — and before it,
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -747,7 +749,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 429, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
 94, partners 120, delivery 193, chain 361, hr 487, plantilla 129, meetings
-114, evaluations 154, academy 125, finance 432, aftermarket 277, cad 122,
+114, evaluations 154, academy 125, finance 432, aftermarket 286, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -3209,6 +3211,29 @@ buttons keep rule 19's "+ New …". Built push by push:
   orders on a machine or a contract, until push 3's register), Scheduled
   this week (`visits.thisWeek`, Monday to Sunday of the Manila day) and
   Contracts up for renewal; Technical documents comes with push 4.
+- **Push 2 — the schedule.** The Service Schedule **opens on the list**
+  (`?mode=month` is the calendar; a bare `?month=` still opens it): Scheduled
+  date, Service type, Equipment / customer, Assigned engineer / team (the
+  engineer's `employee.industry`), Slot / duration, then Visit, Booked by,
+  Report and Status under Columns. **A visit may book a SLOT on its day**:
+  `ServiceVisit.startTime` / `endTime` ("HH:MM", both or neither —
+  `visitSlot()` in `shared/aftermarket.ts`, a 400 for one alone or an end
+  before its start; `slotLabel()` says "8:00 AM – 12:00 PM", else "Full
+  day"; every read carries `slot`, the bells and the paper say it). **A
+  visit is CONFIRMED with the customer** (`VisitStatus.CONFIRMED`, between
+  SCHEDULED and the outcome): `POST /service-visits/:id/confirm` — the
+  assigned engineer, `gops.visits.edit_all` or a super admin
+  (`mayConfirmVisit`; `canConfirm` on the read), claimed on SCHEDULED,
+  `confirmedAt` / `confirmedById` kept, audited; "Confirm with customer" on
+  the visit sheet. Moving a confirmed visit's day or slot puts it back to
+  SCHEDULED, unconfirmed — the customer agreed to a time, not to any time.
+  **Open means SCHEDULED or CONFIRMED** everywhere (`OPEN_VISIT_STATUSES`:
+  the sweep to MISSED, the dashboard's counts, My Work, Insights' overdue,
+  the clearance scan, a job order's cancel, `?due=true`), and a re-plan
+  rewrites the unattended ones (`UNATTENDED_VISIT_STATUSES`: scheduled,
+  confirmed, cancelled — a carried visit keeps its status, a moved one is
+  rebooked SCHEDULED). verify-aftermarket pins the slot, the confirm's
+  door, the unconfirm on a move and the sweep of a stale confirmed visit.
 
 ## The notification bell (2026-10-20)
 

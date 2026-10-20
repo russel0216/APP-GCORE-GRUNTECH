@@ -1028,7 +1028,7 @@ jobOrderRoutes.post(
 
     await prisma.$transaction(async (tx) => {
       // An order raised as a service call before 2026-10-09 may still carry a visit.
-      if (row.visit && row.visit.status === 'SCHEDULED') {
+      if (row.visit && (row.visit.status === 'SCHEDULED' || row.visit.status === 'CONFIRMED')) {
         await tx.serviceVisit.update({ where: { id: row.visit.id }, data: { status: 'CANCELLED' } });
       }
       await tx.jobOrder.update({

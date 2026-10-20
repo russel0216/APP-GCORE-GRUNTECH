@@ -47,6 +47,10 @@ import {
   currentTemplate,
   renewalPipeline,
   sweepOverdue,
+  OPEN_VISIT_STATUSES,
+  UNATTENDED_VISIT_STATUSES,
+  visitSlot,
+  slotLabel,
   type TemplateSection,
 } from '../shared/aftermarket';
 import { visibleOwners } from '../shared/team';
@@ -388,8 +392,8 @@ assetRoutes.get(
           take: 50,
         },
         visits: {
-          where: { status: { in: ['SCHEDULED', 'MISSED'] } },
-          select: { id: true, number: true, dueDate: true, kind: true, status: true },
+          where: { status: { in: [...OPEN_VISIT_STATUSES, 'MISSED'] } },
+          select: { id: true, number: true, dueDate: true, kind: true, status: true, startTime: true, endTime: true },
           orderBy: { dueDate: 'asc' },
           take: 10,
         },
@@ -996,7 +1000,7 @@ contractRoutes.get(
         planned: row.plannedVisits,
         completed,
         missed: row.visits.filter((v) => v.status === 'MISSED').length,
-        remaining: row.visits.filter((v) => v.status === 'SCHEDULED').length,
+        remaining: row.visits.filter((v) => OPEN_VISIT_STATUSES.includes(v.status)).length,
       },
     });
   }),
@@ -1163,7 +1167,7 @@ async function assertNoReportOnReplannedVisits(tx: Prisma.TransactionClient, con
     where: {
       contractId,
       sequence: { not: null },
-      status: { in: ['SCHEDULED', 'CANCELLED'] },
+      status: { in: UNATTENDED_VISIT_STATUSES },
       report: { isNot: null },
     },
     select: { number: true, report: { select: { number: true } } },
@@ -1533,8 +1537,10 @@ contractRoutes.patch(
         // one gets back what it was — status, day, engineer, notes.
         for (const visit of carried) {
           const restored = await tx.serviceVisit.updateMany({
-            where: { contractId: contract.id, sequence: visit.sequence, status: { in: ['SCHEDULED', 'CANCELLED'] } },
+            where: { contractId: contract.id, sequence: visit.sequence, status: { in: UNATTENDED_VISIT_STATUSES } },
             data: {
+              // A confirmed visit left on its day stays confirmed; one the
+              // plan moved was written afresh and waits to be confirmed again.
               status: visit.status,
               dueDate: visit.dueDate,
               assignedToId: visit.assignedToId,
@@ -1547,7 +1553,7 @@ contractRoutes.patch(
         }
         regenerated = { ...result, carried: carried.length };
         written = await tx.serviceVisit.findMany({
-          where: { contractId: contract.id, sequence: { not: null }, status: { in: ['SCHEDULED', 'CANCELLED'] } },
+          where: { contractId: contract.id, sequence: { not: null }, status: { in: UNATTENDED_VISIT_STATUSES } },
           select: visitFields,
           orderBy: { sequence: 'asc' },
         });
@@ -1624,7 +1630,9 @@ const visitInclude = {
   customer: { select: { id: true, name: true } },
   site: { select: { id: true, name: true, city: true } },
   asset: { select: { id: true, code: true, name: true, serialNo: true } },
-  assignedTo: { select: { id: true, name: true } },
+  // The engineer's team (KAT, HIT …) is the schedule's "Engineer / team" column (2026-10-20).
+  assignedTo: { select: { id: true, name: true, employee: { select: { industry: { select: { id: true, code: true, name: true } } } } } },
+  confirmedBy: { select: { id: true, name: true } },
   report: { select: { id: true, number: true, status: true, performedAt: true } },
   // Why a visit with no contract sequence exists: the job order that asked for it.
   jobOrder: { select: { id: true, number: true, status: true } },
@@ -1692,16 +1700,27 @@ function visitWhere(
 }
 
 /** Derived on read, never stored: a stored flag is wrong the moment midnight passes. */
-function presentVisit<T extends { status: string; dueDate: Date; assignedToId: string | null }>(row: T, today: Date, me?: ResolvedUser) {
+function presentVisit<T extends { status: string; dueDate: Date; assignedToId: string | null; startTime?: string | null; endTime?: string | null }>(
+  row: T,
+  today: Date,
+  me?: ResolvedUser,
+) {
   return {
     ...row,
     daysUntilDue: daysBetween(today, row.dueDate),
-    overdue: row.status === 'SCHEDULED' && row.dueDate < today,
+    overdue: OPEN_VISIT_STATUSES.includes(row.status as VisitStatus) && row.dueDate < today,
+    slot: slotLabel(row.startTime ?? null, row.endTime ?? null),
     // Move, assign, cancel: Edit All, or Edit Own on a visit assigned to the
     // viewer (2026-10-18).
     ...(me ? { canEdit: mayEdit(me, 'gops', 'visits', row.assignedToId === me.id, row.assignedToId) } : {}),
+    // Confirm with the customer (2026-10-20): the engineer it is booked on, or Edit All.
+    ...(me ? { canConfirm: row.status === 'SCHEDULED' && mayConfirmVisit(me, row.assignedToId) } : {}),
   };
 }
+
+/** Who confirms a visit with the customer: the engineer booked on it, or Edit All. */
+const mayConfirmVisit = (me: ResolvedUser, assignedToId: string | null) =>
+  me.isSuperAdmin || me.permissions.has('gops.visits.edit_all') || (!!assignedToId && assignedToId === me.id);
 
 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
 
@@ -1887,19 +1906,22 @@ visitRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Due', 'Customer and machine', 'Kind', 'Booked by', 'Engineer', 'Report', 'Status'],
+          // The screen's columns (2026-10-20): the slot beside the date, the
+          // engineer's team under their name.
+          head: ['Number', 'Scheduled', 'Slot', 'Customer and machine', 'Service type', 'Booked by', 'Engineer / team', 'Report', 'Status'],
           rows: rows.map((r) => {
             const v = presentVisit(r, today);
-            const open = r.status === 'SCHEDULED' || r.status === 'MISSED';
+            const open = OPEN_VISIT_STATUSES.includes(r.status) || r.status === 'MISSED';
             const due =
               !open ? undefined : v.daysUntilDue === 0 ? 'Today' : v.daysUntilDue < 0 ? `${-v.daysUntilDue} day${v.daysUntilDue === -1 ? '' : 's'} late` : `In ${v.daysUntilDue} day${v.daysUntilDue === 1 ? '' : 's'}`;
             return [
               r.sequence && r.contract ? `${r.number}\nVisit ${r.sequence} of ${r.contract.plannedVisits}` : r.number,
               due ? `${formatShortDate(r.dueDate)}\n${due}` : formatShortDate(r.dueDate),
+              v.slot,
               { title: r.customer.name, body: r.asset ? `${r.asset.code} ${r.asset.name}` : (r.site?.name ?? undefined) },
               KIND_LABEL[r.kind] ?? statusLabel(r.kind),
               r.contract?.number ?? r.jobOrder?.number ?? 'Call-out',
-              r.assignedTo?.name ?? 'Unassigned',
+              r.assignedTo ? { title: r.assignedTo.name, body: r.assignedTo.employee?.industry?.code ?? undefined } : 'Unassigned',
               r.report?.number ?? '',
               v.overdue ? 'Overdue' : statusLabel(r.status),
             ];
@@ -1947,7 +1969,7 @@ function visitListWhere(me: ResolvedUser, q: ListQuery): Prisma.ServiceVisitWher
   const to = filterDay(q.filters.to, 'To');
   if (from || to) where.dueDate = { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) };
   if (q.filters.due === 'true') {
-    where.status = 'SCHEDULED';
+    where.status = { in: OPEN_VISIT_STATUSES };
     where.dueDate = { lte: dayKey(new Date()) };
   }
   if (q.search) {
@@ -1992,18 +2014,26 @@ const visitSchema = z.object({
   assetId: z.string().optional().nullable(),
   contractId: z.string().optional().nullable(),
   dueDate: z.string().min(1, 'When?'),
+  /** The slot on the day: both "HH:MM", or neither for a full-day visit. */
+  startTime: z.string().max(5).optional().nullable(),
+  endTime: z.string().max(5).optional().nullable(),
   assignedToId: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
 });
 
 const visitLink = (id: string) => `/g-ops/visits?visit=${id}`;
+/** "due 2026-10-22, 8:00 AM – 12:00 PM" — what a bell about a visit says. */
+const visitWhen = (v: { dueDate: Date; startTime: string | null; endTime: string | null }) =>
+  `due ${isoDay(v.dueDate)}${v.startTime ? `, ${slotLabel(v.startTime, v.endTime)}` : ''}`;
 
 /** An unscheduled call — a breakdown does not appear on a PM schedule. */
 visitRoutes.post(
   '/',
   require_('gops.visits.create'),
   handler(async (req, res) => {
+    const me = req.user!;
     const body = parseBody(visitSchema, req.body);
+    const slot = visitSlot(body.startTime, body.endTime);
     const visit = await prisma.$transaction(async (tx) =>
       tx.serviceVisit.create({
         data: {
@@ -2014,6 +2044,7 @@ visitRoutes.post(
           assetId: body.assetId || null,
           contractId: body.contractId || null,
           dueDate: asDate(body.dueDate, 'Due date'),
+          ...slot,
           assignedToId: body.assignedToId || null,
           notes: body.notes || null,
         },
@@ -2026,7 +2057,7 @@ visitRoutes.post(
         userId: visit.assignedToId,
         type: 'pm.due',
         title: `${KIND_LABEL[visit.kind]} visit assigned`,
-        body: `${visit.customer.name} — due ${isoDay(visit.dueDate)}`,
+        body: `${visit.customer.name} — ${visitWhen(visit)}`,
         link: visitLink(visit.id),
       });
     }
@@ -2040,7 +2071,7 @@ visitRoutes.post(
       },
       req,
     );
-    res.status(201).json(presentVisit(visit, dayKey(new Date())));
+    res.status(201).json(presentVisit(visit, dayKey(new Date()), me));
   }),
 );
 
@@ -2057,6 +2088,9 @@ visitRoutes.patch(
     const body = parseBody(
       z.object({
         dueDate: z.string().optional(),
+        /** The slot on the day; sent together, both "HH:MM" or both empty. */
+        startTime: z.string().max(5).optional().nullable(),
+        endTime: z.string().max(5).optional().nullable(),
         assignedToId: z.string().optional().nullable(),
         status: z.enum(['SCHEDULED', 'CANCELLED']).optional(),
         notes: z.string().optional().nullable(),
@@ -2082,12 +2116,22 @@ visitRoutes.patch(
       ? [baseNotes, `Cancelled ${isoDay(new Date())}: ${body.reason}`].filter(Boolean).join('\n')
       : baseNotes;
 
+    const slot = body.startTime !== undefined || body.endTime !== undefined ? visitSlot(body.startTime ?? visit.startTime, body.endTime ?? visit.endTime) : null;
+    const dueDate = body.dueDate ? asDate(body.dueDate, 'Due date') : visit.dueDate;
+    const slotMoved = !!slot && (slot.startTime !== visit.startTime || slot.endTime !== visit.endTime);
+    // A confirmed visit whose day or slot moves is an appointment the
+    // customer has not agreed to: it goes back to SCHEDULED, to be confirmed
+    // again (2026-10-20).
+    const unconfirm = visit.status === 'CONFIRMED' && !body.status && (dueDate.getTime() !== visit.dueDate.getTime() || slotMoved);
+
     const updated = await prisma.serviceVisit.update({
       where: { id: visit.id },
       data: {
-        ...(body.dueDate ? { dueDate: asDate(body.dueDate, 'Due date') } : {}),
+        ...(body.dueDate ? { dueDate } : {}),
+        ...(slot ?? {}),
         ...(body.assignedToId !== undefined ? { assignedToId: body.assignedToId || null } : {}),
         ...(body.status ? { status: body.status } : {}),
+        ...(unconfirm || body.status ? { status: body.status ?? 'SCHEDULED', confirmedAt: null, confirmedById: null } : {}),
         notes,
       },
       include: visitInclude,
@@ -2098,7 +2142,7 @@ visitRoutes.patch(
         userId: body.assignedToId,
         type: 'pm.due',
         title: `${KIND_LABEL[updated.kind]} visit assigned`,
-        body: `${updated.customer.name} — due ${isoDay(updated.dueDate)}`,
+        body: `${updated.customer.name} — ${visitWhen(updated)}`,
         link: visitLink(updated.id),
       });
     }
@@ -2107,10 +2151,12 @@ visitRoutes.patch(
       body.dueDate && isoDay(visit.dueDate) !== isoDay(updated.dueDate)
         ? `due ${isoDay(visit.dueDate)} → ${isoDay(updated.dueDate)}`
         : null,
+      slotMoved ? `slot ${slotLabel(updated.startTime, updated.endTime)}` : null,
       body.assignedToId !== undefined && body.assignedToId !== visit.assignedToId
         ? `engineer ${updated.assignedTo?.name ?? 'unassigned'}`
         : null,
       body.status && body.status !== visit.status ? `status ${visit.status} → ${body.status}` : null,
+      unconfirm ? 'to be confirmed again' : null,
     ].filter(Boolean);
     await audit(
       {
@@ -2123,6 +2169,48 @@ visitRoutes.patch(
       },
       req,
     );
+    res.json(presentVisit(updated, dayKey(new Date()), me));
+  }),
+);
+
+/**
+ * Confirmed with the customer (2026-10-20, the owner's spec): the engineer
+ * the visit is booked on, or Edit All — a reader on the schedule may hold
+ * no edit right and still be the one who phoned. Claimed on SCHEDULED, so
+ * two taps confirm it once; moving the day or the slot afterwards puts it
+ * back to SCHEDULED (the PATCH's rule).
+ */
+visitRoutes.post(
+  '/:id/confirm',
+  requireAny(...VISIT_VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const visit = await prisma.serviceVisit.findUnique({ where: { id: req.params.id }, include: visitInclude });
+    if (!visit) throw notFound('Visit not found');
+    if (!mayConfirmVisit(me, visit.assignedToId)) {
+      throw forbidden('Only the engineer this visit is booked on, or whoever manages the schedule, confirms it with the customer');
+    }
+    if (visit.status !== 'SCHEDULED') {
+      throw badRequest(visit.status === 'CONFIRMED' ? 'This visit is already confirmed' : `A ${statusLabel(visit.status).toLowerCase()} visit cannot be confirmed`);
+    }
+    const now = new Date();
+    const claimed = await prisma.serviceVisit.updateMany({
+      where: { id: visit.id, status: 'SCHEDULED' },
+      data: { status: 'CONFIRMED', confirmedAt: now, confirmedById: me.id },
+    });
+    if (!claimed.count) throw conflict('This visit changed a moment ago — reload it');
+    await audit(
+      {
+        entityType: 'service_visit',
+        entityId: visit.id,
+        action: 'UPDATED',
+        summary: `${visit.number} confirmed with ${visit.customer.name} — ${visitWhen(visit)}`,
+        before: { status: visit.status },
+        after: { status: 'CONFIRMED', confirmedAt: now, confirmedById: me.id },
+      },
+      req,
+    );
+    const updated = await prisma.serviceVisit.findUniqueOrThrow({ where: { id: visit.id }, include: visitInclude });
     res.json(presentVisit(updated, dayKey(new Date()), me));
   }),
 );
@@ -2986,13 +3074,13 @@ aftermarketRoutes.get(
       }),
       prisma.serviceContract.count({ where: { status: 'ACTIVE' } }),
       prisma.serviceContract.count({ where: { status: 'ACTIVE', endsAt: { lte: horizon } } }),
-      prisma.serviceVisit.count({ where: { status: 'SCHEDULED', dueDate: { lte: today } } }),
+      prisma.serviceVisit.count({ where: { status: { in: OPEN_VISIT_STATUSES }, dueDate: { lte: today } } }),
       prisma.serviceVisit.count({
-        where: { status: 'SCHEDULED', dueDate: { gt: today, lte: monthEnd } },
+        where: { status: { in: OPEN_VISIT_STATUSES }, dueDate: { gt: today, lte: monthEnd } },
       }),
       prisma.serviceVisit.count({ where: { status: 'MISSED' } }),
       prisma.serviceReport.count({ where: { status: 'PENDING_APPROVAL' } }),
-      prisma.serviceVisit.count({ where: { status: { in: ['SCHEDULED'] }, dueDate: { gte: weekStart, lte: weekEnd } } }),
+      prisma.serviceVisit.count({ where: { status: { in: OPEN_VISIT_STATUSES }, dueDate: { gte: weekStart, lte: weekEnd } } }),
       // Active service JOs (2026-10-20): open job orders raised for service
       // work — on a machine or a contract — awaiting approval or approved
       // and not yet done.
@@ -3236,7 +3324,7 @@ registerSchedule(async (user, window) => {
   const rows = await prisma.serviceVisit.findMany({
     where: {
       assignedToId: user.id,
-      status: 'SCHEDULED',
+      status: { in: OPEN_VISIT_STATUSES },
       dueDate: { gte: new Date(window.from.getTime() - pad), lte: new Date(window.to.getTime() + pad) },
     },
     orderBy: { dueDate: 'asc' },

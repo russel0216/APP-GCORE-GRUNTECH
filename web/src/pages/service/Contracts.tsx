@@ -798,7 +798,7 @@ export function ContractDetail() {
   }
 
   const today = todayLocal();
-  const nextDue = row.visits.find((v) => v.status === 'SCHEDULED' && v.dueDate.slice(0, 10) >= today);
+  const nextDue = row.visits.find((v) => (v.status === 'SCHEDULED' || v.status === 'CONFIRMED') && v.dueDate.slice(0, 10) >= today);
   const calendarHref = `/g-ops/visits?contractId=${row.id}&month=${monthOf(nextDue ? nextDue.dueDate.slice(0, 10) : today)}`;
   const canRenew =
     !row.renewedTo &&
@@ -1041,7 +1041,7 @@ export function ContractDetail() {
                     </td>
                     <td>
                       <VisitBadge
-                        visit={{ status: v.status, overdue: v.status === 'SCHEDULED' && v.dueDate.slice(0, 10) < today }}
+                        visit={{ status: v.status, overdue: (v.status === 'SCHEDULED' || v.status === 'CONFIRMED') && v.dueDate.slice(0, 10) < today }}
                       />
                     </td>
                   </tr>

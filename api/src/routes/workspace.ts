@@ -436,7 +436,8 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
       select: { id: true, number: true, name: true, status: true, targetEndDate: true, customer: { select: { name: true } } },
     }),
     prisma.serviceVisit.findMany({
-      where: { assignedToId: me.id, status: 'SCHEDULED' },
+      // Booked or confirmed with the customer: both still to be made (2026-10-20).
+      where: { assignedToId: me.id, status: { in: ['SCHEDULED', 'CONFIRMED'] } },
       orderBy: { dueDate: 'asc' },
       take: TAKE,
       select: {
