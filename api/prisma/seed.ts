@@ -223,34 +223,22 @@ const WORKFLOWS: WorkflowSeed[] = [
     standIns: true,
     steps: [{ sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' }],
   },
-  // REQUEST FOR APPROVAL (2026-10-13, the owner's call: "Internal Approval
-  // (Technical Manager, Team Leader and CEO more than 1 million Project
-  // Costing)"): a project's drawing or document, decided by the Technical
-  // Manager, then the preparer's Team Leader, and the CEO / President too
-  // when the PROJECT's contract value is above ₱1,000,000 (the amount the
-  // submit snapshots). The costing's two switches: a preparer who holds a
-  // step signs it at submit, and a manager may stand in.
+  // REQUEST FOR APPROVAL (2026-10-13; the CEO dropped 2026-10-20, the
+  // owner's call: "don't add CEO — only the technical manager and team leader
+  // or sales on the team who handles the project"): ONE route for any amount —
+  // the Technical Manager on the preparer's team (OWN_TEAM_ROLES), then the
+  // preparer's Team Leader (team-first). The two banded routes before it are
+  // RETIRED below; a request pending on one finishes on it. The costing's two
+  // switches: a preparer who holds a step signs it at submit, and a manager
+  // may stand in.
   {
     documentType: 'plan_approval',
-    name: 'Request for Approval — technical manager, team leader',
-    maxAmount: 1_000_000,
+    name: 'Request for Approval — technical manager, team leader (any amount)',
     preparerSigns: true,
     standIns: true,
     steps: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
-    ],
-  },
-  {
-    documentType: 'plan_approval',
-    name: 'Request for Approval — technical manager, team leader, then CEO / President over ₱1,000,000',
-    minAmount: 1_000_000.01,
-    preparerSigns: true,
-    standIns: true,
-    steps: [
-      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
-      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
-      { sequence: 3, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   // ── The owner's routing sheet (2026-10-12) ─────────────────────────────
@@ -829,6 +817,10 @@ async function main() {
     'Purchase Request — ₱50,000 and above',
     'Purchase Order — project manager then finance',
     'Budget Request — project manager then finance',
+    // The Request for Approval loses its CEO band (2026-10-20): one route,
+    // Technical Manager › Team Leader, whatever the project's value.
+    'Request for Approval — technical manager, team leader',
+    'Request for Approval — technical manager, team leader, then CEO / President over ₱1,000,000',
   ];
   for (const name of RETIRED) {
     const stale = await prisma.approvalWorkflow.findFirst({ where: { name, isActive: true } });

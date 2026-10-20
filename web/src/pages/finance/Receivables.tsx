@@ -2078,16 +2078,28 @@ interface PaymentsSummary {
   chequesClearedPct: number | null;
   teams: TeamShare[];
   history?: { count: number; amount: number };
+  repaid: number;
+  repayments: number;
+  /** Every payment in the list not cleared yet, either way. */
+  unclearedAll: number;
 }
 
 /**
- * The payments register — every movement of money, opening on what was
- * COLLECTED (the owner's "Payments menu to see collected", laid out on his
- * Payment & Collection sample): SI No., company, amount paid, date of
- * collection, cheque no., OR number, sales personnel and team, cleared.
- * Money out stays in the same register under Direction.
+ * The payments register, laid out on the owner's Payment & Collection
+ * sample: SI No., company, amount paid, date of collection, cheque no., OR
+ * number, sales personnel and team, cleared.
  */
-export function Payments() {
+/**
+ * One register over the payments table, two screens (2026-10-20, the owner's
+ * call: "the collection is intended for monitoring accounts receivable only").
+ * Collections lists money in FROM CUSTOMERS; Money out › Payments &
+ * Repayments lists money out and money a person pays back — a cash advance's
+ * repayment, a salary or commission deduction, unspent budget returned. The
+ * register is a preset (`initialFilters`), so each menu entry keeps its path.
+ */
+export function Payments({ register = 'collections' }: { register?: 'collections' | 'other' }) {
+  const collections = register === 'collections';
+  const base = collections ? '/g-fin/payments' : '/g-fin/payments-out';
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const { can } = useAuth();
@@ -2111,16 +2123,16 @@ export function Payments() {
     },
     {
       key: 'allocations',
-      label: 'SI No. / settles',
+      label: collections ? 'SI No. / settles' : 'Settles',
       render: (r) => <AllocationLinks row={r} />,
     },
     {
       key: 'party',
-      label: 'Company',
+      label: collections ? 'Company' : 'Paid to / by',
       render: (r) => (
         <div>
           <div>{partyName(r)}</div>
-          {r.kind !== 'RECEIPT' && <div className="faint">money out</div>}
+          <div className="faint">{r.kind === 'RECEIPT' ? (collections ? null : 'paid back') : 'money out'}</div>
         </div>
       ),
     },
@@ -2133,7 +2145,7 @@ export function Payments() {
     },
     {
       key: 'paymentDate',
-      label: 'Date of collection',
+      label: collections ? 'Date of collection' : 'Date',
       sortKey: 'paymentDate',
       render: (r) => formatDate(r.paymentDate),
     },
@@ -2185,14 +2197,14 @@ export function Payments() {
     {
       key: 'kind',
       label: 'Direction',
-      optional: true,
+      optional: collections,
       render: (r) => (
         <StatusBadge status={r.kind} extra={{ RECEIPT: 'ok', DISBURSEMENT: '' }} label={r.kind === 'RECEIPT' ? 'money in' : 'money out'} />
       ),
     },
   ];
 
-  const filters: FilterDef[] = [
+  const allFilters: FilterDef[] = [
     {
       key: 'kind',
       label: 'Direction',
@@ -2211,6 +2223,12 @@ export function Payments() {
         { value: 'CASH', label: 'Cash' },
         { value: 'ONLINE', label: 'Online' },
         { value: 'OFFSET', label: 'Offset' },
+        ...(collections
+          ? []
+          : [
+              { value: 'SALARY_DEDUCTION', label: 'Salary deduction' },
+              { value: 'COMMISSION_DEDUCTION', label: 'Commission deduction' },
+            ]),
       ],
     },
     {
@@ -2238,35 +2256,70 @@ export function Payments() {
         return `${c.name} · ${c.code}`;
       },
     },
-    { key: 'from', toKey: 'to', label: 'Date of collection', type: 'dateRange' },
+    { key: 'from', toKey: 'to', label: collections ? 'Date of collection' : 'Date', type: 'dateRange' },
   ];
+  // Collections are money in from customers: no direction to pick. The other
+  // register has no salesperson, team or customer to narrow by.
+  const filters = allFilters.filter((d) =>
+    collections ? d.key !== 'kind' : !['salespersonId', 'teamId', 'customerId'].includes(d.key),
+  );
 
   return (
     <div>
       <div className="page-head">
         <div>
-          <h1>Collections</h1>
+          <h1>{collections ? 'Collections' : 'Payments & Repayments'}</h1>
         </div>
       </div>
 
       <DataList<PaymentRow>
-        listKey="payments"
+        key={register}
+        listKey={collections ? 'payments' : 'payments-out'}
         endpoint="/payments"
         printPath="/api/payments/pdf"
-        reportPath="/g-fin/reports?kind=collections"
-        columns={columns}
+        reportPath={collections ? '/g-fin/reports?kind=collections' : '/g-fin/reports?kind=payments'}
+        columns={columns.filter((c) => collections || !['orNumber', 'salesperson', 'team'].includes(c.key))}
         rowKey={(r) => r.id}
         reloadToken={reload}
-        searchPlaceholder="Search number, OR no., SI no., cheque, customer…"
-        emptyTitle="No payments recorded yet"
+        searchPlaceholder={collections ? 'Search number, OR no., SI no., cheque, customer…' : 'Search number, reference, payee, document…'}
+        emptyTitle={collections ? 'No collections recorded yet' : 'No payments or repayments recorded yet'}
         emptyHint="An uncleared cheque is recorded but counts as cash only once it clears."
         onRowClick={(r) => navigate(paymentLink(r.id))}
         selectable
-        defaultFilters={{ kind: 'RECEIPT' }}
+        initialFilters={{ register }}
         filters={filters}
         summary={(raw) => {
           const sum = raw as unknown as PaymentsSummary | undefined;
           if (!sum) return null;
+          if (!collections) {
+            return (
+              <>
+                <Stat
+                  label="Money out"
+                  value={formatMoney(sum.paidOut)}
+                  figure
+                  sub={`${sum.disbursements} payment${sum.disbursements === 1 ? '' : 's'}`}
+                  to={`${base}?kind=DISBURSEMENT`}
+                />
+                <Stat
+                  label="Repayments received"
+                  value={formatMoney(sum.repaid)}
+                  figure
+                  accent="ok"
+                  sub={`${sum.repayments} paid back — cash advances and unspent budget, never a collection`}
+                  to={`${base}?kind=RECEIPT`}
+                />
+                <Stat
+                  label="Uncleared"
+                  value={formatMoney(sum.unclearedAll)}
+                  figure
+                  accent={sum.unclearedAll > 0 ? 'warn' : undefined}
+                  sub="not cash until the bank clears it"
+                  to={`${base}?uncleared=true`}
+                />
+              </>
+            );
+          }
           return (
             <>
               <Stat
@@ -2288,27 +2341,20 @@ export function Payments() {
                 figure
                 accent={sum.uncleared > 0 ? 'warn' : undefined}
                 sub={`${sum.unclearedCount} not cash until the bank clears ${sum.unclearedCount === 1 ? 'it' : 'them'}`}
-                to="/g-fin/payments?kind=RECEIPT&uncleared=true"
+                to="/g-fin/payments?uncleared=true"
               />
               <Stat
                 label="Cleared cheques"
                 value={sum.chequesClearedPct === null ? '—' : `${sum.chequesClearedPct.toFixed(1)}%`}
                 sub={sum.cheques ? `${sum.chequesCleared} of ${sum.cheques} cheque${sum.cheques === 1 ? '' : 's'}, by value` : 'no cheques received'}
-                to="/g-fin/payments?kind=RECEIPT&method=CHECK"
-              />
-              <Stat
-                label="Money out"
-                value={formatMoney(sum.paidOut)}
-                figure
-                sub={`${sum.disbursements} payment${sum.disbursements === 1 ? '' : 's'}`}
-                to="/g-fin/payments?kind=DISBURSEMENT"
+                to="/g-fin/payments?method=CHECK"
               />
               {teamCards(sum.teams, formatMoney, 'collection')}
             </>
           );
         }}
         actions={
-          can('gfin.ar.create') ? (
+          collections && can('gfin.ar.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setRecording(true)}>
               + Record collection
             </button>

@@ -4194,6 +4194,41 @@ async function main() {
       undo.status === 200 && loanBack?.status === 'RELEASED' && money(Number(loanBack.amountRefunded), 1_000) && loanBack.repaidAt === null,
       `${undo.status} ${loanBack?.status} ${loanBack?.amountRefunded} ${loanBack?.repaidAt}`,
     );
+    // A repayment is never a collection (2026-10-20, the owner's call): it
+    // lists under Money out › Payments & Repayments, not under Collections.
+    const deductionId = String(deduction.body.id);
+    const [inCollections, inOther, collectionsCards] = await Promise.all([
+      fin('GET', `/payments?register=collections&pageSize=200&search=${encodeURIComponent(String(deduction.body.number))}`),
+      fin('GET', `/payments?register=other&pageSize=200&search=${encodeURIComponent(String(deduction.body.number))}`),
+      fin('GET', '/payments?register=collections&pageSize=1'),
+    ]);
+    const anyRepaid = await prisma.payment.aggregate({ where: { kind: 'RECEIPT', customerId: null, importedFrom: null }, _count: { _all: true } });
+    await throwaway('zzfin_payout', ['gfin.payments_out.view_all']);
+    const payOut = as(await makeUser('ZZ Payments Out Reader', 'payout@verifyf.local', ['zzfin_payout']));
+    const aCollection = await prisma.payment.findFirst({ where: { kind: 'RECEIPT', customerId: customer.id }, select: { id: true } });
+    const [outList, outOne, outCollection, badRegister] = await Promise.all([
+      payOut('GET', '/payments?register=collections&pageSize=200'),
+      payOut('GET', `/payments/${deductionId}`),
+      payOut('GET', `/payments/${aCollection?.id}`),
+      fin('GET', '/payments?register=everything'),
+    ]);
+    const outRows = (outList.body.rows ?? []) as { kind: string; customerId: string | null }[];
+    check(
+      'a salary deduction lists under Payments & Repayments and never under Collections; the Collections cards count customers\' money only',
+      (inCollections.body.total as number) === 0 &&
+        (inOther.body.rows as { id: string }[]).some((r) => r.id === deductionId) &&
+        collectionsCards.body.summary?.repayments === 0 &&
+        anyRepaid._count._all > 0 &&
+        badRegister.status === 400,
+      `${inCollections.body.total} ${(inOther.body.rows as unknown[])?.length} ${collectionsCards.body.summary?.repayments} ${badRegister.status}`,
+    );
+    check(
+      'a reader of Payments & Repayments alone sees that register whatever is asked, opens a repayment, and gets a 404 on a customer collection',
+      outList.status === 200 && outRows.length > 0 && outRows.every((r) => !(r.kind === 'RECEIPT' && r.customerId)) &&
+        outOne.status === 200 && !!aCollection && outCollection.status === 404,
+      `${outList.status} ${outRows.length} ${outOne.status} ${outCollection.status}`,
+    );
+
     const caRep = await fin('GET', `/fin-reports/cash-advances?from=${todayIso}&to=${todayIso}&requestedById=${engineer.id}`);
     const caCard = (label: string) => (caRep.body.cards as { label: string; value: number }[] | undefined)?.find((c) => c.label === label)?.value ?? -1;
     check(

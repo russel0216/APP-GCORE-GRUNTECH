@@ -401,7 +401,6 @@ export function RfqEditor() {
   function body() {
     return {
       dueDate: header.dueDate || null,
-      deliverTo: header.deliverTo.trim() || null,
       terms: header.terms.trim() || null,
       notes: header.notes.trim() || null,
       itemIds: linesFixed ? undefined : [...picked],
@@ -513,8 +512,8 @@ export function RfqEditor() {
               <Field label="Quote by" hint={request.neededBy ? `Needed by ${formatDate(request.neededBy)}` : 'The date the suppliers answer by'}>
                 <input type="date" value={header.dueDate} onChange={(e) => setHeader((h) => ({ ...h, dueDate: e.target.value }))} />
               </Field>
-              <Field label="Deliver to">
-                <input value={header.deliverTo} maxLength={500} onChange={(e) => setHeader((h) => ({ ...h, deliverTo: e.target.value }))} />
+              <Field label="Deliver to" hint="Always the company's warehouse — the supplier's paper names no project site or customer">
+                <input value={header.deliverTo} readOnly />
               </Field>
             </div>
             <div className="qe-rows">

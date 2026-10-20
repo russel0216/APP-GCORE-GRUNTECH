@@ -2405,10 +2405,43 @@ async function main() {
       const source = await api(rfqBuyerToken, 'GET', `/rfqs/source?requestId=${rfqPr.id}`);
       const sourceLines = (source.body.lines as { id: string }[] | undefined) ?? [];
       check(
-        'an RFQ is raised only from an approved request, and its source offers every line of it with where it is delivered',
+        'an RFQ is raised only from an approved request, and its source offers every line of it, delivered to the company warehouse — never the project site (2026-10-20)',
         fromDraft.status === 400 && /only an approved request/.test(String(fromDraft.body.error)) &&
-          source.status === 200 && sourceLines.length === 2 && String(source.body.deliverTo).includes(job.name),
+          source.status === 200 && sourceLines.length === 2 && /Warehouse/.test(String(source.body.deliverTo)) &&
+          !String(source.body.deliverTo).includes(job.name),
         `${fromDraft.status} ${String(fromDraft.body.error)} · ${source.status} ${sourceLines.length} "${String(source.body.deliverTo)}"`,
+      );
+
+      // A purchase request carries files (2026-10-20, the owner's call): its
+      // requester attaches the supplier's quotation to the draft, the paper
+      // prints it behind, and once it is decided nothing more is added.
+      const engineerToken = signToken(engineer.id, engineer.email);
+      const specPdf = await PDFDocument.create();
+      specPdf.addPage([300, 400]);
+      const specForm = () => {
+        const f = new FormData();
+        f.append('files', new Blob([Buffer.from(specBytes)], { type: 'application/pdf' }), `${TAG}-pr-spec.pdf`);
+        return f;
+      };
+      const specBytes = await specPdf.save();
+      const prUp = await fetch(`${BASE}/attachments/purchase_request/${draftPr.id}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${engineerToken}` },
+        body: specForm(),
+      });
+      const prPaper = await printed(engineerToken, `/purchase-requests/${draftPr.id}/pdf`);
+      const prPages = prPaper.bytes ? (await PDFDocument.load(prPaper.bytes)).getPageCount() : 0;
+      await prisma.purchaseRequest.update({ where: { id: draftPr.id }, data: { status: 'APPROVED', approvedAt: new Date() } });
+      const prLate = await fetch(`${BASE}/attachments/purchase_request/${draftPr.id}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${engineerToken}` },
+        body: specForm(),
+      });
+      await prisma.purchaseRequest.update({ where: { id: draftPr.id }, data: { status: 'DRAFT', approvedAt: null } });
+      check(
+        'a purchase request takes an attachment on its draft, prints it behind the request, and takes no more once decided',
+        prUp.status === 201 && prPaper.status === 200 && prPaper.text.includes(`${TAG}-pr-spec.pdf`) && prPages === 3 && prLate.status >= 400,
+        `${prUp.status} ${prPaper.status} ${prPages} page(s) ${prLate.status}`,
       );
 
       const foreignLine = await api(rfqBuyerToken, 'POST', '/rfqs', { requestId: rfqPr.id, itemIds: [pr.items[0].id] });
@@ -2464,10 +2497,10 @@ async function main() {
         terms: 'Quote VAT inclusive; 30 days.',
       });
       check(
-        'one save changes the header, asks the second line and drops a supplier; a stale version is refused',
+        'one save changes the header, asks the second line and drops a supplier — the delivery stays the warehouse; a stale version is refused',
         stale.status === 400 && /changed a moment ago/.test(String(stale.body.error)) && sheet.status === 200 &&
           (sheet.body.lines as unknown[]).length === 2 && (sheet.body.suppliers as unknown[]).length === 1 &&
-          sheet.body.deliverTo === 'Plant gate 2',
+          /Warehouse/.test(String(sheet.body.deliverTo)) && sheet.body.deliverTo !== 'Plant gate 2',
         `${stale.status} ${sheet.status} ${(sheet.body.lines as unknown[] | undefined)?.length} ${(sheet.body.suppliers as unknown[] | undefined)?.length}`,
       );
 
@@ -2535,6 +2568,12 @@ async function main() {
           !theirText.includes('1,150.50') && /PREPARED BY Verify RFQ Buyer .*?\w{3} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/.test(theirText) &&
           theirText.includes('Quote VAT inclusive'),
         `${theirPaper.status} — ${theirText.slice(0, 500)}`,
+      );
+      check(
+        'the supplier\'s paper names the project by its reference only — no project name, site or customer — the supplier\'s contact by name and number, and delivery to the company warehouse (2026-10-20)',
+        theirText.includes(`Project ${job.number}`) && !theirText.includes(job.name) && !theirText.includes(customer.name) &&
+          /Attention: Ana Reyes/.test(theirText) && /Tel No\.: 0917 000 0000/.test(theirText) && /Warehouse/.test(theirText),
+        theirText.slice(0, 700),
       );
       check(
         'the RFQ\'s own paper lists every supplier asked and what each quoted',

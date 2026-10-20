@@ -16,7 +16,8 @@ import {
   deleteOrRefuse,
   type ListQuery,
 } from '../http/kit';
-import { deleteAttachmentsOf } from '../shared/attachments';
+import { deleteAttachmentsOf, registerAttachmentGuard } from '../shared/attachments';
+import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -33,6 +34,7 @@ import {
   cancelOpenRequest,
   routeBrief,
   onApprovalReopened,
+  mayDecide,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import {
@@ -4045,15 +4047,50 @@ purchaseRequestRoutes.get(
       signatories,
     });
 
+    // The supplier quotations, specifications and drawings filed on it go
+    // behind the request (2026-10-20, the owner's call); `?attachments=0` bare.
+    const files = req.query.attachments === '0' ? [] : await attachedFiles('purchase_request', pr.id);
+    const { pdf: withFiles, listed } = await withAttachments(pdf, files, { title: 'Purchase Request', number: pr.number, reference: pr.purpose ?? undefined });
+
     await audit(
-      { entityType: 'purchase_request', entityId: pr.id, action: 'EXPORTED', summary: `Printed ${pr.number}` },
+      {
+        entityType: 'purchase_request',
+        entityId: pr.id,
+        action: 'EXPORTED',
+        summary: `Printed ${pr.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}`,
+      },
       req,
     );
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Purchase Request', number: pr.number, author: pr.requestedBy.name, date: pr.createdAt })));
-    res.send(pdf);
+    res.send(withFiles);
   }),
+);
+
+/**
+ * Files on a purchase request (2026-10-20, the owner's call: "Purchase Request
+ * can add attachment") — the supplier's quotation, a specification, a
+ * drawing. Read as the request is read (its register's rights, or whoever may
+ * decide its open request); written while it is a draft or waits for approval
+ * by whoever may change it — what the approvers decide on is what it carries.
+ */
+registerAttachmentGuard(
+  'purchase_request',
+  async (user, id) => {
+    const pr = await prisma.purchaseRequest.findUnique({ where: { id }, select: { requestedById: true } });
+    if (!pr) return false;
+    if (can(user, 'gchain.purchase_requests.view_all') || can(user, 'gops.purchase_requests.view_all')) return true;
+    if (pr.requestedById === user.id) return true;
+    if (can(user, 'gchain.purchase_requests.view_own') || can(user, 'gops.purchase_requests.view_own')) return true;
+    return mayDecide(user.id, 'purchase_request', [id]);
+  },
+  {
+    write: async (user, id) => {
+      const pr = await prisma.purchaseRequest.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+      return !!pr && (pr.status === 'DRAFT' || pr.status === 'PENDING_APPROVAL') && mayEditPr(user, pr);
+    },
+  },
 );
 
 // ── Global search ────────────────────────────────────────────────────────────

@@ -29,6 +29,10 @@ export const ACCESS_SPLIT: { key: string; from: string; to: string[] }[] = [
   // Pull-out slips became OWNED_KEPT (2026-10-18: anyone raises one): whoever
   // raised them keeps reading and changing their own.
   { key: 'pullout', from: 'gchain.pullout_slips.create', to: ['gchain.pullout_slips.view_own', 'gchain.pullout_slips.edit_own'] },
+  // Repayments and money out left Collections (2026-10-20) for a register of
+  // their own: whoever read the one register reads the new one.
+  { key: 'payments-out', from: 'gfin.payments.view_all', to: ['gfin.payments_out.view_all'] },
+  { key: 'payments-out-ap', from: 'gfin.ap.view_all', to: ['gfin.payments_out.view_all'] },
 ];
 /** The splits the first version of this step ran under its one mark. */
 const FIRST_RUN = ['calendar', 'attendance', 'visits'];
@@ -75,7 +79,7 @@ export async function splitBorrowedRights(): Promise<number | null> {
     create: {
       key: MARK,
       value,
-      description: 'The Access boxes given, once each, to whoever held the right they replace (calendar, attendance, visits, pullout).',
+      description: 'The Access boxes given, once each, to whoever held the right they replace (calendar, attendance, visits, pullout, payments-out).',
     },
     update: { value },
   });

@@ -20,6 +20,7 @@ import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
 import { RFQ_TONES } from './Rfq';
 import { PulloutCard } from './PulloutSlips';
+import { Attachments } from '../../components/Attachments';
 
 export const PR_STATUSES = [
   { value: 'DRAFT', label: 'Draft' },
@@ -653,6 +654,13 @@ export function PurchaseRequestDetail() {
         </div>
       )}
 
+      <Attachments
+        entityType="purchase_request"
+        entityId={pr.id}
+        title="Attachments"
+        hint="The supplier's quotation, a specification or a drawing — printed behind the request"
+        canEdit={pr.canEdit || pr.canWithdraw}
+      />
     </div>
   );
 }

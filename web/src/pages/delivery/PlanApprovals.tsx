@@ -13,8 +13,8 @@ import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatD
 /**
  * REQUEST FOR APPROVAL (2026-10-13, the owner's call: "replace the Approved
  * Plans with Request for Approval — a form with internal approval (Technical
- * Manager, Team Leader, and the CEO above ₱1,000,000) and a drawing reference
- * number, which could come from a CAD J.O.").
+ * Manager, Team Leader) and a drawing reference number, which could come
+ * from a CAD J.O."); no CEO step since 2026-10-20.
  *
  * A project's drawing or document, raised as a draft with its files, sent
  * through the approval engine — never approved by hand — and decided on the
@@ -147,8 +147,8 @@ export function ProjectPlanApprovalsCard({
         )}
       </div>
       <p className="muted del-lede">
-        A drawing or document sent for internal approval — Technical Manager, then Team Leader, and the CEO / President
-        too on a project above ₱1,000,000. Work should not start on a drawing that is not approved.
+        A drawing or document sent for internal approval — the Technical Manager, then the Team Leader of the team
+        handling the project. Work should not start on a drawing that is not approved.
       </p>
       {plans.length === 0 ? (
         <Empty title="No requests for approval yet" hint="Raise one with its drawing attached, or from an accepted CAD J.O." />

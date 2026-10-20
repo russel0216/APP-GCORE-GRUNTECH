@@ -3944,12 +3944,46 @@ function allocationKind(a: {
  * The payment register's where-builder — the screen's rows and the printed
  * list read the same set (`?ids=` narrows to the rows ticked).
  */
-function paymentListWhere(q: ListQuery): Prisma.PaymentWhereInput {
+/**
+ * The two registers over one table (2026-10-20, the owner's call: "CA
+ * repayment don't direct to money in Collection, as the collection is intended
+ * for monitoring accounts receivable only"). COLLECTIONS is money in FROM A
+ * CUSTOMER; everything else — money out, and money a person pays back (a cash
+ * advance's repayment, a salary or commission deduction, unspent budget
+ * returned) — is Money out › Payments & Repayments.
+ */
+export const COLLECTION_WHERE: Prisma.PaymentWhereInput = { kind: 'RECEIPT', customerId: { not: null } };
+const NOT_COLLECTION_WHERE: Prisma.PaymentWhereInput = { OR: [{ kind: 'DISBURSEMENT' }, { customerId: null }] };
+const PAYMENT_REGISTERS = ['collections', 'other'] as const;
+type PaymentRegister = (typeof PAYMENT_REGISTERS)[number];
+
+/** The rights that open the whole table; a holder of Payments & Repayments alone sees its register only. */
+const ALL_PAYMENTS = ['gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all'] as const;
+const PAYMENT_READERS = [...ALL_PAYMENTS, 'gfin.payments_out.view_all'] as const;
+
+function paymentRegister(me: ResolvedUser, q: ListQuery): PaymentRegister | null {
+  const asked = q.filters.register;
+  if (asked !== undefined && asked !== '' && !PAYMENT_REGISTERS.includes(asked as PaymentRegister)) {
+    throw badRequest(`Unknown register "${asked}" — collections or other`);
+  }
+  if (!ALL_PAYMENTS.some((k) => can(me, k))) return 'other';
+  return (asked as PaymentRegister) || null;
+}
+
+/** May this caller open this one payment? The whole table's readers, or the other register's for what is not a collection. */
+function mayReadPayment(me: ResolvedUser, row: { kind: PaymentKind; customerId: string | null }): boolean {
+  if (ALL_PAYMENTS.some((k) => can(me, k))) return true;
+  return can(me, 'gfin.payments_out.view_all') && !(row.kind === 'RECEIPT' && row.customerId);
+}
+
+function paymentListWhere(q: ListQuery, register: PaymentRegister | null = null): Prisma.PaymentWhereInput {
   const where: Prisma.PaymentWhereInput = {};
+  if (register === 'collections') Object.assign(where, COLLECTION_WHERE);
+  if (register === 'other') where.AND = [NOT_COLLECTION_WHERE];
 
   const kind = choice(q.filters.kind, PaymentKind, 'Direction', (k) => (k === 'RECEIPT' ? 'Money in' : 'Money out'));
-  if (kind) where.kind = kind;
-  if (q.filters.customerId) where.customerId = q.filters.customerId;
+  if (kind) where.AND = [...((where.AND as Prisma.PaymentWhereInput[] | undefined) ?? []), { kind }];
+  if (q.filters.customerId) where.AND = [...((where.AND as Prisma.PaymentWhereInput[] | undefined) ?? []), { customerId: q.filters.customerId }];
   if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
   if (q.filters.payeeUserId) where.payeeUserId = q.filters.payeeUserId;
   const from = filterDay(q.filters.from, 'From');
@@ -3985,10 +4019,10 @@ const PAYMENT_SORTS = ['number', 'paymentDate', 'amount', 'createdAt'];
 
 paymentRoutes.get(
   '/',
-  requireAny('gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all'),
+  requireAny(...PAYMENT_READERS),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = paymentListWhere(q);
+    const where = paymentListWhere(q, paymentRegister(currentUser(req), q));
 
     const [rows, total] = await Promise.all([
       prisma.payment.findMany({
@@ -4013,9 +4047,9 @@ paymentRoutes.get(
  * invoices they settled (`teamShares`, by the amount applied to each).
  */
 async function paymentListSummary(where: Prisma.PaymentWhereInput) {
-  const collectionWhere: Prisma.PaymentWhereInput = { AND: [where, { kind: 'RECEIPT', customerId: { not: null }, ...LIVE_MONEY }] };
+  const collectionWhere: Prisma.PaymentWhereInput = { AND: [where, { ...COLLECTION_WHERE, ...LIVE_MONEY }] };
   const chequeWhere: Prisma.PaymentWhereInput = { AND: [collectionWhere, { method: 'CHECK' }] };
-  const [collected, uncleared, out, allocations, cheques, chequesCleared, history] = await Promise.all([
+  const [collected, uncleared, out, allocations, cheques, chequesCleared, history, repaid, unclearedAll] = await Promise.all([
     prisma.payment.aggregate({ where: collectionWhere, _sum: { amount: true }, _count: { _all: true } }),
     prisma.payment.aggregate({ where: { AND: [collectionWhere, { clearedAt: null }] }, _sum: { amount: true }, _count: { _all: true } }),
     prisma.payment.aggregate({ where: { AND: [where, { kind: 'DISBURSEMENT' }] }, _sum: { amount: true }, _count: { _all: true } }),
@@ -4027,6 +4061,9 @@ async function paymentListSummary(where: Prisma.PaymentWhereInput) {
     prisma.payment.aggregate({ where: { AND: [chequeWhere, { clearedAt: { not: null } }] }, _sum: { amount: true }, _count: { _all: true } }),
     // SCORO's collections, listed but never counted (the owner's call).
     prisma.payment.aggregate({ where: { AND: [where, { kind: 'RECEIPT', importedFrom: { not: null } }] }, _sum: { amount: true }, _count: { _all: true } }),
+    // Money a person paid back — never a collection (2026-10-20).
+    prisma.payment.aggregate({ where: { AND: [where, { kind: 'RECEIPT', customerId: null }] }, _sum: { amount: true }, _count: { _all: true } }),
+    prisma.payment.aggregate({ where: { AND: [where, { clearedAt: null }] }, _sum: { amount: true } }),
   ]);
   const chequeTotal = num(cheques._sum.amount);
   return {
@@ -4042,6 +4079,9 @@ async function paymentListSummary(where: Prisma.PaymentWhereInput) {
     disbursements: out._count._all,
     teams: await teamShares(allocations.map((a) => ({ team: a.invoice?.team ?? null, cents: Math.round(num(a.amount) * 100) }))),
     history: { count: history._count._all, amount: num(history._sum.amount) },
+    repaid: num(repaid._sum.amount),
+    repayments: repaid._count._all,
+    unclearedAll: num(unclearedAll._sum.amount),
   };
 }
 
@@ -4055,10 +4095,11 @@ async function paymentListSummary(where: Prisma.PaymentWhereInput) {
  */
 paymentRoutes.get(
   '/pdf',
-  requireAny('gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all'),
+  requireAny(...PAYMENT_READERS),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where = paymentListWhere(q);
+    const register = paymentRegister(currentUser(req), q);
+    const where = paymentListWhere(q, register);
     const [rows, count, byKind, uncleared, currency, customer, supplier, payee] = await Promise.all([
       prisma.payment.findMany({
         where,
@@ -4158,7 +4199,12 @@ paymentRoutes.get(
       ]),
     );
 
-    const pdf = await renderDocument({ title: 'Collections', date: new Date(), reference, sections });
+    const pdf = await renderDocument({
+      title: register === 'collections' ? 'Collections' : register === 'other' ? 'Payments & Repayments' : 'Payments',
+      date: new Date(),
+      reference,
+      sections,
+    });
     await audit(
       { entityType: 'payment', entityId: 'list', action: 'EXPORTED', summary: `Exported the payment list as PDF (${rows.length} payment(s))` },
       req,
@@ -4169,13 +4215,13 @@ paymentRoutes.get(
 
 paymentRoutes.get(
   '/:id',
-  requireAny('gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all'),
+  requireAny(...PAYMENT_READERS),
   handler(async (req, res) => {
     const row = await prisma.payment.findUnique({
       where: { id: req.params.id },
       include: paymentInclude,
     });
-    if (!row) throw notFound('Payment not found');
+    if (!row || !mayReadPayment(currentUser(req), row)) throw notFound('Payment not found');
     res.json(presentPayment(row));
   }),
 );
@@ -4190,10 +4236,10 @@ paymentRoutes.get(
  */
 paymentRoutes.get(
   '/:id/pdf',
-  requireAny('gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all'),
+  requireAny(...PAYMENT_READERS),
   handler(async (req, res) => {
     const row = await prisma.payment.findUnique({ where: { id: req.params.id }, include: paymentInclude });
-    if (!row) throw notFound('Payment not found');
+    if (!row || !mayReadPayment(currentUser(req), row)) throw notFound('Payment not found');
     const currency = await companyCurrency();
     const receipt = row.kind === 'RECEIPT';
     const party = row.customer?.name ?? row.supplier?.name ?? row.payeeUser?.name ?? '—';

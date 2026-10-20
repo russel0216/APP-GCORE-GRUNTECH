@@ -30,17 +30,17 @@ import { visibleOwners } from '../shared/team';
 
 /**
  * REQUEST FOR APPROVAL (2026-10-13, the owner's call: "replace the Approved
- * Plans with Request for Approval — a form with internal approval: Technical
- * Manager, Team Leader, and the CEO above ₱1,000,000 of project costing — and
- * a drawing reference number, which could come from a CAD J.O.").
+ * Plans with Request for Approval — a form with internal approval … and a
+ * drawing reference number, which could come from a CAD J.O."); the CEO step
+ * went on 2026-10-20 ("only the technical manager and team leader").
  *
  * The record is the old `ApprovedPlan` row and its keys (`gops.plans.*`), a
  * routed document now: DRAFT → PENDING_APPROVAL → APPROVED, through the one
  * engine as `plan_approval` (rule 2). Nobody approves one by hand any more —
  * the old `PATCH /jobs/:jobId/plans/:planId { status }` is gone. The amount
  * the route is chosen by is the PROJECT's contract value, snapshotted at
- * submit; the seeded routes are Technical Manager › Team Leader, and the
- * CEO / President too above ₱1,000,000, with `preparerSigns` and `standIns`
+ * submit; the seeded route is Technical Manager › Team Leader for any
+ * amount, with `preparerSigns` and `standIns`
  * as the costing's. A return or a rejection sends it back to DRAFT for a new
  * drawing; approving one SUPERSEDES any earlier approved request on the same
  * project and drawing reference.

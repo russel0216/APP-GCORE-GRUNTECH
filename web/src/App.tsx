@@ -1374,12 +1374,21 @@ function Routed() {
             </Guard>
           }
         />
+        {/* Money out and money paid back by people — never a collection (2026-10-20). */}
+        <Route
+          path="/g-fin/payments-out"
+          element={
+            <Guard permission="gfin.payments_out.view_all">
+              <Payments register="other" />
+            </Guard>
+          }
+        />
         {/* One payment. Whoever may read receivables or payables opens it, as the
             API allows — a collection is linked from the invoice it settled. */}
         <Route
           path="/g-fin/payments/:id"
           element={
-            <GuardAny permissions={['gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all']}>
+            <GuardAny permissions={['gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all', 'gfin.payments_out.view_all']}>
               <PaymentDetail />
             </GuardAny>
           }

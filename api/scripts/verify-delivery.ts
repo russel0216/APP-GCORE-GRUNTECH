@@ -1169,10 +1169,10 @@ async function main() {
     check('its files are frozen while it is with the approvers (403)', (await attachRfa(rfaEngToken, rfaId, 'late.pdf')) === 403);
     const rfaRoute2 = async (amount: number) => (await pickWorkflow('plan_approval', amount))?.steps.map((st) => st.name).join(' › ');
     check(
-      'up to ₱1,000,000.00 of contract value it takes two signatures; above it the CEO / President signs too',
+      'two signatures whatever the contract value — no CEO / President step (2026-10-20)',
       (await rfaRoute2(1_000_000)) === 'Technical Manager › Team Leader' &&
-        (await rfaRoute2(1_000_000.01)) === 'Technical Manager › Team Leader › CEO / President',
-      `${await rfaRoute2(1_000_000)} | ${await rfaRoute2(1_000_000.01)}`,
+        (await rfaRoute2(50_000_000)) === 'Technical Manager › Team Leader',
+      `${await rfaRoute2(1_000_000)} | ${await rfaRoute2(50_000_000)}`,
     );
     const rfaReq = await rfaRequest(rfaId);
     await act({ requestId: rfaReq.id, userId: rfaTm.id, action: 'APPROVED' });

@@ -236,9 +236,13 @@ export const REGISTRY: ModuleDef[] = [
       // The owner's module 5 (2026-10-15): the requests whose cash went out —
       // released, spent, returned — with the actual entry and the refund.
       { key: 'budget_liquidations', group: 'Money out', label: 'Budget Liquidations', path: '/g-fin/budget-liquidations', actions: READ, phase: 7 },
-      // Every movement of money, in or out. Recording one is gated by the A/R
-      // or A/P create permission depending on direction — seeing the register
-      // is its own, lesser right.
+      // Money out, and money a person pays back — a cash advance's repayment,
+      // a salary or commission deduction, unspent budget returned (2026-10-20,
+      // the owner's call: those are never a collection).
+      { key: 'payments_out', group: 'Money out', label: 'Payments & Repayments', path: '/g-fin/payments-out', actions: READ, phase: 7 },
+      // Money in from customers. Recording one is gated by the A/R create
+      // permission — seeing the register is its own, lesser right; its holder
+      // also opens every payment (the A/R and A/P readers do too).
       { key: 'payments', group: 'Money in', label: 'Collections', path: '/g-fin/payments', actions: READ, phase: 7 },
       { key: 'cashflow', group: 'Analysis', label: 'Cash Flow', path: '/g-fin/cash-flow', actions: READ, phase: 7 },
       { key: 'budget_vs_actual', group: 'Analysis', label: 'Budget vs Actual', path: '/g-fin/budget-vs-actual', actions: READ, phase: 7 },

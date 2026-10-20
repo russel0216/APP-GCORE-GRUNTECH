@@ -112,7 +112,7 @@ const SCREEN: Record<string, string> = {
   // Finance. A payment has its own page since 2026-10-09; a disbursement is
   // the same record seen from the money-out side.
   payment: '/g-fin/payments',
-  disbursement: '/g-fin/payments',
+  disbursement: '/g-fin/payments-out',
   attendance: '/g-hr/attendance',
   report_template: '/g-ops/report-templates',
   number_sequence: '/admin/numbering',

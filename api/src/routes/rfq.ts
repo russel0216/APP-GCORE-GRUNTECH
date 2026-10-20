@@ -250,7 +250,7 @@ rfqRoutes.get(
         warehouse: pr.warehouse ? { id: pr.warehouse.id, name: pr.warehouse.name } : null,
         requestedBy: pr.requestedBy,
       },
-      deliverTo: deliverToOf(pr),
+      deliverTo: (await warehouseDeliverTo({ warehouseId: pr.warehouse?.id })).line,
       lines: pr.items.map((i) => ({
         id: i.id,
         partNumber: i.partNumber,
@@ -384,17 +384,33 @@ rfqRoutes.get(
   }),
 );
 
-function deliverToOf(pr: {
-  job: { name: string; site?: { name: string; address: string | null; city: string | null } | null } | null;
-  warehouse: { name: string; address?: string | null; city?: string | null } | null;
-}): string {
-  if (pr.job) {
-    const site = pr.job.site;
-    const where = site ? [site.address, site.city].filter(Boolean).join(', ') || site.name : null;
-    return [pr.job.name, where].filter(Boolean).join(' — ');
-  }
-  if (pr.warehouse) return [pr.warehouse.name, [pr.warehouse.address, pr.warehouse.city].filter(Boolean).join(', ')].filter(Boolean).join(' — ');
-  return '';
+/**
+ * Where a supplier delivers (2026-10-20, the owner's call: "address only, but
+ * always in Gruntechnology Corporation Warehouse"): never a project's site or
+ * its customer's name — the company's warehouse, the request's own where it
+ * names one, else the main warehouse (code MAIN, else the first active one
+ * with an address), else the company's address. One line, the company's
+ * registered name first, so the supplier's paper names no customer.
+ */
+export async function warehouseDeliverTo(pr: { warehouseId?: string | null }): Promise<{ name: string; address: string; line: string }> {
+  const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { name: true, legalName: true, address: true, city: true } });
+  const place = (...parts: (string | null | undefined)[]) => parts.filter((p) => p?.trim()).join(', ');
+  const own = pr.warehouseId
+    ? await prisma.warehouse.findUnique({ where: { id: pr.warehouseId }, select: { address: true, city: true } })
+    : null;
+  const main =
+    own && place(own.address, own.city)
+      ? own
+      : ((await prisma.warehouse.findFirst({ where: { code: 'MAIN', isActive: true, address: { not: null } }, select: { address: true, city: true } })) ??
+        (await prisma.warehouse.findFirst({ where: { isActive: true, address: { not: null } }, orderBy: { name: 'asc' }, select: { address: true, city: true } })));
+  const address = place(main?.address, main?.city) || place(company?.address, company?.city);
+  const name = `${company?.legalName || company?.name || 'Company'} Warehouse`;
+  return { name, address, line: [name, address].filter(Boolean).join(' — ') };
+}
+
+/** An RFQ's reference for a supplier: the project's NUMBER only, never its name or customer. */
+function projectRef(pr: { job: { number: string } | null; warehouse?: { name: string } | null }): string {
+  return pr.job ? `Project ${pr.job.number}` : 'Stock replenishment';
 }
 
 async function loadRfq(id: string) {
@@ -554,6 +570,9 @@ rfqRoutes.post(
     if (!itemIds.length) throw badRequest('Tick at least one line to ask about');
     if (itemIds.some((id) => !own.has(id))) throw badRequest(`A line is not one of ${pr.number}'s`);
     await checkSuppliers(body.suppliers);
+    // Always the company's warehouse (the owner's call, 2026-10-20) — never
+    // a project site, so the supplier's paper names no customer.
+    const delivery = await warehouseDeliverTo({ warehouseId: pr.warehouseId });
 
     const rfq = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('rfq', tx);
@@ -563,7 +582,7 @@ rfqRoutes.post(
           requestId: pr.id,
           preparedById: me.id,
           dueDate: asDay(body.dueDate),
-          deliverTo: body.deliverTo?.trim() || null,
+          deliverTo: delivery.line,
           terms: body.terms?.trim() || null,
           notes: body.notes?.trim() || null,
           items: { create: [...new Set(itemIds)].map((id) => ({ requestItemId: id, sortOrder: own.get(id)! })) },
@@ -631,7 +650,6 @@ rfqRoutes.put(
           // when only the suppliers changed.
           updatedAt: new Date(),
           ...(body.dueDate !== undefined ? { dueDate: asDay(body.dueDate) } : {}),
-          ...(body.deliverTo !== undefined ? { deliverTo: body.deliverTo?.trim() || null } : {}),
           ...(body.terms !== undefined ? { terms: body.terms?.trim() || null } : {}),
           ...(body.notes !== undefined ? { notes: body.notes?.trim() || null } : {}),
         },
@@ -851,23 +869,52 @@ rfqRoutes.get(
     const row = rowId ? view.suppliers.find((s) => s.id === rowId) : undefined;
     if (rowId && !row) throw notFound('Supplier not on this RFQ');
 
-    const reference = [`PR ${rfq.request.number}`, rfq.request.job ? `${rfq.request.job.number} — ${rfq.request.job.name}` : rfq.request.purpose].join(' · ');
+    // What a supplier reads (2026-10-20, the owner's calls): the project's
+    // reference NUMBER only — never its name, site or customer — and the
+    // goods delivered to the company's warehouse, whatever the RFQ typed.
+    const reference = [`RFQ ${rfq.number}`, projectRef(rfq.request)].join(' · ');
+    const delivery = await warehouseDeliverTo({ warehouseId: rfq.request.warehouse?.id });
     const sections: PdfSection[] = [];
     if (row) {
+      // The supplier asked, addressed as the purchase order addresses it
+      // (item 5 of 2026-10-20): the supplier and the contact person this RFQ
+      // goes to — this row's Attention, Tel and Email, else the supplier's
+      // primary contact — beside where the goods go.
       const s = row.supplier;
+      const primary = await prisma.supplierContact.findFirst({
+        where: { supplierId: s.id },
+        orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }],
+        select: { name: true, position: true, mobile: true, phone: true, email: true },
+      });
+      const attention = row.contactName ?? primary?.name ?? null;
+      const position = primary && attention && primary.name === attention ? primary.position : null;
+      const tel = row.contactPhone ?? primary?.mobile ?? primary?.phone ?? s.phone;
+      const mail = row.email ?? primary?.email ?? s.email;
+      sections.push({
+        kind: 'blocks',
+        titleSize: 11,
+        blocks: [
+          {
+            title: 'To',
+            lines: [
+              s.name,
+              [s.address, s.city].filter(Boolean).join(', '),
+              attention ? `Attention: ${[attention, position].filter(Boolean).join(', ')}` : '',
+              tel ? `Tel No.: ${tel}` : '',
+              mail ?? '',
+            ].filter((l) => l.trim()),
+          },
+          { title: 'Deliver to', lines: [delivery.name, delivery.address].filter((l) => l.trim()) },
+        ],
+      });
       sections.push({
         kind: 'fields',
         columns: 2,
         fields: [
-          { label: 'To', value: s.name },
+          { label: 'Project reference', value: projectRef(rfq.request) },
           { label: 'Quote by', value: rfq.dueDate ? formatDate(rfq.dueDate) : '—' },
-          { label: 'Attention', value: row.contactName ?? '—' },
-          { label: 'Deliver to', value: rfq.deliverTo ?? '—' },
-          { label: 'Tel No.', value: row.contactPhone ?? s.phone ?? '—' },
-          { label: 'Purchase request', value: rfq.request.number },
-          { label: 'Email', value: row.email ?? s.email ?? '—' },
+          { label: 'RFQ no.', value: rfq.number },
           { label: 'Sent', value: row.sentAt ? formatDate(row.sentAt) : 'Not yet sent' },
-          { label: 'Address', value: [s.address, s.city].filter(Boolean).join(', ') || '—' },
         ],
       });
       sections.push({
@@ -894,8 +941,8 @@ rfqRoutes.get(
         fields: [
           { label: 'Purchase request', value: rfq.request.number },
           { label: 'Quote by', value: rfq.dueDate ? formatDate(rfq.dueDate) : '—' },
-          { label: 'For', value: rfq.request.job ? `${rfq.request.job.number} — ${rfq.request.job.name}` : (rfq.request.warehouse?.name ?? 'Stock') },
-          { label: 'Deliver to', value: rfq.deliverTo ?? '—' },
+          { label: 'Project reference', value: projectRef(rfq.request) },
+          { label: 'Deliver to', value: delivery.line || '—' },
           { label: 'Status', value: statusLabel(rfq.status) },
           { label: 'Sent', value: rfq.sentAt ? formatDate(rfq.sentAt) : 'Not yet sent' },
           { label: 'Suppliers asked', value: String(view.suppliers.length) },
@@ -943,7 +990,7 @@ rfqRoutes.get(
       title: 'Request for Quotation',
       documentNumber: rfq.number,
       date: rfq.createdAt,
-      reference: row ? `${reference} · to ${row.supplier.name}` : reference,
+      reference,
       sections,
       signatories,
     });

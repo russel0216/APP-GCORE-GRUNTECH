@@ -447,7 +447,7 @@ export const FIN_REPORT_KINDS: readonly ReportKind[] = [
   { key: 'collections', label: 'Collections', list: '/g-fin/payments' },
   { key: 'payables', label: 'Accounts payable (by due date)', list: '/g-fin/ap', mode: 'span' },
   { key: 'payables-aging', label: 'Payables aging', list: '/g-fin/ap', mode: 'asOf' },
-  { key: 'payments', label: 'Payments out', list: '/g-fin/payments?kind=DISBURSEMENT' },
+  { key: 'payments', label: 'Payments out', list: '/g-fin/payments-out?kind=DISBURSEMENT' },
   { key: 'budget-requests', label: 'Budget requests (by date needed)', list: '/g-fin/budget-requests' },
   { key: 'liquidations', label: 'Budget liquidations', list: '/g-fin/budget-liquidations' },
   { key: 'reimbursements', label: 'Reimbursements', list: '/g-fin/expenses' },
