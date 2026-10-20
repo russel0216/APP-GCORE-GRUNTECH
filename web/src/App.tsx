@@ -68,6 +68,7 @@ import {
 import { BorrowSlips, BorrowSlipDetail, BorrowRequestEditor } from './pages/chain/BorrowSlips';
 import { PulloutSlips, PulloutDetail, PulloutEditor } from './pages/chain/PulloutSlips';
 import { Clock } from './pages/hr/Clock';
+import { MyRecords } from './pages/hr/MyRecords';
 import { HrDashboard, AttendanceRegister } from './pages/hr/Dashboard';
 import { Leave } from './pages/hr/Leave';
 import { Overtime, OvertimeDetail } from './pages/hr/Overtime';
@@ -1003,6 +1004,14 @@ function Routed() {
         {/* The clock is deliberately ungated: "any one who access the web
             application can clock in clock out". */}
         <Route path="/g-hr/clock" element={<Clock />} />
+        <Route
+          path="/g-hr/my-records"
+          element={
+            <Guard permission="ghr.my_records.view_own">
+              <MyRecords />
+            </Guard>
+          }
+        />
         <Route
           path="/g-hr"
           element={

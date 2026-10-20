@@ -37,6 +37,8 @@ export const ACCESS_SPLIT: { key: string; from: string; to: string[] }[] = [
   // is read, set where Finance Settings are.
   { key: 'operations-budget-view', from: 'gfin.budget_vs_actual.view_all', to: ['gfin.operations_budget.view_all'] },
   { key: 'operations-budget-edit', from: 'gfin.settings.edit_all', to: ['gfin.operations_budget.view_all', 'gfin.operations_budget.edit_all'] },
+  // My Records (2026-10-20): everyone who clocks in reads their own records.
+  { key: 'my-records', from: 'ghr.clock.view_own', to: ['ghr.my_records.view_own'] },
 ];
 /** The splits the first version of this step ran under its one mark. */
 const FIRST_RUN = ['calendar', 'attendance', 'visits'];

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, EmploymentType } from '@prisma/client';
 import { prisma } from '../prisma';
+import { TAX_STATUS_CODES } from '../shared/records';
 import {
   handler,
   parseBody,
@@ -452,6 +453,8 @@ const employeeSchema = z.object({
   philhealthNo: z.string().trim().optional().nullable(),
   pagibigNo: z.string().trim().optional().nullable(),
   tin: z.string().trim().optional().nullable(),
+  /** The BIR tax status (2026-10-20) — HR's, never Edit Own's. */
+  taxStatus: z.enum(TAX_STATUS_CODES).optional().nullable(),
   isActive: z.boolean().default(true),
   notes: z.string().optional().nullable(),
 });
@@ -641,6 +644,7 @@ employeeRoutes.post(
           birthDate: asDate(body.birthDate),
           emergencyContactName: body.emergencyContactName || null,
           emergencyContactPhone: body.emergencyContactPhone || null,
+          taxStatus: body.taxStatus || null,
           isActive: body.isActive,
           notes: body.notes || null,
           ...rateData(body, maySetRates),
@@ -861,6 +865,7 @@ employeeRoutes.patch(
       'address',
       'emergencyContactName',
       'emergencyContactPhone',
+      'taxStatus',
       'notes',
     ] as const) {
       if (body[f] !== undefined) data[f] = body[f] || null;

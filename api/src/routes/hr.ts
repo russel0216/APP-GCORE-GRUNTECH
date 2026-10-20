@@ -3676,6 +3676,8 @@ hrSettingsRoutes.put(
         evaluationNoticeDays: z.number().int().min(0).max(90).optional(),
         ratingScale: z.number().int().min(2).max(10).optional(),
         ratingLabels: z.array(z.string().trim().min(1)).max(10).optional(),
+        cutoffMode: z.enum(['SEMI_MONTHLY', 'MONTHLY']).optional(),
+        cutoffFirstEnds: z.number().int().min(1).max(27).optional(),
         // The greetings card sends only this key; a partial object merges over
         // what is stored, so one template can change without the others.
         greetings: z

@@ -247,7 +247,7 @@ function usePreview(start: string, end: string, dinnerBreak: boolean) {
  * change withdraws the request the supervisor has and sends the changed one
  * again, so the act is still "Submit for approval".
  */
-function PriorModal({
+export function PriorModal({
   existing,
   onClose,
   onFiled,

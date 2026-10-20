@@ -276,6 +276,11 @@ export const REGISTRY: ModuleDef[] = [
     submodules: [
       { key: 'dashboard', group: 'Overview', label: 'Dashboard', path: '/g-hr', actions: REPORT, phase: 6 },
       { key: 'clock', group: 'My day', label: 'Clock In/Out', path: '/g-hr/clock', actions: ['view_own'], phase: 6 },
+      // The signed-in employee's own records (2026-10-20, the owner's G-HR
+      // Records spec): the cutoff's daily time record, leave balances, own
+      // overtime, the 201 file and their place on the Plantilla — one page,
+      // one key, the Clock's pattern (everyone reads their own).
+      { key: 'my_records', group: 'Records', label: 'My Records', path: '/g-hr/my-records', actions: ['view_own'], phase: 10 },
       // The register behind the dashboard: every clock entry, with how the
       // person was identified. Gated by the dashboard permission — seeing the
       // day's counts and seeing the entries behind them are the same right.

@@ -676,8 +676,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,559 assertions across twenty-two scripts** (counted 2026-10-20, after
-the owner's batch E of 2026-10-20 — 2 on finance for the operations
+**4,588 assertions across twenty-two scripts** (counted 2026-10-20, after
+the G-HR Records module's My Records — 29 on hr for the cutoff, the daily
+time record, the 201 file and the own-only read — and before it the owner's batch E of 2026-10-20 — 2 on finance for the operations
 budget — and before it batch D (one on finance for the statement of
 account), batch C — 2 on delivery for the RFA's customer
 approval form and its record — and before it batch B — 2 on chain for the canvass reopened on
@@ -765,7 +766,7 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
 429, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
-94, partners 120, delivery 195, chain 365, hr 487, plantilla 129, meetings
+94, partners 120, delivery 195, chain 365, hr 516, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 439, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
@@ -3420,6 +3421,54 @@ dashboard stands and the four cards sit on the Courses page.
   in order), a `PUT` naming categories adds the missing ones and removes
   none, and HR Settings' Academy card points at Admin › Categories instead
   of its textarea. Audit type `course_category`, mapped in `links.ts`.
+
+## G-HR Records (2026-10-20)
+
+The owner's `G-HR_Records_Module_UI_Specification.pdf` (answered "build
+default"): a personal Records page — Attendance, Employee 201 File, Memos
+Received, Plantilla — on the records G-HR already keeps.
+
+- **My Records** (`ghr.my_records`, `['view_own']`, the Clock's pattern —
+  Records group first; `/g-hr/my-records`, `routes/myRecords.ts` at
+  `/api/my-records`, `pages/hr/MyRecords.tsx`; `splitBorrowedRights()`
+  gave it once to every role holding `ghr.clock.view_own`, and
+  `HR_COMMON` lists it). **Only ever the caller's own**: the route takes
+  no employee id, answers `{ employee: null }` for a login with no
+  employee record, and is the one place a person reads their OWN SSS,
+  Pag-IBIG, PhilHealth and TIN (the employee routes still strip them
+  without the pay-rates right). Nothing is stored but the tax status.
+- **The cutoff** is an HR setting — `cutoffMode` SEMI_MONTHLY (1 to
+  `cutoffFirstEnds`, 15 by default, then to the month's end) or MONTHLY,
+  on HR Settings' working-day card — and `shared/records.ts` the pure
+  rule: `cutoffFor(dayKey, rule)` (keys `2026-10-A`, `2026-10-B`,
+  `2026-10`), `cutoffByKey` (a key under the other rule is null → a 400),
+  `shiftCutoff`, `daysOf`. `?cutoff=` picks one; the page offers
+  Previous / Next (never past the current one).
+- **The daily time record** is one row per calendar day of the cutoff,
+  `dtrDay()` (pure): a punch always wins (a worked Sunday shows what was
+  worked); else a stored holiday is Holiday (named), an approved leave On
+  leave, Sunday a Rest day, a day before the hire date Not yet hired, a
+  past working day Absent, today and later Upcoming. An open day is
+  In progress — today's total runs live from the time in — or, older, "No
+  clock-out" with nothing rendered. Late and undertime are the
+  attendance row's own; cards add the cutoff up (days present, total
+  rendered, late, undertime, absent).
+- **Leave** is a card per active leave type — `leaveBalance()` for this
+  year, remaining over "N of M days consumed". **Overtime** is the
+  cutoff's own filings with the approver — the open step ("Waiting —
+  Supervisor") or the last person who decided — and "+ File overtime",
+  the Overtime screen's own `PriorModal` (exported).
+- **The 201 file**: employee no., name, title, team, employment, date
+  started, years in service (`serviceLength()`, whole months, derived),
+  the government numbers and **tax status** — `Employee.taxStatus`, the
+  BIR codes S, S1–S4, M, M1–M4, Z (`TAX_STATUSES`, the web copy in
+  `pages/masters/Employees.tsx` pinned equal by verify-hr), set by HR on
+  the employee form's Employment section (sent only when changed, so an
+  Edit Own save never carries it) — and contact and emergency details,
+  which the person keeps on My Account. **Plantilla** is their title,
+  plantilla position (and the role it counts), also-holds, roles by
+  level, team, Reports to and direct reports, with "View Plantilla →"
+  for whoever may open it.
 
 ## The notification bell (2026-10-20)
 

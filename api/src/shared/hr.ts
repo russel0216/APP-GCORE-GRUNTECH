@@ -3,6 +3,7 @@ import { prisma } from '../prisma';
 import { dayKey, manilaDayKey, manilaMinutesOfDay } from './day';
 import { badRequest } from '../http/kit';
 import { FACE_ENGINE } from './faceEngine';
+import type { CutoffMode } from './records';
 
 /**
  * HR rules that more than one route needs: face matching, the working day,
@@ -58,6 +59,13 @@ export interface HrSettings {
   ratingLabels: string[];
   /** Birthday and work-anniversary greetings (2026-10-08) — see shared/celebrations.ts. */
   greetings: GreetingSettings;
+  /**
+   * The payroll cutoff a daily time record covers (2026-10-20, My Records):
+   * semi-monthly — 1 to `cutoffFirstEnds`, then to the month's end — or
+   * monthly. `cutoffFor()` in shared/records.ts.
+   */
+  cutoffMode: CutoffMode;
+  cutoffFirstEnds: number;
 }
 
 /**
@@ -110,6 +118,8 @@ const DEFAULTS: HrSettings = {
   ratingScale: 5,
   ratingLabels: ['Unsatisfactory', 'Needs improvement', 'Meets expectations', 'Exceeds expectations', 'Outstanding'],
   greetings: GREETING_DEFAULTS,
+  cutoffMode: 'SEMI_MONTHLY',
+  cutoffFirstEnds: 15,
 };
 
 export async function hrSettings(db: Prisma.TransactionClient = prisma): Promise<HrSettings> {

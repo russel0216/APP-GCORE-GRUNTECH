@@ -89,6 +89,7 @@ import { formatAmount, formatMoney, statusLabel } from '../src/shared/pdf';
 import { OT_STAGE_LABEL } from '../src/routes/hr';
 import { manilaDayKey } from '../src/shared/day';
 import { PEOPLE_FLOW_DEFAULTS, addDaysKey, addMonthsKey, buildPath, type FlowFacts } from '../src/shared/peopleFlow';
+import { cutoffFor, cutoffByKey, shiftCutoff, daysOf, dtrDay, serviceLength, taxStatusLabel, TAX_STATUSES, type CutoffRule, type DtrPunch } from '../src/shared/records';
 import {
   checkListPaper,
   checkOwnPaper,
@@ -4958,6 +4959,90 @@ async function main() {
       stored !== null || ((listed.body.rows ?? []) as unknown[]).length === PEOPLE_FLOW_DEFAULTS.length,
       String(((listed.body.rows ?? []) as unknown[]).length),
     );
+  }
+
+  // ══ My Records (2026-10-20) ═══════════════════════════════════════════════
+  console.log('\nMy Records — the cutoff, the daily time record, the 201 file');
+  {
+    const semi: CutoffRule = { mode: 'SEMI_MONTHLY', firstEnds: 15 };
+    const monthly: CutoffRule = { mode: 'MONTHLY', firstEnds: 15 };
+    check('the 15th is the first cutoff’s last day, the 16th the second’s first', cutoffFor('2026-10-15', semi).key === '2026-10-A' && cutoffFor('2026-10-16', semi).key === '2026-10-B');
+    const feb = cutoffFor('2026-02-20', semi);
+    check('February’s second cutoff runs to the 28th, a leap year’s to the 29th', feb.to === '2026-02-28' && cutoffFor('2028-02-29', semi).to === '2028-02-29', `${feb.from}–${feb.to}`);
+    check('the cutoff before 1–15 October is 16–30 September', shiftCutoff(cutoffFor('2026-10-03', semi), -1, semi).key === '2026-09-B' && shiftCutoff(cutoffFor('2026-10-03', semi), -1, semi).to === '2026-09-30');
+    check('the cutoff after 16–31 December is 1–15 January of the next year', shiftCutoff(cutoffFor('2026-12-20', semi), 1, semi).key === '2027-01-A');
+    check('monthly runs the whole month', cutoffFor('2026-11-07', monthly).from === '2026-11-01' && cutoffFor('2026-11-07', monthly).to === '2026-11-30' && cutoffFor('2026-11-07', monthly).key === '2026-11');
+    check('a split on the 10th moves the boundary', cutoffFor('2026-10-11', { mode: 'SEMI_MONTHLY', firstEnds: 10 }).from === '2026-10-11');
+    check('a key is read under its rule, and refused under the other', cutoffByKey('2026-10-B', semi)?.from === '2026-10-16' && cutoffByKey('2026-10-B', monthly) === null && cutoffByKey('2026-13', monthly) === null);
+    check('a cutoff lists every one of its days', daysOf('2026-09-16', '2026-09-30').length === 15);
+
+    const at = (key: string, hm: string) => new Date(`${key}T${hm}:00+08:00`);
+    const punch = (over: Partial<DtrPunch> = {}): DtrPunch => ({ timeIn: at('2026-09-16', '08:00'), timeOut: at('2026-09-16', '17:00'), status: 'PRESENT', lateMinutes: 0, workedMinutes: 480, undertimeMinutes: 0, ...over });
+    const base = { today: '2026-10-20', now: at('2026-10-20', '10:30'), holiday: null, leave: null, punch: null };
+    check('a Sunday with no punch is a rest day', dtrDay({ ...base, date: '2026-09-20' }).status === 'REST_DAY');
+    check('a holiday with no punch is a holiday, named', dtrDay({ ...base, date: '2026-09-21', holiday: 'Test Day' }).status === 'HOLIDAY' && dtrDay({ ...base, date: '2026-09-21', holiday: 'Test Day' }).note === 'Test Day');
+    check('an approved leave reads On leave', dtrDay({ ...base, date: '2026-09-22', leave: 'Sick Leave' }).status === 'ON_LEAVE');
+    check('a past working day with nothing is absent; today and later are not', dtrDay({ ...base, date: '2026-09-23' }).status === 'ABSENT' && dtrDay({ ...base, date: '2026-10-20' }).status === 'UPCOMING');
+    check('a day before the hire date is no absence', dtrDay({ ...base, date: '2026-09-23', hired: '2026-10-01' }).status === 'NOT_EMPLOYED');
+    check('a punch wins over Sunday — a worked Sunday shows what was worked', dtrDay({ ...base, date: '2026-09-20', punch: punch() }).status === 'PRESENT');
+    const lateDay = dtrDay({ ...base, date: '2026-09-17', punch: punch({ status: 'LATE', lateMinutes: 20, undertimeMinutes: 30, workedMinutes: 430 }) });
+    check('a late day keeps its late and undertime minutes', lateDay.status === 'LATE' && lateDay.lateMinutes === 20 && lateDay.undertimeMinutes === 30 && lateDay.workedMinutes === 430);
+    const openToday = dtrDay({ ...base, date: '2026-10-20', punch: punch({ timeIn: at('2026-10-20', '08:00'), timeOut: null, workedMinutes: 0 }) });
+    check('today’s open day runs live: 08:00 to 10:30 is 150 minutes so far', openToday.status === 'OPEN' && openToday.open && openToday.workedMinutes === 150, String(openToday.workedMinutes));
+    const openOld = dtrDay({ ...base, date: '2026-09-18', punch: punch({ timeOut: null, workedMinutes: 0 }) });
+    check('an older open day is a missing clock-out, not live', openOld.status === 'OPEN' && !openOld.open && openOld.workedMinutes === 0);
+    check('service length counts whole months', JSON.stringify(serviceLength('2014-03-15', '2026-10-20')) === JSON.stringify({ years: 12, months: 7 }) && serviceLength('2026-10-21', '2026-10-20').months === 0);
+    check('a tax status reads with its words', taxStatusLabel('S1') === 'S1 — Single, 1 qualified dependent' && taxStatusLabel(null) === null);
+    const webTax = fs.readFileSync(path.join(__dirname, '../../web/src/pages/masters/Employees.tsx'), 'utf8');
+    check('the employee form offers the API’s tax status list, code for code', TAX_STATUSES.every((t) => webTax.includes(`{ code: '${t.code}', label: '${t.label}' }`)));
+
+    if (await apiReachable()) {
+      const recRole = await makeRole('zzhr_records_own', `${TAG} My Records`, ['ghr.my_records.view_own', 'ghr.overtime.view_own']);
+      const recBoss = await makeUser('ZZ Records Boss', 'recboss@verifyhr.local', [recRole.id]);
+      const recUser = await makeUser('ZZ Records Staff', 'recstaff@verifyhr.local', [recRole.id], recBoss.id);
+      const recPeer = await makeUser('ZZ Records Peer', 'recpeer@verifyhr.local', [recRole.id]);
+      const recNobody = await makeUser('ZZ Records Nobody', 'recnobody@verifyhr.local', []);
+      const recEmp = await prisma.employee.create({
+        data: {
+          employeeNo: `${TAG}-MR1`,
+          firstName: `${TAG} Rhea`,
+          lastName: 'Records',
+          dateHired: new Date('2026-09-01T00:00:00Z'),
+          userId: recUser.id,
+          sssNo: '34-1234567-8',
+          tin: '123-456-789-000',
+          taxStatus: 'S1',
+        },
+      });
+      await prisma.employee.create({ data: { employeeNo: `${TAG}-MR2`, firstName: `${TAG} Pete`, lastName: 'Peer', userId: recPeer.id, sssNo: '99-9999999-9' } });
+      await prisma.attendance.createMany({
+        data: [
+          { employeeId: recEmp.id, date: new Date('2026-09-16T00:00:00Z'), timeIn: at('2026-09-16', '07:55'), timeOut: at('2026-09-16', '17:00'), status: 'PRESENT', workedMinutes: 480 },
+          { employeeId: recEmp.id, date: new Date('2026-09-17T00:00:00Z'), timeIn: at('2026-09-17', '08:35'), timeOut: at('2026-09-17', '16:30'), status: 'LATE', lateMinutes: 20, undertimeMinutes: 30, workedMinutes: 415 },
+        ],
+      });
+      const recT = signToken(recUser.id, recUser.email);
+      const mine = await api(recT, 'GET', '/my-records?cutoff=2026-09-B');
+      const rows = (mine.body.dtr?.days ?? []) as { date: string; status: string; lateMinutes: number }[];
+      const statusOf = (d: string) => rows.find((r) => r.date === d)?.status;
+      check(
+        'My Records lists every day of the asked cutoff, each read off the clock',
+        mine.status === 200 && rows.length === 15 && statusOf('2026-09-16') === 'PRESENT' && statusOf('2026-09-17') === 'LATE' && statusOf('2026-09-20') === 'REST_DAY' && statusOf('2026-09-18') === 'ABSENT',
+        rows.map((r) => `${r.date.slice(8)}:${r.status}`).join(' '),
+      );
+      check('the totals add the cutoff up', mine.body.dtr?.totals.present === 2 && mine.body.dtr?.totals.lateMinutes === 20 && mine.body.dtr?.totals.workedMinutes === 895, JSON.stringify(mine.body.dtr?.totals));
+      check('the previous and next cutoffs are named', mine.body.cutoff?.previous === '2026-09-A' && mine.body.cutoff?.next === '2026-10-A');
+      check(
+        'the 201 file shows the person their own government numbers and tax status',
+        mine.body.file?.sssNo === '34-1234567-8' && mine.body.file?.tin === '123-456-789-000' && mine.body.file?.taxStatusLabel === 'S1 — Single, 1 qualified dependent',
+      );
+      check('the Plantilla tab names who they report to', mine.body.plantilla?.reportsTo?.name === 'ZZ Records Boss');
+      const peerText = JSON.stringify((await api(signToken(recPeer.id, recPeer.email), 'GET', '/my-records')).body);
+      check('a colleague’s My Records never carries another person’s numbers', !peerText.includes('34-1234567-8') && peerText.includes('99-9999999-9'));
+      check('a login with no employee record is told so, not refused', (await api(signToken(recBoss.id, recBoss.email), 'GET', '/my-records')).body.employee === null);
+      check('without My Records the page is refused', (await api(signToken(recNobody.id, recNobody.email), 'GET', '/my-records')).status === 403);
+      check('a cutoff that is not one is a 400', (await api(recT, 'GET', '/my-records?cutoff=2026-09')).status === 400);
+    }
   }
 
   await cleanup();

@@ -979,6 +979,9 @@ model Employee {
   philhealthNo     String?
   pagibigNo        String?
   tin              String?
+  /// The BIR tax status code (2026-10-20, the Records module): S, S1–S4,
+  /// M, M1–M4 or Z — `TAX_STATUSES` in shared/records.ts. Set by HR.
+  taxStatus        String?
 
   isActive  Boolean  @default(true)
   notes     String?

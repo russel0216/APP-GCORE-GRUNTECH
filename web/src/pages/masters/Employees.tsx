@@ -14,6 +14,21 @@ import { PersonSelect, usePeople, type PersonRow } from '../../components/People
 import { FaceSamplesPanel } from '../hr/FaceSamples';
 import { Stat } from '../../components/charts';
 
+/** The BIR tax status codes — the API's `TAX_STATUSES` (shared/records.ts). */
+export const TAX_STATUSES: { code: string; label: string }[] = [
+  { code: 'S', label: 'Single' },
+  { code: 'S1', label: 'Single, 1 qualified dependent' },
+  { code: 'S2', label: 'Single, 2 qualified dependents' },
+  { code: 'S3', label: 'Single, 3 qualified dependents' },
+  { code: 'S4', label: 'Single, 4 qualified dependents' },
+  { code: 'M', label: 'Married' },
+  { code: 'M1', label: 'Married, 1 qualified dependent' },
+  { code: 'M2', label: 'Married, 2 qualified dependents' },
+  { code: 'M3', label: 'Married, 3 qualified dependents' },
+  { code: 'M4', label: 'Married, 4 qualified dependents' },
+  { code: 'Z', label: 'Zero exemption' },
+];
+
 const EMPLOYMENT_TYPES = [
   { value: 'REGULAR', label: 'Regular' },
   { value: 'PROBATIONARY', label: 'Probationary' },
@@ -60,6 +75,8 @@ interface EmployeeRow {
   /** Positions held beside the main one (2026-10-19). */
   extraPositions?: { position: { id: string; code: string; title: string } }[];
   employmentType: string;
+  /** The BIR tax status code (2026-10-20) — S, S1–S4, M, M1–M4, Z. */
+  taxStatus?: string | null;
   dateHired: string | null;
   dateRegularized: string | null;
   /** When probation or training is due to end — the evaluation clock. */
@@ -579,6 +596,7 @@ function EmployeeForm({
     positionId: employee?.positionId ?? '',
     extraPositionIds: (employee?.extraPositions ?? []).map((x) => x.position.id),
     employmentType: employee?.employmentType ?? 'REGULAR',
+    taxStatus: employee?.taxStatus ?? '',
     dateHired: employee?.dateHired?.slice(0, 10) ?? '',
     dateRegularized: employee?.dateRegularized?.slice(0, 10) ?? '',
     periodEndDate: employee?.periodEndDate?.slice(0, 10) ?? '',
@@ -765,6 +783,9 @@ function EmployeeForm({
       // The title is the highest role once there is a login (ROLE_REV1, 2026-10-19);
       // until then it is free text.
       if (!employee?.user && !form.positionId) payload.position = form.position.trim() || null;
+      // HR's alone, so sent only when it changed — a save of one's own contact
+      // details never carries it.
+      if ((form.taxStatus || null) !== (employee?.taxStatus ?? null)) payload.taxStatus = form.taxStatus || null;
 
       if (setRates) {
         payload.dailyRate = form.dailyRate === '' ? null : Number(form.dailyRate);
@@ -1055,6 +1076,16 @@ function EmployeeForm({
                 {EMPLOYMENT_TYPES.map((t) => (
                   <option key={t.value} value={t.value}>
                     {t.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Tax status" hint="The BIR code on the 201 file">
+              <select value={form.taxStatus} onChange={(e) => setForm({ ...form, taxStatus: e.target.value })}>
+                <option value="">— not set —</option>
+                {TAX_STATUSES.map((t) => (
+                  <option key={t.code} value={t.code}>
+                    {t.code} — {t.label}
                   </option>
                 ))}
               </select>

@@ -39,6 +39,9 @@ interface HrSettings {
   faceThreshold: number;
   /** A capture must answer a blink-or-turn challenge (the liveness check). */
   faceLiveness: boolean;
+  /** The payroll cutoff My Records' daily time record covers (2026-10-20). */
+  cutoffMode: 'SEMI_MONTHLY' | 'MONTHLY';
+  cutoffFirstEnds: number;
 }
 
 /**
@@ -59,6 +62,8 @@ const EDITED_KEYS = [
   'hoursPerDay',
   'faceThreshold',
   'faceLiveness',
+  'cutoffMode',
+  'cutoffFirstEnds',
 ] as const satisfies readonly (keyof HrSettings)[];
 
 function edited(s: HrSettings): HrSettings {
@@ -195,6 +200,23 @@ export function HrSettingsPage() {
                 onChange={(e) => set('hoursPerDay', Number(e.target.value))}
               />
             </Field>
+            <Field label="Payroll cutoff" hint="The period each person's daily time record covers on My Records">
+              <select value={settings.cutoffMode} onChange={(e) => set('cutoffMode', e.target.value as HrSettings['cutoffMode'])}>
+                <option value="SEMI_MONTHLY">Semi-monthly</option>
+                <option value="MONTHLY">Monthly</option>
+              </select>
+            </Field>
+            {settings.cutoffMode === 'SEMI_MONTHLY' && (
+              <Field label="First cutoff ends on day" hint={`1–${settings.cutoffFirstEnds}, then ${settings.cutoffFirstEnds + 1} to the month's end`}>
+                <NumberInput
+                  kind="count"
+                  min={1}
+                  max={27}
+                  value={settings.cutoffFirstEnds}
+                  onChange={(e) => set('cutoffFirstEnds', Number(e.target.value))}
+                />
+              </Field>
+            )}
           </div>
 
           <div className="card">
