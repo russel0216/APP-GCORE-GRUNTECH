@@ -1770,6 +1770,9 @@ function presentCanvass(canvass: LoadedCanvass, me: ResolvedUser, orders: { id: 
     // POST /:id/cancel and DELETE /:id's own rules (the cancel also refuses
     // an award an order was placed on).
     canCancel: (open || canvass.status === 'AWARDED') && mayEditCanvass(me, canvass) && !orders.length,
+    // POST /:id/reopen's rule (2026-10-20): an award whose orders are all
+    // still drafts — returned or pulled back — or were cancelled.
+    canReopen: canvass.status === 'AWARDED' && can(me, 'gchain.canvass.edit_all') && orders.every((o) => o.status === 'DRAFT'),
     canDelete: canvass.status === 'CANCELLED' && can(me, 'gchain.canvass.delete') && mayEditCanvass(me, canvass),
   };
 }
@@ -1882,6 +1885,64 @@ canvassRoutes.post(
     });
     await audit({ entityType: 'canvass', entityId: canvass.id, action: 'CANCELLED', summary: `${canvass.number} cancelled — ${body.reason}` }, req);
     res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
+/**
+ * Reopens an awarded canvass (2026-10-20, the owner's call: "returned or
+ * pulled-back P.O. can edit canvass"). Only while every order placed on the
+ * award is still a DRAFT — returned by its approver or pulled back — or was
+ * cancelled: nothing went to the supplier. The award is withdrawn (the
+ * winner unticked, AWARDED BY cleared, the reason on its notes) and its RFQ
+ * opens again (CLOSED → QUOTED), so prices, the recommendation and the award
+ * may change. The draft order stays: awarded again to the same supplier it
+ * carries on; awarded to another, the award cancels it (below). Claimed on
+ * AWARDED, the edit_all right that awards.
+ */
+canvassRoutes.post(
+  '/:id/reopen',
+  require_('gchain.canvass.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is reopened').max(2000) }), req.body);
+    const canvass = await prisma.canvass.findUnique({
+      where: { id: req.params.id },
+      include: { suppliers: { select: { supplierId: true, isSelected: true, supplier: { select: { name: true } } } } },
+    });
+    if (!canvass) throw notFound('Canvass not found');
+    if (canvass.status !== 'AWARDED') throw badRequest(`${canvass.number} is ${statusLabel(canvass.status).toLowerCase()} — only an awarded canvass is reopened`);
+    const orders = await ordersOnAward(canvass);
+    const placed = orders.filter((o) => o.status !== 'DRAFT');
+    if (placed.length) {
+      throw badRequest(
+        `Purchase order ${placed.map((o) => `${o.number} (${statusLabel(o.status).toLowerCase()})`).join(', ')} stands on this award — pull it back to draft or cancel it first`,
+      );
+    }
+    const winner = canvass.suppliers.find((s) => s.isSelected);
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.canvass.updateMany({
+        where: { id: canvass.id, status: 'AWARDED' },
+        data: {
+          status: 'OPEN',
+          awardedAt: null,
+          awardedById: null,
+          notes: `${canvass.notes ? `${canvass.notes}\n` : ''}Reopened${winner ? ` (was awarded to ${winner.supplier.name})` : ''}: ${body.reason}`,
+        },
+      });
+      if (!claimed.count) throw badRequest(`${canvass.number} changed a moment ago — reload to see it`);
+      await tx.canvassSupplier.updateMany({ where: { canvassId: canvass.id }, data: { isSelected: false } });
+      if (canvass.rfqId) await tx.rfq.updateMany({ where: { id: canvass.rfqId, status: 'CLOSED' }, data: { status: 'QUOTED' } });
+    });
+    await audit(
+      {
+        entityType: 'canvass',
+        entityId: canvass.id,
+        action: 'UPDATED',
+        summary: `${canvass.number} reopened${winner ? ` (was awarded to ${winner.supplier.name})` : ''} — ${body.reason}`,
+        after: { reopened: true, draftOrders: orders.map((o) => o.number) },
+      },
+      req,
+    );
+    res.json({ ok: true, status: 'OPEN', draftOrders: orders.map((o) => o.number) });
   }),
 );
 
@@ -2314,6 +2375,15 @@ canvassRoutes.post(
     if (row.canvass.status !== 'OPEN') throw badRequest('This canvass has already been awarded');
     const onSheet = new Set(sheetLinesOf(row.canvass, row.canvass.request.items).map((i) => i.id));
     if (!row.quotes.some((qq) => onSheet.has(qq.requestItemId))) throw badRequest('That supplier has not quoted anything');
+    // A reopened canvass awarded to ANOTHER supplier: the draft order raised
+    // on the old award goes (2026-10-20) — nothing was sent on it.
+    const others = await prisma.canvassSupplier.findMany({ where: { canvassId: row.canvassId, supplierId: { not: row.supplierId } }, select: { supplierId: true } });
+    const staleOrders = others.length
+      ? await prisma.purchaseOrder.findMany({
+          where: { requestId: row.canvass.requestId, supplierId: { in: others.map((o) => o.supplierId) }, status: 'DRAFT' },
+          select: { id: true, number: true },
+        })
+      : [];
 
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.canvass.updateMany({
@@ -2321,6 +2391,12 @@ canvassRoutes.post(
         data: { status: 'AWARDED', awardedAt: new Date(), awardedById: me.id },
       });
       if (!claimed.count) throw badRequest('This canvass was awarded a moment ago — reload to see it');
+      for (const o of staleOrders) {
+        await tx.purchaseOrder.updateMany({
+          where: { id: o.id, status: 'DRAFT' },
+          data: { status: 'CANCELLED', cancelReason: `${row.canvass.number} was awarded to ${row.supplier.name} instead` },
+        });
+      }
       await tx.canvassSupplier.updateMany({ where: { canvassId: row.canvassId }, data: { isSelected: false } });
       await tx.canvassSupplier.update({ where: { id: row.id }, data: { isSelected: true } });
       if (row.canvass.rfqId) await tx.rfq.updateMany({ where: { id: row.canvass.rfqId, status: { in: ['SENT', 'QUOTED'] } }, data: { status: 'CLOSED' } });
@@ -2335,7 +2411,18 @@ canvassRoutes.post(
       },
       req,
     );
-    res.json({ ok: true, supplier: row.supplier.name });
+    for (const o of staleOrders) {
+      await audit(
+        {
+          entityType: 'purchase_order',
+          entityId: o.id,
+          action: 'CANCELLED',
+          summary: `${o.number} cancelled — ${row.canvass.number} was awarded to ${row.supplier.name} instead`,
+        },
+        req,
+      );
+    }
+    res.json({ ok: true, supplier: row.supplier.name, cancelledOrders: staleOrders.map((o) => o.number) });
   }),
 );
 

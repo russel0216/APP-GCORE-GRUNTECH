@@ -232,6 +232,8 @@ export function Receivables() {
       render: (r) => (
         <>
           <span className="mono">{r.siNumber ?? r.number}</span>
+          {/* A printed SI set aside before the customer counters it (2026-10-20). */}
+          {r.siNumber && !r.counteredDate && <div className="faint">Reserved SI</div>}
           {r.siNumber && <div className="faint mono">{r.number}</div>}
         </>
       ),
@@ -1332,7 +1334,10 @@ export function InvoiceDetail() {
             <h3 className="card-title">Where it stands</h3>
             <dl className="kv">
               <dt>Invoice no.</dt>
-              <dd className="mono">{row.siNumber ?? <span className="faint">not yet typed — Modify the draft</span>}</dd>
+              <dd className="mono">
+                {row.siNumber ?? <span className="faint">not yet typed — Modify the draft</span>}
+                {row.siNumber && !row.counteredDate && <span className="faint"> · reserved until it is countered</span>}
+              </dd>
               <dt>Dated</dt>
               <dd>{formatDate(row.invoiceDate)}</dd>
               <dt>Countered</dt>
@@ -1733,10 +1738,14 @@ export function RecordPaymentModal({
   // A collection may carry lines typed by hand (2026-10-16, the owner's call):
   // money received on account, against no invoice on file yet.
   const [manual, setManual] = useState<{ reference: string; amount: number }[]>([]);
+  // The EWT the customer withheld on this collection, per invoice (2026-10-20):
+  // blank says nothing; typed, it becomes the invoice's EWT and what is owed
+  // moves with it — the server checks the amount against that.
+  const [ewt, setEwt] = useState<Record<string, string>>({});
   const manualTotal = manual.reduce((s, l) => s + (l.amount || 0), 0);
   const manualIncomplete = manual.some((l) => (l.amount > 0) !== !!l.reference.trim());
   const total = Object.values(allocations).reduce((s, v) => s + (v || 0), 0) + manualTotal;
-  const overApplied = rows.some((t) => (allocations[t.id] ?? 0) > t.outstanding + 0.005);
+  const overApplied = rows.some((t) => ewt[t.id] === undefined && (allocations[t.id] ?? 0) > t.outstanding + 0.005);
   // An advance or a budget request goes out in one voucher: all of it, or none of it.
   const partialRelease =
     release &&
@@ -1759,7 +1768,12 @@ export function RecordPaymentModal({
         notes: form.notes || null,
         allocations: Object.entries(allocations)
           .filter(([, amount]) => amount > 0)
-          .map(([id, amount]) => ({ kind: targetKind, id, amount })),
+          .map(([id, amount]) => ({
+            kind: targetKind,
+            id,
+            amount,
+            ...(collection && ewt[id] !== undefined && ewt[id] !== '' ? { ewtWithheld: Number(ewt[id]) } : {}),
+          })),
         lines: manual.filter((l) => l.amount > 0 && l.reference.trim()).map((l) => ({ reference: l.reference.trim(), amount: l.amount })),
       }).then((p) => {
         toast(
@@ -1887,6 +1901,7 @@ export function RecordPaymentModal({
             <tr>
               <th>Document</th>
               <th className="right">Outstanding</th>
+              {collection && <th className="right">EWT withheld</th>}
               <th className="right">Applying</th>
             </tr>
           </thead>
@@ -1895,6 +1910,26 @@ export function RecordPaymentModal({
               <tr key={t.id}>
                 <td className="mono">{t.number}</td>
                 <td className="right mono">{formatMoney(t.outstanding)}</td>
+                {collection && (
+                  <td className="right">
+                    <NumberInput
+                      kind="money"
+                      min={0}
+                      aria-label={`EWT withheld on ${t.number}`}
+                      className="fin-amount-input"
+                      placeholder="as billed"
+                      value={ewt[t.id] ?? ''}
+                      onChange={(e) =>
+                        setEwt((w) => {
+                          const next = { ...w };
+                          if (e.target.value === '') delete next[t.id];
+                          else next[t.id] = e.target.value;
+                          return next;
+                        })
+                      }
+                    />
+                  </td>
+                )}
                 <td className="right">
                   <NumberInput
                     kind="money"
@@ -1928,6 +1963,7 @@ export function RecordPaymentModal({
                     Remove
                   </button>
                 </td>
+                {collection && <td />}
                 <td className="right">
                   <NumberInput
                     kind="money"
@@ -1943,7 +1979,7 @@ export function RecordPaymentModal({
           </tbody>
           <tfoot>
             <tr>
-              <th colSpan={2} className="right">
+              <th colSpan={collection ? 3 : 2} className="right">
                 Total
               </th>
               <th className="right mono">{formatMoney(total)}</th>
@@ -1955,6 +1991,12 @@ export function RecordPaymentModal({
         <button type="button" className="btn btn-sm fin-gap-top-sm" onClick={() => setManual([...manual, { reference: '', amount: 0 }])}>
           + Add line
         </button>
+      )}
+      {collection && Object.keys(ewt).length > 0 && (
+        <p className="faint fin-gap-top">
+          The EWT typed is what the customer withheld on this collection. Once a collection says it, the invoice’s EWT is the sum
+          its collections withheld — what is still owed moves with it.
+        </p>
       )}
       {manual.length > 0 && (
         <p className="faint fin-gap-top">
@@ -1989,6 +2031,8 @@ export function RecordPaymentModal({
 // ── The payments register ────────────────────────────────────────────────────
 
 interface Allocation {
+  /** The EWT the customer withheld on this collection, where it was typed (2026-10-20). */
+  ewtWithheld?: number | null;
   id: string;
   amount: number;
   invoice: { id: string; number: string } | null;
@@ -2583,7 +2627,10 @@ export function PaymentDetail() {
                           '—'
                         )}
                       </td>
-                      <td className="faint">{t?.what ?? '—'}</td>
+                      <td className="faint">
+                        {t?.what ?? '—'}
+                        {a.ewtWithheld != null && <div>EWT withheld {formatMoney(a.ewtWithheld)}</div>}
+                      </td>
                       <td className="right mono">{formatMoney(a.amount)}</td>
                     </tr>
                   );

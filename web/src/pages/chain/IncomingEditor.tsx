@@ -30,6 +30,12 @@ interface Warehouse {
   code: string;
   name: string;
 }
+/** A product group — the item category goods go into inventory under (2026-10-20). */
+interface Category {
+  id: string;
+  code: string;
+  name: string;
+}
 interface OrderOption {
   id: string;
   number: string;
@@ -50,6 +56,10 @@ interface OrderLine {
   pendingQty: number;
   left: number;
   unitPrice: number;
+  /** The item's product group; null where it has none. */
+  category: Category | null;
+  /** No item on file yet: received into a warehouse it is filed new, under the group the line names. */
+  newItem: boolean;
 }
 interface OrderData {
   id: string;
@@ -71,6 +81,7 @@ interface ItemOption {
   partNumber: string | null;
   unit: string;
   standardCost: number;
+  category?: Category | null;
 }
 interface FreeLine {
   key: string;
@@ -80,6 +91,7 @@ interface FreeLine {
   unit: string;
   quantity: string;
   unitCost: string;
+  categoryId: string;
 }
 interface Existing {
   id: string;
@@ -107,6 +119,8 @@ interface Existing {
     unit: string;
     quantity: number;
     unitCost: number;
+    categoryId?: string | null;
+    category?: Category | null;
   }[];
 }
 
@@ -114,7 +128,7 @@ type Mode = 'order' | 'none';
 
 let keySeq = 0;
 const newKey = () => `l${++keySeq}`;
-const blankFree = (): FreeLine => ({ key: newKey(), item: null, partNumber: '', description: '', unit: '', quantity: '', unitCost: '' });
+const blankFree = (): FreeLine => ({ key: newKey(), item: null, partNumber: '', description: '', unit: '', quantity: '', unitCost: '', categoryId: '' });
 const cents = (n: number) => Math.round(n * 100) / 100;
 const qtyText = (n: number) => new Intl.NumberFormat('en-PH', { maximumFractionDigits: 3 }).format(n);
 
@@ -133,6 +147,9 @@ export function IncomingEditor() {
   const [attempted, setAttempted] = useState(false);
   const [existing, setExisting] = useState<Existing | null>(null);
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  /** The product group named on each order line (by order line id). */
+  const [groups, setGroups] = useState<Record<string, string>>({});
 
   const [mode, setMode] = useState<Mode>('order');
   const [order, setOrder] = useState<OrderData | null>(null);
@@ -162,9 +179,10 @@ export function IncomingEditor() {
     let live = true;
     (async () => {
       try {
-        const opts = await api.get<{ warehouses: Warehouse[] }>('/receivings/options');
+        const opts = await api.get<{ warehouses: Warehouse[]; categories: Category[] }>('/receivings/options');
         if (!live) return;
         setWarehouses(opts.warehouses);
+        setCategories(opts.categories ?? []);
         if (editing) {
           const r = await api.get<Existing>(`/receivings/${id}`);
           if (!live) return;
@@ -183,21 +201,30 @@ export function IncomingEditor() {
             setMode('order');
             await loadOrder(r.orderId, r.id);
             const q: Record<string, string> = {};
-            for (const i of r.items) if (i.orderItemId) q[i.orderItemId] = String(i.quantity);
+            const g: Record<string, string> = {};
+            for (const i of r.items) {
+              if (!i.orderItemId) continue;
+              q[i.orderItemId] = String(i.quantity);
+              if (i.categoryId) g[i.orderItemId] = i.categoryId;
+            }
             setReceive(q);
-            setSaved(JSON.stringify({ mode: 'order', h, q }));
+            setGroups(g);
+            setSaved(JSON.stringify({ mode: 'order', h, q, g }));
           } else {
             setMode('none');
             setFromSupplier(!!r.supplier);
             setSupplier(r.supplier ? { id: r.supplier.id, name: r.supplier.name } : null);
             const ls = r.items.map((i) => ({
               key: newKey(),
-              item: i.itemId ? { id: i.itemId, code: i.code ?? '', name: i.name ?? i.description, partNumber: null, unit: i.unit, standardCost: 0 } : null,
+              item: i.itemId
+                ? { id: i.itemId, code: i.code ?? '', name: i.name ?? i.description, partNumber: null, unit: i.unit, standardCost: 0, category: i.category ?? null }
+                : null,
               partNumber: i.partNumber ?? '',
               description: i.description,
               unit: i.unit,
               quantity: String(i.quantity),
               unitCost: String(i.unitCost),
+              categoryId: i.categoryId ?? i.category?.id ?? '',
             }));
             setFree(ls.length ? ls : [blankFree()]);
             setSaved(JSON.stringify({ mode: 'none', h, ls: ls.map(({ key: _k, ...rest }) => rest) }));
@@ -243,7 +270,7 @@ export function IncomingEditor() {
 
   const snapshot = () =>
     mode === 'order'
-      ? JSON.stringify({ mode, h: header, q: receive })
+      ? JSON.stringify({ mode, h: header, q: receive, g: groups })
       : JSON.stringify({ mode, h: header, ls: free.map(({ key: _k, ...rest }) => rest) });
   const dirty = saved !== null && (saved === '' ? orderLinesSent.length > 0 || freeSent.length > 0 : snapshot() !== saved);
   useUnsavedChanges(dirty && !busy);
@@ -257,6 +284,7 @@ export function IncomingEditor() {
     else if (!orderLinesSent.length) problems.push('Type what came in on at least one line');
     for (const l of orderLinesSent) {
       if (Number(receive[l.id]) > l.left + 0.0005) problems.push(`${l.name ?? l.description}: only ${qtyText(l.left)} left to receive`);
+      else if (l.newItem && header.warehouseId && !groups[l.id]) problems.push(`${l.name ?? l.description}: choose its product group — it is a new item`);
     }
   } else {
     if (fromSupplier ? !supplier : !header.sourceName.trim()) problems.push('Say where the goods came from');
@@ -267,6 +295,7 @@ export function IncomingEditor() {
       if (!l.item && !l.partNumber.trim() && !l.description.trim()) problems.push(`Line ${n + 1}: choose the item, or type its part number or description`);
       else if (!(Number(l.quantity) > 0)) problems.push(`Line ${n + 1}: quantity must be more than zero`);
       else if (l.unitCost === '') problems.push(`Line ${n + 1}: type the unit cost (0 for a free item)`);
+      else if (!l.item && !l.categoryId) problems.push(`Line ${n + 1}: choose its product group — a new item goes into inventory under one`);
     });
   }
 
@@ -283,7 +312,7 @@ export function IncomingEditor() {
       return {
         ...common,
         orderId: order!.id,
-        items: orderLinesSent.map((l) => ({ orderItemId: l.id, quantity: Number(receive[l.id]) })),
+        items: orderLinesSent.map((l) => ({ orderItemId: l.id, quantity: Number(receive[l.id]), categoryId: groups[l.id] || null })),
       };
     }
     return {
@@ -299,6 +328,7 @@ export function IncomingEditor() {
         unit: l.unit.trim() || null,
         quantity: Number(l.quantity),
         unitCost: Number(l.unitCost) || 0,
+        categoryId: l.categoryId || null,
       })),
     };
   }
@@ -552,6 +582,7 @@ export function IncomingEditor() {
                       <tr>
                         <th>#</th>
                         <th>Item</th>
+                        <th>Product group</th>
                         <th>Unit</th>
                         <th className="right">Ordered</th>
                         <th className="right">Received</th>
@@ -573,6 +604,19 @@ export function IncomingEditor() {
                               </div>
                               {l.name && l.description !== l.name && <div className="faint">{l.description}</div>}
                               {(l.code ?? l.partNumber) && <div className="faint mono">{l.code ?? l.partNumber}</div>}
+                            </td>
+                            <td>
+                              {l.category ? (
+                                l.category.name
+                              ) : (
+                                <GroupSelect
+                                  label={`Product group — ${l.name ?? l.description}`}
+                                  categories={categories}
+                                  value={groups[l.id] ?? ''}
+                                  required={l.newItem && !!header.warehouseId}
+                                  onChange={(v) => setGroups((g) => ({ ...g, [l.id]: v }))}
+                                />
+                              )}
                             </td>
                             <td>{l.unit}</td>
                             <td className="right mono">{qtyText(l.quantity)}</td>
@@ -610,6 +654,7 @@ export function IncomingEditor() {
                       <th>Item</th>
                       <th>Part No.</th>
                       <th>Description</th>
+                      <th>Product group</th>
                       <th>Unit</th>
                       <th className="right">Qty</th>
                       <th className="right">Unit cost</th>
@@ -635,6 +680,7 @@ export function IncomingEditor() {
                                         description: x.description || item?.name || '',
                                         unit: x.unit || item?.unit || '',
                                         unitCost: x.unitCost || (item ? String(item.standardCost) : ''),
+                                        categoryId: x.categoryId || item?.category?.id || '',
                                       }
                                     : x,
                                 ),
@@ -658,6 +704,19 @@ export function IncomingEditor() {
                             value={l.description}
                             onChange={(e) => setFree((ls) => ls.map((x) => (x.key === l.key ? { ...x, description: e.target.value } : x)))}
                           />
+                        </td>
+                        <td>
+                          {l.item?.category ? (
+                            l.item.category.name
+                          ) : (
+                            <GroupSelect
+                              label={`Product group — line ${n + 1}`}
+                              categories={categories}
+                              value={l.categoryId}
+                              required={!l.item}
+                              onChange={(v) => setFree((ls) => ls.map((x) => (x.key === l.key ? { ...x, categoryId: v } : x)))}
+                            />
+                          )}
                         </td>
                         <td className="inc-unit-cell">
                           <input
@@ -877,5 +936,35 @@ function ItemLookup({
         </ul>
       )}
     </div>
+  );
+}
+
+/**
+ * The product group a line goes into inventory under (2026-10-20, the owner's
+ * call): required where the line files a new item; on an item with none it
+ * fills that item's.
+ */
+function GroupSelect({
+  label,
+  categories,
+  value,
+  required,
+  onChange,
+}: {
+  label: string;
+  categories: Category[];
+  value: string;
+  required: boolean;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <select aria-label={label} value={value} required={required} onChange={(e) => onChange(e.target.value)}>
+      <option value="">{required ? '— choose —' : '— none —'}</option>
+      {categories.map((c) => (
+        <option key={c.id} value={c.id}>
+          {c.code} — {c.name}
+        </option>
+      ))}
+    </select>
   );
 }

@@ -28,6 +28,7 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
 import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
+import { assertSiNumberFree } from '../shared/siNumbers';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
@@ -88,6 +89,7 @@ import {
   daysBetween,
   settleable,
   refreshSettlement,
+  withheldOn,
   refreshAdvance,
   refreshBudgetRequest,
   claimPayable,
@@ -935,15 +937,6 @@ async function resolveCredit(
  * (case- and space-blind) on another invoice that is not cancelled is a 409
  * naming it, before anything is written.
  */
-async function assertSiNumberFree(siNumber: string | null | undefined, exceptId?: string) {
-  const si = siNumber?.trim();
-  if (!si) return;
-  const taken = await prisma.invoice.findFirst({
-    where: { siNumber: { equals: si, mode: 'insensitive' }, status: { not: 'CANCELLED' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
-    select: { number: true },
-  });
-  if (taken) throw conflict(`Invoice no. ${si} is already on ${taken.number}`);
-}
 
 /** The invoice date and countered day a form sends: countered alone is both. */
 function datesFrom(body: { invoiceDate?: string; counteredDate?: string | null }, fallback: Date) {
@@ -1277,7 +1270,7 @@ invoiceRoutes.put(
         ? expectedCollection(invoiceDate, counteredDate, termsDays)
         : existing.dueDate;
     if (dueDate < invoiceDate) throw badRequest('The due date is before the invoice date');
-    if (header.siNumber !== undefined) await assertSiNumberFree(header.siNumber, existing.id);
+    if (header.siNumber !== undefined) await assertSiNumberFree(header.siNumber, { invoiceId: existing.id });
     const headerData = {
       invoiceDate,
       counteredDate,
@@ -3910,6 +3903,7 @@ function presentPayment(row: PaymentRow) {
     allocations: row.allocations.map((a) => ({
       ...a,
       amount: num(a.amount),
+      ewtWithheld: a.ewtWithheld == null ? null : num(a.ewtWithheld),
       invoice: a.invoice ? { ...a.invoice, netCollectible: num(a.invoice.netCollectible) } : null,
       bill: a.bill ? { ...a.bill, netPayable: num(a.bill.netPayable) } : null,
       claim: a.claim ? { ...a.claim, total: num(a.claim.total) } : null,
@@ -4247,10 +4241,19 @@ paymentRoutes.get(
     const settled = row.allocations.map((a) => {
       const t = a.invoice ?? a.bill ?? a.claim ?? a.advance ?? a.budgetRequest ?? a.commissionShare?.request;
       const what = a.invoice ? 'Sales invoice' : a.bill ? 'Supplier bill' : a.claim ? 'Expense claim' : a.advance ? 'Cash advance' : a.budgetRequest ? 'Budget request' : 'Commission';
-      return [t?.number ?? '—', what, a.invoice?.invoiceDate ? formatShortDate(a.invoice.invoiceDate) : '—', formatAmount(num(a.amount))];
+      return [
+        t?.number ?? '—',
+        what,
+        a.invoice?.invoiceDate ? formatShortDate(a.invoice.invoiceDate) : '—',
+        a.ewtWithheld == null ? '' : formatAmount(num(a.ewtWithheld)),
+        formatAmount(num(a.amount)),
+      ];
     });
     // Lines typed by hand: received on account, settling no invoice yet.
-    for (const l of row.lines) settled.push([l.reference, 'On account', '—', formatAmount(num(l.amount))]);
+    for (const l of row.lines) settled.push([l.reference, 'On account', '—', '', formatAmount(num(l.amount))]);
+    // The EWT column only where a collection said what was withheld (2026-10-20).
+    const withEwt = row.allocations.some((a) => a.ewtWithheld != null);
+    const cols = (r: string[]) => (withEwt ? r : [...r.slice(0, 3), r[4]]);
     const sections: PdfSection[] = [
       {
         kind: 'fields',
@@ -4269,9 +4272,9 @@ paymentRoutes.get(
       {
         kind: 'table',
         title: receipt ? 'In payment of' : 'Settles',
-        head: ['Number', 'Document', 'Dated', `Applied (${currency})`],
-        align: ['left', 'left', 'left', 'right'],
-        rows: settled,
+        head: cols(['Number', 'Document', 'Dated', `EWT withheld (${currency})`, `Applied (${currency})`]),
+        align: cols(['left', 'left', 'left', 'right', 'right']) as ('left' | 'right')[],
+        rows: settled.map(cols),
       },
       { kind: 'totals', rows: [{ label: receipt ? 'Amount received' : 'Amount paid', value: formatMoney(num(row.amount), currency), bold: true }] },
     ];
@@ -4313,6 +4316,8 @@ const paymentSchema = z.object({
         kind: z.enum(['invoice', 'bill', 'claim', 'advance', 'advance_refund', 'budget_request', 'budget_request_refund']),
         id: z.string().min(1),
         amount: z.number().positive('An allocation must be more than zero'),
+        /** On a customer's invoice: the EWT they withheld on this collection, typed (2026-10-20). */
+        ewtWithheld: z.number().min(0).optional().nullable(),
       }),
     )
     .default([]),
@@ -4381,8 +4386,22 @@ paymentRoutes.post(
     const advances: { id: string; number: string }[] = [];
     const requests: { id: string; number: string }[] = [];
     for (const allocation of body.allocations) {
+      if (allocation.ewtWithheld != null && allocation.kind !== 'invoice') {
+        throw badRequest('The EWT withheld is typed on a customer’s invoice only');
+      }
       const target = await settleable(allocation.kind as SettleableKind, allocation.id);
       if (!target) throw notFound(`That ${allocation.kind.replace(/_/g, ' ')} does not exist`);
+      // The EWT the customer withheld on THIS collection (2026-10-20): the
+      // invoice's EWT becomes what its collections say, so what is owed moves
+      // with it — checked as it will stand once this is written.
+      if (allocation.kind === 'invoice' && allocation.ewtWithheld != null) {
+        const inv = await prisma.invoice.findUniqueOrThrow({ where: { id: allocation.id } });
+        if (allocation.ewtWithheld > cents(num(inv.grossAmount) * 0.15) + 0.005) {
+          throw badRequest(`${inv.number}: an EWT of ${allocation.ewtWithheld} is more than 15% of its amount before VAT`);
+        }
+        const after = await withheldOn(prisma, inv.id, inv, cents(allocation.ewtWithheld));
+        target.outstanding = cents(after.netCollectible - num(inv.amountCollected));
+      }
       if (allocation.amount > target.outstanding + 0.005) {
         throw badRequest(
           target.outstanding <= 0.005 && allocation.kind === 'advance_refund'
@@ -4450,6 +4469,7 @@ paymentRoutes.post(
           allocations: {
             create: body.allocations.map((a) => ({
               invoiceId: a.kind === 'invoice' ? a.id : null,
+              ewtWithheld: a.kind === 'invoice' && a.ewtWithheld != null ? D(cents(a.ewtWithheld)) : null,
               billId: a.kind === 'bill' ? a.id : null,
               claimId: a.kind === 'claim' ? a.id : null,
               advanceId: a.kind === 'advance' || a.kind === 'advance_refund' ? a.id : null,

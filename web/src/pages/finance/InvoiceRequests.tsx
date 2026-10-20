@@ -49,6 +49,8 @@ interface RequestRow {
   billing: { id: string; number: string } | null;
   salesOrder: { id: string; number: string };
   poReference: string | null;
+  /** The BIR printed SI number reserved for it (2026-10-20). */
+  siNumber: string | null;
   netCollectible: number;
   requestedBy: Named;
   team: { id: string; code: string } | null;
@@ -213,6 +215,7 @@ export interface InvoiceRequestDetail {
   termsDays: number | null;
   terms: string;
   poReference: string | null;
+  siNumber: string | null;
   salesperson: Named | null;
   team: { id: string; code: string; name: string } | null;
   notes: string | null;
@@ -260,6 +263,7 @@ export function InvoiceRequestModal({
     invoiceDate: existing?.invoiceDate?.slice(0, 10) ?? '',
     termsDays: existing?.termsDays ?? 30,
     poReference: existing?.poReference ?? '',
+    siNumber: existing?.siNumber ?? '',
     notes: existing?.notes ?? '',
     grossAmount: existing && existing.kind === 'order' ? existing.grossAmount : 0,
     description: existing?.description ?? '',
@@ -330,6 +334,7 @@ export function InvoiceRequestModal({
         invoiceDate: form.invoiceDate || null,
         termsDays: form.termsDays,
         poReference: form.poReference || null,
+        siNumber: form.siNumber.trim() || null,
         notes: form.notes || null,
         ewtRate: form.ewtRate,
         ...(fromOrder ? { grossAmount: form.grossAmount, description: form.description || null } : {}),
@@ -447,6 +452,12 @@ export function InvoiceRequestModal({
               <input type="date" value={form.invoiceDate} onChange={(e) => setForm((f) => ({ ...f, invoiceDate: e.target.value }))} />
             </Field>
           </div>
+          <Field
+            label="Reserved SI no."
+            hint="The BIR printed sales invoice set aside for it — carried to the invoice, which reads “Reserved” until the customer counters it"
+          >
+            <input value={form.siNumber} onChange={(e) => setForm((f) => ({ ...f, siNumber: e.target.value }))} maxLength={40} />
+          </Field>
           <Field label="Payment terms">
             <TermsPicker value={form.termsDays} onChange={(days) => setForm((f) => ({ ...f, termsDays: days }))} />
           </Field>
@@ -645,6 +656,8 @@ export function InvoiceRequestPage() {
               </dd>
               <dt>Customer P.O.</dt>
               <dd>{row.poReference ?? '—'}</dd>
+              <dt>Reserved SI no.</dt>
+              <dd>{row.siNumber ? <span className="mono">{row.siNumber}</span> : <span className="faint">None reserved</span>}</dd>
               <dt>Payment terms</dt>
               <dd>{row.terms || '—'}</dd>
               <dt>Invoice date</dt>

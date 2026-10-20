@@ -310,6 +310,8 @@ interface CanvassDetailData {
   canAward: boolean;
   canRefresh: boolean;
   canCancel: boolean;
+  /** POST /:id/reopen's rule: awarded, every order on it still a draft or cancelled. */
+  canReopen?: boolean;
   canDelete: boolean;
   createdBy: { id: string; name: string };
   awardedBy: { id: string; name: string } | null;
@@ -393,6 +395,12 @@ export function CanvassDetail() {
     if (!canvass) return;
     await api.post(`/canvasses/${canvass.id}/cancel`, { reason });
     toast('ok', `${canvass.number} cancelled`);
+    await load();
+  }
+  async function reopen(reason: string) {
+    if (!canvass) return;
+    await api.post(`/canvasses/${canvass.id}/reopen`, { reason });
+    toast('ok', `${canvass.number} is open again`);
     await load();
   }
   async function remove() {
@@ -483,6 +491,21 @@ export function CanvassDetail() {
               confirmLabel: 'Refresh',
               tone: 'primary',
               onConfirm: refresh,
+            },
+          },
+          canvass.canReopen && {
+            label: 'Reopen to change it',
+            hint: 'Its order is still a draft — returned or pulled back',
+            confirm: {
+              title: `Reopen ${canvass.number}?`,
+              body:
+                'The award is withdrawn so the prices, the recommendation and the award can change. The draft order stays: awarded again to the same supplier it carries on; awarded to another, it is cancelled.',
+              confirmLabel: 'Reopen',
+              tone: 'primary',
+              reason: 'required',
+              minReason: 3,
+              reasonLabel: 'Why is it reopened?',
+              onConfirm: reopen,
             },
           },
           canvass.canCancel && {

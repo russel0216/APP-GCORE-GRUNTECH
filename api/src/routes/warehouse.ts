@@ -23,7 +23,7 @@ import { registerSearch } from '../shared/search';
 import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES, stockState, itemsOnOrder, STOCK_STATES, type StockState } from '../shared/chain';
 import { nextNumber } from '../shared/numbering';
 import { issueProjectStock, projectHoldings, receiveProjectStock } from '../shared/projectStock';
-import { itemForTypedLine } from '../shared/typedItems';
+import { itemForTypedLine, matchTypedItem } from '../shared/typedItems';
 import { notify } from '../shared/notifications';
 import {
   contactOf,
@@ -254,7 +254,7 @@ receivingRoutes.get(
   requireAny(...RECEIVING_FORM),
   handler(async (req, res) => {
     const term = String(req.query.q ?? '').trim();
-    const [warehouses, orders] = await Promise.all([
+    const [warehouses, orders, categories] = await Promise.all([
       prisma.warehouse.findMany({ where: { isActive: true }, orderBy: { name: 'asc' }, select: { id: true, code: true, name: true } }),
       prisma.purchaseOrder.findMany({
         where: {
@@ -280,8 +280,10 @@ receivingRoutes.get(
           job: { select: { number: true, name: true } },
         },
       }),
+      // The product groups a line files a new item under (2026-10-20).
+      prisma.itemCategory.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, code: true, name: true } }),
     ]);
-    res.json({ warehouses, orders });
+    res.json({ warehouses, orders, categories });
   }),
 );
 
@@ -320,7 +322,7 @@ receivingRoutes.get(
       },
       orderBy: { name: 'asc' },
       take: 20,
-      select: { id: true, code: true, name: true, partNumber: true, unit: true, standardCost: true },
+      select: { id: true, code: true, name: true, partNumber: true, unit: true, standardCost: true, category: { select: { id: true, code: true, name: true } } },
     });
     res.json(items.map((i) => ({ ...i, standardCost: num(i.standardCost) })));
   }),
@@ -341,7 +343,7 @@ receivingRoutes.get(
         supplier: { select: { id: true, name: true } },
         job: { select: { id: true, number: true, name: true } },
         warehouse: { select: { id: true, name: true } },
-        items: { include: { item: { select: { id: true, code: true } } }, orderBy: { id: 'asc' } },
+        items: { include: { item: { select: { id: true, code: true, category: { select: { id: true, code: true, name: true } } } } }, orderBy: { id: 'asc' } },
       },
     });
     if (!order) throw notFound('Purchase order not found');
@@ -355,6 +357,15 @@ receivingRoutes.get(
       _sum: { quantity: true },
     });
     const pending = new Map(held.map((h) => [h.orderItemId, num(h._sum.quantity)]));
+    // A typed line the item master already knows takes that item's product
+    // group; one it does not will be filed new and needs one (2026-10-20).
+    const matched = new Map<string, { id: string; code: string; name: string } | null>();
+    for (const i of order.items) {
+      if (i.item) continue;
+      const id = await matchTypedItem(prisma, i);
+      matched.set(i.id, id ? await prisma.item.findUnique({ where: { id }, select: { category: { select: { id: true, code: true, name: true } } } }).then((r) => r?.category ?? null) : null);
+      if (!id) matched.delete(i.id);
+    }
     res.json({
       id: order.id,
       number: order.number,
@@ -380,6 +391,10 @@ receivingRoutes.get(
           pendingQty: waiting,
           left: Math.max(0, Math.round((num(i.quantity) - num(i.receivedQty) - waiting) * 1000) / 1000),
           unitPrice: num(i.unitPrice),
+          /** The item's product group; null where it has none. */
+          category: i.item ? i.item.category : (matched.get(i.id) ?? null),
+          /** No item on file yet: received into a warehouse it is filed new, under the group the line names. */
+          newItem: !i.item && !matched.has(i.id),
         };
       }),
     });
@@ -486,11 +501,12 @@ async function loadReceiving(id: string) {
         include: {
           orderItem: {
             include: {
-              item: { select: { id: true, code: true, name: true } },
+              item: { select: { id: true, code: true, name: true, category: { select: { id: true, code: true, name: true } } } },
               costCategory: { select: { id: true, name: true } },
             },
           },
-          item: { select: { id: true, code: true, name: true, partNumber: true, unit: true } },
+          item: { select: { id: true, code: true, name: true, partNumber: true, unit: true, category: { select: { id: true, code: true, name: true } } } },
+          category: { select: { id: true, code: true, name: true } },
           location: { select: { id: true, code: true } },
         },
         orderBy: { id: 'asc' },
@@ -506,6 +522,9 @@ const receivingValue = (items: { quantity: Prisma.Decimal; unitCost: Prisma.Deci
 
 /** A received line as every reader shows it, whichever way it was received. */
 function lineFacts(i: LoadedReceiving['items'][number]) {
+  // The product group: the item's own once it has one, else what the line named.
+  const itemCategory = i.orderItem ? i.orderItem.item?.category : i.item?.category;
+  const category = itemCategory ?? i.category ?? null;
   if (i.orderItem) {
     return {
       code: i.orderItem.item?.code ?? i.orderItem.partNumber ?? null,
@@ -513,6 +532,8 @@ function lineFacts(i: LoadedReceiving['items'][number]) {
       name: i.orderItem.name,
       description: i.orderItem.description,
       unit: i.orderItem.unit,
+      category,
+      categoryId: i.categoryId,
     };
   }
   return {
@@ -521,6 +542,8 @@ function lineFacts(i: LoadedReceiving['items'][number]) {
     name: i.item?.name ?? null,
     description: i.description ?? i.item?.name ?? '',
     unit: i.unit ?? i.item?.unit ?? '',
+    category,
+    categoryId: i.categoryId,
   };
 }
 
@@ -691,6 +714,8 @@ const receivingSchema = z.object({
         quantity: z.number().positive(),
         unitCost: z.number().min(0).optional(),
         locationId: z.string().optional().nullable(),
+        /** The product group (item category) — required where the line files a new item (2026-10-20). */
+        categoryId: z.string().optional().nullable(),
         serialNo: z.string().trim().optional().nullable(),
         batchNo: z.string().trim().optional().nullable(),
         remarks: z.string().optional().nullable(),
@@ -754,7 +779,16 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     invoiceRefNo: body.invoiceRefNo || null,
     notes: body.notes?.trim() || null,
   };
+  // Every product group named must be on file.
+  const categoryIds = [...new Set(body.items.map((l) => l.categoryId).filter((v): v is string => !!v))];
+  if (categoryIds.length) {
+    const known = await prisma.itemCategory.count({ where: { id: { in: categoryIds } } });
+    if (known !== categoryIds.length) throw badRequest('A product group named on a line is not on file');
+  }
+  const needsGroup = (n: number, what: string) =>
+    badRequest(`Line ${n + 1}: choose the product group ${what} goes into inventory under — it is a new item`);
   const extras = (l: ReceivingBody['items'][number]) => ({
+    categoryId: l.categoryId || null,
     locationId: l.locationId || null,
     serialNo: l.serialNo || null,
     batchNo: l.batchNo || null,
@@ -769,6 +803,15 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     if (order.status === 'RECEIVED') throw badRequest(`${order.number} has been received in full`);
     await checkOutstanding(prisma, order.items, body.items, exceptReceivingId);
     const byOrderItem = new Map(order.items.map((i) => [i.id, i]));
+    // A line the order typed without an item becomes one in the item master
+    // when it reaches a warehouse — unless one already matches, it needs its
+    // product group (2026-10-20).
+    if (warehouseId ?? order.warehouseId) {
+      for (const [n, l] of body.items.entries()) {
+        const oi = byOrderItem.get(l.orderItemId!);
+        if (oi && !oi.itemId && !l.categoryId && !(await matchTypedItem(prisma, oi))) throw needsGroup(n, `“${oi.name ?? oi.description}”`);
+      }
+    }
     const rows = body.items.map((l) => ({
       orderItemId: l.orderItemId!,
       itemId: null,
@@ -782,7 +825,7 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     return {
       header: { orderId: order.id, supplierId: null, sourceName: null, reason: null, ...misc, warehouseId: warehouseId ?? order.warehouseId ?? null },
       rows,
-      newItems: new Map<number, { name: string; partNumber: string | null; unit: string }>(),
+      newItems: new Map<number, { name: string; partNumber: string | null; unit: string; categoryId: string | null }>(),
       label: `against ${order.number}`,
     };
   }
@@ -804,10 +847,10 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
   // whose part number or code (else name) is what was typed, else a new item
   // filed in the item master when the report is saved (2026-10-16, the
   // owner's report: "Can't save").
-  const newItems = new Map<number, { name: string; partNumber: string | null; unit: string }>();
+  const newItems = new Map<number, { name: string; partNumber: string | null; unit: string; categoryId: string | null }>();
   const rows: Array<{
     orderItemId: null; itemId: string | null; partNumber: string | null; description: string | null; unit: string | null;
-    quantity: Prisma.Decimal; unitCost: Prisma.Decimal; locationId: string | null; serialNo: string | null; batchNo: string | null; remarks: string | null;
+    quantity: Prisma.Decimal; unitCost: Prisma.Decimal; categoryId: string | null; locationId: string | null; serialNo: string | null; batchNo: string | null; remarks: string | null;
   }> = [];
   for (const [n, l] of body.items.entries()) {
     if (l.orderItemId) throw badRequest(`Line ${n + 1}: there is no purchase order on this report`);
@@ -825,7 +868,10 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
       if (!found.length && desc) found = await prisma.item.findMany({ where: { isActive: true, name: { equals: desc, mode: 'insensitive' } }, select: sel, take: 2 });
       if (found.length > 1) throw badRequest(`Line ${n + 1}: “${part ?? desc}” matches more than one item — pick it from the list`);
       item = found[0] ?? null;
-      if (!item) newItems.set(n, { name: desc ?? part!, partNumber: part, unit: l.unit?.trim() || 'pcs' });
+      if (!item) {
+        if (!l.categoryId) throw needsGroup(n, `“${desc ?? part}”`);
+        newItems.set(n, { name: desc ?? part!, partNumber: part, unit: l.unit?.trim() || 'pcs', categoryId: l.categoryId });
+      }
     }
     rows.push({
       orderItemId: null,
@@ -856,12 +902,12 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
 async function fileNewItems(
   tx: Prisma.TransactionClient,
   rows: Array<{ itemId: string | null }>,
-  newItems: Map<number, { name: string; partNumber: string | null; unit: string }>,
+  newItems: Map<number, { name: string; partNumber: string | null; unit: string; categoryId: string | null }>,
   actorId: string,
 ) {
   for (const [n, it] of newItems) {
     const code = await nextNumber('item', tx);
-    const created = await tx.item.create({ data: { code, name: it.name, partNumber: it.partNumber, unit: it.unit } });
+    const created = await tx.item.create({ data: { code, name: it.name, partNumber: it.partNumber, unit: it.unit, categoryId: it.categoryId } });
     rows[n].itemId = created.id;
     await tx.auditLog.create({
       data: { entityType: 'item', entityId: created.id, action: 'CREATED', summary: `${code} ${it.name} added from an incoming report`, actorId },
@@ -886,6 +932,8 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     if (!receiving.warehouseId) throw badRequest(`${receiving.number} names no warehouse`);
     for (const line of receiving.items) {
       if (!line.itemId) throw badRequest(`${receiving.number} has a line with no item`);
+      // The product group the line named fills a blank one on its item.
+      if (line.categoryId) await tx.item.updateMany({ where: { id: line.itemId, categoryId: null }, data: { categoryId: line.categoryId } });
       await receiveStock(tx, {
         itemId: line.itemId,
         warehouseId: receiving.warehouseId,
@@ -925,8 +973,11 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     // one filed now — and the order line is linked to it.
     const stockWarehouseId = receiving.warehouseId ?? order.warehouseId;
     if (order.kind === 'STOCK_REPLENISHMENT' && stockWarehouseId && !orderItem.itemId) {
-      orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId);
+      orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId, line.categoryId);
       await tx.purchaseOrderItem.update({ where: { id: orderItem.id }, data: { itemId: orderItem.itemId } });
+    }
+    if (orderItem.itemId && line.categoryId) {
+      await tx.item.updateMany({ where: { id: orderItem.itemId, categoryId: null }, data: { categoryId: line.categoryId } });
     }
     if (order.kind === 'STOCK_REPLENISHMENT' && stockWarehouseId && orderItem.itemId) {
       await receiveStock(tx, {
@@ -957,7 +1008,7 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     // never again when they leave — shared/projectStock.ts.
     if (order.kind === 'DIRECT_TO_JOB' && order.jobId && receiving.warehouseId) {
       if (!orderItem.itemId) {
-        orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId);
+        orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId, line.categoryId);
         await tx.purchaseOrderItem.update({ where: { id: orderItem.id }, data: { itemId: orderItem.itemId } });
       }
       await receiveProjectStock(tx, {
@@ -1441,26 +1492,25 @@ receivingRoutes.get(
       {
         kind: 'table',
         // No widths: each column from its content, the description taking what is left (rule 6).
-        head: ['No.', 'Code', 'Part No.', 'Description', 'Qty', 'Unit', 'Unit cost', 'Amount'],
-        align: ['right', 'left', 'left', 'left', 'right', 'left', 'right', 'right'],
+        // No price on the paper (2026-10-20, the owner's call): it records
+        // what arrived and where it went, the product group it is filed under.
+        head: ['No.', 'Code', 'Part No.', 'Description', 'Product group', 'Qty', 'Unit'],
+        align: ['right', 'left', 'left', 'left', 'left', 'right', 'left'],
         rows: view.items.map((i, n) => [
           String(n + 1),
           i.code ?? '',
           i.partNumber ?? '',
           i.name && i.description && i.description !== i.name ? { title: i.name, body: i.description } : (i.name ?? i.description ?? ''),
+          i.category?.name ?? '—',
           qty(i.quantity),
           i.unit ?? '',
-          formatAmount(i.unitCost),
-          formatAmount(i.amount),
         ]),
       },
-      { kind: 'totals', rows: [{ label: 'Total', value: formatAmount(view.value), bold: true }] },
     ];
     if (receiving.reason) sections.push({ kind: 'text', title: 'Why there is no purchase order', body: receiving.reason });
     if (receiving.notes) sections.push({ kind: 'text', title: 'Notes', body: receiving.notes });
     if (receiving.cancelReason && receiving.status === 'CANCELLED') sections.push({ kind: 'text', title: 'Cancelled', body: receiving.cancelReason });
 
-    const currency = await companyCurrency();
     const bare = await renderDocument({
       title: 'Incoming Report',
       titleBold: true,
@@ -1477,7 +1527,6 @@ receivingRoutes.get(
         [
           ['Delivery receipt no.', receiving.deliveryRefNo ?? '—'],
           ['Invoice no.', receiving.invoiceRefNo ?? '—'],
-          ['Currency', currency],
         ],
       ],
       sections,

@@ -1044,6 +1044,8 @@ model ItemCategory {
   children    ItemCategory[] @relation("ItemCategoryTree")
 
   items Item[]
+  /// The product group an incoming line files a NEW item under (2026-10-20).
+  receivingLines ReceivingItem[]
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -3000,6 +3002,12 @@ model ReceivingItem {
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
+  /// The product group (item category) the goods go into inventory under
+  /// (2026-10-20, the owner's call): required where the line files a new
+  /// item, and filling a blank one on the item it names.
+  categoryId String?
+  category   ItemCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
   quantity Decimal @db.Decimal(18, 3)
   unitCost Decimal @db.Decimal(18, 2)
   serialNo String?
@@ -4380,6 +4388,10 @@ model Invoice {
   invoiceTotal   Decimal @db.Decimal(18, 2)
   /// invoiceTotal − ewtAmount. THE figure A/R is measured against.
   netCollectible Decimal @db.Decimal(18, 2)
+  /// The EWT the invoice was raised with, kept while its collections say
+  /// what the customer ACTUALLY withheld (2026-10-20): `ewtAmount` is then
+  /// their sum, and this puts it back when no collection says so any more.
+  ewtAsBilled    Decimal? @db.Decimal(18, 2)
 
   /// Maintained from allocations. Denormalised because every A/R screen reads
   /// it and the aging query cannot afford a join per row.
@@ -4821,6 +4833,11 @@ model PaymentAllocation {
 
   invoiceId String?
   invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  /// The EWT the customer withheld on THIS collection of the invoice, typed
+  /// by finance (2026-10-20, the owner's call: "sometimes the collection is
+  /// not matched from the invoice"). Null says nothing; once any collection
+  /// of an invoice says it, the invoice's EWT is their sum.
+  ewtWithheld Decimal? @db.Decimal(18, 2)
 
   billId String?
   bill   SupplierBill? @relation(fields: [billId], references: [id], onDelete: Cascade)
@@ -5680,6 +5697,12 @@ model InvoiceRequest {
   grossAmount       Decimal?         @db.Decimal(18, 2)
   description       String?
 
+  /// The BIR printed sales invoice number set aside for it (2026-10-20, the
+  /// owner's call: "invoice request for uncountered / reserved S.I."): typed
+  /// on the request, carried to the invoice its approval raises — which reads
+  /// "Reserved SI …" until the customer counters it. One live request or
+  /// invoice holds a number.
+  siNumber      String?
   /// What the invoice will carry.
   invoiceDate   DateTime? @db.Date
   termsDays     Int?
@@ -5704,6 +5727,7 @@ model InvoiceRequest {
   updatedAt DateTime @updatedAt
 
   @@index([number])
+  @@index([siNumber])
   @@index([progressBillingId, status])
   @@index([salesOrderId, status])
   @@index([status, createdAt])

@@ -8,23 +8,40 @@ export async function itemForTypedLine(
   tx: Prisma.TransactionClient,
   line: { name: string | null; partNumber: string | null; description: string; unit: string },
   actorId: string,
+  /** The product group the incoming line named (2026-10-20): a new item's, and a matched item's when it has none. */
+  categoryId: string | null = null,
 ): Promise<string> {
+  const matched = await matchTypedItem(tx, line);
+  if (matched) {
+    if (categoryId) await tx.item.updateMany({ where: { id: matched, categoryId: null }, data: { categoryId } });
+    return matched;
+  }
   const part = line.partNumber?.trim() || null;
   const name = (line.name?.trim() || line.description.trim()).slice(0, 300);
-  const found = part
-    ? await tx.item.findMany({ where: { isActive: true, OR: [{ partNumber: { equals: part, mode: 'insensitive' } }, { code: { equals: part, mode: 'insensitive' } }] }, select: { id: true }, take: 2 })
-    : [];
-  if (found.length === 1) return found[0].id;
-  if (!found.length) {
-    const byName = await tx.item.findMany({ where: { isActive: true, name: { equals: name, mode: 'insensitive' } }, select: { id: true }, take: 2 });
-    if (byName.length === 1) return byName[0].id;
-  }
   const code = await nextNumber('item', tx);
-  const created = await tx.item.create({ data: { code, name, partNumber: part, unit: line.unit || 'pcs' } });
+  const created = await tx.item.create({ data: { code, name, partNumber: part, unit: line.unit || 'pcs', categoryId } });
   await tx.auditLog.create({
     data: { entityType: 'item', entityId: created.id, action: 'CREATED', summary: `${code} ${name} added on receiving a purchase order line`, actorId: actorId || null },
   });
   return created.id;
+}
+
+/** The one active item a typed line is — by part number or code, else by name — or null when it would be filed new. */
+export async function matchTypedItem(
+  db: Prisma.TransactionClient | typeof prisma,
+  line: { name: string | null; partNumber: string | null; description: string },
+): Promise<string | null> {
+  const part = line.partNumber?.trim() || null;
+  const name = (line.name?.trim() || line.description.trim()).slice(0, 300);
+  const found = part
+    ? await db.item.findMany({ where: { isActive: true, OR: [{ partNumber: { equals: part, mode: 'insensitive' } }, { code: { equals: part, mode: 'insensitive' } }] }, select: { id: true }, take: 2 })
+    : [];
+  if (found.length === 1) return found[0].id;
+  if (!found.length) {
+    const byName = await db.item.findMany({ where: { isActive: true, name: { equals: name, mode: 'insensitive' } }, select: { id: true }, take: 2 });
+    if (byName.length === 1) return byName[0].id;
+  }
+  return null;
 }
 
 /**

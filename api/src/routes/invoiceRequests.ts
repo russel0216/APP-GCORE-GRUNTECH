@@ -44,6 +44,7 @@ import { dayKey, manilaDayStart, manilaDayEnd } from '../shared/day';
 import { expectedCollection, invoiceCredit, termsLabel } from '../shared/receivables';
 import { quotationTeamOf, reportsTo, teamOf, visibleOwners } from '../shared/team';
 import { usersHolding } from '../shared/clearance';
+import { assertSiNumberFree } from '../shared/siNumbers';
 import { assertOrderLeft, billingForInvoiceInclude, createInvoiceFromBilling, createInvoiceFromOrder, orderInvoiced, orderNet } from '../shared/billingInvoice';
 
 /**
@@ -274,6 +275,7 @@ async function present(me: ResolvedUser, row: RequestRow) {
     termsDays: row.termsDays,
     terms: termsLabel(row.termsDays ?? undefined),
     poReference: row.poReference,
+    siNumber: row.siNumber,
     salesperson: row.salesperson,
     team: row.team,
     notes: row.notes,
@@ -382,6 +384,7 @@ async function listRow(r: RequestRow, stage: string | undefined) {
     billing: r.progressBilling && { id: r.progressBilling.id, number: r.progressBilling.number },
     salesOrder: { id: r.salesOrder.id, number: r.salesOrder.number },
     poReference: r.poReference,
+    siNumber: r.siNumber,
     netCollectible: money.netCollectible,
     invoiceTotal: money.invoiceTotal,
     requestedBy: r.requestedBy,
@@ -581,6 +584,8 @@ const headerSchema = z.object({
   description: z.string().trim().max(500).optional().nullable(),
   /** The withholding rate, editable (0–15%); null takes the billing's, else the company's. */
   ewtRate: z.number().min(0).max(0.15).optional().nullable(),
+  /** The BIR printed SI number set aside for it (2026-10-20). */
+  siNumber: z.string().trim().max(40).optional().nullable(),
 });
 
 /**
@@ -625,7 +630,10 @@ async function checkHeader(
   }
   const invoiceDate = body.invoiceDate ? new Date(body.invoiceDate) : null;
   if (invoiceDate && Number.isNaN(invoiceDate.getTime())) throw badRequest('Invoice date is not a valid date');
+  const siNumber = body.siNumber?.trim() || null;
+  await assertSiNumberFree(siNumber, { requestId: source.exceptRequestId });
   return {
+    siNumber,
     salesOrderId: order.id,
     invoiceDate: invoiceDate ? dayKey(invoiceDate) : null,
     termsDays: body.termsDays ?? order.termsDays ?? null,
@@ -871,7 +879,17 @@ export async function settleInvoiceRequest(approval: ApprovalRequest, outcome: A
         teamId: row.teamId,
         salesOrderId: row.salesOrderId,
         ewtRate: row.ewtRate == null ? null : num(row.ewtRate),
+        // The SI number it reserved goes onto the invoice — unless a live
+        // invoice took it meanwhile, which sends the request back (below).
+        siNumber: row.siNumber,
       };
+      if (row.siNumber) {
+        const taken = await tx.invoice.findFirst({
+          where: { siNumber: { equals: row.siNumber, mode: 'insensitive' }, status: { not: 'CANCELLED' } },
+          select: { number: true },
+        });
+        if (taken) throw new Error(`invoice no. ${row.siNumber} is already on ${taken.number}`);
+      }
       const actor = last?.approverId ?? row.requestedById;
       if (!row.progressBillingId) {
         const so = await tx.salesOrder.findUniqueOrThrow({ where: { id: row.salesOrderId } });
@@ -1050,6 +1068,7 @@ invoiceRequestRoutes.get(
             : []),
           { label: 'Payment terms', value: termsLabel(row.termsDays ?? undefined) },
           { label: 'Invoice date', value: row.invoiceDate ? formatDate(row.invoiceDate) : 'On approval' },
+          { label: 'Reserved SI no.', value: row.siNumber ?? 'None reserved' },
           { label: 'Sales personnel', value: row.salesperson?.name ?? '' },
           { label: 'Team', value: row.team?.code ?? '' },
           { label: 'Status', value: statusLabel(row.status) },

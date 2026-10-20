@@ -2744,6 +2744,35 @@ async function main() {
         `${sheetPaper.status} ${sheetPaper.pages.join()} — ${sheetText.slice(0, 600)}`,
       );
 
+      // A returned or pulled-back order lets the canvass change (2026-10-20):
+      // reopened while its order is only a draft, never once one went out;
+      // awarded again to another supplier, the stale draft order is cancelled.
+      {
+        const stalePo = await prisma.purchaseOrder.create({
+          data: { number: `${TAG}-PO-RE-${Date.now()}`, status: 'ISSUED', kind: 'DIRECT_TO_JOB', requestId: rfqPr.id, jobId: job.id, supplierId: supplier.id, createdById: sheetBuyer.id, notes: `${TAG} reopen` },
+        });
+        const refusedReopen = await api(sheetToken, 'POST', `/canvasses/${sheetId}/reopen`, { reason: 'prices changed' });
+        await prisma.purchaseOrder.update({ where: { id: stalePo.id }, data: { status: 'DRAFT' } });
+        const canReopen = (await api(sheetToken, 'GET', `/canvasses/${sheetId}`)).body.canReopen === true;
+        const reopened = await api(sheetToken, 'POST', `/canvasses/${sheetId}/reopen`, { reason: 'prices changed' });
+        const [afterReopen, rfqAfterReopen] = await Promise.all([
+          prisma.canvass.findUniqueOrThrow({ where: { id: sheetId }, include: { suppliers: true } }),
+          prisma.rfq.findUniqueOrThrow({ where: { id: rfqId } }),
+        ]);
+        const reAward = await api(sheetToken, 'POST', `/canvasses/${sheetId}/award/${partCol.id}`);
+        const staleAfter = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: stalePo.id } });
+        check(
+          'an awarded canvass reopens only while its order is a draft; the award is withdrawn and the RFQ opens again; awarded to another supplier, the draft order is cancelled',
+          refusedReopen.status === 400 && /stands on this award/.test(String(refusedReopen.body.error)) && canReopen &&
+            reopened.status === 200 && afterReopen.status === 'OPEN' && afterReopen.awardedById === null &&
+            afterReopen.suppliers.every((r) => !r.isSelected) && rfqAfterReopen.status === 'QUOTED' &&
+            reAward.status === 200 && staleAfter.status === 'CANCELLED' && /awarded to/.test(staleAfter.cancelReason ?? ''),
+          `${refusedReopen.status} ${String(refusedReopen.body.error)} ${canReopen} ${reopened.status} ${afterReopen.status} ${rfqAfterReopen.status} ${reAward.status} ${staleAfter.status}`,
+        );
+        await prisma.auditLog.deleteMany({ where: { entityType: 'purchase_order', entityId: stalePo.id } });
+        await prisma.purchaseOrder.delete({ where: { id: stalePo.id } });
+      }
+
       const sheetCancel = await api(sheetToken, 'POST', `/canvasses/${sheetId}/cancel`, { reason: 'the scope changed' });
       const rfqAfterCancel = await prisma.rfq.findUniqueOrThrow({ where: { id: rfqId } });
       check(
@@ -4373,16 +4402,29 @@ async function main() {
         warehouseId: warehouse.id,
         items: [{ partNumber: typedPart, description: `${TAG} typed valve`, unit: 'set', quantity: 1, unitCost: 50 }],
       };
-      const t1 = await api(receiverToken, 'POST', '/receivings', typedBody);
+      // A new item needs its product group (2026-10-20): refused without one,
+      // filed under it with one; the next report finds the item and asks none.
+      const group = await prisma.itemCategory.findFirstOrThrow({ orderBy: { sortOrder: 'asc' } });
+      const noGroup = await api(receiverToken, 'POST', '/receivings', typedBody);
+      const t1 = await api(receiverToken, 'POST', '/receivings', { ...typedBody, items: [{ ...typedBody.items[0], categoryId: group.id }] });
       const t2 = await api(receiverToken, 'POST', '/receivings', typedBody);
       const made = await prisma.item.findMany({ where: { partNumber: typedPart } });
       const lines = await prisma.receivingItem.findMany({ where: { receivingId: { in: [String(t1.body.id), String(t2.body.id)] } } });
       const blank = await api(receiverToken, 'POST', '/receivings', { ...typedBody, items: [{ quantity: 1, unitCost: 1 }] });
       check(
-        'a line typed without picking an item files it once in the item master and the next report takes it',
-        t1.status === 201 && t2.status === 201 && made.length === 1 && made[0].unit === 'set' &&
+        'a line typed without picking an item files it once in the item master, under the product group it names, and the next report takes it',
+        noGroup.status === 400 && /product group/.test(String(noGroup.body.error)) &&
+          t1.status === 201 && t2.status === 201 && made.length === 1 && made[0].unit === 'set' && made[0].categoryId === group.id &&
           lines.length === 2 && lines.every((l) => l.itemId === made[0].id) && blank.status === 400,
-        `${t1.status}/${t2.status} items ${made.length} lines ${lines.map((l) => l.itemId).join(',')} blank ${blank.status}`,
+        `${noGroup.status} ${String(noGroup.body.error)} ${t1.status}/${t2.status} items ${made.length} ${made[0]?.categoryId} lines ${lines.map((l) => l.itemId).join(',')} blank ${blank.status}`,
+      );
+      const typedPaper = await printed(receiverToken, `/receivings/${String(t1.body.id)}/pdf?attachments=0`);
+      const typedText = flat(typedPaper.text);
+      check(
+        'the Incoming Report prints no price — each line with its product group instead (2026-10-20)',
+        typedPaper.status === 200 && /PRODUCT GROUP/i.test(typedText) && typedText.includes(group.name) &&
+          !/UNIT COST|AMOUNT \(/i.test(typedText) && !typedText.includes('50.00'),
+        typedText.slice(0, 500),
       );
       await prisma.receiving.deleteMany({ where: { id: { in: [String(t1.body.id), String(t2.body.id)] } } });
       await prisma.auditLog.deleteMany({ where: { entityType: 'item', entityId: { in: made.map((m) => m.id) } } });

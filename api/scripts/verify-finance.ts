@@ -1705,6 +1705,35 @@ async function main() {
       String(wrongDirection.status),
     );
 
+    // The EWT the customer actually withheld, typed on the collection
+    // (2026-10-20): the invoice's EWT becomes it, the net collectible follows,
+    // and deleting the collection puts the EWT it was raised with back.
+    {
+      const fifth = await api('POST', '/invoices', { customerId: customer.id, lines: [{ description: `${TAG} withheld differently`, amount: 10_000 }] });
+      await api('POST', `/invoices/${fifth.body.id}/issue`);
+      const tooMuchEwt = await api('POST', '/payments', {
+        kind: 'RECEIPT',
+        customerId: customer.id,
+        allocations: [{ kind: 'invoice', id: fifth.body.id, amount: 9_000, ewtWithheld: 1_600 }],
+      });
+      const paidWithEwt = await api('POST', '/payments', {
+        kind: 'RECEIPT',
+        customerId: customer.id,
+        allocations: [{ kind: 'invoice', id: fifth.body.id, amount: 11_100, ewtWithheld: 100 }],
+      });
+      const fifthAfter = await prisma.invoice.findUniqueOrThrow({ where: { id: String(fifth.body.id) } });
+      const undoEwt = await api('DELETE', `/payments/${paidWithEwt.body.id}`);
+      const fifthBack = await prisma.invoice.findUniqueOrThrow({ where: { id: String(fifth.body.id) } });
+      check(
+        'a collection that states the EWT withheld makes it the invoice’s: 100 withheld of 200 billed, 11,100 settles it in full; deleted, the 200 is back',
+        tooMuchEwt.status === 400 && paidWithEwt.status === 201 &&
+          money(num(fifthAfter.ewtAmount), 100) && money(num(fifthAfter.netCollectible), 11_100) && money(num(fifthAfter.ewtAsBilled), 200) &&
+          fifthAfter.status === 'PAID' &&
+          undoEwt.status === 200 && money(num(fifthBack.ewtAmount), 200) && money(num(fifthBack.netCollectible), 11_000) && fifthBack.ewtAsBilled === null,
+        `${tooMuchEwt.status} ${paidWithEwt.status} ${JSON.stringify(paidWithEwt.body).slice(0, 120)} ${fifthAfter.ewtAmount} ${fifthAfter.netCollectible} ${fifthAfter.status} · ${undoEwt.status} ${fifthBack.ewtAmount} ${fifthBack.netCollectible}`,
+      );
+    }
+
     const badDue = await api('POST', '/invoices', {
       customerId: customer.id,
       invoiceDate: '2026-09-30',
@@ -4325,8 +4354,11 @@ async function main() {
       notMine.status === 403 && notApproved.status === 400,
       `${notMine.status} / ${notApproved.status} ${JSON.stringify(notApproved.body).slice(0, 120)}`,
     );
-    const ir = await seller('POST', '/invoice-requests', { progressBillingId: irB1.id, salesOrderId: irOrder.id });
+    const reservedSi = `${TAG}-SI-${Date.now() % 100000}`;
+    const ir = await seller('POST', '/invoice-requests', { progressBillingId: irB1.id, salesOrderId: irOrder.id, siNumber: reservedSi });
     const irSecond = await seller('POST', '/invoice-requests', { progressBillingId: irB1.id, salesOrderId: irOrder.id });
+    // The printed SI it reserved is one holder's (2026-10-20).
+    const siReserved2 = await seller('POST', '/invoice-requests', { salesOrderId: irOrder.id, grossAmount: 1_000, siNumber: reservedSi.toLowerCase() });
     check(
       'the seller raises one, numbered GT-IR, taking the order’s PO and terms — and a second while it is live is refused',
       ir.status === 201 &&
@@ -4383,6 +4415,12 @@ async function main() {
         irB1After.status === 'INVOICED' &&
         (await prisma.invoice.count({ where: { progressBillingId: irB1.id } })) === 1,
       `${irDone.status} ${irDone.invoice?.status} ${irDone.invoice?.poReference} ${irB1After.status}`,
+    );
+    check(
+      'the BIR printed SI reserved on the request is its alone (a second request is a 409 naming it) and goes onto the invoice its approval raises',
+      ir.body.siNumber === reservedSi && siReserved2.status === 409 && String(siReserved2.body.error).includes(String(ir.body.number)) &&
+        irDone.invoice?.siNumber === reservedSi,
+      `${ir.body.siNumber} ${siReserved2.status} ${String(siReserved2.body.error)} ${irDone.invoice?.siNumber}`,
     );
     await settleInvoiceRequest(irOpen, 'APPROVED');
     check('a settlement that arrives twice raises nothing more', (await prisma.invoice.count({ where: { progressBillingId: irB1.id } })) === 1);

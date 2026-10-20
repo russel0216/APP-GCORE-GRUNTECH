@@ -465,6 +465,34 @@ export async function refreshAdvance(
  * payment cannot leave a stale total behind. Statuses are a function of the
  * arithmetic, never set by hand.
  */
+/**
+ * An invoice's EWT re-derived from its collections (2026-10-20). `extra`
+ * adds an EWT a collection being recorded states, before it is written —
+ * how the payment route checks an allocation against what will be owed.
+ */
+export async function withheldOn(
+  tx: Tx,
+  invoiceId: string,
+  row: { invoiceTotal: Prisma.Decimal; ewtAmount: Prisma.Decimal; netCollectible: Prisma.Decimal; ewtAsBilled: Prisma.Decimal | null },
+  extra: number | null = null,
+): Promise<{ ewtAmount: number; netCollectible: number; ewtAsBilled: number | null; changed: boolean }> {
+  const stated = await tx.paymentAllocation.aggregate({
+    where: { invoiceId, ewtWithheld: { not: null } },
+    _sum: { ewtWithheld: true },
+    _count: { _all: true },
+  });
+  const says = stated._count._all > 0 || extra != null;
+  const asBilled = row.ewtAsBilled == null ? null : num(row.ewtAsBilled);
+  const ewtAmount = says ? cents(num(stated._sum.ewtWithheld) + (extra ?? 0)) : (asBilled ?? num(row.ewtAmount));
+  const ewtAsBilled = says ? (asBilled ?? num(row.ewtAmount)) : null;
+  const netCollectible = cents(num(row.invoiceTotal) - ewtAmount);
+  const changed =
+    Math.abs(ewtAmount - num(row.ewtAmount)) > 0.004 ||
+    Math.abs(netCollectible - num(row.netCollectible)) > 0.004 ||
+    (ewtAsBilled == null) !== (asBilled == null);
+  return { ewtAmount, netCollectible, ewtAsBilled, changed };
+}
+
 export async function refreshSettlement(
   tx: Tx,
   kind: SettleableKind,
@@ -479,8 +507,19 @@ export async function refreshSettlement(
   const paid = cents(num(sum._sum.amount));
 
   if (kind === 'invoice') {
-    const row = await tx.invoice.findUnique({ where: { id } });
-    if (!row) throw badRequest('Invoice not found');
+    const found = await tx.invoice.findUnique({ where: { id } });
+    if (!found) throw badRequest('Invoice not found');
+    // What the customer actually withheld, where its collections say it
+    // (2026-10-20): the EWT is their sum and the net collectible follows; with
+    // none saying it any more, the EWT the invoice was raised with is back.
+    const ewt = await withheldOn(tx, id, found);
+    const row =
+      ewt.changed
+        ? await tx.invoice.update({
+            where: { id },
+            data: { ewtAmount: D(ewt.ewtAmount), netCollectible: D(ewt.netCollectible), ewtAsBilled: ewt.ewtAsBilled == null ? null : D(ewt.ewtAsBilled) },
+          })
+        : found;
     const payable = num(row.netCollectible);
     // A cancelled invoice keeps its status: a payment recorded against one is a
     // data problem to look at, not a reason to quietly resurrect it.
