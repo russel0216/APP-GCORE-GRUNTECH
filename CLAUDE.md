@@ -4036,7 +4036,12 @@ listed and left alone; each move audited on the user. The engine still reads
 Warehouse Supervisor reports to both Purchasing Managers):
 `Role.alsoReportsToRoleIds` ("Also reports to", a `TickPicker` on the
 Hierarchy tab, in the same PUT and cycle check); "Apply to people" writes the
-first parent only, since a person has one "Reports to". **The Organizational
+first parent only, since a person has one "Reports to" — but a SUPERVISOR
+step that goes to the requester's "Reports to" ALSO goes to the active
+holders of their roles' `alsoReportsToRoleIds` (`approversForStep`), so a
+Warehouse Supervisor's documents reach both Purchasing Managers. The By-role
+chart keeps the head's two sides, BOSS (branches nobody on a team holds) and
+Industry Teams. **The Organizational
 Chart opens By role** (`RoleChart` in `OrgChart.tsx`, `GET /roles/chart`
 behind Admin › Users' view right): each role's tile under its first parent
 role, a tile per holder with picture and team, "Vacant" where nobody holds

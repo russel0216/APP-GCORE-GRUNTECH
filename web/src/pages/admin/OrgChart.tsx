@@ -393,13 +393,46 @@ function RoleChart({ people, meId, search, onReady }: { people: Person[]; meId?:
   if (!roles) return <Loading />;
   const names = new Map(roles.map((r) => [r.id, r.name]));
   const forest = roleForest(roles);
+  const props = { byRole, names, meId, search };
+  // The head (the top role with roles under it) keeps the chart's two sides:
+  // BOSS — the roles whose branch holds nobody on a selling team — and the
+  // Industry Teams (2026-10-20, the owner's call).
+  const head = [...forest].filter((n) => n.children.length).sort((a, b) => (a.role.rank ?? 99) - (b.role.rank ?? 99))[0];
+  const onTeam = (n: RoleNode): boolean =>
+    (byRole.get(n.role.key) ?? []).some((p) => !!p.team) || n.children.some(onTeam);
+  const others = forest.filter((n) => n !== head);
+  const sides = head
+    ? [
+        { key: 'boss', label: 'BOSS — Business and Operation Support Services', items: head.children.filter((c) => !onTeam(c)) },
+        { key: 'industry', label: 'Industry Teams', items: head.children.filter(onTeam) },
+      ].filter((s) => s.items.length > 0)
+    : [];
   return (
     <div className="org-tree">
-      <ul className="org-row">
-        {forest.map((n) => (
-          <RoleBranch key={n.role.id} node={n} byRole={byRole} names={names} meId={meId} search={search} />
-        ))}
-      </ul>
+      {head && (
+        <>
+          <RoleTile {...props} node={head} holders={byRole.get(head.role.key) ?? []} />
+          <ul className="org-row">
+            {sides.map((side) => (
+              <li key={side.key} className="org-row-item org-side" style={{ flexGrow: side.items.length }}>
+                <span className="org-side-label">{side.label}</span>
+                <ul className="org-row">
+                  {side.items.map((n) => (
+                    <RoleBranch key={n.role.id} {...props} node={n} />
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {others.length > 0 && (
+        <ul className="org-row">
+          {others.map((n) => (
+            <RoleBranch key={n.role.id} {...props} node={n} />
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

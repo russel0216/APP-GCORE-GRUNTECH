@@ -290,8 +290,23 @@ export async function approversForStep(
       // with no leader, keep the "Reports to".
       const onTeam = step.roleId ? await teamFirstHolders(step.roleId, requesterId, tx) : [];
       if (onTeam.length) base = onTeam;
-      else if (requester?.supervisorId) base = [requester.supervisorId];
-      else if (step.roleId) {
+      else if (requester?.supervisorId) {
+        // A role that ALSO reports to other roles (Admin › Roles › Hierarchy,
+        // 2026-10-20 — the Warehouse Supervisor to both Purchasing Managers)
+        // sends the step to those roles' holders beside the "Reports to".
+        const mine = await tx.userRole.findMany({
+          where: { userId: requesterId },
+          select: { role: { select: { alsoReportsToRoleIds: true } } },
+        });
+        const extraRoles = [...new Set(mine.flatMap((r) => r.role.alsoReportsToRoleIds))];
+        const extra = extraRoles.length
+          ? await tx.userRole.findMany({
+              where: { roleId: { in: extraRoles }, user: { isActive: true }, userId: { not: requesterId } },
+              select: { userId: true },
+            })
+          : [];
+        base = [...new Set([requester.supervisorId, ...extra.map((r) => r.userId)])];
+      } else if (step.roleId) {
         const rows = await tx.userRole.findMany({
           where: { roleId: step.roleId, user: { isActive: true } },
           select: { userId: true },
