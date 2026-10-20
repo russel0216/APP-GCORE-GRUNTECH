@@ -222,6 +222,10 @@ async function cleanup() {
     select: { id: true },
   });
   const ids = users.map((u) => u.id);
+  // Memos (2026-10-20): their author is kept by a Restrict, so they go first.
+  await prisma.memo.deleteMany({ where: { OR: [{ createdById: { in: ids } }, { title: { startsWith: TAG } }] } });
+  await prisma.position.deleteMany({ where: { code: { startsWith: TAG } } });
+  await prisma.industry.deleteMany({ where: { code: { startsWith: TAG } } });
   if (ids.length) {
     await prisma.approvalAction.deleteMany({ where: { approverId: { in: ids } } });
     await prisma.approvalRequest.deleteMany({ where: { requesterId: { in: ids } } });
@@ -4959,6 +4963,93 @@ async function main() {
       stored !== null || ((listed.body.rows ?? []) as unknown[]).length === PEOPLE_FLOW_DEFAULTS.length,
       String(((listed.body.rows ?? []) as unknown[]).length),
     );
+  }
+
+  // ══ Memos (2026-10-20) ════════════════════════════════════════════════════
+  console.log('\nMemos — issued to an audience, acknowledged once');
+  if (await apiReachable()) {
+    const memoHrRole = await makeRole('zzhr_memo_hr', `${TAG} Memos HR`, ['ghr.memos.view_all', 'ghr.memos.create', 'ghr.memos.edit_all']);
+    const memoHr = await makeUser('ZZ Memo HR', 'memohr@verifyhr.local', [memoHrRole.id]);
+    const staffA = await makeUser('ZZ Memo Ana', 'memoana@verifyhr.local', []);
+    const staffB = await makeUser('ZZ Memo Ben', 'memoben@verifyhr.local', []);
+    const staffC = await makeUser('ZZ Memo Cai', 'memocai@verifyhr.local', []);
+    const team1 = await prisma.industry.create({ data: { code: `${TAG}T1`, name: `${TAG} Team One` } });
+    const team2 = await prisma.industry.create({ data: { code: `${TAG}T2`, name: `${TAG} Team Two` } });
+    const post = await prisma.position.create({ data: { code: `${TAG}-P1`, title: `${TAG} Memo Post` } });
+    const empA = await prisma.employee.create({ data: { employeeNo: `${TAG}-MA`, firstName: `${TAG} Ana`, lastName: 'Memo', userId: staffA.id, industryId: team1.id } });
+    const empB = await prisma.employee.create({ data: { employeeNo: `${TAG}-MB`, firstName: `${TAG} Ben`, lastName: 'Memo', userId: staffB.id, industryId: team2.id } });
+    const empC = await prisma.employee.create({ data: { employeeNo: `${TAG}-MC`, firstName: `${TAG} Cai`, lastName: 'Memo', userId: staffC.id, industryId: team2.id } });
+    await prisma.employeeExtraPosition.create({ data: { employeeId: empC.id, positionId: post.id } });
+    const hrT = signToken(memoHr.id, memoHr.email);
+    const aT = signToken(staffA.id, staffA.email);
+    const bT = signToken(staffB.id, staffB.email);
+    const cT = signToken(staffC.id, staffC.email);
+
+    check('someone with no memo right cannot draft one', (await api(aT, 'POST', '/memos', { title: `${TAG} nope`, body: 'x' })).status === 403);
+    check('a team audience must name a team', (await api(hrT, 'POST', '/memos', { title: `${TAG} empty`, body: 'x', audience: 'TEAMS' })).status === 400);
+    const reachTeam = await api(hrT, 'POST', '/memos/reach', { audience: 'TEAMS', teamIds: [team1.id] });
+    const reachPost = await api(hrT, 'POST', '/memos/reach', { audience: 'POSITIONS', positionIds: [post.id] });
+    check('the reach counts the team’s active people, and a position counts who also holds it', reachTeam.body.count === 1 && reachPost.body.count === 1, `${reachTeam.body.count} · ${reachPost.body.count}`);
+
+    const draft = await api(hrT, 'POST', '/memos', { title: `${TAG} Holiday hours`, body: 'Office closes at 3 PM.', audience: 'TEAMS', teamIds: [team1.id] });
+    const memoId = String(draft.body.id);
+    check('HR drafts a memo, unnumbered', draft.status === 201 && draft.body.number === null && draft.body.status === 'DRAFT');
+    check('a draft is nobody else’s to read', (await api(aT, 'GET', `/memos/${memoId}`)).status === 404);
+    const issued = await api(hrT, 'POST', `/memos/${memoId}/issue`);
+    check('issuing numbers it and resolves the team into its recipients', issued.status === 200 && /MEMO/.test(String(issued.body.number)) && issued.body.recipients === 1, JSON.stringify(issued.body).slice(0, 160));
+    check('the recipient is told', !!(await prisma.notification.findFirst({ where: { userId: staffA.id, type: 'memo.issued' } })));
+    check('an issued memo is not changed', (await api(hrT, 'PATCH', `/memos/${memoId}`, { title: `${TAG} Changed`, body: 'y', audience: 'ALL' })).status === 400);
+    check('nor deleted — it is archived instead', (await api(hrT, 'DELETE', `/memos/${memoId}`)).status === 400);
+
+    const asA = await api(aT, 'GET', `/memos/${memoId}`);
+    check('the recipient opens it with no memo right, and sees no recipient list', asA.status === 200 && (asA.body.mine as { acknowledgedAt: unknown })?.acknowledgedAt === null && asA.body.seesRecipients === false && (asA.body.recipientsList as unknown[]).length === 0);
+    check('someone it was not addressed to gets a 404', (await api(bT, 'GET', `/memos/${memoId}`)).status === 404);
+    const laterHire = await prisma.employee.create({ data: { employeeNo: `${TAG}-ML`, firstName: `${TAG} Late`, lastName: 'Hire', industryId: team1.id } });
+    check('a later hire on the team is not added to a memo already issued', (await prisma.memoRecipient.count({ where: { memoId, employeeId: laterHire.id } })) === 0);
+    const received = await api(aT, 'GET', '/memos/received');
+    check('it is on the recipient’s Memos Received, unacknowledged', (received.body.rows as { id: string; acknowledgedAt: unknown }[]).some((r) => r.id === memoId && r.acknowledgedAt === null) && received.body.unacknowledged === 1);
+    const workA = await api(aT, 'GET', '/my-work');
+    check('My Work asks the recipient to acknowledge it', ((workA.body.assignedToMe ?? []) as { kind: string; id: string }[]).some((r) => r.kind === 'memo' && r.id === memoId));
+    check('the recipient acknowledges it once', (await api(aT, 'POST', `/memos/${memoId}/acknowledge`)).status === 200);
+    check('a second acknowledgement is a 409', (await api(aT, 'POST', `/memos/${memoId}/acknowledge`)).status === 409);
+    check('someone else cannot acknowledge it for them', (await api(bT, 'POST', `/memos/${memoId}/acknowledge`)).status === 404);
+    const workA2 = await api(aT, 'GET', '/my-work');
+    check('once acknowledged it leaves My Work', !((workA2.body.assignedToMe ?? []) as { kind: string; id: string }[]).some((r) => r.kind === 'memo' && r.id === memoId));
+    const asHr = await api(hrT, 'GET', `/memos/${memoId}`);
+    check('HR sees who acknowledged and when', asHr.body.acknowledged === 1 && (asHr.body.recipientsList as { employeeId: string; acknowledgedAt: unknown }[]).some((r) => r.employeeId === empA.id && !!r.acknowledgedAt));
+
+    const people = await api(hrT, 'POST', '/memos', { title: `${TAG} Safety briefing`, body: 'Attend Friday.', audience: 'PEOPLE', employeeIds: [empA.id, empB.id] });
+    const peopleId = String(people.body.id);
+    await api(hrT, 'POST', `/memos/${peopleId}/issue`);
+    await api(aT, 'POST', `/memos/${peopleId}/acknowledge`);
+    const remind = await api(hrT, 'POST', `/memos/${peopleId}/remind`);
+    check('a reminder goes only to those who have not acknowledged', remind.status === 200 && remind.body.reminded === 1 && !!(await prisma.notification.findFirst({ where: { userId: staffB.id, type: 'memo.reminder' } })) && !(await prisma.notification.findFirst({ where: { userId: staffA.id, type: 'memo.reminder' } })));
+    check('and once a day at most', (await api(hrT, 'POST', `/memos/${peopleId}/remind`)).status === 409);
+
+    const byPost = await api(hrT, 'POST', '/memos', { title: `${TAG} Post memo`, body: 'For the post.', audience: 'POSITIONS', positionIds: [post.id] });
+    const postIssued = await api(hrT, 'POST', `/memos/${String(byPost.body.id)}/issue`);
+    check('a position memo reaches who holds the post beside their main one', postIssued.body.recipients === 1 && (await prisma.memoRecipient.count({ where: { memoId: String(byPost.body.id), employeeId: empC.id } })) === 1);
+    check('…and the recipient reads it', (await api(cT, 'GET', `/memos/${String(byPost.body.id)}`)).status === 200);
+
+    check('an issued memo is archived', (await api(hrT, 'POST', `/memos/${memoId}/archive`)).status === 200);
+    const archivedList = await api(aT, 'GET', '/memos/received');
+    check('an archived memo stays on the recipient’s list, marked', (archivedList.body.rows as { id: string; archived: boolean }[]).some((r) => r.id === memoId && r.archived));
+    check('and is restored', (await api(hrT, 'POST', `/memos/${memoId}/archive`, { restore: true })).status === 200 && (await prisma.memo.findUnique({ where: { id: memoId } }))?.status === 'ISSUED');
+
+    const hrPaper = await printed(hrT, `/memos/${memoId}/pdf`);
+    const aPaper = await printed(aT, `/memos/${memoId}/pdf`);
+    check(
+      'the memorandum prints — HR’s copy with who acknowledged, the recipient’s without',
+      hrPaper.status === 200 && flat(hrPaper.text).includes('Holiday hours') && /Acknowledgements/i.test(flat(hrPaper.text)) && aPaper.status === 200 && !/Acknowledgements/i.test(flat(aPaper.text)),
+    );
+    const list = await api(hrT, 'GET', `/memos?search=${TAG}`);
+    check('the register lists them with acknowledgement counts and cards', list.status === 200 && (list.body.rows as { id: string; acknowledged: number; recipients: number }[]).some((r) => r.id === memoId && r.acknowledged === 1 && r.recipients === 1) && typeof (list.body.summary as { issued: number }).issued === 'number');
+    check('a stranger cannot open the register', (await api(bT, 'GET', '/memos')).status === 403);
+    const onRecord = await api(hrT, 'GET', `/memos/received?employeeId=${empA.id}`);
+    check('HR reads the memos one employee was issued, on their record', (onRecord.body.rows as { id: string }[]).some((r) => r.id === memoId) && (onRecord.body.rows as { id: string }[]).some((r) => r.id === peopleId));
+    check('a colleague cannot read another’s memos that way', (await api(bT, 'GET', `/memos/received?employeeId=${empA.id}`)).status === 404);
+    const scrap = await api(hrT, 'POST', '/memos', { title: `${TAG} Scrap`, body: 'z' });
+    check('a draft is deleted', (await api(hrT, 'DELETE', `/memos/${String(scrap.body.id)}`)).status === 200);
   }
 
   // ══ My Records (2026-10-20) ═══════════════════════════════════════════════

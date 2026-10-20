@@ -133,6 +133,8 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   { type: 'training_certification', code: 'TC', label: 'Training Certification' },
   // The Help box's tickets (2026-10-11): GT-HT-2026-0001 on the stock pattern.
   { type: 'help_ticket', code: 'HT', label: 'Help Ticket' },
+  // G-HR › Records › Memos (2026-10-20): numbered when issued, GT-MEMO-2026-0001.
+  { type: 'memo', code: 'MEMO', label: 'Memorandum' },
 ];
 
 /** `2026` for a yearly counter, `2026-09` for a monthly one, '' for a flat one. */

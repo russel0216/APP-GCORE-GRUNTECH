@@ -59,6 +59,8 @@ const DETAIL: Record<string, string> = {
   // The Service JO under Aftermarket (2026-10-20) — the same table, its own register.
   service_job_order: '/g-ops/service-job-orders',
   service_document: '/g-ops/service-documents',
+  // G-HR › Records › Memos (2026-10-20).
+  memo: '/g-hr/memos',
   cad_job_order: '/g-ops/cad-job-orders',
   // A project's drawing sent for approval (2026-10-13); the engine files it as plan_approval.
   approved_plan: '/g-ops/plans',

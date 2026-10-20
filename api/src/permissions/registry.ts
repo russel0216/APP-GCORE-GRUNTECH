@@ -281,6 +281,11 @@ export const REGISTRY: ModuleDef[] = [
       // overtime, the 201 file and their place on the Plantilla — one page,
       // one key, the Clock's pattern (everyone reads their own).
       { key: 'my_records', group: 'Records', label: 'My Records', path: '/g-hr/my-records', actions: ['view_own'], phase: 10 },
+      // Memos (2026-10-20, the Records spec): HR issues a memorandum to
+      // everyone, teams, positions or named people; each recipient reads it
+      // and acknowledges it once. Own is the memos one issued — a memo
+      // addressed to someone opens for them with no right at all.
+      { key: 'memos', own: 'memos you issued', group: 'Records', label: 'Memos', path: '/g-hr/memos', actions: SHARED_KEPT, phase: 10, note: 'Create issues a memo; anyone a memo is addressed to reads and acknowledges it without a right' },
       // The register behind the dashboard: every clock entry, with how the
       // person was identified. Gated by the dashboard permission — seeing the
       // day's counts and seeing the entries behind them are the same right.

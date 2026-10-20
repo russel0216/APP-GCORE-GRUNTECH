@@ -100,3 +100,11 @@ button.perm-chip {
   text-align: center;
   padding: 0 var(--s-4);
 }
+
+/* A memo's text as it was written: its own line breaks, never squeezed (2026-10-20). */
+.memo-body {
+  margin: var(--s-4) 0 0;
+  white-space: pre-wrap;
+  font-size: var(--fs-md);
+  line-height: 1.6;
+}

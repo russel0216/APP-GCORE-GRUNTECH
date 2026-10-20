@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { peopleFlowWork } from '../shared/peopleFlow';
+import { memosToAcknowledge } from './memos';
 import { Prisma } from '@prisma/client';
 import { ratePct } from '../shared/listPaper';
 import fs from 'node:fs';
@@ -591,6 +592,8 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
     // Outgoing (2026-10-15): what was issued to me and is waiting for me to
     // confirm I received it — the slip is my receive proof.
     ...(await outgoingToConfirm(me)),
+    // Memos (2026-10-20): what was issued to me and I have not acknowledged.
+    ...(await memosToAcknowledge(me)),
   ];
   return rows.sort(byUrgency);
 }

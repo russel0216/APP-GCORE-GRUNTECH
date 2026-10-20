@@ -9,6 +9,7 @@ import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { EmployeeEvaluationsTab } from '../hr/EmployeeEvaluationsTab';
 import { EmployeeFlowTab } from '../hr/PeopleFlow';
+import { MemosReceived } from '../hr/Memos';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople, type PersonRow } from '../../components/People';
 import { FaceSamplesPanel } from '../hr/FaceSamples';
@@ -425,7 +426,7 @@ export function Employees() {
   );
 }
 
-type EmployeeTab = 'person' | 'employment' | 'login' | 'pay' | 'evaluations' | 'face' | 'flow';
+type EmployeeTab = 'person' | 'employment' | 'login' | 'pay' | 'evaluations' | 'face' | 'flow' | 'memos';
 
 /**
  * Which door a new person comes in by (2026-10-10, the owner's call: "unite
@@ -520,6 +521,8 @@ function EmployeeForm({
   const setRates = employee?.canEditRates ?? can('ghr.employee_rates.edit_all');
   const seeEvaluations = !!employee && can('ghr.evaluations.view_all');
   const seeFlow = !!employee && can('ghr.people_flow.view_all');
+  // The memos this person was issued and whether they acknowledged them (2026-10-20).
+  const seeMemos = !!employee && can('ghr.memos.view_all');
   // The samples the clock matches this person against: HR's to look at and
   // remove (a blurred one, or someone else's); they are only ever ADDED by
   // the person on the Clock page.
@@ -966,6 +969,11 @@ function EmployeeForm({
               People Flow
             </button>
           )}
+          {seeMemos && (
+            <button className={tab === 'memos' ? 'active' : ''} onClick={() => setTab('memos')}>
+              Memos
+            </button>
+          )}
           {seeFaces && (
             <button className={tab === 'face' ? 'active' : ''} onClick={() => setTab('face')}>
               Face samples
@@ -1286,6 +1294,7 @@ function EmployeeForm({
       )}
 
       {tab === 'flow' && seeFlow && employee && <EmployeeFlowTab employeeId={employee.id} />}
+      {tab === 'memos' && seeMemos && employee && <MemosReceived employeeId={employee.id} />}
 
       {tab === 'evaluations' && seeEvaluations && employee && (
         <EmployeeEvaluationsTab

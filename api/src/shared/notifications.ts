@@ -69,6 +69,9 @@ export type NotificationType =
   /** The Help box (2026-10-11): a new ticket to the super admins, a reply or a change of status to the other side. */
   | 'help.ticket'
   | 'help.reply'
+  /** Memos (2026-10-20): a memo issued to you, and a reminder to acknowledge it. */
+  | 'memo.issued'
+  | 'memo.reminder'
   | 'system';
 
 export interface NotifyInput {

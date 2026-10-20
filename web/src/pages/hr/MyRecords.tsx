@@ -6,12 +6,13 @@ import { parseDay } from '../../lib/day';
 import { Stat } from '../../components/charts';
 import { Empty, ErrorBox, Loading, StatusBadge, durationLabel, formatDate, formatTime, type Tone } from '../../components/ui';
 import { PriorModal } from './Overtime';
+import { MemosReceived } from './Memos';
 
 /**
  * G-HR › MY RECORDS (2026-10-20, the owner's G-HR Records spec): the signed-in
  * employee's own records on one page — Attendance (leave balances, the
- * cutoff's daily time record, their overtime), the Employee 201 File and
- * their place on the Plantilla. Everything is read by `GET /my-records`,
+ * cutoff's daily time record, their overtime), the Employee 201 File, the
+ * memos issued to them and their place on the Plantilla. Everything is read by `GET /my-records`,
  * which only ever answers for the caller.
  */
 
@@ -101,9 +102,9 @@ interface Records {
   };
 }
 
-const TABS = ['attendance', 'file', 'plantilla'] as const;
+const TABS = ['attendance', 'file', 'memos', 'plantilla'] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { attendance: 'Attendance', file: 'Employee 201 File', plantilla: 'Plantilla' };
+const TAB_LABEL: Record<Tab, string> = { attendance: 'Attendance', file: 'Employee 201 File', memos: 'Memos Received', plantilla: 'Plantilla' };
 
 const DTR_LABEL: Record<DtrStatus, string> = {
   NOT_EMPLOYED: 'Not yet hired',
@@ -183,6 +184,7 @@ export function MyRecords() {
           </div>
           {tab === 'attendance' && <AttendanceTab data={data} onCutoff={(k) => set('cutoff', k)} onFiled={load} />}
           {tab === 'file' && <FileTab file={data.file} />}
+          {tab === 'memos' && <MemosReceived />}
           {tab === 'plantilla' && <PlantillaTab p={data.plantilla} />}
         </div>
       )}

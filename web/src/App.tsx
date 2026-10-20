@@ -69,6 +69,7 @@ import { BorrowSlips, BorrowSlipDetail, BorrowRequestEditor } from './pages/chai
 import { PulloutSlips, PulloutDetail, PulloutEditor } from './pages/chain/PulloutSlips';
 import { Clock } from './pages/hr/Clock';
 import { MyRecords } from './pages/hr/MyRecords';
+import { Memos, MemoPage } from './pages/hr/Memos';
 import { HrDashboard, AttendanceRegister } from './pages/hr/Dashboard';
 import { Leave } from './pages/hr/Leave';
 import { Overtime, OvertimeDetail } from './pages/hr/Overtime';
@@ -1012,6 +1013,16 @@ function Routed() {
             </Guard>
           }
         />
+        <Route
+          path="/g-hr/memos"
+          element={
+            <GuardAny permissions={['ghr.memos.view_all', 'ghr.memos.view_team', 'ghr.memos.view_own']}>
+              <Memos />
+            </GuardAny>
+          }
+        />
+        {/* No Guard: a memo addressed to someone opens for them with no right — the API decides. */}
+        <Route path="/g-hr/memos/:id" element={<MemoPage />} />
         <Route
           path="/g-hr"
           element={

@@ -44,6 +44,8 @@ model User {
   supervisorId String?
   supervisor   User?   @relation("Supervision", fields: [supervisorId], references: [id], onDelete: SetNull)
   reports      User[]  @relation("Supervision")
+  memosAuthored Memo[] @relation("MemoAuthor")
+  memosIssued   Memo[] @relation("MemoIssuer")
 
   departmentId String?
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
@@ -945,6 +947,7 @@ model Employee {
   /// Positions held beside the main one (2026-10-19: one person, two
   /// managers' posts). Each counts as filled; `position` joins the titles.
   extraPositions EmployeeExtraPosition[]
+  memos          MemoRecipient[]
   /// The industry team the person works in (Utilities, Healthcare…), from the
   /// same Industry rows customers are classified by. Set by HR; shown to the
   /// person on their invitation and My Account, never edited by them.
@@ -5923,4 +5926,67 @@ model OperationsBudget {
   updatedAt      DateTime     @updatedAt
 
   @@unique([year, costCategoryId])
+}
+
+/// A memorandum (2026-10-20, the owner's G-HR Records spec). HR drafts it,
+/// addresses it to everyone, teams, positions or named people, and issues
+/// it: the recipients are RESOLVED at issue into `MemoRecipient` rows, so a
+/// later hire never receives an old memo and the record says who was told.
+/// Each recipient acknowledges it once. Numbered at issue (`memo`), so a
+/// draft burns no number. Archived, it stays on every recipient's list.
+model Memo {
+  id            String          @id @default(cuid())
+  number        String?         @unique
+  status        MemoStatus      @default(DRAFT)
+  title         String
+  body          String
+  /// "Human Resources Department" — who it comes from, printed as FROM.
+  issuingOffice String?
+  audience      MemoAudience    @default(ALL)
+  teamIds       String[]
+  positionIds   String[]
+  employeeIds   String[]
+  /// The memo's own date (a DATE, the Manila day); set at issue when blank.
+  memoDate      DateTime?       @db.Date
+  issuedAt      DateTime?
+  issuedById    String?
+  issuedBy      User?           @relation("MemoIssuer", fields: [issuedById], references: [id], onDelete: SetNull)
+  archivedAt    DateTime?
+  archivedById  String?
+  remindedAt    DateTime?
+  createdById   String
+  createdBy     User            @relation("MemoAuthor", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  recipients    MemoRecipient[]
+
+  @@index([status])
+  @@index([createdById])
+}
+
+enum MemoStatus {
+  DRAFT
+  ISSUED
+  ARCHIVED
+}
+
+enum MemoAudience {
+  ALL
+  TEAMS
+  POSITIONS
+  PEOPLE
+}
+
+/// One person a memo was issued to, and when they acknowledged it.
+model MemoRecipient {
+  id             String    @id @default(cuid())
+  memoId         String
+  memo           Memo      @relation(fields: [memoId], references: [id], onDelete: Cascade)
+  employeeId     String
+  employee       Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  acknowledgedAt DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@unique([memoId, employeeId])
+  @@index([employeeId])
 }
