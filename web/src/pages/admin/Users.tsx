@@ -17,7 +17,6 @@ import {
 import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { OrgChart } from './OrgChart';
-import { PeopleTree } from './PeopleTree';
 import { rolesByLevel } from '../../lib/roleLevels';
 import { NewPersonModal } from '../masters/Employees';
 import { PersonSelect, usePeople } from '../../components/People';
@@ -225,7 +224,7 @@ export function Users() {
       {view === 'tree' ? (
         <OrgChart key={reload} />
       ) : view === 'hierarchy' ? (
-        <PeopleTree key={reload} />
+        <OrgChart key={`h${reload}`} rolesOnly />
       ) : (
       <DataList<UserRow>
         listKey="admin-users"

@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Avatar, Empty, ErrorBox, Loading } from '../../components/ui';
+import { levelLabel } from '../../lib/roleLevels';
 
 /*
   The organisational chart: who reports to whom, drawn from the one place G-CORE
@@ -318,7 +319,7 @@ export function roleForest(roles: ChartRole[]): RoleNode[] {
   return roots;
 }
 
-function RoleTile({ node, holders, names, meId, search }: { node: RoleNode; holders: Person[]; names: Map<string, string>; meId?: string; search: string }) {
+function RoleTile({ node, holders, names, meId, search, rolesOnly }: { node: RoleNode; holders: Person[]; names: Map<string, string>; meId?: string; search: string; rolesOnly?: boolean }) {
   const r = node.role;
   const also = [r.reportsToRoleId ? r.alsoReportsToRoleIds : r.alsoReportsToRoleIds.slice(1)]
     .flat()
@@ -326,7 +327,14 @@ function RoleTile({ node, holders, names, meId, search }: { node: RoleNode; hold
     .filter(Boolean);
   return (
     <span className="org-person">
-      {holders.length === 0 ? (
+      {rolesOnly ? (
+        <span className={`org-card is-role${KEY_ROLES.has(r.key) ? ' is-key' : ''}`}>
+          <span className="org-card-text">
+            {r.rank != null && <span className="org-position">{levelLabel(r.rank)}</span>}
+            <span className="org-name">{r.name}</span>
+          </span>
+        </span>
+      ) : holders.length === 0 ? (
         <span className="org-card is-vacant">
           <span className="org-card-text">
             <span className="org-position">{r.name}</span>
@@ -357,7 +365,7 @@ function RoleTile({ node, holders, names, meId, search }: { node: RoleNode; hold
   );
 }
 
-function RoleBranch(props: { node: RoleNode; byRole: Map<string, Person[]>; names: Map<string, string>; meId?: string; search: string }) {
+function RoleBranch(props: { node: RoleNode; byRole: Map<string, Person[]>; names: Map<string, string>; meId?: string; search: string; rolesOnly?: boolean }) {
   const { node, byRole } = props;
   return (
     <li className="org-row-item">
@@ -373,7 +381,7 @@ function RoleBranch(props: { node: RoleNode; byRole: Map<string, Person[]>; name
   );
 }
 
-function RoleChart({ people, meId, search, onReady }: { people: Person[]; meId?: string; search: string; onReady: () => void }) {
+function RoleChart({ people, meId, search, onReady, rolesOnly }: { people: Person[]; meId?: string; search: string; onReady: () => void; rolesOnly?: boolean }) {
   const [roles, setRoles] = useState<ChartRole[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   useEffect(() => {
@@ -393,7 +401,7 @@ function RoleChart({ people, meId, search, onReady }: { people: Person[]; meId?:
   if (!roles) return <Loading />;
   const names = new Map(roles.map((r) => [r.id, r.name]));
   const forest = roleForest(roles);
-  const props = { byRole, names, meId, search };
+  const props = { byRole, names, meId, search, rolesOnly };
   // The head (the top role with roles under it) keeps the chart's two sides:
   // BOSS — the roles whose branch holds nobody on a selling team — and the
   // Industry Teams (2026-10-20, the owner's call).
@@ -408,7 +416,7 @@ function RoleChart({ people, meId, search, onReady }: { people: Person[]; meId?:
       ].filter((s) => s.items.length > 0)
     : [];
   return (
-    <div className="org-tree">
+    <div className={`org-tree${rolesOnly ? " is-roles" : ""}`}>
       {head && (
         <>
           <RoleTile {...props} node={head} holders={byRole.get(head.role.key) ?? []} />
@@ -426,18 +434,31 @@ function RoleChart({ people, meId, search, onReady }: { people: Person[]; meId?:
           </ul>
         </>
       )}
-      {others.length > 0 && (
+      {others.filter((n) => n.children.length).length > 0 && (
         <ul className="org-row">
-          {others.map((n) => (
+          {others.filter((n) => n.children.length).map((n) => (
             <RoleBranch key={n.role.id} {...props} node={n} />
           ))}
         </ul>
+      )}
+      {/* A role with no parent and nothing under it is not placed yet: wrapped, never one endless row. */}
+      {others.some((n) => !n.children.length) && (
+        <div className="org-loose">
+          <h3 className="card-title">Not placed in the hierarchy yet</h3>
+          <ul className="org-loose-list">
+            {others.filter((n) => !n.children.length).map((n) => (
+              <li key={n.role.id}>
+                <RoleTile {...props} node={n} holders={byRole.get(n.role.key) ?? []} />
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );
 }
 
-export function OrgChart() {
+export function OrgChart({ rolesOnly }: { rolesOnly?: boolean } = {}) {
   const { me } = useAuth();
   const location = useLocation();
   const { people, error } = useOrgPeople();
@@ -478,6 +499,7 @@ export function OrgChart() {
 
   return (
     <div className="card org-card-wrap">
+      {!rolesOnly && (
       <div className="row org-switch">
         <div className="scope-switch">
           <button type="button" className={byPerson ? '' : 'active'} aria-pressed={!byPerson} onClick={() => setByPerson(false)}>
@@ -488,8 +510,13 @@ export function OrgChart() {
           </button>
         </div>
       </div>
+      )}
       <p className="muted org-lead">
-        {byPerson ? (
+        {rolesOnly ? (
+          <>
+            Each role under the role it reports to, as set on <strong>Roles &amp; Permissions › Hierarchy</strong>.
+          </>
+        ) : byPerson ? (
           <>
             Drawn from each person's <strong>Reports to</strong> — the same line their leave, overtime and other approvals
             follow. Open anyone to change it.
@@ -521,7 +548,7 @@ export function OrgChart() {
           {byPerson ? (
             trees.map((t) => <Tree key={t.person.id} head={t} meId={me?.user.id} search={location.search} />)
           ) : (
-            <RoleChart people={people} meId={me?.user.id} search={location.search} onReady={fit} />
+            <RoleChart people={people} meId={me?.user.id} search={location.search} onReady={fit} rolesOnly={rolesOnly} />
           )}
         </div>
       </div>

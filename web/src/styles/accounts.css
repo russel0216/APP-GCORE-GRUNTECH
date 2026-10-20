@@ -749,3 +749,30 @@
   color: var(--muted);
   text-align: center;
 }
+
+/* The Hierarchy Chart's role-only boxes (2026-10-20): no picture, so no ring. */
+.org-card.is-role {
+  padding: var(--s-1) var(--s-3);
+  white-space: nowrap;
+  max-width: none;
+}
+.org-card.is-role .org-card-text {
+  min-width: max-content;
+}
+.org-card.is-role > :first-child {
+  box-shadow: none;
+  border-radius: 0;
+}
+/* Roles not placed yet wrap in rows under the chart, never one column. */
+.org-tree .org-loose-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--s-2);
+  width: 72rem;
+  margin: 0 auto;
+}
+/* A role box never shrinks under its words; the canvas widens and Fit zooms out. */
+.org-tree.is-roles .org-row-item {
+  min-width: max-content;
+}

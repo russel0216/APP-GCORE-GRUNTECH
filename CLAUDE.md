@@ -4080,12 +4080,13 @@ hierarchy" — department removed EVERYWHERE, and both hierarchies.
   Admin › Roles lists its cards under their level; the role form's "Level
   on the chart" names them.
 - **The Hierarchy Chart**: Admin › Users › **Hierarchy Chart** (`?view=
-  hierarchy`, `pages/admin/PeopleTree.tsx`; 2026-10-20, the owner's call:
-  "the Roles › Hierarchy settings reflect — no name or person") — the
-  ROLES under the roles they report to (`GET /roles/chart`, `roleForest`
-  exported from `OrgChart.tsx`), an outline that opens and closes, each
-  line the role, its level and "Also reports to …". No person is named;
-  who holds a role is the Organizational Chart's.
+  hierarchy`; 2026-10-20, the owner's call: "the Roles › Hierarchy settings
+  reflect — no name or person", "boxes like the org chart") — the
+  Organizational Chart's By-role drawing with `rolesOnly`: a box per role
+  (its level over its name, "Also reports to …" under it), the BOSS and
+  Industry Teams sides, the zoom, and the roles with no parent and nothing
+  under them wrapped under "Not placed in the hierarchy yet". No person is
+  named; who holds a role is the Organizational Chart's.
 - **The Organizational Chart has two sides** (2026-10-19, the owner's
   call): under the head, **BOSS — Business and Operation Support
   Services** (the direct reports with no selling team) on the left and the
