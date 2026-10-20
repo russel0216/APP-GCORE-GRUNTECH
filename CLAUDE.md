@@ -4040,8 +4040,10 @@ first parent only, since a person has one "Reports to" — but a SUPERVISOR
 step that goes to the requester's "Reports to" ALSO goes to the active
 holders of their roles' `alsoReportsToRoleIds` (`approversForStep`), so a
 Warehouse Supervisor's documents reach both Purchasing Managers. The By-role
-chart keeps the head's two sides, BOSS (branches nobody on a team holds) and
-Industry Teams. **The Organizational
+chart keeps the head's two sides: Industry Teams for a branch holding a
+team-managing role (Team Leader, Technical / Sales / Aftermarket Manager —
+`KEY_ROLES`), BOSS for every other — decided by the ROLE, never by its
+holders' teams, so the CEO's Purchasing and Design Manager roles sit on BOSS. **The Organizational
 Chart opens By role** (`RoleChart` in `OrgChart.tsx`, `GET /roles/chart`
 behind Admin › Users' view right): each role's tile under its first parent
 role, a tile per holder with picture and team, "Vacant" where nobody holds

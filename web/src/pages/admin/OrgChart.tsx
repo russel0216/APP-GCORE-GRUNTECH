@@ -406,8 +406,11 @@ function RoleChart({ people, meId, search, onReady, rolesOnly }: { people: Perso
   // BOSS — the roles whose branch holds nobody on a selling team — and the
   // Industry Teams (2026-10-20, the owner's call).
   const head = [...forest].filter((n) => n.children.length).sort((a, b) => (a.role.rank ?? 99) - (b.role.rank ?? 99))[0];
-  const onTeam = (n: RoleNode): boolean =>
-    (byRole.get(n.role.key) ?? []).some((p) => !!p.team) || n.children.some(onTeam);
+  // A branch is the Industry Teams' when it holds a team-managing role (Team
+  // Leader, Technical / Sales / Aftermarket Manager) — decided by the ROLE,
+  // never by its holders' teams, so a head role the CEO holds (Purchasing
+  // Manager, Design Manager) stays on BOSS (2026-10-20, the owner's call).
+  const onTeam = (n: RoleNode): boolean => KEY_ROLES.has(n.role.key) || n.children.some(onTeam);
   const others = forest.filter((n) => n !== head);
   const sides = head
     ? [
