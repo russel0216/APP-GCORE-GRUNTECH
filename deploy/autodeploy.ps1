@@ -115,5 +115,5 @@ if ($code -eq 0 -and $now -eq $remote) {
     exit 0
 }
 "FAILED $remote $(Get-Date -Format s) exit $code" | Set-Content $last
-Log "==> FAILED deploying $short (exit $code) - read above; the site stays on $($now.Substring(0, 7)). Fix, push again, or run deploy\rebuild.ps1 by hand."
+Log "==> FAILED deploying $short (exit $code) - read above; the checkout is at $($now.Substring(0, 7)). Fix, push again, or run deploy\rebuild.ps1 by hand."
 exit 1

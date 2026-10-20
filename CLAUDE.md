@@ -922,7 +922,11 @@ the new code BEFORE it stops the running site (a commit that does not build
 leaves the site as it was), asks no questions (`--ff-only`,
 `GIT_ASK_YESNO=false`), and holds `data/rebuild.lock` so two cannot run at
 once. The task runs as the administrator who registered it, because the pull
-needs their saved GitHub login. G-Core owns
+needs their saved GitHub login. **A step that fails after the stop (the seed,
+the task settings) starts the API again** in `rebuild.ps1`'s `finally`
+(2026-10-20: a failure there had left the site on Cloudflare's 502); the run
+still ends red, and autodeploy does not retry a FAILED commit — push again or
+run the rebuild by hand. G-Core owns
 `C:\G-CORE-GRUNTECH`, port **5100**, the **`GCoreGruntechApi`** scheduled task,
 the **`gcore-gruntech-db`** container on **5435**, and the **`gcore-gruntech`**
 tunnel — nothing else on that machine.

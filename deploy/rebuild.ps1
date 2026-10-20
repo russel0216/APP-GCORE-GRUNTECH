@@ -60,6 +60,13 @@ if (Test-Path $lock) {
 New-Item -ItemType Directory -Force -Path "$root\data" | Out-Null
 "$PID $(Get-Date -Format s)" | Set-Content $lock
 
+# Once the API is stopped, the script owes it a start. A step that fails after
+# the stop (the seed, the task settings) used to throw past the start and leave
+# the site down - Cloudflare's 502 - until somebody ran this by hand. `finally`
+# below starts our own task again in that case; the run still ends red.
+$stopped = $false
+$started = $false
+
 try {
 
 # The order below is deliberate: everything that can FAIL - the pull, the
@@ -143,6 +150,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Applying the schema failed' }
 
 # -- 5. Stop OURS, and only ours ----------------------------------------------
 Step "stop ONLY $task"
+$stopped = $true
 schtasks /End /TN $task 2>$null | Out-Null
 Start-Sleep -Seconds 3
 
@@ -205,6 +213,7 @@ if ($LASTEXITCODE -ne 0) { throw "Could not update the $task task settings." }
 
 Step "start $task"
 schtasks /Run /TN $task | Out-Null
+$started = $true
 Start-Sleep -Seconds 8
 
 Step 'health check'
@@ -258,5 +267,10 @@ if (-not $publicOk) {
 Write-Host "`nG-CORE Gruntech is up on http://localhost:$apiPort - https://gruntech.gcore.tech`n" -ForegroundColor Green
 
 } finally {
+    if ($stopped -and -not $started) {
+        # Our own task only - never node by image name, never PM2 or Cloudflared.
+        Write-Host "`nThe rebuild failed after stopping $task - starting it again so the site is not left down." -ForegroundColor Red
+        schtasks /Run /TN $task | Out-Null
+    }
     Remove-Item $lock -Force -ErrorAction SilentlyContinue
 }
