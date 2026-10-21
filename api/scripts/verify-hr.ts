@@ -33,6 +33,7 @@ import sharp from 'sharp';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { scanAccountabilities } from '../src/shared/clearance';
+import { CANDIDATE_FLOW, ENTRANCE_EXAMS, examPct, hiredBenchmark, nextStatuses, weightedScore } from '../src/shared/hiring';
 import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
@@ -186,6 +187,17 @@ async function cleanup() {
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
   // Company assets (2026-10-21): their issuances hold employees and users by a Restrict.
   await prisma.companyAsset.deleteMany({ where: { OR: [{ brandModel: { startsWith: TAG } }, { createdBy: { email: { endsWith: '@verifyhr.local' } } }] } });
+  // Hiring (2026-10-21): contract → candidate → request, each held by a Restrict.
+  const hiringRequests = await prisma.manpowerRequest.findMany({ where: { OR: [{ title: { startsWith: TAG } }, { requestedBy: { email: { endsWith: '@verifyhr.local' } } }] }, select: { id: true } });
+  if (hiringRequests.length) {
+    const mprIds = hiringRequests.map((m) => m.id);
+    const contracts = await prisma.employmentContract.findMany({ where: { candidate: { mprId: { in: mprIds } } }, select: { id: true } });
+    await prisma.approvalRequest.deleteMany({ where: { documentType: { in: ['manpower_request', 'employment_contract'] }, documentId: { in: [...mprIds, ...contracts.map((k) => k.id)] } } });
+    await prisma.employmentContract.deleteMany({ where: { id: { in: contracts.map((k) => k.id) } } });
+    await prisma.candidate.deleteMany({ where: { mprId: { in: mprIds } } });
+    await prisma.manpowerRequest.deleteMany({ where: { id: { in: mprIds } } });
+  }
+  await prisma.examCatalog.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.overtimeRequest.deleteMany({ where: { reason: { startsWith: TAG } } });
   await prisma.leaveRequest.deleteMany({ where: { reason: { startsWith: TAG } } });
   const employees = await prisma.employee.findMany({
@@ -5109,7 +5121,7 @@ async function main() {
     check('someone with no asset right cannot open the register', (await api(signToken(noRight.id, noRight.email), 'GET', '/assets')).status === 403);
     const car = await api(hrT, 'POST', '/assets', { assetTypeId: type.id, brandModel: `${TAG} Toyota Hilux 2.4L`, serialNo: 'TH-8821', plateNo: 'NBF-9012', cost: 1_450_000 });
     const carId = String(car.body.id);
-    check('HR adds an asset; G-CORE gives it its tag', car.status === 201 && /^GT-AST-\d{4}-\d{4}$/.test(String(car.body.tag)), JSON.stringify(car.body).slice(0, 160));
+    check('HR adds an asset; G-CORE gives it its tag', car.status === 201 && /^GT-TAG-\d{4}-\d{4}$/.test(String(car.body.tag)), JSON.stringify(car.body).slice(0, 160));
     check('someone who may only read their own cannot add one', (await api(hT, 'POST', '/assets', { assetTypeId: type.id, brandModel: `${TAG} Nope` })).status === 403);
     check('an asset not issued is not the would-be holder’s to open', (await api(hT, 'GET', `/assets/${carId}`)).status === 404);
 
@@ -5157,6 +5169,167 @@ async function main() {
     const paper = await printed(hrT, `/assets/pdf?search=${encodeURIComponent(TAG)}&retired=true`);
     check('the register prints', paper.status === 200 && /COMPANY ASSETS/i.test(flat(paper.text)));
     await prisma.employeeClearance.delete({ where: { id: clearance.id } });
+  }
+
+  // ══ Hiring (2026-10-21) ═══════════════════════════════════════════════════
+  console.log('\nHiring — the man power request, candidates, exams, the contract and the hire');
+  {
+    check('the weighted exam score is the mean of each exam’s percentage by weight', weightedScore([{ score: 90, maxScore: 100, weight: 1 }, { score: 40, maxScore: 50, weight: 1 }]) === 85 && weightedScore([{ score: 90, maxScore: 100, weight: 3 }, { score: 40, maxScore: 50, weight: 1 }]) === 87.5 && weightedScore([]) === null);
+    check('a candidate is never moved to Hired by hand', !CANDIDATE_FLOW.some((s) => nextStatuses(s).includes('HIRED')));
+    check('the four entrance exams are on the catalogue', (await prisma.examCatalog.count({ where: { name: { in: [...ENTRANCE_EXAMS] }, isSystem: true } })) === ENTRANCE_EXAMS.length);
+
+    const team = await prisma.industry.create({ data: { code: `${TAG}H1`, name: `${TAG} Hiring Team` } });
+    const otherTeam = await prisma.industry.create({ data: { code: `${TAG}H2`, name: `${TAG} Other Team` } });
+    const [tmRole, tlRole, hrRoleReal, ceoRole] = await Promise.all(['technical_manager', 'team_leader', 'hr', 'ceo'].map((k) => prisma.role.findUnique({ where: { key: k } })));
+    if (!tmRole || !tlRole || !hrRoleReal || !ceoRole) throw new Error('The engine roles technical_manager, team_leader, hr and ceo must exist');
+    const mprRight = await makeRole('zzhr_mpr_own', `${TAG} MPR own`, ['ghr.manpower_requests.view_own', 'ghr.manpower_requests.create', 'ghr.manpower_requests.edit_own']);
+    const hiringHr = await makeRole('zzhr_hiring_hr', `${TAG} Hiring HR`, [
+      'ghr.manpower_requests.view_all',
+      'ghr.candidates.view_all', 'ghr.candidates.create', 'ghr.candidates.edit_all',
+      'ghr.entrance_exams.view_all', 'ghr.entrance_exams.edit_all',
+      'ghr.employment_contracts.view_all', 'ghr.employment_contracts.create', 'ghr.employment_contracts.edit_all', 'ghr.employment_contracts.delete',
+    ]);
+    const tm = await makeUser(`${TAG} Tess Manager`, 'hiretm@verifyhr.local', [tmRole.id, mprRight.id]);
+    const tl = await makeUser(`${TAG} Tom Leader`, 'hiretl@verifyhr.local', [tlRole.id]);
+    const otherTm = await makeUser(`${TAG} Otto Manager`, 'hireothertm@verifyhr.local', [tmRole.id]);
+    const hr1 = await makeUser(`${TAG} Hanna HR`, 'hirehr1@verifyhr.local', [hrRoleReal.id, hiringHr.id]);
+    const hr2 = await makeUser(`${TAG} Hugo HR`, 'hirehr2@verifyhr.local', [hrRoleReal.id]);
+    const ceo = await makeUser(`${TAG} Cara CEO`, 'hireceo@verifyhr.local', [ceoRole.id]);
+    const nobody = await makeUser(`${TAG} Nobody`, 'hirenobody@verifyhr.local', []);
+    await prisma.employee.createMany({
+      data: [
+        { employeeNo: `${TAG}-HTM`, firstName: `${TAG} Tess`, lastName: 'Manager', userId: tm.id, industryId: team.id },
+        { employeeNo: `${TAG}-HTL`, firstName: `${TAG} Tom`, lastName: 'Leader', userId: tl.id, industryId: team.id },
+        { employeeNo: `${TAG}-HOT`, firstName: `${TAG} Otto`, lastName: 'Manager', userId: otherTm.id, industryId: otherTeam.id },
+      ],
+    });
+    const T = (u: { id: string; email: string }) => signToken(u.id, u.email);
+    const decide = async (who: { id: string; email: string }, type: string, id: string, action = 'APPROVED') => {
+      const open = await prisma.approvalRequest.findFirst({ where: { documentType: type, documentId: id, status: 'PENDING' } });
+      return open ? api(T(who), 'POST', `/approvals/${open.id}/act`, { action }) : { status: 0, body: {} };
+    };
+
+    check('someone with no hiring right cannot open the requests', (await api(T(nobody), 'GET', '/hiring/mprs')).status === 403);
+    const mpr = await api(T(tm), 'POST', '/hiring/mprs', {
+      title: `${TAG} Sr. Mechanical Field Engineer`,
+      headcount: 1,
+      salaryMin: 45000,
+      salaryMax: 60000,
+      education: 'BS Mechanical Engineering',
+      licenses: 'PRC Registered Mechanical Engineer',
+      experience: '4+ years in industrial pump overhaul',
+    });
+    const mprId = String(mpr.body.id);
+    check('a hiring manager raises a man power request — a draft, numbered, on their team', mpr.status === 201 && /^GT-MPR-\d{4}-\d{4}$/.test(String(mpr.body.number)) && mpr.body.status === 'DRAFT' && (mpr.body.team as { id: string } | null)?.id === team.id, JSON.stringify(mpr.body).slice(0, 200));
+    check('a salary range is low to high', (await api(T(tm), 'POST', '/hiring/mprs', { title: `${TAG} Bad`, salaryMin: 60000, salaryMax: 45000 })).status === 400);
+    const route = mpr.body.approvalRoute as { steps: { name: string; approvers: { name: string }[] }[] } | null;
+    check(
+      'it goes to the team’s Team Leader, then HR, then the CEO / President',
+      !!route && route.steps.map((st) => st.name).join(' › ') === 'Team Leader › HR Officer › CEO / President' && route.steps[0].approvers.map((a) => a.name).join() === tl.name,
+      JSON.stringify(route?.steps.map((st) => [st.name, st.approvers.map((a) => a.name)])),
+    );
+    check('submitted, it waits on approval', (await api(T(tm), 'POST', `/hiring/mprs/${mprId}/submit`)).body.status === 'PENDING_APPROVAL');
+    check('no applicant is added to a request still waiting', (await api(T(hr1), 'POST', '/hiring/candidates', { mprId, firstName: 'Early', lastName: `${TAG}` })).status === 400);
+    check('the Team Leader reads it while it waits on them, with no hiring right', (await api(T(tl), 'GET', `/hiring/mprs/${mprId}`)).status === 200);
+    check('a Technical Manager of another team does not', (await api(T(otherTm), 'GET', `/hiring/mprs/${mprId}`)).status === 404);
+    await decide(tl, 'manpower_request', mprId);
+    await decide(hr2, 'manpower_request', mprId);
+    const ceoMpr = await decide(ceo, 'manpower_request', mprId);
+    check('three signatures approve it', ceoMpr.status === 200 && (await prisma.manpowerRequest.findUnique({ where: { id: mprId } }))?.status === 'APPROVED');
+    const mprPaper = await printed(T(tm), `/hiring/mprs/${mprId}/pdf`);
+    check('the Man Power Requisition prints its boxes and its three signatures', mprPaper.status === 200 && /MAN POWER REQUISITION/i.test(flat(mprPaper.text)) && flat(mprPaper.text).includes('PRC Registered Mechanical Engineer') && flat(mprPaper.text).includes('Cara CEO'));
+
+    // Candidates
+    const aris = await api(T(hr1), 'POST', '/hiring/candidates', { mprId, firstName: `${TAG} Aris`, lastName: 'Delos Reyes', education: 'BSME, Mapua', license: 'PRC Licensed ME', skills: 'Pump systems', yearsExperience: 5 });
+    const kevin = await api(T(hr1), 'POST', '/hiring/candidates', { mprId, firstName: `${TAG} Kevin`, lastName: 'Alonzo', education: 'BS IE, UP' });
+    const arisId = String(aris.body.id);
+    const kevinId = String(kevin.body.id);
+    check('HR adds applicants to the approved request, each Applied', aris.status === 201 && kevin.status === 201 && aris.body.status === 'APPLIED');
+    check('a hiring manager without the candidates right cannot open the pool', (await api(T(tm), 'GET', '/hiring/candidates')).status === 403);
+    const move = (id: string, to: string, note?: string) => api(T(hr1), 'POST', `/hiring/candidates/${id}/move`, { to, note });
+    check('screening, then an exam scheduled', (await move(arisId, 'UNDER_SCREENING')).status === 200 && (await move(arisId, 'EXAM_SCHEDULED')).body.status === 'EXAM_SCHEDULED');
+    check('a move the pipeline does not allow is refused — no jumping to Hired', (await move(arisId, 'HIRED')).status === 400 && (await move(arisId, 'INTERVIEW_PASSED')).status === 400);
+    check('declining asks why', (await move(kevinId, 'DECLINED')).status === 400);
+    const exams = await prisma.examCatalog.findMany({ where: { name: { in: [...ENTRANCE_EXAMS] } }, orderBy: { sortOrder: 'asc' } });
+    check('a score over the exam’s maximum is refused', (await api(T(hr1), 'PUT', `/hiring/candidates/${arisId}/exams`, { results: [{ examId: exams[0].id, score: exams[0].maxScore + 1 }] })).status === 400);
+    const arisScores = [92, 88, 90, 80];
+    const scored = await api(T(hr1), 'PUT', `/hiring/candidates/${arisId}/exams`, { results: exams.map((e, i) => ({ examId: e.id, score: (arisScores[i] / 100) * e.maxScore })) });
+    const expect = weightedScore(exams.map((e, i) => ({ score: (arisScores[i] / 100) * e.maxScore, maxScore: e.maxScore, weight: Number(e.weight) })));
+    check('the scores are recorded and the exam score is their weighted percentage', scored.status === 200 && scored.body.examScore === expect, `${scored.body.examScore} vs ${expect}`);
+    const noFigures = await prisma.auditLog.findFirst({ where: { entityType: 'candidate', entityId: arisId, summary: { contains: 'entrance exam' } }, orderBy: { at: 'desc' } });
+    check('the trail says scores were recorded, never the figures', !!noFigures && !/\d{2}\.\d|\b92\b/.test(noFigures.summary ?? "") && noFigures.after === null);
+
+    // The catalogue
+    const own = await api(T(hr1), 'POST', '/hiring/exams', { name: `${TAG} Safety Awareness`, maxScore: 50, weight: 2 });
+    check('HR adds an exam to the catalogue', own.status === 201 && own.body.maxScore === 50);
+    check('the hiring manager cannot change the catalogue', (await api(T(tm), 'POST', '/hiring/exams', { name: `${TAG} Nope` })).status === 403);
+    await api(T(hr1), 'PUT', `/hiring/candidates/${kevinId}/exams`, { results: [{ examId: String(own.body.id), score: 30 }, { examId: exams[0].id, score: exams[0].maxScore * 0.7 }] });
+    check('a maximum already scored against is fixed', (await api(T(hr1), 'PATCH', `/hiring/exams/${String(own.body.id)}`, { maxScore: 100 })).status === 400);
+    check('a scored exam is switched off, not deleted; a standard one is never deleted', (await api(T(hr1), 'DELETE', `/hiring/exams/${String(own.body.id)}`)).status === 400 && (await api(T(hr1), 'DELETE', `/hiring/exams/${exams[0].id}`)).status === 400);
+
+    // Interview, then the contract
+    for (const to of ['EXAM_DONE', 'INTERVIEW_SCHEDULED', 'INTERVIEW_PASSED']) await move(arisId, to);
+    check('no contract for someone still under screening', (await api(T(hr1), 'POST', '/hiring/contracts', { candidateId: kevinId, monthlySalary: 50000, startDate: '2026-11-03' })).status === 400);
+    const contract = await api(T(hr1), 'POST', '/hiring/contracts', { candidateId: arisId, monthlySalary: 55000, allowances: 3000, startDate: '2026-11-03', periodEndDate: '2027-05-03' });
+    const contractId = String(contract.body.id);
+    check(
+      'HR prepares the contract from the request; the candidate moves to the contract stage',
+      contract.status === 201 && /^GT-EC-\d{4}-\d{4}$/.test(String(contract.body.number)) && contract.body.title === `${TAG} Sr. Mechanical Field Engineer` && (await prisma.candidate.findUnique({ where: { id: arisId } }))?.status === 'CONTRACT_STAGE',
+      JSON.stringify(contract.body).slice(0, 200),
+    );
+    check('one standing contract per candidate', (await api(T(hr1), 'POST', '/hiring/contracts', { candidateId: arisId, monthlySalary: 1, startDate: '2026-11-03' })).status === 409);
+    const kRoute = contract.body.approvalRoute as { steps: { name: string; approvers: { name: string }[] }[] } | null;
+    check(
+      'the contract goes to the REQUEST’S team: its Technical Manager and Team Leader, then HR, then the CEO',
+      !!kRoute && kRoute.steps.map((st) => st.name).join(' › ') === 'Technical Manager › Team Leader › HR Officer › CEO / President' &&
+        kRoute.steps[0].approvers.map((a) => a.name).join() === tm.name && kRoute.steps[1].approvers.map((a) => a.name).join() === tl.name,
+      JSON.stringify(kRoute?.steps.map((st) => [st.name, st.approvers.map((a) => a.name)])),
+    );
+    check('the HR who prepared it is not asked to approve it', !kRoute?.steps[2].approvers.some((a) => a.name === hr1.name) && !!kRoute?.steps[2].approvers.some((a) => a.name === hr2.name));
+    await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/submit`);
+    const kReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'employment_contract', documentId: contractId, status: 'PENDING' } });
+    check('submitted in HR’s name, the request carries the hiring team', kReq?.requesterId === hr1.id && kReq?.teamId === team.id);
+    check('the other team’s Technical Manager may not decide it', (await decide(otherTm, 'employment_contract', contractId)).status === 403);
+    check('the step’s approver reads it while it waits on them', (await api(T(tm), 'GET', `/hiring/contracts/${contractId}`)).status === 200);
+    await decide(tm, 'employment_contract', contractId);
+    await decide(tl, 'employment_contract', contractId);
+    check('the HR who prepared it cannot decide the HR step', (await decide(hr1, 'employment_contract', contractId)).status >= 400);
+    await decide(hr2, 'employment_contract', contractId);
+    check('hiring waits for the signed paper', (await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/hire`, { employeeId: 'x' })).status === 400);
+    await decide(ceo, 'employment_contract', contractId);
+    check('four signatures approve the contract', (await prisma.employmentContract.findUnique({ where: { id: contractId } }))?.status === 'APPROVED');
+    const kPaper = await printed(T(hr1), `/hiring/contracts/${contractId}/pdf`);
+    check(
+      'the Employment Contract prints the pay, the four signatures and the lines for the wet signature',
+      kPaper.status === 200 && /EMPLOYMENT CONTRACT/i.test(flat(kPaper.text)) && flat(kPaper.text).includes('55,000.00') && flat(kPaper.text).includes('Cara CEO') && /Signature over printed name/.test(flat(kPaper.text)),
+    );
+    check('signed, it is recorded on a day that has come', (await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/signed`, { signedOn: '2099-01-01' })).status === 400);
+    check('recorded as signed', (await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/signed`, {})).body.status === 'SIGNED');
+
+    // The hire: the employee record is made through the one employee form; this links it.
+    const hired = await prisma.employee.create({ data: { employeeNo: `${TAG}-HIRE`, firstName: `${TAG} Aris`, lastName: 'Delos Reyes', industryId: team.id } });
+    const hire = await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/hire`, { employeeId: hired.id });
+    const arisAfter = await prisma.candidate.findUnique({ where: { id: arisId } });
+    check('the hire marks the candidate Hired, linked to the record', hire.status === 200 && arisAfter?.status === 'HIRED' && arisAfter.employeeId === hired.id);
+    check('the request is filled once its headcount is hired', (await prisma.manpowerRequest.findUnique({ where: { id: mprId } }))?.status === 'FILLED');
+    check('a candidate is hired once', (await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/hire`, { employeeId: hired.id })).status === 409);
+    check('a contract someone was hired on is kept', (await api(T(hr1), 'POST', `/hiring/contracts/${contractId}/cancel`, { reason: 'Second thoughts' })).status === 400);
+    const events = await prisma.candidateEvent.findMany({ where: { candidateId: arisId }, orderBy: { createdAt: 'asc' } });
+    check('the trail holds every move, Applied to Hired', events.map((e) => e.toStatus).join(',') === 'APPLIED,UNDER_SCREENING,EXAM_SCHEDULED,EXAM_DONE,INTERVIEW_SCHEDULED,INTERVIEW_PASSED,CONTRACT_STAGE,HIRED');
+
+    // The benchmark: the average of the HIRED candidates' results.
+    const bench = await hiredBenchmark();
+    const arisPct = examPct((arisScores[0] / 100) * exams[0].maxScore, exams[0].maxScore);
+    const count = bench.get(exams[0].id)?.count ?? 0;
+    check('the benchmark counts the hired candidate', count >= 1);
+    const analytics = await api(T(hr1), 'GET', `/hiring/exams/analytics?candidateId=${kevinId}`);
+    const row0 = (analytics.body.rows as { examId: string; candidate: number | null; benchmark: number | null }[]).find((r) => r.examId === exams[0].id);
+    check('the analytics card puts the applicant beside the hired average', analytics.status === 200 && row0?.candidate === 70 && row0?.benchmark === bench.get(exams[0].id)?.pct && (count > 1 || row0?.benchmark === arisPct), JSON.stringify(row0));
+    check('a request with candidates on it is not deleted', (await api(T(tm), 'DELETE', `/hiring/mprs/${mprId}`)).status >= 400);
+    for (const p of ['/hiring/mprs/pdf', '/hiring/candidates/pdf', '/hiring/contracts/pdf']) {
+      const paper = await printed(T(hr1), `${p}?search=${encodeURIComponent(TAG)}`);
+      check(`${p} prints`, paper.status === 200 && flat(paper.text).includes('Delos Reyes') !== (p === '/hiring/mprs/pdf'));
+    }
   }
 
   // ══ My Records (2026-10-20) ═══════════════════════════════════════════════

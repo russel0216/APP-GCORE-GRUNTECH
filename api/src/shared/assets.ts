@@ -1,4 +1,5 @@
 import { prisma } from '../prisma';
+import { audit } from './audit';
 
 /**
  * G-HR › Records › Asset Management (2026-10-21, the owner's Asset Management
@@ -59,4 +60,32 @@ export async function leavingEmployees(employeeIds: string[]): Promise<Map<strin
   for (const c of clearances) if (!out.has(c.employeeId)) out.set(c.employeeId, { since: c.lastWorkingDay, dateSeparated: null });
   for (const e of separated) out.set(e.id, { since: out.get(e.id)?.since ?? e.dateSeparated, dateSeparated: e.dateSeparated });
   return out;
+}
+
+/** The once-only mark of the tag code's move. */
+export const ASSET_TAG_MOVED = 'seed.assetTagCodeMoved20261021';
+
+/**
+ * The company asset's tag code moves from AST to TAG once (2026-10-21): AST
+ * is the installed base's code, and both counted from 0001 under it, so a
+ * laptop's tag and a customer's compressor printed the same number. The
+ * template and every period counter of `company_asset` still on AST move
+ * (each counter prints its own copy of the code); a tag already issued keeps
+ * its print. Only while the template carries AST — a code an administrator
+ * chose stays. Audited.
+ */
+export async function moveAssetTagCode(): Promise<{ moved: number }> {
+  if (await prisma.setting.findUnique({ where: { key: ASSET_TAG_MOVED } })) return { moved: 0 };
+  const moved = await prisma.$transaction(async (tx) => {
+    const template = await tx.numberSequence.findFirst({ where: { documentType: 'company_asset', periodKey: '' }, select: { typeCode: true } });
+    const n = template?.typeCode === 'AST' ? await tx.numberSequence.updateMany({ where: { documentType: 'company_asset', typeCode: 'AST' }, data: { typeCode: 'TAG' } }) : { count: 0 };
+    await tx.setting.upsert({
+      where: { key: ASSET_TAG_MOVED },
+      create: { key: ASSET_TAG_MOVED, value: { at: new Date().toISOString(), rows: n.count }, description: "The company asset tag's numbering code moved from AST (the installed base's) to TAG once." },
+      update: {},
+    });
+    return n.count;
+  });
+  if (moved) await audit({ entityType: 'number_sequence', entityId: 'company_asset', action: 'UPDATED', summary: 'Company asset tag code moved from AST to TAG — AST numbers the installed base', actorName: 'system' });
+  return { moved };
 }

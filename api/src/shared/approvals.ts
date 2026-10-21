@@ -160,14 +160,25 @@ export interface ApprovalContext {
    * goes to that role's importation twin instead.
    */
   importation?: boolean;
+  /**
+   * The team the document is FOR, read in place of the requester's own
+   * (2026-10-21, the hiring contract: HR prepares it, and its Technical
+   * Manager and Team Leader steps are the hiring team's — the manpower
+   * request's team). Null or absent: the requester's team, as always.
+   */
+  teamId?: string | null;
 }
 
 /** The context a stored request carries. */
-export const ctxOf = (r: { jobId: string | null; projectManagerId?: string | null; importation?: boolean }): ApprovalContext => ({
+export const ctxOf = (r: { jobId: string | null; projectManagerId?: string | null; importation?: boolean; teamId?: string | null }): ApprovalContext => ({
   jobId: r.jobId,
   projectManagerId: r.projectManagerId ?? null,
   importation: r.importation ?? false,
+  teamId: r.teamId ?? null,
 });
+
+/** The team a step is scoped to: the document's (`ctx.teamId`), else the requester's. */
+const teamFor = async (requesterId: string, tx: Prisma.TransactionClient, ctx: ApprovalContext) => ctx.teamId ?? (await teamOfRequester(requesterId, tx));
 
 /**
  * Roles with an IMPORTATION twin (2026-10-17, the owner's chart: Dina is the
@@ -237,8 +248,8 @@ export async function approversForStep(
         // its Technical Manager) is the one on the requester's own team, as a
         // ROLE step naming that role is — never a Technical Manager of another team.
         if (rows.length && OWN_TEAM_ROLES.includes(rows[0].role.key)) {
-          const post = await teamPostHolders(rows[0].role.key, await teamOfRequester(requesterId, tx), requesterId, tx);
-          return post ?? leadersFor(holders, requesterId, tx);
+          const post = await teamPostHolders(rows[0].role.key, await teamFor(requesterId, tx, ctx), requesterId, tx);
+          return post ?? leadersFor(holders, requesterId, tx, ctx.teamId);
         }
         return holders;
       }
@@ -269,10 +280,12 @@ export async function approversForStep(
       if (!rows.length) return holders;
       const key = rows[0].role.key;
       // A team's post set on Admin › Categories › Teams (shared or named) first.
-      const post = await teamPostHolders(key, await teamOfRequester(requesterId, tx), requesterId, tx);
+      const post = await teamPostHolders(key, await teamFor(requesterId, tx, ctx), requesterId, tx);
       if (post) return post;
-      if (TEAM_SCOPED_ROLES.includes(key)) return supportersFor(holders, requesterId, tx);
-      if (OWN_TEAM_ROLES.includes(key)) return leadersFor(holders, requesterId, tx);
+      if (TEAM_SCOPED_ROLES.includes(key)) return supportersFor(holders, requesterId, tx, ctx.teamId);
+      // A Team Leader named as a ROLE step (the hiring contract's step 2,
+      // 2026-10-21) is the team's leader too, as on a SUPERVISOR step.
+      if (OWN_TEAM_ROLES.includes(key) || TEAM_FIRST_ROLES.includes(key)) return leadersFor(holders, requesterId, tx, ctx.teamId);
       return holders;
     }
 
@@ -288,7 +301,7 @@ export async function approversForStep(
       // Lead, an engineer to the Technical Manager, and their documents still
       // go to the team's leader). Department staff with no team, and a team
       // with no leader, keep the "Reports to".
-      const onTeam = step.roleId ? await teamFirstHolders(step.roleId, requesterId, tx) : [];
+      const onTeam = step.roleId ? await teamFirstHolders(step.roleId, requesterId, tx, ctx.teamId) : [];
       if (onTeam.length) base = onTeam;
       else if (requester?.supervisorId) {
         // A role that ALSO reports to other roles (Admin › Roles › Hierarchy,
@@ -311,11 +324,11 @@ export async function approversForStep(
           where: { roleId: step.roleId, user: { isActive: true } },
           select: { userId: true },
         });
-        base = await leadersFor(rows.map((r) => r.userId), requesterId, tx);
+        base = await leadersFor(rows.map((r) => r.userId), requesterId, tx, ctx.teamId);
       } else base = await usersInRole('hr', tx);
       // The step's other roles, on the requester's own team only — beside
       // the "Reports to" or the fallback, never instead of them.
-      const also = await teamHoldersOf(step.alsoRoleIds ?? [], requesterId, tx);
+      const also = await teamHoldersOf(step.alsoRoleIds ?? [], requesterId, tx, ctx.teamId);
       return also.length ? [...new Set([...base, ...also])] : base;
     }
 
@@ -356,12 +369,12 @@ export const OWN_TEAM_ROLES = ['technical_manager', 'service_manager'];
 export const TEAM_FIRST_ROLES = ['team_leader'];
 
 /** The TEAM_FIRST holders of `roleId` on the requester's own team, never the requester; empty for any other role. */
-async function teamFirstHolders(roleId: string, requesterId: string, tx: Prisma.TransactionClient): Promise<string[]> {
+async function teamFirstHolders(roleId: string, requesterId: string, tx: Prisma.TransactionClient, teamId?: string | null): Promise<string[]> {
   const role = await tx.role.findUnique({ where: { id: roleId }, select: { key: true } });
   if (!role || !TEAM_FIRST_ROLES.includes(role.key)) return [];
-  const post = await teamPostHolders(role.key, await teamOfRequester(requesterId, tx), requesterId, tx);
+  const post = await teamPostHolders(role.key, teamId ?? (await teamOfRequester(requesterId, tx)), requesterId, tx);
   if (post) return post;
-  return teamHoldersOf([roleId], requesterId, tx);
+  return teamHoldersOf([roleId], requesterId, tx, teamId);
 }
 
 /**
@@ -375,10 +388,10 @@ async function teamFirstHolders(roleId: string, requesterId: string, tx: Prisma.
  * handles, never stalls. (Until this, a holder with nothing ticked handled
  * every team.)
  */
-export async function supportersFor(holders: string[], requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<string[]> {
+export async function supportersFor(holders: string[], requesterId: string, tx: Prisma.TransactionClient = prisma, teamId?: string | null): Promise<string[]> {
   if (!holders.length) return holders;
   const [requester, links, own] = await Promise.all([
-    tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } }),
+    teamId ? { industryId: teamId } : tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } }),
     tx.userSupportTeam.findMany({ where: { userId: { in: holders } }, select: { userId: true, industryId: true } }),
     tx.employee.findMany({ where: { userId: { in: holders } }, select: { userId: true, industryId: true } }),
   ]);
@@ -401,9 +414,9 @@ export async function supportersFor(holders: string[], requesterId: string, tx: 
  * stalls because the team has no leader. The requester is never the reason a
  * team counts as led: a Team Leader alone on their team falls back to all.
  */
-export async function leadersFor(holders: string[], requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<string[]> {
+export async function leadersFor(holders: string[], requesterId: string, tx: Prisma.TransactionClient = prisma, teamId?: string | null): Promise<string[]> {
   if (!holders.length) return holders;
-  const requester = await tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } });
+  const requester = teamId ? { industryId: teamId } : await tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } });
   if (!requester?.industryId) return holders;
   const onTeam = await tx.employee.findMany({
     where: { userId: { in: holders.filter((h) => h !== requesterId) }, industryId: requester.industryId },
@@ -420,9 +433,9 @@ export async function leadersFor(holders: string[], requesterId: string, tx: Pri
  * borrow slip's first step (2026-10-14): a Technical Manager on the
  * requester's team decides it beside their "Reports to".
  */
-export async function teamHoldersOf(roleIds: string[], requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<string[]> {
+export async function teamHoldersOf(roleIds: string[], requesterId: string, tx: Prisma.TransactionClient = prisma, teamId?: string | null): Promise<string[]> {
   if (!roleIds.length) return [];
-  const requester = await tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } });
+  const requester = teamId ? { industryId: teamId } : await tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } });
   if (!requester?.industryId) return [];
   const rows = await tx.userRole.findMany({
     where: {
@@ -690,6 +703,8 @@ export interface SubmitInput {
   projectManagerId?: string | null;
   /** An importation (no VAT): a Purchasing Manager step goes to the Importation manager. */
   importation?: boolean;
+  /** The team the document is for, in place of the requester's own (`ApprovalContext.teamId`). */
+  teamId?: string | null;
 }
 
 export async function submitForApproval(input: SubmitInput): Promise<ApprovalRequest> {
@@ -722,6 +737,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
         jobId: input.jobId ?? null,
         projectManagerId: input.projectManagerId ?? null,
         importation: input.importation ?? false,
+        teamId: input.teamId ?? null,
         workflowId: workflow.id,
         currentSequence: 1,
         status: 'APPROVED',
@@ -748,7 +764,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
   // (`preparerSigns`): signed at submit, dated the request's own instant, so
   // "Prepared by" and those steps print one timestamp. The document waits
   // only on the steps other people hold.
-  const submitCtx: ApprovalContext = { jobId: input.jobId ?? null, projectManagerId: input.projectManagerId ?? null, importation: input.importation ?? false };
+  const submitCtx: ApprovalContext = { jobId: input.jobId ?? null, projectManagerId: input.projectManagerId ?? null, importation: input.importation ?? false, teamId: input.teamId ?? null };
   const held = await heldSequences(workflow, input.requesterId, prisma, submitCtx);
   const open = workflow.steps.filter((st) => !held.has(st.sequence));
 
@@ -789,6 +805,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
         jobId: input.jobId ?? null,
         projectManagerId: input.projectManagerId ?? null,
         importation: input.importation ?? false,
+        teamId: input.teamId ?? null,
         workflowId: workflow.id,
         currentSequence: (firstStep ?? workflow.steps[workflow.steps.length - 1]).sequence,
         status: firstStep ? 'PENDING' : 'APPROVED',
@@ -1560,6 +1577,8 @@ export interface DraftRoute {
   projectManagerId?: string | null;
   /** An importation: a Purchasing Manager step previews as the Importation manager's. */
   importation?: boolean;
+  /** The team the document is for (`ApprovalContext.teamId`). */
+  teamId?: string | null;
 }
 
 /**
@@ -1605,7 +1624,7 @@ export async function approvalSlots(documentType: string, documentId: string, dr
   const open = request?.status === 'PENDING';
   if (draft && !open) {
     // An option the document no longer qualifies for falls back to the standard route.
-    const ctx: ApprovalContext = { jobId: draft.jobId, projectManagerId: draft.projectManagerId, importation: draft.importation ?? false };
+    const ctx: ApprovalContext = { jobId: draft.jobId, projectManagerId: draft.projectManagerId, importation: draft.importation ?? false, teamId: draft.teamId ?? null };
     const route =
       (draft.optionId ? await routePreview(documentType, draft.amount, draft.requesterId, draft.optionId, ctx) : null) ??
       (await routePreview(documentType, draft.amount, draft.requesterId, null, ctx));

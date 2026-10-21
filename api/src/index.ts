@@ -105,6 +105,7 @@ import { procurementSettingsRoutes } from './routes/procurementSettings';
 import { myRecordsRoutes } from './routes/myRecords';
 import { memoRoutes } from './routes/memos';
 import { assetRoutes as companyAssetRoutes } from './routes/assets';
+import { hiringRoutes } from './routes/hiring';
 import { cadJobOrderRoutes } from './routes/cadJobOrders';
 import { helpTicketRoutes } from './routes/helpTickets';
 import { positionRoutes } from './routes/positions';
@@ -242,6 +243,7 @@ app.use('/api/procurement-settings', procurementSettingsRoutes);
 app.use('/api/my-records', myRecordsRoutes);
 app.use('/api/memos', memoRoutes);
 app.use('/api/assets', companyAssetRoutes);
+app.use('/api/hiring', hiringRoutes);
 
 // Aftermarket (Phase 8)
 app.use('/api/installed-assets', assetRoutes);

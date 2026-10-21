@@ -295,7 +295,7 @@ function AssetModal({ existing, seesCost, onClose, onSaved }: { existing?: Asset
       }
     >
       <ErrorBox error={error} />
-      {!existing && <p className="faint">G-CORE gives it its tag (GT-AST-…) when saved.</p>}
+      {!existing && <p className="faint">G-CORE gives it its tag (GT-TAG-…) when saved.</p>}
       <div className="grid grid-2">
         <Field label="Asset type" htmlFor={`${idBase}-type`}>
           <select id={`${idBase}-type`} value={form.assetTypeId} onChange={(e) => set('assetTypeId', e.target.value)}>

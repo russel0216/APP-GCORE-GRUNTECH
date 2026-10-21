@@ -72,6 +72,7 @@ import { Clock } from './pages/hr/Clock';
 import { MyRecords } from './pages/hr/MyRecords';
 import { Memos, MemoPage } from './pages/hr/Memos';
 import { Assets, AssetPage } from './pages/hr/Assets';
+import { ManpowerRequests, ManpowerRequestPage, Candidates, CandidatePage, EntranceExams, Contracts, ContractPage } from './pages/hr/Hiring';
 import { HrDashboard, AttendanceRegister } from './pages/hr/Dashboard';
 import { Leave } from './pages/hr/Leave';
 import { Overtime, OvertimeDetail } from './pages/hr/Overtime';
@@ -1049,6 +1050,50 @@ function Routed() {
             </GuardAny>
           }
         />
+        <Route
+          path="/g-hr/hiring/mpr"
+          element={
+            <GuardAny permissions={['ghr.manpower_requests.view_all', 'ghr.manpower_requests.view_team', 'ghr.manpower_requests.view_own']}>
+              <ManpowerRequests />
+            </GuardAny>
+          }
+        />
+        {/* No Guard: an approver with no right to the register reads the request while it waits on them — the API decides. */}
+        <Route path="/g-hr/hiring/mpr/:id" element={<ManpowerRequestPage />} />
+        <Route
+          path="/g-hr/hiring/candidates"
+          element={
+            <GuardAny permissions={['ghr.candidates.view_all', 'ghr.candidates.view_team', 'ghr.candidates.view_own']}>
+              <Candidates />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/hiring/candidates/:id"
+          element={
+            <GuardAny permissions={['ghr.candidates.view_all', 'ghr.candidates.view_team', 'ghr.candidates.view_own']}>
+              <CandidatePage />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/hiring/exams"
+          element={
+            <GuardAny permissions={['ghr.entrance_exams.view_all', 'ghr.entrance_exams.view_team', 'ghr.entrance_exams.view_own', 'ghr.candidates.view_all']}>
+              <EntranceExams />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/hiring/contracts"
+          element={
+            <GuardAny permissions={['ghr.employment_contracts.view_all', 'ghr.employment_contracts.view_team', 'ghr.employment_contracts.view_own']}>
+              <Contracts />
+            </GuardAny>
+          }
+        />
+        {/* No Guard: the contract's approvers read it while it waits on them — the API decides. */}
+        <Route path="/g-hr/hiring/contracts/:id" element={<ContractPage />} />
         <Route
           path="/g-hr"
           element={

@@ -676,8 +676,12 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,677 assertions across twenty-two scripts** (counted 2026-10-21, after
-22 on hr for Asset Management — the tag, issue once, View Own's door, the
+**4,728 assertions across twenty-two scripts** (counted 2026-10-21, after
+50 on hr and one on foundation for Hiring — the weighted score, the request's
+route and its decider's door, the pool's moves, the exam catalogue's fixed
+maximum, the contract routed to the request's team and never to the HR who
+prepared it, the signed paper, the hire filling the request and the hired
+average — and before it 22 on hr for Asset Management — the tag, issue once, View Own's door, the
 cost hidden, the clearance line and Return pending, take back, the slip,
 retire not delete — and before it the owner's batch of 2026-10-21's first push — 2 on chain for the CEO
 printed under his highest role, 1 on sales for a sales order delete that
@@ -779,8 +783,8 @@ and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
-429, masters 92, sales 643, costing 205, pipeline 121, calendar 103, numbering
-94, partners 120, delivery 195, chain 379, hr 587, plantilla 129, meetings
+430, masters 92, sales 643, costing 205, pipeline 121, calendar 103, numbering
+94, partners 120, delivery 195, chain 379, hr 637, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 440, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
@@ -3661,7 +3665,9 @@ added AND those issued to one), `/g-hr/assets` and `/g-hr/assets/:id`,
 
 - **`CompanyAsset` is one TAGGED unit** — never a stock quantity (the
   warehouse's items and borrow slips are another thing): `tag` from
-  `nextNumber('company_asset')` (GT-AST-2026-0001), an `AssetType`, brand &
+  `nextNumber('company_asset')` (GT-TAG-2026-0001 — never AST, the installed
+  base's code: `moveAssetTagCode()` moved it once, `seed.assetTagCodeMoved20261021`),
+  an `AssetType`, brand &
   model, serial, plate, description, purchase date, `cost` (Edit All alone
   reads or writes it), `status` (`AssetStatusHr`: AVAILABLE | ISSUED |
   UNDER_REPAIR | RETIRED — `AssetStatus` is the customer machine's).
@@ -3705,6 +3711,89 @@ added AND those issued to one), `/g-hr/assets` and `/g-hr/assets/:id`,
   an **Assets** tab (`GET /assets/employee/:employeeId` — View All, or one's
   own). Ctrl+K finds assets; `recordLink` maps `company_asset` and
   `asset_type`.
+
+## G-HR › Hiring (2026-10-21)
+
+The owner's `G-HR_Hiring_Module_UI_Specification.pdf` (batch of 2026-10-21,
+push 3; his answer: **print and sign only** — the hire has no G-CORE access
+yet, so there is no online contract link; the rest built on the plan's
+defaults). Its own section, **Hiring**, between Records and People, the
+PDF's four tabs as its strip (verify-foundation pins both): Man Power
+Request · Candidates · Entrance Exam · Contracts & Approvals.
+`routes/hiring.ts` at `/api/hiring/*`, `shared/hiring.ts`,
+`pages/hr/Hiring.tsx`, `styles/hiring.css`. `splitBorrowedRights()` gave
+every Hiring box once to whoever held Employees › Edit All (`hiring`), and
+the request's own pair and Create to whoever reads My Records
+(`hiring-mpr-own`) — anyone may raise a request.
+
+- **Man Power Request** (`ghr.manpower_requests`, OWNED; `ManpowerRequest`,
+  numbering `manpower_request` GT-MPR-2026-0001): the PDF's five boxes
+  (position title, salary range, education, licences, experience), the
+  Plantilla slot it fills if any, headcount, employment type, needed by,
+  justification and the TEAM (the requester's by default). DRAFT →
+  PENDING_APPROVAL → APPROVED → FILLED, or CANCELLED with its reason. The
+  route is "Man Power Request — team leader, HR officer, CEO / President"
+  (`preparerSigns`, `standIns`; the HR step's `alsoRoleKeys` add the HR
+  Manager). Submit, pull back, cancel (refused once someone is hired or a
+  contract stands), delete (a draft or a cancelled one with no candidates);
+  `onApprovalReopened` refuses while a contract stands. Its page is the
+  PDF's form and the request's candidate pool; its paper "Man Power
+  Requisition". A decider with no right reads it through
+  `requireAnyOrDecider` (the page has no web Guard).
+- **Candidates** (`ghr.candidates`, SHARED_KEPT — own is the applicants
+  one added; `Candidate`): added only against an APPROVED request, moved
+  along the PDF's chips by `nextStatuses()` (APPLIED → UNDER_SCREENING →
+  EXAM_SCHEDULED → EXAM_DONE → INTERVIEW_SCHEDULED → INTERVIEW_PASSED |
+  INTERVIEW_FAILED → CONTRACT_STAGE; DECLINED / WITHDRAWN with a reason and
+  back to screening), each move a dated `CandidateEvent` (the trail).
+  **Hired is never a move**: only the hire sets it. Files on `candidate`
+  (the CV, the licence). The list's cards are screening, at the exam, at the
+  interview, contract stage and hired.
+- **Entrance Exam** (`ghr.entrance_exams`, SETTINGS — a catalogue keeps no
+  record of anybody's): `ExamCatalog` (Abstract Reasoning, Basic Math &
+  Logic, Technical / Mechanical, Communication & Verbs seeded as system
+  rows by `seedEntranceExams()`; HR adds more, each scored out of
+  `maxScore` and weighed by `weight`; a maximum already scored against is
+  fixed; a scored or system exam is switched off, never deleted) and
+  `ExamResult` (candidate × exam, `PUT /candidates/:id/exams` replaces
+  them whole). **The exam score is `weightedScore()`** — each exam's score
+  over its maximum, weighed, to one decimal; never stored. **The benchmark
+  is the HIRED candidates' average** (`hiredBenchmark()`, the owner's
+  "company average": employees never sit the entrance exam). The analytics
+  card (`GET /exams/analytics?candidateId=`) is a table, readable without
+  colour: the applicant's % and bar beside the hired average and its count,
+  and the difference in points. The scores never reach the audit trail —
+  "Recorded 4 entrance exam scores", no figures.
+- **Contracts & Approvals** (`ghr.employment_contracts`, OWNED;
+  `EmploymentContract`, numbering `employment_contract` GT-EC-2026-0001):
+  HR prepares it for a candidate who passed the interview (moving them to
+  the contract stage; one standing contract each, under a lock on the
+  candidate) — position, monthly salary and allowances, type, start date,
+  probation end, work location and the standard terms (`CONTRACT_TERMS`,
+  changed on Modify). **The route is the REQUEST'S team's**:
+  "Employment contract — technical manager, team leader, HR officer, CEO /
+  President" (`standIns`, NO `preparerSigns`), submitted in HR's name with
+  `teamId` = the request's team — **`ApprovalContext.teamId`**
+  (`ApprovalRequest.teamId`, `SubmitInput.teamId`, `DraftRoute.teamId`),
+  the engine's new "team the document is FOR", read in place of the
+  requester's own by every team rule (`leadersFor`, `supportersFor`,
+  `teamHoldersOf`, `teamFirstHolders`, `teamPostHolders`). A ROLE step
+  naming `team_leader` now goes to the team's leader too, as a SUPERVISOR
+  step does. The HR step is the HR Officer or the HR Manager — never the HR
+  who prepared it (rule 3). APPROVED → **Print for the wet signature**
+  (the paper: the parties, the pay, the terms, Prepared by and the four
+  steps dated, and a Conforme block with signature lines for the hire and
+  the company) → **Mark signed** (`signedOn`, never a day to come) →
+  **Hire**: the one employee form (`NewPersonModal`, which now takes
+  `prefill` and tells `onCreated(employeeId)`) opens prefilled from the
+  contract, and `POST /contracts/:id/hire { employeeId }` marks the
+  candidate HIRED (claimed on CONTRACT_STAGE, once), the request FILLED
+  when its headcount is hired, and copies the contract's files onto the
+  employee record. A contract someone was hired on is kept.
+- Ctrl+K finds requests, candidates and contracts; `recordLink` maps
+  `manpower_request`, `candidate`, `employment_contract` and
+  `entrance_exam`; every register prints. Not built (deferred): My Work rows
+  for exams and interviews scheduled today, and the online contract link.
 
 ## The notification bell (2026-10-20)
 

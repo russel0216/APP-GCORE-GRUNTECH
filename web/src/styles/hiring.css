@@ -1,0 +1,85 @@
+/* G-HR › Hiring (2026-10-21) — the MPR's boxes, the score comparison, the trail. Tokens only. */
+
+.hiring-ref {
+  color: var(--ok);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+/* The PDF's labelled boxes: the label in small capitals over its value. */
+.hiring-boxes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--s-3);
+  margin-bottom: var(--s-4);
+}
+
+.hiring-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.hiring-box-wide {
+  grid-column: 1 / -1;
+}
+
+.hiring-box-label {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Candidate beside the hired average: a bar and its number, readable without colour. */
+.hiring-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.hiring-bar .mini-bar {
+  flex: 1;
+  min-width: 6rem;
+}
+
+.hiring-up {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.hiring-down {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.hiring-terms {
+  white-space: pre-line;
+  margin: 0;
+}
+
+.hiring-trail {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.hiring-trail li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.hiring-trail-date {
+  min-width: 9rem;
+  color: var(--muted);
+}

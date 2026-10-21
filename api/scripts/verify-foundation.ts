@@ -546,6 +546,16 @@ async function main() {
     chainStrip('Procurement') === PROCUREMENT_STRIP && chainStrip('Warehouse') === WAREHOUSE_STRIP,
     `${chainStrip('Procurement')} | ${chainStrip('Warehouse')}`,
   );
+  // G-HR › Hiring (2026-10-21, the owner's Hiring module): its own section,
+  // between Records and People, with the PDF's four tabs as its strip.
+  const ghrGroups = [...new Set(menuFor(superUser).find((m) => m.key === 'ghr')!.submodules.filter((s) => !s.hidden).map((s) => s.group))];
+  const hiringStrip = menuFor(superUser).find((m) => m.key === 'ghr')!.submodules.filter((s) => s.group === 'Hiring' && !s.hidden).map((s) => s.label).join();
+  check(
+    'G-HR’s Hiring section sits between Records and People: Man Power Request, Candidates, Entrance Exam, Contracts & Approvals',
+    ghrGroups.indexOf('Hiring') === ghrGroups.indexOf('Records') + 1 && ghrGroups.indexOf('People') === ghrGroups.indexOf('Hiring') + 1 &&
+      hiringStrip === 'Man Power Request,Candidates,Entrance Exam,Contracts & Approvals',
+    `${ghrGroups.join(' · ')} | ${hiringStrip}`,
+  );
   // The Sales strip is the sales flow (2026-10-08, the owner's call).
   const salesStrip = menuFor(superUser)
     .find((m) => m.key === 'gops')!

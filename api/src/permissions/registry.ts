@@ -331,6 +331,15 @@ export const REGISTRY: ModuleDef[] = [
       // who holds each (2026-10-21, the owner's Asset Management tab, beside
       // the Plantilla). Create adds an asset; Edit issues and takes back.
       { key: 'assets', own: 'the assets you added, and those issued to you', group: 'Records', label: 'Asset Management', path: '/g-hr/assets', actions: SHARED_KEPT, phase: 10, note: 'Create adds an asset; Edit All issues, takes back and retires any; View Own reads what you added and what is issued to you' },
+      // HIRING (2026-10-21, the owner's Hiring module): its own section
+      // between Records and People — the Man Power Request a hiring manager
+      // raises, the candidates gathered against it, the entrance exams and
+      // their scores, and the employment contract routed and printed for
+      // the wet signature.
+      { key: 'manpower_requests', own: 'the requests you raised', group: 'Hiring', label: 'Man Power Request', path: '/g-hr/hiring/mpr', actions: OWNED, phase: 10, note: 'Create raises a request for people (routed Team Leader › HR Officer › CEO / President); View Own reads your own' },
+      { key: 'candidates', own: 'the candidates you added', group: 'Hiring', label: 'Candidates', path: '/g-hr/hiring/candidates', actions: SHARED_KEPT, phase: 10, note: 'Create adds an applicant; Edit moves them along and records exam scores' },
+      { key: 'entrance_exams', own: 'the catalogue (it keeps no record of anybody)', group: 'Hiring', label: 'Entrance Exam', path: '/g-hr/hiring/exams', actions: SETTINGS, phase: 10, note: 'View reads the catalogue and the score analytics; Edit changes the catalogue' },
+      { key: 'employment_contracts', own: 'the contracts you prepared', group: 'Hiring', label: 'Contracts & Approvals', path: '/g-hr/hiring/contracts', actions: OWNED, phase: 10, note: 'Create prepares a contract (routed Technical Manager › Team Leader › HR Officer › CEO / President of the hiring team); printed for the wet signature' },
       // Pay data and evaluations are the two things on an employee a colleague
       // must not see; both live behind their own key rather than under employees.
       // One person's path from pre-boarding to the clearance certificate

@@ -258,8 +258,8 @@ positionRoutes.get(
 
 /**
  * The picker on the employee form and on a course's requirements. Naming a
- * position is not the plantilla right, so the employee and course keys are
- * enough here.
+ * position is not the plantilla right, so the employee, course and hiring
+ * keys are enough here.
  */
 positionRoutes.get(
   '/lookup',
@@ -269,6 +269,9 @@ positionRoutes.get(
     'ghr.courses.view_all',
     'ghr.courses.create',
     'ghr.courses.edit_all',
+    // A Man Power Request and a contract name the slot they fill (2026-10-21).
+    'ghr.manpower_requests.create',
+    'ghr.employment_contracts.create',
   ),
   handler(async (_req, res) => {
     const positions = await prisma.position.findMany({

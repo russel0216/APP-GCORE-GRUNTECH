@@ -24,6 +24,7 @@ import './styles/workspace.css';
 import './styles/delivery.css';
 import './styles/procurement.css';
 import './styles/hr-audit.css';
+import './styles/hiring.css';
 import './styles/quotation-editor.css';
 import './styles/quotation-detail.css';
 import './styles/accounts.css';

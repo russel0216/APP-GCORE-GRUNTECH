@@ -41,14 +41,19 @@ model User {
   photoPath String?
 
   // Approval routing: "approvers are to whom they are directly reporting".
-  supervisorId   String?
-  supervisor     User?           @relation("Supervision", fields: [supervisorId], references: [id], onDelete: SetNull)
-  reports        User[]          @relation("Supervision")
-  memosAuthored  Memo[]          @relation("MemoAuthor")
-  assetsAdded    CompanyAsset[]  @relation("AssetAdder")
-  assetsIssued   AssetIssuance[] @relation("AssetIssuer")
-  assetsReceived AssetIssuance[] @relation("AssetReceiver")
-  memosIssued    Memo[]          @relation("MemoIssuer")
+  supervisorId      String?
+  supervisor        User?                @relation("Supervision", fields: [supervisorId], references: [id], onDelete: SetNull)
+  reports           User[]               @relation("Supervision")
+  memosAuthored     Memo[]               @relation("MemoAuthor")
+  assetsAdded       CompanyAsset[]       @relation("AssetAdder")
+  manpowerRequests  ManpowerRequest[]    @relation("MprRequester")
+  candidatesAdded   Candidate[]          @relation("CandidateAdder")
+  candidateEvents   CandidateEvent[]     @relation("CandidateEventBy")
+  examResultsGiven  ExamResult[]         @relation("ExamExaminer")
+  contractsPrepared EmploymentContract[] @relation("ContractPreparer")
+  assetsIssued      AssetIssuance[]      @relation("AssetIssuer")
+  assetsReceived    AssetIssuance[]      @relation("AssetReceiver")
+  memosIssued       Memo[]               @relation("MemoIssuer")
 
   departmentId String?
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
@@ -509,6 +514,9 @@ model ApprovalRequest {
   /// The project manager the DOCUMENT names itself (a job order's, before its
   /// project exists) — a PROJECT_MANAGER step reads this first, then the job's.
   projectManagerId String?
+  /// The team the document is FOR, read in place of the requester's own (the
+  /// hiring contract, 2026-10-21: HR prepares it for the manpower request's team).
+  teamId           String?
 
   workflowId String?
   workflow   ApprovalWorkflow? @relation(fields: [workflowId], references: [id], onDelete: SetNull)
@@ -790,6 +798,7 @@ model Industry {
   jobOrders          JobOrder[]          @relation("JobOrderTeam")
   cadJobOrders       CadJobOrder[]       @relation("CadJobOrderTeam")
   posts              TeamPost[]
+  manpowerRequests   ManpowerRequest[]   @relation("MprTeam")
   // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
   createdById        String?
 }
@@ -952,6 +961,8 @@ model Employee {
   extraPositions EmployeeExtraPosition[]
   memos          MemoRecipient[]
   assetIssuances AssetIssuance[]
+  /// The candidate this employee was hired as (G-HR › Hiring, 2026-10-21).
+  hiredFrom      Candidate?
   /// The industry team the person works in (Utilities, Healthcare…), from the
   /// same Industry rows customers are classified by. Set by HR; shown to the
   /// person on their invitation and My Account, never edited by them.
@@ -3825,6 +3836,8 @@ model Position {
   roleId              String?
   role                Role?                   @relation("PositionRole", fields: [roleId], references: [id], onDelete: SetNull)
   courseRequirements  CourseRequirement[]
+  manpowerRequests    ManpowerRequest[]
+  contracts           EmploymentContract[]
   createdAt           DateTime                @default(now())
   updatedAt           DateTime                @updatedAt
 
@@ -6166,4 +6179,194 @@ model AssetIssuance {
 
   @@index([assetId])
   @@index([employeeId])
+}
+
+// ── G-HR › Hiring (2026-10-21, the owner's Hiring module) ───────────────────
+
+/// A Man Power Request: a hiring manager asks for people for a position —
+/// the PDF's MPR form (title, salary range, education, licences, experience
+/// and skills). Routed through the one engine as `manpower_request`;
+/// approved, candidates are gathered against it; FILLED once its headcount
+/// is hired.
+model ManpowerRequest {
+  id             String         @id @default(cuid())
+  number         String         @unique
+  /// The Plantilla slot it fills, when it is one; the title is what prints.
+  positionId     String?
+  position       Position?      @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  title          String
+  headcount      Int            @default(1)
+  salaryMin      Decimal?       @db.Decimal(18, 2)
+  salaryMax      Decimal?       @db.Decimal(18, 2)
+  education      String?
+  licenses       String?
+  experience     String?
+  justification  String?
+  employmentType EmploymentType @default(PROBATIONARY)
+  neededBy       DateTime?      @db.Date
+  /// The hiring team — the contract's Technical Manager and Team Leader steps are this team's.
+  teamId         String?
+  team           Industry?      @relation("MprTeam", fields: [teamId], references: [id], onDelete: SetNull)
+  requestedById  String
+  requestedBy    User           @relation("MprRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  status         ManpowerStatus @default(DRAFT)
+  cancelReason   String?
+  approvedAt     DateTime?
+  filledAt       DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  candidates     Candidate[]
+
+  @@index([status])
+  @@index([requestedById])
+}
+
+enum ManpowerStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  FILLED
+  CANCELLED
+}
+
+/// An applicant for an approved MPR, moved along the PDF's chips; each move
+/// is a dated `CandidateEvent`. The exam score is read off the results.
+model Candidate {
+  id              String               @id @default(cuid())
+  mprId           String
+  mpr             ManpowerRequest      @relation(fields: [mprId], references: [id], onDelete: Restrict)
+  firstName       String
+  lastName        String
+  email           String?
+  phone           String?
+  /// "BSME, Mapúa Univ."
+  education       String?
+  /// "PRC Licensed ME"
+  license         String?
+  /// "Pump systems, hydraulics"
+  skills          String?
+  yearsExperience Int?
+  source          String?
+  status          CandidateStatus      @default(APPLIED)
+  notes           String?
+  /// The employee record made on hire.
+  employeeId      String?              @unique
+  employee        Employee?            @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  createdById     String
+  createdBy       User                 @relation("CandidateAdder", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  events          CandidateEvent[]
+  examResults     ExamResult[]
+  contracts       EmploymentContract[]
+
+  @@index([mprId])
+  @@index([status])
+}
+
+enum CandidateStatus {
+  APPLIED
+  UNDER_SCREENING
+  EXAM_SCHEDULED
+  EXAM_DONE
+  INTERVIEW_SCHEDULED
+  INTERVIEW_PASSED
+  INTERVIEW_FAILED
+  CONTRACT_STAGE
+  HIRED
+  DECLINED
+  WITHDRAWN
+}
+
+/// One move of a candidate — the trail ("interview passed on Oct 18").
+model CandidateEvent {
+  id          String           @id @default(cuid())
+  candidateId String
+  candidate   Candidate        @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  fromStatus  CandidateStatus?
+  toStatus    CandidateStatus
+  on          DateTime         @db.Date
+  note        String?
+  byId        String
+  by          User             @relation("CandidateEventBy", fields: [byId], references: [id], onDelete: Restrict)
+  createdAt   DateTime         @default(now())
+
+  @@index([candidateId])
+}
+
+/// An entrance exam on the catalogue: Abstract Reasoning, Basic Math &
+/// Logic, Technical / Mechanical, Communication & Verbs (seeded system rows),
+/// and what HR adds. Each is scored out of `maxScore` and weighs `weight`.
+model ExamCatalog {
+  id          String       @id @default(cuid())
+  name        String       @unique
+  description String?
+  maxScore    Int          @default(100)
+  weight      Decimal      @default(1) @db.Decimal(6, 2)
+  sortOrder   Int          @default(0)
+  isSystem    Boolean      @default(false)
+  isActive    Boolean      @default(true)
+  createdById String?
+  createdAt   DateTime     @default(now())
+  results     ExamResult[]
+}
+
+/// A candidate's score on one exam.
+model ExamResult {
+  id          String      @id @default(cuid())
+  candidateId String
+  candidate   Candidate   @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  examId      String
+  exam        ExamCatalog @relation(fields: [examId], references: [id], onDelete: Restrict)
+  score       Decimal     @db.Decimal(8, 2)
+  takenOn     DateTime    @db.Date
+  examinerId  String?
+  examiner    User?       @relation("ExamExaminer", fields: [examinerId], references: [id], onDelete: SetNull)
+  notes       String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@unique([candidateId, examId])
+}
+
+/// The employment contract offered to a candidate — routed through the one
+/// engine as `employment_contract` (Technical Manager › Team Leader › HR
+/// Officer › CEO / President, the hiring team's), then printed for the wet
+/// signature (no online link: the hire has no G-CORE access yet). SIGNED is
+/// HR recording the signed paper; the hire follows.
+model EmploymentContract {
+  id             String                   @id @default(cuid())
+  number         String                   @unique
+  candidateId    String
+  candidate      Candidate                @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  positionId     String?
+  position       Position?                @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  title          String
+  monthlySalary  Decimal                  @db.Decimal(18, 2)
+  allowances     Decimal                  @default(0) @db.Decimal(18, 2)
+  allowanceNote  String?
+  employmentType EmploymentType           @default(PROBATIONARY)
+  startDate      DateTime                 @db.Date
+  periodEndDate  DateTime?                @db.Date
+  workLocation   String?
+  terms          String?
+  status         EmploymentContractStatus @default(DRAFT)
+  cancelReason   String?
+  approvedAt     DateTime?
+  signedOn       DateTime?                @db.Date
+  preparedById   String
+  preparedBy     User                     @relation("ContractPreparer", fields: [preparedById], references: [id], onDelete: Restrict)
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  @@index([candidateId])
+  @@index([status])
+}
+
+enum EmploymentContractStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  SIGNED
+  CANCELLED
 }

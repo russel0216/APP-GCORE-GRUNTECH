@@ -473,7 +473,33 @@ interface RegisterOption {
  * The one creation form, for either door. It loads the lists the form picks
  * from itself, so Admin › Users needs nothing of the register page.
  */
-export function NewPersonModal({ door, onClose, onSaved }: { door: PersonDoor; onClose: () => void; onSaved: () => void }) {
+/** What a new person's form starts with — the hire from a signed contract (G-HR › Hiring). */
+export interface PersonPrefill {
+  firstName?: string;
+  lastName?: string;
+  personalEmail?: string;
+  mobile?: string;
+  industryId?: string;
+  position?: string;
+  employmentType?: string;
+  dateHired?: string;
+  periodEndDate?: string;
+}
+
+export function NewPersonModal({
+  door,
+  prefill,
+  onCreated,
+  onClose,
+  onSaved,
+}: {
+  door: PersonDoor;
+  prefill?: PersonPrefill;
+  /** Told the new record's id as soon as it is saved, before any invitation shows. */
+  onCreated?: (employeeId: string) => void | Promise<void>;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
   const [teams, setTeams] = useState<TeamOption[]>([]);
   const [positions, setPositions] = useState<PositionOption[]>([]);
   useEffect(() => {
@@ -485,6 +511,8 @@ export function NewPersonModal({ door, onClose, onSaved }: { door: PersonDoor; o
     <EmployeeForm
       employee={null}
       door={door}
+      prefill={prefill}
+      onCreated={onCreated}
       teams={teams}
       positions={positions}
       onClose={onClose}
@@ -500,10 +528,14 @@ function EmployeeForm({
   flaggedSampleId,
   teams,
   positions: _positions,
+  prefill,
+  onCreated,
   onClose,
   onSaved,
 }: {
   employee: EmployeeRow | null;
+  prefill?: PersonPrefill;
+  onCreated?: (employeeId: string) => void | Promise<void>;
   /** For a new person: which screen is asking (see `PersonDoor`). */
   door?: PersonDoor;
   /** The tab a deep link asks for (`?tab=face`). */
@@ -592,23 +624,23 @@ function EmployeeForm({
 
   const [form, setForm] = useState({
     employeeNo: employee?.employeeNo ?? '',
-    firstName: employee?.firstName ?? '',
-    lastName: employee?.lastName ?? '',
+    firstName: employee?.firstName ?? prefill?.firstName ?? '',
+    lastName: employee?.lastName ?? prefill?.lastName ?? '',
     middleName: employee?.middleName ?? '',
     suffix: employee?.suffix ?? '',
     userId: employee?.user?.id ?? '',
-    industryId: employee?.industry?.id ?? '',
-    position: employee?.position ?? '',
+    industryId: employee?.industry?.id ?? prefill?.industryId ?? '',
+    position: employee?.position ?? prefill?.position ?? '',
     positionId: employee?.positionId ?? '',
     extraPositionIds: (employee?.extraPositions ?? []).map((x) => x.position.id),
-    employmentType: employee?.employmentType ?? 'REGULAR',
+    employmentType: employee?.employmentType ?? prefill?.employmentType ?? 'REGULAR',
     taxStatus: employee?.taxStatus ?? '',
-    dateHired: employee?.dateHired?.slice(0, 10) ?? '',
+    dateHired: employee?.dateHired?.slice(0, 10) ?? prefill?.dateHired ?? '',
     dateRegularized: employee?.dateRegularized?.slice(0, 10) ?? '',
-    periodEndDate: employee?.periodEndDate?.slice(0, 10) ?? '',
+    periodEndDate: employee?.periodEndDate?.slice(0, 10) ?? prefill?.periodEndDate ?? '',
     dateSeparated: employee?.dateSeparated?.slice(0, 10) ?? '',
-    mobile: employee?.mobile ?? '',
-    personalEmail: employee?.personalEmail ?? '',
+    mobile: employee?.mobile ?? prefill?.mobile ?? '',
+    personalEmail: employee?.personalEmail ?? prefill?.personalEmail ?? '',
     address: employee?.address ?? '',
     birthDate: employee?.birthDate?.slice(0, 10) ?? '',
     emergencyContactName: employee?.emergencyContactName ?? '',
@@ -813,10 +845,11 @@ function EmployeeForm({
       if (employee) {
         await api.patch(`/employees/${employee.id}`, payload);
       } else {
-        const created = await api.post<{ login: { user: { email: string }; invite: Delivery | null } | null }>(
+        const created = await api.post<{ id: string; login: { user: { email: string }; invite: Delivery | null } | null }>(
           '/employees',
           payload,
         );
+        await onCreated?.(created.id);
         // The invitation stays on screen so its link can be passed on.
         if (created.login?.invite) {
           toast('ok', `${form.firstName} ${form.lastName} added, with their login`);

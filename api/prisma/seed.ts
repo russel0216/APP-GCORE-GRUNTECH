@@ -20,7 +20,8 @@ import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
 import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawingTypes';
 import { COURSE_CATEGORIES, seedCourseCategories } from '../src/shared/courseCategories';
 import { SERVICE_DOCUMENT_CATEGORIES, seedServiceDocumentCategories } from '../src/shared/serviceDocumentCategories';
-import { ASSET_TYPES, seedAssetTypes } from '../src/shared/assets';
+import { ASSET_TYPES, moveAssetTagCode, seedAssetTypes } from '../src/shared/assets';
+import { ENTRANCE_EXAMS, seedEntranceExams } from '../src/shared/hiring';
 import { migrateFaceThreshold } from '../src/shared/faceSamples';
 import { removeScoroArchive } from '../src/shared/scoroArchive';
 import { backfillCustomerAddresses } from '../src/shared/customerAddress';
@@ -240,6 +241,37 @@ const WORKFLOWS: WorkflowSeed[] = [
     steps: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+    ],
+  },
+  // HIRING (2026-10-21, the owner's Hiring module; his answer left the routes
+  // to the plan's defaults, editable in Admin › Approval Workflows). The MAN
+  // POWER REQUEST: the requester's Team Leader, the HR Officer, the CEO /
+  // President. The EMPLOYMENT CONTRACT, prepared by HR for the request's
+  // team (`ApprovalContext.teamId`): that team's Technical Manager and Team
+  // Leader, the HR Officer, the CEO / President — the PDF's position
+  // supervisor, department head, HR director and company president. The HR
+  // step is decided by the HR Officer OR the HR Manager: HR prepares the
+  // contract, and nobody approves what they prepared.
+  {
+    documentType: 'manpower_request',
+    name: 'Man Power Request — team leader, HR officer, CEO / President',
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'HR Officer', approverType: 'ROLE', roleKey: 'hr', alsoRoleKeys: ['hr_manager'] },
+      { sequence: 3, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+  },
+  {
+    documentType: 'employment_contract',
+    name: 'Employment contract — technical manager, team leader, HR officer, CEO / President',
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'ROLE', roleKey: 'team_leader' },
+      { sequence: 3, name: 'HR Officer', approverType: 'ROLE', roleKey: 'hr', alsoRoleKeys: ['hr_manager'] },
+      { sequence: 4, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   // ── The owner's routing sheet (2026-10-12) ─────────────────────────────
@@ -1281,6 +1313,11 @@ async function main() {
   console.log(`  ✓ Service document categories (${SERVICE_DOCUMENT_CATEGORIES.length}${documentCategoriesAdded ? `, ${documentCategoriesAdded} added` : ''})`);
   const assetTypesAdded = await seedAssetTypes();
   console.log(`  ✓ Asset types (${ASSET_TYPES.length}${assetTypesAdded ? `, ${assetTypesAdded} added` : ''})`);
+  const tagMoved = await moveAssetTagCode();
+  if (tagMoved.moved) console.log(`  · Company asset tag code moved from AST to TAG (${tagMoved.moved} row(s))`);
+  // The entrance exams on the owner's Hiring sheet (2026-10-21): system rows.
+  const examsAdded = await seedEntranceExams();
+  console.log(`  ✓ Entrance exams (${ENTRANCE_EXAMS.length}${examsAdded ? `, ${examsAdded} added` : ''})`);
 
   // The course categories (2026-10-20, the owner's Academy UI): his four as
   // system rows, the settings' five and every category on file as plain rows.

@@ -45,6 +45,20 @@ export const ACCESS_SPLIT: { key: string; from: string; to: string[] }[] = [
   { key: 'assets', from: 'ghr.employees.edit_all', to: ['ghr.assets.view_all', 'ghr.assets.create', 'ghr.assets.edit_all'] },
   // …and everyone who reads their own records reads the property issued to them.
   { key: 'assets-own', from: 'ghr.my_records.view_own', to: ['ghr.assets.view_own'] },
+  // G-HR › Hiring (2026-10-21): HR runs it — whoever edits every employee
+  // record gets every Hiring box; anyone may raise their own Man Power
+  // Request (the hiring manager), so those holding My Records get its own pair.
+  {
+    key: 'hiring',
+    from: 'ghr.employees.edit_all',
+    to: [
+      'ghr.manpower_requests.view_all', 'ghr.manpower_requests.create', 'ghr.manpower_requests.edit_all', 'ghr.manpower_requests.delete',
+      'ghr.candidates.view_all', 'ghr.candidates.create', 'ghr.candidates.edit_all',
+      'ghr.entrance_exams.view_all', 'ghr.entrance_exams.edit_all',
+      'ghr.employment_contracts.view_all', 'ghr.employment_contracts.create', 'ghr.employment_contracts.edit_all', 'ghr.employment_contracts.delete',
+    ],
+  },
+  { key: 'hiring-mpr-own', from: 'ghr.my_records.view_own', to: ['ghr.manpower_requests.view_own', 'ghr.manpower_requests.create', 'ghr.manpower_requests.edit_own'] },
   // Procurement Settings (2026-10-21): kept by whoever may change every purchase order.
   { key: 'procurement-settings', from: 'gchain.purchase_orders.edit_all', to: ['gchain.settings.view_all', 'gchain.settings.edit_all'] },
 ];

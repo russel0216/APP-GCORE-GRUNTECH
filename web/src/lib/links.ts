@@ -63,6 +63,9 @@ const DETAIL: Record<string, string> = {
   memo: '/g-hr/memos',
   // G-HR › Records › Asset Management (2026-10-21).
   company_asset: '/g-hr/assets',
+  manpower_request: '/g-hr/hiring/mpr',
+  candidate: '/g-hr/hiring/candidates',
+  employment_contract: '/g-hr/hiring/contracts',
   cad_job_order: '/g-ops/cad-job-orders',
   // A project's drawing sent for approval (2026-10-13); the engine files it as plan_approval.
   approved_plan: '/g-ops/plans',
@@ -138,6 +141,7 @@ const SCREEN: Record<string, string> = {
   cad_drawing_type: '/admin/categories',
   service_document_category: '/admin/categories',
   asset_type: '/admin/categories',
+  entrance_exam: '/g-hr/hiring/exams',
   course_category: '/admin/categories',
   costing_template: '/g-ops/costing',
   // A report's paper and CSV audit as EXPORTED under its division's type.

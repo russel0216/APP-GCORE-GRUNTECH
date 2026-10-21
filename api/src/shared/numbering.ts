@@ -135,8 +135,13 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   { type: 'help_ticket', code: 'HT', label: 'Help Ticket' },
   // G-HR › Records › Memos (2026-10-20): numbered when issued, GT-MEMO-2026-0001.
   { type: 'memo', code: 'MEMO', label: 'Memorandum' },
-  // G-HR › Records › Asset Management (2026-10-21): the property tag, GT-AST-2026-0001.
-  { type: 'company_asset', code: 'AST', label: 'Company Asset Tag' },
+  // G-HR › Records › Asset Management (2026-10-21): the property tag,
+  // GT-TAG-2026-0001 — never AST, the installed base's code, so a tag and a
+  // customer's machine never print the same number (`moveAssetTagCode()`).
+  { type: 'company_asset', code: 'TAG', label: 'Company Asset Tag' },
+  // G-HR › Hiring (2026-10-21): the Man Power Request and the employment contract.
+  { type: 'manpower_request', code: 'MPR', label: 'Man Power Request' },
+  { type: 'employment_contract', code: 'EC', label: 'Employment Contract' },
 ];
 
 /** `2026` for a yearly counter, `2026-09` for a monthly one, '' for a flat one. */

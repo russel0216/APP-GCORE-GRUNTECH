@@ -111,6 +111,7 @@ const SECTION_ICONS: Record<string, IconName> = {
   Procurement: 'cart',
   Warehouse: 'box',
   'Master data': 'layers',
+  Hiring: 'check',
   People: 'people',
   Academy: 'book',
   Process: 'check',
