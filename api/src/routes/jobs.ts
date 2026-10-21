@@ -19,7 +19,9 @@ import { deleteAttachmentsOf } from '../shared/attachments';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
-import { renderDocument, formatAmount, formatMoney, formatShortDate, statusLabel, companyCurrency, type PdfSection } from '../shared/pdf';
+import { renderDocument, formatAmount, formatMoney, formatShortDate, statusLabel, companyCurrency, type PdfSection, type PdfRow, type PdfCell } from '../shared/pdf';
+import { contentDisposition, paperFileName } from '../shared/paperName';
+import { phasePctFromTasks } from '../shared/progressReport';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { addMonths, dayKey, planSchedule } from '../shared/aftermarket';
@@ -1341,6 +1343,175 @@ jobRoutes.patch(
       req,
     );
     res.json({ ...job, contractValue: num(job.contractValue) });
+  }),
+);
+
+// ── Scope of Work paper ──────────────────────────────────────────────────────
+
+/**
+ * The project's Scope of Work on paper (2026-10-21, the owner's call: "make
+ * the scope of work in the project printable"): the Scope of Work tab as it
+ * stands — each phase with its dates, working days (Mon–Sat, holidays off),
+ * value and progress, its tasks under it with whoever does them — the
+ * contract value as the total, then the Gantt chart as a landscape appendix
+ * dated from the project's earliest planned day. A plan, not a decision, so
+ * no sign-offs. Behind the project's own read rule; audited.
+ */
+jobRoutes.get(
+  '/:id/scope/pdf',
+  requireAny('gops.projects.view_all', 'gops.projects.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.projects.view_all');
+    const ids = onlyOwn ? visibleOwners(me, 'gops', 'projects') : null;
+    const job = await prisma.job.findFirst({
+      where: { id: req.params.id, ...(ids ? { OR: [{ projectManagerId: { in: ids } }, { createdById: { in: ids } }] } : {}) },
+      include: {
+        customer: { select: { name: true } },
+        site: { select: { name: true } },
+        projectManager: { select: { name: true } },
+        scopeItems: { orderBy: { sortOrder: 'asc' } },
+        tasks: {
+          orderBy: [{ startDate: 'asc' }, { createdAt: 'asc' }],
+          include: { assignedTo: { select: { name: true } } },
+        },
+      },
+    });
+    if (!job) throw notFound('Project not found');
+
+    const currency = await companyCurrency();
+    const days = (from: Date | null, to: Date | null) => (from && to && to >= from ? workingDaysBetween(from, to) : null);
+    const span = (from: Date | null, to: Date | null) =>
+      from && to ? `${formatShortDate(from)} – ${formatShortDate(to)}` : from ? `from ${formatShortDate(from)}` : to ? `to ${formatShortDate(to)}` : '—';
+    const phases = job.scopeItems.map((s) => ({
+      item: s,
+      tasks: job.tasks.filter((t) => t.scopeItemId === s.id),
+    }));
+    const loose = job.tasks.filter((t) => !t.scopeItemId || !job.scopeItems.some((s) => s.id === t.scopeItemId));
+    // A phase's own dates, else the span of its tasks.
+    const phaseDates = (p: (typeof phases)[number]) => {
+      const starts = [p.item.plannedStart, ...p.tasks.map((t) => t.startDate)].filter((d): d is Date => !!d);
+      const ends = [p.item.plannedEnd, ...p.tasks.map((t) => t.dueDate)].filter((d): d is Date => !!d);
+      return {
+        from: p.item.plannedStart ?? (starts.length ? new Date(Math.min(...starts.map((d) => d.getTime()))) : null),
+        to: p.item.plannedEnd ?? (ends.length ? new Date(Math.max(...ends.map((d) => d.getTime()))) : null),
+      };
+    };
+    const taskRow = (t: (typeof job.tasks)[number]): PdfCell[] => [
+      '',
+      { title: `• ${t.name}`, body: [t.description, t.assignedTo?.name ? `By ${t.assignedTo.name}` : null].filter(Boolean).join(' — ') || undefined, plain: true },
+      span(t.startDate, t.dueDate),
+      String(days(t.startDate, t.dueDate) ?? '—'),
+      '',
+      `${t.progressPct}%`,
+      statusLabel(t.status),
+    ];
+    const rows: PdfRow[] = [];
+    phases.forEach((p, i) => {
+      const d = phaseDates(p);
+      rows.push([
+        String(i + 1),
+        { title: p.item.name, body: p.item.description ?? undefined },
+        span(d.from, d.to),
+        String(days(d.from, d.to) ?? (p.item.durationDays || '—')),
+        formatAmount(num(p.item.value)),
+        (() => { const pct = phasePctFromTasks(p.tasks); return pct == null ? '—' : `${Math.round(pct)}%`; })(),
+        '',
+      ]);
+      for (const t of p.tasks) rows.push(taskRow(t));
+    });
+    if (loose.length) {
+      rows.push({ heading: 'Not under a scope line' });
+      for (const t of loose) rows.push(taskRow(t));
+    }
+    const total = job.scopeItems.reduce((s, i) => s + num(i.value), 0);
+
+    // The Gantt chart, on working days from the earliest planned day.
+    const allDates = [
+      ...job.scopeItems.flatMap((s) => [s.plannedStart, s.plannedEnd]),
+      ...job.tasks.flatMap((t) => [t.startDate, t.dueDate]),
+      job.startDate,
+    ].filter((d): d is Date => !!d);
+    const origin = allDates.length ? new Date(Math.min(...allDates.map((d) => d.getTime()))) : null;
+    const dayOf = (d: Date) => Math.max(1, workingDaysBetween(origin!, d));
+    const bar = (from: Date | null, to: Date | null) =>
+      from && origin ? { start: dayOf(from), days: Math.max(1, days(from, to ?? from) ?? 1) } : null;
+    const groups = origin
+      ? [
+          ...phases.map((p) => {
+            const d = phaseDates(p);
+            const own = bar(d.from, d.to);
+            return {
+              name: p.item.name,
+              ...(own ? { start: own.start, days: own.days } : {}),
+              tasks: p.tasks.flatMap((t) => {
+                const b = bar(t.startDate, t.dueDate);
+                return b ? [{ name: t.name, ...b }] : [];
+              }),
+            };
+          }),
+          ...(loose.length
+            ? [
+                {
+                  name: 'Not under a scope line',
+                  tasks: loose.flatMap((t) => {
+                    const b = bar(t.startDate, t.dueDate);
+                    return b ? [{ name: t.name, ...b }] : [];
+                  }),
+                },
+              ]
+            : []),
+        ].filter((g) => g.tasks.length || g.start)
+      : [];
+
+    const sections: PdfSection[] = [
+      {
+        kind: 'fields',
+        title: 'Project',
+        fields: [
+          { label: 'Project', value: `${job.number} — ${job.name}` },
+          { label: 'Customer', value: job.customer.name },
+          { label: 'Site', value: job.site?.name ?? '' },
+          { label: 'Technical Manager', value: job.projectManager?.name ?? '' },
+          { label: 'Start', value: job.startDate ? formatShortDate(job.startDate) : '' },
+          { label: 'Target end', value: job.targetEndDate ? formatShortDate(job.targetEndDate) : '' },
+          { label: 'Status', value: statusLabel(job.status) },
+        ].filter((f) => f.value),
+      },
+      {
+        kind: 'table',
+        title: 'Scope of work',
+        head: ['No.', 'Phase / task', 'Dates', 'Days', `Value (${currency})`, 'Progress', 'Status'],
+        widths: [0.7, 3.2, 1.9, 0.8, 1.4, 1.3, 1.3],
+        align: ['left', 'left', 'left', 'right', 'right', 'right', 'left'],
+        headingSpan: 2,
+        rows,
+      },
+      { kind: 'totals', rows: [{ label: 'Contract value', value: formatMoney(total, currency), bold: true }] },
+      ...(groups.length
+        ? [
+            {
+              kind: 'gantt' as const,
+              title: 'Schedule',
+              landscape: true,
+              startDate: origin!.toISOString().slice(0, 10),
+              legend: 'Days are working days (Mon–Sat, holidays off), from the earliest planned day.',
+              groups,
+            },
+          ]
+        : []),
+    ];
+    const pdf = await renderDocument({
+      title: 'Scope of Work',
+      documentNumber: job.number,
+      date: new Date(),
+      reference: `${job.number} — ${job.name}`,
+      sections,
+    });
+    await audit({ entityType: 'job', entityId: job.id, action: 'EXPORTED', summary: `Printed the scope of work of ${job.number}` }, req);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Scope of Work', number: job.number, author: me.name, date: new Date() })));
+    res.send(pdf);
   }),
 );
 

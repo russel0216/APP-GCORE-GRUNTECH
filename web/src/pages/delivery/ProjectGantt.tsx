@@ -1,5 +1,5 @@
 import { useId, useMemo, useState } from 'react';
-import { api } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { addDays, daysBetween, mondayOf, parseDay, todayLocal } from '../../lib/day';
 import { Empty, ErrorBox, Field, ModalFoot, StatusBadge, formatDate, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
@@ -196,9 +196,12 @@ export function ProjectGantt({
     <div className="card">
       <div className="card-head">
         <h3 className="card-title">Scope of work — Gantt chart</h3>
-        {canEdit && (
-          <div className="row">
-            {hasCosting && (
+        <div className="row">
+          {/* The tab on paper: phases, tasks and the chart (2026-10-21). */}
+          <button type="button" className="btn btn-sm" onClick={() => openPdf(`/api/jobs/${jobId}/scope/pdf`, setError)}>
+            Print
+          </button>
+          {canEdit && hasCosting && (
               <button
                 type="button"
                 className="btn btn-sm"
@@ -209,11 +212,12 @@ export function ProjectGantt({
                 Plan from costing
               </button>
             )}
+          {canEdit && (
             <button type="button" className="btn btn-sm" onClick={() => setEditing('new')} disabled={busy}>
               + Add task
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
       <p className="muted del-lede">
         Each scope line is a phase; its tasks sit under it. A bar runs from a task’s start to its due date and fills

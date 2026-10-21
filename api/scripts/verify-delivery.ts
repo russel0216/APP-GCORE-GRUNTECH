@@ -948,6 +948,17 @@ async function main() {
     });
     check('a task cannot be moved onto another project’s scope line', moved.status === 400, String(moved.status));
 
+    // The Scope of Work tab on paper (2026-10-21): phases, their tasks and
+    // the Gantt chart as a landscape appendix.
+    const scopePaper = await printed(leadToken, `/jobs/${job.id}/scope/pdf`);
+    const scopeText = flat(scopePaper.text);
+    check(
+      'the scope of work prints: the phase, its tasks, the contract value and the chart on a landscape page',
+      scopePaper.status === 200 && /SCOPE OF WORK/i.test(scopeText) && scopeText.includes(`${TAG} Fabrication`) &&
+        scopeText.includes(`${TAG} Fabricate`) && /Contract value/i.test(scopeText) && scopePaper.pages.includes(LANDSCAPE),
+      `${scopePaper.status} ${scopePaper.pages.join(',')} ${scopeText.slice(0, 200)}`,
+    );
+
     // (0b) A meeting held for the project lists on its Meetings & Records tab.
     const kickoff = await http(leadToken, 'POST', '/meetings', {
       title: `${TAG} Kick-off`,
