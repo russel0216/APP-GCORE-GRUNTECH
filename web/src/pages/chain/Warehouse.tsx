@@ -590,6 +590,8 @@ interface StockRow {
   location: { id: string; code: string; name: string | null } | null;
   /** A project's own stock (`?stock=project`, 2026-10-18): whose it is. */
   project?: { id: string; number: string; name: string };
+  /** On the sales order list (`?stock=order`, 2026-10-21): whose goods they are. */
+  salesOrder?: { id: string; number: string; customer: string };
 }
 
 type StockState = 'IN_STOCK' | 'LOW_STOCK' | 'CRITICAL' | 'ON_ORDER' | 'PROJECT_STOCK';
@@ -618,9 +620,10 @@ interface InventorySummary {
   categories?: CategoryTile[];
   /** On the company list: the projects' own goods on the shelves. */
   projectStock?: { lines: number; projects: number; value: number };
-  /** On the project list (`?stock=project`). */
-  stock?: 'project';
+  /** On the project list (`?stock=project`) or the sales order list (`?stock=order`). */
+  stock?: 'project' | 'order';
   projects?: number;
+  orders?: number;
 }
 
 interface Movement {
@@ -728,6 +731,8 @@ export function Inventory() {
   const chosenCategory = params.get('categoryId') ?? '';
   // The projects' own goods (2026-10-18) — the same list on `?stock=project`.
   const projectStock = params.get('stock') === 'project';
+  // What was bought for a sales order with no project (2026-10-21) — `?stock=order`.
+  const orderStock = params.get('stock') === 'order';
   /** The list's own URL with the category set (or cleared, when it is the one chosen). */
   const categoryLink = (id: string) => {
     const p = new URLSearchParams(params);
@@ -750,6 +755,23 @@ export function Inventory() {
                     {s.project.number}
                   </Link>
                   <div className="faint">{s.project.name}</div>
+                </div>
+              ) : null,
+          } as Column<StockRow>,
+        ]
+      : []),
+    ...(orderStock
+      ? [
+          {
+            key: 'salesOrder',
+            label: 'Sales order',
+            render: (s: StockRow) =>
+              s.salesOrder ? (
+                <div>
+                  <Link to={`/g-ops/sales-orders/${s.salesOrder.id}`} onClick={(e) => e.stopPropagation()} className="mono">
+                    {s.salesOrder.number}
+                  </Link>
+                  <div className="faint">{s.salesOrder.customer}</div>
                 </div>
               ) : null,
           } as Column<StockRow>,
@@ -841,7 +863,9 @@ export function Inventory() {
           rowKey={(s) => s.id}
           searchPlaceholder="Search item name, code, part number…"
           onRowClick={(s) =>
-            navigate(`/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}${s.project ? `&jobId=${s.project.id}` : ''}`)
+            navigate(
+              `/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}${s.project ? `&jobId=${s.project.id}` : ''}${s.salesOrder ? `&salesOrderId=${s.salesOrder.id}` : ''}`,
+            )
           }
           emptyTitle={projectStock ? 'No project stock' : 'No stock yet'}
           emptyHint={
@@ -866,6 +890,15 @@ export function Inventory() {
           summary={(raw) => {
             const sum = raw as InventorySummary;
             const tiles = sum.categories ?? [];
+            if (sum.stock === 'order') {
+              return (
+                <>
+                  <Stat label="Sales order stock" value={sum.items ?? 0} sub="Items held for sales orders" />
+                  <Stat label="Sales orders" value={sum.orders ?? 0} sub="With goods on the shelves" />
+                  <Stat label="Value" value={formatMoney(sum.valuation ?? 0)} sub="Counted against each order's quoted cost" />
+                </>
+              );
+            }
             if (sum.stock === 'project') {
               return (
                 <>
@@ -921,6 +954,7 @@ export function Inventory() {
               options: [
                 { value: 'company', label: 'Company stock' },
                 { value: 'project', label: 'Project stock' },
+                { value: 'order', label: 'Sales order stock' },
               ],
             },
             {
@@ -1124,6 +1158,8 @@ export function StockCard() {
   const warehouseId = params.get('warehouseId');
   // A project's own stock of the item (2026-10-18): its card alone.
   const jobId = params.get('jobId');
+  // A sales order's own stock of the item (2026-10-21): its card alone.
+  const salesOrderId = params.get('salesOrderId');
   const [data, setData] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
@@ -1131,11 +1167,11 @@ export function StockCard() {
   useEffect(() => {
     if (!itemId) return;
     api
-      .get<Record<string, unknown>>(`/inventory/${itemId}/card${qs({ warehouseId, jobId })}`)
+      .get<Record<string, unknown>>(`/inventory/${itemId}/card${qs({ warehouseId, jobId, salesOrderId })}`)
       .then(setData)
       .catch(setError)
       .finally(() => setLoading(false));
-  }, [itemId, warehouseId, jobId]);
+  }, [itemId, warehouseId, jobId, salesOrderId]);
 
   if (loading) return <Loading />;
   if (!data) return <ErrorBox error={error ?? new Error('Not found')} />;
@@ -1152,7 +1188,8 @@ export function StockCard() {
   }[];
   const project = data.project as { id: string; number: string; name: string } | null | undefined;
   // Edit All places any stock line; Edit Own the items the viewer added (2026-10-18, the card's `canEdit`).
-  const mayPlace = data.canEdit === true && !jobId;
+  const mayPlace = data.canEdit === true && !jobId && !salesOrderId;
+  const salesOrder = data.salesOrder as { id: string; number: string } | null | undefined;
   /** Files the stock line in a bin (2026-10-15). */
   async function placeIn(balanceId: string, locationId: string) {
     try {
@@ -1183,7 +1220,12 @@ export function StockCard() {
         code={item.code}
         title={item.name}
         meta={
-          jobId ? (
+          salesOrderId ? (
+            <>
+              {salesOrder ? <Link to={`/g-ops/sales-orders/${salesOrder.id}`}>{salesOrder.number}</Link> : 'A sales order'}'s own stock — bought for the order,
+              counted against its quoted cost · <Link to={`/g-chain/inventory/${itemId}`}>The company’s stock of it</Link>
+            </>
+          ) : jobId ? (
             <>
               {project ? (
                 <>

@@ -241,9 +241,18 @@ export function BorrowRequestEditor() {
   const [busy, setBusy] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const [dirty, setDirty] = useState(false);
+  // The issued sales orders a request may name (2026-10-21).
+  const [salesOrders, setSalesOrders] = useState<{ id: string; number: string; customer: string }[]>([]);
+  useEffect(() => {
+    api
+      .get<{ id: string; number: string; customer: string }[]>('/borrow-slips/sales-orders')
+      .then(setSalesOrders)
+      .catch(() => setSalesOrders([]));
+  }, []);
   const [form, setForm] = useState({
     warehouseId: '',
     jobId: '',
+    salesOrderId: '',
     borrowerId: '',
     borrowerName: '',
     borrowType: '',
@@ -275,6 +284,7 @@ export function BorrowRequestEditor() {
           setForm({
             warehouseId,
             jobId: (slip.job as { id: string } | null)?.id ?? '',
+            salesOrderId: (slip.salesOrder as { id: string } | null)?.id ?? '',
             borrowerId: typeof slip.borrowerId === 'string' ? slip.borrowerId : '',
             borrowerName: String(slip.borrowerName ?? ''),
             borrowType: typeof slip.borrowType === 'string' ? slip.borrowType : '',
@@ -354,6 +364,7 @@ export function BorrowRequestEditor() {
     const body = {
       warehouseId: form.warehouseId,
       jobId: form.jobId || null,
+      salesOrderId: form.jobId ? null : form.salesOrderId || null,
       borrowerId: options?.mayNameBorrower ? form.borrowerId || null : null,
       borrowerName: options?.mayNameBorrower ? form.borrowerName.trim() || null : null,
       borrowType: form.borrowType || null,
@@ -466,6 +477,18 @@ export function BorrowRequestEditor() {
               ))}
             </select>
           </Field>
+          {!form.jobId && salesOrders.length > 0 && (
+            <Field label="For a sales order" hint="Optional — recorded, never charged">
+              <select value={form.salesOrderId} onChange={(e) => set({ salesOrderId: e.target.value })}>
+                <option value="">— none —</option>
+                {salesOrders.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.number} — {o.customer}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
           {options.mayNameBorrower ? (
             <>
               <Field label="Borrower" hint="Leave both empty to borrow it yourself">

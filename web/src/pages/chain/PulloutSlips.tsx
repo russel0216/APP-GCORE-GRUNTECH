@@ -188,6 +188,8 @@ interface StockItem {
   name: string;
   unit: string;
   available: number;
+  /** Bought for the sales order and held for it at this warehouse (2026-10-21). */
+  orderStock?: boolean;
 }
 
 interface SourceData {
@@ -815,7 +817,10 @@ export function PulloutEditor() {
                           {itemOptions(l.itemId)}
                         </select>
                       </td>
-                      <td className="right mono">{it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}</td>
+                      <td className="right mono">
+                        {it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}
+                        {it?.orderStock && <div className="faint">held for the order</div>}
+                      </td>
                       <td>
                         <NumberInput
                           kind="quantity"
@@ -896,7 +901,10 @@ export function PulloutEditor() {
                           {itemOptions(p.itemId)}
                         </select>
                       </td>
-                      <td className="right mono">{it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}</td>
+                      <td className="right mono">
+                        {it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}
+                        {it?.orderStock && <div className="faint">held for the order</div>}
+                      </td>
                       <td>
                         <NumberInput
                           kind="quantity"

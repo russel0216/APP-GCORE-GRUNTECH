@@ -30,6 +30,7 @@ import { renderDocument, formatDate, formatShortDate, statusLabel, type PdfSecti
 import { manilaDate } from '../shared/day';
 import { LIST_CAP, listReference, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { issueProjectStock, projectHoldings, receiveProjectStock } from '../shared/projectStock';
+import { issueOrderStock, orderHoldings, receiveOrderStock } from '../shared/orderStock';
 import { issueStock, postJobCost, releaseCommitment, returnIssuedStock, reverseJobCost } from '../shared/inventory';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 
@@ -423,19 +424,36 @@ async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: stri
       }
     }
     const balByItem = new Map([...own].map(([k, v]) => [k, { averageCost: v.averageCost }]));
-    return { source, balByItem, pulloutDate: asDate(body.pulloutDate) ?? today(), returnBy: asDate(body.returnBy) };
+    return { source, balByItem, orderItems: new Set<string>(), pulloutDate: asDate(body.pulloutDate) ?? today(), returnBy: asDate(body.returnBy) };
+  }
+  // What the sales order bought for itself and holds at this warehouse
+  // (2026-10-21): an item it holds comes from ITS stock — all of it, never
+  // half from the company's — and posts nothing again.
+  const held = body.kind === 'SALES_ORDER' && source.salesOrderId ? await orderHoldings(prisma, source.salesOrderId, body.warehouseId) : new Map();
+  const orderItems = new Set<string>();
+  for (const [itemId, q] of perItem) {
+    const h = held.get(itemId);
+    if (!h) continue;
+    if (num(h.quantity) < q - 0.0005) {
+      throw badRequest(`${source.number} holds only ${qty(num(h.quantity))} of ${itemById.get(itemId)!.name} in ${warehouse.name} — pull out what it holds`);
+    }
+    orderItems.add(itemId);
   }
   const balances = await prisma.inventoryBalance.findMany({
-    where: { warehouseId: body.warehouseId, itemId: { in: [...perItem.keys()] } },
+    where: { warehouseId: body.warehouseId, itemId: { in: [...perItem.keys()].filter((i) => !orderItems.has(i)) } },
     include: { item: { select: { name: true } } },
   });
-  const balByItem = new Map(balances.map((b) => [b.itemId, b]));
+  const balByItem = new Map<string, { averageCost: Prisma.Decimal }>(balances.map((b) => [b.itemId, b]));
   for (const [itemId, q] of perItem) {
-    const b = balByItem.get(itemId);
+    if (orderItems.has(itemId)) {
+      balByItem.set(itemId, { averageCost: held.get(itemId)!.averageCost });
+      continue;
+    }
+    const b = balances.find((x) => x.itemId === itemId);
     const free = b ? availableOf(b) : 0;
     if (free < q - 0.0005) throw badRequest(`Only ${qty(free)} of ${itemById.get(itemId)!.name} is available in ${warehouse.name} now`);
   }
-  return { source, balByItem, pulloutDate: asDate(body.pulloutDate) ?? today(), returnBy: asDate(body.returnBy) };
+  return { source, balByItem, orderItems, pulloutDate: asDate(body.pulloutDate) ?? today(), returnBy: asDate(body.returnBy) };
 }
 
 /** The header a sheet writes, beyond its source and warehouse. */
@@ -464,6 +482,7 @@ async function writeLines(
   slipId: string,
   lines: z.infer<typeof lineSchema>[],
   balByItem: Map<string, { averageCost: Prisma.Decimal }>,
+  orderItems: Set<string> = new Set(),
 ) {
   await tx.pulloutItem.deleteMany({ where: { slipId } });
   await tx.pulloutItem.createMany({
@@ -479,6 +498,7 @@ async function writeLines(
         sortOrder: n,
         serialNo: l.serialNo?.trim() || null,
         condition: l.condition?.trim() || null,
+        orderStock: orderItems.has(l.itemId),
       };
     }),
   });
@@ -763,11 +783,24 @@ pulloutRoutes.get(
           })
         : [],
     ]);
+    // What the sales order holds of its own at the warehouse comes first, in place of the company's (2026-10-21).
+    const orderHeld = salesOrderId && warehouseId ? await orderHoldings(prisma, salesOrderId, warehouseId) : new Map();
+    const companyItems = stock.filter((b) => !orderHeld.has(b.itemId)).map((b) => ({ ...b.item, available: availableOf(b), orderStock: false }));
+    const orderItems = [...orderHeld.values()].map((r) => ({
+      id: r.item.id,
+      code: r.item.code,
+      partNumber: r.item.partNumber,
+      brand: null,
+      name: r.item.name,
+      unit: r.item.unit,
+      available: num(r.quantity),
+      orderStock: true,
+    }));
     res.json({
       source,
       purposes: Object.entries(PULLOUT_PURPOSES).map(([key, label]) => ({ key, label, noSource: OTHER_PURPOSES.includes(key as PulloutPurpose) })),
       warehouses,
-      items: stock.map((b) => ({ ...b.item, available: availableOf(b) })),
+      items: [...orderItems, ...companyItems],
     });
   }),
 );
@@ -983,7 +1016,7 @@ pulloutRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(sheetSchema, req.body);
-    const { source, balByItem, pulloutDate, returnBy } = await checkSheet(body);
+    const { source, balByItem, orderItems, pulloutDate, returnBy } = await checkSheet(body);
     const slip = await prisma.$transaction(async (tx) => {
       const number = await nextNumber(DOC, tx);
       const created = await tx.pulloutSlip.create({
@@ -1000,7 +1033,7 @@ pulloutRoutes.post(
           ...headerData(body, returnBy),
         },
       });
-      await writeLines(tx, created.id, body.lines, balByItem);
+      await writeLines(tx, created.id, body.lines, balByItem, orderItems);
       return created;
     });
     await audit(
@@ -1037,14 +1070,14 @@ pulloutRoutes.put(
       throw badRequest('A slip keeps the document it pulls against — raise another for a different one');
     }
     if (body.version && new Date(body.version).getTime() !== slip.updatedAt.getTime()) throw badRequest(`${slip.number} changed a moment ago — reload to see it`);
-    const { balByItem, pulloutDate, returnBy } = await checkSheet(body, slip.id);
+    const { balByItem, orderItems, pulloutDate, returnBy } = await checkSheet(body, slip.id);
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.pulloutSlip.updateMany({
         where: { id: slip.id, status: 'DRAFT', updatedAt: slip.updatedAt },
         data: { warehouseId: body.warehouseId, pulloutDate, requestedById: body.requestedById || null, ...headerData(body, returnBy) },
       });
       if (!claimed.count) throw badRequest(`${slip.number} changed a moment ago — reload to see it`);
-      await writeLines(tx, slip.id, body.lines, balByItem);
+      await writeLines(tx, slip.id, body.lines, balByItem, orderItems);
     });
     await audit({ entityType: 'pullout_slip', entityId: slip.id, action: 'UPDATED', summary: `Modified ${slip.number}` }, req);
     res.json(await presentSlip((await loadSlip(slip.id))!, me));
@@ -1210,7 +1243,12 @@ async function postPullout(tx: Prisma.TransactionClient, slipId: string, actorId
       createdById: actorId,
     };
     if (own && !slip.jobId) throw badRequest(`${slip.number} names no project`);
-    const moved = own ? await issueProjectStock(tx, { ...move, jobId: slip.jobId! }) : await issueStock(tx, move);
+    if (line.orderStock && !slip.salesOrderId) throw badRequest(`${slip.number} names no sales order`);
+    const moved = own
+      ? await issueProjectStock(tx, { ...move, jobId: slip.jobId! })
+      : line.orderStock
+        ? await issueOrderStock(tx, { ...move, salesOrderId: slip.salesOrderId! })
+        : await issueStock(tx, move);
     await tx.pulloutItem.update({ where: { id: line.id }, data: { unitCost: D(moved.unitCost), amount: D(moved.amount) } });
     let category = line.item.costCategoryId;
     if (slip.kind === 'PURCHASE_REQUEST' && line.sourceLineId) {
@@ -1223,7 +1261,8 @@ async function postPullout(tx: Prisma.TransactionClient, slipId: string, actorId
       category = pr.costCategoryId ?? category;
       if (category) release.set(category, (release.get(category) ?? 0) + cents(num(line.quantity) * num(pr.estimatedCost)));
     }
-    if (slip.jobId && category) incurred.set(category, (incurred.get(category) ?? 0) + moved.amount);
+    // The sales order's own goods were the deal's cost when received: no project is charged for them again.
+    if (slip.jobId && category && !line.orderStock) incurred.set(category, (incurred.get(category) ?? 0) + moved.amount);
   }
   if (slip.jobId) {
     if (slip.requestId) {
@@ -1412,6 +1451,7 @@ onApprovalReopened(DOC, {
         createdById: actor.id,
       };
       if (slip.kind === 'PROJECT_STOCK' && slip.jobId) await receiveProjectStock(tx, { ...back, jobId: slip.jobId });
+      else if (line.orderStock && slip.salesOrderId) await receiveOrderStock(tx, { ...back, salesOrderId: slip.salesOrderId });
       else await returnIssuedStock(tx, back);
       const pr = slip.kind === 'PURCHASE_REQUEST' && line.sourceLineId ? prLines.get(line.sourceLineId) : undefined;
       if (pr) {

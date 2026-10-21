@@ -23,7 +23,7 @@ import { registerSearch } from '../shared/search';
 import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES, stockState, itemsOnOrder, STOCK_STATES, type StockState } from '../shared/chain';
 import { nextNumber } from '../shared/numbering';
 import { issueProjectStock, projectHoldings, receiveProjectStock } from '../shared/projectStock';
-import { issueOrderStock, receiveOrderStock } from '../shared/orderStock';
+import { issueOrderStock, orderHoldings, receiveOrderStock } from '../shared/orderStock';
 import { itemForTypedLine, matchTypedItem } from '../shared/typedItems';
 import { notify } from '../shared/notifications';
 import {
@@ -1954,7 +1954,8 @@ stockIssueRoutes.get(
   handler(async (req, res) => {
     const warehouseId = req.query.warehouseId ? String(req.query.warehouseId) : null;
     const jobId = req.query.jobId ? String(req.query.jobId) : null;
-    const [warehouses, stock, ownStock] = await Promise.all([
+    const salesOrderId = req.query.salesOrderId ? String(req.query.salesOrderId) : null;
+    const [warehouses, stock, ownStock, orderStock, salesOrders] = await Promise.all([
       prisma.warehouse.findMany({ where: { isActive: true }, orderBy: { name: 'asc' }, select: { id: true, name: true } }),
       warehouseId
         ? prisma.inventoryBalance.findMany({
@@ -1965,9 +1966,28 @@ stockIssueRoutes.get(
         : [],
       // The project's own stock at that warehouse (2026-10-18): offered first, marked.
       warehouseId && jobId ? projectHoldings(prisma, jobId, warehouseId) : new Map(),
+      // A sales order's own stock at that warehouse (2026-10-21): offered first, marked.
+      warehouseId && salesOrderId ? orderHoldings(prisma, salesOrderId, warehouseId) : new Map(),
+      // The issued sales orders holding stock of their own — the slip's "For a sales order" choices.
+      prisma.salesOrder.findMany({
+        where: { status: 'ISSUED', orderStock: { some: { quantity: { gt: 0 } } } },
+        select: { id: true, number: true, customer: { select: { name: true } } },
+        orderBy: { orderDate: 'desc' },
+        take: 100,
+      }),
     ]);
     res.json({
       warehouses,
+      salesOrders: salesOrders.map((o) => ({ id: o.id, number: o.number, customer: o.customer.name })),
+      orderStock: [...orderStock.values()].map((r) => ({
+        itemId: r.itemId,
+        code: r.item.code,
+        partNumber: r.item.partNumber,
+        name: r.item.name,
+        unit: r.item.unit,
+        available: num(r.quantity),
+        averageCost: num(r.averageCost),
+      })),
       projectStock: [...ownStock.values()].map((r) => ({
         itemId: r.itemId,
         code: r.item.code,
@@ -2005,10 +2025,13 @@ const issueLineSchema = z.object({
   remarks: z.string().trim().max(500).optional().nullable(),
   /** From the slip's project's own stock (2026-10-18) — needs the slip to name the project. */
   projectStock: z.boolean().optional(),
+  /** From the slip's sales order's own stock (2026-10-21) — needs the slip to name the order. */
+  orderStock: z.boolean().optional(),
 });
 
 const issueSchema = z.object({
   jobId: z.string().optional().nullable(),
+  salesOrderId: z.string().optional().nullable(),
   warehouseId: z.string().min(1, 'Which warehouse?'),
   issuedToId: z.string().optional().nullable(),
   issuedToName: z.string().trim().optional().nullable(),
@@ -2029,23 +2052,48 @@ const issueSchema = z.object({
  * one it would issue at), and — charged to a project — carries its budget
  * line, the item's own filling in.
  */
-async function checkIssueLines(lines: z.infer<typeof issueLineSchema>[], warehouseId: string, jobId: string | null) {
+async function checkIssueLines(lines: z.infer<typeof issueLineSchema>[], warehouseId: string, jobId: string | null, salesOrderId: string | null = null) {
   const ids = [...new Set(lines.map((l) => l.itemId))];
-  const [items, balances, own] = await Promise.all([
+  const [items, balances, own, orderOwn] = await Promise.all([
     prisma.item.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, costCategoryId: true } }),
     prisma.inventoryBalance.findMany({ where: { warehouseId, itemId: { in: ids } } }),
     jobId ? projectHoldings(prisma, jobId, warehouseId) : Promise.resolve(new Map()),
+    salesOrderId ? orderHoldings(prisma, salesOrderId, warehouseId) : Promise.resolve(new Map()),
   ]);
   const byItem = new Map(items.map((i) => [i.id, i]));
   const byBalance = new Map(balances.map((b) => [b.itemId, b]));
   const asked = new Map<string, number>();
   for (const l of lines) {
-    const k = `${l.projectStock ? 'p' : 'c'}:${l.itemId}`;
+    const k = `${l.projectStock ? 'p' : l.orderStock ? 's' : 'c'}:${l.itemId}`;
     asked.set(k, (asked.get(k) ?? 0) + l.quantity);
   }
   return lines.map((l, n) => {
     const item = byItem.get(l.itemId);
     if (!item) throw badRequest(`Line ${n + 1}: that item does not exist`);
+    if (l.orderStock) {
+      // The sales order's own goods: the deal's cost already, nothing posted again.
+      if (!salesOrderId) throw badRequest(`Line ${n + 1}: a sales order's stock goes out on a slip that names the order`);
+      const held = orderOwn.get(l.itemId);
+      const onHand = held ? num(held.quantity) : 0;
+      if ((asked.get(`s:${l.itemId}`) ?? 0) > onHand + 0.0005) {
+        throw badRequest(`Line ${n + 1}: the sales order holds only ${qty(onHand)} of ${item.name} at this warehouse`);
+      }
+      const unitCost = num(held?.averageCost);
+      return {
+        itemId: l.itemId,
+        costCategoryId: null,
+        locationId: l.locationId || held?.locationId || null,
+        quantity: D(l.quantity),
+        unitCost: D(unitCost),
+        amount: D(cents(l.quantity * unitCost)),
+        projectStock: false,
+        orderStock: true,
+        serialNo: l.serialNo || null,
+        condition: l.condition || null,
+        remarks: l.remarks || null,
+        sortOrder: n,
+      };
+    }
     if (l.projectStock) {
       // The project's own goods: already charged to it at receiving.
       if (!jobId) throw badRequest(`Line ${n + 1}: project stock goes out on a slip that names the project`);
@@ -2063,6 +2111,7 @@ async function checkIssueLines(lines: z.infer<typeof issueLineSchema>[], warehou
         unitCost: D(unitCost),
         amount: D(cents(l.quantity * unitCost)),
         projectStock: true,
+        orderStock: false,
         serialNo: l.serialNo || null,
         condition: l.condition || null,
         remarks: l.remarks || null,
@@ -2087,6 +2136,7 @@ async function checkIssueLines(lines: z.infer<typeof issueLineSchema>[], warehou
       unitCost: D(unitCost),
       amount: D(cents(l.quantity * unitCost)),
       projectStock: false,
+      orderStock: false,
       serialNo: l.serialNo || null,
       condition: l.condition || null,
       remarks: l.remarks || null,
@@ -2103,6 +2153,12 @@ async function checkIssueHeader(body: Partial<z.infer<typeof issueSchema>>) {
   if (body.jobId && !(await prisma.job.findUnique({ where: { id: body.jobId }, select: { id: true } }))) {
     throw badRequest('That project does not exist');
   }
+  if (body.salesOrderId) {
+    if (body.jobId) throw badRequest('A slip names a project or a sales order, not both');
+    const so = await prisma.salesOrder.findUnique({ where: { id: body.salesOrderId }, select: { number: true, status: true } });
+    if (!so) throw badRequest('That sales order does not exist');
+    if (so.status !== 'ISSUED') throw badRequest(`${so.number} is ${statusLabel(so.status).toLowerCase()} — goods go out against an issued sales order`);
+  }
   if (body.issuedToId && !(await prisma.user.findUnique({ where: { id: body.issuedToId }, select: { id: true } }))) {
     throw badRequest('That person is not on file');
   }
@@ -2115,7 +2171,7 @@ stockIssueRoutes.post(
     const me = currentUser(req);
     const body = parseBody(issueSchema.extend({ lines: z.array(issueLineSchema).max(300).optional() }), req.body);
     await checkIssueHeader(body);
-    const rows = body.lines?.length ? await checkIssueLines(body.lines, body.warehouseId, body.jobId || null) : [];
+    const rows = body.lines?.length ? await checkIssueLines(body.lines, body.warehouseId, body.jobId || null, body.salesOrderId || null) : [];
 
     const issue = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('stock_issue', tx);
@@ -2123,6 +2179,7 @@ stockIssueRoutes.post(
         data: {
           number,
           jobId: body.jobId || null,
+          salesOrderId: body.salesOrderId || null,
           warehouseId: body.warehouseId,
           issuedById: me.id,
           issuedToId: body.issuedToId || null,
@@ -2164,12 +2221,13 @@ stockIssueRoutes.put(
     assertChangeIssue(me, issue);
     if (issue.status !== 'DRAFT') throw badRequest(`${issue.number} is ${statusLabel(issue.status).toLowerCase()} — only a draft is modified`);
     await checkIssueHeader(body);
-    const rows = await checkIssueLines(body.lines, body.warehouseId, body.jobId || null);
+    const rows = await checkIssueLines(body.lines, body.warehouseId, body.jobId || null, body.salesOrderId || null);
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.stockIssue.updateMany({
         where: { id: issue.id, status: 'DRAFT', ...(body.version ? { updatedAt: new Date(body.version) } : {}) },
         data: {
           jobId: body.jobId || null,
+          salesOrderId: body.salesOrderId || null,
           warehouseId: body.warehouseId,
           issuedToId: body.issuedToId || null,
           issuedToName: body.issuedToName || null,
@@ -2571,6 +2629,21 @@ async function postStockIssue(tx: Prisma.TransactionClient, issueId: string, act
   const ownByCategory = new Map<string, number>();
 
   for (const line of current.items) {
+    if (line.orderStock) {
+      if (!current.salesOrderId) throw badRequest(`${current.number} draws a sales order's stock but names no order`);
+      const moved = await issueOrderStock(tx, {
+        salesOrderId: current.salesOrderId,
+        itemId: line.itemId,
+        warehouseId: current.warehouseId,
+        quantity: num(line.quantity),
+        sourceType: 'stock_issue',
+        sourceId: current.id,
+        sourceNumber: current.number,
+        createdById: actorId,
+      });
+      await tx.stockIssueItem.update({ where: { id: line.id }, data: { unitCost: D(moved.unitCost), amount: D(moved.amount) } });
+      continue;
+    }
     if (line.projectStock) {
       if (!current.jobId) throw badRequest(`${current.number} draws project stock but names no project`);
       const moved = await issueProjectStock(tx, {
@@ -2867,6 +2940,21 @@ onApprovalReopened(ISSUE_DOC, {
     if (!claimed.count) throw badRequest(`${issue.number} changed a moment ago — reload to see where it stands`);
     const why = `${issue.number} pulled back to draft by ${actor.name}: ${reason}`;
     for (const line of issue.items) {
+      if (line.orderStock && issue.salesOrderId) {
+        await receiveOrderStock(tx, {
+          salesOrderId: issue.salesOrderId,
+          itemId: line.itemId,
+          warehouseId: issue.warehouseId,
+          quantity: num(line.quantity),
+          unitCost: num(line.unitCost),
+          sourceType: 'stock_issue',
+          sourceId: issue.id,
+          sourceNumber: issue.number,
+          notes: why,
+          createdById: actor.id,
+        });
+        continue;
+      }
       if (line.projectStock && issue.jobId) {
         await receiveProjectStock(tx, {
           jobId: issue.jobId,
@@ -3202,6 +3290,7 @@ async function loadSlip(id: string) {
     where: { id },
     include: {
       job: { select: { id: true, number: true, name: true } },
+      salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } },
       warehouse: { select: { id: true, name: true } },
       issuedBy: { select: { id: true, name: true } },
       requestedBy: { select: { id: true, name: true } },
@@ -3264,6 +3353,21 @@ async function presentSlip(slip: LoadedSlip, me: ResolvedUser) {
     })),
   };
 }
+
+/** The issued sales orders a borrow request may name (2026-10-21) — numbers and customers only, above `/:id`. */
+borrowRoutes.get(
+  '/sales-orders',
+  require_('gchain.borrow_slips.create'),
+  handler(async (_req, res) => {
+    const rows = await prisma.salesOrder.findMany({
+      where: { status: 'ISSUED' },
+      select: { id: true, number: true, customer: { select: { name: true } } },
+      orderBy: { orderDate: 'desc' },
+      take: 200,
+    });
+    res.json(rows.map((r) => ({ id: r.id, number: r.number, customer: r.customer.name })));
+  }),
+);
 
 borrowRoutes.get(
   '/:id',
@@ -3345,7 +3449,7 @@ borrowRoutes.get(
         kind: 'text',
         title: 'Reason for borrowing / project destination',
         body: [
-          `Project / customer: ${slip.job ? `${slip.job.number} — ${slip.job.name}` : '—'}`,
+          `Project / customer: ${slip.job ? `${slip.job.number} — ${slip.job.name}` : slip.salesOrder ? `Sales order ${slip.salesOrder.number} — ${slip.salesOrder.customer.name}` : '—'}`,
           `Site location: ${slip.siteLocation ?? '—'}`,
           `Purpose: ${slip.purpose}`,
           slip.notes ? `Notes: ${slip.notes}` : null,
@@ -3511,6 +3615,7 @@ const borrowLineSchema = z.object({
 
 const borrowSheetSchema = z.object({
   jobId: z.string().optional().nullable(),
+  salesOrderId: z.string().optional().nullable(),
   warehouseId: z.string().min(1, 'Which warehouse?'),
   borrowerId: z.string().optional().nullable(),
   borrowerName: z.string().trim().optional().nullable(),
@@ -3537,6 +3642,11 @@ async function checkBorrowSheet(me: ResolvedUser, body: z.infer<typeof borrowShe
   if (body.jobId) {
     const job = await prisma.job.findUnique({ where: { id: body.jobId }, select: { status: true } });
     if (!job || !['PLANNING', 'IN_PROGRESS', 'ON_HOLD'].includes(job.status)) throw badRequest('That project is not open');
+  }
+  if (body.salesOrderId) {
+    if (body.jobId) throw badRequest('A slip names a project or a sales order, not both');
+    const so = await prisma.salesOrder.findUnique({ where: { id: body.salesOrderId }, select: { number: true, status: true } });
+    if (!so || so.status !== 'ISSUED') throw badRequest('That sales order is not issued');
   }
   const day = today();
   const dueAt = asDate(body.dueAt)!;
@@ -3602,6 +3712,7 @@ borrowRoutes.post(
           number,
           status,
           jobId: body.jobId || null,
+          salesOrderId: body.salesOrderId || null,
           warehouseId: body.warehouseId,
           borrowerId: checked.borrowerId,
           borrowerName: checked.borrowerName,
@@ -3701,6 +3812,7 @@ borrowRoutes.put(
         where: { id: slip.id, status: 'DRAFT', updatedAt: slip.updatedAt },
         data: {
           jobId: body.jobId || null,
+          salesOrderId: body.salesOrderId || null,
           warehouseId: body.warehouseId,
           borrowerId: checked.borrowerId,
           borrowerName: checked.borrowerName,
@@ -4235,15 +4347,128 @@ async function projectStockList(me: ResolvedUser, q: ListQuery) {
   };
 }
 
+/**
+ * A SALES ORDER's own stock (2026-10-21): what was bought for an order with
+ * no project and received into a warehouse — never the company's balance or
+ * average — under Inventory's Stock filter (`?stock=order`), one row per
+ * order × item × warehouse. Released by a pull-out or an Outgoing slip on
+ * the order, posting nothing again.
+ */
+function orderStockWhere(me: ResolvedUser, q: ListQuery): Prisma.SalesOrderStockWhereInput {
+  const and: Prisma.SalesOrderStockWhereInput[] = [{ quantity: { gt: 0 } }];
+  const own = ownStockWhere(me);
+  if (own) and.push(own);
+  if (q.filters.warehouseId) and.push({ warehouseId: q.filters.warehouseId });
+  if (q.filters.salesOrderId) and.push({ salesOrderId: q.filters.salesOrderId });
+  if (q.search) {
+    and.push({
+      OR: [
+        { item: { name: { contains: q.search, mode: 'insensitive' } } },
+        { item: { code: { contains: q.search, mode: 'insensitive' } } },
+        { item: { partNumber: { contains: q.search, mode: 'insensitive' } } },
+        { salesOrder: { number: { contains: q.search, mode: 'insensitive' } } },
+        { salesOrder: { customer: { name: { contains: q.search, mode: 'insensitive' } } } },
+      ],
+    });
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) and.push({ id: { in: ids } });
+  if (q.filters.categoryId) and.push({ item: { categoryId: q.filters.categoryId === 'none' ? null : q.filters.categoryId } });
+  return { AND: and };
+}
+
+async function orderStockCard(me: ResolvedUser) {
+  const rows = await prisma.salesOrderStock.findMany({
+    where: { quantity: { gt: 0 }, ...(ownStockWhere(me) ?? {}) },
+    select: { salesOrderId: true, quantity: true, averageCost: true },
+  });
+  const value = rows.reduce((s, b) => s.add(b.quantity.mul(b.averageCost)), new Prisma.Decimal(0));
+  return { lines: rows.length, orders: new Set(rows.map((r) => r.salesOrderId)).size, value: Number(value.toFixed(2)) };
+}
+
+async function orderStockList(me: ResolvedUser, q: ListQuery) {
+  const where = orderStockWhere(me, q);
+  const [rows, total, everything] = await Promise.all([
+    prisma.salesOrderStock.findMany({
+      where,
+      include: {
+        item: {
+          select: {
+            id: true,
+            code: true,
+            partNumber: true,
+            brand: true,
+            name: true,
+            description: true,
+            unit: true,
+            minStock: true,
+            reorderLevel: true,
+            category: { select: { id: true, name: true } },
+            preferredSupplier: { select: { id: true, name: true } },
+          },
+        },
+        warehouse: { select: { id: true, name: true } },
+        location: { select: { id: true, code: true, name: true } },
+        salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } },
+      },
+      orderBy: [{ salesOrder: { number: 'asc' } }, { item: { name: 'asc' } }],
+      skip: (q.page - 1) * q.pageSize,
+      take: q.pageSize,
+    }),
+    prisma.salesOrderStock.count({ where }),
+    prisma.salesOrderStock.findMany({ where, select: { salesOrderId: true, itemId: true, quantity: true, averageCost: true } }),
+  ]);
+  const value = everything.reduce((s, b) => s.add(b.quantity.mul(b.averageCost)), new Prisma.Decimal(0));
+  return {
+    ...listResult(
+      rows.map((r) => {
+        const quantity = num(r.quantity);
+        return {
+          id: r.id,
+          item: {
+            ...r.item,
+            minStock: r.item.minStock == null ? null : num(r.item.minStock),
+            reorderLevel: r.item.reorderLevel == null ? null : num(r.item.reorderLevel),
+          },
+          warehouse: r.warehouse,
+          location: r.location,
+          salesOrder: { id: r.salesOrder.id, number: r.salesOrder.number, customer: r.salesOrder.customer.name },
+          quantity,
+          borrowedQty: 0,
+          available: quantity,
+          averageCost: num(r.averageCost),
+          value: cents(quantity * num(r.averageCost)),
+          needsReorder: false,
+          state: 'ORDER_STOCK',
+        };
+      }),
+      total,
+      q,
+    ),
+    summary: {
+      stock: 'order',
+      items: new Set(everything.map((b) => b.itemId)).size,
+      orders: new Set(everything.map((b) => b.salesOrderId)).size,
+      // What the deals paid for it — counted against each order's quoted cost.
+      valuation: Number(value.toFixed(2)),
+      categories: [],
+    },
+  };
+}
+
 inventoryRoutes.get(
   '/',
   requireView('gchain', 'inventory'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const stockKind = choice(q.filters.stock, { company: 'company', project: 'project' } as const, 'Stock');
+    const stockKind = choice(q.filters.stock, { company: 'company', project: 'project', order: 'order' } as const, 'Stock');
     if (stockKind === 'project') {
       res.json(await projectStockList(me, q));
+      return;
+    }
+    if (stockKind === 'order') {
+      res.json(await orderStockList(me, q));
       return;
     }
     const { base, where } = await inventoryListWhere(me, q);
@@ -4344,6 +4569,8 @@ inventoryRoutes.get(
         pendingOrders,
         // The projects' own goods on the shelves — their card links to `?stock=project`.
         projectStock: await projectStockCard(me),
+        // The sales orders' own goods — their card links to `?stock=order` (2026-10-21).
+        orderStock: await orderStockCard(me),
         // The first eight categories always (the owner's eight lead the
         // order), and any other that holds stock.
         categories: [
@@ -4515,7 +4742,54 @@ inventoryRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    if (choice(q.filters.stock, { company: 'company', project: 'project' } as const, 'Stock') === 'project') {
+    const stockKind = choice(q.filters.stock, { company: 'company', project: 'project', order: 'order' } as const, 'Stock');
+    if (stockKind === 'order') {
+      // The sales orders' own stock on paper (2026-10-21), the same query as the list.
+      const where = orderStockWhere(me, q);
+      const [rows, count, currency] = await Promise.all([
+        prisma.salesOrderStock.findMany({
+          where,
+          include: {
+            item: { select: { code: true, name: true, brand: true, unit: true } },
+            warehouse: { select: { name: true } },
+            location: { select: { code: true } },
+            salesOrder: { select: { number: true, customer: { select: { name: true } } } },
+          },
+          orderBy: [{ salesOrder: { number: 'asc' } }, { item: { name: 'asc' } }],
+          take: LIST_CAP,
+        }),
+        prisma.salesOrderStock.count({ where }),
+        companyCurrency(),
+      ]);
+      const total = cents(rows.reduce((s2, b) => s2 + num(b.quantity) * num(b.averageCost), 0));
+      const pdf = await renderDocument({
+        title: 'Sales Order Stock',
+        date: new Date(),
+        reference: listReference(count, rows.length, ['stock line', 'stock lines'], [q.search && `search "${q.search}"`, q.filters.ids && 'the rows selected']),
+        landscape: true,
+        sections: [
+          {
+            kind: 'table',
+            head: ['Sales order', 'Item', 'Warehouse', 'Bin', 'On hand', `Avg. cost (${currency})`, `Value (${currency})`],
+            align: ['left', 'left', 'left', 'left', 'right', 'right', 'right'],
+            rows: rows.map((b) => [
+              { title: b.salesOrder.number, body: b.salesOrder.customer.name },
+              { title: b.item.name, body: [b.item.code, b.item.brand].filter(Boolean).join(' · ') },
+              b.warehouse.name,
+              b.location?.code ?? '',
+              `${qty(num(b.quantity))} ${b.item.unit}`,
+              formatAmount(num(b.averageCost)),
+              formatAmount(cents(num(b.quantity) * num(b.averageCost))),
+            ]),
+          },
+          { kind: 'totals', rows: [{ label: totalLabel('Bought for the sales orders', count, rows.length), value: formatMoney(total, currency), bold: true }] },
+        ],
+      });
+      await audit({ entityType: 'inventory', entityId: 'list', action: 'EXPORTED', summary: `Exported the sales order stock as PDF (${rows.length} line(s))` }, req);
+      sendListPdf(res, pdf, 'sales-order-stock.pdf');
+      return;
+    }
+    if (stockKind === 'project') {
       // The projects' own stock on paper (2026-10-18), the same query as the list.
       const { where: own } = projectStockWhere(me, q);
       const [rows, count, currency] = await Promise.all([
@@ -4639,6 +4913,40 @@ inventoryRoutes.get(
     const warehouseId = req.query.warehouseId ? String(req.query.warehouseId) : undefined;
     // A project's own stock of the item (2026-10-18) — its rows and its moves alone.
     const jobId = req.query.jobId ? String(req.query.jobId) : undefined;
+    // A sales order's own stock of the item (2026-10-21) — its rows and its moves alone.
+    const salesOrderId = req.query.salesOrderId ? String(req.query.salesOrderId) : undefined;
+    if (salesOrderId) {
+      const [item, rows, moves] = await Promise.all([
+        prisma.item.findUnique({ where: { id: req.params.itemId }, select: { id: true, code: true, name: true, unit: true, reorderLevel: true, minStock: true, createdById: true } }),
+        prisma.salesOrderStock.findMany({
+          where: { itemId: req.params.itemId, salesOrderId, ...(warehouseId ? { warehouseId } : {}) },
+          include: { warehouse: { select: { id: true, name: true } }, location: { select: { id: true, code: true, name: true } } },
+        }),
+        prisma.inventoryTransaction.findMany({
+          where: { itemId: req.params.itemId, salesOrderId, ...(warehouseId ? { warehouseId } : {}) },
+          include: { warehouse: { select: { id: true, name: true } }, createdBy: { select: { id: true, name: true } } },
+          orderBy: { occurredAt: 'desc' },
+          take: 200,
+        }),
+      ]);
+      if (!item) throw notFound('Item not found');
+      assertStockVisible(me, item);
+      res.json({
+        canEdit: false,
+        item: { ...item, reorderLevel: item.reorderLevel == null ? null : num(item.reorderLevel), minStock: item.minStock == null ? null : num(item.minStock) },
+        salesOrder: await prisma.salesOrder.findUnique({ where: { id: salesOrderId }, select: { id: true, number: true } }),
+        balances: rows.map((b) => ({
+          ...b,
+          warehouse: { ...b.warehouse, locations: [] },
+          quantity: num(b.quantity),
+          borrowedQty: 0,
+          averageCost: num(b.averageCost),
+          value: cents(num(b.quantity) * num(b.averageCost)),
+        })),
+        movements: moves.map((m) => ({ ...m, quantity: num(m.quantity), unitCost: num(m.unitCost), balanceAfter: num(m.balanceAfter) })),
+      });
+      return;
+    }
     if (jobId) {
       const [item, rows, moves] = await Promise.all([
         prisma.item.findUnique({ where: { id: req.params.itemId }, select: { id: true, code: true, name: true, unit: true, reorderLevel: true, minStock: true, createdById: true } }),
@@ -4686,7 +4994,7 @@ inventoryRoutes.get(
       }),
       prisma.inventoryTransaction.findMany({
         // The company's stock alone: a project's own moves have their own card.
-        where: { itemId: req.params.itemId, jobId: null, ...(warehouseId ? { warehouseId } : {}) },
+        where: { itemId: req.params.itemId, jobId: null, salesOrderId: null, ...(warehouseId ? { warehouseId } : {}) },
         include: {
           warehouse: { select: { id: true, name: true } },
           createdBy: { select: { id: true, name: true } },

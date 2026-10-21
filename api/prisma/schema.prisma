@@ -1705,6 +1705,8 @@ model SalesOrder {
   purchaseOrders   PurchaseOrder[]    @relation("PoSalesOrder")
   orderStock       SalesOrderStock[]
   stockMoves       InventoryTransaction[] @relation("SalesOrderStockMoves")
+  stockIssues      StockIssue[]           @relation("IssueSalesOrder")
+  borrowSlips      BorrowSlip[]           @relation("BorrowSalesOrder")
 
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
@@ -3093,6 +3095,11 @@ model StockIssue {
   jobId String?
   job   Job?    @relation(fields: [jobId], references: [id], onDelete: Restrict)
 
+  /// The sales order whose own stock the slip releases (2026-10-21) — a
+  /// project or a sales order, never both.
+  salesOrderId String?
+  salesOrder   SalesOrder? @relation("IssueSalesOrder", fields: [salesOrderId], references: [id], onDelete: Restrict)
+
   warehouseId String
   warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
 
@@ -3154,6 +3161,9 @@ model StockIssueItem {
   /// Drawn from the slip's project's own stock (2026-10-18): already charged
   /// to the project at receiving, so issuing it posts no cost again.
   projectStock Boolean @default(false)
+  /// Drawn from the slip's sales order's own stock (2026-10-21) — the deal's
+  /// cost already, so issuing it posts nothing.
+  orderStock   Boolean @default(false)
   remarks      String?
   /// Serial or batch, and its condition as it left (2026-10-15).
   serialNo     String?
@@ -3278,6 +3288,9 @@ model PulloutItem {
   /// Serial or batch, and its condition as it left (2026-10-15).
   serialNo     String?
   condition    String?
+  /// Drawn from the sales order's own stock (2026-10-21) — what was bought
+  /// for it and received into this warehouse — never the company's.
+  orderStock   Boolean @default(false)
 
   @@index([slipId])
   @@index([sourceLineId])
@@ -3323,6 +3336,10 @@ model BorrowSlip {
 
   jobId String?
   job   Job?    @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  /// The sales order the tools go out for (2026-10-21) — a reference, no cost.
+  salesOrderId String?
+  salesOrder   SalesOrder? @relation("BorrowSalesOrder", fields: [salesOrderId], references: [id], onDelete: SetNull)
 
   warehouseId String
   warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)

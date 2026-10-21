@@ -1277,7 +1277,9 @@ async function refuseWhileBuying(orderId: string, number: string, verb: string) 
       select: { number: true },
     }),
     prisma.purchaseOrder.findMany({ where: { salesOrderId: orderId, status: { not: 'CANCELLED' } }, select: { number: true } }),
-  ]);
+    // An Outgoing slip releasing the order's own stock (2026-10-21).
+    prisma.stockIssue.findMany({ where: { salesOrderId: orderId, status: { not: 'CANCELLED' } }, select: { number: true } }),
+  ]).then(([r, o, i]) => [r, [...o, ...i]] as const);
   const names = [...requests, ...orders].map((d) => d.number);
   if (names.length) throw badRequest(`${number} cannot be ${verb} — ${names.join(', ')} ${names.length === 1 ? 'buys' : 'buy'} for it`);
 }

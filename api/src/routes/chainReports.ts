@@ -100,6 +100,7 @@ async function purchaseRequests(range: Range): Promise<Report> {
     include: {
       items: { select: { estimatedAmount: true } },
       job: { select: { number: true, name: true } },
+      salesOrder: { select: { number: true } },
       requestedBy: { select: { name: true } },
       warehouse: { select: { name: true } },
     },
@@ -129,7 +130,7 @@ async function purchaseRequests(range: Range): Promise<Report> {
     series: series.done(),
     tables: [
       table('By status', [{ label: 'Status' }, { label: 'Requests', align: 'right' }, { label: 'Estimated value', money: true }], money2(tally(rows, (r) => statusLabel(r.status), fig), 20)),
-      table('By project', [{ label: 'Project' }, { label: 'Requests', align: 'right' }, { label: 'Estimated value', money: true }], money2(tally(live, (r) => (r.job ? `${r.job.number} — ${r.job.name}` : (r.warehouse ? `Stock — ${r.warehouse.name}` : 'Stock')), fig))),
+      table('By project or sales order', [{ label: 'Project / sales order' }, { label: 'Requests', align: 'right' }, { label: 'Estimated value', money: true }], money2(tally(live, (r) => (r.job ? `${r.job.number} — ${r.job.name}` : r.salesOrder ? `Sales order ${r.salesOrder.number}` : (r.warehouse ? `Stock — ${r.warehouse.name}` : 'Stock')), fig))),
       table('By requester', [{ label: 'Requester' }, { label: 'Requests', align: 'right' }, { label: 'Estimated value', money: true }], money2(tally(live, (r) => r.requestedBy.name, fig))),
     ],
   };
@@ -234,7 +235,7 @@ async function canvass(range: Range): Promise<Report> {
 async function purchaseOrders(range: Range): Promise<Report> {
   const rows = await prisma.purchaseOrder.findMany({
     where: { orderDate: { gte: range.from, lte: range.to } },
-    include: { supplier: { select: { name: true } }, job: { select: { number: true, name: true } } },
+    include: { supplier: { select: { name: true } }, job: { select: { number: true, name: true } }, salesOrder: { select: { number: true } } },
   });
   const placed = rows.filter((r) => ['ISSUED', 'PARTIALLY_RECEIVED', 'RECEIVED'].includes(r.status));
   const months = monthsOf(range);
@@ -274,7 +275,7 @@ async function purchaseOrders(range: Range): Promise<Report> {
     tables: [
       table('By supplier', [{ label: 'Supplier' }, { label: 'Orders', align: 'right' }, { label: 'Total', money: true }], money2(bySupplier, 15)),
       ...(matrix ? [matrix] : []),
-      table('By project', [{ label: 'Project' }, { label: 'Orders', align: 'right' }, { label: 'Total', money: true }], money2(tally(placed, (r) => (r.job ? `${r.job.number} — ${r.job.name}` : 'Stock'), (r) => [1, num(r.total)]))),
+      table('By project or sales order', [{ label: 'Project / sales order' }, { label: 'Orders', align: 'right' }, { label: 'Total', money: true }], money2(tally(placed, (r) => (r.job ? `${r.job.number} — ${r.job.name}` : r.salesOrder ? `Sales order ${r.salesOrder.number}` : 'Stock'), (r) => [1, num(r.total)]))),
     ],
     notes: months.length > 12 ? ['Choose a range of twelve months or fewer to see each supplier month by month.'] : undefined,
   };
@@ -414,6 +415,7 @@ async function outgoing(range: Range): Promise<Report> {
     include: {
       items: { select: { quantity: true, amount: true, item: { select: { name: true, code: true } } } },
       job: { select: { number: true, name: true } },
+      salesOrder: { select: { number: true } },
       issuedTo: { select: { name: true } },
     },
   });
@@ -441,7 +443,7 @@ async function outgoing(range: Range): Promise<Report> {
     ],
     series: series.done(),
     tables: [
-      table('By project', [{ label: 'Project' }, { label: 'Slips', align: 'right' }, { label: 'Quantity', align: 'right' }, { label: 'Value', money: true }], three(tally(issued, (r) => (r.job ? `${r.job.number} — ${r.job.name}` : 'General use'), (r) => [1, qtyOf(r), valueOf(r)]))),
+      table('By project or sales order', [{ label: 'Project / sales order' }, { label: 'Slips', align: 'right' }, { label: 'Quantity', align: 'right' }, { label: 'Value', money: true }], three(tally(issued, (r) => (r.job ? `${r.job.number} — ${r.job.name}` : r.salesOrder ? `Sales order ${r.salesOrder.number}` : 'General use'), (r) => [1, qtyOf(r), valueOf(r)]))),
       table('By requestor', [{ label: 'Requested by' }, { label: 'Slips', align: 'right' }, { label: 'Quantity', align: 'right' }, { label: 'Value', money: true }], three(tally(issued, (r) => r.issuedTo?.name ?? r.issuedToName ?? 'Not named', (r) => [1, qtyOf(r), valueOf(r)]))),
       table('Top items', [{ label: 'Item' }, { label: 'Lines', align: 'right' }, { label: 'Quantity', align: 'right' }, { label: 'Value', money: true }], three(tally(lines, (l) => l.key, (l) => [1, l.quantity, l.value]), 15)),
     ],

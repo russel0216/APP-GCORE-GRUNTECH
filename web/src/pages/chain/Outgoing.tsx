@@ -179,6 +179,8 @@ interface StockOption {
   itemId: string;
   /** The project's own goods: charged to it when they arrived, so issuing them charges nothing again. */
   projectStock?: boolean;
+  /** A sales order's own goods, bought for it (2026-10-21): the deal's cost already. */
+  orderStock?: boolean;
   code: string;
   partNumber: string | null;
   brand: string | null;
@@ -204,6 +206,7 @@ interface Existing {
   warehouseId: string;
   jobId: string | null;
   job: { id: string; number: string; name: string } | null;
+  salesOrderId?: string | null;
   issuedToId: string | null;
   issuedTo: { id: string; name: string } | null;
   issuedToName: string | null;
@@ -215,12 +218,14 @@ interface Existing {
   carrier: string | null;
   driverName: string | null;
   instructions: string | null;
-  items: { itemId: string; projectStock?: boolean; quantity: number; serialNo: string | null; condition: string | null; remarks: string | null }[];
+  items: { itemId: string; projectStock?: boolean; orderStock?: boolean; quantity: number; serialNo: string | null; condition: string | null; remarks: string | null }[];
 }
 
-/** A line's pick: the item, or `p:<item>` from the project's own stock. */
+/** A line's pick: the item, `p:<item>` from the project's own stock, or `s:<item>` from the sales order's. */
 const OWN = 'p:';
-const pickOf = (itemId: string, projectStock?: boolean) => (projectStock ? `${OWN}${itemId}` : itemId);
+const ORDER = 's:';
+const pickOf = (itemId: string, projectStock?: boolean, orderStock?: boolean) =>
+  projectStock ? `${OWN}${itemId}` : orderStock ? `${ORDER}${itemId}` : itemId;
 
 /** The conditions a line usually leaves in; anything else may be typed. */
 const CONDITIONS = ['New', 'Good', 'Used — good', 'Refurbished', 'For repair'];
@@ -245,6 +250,7 @@ export function OutgoingEditor() {
   const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
   const [stock, setStock] = useState<StockOption[]>([]);
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
+  const [salesOrders, setSalesOrders] = useState<{ id: string; number: string; customer: string }[]>([]);
   const [terms, setTerms] = useState('');
   const [notALogin, setNotALogin] = useState(false);
   const [header, setHeader] = useState({
@@ -253,6 +259,7 @@ export function OutgoingEditor() {
     issuedToId: '',
     issuedToName: '',
     jobId: '',
+    salesOrderId: '',
     purpose: '',
     deliverTo: '',
     referenceNo: '',
@@ -271,9 +278,12 @@ export function OutgoingEditor() {
     let live = true;
     (async () => {
       try {
-        const opts = await api.get<{ warehouses: { id: string; name: string }[]; terms: string }>('/stock-issues/options');
+        const opts = await api.get<{ warehouses: { id: string; name: string }[]; terms: string; salesOrders?: { id: string; number: string; customer: string }[] }>(
+          '/stock-issues/options',
+        );
         if (!live) return;
         setWarehouses(opts.warehouses);
+        setSalesOrders(opts.salesOrders ?? []);
         setTerms(opts.terms);
         api.get<typeof jobs>('/jobs/lookup').then((j) => live && setJobs(j)).catch(() => {});
         if (editing) {
@@ -286,6 +296,7 @@ export function OutgoingEditor() {
             issuedToId: r.issuedToId ?? '',
             issuedToName: r.issuedToId ? '' : (r.issuedToName ?? ''),
             jobId: r.jobId ?? '',
+            salesOrderId: r.salesOrderId ?? '',
             purpose: r.purpose,
             deliverTo: r.deliverTo ?? '',
             referenceNo: r.referenceNo ?? '',
@@ -296,7 +307,7 @@ export function OutgoingEditor() {
           };
           const ls = r.items.map((i) => ({
             key: newKey(),
-            itemId: pickOf(i.itemId, i.projectStock),
+            itemId: pickOf(i.itemId, i.projectStock, i.orderStock),
             serialNo: i.serialNo ?? '',
             quantity: String(i.quantity),
             condition: i.condition ?? '',
@@ -335,8 +346,8 @@ export function OutgoingEditor() {
     }
     let live = true;
     api
-      .get<{ stock: StockOption[]; projectStock: StockOption[] }>(
-        `/stock-issues/options${qs({ warehouseId: header.warehouseId, jobId: header.jobId || undefined })}`,
+      .get<{ stock: StockOption[]; projectStock: StockOption[]; orderStock?: StockOption[] }>(
+        `/stock-issues/options${qs({ warehouseId: header.warehouseId, jobId: header.jobId || undefined, salesOrderId: header.salesOrderId || undefined })}`,
       )
       .then(
         (r) =>
@@ -344,6 +355,7 @@ export function OutgoingEditor() {
           setStock([
             // The project's own goods first, then the company's stock.
             ...(r.projectStock ?? []).map((o) => ({ ...o, itemId: pickOf(o.itemId, true), projectStock: true })),
+            ...(r.orderStock ?? []).map((o) => ({ ...o, itemId: pickOf(o.itemId, false, true), orderStock: true })),
             ...r.stock,
           ]),
       )
@@ -351,7 +363,7 @@ export function OutgoingEditor() {
     return () => {
       live = false;
     };
-  }, [header.warehouseId, header.jobId]);
+  }, [header.warehouseId, header.jobId, header.salesOrderId]);
 
   const stockOf = useMemo(() => new Map(stock.map((s) => [s.itemId, s])), [stock]);
   const sent = lines.filter((l) => l.itemId || l.quantity);
@@ -394,6 +406,7 @@ export function OutgoingEditor() {
       issuedToId: notALogin ? null : header.issuedToId || null,
       issuedToName: notALogin ? header.issuedToName.trim() || null : (people.find((p) => p.id === header.issuedToId)?.name ?? existing?.issuedTo?.name ?? null),
       jobId: header.jobId || null,
+      salesOrderId: header.jobId ? null : header.salesOrderId || null,
       purpose: header.purpose.trim(),
       deliverTo: header.deliverTo.trim() || null,
       referenceNo: header.referenceNo.trim() || null,
@@ -402,8 +415,9 @@ export function OutgoingEditor() {
       instructions: header.instructions.trim() || null,
       notes: header.notes.trim() || null,
       lines: sent.map((l) => ({
-        itemId: l.itemId.startsWith(OWN) ? l.itemId.slice(OWN.length) : l.itemId,
+        itemId: l.itemId.startsWith(OWN) ? l.itemId.slice(OWN.length) : l.itemId.startsWith(ORDER) ? l.itemId.slice(ORDER.length) : l.itemId,
         projectStock: l.itemId.startsWith(OWN),
+        orderStock: l.itemId.startsWith(ORDER),
         quantity: Number(l.quantity),
         serialNo: l.serialNo.trim() || null,
         condition: l.condition.trim() || null,
@@ -563,6 +577,18 @@ export function OutgoingEditor() {
                   ))}
                 </select>
               </Field>
+              {!header.jobId && (salesOrders.length > 0 || header.salesOrderId) && (
+                <Field label="For a sales order" hint="Releases what was bought for the order and held at the warehouse — nothing is charged again">
+                  <select value={header.salesOrderId} onChange={set('salesOrderId')}>
+                    <option value="">— none —</option>
+                    {salesOrders.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.number} — {o.customer}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
               <Field label="Deliver to" hint={job ? 'Leave blank to print the project' : 'Site, office, room'}>
                 <input value={header.deliverTo} maxLength={300} onChange={set('deliverTo')} />
               </Field>
@@ -735,7 +761,8 @@ export function OutgoingEditor() {
 /** What the warehouse holds, searched by code, part number, brand or name. */
 function StockLookup({ stock, value, onPick }: { stock: StockOption[]; value: string; onPick: (itemId: string) => void }) {
   const chosen = stock.find((s) => s.itemId === value) ?? null;
-  const label = (s: StockOption) => `${s.partNumber ?? s.code} — ${s.name}${s.projectStock ? ' (project stock)' : ''}`;
+  const label = (s: StockOption) =>
+    `${s.partNumber ?? s.code} — ${s.name}${s.projectStock ? ' (project stock)' : s.orderStock ? ' (sales order stock)' : ''}`;
   const [term, setTerm] = useState(chosen ? label(chosen) : '');
   const [open, setOpen] = useState(false);
   const shown = useRef(value);
@@ -787,7 +814,7 @@ function StockLookup({ stock, value, onPick }: { stock: StockOption[]; value: st
               >
                 <span className="mono">{s.partNumber ?? s.code}</span> — {s.name}
                 <span className="muted">
-                  {s.projectStock ? ' · the project’s own stock' : ''}
+                  {s.projectStock ? ' · the project’s own stock' : s.orderStock ? ' · held for the sales order' : ''}
                   {s.brand ? ` · ${s.brand}` : ''} · {qtyText(s.available)} {s.unit} available
                 </span>
               </button>

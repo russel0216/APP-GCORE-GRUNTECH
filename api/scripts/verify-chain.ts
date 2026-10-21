@@ -185,6 +185,7 @@ async function cleanup() {
   // (Restrict); they go with their TAG later, so let go of the order first.
   await prisma.purchaseOrder.updateMany({ where: { salesOrder: { number: { startsWith: TAG } } }, data: { salesOrderId: null } });
   await prisma.purchaseRequest.updateMany({ where: { salesOrder: { number: { startsWith: TAG } } }, data: { salesOrderId: null } });
+  await prisma.stockIssue.updateMany({ where: { salesOrder: { number: { startsWith: TAG } } }, data: { salesOrderId: null } });
   await prisma.salesOrder.deleteMany({ where: { number: { startsWith: TAG } } });
   await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
   // The warehouse's bells about this script's borrow slips name the slip,
@@ -953,6 +954,7 @@ async function main() {
   // read off the documents, and goods received into a warehouse are held for
   // the order apart from the company's stock.
   console.log('\nBuying for a sales order');
+  let boughtForOrderId = '';
   {
     const { salesOrderSpend } = await import('../src/shared/orderStock');
     const soQuote = await prisma.quotation.create({
@@ -1099,6 +1101,48 @@ async function main() {
       goodsOnly.length === 1 && both.length === 2 && both.some((t) => t.kind === 'text' && t.title === 'Terms — services'),
       JSON.stringify(both.map((t) => (t.kind === 'text' ? t.title : t.kind))),
     );
+    boughtForOrderId = so.id;
+    // The order's own goods go out by a pull-out slip and an Outgoing slip on
+    // the order: off its shelf, never the company's, posting nothing again.
+    const companyBeforeOut = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+    const ledgerBeforeOut = await prisma.jobCostEntry.count();
+    const soPull = await prisma.pulloutSlip.create({
+      data: {
+        number: await nextNumber('pullout_slip'),
+        kind: 'SALES_ORDER',
+        status: 'PENDING_APPROVAL',
+        salesOrderId: so.id,
+        warehouseId: warehouse.id,
+        preparedById: procurement.id,
+        pulloutDate: new Date(),
+        notes: `${TAG} sales order stock pull-out`,
+        items: { create: [{ itemId: item.id, quantity: D(1), unitCost: D(280), amount: D(280), orderStock: true }] },
+      },
+    });
+    await settlePullout(soPull.id, 'APPROVED');
+    const soOut = await prisma.stockIssue.create({
+      data: {
+        number: await nextNumber('stock_issue'),
+        status: 'PENDING_APPROVAL',
+        salesOrderId: so.id,
+        warehouseId: warehouse.id,
+        issuedById: procurement.id,
+        purpose: `${TAG} sales order stock to the customer`,
+        items: { create: [{ itemId: item.id, quantity: D(1), unitCost: D(280), amount: D(280), orderStock: true }] },
+      },
+    });
+    await settleStockIssue(soOut.id, 'APPROVED');
+    const heldAfter = await prisma.salesOrderStock.findUnique({ where: { salesOrderId_itemId_warehouseId: { salesOrderId: so.id, itemId: item.id, warehouseId: warehouse.id } } });
+    const companyAfterOut = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+    check(
+      'a pull-out and an Outgoing slip on the order take its own stock (2 → 0), leave the company\'s alone and charge no project',
+      (await prisma.pulloutSlip.findUniqueOrThrow({ where: { id: soPull.id } })).status === 'PULLED_OUT' &&
+        (await prisma.stockIssue.findUniqueOrThrow({ where: { id: soOut.id } })).status === 'ISSUED' &&
+        money(num(heldAfter?.quantity), 0) &&
+        num(companyAfterOut?.quantity) === num(companyBeforeOut?.quantity) &&
+        (await prisma.jobCostEntry.count()) === ledgerBeforeOut,
+      `held ${num(heldAfter?.quantity)} · company ${num(companyBeforeOut?.quantity)} → ${num(companyAfterOut?.quantity)}`,
+    );
     const { issueOrderStock } = await import('../src/shared/orderStock');
     await expectRejection(
       'more than the order holds is refused',
@@ -1155,6 +1199,18 @@ async function main() {
       const company = await api(buyerToken, 'GET', `/inventory?warehouseId=${warehouse.id}`);
       const companyBody = company.body as { summary?: { projectStock?: { lines: number } } };
       check('and the company list counts it on its Project stock card', (companyBody.summary?.projectStock?.lines ?? 0) >= 1, JSON.stringify(companyBody.summary?.projectStock));
+      // A sales order's own stock (2026-10-21) under the same Stock filter.
+      const { receiveOrderStock } = await import('../src/shared/orderStock');
+      await prisma.$transaction((tx) =>
+        receiveOrderStock(tx, { salesOrderId: boughtForOrderId, itemId: item.id, warehouseId: warehouse.id, quantity: 5, unitCost: 100, sourceType: 'test', createdById: procurement.id }),
+      );
+      const orderList = await api(buyerToken, 'GET', `/inventory?stock=order&salesOrderId=${boughtForOrderId}`);
+      const orderBody = orderList.body as { rows?: { salesOrder?: { id: string }; quantity: number }[]; summary?: { stock?: string; valuation?: number } };
+      check(
+        'GET /inventory?stock=order lists a sales order\'s own goods (5 at 100)',
+        orderList.status === 200 && orderBody.summary?.stock === 'order' && orderBody.rows?.length === 1 && orderBody.rows[0].salesOrder?.id === boughtForOrderId && orderBody.rows[0].quantity === 5 && orderBody.summary?.valuation === 500,
+        `${orderList.status} ${JSON.stringify(orderBody.summary)}`,
+      );
     }
 
     // A bill against the order and the goods received on it.
