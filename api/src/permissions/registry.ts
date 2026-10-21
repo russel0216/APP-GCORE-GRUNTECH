@@ -327,6 +327,10 @@ export const REGISTRY: ModuleDef[] = [
       // each are approved, who fills them and what is vacant. Filled/vacant are
       // counted off active employees, never stored.
       { key: 'plantilla', own: 'positions you added', group: 'Records', label: 'Plantilla', path: '/g-hr/plantilla', actions: SHARED, phase: 6 },
+      // The company's tagged property — vehicles, laptops, tools, kits — and
+      // who holds each (2026-10-21, the owner's Asset Management tab, beside
+      // the Plantilla). Create adds an asset; Edit issues and takes back.
+      { key: 'assets', own: 'the assets you added, and those issued to you', group: 'Records', label: 'Asset Management', path: '/g-hr/assets', actions: SHARED_KEPT, phase: 10, note: 'Create adds an asset; Edit All issues, takes back and retires any; View Own reads what you added and what is issued to you' },
       // Pay data and evaluations are the two things on an employee a colleague
       // must not see; both live behind their own key rather than under employees.
       // One person's path from pre-boarding to the clearance certificate

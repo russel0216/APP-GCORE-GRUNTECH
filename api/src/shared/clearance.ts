@@ -112,6 +112,24 @@ export async function scanAccountabilities(employee: {
   const fullName = `${employee.firstName} ${employee.lastName}`.trim();
   const today = dayKey(new Date());
 
+  // ── ADMIN: company property issued to them (2026-10-21, Asset Management) ──
+  // Each open issuance is a line, cleared only by the asset's return.
+  const held = await prisma.assetIssuance.findMany({
+    where: { employeeId: employee.id, returnedOn: null },
+    include: { asset: { select: { id: true, tag: true, brandModel: true, serialNo: true, plateNo: true, assetType: { select: { name: true } } } } },
+    orderBy: { issuedOn: 'asc' },
+  });
+  for (const h of held) {
+    const ref = h.asset.plateNo ?? h.asset.serialNo;
+    refs.push({
+      area: 'ADMIN',
+      sourceType: 'asset_issuance',
+      sourceId: h.id,
+      description: `${h.asset.assetType.name} ${h.asset.tag} — ${h.asset.brandModel}${ref ? ` (${ref})` : ''}, issued ${formatDate(h.issuedOn)}`,
+      link: `/g-hr/assets/${h.asset.id}`,
+    });
+  }
+
   // ── WAREHOUSE: borrow slips ──
   // A slip written to a person with no login is matched by name; only
   // borrowerId is reliable, and the screen says "searched by name" on those.

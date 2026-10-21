@@ -676,8 +676,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,655 assertions across twenty-two scripts** (counted 2026-10-21, after
-the owner's batch of 2026-10-21's first push — 2 on chain for the CEO
+**4,677 assertions across twenty-two scripts** (counted 2026-10-21, after
+22 on hr for Asset Management — the tag, issue once, View Own's door, the
+cost hidden, the clearance line and Return pending, take back, the slip,
+retire not delete — and before it the owner's batch of 2026-10-21's first push — 2 on chain for the CEO
 printed under his highest role, 1 on sales for a sales order delete that
 names what blocks it, 2 on calendar for Not going's reason, 17 on hr for a
 memo's explanation letter, its stamped paper and pull back then delete — and
@@ -778,7 +780,7 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
 429, masters 92, sales 643, costing 205, pipeline 121, calendar 103, numbering
-94, partners 120, delivery 195, chain 379, hr 565, plantilla 129, meetings
+94, partners 120, delivery 195, chain 379, hr 587, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 440, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
@@ -3646,6 +3648,63 @@ pushes; the first:
   Acknowledgements table prints `formatDateTime` and the explanation, and
   the recipient's own copy prints "Acknowledged by <name> on <date, time>"
   as the digital signature.
+
+## G-HR › Records › Asset Management (2026-10-21)
+
+The owner's `G-HR_Asset_Management_Tab_Specification.pdf` (batch of
+2026-10-21, push 2; the plan's push 2 and his answer: G-CORE tag numbers).
+Beside the Plantilla: `ghr.assets` (SHARED_KEPT — own is the assets one
+added AND those issued to one), `/g-hr/assets` and `/g-hr/assets/:id`,
+`routes/assets.ts` at `/api/assets` (imported in `index.ts` as
+`companyAssetRoutes`: `/api/installed-assets` already exports an
+`assetRoutes`), `shared/assets.ts`, `pages/hr/Assets.tsx`.
+
+- **`CompanyAsset` is one TAGGED unit** — never a stock quantity (the
+  warehouse's items and borrow slips are another thing): `tag` from
+  `nextNumber('company_asset')` (GT-AST-2026-0001), an `AssetType`, brand &
+  model, serial, plate, description, purchase date, `cost` (Edit All alone
+  reads or writes it), `status` (`AssetStatusHr`: AVAILABLE | ISSUED |
+  UNDER_REPAIR | RETIRED — `AssetStatus` is the customer machine's).
+- **`AssetIssuance` is the history**: employee, issued on / by, condition and
+  remarks out, returned on / received by, condition and note back. One open
+  at a time, claimed on the asset's status (`/issue` AVAILABLE → ISSUED,
+  `/return` closes the open one → AVAILABLE, or UNDER_REPAIR with
+  `toRepair`). `/repair` toggles UNDER_REPAIR; `/retire { reason }` (refused
+  while issued; `{ restore: true }` back); `DELETE` only an asset never
+  issued, Edit All — its history is a record.
+- **Return pending is derived, never stored** (`assetState()`,
+  `leavingEmployees()`): an ISSUED asset whose holder has a clearance not
+  cancelled, or a separation date — the red card, the `?status=
+  RETURN_PENDING` filter (a where on the same rule) and the row's remark
+  "Leaving — last day …. Return required before the exit clearance."
+- **The clearance**: `scanAccountabilities()` lists every open issuance as
+  an ADMIN line (`sourceType` `asset_issuance`, linking the asset), cleared
+  only by the return — the borrow slip's rule; People Flow's property item
+  follows the clearance.
+- **The screen** is the PDF's: four cards from the list's own query (Total
+  company assets — not retired, Issued, Available, Pending return), Asset
+  type, Brand & model, Asset details / tag, Date issued, Issued to (employee
+  & team), Status, Remarks & clearance note; the PDF's two views as the
+  `view=issued` filter (rule 9), retired ones only with `retired=true`;
+  "+ New asset"; the policy note under the list linking Turnover &
+  Clearance. The record page: Issue to employee / Take back as next steps
+  (modal forms; the employee picker is `/employees/lookup`, now open to the
+  asset rights), Print is the open issuance's **Asset Issuance Slip**
+  (`GET /assets/:id/issuances/:issuanceId/pdf` — the asset, the holder,
+  condition, the return; Issued by, Received by, Returned — received by,
+  "Pending" until back), ⋯ Send to repair / Retire / Restore / Delete,
+  the issuance history with a slip per row, and Files (`company_asset`
+  attachments). The register prints (`GET /assets/pdf`, landscape).
+- **Asset types** are Admin › Categories › Asset types
+  (`/reference/asset-types`, the service document categories' contract;
+  `ASSET_TYPES` seeded as system rows: Company Vehicle, Office Laptop,
+  Mobile Phone, Power Tools / Testing, Safety Gear & Tool Kit, Other).
+- **Who**: `splitBorrowedRights()` gave View All, Create and Edit All once
+  to whoever held Employees › Edit All, and View Own to whoever reads their
+  own records (`assets-own`); `HR_COMMON` lists it. The employee record has
+  an **Assets** tab (`GET /assets/employee/:employeeId` — View All, or one's
+  own). Ctrl+K finds assets; `recordLink` maps `company_asset` and
+  `asset_type`.
 
 ## The notification bell (2026-10-20)
 

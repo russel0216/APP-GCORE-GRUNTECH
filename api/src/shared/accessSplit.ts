@@ -41,6 +41,10 @@ export const ACCESS_SPLIT: { key: string; from: string; to: string[] }[] = [
   { key: 'my-records', from: 'ghr.clock.view_own', to: ['ghr.my_records.view_own'] },
   // Memos (2026-10-20): HR — whoever kept the employee records — issues them.
   { key: 'memos', from: 'ghr.employees.edit_all', to: ['ghr.memos.view_all', 'ghr.memos.create', 'ghr.memos.edit_all'] },
+  // Asset Management (2026-10-21): HR — whoever kept the employee records — keeps the property register.
+  { key: 'assets', from: 'ghr.employees.edit_all', to: ['ghr.assets.view_all', 'ghr.assets.create', 'ghr.assets.edit_all'] },
+  // …and everyone who reads their own records reads the property issued to them.
+  { key: 'assets-own', from: 'ghr.my_records.view_own', to: ['ghr.assets.view_own'] },
   // Procurement Settings (2026-10-21): kept by whoever may change every purchase order.
   { key: 'procurement-settings', from: 'gchain.purchase_orders.edit_all', to: ['gchain.settings.view_all', 'gchain.settings.edit_all'] },
 ];

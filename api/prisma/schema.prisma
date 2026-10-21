@@ -41,11 +41,14 @@ model User {
   photoPath String?
 
   // Approval routing: "approvers are to whom they are directly reporting".
-  supervisorId String?
-  supervisor   User?   @relation("Supervision", fields: [supervisorId], references: [id], onDelete: SetNull)
-  reports      User[]  @relation("Supervision")
-  memosAuthored Memo[] @relation("MemoAuthor")
-  memosIssued   Memo[] @relation("MemoIssuer")
+  supervisorId   String?
+  supervisor     User?           @relation("Supervision", fields: [supervisorId], references: [id], onDelete: SetNull)
+  reports        User[]          @relation("Supervision")
+  memosAuthored  Memo[]          @relation("MemoAuthor")
+  assetsAdded    CompanyAsset[]  @relation("AssetAdder")
+  assetsIssued   AssetIssuance[] @relation("AssetIssuer")
+  assetsReceived AssetIssuance[] @relation("AssetReceiver")
+  memosIssued    Memo[]          @relation("MemoIssuer")
 
   departmentId String?
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
@@ -95,16 +98,16 @@ model User {
   trainingVerified       TrainingRecord[]     @relation("TrainingVerifier")
   trainingRecordsCreated TrainingRecord[]     @relation("TrainingRecordAuthor")
 
-  jobsManaged     Job[]            @relation("JobManager")
-  jobsCreated     Job[]            @relation("JobCreator")
-  costEntries     JobCostEntry[]
-  budgetRequests  BudgetRequest[]  @relation("BudgetRequester")
-  reportsPrepared ProgressReport[] @relation("ReportPreparer")
-  reportsApproved ProgressReport[] @relation("ReportApprover")
-  plansUploaded   ApprovedPlan[]   @relation("PlanUploader")
-  plansCustomerRecorded ApprovedPlan[] @relation("PlanCustomerRecorder")
+  jobsManaged           Job[]              @relation("JobManager")
+  jobsCreated           Job[]              @relation("JobCreator")
+  costEntries           JobCostEntry[]
+  budgetRequests        BudgetRequest[]    @relation("BudgetRequester")
+  reportsPrepared       ProgressReport[]   @relation("ReportPreparer")
+  reportsApproved       ProgressReport[]   @relation("ReportApprover")
+  plansUploaded         ApprovedPlan[]     @relation("PlanUploader")
+  plansCustomerRecorded ApprovedPlan[]     @relation("PlanCustomerRecorder")
   operationsBudgetsSet  OperationsBudget[] @relation("OperationsBudgetEditor")
-  tasksAssigned   JobTask[]        @relation("TaskAssignee")
+  tasksAssigned         JobTask[]          @relation("TaskAssignee")
 
   prsRequested      PurchaseRequest[]      @relation("PrRequester")
   canvassesCreated  Canvass[]              @relation("CanvassCreator")
@@ -136,28 +139,28 @@ model User {
   reimbursements   Payment[]      @relation("Payee")
   cashAdvances     CashAdvance[]  @relation("AdvanceRequester")
 
-  assetsCreated       InstalledAsset[]  @relation("AssetCreator")
-  contractsCreated    ServiceContract[] @relation("ContractCreator")
-  visitsAssigned      ServiceVisit[]    @relation("VisitEngineer")
-  visitsConfirmed     ServiceVisit[]    @relation("VisitConfirmer")
+  assetsCreated         InstalledAsset[]  @relation("AssetCreator")
+  contractsCreated      ServiceContract[] @relation("ContractCreator")
+  visitsAssigned        ServiceVisit[]    @relation("VisitEngineer")
+  visitsConfirmed       ServiceVisit[]    @relation("VisitConfirmer")
   serviceDocumentsFiled ServiceDocument[] @relation("ServiceDocumentFiler")
-  templatesAuthored   ReportTemplate[]  @relation("TemplateAuthor")
-  reportsPerformed    ServiceReport[]   @relation("ReportAuthor")
-  jobOrdersRequested  JobOrder[]        @relation("JobOrderRequester")
-  jobOrdersAssigned   JobOrder[]        @relation("JobOrderEngineer")
-  jobOrdersManaged    JobOrder[]        @relation("JobOrderProjectManager")
-  jobOrdersEngineered JobOrder[]        @relation("JobOrderProjectEngineer")
-  jobOrdersLed        JobOrder[]        @relation("JobOrderProjectLead")
-  jobOrderSupport     JobOrderSupport[]
-  cadRequested        CadJobOrder[]     @relation("CadRequestedBy")
-  cadAssigned         CadJobOrder[]     @relation("CadAssignedTo")
-  cadCompleted        CadJobOrder[]     @relation("CadCompletedBy")
-  cadRevisions        CadRevision[]     @relation("CadRevisionSubmitter")
-  cadComments         CadComment[]      @relation("CadCommentAuthor")
-  helpTickets         HelpTicket[]      @relation("HelpTicketRaiser")
-  helpTicketReplies   HelpTicketReply[] @relation("HelpTicketReplyAuthor")
+  templatesAuthored     ReportTemplate[]  @relation("TemplateAuthor")
+  reportsPerformed      ServiceReport[]   @relation("ReportAuthor")
+  jobOrdersRequested    JobOrder[]        @relation("JobOrderRequester")
+  jobOrdersAssigned     JobOrder[]        @relation("JobOrderEngineer")
+  jobOrdersManaged      JobOrder[]        @relation("JobOrderProjectManager")
+  jobOrdersEngineered   JobOrder[]        @relation("JobOrderProjectEngineer")
+  jobOrdersLed          JobOrder[]        @relation("JobOrderProjectLead")
+  jobOrderSupport       JobOrderSupport[]
+  cadRequested          CadJobOrder[]     @relation("CadRequestedBy")
+  cadAssigned           CadJobOrder[]     @relation("CadAssignedTo")
+  cadCompleted          CadJobOrder[]     @relation("CadCompletedBy")
+  cadRevisions          CadRevision[]     @relation("CadRevisionSubmitter")
+  cadComments           CadComment[]      @relation("CadCommentAuthor")
+  helpTickets           HelpTicket[]      @relation("HelpTicketRaiser")
+  helpTicketReplies     HelpTicketReply[] @relation("HelpTicketReplyAuthor")
   /// The teams this person supports on a team-scoped approval step (Back Support).
-  supportTeams        UserSupportTeam[]
+  supportTeams          UserSupportTeam[]
 
   quoteLinesProvided QuotationItem[]  @relation("QuoteLineProvider")
   soLinesProvided    SalesOrderLine[] @relation("SoLineProvider")
@@ -218,24 +221,24 @@ model Department {
 }
 
 model Role {
-  id          String  @id @default(cuid())
-  key         String  @unique
-  name        String
-  description String?
+  id                   String   @id @default(cuid())
+  key                  String   @unique
+  name                 String
+  description          String?
   // System roles cannot be deleted, but their permissions remain editable —
   // "Roles should be customizable" (requirements §14).
-  isSystem    Boolean @default(false)
+  isSystem             Boolean  @default(false)
   /// Its level on the organisation chart (2026-10-19, ROLE_REV1): 1 is the
   /// CEO / President, 6 the skilled trades. A person's title on documents is
   /// their highest role — the lowest rank, then `sortOrder` (the chart's order).
-  rank        Int?
-  sortOrder   Int     @default(0)
+  rank                 Int?
+  sortOrder            Int      @default(0)
   /// The role this role reports to (2026-10-19, Admin › Roles › Hierarchy):
   /// set by role, never by person; "Apply to people" writes each holder's
   /// "Reports to" from it (the parent role's holder, same team first).
-  reportsToRoleId String?
-  reportsToRole   Role?   @relation("RoleHierarchy", fields: [reportsToRoleId], references: [id], onDelete: SetNull)
-  reportingRoles  Role[]  @relation("RoleHierarchy")
+  reportsToRoleId      String?
+  reportsToRole        Role?    @relation("RoleHierarchy", fields: [reportsToRoleId], references: [id], onDelete: SetNull)
+  reportingRoles       Role[]   @relation("RoleHierarchy")
   /// Further roles it also reports to (2026-10-20, the owner's call: the
   /// Warehouse Supervisor reports to both Purchasing Managers). Drawn on the
   /// role chart; "Apply to people" writes the first parent only.
@@ -936,23 +939,24 @@ model Employee {
   userId String? @unique
   user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  departmentId String?
-  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
-  position     String?
+  departmentId   String?
+  department     Department?             @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  position       String?
   /// The plantilla slot. `position` (the string) is a MIRROR of positionRef.title,
   /// written only by setEmployeePosition() in shared/plantilla.ts; it stays free
   /// text only for an employee with no plantilla position (unclassified).
-  positionId   String?
-  positionRef  Position?   @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  positionId     String?
+  positionRef    Position?               @relation(fields: [positionId], references: [id], onDelete: SetNull)
   /// Positions held beside the main one (2026-10-19: one person, two
   /// managers' posts). Each counts as filled; `position` joins the titles.
   extraPositions EmployeeExtraPosition[]
   memos          MemoRecipient[]
+  assetIssuances AssetIssuance[]
   /// The industry team the person works in (Utilities, Healthcare…), from the
   /// same Industry rows customers are classified by. Set by HR; shown to the
   /// person on their invitation and My Account, never edited by them.
-  industryId   String?
-  industry     Industry?   @relation(fields: [industryId], references: [id], onDelete: Restrict)
+  industryId     String?
+  industry       Industry?               @relation(fields: [industryId], references: [id], onDelete: Restrict)
 
   employmentType  EmploymentType @default(REGULAR)
   dateHired       DateTime?      @db.Date
@@ -1021,19 +1025,19 @@ model CostCategory {
   isSystem  Boolean @default(false)
   isActive  Boolean @default(true)
 
-  items          Item[]
+  items             Item[]
   /// The office's own budget by year (2026-10-20), apart from any project's.
   operationsBudgets OperationsBudget[]
-  costingLines   CostingLine[]
-  costEntries    JobCostEntry[]
-  budgetRequests BudgetRequest[]
-  prItems        PurchaseRequestItem[]
-  poItems        PurchaseOrderItem[]
-  issueItems     StockIssueItem[]
-  overtime       OvertimeRequest[]
-  supplierBills  SupplierBill[]        @relation("BillCategory")
-  expenseClaims  ExpenseClaim[]        @relation("ExpenseCategory")
-  cashAdvances   CashAdvance[]         @relation("AdvanceCategory")
+  costingLines      CostingLine[]
+  costEntries       JobCostEntry[]
+  budgetRequests    BudgetRequest[]
+  prItems           PurchaseRequestItem[]
+  poItems           PurchaseOrderItem[]
+  issueItems        StockIssueItem[]
+  overtime          OvertimeRequest[]
+  supplierBills     SupplierBill[]        @relation("BillCategory")
+  expenseClaims     ExpenseClaim[]        @relation("ExpenseCategory")
+  cashAdvances      CashAdvance[]         @relation("AdvanceCategory")
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -1053,7 +1057,7 @@ model ItemCategory {
   parent      ItemCategory?  @relation("ItemCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
   children    ItemCategory[] @relation("ItemCategoryTree")
 
-  items Item[]
+  items          Item[]
   /// The product group an incoming line files a NEW item under (2026-10-20).
   receivingLines ReceivingItem[]
 
@@ -1696,13 +1700,13 @@ model SalesOrder {
   vatAmount      Decimal @default(0) @db.Decimal(18, 2)
   total          Decimal @default(0) @db.Decimal(18, 2)
 
-  lines        SalesOrderLine[]
-  jobOrders    JobOrder[]
-  pulloutSlips PulloutSlip[]
-  invoices     Invoice[]
+  lines            SalesOrderLine[]
+  jobOrders        JobOrder[]
+  pulloutSlips     PulloutSlip[]
+  invoices         Invoice[]
   /// Bought for it with no project (2026-10-21).
-  purchaseRequests PurchaseRequest[]  @relation("PrSalesOrder")
-  purchaseOrders   PurchaseOrder[]    @relation("PoSalesOrder")
+  purchaseRequests PurchaseRequest[]      @relation("PrSalesOrder")
+  purchaseOrders   PurchaseOrder[]        @relation("PoSalesOrder")
   orderStock       SalesOrderStock[]
   stockMoves       InventoryTransaction[] @relation("SalesOrderStockMoves")
   stockIssues      StockIssue[]           @relation("IssueSalesOrder")
@@ -2677,16 +2681,16 @@ model PurchaseRequestItem {
   /// Goods or a service (2026-10-21): a service is received as "service
   /// rendered" and never enters stock; each prints its own standard terms.
   nature          LineNature @default(GOODS)
-  quantity        Decimal @db.Decimal(18, 3)
-  unit            String  @default("pcs")
-  estimatedCost   Decimal @default(0) @db.Decimal(18, 2)
+  quantity        Decimal    @db.Decimal(18, 3)
+  unit            String     @default("pcs")
+  estimatedCost   Decimal    @default(0) @db.Decimal(18, 2)
   /// quantity × estimatedCost, stored so the commitment is a recorded fact.
-  estimatedAmount Decimal @default(0) @db.Decimal(18, 2)
-  orderedQty      Decimal @default(0) @db.Decimal(18, 3)
+  estimatedAmount Decimal    @default(0) @db.Decimal(18, 2)
+  orderedQty      Decimal    @default(0) @db.Decimal(18, 3)
   /// Taken from the shelf by a pull-out slip instead of bought (2026-10-14):
   /// what is left to order is quantity − orderedQty − pulledQty.
-  pulledQty       Decimal @default(0) @db.Decimal(18, 3)
-  sortOrder       Int     @default(0)
+  pulledQty       Decimal    @default(0) @db.Decimal(18, 3)
+  sortOrder       Int        @default(0)
 
   quotes     CanvassQuote[]
   rfqItems   RfqItem[]
@@ -2978,12 +2982,12 @@ model PurchaseOrderItem {
   description String
   /// Goods or a service — the request line's, carried over (2026-10-21).
   nature      LineNature @default(GOODS)
-  quantity    Decimal @db.Decimal(18, 3)
-  unit        String  @default("pcs")
-  unitPrice   Decimal @db.Decimal(18, 2)
-  amount      Decimal @db.Decimal(18, 2)
-  receivedQty Decimal @default(0) @db.Decimal(18, 3)
-  sortOrder   Int     @default(0)
+  quantity    Decimal    @db.Decimal(18, 3)
+  unit        String     @default("pcs")
+  unitPrice   Decimal    @db.Decimal(18, 2)
+  amount      Decimal    @db.Decimal(18, 2)
+  receivedQty Decimal    @default(0) @db.Decimal(18, 3)
+  sortOrder   Int        @default(0)
 
   receivingItems ReceivingItem[]
 
@@ -3805,24 +3809,24 @@ model OvertimeRequest {
 /// approved. Filled and vacant are DERIVED by counting active employees on
 /// the position — never stored.
 model Position {
-  id                  String              @id @default(cuid())
-  code                String              @unique
+  id                  String                  @id @default(cuid())
+  code                String                  @unique
   title               String
   departmentId        String?
-  department          Department?         @relation(fields: [departmentId], references: [id], onDelete: SetNull)
-  authorisedHeadcount Int                 @default(1)
+  department          Department?             @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  authorisedHeadcount Int                     @default(1)
   description         String?
-  sortOrder           Int                 @default(0)
-  isActive            Boolean             @default(true)
+  sortOrder           Int                     @default(0)
+  isActive            Boolean                 @default(true)
   employees           Employee[]
   extraHolders        EmployeeExtraPosition[]
   /// The role this slot counts (2026-10-19: "keep plantilla, count by role") —
   /// filled is the active employees whose login holds it.
   roleId              String?
-  role                Role?               @relation("PositionRole", fields: [roleId], references: [id], onDelete: SetNull)
+  role                Role?                   @relation("PositionRole", fields: [roleId], references: [id], onDelete: SetNull)
   courseRequirements  CourseRequirement[]
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
 
   // Who added it (2026-10-18): "Edit Own" on Admin › Roles reads it.
   createdById String?
@@ -4489,14 +4493,14 @@ model Invoice {
 
   /// Snapshotted from the billing, or entered on a standalone invoice. Never
   /// recomputed from Settings afterwards.
-  grossAmount    Decimal @db.Decimal(18, 2)
-  vatRate        Decimal @default(0.12) @db.Decimal(6, 4)
-  vatAmount      Decimal @db.Decimal(18, 2)
-  ewtRate        Decimal @default(0.02) @db.Decimal(6, 4)
-  ewtAmount      Decimal @db.Decimal(18, 2)
-  invoiceTotal   Decimal @db.Decimal(18, 2)
+  grossAmount    Decimal  @db.Decimal(18, 2)
+  vatRate        Decimal  @default(0.12) @db.Decimal(6, 4)
+  vatAmount      Decimal  @db.Decimal(18, 2)
+  ewtRate        Decimal  @default(0.02) @db.Decimal(6, 4)
+  ewtAmount      Decimal  @db.Decimal(18, 2)
+  invoiceTotal   Decimal  @db.Decimal(18, 2)
   /// invoiceTotal − ewtAmount. THE figure A/R is measured against.
-  netCollectible Decimal @db.Decimal(18, 2)
+  netCollectible Decimal  @db.Decimal(18, 2)
   /// The EWT the invoice was raised with, kept while its collections say
   /// what the customer ACTUALLY withheld (2026-10-20): `ewtAmount` is then
   /// their sum, and this puts it back when no collection says so any more.
@@ -4940,8 +4944,8 @@ model PaymentAllocation {
   paymentId String
   payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
 
-  invoiceId String?
-  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoiceId   String?
+  invoice     Invoice? @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   /// The EWT the customer withheld on THIS collection of the invoice, typed
   /// by finance (2026-10-20, the owner's call: "sometimes the collection is
   /// not matched from the invoice"). Null says nothing; once any collection
@@ -5200,13 +5204,13 @@ model ServiceVisit {
   asset   InstalledAsset? @relation(fields: [assetId], references: [id], onDelete: SetNull)
 
   /// Which visit of the contract's schedule this is — 1 of 4, 2 of 4.
-  sequence    Int?
-  dueDate     DateTime  @db.Date
-  performedAt DateTime? @db.Date
+  sequence      Int?
+  dueDate       DateTime  @db.Date
+  performedAt   DateTime? @db.Date
   /// The slot on the day (2026-10-20, the owner's spec): "HH:MM" both, or
   /// neither for a full-day site visit — `visitSlot()` is the one rule.
-  startTime   String?
-  endTime     String?
+  startTime     String?
+  endTime       String?
   /// Confirmed with the customer — by the engineer on it or Edit All.
   confirmedAt   DateTime?
   confirmedById String?
@@ -5266,18 +5270,18 @@ enum ChargeBasis {
 /// completes it. It carries no cost of its own; cost reaches its jobId through
 /// PRs, stock issues, overtime and expense claims that quote that job.
 model JobOrder {
-  id                 String         @id @default(cuid())
+  id                 String           @id @default(cuid())
   /// The costing's Labor cost when the Technical Manager approved an Amount
   /// that differs from it — approval is the agreement (2026-10-16). Null when
   /// the two tallied or no costing stood behind it.
-  laborCostingAmount Decimal?       @db.Decimal(18, 2)
+  laborCostingAmount Decimal?         @db.Decimal(18, 2)
   laborAgreedById    String?
   laborAgreedAt      DateTime?
-  number             String         @unique
-  status             JobOrderStatus @default(DRAFT)
+  number             String           @unique
+  status             JobOrderStatus   @default(DRAFT)
   category           JobOrderCategory @default(PROJECT)
-  kind               ServiceKind    @default(CORRECTIVE)
-  urgent             Boolean        @default(false)
+  kind               ServiceKind      @default(CORRECTIVE)
+  urgent             Boolean          @default(false)
 
   customerId String
   customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)
@@ -6077,5 +6081,89 @@ model MemoRecipient {
   createdAt      DateTime  @default(now())
 
   @@unique([memoId, employeeId])
+  @@index([employeeId])
+}
+
+/// What kind of company property an asset is (2026-10-21, the owner's Asset
+/// Management tab): Admin › Categories › Asset types — Company Vehicle,
+/// Office Laptop, Power Tools / Testing, Safety Gear & Tool Kit, Mobile
+/// Phone … Seeded rows are system rows (renamable, undeletable, switched off
+/// rather than removed); an administrator may add more.
+model AssetType {
+  id        String   @id @default(cuid())
+  name      String
+  sortOrder Int      @default(0)
+  isSystem  Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  assets      CompanyAsset[]
+  createdById String?
+}
+
+/// One TAGGED unit of company property — a car, a laptop, a meter, a kit —
+/// issued to employees one at a time (G-HR › Records › Asset Management,
+/// 2026-10-21). Never a stock quantity: the warehouse's items and borrow
+/// slips are another thing. Its tag is G-CORE's number (`company_asset`).
+/// Whether it is out, and with whom, is its open issuance; RETURN_PENDING
+/// is derived (`assetStatus()`), never stored.
+model CompanyAsset {
+  id            String          @id @default(cuid())
+  tag           String          @unique
+  assetTypeId   String
+  assetType     AssetType       @relation(fields: [assetTypeId], references: [id], onDelete: Restrict)
+  /// "Toyota Hilux 2.4L (2023)", "Dell Latitude 5440 i7 / 16GB".
+  brandModel    String
+  serialNo      String?
+  plateNo       String?
+  description   String?
+  purchaseDate  DateTime?       @db.Date
+  /// What it cost — read by whoever may edit every asset.
+  cost          Decimal?        @db.Decimal(18, 2)
+  status        AssetStatusHr   @default(AVAILABLE)
+  notes         String?
+  retiredAt     DateTime?
+  retiredReason String?
+  createdById   String
+  createdBy     User            @relation("AssetAdder", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  issuances     AssetIssuance[]
+
+  @@index([assetTypeId])
+  @@index([status])
+}
+
+/// AVAILABLE in the office, ISSUED to someone, UNDER_REPAIR, RETIRED (kept,
+/// never offered). Return pending is read off the holder, not stored.
+enum AssetStatusHr {
+  AVAILABLE
+  ISSUED
+  UNDER_REPAIR
+  RETIRED
+}
+
+/// One hand-over of an asset to an employee and its return — the history.
+/// At most one is open per asset (`returnedOn` null), claimed on the asset's
+/// status. An open issuance is an ADMIN item on its holder's clearance.
+model AssetIssuance {
+  id            String       @id @default(cuid())
+  assetId       String
+  asset         CompanyAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  employeeId    String
+  employee      Employee     @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  issuedOn      DateTime     @db.Date
+  issuedById    String
+  issuedBy      User         @relation("AssetIssuer", fields: [issuedById], references: [id], onDelete: Restrict)
+  conditionOut  String?
+  remarks       String?
+  returnedOn    DateTime?    @db.Date
+  receivedById  String?
+  receivedBy    User?        @relation("AssetReceiver", fields: [receivedById], references: [id], onDelete: SetNull)
+  conditionBack String?
+  returnNote    String?
+  createdAt     DateTime     @default(now())
+
+  @@index([assetId])
   @@index([employeeId])
 }

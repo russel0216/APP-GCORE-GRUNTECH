@@ -32,6 +32,7 @@ import bcrypt from 'bcryptjs';
 import sharp from 'sharp';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { scanAccountabilities } from '../src/shared/clearance';
 import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
@@ -183,6 +184,8 @@ async function cleanup() {
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
+  // Company assets (2026-10-21): their issuances hold employees and users by a Restrict.
+  await prisma.companyAsset.deleteMany({ where: { OR: [{ brandModel: { startsWith: TAG } }, { createdBy: { email: { endsWith: '@verifyhr.local' } } }] } });
   await prisma.overtimeRequest.deleteMany({ where: { reason: { startsWith: TAG } } });
   await prisma.leaveRequest.deleteMany({ where: { reason: { startsWith: TAG } } });
   const employees = await prisma.employee.findMany({
@@ -5086,6 +5089,74 @@ async function main() {
     check('issued again it keeps its number, and is acknowledged anew', reissued.status === 200 && reissued.body.number === askNo && (await prisma.memoRecipient.count({ where: { memoId: askId, acknowledgedAt: null } })) === 1);
     await api(hrT, 'POST', `/memos/${askId}/pull-back`, { reason: 'Withdrawn for good' });
     check('pulled back, it is deleted', (await api(hrT, 'DELETE', `/memos/${askId}`)).status === 200 && !(await prisma.memo.findUnique({ where: { id: askId } })));
+  }
+
+  // ══ Asset Management (2026-10-21) ═════════════════════════════════════════
+  console.log('\nAsset Management — tagged property, issued and taken back, on the clearance');
+  {
+    const assetHrRole = await makeRole('zzhr_asset_hr', `${TAG} Assets HR`, ['ghr.assets.view_all', 'ghr.assets.create', 'ghr.assets.edit_all']);
+    const ownRole = await makeRole('zzhr_asset_own', `${TAG} Assets own`, ['ghr.assets.view_own']);
+    const assetHr = await makeUser('ZZ Asset HR', 'assethr@verifyhr.local', [assetHrRole.id]);
+    const holderUser = await makeUser('ZZ Asset Holder', 'assetholder@verifyhr.local', [ownRole.id]);
+    const otherUser = await makeUser('ZZ Asset Other', 'assetother@verifyhr.local', [ownRole.id]);
+    const holder = await prisma.employee.create({ data: { employeeNo: `${TAG}-AH`, firstName: `${TAG} Hana`, lastName: 'Holder', userId: holderUser.id } });
+    const hrT = signToken(assetHr.id, assetHr.email);
+    const hT = signToken(holderUser.id, holderUser.email);
+    const oT = signToken(otherUser.id, otherUser.email);
+    const type = await prisma.assetType.findFirstOrThrow({ where: { name: 'Company Vehicle' } });
+
+    const noRight = await makeUser('ZZ Asset Nobody', 'assetnobody@verifyhr.local', []);
+    check('someone with no asset right cannot open the register', (await api(signToken(noRight.id, noRight.email), 'GET', '/assets')).status === 403);
+    const car = await api(hrT, 'POST', '/assets', { assetTypeId: type.id, brandModel: `${TAG} Toyota Hilux 2.4L`, serialNo: 'TH-8821', plateNo: 'NBF-9012', cost: 1_450_000 });
+    const carId = String(car.body.id);
+    check('HR adds an asset; G-CORE gives it its tag', car.status === 201 && /^GT-AST-\d{4}-\d{4}$/.test(String(car.body.tag)), JSON.stringify(car.body).slice(0, 160));
+    check('someone who may only read their own cannot add one', (await api(hT, 'POST', '/assets', { assetTypeId: type.id, brandModel: `${TAG} Nope` })).status === 403);
+    check('an asset not issued is not the would-be holder’s to open', (await api(hT, 'GET', `/assets/${carId}`)).status === 404);
+
+    const issued = await api(hrT, 'POST', `/assets/${carId}/issue`, { employeeId: holder.id, conditionOut: 'Good', remarks: 'Field deployment' });
+    check('HR issues it to an employee', issued.status === 200 && issued.body.state === 'ISSUED' && (issued.body.holder as { name: string } | null)?.name === `${TAG} Hana Holder`);
+    check('it is issued once — a second issue is a 409', (await api(hrT, 'POST', `/assets/${carId}/issue`, { employeeId: holder.id })).status === 409);
+    const asHolder = await api(hT, 'GET', `/assets/${carId}`);
+    check('the holder reads it with View Own, without its cost', asHolder.status === 200 && asHolder.body.cost === null && asHolder.body.seesCost === false);
+    check('HR sees the cost', (await api(hrT, 'GET', `/assets/${carId}`)).body.cost === 1_450_000);
+    check('a colleague with View Own does not', (await api(oT, 'GET', `/assets/${carId}`)).status === 404);
+    const mine = await api(hT, 'GET', '/assets?scope=mine');
+    check('it is on the holder’s own list', (mine.body.rows as { id: string }[]).some((r) => r.id === carId));
+    check('the holder cannot take it back', (await api(hT, 'POST', `/assets/${carId}/return`, {})).status === 403);
+    const onRecord = await api(hrT, 'GET', `/assets/employee/${holder.id}`);
+    check('the employee record lists what they hold', onRecord.status === 200 && onRecord.body.holding === 1);
+
+    // The clearance: an open issuance is an ADMIN line, and the asset reads Return pending.
+    const scanBefore = await scanAccountabilities(holder);
+    const clearance = await prisma.employeeClearance.create({
+      data: { number: `${TAG}-CLR-AST`, employeeId: holder.id, reason: 'RESIGNATION', lastWorkingDay: new Date('2026-11-15T00:00:00Z'), raisedById: assetHr.id },
+    });
+    const pending = await api(hrT, 'GET', `/assets/${carId}`);
+    const pendingList = await api(hrT, 'GET', `/assets?status=RETURN_PENDING&search=${encodeURIComponent(TAG)}`);
+    check(
+      'an issued asset is a line on its holder’s clearance, and reads Return pending once they are leaving',
+      scanBefore.some((r) => r.area === 'ADMIN' && r.sourceType === 'asset_issuance' && r.link === `/g-hr/assets/${carId}`) &&
+        pending.body.state === 'RETURN_PENDING' && String(pending.body.returnNotice).includes('November 15, 2026') &&
+        (pendingList.body.rows as { id: string }[]).some((r) => r.id === carId) && (pendingList.body.summary as { returnPending: number }).returnPending >= 1,
+      `${pending.body.state} ${pending.body.returnNotice}`,
+    );
+    check('an issued asset is not retired', (await api(hrT, 'POST', `/assets/${carId}/retire`, { reason: 'Old' })).status === 409);
+    const back = await api(hrT, 'POST', `/assets/${carId}/return`, { conditionBack: 'Minor scratches', returnNote: 'Checked with the driver' });
+    const scanAfter = await scanAccountabilities(holder);
+    check('taken back, it is available and its clearance line is gone', back.status === 200 && back.body.state === 'AVAILABLE' && !scanAfter.some((r) => r.sourceType === 'asset_issuance'));
+    const hist = await api(hrT, 'GET', `/assets/${carId}`);
+    const h0 = (hist.body.history as { id: string; returnedOn: string | null; receivedBy: string | null }[])[0];
+    check('the history keeps the hand-over and the return, with who received it', !!h0?.returnedOn && h0.receivedBy === 'ZZ Asset HR');
+    const slip = await printed(hrT, `/assets/${carId}/issuances/${h0.id}/pdf`);
+    check('the Asset Issuance Slip prints the asset, the holder and the return', slip.status === 200 && /ASSET ISSUANCE SLIP/i.test(flat(slip.text)) && flat(slip.text).includes('Hana Holder') && flat(slip.text).includes('Minor scratches'));
+    check('an asset ever issued is not deleted — it is retired', (await api(hrT, 'DELETE', `/assets/${carId}`)).status === 400);
+    check('retired with a reason', (await api(hrT, 'POST', `/assets/${carId}/retire`, { reason: 'Sold' })).status === 200 && (await prisma.companyAsset.findUnique({ where: { id: carId } }))?.status === 'RETIRED');
+    check('a retired asset leaves the register unless asked for', !((await api(hrT, 'GET', `/assets?search=${encodeURIComponent(TAG)}`)).body.rows as { id: string }[]).some((r) => r.id === carId));
+    const spare = await api(hrT, 'POST', '/assets', { assetTypeId: type.id, brandModel: `${TAG} Spare` });
+    check('one never issued is deleted', (await api(hrT, 'DELETE', `/assets/${String(spare.body.id)}`)).status === 200);
+    const paper = await printed(hrT, `/assets/pdf?search=${encodeURIComponent(TAG)}&retired=true`);
+    check('the register prints', paper.status === 200 && /COMPANY ASSETS/i.test(flat(paper.text)));
+    await prisma.employeeClearance.delete({ where: { id: clearance.id } });
   }
 
   // ══ My Records (2026-10-20) ═══════════════════════════════════════════════

@@ -71,6 +71,7 @@ import { PulloutSlips, PulloutDetail, PulloutEditor } from './pages/chain/Pullou
 import { Clock } from './pages/hr/Clock';
 import { MyRecords } from './pages/hr/MyRecords';
 import { Memos, MemoPage } from './pages/hr/Memos';
+import { Assets, AssetPage } from './pages/hr/Assets';
 import { HrDashboard, AttendanceRegister } from './pages/hr/Dashboard';
 import { Leave } from './pages/hr/Leave';
 import { Overtime, OvertimeDetail } from './pages/hr/Overtime';
@@ -1032,6 +1033,22 @@ function Routed() {
         />
         {/* No Guard: a memo addressed to someone opens for them with no right — the API decides. */}
         <Route path="/g-hr/memos/:id" element={<MemoPage />} />
+        <Route
+          path="/g-hr/assets"
+          element={
+            <GuardAny permissions={['ghr.assets.view_all', 'ghr.assets.view_team', 'ghr.assets.view_own']}>
+              <Assets />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/assets/:id"
+          element={
+            <GuardAny permissions={['ghr.assets.view_all', 'ghr.assets.view_team', 'ghr.assets.view_own']}>
+              <AssetPage />
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-hr"
           element={

@@ -330,6 +330,10 @@ employeeRoutes.get(
     'ghr.training_sessions.edit_all',
     'ghr.evaluations.create',
     'ghr.clearances.create',
+    // Issuing a company asset names its holder (2026-10-21).
+    'ghr.assets.create',
+    'ghr.assets.edit_own',
+    'ghr.assets.edit_all',
   ),
   handler(async (req, res) => {
     const term = String(req.query.q ?? '').trim();

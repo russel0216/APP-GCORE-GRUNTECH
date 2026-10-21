@@ -135,6 +135,8 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   { type: 'help_ticket', code: 'HT', label: 'Help Ticket' },
   // G-HR › Records › Memos (2026-10-20): numbered when issued, GT-MEMO-2026-0001.
   { type: 'memo', code: 'MEMO', label: 'Memorandum' },
+  // G-HR › Records › Asset Management (2026-10-21): the property tag, GT-AST-2026-0001.
+  { type: 'company_asset', code: 'AST', label: 'Company Asset Tag' },
 ];
 
 /** `2026` for a yearly counter, `2026-09` for a monthly one, '' for a flat one. */

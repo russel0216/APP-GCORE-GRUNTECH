@@ -24,6 +24,7 @@ const OWN_SELF = (sub: string) => [`ghr.${sub}.view_own`, `ghr.${sub}.create`, `
 export const HR_COMMON: string[] = [
   'ghr.clock.view_own',
   'ghr.my_records.view_own',
+  'ghr.assets.view_own',
   'ghr.attendance.view_own',
   ...OWN_SELF('leave'),
   ...OWN_SELF('overtime'),

@@ -20,6 +20,7 @@ import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
 import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawingTypes';
 import { COURSE_CATEGORIES, seedCourseCategories } from '../src/shared/courseCategories';
 import { SERVICE_DOCUMENT_CATEGORIES, seedServiceDocumentCategories } from '../src/shared/serviceDocumentCategories';
+import { ASSET_TYPES, seedAssetTypes } from '../src/shared/assets';
 import { migrateFaceThreshold } from '../src/shared/faceSamples';
 import { removeScoroArchive } from '../src/shared/scoroArchive';
 import { backfillCustomerAddresses } from '../src/shared/customerAddress';
@@ -1278,6 +1279,8 @@ async function main() {
   // What a service document is (2026-10-20): the six, system rows.
   const documentCategoriesAdded = await seedServiceDocumentCategories();
   console.log(`  ✓ Service document categories (${SERVICE_DOCUMENT_CATEGORIES.length}${documentCategoriesAdded ? `, ${documentCategoriesAdded} added` : ''})`);
+  const assetTypesAdded = await seedAssetTypes();
+  console.log(`  ✓ Asset types (${ASSET_TYPES.length}${assetTypesAdded ? `, ${assetTypesAdded} added` : ''})`);
 
   // The course categories (2026-10-20, the owner's Academy UI): his four as
   // system rows, the settings' five and every category on file as plain rows.

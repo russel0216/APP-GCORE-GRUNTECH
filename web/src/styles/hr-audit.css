@@ -114,3 +114,36 @@ button.perm-chip {
   white-space: pre-wrap;
   margin: 0;
 }
+
+/* Asset Management (2026-10-21). The red clearance remark on a row whose holder is leaving. */
+.asset-notice {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* The exit-clearance note under the register. */
+.asset-policy {
+  margin-top: var(--block-gap);
+}
+
+/* The issue form's employee: the pick with Change beside it, and the hits under the box. */
+.asset-picked {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.asset-hits {
+  list-style: none;
+  margin: var(--s-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.asset-hits .btn {
+  width: 100%;
+  justify-content: flex-start;
+}

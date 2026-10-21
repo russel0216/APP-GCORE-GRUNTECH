@@ -97,6 +97,16 @@ export interface DrawingTypeDef {
 }
 
 /** What a service document is (2026-10-20): Manual, Electrical drawing…, with how many documents carry it. */
+/** A company asset's type (2026-10-21, G-HR › Asset Management). */
+export interface AssetTypeDef {
+  id: string;
+  name: string;
+  sortOrder: number;
+  isSystem: boolean;
+  isActive: boolean;
+  _count?: { assets: number };
+}
+
 export interface DocumentCategoryDef {
   id: string;
   name: string;
@@ -553,6 +563,43 @@ const DOCUMENT_CATEGORIES: CategorySpec<DocumentCategoryDef> = {
   },
 };
 
+const ASSET_TYPES: CategorySpec<AssetTypeDef> = {
+  noun: 'asset type',
+  title: 'Asset types',
+  endpoint: '/reference/asset-types',
+  columns: [
+    {
+      key: 'name',
+      head: 'Name',
+      render: (t) => (
+        <>
+          {t.name}
+          {t.isSystem && <span className="faint"> · built-in</span>}
+        </>
+      ),
+    },
+    { key: 'assets', head: 'Assets', headClass: 'right', cellClass: 'right', render: (t) => (t._count?.assets ?? 0).toLocaleString('en-US') },
+    { key: 'status', head: 'Status', render: (t) => activeBadge(t.isActive) },
+  ],
+  footnote:
+    'What a company asset is — a vehicle, a laptop, a phone, a tool kit — on G-HR › Asset Management. The built-ins can be renamed but not deleted; a type in use is deactivated rather than deleted, and the assets under it keep it.',
+  blank: { name: '', sortOrder: 0, isActive: true },
+  fromRow: (t) => ({ name: t.name, sortOrder: t.sortOrder, isActive: t.isActive }),
+  fields: () => [
+    { kind: 'text', key: 'name', label: 'Name', hint: 'e.g. Company Vehicle, Two-way Radio', maxLength: 80 },
+    { kind: 'count', key: 'sortOrder', label: 'Sort order' },
+    { kind: 'check', key: 'isActive', label: 'Active — an inactive type stays on its assets but is not offered' },
+  ],
+  canSave: (f) => !!text(f.name).trim(),
+  deletable: (t) => !t.isSystem && (t._count?.assets ?? 0) === 0,
+  notice: (t) => {
+    if (t.isSystem) return 'A built-in type: rename it, or untick Active to stop offering it.';
+    const inUse = t._count?.assets ?? 0;
+    if (inUse === 0) return null;
+    return `${inUse === 1 ? 'One asset is' : `${inUse.toLocaleString('en-US')} assets are`} of this type, so it cannot be deleted — untick Active to stop offering it.`;
+  },
+};
+
 const DRAWING_TYPES: CategorySpec<DrawingTypeDef> = {
   noun: 'drawing type',
   title: 'Drawing types',
@@ -869,10 +916,11 @@ interface CategoryLists {
   activityTypes: ActivityTypeDef[];
   drawingTypes: DrawingTypeDef[];
   documentCategories: DocumentCategoryDef[];
+  assetTypes: AssetTypeDef[];
   courseCategories: CourseCategoryDef[];
 }
 
-const NO_LISTS: CategoryLists = { cost: [], items: [], teams: [], subIndustries: [], groups: [], activityTypes: [], drawingTypes: [], documentCategories: [], courseCategories: [] };
+const NO_LISTS: CategoryLists = { cost: [], items: [], teams: [], subIndustries: [], groups: [], activityTypes: [], drawingTypes: [], documentCategories: [], courseCategories: [], assetTypes: [] };
 
 export function Categories() {
   const [lists, setLists] = useState<CategoryLists>(NO_LISTS);
@@ -882,7 +930,7 @@ export function Categories() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories, courseCategories] = await Promise.all([
+      const [cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories, courseCategories, assetTypes] = await Promise.all([
         api.get<CostCategory[]>('/reference/cost-categories'),
         api.get<ItemCategory[]>('/reference/item-categories'),
         api.get<Industry[]>('/reference/industries'),
@@ -892,8 +940,9 @@ export function Categories() {
         api.get<DrawingTypeDef[]>('/reference/cad-drawing-types'),
         api.get<DocumentCategoryDef[]>('/reference/service-document-categories'),
         api.get<CourseCategoryDef[]>('/reference/course-categories'),
+        api.get<AssetTypeDef[]>('/reference/asset-types'),
       ]);
-      setLists({ cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories, courseCategories });
+      setLists({ cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories, courseCategories, assetTypes });
       setError(null);
     } catch (err) {
       setError(err);
@@ -951,6 +1000,7 @@ export function Categories() {
       <CategoryCard spec={ACTIVITY_TYPES} rows={lists.activityTypes} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={DRAWING_TYPES} rows={lists.drawingTypes} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={DOCUMENT_CATEGORIES} rows={lists.documentCategories} onChanged={changed} className="card m-industries" />
+      <CategoryCard spec={ASSET_TYPES} rows={lists.assetTypes} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={COURSE_CATEGORIES} rows={lists.courseCategories} onChanged={changed} className="card m-industries" />
     </div>
   );

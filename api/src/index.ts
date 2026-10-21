@@ -104,6 +104,7 @@ import { operationsBudgetRoutes } from './routes/operationsBudget';
 import { procurementSettingsRoutes } from './routes/procurementSettings';
 import { myRecordsRoutes } from './routes/myRecords';
 import { memoRoutes } from './routes/memos';
+import { assetRoutes as companyAssetRoutes } from './routes/assets';
 import { cadJobOrderRoutes } from './routes/cadJobOrders';
 import { helpTicketRoutes } from './routes/helpTickets';
 import { positionRoutes } from './routes/positions';
@@ -240,6 +241,7 @@ app.use('/api/operations-budget', operationsBudgetRoutes);
 app.use('/api/procurement-settings', procurementSettingsRoutes);
 app.use('/api/my-records', myRecordsRoutes);
 app.use('/api/memos', memoRoutes);
+app.use('/api/assets', companyAssetRoutes);
 
 // Aftermarket (Phase 8)
 app.use('/api/installed-assets', assetRoutes);
