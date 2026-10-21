@@ -23,6 +23,7 @@ import { registerSearch } from '../shared/search';
 import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES, stockState, itemsOnOrder, STOCK_STATES, type StockState } from '../shared/chain';
 import { nextNumber } from '../shared/numbering';
 import { issueProjectStock, projectHoldings, receiveProjectStock } from '../shared/projectStock';
+import { issueOrderStock, receiveOrderStock } from '../shared/orderStock';
 import { itemForTypedLine, matchTypedItem } from '../shared/typedItems';
 import { notify } from '../shared/notifications';
 import {
@@ -342,6 +343,7 @@ receivingRoutes.get(
       include: {
         supplier: { select: { id: true, name: true } },
         job: { select: { id: true, number: true, name: true } },
+        salesOrder: { select: { id: true, number: true } },
         warehouse: { select: { id: true, name: true } },
         items: { include: { item: { select: { id: true, code: true, category: { select: { id: true, code: true, name: true } } } } }, orderBy: { id: 'asc' } },
       },
@@ -486,6 +488,7 @@ async function loadReceiving(id: string) {
         include: {
           supplier: { select: { id: true, name: true } },
           job: { select: { id: true, number: true, name: true } },
+          salesOrder: { select: { id: true, number: true } },
         },
       },
       supplier: { select: { id: true, name: true } },
@@ -1024,6 +1027,30 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
         createdById: actorId,
       });
     }
+
+    // Bought for a SALES ORDER (2026-10-21): received into a warehouse, the
+    // goods sit there as the order's own stock — never the company's — for a
+    // pull-out or an Outgoing slip on the order to release; received with no
+    // warehouse they went straight to the customer and nothing is held. No
+    // job is charged either way: the deal bears the cost (shared/orderStock).
+    if (order.kind === 'SALES_ORDER' && order.salesOrderId && receiving.warehouseId) {
+      if (!orderItem.itemId) {
+        orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId, line.categoryId);
+        await tx.purchaseOrderItem.update({ where: { id: orderItem.id }, data: { itemId: orderItem.itemId } });
+      }
+      await receiveOrderStock(tx, {
+        salesOrderId: order.salesOrderId,
+        itemId: orderItem.itemId,
+        warehouseId: receiving.warehouseId,
+        quantity,
+        unitCost,
+        locationId: line.locationId,
+        sourceType: 'receiving',
+        sourceId: receiving.id,
+        sourceNumber: receiving.number,
+        createdById: actorId,
+      });
+    }
   }
 
   if (order.kind === 'DIRECT_TO_JOB' && order.jobId) {
@@ -1063,14 +1090,19 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
 async function tellReceived(receivingId: string, userId: string) {
   const r = await prisma.receiving.findUnique({
     where: { id: receivingId },
-    select: { id: true, number: true, order: { select: { number: true, job: { select: { number: true } } } } },
+    select: {
+      id: true,
+      number: true,
+      order: { select: { number: true, job: { select: { number: true } }, salesOrder: { select: { number: true } } } },
+    },
   });
-  if (!r?.order?.job) return;
+  const forWhat = r?.order?.job?.number ?? r?.order?.salesOrder?.number;
+  if (!r?.order || !forWhat) return;
   await notify({
     userId,
     type: 'po.received',
     title: `Goods received — ${r.order.number}`,
-    body: `${r.order.job.number} · ${r.number}`,
+    body: `${forWhat} · ${r.number}`,
     link: `/g-chain/incoming/${r.id}`,
   });
 }
@@ -1390,6 +1422,21 @@ onApprovalReopened(RECEIVING_DOC, {
         // The project's own stock goes back out — refused, naming it, once some left the shelf.
         await issueProjectStock(tx, {
           jobId: order.jobId,
+          itemId: orderItem.itemId,
+          warehouseId: receiving.warehouseId,
+          quantity: num(line.quantity),
+          type: 'RECEIPT',
+          sourceType: 'receiving',
+          sourceId: receiving.id,
+          sourceNumber: receiving.number,
+          notes: why,
+          createdById: actor.id,
+        });
+      }
+      if (order?.kind === 'SALES_ORDER' && order.salesOrderId && receiving.warehouseId && orderItem?.itemId) {
+        // The sales order's own stock goes back out — refused once some left the shelf.
+        await issueOrderStock(tx, {
+          salesOrderId: order.salesOrderId,
           itemId: orderItem.itemId,
           warehouseId: receiving.warehouseId,
           quantity: num(line.quantity),

@@ -32,6 +32,7 @@ import { CostPanelBlock, type Item } from './Quotations';
 import { AppendQuotePanel, linesFromItems } from './QuotationEditor';
 import { loadPeople } from '../../components/People';
 import { PulloutCard } from '../chain/PulloutSlips';
+import { OrderSpendPanel, type OrderSpend } from '../chain/PurchaseRequisitionEditor';
 import { InvoiceRequestModal, REQUEST_TONES } from '../finance/InvoiceRequests';
 import {
   DiscountCalculator,
@@ -145,6 +146,13 @@ interface SalesOrderDetailRow extends SalesOrderRow {
     seesRequests: boolean;
     requests: { id: string; number: string; status: string; billing: string | null; grossAmount: number; invoice: { id: string; number: string } | null }[];
     invoices: { id: string; number: string; siNumber: string | null; status: string; invoiceDate: string; grossAmount: number; netCollectible: number }[];
+  };
+  /** What was bought for the order with no project (2026-10-21). */
+  purchasing?: {
+    canRequest: boolean;
+    spend: OrderSpend | null;
+    requests: { id: string; number: string; status: string; purpose: string | null; estimated: number }[];
+    orders: { id: string; number: string; status: string; supplier: string; total: number; currency: string | null }[];
   };
   /** Optional routes the submitter may tick — "Add the CEO as approver". */
   approvalOptions?: { id: string; label: string }[];
@@ -790,6 +798,10 @@ export function SalesOrderDetail() {
 
       {order.status === 'ISSUED' && order.invoicing && <InvoicingCard order={order} invoicing={order.invoicing} />}
 
+      {order.purchasing && (order.status === 'ISSUED' || order.purchasing.requests.length > 0) && (
+        <PurchasingCard orderId={order.id} purchasing={order.purchasing} />
+      )}
+
       <PulloutCard salesOrderId={order.id} />
 
       <CommissionsCard salesOrderId={order.id} />
@@ -816,6 +828,75 @@ export function SalesOrderDetail() {
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * Buying for the order with no project (2026-10-21): its quoted cost against
+ * what the requests and orders raised for it have committed and received, and
+ * the documents themselves. Over the quoted cost is said, never refused.
+ */
+function PurchasingCard({ orderId, purchasing }: { orderId: string; purchasing: NonNullable<SalesOrderDetailRow['purchasing']> }) {
+  return (
+    <section className="card sales-card-gap">
+      <div className="card-head">
+        <h3 className="card-title">Purchasing</h3>
+        {purchasing.canRequest && (
+          <div className="card-actions">
+            <Link to={`/g-chain/purchase-requests/new?salesOrder=${orderId}`} className="btn btn-sm">
+              + New purchase request
+            </Link>
+          </div>
+        )}
+      </div>
+      <OrderSpendPanel spend={purchasing.spend} />
+      {purchasing.requests.length === 0 && purchasing.orders.length === 0 ? (
+        <p className="muted">Nothing bought for it yet — a purchase request for the order needs no project.</p>
+      ) : (
+        <div className="table-wrap fin-gap-top">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Document</th>
+                <th>For</th>
+                <th className="num">Amount</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {purchasing.requests.map((r) => (
+                <tr key={r.id}>
+                  <td>
+                    <Link to={`/g-chain/purchase-requests/${r.id}`} className="mono">
+                      {r.number}
+                    </Link>
+                  </td>
+                  <td>{r.purpose ?? 'Purchase request'}</td>
+                  <td className="num">{formatMoney(r.estimated)}</td>
+                  <td>
+                    <StatusBadge status={r.status} />
+                  </td>
+                </tr>
+              ))}
+              {purchasing.orders.map((o) => (
+                <tr key={o.id}>
+                  <td>
+                    <Link to={`/g-chain/purchase-orders/${o.id}`} className="mono">
+                      {o.number}
+                    </Link>
+                  </td>
+                  <td>{o.supplier}</td>
+                  <td className="num">{formatMoney(o.total, o.currency ?? 'PHP')}</td>
+                  <td>
+                    <StatusBadge status={o.status} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 

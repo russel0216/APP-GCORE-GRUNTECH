@@ -54,6 +54,7 @@ interface Draft {
   kind: string;
   request: { id: string; number: string; purpose: string; preferredSupplier: string | null } | null;
   job: { id: string; number: string; name: string } | null;
+  salesOrder?: { id: string; number: string; customer: { name: string } } | null;
   warehouse: { id: string; name: string } | null;
   canvass: { id: string; number: string } | null;
   supplier: { id: string; name: string; paymentTerms: string | null } | null;
@@ -82,6 +83,7 @@ interface ExistingPo {
   version: string;
   supplier: { id: string; name: string; paymentTerms: string | null };
   job: { id: string; number: string; name: string } | null;
+  salesOrder?: { id: string; number: string; customer: { name: string } } | null;
   warehouse: { id: string; name: string } | null;
   request: { id: string; number: string; purpose: string } | null;
   fromCanvass: { id: string; number: string } | null;
@@ -180,6 +182,9 @@ export function PurchaseOrderEditor() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [budget, setBudget] = useState<Budget | null>(null);
+  // An order raised with no request may be for a sales order (2026-10-21).
+  const [orderChoices, setOrderChoices] = useState<{ id: string; number: string; customer: string; subject: string }[]>([]);
+  const [pickedOrderId, setPickedOrderId] = useState('');
   const [route, setRoute] = useState<Route | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -285,10 +290,22 @@ export function PurchaseOrderEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, fromRequest, fromCanvass]);
 
-  const kind = existing?.kind ?? draft?.kind ?? 'DIRECT_TO_JOB';
-  const direct = kind === 'DIRECT_TO_JOB';
-  const job = existing?.job ?? draft?.job ?? null;
   const request = existing?.request ?? draft?.request ?? null;
+  // Raised with no request, the buyer may name the sales order it is for.
+  const standalone = !existing && !request;
+  const kind = existing?.kind ?? (standalone && pickedOrderId ? 'SALES_ORDER' : (draft?.kind ?? 'DIRECT_TO_JOB'));
+  const job = existing?.job ?? draft?.job ?? null;
+  // Only an order charged to a project asks each line for its budget line.
+  const direct = kind === 'DIRECT_TO_JOB';
+  const salesOrder = existing?.salesOrder ?? draft?.salesOrder ?? null;
+
+  useEffect(() => {
+    if (!standalone) return;
+    api
+      .get<typeof orderChoices>('/purchase-orders/sales-orders')
+      .then(setOrderChoices)
+      .catch(() => setOrderChoices([]));
+  }, [standalone]);
   const canvass = existing?.fromCanvass ?? draft?.canvass ?? null;
   const warehouse = existing?.warehouse ?? draft?.warehouse ?? null;
   const companyRate = Number(existing?.vatRate) || Number(draft?.vatRate) || 0.12;
@@ -422,7 +439,9 @@ export function PurchaseOrderEditor() {
         unit: l.unit.trim() || 'pcs',
         unitPrice: Number(l.unitPrice) || 0,
       })),
-      ...(existing ? { version: existing.version } : { requestId: fromCanvass ? null : fromRequest, canvassId: fromCanvass }),
+      ...(existing
+        ? { version: existing.version }
+        : { requestId: fromCanvass ? null : fromRequest, canvassId: fromCanvass, salesOrderId: standalone ? pickedOrderId || null : null }),
     };
   }
 
@@ -561,18 +580,33 @@ export function PurchaseOrderEditor() {
                   autoFocus={!editing && !canvass}
                 />
               </Field>
-              <Field label="For">
-                <div className="qe-static">
-                  {job ? (
-                    <Link to={`/g-ops/projects/${job.id}`}>
-                      {job.number} — {job.name}
-                    </Link>
-                  ) : warehouse ? (
-                    `Stock for ${warehouse.name}`
-                  ) : (
-                    <span className="muted">No project — not charged to a budget</span>
-                  )}
-                </div>
+              <Field label="For" hint={standalone ? 'An order with no request may be bought for an issued sales order — no project needed' : undefined}>
+                {standalone ? (
+                  <select value={pickedOrderId} onChange={(e) => setPickedOrderId(e.target.value)}>
+                    <option value="">— no project — not charged to a budget —</option>
+                    {orderChoices.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        Sales order {o.number} — {o.customer}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="qe-static">
+                    {job ? (
+                      <Link to={`/g-ops/projects/${job.id}`}>
+                        {job.number} — {job.name}
+                      </Link>
+                    ) : salesOrder ? (
+                      <Link to={`/g-ops/sales-orders/${salesOrder.id}`}>
+                        Sales order {salesOrder.number} — {salesOrder.customer.name}
+                      </Link>
+                    ) : warehouse ? (
+                      `Stock for ${warehouse.name}`
+                    ) : (
+                      <span className="muted">No project — not charged to a budget</span>
+                    )}
+                  </div>
+                )}
               </Field>
               <Field label="Delivery date">
                 <input type="date" value={header.deliveryDate} onChange={(e) => setHeader((h) => ({ ...h, deliveryDate: e.target.value }))} />
@@ -730,6 +764,7 @@ export function PurchaseOrderEditor() {
                             n={i + 1}
                             line={l}
                             jobId={job?.id ?? ''}
+                            salesOrderId={salesOrder?.id ?? (standalone ? pickedOrderId : '')}
                             suggestPath="/purchase-orders/suggest"
                             invalid={problem === 'Say what is ordered'}
                             onChange={(patch) => setLine(l.key, patch)}

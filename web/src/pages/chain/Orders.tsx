@@ -373,6 +373,11 @@ export function PurchaseOrderDetail() {
         <div className="alert info">With the approvers. It cannot be changed until they decide.</div>
       )}
 
+      {po.status === 'ISSUED' && po.kind === 'SALES_ORDER' && (
+        <div className="alert ok">
+          Issued for a sales order — {formatMoney(po.subtotal, po.currency ?? 'PHP')} is committed against the order's quoted cost. No project is charged.
+        </div>
+      )}
       {po.status === 'ISSUED' && po.kind === 'DIRECT_TO_JOB' && (
         <div className="alert ok">
           Issued — {formatMoney(po.subtotal)} is committed against the project at the agreed price.

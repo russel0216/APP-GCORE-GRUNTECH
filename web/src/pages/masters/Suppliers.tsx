@@ -685,7 +685,7 @@ export function SupplierDetail() {
                 </Link>
               </td>
               <td>{formatDate(o.orderDate)}</td>
-              <td>{o.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : 'Stock'}</td>
+              <td>{o.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : o.kind === 'SALES_ORDER' ? 'For a sales order' : 'Stock'}</td>
               <td>{o.job ? `${o.job.number} — ${o.job.name}` : '—'}</td>
               <td>{formatDate(o.deliveryDate)}</td>
               <td className="num">{formatMoney(o.total)}</td>

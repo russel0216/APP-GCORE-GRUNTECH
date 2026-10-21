@@ -408,9 +408,13 @@ export async function warehouseDeliverTo(pr: { warehouseId?: string | null }): P
   return { name, address, line: [name, address].filter(Boolean).join(' — ') };
 }
 
-/** An RFQ's reference for a supplier: the project's NUMBER only, never its name or customer. */
-function projectRef(pr: { job: { number: string } | null; warehouse?: { name: string } | null }): string {
-  return pr.job ? `Project ${pr.job.number}` : 'Stock replenishment';
+/**
+ * An RFQ's reference for a supplier: the project's NUMBER only, never its
+ * name or customer — and for a sales order's purchase (2026-10-21) the
+ * order's number alone.
+ */
+function projectRef(pr: { job: { number: string } | null; salesOrder?: { number: string } | null; warehouse?: { name: string } | null }): string {
+  return pr.job ? `Project ${pr.job.number}` : pr.salesOrder ? `Sales order ${pr.salesOrder.number}` : 'Stock replenishment';
 }
 
 async function loadRfq(id: string) {
@@ -428,6 +432,7 @@ async function loadRfq(id: string) {
           preferredSupplier: true,
           approvedAt: true,
           job: { select: { id: true, number: true, name: true } },
+          salesOrder: { select: { id: true, number: true } },
           warehouse: { select: { id: true, name: true } },
         },
       },

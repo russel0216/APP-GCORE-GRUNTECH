@@ -177,6 +177,7 @@ export function ReceivingDetail() {
     kind: string;
     supplier: { id: string; name: string };
     job: { id: string; number: string; name: string } | null;
+    salesOrder?: { id: string; number: string } | null;
   } | null;
   const from = String(rec.from ?? '');
   const fromSupplier = (rec.supplier ?? null) as { id: string; name: string } | null;
@@ -369,8 +370,10 @@ export function ReceivingDetail() {
       <ErrorBox error={error} />
 
       {received ? (
-        <div className={`alert ${order?.kind === 'DIRECT_TO_JOB' ? 'ok' : 'info'}`}>
-          {order?.kind === 'DIRECT_TO_JOB'
+        <div className={`alert ${order?.kind === 'DIRECT_TO_JOB' || order?.kind === 'SALES_ORDER' ? 'ok' : 'info'}`}>
+          {order?.kind === 'SALES_ORDER'
+            ? `${formatMoney(Number(rec.value))} received for sales order ${order.salesOrder?.number ?? ''} — no project charged.${warehouse ? ` The goods are held in ${warehouse.name} for the order, released by a pull-out or Outgoing slip.` : ' Delivered straight to the customer.'}`
+            : order?.kind === 'DIRECT_TO_JOB'
             ? `${formatMoney(Number(rec.value))} charged to ${order.job?.number ?? 'the project'}, and the same released from committed.${warehouse ? ` The goods are in ${warehouse.name} as the project's own stock.` : ''}`
             : `${formatMoney(Number(rec.value))} added to stock. No project has been charged — that happens at issuance.`}
         </div>
@@ -382,7 +385,11 @@ export function ReceivingDetail() {
             ? 'Waiting for approval. Nothing has moved yet.'
             : 'A draft — nothing has moved yet, and nothing will until it is submitted and approved. Attach the packing list or delivery receipt below, then submit it for approval.'}{' '}
           {/* Where the goods land once approved — the two purchase kinds stay disjoint (Phase 5). */}
-          {order?.kind === 'DIRECT_TO_JOB'
+          {order?.kind === 'SALES_ORDER'
+            ? warehouse
+              ? `Approved, the goods are held in ${warehouse.name} for sales order ${order.salesOrder?.number ?? ''} (Inventory › Stock: Sales order stock), released by a pull-out or Outgoing slip. No project is charged.`
+              : `Approved, it counts as spent on sales order ${order.salesOrder?.number ?? ''}. Delivered straight to the customer, nothing enters a warehouse.`
+            : order?.kind === 'DIRECT_TO_JOB'
             ? warehouse
               ? `Approved, it is charged to ${order.job?.number ?? 'the project'} and the goods sit in ${warehouse.name} as the project's own stock (Inventory › Stock: Project stock), released by Outgoing or a pull-out slip without being charged again.`
               : `Approved, it is charged to ${order.job?.number ?? 'the project'}. Delivered to site, nothing enters a warehouse — receive it into a warehouse to keep it as the project's stock.`

@@ -58,6 +58,8 @@ export function CashAdvanceEditor() {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [attempted, setAttempted] = useState(false);
+  // Supporting papers for finance's check, filed with the save (2026-10-21).
+  const [files, setFiles] = useState<File[]>([]);
   const [header, setHeader] = useState<Header>({ requestDate: todayLocal(), neededBy: '', purpose: '', jobId: '', costCategoryId: '', notes: '' });
   const [lines, setLines] = useState<RequestLine[]>(() => [blankRequestLine()]);
   const [saved, setSaved] = useState<string | null>(null);
@@ -147,6 +149,16 @@ export function CashAdvanceEditor() {
         ? (await api.put<{ id: string }>(`/cash-advances/${existing.id}`, body)).id
         : (await api.post<{ id: string }>('/cash-advances', body)).id;
       setSaved(snapshot(header, lines));
+      if (files.length) {
+        const form = new FormData();
+        for (const f of files) form.append('files', f);
+        try {
+          await api.post(`/attachments/cash_advance/${savedId}`, form);
+          setFiles([]);
+        } catch {
+          toast('error', 'Saved, but the attachments could not be filed — add them on the cash advance');
+        }
+      }
       if (submit) {
         try {
           await api.post(`/cash-advances/${savedId}/submit`);
@@ -298,6 +310,37 @@ export function CashAdvanceEditor() {
               <dt className="prq-total-big">Amount requested</dt>
               <dd className="prq-total-big mono">{formatMoney(total)}</dd>
             </dl>
+          </section>
+
+          <section className="card" aria-labelledby="ca-files">
+            <h2 id="ca-files" className="card-title">Attachments</h2>
+            <p className="prq-hint">
+              Quotations, a breakdown or anything that supports the request — they go with the advance, so finance sees them when checking it.
+              {existing ? ' Files already on it stay; add more here or on its page.' : ''}
+            </p>
+            <input
+              type="file"
+              multiple
+              accept="image/*,application/pdf,.xlsx,.xls,.csv,.docx,.doc"
+              aria-label="Attach supporting papers"
+              onChange={(e) => {
+                const picked = Array.from(e.target.files ?? []);
+                setFiles((cur) => [...cur, ...picked]);
+                e.target.value = '';
+              }}
+            />
+            {files.length > 0 && (
+              <ul className="fin-files">
+                {files.map((f, i) => (
+                  <li key={`${f.name}-${i}`}>
+                    <span>{f.name}</span>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => setFiles(files.filter((_, j) => j !== i))}>
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
 
           <section className="card" aria-labelledby="ca-approval">

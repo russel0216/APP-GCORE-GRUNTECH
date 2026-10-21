@@ -36,6 +36,10 @@ import { cents, D, num, dayKey, daysBetween, financeSettings } from '../shared/f
 import { claimInclude, presentClaim, cashRequestSections, cashRequestSignatories } from './finance';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { registerAttachmentGuard } from '../shared/attachments';
+import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
+import { mayDecide } from '../shared/approvals';
+import { can } from '../permissions/resolve';
 
 /**
  * Cash advances — money issued to a person BEFORE it is spent.
@@ -811,13 +815,23 @@ advanceRoutes.get(
       }),
     });
 
+    // The quotations, receipts and papers filed for finance's checking go
+    // behind the advance (2026-10-21); `?attachments=0` prints it bare.
+    const files = req.query.attachments === '0' ? [] : await attachedFiles('cash_advance', row.id);
+    const { pdf: withFiles, listed } = await withAttachments(pdf, files, { title: 'Cash Advance', number: row.number, reference: row.purpose ?? undefined });
+
     await audit(
-      { entityType: 'cash_advance', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.number}` },
+      {
+        entityType: 'cash_advance',
+        entityId: row.id,
+        action: 'EXPORTED',
+        summary: `Printed ${row.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}`,
+      },
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Cash Advance', number: row.number, author: row.requestedBy.name, date: row.requestDate })));
-    res.send(pdf);
+    res.send(withFiles);
   }),
 );
 
@@ -849,3 +863,30 @@ registerSearch({
     }));
   },
 });
+
+/**
+ * The papers behind an advance, for finance's checking (2026-10-21, the
+ * owner's call: "add also attachment on Cash Advance for finance checking"):
+ * a quotation, a canvass, a breakdown — read by whoever reads the advance
+ * (its requester, View All, the team's) and by whoever may decide its open
+ * request; filed while it is a draft or waiting for approval, by whoever may
+ * change it (its requester, or Edit All — finance asking for the missing
+ * paper).
+ */
+registerAttachmentGuard(
+  'cash_advance',
+  async (user, id) => {
+    const row = await prisma.cashAdvance.findUnique({ where: { id }, select: { requestedById: true } });
+    if (!row) return false;
+    if (user.isSuperAdmin || can(user, 'gfin.cash_advances.view_all')) return true;
+    if (visibleOwners(user, 'gfin', 'cash_advances').includes(row.requestedById)) return true;
+    return mayDecide(user.id, 'cash_advance', [id]);
+  },
+  {
+    write: async (user, id) => {
+      const row = await prisma.cashAdvance.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+      if (!row || !['DRAFT', 'PENDING_APPROVAL'].includes(row.status)) return false;
+      return canEditRecord(user, 'gfin', 'cash_advances', row.requestedById);
+    },
+  },
+);

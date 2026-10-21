@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { salesOrderSpend } from '../shared/orderStock';
 import { inBase, RATE_SELECT, rateOf } from '../shared/exchangeRates';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
@@ -664,9 +665,44 @@ salesOrderRoutes.get(
       approvalOptions: options,
       approvalRoutes,
       invoicing: await orderInvoicing(me, order),
+      purchasing: await orderPurchasing(me, order, showCost),
     });
   }),
 );
+
+/**
+ * What was bought for the order with no project (2026-10-21): the purchase
+ * requests and orders of kind SALES_ORDER on it, and — for a viewer who may
+ * see its cost — `salesOrderSpend`: the quoted cost against what is
+ * requested, committed and incurred, and what that leaves. `canRequest` is
+ * the purchase request's own create right on an issued order.
+ */
+async function orderPurchasing(me: ReturnType<typeof currentUser>, order: { id: string; status: string }, showCost: boolean) {
+  const [requests, orders] = await Promise.all([
+    prisma.purchaseRequest.findMany({
+      where: { salesOrderId: order.id, kind: 'SALES_ORDER' },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, number: true, status: true, purpose: true, items: { select: { estimatedAmount: true } } },
+    }),
+    prisma.purchaseOrder.findMany({
+      where: { salesOrderId: order.id, kind: 'SALES_ORDER' },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, number: true, status: true, total: true, currency: true, supplier: { select: { name: true } } },
+    }),
+  ]);
+  return {
+    canRequest: order.status === 'ISSUED' && can(me, 'gchain.purchase_requests.create'),
+    spend: showCost ? await salesOrderSpend(order.id) : null,
+    requests: requests.map((r) => ({
+      id: r.id,
+      number: r.number,
+      status: r.status,
+      purpose: r.purpose,
+      estimated: Math.round(r.items.reduce((s, i) => s + num(i.estimatedAmount), 0) * 100) / 100,
+    })),
+    orders: orders.map((o) => ({ id: o.id, number: o.number, status: o.status, supplier: o.supplier.name, total: num(o.total), currency: o.currency })),
+  };
+}
 
 /**
  * After the order is issued, its invoicing (2026-10-16, the owner's call:
@@ -1230,6 +1266,23 @@ async function refuseWhilePulledOut(orderId: string, number: string, verb: strin
 }
 
 /**
+ * Nor while something is being bought for it (2026-10-21): a purchase
+ * request still live, or a purchase order not cancelled — buying for a deal
+ * that is no longer booked is what this stops. Cancel those first.
+ */
+async function refuseWhileBuying(orderId: string, number: string, verb: string) {
+  const [requests, orders] = await Promise.all([
+    prisma.purchaseRequest.findMany({
+      where: { salesOrderId: orderId, status: { notIn: ['CANCELLED', 'REJECTED'] } },
+      select: { number: true },
+    }),
+    prisma.purchaseOrder.findMany({ where: { salesOrderId: orderId, status: { not: 'CANCELLED' } }, select: { number: true } }),
+  ]);
+  const names = [...requests, ...orders].map((d) => d.number);
+  if (names.length) throw badRequest(`${number} cannot be ${verb} — ${names.join(', ')} ${names.length === 1 ? 'buys' : 'buy'} for it`);
+}
+
+/**
  * Nor while an invoice bills it (2026-10-15): the invoice is a receivable
  * the customer holds, and the order is what it was raised against. Cancel
  * the invoice first.
@@ -1253,6 +1306,7 @@ onApprovalReopened('sales_order', {
     const order = await tx.salesOrder.findUnique({ where: { id: documentId }, select: { id: true, number: true } });
     if (!order) throw notFound('Sales order not found');
     await refuseWhilePulledOut(order.id, order.number, 'pulled back');
+    await refuseWhileBuying(order.id, order.number, 'pulled back');
     await refuseWhileInvoiced(order.id, order.number, 'pulled back');
     const requests = await tx.invoiceRequest.findMany({
       where: { salesOrderId: order.id, status: { in: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'] } },
@@ -1272,6 +1326,7 @@ salesOrderRoutes.post(
   handler(async (req, res) => {
     const { order } = await orderForEdit(req, req.params.id, false);
     await refuseWhilePulledOut(order.id, order.number, 'reopened');
+    await refuseWhileBuying(order.id, order.number, 'reopened');
     await refuseWhileInvoiced(order.id, order.number, 'reopened');
     const claimed = await prisma.salesOrder.updateMany({
       where: { id: order.id, status: 'ISSUED' },
@@ -1293,6 +1348,7 @@ salesOrderRoutes.post(
     const { me, order } = await orderForEdit(req, req.params.id, false);
     const { reason } = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled') }), req.body);
     await refuseWhilePulledOut(order.id, order.number, 'cancelled');
+    await refuseWhileBuying(order.id, order.number, 'cancelled');
     await refuseWhileInvoiced(order.id, order.number, 'cancelled');
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.salesOrder.updateMany({

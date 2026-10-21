@@ -21,6 +21,7 @@ import { useBackLink } from '../../components/Navigation';
 import { RFQ_TONES } from './Rfq';
 import { PulloutCard } from './PulloutSlips';
 import { Attachments } from '../../components/Attachments';
+import { OrderSpendPanel, type OrderSpend } from './PurchaseRequisitionEditor';
 
 export const PR_STATUSES = [
   { value: 'DRAFT', label: 'Draft' },
@@ -61,6 +62,7 @@ interface PrRow {
   neededBy: string | null;
   createdAt: string;
   job: { id: string; number: string; name: string } | null;
+  salesOrder?: { id: string; number: string; customer: { name: string } } | null;
   warehouse: { id: string; name: string } | null;
   requestedBy: { id: string; name: string };
   itemCount: number;
@@ -90,7 +92,11 @@ export function PurchaseRequests() {
         <div>
           <div>{r.purpose}</div>
           <div className="faint">
-            {r.job ? `${r.job.number} — ${r.job.name}` : (r.warehouse?.name ?? 'Stock')}
+            {r.job
+              ? `${r.job.number} — ${r.job.name}`
+              : r.salesOrder
+                ? `${r.salesOrder.number} — ${r.salesOrder.customer.name}`
+                : (r.warehouse?.name ?? 'Stock')}
           </div>
         </div>
       ),
@@ -99,8 +105,17 @@ export function PurchaseRequests() {
       key: 'kind',
       label: 'Type',
       render: (r) => (
-        <span className="badge" title={r.kind === 'DIRECT_TO_JOB' ? 'Charges the project when received' : 'Charges a project when issued from stock'}>
-          {r.kind === 'DIRECT_TO_JOB' ? 'direct to job' : 'stock'}
+        <span
+          className="badge"
+          title={
+            r.kind === 'DIRECT_TO_JOB'
+              ? 'Charges the project when received'
+              : r.kind === 'SALES_ORDER'
+                ? 'Bought for a sales order — no project'
+                : 'Charges a project when issued from stock'
+          }
+        >
+          {r.kind === 'DIRECT_TO_JOB' ? 'direct to job' : r.kind === 'SALES_ORDER' ? 'sales order' : 'stock'}
         </span>
       ),
     },
@@ -149,7 +164,7 @@ export function PurchaseRequests() {
         columns={columns}
         rowKey={(r) => r.id}
         scoped
-        searchPlaceholder="Search number, purpose, project…"
+        searchPlaceholder="Search number, purpose, project, sales order…"
         onRowClick={(r) => navigate(`${base}/${r.id}`)}
         emptyTitle="No purchase requests yet"
         emptyHint="Direct to job charges the project when the goods arrive; stock replenishment charges one only when it is issued."
@@ -160,6 +175,7 @@ export function PurchaseRequests() {
             label: 'Type',
             options: [
               { value: 'DIRECT_TO_JOB', label: 'Direct to job' },
+              { value: 'SALES_ORDER', label: 'For a sales order' },
               { value: 'STOCK_REPLENISHMENT', label: 'Stock replenishment' },
             ],
           },
@@ -214,6 +230,7 @@ interface PrDetail {
   canCancel: boolean;
   estimatedTotal: number;
   job: { id: string; number: string; name: string } | null;
+  salesOrder?: { id: string; number: string; customer: { name: string } } | null;
   warehouse: { id: string; name: string } | null;
   requestedBy: { id: string; name: string };
   items: PrItem[];
@@ -221,6 +238,8 @@ interface PrDetail {
   rfqs: { id: string; number: string; status: string; createdAt: string; _count: { suppliers: number; items: number } }[];
   orders: { id: string; number: string; status: string; total: number; supplier: { id: string; name: string } }[];
   budget: Record<string, { budgeted: number; committed: number; incurred: number; available: number }>;
+  /** A sales order's purchase: the order's quoted cost and what it has spent (2026-10-21). */
+  spend: OrderSpend | null;
 }
 
 export function PurchaseRequestDetail() {
@@ -365,13 +384,21 @@ export function PurchaseRequestDetail() {
         amountLabel="Estimated total"
         meta={
           <>
-            {pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : 'Stock replenishment'}
+            {pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : pr.kind === 'SALES_ORDER' ? 'For a sales order' : 'Stock replenishment'}
             {pr.job ? (
               <>
                 {' '}
                 ·{' '}
                 <Link to={`/g-ops/projects/${pr.job.id}`}>
                   {pr.job.number} — {pr.job.name}
+                </Link>
+              </>
+            ) : pr.salesOrder ? (
+              <>
+                {' '}
+                ·{' '}
+                <Link to={`/g-ops/sales-orders/${pr.salesOrder.id}`}>
+                  {pr.salesOrder.number} — {pr.salesOrder.customer.name}
                 </Link>
               </>
             ) : pr.warehouse ? (
@@ -478,6 +505,14 @@ export function PurchaseRequestDetail() {
         <div className="alert ok">
           Approved — {formatMoney(pr.estimatedTotal)} is now committed against the project's budget
           at estimated prices. Raising the order replaces that with the price actually agreed.
+        </div>
+      )}
+      {pr.kind === 'SALES_ORDER' && pr.spend && (
+        <div className="card">
+          <div className="card-head">
+            <h3 className="card-title">Against the sales order's quoted cost</h3>
+          </div>
+          <OrderSpendPanel spend={pr.spend} asked={pr.status === 'DRAFT' ? pr.estimatedTotal : undefined} />
         </div>
       )}
 

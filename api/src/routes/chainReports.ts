@@ -124,7 +124,7 @@ async function purchaseRequests(range: Range): Promise<Report> {
       { label: 'Raised', value: rows.length },
       { label: 'Approved', value: rows.filter((r) => approved(r.status)).length, sub: `${rows.filter((r) => r.status === 'PENDING_APPROVAL').length} waiting for approval` },
       { label: 'Estimated value', value: cents(live.reduce((s, r) => s + valueOf(r), 0)), money: true, sub: 'drafts and pending included; cancelled and rejected left out' },
-      { label: 'Direct to project', value: rows.filter((r) => r.kind === 'DIRECT_TO_JOB').length, sub: `${rows.filter((r) => r.kind !== 'DIRECT_TO_JOB').length} for stock` },
+      { label: 'Direct to project', value: rows.filter((r) => r.kind === 'DIRECT_TO_JOB').length, sub: `${rows.filter((r) => r.kind === 'STOCK_REPLENISHMENT').length} for stock, ${rows.filter((r) => r.kind === 'SALES_ORDER').length} for a sales order` },
     ],
     series: series.done(),
     tables: [

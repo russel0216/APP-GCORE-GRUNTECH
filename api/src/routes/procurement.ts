@@ -62,6 +62,22 @@ import {
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { canvassFigures, MAX_SHEET_SUPPLIERS, type SheetLine } from '../shared/canvassMath';
 import { jobCostingIds } from '../shared/costingSets';
+import { salesOrderSpend } from '../shared/orderStock';
+
+/** What a purchase is for, in words — the lists, the papers and the trail. */
+export function purchaseKindLabel(kind: string): string {
+  return kind === 'DIRECT_TO_JOB' ? 'Direct to project' : kind === 'SALES_ORDER' ? 'For a sales order' : 'Stock replenishment';
+}
+
+/**
+ * A request bought for a sales order names an ISSUED one (2026-10-21): a
+ * draft or pending order may still change, a cancelled one sells nothing.
+ */
+async function checkSalesOrderTarget(salesOrderId: string) {
+  const so = await prisma.salesOrder.findUnique({ where: { id: salesOrderId }, select: { number: true, status: true } });
+  if (!so) throw badRequest('That sales order does not exist');
+  if (so.status !== 'ISSUED') throw badRequest(`${so.number} is ${statusLabel(so.status).toLowerCase()} — buy for an issued sales order`);
+}
 
 const D = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -131,12 +147,14 @@ function prListWhere(me: ResolvedUser, q: ListQuery): { where: Prisma.PurchaseRe
   const kind = choice(f.kind, PurchaseKind, 'Type');
   if (kind) and.push({ kind });
   if (f.jobId) and.push({ jobId: f.jobId });
+  if (f.salesOrderId) and.push({ salesOrderId: f.salesOrderId });
   if (q.search) {
     and.push({
       OR: [
         { number: { contains: q.search, mode: 'insensitive' } },
         { purpose: { contains: q.search, mode: 'insensitive' } },
         { job: { name: { contains: q.search, mode: 'insensitive' } } },
+        { salesOrder: { number: { contains: q.search, mode: 'insensitive' } } },
       ],
     });
   }
@@ -158,6 +176,7 @@ purchaseRequestRoutes.get(
         where,
         include: {
           job: { select: { id: true, number: true, name: true } },
+          salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } },
           requestedBy: { select: { id: true, name: true } },
           warehouse: { select: { id: true, name: true } },
           items: { select: { estimatedAmount: true } },
@@ -181,6 +200,7 @@ purchaseRequestRoutes.get(
           neededBy: r.neededBy,
           createdAt: r.createdAt,
           job: r.job,
+          salesOrder: r.salesOrder,
           warehouse: r.warehouse,
           requestedBy: r.requestedBy,
           itemCount: r.items.length,
@@ -217,6 +237,7 @@ purchaseRequestRoutes.get(
         where,
         include: {
           job: { select: { number: true, name: true } },
+          salesOrder: { select: { number: true, customer: { select: { name: true } } } },
           requestedBy: { select: { name: true } },
           warehouse: { select: { name: true } },
           items: { select: { estimatedAmount: true } },
@@ -238,7 +259,7 @@ purchaseRequestRoutes.get(
     const reference = listReference(count, rows.length, ['purchase request', 'purchase requests'], [
       q.search && `search "${q.search}"`,
       f.status && `status ${statusLabel(f.status)}`,
-      f.kind && (f.kind === 'DIRECT_TO_JOB' ? 'direct to job' : 'stock replenishment'),
+      f.kind && purchaseKindLabel(f.kind).toLowerCase(),
       project,
       mine && 'raised by me',
       f.ids && 'the rows selected',
@@ -253,8 +274,15 @@ purchaseRequestRoutes.get(
         align: ['left', 'left', 'left', 'right', 'right', 'left', 'left', 'left'],
         rows: rows.map((r) => [
           r.number,
-          { title: r.purpose, body: r.job ? `${r.job.number} — ${r.job.name}` : (r.warehouse?.name ?? 'Stock') },
-          r.kind === 'DIRECT_TO_JOB' ? 'Direct to job' : 'Stock',
+          {
+            title: r.purpose,
+            body: r.job
+              ? `${r.job.number} — ${r.job.name}`
+              : r.salesOrder
+                ? `${r.salesOrder.number} — ${r.salesOrder.customer.name}`
+                : (r.warehouse?.name ?? 'Stock'),
+          },
+          r.kind === 'DIRECT_TO_JOB' ? 'Direct to job' : r.kind === 'SALES_ORDER' ? 'Sales order' : 'Stock',
           String(r.items.length),
           bracketed(formatAmount(estimated(r).toFixed(2)), !PR_CLOSED.includes(r.status)),
           r.requestedBy.name,
@@ -342,10 +370,63 @@ export async function projectBudgetByLine(jobId: string) {
   };
 }
 
+/**
+ * The issued sales orders a request may buy for (2026-10-21), newest first:
+ * number, customer and the quotation's subject — names only, behind the
+ * request's own rights, so a purchasing officer with no sales right can pick
+ * one. `?q=` searches the number, the customer and the subject.
+ */
+purchaseRequestRoutes.get(
+  '/sales-orders',
+  requireAny(...PR_WRITERS),
+  handler(async (req, res) => {
+    res.json(await issuedSalesOrders(String(req.query.q ?? '').trim()));
+  }),
+);
+
+/** The issued sales orders a purchase may be for — the request's and the order's pickers. */
+async function issuedSalesOrders(q: string) {
+  const rows = await prisma.salesOrder.findMany({
+    where: {
+      status: 'ISSUED',
+      ...(q
+        ? {
+            OR: [
+              { number: { contains: q, mode: 'insensitive' } },
+              { customer: { name: { contains: q, mode: 'insensitive' } } },
+              { quotation: { subject: { contains: q, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    },
+    orderBy: { orderDate: 'desc' },
+    take: 30,
+    select: {
+      id: true,
+      number: true,
+      orderDate: true,
+      customer: { select: { name: true } },
+      quotation: { select: { subject: true } },
+    },
+  });
+  return rows.map((r) => ({ id: r.id, number: r.number, orderDate: r.orderDate, customer: r.customer.name, subject: r.quotation.subject }));
+}
+
 purchaseRequestRoutes.get(
   '/budget',
   requireAny(...PR_WRITERS),
   handler(async (req, res) => {
+    // Bought for a sales order: the order's quoted cost and what it has spent.
+    if (req.query.salesOrderId) {
+      const salesOrderId = String(req.query.salesOrderId);
+      const so = await prisma.salesOrder.findUnique({
+        where: { id: salesOrderId },
+        select: { id: true, number: true, status: true, customer: { select: { name: true } } },
+      });
+      if (!so) throw notFound('Sales order not found');
+      res.json({ salesOrder: { id: so.id, number: so.number, status: so.status, customer: so.customer.name }, spend: await salesOrderSpend(so.id) });
+      return;
+    }
     const jobId = String(req.query.jobId ?? '');
     if (!jobId) throw badRequest('Name the project');
     const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, number: true, name: true } });
@@ -365,7 +446,7 @@ purchaseRequestRoutes.get(
  * reader — the quotation's suggestion rule. Without `q` the costing's lines
  * come whole ("Add from costing…"); the items need a word.
  */
-export async function lineSuggestions(me: ResolvedUser, term: string, jobId: string) {
+export async function lineSuggestions(me: ResolvedUser, term: string, jobId: string, salesOrderId = '') {
   const job = jobId
     ? await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, costingId: true, projectManagerId: true } })
     : null;
@@ -430,7 +511,57 @@ export async function lineSuggestions(me: ResolvedUser, term: string, jobId: str
         })
       : [],
   ]);
+  // A sales order's own lines (2026-10-21): what was sold, with the cost the
+  // quotation carried where the caller may see it (the quotation's rule).
+  const order = salesOrderId
+    ? await prisma.salesOrder.findUnique({
+        where: { id: salesOrderId },
+        select: {
+          ownerId: true,
+          lines: {
+            where: {
+              isHeading: false,
+              ...(term
+                ? {
+                    OR: [
+                      { title: { contains: term, mode: 'insensitive' as const } },
+                      { description: { contains: term, mode: 'insensitive' as const } },
+                      { partNumber: { contains: term, mode: 'insensitive' as const } },
+                    ],
+                  }
+                : {}),
+            },
+            orderBy: { sortOrder: 'asc' },
+            take: term ? 25 : 500,
+            select: {
+              id: true,
+              title: true,
+              description: true,
+              partNumber: true,
+              quantity: true,
+              unit: true,
+              unitCost: true,
+              providerSupplier: { select: { name: true } },
+            },
+          },
+        },
+      })
+    : null;
+  const seesOrderCost =
+    !!order && (canEditRecord(me, 'gops', 'sales_orders', order.ownerId) || can(me, 'gops.costing.view_all'));
   return {
+    salesOrder: (order?.lines ?? []).map((l) => ({
+      id: l.id,
+      itemId: null as string | null,
+      partNumber: l.partNumber,
+      name: l.title ?? l.description,
+      description: l.title && l.description !== l.title ? l.description : '',
+      quantity: num(l.quantity),
+      unit: l.unit,
+      unitCost: seesOrderCost && l.unitCost != null ? num(l.unitCost) : null,
+      costCategory: null as { id: string; code: string; name: string } | null,
+      supplier: l.providerSupplier?.name ?? null,
+    })),
     costing: costing.map((l) => ({
       id: l.id,
       itemId: l.itemId,
@@ -461,7 +592,9 @@ purchaseRequestRoutes.get(
   '/suggest',
   requireAny(...PR_WRITERS),
   handler(async (req, res) => {
-    res.json(await lineSuggestions(currentUser(req), String(req.query.q ?? '').trim(), String(req.query.jobId ?? '')));
+    res.json(
+      await lineSuggestions(currentUser(req), String(req.query.q ?? '').trim(), String(req.query.jobId ?? ''), String(req.query.salesOrderId ?? '')),
+    );
   }),
 );
 
@@ -492,6 +625,7 @@ async function loadPr(id: string) {
     where: { id },
     include: {
       job: { select: { id: true, number: true, name: true } },
+      salesOrder: { select: { id: true, number: true, customer: { select: { name: true } }, quotation: { select: { subject: true } } } },
       warehouse: { select: { id: true, name: true } },
       requestedBy: { select: { id: true, name: true, position: true } },
       items: {
@@ -557,6 +691,8 @@ purchaseRequestRoutes.get(
       ...presentPr(pr as unknown as Record<string, unknown>),
       orders: pr.orders.map((o) => ({ ...o, total: num(o.total) })),
       budget,
+      // A sales order's purchase is measured against the order's quoted cost.
+      spend: pr.salesOrderId ? await salesOrderSpend(pr.salesOrderId) : null,
       // The routes' own rules (prForEdit, /withdraw): a draft is changed, and
       // a pending one pulled back, by its requester or an edit_all holder.
       canEdit: pr.status === 'DRAFT' && mayEditPr(me, pr),
@@ -668,9 +804,12 @@ async function writePrLines(tx: Prisma.TransactionClient, requestId: string, lin
   }
 }
 
+const PR_KINDS = ['DIRECT_TO_JOB', 'STOCK_REPLENISHMENT', 'SALES_ORDER'] as const;
+
 const prSchema = z.object({
-  kind: z.enum(['DIRECT_TO_JOB', 'STOCK_REPLENISHMENT']).default('DIRECT_TO_JOB'),
+  kind: z.enum(PR_KINDS).default('DIRECT_TO_JOB'),
   jobId: z.string().optional().nullable(),
+  salesOrderId: z.string().optional().nullable(),
   warehouseId: z.string().optional().nullable(),
   purpose: z.string().trim().min(3, 'Say what this is for'),
   neededBy: z.string().optional().nullable(),
@@ -691,13 +830,29 @@ function mayEditPr(me: ResolvedUser, pr: { requestedById: string }): boolean {
  * change: a direct-to-job request must name its job, a stock replenishment
  * its warehouse (and never a job).
  */
-function checkPrTarget(kind: string, jobId: string | null | undefined, warehouseId: string | null | undefined) {
+function checkPrTarget(
+  kind: string,
+  jobId: string | null | undefined,
+  warehouseId: string | null | undefined,
+  salesOrderId?: string | null,
+) {
   if (kind === 'DIRECT_TO_JOB' && !jobId) {
     throw badRequest('A direct-to-job request must name the project it is for');
   }
   if (kind === 'STOCK_REPLENISHMENT' && !warehouseId) {
     throw badRequest('A stock replenishment must name the warehouse it is for');
   }
+  if (kind === 'SALES_ORDER' && !salesOrderId) {
+    throw badRequest('A request for a sales order must name the sales order it buys for');
+  }
+}
+
+/** Which of the three a request names, by its kind — never a job on a sales order's, never a sales order on a project's. */
+function prTargets(kind: string, jobId: string | null | undefined, salesOrderId: string | null | undefined) {
+  return {
+    jobId: kind === 'DIRECT_TO_JOB' ? jobId || null : null,
+    salesOrderId: kind === 'SALES_ORDER' ? salesOrderId || null : null,
+  };
 }
 
 purchaseRequestRoutes.post(
@@ -706,11 +861,13 @@ purchaseRequestRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(prSchema.extend({ lines: z.array(prLineSchema).max(500).optional() }), req.body);
-    checkPrTarget(body.kind, body.jobId, body.warehouseId);
-    if (body.jobId && body.kind === 'DIRECT_TO_JOB') {
-      const job = await prisma.job.findUnique({ where: { id: body.jobId }, select: { id: true } });
+    checkPrTarget(body.kind, body.jobId, body.warehouseId, body.salesOrderId);
+    const targets = prTargets(body.kind, body.jobId, body.salesOrderId);
+    if (targets.jobId) {
+      const job = await prisma.job.findUnique({ where: { id: targets.jobId }, select: { id: true } });
       if (!job) throw badRequest('That project does not exist');
     }
+    if (targets.salesOrderId) await checkSalesOrderTarget(targets.salesOrderId);
     // Every line is checked before the number is issued: a refused line
     // burns no number (the costing sheet's rule).
     const lines = body.lines ? await checkPrLines(body.kind, body.lines, []) : [];
@@ -721,7 +878,7 @@ purchaseRequestRoutes.post(
         data: {
           number,
           kind: body.kind,
-          jobId: body.kind === 'DIRECT_TO_JOB' ? body.jobId : null,
+          ...targets,
           warehouseId: body.warehouseId || null,
           requestedById: me.id,
           purpose: body.purpose,
@@ -779,8 +936,9 @@ purchaseRequestRoutes.patch(
     const { pr } = await prForEdit(req, req.params.id);
     const body = parseBody(
       z.object({
-        kind: z.enum(['DIRECT_TO_JOB', 'STOCK_REPLENISHMENT']).optional(),
+        kind: z.enum(PR_KINDS).optional(),
         jobId: z.string().optional().nullable(),
+        salesOrderId: z.string().optional().nullable(),
         warehouseId: z.string().optional().nullable(),
         purpose: z.string().trim().min(3, 'Say what this is for').optional(),
         neededBy: z.string().optional().nullable(),
@@ -791,10 +949,14 @@ purchaseRequestRoutes.patch(
     );
 
     const kind = body.kind ?? pr.kind;
-    const jobId =
-      kind === 'STOCK_REPLENISHMENT' ? null : body.jobId !== undefined ? body.jobId || null : pr.jobId;
+    const { jobId, salesOrderId } = prTargets(
+      kind,
+      body.jobId !== undefined ? body.jobId : pr.jobId,
+      body.salesOrderId !== undefined ? body.salesOrderId : pr.salesOrderId,
+    );
     const warehouseId = body.warehouseId !== undefined ? body.warehouseId || null : pr.warehouseId;
-    checkPrTarget(kind, jobId, warehouseId);
+    checkPrTarget(kind, jobId, warehouseId, salesOrderId);
+    if (salesOrderId && salesOrderId !== pr.salesOrderId) await checkSalesOrderTarget(salesOrderId);
 
     if (jobId && jobId !== pr.jobId) {
       const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true } });
@@ -826,8 +988,11 @@ purchaseRequestRoutes.patch(
     }
 
     const changed: string[] = [];
-    if (kind !== pr.kind) changed.push(kind === 'DIRECT_TO_JOB' ? 'now for a project' : 'now for warehouse stock');
+    if (kind !== pr.kind) {
+      changed.push(kind === 'DIRECT_TO_JOB' ? 'now for a project' : kind === 'SALES_ORDER' ? 'now for a sales order' : 'now for warehouse stock');
+    }
     if (jobId !== pr.jobId && kind === pr.kind) changed.push('project');
+    if (salesOrderId !== pr.salesOrderId && kind === pr.kind) changed.push('sales order');
     if (warehouseId !== pr.warehouseId) changed.push('warehouse');
     if (body.purpose !== undefined && body.purpose !== pr.purpose) changed.push('purpose');
     if (body.neededBy !== undefined && (asDate(body.neededBy)?.getTime() ?? null) !== (pr.neededBy?.getTime() ?? null)) {
@@ -846,6 +1011,7 @@ purchaseRequestRoutes.patch(
         data: {
           kind,
           jobId,
+          salesOrderId,
           warehouseId,
           ...(body.purpose !== undefined ? { purpose: body.purpose } : {}),
           ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
@@ -1010,9 +1176,10 @@ purchaseRequestRoutes.put(
       req.body,
     );
     const kind = body.kind;
-    const jobId = kind === 'STOCK_REPLENISHMENT' ? null : body.jobId || null;
+    const { jobId, salesOrderId } = prTargets(kind, body.jobId, body.salesOrderId);
     const warehouseId = body.warehouseId || null;
-    checkPrTarget(kind, jobId, warehouseId);
+    checkPrTarget(kind, jobId, warehouseId, salesOrderId);
+    if (salesOrderId && salesOrderId !== pr.salesOrderId) await checkSalesOrderTarget(salesOrderId);
     if (jobId && jobId !== pr.jobId) {
       const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true } });
       if (!job) throw badRequest('That project does not exist');
@@ -1031,6 +1198,7 @@ purchaseRequestRoutes.put(
         data: {
           kind,
           jobId,
+          salesOrderId,
           warehouseId,
           purpose: body.purpose,
           neededBy: asDate(body.neededBy),
@@ -1078,11 +1246,14 @@ purchaseRequestRoutes.post(
     const me = currentUser(req);
     const pr = await prisma.purchaseRequest.findUnique({
       where: { id: req.params.id },
-      include: { items: { include: { costCategory: true } }, job: true },
+      include: { items: { include: { costCategory: true } }, job: true, salesOrder: { select: { number: true, status: true } } },
     });
     if (!pr) throw notFound('Purchase request not found');
     if (!mayEditPr(me, pr)) throw forbidden('This request belongs to someone else');
     if (pr.status !== 'DRAFT') throw badRequest('This request has already been submitted');
+    if (pr.kind === 'SALES_ORDER' && pr.salesOrder && pr.salesOrder.status !== 'ISSUED') {
+      throw badRequest(`${pr.salesOrder.number} is ${statusLabel(pr.salesOrder.status).toLowerCase()} — buy for an issued sales order`);
+    }
     if (!pr.items.length) throw badRequest('Add at least one line before submitting');
 
     const total = cents(pr.items.reduce((s, i) => s + num(i.estimatedAmount), 0));
@@ -1130,7 +1301,7 @@ purchaseRequestRoutes.post(
         documentType: 'purchase_request',
         documentId: pr.id,
         documentNumber: pr.number,
-        subject: `${pr.job ? `${pr.job.number} — ` : ''}${pr.purpose}`,
+        subject: `${pr.job ? `${pr.job.number} — ` : pr.salesOrder ? `${pr.salesOrder.number} — ` : ''}${pr.purpose}`,
         amount: total,
         link: `/g-chain/purchase-requests/${pr.id}`,
         requesterId: pr.requestedById,
@@ -1690,6 +1861,7 @@ async function loadCanvass(id: string) {
       request: {
         include: {
           job: { select: { id: true, number: true, name: true } },
+          salesOrder: { select: { id: true, number: true } },
           warehouse: { select: { id: true, name: true } },
           items: {
             orderBy: { sortOrder: 'asc' },
@@ -2547,7 +2719,13 @@ canvassRoutes.get(
       reference: [
         `PR ${pr.number}${pr.approvedAt ? ` (approved ${formatShortDate(pr.approvedAt)})` : ''}`,
         canvass.rfq ? `RFQ ${canvass.rfq.number}` : null,
-        pr.job ? `${pr.job.number} — ${pr.job.name}` : pr.warehouse ? `Stock for ${pr.warehouse.name}` : pr.purpose,
+        pr.job
+          ? `${pr.job.number} — ${pr.job.name}`
+          : pr.salesOrder
+            ? `For sales order ${pr.salesOrder.number}`
+            : pr.warehouse
+              ? `Stock for ${pr.warehouse.name}`
+              : pr.purpose,
       ]
         .filter(Boolean)
         .join(' · '),
@@ -2696,6 +2874,7 @@ purchaseOrderRoutes.get(
         include: {
           supplier: { select: { name: true } },
           job: { select: { number: true, name: true } },
+          salesOrder: { select: { number: true } },
           request: { select: { number: true } },
           items: { select: { quantity: true, receivedQty: true } },
         },
@@ -2728,7 +2907,7 @@ purchaseOrderRoutes.get(
         align: ['left', 'left', 'left', 'left', 'right', 'right', 'left', 'left'],
         rows: rows.map((o) => [
           o.number,
-          { title: o.supplier.name, body: o.job ? `${o.job.number} — ${o.job.name}` : 'Stock' },
+          { title: o.supplier.name, body: o.job ? `${o.job.number} — ${o.job.name}` : o.salesOrder ? `For ${o.salesOrder.number}` : 'Stock' },
           formatShortDate(o.orderDate),
           o.deliveryDate ? formatShortDate(o.deliveryDate) : '',
           bracketed(formatAmount(num(o.total)), o.status !== 'CANCELLED'),
@@ -2765,6 +2944,7 @@ async function loadPo(id: string) {
     include: {
       supplier: true,
       job: { select: { id: true, number: true, name: true } },
+      salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } },
       warehouse: { select: { id: true, name: true } },
       request: {
         select: {
@@ -2917,6 +3097,15 @@ purchaseOrderRoutes.get(
   }),
 );
 
+/** An order raised with no request may be for a sales order (2026-10-21): the issued ones, names only. */
+purchaseOrderRoutes.get(
+  '/sales-orders',
+  require_('gchain.purchase_orders.create'),
+  handler(async (req, res) => {
+    res.json(await issuedSalesOrders(String(req.query.q ?? '').trim()));
+  }),
+);
+
 purchaseOrderRoutes.get(
   '/draft',
   require_('gchain.purchase_orders.create'),
@@ -2932,6 +3121,7 @@ purchaseOrderRoutes.get(
       kind: pr?.kind ?? 'DIRECT_TO_JOB',
       request: pr ? { id: pr.id, number: pr.number, purpose: pr.purpose, preferredSupplier: pr.preferredSupplier } : null,
       job: pr?.job ?? null,
+      salesOrder: pr?.salesOrder ?? null,
       warehouse: pr?.warehouse ?? null,
       canvass: source.canvass,
       supplier: source.supplier,
@@ -2974,7 +3164,9 @@ purchaseOrderRoutes.get(
   '/suggest',
   requireAny(...PO_WRITERS),
   handler(async (req, res) => {
-    res.json(await lineSuggestions(currentUser(req), String(req.query.q ?? '').trim(), String(req.query.jobId ?? '')));
+    res.json(
+      await lineSuggestions(currentUser(req), String(req.query.q ?? '').trim(), String(req.query.jobId ?? ''), String(req.query.salesOrderId ?? '')),
+    );
   }),
 );
 
@@ -3023,6 +3215,8 @@ const poSchema = z.object({
   deliverTo: z.string().optional().nullable(),
   deliverAddress: z.string().max(500).optional().nullable(),
   quoteRef: z.string().max(120).optional().nullable(),
+  /** An order raised with no request, for a sales order (2026-10-21). */
+  salesOrderId: z.string().optional().nullable(),
   currency: z.enum(QUOTATION_CURRENCY_CODES).optional(),
   terms: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
@@ -3083,7 +3277,7 @@ async function orderSource(requestId: string | null | undefined, canvassId: stri
     const canvass = await prisma.canvass.findUnique({
       where: { id: canvassId },
       include: {
-        request: { include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, warehouse: { select: { id: true, name: true } } } },
+        request: { include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } }, warehouse: { select: { id: true, name: true } } } },
         suppliers: { where: { isSelected: true }, include: { quotes: true, supplier: { select: { id: true, name: true, paymentTerms: true } } } },
       },
     });
@@ -3102,7 +3296,7 @@ async function orderSource(requestId: string | null | undefined, canvassId: stri
   if (requestId) {
     const pr = await prisma.purchaseRequest.findUnique({
       where: { id: requestId },
-      include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, warehouse: { select: { id: true, name: true } } },
+      include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } }, warehouse: { select: { id: true, name: true } } },
     });
     if (!pr) throw notFound('Purchase request not found');
     if (pr.status !== 'APPROVED' && pr.status !== 'PARTIALLY_ORDERED') {
@@ -3222,7 +3416,11 @@ purchaseOrderRoutes.post(
     if (pr && !source.lines.length) {
       throw badRequest('Everything on that request has already been ordered');
     }
-    const kind = pr?.kind ?? 'DIRECT_TO_JOB';
+    // Raised with no request, an order may still be for a sales order — then
+    // it buys for that deal; from a request it takes the request's.
+    if (!pr && body.salesOrderId) await checkSalesOrderTarget(body.salesOrderId);
+    const salesOrderId = pr ? pr.salesOrderId : body.salesOrderId || null;
+    const kind = pr?.kind ?? (salesOrderId ? 'SALES_ORDER' : 'DIRECT_TO_JOB');
     // The page sends the lines as it shows them; a caller that sends none
     // gets the source's lines, as before. Every line is checked before the
     // number is issued.
@@ -3240,6 +3438,7 @@ purchaseOrderRoutes.post(
           supplierId: body.supplierId,
           requestId: pr?.id ?? null,
           jobId: pr?.jobId ?? null,
+          salesOrderId,
           warehouseId: pr?.warehouseId ?? null,
           createdById: me.id,
           // Set here rather than left to the column's now(), which the
@@ -3525,7 +3724,7 @@ purchaseOrderRoutes.post(
   handler(async (req, res) => {
     const po = await prisma.purchaseOrder.findUnique({
       where: { id: req.params.id },
-      include: { items: true, supplier: true, job: true },
+      include: { items: true, supplier: true, job: true, salesOrder: { select: { number: true } } },
     });
     if (!po) throw notFound('Purchase order not found');
     if (po.status !== 'DRAFT') throw badRequest('This order has already been submitted');
@@ -3543,7 +3742,7 @@ purchaseOrderRoutes.post(
         documentType: 'purchase_order',
         documentId: po.id,
         documentNumber: po.number,
-        subject: `${po.supplier.name}${po.job ? ` — ${po.job.number}` : ''}`,
+        subject: `${po.supplier.name}${po.job ? ` — ${po.job.number}` : po.salesOrder ? ` — ${po.salesOrder.number}` : ''}`,
         amount: num(po.total),
         link: `/g-chain/purchase-orders/${po.id}`,
         // An importation (no VAT, 2026-10-16) goes to the Purchasing Manager
@@ -4101,8 +4300,10 @@ purchaseRequestRoutes.get(
           kind: 'fields',
           columns: 3,
           fields: [
-            { label: 'Type', value: pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : 'Stock replenishment' },
-            { label: 'Project', value: pr.job ? `${pr.job.number} — ${pr.job.name}` : '—' },
+            { label: 'Type', value: purchaseKindLabel(pr.kind) },
+            pr.kind === 'SALES_ORDER'
+              ? { label: 'Sales order', value: pr.salesOrder ? `${pr.salesOrder.number} — ${pr.salesOrder.customer.name}` : '—' }
+              : { label: 'Project', value: pr.job ? `${pr.job.number} — ${pr.job.name}` : '—' },
             { label: 'Warehouse', value: pr.warehouse?.name ?? '—' },
             { label: 'Requested by', value: pr.requestedBy.name },
             { label: 'Needed by', value: pr.neededBy ? formatDate(pr.neededBy) : '—' },

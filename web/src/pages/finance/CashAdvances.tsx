@@ -24,6 +24,7 @@ import {
 import { RecordPaymentModal, paymentLink, useTeams } from './Receivables';
 import { CLAIM_TONES } from './Expenses';
 import { RequestItemsCard, type RequestItem } from '../../components/RequestLines';
+import { Attachments } from '../../components/Attachments';
 
 /**
  * Cash advances — money handed to a person BEFORE it is spent.
@@ -720,6 +721,14 @@ export function CashAdvanceDetail() {
           </div>
         </div>
       </div>
+
+      <Attachments
+        entityType="cash_advance"
+        entityId={row.id}
+        hint="Quotations, a breakdown or anything finance needs to check the request. Printed behind the advance."
+        // Changed while it is a draft or with the approvers, by whoever may modify it.
+        canEdit={(row.status === 'DRAFT' || row.status === 'PENDING_APPROVAL') && ((own && can('gfin.cash_advances.edit_own')) || editAll)}
+      />
 
       {modal === 'release' && (
         <RecordPaymentModal

@@ -181,6 +181,10 @@ async function cleanup() {
     await prisma.approvalRequest.deleteMany({ where: { documentId: { in: taggedPullouts.map((t) => t.id) } } });
     await prisma.pulloutSlip.deleteMany({ where: { id: { in: taggedPullouts.map((t) => t.id) } } });
   }
+  // Requests and orders bought for this script's sales orders hold them
+  // (Restrict); they go with their TAG later, so let go of the order first.
+  await prisma.purchaseOrder.updateMany({ where: { salesOrder: { number: { startsWith: TAG } } }, data: { salesOrderId: null } });
+  await prisma.purchaseRequest.updateMany({ where: { salesOrder: { number: { startsWith: TAG } } }, data: { salesOrderId: null } });
   await prisma.salesOrder.deleteMany({ where: { number: { startsWith: TAG } } });
   await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
   // The warehouse's bells about this script's borrow slips name the slip,
@@ -941,6 +945,116 @@ async function main() {
       'posting CONSUMED only',
       pullCost.length === 1 && pullCost[0].state === 'CONSUMED' && money(num(pullCost[0].amount), 400),
       pullCost.map((c) => `${c.state} ${num(c.amount)}`).join(', '),
+    );
+  }
+
+  // ── 10c. Buying for a sales order with no project (2026-10-21) ────────────
+  // The deal bears the cost: nothing reaches a job's ledger, what it spent is
+  // read off the documents, and goods received into a warehouse are held for
+  // the order apart from the company's stock.
+  console.log('\nBuying for a sales order');
+  {
+    const { salesOrderSpend } = await import('../src/shared/orderStock');
+    const soQuote = await prisma.quotation.create({
+      data: { number: `${TAG}-QB-${Date.now()}`, customerId: customer.id, ownerId: procurement.id, subject: `${TAG} bought-for quote` },
+    });
+    const so = await prisma.salesOrder.create({
+      data: {
+        number: `${TAG}-SOB-${Date.now()}`,
+        status: 'ISSUED',
+        quotationId: soQuote.id,
+        customerId: customer.id,
+        ownerId: procurement.id,
+        orderDate: new Date(),
+        lines: { create: [{ title: `${TAG} Valve`, quantity: D(2), unit: 'pcs', unitPrice: D(500), amount: D(1000), unitCost: D(300), costAmount: D(600) }] },
+      },
+    });
+    const soPr = await prisma.purchaseRequest.create({
+      data: {
+        number: await nextNumber('purchase_request'),
+        kind: 'SALES_ORDER',
+        status: 'APPROVED',
+        salesOrderId: so.id,
+        warehouseId: warehouse.id,
+        requestedById: procurement.id,
+        purpose: `${TAG} buy for the sales order`,
+        items: { create: [{ itemId: item.id, description: `${TAG} Valve`, quantity: D(2), unit: 'pcs', estimatedCost: D(250), estimatedAmount: D(500) }] },
+      },
+      include: { items: true },
+    });
+    let spend = await salesOrderSpend(so.id);
+    check(
+      'an approved request for the order commits its estimate against the quoted cost (600 quoted, 500 committed, 100 left)',
+      !!spend && money(spend.quoted, 600) && money(spend.committed, 500) && money(spend.left, 100),
+      JSON.stringify(spend),
+    );
+    const soPo = await prisma.purchaseOrder.create({
+      data: {
+        number: await nextNumber('purchase_order'),
+        kind: 'SALES_ORDER',
+        status: 'ISSUED',
+        supplierId: supplier.id,
+        requestId: soPr.id,
+        salesOrderId: so.id,
+        warehouseId: warehouse.id,
+        createdById: procurement.id,
+        notes: `${TAG} order for the sales order`,
+        subtotal: D(560),
+        vatAmount: D(0),
+        total: D(560),
+        items: { create: [{ requestItemId: soPr.items[0].id, itemId: item.id, description: `${TAG} Valve`, quantity: D(2), unit: 'pcs', unitPrice: D(280), amount: D(560) }] },
+      },
+      include: { items: true },
+    });
+    await prisma.purchaseRequestItem.update({ where: { id: soPr.items[0].id }, data: { orderedQty: D(2) } });
+    spend = await salesOrderSpend(so.id);
+    check(
+      'once ordered, the order commits at the agreed price and the request\'s estimate is no longer counted (560 committed, 40 left)',
+      !!spend && money(spend.committed, 560) && money(spend.left, 40),
+      JSON.stringify(spend),
+    );
+    const companyBefore = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+    const ledgerBefore = await prisma.jobCostEntry.count();
+    const soIn = await prisma.receiving.create({
+      data: {
+        number: await nextNumber('receiving'),
+        status: 'PENDING_APPROVAL',
+        orderId: soPo.id,
+        warehouseId: warehouse.id,
+        receivedById: procurement.id,
+        items: { create: [{ orderItemId: soPo.items[0].id, itemId: item.id, quantity: D(2), unitCost: D(280) }] },
+      },
+    });
+    await settleReceiving(soIn.id, 'APPROVED');
+    const held = await prisma.salesOrderStock.findUnique({ where: { salesOrderId_itemId_warehouseId: { salesOrderId: so.id, itemId: item.id, warehouseId: warehouse.id } } });
+    const companyAfter = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+    const soInRow = await prisma.receiving.findUniqueOrThrow({ where: { id: soIn.id } });
+    check(
+      'received into a warehouse, the goods are held for the order (2 at 280), apart from the company\'s stock',
+      soInRow.status === 'RECEIVED' &&
+        !!held &&
+        money(num(held.quantity), 2) &&
+        money(num(held.averageCost), 280) &&
+        num(companyAfter?.quantity) === num(companyBefore?.quantity) &&
+        num(companyAfter?.averageCost) === num(companyBefore?.averageCost),
+      `${soInRow.status} ${held ? `${num(held.quantity)} @ ${num(held.averageCost)}` : 'none'}`,
+    );
+    check('and no project is charged', (await prisma.jobCostEntry.count()) === ledgerBefore);
+    check(
+      'its movement carries the sales order',
+      (await prisma.inventoryTransaction.count({ where: { salesOrderId: so.id, sourceType: 'receiving', sourceId: soIn.id } })) === 1,
+    );
+    spend = await salesOrderSpend(so.id);
+    check(
+      'received, the cost moves from committed to incurred (0 committed, 560 incurred, 40 left)',
+      !!spend && money(spend.committed, 0) && money(spend.incurred, 560) && money(spend.left, 40),
+      JSON.stringify(spend),
+    );
+    const { issueOrderStock } = await import('../src/shared/orderStock');
+    await expectRejection(
+      'more than the order holds is refused',
+      () => prisma.$transaction((tx) => issueOrderStock(tx, { salesOrderId: so.id, itemId: item.id, warehouseId: warehouse.id, quantity: 3, sourceType: 'test' })),
+      'Not enough',
     );
   }
 

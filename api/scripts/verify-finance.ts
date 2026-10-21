@@ -23,6 +23,7 @@
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
+import { deleteAttachment } from '../src/shared/attachments';
 import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
@@ -2013,6 +2014,34 @@ async function main() {
           Array.isArray(claimRoute.body.route?.steps),
         `${lined.status} ${lined.body.amount} · ${relined.status} ${relined.body.amount} · ${linedText.includes('BREAKDOWN')} · ${caRoute.status} ${claimRoute.status}`,
       );
+      // Supporting papers for finance's check (2026-10-21): filed on the
+      // requester's draft, read by the requester and finance, printed behind.
+      if (lined.status === 201) {
+        const form = new FormData();
+        form.append('files', new Blob([Buffer.from('%PDF-1.4\n%verify\n')], { type: 'application/pdf' }), `${TAG}-quote.pdf`);
+        const up = await fetch(`${BASE}/attachments/cash_advance/${lined.body.id}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${signToken(engineer.id, engineer.email)}` },
+          body: form,
+        });
+        const ownList = await eng('GET', `/attachments/cash_advance/${lined.body.id}`);
+        const finList = await fin('GET', `/attachments/cash_advance/${lined.body.id}`);
+        const strangerList = await as(stranger)('GET', `/attachments/cash_advance/${lined.body.id}`);
+        const caPaper = await eng('GET', `/cash-advances/${lined.body.id}/pdf`);
+        const caPaperText = caPaper.bytes ? pdfText(caPaper.bytes) : '';
+        check(
+          'a cash advance takes attachments on its draft; the requester and finance read them, a stranger does not, and the paper lists them',
+          up.status === 201 &&
+            ownList.status === 200 && Array.isArray(ownList.body) && ownList.body.length === 1 &&
+            finList.status === 200 && Array.isArray(finList.body) && finList.body.length === 1 &&
+            strangerList.status === 404 &&
+            caPaperText.includes(`${TAG}-quote.pdf`),
+          `${up.status} · ${ownList.status} ${finList.status} ${strangerList.status} · listed ${caPaperText.includes(`${TAG}-quote.pdf`)}`,
+        );
+        for (const a of await prisma.attachment.findMany({ where: { entityType: 'cash_advance', entityId: lined.body.id }, select: { id: true } })) {
+          await deleteAttachment(a.id);
+        }
+      }
       if (lined.status === 201) await eng('POST', `/cash-advances/${lined.body.id}/cancel`, { reason: 'verify' });
 
       // A draft prints the route submitting it WOULD take (rule 6): every step

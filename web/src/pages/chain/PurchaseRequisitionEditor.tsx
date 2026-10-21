@@ -46,6 +46,27 @@ interface Budget {
   blocked: boolean;
 }
 
+/** What a sales order has spent buying for itself (2026-10-21) — `salesOrderSpend` on the API. */
+export interface OrderSpend {
+  quoted: number;
+  requested: number;
+  committed: number;
+  incurred: number;
+  left: number;
+}
+
+interface OrderBudget {
+  salesOrder: { id: string; number: string; status: string; customer: string };
+  spend: OrderSpend | null;
+}
+
+interface OrderOption {
+  id: string;
+  number: string;
+  customer: string;
+  subject: string;
+}
+
 export interface Suggestion {
   id: string;
   itemId?: string | null;
@@ -79,6 +100,7 @@ interface ExistingPr {
   canEdit: boolean;
   version: string;
   job: { id: string; number: string; name: string } | null;
+  salesOrder: { id: string; number: string; customer: { name: string } } | null;
   warehouse: { id: string; name: string } | null;
   requestedBy: { id: string; name: string };
   items: {
@@ -101,8 +123,10 @@ interface Line extends PrLineDraft {
 }
 
 interface Header {
-  kind: 'DIRECT_TO_JOB' | 'STOCK_REPLENISHMENT';
+  kind: 'DIRECT_TO_JOB' | 'STOCK_REPLENISHMENT' | 'SALES_ORDER';
   jobId: string;
+  /** The issued sales order a SALES_ORDER request buys for — no project (2026-10-21). */
+  salesOrderId: string;
   warehouseId: string;
   purpose: string;
   neededBy: string;
@@ -157,6 +181,8 @@ export function PurchaseRequisitionEditor() {
   const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
   const [budget, setBudget] = useState<Budget | null>(null);
+  const [orderBudget, setOrderBudget] = useState<OrderBudget | null>(null);
+  const [orders, setOrders] = useState<OrderOption[]>([]);
   const [costing, setCosting] = useState<Suggestion[] | null>(null);
   const [route, setRoute] = useState<Route | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -168,9 +194,12 @@ export function PurchaseRequisitionEditor() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const presetJobId = params.get('jobId');
+  // Opened from a sales order's "Request purchase" (2026-10-21): bought for it, no project.
+  const presetSalesOrderId = params.get('salesOrder');
   const [header, setHeader] = useState<Header>({
-    kind: 'DIRECT_TO_JOB',
+    kind: presetSalesOrderId ? 'SALES_ORDER' : 'DIRECT_TO_JOB',
     jobId: presetJobId ?? '',
+    salesOrderId: presetSalesOrderId ?? '',
     warehouseId: '',
     purpose: '',
     // A week out: most requests are wanted soon, and a blank date is the one nobody chases.
@@ -202,8 +231,9 @@ export function PurchaseRequisitionEditor() {
           if (!live) return;
           setExisting(pr);
           h = {
-            kind: pr.kind === 'STOCK_REPLENISHMENT' ? 'STOCK_REPLENISHMENT' : 'DIRECT_TO_JOB',
+            kind: pr.kind === 'STOCK_REPLENISHMENT' || pr.kind === 'SALES_ORDER' ? pr.kind : 'DIRECT_TO_JOB',
             jobId: pr.job?.id ?? '',
+            salesOrderId: pr.salesOrder?.id ?? '',
             warehouseId: pr.warehouse?.id ?? '',
             purpose: pr.purpose,
             neededBy: pr.neededBy ? pr.neededBy.slice(0, 10) : '',
@@ -241,8 +271,37 @@ export function PurchaseRequisitionEditor() {
   }, [id]);
 
   const direct = header.kind === 'DIRECT_TO_JOB';
+  const forOrder = header.kind === 'SALES_ORDER';
   // The project is fixed when the page was opened from one (or the draft names one).
   const jobFixed = Boolean(presetJobId) || (editing && Boolean(existing?.job));
+  // So is the sales order, opened from its page.
+  const orderFixed = Boolean(presetSalesOrderId);
+
+  useEffect(() => {
+    if (orderFixed || !forOrder) return;
+    api
+      .get<OrderOption[]>('/purchase-requests/sales-orders')
+      .then(setOrders)
+      .catch(() => setOrders([]));
+  }, [orderFixed, forOrder]);
+
+  // The sales order's cost position and its lines, whenever the order changes.
+  useEffect(() => {
+    setOrderBudget(null);
+    if (!forOrder || !header.salesOrderId) return;
+    let live = true;
+    api
+      .get<OrderBudget>(`/purchase-requests/budget${qs({ salesOrderId: header.salesOrderId })}`)
+      .then((b) => live && setOrderBudget(b))
+      .catch(() => {});
+    api
+      .get<{ salesOrder: Suggestion[] }>(`/purchase-requests/suggest${qs({ salesOrderId: header.salesOrderId })}`)
+      .then((r) => live && setCosting(r.salesOrder))
+      .catch(() => live && setCosting([]));
+    return () => {
+      live = false;
+    };
+  }, [forOrder, header.salesOrderId]);
 
   useEffect(() => {
     if (jobFixed || !direct) return;
@@ -255,7 +314,7 @@ export function PurchaseRequisitionEditor() {
   // The project's budget and its costing, whenever the project changes.
   useEffect(() => {
     setBudget(null);
-    setCosting(null);
+    if (!forOrder) setCosting(null);
     if (!direct || !header.jobId) return;
     let live = true;
     api
@@ -290,13 +349,26 @@ export function PurchaseRequisitionEditor() {
   useUnsavedChanges(dirty && !busy);
 
   const projectName = budget?.job ?? existing?.job ?? jobs.find((j) => j.id === header.jobId) ?? null;
+  const orderName =
+    orderBudget?.salesOrder ??
+    (existing?.salesOrder ? { ...existing.salesOrder, customer: existing.salesOrder.customer.name } : null) ??
+    orders.find((o) => o.id === header.salesOrderId) ??
+    null;
   useBackLink(
     editing && existing
       ? `${base}/${existing.id}`
       : presetJobId
         ? `/g-ops/projects/${presetJobId}?tab=procurement`
-        : null,
-    editing && existing ? existing.number : projectName ? `${projectName.number} Purchase Requisition` : null,
+        : presetSalesOrderId
+          ? `/g-ops/sales-orders/${presetSalesOrderId}`
+          : null,
+    editing && existing
+      ? existing.number
+      : projectName
+        ? `${projectName.number} Purchase Requisition`
+        : presetSalesOrderId && orderName
+          ? orderName.number
+          : null,
   );
 
   // ── Lines ──────────────────────────────────────────────────────────────────
@@ -371,7 +443,8 @@ export function PurchaseRequisitionEditor() {
   const problems: string[] = [];
   if (header.purpose.trim().length < 3) problems.push('Say what this request is for (Purpose)');
   if (direct && !header.jobId) problems.push('Choose the project');
-  if (!direct && !header.warehouseId) problems.push('Choose the warehouse');
+  if (forOrder && !header.salesOrderId) problems.push('Choose the sales order');
+  if (header.kind === 'STOCK_REPLENISHMENT' && !header.warehouseId) problems.push('Choose the warehouse');
   sent.forEach((l, i) => {
     const p = lineProblem(l);
     if (p) problems.push(`Line ${i + 1}: ${p}`);
@@ -381,6 +454,7 @@ export function PurchaseRequisitionEditor() {
     return {
       kind: header.kind,
       jobId: direct ? header.jobId || null : null,
+      salesOrderId: forOrder ? header.salesOrderId || null : null,
       warehouseId: header.warehouseId || null,
       purpose: header.purpose.trim(),
       neededBy: header.neededBy || null,
@@ -483,6 +557,12 @@ export function PurchaseRequisitionEditor() {
                   For <Link to={`/g-ops/projects/${projectName.id}`}>{projectName.number} — {projectName.name}</Link>.{' '}
                 </>
               ) : null}
+              {forOrder && orderName ? (
+                <>
+                  For sales order <Link to={`/g-ops/sales-orders/${orderName.id}`}>{orderName.number} — {orderName.customer}</Link>, no
+                  project.{' '}
+                </>
+              ) : null}
               {existing
                 ? 'Change what you need and Save — the header and the lines are saved together.'
                 : 'The header and the lines are saved together; the number is issued on the first save.'}
@@ -498,7 +578,7 @@ export function PurchaseRequisitionEditor() {
         )}
       </section>
 
-      <div className={`prq-grid${direct ? '' : ' prq-grid-solo'}`}>
+      <div className={`prq-grid${direct || forOrder ? '' : ' prq-grid-solo'}`}>
         <div className="prq-main">
           {/* ── Details ─────────────────────────────────────────────────────── */}
           <section className="card" aria-labelledby="prq-details">
@@ -507,25 +587,51 @@ export function PurchaseRequisitionEditor() {
               <Field label="Number">
                 <div className="qe-static">{existing ? <span className="mono">{existing.number}</span> : <span className="muted">Given on save</span>}</div>
               </Field>
-              {!jobFixed ? (
+              {!jobFixed && !orderFixed ? (
                 <Field label="Kind">
                   <select
                     value={header.kind}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      const kind = e.target.value as Header['kind'];
+                      setCosting(null);
                       setHeader((h) => ({
                         ...h,
-                        kind: e.target.value as Header['kind'],
-                        jobId: e.target.value === 'DIRECT_TO_JOB' ? h.jobId : '',
-                      }))
-                    }
+                        kind,
+                        jobId: kind === 'DIRECT_TO_JOB' ? h.jobId : '',
+                        salesOrderId: kind === 'SALES_ORDER' ? h.salesOrderId : '',
+                      }));
+                    }}
                   >
                     <option value="DIRECT_TO_JOB">Direct to project (charged to its budget)</option>
+                    <option value="SALES_ORDER">For a sales order (no project)</option>
                     <option value="STOCK_REPLENISHMENT">Warehouse stock (charged when issued)</option>
                   </select>
                 </Field>
               ) : (
                 <Field label="Kind">
-                  <div className="qe-static">Direct to project</div>
+                  <div className="qe-static">{orderFixed ? 'For a sales order' : 'Direct to project'}</div>
+                </Field>
+              )}
+              {forOrder && !orderFixed && (
+                <Field label="Sales order" required error={attempted && !header.salesOrderId ? 'Choose the sales order' : null}>
+                  <select
+                    value={header.salesOrderId}
+                    required
+                    onChange={(e) => setHeader((h) => ({ ...h, salesOrderId: e.target.value }))}
+                  >
+                    <option value="">— choose an issued order —</option>
+                    {existing?.salesOrder && !orders.some((o) => o.id === existing.salesOrder!.id) && (
+                      <option value={existing.salesOrder.id}>
+                        {existing.salesOrder.number} — {existing.salesOrder.customer.name}
+                      </option>
+                    )}
+                    {orders.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.number} — {o.customer}
+                        {o.subject ? ` · ${o.subject}` : ''}
+                      </option>
+                    ))}
+                  </select>
                 </Field>
               )}
               {direct && !jobFixed && (
@@ -541,12 +647,12 @@ export function PurchaseRequisitionEditor() {
                 </Field>
               )}
               <Field
-                label={direct ? 'Deliver to warehouse' : 'Warehouse'}
-                required={!direct}
-                error={attempted && !direct && !header.warehouseId ? 'Choose the warehouse' : null}
+                label={direct || forOrder ? 'Deliver to warehouse' : 'Warehouse'}
+                required={header.kind === 'STOCK_REPLENISHMENT'}
+                error={attempted && header.kind === 'STOCK_REPLENISHMENT' && !header.warehouseId ? 'Choose the warehouse' : null}
               >
                 <select value={header.warehouseId} onChange={(e) => setHeader((h) => ({ ...h, warehouseId: e.target.value }))}>
-                  <option value="">{direct ? '— straight to site —' : '— choose —'}</option>
+                  <option value="">{direct ? '— straight to site —' : forOrder ? '— straight to the customer —' : '— choose —'}</option>
                   {warehouses.map((w) => (
                     <option key={w.id} value={w.id}>
                       {w.name}
@@ -584,7 +690,9 @@ export function PurchaseRequisitionEditor() {
             <p className="prq-hint">
               {direct
                 ? 'Each line is charged to a budget line (cost category) of the project. Only an approved request commits the budget; receiving incurs it.'
-                : 'This buys for the warehouse. No project is charged until the stock is issued to one.'}
+                : forOrder
+                  ? "This buys for the sales order — no project is needed. What it costs is measured against the order's quoted cost; received into a warehouse, the goods are held for the order until they go out."
+                  : 'This buys for the warehouse. No project is charged until the stock is issued to one.'}
             </p>
           </section>
 
@@ -592,12 +700,14 @@ export function PurchaseRequisitionEditor() {
           <section className="card" aria-labelledby="prq-lines">
             <div className="card-head">
               <h2 id="prq-lines" className="card-title">Lines</h2>
-              {direct && costing && costing.length > 0 && (
-                <span className="muted prq-source">From this project's costing · {costing.length} lines</span>
+              {(direct || forOrder) && costing && costing.length > 0 && (
+                <span className="muted prq-source">
+                  From this {forOrder ? 'sales order' : "project's costing"} · {costing.length} lines
+                </span>
               )}
-              {direct && costing && costing.length > 0 && (
+              {(direct || forOrder) && costing && costing.length > 0 && (
                 <button type="button" className="btn btn-sm" aria-expanded={costingPanel} onClick={() => setCostingPanel((v) => !v)}>
-                  Add from costing…
+                  {forOrder ? 'Add from sales order…' : 'Add from costing…'}
                 </button>
               )}
               <button type="button" className="btn btn-sm" onClick={() => fileRef.current?.click()}>
@@ -624,6 +734,7 @@ export function PurchaseRequisitionEditor() {
             {costingPanel && costing && (
               <CostingPanel
                 rows={costing}
+                source={forOrder ? 'order' : 'costing'}
                 onList={(sg) => costingHas.has(`${sg.costCategory?.id ?? ''}|${sg.name.trim().toLowerCase()}`)}
                 onCancel={() => setCostingPanel(false)}
                 onAdd={(picked) => {
@@ -641,7 +752,7 @@ export function PurchaseRequisitionEditor() {
                   );
                   takeSupplier(picked.map((sg) => sg.supplier));
                   setCostingPanel(false);
-                  toast('ok', `${picked.length} line${picked.length === 1 ? '' : 's'} added from the costing`);
+                  toast('ok', `${picked.length} line${picked.length === 1 ? '' : 's'} added from the ${forOrder ? 'sales order' : 'costing'}`);
                 }}
               />
             )}
@@ -707,6 +818,7 @@ export function PurchaseRequisitionEditor() {
                             n={i + 1}
                             line={l}
                             jobId={direct ? header.jobId : ''}
+                            salesOrderId={forOrder ? header.salesOrderId : ''}
                             invalid={problem === 'Say what is needed'}
                             onChange={(patch) => setLine(l.key, patch)}
                             onPick={(sg) => fromSuggestion(l.key, sg)}
@@ -767,7 +879,7 @@ export function PurchaseRequisitionEditor() {
               </div>
             )}
             <p className="prq-hint">
-              Type in Item to search {direct ? "this project's costing and " : ''}the item master — a pick fills the part
+              Type in Item to search {direct ? "this project's costing and " : forOrder ? "the sales order's lines and " : ''}the item master — a pick fills the part
               no., unit, cost and budget line, all still editable. Paste rows from a spreadsheet into an empty Item box
               (Part No., Item, Description, Unit, Qty, Est. unit cost) or Import CSV with those headings.
             </p>
@@ -807,6 +919,23 @@ export function PurchaseRequisitionEditor() {
 
           <div className="row qe-foot">{actions}</div>
         </div>
+
+        {/* ── The sales order's cost, live ──────────────────────────────────── */}
+        {forOrder && (
+          <aside className="card prq-budget" aria-labelledby="prq-order-budget">
+            <div className="card-head">
+              <h2 id="prq-order-budget" className="card-title">Sales order cost — live</h2>
+              <span className="muted prq-source">as you type</span>
+            </div>
+            {!header.salesOrderId ? (
+              <p className="muted">Choose the sales order to see its cost.</p>
+            ) : !orderBudget ? (
+              <Loading />
+            ) : (
+              <OrderSpendPanel spend={orderBudget.spend} asked={total} />
+            )}
+          </aside>
+        )}
 
         {/* ── Budget, live ──────────────────────────────────────────────────── */}
         {direct && (
@@ -877,6 +1006,7 @@ export function ItemCell({
   n,
   line,
   jobId,
+  salesOrderId = '',
   suggestPath = '/purchase-requests/suggest',
   invalid,
   onChange,
@@ -886,6 +1016,8 @@ export function ItemCell({
   n: number;
   line: Pick<Line, 'name' | 'description'>;
   jobId: string;
+  /** A sales order's purchase: its lines come first (2026-10-21). */
+  salesOrderId?: string;
   /** The suggestion endpoint — the requisition's, or the order's twin behind the order's rights. */
   suggestPath?: string;
   invalid: boolean;
@@ -894,7 +1026,7 @@ export function ItemCell({
   onPasteRows: (text: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [matches, setMatches] = useState<(Suggestion & { source: 'costing' | 'item' })[]>([]);
+  const [matches, setMatches] = useState<(Suggestion & { source: 'costing' | 'order' | 'item' })[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLUListElement>(null);
   const term = line.name.trim();
@@ -907,10 +1039,11 @@ export function ItemCell({
     let live = true;
     const timer = window.setTimeout(() => {
       api
-        .get<{ costing: Suggestion[]; items: Suggestion[] }>(`${suggestPath}${qs({ q: term, jobId })}`)
+        .get<{ costing: Suggestion[]; salesOrder?: Suggestion[]; items: Suggestion[] }>(`${suggestPath}${qs({ q: term, jobId, salesOrderId })}`)
         .then((r) => {
           if (!live) return;
           setMatches([
+            ...(r.salesOrder ?? []).map((s) => ({ ...s, source: 'order' as const })),
             ...r.costing.map((s) => ({ ...s, source: 'costing' as const })),
             ...r.items.map((s) => ({ ...s, source: 'item' as const })),
           ].slice(0, 20));
@@ -921,7 +1054,7 @@ export function ItemCell({
       live = false;
       window.clearTimeout(timer);
     };
-  }, [open, term, jobId, suggestPath]);
+  }, [open, term, jobId, salesOrderId, suggestPath]);
 
   const buttons = () => Array.from(menuRef.current?.querySelectorAll('button') ?? []);
 
@@ -992,7 +1125,7 @@ export function ItemCell({
               >
                 <span className="qe-suggest-name">{sg.name}</span>
                 <span className="faint qe-suggest-meta">
-                  {sg.source === 'costing' ? 'Costing' : `Item ${sg.code ?? ''}`}
+                  {sg.source === 'costing' ? 'Costing' : sg.source === 'order' ? 'Sales order' : `Item ${sg.code ?? ''}`}
                   {sg.partNumber ? ` · ${sg.partNumber}` : ''}
                   {sg.costCategory ? ` · ${sg.costCategory.name}` : ''}
                   {sg.unitCost != null ? ` · ${formatMoney(sg.unitCost)} / ${sg.unit}` : ` · ${sg.unit}`}
@@ -1018,11 +1151,14 @@ export function ItemCell({
 /** "Add from costing…": the project's costing lines by budget line, ticked and added — in the page, never a dialog. */
 function CostingPanel({
   rows,
+  source = 'costing',
   onList,
   onAdd,
   onCancel,
 }: {
   rows: Suggestion[];
+  /** Whose lines: the project's costing, or the sales order's (2026-10-21). */
+  source?: 'costing' | 'order';
   onList: (sg: Suggestion) => boolean;
   onAdd: (picked: Suggestion[]) => void;
   onCancel: () => void;
@@ -1030,7 +1166,7 @@ function CostingPanel({
   const [ticked, setTicked] = useState<Set<string>>(new Set());
   const groups = new Map<string, Suggestion[]>();
   for (const r of rows) {
-    const k = r.costCategory?.name ?? 'No budget line';
+    const k = r.costCategory?.name ?? (source === 'order' ? 'Sold on the sales order' : 'No budget line');
     groups.set(k, [...(groups.get(k) ?? []), r]);
   }
   const toggle = (id: string) =>
@@ -1042,7 +1178,11 @@ function CostingPanel({
     });
   return (
     <div className="prq-panel">
-      <p className="prq-hint">Tick the costing lines to request. Each comes with its quantity, unit, budget line and — where you may see it — its cost; change any of them after.</p>
+      <p className="prq-hint">
+        {source === 'order'
+          ? 'Tick the sales order lines to buy. Each comes with its quantity, unit and — where you may see it — the cost the quotation carried; change any of them after.'
+          : 'Tick the costing lines to request. Each comes with its quantity, unit, budget line and — where you may see it — its cost; change any of them after.'}
+      </p>
       <div className="prq-panel-list">
         {[...groups.entries()].map(([name, list]) => (
           <fieldset key={name}>
@@ -1082,5 +1222,53 @@ function CostingPanel({
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * A sales order's cost as it stands (2026-10-21): the quoted cost against
+ * what is requested, committed and received, with what `asked` — the request
+ * on the page — would leave. Over it is said, never refused: the deal's cost
+ * guards no budget the way a project's does.
+ */
+export function OrderSpendPanel({ spend, asked }: { spend: OrderSpend | null; asked?: number }) {
+  if (!spend) return <p className="muted">Its cost is shown to whoever may see the sales order's cost.</p>;
+  const after = Math.round((spend.left - spend.requested - (asked ?? 0)) * 100) / 100;
+  const used = spend.quoted > 0 ? ((spend.quoted - after) / spend.quoted) * 100 : 100;
+  return (
+    <>
+      <dl className="kv prq-spend">
+        <dt>Quoted cost</dt>
+        <dd className="mono">{formatMoney(spend.quoted)}</dd>
+        <dt>Committed</dt>
+        <dd className="mono">{formatMoney(spend.committed)}</dd>
+        <dt>Received</dt>
+        <dd className="mono">{formatMoney(spend.incurred)}</dd>
+        {spend.requested > 0 && (
+          <>
+            <dt>Awaiting approval</dt>
+            <dd className="mono">{formatMoney(spend.requested)}</dd>
+          </>
+        )}
+        {asked !== undefined && (
+          <>
+            <dt>This request</dt>
+            <dd className="mono">{formatMoney(asked)}</dd>
+          </>
+        )}
+      </dl>
+      <div className="prq-bud prq-bud-total">
+        <div className="prq-bud-top">
+          <strong>Left of the quoted cost</strong>
+          <strong className={after < 0 ? 'prq-over' : undefined}>{formatMoney(after)}</strong>
+        </div>
+        <Meter pct={used} tone={after < 0 ? 'danger' : used > 85 ? 'warn' : undefined} />
+      </div>
+      {after < 0 && (
+        <div className="alert warn">
+          Over the order's quoted cost by {formatMoney(-after)} — the margin it was sold at shrinks. Submitting is allowed; the approver will see it.
+        </div>
+      )}
+    </>
   );
 }

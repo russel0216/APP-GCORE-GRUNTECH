@@ -1122,6 +1122,7 @@ model Item {
   borrowItems          BorrowSlipItem[]
   balances             InventoryBalance[]
   projectStock         ProjectStock[]
+  orderStock           SalesOrderStock[]
   pulloutItems         PulloutItem[]
   stockMoves           InventoryTransaction[]
   installedAssets      InstalledAsset[]
@@ -1155,6 +1156,7 @@ model Warehouse {
   pulloutSlips     PulloutSlip[]
   balances         InventoryBalance[]
   projectStock     ProjectStock[]
+  orderStock       SalesOrderStock[]
   stockMoves       InventoryTransaction[]
 
   createdAt   DateTime @default(now())
@@ -1176,6 +1178,7 @@ model Location {
   issueItems     StockIssueItem[]
   balances       InventoryBalance[]
   projectStock   ProjectStock[]
+  orderStock     SalesOrderStock[]
 
   createdAt DateTime @default(now())
 
@@ -1697,6 +1700,11 @@ model SalesOrder {
   jobOrders    JobOrder[]
   pulloutSlips PulloutSlip[]
   invoices     Invoice[]
+  /// Bought for it with no project (2026-10-21).
+  purchaseRequests PurchaseRequest[]  @relation("PrSalesOrder")
+  purchaseOrders   PurchaseOrder[]    @relation("PoSalesOrder")
+  orderStock       SalesOrderStock[]
+  stockMoves       InventoryTransaction[] @relation("SalesOrderStockMoves")
 
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
@@ -2570,6 +2578,10 @@ model JobTask {
 enum PurchaseKind {
   DIRECT_TO_JOB
   STOCK_REPLENISHMENT
+  /// Bought for a SALES ORDER with no project (2026-10-21, the owner's call:
+  /// "purchase request till purchase order without the need to create a
+  /// project, a sales order only"): the deal bears the cost, never a job.
+  SALES_ORDER
 }
 
 enum PrStatus {
@@ -2595,6 +2607,10 @@ model PurchaseRequest {
 
   warehouseId String?
   warehouse   Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
+
+  /// Required when kind is SALES_ORDER — the issued order it buys for.
+  salesOrderId String?
+  salesOrder   SalesOrder? @relation("PrSalesOrder", fields: [salesOrderId], references: [id], onDelete: Restrict)
 
   requestedById String
   requestedBy   User   @relation("PrRequester", fields: [requestedById], references: [id], onDelete: Restrict)
@@ -2625,6 +2641,7 @@ model PurchaseRequest {
 
   @@index([status])
   @@index([jobId])
+  @@index([salesOrderId])
 }
 
 model PurchaseRequestItem {
@@ -2876,6 +2893,10 @@ model PurchaseOrder {
   jobId String?
   job   Job?    @relation(fields: [jobId], references: [id], onDelete: Restrict)
 
+  /// The sales order a SALES_ORDER-kind order buys for (from its request).
+  salesOrderId String?
+  salesOrder   SalesOrder? @relation("PoSalesOrder", fields: [salesOrderId], references: [id], onDelete: Restrict)
+
   warehouseId String?
   warehouse   Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
 
@@ -2917,6 +2938,7 @@ model PurchaseOrder {
   @@index([status])
   @@index([supplierId])
   @@index([jobId])
+  @@index([salesOrderId])
 }
 
 model PurchaseOrderItem {
@@ -3417,6 +3439,32 @@ model ProjectStock {
   @@index([itemId])
 }
 
+/// Goods bought for a SALES ORDER (no project) and received into a warehouse
+/// (2026-10-21): held for that deal, apart from the company's stock — never in
+/// its average or its value, the deal already bears their cost. They leave by
+/// a pull-out slip or an Outgoing slip on the order, posting nothing again.
+model SalesOrderStock {
+  id           String     @id @default(cuid())
+  salesOrderId String
+  salesOrder   SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
+  itemId       String
+  item         Item       @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  warehouseId  String
+  warehouse    Warehouse  @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  quantity    Decimal @default(0) @db.Decimal(18, 3)
+  averageCost Decimal @default(0) @db.Decimal(18, 4)
+
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([salesOrderId, itemId, warehouseId])
+  @@index([warehouseId])
+  @@index([itemId])
+}
+
 enum StockMoveType {
   RECEIPT
   ISSUE
@@ -3450,12 +3498,17 @@ model InventoryTransaction {
   jobId String?
   job   Job?    @relation("ProjectStockMoves", fields: [jobId], references: [id], onDelete: SetNull)
 
+  /// A movement of a sales order's own stock (SalesOrderStock, 2026-10-21).
+  salesOrderId String?
+  salesOrder   SalesOrder? @relation("SalesOrderStockMoves", fields: [salesOrderId], references: [id], onDelete: SetNull)
+
   createdById String?
   createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
 
   occurredAt DateTime @default(now())
 
   @@index([jobId])
+  @@index([salesOrderId])
   @@index([itemId, warehouseId, occurredAt])
   @@index([sourceType, sourceId])
 }
