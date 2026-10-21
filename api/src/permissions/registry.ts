@@ -208,6 +208,14 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'suppliers', own: 'suppliers you added', group: 'Master data', label: 'Suppliers', path: '/g-chain/suppliers', actions: SHARED, phase: 2 },
       { key: 'warehouses', own: 'warehouses you added', group: 'Master data', label: 'Warehouses', path: '/g-chain/warehouses', actions: SHARED, phase: 2 },
       { key: 'reports', group: 'Analysis', label: 'Reports', path: '/g-chain/reports', actions: READ, phase: 5 },
+      // The standard terms for goods and for services, and the budget guard (2026-10-21).
+      {
+        key: 'settings', own: 'the page itself — it keeps no record of anybody’s', group: 'Administration',
+        label: 'Procurement Settings',
+        path: '/g-chain/settings',
+        actions: SETTINGS,
+        phase: 5,
+      },
     ],
   },
   {

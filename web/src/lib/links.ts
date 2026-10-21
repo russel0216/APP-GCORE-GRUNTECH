@@ -159,6 +159,7 @@ const DETAIL_LIST: Record<string, string> = {
 function settingLink(id: string): string {
   if (id.startsWith('hr.') || id.startsWith('academy.')) return '/g-hr/settings';
   if (id.startsWith('finance.')) return '/g-fin/settings';
+  if (id.startsWith('procurement.')) return '/g-chain/settings';
   if (id.startsWith('aftermarket.')) return '/g-ops/aftermarket';
   if (id.startsWith('appearance')) return '/admin/appearance';
   // Each designed paper's layout is edited in Admin › PDF Templates.

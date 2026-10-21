@@ -24,7 +24,11 @@ export interface PrLineDraft {
   quantity: string;
   estimatedCost: string;
   costCategoryId: string;
+  /** Goods (the default) or a service — received as "service rendered", never stocked (2026-10-21). */
+  nature?: LineNature;
 }
+
+export type LineNature = 'GOODS' | 'SERVICE';
 
 export interface CategoryRef {
   id: string;
@@ -84,7 +88,7 @@ export function parseDelimited(text: string): string[][] {
   return rows.filter((r) => r.some((cell) => cell.trim() !== ''));
 }
 
-type Column = keyof PrLineDraft;
+type Column = Exclude<keyof PrLineDraft, 'nature'>;
 
 const HEADERS: Record<string, Column> = {
   'budget line': 'costCategoryId',

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, RfqStatus } from '@prisma/client';
 import { prisma } from '../prisma';
+import { termsSections } from '../shared/procurementTerms';
 import {
   handler,
   parseBody,
@@ -983,6 +984,8 @@ rfqRoutes.get(
     }
     const terms = rfq.terms ?? 'Please quote your best price per unit, whether prices include VAT, your payment terms, how long the quote is valid and the delivery lead time.';
     sections.push({ kind: 'text', title: 'Terms of the quotation', body: terms });
+    // What the order will hold the supplier to, for goods and services alike (2026-10-21).
+    sections.push(...(await termsSections(rfq.items.map((i) => i.requestItem.nature))));
     if (rfq.notes && !row) sections.push({ kind: 'text', title: 'Notes', body: rfq.notes });
 
     // Prepared by, with the standard digital timestamp: the person who acted

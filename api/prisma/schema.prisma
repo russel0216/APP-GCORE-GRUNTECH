@@ -2644,6 +2644,13 @@ model PurchaseRequest {
   @@index([salesOrderId])
 }
 
+/// What a procurement line buys (2026-10-21, the owner's call: "category for
+/// goods and services, with the terms that apply").
+enum LineNature {
+  GOODS
+  SERVICE
+}
+
 model PurchaseRequestItem {
   id        String          @id @default(cuid())
   requestId String
@@ -2662,6 +2669,9 @@ model PurchaseRequestItem {
   name            String?
   partNumber      String?
   description     String
+  /// Goods or a service (2026-10-21): a service is received as "service
+  /// rendered" and never enters stock; each prints its own standard terms.
+  nature          LineNature @default(GOODS)
   quantity        Decimal @db.Decimal(18, 3)
   unit            String  @default("pcs")
   estimatedCost   Decimal @default(0) @db.Decimal(18, 2)
@@ -2961,6 +2971,8 @@ model PurchaseOrderItem {
   name        String?
   partNumber  String?
   description String
+  /// Goods or a service — the request line's, carried over (2026-10-21).
+  nature      LineNature @default(GOODS)
   quantity    Decimal @db.Decimal(18, 3)
   unit        String  @default("pcs")
   unitPrice   Decimal @db.Decimal(18, 2)

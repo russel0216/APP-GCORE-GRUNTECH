@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, PrStatus, PurchaseKind, PoStatus, CanvassStatus } from '@prisma/client';
 import { prisma } from '../prisma';
+import { termsSections } from '../shared/procurementTerms';
 import {
   handler,
   parseBody,
@@ -712,6 +713,24 @@ purchaseRequestRoutes.get(
  * `name` is the bold title; a line typed as a name alone carries it as its
  * description too, because every older reader prints `description`.
  */
+/** Goods or a service (2026-10-21). */
+const LINE_NATURES = ['GOODS', 'SERVICE'] as const;
+type LineNatureKey = (typeof LINE_NATURES)[number];
+
+/**
+ * A line's nature, checked: a service is never stock — it names no item and
+ * cannot be bought to replenish the warehouse (it is received as "service
+ * rendered", never shelved).
+ */
+function checkNature(kind: string, nature: string | null | undefined, itemId: string | null | undefined, n: number, what: string): LineNatureKey {
+  const value: LineNatureKey = nature === 'SERVICE' ? 'SERVICE' : 'GOODS';
+  if (value === 'SERVICE') {
+    if (kind === 'STOCK_REPLENISHMENT') throw badRequest(`Line ${n} (${what}): a service is not bought for stock — raise it for a project or a sales order`);
+    if (itemId) throw badRequest(`Line ${n} (${what}): a service names no stock item — clear the item or make it goods`);
+  }
+  return value;
+}
+
 const prLineSchema = z.object({
   id: z.string().optional().nullable(),
   itemId: z.string().optional().nullable(),
@@ -719,6 +738,7 @@ const prLineSchema = z.object({
   partNumber: z.string().trim().max(120).optional().nullable(),
   name: z.string().trim().max(300).optional().nullable(),
   description: z.string().trim().max(4000).optional().nullable(),
+  nature: z.enum(LINE_NATURES).optional().nullable(),
   quantity: z.number().positive('Quantity must be more than zero'),
   unit: z.string().trim().max(40).optional().nullable(),
   estimatedCost: z.number().min(0, 'An estimated cost cannot be negative').default(0),
@@ -732,6 +752,7 @@ interface CheckedPrLine {
   partNumber: string | null;
   name: string | null;
   description: string;
+  nature: LineNatureKey;
   quantity: number;
   unit: string;
   estimatedCost: number;
@@ -768,6 +789,7 @@ async function checkPrLines(kind: string, lines: PrLineInput[], existingIds: str
     if (kind === 'DIRECT_TO_JOB' && !costCategoryId) {
       throw badRequest(`Line ${n} (${name ?? description}): choose its budget line — it is how the cost finds the project budget`);
     }
+    const nature = checkNature(kind, l.nature, l.itemId, n, name ?? description);
     return {
       id: l.id || null,
       itemId: l.itemId || null,
@@ -775,6 +797,7 @@ async function checkPrLines(kind: string, lines: PrLineInput[], existingIds: str
       partNumber: l.partNumber?.trim() || null,
       name,
       description,
+      nature,
       quantity: l.quantity,
       unit: l.unit?.trim() || 'pcs',
       estimatedCost: l.estimatedCost,
@@ -793,6 +816,7 @@ async function writePrLines(tx: Prisma.TransactionClient, requestId: string, lin
       partNumber: l.partNumber,
       name: l.name,
       description: l.description,
+      nature: l.nature,
       quantity: D(l.quantity),
       unit: l.unit,
       estimatedCost: D(l.estimatedCost),
@@ -3246,6 +3270,7 @@ const poLineSchema = z.object({
   partNumber: z.string().trim().max(120).optional().nullable(),
   name: z.string().trim().max(300).optional().nullable(),
   description: z.string().trim().max(4000).optional().nullable(),
+  nature: z.enum(LINE_NATURES).optional().nullable(),
   quantity: z.number().positive('Quantity must be more than zero'),
   unit: z.string().trim().max(40).optional().nullable(),
   unitPrice: z.number().min(0, 'A unit price cannot be negative'),
@@ -3260,6 +3285,7 @@ interface OrderLine {
   partNumber: string | null;
   name: string | null;
   description: string;
+  nature: LineNatureKey;
   quantity: number;
   unit: string;
   unitPrice: number;
@@ -3309,7 +3335,7 @@ async function orderSource(requestId: string | null | undefined, canvassId: stri
 }
 
 function fromRequestItem(
-  i: { id: string; itemId: string | null; costCategoryId: string | null; partNumber: string | null; name: string | null; description: string; quantity: Prisma.Decimal; orderedQty: Prisma.Decimal; pulledQty: Prisma.Decimal; unit: string },
+  i: { id: string; itemId: string | null; costCategoryId: string | null; partNumber: string | null; name: string | null; description: string; nature: LineNatureKey; quantity: Prisma.Decimal; orderedQty: Prisma.Decimal; pulledQty: Prisma.Decimal; unit: string },
   unitPrice: number,
 ): OrderLine {
   return {
@@ -3320,6 +3346,7 @@ function fromRequestItem(
     partNumber: i.partNumber,
     name: i.name,
     description: i.description,
+    nature: i.nature,
     // What a pull-out slip took from the shelf is not bought (2026-10-14).
     quantity: num(i.quantity) - num(i.orderedQty) - num(i.pulledQty),
     unit: i.unit,
@@ -3339,6 +3366,12 @@ async function checkPoLines(
   existingIds: string[],
   requestItemIds: string[],
 ): Promise<OrderLine[]> {
+  // A request line keeps the nature the request gave it.
+  const requestNature = new Map(
+    requestItemIds.length
+      ? (await prisma.purchaseRequestItem.findMany({ where: { id: { in: requestItemIds } }, select: { id: true, nature: true } })).map((r) => [r.id, r.nature])
+      : [],
+  );
   const itemIds = [...new Set(lines.map((l) => l.itemId).filter((v): v is string => !!v))];
   const categoryIds = [...new Set(lines.map((l) => l.costCategoryId).filter((v): v is string => !!v))];
   const [items, categories] = await Promise.all([
@@ -3362,6 +3395,7 @@ async function checkPoLines(
     if (kind === 'DIRECT_TO_JOB' && !costCategoryId) {
       throw badRequest(`Line ${n} (${name ?? description}): choose its budget line — it is how the committed cost finds the project budget`);
     }
+    const nature = checkNature(kind, (l.requestItemId && requestNature.get(l.requestItemId)) || l.nature, l.itemId, n, name ?? description);
     return {
       id: l.id || null,
       requestItemId: l.requestItemId || null,
@@ -3370,6 +3404,7 @@ async function checkPoLines(
       partNumber: l.partNumber?.trim() || null,
       name,
       description,
+      nature,
       quantity: l.quantity,
       unit: l.unit?.trim() || 'pcs',
       unitPrice: l.unitPrice,
@@ -3389,6 +3424,7 @@ async function writePoLines(tx: Prisma.TransactionClient, orderId: string, lines
       partNumber: l.partNumber,
       name: l.name,
       description: l.description,
+      nature: l.nature,
       quantity: D(l.quantity),
       unit: l.unit,
       unitPrice: D(l.unitPrice),
@@ -4197,6 +4233,8 @@ purchaseOrderRoutes.get(
     ];
 
     if (po.notes) sections.push({ kind: 'text', title: 'Notes', body: po.notes });
+    // The standard terms for what the order buys: goods, services or both (2026-10-21).
+    sections.push(...(await termsSections(po.items.map((i) => i.nature))));
 
     // Prepared by the buyer, with how to reach them (read for the paper
     // only — the order's JSON carries no mobile), then every step of the

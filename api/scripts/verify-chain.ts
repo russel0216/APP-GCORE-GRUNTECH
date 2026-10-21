@@ -1050,6 +1050,55 @@ async function main() {
       !!spend && money(spend.committed, 0) && money(spend.incurred, 560) && money(spend.left, 40),
       JSON.stringify(spend),
     );
+    // A SERVICE bought for the order is received as "service rendered": it
+    // counts as spent and never enters a shelf, even received at a warehouse.
+    const svcPo = await prisma.purchaseOrder.create({
+      data: {
+        number: await nextNumber('purchase_order'),
+        kind: 'SALES_ORDER',
+        status: 'ISSUED',
+        supplierId: supplier.id,
+        salesOrderId: so.id,
+        warehouseId: warehouse.id,
+        createdById: procurement.id,
+        notes: `${TAG} service for the sales order`,
+        subtotal: D(30),
+        vatAmount: D(0),
+        total: D(30),
+        items: { create: [{ description: `${TAG} Valve test`, nature: 'SERVICE', quantity: D(1), unit: 'lot', unitPrice: D(30), amount: D(30) }] },
+      },
+      include: { items: true },
+    });
+    const movesBefore = await prisma.inventoryTransaction.count({ where: { salesOrderId: so.id } });
+    const svcIn = await prisma.receiving.create({
+      data: {
+        number: await nextNumber('receiving'),
+        status: 'PENDING_APPROVAL',
+        orderId: svcPo.id,
+        warehouseId: warehouse.id,
+        receivedById: procurement.id,
+        items: { create: [{ orderItemId: svcPo.items[0].id, quantity: D(1), unitCost: D(30) }] },
+      },
+    });
+    await settleReceiving(svcIn.id, 'APPROVED');
+    const svcOrder = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: svcPo.id }, include: { items: true } });
+    spend = await salesOrderSpend(so.id);
+    check(
+      'a service received is rendered: the order is received, the spend counts it (590 incurred, 10 left), and nothing is shelved or filed as an item',
+      svcOrder.status === 'RECEIVED' &&
+        svcOrder.items[0].itemId === null &&
+        (await prisma.inventoryTransaction.count({ where: { salesOrderId: so.id } })) === movesBefore &&
+        !!spend && money(spend.incurred, 590) && money(spend.left, 10),
+      `${svcOrder.status} item ${svcOrder.items[0].itemId} · ${JSON.stringify(spend)}`,
+    );
+    const { termsSections } = await import('../src/shared/procurementTerms');
+    const goodsOnly = await termsSections(['GOODS']);
+    const both = await termsSections(['GOODS', 'SERVICE']);
+    check(
+      'an order prints the goods terms for goods and the service terms where it buys a service',
+      goodsOnly.length === 1 && both.length === 2 && both.some((t) => t.kind === 'text' && t.title === 'Terms — services'),
+      JSON.stringify(both.map((t) => (t.kind === 'text' ? t.title : t.kind))),
+    );
     const { issueOrderStock } = await import('../src/shared/orderStock');
     await expectRejection(
       'more than the order holds is refused',
@@ -1526,6 +1575,36 @@ async function main() {
         (await prisma.purchaseRequest.count()) === counterBefore + 1 && seq(sheetB.body.number) === seq(sheetA.body.number) + 1,
       `${bareSheet.status} ${JSON.stringify(bareSheet.body).slice(0, 140)} ${sheetA.body.number} ${sheetB.body.number}`,
     );
+    // Goods or a service (2026-10-21): a service is never bought for stock and names no stock item.
+    {
+      const serviceForStock = await api(requesterToken, 'POST', '/purchase-requests', {
+        kind: 'STOCK_REPLENISHMENT',
+        warehouseId: warehouse.id,
+        purpose: `${TAG} service for stock`,
+        lines: [{ name: `${TAG} calibration`, nature: 'SERVICE', quantity: 1, estimatedCost: 500 }],
+      });
+      const serviceWithItem = await api(requesterToken, 'POST', '/purchase-requests', {
+        kind: 'DIRECT_TO_JOB',
+        jobId: job.id,
+        purpose: `${TAG} service with item`,
+        lines: [{ itemId: item.id, name: `${TAG} pipe as a service`, nature: 'SERVICE', quantity: 1, estimatedCost: 500 }],
+      });
+      const serviceOk = await api(requesterToken, 'POST', '/purchase-requests', {
+        kind: 'DIRECT_TO_JOB',
+        jobId: job.id,
+        purpose: `${TAG} service line`,
+        lines: [{ costCategoryId: materials.id, name: `${TAG} calibration`, nature: 'SERVICE', quantity: 1, estimatedCost: 500 }],
+      });
+      const serviceRead = serviceOk.status === 201 ? await api(requesterToken, 'GET', `/purchase-requests/${serviceOk.body.id}`) : serviceOk;
+      check(
+        'a service line is refused on a stock request and with a stock item, and kept as a service on a project request',
+        serviceForStock.status === 400 &&
+          serviceWithItem.status === 400 &&
+          serviceOk.status === 201 &&
+          (serviceRead.body.items as { nature: string }[] | undefined)?.[0]?.nature === 'SERVICE',
+        `${serviceForStock.status} ${serviceWithItem.status} ${serviceOk.status}`,
+      );
+    }
     const version = String(sheetRead.body.version);
     const sheetPut = await api(requesterToken, 'PUT', `/purchase-requests/${sheetId}/sheet`, {
       kind: 'DIRECT_TO_JOB',

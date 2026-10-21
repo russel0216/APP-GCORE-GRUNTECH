@@ -52,6 +52,7 @@ import { PurchaseOrderEditor } from './pages/chain/PurchaseOrderEditor';
 import { IncomingEditor } from './pages/chain/IncomingEditor';
 import { OutgoingEditor, StockIssueDetail, StockIssues } from './pages/chain/Outgoing';
 import { ChainReports } from './pages/chain/ChainReports';
+import { ProcurementSettings } from './pages/chain/ProcurementSettings';
 import { RfqDetail, RfqEditor, Rfqs } from './pages/chain/Rfq';
 import {
   PurchaseOrders,
@@ -997,6 +998,14 @@ function Routed() {
           element={
             <Guard permission="gchain.reports.view_all">
               <ChainReports />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/settings"
+          element={
+            <Guard permission="gchain.settings.view_all">
+              <ProcurementSettings />
             </Guard>
           }
         />

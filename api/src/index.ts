@@ -101,6 +101,7 @@ import { jobOrderRoutes } from './routes/jobOrders';
 import { serviceJobOrderRoutes } from './routes/serviceJobOrders';
 import { serviceDocumentRoutes } from './routes/serviceDocuments';
 import { operationsBudgetRoutes } from './routes/operationsBudget';
+import { procurementSettingsRoutes } from './routes/procurementSettings';
 import { myRecordsRoutes } from './routes/myRecords';
 import { memoRoutes } from './routes/memos';
 import { cadJobOrderRoutes } from './routes/cadJobOrders';
@@ -236,6 +237,7 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/finance-reports', financeReportRoutes);
 app.use('/api/finance-settings', financeSettingsRoutes);
 app.use('/api/operations-budget', operationsBudgetRoutes);
+app.use('/api/procurement-settings', procurementSettingsRoutes);
 app.use('/api/my-records', myRecordsRoutes);
 app.use('/api/memos', memoRoutes);
 

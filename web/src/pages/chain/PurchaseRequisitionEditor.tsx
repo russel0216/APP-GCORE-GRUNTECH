@@ -111,6 +111,7 @@ interface ExistingPr {
     quantity: number;
     unit: string;
     estimatedCost: number;
+    nature?: 'GOODS' | 'SERVICE';
     item: { id: string } | null;
     costCategory: { id: string } | null;
   }[];
@@ -251,6 +252,7 @@ export function PurchaseRequisitionEditor() {
             quantity: String(i.quantity),
             estimatedCost: String(i.estimatedCost),
             costCategoryId: i.costCategory?.id ?? '',
+            nature: i.nature ?? 'GOODS',
           }));
           if (!ls.length) ls = [blankLine()];
           setHeader(h);
@@ -462,7 +464,7 @@ export function PurchaseRequisitionEditor() {
       preferredSupplier: header.preferredSupplier.trim() || null,
       lines: sent.map((l) => ({
         id: l.id,
-        itemId: l.itemId,
+        itemId: l.nature === 'SERVICE' && header.kind !== 'STOCK_REPLENISHMENT' ? null : l.itemId,
         costCategoryId: l.costCategoryId || null,
         partNumber: l.partNumber.trim() || null,
         name: l.name.trim() || null,
@@ -470,6 +472,8 @@ export function PurchaseRequisitionEditor() {
         quantity: Number(l.quantity),
         unit: l.unit.trim() || 'pcs',
         estimatedCost: Number(l.estimatedCost) || 0,
+        // A stock request buys goods only; a service names no stock item.
+        nature: header.kind === 'STOCK_REPLENISHMENT' ? 'GOODS' : (l.nature ?? 'GOODS'),
       })),
       ...(existing ? { version: existing.version } : {}),
     };
@@ -803,6 +807,21 @@ export function PurchaseRequisitionEditor() {
                               </option>
                             ))}
                           </select>
+                          {/* Goods or a service (2026-10-21): a service is never bought for stock and names no stock item. */}
+                          {header.kind !== 'STOCK_REPLENISHMENT' && (
+                            <select
+                              aria-label={`Line ${i + 1} goods or service`}
+                              className="prq-nature"
+                              value={l.nature ?? 'GOODS'}
+                              onChange={(e) => {
+                                const nature = e.target.value as 'GOODS' | 'SERVICE';
+                                setLine(l.key, nature === 'SERVICE' ? { nature, itemId: null } : { nature });
+                              }}
+                            >
+                              <option value="GOODS">Goods</option>
+                              <option value="SERVICE">Service</option>
+                            </select>
+                          )}
                         </td>
                         <td>
                           <input

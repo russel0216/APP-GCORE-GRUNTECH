@@ -727,3 +727,8 @@ a.inv-move:hover .inv-move-what {
 .rep-wide {
   grid-column: 1 / -1;
 }
+
+/* Goods or a service under a line's budget line (2026-10-21). */
+.prq-nature {
+  margin-top: var(--s-1);
+}

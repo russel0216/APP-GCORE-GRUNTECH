@@ -60,6 +60,8 @@ interface OrderLine {
   category: Category | null;
   /** No item on file yet: received into a warehouse it is filed new, under the group the line names. */
   newItem: boolean;
+  /** A service is received as "service rendered" and enters no stock (2026-10-21). */
+  nature?: 'GOODS' | 'SERVICE';
 }
 interface OrderData {
   id: string;
@@ -606,7 +608,9 @@ export function IncomingEditor() {
                               {(l.code ?? l.partNumber) && <div className="faint mono">{l.code ?? l.partNumber}</div>}
                             </td>
                             <td>
-                              {l.category ? (
+                              {l.nature === 'SERVICE' ? (
+                                <span className="muted">Service rendered — no stock</span>
+                              ) : l.category ? (
                                 l.category.name
                               ) : (
                                 <GroupSelect

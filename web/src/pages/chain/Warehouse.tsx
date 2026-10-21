@@ -198,6 +198,8 @@ export function ReceivingDetail() {
     amount: number;
     serialNo: string | null;
     batchNo: string | null;
+    /** A service received as "service rendered" — no stock (2026-10-21). */
+    service?: boolean;
     orderItem: { costCategory: { name: string } | null } | null;
   }[];
 
@@ -432,6 +434,7 @@ export function ReceivingDetail() {
                     <div>{i.name ?? i.description}</div>
                     {i.name && i.description && i.description !== i.name && <div className="faint">{i.description}</div>}
                     {i.code && <div className="faint mono">{i.code}</div>}
+                    {i.service && <div className="faint">Service rendered — no stock</div>}
                   </td>
                   <td>{i.orderItem?.costCategory?.name ?? <span className="faint">—</span>}</td>
                   <td className="right mono">

@@ -44,6 +44,7 @@ interface SourceLine {
   partNumber: string | null;
   name: string | null;
   description: string;
+  nature?: 'GOODS' | 'SERVICE';
   quantity: number;
   unit: string;
   unitPrice: number;
@@ -97,6 +98,7 @@ interface ExistingPo {
     quantity: number;
     unit: string;
     unitPrice: number;
+    nature?: 'GOODS' | 'SERVICE';
     item: { id: string } | null;
     costCategory: { id: string } | null;
   }[];
@@ -114,6 +116,8 @@ interface Line {
   unit: string;
   quantity: string;
   unitPrice: string;
+  /** Goods or a service (2026-10-21); a request line keeps the request's. */
+  nature: 'GOODS' | 'SERVICE';
 }
 
 interface Header {
@@ -144,6 +148,7 @@ const blankLine = (costCategoryId = ''): Line => ({
   unit: 'pcs',
   quantity: '1',
   unitPrice: '',
+  nature: 'GOODS',
 });
 
 const fromSource = (l: SourceLine): Line => ({
@@ -158,6 +163,7 @@ const fromSource = (l: SourceLine): Line => ({
   unit: l.unit,
   quantity: String(l.quantity),
   unitPrice: String(l.unitPrice),
+  nature: l.nature ?? 'GOODS',
 });
 
 const amountOf = (l: Line) => prLineAmount(Number(l.quantity) || 0, Number(l.unitPrice) || 0);
@@ -252,6 +258,7 @@ export function PurchaseOrderEditor() {
             unit: i.unit,
             quantity: String(i.quantity),
             unitPrice: String(i.unitPrice),
+            nature: i.nature ?? 'GOODS',
           }));
         } else {
           const ship = await api.get<{ name: string; address: string }>('/purchase-orders/ship-to').catch(() => ({ name: '', address: '' }));
@@ -389,6 +396,7 @@ export function PurchaseOrderEditor() {
       unit: p.unit,
       quantity: p.quantity,
       unitPrice: p.estimatedCost,
+      nature: 'GOODS',
     }));
     setLines((ls) => {
       const at = replaceKey ? ls.findIndex((l) => l.key === replaceKey) : -1;
@@ -430,7 +438,7 @@ export function PurchaseOrderEditor() {
       lines: sent.map((l) => ({
         id: l.id,
         requestItemId: l.requestItemId,
-        itemId: l.itemId,
+        itemId: l.nature === 'SERVICE' && kind !== 'STOCK_REPLENISHMENT' ? null : l.itemId,
         costCategoryId: l.costCategoryId || null,
         partNumber: l.partNumber.trim() || null,
         name: l.name.trim() || null,
@@ -438,6 +446,7 @@ export function PurchaseOrderEditor() {
         quantity: Number(l.quantity),
         unit: l.unit.trim() || 'pcs',
         unitPrice: Number(l.unitPrice) || 0,
+        nature: kind === 'STOCK_REPLENISHMENT' ? 'GOODS' : l.nature,
       })),
       ...(existing
         ? { version: existing.version }
@@ -749,6 +758,24 @@ export function PurchaseOrderEditor() {
                               </option>
                             ))}
                           </select>
+                          {/* Goods or a service (2026-10-21): a request line keeps the request's. */}
+                          {kind !== 'STOCK_REPLENISHMENT' &&
+                            (l.requestItemId ? (
+                              <div className="prq-nature muted">{l.nature === 'SERVICE' ? 'Service' : 'Goods'}</div>
+                            ) : (
+                              <select
+                                aria-label={`Line ${i + 1} goods or service`}
+                                className="prq-nature"
+                                value={l.nature}
+                                onChange={(e) => {
+                                  const nature = e.target.value as 'GOODS' | 'SERVICE';
+                                  setLine(l.key, nature === 'SERVICE' ? { nature, itemId: null } : { nature });
+                                }}
+                              >
+                                <option value="GOODS">Goods</option>
+                                <option value="SERVICE">Service</option>
+                              </select>
+                            ))}
                         </td>
                         <td>
                           <input

@@ -396,7 +396,9 @@ receivingRoutes.get(
           /** The item's product group; null where it has none. */
           category: i.item ? i.item.category : (matched.get(i.id) ?? null),
           /** No item on file yet: received into a warehouse it is filed new, under the group the line names. */
-          newItem: !i.item && !matched.has(i.id),
+          newItem: i.nature !== 'SERVICE' && !i.item && !matched.has(i.id),
+          /** A service is received as "service rendered" — it enters no stock (2026-10-21). */
+          nature: i.nature,
         };
       }),
     });
@@ -537,6 +539,7 @@ function lineFacts(i: LoadedReceiving['items'][number]) {
       unit: i.orderItem.unit,
       category,
       categoryId: i.categoryId,
+      service: i.orderItem.nature === 'SERVICE',
     };
   }
   return {
@@ -547,6 +550,7 @@ function lineFacts(i: LoadedReceiving['items'][number]) {
     unit: i.unit ?? i.item?.unit ?? '',
     category,
     categoryId: i.categoryId,
+    service: false,
   };
 }
 
@@ -812,7 +816,8 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     if (warehouseId ?? order.warehouseId) {
       for (const [n, l] of body.items.entries()) {
         const oi = byOrderItem.get(l.orderItemId!);
-        if (oi && !oi.itemId && !l.categoryId && !(await matchTypedItem(prisma, oi))) throw needsGroup(n, `“${oi.name ?? oi.description}”`);
+        // A service is rendered, never shelved: it files no item.
+        if (oi && oi.nature !== 'SERVICE' && !oi.itemId && !l.categoryId && !(await matchTypedItem(prisma, oi))) throw needsGroup(n, `“${oi.name ?? oi.description}”`);
       }
     }
     const rows = body.items.map((l) => ({
@@ -974,7 +979,12 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     // stock (2026-10-16, the owner's report: received but not in inventory):
     // the one active item by part number or code, else by name, else a new
     // one filed now — and the order line is linked to it.
-    const stockWarehouseId = receiving.warehouseId ?? order.warehouseId;
+    // A SERVICE is received as "service rendered" (2026-10-21): it is
+    // charged (or counted against its sales order) like goods, and never
+    // enters a shelf — no stock, no project or order stock, no item filed.
+    const service = orderItem.nature === 'SERVICE';
+    const stockWarehouseId = service ? null : receiving.warehouseId ?? order.warehouseId;
+    const shelfWarehouseId = service ? null : receiving.warehouseId;
     if (order.kind === 'STOCK_REPLENISHMENT' && stockWarehouseId && !orderItem.itemId) {
       orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId, line.categoryId);
       await tx.purchaseOrderItem.update({ where: { id: orderItem.id }, data: { itemId: orderItem.itemId } });
@@ -1009,7 +1019,7 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     // Project goods received into a WAREHOUSE (not to site) sit on its shelf
     // as the project's own stock (2026-10-18): charged below, as ever, and
     // never again when they leave — shared/projectStock.ts.
-    if (order.kind === 'DIRECT_TO_JOB' && order.jobId && receiving.warehouseId) {
+    if (order.kind === 'DIRECT_TO_JOB' && order.jobId && shelfWarehouseId) {
       if (!orderItem.itemId) {
         orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId, line.categoryId);
         await tx.purchaseOrderItem.update({ where: { id: orderItem.id }, data: { itemId: orderItem.itemId } });
@@ -1017,7 +1027,7 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
       await receiveProjectStock(tx, {
         jobId: order.jobId,
         itemId: orderItem.itemId,
-        warehouseId: receiving.warehouseId,
+        warehouseId: shelfWarehouseId,
         quantity,
         unitCost,
         locationId: line.locationId,
@@ -1033,7 +1043,7 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     // pull-out or an Outgoing slip on the order to release; received with no
     // warehouse they went straight to the customer and nothing is held. No
     // job is charged either way: the deal bears the cost (shared/orderStock).
-    if (order.kind === 'SALES_ORDER' && order.salesOrderId && receiving.warehouseId) {
+    if (order.kind === 'SALES_ORDER' && order.salesOrderId && shelfWarehouseId) {
       if (!orderItem.itemId) {
         orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId, line.categoryId);
         await tx.purchaseOrderItem.update({ where: { id: orderItem.id }, data: { itemId: orderItem.itemId } });
@@ -1041,7 +1051,7 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
       await receiveOrderStock(tx, {
         salesOrderId: order.salesOrderId,
         itemId: orderItem.itemId,
-        warehouseId: receiving.warehouseId,
+        warehouseId: shelfWarehouseId,
         quantity,
         unitCost,
         locationId: line.locationId,
@@ -1548,7 +1558,7 @@ receivingRoutes.get(
           i.code ?? '',
           i.partNumber ?? '',
           i.name && i.description && i.description !== i.name ? { title: i.name, body: i.description } : (i.name ?? i.description ?? ''),
-          i.category?.name ?? '—',
+          i.service ? 'Service rendered' : (i.category?.name ?? '—'),
           qty(i.quantity),
           i.unit ?? '',
         ]),

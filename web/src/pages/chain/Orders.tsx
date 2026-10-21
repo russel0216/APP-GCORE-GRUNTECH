@@ -168,6 +168,7 @@ interface PoDetailData {
 
 interface PoLine {
   id: string;
+  nature?: 'GOODS' | 'SERVICE';
   name: string | null;
   partNumber: string | null;
   description: string;
@@ -446,6 +447,7 @@ export function PurchaseOrderDetail() {
                     ) : (
                       <strong>{i.name ?? i.description}</strong>
                     )}
+                      {i.nature === 'SERVICE' && <div className="faint">Service</div>}
                   </td>
                   <td className="right mono">{i.quantity}</td>
                   <td>{i.unit}</td>
