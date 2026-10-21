@@ -43,14 +43,26 @@ interface MemoDetail extends MemoRow {
   employeeIds: string[];
   archivedAt: string | null;
   remindedAt: string | null;
-  recipientsList: { employeeId: string; name: string; employeeNo: string | null; position: string | null; team: string | null; acknowledgedAt: string | null }[];
-  mine: { acknowledgedAt: string | null } | null;
+  recipientsList: {
+    employeeId: string;
+    name: string;
+    employeeNo: string | null;
+    position: string | null;
+    team: string | null;
+    acknowledgedAt: string | null;
+    reply: string | null;
+    repliedAt: string | null;
+  }[];
+  mine: { acknowledgedAt: string | null; reply: string | null; repliedAt: string | null } | null;
   canEdit: boolean;
   canIssue: boolean;
   canRemind: boolean;
   canArchive: boolean;
   canRestore: boolean;
   canAcknowledge: boolean;
+  canPullBack: boolean;
+  canDelete: boolean;
+  canReply: boolean;
   seesRecipients: boolean;
 }
 interface Summary {
@@ -110,6 +122,8 @@ export function Memos() {
         columns={columns}
         rowKey={(r) => r.id}
         scoped
+        // Mine here is the memos one DRAFTED; what was sent to one is My Records › Memos Received.
+        mineLabel="Drafted by me"
         selectable
         searchPlaceholder="Search number, title, text…"
         emptyTitle="No memos yet"
@@ -399,12 +413,24 @@ export function MemoPage() {
             label: 'Restore',
             confirm: { title: `Restore memo ${r.number}?`, body: 'It reads as issued again.', confirmLabel: 'Restore', tone: 'primary', onConfirm: () => post('archive', { restore: true }, 'Restored') },
           },
-          r.canEdit && {
+          r.canPullBack && {
+            label: 'Pull back to draft',
+            danger: true,
+            confirm: {
+              title: `Pull memo ${r.number} back to draft?`,
+              body: `It leaves every recipient's list and each is told it was withdrawn. ${r.acknowledged ? `The ${r.acknowledged} acknowledgement${r.acknowledged === 1 ? '' : 's'} given are kept on the audit trail; issued again, everyone acknowledges anew.` : ''} A draft may then be changed, issued again or deleted.`,
+              confirmLabel: 'Pull back',
+              reason: 'required' as const,
+              minReason: 3,
+              onConfirm: (reason: string) => post('pull-back', { reason }, 'Pulled back to draft'),
+            },
+          },
+          r.canDelete && {
             label: 'Delete',
             danger: true,
             confirm: {
               title: `Delete the draft "${r.title}"?`,
-              body: 'The draft and its files go for good. Nobody was sent it.',
+              body: r.number ? 'The draft and its files go for good. It was issued once and pulled back — that stays on the audit trail.' : 'The draft and its files go for good. Nobody was sent it.',
               confirmLabel: 'Delete',
               onConfirm: async () => {
                 await api.del(`/memos/${r.id}`);
@@ -422,7 +448,9 @@ export function MemoPage() {
       <div className="stack">
         {r.mine && (
           <div className={`alert ${r.mine.acknowledgedAt ? 'ok' : 'warn'}`}>
-            {r.mine.acknowledgedAt ? `You acknowledged this memo on ${formatDateTime(r.mine.acknowledgedAt)}.` : 'This memo is addressed to you — read it and press Acknowledge.'}
+            {r.mine.acknowledgedAt
+              ? `You acknowledged this memo on ${formatDateTime(r.mine.acknowledgedAt)}.`
+              : 'This memo is addressed to you — read it, write an explanation below if one is asked of you, and press Acknowledge.'}
           </div>
         )}
         <section className="card">
@@ -441,6 +469,8 @@ export function MemoPage() {
           </dl>
           <p className="memo-body">{r.body}</p>
         </section>
+
+        {r.mine && (r.canReply || r.mine.reply) && <MemoReply memoId={r.id} mine={r.mine} canReply={r.canReply} onSaved={load} />}
 
         <Attachments entityType="memo" entityId={r.id} title="Files" hint="The signed copy, a policy — added while the memo is a draft" canEdit={r.canEdit} />
 
@@ -461,6 +491,7 @@ export function MemoPage() {
                     <tr>
                       <th>Employee</th>
                       <th>Team</th>
+                      <th>Explanation</th>
                       <th>Acknowledged</th>
                     </tr>
                   </thead>
@@ -472,6 +503,16 @@ export function MemoPage() {
                           <div className="faint">{[p.employeeNo, p.position].filter(Boolean).join(' · ')}</div>
                         </td>
                         <td>{p.team ?? <span className="faint">—</span>}</td>
+                        <td>
+                          {p.reply ? (
+                            <>
+                              <div className="memo-reply-text">{p.reply}</div>
+                              <div className="faint">{p.repliedAt ? formatDateTime(p.repliedAt) : ''}</div>
+                            </>
+                          ) : (
+                            <span className="faint">—</span>
+                          )}
+                        </td>
                         <td>{p.acknowledgedAt ? formatDateTime(p.acknowledgedAt) : <StatusBadge status="PENDING" label="Not yet" />}</td>
                       </tr>
                     ))}
@@ -494,6 +535,61 @@ export function MemoPage() {
         />
       )}
     </div>
+  );
+}
+
+/** The recipient's explanation letter: written in the card before acknowledging, changed until then. */
+function MemoReply({
+  memoId,
+  mine,
+  canReply,
+  onSaved,
+}: {
+  memoId: string;
+  mine: { reply: string | null; repliedAt: string | null };
+  canReply: boolean;
+  onSaved: () => Promise<void>;
+}) {
+  const toast = useToast();
+  const [text, setText] = useState(mine.reply ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const dirty = text.trim() !== (mine.reply ?? '');
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post(`/memos/${memoId}/reply`, { text });
+      toast('ok', mine.reply ? 'Explanation updated' : 'Explanation sent');
+      await onSaved();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h3 className="card-title">Your explanation</h3>
+        {mine.repliedAt && <span className="faint">Sent {formatDateTime(mine.repliedAt)}</span>}
+      </div>
+      {canReply ? (
+        <>
+          <Field label="Explanation letter" hint="HR is told. You may change it until you acknowledge the memo.">
+            <textarea rows={6} value={text} onChange={(e) => setText(e.target.value)} />
+          </Field>
+          <ErrorBox error={error} />
+          <div className="card-foot">
+            <button type="button" className="btn btn-primary btn-sm" disabled={busy || !dirty || text.trim().length < 3} onClick={save}>
+              {mine.reply ? 'Save explanation' : 'Send explanation'}
+            </button>
+          </div>
+        </>
+      ) : (
+        <p className="memo-reply-text">{mine.reply}</p>
+      )}
+    </section>
   );
 }
 

@@ -35,6 +35,8 @@ import {
   routeBrief,
   approvalSlots,
   slotSignatories,
+  byHighestRole,
+  withoutCoSignedRepeats,
   preparedAt,
   mayDecide,
   usersInRole,
@@ -1521,7 +1523,8 @@ receivingRoutes.get(
         : await approvalSlots(RECEIVING_DOC, receiving.id);
     const signatories: Signatory[] = [
       { role: 'Prepared by', name: receiving.receivedBy.name, ...(await contactOf(receiving.receivedById)), at: preparedAt(slots) ?? receiving.createdAt },
-      ...slotSignatories(slots),
+      // Each signer under their highest role, once — the purchase order's rule.
+      ...slotSignatories(withoutCoSignedRepeats(await byHighestRole(slots))),
     ];
 
     // Received from: the supplier's own block where one is on file.

@@ -11,7 +11,7 @@ import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify, type NotificationType } from '../shared/notifications';
 import { mailConfig, sendMail } from '../shared/mail';
-import { renderDocument, formatDate, formatShortDate, type PdfSection } from '../shared/pdf';
+import { renderDocument, formatDate, formatDateTime, formatShortDate, type PdfSection } from '../shared/pdf';
 import { contactOf } from '../shared/approvals';
 import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
 import { contentDisposition, paperFileName } from '../shared/paperName';
@@ -86,8 +86,9 @@ function audienceWhere(m: { audience: MemoAudience; teamIds: string[]; positionI
 }
 
 /** Whether the caller is one of the memo's recipients. */
-async function isRecipient(me: ResolvedUser, memoId: string): Promise<{ id: string; acknowledgedAt: Date | null } | null> {
-  return prisma.memoRecipient.findFirst({ where: { memoId, employee: { userId: me.id } }, select: { id: true, acknowledgedAt: true } });
+type Mine = { id: string; acknowledgedAt: Date | null; reply: string | null; repliedAt: Date | null };
+async function isRecipient(me: ResolvedUser, memoId: string): Promise<Mine | null> {
+  return prisma.memoRecipient.findFirst({ where: { memoId, employee: { userId: me.id } }, select: { id: true, acknowledgedAt: true, reply: true, repliedAt: true } });
 }
 
 /** May the caller read it through the register — View All, or the memo they drafted. */
@@ -101,7 +102,7 @@ function readsRegister(me: ResolvedUser, row: { createdById: string }): boolean 
 }
 
 /** The register, or the person it was sent to — else a 404 (a memo about others is nobody else's business). */
-async function readable(me: ResolvedUser, id: string): Promise<{ row: Row; register: boolean; mine: { id: string; acknowledgedAt: Date | null } | null }> {
+async function readable(me: ResolvedUser, id: string): Promise<{ row: Row; register: boolean; mine: Mine | null }> {
   const row = await load(id);
   const register = readsRegister(me, row);
   const mine = row.status === 'DRAFT' ? null : await isRecipient(me, row.id);
@@ -416,7 +417,7 @@ memoRoutes.delete(
     const me = currentUser(req);
     const row = await load(req.params.id);
     if (!canEditRecord(me, 'ghr', 'memos', row.createdById)) throw notFound('Memo not found');
-    if (row.status !== 'DRAFT') throw badRequest('Only a draft is deleted — an issued memo is archived');
+    if (row.status !== 'DRAFT') throw badRequest('Only a draft is deleted — pull an issued memo back to draft first');
     const gone = await prisma.memo.deleteMany({ where: { id: row.id, status: 'DRAFT' } });
     if (!gone.count) throw conflict('The memo was issued a moment ago — reload it');
     await deleteAttachmentsOf(DOC, [row.id]);
@@ -441,7 +442,8 @@ memoRoutes.post(
       if (!claimed.count) throw conflict('The memo changed a moment ago — reload it');
       const people = await tx.employee.findMany({ where: audienceWhere(row), select: { id: true, userId: true } });
       if (!people.length) throw badRequest('Nobody active is addressed — choose who the memo is for');
-      const number = await nextNumber('memo', tx);
+      // Pulled back and issued again, it keeps its number.
+      const number = row.number ?? (await nextNumber('memo', tx));
       await tx.memo.update({ where: { id: row.id }, data: { number, issuedAt: new Date(), issuedById: me.id, memoDate: row.memoDate ?? today } });
       await tx.memoRecipient.createMany({ data: people.map((p) => ({ memoId: row.id, employeeId: p.id })), skipDuplicates: true });
       return { number, people };
@@ -465,7 +467,7 @@ memoRoutes.post(
     const mine = row.status === 'DRAFT' ? null : await isRecipient(me, row.id);
     if (!mine) throw notFound('Memo not found');
     const done = await prisma.memoRecipient.updateMany({ where: { id: mine.id, acknowledgedAt: null }, data: { acknowledgedAt: new Date() } });
-    if (!done.count) throw conflict(`You acknowledged this memo on ${formatDate(mine.acknowledgedAt ?? new Date())}`);
+    if (!done.count) throw conflict(`You acknowledged this memo on ${formatDateTime(mine.acknowledgedAt ?? new Date())}`);
     await audit({ entityType: DOC, entityId: row.id, action: 'APPROVED', summary: `${me.name} acknowledged memo ${row.number}` }, req);
     res.json({ ok: true, acknowledgedAt: new Date() });
   }),
@@ -510,6 +512,84 @@ memoRoutes.post(
   }),
 );
 
+/**
+ * Pull an issued (or archived) memo back to draft (2026-10-21, the owner's
+ * call: "the issuer can pull back and delete the memo even if
+ * acknowledged"). The recipients' rows go — a re-issue resolves its audience
+ * again — and who had acknowledged or replied, and when, is kept on the
+ * audit row. Every recipient is told it was withdrawn. It keeps its number.
+ * Only then may it be deleted.
+ */
+memoRoutes.post(
+  '/:id/pull-back',
+  requireEdit('ghr', 'memos'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const row = await load(req.params.id);
+    if (!canEditRecord(me, 'ghr', 'memos', row.createdById)) throw notFound('Memo not found');
+    const { reason } = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is pulled back') }), req.body);
+    const recipients = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.memo.updateMany({
+        where: { id: row.id, status: { in: ['ISSUED', 'ARCHIVED'] } },
+        data: { status: 'DRAFT', archivedAt: null, archivedById: null, remindedAt: null },
+      });
+      if (!claimed.count) throw badRequest('Only an issued memo is pulled back');
+      const rows = await tx.memoRecipient.findMany({
+        where: { memoId: row.id },
+        select: { acknowledgedAt: true, repliedAt: true, employee: { select: { firstName: true, lastName: true, userId: true } } },
+      });
+      await tx.memoRecipient.deleteMany({ where: { memoId: row.id } });
+      return rows;
+    });
+    const acknowledged = recipients.filter((r) => r.acknowledgedAt);
+    await audit(
+      {
+        entityType: DOC,
+        entityId: row.id,
+        action: 'CANCELLED',
+        summary: `Pulled memo ${row.number} back to draft — ${reason} (${acknowledged.length} of ${recipients.length} had acknowledged)`,
+        before: {
+          recipients: recipients.map((r) => ({
+            name: `${r.employee.firstName} ${r.employee.lastName}`,
+            acknowledgedAt: r.acknowledgedAt,
+            repliedAt: r.repliedAt,
+          })),
+        },
+      },
+      req,
+    );
+    await tell(
+      recipients.map((r) => r.employee.userId).filter((id): id is string => !!id && id !== me.id),
+      { type: 'memo.withdrawn', title: `Memo ${row.number} withdrawn: ${row.title}`, body: reason, link: `/my-work` },
+    );
+    res.json({ ok: true, status: 'DRAFT' });
+  }),
+);
+
+/**
+ * The recipient's explanation letter (2026-10-21): written before they
+ * acknowledge, changed until then; acknowledging afterwards is still theirs.
+ * Whoever drafted and issued the memo is told.
+ */
+memoRoutes.post(
+  '/:id/reply',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const row = await load(req.params.id);
+    const mine = row.status === 'ISSUED' ? await isRecipient(me, row.id) : null;
+    if (!mine) throw notFound(row.status === 'ARCHIVED' ? 'This memo is archived — it takes no reply' : 'Memo not found');
+    const { text } = parseBody(z.object({ text: z.string().trim().min(3, 'Write your explanation').max(10_000) }), req.body);
+    const done = await prisma.memoRecipient.updateMany({ where: { id: mine.id, acknowledgedAt: null }, data: { reply: text, repliedAt: new Date() } });
+    if (!done.count) throw conflict('You acknowledged this memo already — the reply was written before that');
+    await audit({ entityType: DOC, entityId: row.id, action: 'UPDATED', summary: `${me.name} ${mine.reply ? 'changed their' : 'wrote an'} explanation on memo ${row.number}` }, req);
+    await tell(
+      [row.createdById, row.issuedById].filter((id): id is string => !!id && id !== me.id),
+      { type: 'memo.replied', title: `${me.name} replied to memo ${row.number}`, body: text.length > 140 ? `${text.slice(0, 140)}…` : text, link: `${PATH}/${row.id}` },
+    );
+    res.json({ ok: true, repliedAt: new Date() });
+  }),
+);
+
 // ── One memo ────────────────────────────────────────────────────────────────
 
 memoRoutes.get(
@@ -522,7 +602,7 @@ memoRoutes.get(
       ? await prisma.memoRecipient.findMany({
           where: { memoId: row.id },
           orderBy: [{ employee: { lastName: 'asc' } }, { employee: { firstName: 'asc' } }],
-          select: { acknowledgedAt: true, employee: { select: { id: true, employeeNo: true, firstName: true, lastName: true, position: true, industry: { select: { code: true } } } } },
+          select: { acknowledgedAt: true, reply: true, repliedAt: true, employee: { select: { id: true, employeeNo: true, firstName: true, lastName: true, position: true, industry: { select: { code: true } } } } },
         })
       : [];
     const acknowledged = register ? recipients.filter((r) => r.acknowledgedAt).length : 0;
@@ -542,12 +622,17 @@ memoRoutes.get(
         position: r.employee.position,
         team: r.employee.industry?.code ?? null,
         acknowledgedAt: r.acknowledgedAt,
+        reply: r.reply,
+        repliedAt: r.repliedAt,
       })),
-      mine: mine ? { acknowledgedAt: mine.acknowledgedAt } : null,
+      mine: mine ? { acknowledgedAt: mine.acknowledgedAt, reply: mine.reply, repliedAt: mine.repliedAt } : null,
       canEdit: mayChange && row.status === 'DRAFT',
       canIssue: mayChange && row.status === 'DRAFT',
       canRemind: mayChange && row.status === 'ISSUED' && row._count.recipients > acknowledged,
       canArchive: mayChange && row.status === 'ISSUED',
+      canPullBack: mayChange && row.status !== 'DRAFT',
+      canDelete: mayChange && row.status === 'DRAFT',
+      canReply: !!mine && !mine.acknowledgedAt && row.status === 'ISSUED',
       canRestore: mayChange && row.status === 'ARCHIVED',
       canAcknowledge: !!mine && !mine.acknowledgedAt,
       seesRecipients: register,
@@ -564,7 +649,7 @@ memoRoutes.get(
   '/:id/pdf',
   handler(async (req, res) => {
     const me = currentUser(req);
-    const { row, register } = await readable(me, req.params.id);
+    const { row, register, mine } = await readable(me, req.params.id);
     const [label] = await audienceLabels([row]);
     const sections: PdfSection[] = [
       {
@@ -583,18 +668,33 @@ memoRoutes.get(
       const recipients = await prisma.memoRecipient.findMany({
         where: { memoId: row.id },
         orderBy: [{ employee: { lastName: 'asc' } }, { employee: { firstName: 'asc' } }],
-        select: { acknowledgedAt: true, employee: { select: { employeeNo: true, firstName: true, lastName: true, industry: { select: { code: true } } } } },
+        select: { acknowledgedAt: true, reply: true, repliedAt: true, employee: { select: { employeeNo: true, firstName: true, lastName: true, industry: { select: { code: true } } } } },
       });
+      // The date AND time each acknowledged (2026-10-21): the stamp is the signature.
       sections.push({
         kind: 'table',
         title: 'Acknowledgements',
-        head: ['Employee', 'Number', 'Team', 'Acknowledged'],
+        head: ['Employee', 'Number', 'Team', 'Explanation', 'Acknowledged'],
         rows: recipients.map((r) => [
           `${r.employee.firstName} ${r.employee.lastName}`,
           r.employee.employeeNo ?? '—',
           r.employee.industry?.code ?? '—',
-          r.acknowledgedAt ? formatDate(r.acknowledgedAt) : 'Pending',
+          r.repliedAt ? `Replied ${formatDateTime(r.repliedAt)}` : '—',
+          r.acknowledgedAt ? formatDateTime(r.acknowledgedAt) : 'Pending',
         ]),
+      });
+      for (const r of recipients.filter((x) => x.reply)) {
+        sections.push({ kind: 'text', title: `Explanation — ${r.employee.firstName} ${r.employee.lastName}, ${formatDateTime(r.repliedAt!)}`, body: r.reply! });
+      }
+    } else if (mine) {
+      // The recipient's own copy: their explanation and their acknowledgement, stamped.
+      if (mine.reply) sections.push({ kind: 'text', title: `Your explanation — ${formatDateTime(mine.repliedAt!)}`, body: mine.reply });
+      sections.push({
+        kind: 'text',
+        title: 'Acknowledgement',
+        body: mine.acknowledgedAt
+          ? `Acknowledged by ${me.name} on ${formatDateTime(mine.acknowledgedAt)}. The name, date and time are considered a digital signature.`
+          : 'Not yet acknowledged.',
       });
     }
     const issuer = row.issuedBy ?? row.createdBy;

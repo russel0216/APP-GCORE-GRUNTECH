@@ -4586,6 +4586,31 @@ async function main() {
       underRows.map((r) => r.number).join(','),
     );
 
+    // What names the order is deleted first (2026-10-21): a cancelled invoice still blocks, named.
+    const so2Row = await prisma.salesOrder.findUniqueOrThrow({ where: { id: so2Body.id }, select: { customerId: true, ownerId: true } });
+    const blocker = await prisma.invoice.create({
+      data: {
+        number: `${TAG}-INV-SO2`,
+        customerId: so2Row.customerId,
+        salesOrderId: so2Body.id,
+        status: 'CANCELLED',
+        invoiceDate: new Date('2026-10-01T00:00:00Z'),
+        dueDate: new Date('2026-10-31T00:00:00Z'),
+        grossAmount: 0,
+        vatAmount: 0,
+        ewtAmount: 0,
+        invoiceTotal: 0,
+        netCollectible: 0,
+        createdById: so2Row.ownerId,
+      },
+    });
+    const refusedDelete = await http(salesToken, 'DELETE', `/sales-orders/${so2Body.id}`);
+    check(
+      'a cancelled order an invoice still names is kept — a 400 naming the invoice, never a 500',
+      refusedDelete.status === 400 && refusedDelete.text.includes(`${TAG}-INV-SO2`) && refusedDelete.text.includes('Delete it first'),
+      `${refusedDelete.status} ${refusedDelete.text.slice(0, 200)}`,
+    );
+    await prisma.invoice.delete({ where: { id: blocker.id } });
     const delCancelled = await http(salesToken, 'DELETE', `/sales-orders/${so2Body.id}`);
     check(
       'a cancelled order can be deleted (2026-10-07, the owner\u2019s call)',

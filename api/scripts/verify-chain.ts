@@ -28,7 +28,7 @@ import { CANVASS_CODE_MOVED, moveCanvassCode } from '../src/shared/canvassCode';
 import { canvassFigures } from '../src/shared/canvassMath';
 import { deleteAttachment } from '../src/shared/attachments';
 import { PDFDocument } from 'pdf-lib';
-import { submitForApproval, act, pickWorkflow, reopenApproved } from '../src/shared/approvals';
+import { submitForApproval, act, pickWorkflow, reopenApproved, byHighestRole, withoutCoSignedRepeats, type ApprovalSlot } from '../src/shared/approvals';
 import { budgetPosition } from '../src/routes/jobs';
 import {
   receiveStock,
@@ -1820,6 +1820,33 @@ async function main() {
       noVat.status === 200 && Number(afterNoVat.vatRate) === 0 && Number(afterNoVat.total) === Number(afterNoVat.subtotal) && afterNoVat.currency === 'USD',
       `${noVat.status} ${JSON.stringify(noVat.body).slice(0, 160)}`,
     );
+    // 2026-10-21, the owner's call: on paper a signer prints under their
+    // HIGHEST role — the CEO signing an importation as its Purchasing Manager
+    // prints as CEO / President, once — and anyone else under the step.
+    {
+      const ceoBuyer = await makeUser('Verify CEO Importer', 'ceoimport@verifyc.local', ['ceo', 'purchasing_manager_import']);
+      const importer = await makeUser('Verify Importer', 'importer@verifyc.local', ['purchasing_manager_import']);
+      const pmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'purchasing_manager' } });
+      const ceoRole = await prisma.role.findUniqueOrThrow({ where: { key: 'ceo' } });
+      const at = new Date();
+      const signed: ApprovalSlot[] = [
+        { step: 'Purchasing Manager', stepRoleId: pmRole.id, userId: ceoBuyer.id, name: ceoBuyer.name, at },
+        { step: 'CEO / President', stepRoleId: ceoRole.id, userId: ceoBuyer.id, name: ceoBuyer.name, at, coSigned: true },
+      ];
+      const printedSlots = withoutCoSignedRepeats(await byHighestRole(signed));
+      check(
+        'the CEO who signs an importation order as its Purchasing Manager prints once, as CEO / President',
+        printedSlots.length === 1 && printedSlots[0].step === ceoRole.name && printedSlots[0].userId === ceoBuyer.id,
+        JSON.stringify(printedSlots.map((x) => x.step)),
+      );
+      const plain = await byHighestRole([{ step: 'Purchasing Manager', stepRoleId: pmRole.id, userId: importer.id, name: importer.name, at }]);
+      const open = await byHighestRole([{ step: 'Purchasing Manager', stepRoleId: pmRole.id, assigned: [{ id: ceoBuyer.id, name: ceoBuyer.name }] }]);
+      check(
+        'an importer at the step’s own level keeps the step’s name; an open step the CEO will sign already reads CEO / President',
+        plain[0].step === 'Purchasing Manager' && open[0].step === ceoRole.name,
+        `${plain[0].step} / ${open[0].step}`,
+      );
+    }
     const stalePo = await api(buyerToken, 'PUT', `/purchase-orders/${pageOrderId}/sheet`, {
       supplierId: supplier.id, notes: `${TAG} stale`, version: String(pageOrderRead.body.version), lines: [],
     });

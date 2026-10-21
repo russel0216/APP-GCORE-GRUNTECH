@@ -676,7 +676,12 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,633 assertions across twenty-two scripts** (counted 2026-10-21, after
+**4,655 assertions across twenty-two scripts** (counted 2026-10-21, after
+the owner's batch of 2026-10-21's first push — 2 on chain for the CEO
+printed under his highest role, 1 on sales for a sales order delete that
+names what blocks it, 2 on calendar for Not going's reason, 17 on hr for a
+memo's explanation letter, its stamped paper and pull back then delete — and
+before it
 the sales order's own stock leaving by pull-out and Outgoing and listed on
 Inventory — 2 on chain — and before it goods and services on procurement lines — 3 on chain for the service
 refused for stock, rendered without a shelf and its terms — and before it
@@ -772,8 +777,8 @@ and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
-429, masters 92, sales 642, costing 205, pipeline 121, calendar 101, numbering
-94, partners 120, delivery 195, chain 377, hr 548, plantilla 129, meetings
+429, masters 92, sales 643, costing 205, pipeline 121, calendar 103, numbering
+94, partners 120, delivery 195, chain 379, hr 565, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 440, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
@@ -3593,6 +3598,54 @@ pushes; the first:
   a pending one by whoever may modify it; the editor files them with the
   save, the page shows the card, the paper prints them behind
   (`?attachments=0` bare). verify-chain and verify-finance pin it.
+
+## The owner's batch of 2026-10-21 — push 1
+
+`docs/notes/P-batch-2026-10-21.md` is the plan, with the owner's answers.
+
+- **A signer prints under their highest role when they are the head of the
+  company** ("always the highest level of position (CEO) even if he holds
+  the level-2 Purchasing Manager for imports"). `byHighestRole(slots)` in
+  `shared/approvals.ts`: a slot signed (or, open, to be signed by one
+  person) by somebody whose highest role is level 1 (`Role.rank`) on a step
+  naming a lower-level role takes that title ("CEO / President"); everyone
+  else keeps the step's name — a Back Support who holds another role is
+  still Back Support. `withoutCoSignedRepeats()` then leaves off a step that
+  person co-signed with the same Approve, so they print once. Slots carry
+  `stepRoleId`. Applied on the purchase order's and the Incoming Report's
+  papers.
+- **Not going says why**: `SalesActivityInvitee.comment`; `POST
+  /activities/:id/respond { response, comment }` refuses DECLINED without
+  one; Maybe takes an optional note, Going none. The organiser's bell
+  carries it, the Responses table shows it under the name, and the page
+  asks through the confirm bar — the email's "Not going" link opens the
+  question rather than recording blind.
+- **The Insights sidebar has icons**: a module with no sections lists its
+  screens flat, and each now takes `screenIcon(module, screen)`
+  (`SCREEN_ICONS` in `components/Icon.tsx`) and `.nav-label`, so the words
+  stay on one line and the collapsed rail shows the icon.
+- **A sales order is deleted only once nothing names it** (the owner's
+  call: those are deleted first): `DELETE /sales-orders/:id` lists every
+  invoice, invoice request, commission request, purchase request, purchase
+  order, outgoing slip and pull-out slip naming it, live or cancelled, by
+  number and status ("… is kept — invoice GT-INV-… (cancelled) still names
+  it. Delete it first"), and runs through `deleteOrRefuse()`. Cancel now
+  also refuses while a live invoice or commission request stands on it.
+- **Memos**: the register's switch reads **Drafted by me · All**
+  (`mineLabel` on `DataList`) — Mine was the memos one drafted, never the
+  ones received (My Records › Memos Received). An issued (or archived)
+  memo is **pulled back to draft** (`POST /memos/:id/pull-back { reason }`,
+  the issuer or Edit All): the recipients' rows go, who had acknowledged or
+  replied and when are kept on the CANCELLED audit row, each recipient is
+  told (`memo.withdrawn`), and the memo keeps its number when issued again;
+  only a draft is deleted. **The explanation letter**: `MemoRecipient.reply`
+  / `repliedAt`, `POST /memos/:id/reply { text }` — the recipient's alone,
+  while issued and before acknowledging (changeable until then; refused
+  after, 409), HR told (`memo.replied`); acknowledging after replying is
+  still theirs. **The paper stamps date and time**: HR's copy's
+  Acknowledgements table prints `formatDateTime` and the explanation, and
+  the recipient's own copy prints "Acknowledged by <name> on <date, time>"
+  as the digital signature.
 
 ## The notification bell (2026-10-20)
 

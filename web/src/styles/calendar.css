@@ -798,3 +798,10 @@
   }
 
 }
+
+/* An invitee's reason, under their name (2026-10-21). */
+.act-rsvp-comment {
+  margin-top: var(--s-1);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+}

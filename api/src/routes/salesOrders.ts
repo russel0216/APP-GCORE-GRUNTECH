@@ -26,6 +26,7 @@ import {
   badRequest,
   forbidden,
   idsFilter,
+  deleteOrRefuse,
 } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord } from '../permissions/resolve';
@@ -1295,6 +1296,49 @@ async function refuseWhileInvoiced(orderId: string, number: string, verb: string
 }
 
 /**
+ * Nor while a live invoice request or commission request stands on it
+ * (2026-10-21): the request bills or pays out on the order.
+ */
+async function refuseWhileRequested(orderId: string, number: string, verb: string) {
+  const [invoiceRequests, commissions] = await Promise.all([
+    prisma.invoiceRequest.findMany({ where: { salesOrderId: orderId, status: { in: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'] } }, select: { number: true } }),
+    prisma.commissionRequest.findMany({ where: { salesOrderId: orderId, status: { not: 'CANCELLED' } }, select: { number: true } }),
+  ]);
+  const names = [...invoiceRequests.map((r) => `invoice request ${r.number}`), ...commissions.map((r) => `commission request ${r.number}`)];
+  if (names.length) throw badRequest(`${number} cannot be ${verb} — ${names.join(', ')} ${names.length === 1 ? 'stands' : 'stand'} on it`);
+}
+
+/**
+ * Every document that names a sales order and would keep it from being
+ * deleted (each relation is Restrict whatever its status), as "Invoice
+ * GT-INV-2026-0012 (cancelled)" — the delete's refusal reads it out.
+ */
+async function documentsOnOrder(orderId: string): Promise<string[]> {
+  const where = { salesOrderId: orderId };
+  const sel = { select: { number: true, status: true } } as const;
+  const [invoices, invoiceRequests, commissions, requests, orders, issues, pullouts] = await Promise.all([
+    prisma.invoice.findMany({ where, ...sel }),
+    prisma.invoiceRequest.findMany({ where, ...sel }),
+    prisma.commissionRequest.findMany({ where, ...sel }),
+    prisma.purchaseRequest.findMany({ where, ...sel }),
+    prisma.purchaseOrder.findMany({ where, ...sel }),
+    prisma.stockIssue.findMany({ where, ...sel }),
+    prisma.pulloutSlip.findMany({ where, ...sel }),
+  ]);
+  const named = (kind: string, rows: { number: string | null; status: string }[]) =>
+    rows.map((r) => `${kind} ${r.number ?? '(draft)'} (${statusLabel(r.status).toLowerCase()})`);
+  return [
+    ...named('invoice', invoices),
+    ...named('invoice request', invoiceRequests),
+    ...named('commission request', commissions),
+    ...named('purchase request', requests),
+    ...named('purchase order', orders),
+    ...named('outgoing slip', issues),
+    ...named('pull-out slip', pullouts),
+  ];
+}
+
+/**
  * An ISSUED order may be pulled back to draft after approval (2026-10-16),
  * by its author or `edit_all` — approval only booked it (ISSUED). Refused
  * while a pull-out slip, a live invoice or a live invoice request stands on it.
@@ -1352,6 +1396,7 @@ salesOrderRoutes.post(
     await refuseWhilePulledOut(order.id, order.number, 'cancelled');
     await refuseWhileBuying(order.id, order.number, 'cancelled');
     await refuseWhileInvoiced(order.id, order.number, 'cancelled');
+    await refuseWhileRequested(order.id, order.number, 'cancelled');
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.salesOrder.updateMany({
         where: { id: order.id, status: { in: ['DRAFT', 'PENDING_APPROVAL', 'ISSUED'] } },
@@ -1385,7 +1430,14 @@ salesOrderRoutes.delete(
     if (order.status !== 'DRAFT' && order.status !== 'CANCELLED') {
       throw badRequest('Only a draft or a cancelled sales order can be deleted — cancel it first');
     }
-    await prisma.salesOrder.delete({ where: { id: order.id } });
+    // Whatever names the order — live or cancelled — is deleted first
+    // (2026-10-21, the owner's call); the refusal says what, by number and
+    // status, rather than the database's foreign key reading as a 500.
+    const blockers = await documentsOnOrder(order.id);
+    if (blockers.length) {
+      throw badRequest(`${order.number} is kept — ${blockers.join('; ')} still ${blockers.length === 1 ? 'names' : 'name'} it. Delete ${blockers.length === 1 ? 'it' : 'them'} first`);
+    }
+    await deleteOrRefuse(`Sales order ${order.number}`, () => prisma.salesOrder.delete({ where: { id: order.id } }));
     await deleteAttachmentsOf('sales_order', [order.id]);
     await audit(
       { entityType: 'sales_order', entityId: order.id, action: 'DELETED', summary: `Deleted sales order ${order.number}`, before: order },

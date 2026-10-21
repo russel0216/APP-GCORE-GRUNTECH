@@ -5050,6 +5050,42 @@ async function main() {
     check('a colleague cannot read another’s memos that way', (await api(bT, 'GET', `/memos/received?employeeId=${empA.id}`)).status === 404);
     const scrap = await api(hrT, 'POST', '/memos', { title: `${TAG} Scrap`, body: 'z' });
     check('a draft is deleted', (await api(hrT, 'DELETE', `/memos/${String(scrap.body.id)}`)).status === 200);
+
+    // 2026-10-21: the explanation letter, the stamped paper, pull back then delete.
+    const ask = await api(hrT, 'POST', '/memos', { title: `${TAG} Explain the absence`, body: 'Explain your absence on Monday.', audience: 'PEOPLE', employeeIds: [empB.id] });
+    const askId = String(ask.body.id);
+    await api(hrT, 'POST', `/memos/${askId}/issue`);
+    const askNo = (await prisma.memo.findUnique({ where: { id: askId } }))?.number;
+    check('an explanation needs words', (await api(bT, 'POST', `/memos/${askId}/reply`, { text: '' })).status === 400);
+    check('someone it was not sent to cannot reply', (await api(aT, 'POST', `/memos/${askId}/reply`, { text: 'Not mine to answer' })).status === 404);
+    const reply = await api(bT, 'POST', `/memos/${askId}/reply`, { text: 'I was at the clinic — certificate to follow.' });
+    check('the recipient writes an explanation before acknowledging, and HR is told', reply.status === 200 && !!(await prisma.notification.findFirst({ where: { userId: memoHr.id, type: 'memo.replied' } })));
+    check('…and may change it until they acknowledge', (await api(bT, 'POST', `/memos/${askId}/reply`, { text: 'I was at the clinic — medical certificate attached to my leave.' })).status === 200);
+    check('a reply never stops the acknowledgement', (await api(bT, 'POST', `/memos/${askId}/acknowledge`)).status === 200);
+    check('once acknowledged, the explanation is closed (409)', (await api(bT, 'POST', `/memos/${askId}/reply`, { text: 'One more thing' })).status === 409);
+    const seen = await api(hrT, 'GET', `/memos/${askId}`);
+    check('HR reads the explanation beside the acknowledgement', (seen.body.recipientsList as { employeeId: string; reply: string | null }[]).some((r) => r.employeeId === empB.id && r.reply?.startsWith('I was at the clinic — medical')));
+    const stamped = flat((await printed(hrT, `/memos/${askId}/pdf`)).text);
+    const ownCopy = flat((await printed(bT, `/memos/${askId}/pdf`)).text);
+    check('HR’s paper stamps the acknowledgement with its time, and prints the explanation', /\d{1,2}:\d{2}.{0,2}(AM|PM)/.test(stamped) && /EXPLANATION — ZZHR BEN MEMO/.test(stamped) && stamped.includes('medical certificate'), stamped.slice(-600));
+    check('the recipient’s own copy says who acknowledged and when', /Acknowledged by ZZ Memo Ben on .*\d{1,2}:\d{2}.{0,2}(AM|PM)/.test(ownCopy) && /YOUR EXPLANATION/.test(ownCopy), ownCopy.slice(-400));
+    check('an issued memo is still not deleted directly', (await api(hrT, 'DELETE', `/memos/${askId}`)).status === 400);
+    check('pulling back needs a reason', (await api(hrT, 'POST', `/memos/${askId}/pull-back`, {})).status === 400);
+    check('the recipient cannot pull it back', [403, 404].includes((await api(bT, 'POST', `/memos/${askId}/pull-back`, { reason: 'Not mine' })).status));
+    const back = await api(hrT, 'POST', `/memos/${askId}/pull-back`, { reason: 'Wrong date in the text' });
+    const backRow = await prisma.memo.findUnique({ where: { id: askId }, include: { _count: { select: { recipients: true } } } });
+    const backAudit = await prisma.auditLog.findFirst({ where: { entityType: 'memo', entityId: askId, action: 'CANCELLED' } });
+    check(
+      'the issuer pulls an acknowledged memo back to draft: it keeps its number, leaves the lists, and the trail keeps who had acknowledged',
+      back.status === 200 && backRow?.status === 'DRAFT' && backRow.number === askNo && backRow._count.recipients === 0 && !!backAudit?.summary.includes('1 of 1 had acknowledged') && JSON.stringify(backAudit?.before).includes('Ben'),
+      `${back.status} ${JSON.stringify(back.body).slice(0, 120)} ${backRow?.status} ${backRow?._count.recipients} ${backAudit?.summary}`,
+    );
+    check('the recipient is told it was withdrawn', !!(await prisma.notification.findFirst({ where: { userId: staffB.id, type: 'memo.withdrawn' } })));
+    check('it is gone from the recipient’s Memos Received', !((await api(bT, 'GET', '/memos/received')).body.rows as { id: string }[]).some((r) => r.id === askId));
+    const reissued = await api(hrT, 'POST', `/memos/${askId}/issue`);
+    check('issued again it keeps its number, and is acknowledged anew', reissued.status === 200 && reissued.body.number === askNo && (await prisma.memoRecipient.count({ where: { memoId: askId, acknowledgedAt: null } })) === 1);
+    await api(hrT, 'POST', `/memos/${askId}/pull-back`, { reason: 'Withdrawn for good' });
+    check('pulled back, it is deleted', (await api(hrT, 'DELETE', `/memos/${askId}`)).status === 200 && !(await prisma.memo.findUnique({ where: { id: askId } })));
   }
 
   // ══ My Records (2026-10-20) ═══════════════════════════════════════════════

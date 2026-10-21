@@ -58,6 +58,8 @@ export interface Activity {
     userId: string;
     response: Rsvp;
     respondedAt: string | null;
+    /** Why — required with Not going. */
+    comment?: string | null;
     user: { id: string; name: string; photoPath?: string | null };
   }[];
   /** The API's tally of the invitees' answers. */

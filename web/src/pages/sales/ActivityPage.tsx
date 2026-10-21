@@ -107,7 +107,8 @@ export function ActivityPage() {
     (async () => {
       try {
         let found = await api.get<Activity>(`/activities/${encodeURIComponent(id)}`);
-        if (answer && found.status === 'PLANNED' && found.invitees.some((i) => i.userId === meId)) {
+        // Not going asks why, so the email's link opens the question instead of recording blind.
+        if (answer && answer !== 'DECLINED' && found.status === 'PLANNED' && found.invitees.some((i) => i.userId === meId)) {
           try {
             await api.post(`/activities/${encodeURIComponent(id)}/respond`, { response: answer });
             toast('ok', `Marked as ${RSVP_LABEL[answer].toLowerCase()}`);
@@ -117,6 +118,7 @@ export function ActivityPage() {
           }
         }
         if (cancelled) return;
+        if (answer === 'DECLINED' && found.status === 'PLANNED' && found.invitees.some((i) => i.userId === meId)) setAskDecline(true);
         setActivity(found);
         setError(null);
         if (answer) {
@@ -141,6 +143,16 @@ export function ActivityPage() {
     // Once per activity: the answer is consumed on the first read.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // The email's "Not going" link opens the question once the page is drawn.
+  const [askDecline, setAskDecline] = useState(false);
+  const respondRef = useRef<((r: Rsvp) => void) | null>(null);
+  useEffect(() => {
+    if (askDecline && activity && respondRef.current) {
+      setAskDecline(false);
+      respondRef.current('DECLINED');
+    }
+  }, [askDecline, activity]);
 
   // The form's other list: the types on offer.
   useEffect(() => {
@@ -188,8 +200,28 @@ export function ActivityPage() {
       setBusy(false);
     }
   }
-  const respond = (r: Rsvp) =>
-    run(() => api.post(`/activities/${activity.id}/respond`, { response: r }), `Marked as ${RSVP_LABEL[r].toLowerCase()}`);
+  const respond = (r: Rsvp) => {
+    if (r === 'ACCEPTED') {
+      return run(() => api.post(`/activities/${activity.id}/respond`, { response: r }), `Marked as ${RSVP_LABEL[r].toLowerCase()}`);
+    }
+    // Not going says why; Maybe may add a note (2026-10-21). Asked in the confirm bar.
+    const declined = r === 'DECLINED';
+    confirm.ask({
+      title: declined ? `Not going to “${activity.subject}”?` : `Maybe for “${activity.subject}”?`,
+      body: `${activity.assignedTo.name} is told${declined ? ', with your reason' : ''}.`,
+      confirmLabel: declined ? 'Not going' : 'Maybe',
+      tone: 'primary',
+      reason: declined ? 'required' : 'optional',
+      reasonLabel: declined ? 'Why you cannot go' : 'A note (optional)',
+      initialReason: mine?.comment ?? '',
+      onConfirm: async (comment: string) => {
+        await api.post(`/activities/${activity.id}/respond`, { response: r, comment: comment.trim() || null });
+        toast('ok', `Marked as ${RSVP_LABEL[r].toLowerCase()}`);
+        await load();
+      },
+    });
+  };
+  respondRef.current = respond;
   const markDone = () => run(() => api.patch(`/activities/${activity.id}`, { status: 'DONE' }), 'Marked done');
   /** Asked in the confirm bar: a refusal throws, so the bar shows it and stays open. */
   const cancel = async () => {
@@ -483,6 +515,7 @@ export function ActivityPage() {
                           {i.user.name}
                           {i.userId === meId && <span className="faint"> (you)</span>}
                         </span>
+                        {i.comment && <div className="faint act-rsvp-comment">“{i.comment}”</div>}
                       </td>
                       <td className="faint">{i.respondedAt ? formatDateTime(i.respondedAt) : '—'}</td>
                     </tr>

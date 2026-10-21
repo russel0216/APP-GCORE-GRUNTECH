@@ -3626,7 +3626,7 @@ const ACTIVITY_INCLUDE = {
   contact: { select: { id: true, name: true, position: true } },
   job: { select: { id: true, number: true, name: true } },
   invitees: {
-    select: { userId: true, notifiedAt: true, response: true, respondedAt: true, user: { select: { id: true, name: true, photoPath: true } } },
+    select: { userId: true, notifiedAt: true, response: true, respondedAt: true, comment: true, user: { select: { id: true, name: true, photoPath: true } } },
     orderBy: { createdAt: 'asc' },
   },
 } as const;
@@ -3670,7 +3670,13 @@ async function resolveActivityType(key: string, keep: string | null = null): Pro
 
 // ── Going / Maybe / Not going (2026-10-08, SCORO's visual confirmation) ──────
 
-const respondSchema = z.object({ response: z.enum(['ACCEPTED', 'TENTATIVE', 'DECLINED']) });
+const respondSchema = z
+  .object({
+    response: z.enum(['ACCEPTED', 'TENTATIVE', 'DECLINED']),
+    comment: z.string().trim().max(500).optional().nullable(),
+  })
+  // Not going says why (2026-10-21): whoever booked it is owed the reason.
+  .refine((b) => b.response !== 'DECLINED' || !!b.comment, { message: 'Say why you cannot go', path: ['comment'] });
 const RESPONSE_WORD: Record<'ACCEPTED' | 'TENTATIVE' | 'DECLINED', string> = {
   ACCEPTED: 'is going',
   TENTATIVE: 'might come',
@@ -3698,24 +3704,25 @@ activityRoutes.post(
     if (!mine) throw forbidden('You are not invited to this activity, so there is nothing to answer');
     if (activity.status !== 'PLANNED') throw conflict('This activity is no longer open for answers');
 
-    await prisma.salesActivityInvitee.update({ where: { id: mine.id }, data: { response: body.response, respondedAt: new Date() } });
+    const comment = body.comment || null;
+    await prisma.salesActivityInvitee.update({ where: { id: mine.id }, data: { response: body.response, respondedAt: new Date(), comment } });
     await audit(
       {
         entityType: 'sales_activity',
         entityId: activity.id,
         action: 'UPDATED',
-        summary: `${activity.subject}: ${me.name} ${RESPONSE_WORD[body.response]}`,
+        summary: `${activity.subject}: ${me.name} ${RESPONSE_WORD[body.response]}${comment ? ` — ${comment}` : ''}`,
         before: { response: mine.response },
-        after: { response: body.response },
+        after: { response: body.response, comment },
       },
       req,
     );
-    if (mine.response !== body.response && activity.assignedToId !== me.id) {
+    if ((mine.response !== body.response || comment) && activity.assignedToId !== me.id) {
       await notify({
         userId: activity.assignedToId,
         type: 'activity.responded',
         title: `${me.name} ${RESPONSE_WORD[body.response]}: ${activity.subject}`,
-        body: activityWhen(activity),
+        body: comment ? `${comment} · ${activityWhen(activity)}` : activityWhen(activity),
         link: activityLink(activity),
       });
     }

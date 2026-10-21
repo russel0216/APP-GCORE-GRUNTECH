@@ -501,7 +501,15 @@ async function main() {
     });
     check("and whoever booked it is told, with a link to the activity's page", !!toldGoing && toldGoing.link === `/g-ops/calendar/activities/${actId}`, JSON.stringify(toldGoing));
     check('their My Work row says what they answered', ((await scheduleFor((await resolveUser(colleague.id))!, { from: new Date('2031-03-02T16:00:00Z'), to: new Date('2031-03-03T16:00:00Z') })).find((r) => r.id === actId)?.sub ?? '').includes('(invited, going)'));
-    const declined = await apiSend(colleagueToken, 'POST', `/activities/${actId}/respond`, { response: 'DECLINED' });
+    const noReason = await apiSend(colleagueToken, 'POST', `/activities/${actId}/respond`, { response: 'DECLINED' });
+    check('Not going without a reason is refused (400)', noReason.status === 400, String(noReason.status));
+    const declined = await apiSend(colleagueToken, 'POST', `/activities/${actId}/respond`, { response: 'DECLINED', comment: 'On site in Batangas that day' });
+    const declinedRow = (declined.body.invitees as { userId: string; comment?: string | null }[] | undefined)?.find((i) => i.userId === colleague.id);
+    const toldWhy = await prisma.notification.findFirst({
+      where: { userId: sales.id, type: 'activity.responded', title: `${colleague.name} is not going: ${TAG} plant walk-through` },
+      orderBy: { createdAt: 'desc' },
+    });
+    check('the reason is kept on the answer and told to whoever booked it', declinedRow?.comment === 'On site in Batangas that day' && !!toldWhy?.body?.startsWith('On site in Batangas that day'), JSON.stringify({ declinedRow, body: toldWhy?.body }));
     const afterDecline = (declined.body.responses as { going: number; notGoing: number } | undefined) ?? { going: -1, notGoing: -1 };
     check('changing the answer moves the tally', declined.status === 200 && afterDecline.going === 0 && afterDecline.notGoing === 1, JSON.stringify(afterDecline));
     const badAnswer = await apiSend(colleagueToken, 'POST', `/activities/${actId}/respond`, { response: 'PENDING' });

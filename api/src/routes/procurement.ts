@@ -31,6 +31,8 @@ import {
   approvalSlots,
   preparedAt,
   slotSignatories,
+  byHighestRole,
+  withoutCoSignedRepeats,
   contactOf,
   cancelOpenRequest,
   routeBrief,
@@ -4255,7 +4257,11 @@ purchaseOrderRoutes.get(
     const signatories: Signatory[] = [
       // A Purchasing Manager's own order: step 1 signed at submit, one timestamp.
       { role: 'Prepared by', name: po.createdBy.name, ...(await contactOf(po.createdById)), at: preparedAt(slots) ?? po.createdAt },
-      ...(slots.length ? slotSignatories(slots) : po.status === 'CANCELLED' ? [] : [{ role: 'Approved by' }]),
+      // Each signer under their highest role, once (2026-10-21): the CEO
+      // signing an importation as its Purchasing Manager prints as the CEO,
+      // and a step he co-signs with it is not printed again. The preparer's
+      // own signed steps stay beside their Prepared by (2026-10-13).
+      ...(slots.length ? slotSignatories(withoutCoSignedRepeats(await byHighestRole(slots))) : po.status === 'CANCELLED' ? [] : [{ role: 'Approved by' }]),
     ];
 
     const pdf = await renderDocument({

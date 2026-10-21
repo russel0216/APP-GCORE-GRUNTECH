@@ -40,7 +40,10 @@ export type IconName =
   | 'book'
   | 'panel'
   | 'person'
-  | 'building';
+  | 'building'
+  | 'funnel'
+  | 'wallet'
+  | 'trend';
 
 /** Path data only — the wrapper supplies the canvas and the stroke. */
 const PATHS: Record<IconName, string> = {
@@ -74,6 +77,12 @@ const PATHS: Record<IconName, string> = {
   person: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8m-7 9v-1a6 6 0 0 1 6-6h2a6 6 0 0 1 6 6v1',
   // A company: SCORO's outsourced provider, a supplier.
   building: 'M4 21V5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v16m0-11h3a2 2 0 0 1 2 2v9M2 21h20M8 7h3m-3 4h3m-3 4h3',
+  // A funnel: the sales pipeline narrowing to what is won.
+  funnel: 'M3 4h18l-7 8.5V19l-4 2v-8.5z',
+  // A wallet: cash, for the cash forecast.
+  wallet: 'M4 7h15a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h12v3M16 13h.01',
+  // A rising line: performance over time.
+  trend: 'M3 17l6-6 4 4 8-8m0 0h-5m5 0v5',
   // An open book: two pages meeting at the spine, for the Academy.
   book: 'M12 7c-1.5-1.5-4-2-9-2v13c5 0 7.5.5 9 2m0-13c1.5-1.5 4-2 9-2v13c-5 0-7.5.5-9 2m0-13v13',
 };
@@ -107,6 +116,25 @@ const SECTION_ICONS: Record<string, IconName> = {
   Process: 'check',
   Configuration: 'gear',
 };
+
+/**
+ * Which icon stands for a screen in a module that declares no sections — its
+ * sidebar lists the screens themselves (Insights, 2026-10-21, the owner's
+ * report: the words wrapped and there was nothing to show when the rail is
+ * collapsed). Keyed `module.screen`; anything else takes the panel glyph.
+ */
+const SCREEN_ICONS: Record<string, IconName> = {
+  'insights.dashboard': 'grid',
+  'insights.profitability': 'chart',
+  'insights.pipeline': 'funnel',
+  'insights.cash': 'wallet',
+  'insights.inventory': 'box',
+  'insights.performance': 'trend',
+};
+
+export function screenIcon(moduleKey: string | null | undefined, screenKey: string): IconName {
+  return (moduleKey && SCREEN_ICONS[`${moduleKey}.${screenKey}`]) || 'panel';
+}
 
 export function sectionIcon(name: string | null | undefined): IconName {
   return (name && SECTION_ICONS[name]) || 'panel';

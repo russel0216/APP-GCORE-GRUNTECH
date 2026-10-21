@@ -4,7 +4,7 @@ import { api, qs, type ListResult } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { CommandPalette } from './CommandPalette';
 import { Avatar, relativeTime } from './ui';
-import { Icon, sectionIcon } from './Icon';
+import { Icon, sectionIcon, screenIcon } from './Icon';
 import { LayoutEditor } from './LayoutEditor';
 import { HelpDesk } from './HelpDesk';
 import { NavigationProvider, type BackTarget, type NavigationApi } from './Navigation';
@@ -600,8 +600,11 @@ export function Shell() {
                       // Announces the current page to a screen reader, which
                       // the magenta bar only ever said to people who can see it.
                       aria-current={active ? 'page' : undefined}
+                      // The label is the tooltip when the rail is collapsed to icons.
+                      title={sub.label}
                     >
-                      <span>{sub.label}</span>
+                      <Icon name={screenIcon(activeModule?.key, sub.key)} size={17} />
+                      <span className="nav-label">{sub.label}</span>
                     </Link>
                   );
                 })}

@@ -72,6 +72,8 @@ export type NotificationType =
   /** Memos (2026-10-20): a memo issued to you, and a reminder to acknowledge it. */
   | 'memo.issued'
   | 'memo.reminder'
+  | 'memo.replied'
+  | 'memo.withdrawn'
   | 'system';
 
 export interface NotifyInput {

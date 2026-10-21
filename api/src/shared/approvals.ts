@@ -603,7 +603,7 @@ export async function routePreview(
   requesterId: string,
   optionId?: string | null,
   ctx: ApprovalContext = {},
-): Promise<{ workflowId: string; name: string; steps: { sequence: number; name: string; held: boolean; approvers: StepPerson[] }[] } | null> {
+): Promise<{ workflowId: string; name: string; steps: { sequence: number; name: string; roleId: string | null; held: boolean; approvers: StepPerson[] }[] } | null> {
   const workflow = await pickWorkflow(documentType, amount, { option: optionId ?? null, requesterId });
   if (!workflow) return null;
   // A step the preparer holds on a route that lets them sign is THEIRS: it is
@@ -624,8 +624,8 @@ export async function routePreview(
     steps: await Promise.all(
       workflow.steps.map(async (st) =>
         held.has(st.sequence)
-          ? { sequence: st.sequence, name: st.name, held: true, approvers: selfPerson }
-          : { sequence: st.sequence, name: st.name, held: false, approvers: await namedApprovers(st, requesterId, prisma, ctx) },
+          ? { sequence: st.sequence, name: st.name, roleId: st.roleId, held: true, approvers: selfPerson }
+          : { sequence: st.sequence, name: st.name, roleId: st.roleId, held: false, approvers: await namedApprovers(st, requesterId, prisma, ctx) },
       ),
     ),
   };
@@ -1461,6 +1461,70 @@ export function onePerPerson(slots: ApprovalSlot[], preparerId: string): Approva
   return kept;
 }
 
+/**
+ * A signer printed under their HIGHEST role (2026-10-21, the owner's call on
+ * the purchase order: "always the highest level of position (CEO), even if
+ * he also holds the level-2 Purchasing Manager for imports"). A slot signed
+ * — or, still open, to be signed by one person — by somebody at the TOP
+ * level (`Role.rank` 1) on a step naming a lower-level role takes their
+ * title as its heading ("CEO / President"); everyone else keeps the step's
+ * name. Only the heading changes. Pair it with
+ * `onePerPerson`, so one person who signed two steps prints once.
+ */
+export async function byHighestRole(slots: ApprovalSlot[]): Promise<ApprovalSlot[]> {
+  const people = new Set<string>();
+  const stepRoles = new Set<string>();
+  for (const s of slots) {
+    const who = s.name ? s.userId : s.assigned?.length === 1 ? s.assigned[0].id : undefined;
+    if (who) people.add(who);
+    if (s.stepRoleId) stepRoles.add(s.stepRoleId);
+  }
+  if (!people.size) return slots;
+  const [holders, roles] = await Promise.all([
+    prisma.userRole.findMany({
+      where: { userId: { in: [...people] }, role: { rank: { not: null } } },
+      select: { userId: true, role: { select: { name: true, rank: true, sortOrder: true } } },
+    }),
+    prisma.role.findMany({ where: { id: { in: [...stepRoles] } }, select: { id: true, rank: true } }),
+  ]);
+  const stepRank = new Map(roles.map((r) => [r.id, r.rank]));
+  const top = new Map<string, { rank: number; title: string }>();
+  for (const id of people) {
+    const mine = holders.filter((h) => h.userId === id).map((h) => h.role);
+    if (!mine.length) continue;
+    mine.sort((a, b) => a.rank! - b.rank! || a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    const best = mine[0].rank!;
+    top.set(id, { rank: best, title: [...new Set(mine.filter((r) => r.rank === best).map((r) => r.name))].join(' / ') });
+  }
+  return slots.map((s) => {
+    const who = s.name ? s.userId : s.assigned?.length === 1 ? s.assigned[0].id : undefined;
+    const mine = who ? top.get(who) : undefined;
+    const rank = s.stepRoleId ? stepRank.get(s.stepRoleId) : null;
+    // A step naming no ranked role (a supervisor's "Reports to") keeps its name,
+    // and so does any step signed below the top level: only the head of the
+    // company (level 1) signs as such whatever the step — a Back Support who
+    // also holds another role is still asked, and printed, as Back Support.
+    if (!mine || rank == null || mine.rank !== 1 || mine.rank >= rank) return s;
+    return { ...s, step: mine.title };
+  });
+}
+
+/**
+ * A step co-signed with an earlier Approve by somebody already printed is
+ * left off the paper (2026-10-21): one person, one signature. Open steps and
+ * the preparer's own signed steps are untouched — the narrower half of
+ * `onePerPerson`, for the papers that keep both.
+ */
+export function withoutCoSignedRepeats(slots: ApprovalSlot[]): ApprovalSlot[] {
+  const seen = new Set<string>();
+  return slots.filter((s) => {
+    if (!s.name || !s.userId) return true;
+    if (s.coSigned && seen.has(s.userId)) return false;
+    seen.add(s.userId);
+    return true;
+  });
+}
+
 /** One step of a document's sign-off block. */
 export interface ApprovalSlot {
   step: string;
@@ -1478,6 +1542,8 @@ export interface ApprovalSlot {
   selfSigned?: boolean;
   /** Signed with the same approver's Approve on an earlier step, at that instant. */
   coSigned?: boolean;
+  /** The role the step names (a ROLE step, or a SUPERVISOR step's fallback) — what `byHighestRole` compares with. */
+  stepRoleId?: string | null;
 }
 
 /**
@@ -1543,7 +1609,7 @@ export async function approvalSlots(documentType: string, documentId: string, dr
     const route =
       (draft.optionId ? await routePreview(documentType, draft.amount, draft.requesterId, draft.optionId, ctx) : null) ??
       (await routePreview(documentType, draft.amount, draft.requesterId, null, ctx));
-    return route ? route.steps.map((st) => ({ step: st.name, assigned: st.approvers })) : [];
+    return route ? route.steps.map((st) => ({ step: st.name, stepRoleId: st.roleId, assigned: st.approvers })) : [];
   }
   if (!request) return [];
   const bySeq = new Map(request.actions.map((a) => [a.sequence, a]));
@@ -1553,6 +1619,7 @@ export async function approvalSlots(documentType: string, documentId: string, dr
       if (a) {
         return {
           step: st.name,
+          stepRoleId: st.roleId,
           userId: a.approverId,
           name: a.approver.name,
           position: a.approver.position ?? undefined,
@@ -1563,7 +1630,7 @@ export async function approvalSlots(documentType: string, documentId: string, dr
           ...(a.coSignedWith != null ? { coSigned: true } : {}),
         };
       }
-      return open ? { step: st.name, assigned: await namedApprovers(st, request.requesterId, prisma, ctxOf(request)) } : null;
+      return open ? { step: st.name, stepRoleId: st.roleId, assigned: await namedApprovers(st, request.requesterId, prisma, ctxOf(request)) } : null;
     }),
   );
   return slots.filter((s): s is ApprovalSlot => s !== null);

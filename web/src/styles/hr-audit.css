@@ -108,3 +108,9 @@ button.perm-chip {
   font-size: var(--fs-md);
   line-height: 1.6;
 }
+
+/* A recipient's explanation letter (2026-10-21), kept as written. */
+.memo-reply-text {
+  white-space: pre-wrap;
+  margin: 0;
+}

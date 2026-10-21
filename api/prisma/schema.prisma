@@ -1982,6 +1982,9 @@ model SalesActivityInvitee {
   /// confirmation), kept with when it was given. Only they can set it.
   response    InviteeResponse @default(PENDING)
   respondedAt DateTime?
+  /// Why — required with Not going, optional with Maybe or Going (2026-10-21,
+  /// the owner's call: "add also comment the reason why the user cannot go").
+  comment     String?
   createdAt   DateTime        @default(now())
 
   @@unique([activityId, userId])
@@ -6067,6 +6070,10 @@ model MemoRecipient {
   employeeId     String
   employee       Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
   acknowledgedAt DateTime?
+  /// The recipient's explanation letter (2026-10-21, the owner's call),
+  /// written before acknowledging and changeable until then. HR is told.
+  reply          String?
+  repliedAt      DateTime?
   createdAt      DateTime  @default(now())
 
   @@unique([memoId, employeeId])

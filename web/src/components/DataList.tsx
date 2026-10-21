@@ -96,6 +96,8 @@ interface Props<T> {
   searchPlaceholder?: string;
   /** Shows the Mine/All switch — for records that have an owner. */
   scoped?: boolean;
+  /** What "Mine" means on this list, where the word alone misleads ("Drafted by me" on Memos). */
+  mineLabel?: string;
   /** Where the switch starts when the URL says nothing. */
   defaultScope?: ListScope;
   onRowClick?: (row: T) => void;
@@ -183,6 +185,7 @@ export function DataList<T>({
   filters = [],
   searchPlaceholder = 'Search…',
   scoped = false,
+  mineLabel = 'Mine',
   defaultScope = 'all',
   onRowClick,
   actions,
@@ -687,7 +690,7 @@ export function DataList<T>({
                   setPage(1);
                 }}
               >
-                Mine
+                {mineLabel}
               </button>
               {teamScope && (
                 <button
