@@ -4884,6 +4884,26 @@ async function main() {
       `${cmList.status} ${JSON.stringify(cmList.body.summary)} ${cmPaper.status} ${cmRep.status}`,
     );
 
+    // ── A sample sales order deleted with everything on it (2026-10-21) ──
+    console.log('\nA sample sales order deleted with its invoice, collection and commission');
+    const pgNotMine = await as(engineer)('DELETE', `/sales-orders/${cmOrder.id}/purge`);
+    const pgPlain = await cmAs('DELETE', `/sales-orders/${cmOrder.id}`);
+    const pgPurged = await cmAs('DELETE', `/sales-orders/${cmOrder.id}/purge`);
+    const pgLoanBack = await prisma.cashAdvance.findUniqueOrThrow({ where: { id: engLoan!.id } });
+    const [pgSoLeft, pgInvLeft, pgCmLeft, pgColLeft, pgVLeft] = await Promise.all([
+      prisma.salesOrder.count({ where: { id: cmOrder.id } }),
+      prisma.invoice.count({ where: { id: cmInvoice.id } }),
+      prisma.commissionRequest.count({ where: { id: String(rfc.body.id) } }),
+      prisma.payment.count({ where: { id: String(collect.body.id) } }),
+      prisma.payment.count({ where: { id: { in: [...vouchers.map((v) => v.paymentId), deductionPay?.id ?? ''] } } }),
+    ]);
+    check(
+      'only its creator or a super admin; the ordinary Delete still refuses; the purge takes the invoice, the collection, the commission, its vouchers and deduction, and the advance owes again',
+      pgNotMine.status === 403 && pgPlain.status === 400 && pgPurged.status === 200 &&
+        pgSoLeft + pgInvLeft + pgCmLeft + pgColLeft + pgVLeft === 0 && money(num(pgLoanBack.amountRefunded), num(engLoan!.amountRefunded)),
+      `${pgNotMine.status} ${pgPlain.status} ${pgPurged.status} ${pgPurged.body.error ?? ''} left ${pgSoLeft}${pgInvLeft}${pgCmLeft}${pgColLeft}${pgVLeft} refunded ${pgLoanBack.amountRefunded}`,
+    );
+
     await saveFinanceSettings({ blockAdvanceWhileUnliquidated: true });
   }
 

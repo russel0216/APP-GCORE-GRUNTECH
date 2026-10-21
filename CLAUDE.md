@@ -676,8 +676,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,728 assertions across twenty-two scripts** (counted 2026-10-21, after
-50 on hr and one on foundation for Hiring — the weighted score, the request's
+**4,729 assertions across twenty-two scripts** (counted 2026-10-21, after
+one on finance for a sample sales order deleted with everything on it, and
+before it 50 on hr and one on foundation for Hiring — the weighted score, the request's
 route and its decider's door, the pool's moves, the exam catalogue's fixed
 maximum, the contract routed to the request's team and never to the HR who
 prepared it, the signed paper, the hire filling the request and the hired
@@ -785,7 +786,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 430, masters 92, sales 643, costing 205, pipeline 121, calendar 103, numbering
 94, partners 120, delivery 195, chain 379, hr 637, plantilla 129, meetings
-114, evaluations 154, academy 145, finance 440, aftermarket 304, cad 122,
+114, evaluations 154, academy 145, finance 441, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -3637,6 +3638,21 @@ pushes; the first:
   number and status ("… is kept — invoice GT-INV-… (cancelled) still names
   it. Delete it first"), and runs through `deleteOrRefuse()`. Cancel now
   also refuses while a live invoice or commission request stands on it.
+- **A SAMPLE sales order is deleted with everything on it** (2026-10-21,
+  the owner's call: "the one who created it or a super admin can delete
+  it"). `DELETE /sales-orders/:id/purge` — a super admin, or the order's
+  creator holding `gops.sales_orders.delete` (`mayPurgeOrder`, sent as
+  `canPurge`; ⋯ › "Delete sample with everything on it", asked in the
+  confirm bar) — at any status, in one transaction: its invoices and the
+  collections on them (a billing it invoiced back to APPROVED), its invoice
+  requests, its commission requests with their payout vouchers and the
+  COMMISSION_DEDUCTION repayments (the advance re-derived), and its purchase
+  requests (RFQs and canvasses cascade), purchase orders, incoming reports,
+  outgoing and pull-out slips, every open request withdrawn through
+  `cancelOpenRequest`; one DELETED audit row naming what went. Refused,
+  naming it, where goods were received or released, a supplier bill stands
+  on its orders, or a collection also settles another document. The
+  ordinary Delete keeps its refusal.
 - **Memos**: the register's switch reads **Drafted by me · All**
   (`mineLabel` on `DataList`) — Mine was the memos one drafted, never the
   ones received (My Records › Memos Received). An issued (or archived)

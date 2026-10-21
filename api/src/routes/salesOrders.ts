@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { salesOrderSpend } from '../shared/orderStock';
+import { refreshAdvance } from '../shared/finance';
 import { inBase, RATE_SELECT, rateOf } from '../shared/exchangeRates';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
@@ -660,6 +661,7 @@ salesOrderRoutes.get(
     res.json({
       ...presentOrder(order as unknown as Record<string, unknown>, showCost),
       canEdit: canEditRecord(me, 'gops', 'sales_orders', order.ownerId),
+      canPurge: mayPurgeOrder(me, order.ownerId),
       canSeeCost: showCost,
       taxOptions,
       needsApproval: !!workflow,
@@ -1444,6 +1446,142 @@ salesOrderRoutes.delete(
       req,
     );
     res.json({ ok: true });
+  }),
+);
+
+/**
+ * PURGE — a super admin removes a SAMPLE sales order with everything that
+ * names it, in one transaction (2026-10-21, the owner's call: "it should be
+ * deleted, for sample only"): its invoices and the collections on them (a
+ * billing it invoiced goes back to approved), its invoice requests, its
+ * commission requests with their payout vouchers and the cash-advance
+ * deductions they made (the advance re-derived), and what was bought for it —
+ * purchase requests (their RFQs and canvasses), purchase orders, incoming
+ * reports, outgoing and pull-out slips. Open approval requests are withdrawn
+ * through the engine. Refused, naming it, where the shelf or another document
+ * moved: goods received or released, a supplier bill, or a collection that
+ * also settles an invoice of another order. Never on the ordinary Delete.
+ * Who: a super admin, or whoever created the order and holds the delete
+ * right (the owner's call: "the one who created it or a super admin").
+ */
+export function mayPurgeOrder(me: ReturnType<typeof currentUser>, ownerId: string): boolean {
+  return me.isSuperAdmin || (ownerId === me.id && can(me, 'gops.sales_orders.delete'));
+}
+
+salesOrderRoutes.delete(
+  '/:id/purge',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const order = await prisma.salesOrder.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, status: true, ownerId: true } });
+    if (!order) throw notFound('Sales order not found');
+    if (!mayPurgeOrder(me, order.ownerId)) throw forbidden('Only whoever created this sales order, or a super admin, can delete it with everything on it');
+    const on = { salesOrderId: order.id };
+    const [invoices, invoiceRequests, commissions, requests, pos, issues, pullouts] = await Promise.all([
+      prisma.invoice.findMany({ where: on, select: { id: true, number: true, progressBillingId: true, allocations: { select: { paymentId: true } } } }),
+      prisma.invoiceRequest.findMany({ where: on, select: { id: true, number: true } }),
+      prisma.commissionRequest.findMany({
+        where: on,
+        select: { id: true, number: true, shares: { select: { id: true, paymentId: true, cashAdvanceId: true } } },
+      }),
+      prisma.purchaseRequest.findMany({ where: on, select: { id: true, number: true } }),
+      prisma.purchaseOrder.findMany({ where: on, select: { id: true, number: true } }),
+      prisma.stockIssue.findMany({ where: on, select: { id: true, number: true, status: true } }),
+      prisma.pulloutSlip.findMany({ where: on, select: { id: true, number: true, status: true } }),
+    ]);
+    const poIds = [...new Set([...pos.map((p) => p.id), ...(await prisma.purchaseOrder.findMany({ where: { requestId: { in: requests.map((r) => r.id) } }, select: { id: true } })).map((p) => p.id)])];
+    const receivings = await prisma.receiving.findMany({ where: { orderId: { in: poIds } }, select: { id: true, number: true, status: true } });
+
+    // What moved stock or money elsewhere is not undone by a purge.
+    const blockers = [
+      ...receivings.filter((r) => r.status === 'RECEIVED').map((r) => `incoming report ${r.number} received goods`),
+      ...issues.filter((i) => i.status === 'ISSUED').map((i) => `outgoing slip ${i.number} released stock`),
+      ...pullouts.filter((p) => p.status === 'PULLED_OUT').map((p) => `pull-out slip ${p.number} released stock`),
+      ...(await prisma.supplierBill.findMany({ where: { orderId: { in: poIds } }, select: { number: true } })).map((b) => `supplier bill ${b.number} is on a purchase order`),
+    ];
+    const invoiceIds = invoices.map((i) => i.id);
+    const collectionIds = [...new Set(invoices.flatMap((i) => i.allocations.map((a) => a.paymentId)))];
+    const shared = await prisma.payment.findMany({
+      where: { id: { in: collectionIds }, allocations: { some: { OR: [{ invoiceId: null }, { invoiceId: { notIn: invoiceIds } }] } } },
+      select: { number: true },
+    });
+    blockers.push(...shared.map((p) => `collection ${p.number} also settles another document`));
+    if (blockers.length) throw badRequest(`${order.number} cannot be purged — ${blockers.join('; ')}. Undo that first`);
+
+    const shares = commissions.flatMap((c) => c.shares);
+    const payoutIds = shares.map((s) => s.paymentId).filter((x): x is string => !!x);
+    const deductions = await prisma.payment.findMany({
+      where: { method: 'COMMISSION_DEDUCTION', notes: { in: commissions.map((c) => `Deducted from commission ${c.number}`) } },
+      select: { id: true, allocations: { select: { advanceId: true } } },
+    });
+    const advanceIds = [...new Set(deductions.flatMap((d) => d.allocations.map((a) => a.advanceId)).filter((x): x is string => !!x))];
+    const reason = `purged by ${me.name}`;
+
+    try {
+      await prisma.$transaction(
+        async (tx) => {
+          for (const c of commissions) await cancelOpenRequest('commission', c.id, tx, reason, me.id);
+          for (const r of invoiceRequests) await cancelOpenRequest('invoice_request', r.id, tx, reason, me.id);
+          for (const r of requests) await cancelOpenRequest('purchase_request', r.id, tx, reason, me.id);
+          for (const id of poIds) await cancelOpenRequest('purchase_order', id, tx, reason, me.id);
+          for (const r of receivings) await cancelOpenRequest('receiving', r.id, tx, reason, me.id);
+          for (const i of issues) await cancelOpenRequest('stock_issue', i.id, tx, reason, me.id);
+          for (const p of pullouts) await cancelOpenRequest('pullout_slip', p.id, tx, reason, me.id);
+          await cancelOpenRequest('sales_order', order.id, tx, reason, me.id);
+
+          // Commissions: the payout vouchers, the deductions, then the requests.
+          await tx.paymentAllocation.deleteMany({ where: { commissionShareId: { in: shares.map((s) => s.id) } } });
+          await tx.payment.deleteMany({ where: { id: { in: [...payoutIds, ...deductions.map((d) => d.id)] } } });
+          for (const id of advanceIds) await refreshAdvance(tx, id);
+          await tx.commissionRequest.deleteMany({ where: { id: { in: commissions.map((c) => c.id) } } });
+
+          // Receivables: the requests, the collections on the invoices, the invoices.
+          await tx.invoiceRequest.deleteMany({ where: { id: { in: invoiceRequests.map((r) => r.id) } } });
+          await tx.payment.deleteMany({ where: { id: { in: collectionIds } } });
+          const billings = invoices.map((i) => i.progressBillingId).filter((x): x is string => !!x);
+          await tx.invoice.deleteMany({ where: { id: { in: invoiceIds } } });
+          if (billings.length) await tx.progressBilling.updateMany({ where: { id: { in: billings } }, data: { status: 'APPROVED' } });
+
+          // What was bought or released for it — none of it moved anything.
+          await tx.pulloutSlip.deleteMany({ where: { id: { in: pullouts.map((p) => p.id) } } });
+          await tx.stockIssue.deleteMany({ where: { id: { in: issues.map((i) => i.id) } } });
+          await tx.receiving.deleteMany({ where: { id: { in: receivings.map((r) => r.id) } } });
+          await tx.purchaseOrder.deleteMany({ where: { id: { in: poIds } } });
+          await tx.purchaseRequest.deleteMany({ where: { id: { in: requests.map((r) => r.id) } } });
+
+          await tx.salesOrder.delete({ where: { id: order.id } });
+        },
+        { timeout: 30_000 },
+      );
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') {
+        throw badRequest(`Something else is still filed against it (${String(err.meta?.field_name ?? 'a linked record')}) — nothing was removed`);
+      }
+      throw err;
+    }
+    // Their files go with them, once the records are gone.
+    await deleteAttachmentsOf('sales_order', [order.id]);
+    await deleteAttachmentsOf('invoice', invoiceIds);
+    await deleteAttachmentsOf('purchase_request', requests.map((r) => r.id));
+    await deleteAttachmentsOf('receiving', receivings.map((r) => r.id));
+    await deleteAttachmentsOf('stock_issue', issues.map((i) => i.id));
+    await deleteAttachmentsOf('pullout_slip', pullouts.map((p) => p.id));
+
+    const removed = {
+      invoices: invoices.map((i) => i.number),
+      collections: collectionIds.length,
+      invoiceRequests: invoiceRequests.map((r) => r.number),
+      commissions: commissions.map((c) => c.number),
+      purchaseRequests: requests.map((r) => r.number),
+      purchaseOrders: poIds.length,
+      incoming: receivings.map((r) => r.number),
+      outgoing: issues.map((i) => i.number),
+      pullouts: pullouts.map((p) => p.number),
+    };
+    await audit(
+      { entityType: 'sales_order', entityId: order.id, action: 'DELETED', summary: `Purged sales order ${order.number} (sample data)`, after: removed },
+      req,
+    );
+    res.json({ ok: true, ...removed });
   }),
 );
 

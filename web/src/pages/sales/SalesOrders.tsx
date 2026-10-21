@@ -134,6 +134,8 @@ type ApprovalRoute = PreviewRoute;
 interface SalesOrderDetailRow extends SalesOrderRow {
   lines: SoLine[];
   canEdit: boolean;
+  /** Its creator (with the delete right) or a super admin: delete a sample with everything on it. */
+  canPurge?: boolean;
   canSeeCost: boolean;
   /** A route is active for sales orders: the order is submitted, not issued. */
   needsApproval?: boolean;
@@ -663,6 +665,22 @@ export function SalesOrderDetail() {
                 onConfirm: remove,
               },
             },
+          // A SAMPLE order and everything on it (2026-10-21, the owner's call).
+          order.canPurge && {
+            label: 'Delete sample with everything on it',
+            hint: 'Invoices, collections, commissions, invoice requests and buying documents go with it',
+            danger: true,
+            confirm: {
+              title: `Delete ${order.number} and everything on it?`,
+              body: 'For sample data only. The order goes for good with its invoices and the collections on them, its invoice and commission requests (their payout vouchers too), and the purchase requests, orders, incoming, outgoing and pull-out slips raised for it. Refused where goods were received or released, a supplier bill stands, or a collection also settles another document.',
+              confirmLabel: 'Delete everything',
+              onConfirm: async () => {
+                await api.del(`/sales-orders/${order.id}/purge`);
+                toast('ok', `${order.number} and everything on it deleted`);
+                navigate('/g-ops/sales-orders');
+              },
+            },
+          },
         ]}
         modify={order.canEdit && draft ? `/g-ops/sales-orders/${order.id}/edit` : undefined}
         confirm={confirm}
