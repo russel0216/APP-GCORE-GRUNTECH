@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
 import { addDays, dayKey, daysBetween, manilaDate } from './day';
+import { postJobCost } from './inventory';
 
 /**
  * The money arithmetic G-FIN shares, in one place.
@@ -360,6 +361,37 @@ export async function refreshBudgetRequest(
       status: status as never,
     },
   });
+
+  // Cash released and not yet liquidated is COMMITTED on the project's
+  // budget line (2026-10-22, the owner's report: a released request did not
+  // show on Budget Monitoring). The approved liquidation takes the
+  // commitment off as it posts what was spent as INCURRED, so the peso is
+  // never counted twice. Re-derived like every figure here: the ledger's
+  // net for this request is brought to what it should be, with a row for
+  // the difference, so deleting the release voucher takes it off again.
+  const shouldCommit = !frozen && !liquidation ? released : 0;
+  const ledger = await tx.jobCostEntry.aggregate({
+    where: { jobId: row.jobId, state: 'COMMITTED', sourceType: 'budget_request', sourceId: id },
+    _sum: { amount: true },
+  });
+  const delta = cents(shouldCommit - num(ledger._sum.amount));
+  if (Math.abs(delta) >= 0.005) {
+    await postJobCost(tx, {
+      jobId: row.jobId,
+      costCategoryId: row.costCategoryId,
+      state: 'COMMITTED',
+      amount: delta,
+      sourceType: 'budget_request',
+      sourceId: id,
+      sourceNumber: row.number,
+      description:
+        delta > 0
+          ? `Cash released to the team — ${row.reason}`
+          : liquidation
+            ? 'Liquidated — the spend is posted as incurred'
+            : 'Release reversed',
+    });
+  }
 
   const payable = status === 'REFUND_DUE' ? cents(Math.max(0, released - spent)) : amount;
   const paid = status === 'REFUND_DUE' ? refunded : released;

@@ -1020,6 +1020,11 @@ async function main() {
 
   const settings = await financeSettings();
   const ledgerCount = () => prisma.jobCostEntry.count({ where: { jobId: job.id } });
+  // A budget request's released cash is COMMITTED on its line (2026-10-22);
+  // the cost rows are everything but that commitment.
+  const costCount = () => prisma.jobCostEntry.count({ where: { jobId: job.id, NOT: { sourceType: 'budget_request' } } });
+  const brCommitted = async (id: string) =>
+    num((await prisma.jobCostEntry.aggregate({ where: { sourceType: 'budget_request', sourceId: id, state: 'COMMITTED' }, _sum: { amount: true } }))._sum.amount);
 
   const newAdvance = async (who: { id: string }, amount: number, purpose: string) =>
     prisma.cashAdvance.create({
@@ -1380,7 +1385,7 @@ async function main() {
   // nothing on the ledger either way.
   const b1 = await newRequest(engineer, 20_000, 'fittings for the tie-in');
   check('a budget request takes a BR number', /^GT-BR-\d{4}-\d{4}$/.test(b1.number), b1.number);
-  const ledgerBeforeRequest = await ledgerCount();
+  const ledgerBeforeRequest = await costCount();
   const b1Request = await submitRequest(b1);
   const b1Step = await prisma.approvalStep.findFirstOrThrow({ where: { workflowId: b1Request.workflowId!, sequence: b1Request.currentSequence } });
   const b1Approvers = await approversForStep(b1Step, engineer.id, prisma, { jobId: job.id });
@@ -1424,7 +1429,11 @@ async function main() {
     'changing the days never moves a deadline already given',
     (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } })).liquidationDueDate?.getTime() === addDays(b1ReleaseDate, 45).getTime(),
   );
-  check('and still nothing is charged to the project', (await ledgerCount()) === ledgerBeforeRequest);
+  check(
+    'nothing is charged to the project; the released cash is committed on its line',
+    (await costCount()) === ledgerBeforeRequest && money(await brCommitted(b1.id), 20_000),
+    `${await costCount()} vs ${ledgerBeforeRequest}, committed ${await brCommitted(b1.id)}`,
+  );
 
   // (4) Under-spend: 17,500 of receipts against 20,000 — the claim settles,
   //     the project is charged 17,500, and 2,500 comes back.
@@ -1434,7 +1443,11 @@ async function main() {
   const b1ClaimAfter = await prisma.expenseClaim.findUniqueOrThrow({ where: { id: b1Claim.id } });
   check('the liquidation the cash covered is SETTLED', b1ClaimAfter.status === 'SETTLED', b1ClaimAfter.status);
   check('the request reads REFUND_DUE', b1Liquidated.status === 'REFUND_DUE' && money(num(b1Liquidated.amountSpent), 17_500), `${b1Liquidated.status} ${b1Liquidated.amountSpent}`);
-  check('the project is charged what was spent — the first and only time the cash is cost', (await ledgerCount()) === ledgerBeforeRequest + 1);
+  check(
+    'the project is charged what was spent — the first and only time the cash is cost — and the commitment comes off',
+    (await costCount()) === ledgerBeforeRequest + 1 && money(await brCommitted(b1.id), 0),
+    `${await costCount()} committed ${await brCommitted(b1.id)}`,
+  );
   const b1LedgerRow = await prisma.jobCostEntry.findFirst({ where: { sourceType: 'expense_claim', sourceId: b1Claim.id } });
   check('as INCURRED, at the receipts total', b1LedgerRow?.state === 'INCURRED' && money(num(b1LedgerRow.amount), 17_500));
   check('2,500 is owed back', money((await settleable('budget_request_refund', b1.id))!.outstanding, 2_500));

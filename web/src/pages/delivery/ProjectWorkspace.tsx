@@ -1394,7 +1394,8 @@ function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
         </div>
 
         <div className="alert info del-gap-top">
-          Committed fills from approved purchase requests and issued orders; incurred from
+          Committed fills from approved purchase requests, issued orders and released budget
+          requests (until they are liquidated); incurred from
           receiving, posted overtime, supplier bills with no receiving, and approved expense claims
           and liquidations.
         </div>

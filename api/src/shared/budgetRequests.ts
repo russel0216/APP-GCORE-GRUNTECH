@@ -1,4 +1,5 @@
 import { prisma } from '../prisma';
+import { refreshBudgetRequest } from './finance';
 
 /**
  * Budget requests used to CHANGE a project's budget: approval wrote a
@@ -16,6 +17,27 @@ import { prisma } from '../prisma';
  * Idempotent: a request already closed, or one raised under the new rule (no
  * BUDGETED row of its own), is left alone.
  */
+/**
+ * Brings every released or liquidating request's COMMITTED ledger rows in
+ * step (2026-10-22): cash released before the rule wrote nothing to Budget
+ * Monitoring. `refreshBudgetRequest()` posts only the difference, so this is
+ * a no-op once a request is in step — safe on every deploy.
+ */
+export async function syncBudgetRequestCommitments(): Promise<number> {
+  const rows = await prisma.budgetRequest.findMany({
+    where: { status: { in: ['RELEASED', 'REFUND_DUE'] } },
+    select: { id: true },
+  });
+  let changed = 0;
+  for (const r of rows) {
+    const before = await prisma.jobCostEntry.count({ where: { sourceType: 'budget_request', sourceId: r.id, state: 'COMMITTED' } });
+    await prisma.$transaction((tx) => refreshBudgetRequest(tx, r.id));
+    const after = await prisma.jobCostEntry.count({ where: { sourceType: 'budget_request', sourceId: r.id, state: 'COMMITTED' } });
+    if (after !== before) changed++;
+  }
+  return changed;
+}
+
 export async function closeLegacyBudgetIncreases(): Promise<number> {
   const approved = await prisma.budgetRequest.findMany({
     where: { status: 'APPROVED', amountReleased: 0, liquidatedAt: null },

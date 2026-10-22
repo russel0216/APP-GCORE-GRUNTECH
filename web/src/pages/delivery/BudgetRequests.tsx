@@ -475,8 +475,8 @@ export function ProjectBudgetRequestsCard({
       </div>
       <p className="muted del-lede">
         Cash for the team to buy what it needs without a purchase requisition. The team leader, back
-        support and the finance manager allow it, finance releases it, and it is liquidated with receipts in Expenses — only what
-        was spent reaches the budget, as incurred.
+        support and the finance manager allow it, finance releases it, and it is liquidated with receipts in Expenses — released cash
+        shows as committed on its budget line, and the liquidation turns what was spent into incurred.
       </p>
       <ErrorBox error={error} />
       {!rows && !error ? (

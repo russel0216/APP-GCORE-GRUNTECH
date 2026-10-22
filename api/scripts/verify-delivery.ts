@@ -404,6 +404,8 @@ async function main() {
 
   const settings = await financeSettings();
   const brLedger = () => prisma.jobCostEntry.count({ where: { jobId: job.id, sourceType: 'budget_request' } });
+  const brCommitted = async () =>
+    num((await prisma.jobCostEntry.aggregate({ where: { jobId: job.id, sourceType: 'budget_request', state: 'COMMITTED' }, _sum: { amount: true } }))._sum.amount);
   const br = await prisma.budgetRequest.create({
     data: {
       number: await nextNumber('budget_request'),
@@ -546,7 +548,7 @@ async function main() {
     brReleased.liquidationDueDate?.getTime() === addDays(releaseDate, settings.budgetRequestLiquidationDays).getTime(),
     String(brReleased.liquidationDueDate),
   );
-  check('still no ledger row — cash in hand is not cost', (await brLedger()) === 0);
+  check('the released cash is COMMITTED on its budget line — Budget Monitoring shows it, never as cost', money(await brCommitted(), 50_000), String(await brCommitted()));
 
   // The team spends 42,000 of it and files the receipts in Expenses: the
   // liquidation posts INCURRED at what was spent, and the change is owed back.
@@ -579,6 +581,7 @@ async function main() {
   position = await budgetPosition(job.id);
   check('the approved liquidation charges the project what was spent, as incurred', money(mat().incurred, incurredBefore + 42_000), String(mat().incurred));
   check('and the budget is still what the costing set', money(mat().budgeted, 400_000));
+  check('the liquidation takes the commitment off, so the peso is not counted twice', money(await brCommitted(), 0), String(await brCommitted()));
   const brLiquidated = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: br.id } });
   check(
     'the request reads REFUND_DUE for the 8,000 not spent',
@@ -1676,9 +1679,9 @@ async function main() {
     const ledger = await http(leadToken, 'GET', `/jobs/${job.id}/ledger?pageSize=100`);
     const liqRow = (ledger.body.rows ?? []).find((r: { sourceType: string; sourceId: string }) => r.sourceType === 'expense_claim' && r.sourceId === liquidation.id);
     check(
-      'the ledger row for the liquidation names the claim, and no row names the budget request',
+      'the ledger row for the liquidation names the claim, and the request\'s rows are its commitment only',
       liqRow?.sourceNumber === liquidation.number &&
-        !(ledger.body.rows ?? []).some((r: { sourceType: string }) => r.sourceType === 'budget_request'),
+        (ledger.body.rows ?? []).filter((r: { sourceType: string }) => r.sourceType === 'budget_request').every((r: { state: string }) => r.state === 'COMMITTED'),
       JSON.stringify(liqRow ?? null).slice(0, 160),
     );
     const brList = await http(leadToken, 'GET', `/budget-requests?jobId=${job.id}`);

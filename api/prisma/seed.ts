@@ -9,7 +9,7 @@ import { moveCanvassCode } from '../src/shared/canvassCode';
 import { backfillPositions } from '../src/shared/plantilla';
 import { markUnchangedScoroImports, withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
-import { closeLegacyBudgetIncreases } from '../src/shared/budgetRequests';
+import { closeLegacyBudgetIncreases, syncBudgetRequestCommitments } from '../src/shared/budgetRequests';
 import { migrateCostingMargins } from '../src/shared/costingLegacy';
 import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGroups';
 import { seedActivityTypes } from '../src/shared/activityTypes';
@@ -1046,6 +1046,8 @@ async function main() {
     if (typedReceipts) console.log(`  · Posted the stock of ${typedReceipts} received line(s) typed without an item`);
     const closedIncreases = await closeLegacyBudgetIncreases();
     if (closedIncreases) console.log(`  · Closed ${closedIncreases} budget request(s) approved as budget increases under the old rule`);
+    const committedRequests = await syncBudgetRequestCommitments();
+    if (committedRequests) console.log(`  · Committed the released cash of ${committedRequests} budget request(s) on Budget Monitoring`);
     // Costings priced with a markup, a contingency % or a discount (the rule
     // before 2026-10-09) carry over to the margin rule; the contract value
     // never moves.
