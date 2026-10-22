@@ -104,6 +104,7 @@ model User {
   trainingRecordsCreated TrainingRecord[]     @relation("TrainingRecordAuthor")
 
   jobsManaged           Job[]              @relation("JobManager")
+  jobsEngineered        Job[]              @relation("JobEngineer")
   jobsCreated           Job[]              @relation("JobCreator")
   costEntries           JobCostEntry[]
   budgetRequests        BudgetRequest[]    @relation("BudgetRequester")
@@ -2052,10 +2053,15 @@ model Job {
   quotationRevisionId String?
   quotationRevision   QuotationRevision? @relation(fields: [quotationRevisionId], references: [id], onDelete: SetNull)
 
-  projectManagerId String?
-  projectManager   User?   @relation("JobManager", fields: [projectManagerId], references: [id], onDelete: SetNull)
-  createdById      String
-  createdBy        User    @relation("JobCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  projectManagerId  String?
+  projectManager    User?   @relation("JobManager", fields: [projectManagerId], references: [id], onDelete: SetNull)
+  /// The Project Engineer (2026-10-22): who prepares the kick-off Gantt chart
+  /// and sends it to the Technical Manager. Filled from the project's first
+  /// job order's engineer where one exists, else picked on the project.
+  projectEngineerId String?
+  projectEngineer   User?   @relation("JobEngineer", fields: [projectEngineerId], references: [id], onDelete: SetNull)
+  createdById       String
+  createdBy         User    @relation("JobCreator", fields: [createdById], references: [id], onDelete: Restrict)
 
   contractValue    Decimal   @db.Decimal(18, 2)
   customerPoNumber String?
@@ -2073,6 +2079,22 @@ model Job {
   retentionPct   Decimal? @db.Decimal(6, 4)
 
   notes String?
+
+  /// The kick-off Gantt chart (2026-10-22, the owner's call): prepared by the
+  /// Project Engineer, checked by the Technical Manager through the engine as
+  /// `gantt_chart` (the job's id is the document), approved by the customer
+  /// at the kick-off meeting — their answer recorded below, the record being
+  /// the signature.
+  scheduleStatus               ScheduleStatus @default(DRAFT)
+  scheduleSubmittedAt          DateTime?
+  scheduleApprovedAt           DateTime?
+  scheduleCustomerDecision     String?
+  scheduleCustomerName         String?
+  scheduleCustomerPosition     String?
+  scheduleCustomerDecidedOn    DateTime?      @db.Date
+  scheduleCustomerRemarks      String?
+  scheduleCustomerRecordedAt   DateTime?
+  scheduleCustomerRecordedById String?
 
   scopeItems      JobScopeItem[]
   /// The other costings the project was built from — see JobCostingLink.
@@ -2465,6 +2487,13 @@ model ProgressBillingLine {
   @@unique([billingId, scopeItemId])
 }
 
+/// Where a project's kick-off Gantt chart stands (2026-10-22).
+enum ScheduleStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+}
+
 enum PlanStatus {
   /// Being prepared; Submit for approval routes it (2026-10-13).
   DRAFT
@@ -2567,9 +2596,12 @@ model JobTask {
   assignedToId String?
   assignedTo   User?   @relation("TaskAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
 
-  startDate DateTime? @db.Date
-  dueDate   DateTime? @db.Date
-  doneAt    DateTime?
+  startDate   DateTime? @db.Date
+  dueDate     DateTime? @db.Date
+  doneAt      DateTime?
+  /// A milestone on the kick-off Gantt chart (2026-10-22): a marker on its
+  /// day and a note under the chart, the customer's kick-off among them.
+  isMilestone Boolean   @default(false)
 
   sortOrder Int @default(0)
 

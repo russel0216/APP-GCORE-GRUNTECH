@@ -27,6 +27,8 @@ import '../src/routes/budgetRequests';
 // …and the Request for Approval's (2026-10-13), whose settle is called directly too.
 import { settlePlanApproval } from '../src/routes/planApprovals';
 import { projectVatRate } from '../src/routes/progress';
+// …and the kick-off Gantt chart's (2026-10-22), settled in-process by act().
+import '../src/routes/kickoff';
 import { deleteAttachmentsOf } from '../src/shared/attachments';
 import {
   flat,
@@ -960,6 +962,83 @@ async function main() {
       scopePaper.status === 200 && /SCOPE OF WORK/i.test(scopeText) && scopeText.includes(`${TAG} Fabrication`) &&
         scopeText.includes(`${TAG} Fabricate`) && /Contract value/i.test(scopeText) && scopePaper.pages.includes(LANDSCAPE),
       `${scopePaper.status} ${scopePaper.pages.join(',')} ${scopeText.slice(0, 200)}`,
+    );
+
+    // (0a) The kick-off Gantt chart (2026-10-22, the owner's call): the
+    //      Scope of Work tab on A3, Prepared by the Project Engineer, Checked
+    //      by the Technical Manager through the engine, Approved by the
+    //      customer — their answer recorded on the project.
+    const engRole = await makeRole('kickeng', ['gops.projects.view_own']);
+    const kickEng = await prisma.user.create({
+      data: { name: `${TAG} Kick Engineer`, email: 'kickeng@verifyd.local', passwordHash: await bcrypt.hash('x', 10), roles: { create: [{ roleId: engRole.id }] } },
+    });
+    const kickStranger = await prisma.user.create({ data: { name: `${TAG} Kick Stranger`, email: 'kickstranger@verifyd.local', passwordHash: await bcrypt.hash('x', 10) } });
+    const kickEngToken = signToken(kickEng.id, kickEng.email);
+    const pmToken = signToken(pm.id, pm.email);
+    const kickBefore = await http(leadToken, 'GET', `/jobs/${job.id}/kickoff`);
+    check(
+      'a project with no Project Engineer or Target Date says so, and cannot send its chart',
+      kickBefore.status === 200 && kickBefore.body.status === 'DRAFT' && kickBefore.body.canSubmit === false &&
+        (kickBefore.body.problems as string[]).some((p) => /Project Engineer/.test(p)) && (kickBefore.body.problems as string[]).some((p) => /Target Date/.test(p)),
+      JSON.stringify(kickBefore.body.problems),
+    );
+    const refusedSubmit = await http(leadToken, 'POST', `/jobs/${job.id}/kickoff/submit`);
+    check('and Submit is refused, naming what is missing', refusedSubmit.status === 400, `${refusedSubmit.status} ${JSON.stringify(refusedSubmit.body)}`);
+    const named = await http(leadToken, 'PATCH', `/jobs/${job.id}`, { projectEngineerId: kickEng.id, targetEndDate: '2026-01-31' });
+    check('Modify names the Project Engineer and the Target Date', named.status === 200 && named.body.projectEngineerId === kickEng.id, String(named.status));
+    const milestoneTask = (plannedJob.body.tasks as { id: string; name: string }[]).find((t) => t.name === `${TAG} Mobilise`)!;
+    const ticked = await http(leadToken, 'PATCH', `/jobs/${job.id}/tasks/${milestoneTask.id}`, { isMilestone: true });
+    check('a task is ticked a milestone', ticked.status === 200 && ticked.body.isMilestone === true, JSON.stringify(ticked.body.isMilestone));
+    const mine = await http(kickEngToken, 'GET', `/jobs?scope=mine&pageSize=200`);
+    check('the engineer finds the project under Mine', mine.status === 200 && (mine.body.rows as { id: string }[]).some((r) => r.id === job.id), String(mine.status));
+    const ready = await http(kickEngToken, 'GET', `/jobs/${job.id}/kickoff`);
+    check(
+      'ready: the engineer may send it, to the project’s Technical Manager by name, and the finish is the Target Date in working days',
+      ready.status === 200 && ready.body.canSubmit === true && !(ready.body.problems as string[]).length &&
+        ready.body.approvalRoute?.steps?.[0]?.approvers?.some((a: { id: string }) => a.id === pm.id) &&
+        // 1–31 Jan 2026, Mon–Sat, with the stored holidays set aside: 27 working days.
+        ready.body.finishDay === 27 && ready.body.milestones === 1,
+      JSON.stringify({ route: ready.body.approvalRoute, finishDay: ready.body.finishDay, milestones: ready.body.milestones }),
+    );
+    const kickPaper = await printed(kickEngToken, `/jobs/${job.id}/kickoff/pdf`);
+    const kickText = flat(kickPaper.text);
+    check(
+      'the chart prints on ONE A3 landscape page with the phase, its tasks, the milestone and the three sign-offs, Pending',
+      kickPaper.status === 200 && kickPaper.pages.length === 1 && kickPaper.pages[0] === '1190.55x841.89' &&
+        /SCOPE OF WORK - GANTT CHART/.test(kickText) && kickText.includes(`${TAG} FABRICATION`) && kickText.includes(`${TAG} Mobilise`) &&
+        /Day 1 \(1 Jan 2026\): ZZDELIV Mobilise/.test(kickText) &&
+        /PREPARED BY \(PROJECT ENGINEER\)/.test(kickText) && /CHECKED BY \(TECHNICAL MANAGER\)/.test(kickText) && /APPROVED BY \(CUSTOMER\)/.test(kickText) &&
+        /PLANNED FINISH DATE \(DAY 27\)/.test(kickText) && (kickText.match(/Pending/g) ?? []).length === 3,
+      `${kickPaper.status} ${kickPaper.pages.join(',')} ${kickText.slice(0, 400)}`,
+    );
+    const sent = await http(kickEngToken, 'POST', `/jobs/${job.id}/kickoff/submit`);
+    check('the engineer sends it — waiting on the Technical Manager', sent.status === 200 && sent.body.status === 'PENDING_APPROVAL' && sent.body.canWithdraw === true, `${sent.status} ${JSON.stringify(sent.body)}`);
+    const kickReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'gantt_chart', documentId: job.id, status: 'PENDING' } });
+    check('filed in the engineer’s name through the engine', kickReq?.requesterId === kickEng.id && kickReq?.jobId === job.id, JSON.stringify(kickReq && { requester: kickReq.requesterId, job: kickReq.jobId }));
+    const early = await http(kickEngToken, 'POST', `/jobs/${job.id}/kickoff/customer`, { decision: 'APPROVED', name: 'Juan Customer' });
+    check('the customer’s answer waits for the Technical Manager', early.status === 400, String(early.status));
+    const strangerRead = await http(signToken(kickStranger.id, kickStranger.email), 'GET', `/jobs/${job.id}/kickoff`);
+    check('somebody with no project right and no step to decide reads nothing', strangerRead.status === 404, String(strangerRead.status));
+    await act({ requestId: kickReq!.id, userId: pm.id, action: 'APPROVED' });
+    const checkedKick = await http(kickEngToken, 'GET', `/jobs/${job.id}/kickoff`);
+    check('the Technical Manager’s approval checks it — ready for the customer', checkedKick.body.status === 'APPROVED' && checkedKick.body.canRecordCustomer === true, JSON.stringify(checkedKick.body.status));
+    const reviseBare = await http(kickEngToken, 'POST', `/jobs/${job.id}/kickoff/customer`, { decision: 'REVISE', name: 'Juan Customer' });
+    check('a customer asking to revise must say what', reviseBare.status === 400, String(reviseBare.status));
+    const answered = await http(kickEngToken, 'POST', `/jobs/${job.id}/kickoff/customer`, { decision: 'APPROVED', name: `${TAG} Juan Customer`, position: 'Facilities Head', decidedOn: '2026-01-02' });
+    check('the customer’s approval is recorded at the kick-off meeting', answered.status === 200 && answered.body.customer?.decision === 'APPROVED' && answered.body.customer?.recordedBy?.id === kickEng.id, JSON.stringify(answered.body.customer));
+    const signedKick = flat((await printed(pmToken, `/jobs/${job.id}/kickoff/pdf`)).text);
+    check(
+      'the paper then names all three, dated — nothing Pending',
+      signedKick.includes(kickEng.name) && signedKick.includes(pm.name) && signedKick.includes(`${TAG} Juan Customer, Facilities Head`) &&
+        /Approved, January 2, 2026/.test(signedKick) && !/Pending/.test(signedKick),
+      signedKick.slice(-600),
+    );
+    const pulled = await http(kickEngToken, 'POST', `/approvals/reopen/gantt_chart/${job.id}`, { reason: 'phases moved' });
+    const afterPull = await http(kickEngToken, 'GET', `/jobs/${job.id}/kickoff`);
+    check(
+      'pulled back to draft, the customer’s answer goes with it — what they approved changed',
+      pulled.status === 200 && afterPull.body.status === 'DRAFT' && afterPull.body.customer?.decision === null,
+      `${pulled.status} ${JSON.stringify(pulled.body)} ${afterPull.body.status}`,
     );
 
     // (0b) A meeting held for the project lists on its Meetings & Records tab.

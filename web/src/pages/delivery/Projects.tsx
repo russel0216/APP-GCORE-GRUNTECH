@@ -307,7 +307,9 @@ function NewJobModal({
   const [costings, setCostings] = useState<CostingOption[]>([]);
   const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
   const { people } = usePeople('role:technical_manager');
+  const { people: everyone } = usePeople();
   const pmId = useId();
+  const peId = useId();
   const customerInputId = useId();
   const [chosen, setChosen] = useState<CostingDetail | null>(null);
   /** The other costings, after the first (2026-10-19: a project may be built from two costings). */
@@ -325,6 +327,7 @@ function NewJobModal({
     customer: null as CustomerRef | null,
     siteId: '',
     projectManagerId: '',
+    projectEngineerId: '',
     customerPoNumber: '',
     customerPoDate: '',
     startDate: todayLocal(),
@@ -429,6 +432,7 @@ function NewJobModal({
         customerId,
         siteId: form.siteId || null,
         projectManagerId: form.projectManagerId || null,
+        projectEngineerId: form.projectEngineerId || null,
         customerPoNumber: form.customerPoNumber || null,
         customerPoDate: form.customerPoDate || null,
         startDate: form.startDate || null,
@@ -626,6 +630,15 @@ function NewJobModal({
             value={form.projectManagerId}
             onChange={(id) => setForm((f) => ({ ...f, projectManagerId: id }))}
             people={people}
+            placeholder="— unassigned —"
+          />
+        </Field>
+        <Field label="Project Engineer" htmlFor={peId} hint="Prepares the kick-off Gantt chart">
+          <PersonSelect
+            id={peId}
+            value={form.projectEngineerId}
+            onChange={(id) => setForm((f) => ({ ...f, projectEngineerId: id }))}
+            people={everyone}
             placeholder="— unassigned —"
           />
         </Field>

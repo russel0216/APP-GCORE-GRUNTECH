@@ -249,11 +249,12 @@ const JOB_SORTS = ['number', 'name', 'contractValue', 'startDate', 'createdAt'];
 export function jobListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobWhereInput {
   const and: Prisma.JobWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.projects.view_all');
-  if (q.scope === 'mine') and.push({ OR: [{ projectManagerId: me.id }, { createdById: me.id }] });
+  // The Project Engineer is on the project too (2026-10-22).
+  if (q.scope === 'mine') and.push({ OR: [{ projectManagerId: me.id }, { projectEngineerId: me.id }, { createdById: me.id }] });
   else if (onlyOwn) {
     // View Team reads the projects its team manages or opened (2026-10-19).
     const ids = visibleOwners(me, 'gops', 'projects');
-    and.push({ OR: [{ projectManagerId: { in: ids } }, { createdById: { in: ids } }] });
+    and.push({ OR: [{ projectManagerId: { in: ids } }, { projectEngineerId: { in: ids } }, { createdById: { in: ids } }] });
   }
   if (q.search) {
     const term = q.search;
@@ -609,6 +610,7 @@ const createJobSchema = z.object({
   siteId: z.string().optional().nullable(),
   contactId: z.string().optional().nullable(),
   projectManagerId: z.string().optional().nullable(),
+  projectEngineerId: z.string().optional().nullable(),
   customerPoNumber: z.string().trim().optional().nullable(),
   customerPoDate: z.string().optional().nullable(),
   contractDate: z.string().optional().nullable(),
@@ -733,6 +735,8 @@ export interface NewJobInput {
   siteId?: string | null;
   contactId?: string | null;
   projectManagerId?: string | null;
+  /** The Project Engineer, who prepares the kick-off Gantt chart (2026-10-22). */
+  projectEngineerId?: string | null;
   quotationRevisionId?: string | null;
   customerPoNumber?: string | null;
   customerPoDate?: Date | null;
@@ -830,6 +834,7 @@ export async function createJobRecord(
       costingId: costings[0].id,
       quotationRevisionId: input.quotationRevisionId || null,
       projectManagerId: input.projectManagerId || null,
+      projectEngineerId: input.projectEngineerId || null,
       createdById: input.createdById,
       contractValue,
       customerPoNumber: input.customerPoNumber || null,
@@ -944,6 +949,7 @@ jobRoutes.post(
         siteId: body.siteId,
         contactId: body.contactId,
         projectManagerId: body.projectManagerId,
+        projectEngineerId: body.projectEngineerId,
         quotationRevisionId: body.quotationRevisionId,
         customerPoNumber: body.customerPoNumber,
         customerPoDate: asDate(body.customerPoDate),
@@ -1030,6 +1036,7 @@ async function loadJob(id: string) {
       site: { select: { id: true, name: true, address: true, city: true } },
       contact: { select: { id: true, name: true } },
       projectManager: { select: { id: true, name: true } },
+      projectEngineer: { select: { id: true, name: true } },
       createdBy: { select: { id: true, name: true } },
       costing: { select: { id: true, number: true, title: true, totalCost: true, contractValue: true } },
       otherCostings: {
@@ -1190,6 +1197,7 @@ const updateJobSchema = z.object({
   siteId: z.string().optional().nullable(),
   contactId: z.string().optional().nullable(),
   projectManagerId: z.string().optional().nullable(),
+  projectEngineerId: z.string().optional().nullable(),
   customerPoNumber: z.string().trim().optional().nullable(),
   customerPoDate: z.string().optional().nullable(),
   contractDate: z.string().optional().nullable(),
@@ -1317,6 +1325,9 @@ jobRoutes.patch(
         ? { connect: { id: body.projectManagerId } }
         : { disconnect: true };
     }
+    if (body.projectEngineerId !== undefined) {
+      data.projectEngineer = body.projectEngineerId ? { connect: { id: body.projectEngineerId } } : { disconnect: true };
+    }
 
     const job = await prisma.job.update({ where: { id: req.params.id }, data });
 
@@ -1365,7 +1376,7 @@ jobRoutes.get(
     const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.projects.view_all');
     const ids = onlyOwn ? visibleOwners(me, 'gops', 'projects') : null;
     const job = await prisma.job.findFirst({
-      where: { id: req.params.id, ...(ids ? { OR: [{ projectManagerId: { in: ids } }, { createdById: { in: ids } }] } : {}) },
+      where: { id: req.params.id, ...(ids ? { OR: [{ projectManagerId: { in: ids } }, { projectEngineerId: { in: ids } }, { createdById: { in: ids } }] } : {}) },
       include: {
         customer: { select: { name: true } },
         site: { select: { name: true } },

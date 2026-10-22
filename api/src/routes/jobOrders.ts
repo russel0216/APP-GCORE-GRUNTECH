@@ -1304,6 +1304,8 @@ export async function settleJobOrder(
           siteId: jo.siteId,
           contactId: jo.contactId,
           projectManagerId: jo.projectManagerId,
+          // The order's engineer prepares the project's kick-off chart (2026-10-22).
+          projectEngineerId: jo.projectEngineerId,
           // A project built on a quotation still under negotiation keeps the
           // link for later: only an APPROVED revision may stand behind a job.
           quotationRevisionId: rev.status === 'APPROVED' ? rev.id : null,

@@ -41,6 +41,8 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   // A project's drawings sent for internal approval (2026-10-13): the
   // engineers and managers on the project raise them, a Technical Manager may.
   plan_approval: ['project_engineer', 'project_manager', 'technical_manager'],
+  // The project's kick-off Gantt chart is prepared by its Project Engineer (2026-10-22).
+  gantt_chart: ['project_engineer', 'project_lead'],
   // G-HR › Hiring (2026-10-21): the hiring manager raises the request; HR prepares the contract.
   manpower_request: ['technical_manager', 'team_leader', 'service_manager'],
   employment_contract: ['hr'],

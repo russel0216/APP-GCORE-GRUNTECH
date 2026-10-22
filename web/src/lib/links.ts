@@ -28,6 +28,8 @@ const DETAIL: Record<string, string> = {
   costing: '/g-ops/costing',
   // Delivery
   job: '/g-ops/projects',
+  // The kick-off Gantt chart's approval is filed under the project's id (2026-10-22).
+  gantt_chart: '/g-ops/projects',
   project: '/g-ops/projects',
   progress_report: '/g-ops/progress',
   progress_billing: '/g-ops/billings',

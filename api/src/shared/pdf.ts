@@ -1,7 +1,7 @@
 import PDFDocument from 'pdfkit';
 import fs from 'node:fs';
 import { prisma } from '../prisma';
-import { workingDayDate } from './day';
+import { isWorkingDay, workingDayDate } from './day';
 
 /**
  * The document engine (model §7).
@@ -1630,6 +1630,474 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
   }
   // Leave the cursor on the last page so nothing is appended to page 1.
   doc.switchToPage(range.start + range.count - 1);
+}
+
+// ── The kick-off Gantt chart: the engine's schedule door ─────────────────────
+
+/** A row of the kick-off chart: a task on working days `start` … `start + days − 1`, or a milestone on `start`. */
+export interface PdfScheduleTask {
+  name: string;
+  start: number;
+  days: number;
+  milestone?: boolean;
+}
+
+/** A phase of the kick-off chart: its own span when it has one, else the span of its tasks. */
+export interface PdfScheduleGroup {
+  name: string;
+  start?: number;
+  days?: number;
+  tasks: PdfScheduleTask[];
+}
+
+/**
+ * The project's kick-off Gantt chart (2026-10-22, the owner's sample — the
+ * WESCO UPS chart on A3): ONE drawing, never a flow of sections, so it has a
+ * door of its own beside `renderDocument` and `renderDesigned`. The module
+ * supplies the phases, tasks and milestones on WORKING days from the
+ * project's start, the band's cells and the three sign-offs; the engine
+ * draws the letterhead, the NO. / TASK / START / FINISH / DAYS table under a
+ * band of weeks and day numbers, the bars with their "Day a–b" labels, the
+ * milestones as dashed lines with their notes under the chart, the legend,
+ * the notes, and along the foot the band — the project, its planned start
+ * and finish, Prepared by, Checked by and Approved by, each name dated or
+ * "Pending". Every string goes through `pdfSafe`.
+ */
+export interface PdfScheduleSpec {
+  title: string;
+  documentNumber?: string;
+  /** The project's name, under the title; and the line under that (customer and site). */
+  projectName: string;
+  projectLine?: string;
+  /** Working day 1 ('YYYY-MM-DD'). */
+  startDate: string;
+  /** The planned finish as a working day — a dashed line on the chart. */
+  finishDay?: number;
+  groups: PdfScheduleGroup[];
+  /** Notes under the chart, each at its day: "Day 3 (22 Oct 2026): …". */
+  milestones: { day: number; note: string }[];
+  notes?: string;
+  /**
+   * The band along the foot, left to right: the project and its dates, then
+   * the sign-offs — each a caption, a value in bold and a line under it (a
+   * name's date and time, or "Pending", printed grey). `wide` doubles a cell.
+   */
+  band: { label: string; value: string; sub?: string; wide?: boolean }[];
+  signoffNote?: string;
+  size?: 'A3' | 'A4';
+}
+
+const SCHED_DARK = '#1F7A3A';
+const SCHED_LIGHT = '#8CCB9B';
+const SCHED_PHASE_ROW = '#EAF4ED';
+const SCHED_HEAD = '#2B2140';
+const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const dayMonth = (d: Date) => `${d.getUTCDate()} ${SHORT_MONTHS[d.getUTCMonth()]}`;
+const dayMonthYear = (d: Date) => `${dayMonth(d)} ${d.getUTCFullYear()}`;
+
+/** The calendar dates of working days 1 … `total` from `start` (Mon–Sat, holidays out). */
+export function scheduleDates(start: Date, total: number): Date[] {
+  const out: Date[] = [];
+  const d = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+  while (out.length < total) {
+    if (isWorkingDay(d)) out.push(new Date(d));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return out;
+}
+
+/** The last working day the chart reaches: its bars, its milestones and the planned finish. */
+export function scheduleEnd(spec: Pick<PdfScheduleSpec, 'groups' | 'milestones' | 'finishDay'>): number {
+  let end = spec.finishDay ?? 1;
+  for (const g of spec.groups) {
+    if (g.start) end = Math.max(end, g.start + Math.max(1, g.days ?? 1) - 1);
+    for (const t of g.tasks) end = Math.max(end, t.start + Math.max(1, t.milestone ? 1 : t.days) - 1);
+  }
+  for (const m of spec.milestones) end = Math.max(end, m.day);
+  return Math.max(1, end);
+}
+
+/** A phase's span: its own, else over its tasks; none when it has neither. */
+function scheduleSpan(g: PdfScheduleGroup): { from: number; to: number } | null {
+  if (g.start) return { from: g.start, to: g.start + Math.max(1, g.days ?? 1) - 1 };
+  if (!g.tasks.length) return null;
+  return {
+    from: Math.min(...g.tasks.map((t) => t.start)),
+    to: Math.max(...g.tasks.map((t) => t.start + Math.max(1, t.milestone ? 1 : t.days) - 1)),
+  };
+}
+
+/** "Day 3" or "Day 29–37". */
+const dayRange = (from: number, to: number) => (from === to ? `Day ${from}` : `Day ${from}–${to}`);
+
+/** Text cut with an ellipsis to fit `width` on one line. */
+function fitLine(doc: PDFKit.PDFDocument, text: string, width: number, bold: boolean, size: number): string {
+  doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size);
+  if (doc.widthOfString(text) <= width) return text;
+  let cut = text;
+  while (cut.length > 1 && doc.widthOfString(`${cut}…`) > width) cut = cut.slice(0, -1);
+  return `${cut.replace(/\s+$/, '')}…`;
+}
+
+export async function renderSchedule(input: PdfScheduleSpec): Promise<Buffer> {
+  const t = (v?: string) => (v === undefined ? v : pdfSafe(v));
+  const spec: PdfScheduleSpec = {
+    ...input,
+    title: pdfSafe(input.title),
+    documentNumber: t(input.documentNumber),
+    projectName: pdfSafe(input.projectName),
+    projectLine: t(input.projectLine),
+    notes: t(input.notes),
+    signoffNote: t(input.signoffNote),
+    groups: input.groups.map((g) => ({ ...g, name: pdfSafe(g.name), tasks: g.tasks.map((x) => ({ ...x, name: pdfSafe(x.name) })) })),
+    milestones: input.milestones.map((m) => ({ ...m, note: pdfSafe(m.note) })),
+    band: input.band.map((b) => ({ ...b, label: pdfSafe(b.label), value: pdfSafe(b.value), sub: t(b.sub) })),
+  };
+  const row = await prisma.company.findUnique({ where: { id: 'company' } });
+  const company = row && safeCompany(row);
+  pageLandscape = true;
+  const size = spec.size ?? 'A3';
+  const doc = new PDFDocument({
+    size,
+    layout: 'landscape',
+    margins: { top: T.flowTop, bottom: T.flowBottomUp, left: T.left, right: T.right },
+    bufferPages: true,
+    info: { Title: spec.documentNumber ? `${spec.documentNumber} — ${spec.title}` : spec.title, Author: company?.name ?? 'G-CORE' },
+  });
+  const chunks: Buffer[] = [];
+  doc.on('data', (c: Buffer) => chunks.push(c));
+  const done = new Promise<Buffer>((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
+  // Everything here is placed by hand; PDFKit must never start a page itself.
+  doc.page.margins.bottom = 0;
+
+  const start = new Date(`${spec.startDate}T00:00:00Z`);
+  const total = scheduleEnd(spec);
+  const dates = scheduleDates(start, total);
+  const left = T.left;
+  const right = doc.page.width - T.right;
+  const usable = right - left;
+
+  // ── The letterhead: the logo and the company top-left, the title and the project top-right.
+  const drawHeader = (): number => {
+    const top = 26;
+    let textX = left;
+    if (company?.logoPath && fs.existsSync(company.logoPath)) {
+      try {
+        doc.image(company.logoPath, left, top, { fit: [56, 56] });
+        textX = left + 64;
+      } catch {
+        /* a broken logo never stops a document printing */
+      }
+    }
+    const name = caps(company?.legalName?.trim() || company?.name || '');
+    if (name) drawLine(doc, fitLine(doc, name, 420, true, 17), textX, top + 6, 420, 'left', true, 17, PURPLE);
+    const lines = letterheadLines(company).slice(0, 2);
+    lines.forEach((line, i) => drawLine(doc, fitLine(doc, line, 420, false, 7.5), textX, top + 28 + i * 10, 420, 'left', false, 7.5, INK));
+    const tag = company?.documentTagline?.trim();
+    if (tag) drawLine(doc, fitLine(doc, caps(tag), 420, true, 7.5), textX, top + 28 + lines.length * 10, 420, 'left', true, 7.5, GREEN);
+    const titleW = usable - 470;
+    const title = caps(spec.title);
+    drawLine(doc, fitLine(doc, title, titleW, true, 22), right - titleW, top + 2, titleW, 'right', true, 22, PURPLE);
+    drawLine(doc, fitLine(doc, caps(spec.projectName), titleW, true, 11), right - titleW, top + 30, titleW, 'right', true, 11, INK);
+    const sub = [spec.documentNumber ? `# ${spec.documentNumber}` : '', spec.projectLine ?? ''].filter(Boolean).join('   ·   ');
+    if (sub) drawLine(doc, fitLine(doc, sub, titleW, false, 8), right - titleW, top + 45, titleW, 'right', false, 8, GREY);
+    const ruleY = top + 64;
+    doc.moveTo(left, ruleY).lineTo(right, ruleY).strokeColor(GREEN).lineWidth(1.5).stroke();
+    return ruleY + 10;
+  };
+
+  // ── The columns.
+  const colNo = 30;
+  const colTask = Math.min(330, usable * 0.27);
+  const colStart = 54;
+  const colFinish = 54;
+  const colDays = 34;
+  const fixed = colNo + colTask + colStart + colFinish + colDays;
+  const gridX = left + fixed;
+  const gridW = usable - fixed;
+  const dayW = gridW / total;
+  const dayX = (day: number) => gridX + (day - 1) * dayW;
+  const headH = 34;
+
+  // Weeks: a run of working days in one Monday-to-Saturday calendar week.
+  const weeks: { from: number; to: number; monday: Date }[] = [];
+  dates.forEach((d, i) => {
+    const dow = (d.getUTCDay() + 6) % 7; // Monday 0
+    const monday = new Date(d);
+    monday.setUTCDate(d.getUTCDate() - dow);
+    const last = weeks[weeks.length - 1];
+    if (last && last.monday.getTime() === monday.getTime()) last.to = i + 1;
+    else weeks.push({ from: i + 1, to: i + 1, monday });
+  });
+  let dayStepN = 1;
+  for (const step of [1, 2, 5, 10, 20, 50, 100]) {
+    dayStepN = step;
+    if (step * dayW >= 13) break;
+  }
+
+  const drawHead = (top: number) => {
+    doc.rect(left, top, usable, headH).fill(SCHED_HEAD);
+    const cells: [string, number, number, Align][] = [
+      ['NO.', left, colNo, 'left'],
+      ['TASK', left + colNo, colTask, 'left'],
+      ['START', left + colNo + colTask, colStart, 'center'],
+      ['FINISH', left + colNo + colTask + colStart, colFinish, 'center'],
+      ['DAYS', left + colNo + colTask + colStart + colFinish, colDays, 'center'],
+    ];
+    for (const [text, x, w, align] of cells) drawLine(doc, text, x + 5, top + headH / 2 - 4, w - 10, align, true, 7.5, '#FFFFFF');
+    // Weeks over the days: "WEEK n" and its Monday, shortened to what fits.
+    weeks.forEach((w, i) => {
+      const x = dayX(w.from);
+      const width = (w.to - w.from + 1) * dayW;
+      if (i > 0) doc.moveTo(x, top).lineTo(x, top + headH).strokeColor('#6E6585').lineWidth(0.5).stroke();
+      const label = width >= 34 ? `WEEK ${i + 1}` : width >= 14 ? `W${i + 1}` : '';
+      if (label) drawLine(doc, label, x + 1, top + 3, width - 2, 'center', true, 6.5, '#FFFFFF');
+      const date = dayMonth(w.monday);
+      doc.font('Helvetica').fontSize(5.5);
+      if (width >= doc.widthOfString(date) + 3) drawLine(doc, date, x + 1, top + 11, width - 2, 'center', false, 5.5, '#D9D2E6');
+    });
+    // The day numbers on white, with ticks.
+    const strip = top + headH - 12;
+    doc.rect(gridX, strip, gridW, 12).fill('#FFFFFF');
+    for (let day = 1; day <= total; day++) {
+      const x = dayX(day);
+      const labelled = day === 1 || day % dayStepN === 0;
+      if (dayW >= 2.5 || labelled) doc.moveTo(x, strip + (labelled ? 7 : 9)).lineTo(x, strip + 12).strokeColor(GREY).lineWidth(0.3).stroke();
+      if (labelled) drawLine(doc, String(day), x + 0.5, strip + 1, Math.max(dayW * dayStepN, 12), 'left', true, 5.5, INK);
+    }
+    doc.rect(left, top, usable, headH).strokeColor(SCHED_HEAD).lineWidth(0.75).stroke();
+  };
+
+  // The rows: each phase, then its tasks.
+  type Line = { kind: 'phase' | 'task'; no: string; name: string; from: number | null; to: number | null; milestone?: boolean };
+  const lines: Line[] = [];
+  spec.groups.forEach((g, i) => {
+    const span = scheduleSpan(g);
+    lines.push({ kind: 'phase', no: String(i + 1), name: g.name, from: span?.from ?? null, to: span?.to ?? null });
+    g.tasks.forEach((task, k) =>
+      lines.push({
+        kind: 'task',
+        no: `${i + 1}.${k + 1}`,
+        name: task.name,
+        from: task.start,
+        to: task.start + Math.max(1, task.milestone ? 1 : task.days) - 1,
+        milestone: task.milestone,
+      }),
+    );
+  });
+
+  // What the last page carries under the table: the milestone notes, the
+  // legend and the notes, then the band along the foot.
+  const bandH = 50;
+  const bandBottom = doc.page.height - 66;
+  const bandTop = bandBottom - bandH;
+  const noteSize = 7;
+  doc.font('Helvetica').fontSize(noteSize);
+  const notesLines = spec.notes ? wrapText(doc, spec.notes, usable, false, noteSize) : [];
+  const milestoneRows = Math.min(3, Math.max(spec.milestones.length ? 1 : 0, Math.ceil(spec.milestones.length / 3)));
+  const under = 8 + milestoneRows * 10 + 18 + notesLines.length * 9 + (spec.signoffNote ? 14 : 0) + 8;
+
+  let y = drawHeader();
+  const firstRoom = bandTop - under - y - headH;
+  // As tall as the sample's rows while they fit on one page, no shorter than 11.
+  const rowH = Math.max(11, Math.min(19, lines.length ? firstRoom / lines.length : 17));
+  const showDay = rowH >= 14.5;
+
+  const drawMilestoneLines = (top: number, bottom: number) => {
+    for (const m of spec.milestones) {
+      const x = dayX(m.day) + dayW / 2;
+      doc.save().moveTo(x, top).lineTo(x, bottom).dash(2, { space: 2 }).strokeColor(PURPLE).lineWidth(0.6).stroke().restore();
+    }
+    if (spec.finishDay && spec.finishDay <= total) {
+      const x = dayX(spec.finishDay) + dayW;
+      doc.save().moveTo(x, top).lineTo(x, bottom).dash(3, { space: 2 }).strokeColor(GREEN).lineWidth(0.8).stroke().restore();
+    }
+  };
+
+  const dateCell = (day: number | null, x: number, w: number, top: number, bold: boolean) => {
+    if (!day) {
+      drawLine(doc, '—', x, top + rowH / 2 - 3.5, w, 'center', false, 7, GREY);
+      return;
+    }
+    const d = dates[day - 1];
+    if (showDay) {
+      drawLine(doc, dayMonth(d), x, top + 2.5, w, 'center', bold, 7.5, INK);
+      drawLine(doc, `Day ${day}`, x, top + 11, w, 'center', false, 5.5, GREY);
+    } else drawLine(doc, dayMonth(d), x, top + rowH / 2 - 4, w, 'center', bold, 7, INK);
+  };
+
+  let tableTop = y;
+  drawHead(y);
+  y += headH;
+  const weekStarts = new Set(weeks.slice(1).map((w) => w.from));
+  /** The day grid under a row's bars: a line a day where there is room, a darker one at each week. */
+  const rowGrid = (top: number, height: number) => {
+    for (let day = 1; day <= total; day++) {
+      const weekStart = weekStarts.has(day);
+      if (dayW >= 3 || weekStart) {
+        doc.moveTo(dayX(day), top).lineTo(dayX(day), top + height).strokeColor(weekStart ? '#BDBDBD' : '#ECECEC').lineWidth(weekStart ? 0.6 : 0.3).stroke();
+      }
+    }
+  };
+  const finishPage = (bottom: number) => {
+    // The columns' rules, the milestones and the frame over the rows.
+    let x = left;
+    for (const w of [colNo, colTask, colStart, colFinish, colDays]) {
+      x += w;
+      doc.moveTo(x, tableTop + headH).lineTo(x, bottom).strokeColor(RULE).lineWidth(0.6).stroke();
+    }
+    doc.moveTo(gridX, tableTop).lineTo(gridX, bottom).strokeColor(SCHED_HEAD).lineWidth(0.9).stroke();
+    drawMilestoneLines(tableTop + headH, bottom);
+    doc.rect(left, tableTop, usable, bottom - tableTop).strokeColor(SCHED_HEAD).lineWidth(0.75).stroke();
+  };
+
+  for (const line of lines) {
+    // A plan too long for one page runs on under the head repeated.
+    if (y + rowH > doc.page.height - 76) {
+      finishPage(y);
+      doc.addPage({ size, layout: 'landscape', margins: doc.page.margins });
+      doc.page.margins.bottom = 0;
+      y = T.flowTop;
+      tableTop = y;
+      drawHead(y);
+      y += headH;
+    }
+    const top = y;
+    const phase = line.kind === 'phase';
+    if (phase) doc.rect(left, top, usable, rowH).fill(SCHED_PHASE_ROW);
+    rowGrid(top, rowH);
+    drawLine(doc, line.no, left + 5, top + rowH / 2 - 4, colNo - 8, 'left', phase, 7.5, INK);
+    const nameX = left + colNo + (phase ? 5 : 14);
+    const nameW = colTask - (phase ? 10 : 19);
+    const name = phase ? caps(line.name) : line.name;
+    drawLine(doc, fitLine(doc, name, nameW, phase, 7.5), nameX, top + rowH / 2 - 4, nameW, 'left', phase, 7.5, INK);
+    dateCell(line.from, left + colNo + colTask, colStart, top, phase);
+    dateCell(line.to, left + colNo + colTask + colStart, colFinish, top, phase);
+    const span = line.from && line.to ? line.to - line.from + 1 : null;
+    drawLine(doc, span ? String(span) : '—', left + colNo + colTask + colStart + colFinish, top + rowH / 2 - 4, colDays, 'center', phase, 7.5, INK);
+
+    if (line.from && line.to) {
+      const x = dayX(line.from);
+      const w = Math.max((line.to - line.from + 1) * dayW, 2);
+      const mid = top + rowH / 2;
+      let label: string;
+      if (line.milestone) {
+        const cx = x + dayW / 2;
+        const r = Math.min(4, rowH / 2 - 2);
+        doc.save().moveTo(cx, mid - r).lineTo(cx + r, mid).lineTo(cx, mid + r).lineTo(cx - r, mid).closePath().fill(SCHED_DARK).restore();
+        label = `Day ${line.from}`;
+        doc.font('Helvetica-Bold').fontSize(6);
+        const lw = doc.widthOfString(label);
+        drawLine(doc, label, cx + r + 3 + lw <= right - 2 ? cx + r + 3 : cx - r - 3 - lw, mid - 3, lw + 2, 'left', true, 6, INK);
+      } else {
+        const h = phase ? Math.min(9, rowH - 5) : Math.min(7, rowH - 6);
+        doc.roundedRect(x + 0.5, mid - h / 2, Math.max(w - 1, 1.5), h, 1.5).fill(phase ? SCHED_DARK : SCHED_LIGHT);
+        if (!phase) doc.roundedRect(x + 0.5, mid - h / 2, Math.max(w - 1, 1.5), h, 1.5).strokeColor(SCHED_DARK).lineWidth(0.4).stroke();
+        const long = phase
+          ? `${dayRange(line.from, line.to)} (${span} working day${span === 1 ? '' : 's'})  ${dayMonthYear(dates[line.from - 1])} to ${dayMonthYear(dates[line.to - 1])}`
+          : dayRange(line.from, line.to);
+        doc.font('Helvetica-Bold').fontSize(6);
+        if (phase && doc.widthOfString(long) + 8 <= w) {
+          drawLine(doc, long, x + 4, mid - 3, w - 6, 'left', true, 6, '#FFFFFF');
+        } else {
+          label = phase ? dayRange(line.from, line.to) : long;
+          const lw = doc.widthOfString(label);
+          // Right of the bar, else left of it when the bar runs to the edge.
+          if (x + w + 4 + lw <= right - 2) drawLine(doc, label, x + w + 3, mid - 3, lw + 2, 'left', true, 6, INK);
+          else drawLine(doc, label, x - lw - 4, mid - 3, lw + 2, 'left', true, 6, INK);
+        }
+      }
+    }
+    doc.moveTo(left, top + rowH).lineTo(right, top + rowH).strokeColor(RULE).lineWidth(0.4).stroke();
+    y = top + rowH;
+  }
+  if (!lines.length) {
+    drawLine(doc, 'No phases or tasks are planned yet — plan them on the Scope of Work tab.', left + colNo + 5, y + 6, colTask + 200, 'left', false, 8, GREY);
+    y += 20;
+  }
+  finishPage(y);
+
+  // The last page must hold what goes under the table; a long plan whose rows
+  // ran to the foot gives it a page of its own.
+  if (y + under > bandTop) {
+    doc.addPage({ size, layout: 'landscape', margins: doc.page.margins });
+    doc.page.margins.bottom = 0;
+    y = T.flowTop;
+  }
+
+  // The milestones' notes, each under its own line, in rows that do not overlap.
+  y += 6;
+  const rowEnds: number[] = [];
+  const sorted = [...spec.milestones].sort((a, b) => a.day - b.day);
+  for (const m of sorted) {
+    const text = `Day ${m.day} (${dayMonthYear(dates[m.day - 1])}): ${m.note}`;
+    doc.font('Helvetica-Bold').fontSize(6.5);
+    const w = Math.min(doc.widthOfString(text) + 4, usable / 2);
+    let x = Math.min(Math.max(left, dayX(m.day) + dayW / 2 - 2), right - w);
+    let r = rowEnds.findIndex((end) => end < x);
+    if (r < 0) {
+      if (rowEnds.length < milestoneRows) r = rowEnds.length;
+      else {
+        r = rowEnds.indexOf(Math.min(...rowEnds));
+        x = Math.min(right - w, rowEnds[r] + 6);
+      }
+    }
+    rowEnds[r] = x + w;
+    drawLine(doc, fitLine(doc, text, w, true, 6.5), x, y + r * 10, w, 'left', true, 6.5, PURPLE);
+  }
+  y += milestoneRows * 10 + 6;
+
+  // The legend: a phase, a task, a milestone, the planned finish.
+  const items: [string, () => void][] = [
+    ['Phase', () => doc.roundedRect(0, 0, 18, 7, 1.5).fill(SCHED_DARK)],
+    ['Task', () => doc.roundedRect(0, 0, 18, 7, 1.5).fillAndStroke(SCHED_LIGHT, SCHED_DARK)],
+    ['Milestone', () => doc.save().moveTo(9, -1).lineTo(13, 3.5).lineTo(9, 8).lineTo(5, 3.5).closePath().fill(SCHED_DARK).restore()],
+    ['Milestone date', () => doc.save().moveTo(9, -2).lineTo(9, 9).dash(2, { space: 2 }).strokeColor(PURPLE).lineWidth(0.8).stroke().restore()],
+    ['Planned finish (target date)', () => doc.save().moveTo(9, -2).lineTo(9, 9).dash(3, { space: 2 }).strokeColor(GREEN).lineWidth(0.9).stroke().restore()],
+  ];
+  let lx = left;
+  for (const [label, draw] of items) {
+    doc.save().translate(lx, y + 1);
+    draw();
+    doc.restore();
+    drawLine(doc, label, lx + 24, y + 0.5, 140, 'left', false, 7.5, INK);
+    doc.font('Helvetica').fontSize(7.5);
+    lx += 24 + doc.widthOfString(label) + 22;
+  }
+  y += 16;
+  for (const line of notesLines) {
+    drawLine(doc, line, left, y, usable, 'left', false, noteSize, GREY);
+    y += 9;
+  }
+
+  // The band along the foot: the project and its dates, then the sign-offs.
+  if (spec.signoffNote) {
+    doc.font('Helvetica-Oblique').fontSize(8).fillColor(INK);
+    doc.text(spec.signoffNote, left, bandTop - 13, { width: usable, lineBreak: false });
+  }
+  const cells = spec.band.map((b) => ({ ...b, weight: b.wide ? 2.4 : 1.25 }));
+  const weightSum = sum(cells.map((c) => c.weight));
+  let cx = left;
+  doc.rect(left, bandTop, usable, bandH).strokeColor(INK).lineWidth(0.75).stroke();
+  cells.forEach((c, i) => {
+    const w = (c.weight / weightSum) * usable;
+    if (i > 0) doc.moveTo(cx, bandTop).lineTo(cx, bandBottom).strokeColor(INK).lineWidth(0.5).stroke();
+    drawLine(doc, fitLine(doc, caps(c.label), w - 10, false, 6), cx + 5, bandTop + 5, w - 10, 'left', false, 6, GREY);
+    if (c.value) {
+      // A name and position are shrunk to fit (7pt the floor) before anything is cut.
+      doc.font('Helvetica-Bold').fontSize(9.5);
+      const full = doc.widthOfString(c.value);
+      const vs = full <= w - 10 ? 9.5 : Math.max(7, Math.floor(((9.5 * (w - 10)) / full) * 10) / 10);
+      drawLine(doc, fitLine(doc, c.value, w - 10, true, vs), cx + 5, bandTop + 22, w - 10, 'left', true, vs, INK);
+    }
+    if (c.sub) drawLine(doc, fitLine(doc, c.sub, w - 10, false, 7), cx + 5, bandTop + 36, w - 10, 'left', false, 7, c.sub === 'Pending' ? GREY : INK);
+    cx += w;
+  });
+
+  paginate(doc, { title: spec.title, documentNumber: spec.documentNumber, reference: spec.projectName, sections: [] }, company);
+  doc.end();
+  pageLandscape = false;
+  return done;
 }
 
 function ensureSpace(doc: PDFKit.PDFDocument, needed: number) {

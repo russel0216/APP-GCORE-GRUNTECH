@@ -1738,6 +1738,8 @@ planRoutes.post(
         startDate: z.string().optional().nullable(),
         dueDate: z.string().optional().nullable(),
         weight: z.number().min(0).max(9999).optional().nullable(),
+        // A milestone on the kick-off Gantt chart (2026-10-22).
+        isMilestone: z.boolean().optional(),
       }),
       req.body,
     );
@@ -1751,6 +1753,7 @@ planRoutes.post(
         startDate: asDate(body.startDate),
         dueDate: asDate(body.dueDate),
         weight: body.weight ?? null,
+        isMilestone: body.isMilestone ?? false,
       },
     });
     res.status(201).json(task);
@@ -1773,6 +1776,7 @@ planRoutes.patch(
         // A task's weight in its phase (2026-10-15): the phase's % from its
         // tasks is Σ weight × progress ÷ Σ weight; none counts as 1.
         weight: z.number().min(0).max(9999).optional().nullable(),
+        isMilestone: z.boolean().optional(),
       }),
       req.body,
     );
@@ -1808,6 +1812,7 @@ planRoutes.patch(
           ...(body.startDate !== undefined ? { startDate: asDate(body.startDate) } : {}),
           ...(body.dueDate !== undefined ? { dueDate: asDate(body.dueDate) } : {}),
           ...(body.weight !== undefined ? { weight: body.weight } : {}),
+          ...(body.isMilestone !== undefined ? { isMilestone: body.isMilestone } : {}),
         },
       }),
     );

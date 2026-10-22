@@ -538,6 +538,18 @@ const CUSTOMER_DECISIONS = [
   { value: 'REVISE', label: 'Revise and resubmit' },
 ];
 
+/** A customer's recorded answer (the Request for Approval's, the kick-off Gantt chart's). */
+export interface CustomerAnswer {
+  decision: string | null;
+  decisionLabel?: string | null;
+  name: string | null;
+  position: string | null;
+  decidedOn: string | null;
+  remarks: string | null;
+  recordedAt: string | null;
+  recordedBy: { id: string; name: string } | null;
+}
+
 /**
  * The customer's approval (2026-10-20, the owner's call): recorded on the
  * page once the team has approved the request — the decision, who at the
@@ -547,26 +559,71 @@ const CUSTOMER_DECISIONS = [
  * email) files beside it and prints behind the request.
  */
 function CustomerApprovalCard({ row, onSaved }: { row: PlanRequest; onSaved: (r: PlanRequest) => void }) {
+  return (
+    <>
+      <CustomerAnswerCard
+        answer={{
+          decision: row.customerDecision ?? null,
+          decisionLabel: row.customerDecisionLabel,
+          name: row.customerName ?? null,
+          position: row.customerPosition ?? null,
+          decidedOn: row.customerDecidedOn ?? null,
+          remarks: row.customerRemarks ?? null,
+          recordedAt: row.customerRecordedAt ?? null,
+          recordedBy: row.customerRecordedBy ?? null,
+        }}
+        canRecord={!!row.canRecordCustomer}
+        endpoint={`/plans/${row.id}/customer`}
+        pending="Pending — send the request to the customer and record their answer here. The name, date and time stand as the signature."
+        onSaved={(saved) => onSaved(saved as PlanRequest)}
+      />
+      <Attachments
+        entityType="approved_plan_customer"
+        entityId={row.id}
+        title="Customer’s copy"
+        hint="The page the customer marked, or their email — printed behind the request."
+        canEdit={!!row.canRecordCustomer}
+      />
+    </>
+  );
+}
+
+/** The customer's answer, shown and recorded in the card — POSTed to `endpoint`, `{ decision: null }` clearing it. */
+export function CustomerAnswerCard({
+  answer,
+  canRecord,
+  endpoint,
+  pending,
+  title = 'Customer approval',
+  onSaved,
+}: {
+  answer: CustomerAnswer;
+  canRecord: boolean;
+  endpoint: string;
+  pending: string;
+  title?: string;
+  onSaved: (saved: unknown) => void;
+}) {
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
   const [form, setForm] = useState({
-    decision: row.customerDecision ?? 'APPROVED',
-    name: row.customerName ?? '',
-    position: row.customerPosition ?? '',
-    decidedOn: row.customerDecidedOn?.slice(0, 10) ?? today,
-    remarks: row.customerRemarks ?? '',
+    decision: answer.decision ?? 'APPROVED',
+    name: answer.name ?? '',
+    position: answer.position ?? '',
+    decidedOn: answer.decidedOn?.slice(0, 10) ?? today,
+    remarks: answer.remarks ?? '',
   });
-  const recorded = !!row.customerDecision;
+  const recorded = !!answer.decision;
 
   async function save(clear = false) {
     setBusy(true);
     setError(null);
     try {
-      const saved = await api.post<PlanRequest>(
-        `/plans/${row.id}/customer`,
+      const saved = await api.post<unknown>(
+        endpoint,
         clear
           ? { decision: null }
           : { decision: form.decision, name: form.name.trim(), position: form.position.trim() || null, decidedOn: form.decidedOn, remarks: form.remarks.trim() || null },
@@ -582,11 +639,10 @@ function CustomerApprovalCard({ row, onSaved }: { row: PlanRequest; onSaved: (r:
   }
 
   return (
-    <>
       <section className="card">
         <div className="card-head">
-          <h3 className="card-title">Customer approval</h3>
-          {row.canRecordCustomer && !open && (
+          <h3 className="card-title">{title}</h3>
+          {canRecord && !open && (
             <button type="button" className="btn btn-sm" onClick={() => setOpen(true)}>
               {recorded ? 'Change' : 'Record the customer’s answer'}
             </button>
@@ -598,34 +654,32 @@ function CustomerApprovalCard({ row, onSaved }: { row: PlanRequest; onSaved: (r:
               <dt>Decision</dt>
               <dd>
                 <StatusBadge
-                  status={row.customerDecision!}
+                  status={answer.decision!}
                   extra={{ APPROVED: 'ok', APPROVED_AS_NOTED: 'ok', REVISE: 'warn' }}
-                  label={row.customerDecisionLabel ?? row.customerDecision!}
+                  label={answer.decisionLabel ?? answer.decision!}
                 />
               </dd>
               <dt>Decided by</dt>
               <dd>
-                {row.customerName}
-                {row.customerPosition ? `, ${row.customerPosition}` : ''}
+                {answer.name}
+                {answer.position ? `, ${answer.position}` : ''}
               </dd>
               <dt>Date</dt>
-              <dd>{row.customerDecidedOn ? formatDate(row.customerDecidedOn) : '—'}</dd>
-              {row.customerRemarks && (
+              <dd>{answer.decidedOn ? formatDate(answer.decidedOn) : '—'}</dd>
+              {answer.remarks && (
                 <>
                   <dt>Remarks</dt>
-                  <dd className="del-prose">{row.customerRemarks}</dd>
+                  <dd className="del-prose">{answer.remarks}</dd>
                 </>
               )}
               <dt>Recorded</dt>
               <dd className="faint">
-                {row.customerRecordedBy?.name ?? '—'}
-                {row.customerRecordedAt ? `, ${new Date(row.customerRecordedAt).toLocaleString('en-PH', { timeZone: 'Asia/Manila' })}` : ''}
+                {answer.recordedBy?.name ?? '—'}
+                {answer.recordedAt ? `, ${new Date(answer.recordedAt).toLocaleString('en-PH', { timeZone: 'Asia/Manila' })}` : ''}
               </dd>
             </dl>
           ) : (
-            <p className="faint">
-              Pending — send the request to the customer and record their answer here. The name, date and time stand as the signature.
-            </p>
+            <p className="faint">{pending}</p>
           ))}
         {open && (
           <div className="stack">
@@ -674,13 +728,5 @@ function CustomerApprovalCard({ row, onSaved }: { row: PlanRequest; onSaved: (r:
           </div>
         )}
       </section>
-      <Attachments
-        entityType="approved_plan_customer"
-        entityId={row.id}
-        title="Customer’s copy"
-        hint="The page the customer marked, or their email — printed behind the request."
-        canEdit={!!row.canRecordCustomer}
-      />
-    </>
   );
 }

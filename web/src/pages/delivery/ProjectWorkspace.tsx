@@ -24,6 +24,7 @@ import { useConfirm } from '../../components/Confirm';
 import { recordLink } from '../../lib/links';
 import { SCurve, type CurvePoint } from './SCurve';
 import { ProjectGantt } from './ProjectGantt';
+import { KickoffCard } from './ProjectKickoff';
 import { JOB_STATUSES, JOB_TONES, ProgressBar } from './Projects';
 import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
@@ -93,6 +94,8 @@ interface Job {
   site: { id: string; name: string; address: string | null; city: string | null } | null;
   contact: { id: string; name: string } | null;
   projectManager: { id: string; name: string } | null;
+  /** Who prepares the kick-off Gantt chart (2026-10-22). */
+  projectEngineer: { id: string; name: string } | null;
   createdBy: { id: string; name: string };
   costing: { id: string; number: string; title: string; totalCost: number; contractValue: number } | null;
   /** Every costing the project was built from, the first first (2026-10-19). */
@@ -148,6 +151,7 @@ interface Job {
     dueDate: string | null;
     scopeItemId: string | null;
     assignedTo: { id: string; name: string } | null;
+    isMilestone?: boolean;
   }[];
   budgetRequestCount: number;
   installedAssetCount: number;
@@ -619,6 +623,7 @@ export function ProjectWorkspace() {
               )}
               <Row label="Actual end" value={job.actualEndDate ? formatDate(job.actualEndDate) : null} />
               <Row label="Technical Manager" value={job.projectManager?.name} />
+              <Row label="Project Engineer" value={job.projectEngineer?.name} />
               {job.installedAssetCount > 0 && (
                 <Row
                   label="Equipment installed"
@@ -673,6 +678,18 @@ export function ProjectWorkspace() {
 
       {current === 'scope' && (
         <div className="stack">
+        {/* The chart on A3 for the customer's kick-off meeting (2026-10-22). */}
+        <KickoffCard
+          jobId={job.id}
+          reloadToken={[
+            reloadToken,
+            job.startDate,
+            job.targetEndDate,
+            job.projectEngineer?.id,
+            job.projectManager?.id,
+            ...job.tasks.map((t) => `${t.id}:${t.startDate}:${t.dueDate}:${t.isMilestone ? 1 : 0}`),
+          ].join('|')}
+        />
         <ProjectGantt
           jobId={job.id}
           jobStart={job.startDate}
@@ -1619,11 +1636,15 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
   const [error, setError] = useState<unknown>(null);
   // The project's manager is its Technical Manager; naming one is not the admin right to list users.
   const { people } = usePeople('role:technical_manager');
+  // Anybody signed in may be the Project Engineer — who prepares the kick-off chart.
+  const { people: everyone } = usePeople();
   const pmId = useId();
+  const peId = useId();
   const [form, setForm] = useState({
     name: job.name,
     status: job.status,
     projectManagerId: job.projectManager?.id ?? '',
+    projectEngineerId: job.projectEngineer?.id ?? '',
     customerPoNumber: job.customerPoNumber ?? '',
     customerPoDate: job.customerPoDate?.slice(0, 10) ?? '',
     startDate: job.startDate?.slice(0, 10) ?? '',
@@ -1640,6 +1661,7 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
         name: form.name,
         status: form.status,
         projectManagerId: form.projectManagerId || null,
+        projectEngineerId: form.projectEngineerId || null,
         customerPoNumber: form.customerPoNumber || null,
         customerPoDate: form.customerPoDate || null,
         startDate: form.startDate || null,
@@ -1697,6 +1719,16 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
             people={people}
             placeholder="— unassigned —"
             current={job.projectManager}
+          />
+        </Field>
+        <Field label="Project Engineer" htmlFor={peId} hint="Prepares the kick-off Gantt chart">
+          <PersonSelect
+            id={peId}
+            value={form.projectEngineerId}
+            onChange={(id) => setForm((f) => ({ ...f, projectEngineerId: id }))}
+            people={everyone}
+            placeholder="— unassigned —"
+            current={job.projectEngineer}
           />
         </Field>
         <Field label="Customer P.O.">

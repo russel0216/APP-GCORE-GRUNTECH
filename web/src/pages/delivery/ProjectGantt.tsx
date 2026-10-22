@@ -38,6 +38,8 @@ export interface GanttTask {
   assignedTo: { id: string; name: string } | null;
   /** Its weight in its phase (2026-10-15); none counts as 1. A Decimal, so it may arrive as text. */
   weight?: number | string | null;
+  /** A milestone on the kick-off Gantt chart (2026-10-22). */
+  isMilestone?: boolean;
 }
 
 /** A task's weight, 1 when none is set — the progress report's "from tasks" rule. */
@@ -315,10 +317,14 @@ export function ProjectGantt({
                     <th scope="row" className="gantt-name">
                       {canEdit ? (
                         <button type="button" className="gantt-edit" onClick={() => setEditing(t)} title="Modify this task">
+                          {t.isMilestone && <span aria-label="Milestone">◆ </span>}
                           {t.name}
                         </button>
                       ) : (
-                        t.name
+                        <>
+                          {t.isMilestone && <span aria-label="Milestone">◆ </span>}
+                          {t.name}
+                        </>
                       )}
                       {t.assignedTo && <span className="faint"> · {t.assignedTo.name}</span>}
                       <StatusBadge status={t.status} extra={TASK_TONES} label={STATUS_LABEL[t.status] ?? t.status} />
@@ -343,7 +349,7 @@ export function ProjectGantt({
       <p className="faint del-note gantt-legend">
         <span className="gantt-key tone-plan" /> planned <span className="gantt-key tone-info" /> in progress{' '}
         <span className="gantt-key tone-ok" /> done <span className="gantt-key tone-danger" /> blocked · the darker part of a
-        bar is the percent complete · the red line is today
+        bar is the percent complete · the red line is today · ◆ a milestone
       </p>
 
       {editing && (
@@ -393,6 +399,7 @@ function TaskEditor({
     status: task?.status ?? 'NOT_STARTED',
     assignedToId: task?.assignedTo?.id ?? '',
     weight: task?.weight === null || task?.weight === undefined ? '' : String(Number(task.weight)),
+    isMilestone: !!task?.isMilestone,
   });
 
   const valid = form.name.trim().length >= 2 && (!form.startDate || !form.dueDate || form.dueDate >= form.startDate);
@@ -407,6 +414,7 @@ function TaskEditor({
         dueDate: form.dueDate || null,
         assignedToId: form.assignedToId || null,
         weight: form.weight === '' ? null : Number(form.weight),
+        isMilestone: form.isMilestone,
       };
       if (task) {
         await api.patch(`/jobs/${jobId}/tasks/${task.id}`, {
@@ -481,6 +489,11 @@ function TaskEditor({
         </Field>
         <Field label="Weight in its phase" hint="How much of the phase this task is — 1 when left blank. The progress report weighs the phase’s % by it.">
           <NumberInput kind="decimal" value={form.weight} onChange={(e) => setForm({ ...form, weight: e.target.value })} />
+        </Field>
+        <Field label="Milestone" hint="Drawn as a marker on the kick-off Gantt chart, its name noted under the chart — the customer's kick-off, a delivery, the hand-over">
+          <label className="check">
+            <input type="checkbox" checked={form.isMilestone} onChange={(e) => setForm({ ...form, isMilestone: e.target.checked })} /> This task is a milestone
+          </label>
         </Field>
         <Field label="Assigned to" htmlFor={assigneeId}>
           <PersonSelect

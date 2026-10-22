@@ -677,8 +677,11 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,742 assertions across twenty-two scripts** (counted 2026-10-22, after
-8 on chain for the declared value rule and the warehouse's doors, and before it
+**4,758 assertions across twenty-two scripts** (counted 2026-10-22, after
+16 on delivery for the kick-off Gantt chart — the missing engineer and
+target refused, the engineer's Mine, the route to the project's Technical
+Manager, one A3 page with three Pending sign-offs, the decider's door, the
+customer's answer and the pull-back that clears it — and before it 8 on chain for the declared value rule and the warehouse's doors, and before it
 one on delivery for a released budget request committed on Budget Monitoring, and before it
 3 on finance for a cancelled invoice deleted, and before it
 one on delivery for the project's Scope of Work on paper, and before it one on finance for a sample sales order deleted with everything on it, and
@@ -789,7 +792,7 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
 430, masters 92, sales 643, costing 205, pipeline 121, calendar 103, numbering
-94, partners 120, delivery 197, chain 387, hr 637, plantilla 129, meetings
+94, partners 120, delivery 213, chain 387, hr 637, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 444, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
@@ -5877,6 +5880,51 @@ tab inside a project, and the Projects page keeps them one click away
   does them, "Not under a scope line" last, the contract value as the total,
   and the Gantt chart as a landscape appendix dated from the earliest planned
   day. A plan, not a decision: no sign-offs. verify-delivery pins it.
+- **The kick-off Gantt chart** (2026-10-22, the owner's call, his WESCO UPS
+  chart as the sample: "Prepared By (Project Engineer), Checked By
+  (Technical Manager), Approved By (Customer) — for the customer kick-off
+  meeting approval"; his answers: the engineer is a field on the project,
+  routed through the engine, A3 required). The Scope of Work tab on ONE A3
+  landscape page through the engine's third door, **`renderSchedule()`**
+  (`shared/pdf.ts`): the letterhead, NO. / TASK / START / FINISH / DAYS
+  ("13 Oct" over "Day 1"), the weeks and day numbers over the grid, phases
+  in dark green with "Day a–b (n working days) date to date", tasks in light
+  green, milestones as diamonds and dashed lines with "Day n (date): note"
+  under the chart, the planned finish dashed, the legend, the notes, and a
+  band along the foot — PROJECT, PLANNED START DATE (DAY 1), PLANNED FINISH
+  DATE (DAY n), PREPARED BY (PROJECT ENGINEER), CHECKED BY (TECHNICAL
+  MANAGER), APPROVED BY (CUSTOMER), each name dated or "Pending" — under
+  "The name, date and time are considered a digital signature of approval."
+  Rows shrink to fit one page (11pt the least) and run on under the head
+  past it. **Its dates are the project's alone**: Day 1 its Start Date, the
+  finish its Target Date, days counted Mon–Sat over the stored holidays
+  (`scheduleDates()`); a task's day is `workingDaysBetween(start, date)`,
+  an undated task is left off and said. `Job.projectEngineerId` (the
+  project form, Modify and the Overview; a job order's engineer when its
+  approval builds the project; the engineer's projects are "Mine"),
+  `JobTask.isMilestone` (the Gantt panel's tick, ◆ on the tab). **The
+  route** is `gantt_chart`, the job's id the document
+  (`routes/kickoff.ts`, mounted on `/api/jobs`): seeded "Kick-off Gantt
+  chart — technical manager" (PROJECT_MANAGER — the project's own Technical
+  Manager, else the technical managers on the engineer's team;
+  `preparerSigns`, `standIns`). `Job.scheduleStatus` DRAFT →
+  PENDING_APPROVAL → APPROVED; `POST /jobs/:id/kickoff/submit` (in the
+  ENGINEER's name, whoever presses it; refused naming what is missing — no
+  engineer, no Start or Target Date, nothing planned), `/withdraw`,
+  `settleKickoff`, the engine's reopen (back to draft, the customer's
+  answer cleared — what they approved changed). The engineer, the Technical
+  Manager or `gops.projects.edit_all` prepares it; `GET /:id/kickoff` and
+  `/kickoff/pdf` take `requireAnyOrDecider` (a deciding TM with no project
+  right reads it while it waits on them). **The customer's approval** is
+  `POST /jobs/:id/kickoff/customer` once checked — the Request for
+  Approval's answer (`Job.scheduleCustomer*`; a revise needs its remarks,
+  never a day to come), shown and recorded by the shared
+  `CustomerAnswerCard` (`pages/delivery/PlanApprovals.tsx`). The page is
+  the "Kick-off Gantt chart" card over the tab's chart
+  (`pages/delivery/ProjectKickoff.tsx`: the people, the dates, what is
+  missing, the route, Print A3, Submit / Pull back, the Approval panel and
+  the customer's card). The tab's own Print stays the Scope of Work paper
+  with values. verify-delivery pins it.
 - **"Plan from costing" is `POST /jobs/:id/tasks/from-costing`**: the
   costing's `ScopeTask`s, planned in working days (`planTasks`), written as
   dated tasks from the project's start date through `workingDayDate()` in

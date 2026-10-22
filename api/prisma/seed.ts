@@ -244,6 +244,19 @@ const WORKFLOWS: WorkflowSeed[] = [
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
     ],
   },
+  // THE KICK-OFF GANTT CHART (2026-10-22, the owner's call: "Prepared By
+  // (Project Engineer), Checked By (Technical Manager), Approved By
+  // (Customer)"): the Project Engineer submits it, the project's own
+  // Technical Manager checks it (the engine's PROJECT_MANAGER step, reading
+  // the job), the technical managers on the engineer's team when the project
+  // names none. The customer's approval is recorded on the project after.
+  {
+    documentType: 'gantt_chart',
+    name: 'Kick-off Gantt chart — technical manager',
+    preparerSigns: true,
+    standIns: true,
+    steps: [{ sequence: 1, name: 'Technical Manager', approverType: 'PROJECT_MANAGER', roleKey: 'technical_manager' }],
+  },
   // HIRING (2026-10-21, the owner's Hiring module; his answer left the routes
   // to the plan's defaults, editable in Admin › Approval Workflows). The MAN
   // POWER REQUEST: the requester's Team Leader, the HR Officer, the CEO /
