@@ -886,6 +886,9 @@ invoiceRoutes.get(
     res.json({
       ...presentInvoice(row),
       canEdit: mayEdit(me, 'gfin', 'ar', row.createdById === me.id, row.createdById),
+      // The delete route's own door (2026-10-22): the creator or Edit All
+      // holding the delete right, or a super admin; the status is the page's.
+      canDelete: me.isSuperAdmin || (can(me, 'gfin.ar.delete') && canEditRecord(me, 'gfin', 'ar', row.createdById)),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
     });
   }),
@@ -1740,6 +1743,47 @@ invoiceRoutes.post(
           `${invoice.number} cancelled — ${body.reason}` +
           (billing ? `; billing ${billing.number} released to be invoiced again` : '') +
           (jobOrder ? `; job order ${jobOrder.number} released to be invoiced again` : ''),
+      },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);
+
+/**
+ * A cancelled (or never issued) invoice is deleted (2026-10-22, the owner's
+ * report on a cancelled sample: "still can't delete this"): `gfin.ar.delete`
+ * on one the caller raised or may edit all, or a super admin — the sales
+ * order's rule. Nothing stands on it: a collection applied to it is refused
+ * (a cancelled invoice has none, and a draft was never collected), its
+ * lines and allocations cascade, an invoice request that raised it is let
+ * go (SetNull), its files go with it, one DELETED audit row.
+ */
+invoiceRoutes.delete(
+  '/:id',
+  require_('gfin.ar.delete'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const invoice = await prisma.invoice.findUnique({
+      where: { id: req.params.id },
+      include: { allocations: { select: { id: true } } },
+    });
+    if (!invoice) throw notFound('Invoice not found');
+    if (!me.isSuperAdmin && !canEditRecord(me, 'gfin', 'ar', invoice.createdById)) {
+      throw forbidden('Only whoever raised this invoice, or Edit All, may delete it');
+    }
+    if (invoice.status !== 'CANCELLED' && invoice.status !== 'DRAFT') {
+      throw badRequest('Only a draft or a cancelled invoice can be deleted — cancel it first');
+    }
+    if (invoice.allocations.length) throw badRequest('Money was applied to this invoice — it is kept');
+    await deleteOrRefuse(invoice.number, () => prisma.invoice.delete({ where: { id: invoice.id } }));
+    await deleteAttachmentsOf('invoice', [invoice.id]);
+    await audit(
+      {
+        entityType: 'invoice',
+        entityId: invoice.id,
+        action: 'DELETED',
+        summary: `Deleted ${invoice.status === 'DRAFT' ? 'draft' : 'cancelled'} invoice ${invoice.number}`,
       },
       req,
     );

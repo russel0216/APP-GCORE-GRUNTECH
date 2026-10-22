@@ -3215,6 +3215,27 @@ async function main() {
       `${iCancelAgain.status} ${JSON.stringify(iCancelAgain.body).slice(0, 120)}`,
     );
 
+    // A cancelled sample is deleted (2026-10-22, the owner's report): by
+    // whoever raised it or Edit All with the delete right, never an issued one.
+    const iDelNosy = await eng('DELETE', `/invoices/${iId}`);
+    check('nobody without the A/R delete right deletes a cancelled invoice', iDelNosy.status === 403, String(iDelNosy.status));
+    await fin('POST', `/invoices/${iReraised.body.id}/issue`);
+    const iDelLive = await fin('DELETE', `/invoices/${iReraised.body.id}`);
+    const iLiveRow = await prisma.invoice.findUnique({ where: { id: iReraised.body.id }, select: { status: true } });
+    check(
+      'an issued invoice is not deleted — cancel it first',
+      iDelLive.status === 400 && iLiveRow?.status === 'ISSUED',
+      `${iLiveRow?.status} → ${iDelLive.status} ${JSON.stringify(iDelLive.body).slice(0, 120)}`,
+    );
+    const iDel = await fin('DELETE', `/invoices/${iId}`);
+    const iGone = await prisma.invoice.findUnique({ where: { id: iId } });
+    const iDelTrail = await prisma.auditLog.findFirst({ where: { entityType: 'invoice', entityId: iId, action: 'DELETED' } });
+    check(
+      'a cancelled invoice is deleted by A/R with the delete right, and the trail says so',
+      iDel.status === 200 && !iGone && !!iDelTrail?.summary?.includes('cancelled invoice'),
+      `${iDel.status} ${JSON.stringify(iDel.body).slice(0, 120)} gone=${!iGone} trail=${iDelTrail?.summary}`,
+    );
+
     // An invoice raised from a billing changes its header, never its figures.
     const report2 = await prisma.progressReport.create({
       data: {

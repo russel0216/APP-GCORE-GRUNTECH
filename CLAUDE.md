@@ -676,7 +676,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,730 assertions across twenty-two scripts** (counted 2026-10-21, after
+**4,733 assertions across twenty-two scripts** (counted 2026-10-22, after
+3 on finance for a cancelled invoice deleted, and before it
 one on delivery for the project's Scope of Work on paper, and before it one on finance for a sample sales order deleted with everything on it, and
 before it 50 on hr and one on foundation for Hiring — the weighted score, the request's
 route and its decider's door, the pool's moves, the exam catalogue's fixed
@@ -786,7 +787,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 430, masters 92, sales 643, costing 205, pipeline 121, calendar 103, numbering
 94, partners 120, delivery 196, chain 379, hr 637, plantilla 129, meetings
-114, evaluations 154, academy 145, finance 441, aftermarket 304, cad 122,
+114, evaluations 154, academy 145, finance 444, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -3653,6 +3654,14 @@ pushes; the first:
   naming it, where goods were received or released, a supplier bill stands
   on its orders, or a collection also settles another document. The
   ordinary Delete keeps its refusal.
+- **A cancelled invoice is deleted** (2026-10-22, the owner's report on a
+  cancelled sample: "still can't delete this"): `DELETE /invoices/:id` takes
+  a DRAFT or a CANCELLED one — `gfin.ar.delete` on an invoice the caller
+  raised or may edit all, or a super admin — refused while a collection is
+  applied to it; its lines cascade, an invoice request that raised it lets
+  go, its files go with it, one DELETED audit row. `GET /invoices/:id` sends
+  `canDelete`; ⋯ › Delete on the invoice page, asked in the confirm bar.
+  An issued invoice is cancelled first, as ever.
 - **Memos**: the register's switch reads **Drafted by me · All**
   (`mineLabel` on `DataList`) — Mine was the memos one drafted, never the
   ones received (My Records › Memos Received). An issued (or archived)

@@ -46,6 +46,7 @@ export interface Invoice {
   id: string;
   /** Edit All, or Edit Own on an invoice the viewer raised (2026-10-18) — the API's word. */
   canEdit?: boolean;
+  canDelete?: boolean;
   number: string;
   status: string;
   invoiceDate: string;
@@ -1076,6 +1077,7 @@ function InvoiceModal({
 export function InvoiceDetail() {
   const { id } = useParams<{ id: string }>();
   const toast = useToast();
+  const navigate = useNavigate();
   const { can } = useAuth();
   const [row, setRow] = useState<Invoice | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -1106,6 +1108,12 @@ export function InvoiceDetail() {
     await load();
   }
 
+  async function remove() {
+    await api.del(`/invoices/${id}`);
+    toast('ok', `${row?.number} deleted`);
+    navigate('/g-fin/ar');
+  }
+
   // Mirror the routes: Modify a draft; cancel anything not cancelled with no
   // money applied to it — both for whoever may edit this invoice: Edit All,
   // or Edit Own on one the viewer raised (2026-10-18, `canEdit` from the API).
@@ -1115,6 +1123,9 @@ export function InvoiceDetail() {
   const canCounter = (owed || row.status === 'PAID') && editable;
   const canCollect = owed && can('gfin.ar.create');
   const canCancel = row.status !== 'CANCELLED' && !row.allocations?.length && editable;
+  // A draft or a cancelled invoice is deleted by whoever raised it or Edit All
+  // with the delete right, or a super admin (2026-10-22) — the API's `canDelete`.
+  const canDelete = (row.status === 'CANCELLED' || row.status === 'DRAFT') && !row.allocations?.length && (row.canDelete ?? false);
   const releases = row.progressBilling
     ? ` ${row.progressBilling.number} goes back to be invoiced again.`
     : row.jobOrder
@@ -1227,6 +1238,16 @@ export function InvoiceDetail() {
               reasonLabel: 'Why? (kept on the invoice)',
               minReason: 3,
               onConfirm: cancel,
+            },
+          },
+          canDelete && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${row.number}?`,
+              body: `${row.status === 'DRAFT' ? 'It was never issued.' : 'It is cancelled and nothing was collected on it.'} Its lines and files go with it; the audit trail keeps the record.`,
+              confirmLabel: 'Delete invoice',
+              onConfirm: remove,
             },
           },
         ]}
