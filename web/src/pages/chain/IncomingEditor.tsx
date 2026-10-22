@@ -341,14 +341,18 @@ export function IncomingEditor() {
     setBusy(true);
     setError(null);
     try {
-      const savedId = existing
-        ? (await api.put<{ id: string }>(`/receivings/${existing.id}/sheet`, body())).id
-        : (await api.post<{ id: string; needsApproval: boolean }>('/receivings', body())).id;
+      const made = existing
+        ? { id: (await api.put<{ id: string }>(`/receivings/${existing.id}/sheet`, body())).id, needsApproval: true }
+        : await api.post<{ id: string; needsApproval: boolean }>('/receivings', body());
+      const savedId = made.id;
       setSaved(snapshot());
-      if (submit) {
+      if (submit && !made.needsApproval) {
+        // No route applies: a new report posted as it was saved.
+        toast('ok', 'Received — the goods are in');
+      } else if (submit) {
         try {
-          await api.post(`/receivings/${savedId}/submit`);
-          toast('ok', 'Saved and submitted for approval');
+          const after = await api.post<{ status: string }>(`/receivings/${savedId}/submit`);
+          toast('ok', after.status === 'RECEIVED' ? 'Received — no approval route applies' : 'Saved and submitted for approval');
         } catch (err) {
           toast('error', `Saved as a draft — not submitted: ${err instanceof Error ? err.message : 'refused'}`);
         }

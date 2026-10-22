@@ -246,8 +246,11 @@ type Header = {
   returnBy: string;
   reason: string;
   notes: string;
+  /** A slip with no source document may charge a project (2026-10-22) — required for project / site use. */
+  jobId: string;
 };
 const BLANK: Header = {
+  jobId: '',
   warehouseId: '',
   pulloutDate: '',
   purpose: '',
@@ -378,6 +381,15 @@ export function PulloutEditor() {
   const [form, setForm] = useState<Header>(BLANK);
   const [picks, setPicks] = useState<Record<string, Pick>>({});
   const [free, setFree] = useState<FreeLine[]>([blankFree()]);
+  // The projects a slip with no source document may charge — for whoever may see projects; nothing listed hides the box.
+  const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
+  useEffect(() => {
+    let live = true;
+    api.get<typeof jobs>('/jobs/lookup').then((j) => live && setJobs(j)).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useBackLink(editing ? `/g-chain/pullout-slips/${id}` : '/g-chain/pullout-slips', editing ? (existing ? String(existing.number) : 'the slip') : 'Pull-out Slips');
   useUnsavedChanges(dirty && !busy);
@@ -437,6 +449,7 @@ export function PulloutEditor() {
             returnBy: str('returnBy').slice(0, 10),
             reason: str('reason'),
             notes: str('notes'),
+            jobId: none ? ((slip.job as { id: string } | null)?.id ?? '') : '',
           });
           const items = slip.items as { sourceLineId: string | null; item: { id: string }; quantity: number; serialNo: string | null; condition: string | null }[];
           if (none || jobId) {
@@ -535,6 +548,7 @@ export function PulloutEditor() {
   if (!form.warehouseId) problems.push('choose the warehouse');
   if (!form.purpose) problems.push('say what it is for');
   if (none && form.reason.trim().length < 3) problems.push('say why there is no source document');
+  if (none && form.purpose === 'PROJECT_USE' && !form.jobId) problems.push('name the project the stock is for');
   if (freeMode) {
     if (!freeSent.length) problems.push('add at least one item');
     const asked = new Map<string, number>();
@@ -570,7 +584,7 @@ export function PulloutEditor() {
       kind: source.kind,
       salesOrderId: source.salesOrderId,
       requestId: source.requestId,
-      jobId: own ? (source.job?.id ?? null) : null,
+      jobId: own ? (source.job?.id ?? null) : none ? form.jobId || null : null,
       warehouseId: form.warehouseId,
       pulloutDate: form.pulloutDate || null,
       purpose: form.purpose || null,
@@ -741,6 +755,28 @@ export function PulloutEditor() {
         </div>
         {none && (
           <div className="qe-rows">
+            {(jobs.length > 0 || form.jobId) && (
+              <Field
+                label="Charge to project"
+                required={form.purpose === 'PROJECT_USE'}
+                hint="Company stock going to a project with no requisition behind it — the project is charged at the warehouse's average, by each item's budget line"
+                error={attempted && form.purpose === 'PROJECT_USE' && !form.jobId ? 'Name the project the stock is for' : null}
+              >
+                <select value={form.jobId} onChange={set('jobId')}>
+                  <option value="">— none —</option>
+                  {jobs.map((j) => (
+                    <option key={j.id} value={j.id}>
+                      {j.number} — {j.name}
+                    </option>
+                  ))}
+                  {form.jobId && !jobs.some((j) => j.id === form.jobId) && source.job && (
+                    <option value={form.jobId}>
+                      {source.job.number} — {source.job.name}
+                    </option>
+                  )}
+                </select>
+              </Field>
+            )}
             <Field label="Why no source document" required error={attempted && form.reason.trim().length < 3 ? 'Say why there is no source document' : null}>
               <textarea rows={2} value={form.reason} placeholder="e.g. wrong size delivered — back to the supplier; analyzer out for a five-day air audit" onChange={set('reason')} />
             </Field>

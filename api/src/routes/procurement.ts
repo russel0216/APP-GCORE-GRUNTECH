@@ -3160,9 +3160,10 @@ purchaseOrderRoutes.get(
 
 /**
  * The project's budget by budget line (`projectBudgetByLine()`), and — for an
- * order from a request — what issuing it releases: the request's net
- * commitment per budget line, which `settlePurchaseOrder` releases whole
- * before it commits the order's own figure.
+ * order from a request — `declared`: the request's net commitment per budget
+ * line, which STAYS committed when the order is issued (2026-10-22): the
+ * page says so, and measures nothing against the order's prices. `released`
+ * is kept, empty, for a page that still reads it.
  */
 purchaseOrderRoutes.get(
   '/budget',
@@ -3173,16 +3174,16 @@ purchaseOrderRoutes.get(
     const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, number: true, name: true } });
     if (!job) throw notFound('Project not found');
     const requestId = req.query.requestId ? String(req.query.requestId) : null;
-    const released: Record<string, number> = {};
+    const declared: Record<string, number> = {};
     if (requestId) {
       const rows = await prisma.jobCostEntry.groupBy({
         by: ['costCategoryId'],
         where: { jobId, state: 'COMMITTED', sourceType: 'purchase_request', sourceId: requestId },
         _sum: { amount: true },
       });
-      for (const r of rows) if (Math.abs(num(r._sum.amount)) >= 0.005) released[r.costCategoryId] = cents(num(r._sum.amount));
+      for (const r of rows) if (Math.abs(num(r._sum.amount)) >= 0.005) declared[r.costCategoryId] = cents(num(r._sum.amount));
     }
-    res.json({ job, ...(await projectBudgetByLine(jobId)), released, blocked: await overBudgetIsBlocked() });
+    res.json({ job, ...(await projectBudgetByLine(jobId)), declared, released: {}, blocked: await overBudgetIsBlocked() });
   }),
 );
 
@@ -3848,12 +3849,16 @@ purchaseOrderRoutes.post(
 );
 
 /**
- * An approved order becomes the FIRM commitment.
+ * An approved order is placed — and, from a request, MOVES NO BUDGET.
  *
- * The request's soft commitment at estimated prices is released and replaced
- * with the order's figure at the price actually agreed. Without the release,
- * the same material would be committed twice — once as a request, once as an
- * order — and the project would look far more committed than it is.
+ * Since 2026-10-22 (the owner's call: "the declared value in the purchase
+ * request should be the one to subtract in budget monitoring — the purchaser
+ * or importer is the one who manually inputs the price") the request's
+ * commitment at its DECLARED estimate is what Budget Monitoring counts until
+ * the goods arrive; the order's typed price never replaces it. Before, the
+ * issue released the request's estimate and committed the order's price. An
+ * order raised with NO request behind it still commits its own figure —
+ * nothing else declared that money.
  *
  * Claimed on PENDING_APPROVAL with a conditional update, so a decision that
  * finds the order no longer waiting (already issued by a repeated settle, or
@@ -3907,16 +3912,9 @@ export async function settlePurchaseOrder(documentId: string, outcome: ApprovalO
 
     if (po.kind !== 'DIRECT_TO_JOB' || !po.jobId) return true;
 
-    // Release the request's soft commitment, then commit the firm figure.
-    if (po.requestId) {
-      await releaseCommitment(tx, {
-        jobId: po.jobId,
-        sourceType: 'purchase_request',
-        sourceId: po.requestId,
-        reason: `Superseded by order ${po.number}`,
-        createdById: po.createdById,
-      });
-    }
+    // From a request: its declared value stays committed; the order's price
+    // is the supplier's business and touches no budget line.
+    if (po.requestId) return true;
 
     const byCategory = new Map<string, number>();
     for (const line of items) {
@@ -3952,7 +3950,13 @@ export async function settlePurchaseOrder(documentId: string, outcome: ApprovalO
     entityType: 'purchase_order',
     entityId: po.id,
     action: 'APPROVED',
-    summary: `${po.number} issued${po.kind === 'DIRECT_TO_JOB' ? ' — budget committed at order price' : ''}`,
+    summary: `${po.number} issued${
+      po.kind === 'DIRECT_TO_JOB' && po.jobId
+        ? po.requestId
+          ? ' — the request’s declared value stays committed'
+          : ' — budget committed at order price'
+        : ''
+    }`,
   });
 }
 
@@ -3962,12 +3966,13 @@ onApprovalSettled('purchase_order', async (request, outcome) => {
 
 /**
  * Pulled back after approval (2026-10-16): ISSUED → DRAFT, everything the
- * issue did undone in reverse — its firm commitment reversed, the request's
- * ordered quantities and status put back, and the request's soft commitment
- * restored by exactly what this order's issue released. Refused once goods
- * are received against it or a supplier bill names it, and — where its issue
- * released the request's commitment — while a later order on the same
- * request still stands (restoring it then would count that order twice).
+ * issue did undone in reverse — the request's ordered quantities and status
+ * put back and, for an order that committed its own figure (one with no
+ * request, or one issued before 2026-10-22), that commitment reversed and
+ * the request's restored by exactly what the issue released. Refused once
+ * goods are received against it or a supplier bill names it, and — where
+ * its issue released the request's commitment — while a later order on the
+ * same request still stands (restoring it then would count that order twice).
  */
 onApprovalReopened('purchase_order', {
   may: async (actor, id) => {

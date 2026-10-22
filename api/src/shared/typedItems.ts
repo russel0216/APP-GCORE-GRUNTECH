@@ -19,7 +19,7 @@ export async function itemForTypedLine(
   const part = line.partNumber?.trim() || null;
   const name = (line.name?.trim() || line.description.trim()).slice(0, 300);
   const code = await nextNumber('item', tx);
-  const created = await tx.item.create({ data: { code, name, partNumber: part, unit: line.unit || 'pcs', categoryId } });
+  const created = await tx.item.create({ data: { code, name, partNumber: part, unit: line.unit || 'pcs', categoryId, createdById: actorId || null } });
   await tx.auditLog.create({
     data: { entityType: 'item', entityId: created.id, action: 'CREATED', summary: `${code} ${name} added on receiving a purchase order line`, actorId: actorId || null },
   });

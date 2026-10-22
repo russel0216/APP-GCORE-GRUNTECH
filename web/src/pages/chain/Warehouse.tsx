@@ -295,15 +295,18 @@ export function ReceivingDetail() {
               className="btn btn-primary"
               onClick={() =>
                 confirm.ask({
-                  title: `Submit ${String(rec.number)} for approval?`,
-                  body: 'Nothing moves until it is approved: then the goods go into stock or onto the project, and the order shows them received. Attach the packing list or delivery receipt first.',
-                  confirmLabel: 'Submit for approval',
+                  title: rec.needsApproval === false ? `Receive ${String(rec.number)} now?` : `Submit ${String(rec.number)} for approval?`,
+                  body:
+                    rec.needsApproval === false
+                      ? 'No approval route applies: the goods go into stock or onto the project now, and the order shows them received.'
+                      : 'Nothing moves until it is approved: then the goods go into stock or onto the project, and the order shows them received. Attach the packing list or delivery receipt first.',
+                  confirmLabel: rec.needsApproval === false ? 'Receive now' : 'Submit for approval',
                   tone: 'primary',
                   onConfirm: submit,
                 })
               }
             >
-              Submit for approval
+              {rec.needsApproval === false ? 'Receive now' : 'Submit for approval'}
             </button>
           ) : (
             received &&

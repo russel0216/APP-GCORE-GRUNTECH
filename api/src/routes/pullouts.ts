@@ -102,8 +102,14 @@ export const PULLOUT_PURPOSES: Record<PulloutPurpose, string> = {
   SUPPLIER_RETURN: 'Supplier return',
   OTHER: 'Other',
 };
-/** The purposes a slip with no source document may carry — a sales order or a project's use has its document. */
-const OTHER_PURPOSES: PulloutPurpose[] = ['SITE_INSTALLATION', 'TESTING_AUDIT', 'REPAIR_SERVICE', 'SUPPLIER_RETURN', 'OTHER'];
+/**
+ * The purposes a slip with no source document may carry — a sales order has
+ * its document. Project / site use is among them since 2026-10-22 (the
+ * owner's report: the warehouse could not pull out what it had received on
+ * a STOCK order for a project, which no request names): such a slip names
+ * the project it charges.
+ */
+const OTHER_PURPOSES: PulloutPurpose[] = ['PROJECT_USE', 'SITE_INSTALLATION', 'TESTING_AUDIT', 'REPAIR_SERVICE', 'SUPPLIER_RETURN', 'OTHER'];
 /** A slip's purpose: its own, else what its kind means (a slip from before the purposes). */
 export const purposeOf = (slip: { purpose: PulloutPurpose | null; kind: PulloutKind }): PulloutPurpose =>
   slip.purpose ??
@@ -327,7 +333,7 @@ const sheetSchema = z
     kind: z.nativeEnum(PulloutKind),
     salesOrderId: z.string().optional().nullable(),
     requestId: z.string().optional().nullable(),
-    /** The project whose own stock a PROJECT_STOCK slip releases. */
+    /** The project whose own stock a PROJECT_STOCK slip releases — or the one a slip with no source document charges (optional there; required for project / site use). */
     jobId: z.string().optional().nullable(),
     warehouseId: z.string().min(1, 'Which warehouse?'),
     pulloutDate: z.string().optional().nullable(),
@@ -352,8 +358,12 @@ const sheetSchema = z
   )
   .refine((b) => b.kind !== 'OTHER' || (b.reason ?? '').trim().length >= 3, { message: 'Say why there is no source document', path: ['reason'] })
   .refine((b) => b.kind !== 'OTHER' || (!!b.purpose && OTHER_PURPOSES.includes(b.purpose)), {
-    message: 'Say what it is for — site installation, testing, a repair, a supplier return or other',
+    message: 'Say what it is for — project use, site installation, testing, a repair, a supplier return or other',
     path: ['purpose'],
+  })
+  .refine((b) => b.kind !== 'OTHER' || b.purpose !== 'PROJECT_USE' || !!b.jobId, {
+    message: 'Name the project the stock is for',
+    path: ['jobId'],
   });
 
 function asDate(v: string | null | undefined): Date | null {
@@ -373,7 +383,14 @@ function asDate(v: string | null | undefined): Date | null {
 async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: string) {
   const sourceId =
     body.kind === 'SALES_ORDER' ? body.salesOrderId! : body.kind === 'PURCHASE_REQUEST' ? body.requestId! : body.kind === 'PROJECT_STOCK' ? body.jobId! : '';
-  const source = await loadSource(body.kind, sourceId, exceptSlipId);
+  let source = await loadSource(body.kind, sourceId, exceptSlipId);
+  if (body.kind === 'OTHER' && body.jobId) {
+    // Company stock charged to a project with no request behind it (2026-10-22).
+    const job = await prisma.job.findUnique({ where: { id: body.jobId }, select: { id: true, number: true, name: true, status: true } });
+    if (!job) throw badRequest('That project does not exist');
+    if (job.status === 'CANCELLED') throw badRequest(`${job.number} was cancelled`);
+    source = { ...NO_SOURCE, jobId: job.id, job: { id: job.id, number: job.number, name: job.name }, label: `No source document — charged to ${job.number}` };
+  }
   const free = body.kind === 'OTHER' || body.kind === 'PROJECT_STOCK';
   if (body.requestedById && !(await prisma.user.findUnique({ where: { id: body.requestedById }, select: { id: true } }))) {
     throw badRequest('The person who asked for it is not on file');
@@ -393,6 +410,9 @@ async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: stri
       if (l.sourceLineId) throw badRequest('This slip answers no source line');
       const item = itemById.get(l.itemId);
       if (!item || !item.isActive) throw badRequest('One of the items is not in the item master');
+      if (body.kind === 'OTHER' && source.jobId && !item.costCategoryId) {
+        throw badRequest(`${item.name} has no budget line — set its cost category in the item master; ${source.job!.number} is charged by budget line`);
+      }
       perItem.set(item.id, (perItem.get(item.id) ?? 0) + l.quantity);
       continue;
     }
@@ -1070,11 +1090,18 @@ pulloutRoutes.put(
       throw badRequest('A slip keeps the document it pulls against — raise another for a different one');
     }
     if (body.version && new Date(body.version).getTime() !== slip.updatedAt.getTime()) throw badRequest(`${slip.number} changed a moment ago — reload to see it`);
-    const { balByItem, orderItems, pulloutDate, returnBy } = await checkSheet(body, slip.id);
+    const { source, balByItem, orderItems, pulloutDate, returnBy } = await checkSheet(body, slip.id);
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.pulloutSlip.updateMany({
         where: { id: slip.id, status: 'DRAFT', updatedAt: slip.updatedAt },
-        data: { warehouseId: body.warehouseId, pulloutDate, requestedById: body.requestedById || null, ...headerData(body, returnBy) },
+        data: {
+          warehouseId: body.warehouseId,
+          pulloutDate,
+          requestedById: body.requestedById || null,
+          // A slip with no source document may change the project it charges while a draft.
+          ...(slip.kind === 'OTHER' ? { jobId: source.jobId } : {}),
+          ...headerData(body, returnBy),
+        },
       });
       if (!claimed.count) throw badRequest(`${slip.number} changed a moment ago — reload to see it`);
       await writeLines(tx, slip.id, body.lines, balByItem, orderItems);

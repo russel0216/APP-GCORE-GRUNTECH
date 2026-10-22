@@ -562,20 +562,21 @@ async function main() {
   await act({ requestId: poApproval.id, userId: purchMgr.id, action: 'APPROVED' });
 
   const afterPo = await position();
-  // 15,000 committed by the request, released, then 13,000 by the order.
-  // Without the release this would read 28,000 and the project would look
-  // nearly twice as committed as it is.
+  // 15,000 committed by the request at its DECLARED estimate stays what Budget
+  // Monitoring counts (2026-10-22, the owner's call): the order's 13,000 at
+  // the price the purchaser typed moves no budget line — neither released
+  // nor committed. Before, the issue swapped the estimate for the price.
   check(
-    'issuing the order RELEASES the request commitment',
-    money(afterPo.committed, 13_000),
-    `${afterPo.committed} — 28,000 would mean it was committed twice`,
+    'issuing the order from a request keeps the request’s declared value committed — the order’s price moves nothing',
+    money(afterPo.committed, 15_000),
+    `${afterPo.committed} — 13,000 would mean the order’s price replaced the declared value, 28,000 that it was committed twice`,
   );
-  check('available reflects the real order price', money(afterPo.available, 487_000));
-
-  const releaseRow = await prisma.jobCostEntry.findFirst({
-    where: { jobId: job.id, sourceType: 'purchase_request', amount: { lt: 0 } },
-  });
-  check('the release is a reversing row, not a deletion', releaseRow !== null);
+  check('so available still reads the declared value', money(afterPo.available, 485_000));
+  check(
+    'the issue wrote no order commitment and released nothing',
+    (await prisma.jobCostEntry.count({ where: { jobId: job.id, sourceType: 'purchase_order', sourceId: po.id } })) === 0 &&
+      (await prisma.jobCostEntry.count({ where: { jobId: job.id, sourceType: 'purchase_request', sourceId: pr.id, amount: { lt: 0 } } })) === 0,
+  );
 
   // ── 4. Receiving turns committed into incurred ─────────────────────────────
   console.log('\nReceiving');
@@ -601,20 +602,24 @@ async function main() {
     // the route no longer builds inventory for those. Mirrored here so the test
     // exercises the same rule the route follows.
 
+    // The route's rule since 2026-10-22, mirrored: the 60 received are charged
+    // at the request's DECLARED estimate (60 × 150 = 9,000) and that much of
+    // the request's commitment comes off; the order's 130 a piece is the
+    // supplier's business. (The HTTP section below drives the real route.)
     const { releaseCommitment, postJobCost } = await import('../src/shared/inventory');
     await releaseCommitment(tx, {
       jobId: job.id,
-      sourceType: 'purchase_order',
-      sourceId: po.id,
+      sourceType: 'purchase_request',
+      sourceId: pr.id,
       costCategoryId: materials.id,
-      amount: 7_800,
+      amount: 9_000,
       reason: `Received on ${created.number}`,
     });
     await postJobCost(tx, {
       jobId: job.id,
       costCategoryId: materials.id,
       state: 'INCURRED',
-      amount: 7_800,
+      amount: 9_000,
       sourceType: 'receiving',
       sourceId: created.id,
       sourceNumber: created.number,
@@ -623,18 +628,22 @@ async function main() {
   });
 
   const afterReceipt = await position();
-  // 60 of 100 received: 7,800 moves from committed to incurred.
-  check('a partial receipt incurs what arrived', money(afterReceipt.incurred, 7_800));
+  // 60 of 100 received: 9,000 of the declared value moves from committed to incurred.
+  check('a partial receipt incurs what arrived at the declared value', money(afterReceipt.incurred, 9_000));
   check(
-    'and releases the same from committed',
-    money(afterReceipt.committed, 5_200),
-    `${afterReceipt.committed} — 13,000 would mean the commitment was never released`,
+    'and releases the same from the request’s commitment',
+    money(afterReceipt.committed, 6_000),
+    `${afterReceipt.committed} — 15,000 would mean the commitment was never released`,
   );
   check(
     'so available is unchanged by the handover',
-    money(afterReceipt.available, 487_000),
+    money(afterReceipt.available, 485_000),
     String(afterReceipt.available),
   );
+  const releaseRow = await prisma.jobCostEntry.findFirst({
+    where: { jobId: job.id, sourceType: 'purchase_request', sourceId: pr.id, amount: { lt: 0 } },
+  });
+  check('the release is a reversing row, not a deletion', releaseRow !== null);
 
   balance = await prisma.inventoryBalance.findUnique({
     where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } },
@@ -1766,9 +1775,11 @@ async function main() {
     );
     const poBudget = await api(buyerToken, 'GET', `/purchase-orders/budget?jobId=${job.id}&requestId=${approvedPr.id}`);
     check(
-      'GET /purchase-orders/budget says what issuing releases from the request, per budget line',
-      poBudget.status === 200 && (poBudget.body.released as Record<string, number>)?.[materials.id] === 4600,
-      JSON.stringify(poBudget.body.released),
+      'GET /purchase-orders/budget says the request’s declared value that stays committed, per budget line — issuing releases nothing',
+      poBudget.status === 200 &&
+        (poBudget.body.declared as Record<string, number>)?.[materials.id] === 4600 &&
+        Object.keys((poBudget.body.released as Record<string, number>) ?? { x: 1 }).length === 0,
+      JSON.stringify({ declared: poBudget.body.declared, released: poBudget.body.released }),
     );
     const foreignRequestLine = await api(buyerToken, 'POST', '/purchase-orders', {
       supplierId: supplier.id, requestId: approvedPr.id, notes: `${TAG} foreign line`,
@@ -5287,6 +5298,265 @@ async function main() {
   // to draft, even if it's fully approved". The requisition's approval
   // committed budget, the order's issue replaced it with its own: pulling
   // either back undoes exactly that, and anything standing on it refuses.
+  // ── The declared value rule (2026-10-22) ─────────────────────────────
+  // The owner's call: "the declared value in the purchase request should be
+  // the one to subtract in budget monitoring — the purchaser or importer is
+  // the one who manually inputs the price". Through the real routes: the
+  // receipt charges the declared value and releases it from the request;
+  // pulling the receipt back puts it back; an order issued under the price
+  // rule before is put right once by the seed.
+  console.log('\nThe declared value rule');
+  {
+    const declaredBefore = await position();
+    const dvPr = await prisma.purchaseRequest.create({
+      data: {
+        number: await nextNumber('purchase_request'),
+        status: 'APPROVED',
+        kind: 'DIRECT_TO_JOB',
+        jobId: job.id,
+        warehouseId: warehouse.id,
+        requestedById: engineer.id,
+        purpose: `${TAG} declared value`,
+        items: { create: [{ itemId: item.id, costCategoryId: materials.id, description: `${TAG} Stainless pipe`, quantity: D(10), unit: 'pcs', estimatedCost: D(100), estimatedAmount: D(1_000) }] },
+      },
+      include: { items: true },
+    });
+    await prisma.jobCostEntry.create({
+      data: { jobId: job.id, costCategoryId: materials.id, state: 'COMMITTED', amount: D(1_000), sourceType: 'purchase_request', sourceId: dvPr.id, sourceNumber: dvPr.number, description: 'Approved request' },
+    });
+    const dvPo = await prisma.purchaseOrder.create({
+      data: {
+        number: await nextNumber('purchase_order'),
+        status: 'PENDING_APPROVAL',
+        kind: 'DIRECT_TO_JOB',
+        requestId: dvPr.id,
+        jobId: job.id,
+        supplierId: supplier.id,
+        warehouseId: warehouse.id,
+        createdById: procurement.id,
+        notes: `${TAG} declared value order`,
+        subtotal: D(900),
+        total: D(900),
+        items: { create: [{ requestItemId: dvPr.items[0].id, itemId: item.id, costCategoryId: materials.id, description: `${TAG} Stainless pipe`, quantity: D(10), unit: 'pcs', unitPrice: D(90), amount: D(900) }] },
+      },
+      include: { items: true },
+    });
+    await settlePurchaseOrder(dvPo.id, 'APPROVED');
+    const dvIssued = await position();
+    check(
+      'settlePurchaseOrder on an order from a request moves no budget: the declared 1,000 stays committed, the 900 typed is not',
+      money(dvIssued.committed - declaredBefore.committed, 1_000) && (await prisma.jobCostEntry.count({ where: { sourceType: 'purchase_order', sourceId: dvPo.id } })) === 0,
+      `${declaredBefore.committed} → ${dvIssued.committed}`,
+    );
+    const dvIn = await prisma.receiving.create({
+      data: {
+        number: await nextNumber('receiving'),
+        orderId: dvPo.id,
+        receivedById: procurement.id,
+        status: 'PENDING_APPROVAL',
+        items: { create: [{ orderItemId: dvPo.items[0].id, quantity: D(4), unitCost: D(90) }] },
+      },
+    });
+    // Through the engine, so the receipt has an approval to pull back: one
+    // holder of both Incoming steps signs them with one Approve.
+    const incomingBoss = await makeUser('Verify Incoming Boss', 'inboss@verifyc.local', ['back_support', 'purchasing_manager']);
+    const dvRequest = await submitForApproval({
+      documentType: 'receiving',
+      documentId: dvIn.id,
+      documentNumber: dvIn.number,
+      subject: `${TAG} declared value receipt`,
+      amount: 360,
+      requesterId: procurement.id,
+    });
+    await act({ requestId: dvRequest.id, userId: incomingBoss.id, action: 'APPROVED' });
+    const dvReceived = await position();
+    const dvIncurredRow = await prisma.jobCostEntry.findFirst({ where: { sourceType: 'receiving', sourceId: dvIn.id, state: 'INCURRED' } });
+    const dvRelease = await prisma.jobCostEntry.aggregate({ where: { sourceType: 'purchase_request', sourceId: dvPr.id, description: `Received on ${dvIn.number}` }, _sum: { amount: true } });
+    check(
+      'the receipt of 4 charges the project 400 — the declared 100 a piece, not the 90 ordered — releases 400 from the request, and the trail names the ordered figure',
+      money(dvReceived.incurred - declaredBefore.incurred, 400) &&
+        money(dvReceived.committed - declaredBefore.committed, 600) &&
+        money(num(dvRelease._sum.amount), -400) &&
+        !!dvIncurredRow &&
+        num(dvIncurredRow.amount) === 400 &&
+        (dvIncurredRow.description ?? '').includes('ordered at 360.00') &&
+        (await prisma.jobCostEntry.count({ where: { sourceType: 'purchase_order', sourceId: dvPo.id } })) === 0,
+      `incurred +${dvReceived.incurred - declaredBefore.incurred}, committed +${dvReceived.committed - declaredBefore.committed}, release ${dvRelease._sum.amount}; ${dvIncurredRow?.description}`,
+    );
+    const procResolvedDv = (await resolveUser(procurement.id))!;
+    const dvBack = await reopenApproved('receiving', dvIn.id, procResolvedDv, `${TAG} wrong count`).then(() => 'ok', (e: Error) => e.message);
+    const dvReopened = await position();
+    check(
+      'pulling the receipt back puts the 400 back on the request’s commitment and takes it off incurred',
+      dvBack === 'ok' && money(dvReopened.committed - declaredBefore.committed, 1_000) && money(dvReopened.incurred - declaredBefore.incurred, 0),
+      `${dvBack}; committed +${dvReopened.committed - declaredBefore.committed}, incurred +${dvReopened.incurred - declaredBefore.incurred}`,
+    );
+
+    // An order issued under the price rule before 2026-10-22, with 4 of its
+    // 10 received at the price: the seed's once-only step puts the declared
+    // value of the 6 still to come back on the request and reverses what the
+    // order still commits.
+    const oldPr = await prisma.purchaseRequest.create({
+      data: {
+        number: await nextNumber('purchase_request'),
+        status: 'PARTIALLY_ORDERED',
+        kind: 'DIRECT_TO_JOB',
+        jobId: job.id,
+        warehouseId: warehouse.id,
+        requestedById: engineer.id,
+        purpose: `${TAG} old rule`,
+        items: { create: [{ itemId: item.id, costCategoryId: materials.id, description: `${TAG} Stainless pipe`, quantity: D(10), unit: 'pcs', estimatedCost: D(100), estimatedAmount: D(1_000), orderedQty: D(10) }] },
+      },
+      include: { items: true },
+    });
+    const oldPo = await prisma.purchaseOrder.create({
+      data: {
+        number: await nextNumber('purchase_order'),
+        status: 'PARTIALLY_RECEIVED',
+        kind: 'DIRECT_TO_JOB',
+        requestId: oldPr.id,
+        jobId: job.id,
+        supplierId: supplier.id,
+        warehouseId: warehouse.id,
+        createdById: procurement.id,
+        issuedAt: new Date(),
+        notes: `${TAG} old rule order`,
+        subtotal: D(900),
+        total: D(900),
+        items: { create: [{ requestItemId: oldPr.items[0].id, itemId: item.id, costCategoryId: materials.id, description: `${TAG} Stainless pipe`, quantity: D(10), unit: 'pcs', unitPrice: D(90), amount: D(900), receivedQty: D(4) }] },
+      },
+    });
+    const oldRows = [
+      { state: 'COMMITTED', amount: D(1_000), sourceType: 'purchase_request', sourceId: oldPr.id, description: 'Approved request' },
+      { state: 'COMMITTED', amount: D(-1_000), sourceType: 'purchase_request', sourceId: oldPr.id, description: `Superseded by order ${oldPo.number}` },
+      { state: 'COMMITTED', amount: D(900), sourceType: 'purchase_order', sourceId: oldPo.id, description: 'Order issued' },
+      { state: 'COMMITTED', amount: D(-360), sourceType: 'purchase_order', sourceId: oldPo.id, description: 'Received on ZZ' },
+      { state: 'INCURRED', amount: D(360), sourceType: 'receiving', sourceId: 'zz-old', description: 'Goods received' },
+    ] as const;
+    for (const r of oldRows) await prisma.jobCostEntry.create({ data: { jobId: job.id, costCategoryId: materials.id, ...r } });
+    const beforeFix = await position();
+    const { applyDeclaredValueRule } = await import('../src/shared/declaredValue');
+    const moved = await applyDeclaredValueRule(prisma, { only: [oldPo.id, dvPo.id] });
+    const afterFix = await position();
+    const movedAgain = await applyDeclaredValueRule(prisma, { only: [oldPo.id, dvPo.id] });
+    check(
+      'the seed puts an order issued under the price rule back on its request’s declared value: 540 at the price → 600 declared for the 6 to come, the received 360 untouched, once',
+      moved === 1 &&
+        movedAgain === 0 &&
+        money(beforeFix.committed - dvReopened.committed, 540) &&
+        money(afterFix.committed - dvReopened.committed, 600) &&
+        money(afterFix.incurred - dvReopened.incurred, 360) &&
+        (await prisma.jobCostEntry.aggregate({ where: { sourceType: 'purchase_order', sourceId: oldPo.id, state: 'COMMITTED' }, _sum: { amount: true } }))._sum.amount?.isZero() === true,
+      `moved ${moved} then ${movedAgain}; committed +${beforeFix.committed - dvReopened.committed} → +${afterFix.committed - dvReopened.committed}; incurred +${afterFix.incurred - dvReopened.incurred}`,
+    );
+    await prisma.jobCostEntry.deleteMany({ where: { sourceId: 'zz-old' } });
+  }
+
+  // ── The warehouse's doors (2026-10-22) ───────────────────────────────
+  // The owner's report: "they still cannot pull out or input product in the
+  // inventory even the incoming of purchased order". Three doors were shut:
+  // Inventory's View Own read "the stock of items you added" (a warehouse
+  // hand saw "No stock yet"); an Incoming draft could not post once no
+  // route applied; and company stock received on a STOCK order could not be
+  // pulled out to a project with no request behind it.
+  console.log('\nThe warehouse’s doors');
+  {
+    const doorUser = async (name: string, email: string, roleId: string) =>
+      prisma.user.create({ data: { name, email, passwordHash: await bcrypt.hash('x', 10), roles: { create: [{ roleId }] } } });
+    const onHand = async () => {
+      const b = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+      return num(b?.quantity);
+    };
+    const handRole = await makeRole('zzchain_hand', 'ZZ Warehouse Hand', ['gchain.inventory.view_own']);
+    const hand = await doorUser('Verify Warehouse Hand', 'hand@verifyc.local', handRole.id);
+    const handToken = signToken(hand.id, hand.email);
+    const handList = await api(handToken, 'GET', `/inventory?warehouseId=${warehouse.id}&pageSize=200`);
+    const handRows = (handList.body.rows ?? []) as { item?: { id: string } }[];
+    const handCard = await api(handToken, 'GET', `/inventory/${item.id}/card`);
+    check(
+      'Inventory › View Own reads the whole shelf — a warehouse hand who added no item sees the stock and opens its card',
+      handList.status === 200 && handRows.some((r) => r.item?.id === item.id) && handCard.status === 200,
+      `${handList.status} ${handRows.length} rows; card ${handCard.status}`,
+    );
+
+    // A stock order's receipt drafted while the route was on, posted once it is off.
+    const doorOrder = await prisma.purchaseOrder.create({
+      data: {
+        number: await nextNumber('purchase_order'),
+        status: 'ISSUED',
+        kind: 'STOCK_REPLENISHMENT',
+        supplierId: supplier.id,
+        warehouseId: warehouse.id,
+        createdById: procurement.id,
+        issuedAt: new Date(),
+        notes: `${TAG} stock order, route off`,
+        subtotal: D(300),
+        total: D(300),
+        items: { create: [{ itemId: item.id, description: `${TAG} Stainless pipe`, quantity: D(3), unit: 'pcs', unitPrice: D(100), amount: D(300) }] },
+      },
+      include: { items: true },
+    });
+    const doorRole = await makeRole('zzchain_door_receiver', 'ZZ Door Receiver', ['gchain.receiving.view_all', 'gchain.receiving.create']);
+    const doorReceiver = await doorUser('Verify Door Receiver', 'doorreceiver@verifyc.local', doorRole.id);
+    const receiverToken = signToken(doorReceiver.id, doorReceiver.email);
+    const doorDraft = await api(receiverToken, 'POST', '/receivings', { orderId: doorOrder.id, items: [{ orderItemId: doorOrder.items[0].id, quantity: 3 }] });
+    const doorId = String(doorDraft.body.id);
+    const routeRows = await prisma.approvalWorkflow.findMany({ where: { documentType: 'receiving', isActive: true }, select: { id: true } });
+    await prisma.approvalWorkflow.updateMany({ where: { id: { in: routeRows.map((r) => r.id) } }, data: { isActive: false } });
+    let doorPosted: Awaited<ReturnType<typeof api>> | null = null;
+    let doorRead: Awaited<ReturnType<typeof api>> | null = null;
+    const shelfBeforeDoor = await onHand();
+    try {
+      doorRead = await api(receiverToken, 'GET', `/receivings/${doorId}`);
+      doorPosted = await api(receiverToken, 'POST', `/receivings/${doorId}/submit`);
+    } finally {
+      await prisma.approvalWorkflow.updateMany({ where: { id: { in: routeRows.map((r) => r.id) } }, data: { isActive: true } });
+    }
+    check(
+      'an Incoming draft saved while the route was on posts at once when no route applies any more: the page says so, the goods are in, the order received',
+      doorDraft.status === 201 &&
+        doorDraft.body.status === 'DRAFT' &&
+        doorRead?.status === 200 &&
+        doorRead.body.needsApproval === false &&
+        doorRead.body.canSubmit === true &&
+        doorPosted?.status === 200 &&
+        doorPosted.body.status === 'RECEIVED' &&
+        money(await onHand(), shelfBeforeDoor + 3) &&
+        (await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: doorOrder.id } })).status === 'RECEIVED',
+      `${doorDraft.status} ${doorDraft.body.status}; read ${doorRead?.status} needsApproval ${doorRead?.body.needsApproval}; submit ${doorPosted?.status} ${doorPosted?.body.status ?? doorPosted?.body.error}; shelf ${shelfBeforeDoor} → ${await onHand()}`,
+    );
+
+    // Company stock pulled out to a project with no request behind it.
+    const keeperTokenDoor = signToken(storekeeper.id, storekeeper.email);
+    const noProject = await api(keeperTokenDoor, 'POST', '/pullout-slips', {
+      kind: 'OTHER', warehouseId: warehouse.id, purpose: 'PROJECT_USE', reason: `${TAG} received on a stock order`, lines: [{ itemId: item.id, quantity: 2 }],
+    });
+    const toProject = await api(keeperTokenDoor, 'POST', '/pullout-slips', {
+      kind: 'OTHER', warehouseId: warehouse.id, purpose: 'PROJECT_USE', jobId: job.id, reason: `${TAG} received on a stock order`, lines: [{ itemId: item.id, quantity: 2 }],
+    });
+    const toProjectId = String(toProject.body.id);
+    const doorPosition = await position();
+    const shelfBeforePull = await onHand();
+    await prisma.pulloutSlip.update({ where: { id: toProjectId }, data: { status: 'PENDING_APPROVAL' } });
+    await settlePullout(toProjectId, 'APPROVED');
+    const pulledSlip = await prisma.pulloutSlip.findUniqueOrThrow({ where: { id: toProjectId }, include: { items: true } });
+    const afterPull = await position();
+    const pulledAmount = num(pulledSlip.items[0].amount);
+    check(
+      'a pull-out with no source document names the project it charges: project use needs one; out it goes at the warehouse’s average, charged INCURRED and CONSUMED on the item’s budget line',
+      noProject.status === 400 &&
+        toProject.status === 201 &&
+        pulledSlip.status === 'PULLED_OUT' &&
+        pulledSlip.jobId === job.id &&
+        pulledSlip.purpose === 'PROJECT_USE' &&
+        pulledAmount > 0 &&
+        money(await onHand(), shelfBeforePull - 2) &&
+        money(afterPull.incurred - doorPosition.incurred, pulledAmount) &&
+        money(afterPull.consumed - doorPosition.consumed, pulledAmount),
+      `${noProject.status} ${JSON.stringify(noProject.body).slice(0, 100)}; ${toProject.status} ${JSON.stringify(toProject.body).slice(0, 100)}; ${pulledSlip.status} ${pulledAmount}; shelf ${shelfBeforePull} → ${await onHand()}; incurred +${afterPull.incurred - doorPosition.incurred} consumed +${afterPull.consumed - doorPosition.consumed}`,
+    );
+  }
+
   console.log('\nPulled back after approval');
   {
     const engResolved = (await resolveUser(engineer.id))!;
@@ -5383,9 +5653,9 @@ async function main() {
     const poRow = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: backPo.id } });
     const prAfterPo = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: backPr.id }, include: { items: true } });
     check(
-      'an issued order is pulled back to a draft by its buyer: its firm commitment reversed, the request’s ordered quantity and status put back, and the request’s commitment restored',
+      'an issued order is pulled back to a draft by its buyer: the request’s ordered quantity and status put back, its declared commitment untouched throughout (the order’s price never moved it)',
       issuedPo.status === 'ISSUED' &&
-        money(committedIssued - committedBefore, 900) &&
+        money(committedIssued - committedBefore, 1_000) &&
         poBack === 'ok' &&
         poRow.status === 'DRAFT' &&
         poRow.issuedAt === null &&
@@ -5409,8 +5679,8 @@ async function main() {
     });
     const poWithGoods = await reopenApproved('purchase_order', backPo.id, procResolved, `${TAG} again`).then(() => 'ok', (e: Error) => e.message);
     check(
-      'issued a second time it commits once more at the order’s price (not twice); with goods being received against it, pulling it back is refused, naming the report',
-      money(committedAgain - committedBefore, 900) &&
+      'issued a second time the declared value is still what is committed (never twice); with goods being received against it, pulling it back is refused, naming the report',
+      money(committedAgain - committedBefore, 1_000) &&
         poWithGoods.includes(draftIn.number) &&
         (await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: backPo.id } })).status === 'ISSUED',
       `${committedAgain}; ${poWithGoods}`,

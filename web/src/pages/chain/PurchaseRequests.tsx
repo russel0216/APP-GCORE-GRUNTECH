@@ -505,7 +505,7 @@ export function PurchaseRequestDetail() {
       {pr.status === 'APPROVED' && pr.kind === 'DIRECT_TO_JOB' && (
         <div className="alert ok">
           Approved — {formatMoney(pr.estimatedTotal)} is now committed against the project's budget
-          at estimated prices. Raising the order replaces that with the price actually agreed.
+          at its declared prices — what Budget Monitoring counts until the goods arrive. The order's own prices move no budget line.
         </div>
       )}
       {pr.kind === 'SALES_ORDER' && pr.spend && (

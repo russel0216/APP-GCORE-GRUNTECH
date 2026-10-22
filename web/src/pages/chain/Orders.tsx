@@ -366,8 +366,8 @@ export function PurchaseOrderDetail() {
       {isDraft && po.request && po.items.length > 0 && (
         <div className="alert info">
           Lines came over from {po.request.number} at its <strong>estimated</strong> prices. Set each
-          one to the price actually agreed with {po.supplier.name} before submitting — the approved
-          order is what commits the budget.
+          one to the price actually agreed with {po.supplier.name} before submitting. Budget Monitoring
+          keeps counting the request's declared value; the order's prices move no budget line.
         </div>
       )}
       {po.status === 'PENDING_APPROVAL' && (

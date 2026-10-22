@@ -10,6 +10,7 @@ import { backfillPositions } from '../src/shared/plantilla';
 import { markUnchangedScoroImports, withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
 import { closeLegacyBudgetIncreases, syncBudgetRequestCommitments } from '../src/shared/budgetRequests';
+import { applyDeclaredValueRule } from '../src/shared/declaredValue';
 import { migrateCostingMargins } from '../src/shared/costingLegacy';
 import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGroups';
 import { seedActivityTypes } from '../src/shared/activityTypes';
@@ -1048,6 +1049,10 @@ async function main() {
     if (closedIncreases) console.log(`  · Closed ${closedIncreases} budget request(s) approved as budget increases under the old rule`);
     const committedRequests = await syncBudgetRequestCommitments();
     if (committedRequests) console.log(`  · Committed the released cash of ${committedRequests} budget request(s) on Budget Monitoring`);
+    // Orders issued under the price rule before 2026-10-22: the request's
+    // declared value is what Budget Monitoring counts again, once.
+    const declaredMoved = await applyDeclaredValueRule(prisma);
+    if (declaredMoved) console.log(`  · Put ${declaredMoved} issued order(s) back on their request's declared value`);
     // Costings priced with a markup, a contingency % or a discount (the rule
     // before 2026-10-09) carry over to the margin rule; the contract value
     // never moves.

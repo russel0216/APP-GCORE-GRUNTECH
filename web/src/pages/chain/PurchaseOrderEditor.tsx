@@ -21,9 +21,10 @@ import { ItemCell, type BudgetLine, type Category, type Route, type Suggestion }
  *
  * Header and lines are ONE save (`POST /purchase-orders` with `lines[]`,
  * `PUT /purchase-orders/:id/sheet`). Beside the lines, for an order charged to
- * a project, the budget as issuing the order would leave it: what is
- * available, plus the request's estimate the issue releases, less this
- * order's lines at the agreed price. Under them the order's money (the
+ * a project, the budget: from a request, the request's declared value that
+ * stays committed (2026-10-22 — the order's prices move no budget line);
+ * with no request, what is available less this order's lines at the agreed
+ * price, which issuing commits. Under them the order's money (the
  * server's `recalcPo`, mirrored in `orderTotals`) and the route submitting
  * would take.
  */
@@ -32,7 +33,9 @@ interface Budget {
   job: { id: string; number: string; name: string };
   lines: BudgetLine[];
   total: { budgeted: number; committed: number; incurred: number; available: number };
-  /** What issuing the order releases from its request, per budget line. */
+  /** The request's declared value still committed, per budget line — what Budget Monitoring counts (2026-10-22). */
+  declared: Record<string, number>;
+  /** Kept empty since 2026-10-22: issuing an order from a request releases nothing. */
   released: Record<string, number>;
   blocked: boolean;
 }
@@ -502,11 +505,14 @@ export function PurchaseOrderEditor() {
 
   const ordering = new Map<string, number>();
   for (const l of sent) if (l.costCategoryId) ordering.set(l.costCategoryId, (ordering.get(l.costCategoryId) ?? 0) + amountOf(l));
-  const released = budget?.released ?? {};
-  const budgetRows = (budget?.lines ?? []).filter((b) => b.budgeted > 0 || ordering.has(b.id) || released[b.id]);
-  const leftAfter = (b: BudgetLine) => Math.round((b.available + (released[b.id] ?? 0) - (ordering.get(b.id) ?? 0)) * 100) / 100;
-  const over = budgetRows.filter((b) => leftAfter(b) < -0.004);
-  const releasedTotal = Object.values(released).reduce((s, v) => s + v, 0);
+  // From a request, the request's DECLARED value stays committed and the
+  // order's prices move no budget line (2026-10-22, the owner's call); only an
+  // order with no request behind it commits its own figure on issue.
+  const onRequest = !!request;
+  const declared = budget?.declared ?? {};
+  const budgetRows = (budget?.lines ?? []).filter((b) => b.budgeted > 0 || ordering.has(b.id) || declared[b.id]);
+  const leftAfter = (b: BudgetLine) => (onRequest ? b.available : Math.round((b.available - (ordering.get(b.id) ?? 0)) * 100) / 100);
+  const over = onRequest ? [] : budgetRows.filter((b) => leftAfter(b) < -0.004);
   const mayCreate = can('gchain.purchase_orders.create');
 
   const actions = (
@@ -675,7 +681,7 @@ export function PurchaseOrderEditor() {
             {request && (
               <p className="prq-hint">
                 Lines from {request.number} come at {canvass ? `the price ${canvass.number} awarded` : 'its estimated prices'} — set each to
-                the price actually agreed. The approved, issued order is what commits the budget.
+                the price actually agreed. Budget Monitoring keeps counting the request's declared value; the order's prices move no budget line.
               </p>
             )}
           </section>
@@ -905,13 +911,14 @@ export function PurchaseOrderEditor() {
             ) : (
               <>
                 <p className="prq-hint">
-                  Issuing the order {releasedTotal ? `releases ${request?.number ?? 'the request'}'s estimate and ` : ''}commits these
-                  lines at the agreed price. Nothing moves until it is approved.
+                  {onRequest
+                    ? `Budget Monitoring counts ${request?.number ?? 'the request'}'s declared value, which stays committed until the goods arrive. The prices typed here are the supplier's figure and move no budget line.`
+                    : 'Issuing the order commits these lines at the agreed price. Nothing moves until it is approved.'}
                 </p>
                 {budgetRows.length === 0 && <p className="muted">This project has no budget lines yet.</p>}
                 {budgetRows.map((b) => {
                   const mine = ordering.get(b.id) ?? 0;
-                  const back = released[b.id] ?? 0;
+                  const held = declared[b.id] ?? 0;
                   const left = leftAfter(b);
                   const used = b.budgeted > 0 ? ((b.budgeted - left) / b.budgeted) * 100 : 100;
                   const n = categories.findIndex((c) => c.id === b.id) + 1;
@@ -927,10 +934,17 @@ export function PurchaseOrderEditor() {
                       <Meter pct={used} tone={left < 0 ? 'danger' : used > 85 ? 'warn' : undefined} />
                       <div className="prq-bud-sub">
                         <span>
-                          {mine ? `this order ${formatMoney(mine)}` : 'not touched'}
-                          {back ? ` · request ${formatMoney(back)} back` : ''}
+                          {onRequest
+                            ? held
+                              ? `request's declared value ${formatMoney(held)} committed${mine ? ` · this order ${formatMoney(mine)}` : ''}`
+                              : mine
+                                ? `this order ${formatMoney(mine)} — not counted`
+                                : 'not touched'
+                            : mine
+                              ? `this order ${formatMoney(mine)}`
+                              : 'not touched'}
                         </span>
-                        <span>{left < 0 ? `over by ${formatMoney(-left)}` : 'left after'}</span>
+                        <span>{left < 0 ? `over by ${formatMoney(-left)}` : onRequest ? 'left' : 'left after'}</span>
                       </div>
                     </div>
                   );
@@ -938,7 +952,7 @@ export function PurchaseOrderEditor() {
                 <div className="prq-bud prq-bud-total">
                   <div className="prq-bud-top">
                     <strong>Project — overall left</strong>
-                    <strong>{formatMoney(Math.round((budget.total.available + releasedTotal - money.subtotal) * 100) / 100)}</strong>
+                    <strong>{formatMoney(onRequest ? budget.total.available : Math.round((budget.total.available - money.subtotal) * 100) / 100)}</strong>
                   </div>
                 </div>
                 {over.length > 0 && (

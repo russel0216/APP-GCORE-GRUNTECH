@@ -51,8 +51,9 @@ four databases and four copies of "customer".
    each row's CREATED audit row by `backfillOwnAuthors()`,
    `seed.ownAuthorsBackfilled20261018`), one's own employee record, login,
    attendance, pay rate, passport or path, the visits assigned to one, the
-   incoming reports one received and outgoing slips one issued, the stock
-   of items one added; a page that keeps no record of anybody's (Company,
+   incoming reports one received and outgoing slips one issued, the whole
+   shelf to read on Inventory (it is the company's — since 2026-10-22; Edit
+   Own places the stock of items one added); a page that keeps no record of anybody's (Company,
    Numbering, PDF Templates, Pipeline Stages, Appearance, HR / Finance
    Settings) opens and saves on either key. System Settings and Document
    Templates have View Own and View All alone: nothing on either ever read
@@ -676,7 +677,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,734 assertions across twenty-two scripts** (counted 2026-10-22, after
+**4,742 assertions across twenty-two scripts** (counted 2026-10-22, after
+8 on chain for the declared value rule and the warehouse's doors, and before it
 one on delivery for a released budget request committed on Budget Monitoring, and before it
 3 on finance for a cancelled invoice deleted, and before it
 one on delivery for the project's Scope of Work on paper, and before it one on finance for a sample sales order deleted with everything on it, and
@@ -787,7 +789,7 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
 430, masters 92, sales 643, costing 205, pipeline 121, calendar 103, numbering
-94, partners 120, delivery 197, chain 379, hr 637, plantilla 129, meetings
+94, partners 120, delivery 197, chain 387, hr 637, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 444, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
@@ -1135,10 +1137,48 @@ launcher as the way out) — never a stale phase sentence.
   `backfillProjectStock()` (the seed, once, `seed.projectStockBackfilled`)
   shelved what was received into a warehouse before, posting nothing.
   verify-chain pins it.
-- **Every handover releases what came before.** PR approval commits at estimate
-  → PO issue releases that and commits the agreed price → receiving releases
-  that and incurs. Use `releaseCommitment()`; it posts a negative row rather
-  than deleting, so the ledger stays a history.
+- **The request's DECLARED value is what Budget Monitoring subtracts**
+  (2026-10-22, the owner's call: "the declared value in the purchase request
+  should be the one to subtract in budget monitoring — the purchaser or
+  importer is the one who manually inputs the price"). PR approval commits
+  at the declared estimate → PO issue from a request moves NOTHING (its
+  typed price is the supplier's figure; `settlePurchaseOrder` neither
+  releases nor commits; a standalone direct-to-job order with no request
+  still commits its own price) → receiving charges INCURRED at the declared
+  estimate of the quantity received (qty × the request line's
+  `estimatedCost`; a line with no request line behind it at the receipt's
+  cost as before) and releases that much of the request's commitment, the
+  trail naming the ordered figure where it differs ("… at the request's
+  declared value (ordered at 360.00)"); pulling the receipt back puts it
+  back. Use `releaseCommitment()`; it posts a negative row rather than
+  deleting, so the ledger stays a history. The order page's budget panel
+  shows the request's declared value held (`GET /purchase-orders/budget` →
+  `declared`; `released` is empty now). `applyDeclaredValueRule()`
+  (`shared/declaredValue.ts`, the seed, once,
+  `seed.declaredValueRule20261022`) put every order issued under the price
+  rule back: its remaining own commitment reversed, the declared value of
+  the goods still to come restored on the request under the issue's own
+  release words + " — pulled back" (so a pull-back restores nothing twice);
+  an order committing nothing of its own is left alone. verify-chain pins
+  the issue, the receipt, the pull-back and the once-only step.
+- **The warehouse's doors** (2026-10-22, the owner's report: "they still
+  cannot pull out or input product in the inventory even the incoming of
+  purchased order"): **Inventory's View Own reads the whole shelf** — it
+  read "the stock of items you added", so a warehouse hand saw "No stock
+  yet" while the goods sat there (`ownStockWhere()` in routes/warehouse.ts
+  is the one seam; Edit Own still places the stock of the items one added);
+  an item Incoming files carries `createdById`; **an Incoming draft posts at
+  once when no route applies** (`POST /receivings/:id/submit` — the route
+  switched off, or none in band — the page's button reads "Receive now");
+  and **a pull-out with no source document may charge a PROJECT**
+  (`PulloutKind.OTHER` with `jobId`; purpose Project / site use needs one;
+  the lines are company stock at the warehouse's average, charged INCURRED
+  and CONSUMED on each item's budget line — the way out for stock received
+  on a STOCK order and used on a project no request names). Still the
+  owner's to set on Admin › Roles: Incoming needs Create AND a View key;
+  Pull-out Slips need Create, View Own and Edit Own together; somebody must
+  hold `back_support` and `purchasing_manager` or the Incoming route must be
+  switched off.
 - **Moving weighted average**: a receipt recomputes it, an issue takes it as
   given. Issuing must never change the cost of what remains.
 - **Borrowing does not charge job cost.** It moves stock out of *available*

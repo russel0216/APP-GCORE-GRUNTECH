@@ -917,7 +917,7 @@ async function fileNewItems(
 ) {
   for (const [n, it] of newItems) {
     const code = await nextNumber('item', tx);
-    const created = await tx.item.create({ data: { code, name: it.name, partNumber: it.partNumber, unit: it.unit, categoryId: it.categoryId } });
+    const created = await tx.item.create({ data: { code, name: it.name, partNumber: it.partNumber, unit: it.unit, categoryId: it.categoryId, createdById: actorId } });
     rows[n].itemId = created.id;
     await tx.auditLog.create({
       data: { entityType: 'item', entityId: created.id, action: 'CREATED', summary: `${code} ${it.name} added from an incoming report`, actorId },
@@ -934,7 +934,10 @@ async function fileNewItems(
 async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, actorId: string) {
   const receiving = await tx.receiving.findUniqueOrThrow({
     where: { id: receivingId },
-    include: { items: true, order: { include: { items: true, supplier: { select: { name: true } } } } },
+    include: {
+      items: true,
+      order: { include: { items: { include: { requestItem: { select: { estimatedCost: true } } } }, supplier: { select: { name: true } } } },
+    },
   });
   const order = receiving.order;
 
@@ -960,7 +963,16 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
 
   if (order.status === 'CANCELLED') throw badRequest(`${order.number} was cancelled`);
   const byOrderItem = new Map(order.items.map((i) => [i.id, i]));
+  // What the project is charged per budget line. A line ordered from a
+  // request is charged at the request's DECLARED estimate for the quantity
+  // received (2026-10-22, the owner's call: the declared value is what Budget
+  // Monitoring subtracts; the purchaser's typed price is the supplier's
+  // business), and that much of the request's commitment is released. A line
+  // with no request behind it is charged at the receipt's own cost, and the
+  // order's own commitment released, as before.
   const byCategory = new Map<string, number>();
+  const declaredByCategory = new Map<string, number>();
+  const pricedByCategory = new Map<string, number>();
 
   for (const line of receiving.items) {
     const orderItem = line.orderItemId ? byOrderItem.get(line.orderItemId) : undefined;
@@ -1015,7 +1027,13 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     }
 
     if (order.kind === 'DIRECT_TO_JOB' && orderItem.costCategoryId) {
-      byCategory.set(orderItem.costCategoryId, (byCategory.get(orderItem.costCategoryId) ?? 0) + amount);
+      const declared = orderItem.requestItem ? cents(quantity * num(orderItem.requestItem.estimatedCost)) : null;
+      const charged = declared ?? amount;
+      byCategory.set(orderItem.costCategoryId, (byCategory.get(orderItem.costCategoryId) ?? 0) + charged);
+      pricedByCategory.set(orderItem.costCategoryId, (pricedByCategory.get(orderItem.costCategoryId) ?? 0) + amount);
+      if (declared !== null) {
+        declaredByCategory.set(orderItem.costCategoryId, (declaredByCategory.get(orderItem.costCategoryId) ?? 0) + declared);
+      }
     }
 
     // Project goods received into a WAREHOUSE (not to site) sit on its shelf
@@ -1067,12 +1085,29 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
 
   if (order.kind === 'DIRECT_TO_JOB' && order.jobId) {
     for (const [costCategoryId, amount] of byCategory) {
+      const declared = declaredByCategory.get(costCategoryId) ?? 0;
+      // The request's commitment comes off by the declared value received…
+      if (declared > 0 && order.requestId) {
+        await releaseCommitment(tx, {
+          jobId: order.jobId,
+          sourceType: 'purchase_request',
+          sourceId: order.requestId,
+          costCategoryId,
+          amount: declared,
+          reason: `Received on ${receiving.number}`,
+          createdById: actorId,
+        });
+      }
+      // …and the order's own, at its price, where the order committed one
+      // (no request behind it, or issued before 2026-10-22 under the price
+      // rule and not yet put right by the seed).
+      const priced = pricedByCategory.get(costCategoryId) ?? amount;
       await releaseCommitment(tx, {
         jobId: order.jobId,
         sourceType: 'purchase_order',
         sourceId: order.id,
         costCategoryId,
-        amount,
+        amount: priced,
         reason: `Received on ${receiving.number}`,
         createdById: actorId,
       });
@@ -1084,7 +1119,10 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
         sourceType: 'receiving',
         sourceId: receiving.id,
         sourceNumber: receiving.number,
-        description: `Goods received from ${order.supplier.name}`,
+        description:
+          declared > 0 && Math.abs(priced - declared) >= 0.005
+            ? `Goods received from ${order.supplier.name} — at the request’s declared value (ordered at ${priced.toFixed(2)})`
+            : `Goods received from ${order.supplier.name}`,
         createdById: actorId,
       });
     }
@@ -1226,6 +1264,23 @@ receivingRoutes.post(
       );
     }
     const value = receivingValue(receiving.items);
+    // No route for it (switched off, or none in band): the report posts now,
+    // as a new one does (2026-10-22) — a draft saved while the route was on
+    // was stuck with "No approval workflow is configured" otherwise.
+    if (!(await pickWorkflow(RECEIVING_DOC, value, { requesterId: receiving.receivedById }))) {
+      await prisma.$transaction(async (tx) => {
+        const claimed = await tx.receiving.updateMany({
+          where: { id: receiving.id, status: 'DRAFT', updatedAt: receiving.updatedAt },
+          data: { status: 'RECEIVED' },
+        });
+        if (!claimed.count) throw badRequest(`${receiving.number} changed a moment ago — reload to see where it stands`);
+        await postReceiving(tx, receiving.id, me.id);
+      });
+      await audit({ entityType: 'receiving', entityId: receiving.id, action: 'COMPLETED', summary: `${receiving.number} received — no approval route applies` }, req);
+      await tellReceived(receiving.id, me.id);
+      res.json(await presentReceiving((await loadReceiving(receiving.id))!, me));
+      return;
+    }
     const claimed = await prisma.receiving.updateMany({
       where: { id: receiving.id, status: 'DRAFT', updatedAt: receiving.updatedAt },
       data: { status: 'PENDING_APPROVAL' },
@@ -1496,6 +1551,17 @@ onApprovalReopened(RECEIVING_DOC, {
         reason: why,
         createdById: actor.id,
       });
+      // The request's declared value this receipt released goes back on it.
+      if (order.requestId) {
+        await reverseJobCost(tx, {
+          sourceType: 'purchase_request',
+          sourceId: order.requestId,
+          states: ['COMMITTED'],
+          description: `Received on ${receiving.number}`,
+          reason: why,
+          createdById: actor.id,
+        });
+      }
     }
   },
 });
@@ -4221,13 +4287,22 @@ async function inventoryListWhere(me: ResolvedUser, q: ListQuery): Promise<{ bas
  * What "own" means on Inventory (2026-10-18): the stock of the items the
  * caller added (`Item.createdById`). Null for a View All holder.
  */
+/**
+ * The shelf is the company's, so every View key reads it whole (2026-10-22,
+ * the owner's report: "they still cannot … input product in the inventory"
+ * — a warehouse hand holding View Own, which read "the stock of items you
+ * added", saw "No stock yet" while the goods sat on the shelf). Edit Own
+ * still places the stock of the items one added. Kept as the one seam, so a
+ * narrower reading is one change here.
+ */
 function ownStockWhere(me: ResolvedUser): { item: { createdById: string } } | null {
-  return viewScope(me, 'gchain', 'inventory') === 'all' ? null : { item: { createdById: me.id } };
+  void viewScope(me, 'gchain', 'inventory');
+  return null;
 }
 
-/** May the caller see this item's stock? View All any; View Own the items they added — anybody else's is a 404. */
+/** May the caller see this item's stock? Any View key: the shelf is nobody's. */
 function assertStockVisible(me: ResolvedUser, item: { createdById: string | null }) {
-  assertCanView(me, 'gchain', 'inventory', item.createdById === me.id, item.createdById);
+  assertCanView(me, 'gchain', 'inventory', true, item.createdById);
 }
 
 /**
