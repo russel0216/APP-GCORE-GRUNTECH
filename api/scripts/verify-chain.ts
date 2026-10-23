@@ -11,6 +11,7 @@
  */
 
 import { repairProjectlessReceipts, repairTypedStockReceipts } from '../src/shared/typedItems';
+import { receiptUnitCost, restateForeignReceipts } from '../src/shared/receiptCost';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -1020,8 +1021,9 @@ async function main() {
     await prisma.purchaseRequestItem.update({ where: { id: soPr.items[0].id }, data: { orderedQty: D(2) } });
     spend = await salesOrderSpend(so.id);
     check(
-      'once ordered, the order commits at the agreed price and the request\'s estimate is no longer counted (560 committed, 40 left)',
-      !!spend && money(spend.committed, 560) && money(spend.left, 40),
+      // In pesos at the request's declared cost (2026-10-23, the owner's call), never the order's price of 280.
+      'once ordered, the goods still to come count once, at the request\'s declared value (500 committed, 100 left)',
+      !!spend && money(spend.committed, 500) && money(spend.left, 100),
       JSON.stringify(spend),
     );
     const companyBefore = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
@@ -1041,11 +1043,11 @@ async function main() {
     const companyAfter = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
     const soInRow = await prisma.receiving.findUniqueOrThrow({ where: { id: soIn.id } });
     check(
-      'received into a warehouse, the goods are held for the order (2 at 280), apart from the company\'s stock',
+      'received into a warehouse, the goods are held for the order at the request\'s declared cost (2 at 250), apart from the company\'s stock',
       soInRow.status === 'RECEIVED' &&
         !!held &&
         money(num(held.quantity), 2) &&
-        money(num(held.averageCost), 280) &&
+        money(num(held.averageCost), 250) &&
         num(companyAfter?.quantity) === num(companyBefore?.quantity) &&
         num(companyAfter?.averageCost) === num(companyBefore?.averageCost),
       `${soInRow.status} ${held ? `${num(held.quantity)} @ ${num(held.averageCost)}` : 'none'}`,
@@ -1057,8 +1059,8 @@ async function main() {
     );
     spend = await salesOrderSpend(so.id);
     check(
-      'received, the cost moves from committed to incurred (0 committed, 560 incurred, 40 left)',
-      !!spend && money(spend.committed, 0) && money(spend.incurred, 560) && money(spend.left, 40),
+      'received, the cost moves from committed to incurred (0 committed, 500 incurred, 100 left)',
+      !!spend && money(spend.committed, 0) && money(spend.incurred, 500) && money(spend.left, 100),
       JSON.stringify(spend),
     );
     // A SERVICE bought for the order is received as "service rendered": it
@@ -1095,11 +1097,11 @@ async function main() {
     const svcOrder = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: svcPo.id }, include: { items: true } });
     spend = await salesOrderSpend(so.id);
     check(
-      'a service received is rendered: the order is received, the spend counts it (590 incurred, 10 left), and nothing is shelved or filed as an item',
+      'a service received is rendered: the order is received, the spend counts it (530 incurred, 70 left), and nothing is shelved or filed as an item',
       svcOrder.status === 'RECEIVED' &&
         svcOrder.items[0].itemId === null &&
         (await prisma.inventoryTransaction.count({ where: { salesOrderId: so.id } })) === movesBefore &&
-        !!spend && money(spend.incurred, 590) && money(spend.left, 10),
+        !!spend && money(spend.incurred, 530) && money(spend.left, 70),
       `${svcOrder.status} item ${svcOrder.items[0].itemId} · ${JSON.stringify(spend)}`,
     );
     const { termsSections } = await import('../src/shared/procurementTerms');
@@ -4647,6 +4649,97 @@ async function main() {
         'the repair puts a receipt that posted nowhere on the shelf, once, and re-kinds the order as stock',
         repaired.lines === 1 && money((await onHand()) - beforeRepair, 3) && orphanAfter?.kind === 'STOCK_REPLENISHMENT' && orphanAfter.warehouseId === warehouse.id && again.lines === 0,
         `${JSON.stringify(repaired)} then ${JSON.stringify(again)}; ${beforeRepair} → ${await onHand()}; ${orphanAfter?.kind}`,
+      );
+    }
+
+    // ── A foreign-currency order is received in PESOS (2026-10-23) ──
+    // The owner's report: a USD order's Incoming put the USD price on the
+    // shelf as pesos. A line from a request takes its declared peso cost; any
+    // other the order's price at the order's own rate; no rate, no receipt.
+    console.log('\nA foreign-currency order is received, stocked and charged in pesos');
+    {
+      const usdOrder = async (rate: number | null, note: string) =>
+        prisma.purchaseOrder.create({
+          data: {
+            number: await nextNumber('purchase_order'),
+            status: 'ISSUED',
+            kind: 'STOCK_REPLENISHMENT',
+            supplierId: supplier.id,
+            warehouseId: warehouse.id,
+            createdById: procurement.id,
+            issuedAt: new Date(),
+            currency: 'USD',
+            exchangeRate: rate === null ? null : D(rate),
+            notes: `${TAG} ${note}`,
+            subtotal: D(20),
+            total: D(20),
+            items: { create: [{ itemId: item.id, description: `${TAG} Stainless pipe`, quantity: D(2), unit: 'pcs', unitPrice: D(10), amount: D(20) }] },
+          },
+          include: { items: true },
+        });
+      const usd = await usdOrder(56, 'USD order at 56');
+      const shown = await api(receiverToken, 'GET', `/receivings/order/${usd.id}`);
+      const shownLine = (shown.body.lines as { unitCost: number | null; costBasis: string }[])[0];
+      check(
+        'the Incoming page shows a USD line in pesos at the order’s rate (10 USD at 56 = 560.00)',
+        shownLine?.unitCost === 560 && shownLine.costBasis === 'converted' && shown.body.costProblem === null,
+        JSON.stringify(shownLine),
+      );
+      const usdIn = await api(receiverToken, 'POST', '/receivings', { orderId: usd.id, warehouseId: warehouse.id, items: [{ orderItemId: usd.items[0].id, quantity: 2, unitCost: 10 }] });
+      const usdInId = String(usdIn.body.id);
+      await api(receiverToken, 'POST', `/receivings/${usdInId}/submit`);
+      const usdReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'receiving', documentId: usdInId, status: 'PENDING' } });
+      if (usdReq) await api(bossToken, 'POST', `/approvals/${usdReq.id}/act`, { action: 'APPROVED' });
+      const usdLine = await prisma.receivingItem.findFirst({ where: { receivingId: usdInId } });
+      const usdMove = await prisma.inventoryTransaction.findFirst({ where: { sourceType: 'receiving', sourceId: usdInId, type: 'RECEIPT' } });
+      check(
+        'received, the line and its stock movement carry 560.00 pesos — never the 10 USD, even when a cost is typed',
+        (await prisma.receiving.findUnique({ where: { id: usdInId } }))?.status === 'RECEIVED' && num(usdLine?.unitCost) === 560 && num(usdMove?.unitCost) === 560,
+        `${usdIn.status} ${num(usdLine?.unitCost)} ${num(usdMove?.unitCost)}`,
+      );
+      check(
+        'a line from a purchase request takes the request’s declared peso cost, whatever the order’s currency',
+        receiptUnitCost({ number: 'X', currency: 'USD', exchangeRate: 56 }, { unitPrice: 10, requestItem: { estimatedCost: 1000 } }).unitCost === 1000 &&
+          receiptUnitCost({ number: 'X', currency: 'PHP', exchangeRate: null }, { unitPrice: 75 }).unitCost === 75,
+      );
+
+      const bare = await usdOrder(null, 'USD order with no rate');
+      const refused = await api(receiverToken, 'POST', '/receivings', { orderId: bare.id, warehouseId: warehouse.id, items: [{ orderItemId: bare.items[0].id, quantity: 1 }] });
+      check(
+        'a USD order with no rate to PHP is not received, and says where to set one',
+        refused.status === 400 && /rate to PHP/.test(String(refused.body.error)),
+        `${refused.status} ${String(refused.body.error)}`,
+      );
+
+      // Posted before the fix: a RECEIVED line at the USD figure is restated once the order has a rate.
+      const oldIn = await prisma.receiving.create({
+        data: {
+          number: await nextNumber('receiving'),
+          orderId: bare.id,
+          warehouseId: warehouse.id,
+          receivedById: receiver.id,
+          receivedDate: new Date(),
+          status: 'RECEIVED',
+          items: { create: [{ orderItemId: bare.items[0].id, quantity: D(2), unitCost: D(10) }] },
+        },
+      });
+      const balanceBefore = await prisma.inventoryBalance.findUniqueOrThrow({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+      await prisma.inventoryTransaction.create({
+        data: { itemId: item.id, warehouseId: warehouse.id, type: 'RECEIPT', quantity: D(2), unitCost: D(10), balanceAfter: balanceBefore.quantity, sourceType: 'receiving', sourceId: oldIn.id, sourceNumber: oldIn.number },
+      });
+      const waits = await restateForeignReceipts();
+      await prisma.purchaseOrder.update({ where: { id: bare.id }, data: { exchangeRate: D(56) } });
+      const restated = await restateForeignReceipts();
+      const again = await restateForeignReceipts();
+      const oldLine = await prisma.receivingItem.findFirst({ where: { receivingId: oldIn.id } });
+      const oldMove = await prisma.inventoryTransaction.findFirst({ where: { sourceType: 'receiving', sourceId: oldIn.id } });
+      const balanceAfter = await prisma.inventoryBalance.findUniqueOrThrow({ where: { id: balanceBefore.id } });
+      const expectedAvg = num(balanceBefore.averageCost) + ((560 - 10) * 2) / num(balanceBefore.quantity);
+      check(
+        'a receipt posted at the USD figure waits for a rate, then is restated in pesos once — the line, its movement and the shelf’s average',
+        waits.waiting >= 1 && restated.lines >= 1 && again.lines === 0 && num(oldLine?.unitCost) === 560 && num(oldMove?.unitCost) === 560 &&
+          Math.abs(num(balanceAfter.averageCost) - expectedAvg) < 0.01,
+        `${JSON.stringify(waits)} ${JSON.stringify(restated)} ${JSON.stringify(again)} ${num(oldLine?.unitCost)} avg ${num(balanceBefore.averageCost)} → ${num(balanceAfter.averageCost)} (want ${expectedAvg.toFixed(4)})`,
       );
     }
 

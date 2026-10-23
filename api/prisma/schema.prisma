@@ -2976,6 +2976,11 @@ model PurchaseOrder {
   /// The delivery address under Deliver to (2026-10-14): blank prints the company's.
   deliverAddress String?
   currency       String    @default("PHP")
+  /// Pesos per one unit of `currency` (2026-10-23, the owner's call: a USD
+  /// order is received, stocked and charged in pesos). Null for PHP; taken
+  /// from Company Settings › Exchange rates at save unless typed, and kept —
+  /// a rate changed in Settings never restates an order on file.
+  exchangeRate   Decimal?  @db.Decimal(18, 6)
   terms          String?
   notes          String?
 

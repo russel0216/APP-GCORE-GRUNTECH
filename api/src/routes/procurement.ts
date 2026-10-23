@@ -1,4 +1,5 @@
 import { QUOTATION_CURRENCY_CODES } from '../shared/quotation';
+import { noRateMessage, orderInPesos, rateForOrder } from '../shared/receiptCost';
 import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, PrStatus, PurchaseKind, PoStatus, CanvassStatus } from '@prisma/client';
@@ -3285,6 +3286,8 @@ const poSchema = z.object({
   jobId: z.string().optional().nullable(),
   warehouseId: z.string().optional().nullable(),
   currency: z.enum(QUOTATION_CURRENCY_CODES).optional(),
+  /** Pesos per one unit of a foreign currency (2026-10-23); left out, Company Settings' rate. */
+  exchangeRate: z.number().positive().max(1_000_000).optional().nullable(),
   terms: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   vatInclusive: z.boolean().default(false),
@@ -3297,6 +3300,21 @@ const poSchema = z.object({
 });
 
 /** The rate an order's VAT switch stands for: the company's, or none. */
+/**
+ * The currency and rate a PATCH or sheet save writes (2026-10-23): a rate
+ * typed is kept; a currency changed takes Settings' rate for it; PHP has none.
+ */
+async function orderRateChange(
+  po: { currency: string; exchangeRate: Prisma.Decimal | null },
+  body: { currency?: string; exchangeRate?: number | null },
+): Promise<{ currency?: string; exchangeRate?: Prisma.Decimal | null }> {
+  if (!body.currency && body.exchangeRate === undefined) return {};
+  const currency = body.currency ?? po.currency;
+  const kept = currency === po.currency && po.exchangeRate ? Number(po.exchangeRate) : null;
+  const typed = body.exchangeRate === undefined ? kept : body.exchangeRate;
+  return { currency, exchangeRate: await rateForOrder(currency, typed) };
+}
+
 async function poVat(applyVat: boolean | undefined): Promise<{ vatRate?: Prisma.Decimal; vatInclusive?: boolean }> {
   if (applyVat === undefined) return {};
   if (!applyVat) return { vatRate: D(0), vatInclusive: false };
@@ -3529,7 +3547,10 @@ purchaseOrderRoutes.post(
           deliverAddress: body.deliverAddress || null,
           // The awarded supplier's quotation no. unless the buyer typed one.
           quoteRef: (body.quoteRef ?? source.quoteRef) || null,
-          currency: body.currency ?? (await companyCurrency()),
+          ...(await (async () => {
+            const currency = body.currency ?? (await companyCurrency());
+            return { currency, exchangeRate: await rateForOrder(currency, body.exchangeRate, tx) };
+          })()),
           terms: body.terms || null,
           notes: body.notes || null,
           vatRate: body.applyVat === false ? D(0) : (company?.vatRate ?? D(0.12)),
@@ -3710,7 +3731,7 @@ purchaseOrderRoutes.patch(
         ...(body.deliverTo !== undefined ? { deliverTo: body.deliverTo || null } : {}),
         ...(body.deliverAddress !== undefined ? { deliverAddress: body.deliverAddress || null } : {}),
         ...(body.quoteRef !== undefined ? { quoteRef: body.quoteRef || null } : {}),
-        ...(body.currency ? { currency: body.currency } : {}),
+        ...(await orderRateChange(po, body)),
         ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
         ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
@@ -3780,7 +3801,7 @@ purchaseOrderRoutes.put(
           deliverTo: body.deliverTo || null,
           deliverAddress: body.deliverAddress || null,
           ...(body.quoteRef !== undefined ? { quoteRef: body.quoteRef || null } : {}),
-          ...(body.currency ? { currency: body.currency } : {}),
+          ...(await orderRateChange(po, body)),
           ...(retarget ?? {}),
           terms: body.terms || null,
           notes: body.notes || null,
@@ -3817,6 +3838,10 @@ purchaseOrderRoutes.post(
     if (!po) throw notFound('Purchase order not found');
     if (po.status !== 'DRAFT') throw badRequest('This order has already been submitted');
     if (!po.items.length) throw badRequest('Add at least one line before submitting');
+    // A foreign order is valued, routed and received in pesos (2026-10-23):
+    // without a rate it cannot be, so it is not sent.
+    const totalPesos = orderInPesos(po, num(po.total));
+    if (totalPesos === null) throw badRequest(noRateMessage(po));
 
     // Claimed on DRAFT, so two presses cannot both submit it.
     const claimed = await prisma.purchaseOrder.updateMany({
@@ -3831,7 +3856,7 @@ purchaseOrderRoutes.post(
         documentId: po.id,
         documentNumber: po.number,
         subject: `${po.supplier.name}${po.job ? ` — ${po.job.number}` : po.salesOrder ? ` — ${po.salesOrder.number}` : ''}`,
-        amount: num(po.total),
+        amount: totalPesos,
         link: `/g-chain/purchase-orders/${po.id}`,
         // An importation (no VAT, 2026-10-16) goes to the Purchasing Manager
         // (Importation), the owner's chart of 2026-10-17.
@@ -3965,12 +3990,13 @@ export async function settlePurchaseOrder(documentId: string, outcome: ApprovalO
     // is the supplier's business and touches no budget line.
     if (po.requestId) return true;
 
+    // Committed in PESOS (2026-10-23): a foreign order's lines at its rate.
     const byCategory = new Map<string, number>();
     for (const line of items) {
       if (!line.costCategoryId) continue;
       byCategory.set(
         line.costCategoryId,
-        (byCategory.get(line.costCategoryId) ?? 0) + num(line.amount),
+        (byCategory.get(line.costCategoryId) ?? 0) + (orderInPesos(po, num(line.amount)) ?? num(line.amount)),
       );
     }
     for (const [costCategoryId, amount] of byCategory) {

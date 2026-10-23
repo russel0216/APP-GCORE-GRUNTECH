@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
 import { inBase, RATE_SELECT } from './exchangeRates';
+import { receiptUnitCost } from './receiptCost';
 
 /**
  * Buying for a SALES ORDER with no project (2026-10-21, the owner's call:
@@ -168,7 +169,12 @@ export async function salesOrderSpend(salesOrderId: string, db: Tx | typeof pris
     }),
     db.purchaseOrder.findMany({
       where: { salesOrderId, kind: 'SALES_ORDER', status: { in: [...PO_OPEN] } },
-      select: { items: { select: { quantity: true, receivedQty: true, unitPrice: true } } },
+      select: {
+        number: true,
+        currency: true,
+        exchangeRate: true,
+        items: { select: { quantity: true, receivedQty: true, unitPrice: true, requestItem: { select: { estimatedCost: true } } } },
+      },
     }),
     db.receivingItem.findMany({
       where: { receiving: { status: 'RECEIVED', order: { salesOrderId, kind: 'SALES_ORDER' } } },
@@ -189,7 +195,9 @@ export async function salesOrderSpend(salesOrderId: string, db: Tx | typeof pris
     }
   }
   for (const o of orders) {
-    for (const i of o.items) committed += Math.max(0, num(i.quantity) - num(i.receivedQty)) * num(i.unitPrice);
+    // In pesos (2026-10-23): the request's declared cost, else the price at
+    // the order's rate — what the goods will be taken in at when received.
+    for (const i of o.items) committed += Math.max(0, num(i.quantity) - num(i.receivedQty)) * (receiptUnitCost(o, i).unitCost ?? num(i.unitPrice));
   }
   const incurred = received.reduce((s, l) => s + num(l.quantity) * num(l.unitCost), 0);
   return {

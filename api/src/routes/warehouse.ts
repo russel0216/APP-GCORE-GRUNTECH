@@ -25,6 +25,7 @@ import { nextNumber } from '../shared/numbering';
 import { issueProjectStock, projectHoldings, receiveProjectStock } from '../shared/projectStock';
 import { issueOrderStock, orderHoldings, receiveOrderStock } from '../shared/orderStock';
 import { itemForTypedLine, matchTypedItem } from '../shared/typedItems';
+import { noRateMessage, orderInPesos, receiptUnitCost } from '../shared/receiptCost';
 import { notify } from '../shared/notifications';
 import {
   contactOf,
@@ -347,7 +348,13 @@ receivingRoutes.get(
         job: { select: { id: true, number: true, name: true } },
         salesOrder: { select: { id: true, number: true } },
         warehouse: { select: { id: true, name: true } },
-        items: { include: { item: { select: { id: true, code: true, category: { select: { id: true, code: true, name: true } } } } }, orderBy: { id: 'asc' } },
+        items: {
+          include: {
+            item: { select: { id: true, code: true, category: { select: { id: true, code: true, name: true } } } },
+            requestItem: { select: { estimatedCost: true } },
+          },
+          orderBy: { id: 'asc' },
+        },
       },
     });
     if (!order) throw notFound('Purchase order not found');
@@ -381,8 +388,13 @@ receivingRoutes.get(
       receivable: order.status === 'ISSUED' || order.status === 'PARTIALLY_RECEIVED',
       // An importation order (no VAT): its goods go to the Purchasing Manager (Importation).
       importation: num(order.vatRate) === 0,
+      // The order's currency and rate (2026-10-23): goods are valued in pesos.
+      currency: order.currency,
+      exchangeRate: order.exchangeRate === null ? null : num(order.exchangeRate),
+      costProblem: order.items.some((i) => receiptUnitCost(order, i).unitCost === null) ? noRateMessage(order) : null,
       lines: order.items.map((i) => {
         const waiting = pending.get(i.id) ?? 0;
+        const cost = receiptUnitCost(order, i);
         return {
           id: i.id,
           code: i.item?.code ?? null,
@@ -395,6 +407,9 @@ receivingRoutes.get(
           pendingQty: waiting,
           left: Math.max(0, Math.round((num(i.quantity) - num(i.receivedQty) - waiting) * 1000) / 1000),
           unitPrice: num(i.unitPrice),
+          /** What the line is taken in at, in pesos: the request's declared cost, else the price at the order's rate. */
+          unitCost: cost.unitCost,
+          costBasis: cost.basis,
           /** The item's product group; null where it has none. */
           category: i.item ? i.item.category : (matched.get(i.id) ?? null),
           /** No item on file yet: received into a warehouse it is filed new, under the group the line names. */
@@ -805,7 +820,10 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
   });
 
   if (body.orderId) {
-    const order = await prisma.purchaseOrder.findUnique({ where: { id: body.orderId }, include: { items: true } });
+    const order = await prisma.purchaseOrder.findUnique({
+      where: { id: body.orderId },
+      include: { items: { include: { requestItem: { select: { estimatedCost: true } } } } },
+    });
     if (!order) throw notFound('Purchase order not found');
     if (order.status === 'DRAFT' || order.status === 'PENDING_APPROVAL') throw badRequest(`${order.number} has not been issued yet`);
     if (order.status === 'CANCELLED') throw badRequest(`${order.number} was cancelled`);
@@ -822,16 +840,23 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
         if (oi && oi.nature !== 'SERVICE' && !oi.itemId && !l.categoryId && !(await matchTypedItem(prisma, oi))) throw needsGroup(n, `“${oi.name ?? oi.description}”`);
       }
     }
-    const rows = body.items.map((l) => ({
-      orderItemId: l.orderItemId!,
-      itemId: null,
-      partNumber: null,
-      description: null,
-      unit: null,
-      quantity: D(l.quantity),
-      unitCost: D(l.unitCost ?? num(byOrderItem.get(l.orderItemId!)!.unitPrice)),
-      ...extras(l),
-    }));
+    // A line against an order is valued in PESOS, never typed (2026-10-23):
+    // the request's declared cost, else the order's price at its rate to PHP
+    // — shared/receiptCost.ts. A foreign order with no rate is refused.
+    const rows = body.items.map((l) => {
+      const cost = receiptUnitCost(order, byOrderItem.get(l.orderItemId!)!);
+      if (cost.unitCost === null) throw badRequest(noRateMessage(order));
+      return {
+        orderItemId: l.orderItemId!,
+        itemId: null,
+        partNumber: null,
+        description: null,
+        unit: null,
+        quantity: D(l.quantity),
+        unitCost: D(cost.unitCost),
+        ...extras(l),
+      };
+    });
     return {
       header: { orderId: order.id, supplierId: null, sourceName: null, reason: null, ...misc, warehouseId: warehouseId ?? order.warehouseId ?? null },
       rows,
@@ -986,8 +1011,18 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     const orderItem = line.orderItemId ? byOrderItem.get(line.orderItemId) : undefined;
     if (!orderItem) throw badRequest(`${receiving.number} has a line that is not on ${order.number}`);
     const quantity = num(line.quantity);
-    const unitCost = num(line.unitCost);
+    // Valued in pesos at the moment it posts (2026-10-23): a draft saved
+    // before carried the order's foreign price, and is put right here.
+    const cost = receiptUnitCost(order, orderItem);
+    if (cost.unitCost === null) throw badRequest(noRateMessage(order));
+    const unitCost = cost.unitCost;
+    if (Math.abs(unitCost - num(line.unitCost)) >= 0.005) {
+      await tx.receivingItem.update({ where: { id: line.id }, data: { unitCost: D(unitCost) } });
+    }
     const amount = cents(quantity * unitCost);
+    // What the order's own price comes to in pesos — the commitment a
+    // standalone order made at issue, released below.
+    const orderedPesos = orderInPesos(order, quantity * num(orderItem.unitPrice)) ?? amount;
 
     await tx.purchaseOrderItem.update({
       where: { id: orderItem.id },
@@ -1038,7 +1073,7 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
       const declared = orderItem.requestItem ? cents(quantity * num(orderItem.requestItem.estimatedCost)) : null;
       const charged = declared ?? amount;
       byCategory.set(orderItem.costCategoryId, (byCategory.get(orderItem.costCategoryId) ?? 0) + charged);
-      pricedByCategory.set(orderItem.costCategoryId, (pricedByCategory.get(orderItem.costCategoryId) ?? 0) + amount);
+      pricedByCategory.set(orderItem.costCategoryId, (pricedByCategory.get(orderItem.costCategoryId) ?? 0) + orderedPesos);
       if (declared !== null) {
         declaredByCategory.set(orderItem.costCategoryId, (declaredByCategory.get(orderItem.costCategoryId) ?? 0) + declared);
       }

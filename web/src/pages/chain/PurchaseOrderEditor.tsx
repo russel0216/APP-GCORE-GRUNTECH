@@ -79,6 +79,8 @@ interface ExistingPo {
   deliverAddress?: string | null;
   quoteRef?: string | null;
   currency?: string;
+  /** Pesos per unit of a foreign currency (2026-10-23). */
+  exchangeRate?: number | string | null;
   terms: string | null;
   notes: string | null;
   vatRate: number;
@@ -131,6 +133,8 @@ interface Header {
   deliverAddress: string;
   quoteRef: string;
   currency: string;
+  /** Pesos per unit; blank takes Company Settings' rate. */
+  exchangeRate: string;
   notes: string;
   vatInclusive: boolean;
   applyVat: boolean;
@@ -222,6 +226,7 @@ export function PurchaseOrderEditor() {
     deliverAddress: '',
     quoteRef: '',
     currency: 'PHP',
+    exchangeRate: '',
     notes: '',
     vatInclusive: false,
     applyVat: true,
@@ -252,6 +257,7 @@ export function PurchaseOrderEditor() {
             deliverAddress: po.deliverAddress ?? '',
             quoteRef: po.quoteRef ?? '',
             currency: po.currency ?? 'PHP',
+            exchangeRate: po.exchangeRate != null ? String(Number(po.exchangeRate)) : '',
             notes: po.notes ?? '',
             vatInclusive: po.vatInclusive,
             applyVat: Number(po.vatRate) > 0,
@@ -283,6 +289,7 @@ export function PurchaseOrderEditor() {
             terms: d.supplier?.paymentTerms ?? '',
             quoteRef: d.quoteRef ?? '',
             currency: 'PHP',
+            exchangeRate: '',
             // The company receives by default (2026-10-14, the owner's call).
             deliverTo: ship.name,
             deliverAddress: ship.address,
@@ -458,6 +465,8 @@ export function PurchaseOrderEditor() {
       deliverAddress: header.deliverAddress.trim() || null,
       quoteRef: header.quoteRef.trim() || null,
       currency: header.currency,
+      // A rate typed is kept; blank takes Company Settings' rate for the currency.
+      ...(header.currency !== 'PHP' && Number(header.exchangeRate) > 0 ? { exchangeRate: Number(header.exchangeRate) } : {}),
       notes: header.notes.trim() || null,
       vatInclusive: header.applyVat && header.vatInclusive,
       applyVat: header.applyVat,
@@ -706,13 +715,26 @@ export function PurchaseOrderEditor() {
               <Field label="Quotation ref." hint="The supplier's quotation no. — printed on the order">
                 <input value={header.quoteRef} maxLength={120} onChange={(e) => setHeader((h) => ({ ...h, quoteRef: e.target.value }))} />
               </Field>
-              <Field label="Currency" hint="Printed under Order details — nothing is converted">
-                <select value={header.currency} onChange={(e) => setHeader((h) => ({ ...h, currency: e.target.value }))}>
+              <Field label="Currency" hint="The supplier is paid in it; the order prints in it">
+                <select value={header.currency} onChange={(e) => setHeader((h) => ({ ...h, currency: e.target.value, exchangeRate: '' }))}>
                   {PO_CURRENCIES.map((c) => (
                     <option key={c} value={c}>{c}</option>
                   ))}
                 </select>
               </Field>
+              {header.currency !== 'PHP' && (
+                <Field
+                  label="Rate to PHP"
+                  hint={`Pesos per ${header.currency}. Goods are received and stocked in pesos — a line from a purchase request at its declared cost, any other at this rate. Blank takes Company Settings' rate.`}
+                >
+                  <NumberInput
+                    kind="decimal"
+                    value={header.exchangeRate}
+                    min={0}
+                    onChange={(e) => setHeader((h) => ({ ...h, exchangeRate: e.target.value }))}
+                  />
+                </Field>
+              )}
               <Field label="Deliver to" hint="Who receives it — the company by default">
                 <input list="po-ship-name" value={header.deliverTo} maxLength={300} onChange={(e) => setHeader((h) => ({ ...h, deliverTo: e.target.value }))} />
                 <datalist id="po-ship-name">{shipTo.name && <option value={shipTo.name} />}</datalist>

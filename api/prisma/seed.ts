@@ -30,6 +30,7 @@ import { backfillInvoiceCountering, fillInvoiceCredit } from '../src/shared/rece
 import { fillBillTerms } from '../src/shared/payables';
 import { renumberProgressDocs } from '../src/shared/progressReport';
 import { repairProjectlessReceipts, repairTypedStockReceipts } from '../src/shared/typedItems';
+import { fillOrderRates, restateForeignReceipts } from '../src/shared/receiptCost';
 import { backfillLoginMirrors, linkAdminEmployees } from '../src/shared/personMirror';
 import { CHART_DEPARTMENTS, applyOrgChart, grantSupervisorRole } from '../src/shared/orgChart';
 import { applyEmployeeNumbering, clearEmployeeNumbers } from '../src/shared/employeeNumbers';
@@ -1070,6 +1071,14 @@ async function main() {
     if (typedReceipts) console.log(`  · Posted the stock of ${typedReceipts} received line(s) typed without an item`);
     const projectless = await repairProjectlessReceipts();
     if (projectless.lines || projectless.orders) console.log(`  · Orders raised with no project are stock orders: ${projectless.lines} received line(s) put on the shelf, ${projectless.orders} order(s) re-kinded`);
+    // A foreign-currency order is received in PESOS (2026-10-23): orders with
+    // no rate take Settings', then receipts posted at the foreign price are
+    // restated — shared/receiptCost.ts.
+    const ratedOrders = await fillOrderRates();
+    if (ratedOrders) console.log(`  · ${ratedOrders} foreign-currency purchase order(s) took their rate to PHP from Company Settings`);
+    const restated = await restateForeignReceipts();
+    if (restated.lines) console.log(`  · Restated ${restated.lines} received line(s) of foreign-currency orders in pesos`);
+    if (restated.waiting) console.log(`  · ${restated.waiting} received line(s) of foreign-currency orders wait for a rate to PHP (Company Settings › Exchange rates)`);
     const closedIncreases = await closeLegacyBudgetIncreases();
     if (closedIncreases) console.log(`  · Closed ${closedIncreases} budget request(s) approved as budget increases under the old rule`);
     const committedRequests = await syncBudgetRequestCommitments();

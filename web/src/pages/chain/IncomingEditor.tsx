@@ -56,6 +56,9 @@ interface OrderLine {
   pendingQty: number;
   left: number;
   unitPrice: number;
+  /** Pesos per unit it is taken in at (2026-10-23): the request's declared cost, else the price at the order's rate; null with no rate. */
+  unitCost: number | null;
+  costBasis: 'request' | 'order' | 'converted' | 'no_rate';
   /** The item's product group; null where it has none. */
   category: Category | null;
   /** No item on file yet: received into a warehouse it is filed new, under the group the line names. */
@@ -74,6 +77,11 @@ interface OrderData {
   warehouse: { id: string; name: string } | null;
   /** An importation order (no VAT): the route goes to the Purchasing Manager (Importation). */
   importation?: boolean;
+  /** The order's own currency and rate to PHP; goods are valued in pesos. */
+  currency?: string;
+  exchangeRate?: number | null;
+  /** Said when a foreign order has no rate: nothing can be received until it has one. */
+  costProblem?: string | null;
   lines: OrderLine[];
 }
 interface ItemOption {
@@ -256,7 +264,7 @@ export function IncomingEditor() {
   const orderLinesSent = (order?.lines ?? []).filter((l) => Number(receive[l.id]) > 0);
   const freeSent = free.filter((l) => l.item || l.quantity || l.description);
   const value = useMemo(() => {
-    if (mode === 'order') return cents(orderLinesSent.reduce((s, l) => s + Number(receive[l.id]) * l.unitPrice, 0));
+    if (mode === 'order') return cents(orderLinesSent.reduce((s, l) => s + Number(receive[l.id]) * (l.unitCost ?? 0), 0));
     return cents(freeSent.reduce((s, l) => s + (Number(l.quantity) || 0) * (Number(l.unitCost) || 0), 0));
   }, [mode, orderLinesSent, receive, freeSent]);
 
@@ -283,6 +291,7 @@ export function IncomingEditor() {
   const problems: string[] = [];
   if (mode === 'order') {
     if (!order) problems.push('Choose the purchase order');
+    else if (order.costProblem) problems.push(order.costProblem);
     else if (!orderLinesSent.length) problems.push('Type what came in on at least one line');
     for (const l of orderLinesSent) {
       if (Number(receive[l.id]) > l.left + 0.0005) problems.push(`${l.name ?? l.description}: only ${qtyText(l.left)} left to receive`);
@@ -594,8 +603,8 @@ export function IncomingEditor() {
                         <th className="right">Received</th>
                         <th className="right">Left</th>
                         <th className="right">Receive now</th>
-                        <th className="right">Unit price</th>
-                        <th className="right">Amount</th>
+                        <th className="right">Unit cost (PHP)</th>
+                        <th className="right">Amount (PHP)</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -644,8 +653,19 @@ export function IncomingEditor() {
                                 onChange={(e) => setReceive((q) => ({ ...q, [l.id]: e.target.value }))}
                               />
                             </td>
-                            <td className="right mono">{formatMoney(l.unitPrice)}</td>
-                            <td className="right mono">{formatMoney(cents(now * l.unitPrice))}</td>
+                            <td className="right mono">
+                              {l.unitCost === null ? '—' : formatMoney(l.unitCost)}
+                              <div className="faint">
+                                {l.costBasis === 'request'
+                                  ? 'request’s declared cost'
+                                  : l.costBasis === 'converted'
+                                    ? `${formatMoney(l.unitPrice, order.currency)} at ${order.exchangeRate}`
+                                    : l.costBasis === 'no_rate'
+                                      ? `${formatMoney(l.unitPrice, order.currency)} — no rate`
+                                      : ''}
+                              </div>
+                            </td>
+                            <td className="right mono">{l.unitCost === null ? '—' : formatMoney(cents(now * l.unitCost))}</td>
                           </tr>
                         );
                       })}
