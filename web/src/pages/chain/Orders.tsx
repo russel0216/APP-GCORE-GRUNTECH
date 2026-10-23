@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
+import { Attachments } from '../../components/Attachments';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
@@ -218,7 +219,7 @@ interface PoLine {
 export function PurchaseOrderDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { can } = useAuth();
+  const { can, me } = useAuth();
   const toast = useToast();
 
   const [po, setPo] = useState<PoDetailData | null>(null);
@@ -335,6 +336,11 @@ export function PurchaseOrderDetail() {
         }
         print={`/api/purchase-orders/${po.id}/pdf`}
         more={[
+          {
+            label: 'Print with attachments',
+            hint: 'The order with its files behind it',
+            onSelect: () => openPdf(`/api/purchase-orders/${po.id}/pdf?attachments=1`, (e) => setError(e)),
+          },
           po.canWithdraw && {
             label: 'Pull back to draft',
             confirm: {
@@ -581,6 +587,13 @@ export function PurchaseOrderDetail() {
         </div>
       )}
 
+      <Attachments
+        entityType="purchase_order"
+        entityId={po.id}
+        title="Attachments"
+        hint="The supplier's quotation, a drawing or the signed copy. Print leaves them out; ⋯ › Print with attachments puts them behind the order."
+        canEdit={po.status !== 'CANCELLED' && (can('gchain.purchase_orders.edit_all') || (po.createdBy.id === me?.user.id && can('gchain.purchase_orders.edit_own')))}
+      />
     </div>
   );
 }

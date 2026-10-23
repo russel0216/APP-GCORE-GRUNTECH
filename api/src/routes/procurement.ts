@@ -4497,7 +4497,7 @@ purchaseOrderRoutes.get(
       ...(slots.length ? slotSignatories(withoutCoSignedRepeats(await byHighestRole(slots))) : po.status === 'CANCELLED' ? [] : [{ role: 'Approved by' }]),
     ];
 
-    const pdf = await renderDocument({
+    const bare = await renderDocument({
       title: 'Purchase Order',
       documentNumber: po.number,
       date: po.orderDate,
@@ -4525,8 +4525,18 @@ purchaseOrderRoutes.get(
       footerNote: po.status === 'DRAFT' || po.status === 'PENDING_APPROVAL' ? 'DRAFT — NOT YET ISSUED.' : po.status === 'CANCELLED' ? 'CANCELLED.' : undefined,
     });
 
+    // The paper goes to the supplier, so it prints bare; `?attachments=1`
+    // puts the order's files (their quotation, a drawing) behind it.
+    const files = req.query.attachments === '1' ? await attachedFiles('purchase_order', po.id) : [];
+    const { pdf, listed } = await withAttachments(bare, files, { title: 'Purchase Order', number: po.number, reference: po.supplier.name });
+
     await audit(
-      { entityType: 'purchase_order', entityId: po.id, action: 'EXPORTED', summary: `Printed ${po.number}` },
+      {
+        entityType: 'purchase_order',
+        entityId: po.id,
+        action: 'EXPORTED',
+        summary: `Printed ${po.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}`,
+      },
       req,
     );
 
@@ -4654,6 +4664,29 @@ registerAttachmentGuard(
     write: async (user, id) => {
       const pr = await prisma.purchaseRequest.findUnique({ where: { id }, select: { status: true, requestedById: true } });
       return !!pr && (pr.status === 'DRAFT' || pr.status === 'PENDING_APPROVAL') && mayEditPr(user, pr);
+    },
+  },
+);
+
+/**
+ * A purchase order's files (the supplier's quotation, a drawing, a signed
+ * copy): read by whoever reads the order — its register's View keys, its
+ * buyer, or whoever may decide its open request; written by whoever may
+ * change it, while it is not cancelled.
+ */
+registerAttachmentGuard(
+  'purchase_order',
+  async (user, id) => {
+    const po = await prisma.purchaseOrder.findUnique({ where: { id }, select: { createdById: true } });
+    if (!po) return false;
+    if (can(user, 'gchain.purchase_orders.view_all') || po.createdById === user.id) return true;
+    if (can(user, 'gchain.purchase_orders.view_own')) return true;
+    return mayDecide(user.id, 'purchase_order', [id]);
+  },
+  {
+    write: async (user, id) => {
+      const po = await prisma.purchaseOrder.findUnique({ where: { id }, select: { status: true, createdById: true } });
+      return !!po && po.status !== 'CANCELLED' && mayEditPo(user, po);
     },
   },
 );

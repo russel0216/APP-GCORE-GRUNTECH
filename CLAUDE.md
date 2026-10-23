@@ -6610,6 +6610,13 @@ page's dress (`prq-*`) and reusing its `ItemCell` and `lib/prLines.ts`.
   real figure), so the Incoming, the stock and the landed total read it; a
   standalone project order commits its lines after it. verify-chain pins
   the arithmetic, the paper and a receipt at 67.50 off 75 less 10%.
+- **A purchase order takes attachments** (2026-10-23, the owner's call):
+  the `Attachments` card on the order page (`purchase_order` — the
+  supplier's quotation, a drawing, the signed copy), read by whoever reads
+  the order (its View keys, its buyer, or a decider through `mayDecide`),
+  written by whoever may change it while not cancelled; deleting the order
+  takes them. The paper goes to the supplier, so Print stays bare and
+  `?attachments=1` (⋯ › "Print with attachments") puts them behind it.
 - **The order's paper goes to the supplier, in the owner's layout**
   (2026-10-14, `docs/mockups/purchase-order-layout.pptx`, his slide):
   the title in bold (`titleBold`, this document only), "Date: …" under
