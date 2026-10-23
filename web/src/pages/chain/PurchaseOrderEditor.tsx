@@ -194,6 +194,13 @@ export function PurchaseOrderEditor() {
   // An order raised with no request may be for a sales order (2026-10-21).
   const [orderChoices, setOrderChoices] = useState<{ id: string; number: string; customer: string; subject: string }[]>([]);
   const [pickedOrderId, setPickedOrderId] = useState('');
+  // What a standalone order is for (2026-10-23): the warehouse's stock, a
+  // project, or a sales order — never "direct to project" with no project.
+  const [forMode, setForMode] = useState<'stock' | 'project' | 'order'>('stock');
+  const [pickedJobId, setPickedJobId] = useState('');
+  const [pickedWarehouseId, setPickedWarehouseId] = useState('');
+  const [jobChoices, setJobChoices] = useState<{ id: string; number: string; name: string }[]>([]);
+  const [warehouseChoices, setWarehouseChoices] = useState<{ id: string; name: string }[]>([]);
   const [route, setRoute] = useState<Route | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -303,8 +310,16 @@ export function PurchaseOrderEditor() {
   const request = existing?.request ?? draft?.request ?? null;
   // Raised with no request, the buyer may name the sales order it is for.
   const standalone = !existing && !request;
-  const kind = existing?.kind ?? (standalone && pickedOrderId ? 'SALES_ORDER' : (draft?.kind ?? 'DIRECT_TO_JOB'));
-  const job = existing?.job ?? draft?.job ?? null;
+  const kind =
+    existing?.kind ??
+    (standalone
+      ? forMode === 'order' && pickedOrderId
+        ? 'SALES_ORDER'
+        : forMode === 'project' && pickedJobId
+          ? 'DIRECT_TO_JOB'
+          : 'STOCK_REPLENISHMENT'
+      : (draft?.kind ?? 'STOCK_REPLENISHMENT'));
+  const job = existing?.job ?? draft?.job ?? (standalone && forMode === 'project' ? (jobChoices.find((j) => j.id === pickedJobId) ?? null) : null);
   // Only an order charged to a project asks each line for its budget line.
   const direct = kind === 'DIRECT_TO_JOB';
   const salesOrder = existing?.salesOrder ?? draft?.salesOrder ?? null;
@@ -315,6 +330,14 @@ export function PurchaseOrderEditor() {
       .get<typeof orderChoices>('/purchase-orders/sales-orders')
       .then(setOrderChoices)
       .catch(() => setOrderChoices([]));
+    api
+      .get<typeof jobChoices>('/jobs/lookup')
+      .then(setJobChoices)
+      .catch(() => setJobChoices([]));
+    api
+      .get<typeof warehouseChoices>('/warehouses')
+      .then(setWarehouseChoices)
+      .catch(() => setWarehouseChoices([]));
   }, [standalone]);
   const canvass = existing?.fromCanvass ?? draft?.canvass ?? null;
   const warehouse = existing?.warehouse ?? draft?.warehouse ?? null;
@@ -453,7 +476,13 @@ export function PurchaseOrderEditor() {
       })),
       ...(existing
         ? { version: existing.version }
-        : { requestId: fromCanvass ? null : fromRequest, canvassId: fromCanvass, salesOrderId: standalone ? pickedOrderId || null : null }),
+        : {
+            requestId: fromCanvass ? null : fromRequest,
+            canvassId: fromCanvass,
+            salesOrderId: standalone && forMode === 'order' ? pickedOrderId || null : null,
+            jobId: standalone && forMode === 'project' ? pickedJobId || null : null,
+            warehouseId: standalone && forMode === 'stock' ? pickedWarehouseId || null : null,
+          }),
     };
   }
 
@@ -595,16 +624,56 @@ export function PurchaseOrderEditor() {
                   autoFocus={!editing && !canvass}
                 />
               </Field>
-              <Field label="For" hint={standalone ? 'An order with no request may be bought for an issued sales order — no project needed' : undefined}>
+              <Field
+                label="For"
+                hint={
+                  standalone
+                    ? forMode === 'stock'
+                      ? 'The goods go on the warehouse’s shelf when received — released later by a pull-out or Outgoing slip; nothing is charged to a project'
+                      : forMode === 'project'
+                        ? 'Charged to the project when received; each line names its budget line'
+                        : 'Bought for the deal — its spend, never a project; the goods sit as the order’s own stock when received into a warehouse'
+                    : undefined
+                }
+              >
                 {standalone ? (
-                  <select value={pickedOrderId} onChange={(e) => setPickedOrderId(e.target.value)}>
-                    <option value="">— no project — not charged to a budget —</option>
-                    {orderChoices.map((o) => (
-                      <option key={o.id} value={o.id}>
-                        Sales order {o.number} — {o.customer}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="stack">
+                    <select value={forMode} onChange={(e) => setForMode(e.target.value as typeof forMode)}>
+                      <option value="stock">Warehouse stock</option>
+                      <option value="project">A project</option>
+                      <option value="order">An issued sales order</option>
+                    </select>
+                    {forMode === 'stock' && (
+                      <select value={pickedWarehouseId} onChange={(e) => setPickedWarehouseId(e.target.value)}>
+                        <option value="">— the warehouse named on the Incoming —</option>
+                        {warehouseChoices.map((w) => (
+                          <option key={w.id} value={w.id}>
+                            {w.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {forMode === 'project' && (
+                      <select value={pickedJobId} onChange={(e) => setPickedJobId(e.target.value)}>
+                        <option value="">— choose the project —</option>
+                        {jobChoices.map((j) => (
+                          <option key={j.id} value={j.id}>
+                            {j.number} — {j.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {forMode === 'order' && (
+                      <select value={pickedOrderId} onChange={(e) => setPickedOrderId(e.target.value)}>
+                        <option value="">— choose the sales order —</option>
+                        {orderChoices.map((o) => (
+                          <option key={o.id} value={o.id}>
+                            Sales order {o.number} — {o.customer}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
                 ) : (
                   <div className="qe-static">
                     {job ? (
@@ -617,8 +686,10 @@ export function PurchaseOrderEditor() {
                       </Link>
                     ) : warehouse ? (
                       `Stock for ${warehouse.name}`
+                    ) : kind === 'DIRECT_TO_JOB' ? (
+                      <span className="muted">Direct to project — no project named</span>
                     ) : (
-                      <span className="muted">No project — not charged to a budget</span>
+                      'Warehouse stock — the warehouse named on the Incoming'
                     )}
                   </div>
                 )}

@@ -10,7 +10,7 @@
  * mostly about.
  */
 
-import { repairTypedStockReceipts } from '../src/shared/typedItems';
+import { repairProjectlessReceipts, repairTypedStockReceipts } from '../src/shared/typedItems';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -1378,8 +1378,10 @@ async function main() {
 
     // Editing a draft order.
     const draftDay = manilaDayKey(new Date());
+    // A standalone order for a PROJECT (2026-10-23: one with nothing picked is a stock order).
     const created = await api(buyerToken, 'POST', '/purchase-orders', {
       supplierId: supplier.id,
+      jobId: job.id,
       notes: `${TAG} draft order`,
     });
     const draftId = String(created.body.id);
@@ -4563,6 +4565,91 @@ async function main() {
     const billerRole = await makeRole('zzchain_biller', 'ZZ Biller', ['gfin.ap.view_all', 'gfin.ap.create', 'gchain.receiving.view_all']);
     const biller = await mkUser('Verify Biller', 'biller@verifyc.local', billerRole.id);
     const billerToken = signToken(biller.id, biller.email);
+    // ── An order with no request is for stock, a project or a sales order (2026-10-23) ──
+    // The owner's report: a standalone order was "direct to project" with no
+    // project, its Incoming posted the goods nowhere, and nothing could be
+    // pulled out.
+    console.log('\nA standalone order says what it is for; a receipt never posts nowhere');
+    {
+      const bare = await api(buyerToken, 'POST', '/purchase-orders', { supplierId: supplier.id, notes: `${TAG} standalone, nothing picked` });
+      const forStock = await api(buyerToken, 'POST', '/purchase-orders', { supplierId: supplier.id, warehouseId: warehouse.id, notes: `${TAG} standalone for stock` });
+      const forJob = await api(buyerToken, 'POST', '/purchase-orders', { supplierId: supplier.id, jobId: job.id, notes: `${TAG} standalone for the project` });
+      const badJob = await api(buyerToken, 'POST', '/purchase-orders', { supplierId: supplier.id, jobId: 'no-such-project', notes: `${TAG} standalone, bad project` });
+      check(
+        'a standalone order with nothing picked is a STOCK order; a warehouse or a project picked makes it that',
+        bare.body.kind === 'STOCK_REPLENISHMENT' && bare.body.jobId === null && forStock.body.kind === 'STOCK_REPLENISHMENT' && forStock.body.warehouseId === warehouse.id && forJob.body.kind === 'DIRECT_TO_JOB' && forJob.body.jobId === job.id && badJob.status === 400,
+        `${bare.body.kind} / ${forStock.body.kind} ${forStock.body.warehouseId === warehouse.id} / ${forJob.body.kind} / ${badJob.status}`,
+      );
+      const draftShape = await api(buyerToken, 'GET', '/purchase-orders/draft');
+      check('the page’s standalone draft starts as a stock order', draftShape.body.kind === 'STOCK_REPLENISHMENT');
+
+      // The shape raised before the fix: "direct to project", no project. Received into a warehouse, it builds company stock.
+      const legacy = await prisma.purchaseOrder.create({
+        data: {
+          number: await nextNumber('purchase_order'),
+          status: 'ISSUED',
+          kind: 'DIRECT_TO_JOB',
+          supplierId: supplier.id,
+          createdById: procurement.id,
+          issuedAt: new Date(),
+          notes: `${TAG} legacy projectless order`,
+          subtotal: D(300),
+          total: D(300),
+          items: { create: [{ itemId: item.id, costCategoryId: materials.id, description: `${TAG} Stainless pipe`, quantity: D(4), unit: 'pcs', unitPrice: D(75), amount: D(300) }] },
+        },
+        include: { items: true },
+      });
+      const shelfBefore = await onHand();
+      const legacyIn = await api(receiverToken, 'POST', '/receivings', { orderId: legacy.id, warehouseId: warehouse.id, items: [{ orderItemId: legacy.items[0].id, quantity: 2 }] });
+      const legacyInId = String(legacyIn.body.id);
+      const legacySent = await api(receiverToken, 'POST', `/receivings/${legacyInId}/submit`);
+      const legacyReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'receiving', documentId: legacyInId, status: 'PENDING' } });
+      const legacyOk = legacyReq ? await api(bossToken, 'POST', `/approvals/${legacyReq.id}/act`, { action: 'APPROVED' }) : { status: 0, body: {} };
+      const legacyRow = await prisma.receiving.findUnique({ where: { id: legacyInId } });
+      check(
+        'an order "direct to project" with no project, received into a warehouse, builds the company’s stock there',
+        legacyIn.status === 201 && legacySent.status === 200 && legacyOk.status === 200 && legacyRow?.status === 'RECEIVED' && money((await onHand()) - shelfBefore, 2),
+        `${legacyIn.status} ${legacySent.status} ${legacyOk.status} ${legacyRow?.status}; ${shelfBefore} → ${await onHand()}`,
+      );
+
+      // The repair: a receipt that posted nowhere is put on the shelf once, and the order becomes the stock order it was.
+      const orphanOrder = await prisma.purchaseOrder.create({
+        data: {
+          number: await nextNumber('purchase_order'),
+          status: 'PARTIALLY_RECEIVED',
+          kind: 'DIRECT_TO_JOB',
+          supplierId: supplier.id,
+          createdById: procurement.id,
+          issuedAt: new Date(),
+          notes: `${TAG} orphan receipt order`,
+          subtotal: D(300),
+          total: D(300),
+          items: { create: [{ itemId: item.id, costCategoryId: materials.id, description: `${TAG} Stainless pipe`, quantity: D(4), unit: 'pcs', unitPrice: D(75), amount: D(300), receivedQty: D(3) }] },
+        },
+        include: { items: true },
+      });
+      await prisma.receiving.create({
+        data: {
+          number: await nextNumber('receiving'),
+          orderId: orphanOrder.id,
+          warehouseId: warehouse.id,
+          receivedById: receiver.id,
+          receivedDate: new Date(),
+          status: 'RECEIVED',
+          items: { create: [{ orderItemId: orphanOrder.items[0].id, itemId: item.id, description: `${TAG} Stainless pipe`, quantity: D(3), unit: 'pcs', unitCost: D(75) }] },
+        },
+      });
+      const beforeRepair = await onHand();
+      const repaired = await repairProjectlessReceipts();
+      const again = await repairProjectlessReceipts();
+      const orphanAfter = await prisma.purchaseOrder.findUnique({ where: { id: orphanOrder.id } });
+      check(
+        'the repair puts a receipt that posted nowhere on the shelf, once, and re-kinds the order as stock',
+        repaired.lines === 1 && money((await onHand()) - beforeRepair, 3) && orphanAfter?.kind === 'STOCK_REPLENISHMENT' && orphanAfter.warehouseId === warehouse.id && again.lines === 0,
+        `${JSON.stringify(repaired)} then ${JSON.stringify(again)}; ${beforeRepair} → ${await onHand()}; ${orphanAfter?.kind}`,
+      );
+    }
+
     const stockOrder = await prisma.purchaseOrder.create({
       data: {
         number: await nextNumber('purchase_order'),
@@ -4623,6 +4710,7 @@ async function main() {
     check('the receiver attaches the packing list to the draft', packingUp.status === 201, String(packingUp.status));
 
     const inSubmit = await api(receiverToken, 'POST', `/receivings/${firstInId}/submit`);
+
     const secondIn = await api(receiverToken, 'POST', '/receivings', { orderId: stockOrder.id, items: [{ orderItemId: stockLine.id, quantity: 5 }] });
     const fitsIn = await api(receiverToken, 'POST', '/receivings', { orderId: stockOrder.id, items: [{ orderItemId: stockLine.id, quantity: 4 }] });
     check(

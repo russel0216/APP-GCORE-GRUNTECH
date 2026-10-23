@@ -677,8 +677,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,780 assertions across twenty-two scripts** (counted 2026-10-23, after
-22 on hr for the superior's door — the inactive "Reports to" stepped past,
+**4,784 assertions across twenty-two scripts** (counted 2026-10-23, after
+4 on chain for the standalone order's kind, the project-less receipt that
+builds stock and the once-only repair, and before it 22 on hr for the superior's door — the inactive "Reports to" stepped past,
 the Leave list's Waiting on me and direct reports, the form's warning, and
 the attendance correction asked, routed, applied and pulled back — and
 before it
@@ -796,7 +797,7 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
 430, masters 92, sales 643, costing 205, pipeline 121, calendar 103, numbering
-94, partners 120, delivery 213, chain 387, hr 659, plantilla 129, meetings
+94, partners 120, delivery 213, chain 391, hr 659, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 444, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
@@ -1144,6 +1145,33 @@ launcher as the way out) — never a stale phase sentence.
   `backfillProjectStock()` (the seed, once, `seed.projectStockBackfilled`)
   shelved what was received into a warehouse before, posting nothing.
   verify-chain pins it.
+- **An order with no request says what it is for** (2026-10-23, the owner's
+  report: "receive the partial incoming but didn't push through the inventory
+  … cannot pull out the item" — GT-PO-2026-0005, raised on the Purchase Order
+  page with no request and no sales order, was DIRECT_TO_JOB with NO project,
+  and `postReceiving` builds company stock for STOCK orders, project stock
+  for DIRECT_TO_JOB orders WITH a project and order stock for SALES_ORDER
+  ones, so its receipt posted the goods nowhere). `standaloneKind()` in
+  routes/procurement.ts is the one rule: a sales order picked → SALES_ORDER;
+  a project picked (`jobId` on `POST /purchase-orders`, a budget line per
+  line) → DIRECT_TO_JOB; neither → STOCK_REPLENISHMENT, the warehouse
+  (`warehouseId`) optional — the Incoming names it. The editor's "For" on a
+  standalone order is Warehouse stock / A project / An issued sales order
+  with the matching picker; `GET /purchase-orders/draft` starts a standalone
+  draft as stock; `PUT /:id/sheet` re-targets a standalone draft (`jobId`,
+  `warehouseId`). **A receipt never posts nowhere**: an order still "direct
+  to project" with no project builds company stock when received into a
+  warehouse (`buildsStock` in `postReceiving`) and is refused — the approval
+  back to a draft, the reason on its trail — with no warehouse on either.
+  `repairProjectlessReceipts()` (`shared/typedItems.ts`, the seed, every
+  deploy, idempotent) puts each RECEIVED line of such an order with no stock
+  movement of its own on the shelf of the Incoming's warehouse (else the
+  order's) at its cost and date, and re-kinds every such order — received or
+  still open — as the stock order it was. The PO header reads "Direct to
+  project — no project named" where that shape still shows. Once on the
+  shelf the goods leave by a pull-out slip with no source document (its
+  purpose said) or an Outgoing slip. verify-chain pins the three kinds, the
+  legacy receipt and the once-only repair.
 - **The request's DECLARED value is what Budget Monitoring subtracts**
   (2026-10-22, the owner's call: "the declared value in the purchase request
   should be the one to subtract in budget monitoring — the purchaser or

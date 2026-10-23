@@ -962,6 +962,14 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
   }
 
   if (order.status === 'CANCELLED') throw badRequest(`${order.number} was cancelled`);
+  // An order "direct to project" that names no project (raised standalone
+  // before 2026-10-23) builds the company's stock when received into a
+  // warehouse — a receipt never posts nowhere — and is refused otherwise.
+  const projectless = order.kind === 'DIRECT_TO_JOB' && !order.jobId;
+  if (projectless && !receiving.warehouseId && !order.warehouseId) {
+    throw badRequest(`${order.number} names no project and no warehouse — modify the order to say what it is for first`);
+  }
+  const buildsStock = order.kind === 'STOCK_REPLENISHMENT' || projectless;
   const byOrderItem = new Map(order.items.map((i) => [i.id, i]));
   // What the project is charged per budget line. A line ordered from a
   // request is charged at the request's DECLARED estimate for the quantity
@@ -999,14 +1007,14 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     const service = orderItem.nature === 'SERVICE';
     const stockWarehouseId = service ? null : receiving.warehouseId ?? order.warehouseId;
     const shelfWarehouseId = service ? null : receiving.warehouseId;
-    if (order.kind === 'STOCK_REPLENISHMENT' && stockWarehouseId && !orderItem.itemId) {
+    if (buildsStock && stockWarehouseId && !orderItem.itemId) {
       orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId, line.categoryId);
       await tx.purchaseOrderItem.update({ where: { id: orderItem.id }, data: { itemId: orderItem.itemId } });
     }
     if (orderItem.itemId && line.categoryId) {
       await tx.item.updateMany({ where: { id: orderItem.itemId, categoryId: null }, data: { categoryId: line.categoryId } });
     }
-    if (order.kind === 'STOCK_REPLENISHMENT' && stockWarehouseId && orderItem.itemId) {
+    if (buildsStock && stockWarehouseId && orderItem.itemId) {
       await receiveStock(tx, {
         itemId: orderItem.itemId,
         warehouseId: stockWarehouseId,
@@ -1018,7 +1026,7 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
         createdById: actorId,
       });
     }
-    if (order.kind === 'STOCK_REPLENISHMENT' && stockWarehouseId && orderItem.itemId && line.locationId) {
+    if (buildsStock && stockWarehouseId && orderItem.itemId && line.locationId) {
       // A receipt into a named bin files the stock line there while it has none.
       await tx.inventoryBalance.updateMany({
         where: { itemId: orderItem.itemId, warehouseId: stockWarehouseId, locationId: null },

@@ -263,7 +263,9 @@ export function PurchaseOrderDetail() {
                 {po.job.number} — {po.job.name}
               </Link>
             ) : (
-              `Stock replenishment${po.warehouse ? ` for ${po.warehouse.name}` : ''}`
+              po.kind === 'DIRECT_TO_JOB'
+                ? 'Direct to project — no project named'
+                : `Stock replenishment${po.warehouse ? ` for ${po.warehouse.name}` : ''}`
             )}
             {po.request && (
               <>

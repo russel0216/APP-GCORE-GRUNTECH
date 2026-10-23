@@ -29,7 +29,7 @@ import { backfillCustomerAddresses } from '../src/shared/customerAddress';
 import { backfillInvoiceCountering, fillInvoiceCredit } from '../src/shared/receivables';
 import { fillBillTerms } from '../src/shared/payables';
 import { renumberProgressDocs } from '../src/shared/progressReport';
-import { repairTypedStockReceipts } from '../src/shared/typedItems';
+import { repairProjectlessReceipts, repairTypedStockReceipts } from '../src/shared/typedItems';
 import { backfillLoginMirrors, linkAdminEmployees } from '../src/shared/personMirror';
 import { CHART_DEPARTMENTS, applyOrgChart, grantSupervisorRole } from '../src/shared/orgChart';
 import { applyEmployeeNumbering, clearEmployeeNumbers } from '../src/shared/employeeNumbers';
@@ -1068,6 +1068,8 @@ async function main() {
     }
     const typedReceipts = await repairTypedStockReceipts();
     if (typedReceipts) console.log(`  · Posted the stock of ${typedReceipts} received line(s) typed without an item`);
+    const projectless = await repairProjectlessReceipts();
+    if (projectless.lines || projectless.orders) console.log(`  · Orders raised with no project are stock orders: ${projectless.lines} received line(s) put on the shelf, ${projectless.orders} order(s) re-kinded`);
     const closedIncreases = await closeLegacyBudgetIncreases();
     if (closedIncreases) console.log(`  · Closed ${closedIncreases} budget request(s) approved as budget increases under the old rule`);
     const committedRequests = await syncBudgetRequestCommitments();

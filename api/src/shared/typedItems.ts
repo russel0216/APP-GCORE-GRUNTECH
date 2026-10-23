@@ -85,3 +85,63 @@ export async function repairTypedStockReceipts(): Promise<number> {
   }
   return fixed;
 }
+
+/**
+ * Goods received on an order "direct to project" that names no project
+ * (2026-10-23, the owner's report: GT-PO-2026-0005, raised standalone, was
+ * received into Main Warehouse and showed on no shelf, so nothing could be
+ * pulled out). Such a receipt posted nowhere. Every deploy, idempotent: each
+ * RECEIVED line of such an order with no stock movement of its own yet is
+ * put on the shelf of the Incoming's warehouse (else the order's) at its
+ * cost and date, a typed line's item filed, and the order becomes the stock
+ * order it was — STOCK_REPLENISHMENT, the warehouse named. An order still
+ * open with the same shape is re-kinded too, so its next receipt posts.
+ */
+export async function repairProjectlessReceipts(): Promise<{ lines: number; orders: number }> {
+  const lines = await prisma.receivingItem.findMany({
+    where: { receiving: { status: 'RECEIVED', order: { kind: 'DIRECT_TO_JOB', jobId: null } }, orderItemId: { not: null } },
+    include: { orderItem: true, receiving: { include: { order: { select: { id: true, warehouseId: true } } } } },
+    orderBy: { receiving: { receivedDate: 'asc' } },
+  });
+  let posted = 0;
+  const touched = new Set<string>();
+  for (const line of lines) {
+    const orderItem = line.orderItem!;
+    if (orderItem.nature === 'SERVICE') continue;
+    const warehouseId = line.receiving.warehouseId ?? line.receiving.order?.warehouseId;
+    if (!warehouseId) continue;
+    await prisma.$transaction(async (tx) => {
+      const current = await tx.purchaseOrderItem.findUniqueOrThrow({ where: { id: orderItem.id } });
+      const itemId = current.itemId ?? (await itemForTypedLine(tx, current, line.receiving.receivedById ?? '', line.categoryId));
+      if (!current.itemId) await tx.purchaseOrderItem.update({ where: { id: current.id }, data: { itemId } });
+      const already = await tx.inventoryTransaction.count({ where: { sourceType: 'receiving', sourceId: line.receiving.id, itemId, type: 'RECEIPT' } });
+      if (already) return;
+      await receiveStock(tx, {
+        itemId,
+        warehouseId,
+        quantity: Number(line.quantity),
+        unitCost: Number(line.unitCost),
+        sourceType: 'receiving',
+        sourceId: line.receiving.id,
+        sourceNumber: line.receiving.number,
+        notes: 'Stock an order with no project brought, posted late',
+        createdById: line.receiving.receivedById ?? null,
+        occurredAt: line.receiving.receivedDate,
+      });
+      posted += 1;
+    }, { timeout: 30000 });
+    if (line.receiving.order) {
+      await prisma.purchaseOrder.updateMany({
+        where: { id: line.receiving.order.id, kind: 'DIRECT_TO_JOB', jobId: null },
+        data: { kind: 'STOCK_REPLENISHMENT', warehouseId: line.receiving.order.warehouseId ?? warehouseId },
+      });
+      touched.add(line.receiving.order.id);
+    }
+  }
+  // The rest of that shape, nothing received yet: a stock order from now on.
+  const rekinded = await prisma.purchaseOrder.updateMany({
+    where: { kind: 'DIRECT_TO_JOB', jobId: null, requestId: null, status: { not: 'CANCELLED' } },
+    data: { kind: 'STOCK_REPLENISHMENT' },
+  });
+  return { lines: posted, orders: touched.size + rekinded.count };
+}

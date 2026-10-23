@@ -3144,7 +3144,8 @@ purchaseOrderRoutes.get(
     const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
     res.json({
       vatRate: company ? num(company.vatRate) : 0.12,
-      kind: pr?.kind ?? 'DIRECT_TO_JOB',
+      // A standalone draft starts as the warehouse's stock; the page may name a project or a sales order instead.
+      kind: pr?.kind ?? 'STOCK_REPLENISHMENT',
       request: pr ? { id: pr.id, number: pr.number, purpose: pr.purpose, preferredSupplier: pr.preferredSupplier } : null,
       job: pr?.job ?? null,
       salesOrder: pr?.salesOrder ?? null,
@@ -3234,6 +3235,37 @@ purchaseOrderRoutes.get(
  * From a canvass, the winning supplier's quoted prices become the order lines —
  * the point of canvassing in the first place.
  */
+/**
+ * What an order with no request is for (2026-10-23, the owner's report: a
+ * standalone order was DIRECT_TO_JOB with no project, so its Incoming posted
+ * the goods nowhere and nothing could be pulled out): a sales order, else a
+ * project named on it, else the warehouse's stock. Every standalone order
+ * is one of the three — never a project kind with no project.
+ */
+export function standaloneKind(salesOrderId: string | null, jobId: string | null): PurchaseKind {
+  return salesOrderId ? 'SALES_ORDER' : jobId ? 'DIRECT_TO_JOB' : 'STOCK_REPLENISHMENT';
+}
+
+async function standaloneTarget(
+  salesOrderId: string | null,
+  jobId: string | null | undefined,
+  warehouseId: string | null | undefined,
+): Promise<{ jobId: string | null; warehouseId: string | null }> {
+  if (salesOrderId) return { jobId: null, warehouseId: null };
+  if (jobId) {
+    const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, status: true } });
+    if (!job) throw badRequest('That project does not exist');
+    if (job.status === 'CANCELLED') throw badRequest('That project was cancelled');
+    return { jobId: job.id, warehouseId: null };
+  }
+  if (warehouseId) {
+    const warehouse = await prisma.warehouse.findFirst({ where: { id: warehouseId, isActive: true }, select: { id: true } });
+    if (!warehouse) throw badRequest('That warehouse is not on file');
+    return { jobId: null, warehouseId: warehouse.id };
+  }
+  return { jobId: null, warehouseId: null };
+}
+
 const poSchema = z.object({
   supplierId: z.string().min(1, 'Choose a supplier'),
   requestId: z.string().optional().nullable(),
@@ -3244,6 +3276,14 @@ const poSchema = z.object({
   quoteRef: z.string().max(120).optional().nullable(),
   /** An order raised with no request, for a sales order (2026-10-21). */
   salesOrderId: z.string().optional().nullable(),
+  /**
+   * An order raised with no request (2026-10-23): for a PROJECT (`jobId` —
+   * charged to it, a budget line per line) or for the WAREHOUSE'S STOCK
+   * (`warehouseId`, which the Incoming may still name) — never "direct to
+   * project" with no project, which posted nothing on receipt.
+   */
+  jobId: z.string().optional().nullable(),
+  warehouseId: z.string().optional().nullable(),
   currency: z.enum(QUOTATION_CURRENCY_CODES).optional(),
   terms: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
@@ -3459,7 +3499,8 @@ purchaseOrderRoutes.post(
     // it buys for that deal; from a request it takes the request's.
     if (!pr && body.salesOrderId) await checkSalesOrderTarget(body.salesOrderId);
     const salesOrderId = pr ? pr.salesOrderId : body.salesOrderId || null;
-    const kind = pr?.kind ?? (salesOrderId ? 'SALES_ORDER' : 'DIRECT_TO_JOB');
+    const target = pr ? { jobId: pr.jobId, warehouseId: pr.warehouseId } : await standaloneTarget(salesOrderId, body.jobId, body.warehouseId);
+    const kind = pr?.kind ?? standaloneKind(salesOrderId, target.jobId);
     // The page sends the lines as it shows them; a caller that sends none
     // gets the source's lines, as before. Every line is checked before the
     // number is issued.
@@ -3476,9 +3517,9 @@ purchaseOrderRoutes.post(
           kind,
           supplierId: body.supplierId,
           requestId: pr?.id ?? null,
-          jobId: pr?.jobId ?? null,
+          jobId: target.jobId,
           salesOrderId,
-          warehouseId: pr?.warehouseId ?? null,
+          warehouseId: target.warehouseId,
           createdById: me.id,
           // Set here rather than left to the column's now(), which the
           // database takes in UTC — yesterday's date until 08:00 Manila.
@@ -3718,7 +3759,15 @@ purchaseOrderRoutes.put(
     const requestItemIds = po.requestId
       ? (await prisma.purchaseRequestItem.findMany({ where: { requestId: po.requestId }, select: { id: true } })).map((i) => i.id)
       : [];
-    const lines = await checkPoLines(po.kind, body.lines, loaded.items.map((i) => i.id), requestItemIds);
+    // A standalone draft may still change what it is for (2026-10-23): the
+    // sales order stays as made; a project, a warehouse or neither re-decides
+    // the kind, and the lines are checked under it.
+    let retarget: { kind: PurchaseKind; jobId: string | null; warehouseId: string | null } | null = null;
+    if (!po.requestId && !po.salesOrderId && (body.jobId !== undefined || body.warehouseId !== undefined)) {
+      const target = await standaloneTarget(null, body.jobId ?? null, body.warehouseId ?? null);
+      retarget = { kind: standaloneKind(null, target.jobId), ...target };
+    }
+    const lines = await checkPoLines(retarget?.kind ?? po.kind, body.lines, loaded.items.map((i) => i.id), requestItemIds);
     const version = body.version ? new Date(body.version) : null;
     if (version && Number.isNaN(version.getTime())) throw badRequest('The version is not a date');
 
@@ -3732,7 +3781,7 @@ purchaseOrderRoutes.put(
           deliverAddress: body.deliverAddress || null,
           ...(body.quoteRef !== undefined ? { quoteRef: body.quoteRef || null } : {}),
           ...(body.currency ? { currency: body.currency } : {}),
-        ...(body.currency ? { currency: body.currency } : {}),
+          ...(retarget ?? {}),
           terms: body.terms || null,
           notes: body.notes || null,
           vatInclusive: body.vatInclusive,
