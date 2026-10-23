@@ -343,20 +343,30 @@ const PR_WRITERS = [
  * one row per ACTIVE cost category in its order, and the project's whole.
  * A draft commits nothing, so nothing is left out for the request being
  * edited; the page subtracts its own lines live.
+ *
+ * `exclude` leaves one document's own ledger rows out (a released budget
+ * request's commitment), read separately and subtracted — never a `NOT`
+ * on the nullable source columns, which would drop every row with none.
+ * CONSUMED is reported and never subtracted (Phase 4's rule).
  */
-export async function projectBudgetByLine(jobId: string) {
-  const [categories, rows] = await Promise.all([
+export async function projectBudgetByLine(jobId: string, opts: { exclude?: { sourceType: string; sourceId: string } } = {}) {
+  const [categories, rows, own] = await Promise.all([
     prisma.costCategory.findMany({
       where: { isActive: true },
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       select: { id: true, code: true, name: true },
     }),
     prisma.jobCostEntry.groupBy({ by: ['costCategoryId', 'state'], where: { jobId }, _sum: { amount: true } }),
+    opts.exclude
+      ? prisma.jobCostEntry.groupBy({ by: ['costCategoryId', 'state'], where: { jobId, ...opts.exclude }, _sum: { amount: true } })
+      : Promise.resolve([]),
   ]);
-  const sum = (categoryId: string | null, state: string) =>
-    rows
+  type Row = { costCategoryId: string; state: string; _sum: { amount: Prisma.Decimal | null } };
+  const sumOf = (list: Row[], categoryId: string | null, state: string) =>
+    list
       .filter((r) => (categoryId === null || r.costCategoryId === categoryId) && r.state === state)
       .reduce((s, r) => s + num(r._sum.amount), 0);
+  const sum = (categoryId: string | null, state: string) => sumOf(rows, categoryId, state) - sumOf(own, categoryId, state);
   const position = (categoryId: string | null) => {
     const budgeted = sum(categoryId, 'BUDGETED');
     const committed = sum(categoryId, 'COMMITTED');
@@ -365,11 +375,18 @@ export async function projectBudgetByLine(jobId: string) {
       budgeted: cents(budgeted),
       committed: cents(committed),
       incurred: cents(incurred),
+      consumed: cents(sum(categoryId, 'CONSUMED')),
       available: cents(budgeted - committed - incurred),
     };
   };
+  // An inactive category still carrying ledger rows is listed too, after the active ones.
+  const listed = new Set(categories.map((c) => c.id));
+  const stray = [...new Set(rows.map((r) => r.costCategoryId).filter((id) => id && !listed.has(id)))] as string[];
+  const extra = stray.length
+    ? await prisma.costCategory.findMany({ where: { id: { in: stray } }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, code: true, name: true } })
+    : [];
   return {
-    lines: categories.map((c) => ({ ...c, ...position(c.id) })),
+    lines: [...categories, ...extra].map((c) => ({ ...c, ...position(c.id) })),
     total: position(null),
   };
 }

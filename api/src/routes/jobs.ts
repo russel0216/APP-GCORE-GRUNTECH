@@ -30,6 +30,7 @@ import { planTasks } from '../shared/costingMath';
 import { cleanCostingIds, costingIdsOf } from '../shared/costingSets';
 import { LIST_CAP, listReference, totalLabel, bracketed, bracketNote, listNotes, listDay, namedInFilter, choice, sendListPdf } from '../shared/listPaper';
 import { visibleOwners } from '../shared/team';
+import { projectBudgetByLine } from './procurement';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -1528,31 +1529,147 @@ jobRoutes.get(
 
 // ── Cost ledger ──────────────────────────────────────────────────────────────
 
+/**
+ * The project's cost ledger (2026-10-23, the owner's call: "cost ledger, by
+ * category"). `?state=` and `?costCategoryId=` narrow it; `?group=category`
+ * orders the rows under their budget line (the line's order, newest first
+ * within it), so the card can head each line and subtotal it. Every answer
+ * carries `byCategory` — `projectBudgetByLine()`, Budget Monitoring's own
+ * figures, with CONSUMED beside them — so the card's totals and Budget
+ * Monitoring can never disagree.
+ */
+function ledgerWhere(jobId: string, q: ReturnType<typeof listQuery>): Prisma.JobCostEntryWhereInput {
+  const where: Prisma.JobCostEntryWhereInput = { jobId };
+  const state = choice(q.filters.state, CostState, 'State');
+  if (state) where.state = state;
+  if (q.filters.costCategoryId) where.costCategoryId = q.filters.costCategoryId;
+  return where;
+}
+
+const LEDGER_INCLUDE = {
+  costCategory: { select: { id: true, code: true, name: true, sortOrder: true } },
+  createdBy: { select: { id: true, name: true } },
+} satisfies Prisma.JobCostEntryInclude;
+
+function ledgerOrder(q: ReturnType<typeof listQuery>): Prisma.JobCostEntryOrderByWithRelationInput[] {
+  return q.filters.group === 'category'
+    ? [{ costCategory: { sortOrder: 'asc' } }, { costCategory: { name: 'asc' } }, { occurredAt: 'desc' }]
+    : [{ occurredAt: 'desc' }];
+}
+
 jobRoutes.get(
   '/:id/ledger',
   require_('gops.budget_monitoring.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.JobCostEntryWhereInput = { jobId: req.params.id };
-    const state = choice(q.filters.state, CostState, 'State');
-    if (state) where.state = state;
-    if (q.filters.costCategoryId) where.costCategoryId = q.filters.costCategoryId;
+    const where = ledgerWhere(req.params.id, q);
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, byCategory] = await Promise.all([
       prisma.jobCostEntry.findMany({
         where,
-        include: {
-          costCategory: { select: { id: true, code: true, name: true } },
-          createdBy: { select: { id: true, name: true } },
-        },
-        orderBy: { occurredAt: 'desc' },
+        include: LEDGER_INCLUDE,
+        orderBy: ledgerOrder(q),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.jobCostEntry.count({ where }),
+      projectBudgetByLine(req.params.id),
     ]);
 
-    res.json(listResult(rows.map((r) => ({ ...r, amount: num(r.amount) })), total, q));
+    res.json({
+      ...listResult(rows.map((r) => ({ ...r, amount: num(r.amount) })), total, q),
+      // A line with nothing on the ledger stays off the card.
+      byCategory: {
+        lines: byCategory.lines.filter((l) => l.budgeted || l.committed || l.incurred || l.consumed),
+        total: byCategory.total,
+      },
+    });
+  }),
+);
+
+/**
+ * The ledger on paper — the card's filters, the rows under their budget line
+ * with each line's subtotal by state, then the project's totals (Budget
+ * Monitoring's). Landscape, capped at the list cap, audited.
+ */
+jobRoutes.get(
+  '/:id/ledger/pdf',
+  require_('gops.budget_monitoring.view_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const job = await prisma.job.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, name: true } });
+    if (!job) throw notFound('Project not found');
+    const where = ledgerWhere(job.id, q);
+    const [rows, count, budget, currency, category] = await Promise.all([
+      prisma.jobCostEntry.findMany({
+        where,
+        include: LEDGER_INCLUDE,
+        orderBy: [{ costCategory: { sortOrder: 'asc' } }, { costCategory: { name: 'asc' } }, { occurredAt: 'desc' }],
+        take: LIST_CAP,
+      }),
+      prisma.jobCostEntry.count({ where }),
+      projectBudgetByLine(job.id),
+      companyCurrency(),
+      q.filters.costCategoryId ? prisma.costCategory.findUnique({ where: { id: q.filters.costCategoryId }, select: { name: true } }) : null,
+    ]);
+    const state = q.filters.state ? statusLabel(q.filters.state) : null;
+    const reference = listReference(count, rows.length, ['ledger row', 'ledger rows'], [
+      `${job.number} — ${job.name}`,
+      category && `budget line ${category.name}`,
+      state && `state ${state}`,
+    ]);
+
+    // The rows, a subheading per budget line and its subtotal by state.
+    const body: PdfRow[] = [];
+    const byLine = new Map<string, typeof rows>();
+    for (const r of rows) byLine.set(r.costCategoryId, [...(byLine.get(r.costCategoryId) ?? []), r]);
+    for (const [, list] of byLine) {
+      body.push({ heading: `${list[0].costCategory.code} ${list[0].costCategory.name}` });
+      for (const r of list) {
+        body.push([
+          formatShortDate(r.occurredAt),
+          statusLabel(r.state),
+          r.sourceNumber ? { title: r.sourceNumber, body: r.description ?? '' } : (r.description ?? ''),
+          statusLabel(r.sourceType),
+          r.createdBy?.name ?? '',
+          formatAmount(num(r.amount)),
+        ]);
+      }
+    }
+
+    const shown = budget.lines.filter((l) => (category ? l.id === q.filters.costCategoryId : l.budgeted || l.committed || l.incurred || l.consumed));
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        title: 'By budget line',
+        head: ['Budget line', `Budgeted (${currency})`, `Committed (${currency})`, `Incurred (${currency})`, `Consumed (${currency})`, `Available (${currency})`],
+        align: ['left', 'right', 'right', 'right', 'right', 'right'],
+        rows: shown.map((l) => [`${l.code} ${l.name}`, formatAmount(l.budgeted), formatAmount(l.committed), formatAmount(l.incurred), formatAmount(l.consumed), formatAmount(l.available)]),
+      },
+      {
+        kind: 'totals',
+        rows: [
+          { label: 'Budgeted', value: formatMoney(budget.total.budgeted, currency) },
+          { label: 'Less: committed', value: formatMoney(budget.total.committed, currency) },
+          { label: 'Less: incurred', value: formatMoney(budget.total.incurred, currency) },
+          { label: 'Available', value: formatMoney(budget.total.available, currency), bold: true },
+        ],
+      },
+      {
+        kind: 'table',
+        title: 'Ledger',
+        head: ['Date', 'State', 'Document and description', 'Source', 'By', `Amount (${currency})`],
+        align: ['left', 'left', 'left', 'left', 'left', 'right'],
+        rows: body,
+      },
+      ...listNotes(['Consumed is reported, never subtracted: stock issued to the project was already counted as incurred when it was received. A released commitment is a negative row.']),
+    ];
+    const pdf = await renderDocument({ title: 'Cost Ledger', date: new Date(), reference, landscape: true, sections });
+    await audit({ entityType: 'job', entityId: job.id, action: 'EXPORTED', summary: `Printed the cost ledger of ${job.number} (${rows.length} row(s))` }, req);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Cost Ledger', number: job.number, author: me.name, date: new Date() })));
+    res.send(pdf);
   }),
 );
 

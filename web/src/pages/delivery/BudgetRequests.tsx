@@ -93,11 +93,128 @@ export interface BudgetRequest {
   items?: RequestItem[];
   canEdit?: boolean;
   approvalRoute?: { name: string; steps: { name: string; approvers: { id: string; name: string }[] }[] } | null;
+  /** The register's "Available after" on the request's budget line; null once it takes nothing more. */
+  availableAfter?: number | null;
+  /** "Against the project budget" (GET /:id) — Budget Monitoring's figures, this request's own commitment left out. */
+  budget?: RequestBudget;
   allocations?: {
     id: string;
     amount: number;
     payment: { id: string; number: string; kind: string; paymentDate: string; method: string; reference: string | null; clearedAt: string | null };
   }[];
+}
+
+interface BudgetLineFigures {
+  id: string;
+  code: string;
+  name: string;
+  budgeted: number;
+  committed: number;
+  incurred: number;
+  consumed: number;
+  available: number;
+}
+
+export interface RequestBudget {
+  line: BudgetLineFigures | null;
+  lines: BudgetLineFigures[];
+  total: { budgeted: number; committed: number; incurred: number; available: number };
+  availableBefore: number;
+  thisRequest: number;
+  availableAfter: number;
+  over: boolean;
+  overBy: number;
+  settled: boolean;
+  basis: 'asked' | 'released' | 'settled';
+}
+
+/**
+ * "Against the project budget" (2026-10-23, the owner's call: approvers and
+ * finance see where the money is allocated): the request's budget line —
+ * budgeted, committed, spent, available before — less this request, and what
+ * is left after; under it the project's other budget lines.
+ */
+function RequestBudgetCard({ budget: b, lineName }: { budget: RequestBudget; lineName: string }) {
+  const others = b.lines.filter((l) => l.id !== b.line?.id && (l.budgeted || l.committed || l.incurred));
+  const line = b.line;
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h3 className="card-title">Against the project budget</h3>
+      </div>
+      {b.over && !b.settled && (
+        <div className="alert error">
+          This request takes {lineName} {formatMoney(b.overBy)} over its budget line.
+        </div>
+      )}
+      <dl className="kv">
+        <dt>Budget line</dt>
+        <dd>{lineName}</dd>
+        <dt>Budgeted</dt>
+        <dd className="mono">{formatMoney(line?.budgeted ?? 0)}</dd>
+        <dt>Already committed</dt>
+        <dd className="mono">{formatMoney(line?.committed ?? 0)}</dd>
+        <dt>Already spent</dt>
+        <dd className="mono">{formatMoney(line?.incurred ?? 0)}</dd>
+        <dt>{b.settled ? 'Available now' : 'Available before'}</dt>
+        <dd className="mono">
+          <strong>{formatMoney(b.availableBefore)}</strong>
+        </dd>
+        {!b.settled && (
+          <>
+            <dt>{b.basis === 'released' ? 'This request (cash still out)' : 'This request'}</dt>
+            <dd className="mono">− {formatMoney(b.thisRequest)}</dd>
+            <dt>{b.over ? 'Over by' : 'Available after'}</dt>
+            <dd className={`mono${b.over ? ' del-danger' : ''}`}>
+              <strong>{formatMoney(b.over ? b.overBy : b.availableAfter)}</strong>
+            </dd>
+          </>
+        )}
+      </dl>
+      <p className="muted del-lede">
+        {b.settled
+          ? 'This request takes nothing more from the budget: what it spent is on the ledger as incurred.'
+          : 'Budget Monitoring’s own figures, with this request’s own released cash left out so it is never counted twice.'}
+      </p>
+      {others.length > 0 && (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Other budget lines</th>
+                <th className="right">Budgeted</th>
+                <th className="right">Committed</th>
+                <th className="right">Spent</th>
+                <th className="right">Available</th>
+              </tr>
+            </thead>
+            <tbody>
+              {others.map((l) => (
+                <tr key={l.id}>
+                  <td>{l.name}</td>
+                  <td className="right mono">{formatMoney(l.budgeted)}</td>
+                  <td className="right mono">{formatMoney(l.committed)}</td>
+                  <td className="right mono">{formatMoney(l.incurred)}</td>
+                  <td className={`right mono${l.available < 0 ? ' del-danger' : ''}`}>{formatMoney(l.available)}</td>
+                </tr>
+              ))}
+              <tr>
+                <td>
+                  <strong>Project</strong>
+                </td>
+                <td className="right mono">{formatMoney(b.total.budgeted)}</td>
+                <td className="right mono">{formatMoney(b.total.committed)}</td>
+                <td className="right mono">{formatMoney(b.total.incurred)}</td>
+                <td className="right mono">
+                  <strong>{formatMoney(b.total.available)}</strong>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
 }
 
 /** When the receipts are due, and whether that has passed. */
@@ -186,6 +303,19 @@ export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
       render: (r) => (r.neededBy ? formatDate(r.neededBy) : <span className="faint">—</span>),
     },
     { key: 'status', label: 'Status', render: (r) => <StatusCell row={r} /> },
+    {
+      key: 'availableAfter',
+      label: 'Available after',
+      align: 'right',
+      render: (r) =>
+        r.availableAfter == null ? (
+          <span className="faint">—</span>
+        ) : (
+          <span className={`mono${r.availableAfter < 0 ? ' del-danger' : ''}`} title={`${r.costCategory.name} after this request`}>
+            {formatMoney(r.availableAfter)}
+          </span>
+        ),
+    },
     { key: 'category', label: 'Budget line', render: (r) => r.costCategory.name, optional: true },
     { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', render: (r) => formatDate(r.createdAt), optional: true },
     {
@@ -780,6 +910,7 @@ export function BudgetRequestDetail() {
       )}
       <DecisionNote documentType="budget_request" documentId={row.id} reloadToken={reload} />
       {row.status !== 'DRAFT' && <DocumentApproval documentType="budget_request" documentId={row.id} reloadToken={reload} />}
+      {row.budget && <RequestBudgetCard budget={row.budget} lineName={row.costCategory.name} />}
 
       <ErrorBox error={error} />
 

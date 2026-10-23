@@ -648,15 +648,9 @@ function Routed() {
             </GuardAny>
           }
         />
-        {/* One request: the project side's page, where finance releases and the team liquidates. */}
-        <Route
-          path="/g-ops/budget-requests/:id"
-          element={
-            <GuardAny permissions={['gops.budget_requests.view_all', 'gops.budget_requests.view_own', 'gfin.budget_requests.view_all']}>
-              <BudgetRequestDetail />
-            </GuardAny>
-          }
-        />
+        {/* One request: the project side's page, where finance releases and the team liquidates.
+            No Guard: the API decides — an approver with no right to the register reads what waits on them. */}
+        <Route path="/g-ops/budget-requests/:id" element={<BudgetRequestDetail />} />
         <Route
           path="/g-ops/budget-monitoring"
           element={

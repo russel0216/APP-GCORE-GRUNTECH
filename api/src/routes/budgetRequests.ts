@@ -4,13 +4,14 @@ import { Prisma, RequestStatus, type ApprovalRequest } from '@prisma/client';
 import { prisma } from '../prisma';
 import { deleteAttachmentsOf } from '../shared/attachments';
 import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse } from '../http/kit';
-import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { canEditRecord } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import {
   cancelOpenRequest,
+  mayDecide,
   onApprovalSettled,
   onApprovalReopened,
   routeBrief,
@@ -253,7 +254,11 @@ budgetRequestRoutes.get(
       }),
       prisma.budgetRequest.count({ where }),
     ]);
-    res.json({ ...listResult(rows.map((r) => presentBudgetRequest(r, today)), total, q), summary: await budgetRequestListSummary(where) });
+    const after = await availableAfterFor(rows);
+    res.json({
+      ...listResult(rows.map((r) => ({ ...presentBudgetRequest(r, today), availableAfter: after.get(r.id) ?? null })), total, q),
+      summary: await budgetRequestListSummary(where),
+    });
   }),
 );
 
@@ -427,6 +432,112 @@ budgetRequestRoutes.get(
   }),
 );
 
+/**
+ * "Against the project budget" (2026-10-23, the owner's call: "Budget Request
+ * should reflect subtraction so finance or other who will approve know where
+ * the budget allocated"): the request's budget line as it stands —
+ * `projectBudgetByLine()`, Budget Monitoring's own figures — with the
+ * request's OWN released commitment left out, then this request and what is
+ * left after it. Before release the request commits nothing, so it is the
+ * amount asked; released, the cash still out (released less refunded);
+ * liquidated, rejected or cancelled it takes nothing more (`settled`), the
+ * line shown as it stands. Every other budget line is sent too, so finance
+ * sees where the rest of the money sits.
+ */
+export async function requestBudget(row: { id: string; jobId: string; costCategoryId: string; status: RequestStatus; amount: Prisma.Decimal; amountReleased: Prisma.Decimal; amountRefunded: Prisma.Decimal }) {
+  const { lines, total } = await projectBudgetByLine(row.jobId, { exclude: { sourceType: 'budget_request', sourceId: row.id } });
+  const settled = ['LIQUIDATED', 'REJECTED', 'CANCELLED'].includes(row.status);
+  const out = ['RELEASED', 'REFUND_DUE'].includes(row.status);
+  const thisRequest = settled ? 0 : out ? cents(Math.max(0, num(row.amountReleased) - num(row.amountRefunded))) : num(row.amount);
+  const line = lines.find((l) => l.id === row.costCategoryId) ?? null;
+  const before = line?.available ?? 0;
+  const after = cents(before - thisRequest);
+  return {
+    line,
+    lines,
+    total,
+    availableBefore: before,
+    thisRequest,
+    availableAfter: after,
+    over: after < 0,
+    overBy: after < 0 ? cents(-after) : 0,
+    settled,
+    /** What the figure "This request" means at this status. */
+    basis: settled ? 'settled' : out ? 'released' : 'asked',
+  };
+}
+
+/**
+ * The register's "Available after" column for one page of requests —
+ * `requestBudget()`'s rule in two queries whatever the page's length: the
+ * ledger of every project on the page, and the page's own commitments.
+ * Null for a request that takes nothing more (liquidated, rejected,
+ * cancelled).
+ */
+async function availableAfterFor(rows: Parameters<typeof requestBudget>[0][]): Promise<Map<string, number | null>> {
+  const out = new Map<string, number | null>();
+  const open = rows.filter((r) => !['LIQUIDATED', 'REJECTED', 'CANCELLED'].includes(r.status));
+  for (const r of rows) out.set(r.id, null);
+  if (!open.length) return out;
+  const [ledger, own] = await Promise.all([
+    prisma.jobCostEntry.groupBy({
+      by: ['jobId', 'costCategoryId', 'state'],
+      where: { jobId: { in: [...new Set(open.map((r) => r.jobId))] }, state: { in: ['BUDGETED', 'COMMITTED', 'INCURRED'] } },
+      _sum: { amount: true },
+    }),
+    prisma.jobCostEntry.groupBy({
+      by: ['sourceId', 'costCategoryId', 'state'],
+      where: { sourceType: 'budget_request', sourceId: { in: open.map((r) => r.id) }, state: { in: ['COMMITTED', 'INCURRED'] } },
+      _sum: { amount: true },
+    }),
+  ]);
+  for (const r of open) {
+    const of = (state: string) =>
+      ledger.filter((l) => l.jobId === r.jobId && l.costCategoryId === r.costCategoryId && l.state === state).reduce((s, l) => s + num(l._sum.amount), 0) -
+      own.filter((o) => o.sourceId === r.id && o.costCategoryId === r.costCategoryId && o.state === state).reduce((s, o) => s + num(o._sum.amount), 0);
+    const before = of('BUDGETED') - of('COMMITTED') - of('INCURRED');
+    const out_ = ['RELEASED', 'REFUND_DUE'].includes(r.status);
+    const take = out_ ? Math.max(0, num(r.amountReleased) - num(r.amountRefunded)) : num(r.amount);
+    out.set(r.id, cents(before - take));
+  }
+  return out;
+}
+
+/**
+ * "Against the project budget" on paper: the project's budget lines as
+ * Budget Monitoring has them (this request's own commitment left out), the
+ * request's line marked, then the subtraction as a totals block.
+ */
+function budgetSections(b: Awaited<ReturnType<typeof requestBudget>>, lineName: string, currency: string): PdfSection[] {
+  const shown = b.lines.filter((l) => l.id === b.line?.id || l.budgeted || l.committed || l.incurred);
+  const words = b.basis === 'released' ? 'This request (cash still out)' : 'This request';
+  return [
+    {
+      kind: 'table',
+      title: 'Against the project budget',
+      head: ['Budget line', `Budgeted (${currency})`, `Committed (${currency})`, `Spent (${currency})`, `Available (${currency})`],
+      align: ['left', 'right', 'right', 'right', 'right'],
+      rows: shown.map((l) => [
+        l.id === b.line?.id ? { title: `${l.name} — this request's line` } : l.name,
+        formatAmount(l.budgeted),
+        formatAmount(l.committed),
+        formatAmount(l.incurred),
+        formatAmount(l.available),
+      ]),
+    },
+    {
+      kind: 'totals',
+      rows: b.settled
+        ? [{ label: `${lineName} — available now`, value: formatMoney(b.availableBefore, currency), bold: true }]
+        : [
+            { label: `${lineName} — available before`, value: formatMoney(b.availableBefore, currency) },
+            { label: `Less: ${words.toLowerCase()}`, value: formatMoney(b.thisRequest, currency) },
+            { label: b.over ? 'Over the budget line by' : 'Available after', value: formatMoney(b.over ? b.overBy : b.availableAfter, currency), bold: true },
+          ],
+    },
+  ];
+}
+
 async function loadRequest(id: string) {
   return prisma.budgetRequest.findUnique({
     where: { id },
@@ -444,14 +555,33 @@ async function loadRequest(id: string) {
   });
 }
 
+/**
+ * Who may open one request: the register's readers (`assertCanSee`), or —
+ * through `requireAnyOrDecider` — whoever may decide its open approval
+ * request, while it waits on them (a Back Support or Team Leader with no
+ * right to the register reads what they are asked to decide).
+ */
+async function assertCanOpen(me: Me, row: Parameters<typeof assertCanSee>[1] & { id: string }, deciderOnly: boolean) {
+  if (!deciderOnly) {
+    try {
+      assertCanSee(me, row);
+      return;
+    } catch (err) {
+      if (!(await mayDecide(me.id, 'budget_request', [row.id]))) throw err;
+      return;
+    }
+  }
+  if (!(await mayDecide(me.id, 'budget_request', [row.id]))) throw forbidden('That is someone else’s budget request');
+}
+
 budgetRequestRoutes.get(
   '/:id',
-  requireAny(...LIST_PERMISSIONS),
+  requireAnyOrDecider(...LIST_PERMISSIONS),
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await loadRequest(req.params.id);
     if (!row) throw notFound('Budget request not found');
-    assertCanSee(me, row);
+    await assertCanOpen(me, row, !!res.locals.deciderOnly);
     // The route a draft WOULD take — the team leader, back support, the finance
     // manager (and the CEO / President above ₱100,000) —
     // named before anybody presses Submit (names only).
@@ -462,6 +592,7 @@ budgetRequestRoutes.get(
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
       canEdit: row.status === 'DRAFT' && canEditRecord(me, 'gops', 'budget_requests', row.requestedById),
       approvalRoute,
+      budget: await requestBudget(row),
     });
   }),
 );
@@ -647,12 +778,19 @@ budgetRequestRoutes.post(
     // Claimed, never simply written: two Submit clicks file once.
     const claimed = await prisma.budgetRequest.updateMany({ where: { id: request.id, status: 'DRAFT' }, data: { status: 'PENDING_APPROVAL' } });
     if (!claimed.count) throw badRequest('This request moved a moment ago — reload to see where it stands');
+    // The approvers' bell and queue say what the request takes from its
+    // budget line, as it stood at submit (the page has the live figures).
+    const budget = await requestBudget(request);
+    const currency = await companyCurrency();
+    const position = budget.over
+      ? `${formatMoney(budget.availableBefore, currency)} available, over by ${formatMoney(budget.overBy, currency)}`
+      : `${formatMoney(budget.availableBefore, currency)} available → ${formatMoney(budget.availableAfter, currency)} left`;
     try {
       await submitForApproval({
         documentType: 'budget_request',
         documentId: request.id,
         documentNumber: request.number,
-        subject: `${request.job.number} — ${request.costCategory.name}: ${request.reason}`,
+        subject: `${request.job.number} — ${request.costCategory.name}: ${request.reason} (${request.costCategory.name}: ${position})`,
         amount: num(request.amount),
         link: `/g-ops/budget-requests/${request.id}`,
         // The requester, even when a super admin presses the button: the
@@ -828,12 +966,12 @@ budgetRequestRoutes.delete(
  */
 budgetRequestRoutes.get(
   '/:id/pdf',
-  requireAny(...LIST_PERMISSIONS),
+  requireAnyOrDecider(...LIST_PERMISSIONS),
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await loadRequest(req.params.id);
     if (!row) throw notFound('Budget request not found');
-    assertCanSee(me, row);
+    await assertCanOpen(me, row, !!res.locals.deciderOnly);
     const view = presentBudgetRequest(row);
 
     const release = row.allocations.find((a) => a.payment.kind === 'DISBURSEMENT');
@@ -871,6 +1009,7 @@ budgetRequestRoutes.get(
       });
     }
     if (row.cancelReason) sections.push({ kind: 'text', title: 'Cancelled', body: row.cancelReason });
+    sections.push(...budgetSections(await requestBudget(row), row.costCategory.name, await companyCurrency()));
 
     const pdf = await renderDocument({
       title: 'Budget Request',

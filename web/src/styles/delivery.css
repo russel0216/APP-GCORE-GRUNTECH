@@ -425,3 +425,8 @@
 .pc-subhead {
   color: var(--ok);
 }
+
+/* The cost ledger's budget-line heading row (2026-10-23). */
+.data tr.del-ledger-head td {
+  background: var(--surface-2);
+}

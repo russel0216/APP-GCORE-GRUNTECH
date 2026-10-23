@@ -1959,6 +1959,66 @@ async function main() {
         'route' in routeAnswer.body,
       `${lined.status} ${lined.body?.amount} ${lined.body?.items?.length} · ${modified?.status} ${modified?.body?.amount} · pdf ${linedPdf?.status} · ${panel.status} · ${routeAnswer.status}`,
     );
+    // "Against the project budget" (2026-10-23): the request's budget line as
+    // Budget Monitoring has it, less this request, and what is left — on the
+    // page, the register's column and the paper; a released request's own
+    // commitment is never counted twice.
+    if (linedId) {
+      const lineOf = (body: { lines?: { id: string; available: number }[] }) => body.lines?.find((l) => l.id === br.costCategoryId)?.available;
+      const asked = await http(engToken, 'GET', `/budget-requests/${linedId}`);
+      const b = asked.body.budget ?? {};
+      const listRow = (await http(engToken, 'GET', `/budget-requests?jobId=${job.id}&pageSize=200`)).body.rows?.find((r: { id: string }) => r.id === linedId);
+      const askedPdf = await printed(engToken, `/budget-requests/${linedId}/pdf`);
+      check(
+        'a draft request shows its budget line as Budget Monitoring has it, less the amount asked, on the page, the register and the paper',
+        asked.status === 200 &&
+          b.basis === 'asked' &&
+          b.availableBefore === lineOf(panel.body) &&
+          b.thisRequest === 182 &&
+          b.availableAfter === Math.round((b.availableBefore - 182) * 100) / 100 &&
+          b.over === b.availableAfter < 0 &&
+          listRow?.availableAfter === b.availableAfter &&
+          flat(askedPdf.text).includes('AGAINST THE PROJECT BUDGET'),
+        `${asked.status} ${JSON.stringify({ basis: b.basis, before: b.availableBefore, panel: lineOf(panel.body), take: b.thisRequest, after: b.availableAfter, list: listRow?.availableAfter })}`,
+      );
+      // Released: its cash is committed on the line (written here as
+      // refreshBudgetRequest would), and the page leaves that row out.
+      await prisma.budgetRequest.update({ where: { id: linedId }, data: { status: 'RELEASED', amountReleased: d(182) } });
+      const commit = await prisma.jobCostEntry.create({
+        data: { jobId: job.id, costCategoryId: br.costCategoryId, state: 'COMMITTED', amount: d(182), sourceType: 'budget_request', sourceId: linedId, description: 'ZZDELIVERY released' },
+      });
+      const released = (await http(engToken, 'GET', `/budget-requests/${linedId}`)).body.budget ?? {};
+      const monitoring = await http(engToken, 'GET', `/budget-requests/budget?jobId=${job.id}`);
+      check(
+        'released, the request’s own commitment is left out of "available before" — Budget Monitoring has it once, the page subtracts it once',
+        released.basis === 'released' &&
+          released.availableBefore === b.availableBefore &&
+          released.thisRequest === 182 &&
+          released.availableAfter === b.availableAfter &&
+          lineOf(monitoring.body) === b.availableAfter,
+        JSON.stringify({ basis: released.basis, before: released.availableBefore, after: released.availableAfter, monitoring: lineOf(monitoring.body) }),
+      );
+      // The ledger by budget line: its figures are Budget Monitoring's, its
+      // filter keeps one line, grouping orders by line, and it prints.
+      const byLine = await http(leadToken, 'GET', `/jobs/${job.id}/ledger?pageSize=200&costCategoryId=${br.costCategoryId}`);
+      const grouped = await http(leadToken, 'GET', `/jobs/${job.id}/ledger?pageSize=200&group=category`);
+      const ledgerPdf = await printed(leadToken, `/jobs/${job.id}/ledger/pdf?costCategoryId=${br.costCategoryId}`);
+      const groupedIds = (grouped.body.rows ?? []).map((r: { costCategory: { id: string } }) => r.costCategory.id);
+      const runs = groupedIds.filter((id: string, i: number) => i === 0 || groupedIds[i - 1] !== id).length;
+      check(
+        'the cost ledger narrows to one budget line, groups by line, carries Budget Monitoring’s figures per line, and prints',
+        byLine.status === 200 &&
+          (byLine.body.rows ?? []).length > 0 &&
+          (byLine.body.rows ?? []).every((r: { costCategory: { id: string } }) => r.costCategory.id === br.costCategoryId) &&
+          runs === new Set(groupedIds).size &&
+          lineOf(byLine.body.byCategory ?? {}) === lineOf(monitoring.body) &&
+          ledgerPdf.status === 200 &&
+          flat(ledgerPdf.text).includes('COST LEDGER') &&
+          flat(ledgerPdf.text).includes('BY BUDGET LINE'),
+        `${byLine.status} rows ${byLine.body.rows?.length} · runs ${runs}/${new Set(groupedIds).size} · ${lineOf(byLine.body.byCategory ?? {})} vs ${lineOf(monitoring.body)} · pdf ${ledgerPdf.status}`,
+      );
+      await prisma.jobCostEntry.delete({ where: { id: commit.id } });
+    }
     if (linedId) await prisma.budgetRequest.delete({ where: { id: linedId } });
 
     // (f) The receiving register narrows to the job (PROC's jobId filter):

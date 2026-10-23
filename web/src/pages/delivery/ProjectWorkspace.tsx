@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useId, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { CommissionsCard } from '../finance/Commissions';
-import { api, type ListResult } from '../../lib/api';
+import { api, openPdf, type ListResult } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import {
   Empty,
@@ -1349,6 +1349,20 @@ function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
   const { can } = useAuth();
   const s = job.summary;
   const seesLedger = can('gops.budget_monitoring.view_all');
+  // The ledger's budget line lives in the URL (`?line=`), so a row of the
+  // table above and a link both open the ledger on one category.
+  const [params, setParams] = useSearchParams();
+  const line = params.get('line') ?? '';
+  const setLine = (id: string) =>
+    setParams(
+      (p) => {
+        const next = new URLSearchParams(p);
+        if (id) next.set('line', id);
+        else next.delete('line');
+        return next;
+      },
+      { replace: true },
+    );
 
   return (
     <div className="stack">
@@ -1377,7 +1391,23 @@ function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
             <tbody>
               {job.position.map((p) => (
                 <tr key={p.costCategoryId}>
-                  <td>{p.name}</td>
+                  <td>
+                    {seesLedger ? (
+                      <button
+                        type="button"
+                        className="pr-link"
+                        title="Show this budget line's ledger"
+                        onClick={() => {
+                          setLine(p.costCategoryId);
+                          document.getElementById('cost-ledger')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }}
+                      >
+                        {p.name}
+                      </button>
+                    ) : (
+                      p.name
+                    )}
+                  </td>
                   <td className="right mono">{formatMoney(p.budgeted)}</td>
                   <td className="right mono">{p.committed ? formatMoney(p.committed) : <span className="faint">—</span>}</td>
                   <td className="right mono">{p.incurred ? formatMoney(p.incurred) : <span className="faint">—</span>}</td>
@@ -1418,7 +1448,7 @@ function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
         </div>
       </section>
 
-      {seesLedger && <LedgerCard job={job} reloadToken={reloadToken} />}
+      {seesLedger && <LedgerCard job={job} reloadToken={reloadToken} line={line} setLine={setLine} />}
     </div>
   );
 }
@@ -1428,24 +1458,46 @@ function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
  * document behind it. Budget Monitoring is a view over this table; this is the
  * table.
  */
-function LedgerCard({ job, reloadToken }: { job: Job; reloadToken: number }) {
+/** A budget line's figures beside the ledger (`byCategory` on GET /jobs/:id/ledger). */
+interface LedgerLine {
+  id: string;
+  code: string;
+  name: string;
+  budgeted: number;
+  committed: number;
+  incurred: number;
+  consumed: number;
+  available: number;
+}
+
+function LedgerCard({ job, reloadToken, line, setLine }: { job: Job; reloadToken: number; line: string; setLine: (id: string) => void }) {
+  const toast = useToast();
   const [state, setState] = useState('');
+  const [grouped, setGrouped] = useState(true);
   const [rows, setRows] = useState<LedgerRow[]>([]);
+  const [lines, setLines] = useState<LedgerLine[]>([]);
   const [page, setPage] = useState(1);
   const [pageCount, setPageCount] = useState(1);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
 
+  // A new budget line or state starts the list again.
+  useEffect(() => setPage(1), [line, state, grouped]);
+
+  const query = `${state ? `&state=${state}` : ''}${line ? `&costCategoryId=${line}` : ''}`;
+
   useEffect(() => {
     let live = true;
     setLoading(true);
-    const q = `/jobs/${job.id}/ledger?pageSize=50&page=${page}${state ? `&state=${state}` : ''}`;
     api
-      .get<ListResult<LedgerRow>>(q)
+      .get<ListResult<LedgerRow> & { byCategory: { lines: LedgerLine[] } }>(
+        `/jobs/${job.id}/ledger?pageSize=50&page=${page}${query}${grouped ? '&group=category' : ''}`,
+      )
       .then((r) => {
         if (!live) return;
         setRows((prev) => (page === 1 ? r.rows : [...prev, ...r.rows]));
+        setLines(r.byCategory.lines);
         setPageCount(r.pageCount);
         setTotal(r.total);
         setError(null);
@@ -1455,38 +1507,61 @@ function LedgerCard({ job, reloadToken }: { job: Job; reloadToken: number }) {
     return () => {
       live = false;
     };
-  }, [job.id, state, page, reloadToken]);
+  }, [job.id, query, grouped, page, reloadToken]);
+
+  const lineOf = (id: string) => lines.find((l) => l.id === id);
+  /** What a budget line's heading says: the state shown, else the four columns. */
+  const lineSum = (l: LedgerLine | undefined) => {
+    if (!l) return null;
+    if (state) {
+      const v = { BUDGETED: l.budgeted, COMMITTED: l.committed, INCURRED: l.incurred, CONSUMED: l.consumed }[state] ?? 0;
+      return `${statusLabelOf(state)} ${formatMoney(v)}`;
+    }
+    return `Budgeted ${formatMoney(l.budgeted)} · Committed ${formatMoney(l.committed)} · Incurred ${formatMoney(l.incurred)} · Available ${formatMoney(l.available)}`;
+  };
 
   return (
-    <section className="card">
+    <section className="card" id="cost-ledger">
       <div className="card-head">
         <h3 className="card-title">Cost ledger{total ? ` (${total})` : ''}</h3>
-        <label className="row">
-          <span className="faint del-small">Show</span>
-          <select
-            value={state}
-            onChange={(e) => {
-              setState(e.target.value);
-              setPage(1);
-            }}
-          >
+        <div className="card-actions">
+          <select aria-label="Budget line" value={line} onChange={(e) => setLine(e.target.value)}>
+            <option value="">Every budget line</option>
+            {job.position.map((p) => (
+              <option key={p.costCategoryId} value={p.costCategoryId}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <select aria-label="State" value={state} onChange={(e) => setState(e.target.value)}>
             <option value="">Every state</option>
             <option value="BUDGETED">Budgeted</option>
             <option value="COMMITTED">Committed</option>
             <option value="INCURRED">Incurred</option>
             <option value="CONSUMED">Consumed</option>
           </select>
-        </label>
+          <label className="row">
+            <input type="checkbox" checked={grouped} onChange={(e) => setGrouped(e.target.checked)} />
+            <span className="del-small">Group by budget line</span>
+          </label>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => openPdf(`/api/jobs/${job.id}/ledger/pdf${query.replace(/^&/, '?')}`, (m) => toast('error', m))}
+          >
+            Print
+          </button>
+        </div>
       </div>
       <p className="muted del-lede">
         Nothing here is edited or deleted. A released commitment is a negative row, so the ledger
-        stays a history of what happened.
+        stays a history of what happened. Pick a budget line above, or click one in Budget monitoring.
       </p>
       <ErrorBox error={error} />
       {rows.length === 0 && loading ? (
         <Loading />
       ) : rows.length === 0 ? (
-        <p className="faint del-note">Nothing recorded{state ? ' in that state' : ''}.</p>
+        <p className="faint del-note">Nothing recorded{state || line ? ' for that choice' : ''}.</p>
       ) : (
         <div className="table-wrap">
           <table className="data">
@@ -1494,27 +1569,40 @@ function LedgerCard({ job, reloadToken }: { job: Job; reloadToken: number }) {
               <tr>
                 <th>When</th>
                 <th>State</th>
-                <th>Budget line</th>
+                {!grouped && <th>Budget line</th>}
                 <th>Source</th>
                 <th>Detail</th>
                 <th className="right">Amount</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
+              {rows.map((r, i) => {
                 const to = r.sourceId ? recordLink(r.sourceType, r.sourceId) : null;
                 const label = r.sourceNumber ?? r.sourceType.replace(/_/g, ' ');
+                const heads = grouped && (i === 0 || rows[i - 1].costCategory.id !== r.costCategory.id);
                 return (
-                  <tr key={r.id}>
-                    <td className="muted">{formatDate(r.occurredAt)}</td>
-                    <td>
-                      <StatusBadge status={r.state} extra={LEDGER_TONES} />
-                    </td>
-                    <td>{r.costCategory.name}</td>
-                    <td>{to ? <DocLink to={to}>{label}</DocLink> : <span className="mono">{label}</span>}</td>
-                    <td>{r.description ?? <span className="faint">—</span>}</td>
-                    <td className={`right mono${r.amount < 0 ? ' faint' : ''}`}>{formatMoney(r.amount)}</td>
-                  </tr>
+                  <Fragment key={r.id}>
+                    {heads && (
+                      <tr className="del-ledger-head">
+                        <td colSpan={5}>
+                          <strong>
+                            {r.costCategory.code} {r.costCategory.name}
+                          </strong>
+                          <span className="faint del-small"> — {lineSum(lineOf(r.costCategory.id))}</span>
+                        </td>
+                      </tr>
+                    )}
+                    <tr>
+                      <td className="muted">{formatDate(r.occurredAt)}</td>
+                      <td>
+                        <StatusBadge status={r.state} extra={LEDGER_TONES} />
+                      </td>
+                      {!grouped && <td>{r.costCategory.name}</td>}
+                      <td>{to ? <DocLink to={to}>{label}</DocLink> : <span className="mono">{label}</span>}</td>
+                      <td>{r.description ?? <span className="faint">—</span>}</td>
+                      <td className={`right mono${r.amount < 0 ? ' faint' : ''}`}>{formatMoney(r.amount)}</td>
+                    </tr>
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -1530,6 +1618,11 @@ function LedgerCard({ job, reloadToken }: { job: Job; reloadToken: number }) {
       )}
     </section>
   );
+}
+
+/** A ledger state in words. */
+function statusLabelOf(state: string) {
+  return state.charAt(0) + state.slice(1).toLowerCase();
 }
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
