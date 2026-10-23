@@ -666,3 +666,40 @@ export async function faceHealth() {
     recentRefusals,
   };
 }
+
+const SAMPLES_FLUSHED = 'seed.faceSamplesFlushed20261023';
+
+/**
+ * Every face sample deleted ONCE (2026-10-23, the owner's call: "flush all
+ * face samples so anyone can send samples again") — run by the seed, marked
+ * in `seed.faceSamplesFlushed20261023`. Each sample's photo goes with it,
+ * and an account picture cut from a sample is cleared. Clock entries and
+ * their captures stay: they are the attendance record. Everyone enrols
+ * afresh on the Clock page (three samples). One audit row per person.
+ */
+export async function flushFaceSamples(): Promise<{ samples: number; people: number } | null> {
+  if (await prisma.setting.findUnique({ where: { key: SAMPLES_FLUSHED } })) return null;
+  const rows = await prisma.faceEnrollment.findMany({
+    select: { id: true, employeeId: true, photoPath: true, employee: { select: { userId: true, firstName: true, lastName: true } } },
+  });
+  const byPerson = new Map<string, typeof rows>();
+  for (const r of rows) byPerson.set(r.employeeId, [...(byPerson.get(r.employeeId) ?? []), r]);
+  for (const [employeeId, samples] of byPerson) {
+    await prisma.faceEnrollment.deleteMany({ where: { id: { in: samples.map((s) => s.id) } } });
+    await dropAccountPhotoFromSamples(samples[0].employee.userId, samples.map((s) => s.id));
+    for (const s of samples) await deletePhotoIfUnused(s.photoPath);
+    await audit({
+      entityType: 'employee',
+      entityId: employeeId,
+      action: 'DELETED',
+      summary: `${samples.length} face sample(s) of ${samples[0].employee.firstName} ${samples[0].employee.lastName} cleared — every sample was flushed so everyone enrols again`,
+      actorName: 'system',
+    });
+  }
+  await prisma.setting.upsert({
+    where: { key: SAMPLES_FLUSHED },
+    create: { key: SAMPLES_FLUSHED, value: { at: new Date().toISOString(), samples: rows.length, people: byPerson.size }, description: 'Every face sample was deleted once, 2026-10-23' },
+    update: {},
+  });
+  return { samples: rows.length, people: byPerson.size };
+}

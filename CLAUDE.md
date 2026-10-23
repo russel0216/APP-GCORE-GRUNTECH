@@ -1499,6 +1499,12 @@ launcher as the way out) — never a stale phase sentence.
   track ended or that went dark behind a hidden tab, says "in use by another
   app" and "open G-CORE through https://" in words, and counts "Hours so
   far" live.
+- **Every face sample was flushed once** (2026-10-23, the owner's call:
+  "flush all face samples so anyone can send samples again"):
+  `flushFaceSamples()` in `shared/faceSamples.ts`, the seed, marked
+  `seed.faceSamplesFlushed20261023` — every `FaceEnrollment` row, its photo,
+  and an account picture cut from a sample, one audit row per person; clock
+  entries and their captures stay. Everyone enrols again (three samples).
 - **The owner's three decisions of 2026-10-10 on the face clock**: (1) face
   SAMPLES are readable only by the person and HR with
   `ghr.employees.edit_all`, and a supervisor sees their DIRECT REPORTS' clock

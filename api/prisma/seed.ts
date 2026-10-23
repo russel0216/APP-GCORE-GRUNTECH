@@ -23,7 +23,7 @@ import { COURSE_CATEGORIES, seedCourseCategories } from '../src/shared/courseCat
 import { SERVICE_DOCUMENT_CATEGORIES, seedServiceDocumentCategories } from '../src/shared/serviceDocumentCategories';
 import { ASSET_TYPES, moveAssetTagCode, seedAssetTypes } from '../src/shared/assets';
 import { ENTRANCE_EXAMS, seedEntranceExams } from '../src/shared/hiring';
-import { migrateFaceThreshold } from '../src/shared/faceSamples';
+import { flushFaceSamples, migrateFaceThreshold } from '../src/shared/faceSamples';
 import { removeScoroArchive } from '../src/shared/scoroArchive';
 import { backfillCustomerAddresses } from '../src/shared/customerAddress';
 import { backfillInvoiceCountering, fillInvoiceCredit } from '../src/shared/receivables';
@@ -1427,6 +1427,9 @@ async function main() {
       ? '  ✓ HR rules (face threshold 0.6 → 0.55 for the new face engine)'
       : '  ✓ HR rules',
   );
+  // Every face sample cleared once (2026-10-23, the owner's call) — everyone enrols again.
+  const flushed = await flushFaceSamples();
+  if (flushed) console.log(`  ✓ Face samples flushed (${flushed.samples} from ${flushed.people} people) — everyone enrols again`);
 
   // ── Clearance checklist ────────────────────────────────────────────────────
   // The company-property lines on a leaver's clearance. The rest of the
