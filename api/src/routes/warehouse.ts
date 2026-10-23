@@ -25,7 +25,7 @@ import { nextNumber } from '../shared/numbering';
 import { issueProjectStock, projectHoldings, receiveProjectStock } from '../shared/projectStock';
 import { issueOrderStock, orderHoldings, receiveOrderStock } from '../shared/orderStock';
 import { itemForTypedLine, matchTypedItem } from '../shared/typedItems';
-import { noRateMessage, orderInPesos, receiptUnitCost } from '../shared/receiptCost';
+import { noRateMessage, orderInPesos, receiptUnitCost, restateReceiptLine, RESTATE_SELECT } from '../shared/receiptCost';
 import { notify } from '../shared/notifications';
 import {
   contactOf,
@@ -601,8 +601,12 @@ async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
     canCancel: (draft || receiving.status === 'PENDING_APPROVAL') && handler_,
     // A draft or a cancelled report posted nothing (2026-10-19): its handler deletes it.
     canDelete: (draft || receiving.status === 'CANCELLED') && handler_ && can(me, 'gchain.receiving.delete'),
+    // A received report's peso costs are corrected by Edit All (2026-10-23).
+    canCorrectCost: receiving.status === 'RECEIVED' && can(me, 'gchain.receiving.edit_all'),
     approvalRoute: draft && route ? await routeBrief(RECEIVING_DOC, value, receiving.receivedById, null, { importation: isImportation(receiving) }) : null,
-    order: receiving.order ? { ...receiving.order, total: num(receiving.order.total) } : null,
+    order: receiving.order
+      ? { ...receiving.order, total: num(receiving.order.total), exchangeRate: receiving.order.exchangeRate === null ? null : num(receiving.order.exchangeRate) }
+      : null,
     items: receiving.items.map((i) => ({
       id: i.id,
       orderItemId: i.orderItemId,
@@ -615,12 +619,15 @@ async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
       remarks: i.remarks,
       quantity: num(i.quantity),
       unitCost: num(i.unitCost),
+      /** The peso cost was typed on this report, over what the order says. */
+      costTyped: i.costTyped,
       amount: cents(num(i.quantity) * num(i.unitCost)),
       orderItem: i.orderItem
         ? {
             ...i.orderItem,
             quantity: num(i.orderItem.quantity),
             unitPrice: num(i.orderItem.unitPrice),
+            landedUnitCost: i.orderItem.landedUnitCost === null ? null : num(i.orderItem.landedUnitCost),
             receivedQty: num(i.orderItem.receivedQty),
           }
         : null,
@@ -736,7 +743,8 @@ const receivingSchema = z.object({
         description: z.string().trim().max(2000).optional().nullable(),
         unit: z.string().trim().max(40).optional().nullable(),
         quantity: z.number().positive(),
-        unitCost: z.number().min(0).optional(),
+        /** Pesos; on an order line, typed over what the order says (null: the order's). */
+        unitCost: z.number().min(0).optional().nullable(),
         locationId: z.string().optional().nullable(),
         /** The product group (item category) — required where the line files a new item (2026-10-20). */
         categoryId: z.string().optional().nullable(),
@@ -840,12 +848,16 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
         if (oi && oi.nature !== 'SERVICE' && !oi.itemId && !l.categoryId && !(await matchTypedItem(prisma, oi))) throw needsGroup(n, `“${oi.name ?? oi.description}”`);
       }
     }
-    // A line against an order is valued in PESOS, never typed (2026-10-23):
-    // the request's declared cost, else the order's price at its rate to PHP
-    // — shared/receiptCost.ts. A foreign order with no rate is refused.
+    // A line against an order is valued in PESOS (2026-10-23): the landed
+    // cost on the order line, else the request's declared cost, else the
+    // order's price at its rate to PHP — shared/receiptCost.ts. A peso cost
+    // TYPED on the line overrides them for this receipt (the owner's call:
+    // "manual entry can override the purchase order's USD"). A foreign order
+    // with no rate and nothing typed is refused.
     const rows = body.items.map((l) => {
-      const cost = receiptUnitCost(order, byOrderItem.get(l.orderItemId!)!);
-      if (cost.unitCost === null) throw badRequest(noRateMessage(order));
+      const typed = l.unitCost !== undefined && l.unitCost !== null;
+      const cost = typed ? l.unitCost! : receiptUnitCost(order, byOrderItem.get(l.orderItemId!)!).unitCost;
+      if (cost === null) throw badRequest(noRateMessage(order));
       return {
         orderItemId: l.orderItemId!,
         itemId: null,
@@ -853,7 +865,8 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
         description: null,
         unit: null,
         quantity: D(l.quantity),
-        unitCost: D(cost.unitCost),
+        unitCost: D(cost),
+        costTyped: typed,
         ...extras(l),
       };
     });
@@ -1013,10 +1026,11 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     const quantity = num(line.quantity);
     // Valued in pesos at the moment it posts (2026-10-23): a draft saved
     // before carried the order's foreign price, and is put right here.
-    const cost = receiptUnitCost(order, orderItem);
+    // A cost typed on the Incoming line stands as typed.
+    const cost = line.costTyped ? { unitCost: num(line.unitCost) } : receiptUnitCost(order, orderItem);
     if (cost.unitCost === null) throw badRequest(noRateMessage(order));
     const unitCost = cost.unitCost;
-    if (Math.abs(unitCost - num(line.unitCost)) >= 0.005) {
+    if (!line.costTyped && Math.abs(unitCost - num(line.unitCost)) >= 0.005) {
       await tx.receivingItem.update({ where: { id: line.id }, data: { unitCost: D(unitCost) } });
     }
     const amount = cents(quantity * unitCost);
@@ -1400,6 +1414,62 @@ receivingRoutes.post(
     });
     await audit({ entityType: 'receiving', entityId: receiving.id, action: 'CANCELLED', summary: `${receiving.number} cancelled — ${body.reason}` }, req);
     res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
+/**
+ * Corrects the peso unit cost of lines already RECEIVED (2026-10-23, the
+ * owner's call: "manual entry can override the purchase order's USD …
+ * Inventory unit cost should be the landed cost in PHP"). Edit All alone;
+ * each line restated through `restateReceiptLine()` — its stock movement,
+ * the shelf's average, the item's last cost and, for a project line with no
+ * request behind it, the job's cost by the difference — and marked typed,
+ * so a later landed cost on the order or the seed leaves it as set. A line
+ * sent with `unitCost: null` goes back to what the order says.
+ */
+receivingRoutes.post(
+  '/:id/costs',
+  require_('gchain.receiving.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(
+      z.object({
+        reason: z.string().trim().min(3, 'Say why the cost changes').max(2000),
+        lines: z.array(z.object({ id: z.string(), unitCost: z.number().min(0).max(1e12).nullable() })).min(1),
+      }),
+      req.body,
+    );
+    const receiving = await prisma.receiving.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, status: true } });
+    if (!receiving) throw notFound('Receiving report not found');
+    if (receiving.status !== 'RECEIVED') throw badRequest(`${receiving.number} is not received yet — change its costs on the report itself`);
+    const lines = await prisma.receivingItem.findMany({ where: { receivingId: receiving.id, id: { in: body.lines.map((l) => l.id) } }, select: RESTATE_SELECT });
+    if (lines.length !== new Set(body.lines.map((l) => l.id)).size) throw badRequest('One of the lines is not on this report');
+    const byId = new Map(lines.map((l) => [l.id, l]));
+    let changed = 0;
+    await prisma.$transaction(async (tx) => {
+      for (const sent of body.lines) {
+        const line = byId.get(sent.id)!;
+        let cost = sent.unitCost;
+        let typed = true;
+        if (cost === null) {
+          if (!line.orderItem) throw badRequest('A line received without an order has only the cost typed on it');
+          const rule = receiptUnitCost(line.orderItem.order, line.orderItem);
+          if (rule.unitCost === null) throw badRequest(noRateMessage(line.orderItem.order));
+          cost = rule.unitCost;
+          typed = false;
+        }
+        if (Math.abs(cost - num(line.unitCost)) < 0.005 && typed === line.costTyped) continue;
+        const ok = await restateReceiptLine(tx, line, cost, {
+          summary: `${receiving.number}: unit cost ${num(line.unitCost).toFixed(2)} → ${cost.toFixed(2)} (PHP)${typed ? '' : ", back to the order's"} — ${body.reason}`,
+          after: { typed, reason: body.reason },
+          actorId: me.id,
+          typed,
+        });
+        if (!ok) throw badRequest(`${receiving.number} changed a moment ago — reload to see where it stands`);
+        changed++;
+      }
+    });
+    res.json({ ok: true, changed, receiving: await presentReceiving((await loadReceiving(receiving.id))!, me) });
   }),
 );
 

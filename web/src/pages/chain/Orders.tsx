@@ -6,6 +6,7 @@ import { DataList, type Column } from '../../components/DataList';
 import {
   Empty,
   ErrorBox,
+  Field,
   Loading,
   StatusBadge,
   formatDate,
@@ -16,6 +17,8 @@ import { Stat } from '../../components/charts';
 import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { ProgressBar } from '../delivery/Projects';
+import { NumberInput } from '../../components/NumberInput';
+import { PO_CURRENCIES } from './PurchaseOrderEditor';
 
 // ════════════════════════════════════════════════════════════════════
 //  PURCHASE ORDERS
@@ -30,6 +33,8 @@ interface PoRow {
   orderDate: string;
   deliveryDate: string | null;
   total: number;
+  /** What its goods come to in pesos — landed, declared or converted; null while a line has no rate. */
+  landedTotal?: number | null;
   receivedPct: number;
   supplier: { id: string; name: string };
   job: { id: string; number: string; name: string } | null;
@@ -65,6 +70,14 @@ export function PurchaseOrders() {
       sortKey: 'total',
       align: 'right',
       render: (o) => <span className="mono">{formatMoney(o.total, o.currency ?? 'PHP')}</span>,
+    },
+    {
+      // In the order's own currency above; what the goods come to in pesos here (2026-10-23).
+      key: 'landed',
+      label: 'Landed (PHP)',
+      align: 'right',
+      render: (o) =>
+        o.landedTotal == null ? <span className="faint">no rate</span> : <span className="mono">{formatMoney(o.landedTotal)}</span>,
     },
     {
       key: 'received',
@@ -164,7 +177,21 @@ interface PoDetailData {
   fromCanvass: { id: string; number: string } | null;
   /** The approver's reason, when the latest submission was rejected back to draft. */
   returned: { by: string | null; comment: string | null; at: string | null } | null;
+  exchangeRate?: number | null;
+  /** What the goods come to in pesos; null while a line has no peso cost. */
+  landedTotal?: number | null;
+  /** The buyer (or Edit All) sets the landed cost and corrects the currency. */
+  canSetLanded?: boolean;
 }
+
+/** Where a line's peso cost comes from (shared/receiptCost.ts). */
+const BASIS_WORDS: Record<string, string> = {
+  landed: 'landed cost',
+  request: "request's declared",
+  order: "order's price",
+  converted: 'at the rate',
+  no_rate: 'no rate to PHP',
+};
 
 interface PoLine {
   id: string;
@@ -180,6 +207,9 @@ interface PoLine {
   outstandingQty: number;
   item: { id: string; code: string; name: string } | null;
   costCategory: { id: string; name: string } | null;
+  landedUnitCost?: number | null;
+  pesoUnitCost?: number | null;
+  pesoBasis?: string;
 }
 
 export function PurchaseOrderDetail() {
@@ -193,6 +223,7 @@ export function PurchaseOrderDetail() {
   const [error, setError] = useState<unknown>(null);
   // Bumped on every load so the approval chain re-reads after a submit.
   const [reload, setReload] = useState(0);
+  const [landedOpen, setLandedOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -398,6 +429,12 @@ export function PurchaseOrderDetail() {
         />
         <Stat label="Total" value={formatMoney(po.total, po.currency ?? 'PHP')} accent="neon" figure />
         <Stat
+          label="Landed (PHP)"
+          value={po.landedTotal == null ? '—' : formatMoney(po.landedTotal)}
+          sub={po.landedTotal == null ? `no rate to PHP for ${po.currency}` : 'what the goods are stocked at'}
+          figure
+        />
+        <Stat
           label="Outstanding"
           value={`${outstanding} units`}
           sub={outstanding > 0 && !isDraft ? 'still to be delivered' : undefined}
@@ -408,7 +445,25 @@ export function PurchaseOrderDetail() {
       <div className="card proc-card">
         <div className="card-head">
           <h3 className="card-title">Order lines</h3>
+          {po.canSetLanded && po.items.length > 0 && !landedOpen && (
+            <div className="card-actions">
+              <button className="btn btn-sm" onClick={() => setLandedOpen(true)}>
+                Set landed cost (PHP)
+              </button>
+            </div>
+          )}
         </div>
+        {landedOpen && (
+          <LandedPanel
+            po={po}
+            onClose={() => setLandedOpen(false)}
+            onSaved={async (restated) => {
+              setLandedOpen(false);
+              toast('ok', restated ? `Landed cost saved — ${restated} received line${restated === 1 ? '' : 's'} restated in pesos` : 'Landed cost saved');
+              await load();
+            }}
+          />
+        )}
         {po.items.length === 0 ? (
           <Empty
             title="No lines yet"
@@ -431,6 +486,7 @@ export function PurchaseOrderDetail() {
                 <th>Unit</th>
                 <th className="right">Unit price</th>
                 <th className="right">Amount</th>
+                <th className="right">Landed unit (PHP)</th>
                 <th className="right">Received</th>
                 <th className="right">Outstanding</th>
               </tr>
@@ -455,6 +511,10 @@ export function PurchaseOrderDetail() {
                   <td>{i.unit}</td>
                   <td className="right mono">{formatMoney(i.unitPrice, po.currency ?? 'PHP')}</td>
                   <td className="right mono">{formatMoney(i.amount, po.currency ?? 'PHP')}</td>
+                  <td className="right">
+                    <span className="mono">{i.pesoUnitCost == null ? '—' : formatMoney(i.pesoUnitCost)}</span>
+                    {i.pesoBasis && <div className="faint">{BASIS_WORDS[i.pesoBasis] ?? i.pesoBasis}</div>}
+                  </td>
                   <td className="right mono">{i.receivedQty || <span className="faint">—</span>}</td>
                   <td className={`right mono${i.outstandingQty > 0 && !isDraft ? ' proc-short' : ''}`}>
                     {i.outstandingQty || '—'}
@@ -513,3 +573,129 @@ export function PurchaseOrderDetail() {
   );
 }
 
+
+/**
+ * The landed cost in pesos (2026-10-23): per line, by the unit or the line's
+ * total, and the order's currency and rate put right — on any order not
+ * cancelled. Goods already received at the old figure are restated by the
+ * server. A panel in the card, never a dialog.
+ */
+function LandedPanel({ po, onClose, onSaved }: { po: PoDetailData; onClose: () => void; onSaved: (restated: number) => void | Promise<void> }) {
+  const [currency, setCurrency] = useState(po.currency ?? 'PHP');
+  const [rate, setRate] = useState(po.exchangeRate != null ? String(po.exchangeRate) : '');
+  const [units, setUnits] = useState<Record<string, string>>(() =>
+    Object.fromEntries(po.items.map((i) => [i.id, i.landedUnitCost != null ? String(i.landedUnitCost) : ''])),
+  );
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const issued = !['DRAFT', 'PENDING_APPROVAL'].includes(po.status);
+  const currencyChanged = currency !== (po.currency ?? 'PHP');
+  const lineTotal = (id: string, qty: number) => (units[id] === '' ? '' : String(Math.round(Number(units[id]) * qty * 100) / 100));
+  const sum = po.items.reduce((s, i) => s + (units[i.id] === '' ? 0 : Math.round(Number(units[i.id]) * i.quantity * 100)), 0) / 100;
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.put<{ restated: number }>(`/purchase-orders/${po.id}/landed`, {
+        ...(currencyChanged ? { currency } : {}),
+        ...(currency !== 'PHP' && Number(rate) > 0 && Number(rate) !== po.exchangeRate ? { exchangeRate: Number(rate) } : {}),
+        lines: po.items.map((i) => ({ id: i.id, landedUnitCost: units[i.id] === '' || Number(units[i.id]) === 0 ? null : Number(units[i.id]) })),
+        reason: reason.trim() || null,
+      });
+      await onSaved(res.restated);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="prq-panel">
+      <p className="faint">
+        What each unit really costs in pesos, freight, duties and charges in. The Incoming report, the inventory and a
+        sales order's spend take it; a project's budget keeps the request's declared value. Goods already received are
+        restated. Blank keeps the order's own figure ({currency === 'PHP' ? 'its price' : `its price at the rate to PHP`}, or the request's declared cost).
+      </p>
+      <div className="grid grid-2">
+        <Field label="Currency" hint="What the supplier's prices are in — correct it if it was saved wrong">
+          <select value={currency} onChange={(e) => { setCurrency(e.target.value); setRate(''); }}>
+            {PO_CURRENCIES.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </Field>
+        {currency !== 'PHP' && (
+          <Field label="Rate to PHP" hint={`Pesos per ${currency}; blank takes Company Settings' rate`}>
+            <NumberInput kind="decimal" value={rate} min={0} onChange={(e) => setRate(e.target.value)} />
+          </Field>
+        )}
+      </div>
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th className="right">Qty</th>
+              <th className="right">Unit price ({po.currency ?? 'PHP'})</th>
+              <th className="right">Landed unit (PHP)</th>
+              <th className="right">Landed line total (PHP)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {po.items.map((i) => (
+              <tr key={i.id}>
+                <td>{i.name ?? i.description}</td>
+                <td className="right mono">{i.quantity}</td>
+                <td className="right mono">{formatMoney(i.unitPrice, po.currency ?? 'PHP')}</td>
+                <td className="right">
+                  <NumberInput
+                    kind="money"
+                    value={units[i.id]}
+                    min={0}
+                    aria-label={`Landed unit cost of ${i.name ?? i.description}`}
+                    onChange={(e) => setUnits((u) => ({ ...u, [i.id]: e.target.value }))}
+                  />
+                </td>
+                <td className="right">
+                  <NumberInput
+                    kind="money"
+                    value={lineTotal(i.id, i.quantity)}
+                    min={0}
+                    aria-label={`Landed total of ${i.name ?? i.description}`}
+                    onChange={(e) =>
+                      setUnits((u) => ({
+                        ...u,
+                        [i.id]: e.target.value === '' ? '' : String(Math.round((Number(e.target.value) / i.quantity) * 100) / 100),
+                      }))
+                    }
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="right">
+        Landed total typed: <strong className="mono">{formatMoney(sum)}</strong>
+      </p>
+      {(issued || currencyChanged) && (
+        <Field label="Why" hint={currencyChanged && issued ? 'Required: the currency changes after the order was issued' : 'Kept on the order’s trail'}>
+          <input value={reason} maxLength={2000} onChange={(e) => setReason(e.target.value)} />
+        </Field>
+      )}
+      <ErrorBox error={error} />
+      <div className="row prq-panel-foot">
+        <span className="spacer" />
+        <button className="btn btn-sm" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={save} disabled={busy || (currencyChanged && issued && reason.trim().length < 3)}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}

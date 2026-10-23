@@ -3036,6 +3036,13 @@ model PurchaseOrderItem {
   unit        String     @default("pcs")
   unitPrice   Decimal    @db.Decimal(18, 2)
   amount      Decimal    @db.Decimal(18, 2)
+  /// The LANDED cost of one unit in pesos (2026-10-23, the owner's call:
+  /// "Inventory unit cost should be the landed cost in PHP") — freight,
+  /// duties and charges included, typed by the buyer. When set it is what
+  /// the Incoming report, the stock and a sales order's spend take for this
+  /// line (`receiptUnitCost()`); a project's budget still subtracts the
+  /// request's declared value.
+  landedUnitCost Decimal? @db.Decimal(18, 2)
   receivedQty Decimal    @default(0) @db.Decimal(18, 3)
   sortOrder   Int        @default(0)
 
@@ -3127,6 +3134,9 @@ model ReceivingItem {
 
   quantity Decimal @db.Decimal(18, 3)
   unitCost Decimal @db.Decimal(18, 2)
+  /// The unit cost (pesos) was typed on the Incoming report — over what the
+  /// order says (2026-10-23) — so posting and the seed's restating keep it.
+  costTyped Boolean @default(false)
   serialNo String?
   batchNo  String?
   remarks  String?

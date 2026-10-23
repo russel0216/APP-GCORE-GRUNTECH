@@ -4685,7 +4685,7 @@ async function main() {
         shownLine?.unitCost === 560 && shownLine.costBasis === 'converted' && shown.body.costProblem === null,
         JSON.stringify(shownLine),
       );
-      const usdIn = await api(receiverToken, 'POST', '/receivings', { orderId: usd.id, warehouseId: warehouse.id, items: [{ orderItemId: usd.items[0].id, quantity: 2, unitCost: 10 }] });
+      const usdIn = await api(receiverToken, 'POST', '/receivings', { orderId: usd.id, warehouseId: warehouse.id, items: [{ orderItemId: usd.items[0].id, quantity: 2 }] });
       const usdInId = String(usdIn.body.id);
       await api(receiverToken, 'POST', `/receivings/${usdInId}/submit`);
       const usdReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'receiving', documentId: usdInId, status: 'PENDING' } });
@@ -4693,7 +4693,7 @@ async function main() {
       const usdLine = await prisma.receivingItem.findFirst({ where: { receivingId: usdInId } });
       const usdMove = await prisma.inventoryTransaction.findFirst({ where: { sourceType: 'receiving', sourceId: usdInId, type: 'RECEIPT' } });
       check(
-        'received, the line and its stock movement carry 560.00 pesos — never the 10 USD, even when a cost is typed',
+        'received, the line and its stock movement carry 560.00 pesos — never the 10 USD',
         (await prisma.receiving.findUnique({ where: { id: usdInId } }))?.status === 'RECEIVED' && num(usdLine?.unitCost) === 560 && num(usdMove?.unitCost) === 560,
         `${usdIn.status} ${num(usdLine?.unitCost)} ${num(usdMove?.unitCost)}`,
       );
@@ -4740,6 +4740,106 @@ async function main() {
         waits.waiting >= 1 && restated.lines >= 1 && again.lines === 0 && num(oldLine?.unitCost) === 560 && num(oldMove?.unitCost) === 560 &&
           Math.abs(num(balanceAfter.averageCost) - expectedAvg) < 0.01,
         `${JSON.stringify(waits)} ${JSON.stringify(restated)} ${JSON.stringify(again)} ${num(oldLine?.unitCost)} avg ${num(balanceBefore.averageCost)} → ${num(balanceAfter.averageCost)} (want ${expectedAvg.toFixed(4)})`,
+      );
+
+      // ── The landed cost in pesos, and a typed override (2026-10-23) ──
+      // The owner's four: "on the purchase order list the price is USD but
+      // the currency is PHP — I want the real value in PHP, the landed cost;
+      // on incoming, manual entry can override the purchase order's USD;
+      // inventory unit cost should be the landed cost in PHP".
+      const procToken = signToken(procurement.id, procurement.email);
+      const typedOrder = await usdOrder(56, 'USD order, cost typed on the Incoming');
+      const typedIn = await api(receiverToken, 'POST', '/receivings', {
+        orderId: typedOrder.id,
+        warehouseId: warehouse.id,
+        items: [{ orderItemId: typedOrder.items[0].id, quantity: 2, unitCost: 600 }],
+      });
+      const typedInId = String(typedIn.body.id);
+      await api(receiverToken, 'POST', `/receivings/${typedInId}/submit`);
+      const typedReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'receiving', documentId: typedInId, status: 'PENDING' } });
+      if (typedReq) await api(bossToken, 'POST', `/approvals/${typedReq.id}/act`, { action: 'APPROVED' });
+      const typedLine = await prisma.receivingItem.findFirst({ where: { receivingId: typedInId } });
+      const typedMove = await prisma.inventoryTransaction.findFirst({ where: { sourceType: 'receiving', sourceId: typedInId, type: 'RECEIPT' } });
+      check(
+        'a peso cost typed on the Incoming line overrides the order (600.00, not 10 USD at 56), is kept at posting and marked typed',
+        typedIn.status === 201 && num(typedLine?.unitCost) === 600 && typedLine?.costTyped === true && num(typedMove?.unitCost) === 600,
+        `${typedIn.status} ${num(typedLine?.unitCost)} typed=${typedLine?.costTyped} move=${num(typedMove?.unitCost)}`,
+      );
+
+      // The buyer sets the landed cost on the order already received at 560: the receipt follows.
+      const landed = await api(procToken, 'PUT', `/purchase-orders/${usd.id}/landed`, {
+        lines: [{ id: usd.items[0].id, landedUnitCost: 700 }],
+        reason: `${TAG} freight and duties in`,
+      });
+      const usdLineAfter = await prisma.receivingItem.findFirst({ where: { receivingId: usdInId } });
+      const usdMoveAfter = await prisma.inventoryTransaction.findFirst({ where: { sourceType: 'receiving', sourceId: usdInId, type: 'RECEIPT' } });
+      const itemAfter = await prisma.item.findUniqueOrThrow({ where: { id: item.id } });
+      check(
+        'the landed cost set on the order (700.00) restates the goods received at 560.00 — the line, its movement, the item’s last cost — and the order reads it',
+        landed.status === 200 &&
+          landed.body.restated === 1 &&
+          landed.body.landedTotal === 1400 &&
+          (landed.body.items as { pesoBasis: string; pesoUnitCost: number }[])[0]?.pesoBasis === 'landed' &&
+          num(usdLineAfter?.unitCost) === 700 &&
+          num(usdMoveAfter?.unitCost) === 700 &&
+          num(itemAfter.lastCost) === 700,
+        `${landed.status} ${JSON.stringify(landed.body).slice(0, 160)} line=${num(usdLineAfter?.unitCost)} move=${num(usdMoveAfter?.unitCost)} last=${num(itemAfter.lastCost)}`,
+      );
+      const listed = await api(procToken, 'GET', `/purchase-orders?search=${encodeURIComponent(usd.number)}`);
+      const listedRow = (listed.body.rows as { number: string; currency: string; total: number; landedTotal: number | null }[]).find((r) => r.number === usd.number);
+      const nextIn = await api(receiverToken, 'GET', `/receivings/order/${usd.id}`);
+      check(
+        'the purchase order list shows the order’s total in its own currency (USD) and the landed total in pesos (1,400.00); the Incoming page offers the landed cost',
+        listedRow?.currency === 'USD' && listedRow.total > 0 && listedRow.landedTotal === 1400 && (nextIn.body.lines as { unitCost: number; costBasis: string }[])[0]?.costBasis === 'landed',
+        `${JSON.stringify(listedRow)} ${JSON.stringify((nextIn.body.lines as unknown[])[0]).slice(0, 120)}`,
+      );
+
+      // Edit All corrects a received report's cost; a cost typed there stays when the order's landed cost moves.
+      const corrected = await api(bossToken, 'POST', `/receivings/${usdInId}/costs`, { reason: `${TAG} broker's invoice came`, lines: [{ id: usdLineAfter!.id, unitCost: 650 }] });
+      const landedAgain = await api(procToken, 'PUT', `/purchase-orders/${usd.id}/landed`, { lines: [{ id: usd.items[0].id, landedUnitCost: 720 }], reason: `${TAG} again` });
+      const corrLine = await prisma.receivingItem.findFirst({ where: { receivingId: usdInId } });
+      const backToOrder = await api(bossToken, 'POST', `/receivings/${usdInId}/costs`, { reason: `${TAG} take the order's`, lines: [{ id: usdLineAfter!.id, unitCost: null }] });
+      const backLine = await prisma.receivingItem.findFirst({ where: { receivingId: usdInId } });
+      check(
+        'Edit All corrects a received line to 650.00 (typed); the order’s landed cost moving to 720 leaves it; cleared, it goes back to the order’s 720.00',
+        corrected.status === 200 && corrected.body.changed === 1 && landedAgain.body.restated === 0 && num(corrLine?.unitCost) === 650 && corrLine?.costTyped === true &&
+          backToOrder.status === 200 && num(backLine?.unitCost) === 720 && backLine?.costTyped === false,
+        `${corrected.status} ${JSON.stringify(corrected.body).slice(0, 80)}; again ${landedAgain.body.restated}; ${num(corrLine?.unitCost)}/${corrLine?.costTyped}; back ${backToOrder.status} ${num(backLine?.unitCost)}/${backLine?.costTyped}`,
+      );
+      const receiverTry = await api(receiverToken, 'POST', `/receivings/${usdInId}/costs`, { reason: `${TAG} mine`, lines: [{ id: usdLineAfter!.id, unitCost: 1 }] });
+      check('correcting a received cost is Edit All’s alone', receiverTry.status === 403, String(receiverTry.status));
+
+      // The owner's PO-0005: saved as PHP with USD prices, received at the USD figure as pesos.
+      const wrongCcy = await prisma.purchaseOrder.create({
+        data: {
+          number: await nextNumber('purchase_order'),
+          status: 'ISSUED',
+          kind: 'STOCK_REPLENISHMENT',
+          supplierId: supplier.id,
+          warehouseId: warehouse.id,
+          createdById: procurement.id,
+          issuedAt: new Date(),
+          currency: 'PHP',
+          notes: `${TAG} PHP order with USD prices`,
+          subtotal: D(20),
+          total: D(20),
+          items: { create: [{ itemId: item.id, description: `${TAG} Stainless pipe`, quantity: D(2), unit: 'pcs', unitPrice: D(10), amount: D(20) }] },
+        },
+        include: { items: true },
+      });
+      const wrongIn = await api(receiverToken, 'POST', '/receivings', { orderId: wrongCcy.id, warehouseId: warehouse.id, items: [{ orderItemId: wrongCcy.items[0].id, quantity: 2 }] });
+      const wrongInId = String(wrongIn.body.id);
+      await api(receiverToken, 'POST', `/receivings/${wrongInId}/submit`);
+      const wrongReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'receiving', documentId: wrongInId, status: 'PENDING' } });
+      if (wrongReq) await api(bossToken, 'POST', `/approvals/${wrongReq.id}/act`, { action: 'APPROVED' });
+      const noReason = await api(procToken, 'PUT', `/purchase-orders/${wrongCcy.id}/landed`, { currency: 'USD', exchangeRate: 56 });
+      const fixed = await api(procToken, 'PUT', `/purchase-orders/${wrongCcy.id}/landed`, { currency: 'USD', exchangeRate: 56, reason: `${TAG} it was quoted in dollars` });
+      const fixedLine = await prisma.receivingItem.findFirst({ where: { receivingId: wrongInId } });
+      const fixedOrder = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: wrongCcy.id } });
+      check(
+        'an issued order saved as PHP with USD prices is put right with a reason: USD at 56, and its receipt at 10.00 restated to 560.00',
+        noReason.status === 400 && fixed.status === 200 && fixed.body.restated === 1 && fixedOrder.currency === 'USD' && num(fixedOrder.exchangeRate) === 56 && num(fixedLine?.unitCost) === 560,
+        `${noReason.status} ${fixed.status} ${JSON.stringify(fixed.body).slice(0, 100)} ${fixedOrder.currency} ${num(fixedOrder.exchangeRate)} ${num(fixedLine?.unitCost)}`,
       );
     }
 
@@ -5140,10 +5240,11 @@ async function main() {
         page: LANDSCAPE,
         key: (r) => String(r.number),
         filter: ['awaiting=true', 'awaiting delivery'],
-        total: { label: 'Total', of: (rows) => rows.filter((r) => r.status !== 'CANCELLED').reduce((t, r) => t + Number(r.total), 0) },
+        // Summed in pesos — each order's landed total (2026-10-23); its own currency's total is not added across orders.
+        total: { label: 'Total landed', of: (rows) => rows.filter((r) => r.status !== 'CANCELLED').reduce((t, r) => t + Number(r.landedTotal ?? 0), 0) },
         closed: {
           is: (r) => r.status === 'CANCELLED',
-          figure: (r) => Number(r.total),
+          figure: (r) => Number(r.landedTotal ?? 0),
           note: (n) => `${n} cancelled order${n === 1 ? ', in brackets, is' : 's, in brackets, are'} not counted.`,
         },
         // Summed, as G-FIN sums a draft invoice — and said.

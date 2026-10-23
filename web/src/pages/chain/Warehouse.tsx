@@ -21,6 +21,7 @@ import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
+import { NumberInput } from '../../components/NumberInput';
 import { label } from './PurchaseRequests';
 
 // ════════════════════════════════════════════════════════════════════
@@ -140,6 +141,104 @@ export function Receivings() {
   );
 }
 
+/**
+ * Puts right the peso unit cost of goods already received (2026-10-23): the
+ * stock movement, the shelf's average and the item's last cost follow. A
+ * line left blank goes back to what the order says. In the card, never a
+ * dialog.
+ */
+function CorrectCostPanel({
+  receivingId,
+  items,
+  hasOrder,
+  onClose,
+  onSaved,
+}: {
+  receivingId: string;
+  items: { id: string; name: string | null; description: string; quantity: number; unit: string; unitCost: number; costTyped?: boolean }[];
+  hasOrder: boolean;
+  onClose: () => void;
+  onSaved: (changed: number) => void | Promise<void>;
+}) {
+  const [costs, setCosts] = useState<Record<string, string>>(() => Object.fromEntries(items.map((i) => [i.id, String(i.unitCost)])));
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const changed = items.filter((i) => (costs[i.id] === '' ? hasOrder && i.costTyped : Math.abs(Number(costs[i.id]) - i.unitCost) >= 0.005));
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.post<{ changed: number }>(`/receivings/${receivingId}/costs`, {
+        reason: reason.trim(),
+        lines: changed.map((i) => ({ id: i.id, unitCost: costs[i.id] === '' ? null : Number(costs[i.id]) })),
+      });
+      await onSaved(res.changed);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="prq-panel">
+      <p className="faint">
+        The landed cost of one unit in pesos. The stock, its average cost and the item's last cost follow; what already
+        left the shelf keeps the cost it left at.{hasOrder ? ' Blank goes back to what the order says.' : ''}
+      </p>
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th className="right">Qty</th>
+              <th className="right">Now (PHP)</th>
+              <th className="right">Unit cost (PHP)</th>
+              <th className="right">Amount (PHP)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((i) => (
+              <tr key={i.id}>
+                <td>{i.name ?? i.description}</td>
+                <td className="right mono">
+                  {i.quantity} {i.unit}
+                </td>
+                <td className="right mono">{formatMoney(i.unitCost)}</td>
+                <td className="right">
+                  <NumberInput
+                    kind="money"
+                    min={0}
+                    value={costs[i.id]}
+                    aria-label={`Unit cost in pesos — ${i.name ?? i.description}`}
+                    onChange={(e) => setCosts((c) => ({ ...c, [i.id]: e.target.value }))}
+                  />
+                </td>
+                <td className="right mono">{costs[i.id] === '' ? '—' : formatMoney(Math.round(Number(costs[i.id]) * i.quantity * 100) / 100)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Field label="Why" hint="Kept on the report's trail">
+        <input value={reason} maxLength={2000} onChange={(e) => setReason(e.target.value)} />
+      </Field>
+      <ErrorBox error={error} />
+      <div className="row prq-panel-foot">
+        <span className="spacer" />
+        <button className="btn btn-sm" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={save} disabled={busy || !changed.length || reason.trim().length < 3}>
+          {busy ? 'Saving…' : `Save${changed.length ? ` (${changed.length})` : ''}`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function ReceivingDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -150,6 +249,7 @@ export function ReceivingDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [modifying, setModifying] = useState(false);
+  const [correcting, setCorrecting] = useState(false);
   const [reload, setReload] = useState(0);
 
   const load = useCallback(async () => {
@@ -195,6 +295,8 @@ export function ReceivingDetail() {
     unit: string;
     quantity: number;
     unitCost: number;
+    /** The peso cost was typed on the report, over what the order says. */
+    costTyped?: boolean;
     amount: number;
     serialNo: string | null;
     batchNo: string | null;
@@ -417,7 +519,29 @@ export function ReceivingDetail() {
       )}
 
       <div className="card">
-        <h3 className="card-title">Items received</h3>
+        <div className="card-head">
+          <h3 className="card-title">Items received</h3>
+          {rec.canCorrectCost === true && !correcting && (
+            <div className="card-actions">
+              <button className="btn btn-sm" onClick={() => setCorrecting(true)}>
+                Correct unit cost (PHP)
+              </button>
+            </div>
+          )}
+        </div>
+        {correcting && (
+          <CorrectCostPanel
+            receivingId={recId}
+            items={items}
+            hasOrder={!!order}
+            onClose={() => setCorrecting(false)}
+            onSaved={async (changed) => {
+              setCorrecting(false);
+              toast('ok', changed ? `${changed} line${changed === 1 ? '' : 's'} restated — stock and averages follow` : 'Nothing changed');
+              await load();
+            }}
+          />
+        )}
         <div className="table-wrap">
           <table className="data">
             <thead>
@@ -425,8 +549,8 @@ export function ReceivingDetail() {
                 <th>Item</th>
                 <th>Budget line</th>
                 <th className="right">Qty</th>
-                <th className="right">Unit cost</th>
-                <th className="right">Amount</th>
+                <th className="right">Unit cost (PHP)</th>
+                <th className="right">Amount (PHP)</th>
                 <th>Serial / batch</th>
               </tr>
             </thead>
@@ -443,7 +567,10 @@ export function ReceivingDetail() {
                   <td className="right mono">
                     {i.quantity} {i.unit}
                   </td>
-                  <td className="right mono">{formatMoney(i.unitCost)}</td>
+                  <td className="right">
+                    <span className="mono">{formatMoney(i.unitCost)}</span>
+                    {i.costTyped && order && <div className="faint">typed over the order</div>}
+                  </td>
                   <td className="right mono">{formatMoney(i.amount)}</td>
                   <td className="faint mono">{[i.serialNo, i.batchNo].filter(Boolean).join(' / ') || '—'}</td>
                 </tr>

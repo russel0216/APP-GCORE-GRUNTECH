@@ -173,7 +173,7 @@ export async function salesOrderSpend(salesOrderId: string, db: Tx | typeof pris
         number: true,
         currency: true,
         exchangeRate: true,
-        items: { select: { quantity: true, receivedQty: true, unitPrice: true, requestItem: { select: { estimatedCost: true } } } },
+        items: { select: { quantity: true, receivedQty: true, unitPrice: true, landedUnitCost: true, requestItem: { select: { estimatedCost: true } } } },
       },
     }),
     db.receivingItem.findMany({
@@ -195,7 +195,7 @@ export async function salesOrderSpend(salesOrderId: string, db: Tx | typeof pris
     }
   }
   for (const o of orders) {
-    // In pesos (2026-10-23): the request's declared cost, else the price at
+    // In pesos (2026-10-23): the landed cost, else the request's declared cost, else the price at
     // the order's rate — what the goods will be taken in at when received.
     for (const i of o.items) committed += Math.max(0, num(i.quantity) - num(i.receivedQty)) * (receiptUnitCost(o, i).unitCost ?? num(i.unitPrice));
   }

@@ -58,7 +58,7 @@ interface OrderLine {
   unitPrice: number;
   /** Pesos per unit it is taken in at (2026-10-23): the request's declared cost, else the price at the order's rate; null with no rate. */
   unitCost: number | null;
-  costBasis: 'request' | 'order' | 'converted' | 'no_rate';
+  costBasis: 'landed' | 'request' | 'order' | 'converted' | 'no_rate';
   /** The item's product group; null where it has none. */
   category: Category | null;
   /** No item on file yet: received into a warehouse it is filed new, under the group the line names. */
@@ -129,6 +129,8 @@ interface Existing {
     unit: string;
     quantity: number;
     unitCost: number;
+    /** The peso cost was typed on the report over the order's (2026-10-23). */
+    costTyped?: boolean;
     categoryId?: string | null;
     category?: Category | null;
   }[];
@@ -164,6 +166,8 @@ export function IncomingEditor() {
   const [mode, setMode] = useState<Mode>('order');
   const [order, setOrder] = useState<OrderData | null>(null);
   const [receive, setReceive] = useState<Record<string, string>>({});
+  /** A peso unit cost typed over the order's, by order line id; blank takes the order's (2026-10-23). */
+  const [costs, setCosts] = useState<Record<string, string>>({});
   const [free, setFree] = useState<FreeLine[]>([blankFree()]);
   const [fromSupplier, setFromSupplier] = useState(true);
   const [supplier, setSupplier] = useState<SupplierRef | null>(null);
@@ -212,14 +216,17 @@ export function IncomingEditor() {
             await loadOrder(r.orderId, r.id);
             const q: Record<string, string> = {};
             const g: Record<string, string> = {};
+            const c: Record<string, string> = {};
             for (const i of r.items) {
               if (!i.orderItemId) continue;
               q[i.orderItemId] = String(i.quantity);
               if (i.categoryId) g[i.orderItemId] = i.categoryId;
+              if (i.costTyped) c[i.orderItemId] = String(i.unitCost);
             }
             setReceive(q);
             setGroups(g);
-            setSaved(JSON.stringify({ mode: 'order', h, q, g }));
+            setCosts(c);
+            setSaved(JSON.stringify({ mode: 'order', h, q, g, c }));
           } else {
             setMode('none');
             setFromSupplier(!!r.supplier);
@@ -262,11 +269,14 @@ export function IncomingEditor() {
   // ── Figures ────────────────────────────────────────────────────────────────
 
   const orderLinesSent = (order?.lines ?? []).filter((l) => Number(receive[l.id]) > 0);
+  /** What an order line is taken in at: the peso cost typed, else the order's. */
+  const costOf = (l: OrderLine) => ((costs[l.id] ?? '') !== '' ? Number(costs[l.id]) : l.unitCost);
   const freeSent = free.filter((l) => l.item || l.quantity || l.description);
   const value = useMemo(() => {
-    if (mode === 'order') return cents(orderLinesSent.reduce((s, l) => s + Number(receive[l.id]) * (l.unitCost ?? 0), 0));
+    if (mode === 'order') return cents(orderLinesSent.reduce((s, l) => s + Number(receive[l.id]) * (costOf(l) ?? 0), 0));
     return cents(freeSent.reduce((s, l) => s + (Number(l.quantity) || 0) * (Number(l.unitCost) || 0), 0));
-  }, [mode, orderLinesSent, receive, freeSent]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, orderLinesSent, receive, freeSent, costs]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -280,7 +290,7 @@ export function IncomingEditor() {
 
   const snapshot = () =>
     mode === 'order'
-      ? JSON.stringify({ mode, h: header, q: receive, g: groups })
+      ? JSON.stringify({ mode, h: header, q: receive, g: groups, c: costs })
       : JSON.stringify({ mode, h: header, ls: free.map(({ key: _k, ...rest }) => rest) });
   const dirty = saved !== null && (saved === '' ? orderLinesSent.length > 0 || freeSent.length > 0 : snapshot() !== saved);
   useUnsavedChanges(dirty && !busy);
@@ -291,7 +301,7 @@ export function IncomingEditor() {
   const problems: string[] = [];
   if (mode === 'order') {
     if (!order) problems.push('Choose the purchase order');
-    else if (order.costProblem) problems.push(order.costProblem);
+    else if (order.costProblem && orderLinesSent.some((l) => costOf(l) === null)) problems.push(`${order.costProblem} — or type the unit cost in pesos on the line`);
     else if (!orderLinesSent.length) problems.push('Type what came in on at least one line');
     for (const l of orderLinesSent) {
       if (Number(receive[l.id]) > l.left + 0.0005) problems.push(`${l.name ?? l.description}: only ${qtyText(l.left)} left to receive`);
@@ -323,7 +333,13 @@ export function IncomingEditor() {
       return {
         ...common,
         orderId: order!.id,
-        items: orderLinesSent.map((l) => ({ orderItemId: l.id, quantity: Number(receive[l.id]), categoryId: groups[l.id] || null })),
+        items: orderLinesSent.map((l) => ({
+          orderItemId: l.id,
+          quantity: Number(receive[l.id]),
+          categoryId: groups[l.id] || null,
+          // Typed over the order's peso cost; left out, the order's stands.
+          ...((costs[l.id] ?? '') !== '' ? { unitCost: Number(costs[l.id]) } : {}),
+        })),
       };
     }
     return {
@@ -653,19 +669,30 @@ export function IncomingEditor() {
                                 onChange={(e) => setReceive((q) => ({ ...q, [l.id]: e.target.value }))}
                               />
                             </td>
-                            <td className="right mono">
-                              {l.unitCost === null ? '—' : formatMoney(l.unitCost)}
+                            <td className="right">
+                              <NumberInput
+                                kind="money"
+                                aria-label={`Unit cost in pesos — ${l.name ?? l.description}`}
+                                placeholder={l.unitCost === null ? 'type in PHP' : formatMoney(l.unitCost)}
+                                value={costs[l.id] ?? ''}
+                                min={0}
+                                onChange={(e) => setCosts((c) => ({ ...c, [l.id]: e.target.value }))}
+                              />
                               <div className="faint">
-                                {l.costBasis === 'request'
-                                  ? 'request’s declared cost'
-                                  : l.costBasis === 'converted'
-                                    ? `${formatMoney(l.unitPrice, order.currency)} at ${order.exchangeRate}`
-                                    : l.costBasis === 'no_rate'
-                                      ? `${formatMoney(l.unitPrice, order.currency)} — no rate`
-                                      : ''}
+                                {(costs[l.id] ?? '') !== ''
+                                  ? 'typed — overrides the order'
+                                  : l.costBasis === 'landed'
+                                    ? 'landed cost on the order'
+                                    : l.costBasis === 'request'
+                                      ? 'request’s declared cost'
+                                      : l.costBasis === 'converted'
+                                        ? `${formatMoney(l.unitPrice, order.currency)} at ${order.exchangeRate}`
+                                        : l.costBasis === 'no_rate'
+                                          ? `${formatMoney(l.unitPrice, order.currency)} — no rate`
+                                          : 'the order’s price'}
                               </div>
                             </td>
-                            <td className="right mono">{l.unitCost === null ? '—' : formatMoney(cents(now * l.unitCost))}</td>
+                            <td className="right mono">{costOf(l) === null ? '—' : formatMoney(cents(now * costOf(l)!))}</td>
                           </tr>
                         );
                       })}

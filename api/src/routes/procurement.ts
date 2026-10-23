@@ -1,5 +1,5 @@
 import { QUOTATION_CURRENCY_CODES } from '../shared/quotation';
-import { noRateMessage, orderInPesos, rateForOrder } from '../shared/receiptCost';
+import { noRateMessage, orderInPesos, orderLandedTotal, rateForOrder, receiptUnitCost, restateReceiptLine, RESTATE_SELECT, basisWords } from '../shared/receiptCost';
 import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, PrStatus, PurchaseKind, PoStatus, CanvassStatus } from '@prisma/client';
@@ -2846,7 +2846,7 @@ purchaseOrderRoutes.get(
           supplier: { select: { id: true, name: true } },
           job: { select: { id: true, number: true, name: true } },
           request: { select: { id: true, number: true } },
-          items: { select: { quantity: true, receivedQty: true } },
+          items: { select: { quantity: true, receivedQty: true, unitPrice: true, landedUnitCost: true, requestItem: { select: { estimatedCost: true } } } },
         },
         orderBy: orderBy(q, PO_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
@@ -2868,6 +2868,10 @@ purchaseOrderRoutes.get(
           orderDate: r.orderDate,
           deliveryDate: r.deliveryDate,
           total: num(r.total),
+          /** The supplier's figures are in the order's own currency (2026-10-23)… */
+          currency: r.currency,
+          /** …and this is what its goods come to in pesos — landed, declared or converted; null while a line has none. */
+          landedTotal: orderLandedTotal(r, r.items),
           receivedPct: receivedPct(r.items),
         })),
         total,
@@ -2895,7 +2899,7 @@ purchaseOrderRoutes.get(
     const q = listQuery(req);
     const where = poListWhere(q);
     const f = q.filters;
-    const [rows, count, live, cancelled, unissued, currency, project, supplier] = await Promise.all([
+    const [rows, count, cancelled, unissued, currency, project, supplier] = await Promise.all([
       prisma.purchaseOrder.findMany({
         where,
         include: {
@@ -2903,13 +2907,12 @@ purchaseOrderRoutes.get(
           job: { select: { number: true, name: true } },
           salesOrder: { select: { number: true } },
           request: { select: { number: true } },
-          items: { select: { quantity: true, receivedQty: true } },
+          items: { select: { quantity: true, receivedQty: true, unitPrice: true, landedUnitCost: true, requestItem: { select: { estimatedCost: true } } } },
         },
         orderBy: orderBy(q, PO_SORTS, { createdAt: 'desc' }),
         take: LIST_CAP,
       }),
       prisma.purchaseOrder.count({ where }),
-      prisma.purchaseOrder.aggregate({ where: { AND: [where, { status: { not: 'CANCELLED' } }] }, _sum: { total: true } }),
       prisma.purchaseOrder.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
       prisma.purchaseOrder.count({ where: { AND: [where, { status: { in: PO_UNISSUED } }] } }),
       companyCurrency(),
@@ -2926,18 +2929,26 @@ purchaseOrderRoutes.get(
     // A whole percentage, never rounded up to a delivery that is not complete.
     const pct = (v: number) => (v >= 100 ? '100%' : `${Math.floor(v)}%`);
 
-    // Eight columns: landscape, each sized from what it holds (rule 6).
+    // Each order's total in its OWN currency, and what it comes to in pesos
+    // (2026-10-23) — the pesos are what is summed; a foreign order with no
+    // rate yet is left out of the sum and said.
+    const landedOf = new Map(rows.map((o) => [o.id, orderLandedTotal(o, o.items)]));
+    const standing = rows.filter((o) => o.status !== 'CANCELLED');
+    const summed = standing.reduce((s, o) => s + Math.round((landedOf.get(o.id) ?? 0) * 100), 0) / 100;
+    const noPeso = standing.filter((o) => landedOf.get(o.id) === null).length;
+    // Nine columns: landscape, each sized from what it holds (rule 6).
     const sections: PdfSection[] = [
       {
         kind: 'table',
-        head: ['Number', 'Supplier', 'Ordered', 'Required', `Total (${currency})`, 'Received', 'Request', 'Status'],
-        align: ['left', 'left', 'left', 'left', 'right', 'right', 'left', 'left'],
+        head: ['Number', 'Supplier', 'Ordered', 'Required', 'Total', `Landed (${currency})`, 'Received', 'Request', 'Status'],
+        align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'left', 'left'],
         rows: rows.map((o) => [
           o.number,
           { title: o.supplier.name, body: o.job ? `${o.job.number} — ${o.job.name}` : o.salesOrder ? `For ${o.salesOrder.number}` : 'Stock' },
           formatShortDate(o.orderDate),
           o.deliveryDate ? formatShortDate(o.deliveryDate) : '',
-          bracketed(formatAmount(num(o.total)), o.status !== 'CANCELLED'),
+          bracketed(formatMoney(num(o.total), o.currency), o.status !== 'CANCELLED'),
+          landedOf.get(o.id) === null ? 'no rate' : bracketed(formatAmount(landedOf.get(o.id)!), o.status !== 'CANCELLED'),
           pct(receivedPct(o.items)),
           o.request?.number ?? '',
           statusLabel(o.status),
@@ -2945,7 +2956,7 @@ purchaseOrderRoutes.get(
       },
       {
         kind: 'totals',
-        rows: [{ label: totalLabel('Total', count, rows.length), value: formatMoney(num(live._sum.total), currency), bold: true }],
+        rows: [{ label: totalLabel('Total landed', count, rows.length), value: formatMoney(summed, currency), bold: true }],
       },
     ];
     sections.push(
@@ -2953,6 +2964,7 @@ purchaseOrderRoutes.get(
         unissued > 0 &&
           `The total includes ${counted(unissued, ['order', 'orders'])} not issued yet — nothing is committed on ${unissued === 1 ? 'it' : 'them'} until ${unissued === 1 ? 'it is' : 'they are'}.`,
         bracketNote(cancelled, ['cancelled order', 'cancelled orders']),
+        noPeso > 0 && `${counted(noPeso, ['order', 'orders'])} in a foreign currency with no rate to ${currency} ${noPeso === 1 ? 'is' : 'are'} not in the total.`,
       ]),
     );
 
@@ -2997,6 +3009,7 @@ async function loadPo(id: string) {
         include: {
           item: { select: { id: true, code: true, name: true } },
           costCategory: { select: { id: true, name: true } },
+          requestItem: { select: { estimatedCost: true } },
         },
       },
       bills: {
@@ -3089,14 +3102,26 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
     subtotal: num(po.subtotal),
     vatAmount: num(po.vatAmount),
     total: num(po.total),
-    items: po.items.map((i) => ({
-      ...i,
-      quantity: num(i.quantity),
-      unitPrice: num(i.unitPrice),
-      amount: num(i.amount),
-      receivedQty: num(i.receivedQty),
-      outstandingQty: cents(num(i.quantity) - num(i.receivedQty)),
-    })),
+    exchangeRate: po.exchangeRate === null ? null : num(po.exchangeRate),
+    /** What the order comes to in PESOS, line by line through `receiptUnitCost()`; null while a line has none. */
+    landedTotal: orderLandedTotal(po, po.items),
+    /** The buyer (or Edit All) sets the landed cost and corrects the currency on any order not cancelled. */
+    canSetLanded: !!me && po.status !== 'CANCELLED' && mayEditPo(me, po),
+    items: po.items.map(({ requestItem, ...i }) => {
+      const peso = receiptUnitCost(po, { ...i, requestItem });
+      return {
+        ...i,
+        quantity: num(i.quantity),
+        unitPrice: num(i.unitPrice),
+        amount: num(i.amount),
+        landedUnitCost: i.landedUnitCost === null ? null : num(i.landedUnitCost),
+        /** One unit in pesos, and what it came from. */
+        pesoUnitCost: peso.unitCost,
+        pesoBasis: peso.basis,
+        receivedQty: num(i.receivedQty),
+        outstandingQty: cents(num(i.quantity) - num(i.receivedQty)),
+      };
+    }),
   };
 }
 
@@ -3335,6 +3360,8 @@ const poLineSchema = z.object({
   quantity: z.number().positive('Quantity must be more than zero'),
   unit: z.string().trim().max(40).optional().nullable(),
   unitPrice: z.number().min(0, 'A unit price cannot be negative'),
+  /** The landed cost of one unit in PESOS (2026-10-23); left out keeps what the line has. */
+  landedUnitCost: z.number().min(0).max(1e12).optional().nullable(),
 });
 type PoLineInput = z.infer<typeof poLineSchema>;
 
@@ -3350,6 +3377,7 @@ interface OrderLine {
   quantity: number;
   unit: string;
   unitPrice: number;
+  landedUnitCost?: number | null;
 }
 
 /**
@@ -3469,6 +3497,7 @@ async function checkPoLines(
       quantity: l.quantity,
       unit: l.unit?.trim() || 'pcs',
       unitPrice: l.unitPrice,
+      landedUnitCost: l.landedUnitCost,
     };
   });
 }
@@ -3490,6 +3519,7 @@ async function writePoLines(tx: Prisma.TransactionClient, orderId: string, lines
       unit: l.unit,
       unitPrice: D(l.unitPrice),
       amount: D(cents(l.quantity * l.unitPrice)),
+      ...(l.landedUnitCost !== undefined ? { landedUnitCost: l.landedUnitCost === null || l.landedUnitCost === 0 ? null : D(l.landedUnitCost) } : {}),
       sortOrder,
     };
     if (l.id) await tx.purchaseOrderItem.update({ where: { id: l.id }, data });
@@ -3749,6 +3779,91 @@ purchaseOrderRoutes.patch(
       req,
     );
     res.json(presentPo((await loadPo(req.params.id))!, me));
+  }),
+);
+
+/**
+ * The landed cost in PESOS (2026-10-23, the owner's call: "the purchase order
+ * list is USD but the currency reads PHP — I want the real value in PHP, the
+ * landed cost … Inventory unit cost should be the landed cost in PHP"). On
+ * any order not cancelled, issued or received included, its buyer or Edit
+ * All sets each line's landed unit cost (null clears it) and may put the
+ * order's currency and rate right — prices stay as the supplier quoted them.
+ * Goods already received at the old figure are restated through
+ * `restateReceiptLine()` in the same transaction (a cost typed on the
+ * Incoming report stays). A project's budget is not moved: it is charged the
+ * request's declared value. One audit row.
+ */
+purchaseOrderRoutes.put(
+  '/:id/landed',
+  requireAny(...PO_EDIT),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(
+      z.object({
+        currency: z.enum(QUOTATION_CURRENCY_CODES).optional(),
+        exchangeRate: z.number().positive().max(1e6).optional().nullable(),
+        lines: z.array(z.object({ id: z.string(), landedUnitCost: z.number().min(0).max(1e12).nullable() })).max(500).default([]),
+        reason: z.string().trim().max(2000).optional().nullable(),
+      }),
+      req.body,
+    );
+    const po = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id }, include: { items: { select: { id: true, landedUnitCost: true } } } });
+    if (!po) throw notFound('Purchase order not found');
+    if (!mayEditPo(me, po)) throw forbidden('This order is someone else’s');
+    if (po.status === 'CANCELLED') throw badRequest(`${po.number} was cancelled`);
+    const lineIds = new Set(po.items.map((i) => i.id));
+    for (const l of body.lines) if (!lineIds.has(l.id)) throw badRequest('One of the lines is not on this order');
+    const rate = await orderRateChange(po, body);
+    if (rate.currency && rate.currency !== po.currency && po.status !== 'DRAFT' && po.status !== 'PENDING_APPROVAL' && !body.reason?.trim()) {
+      throw badRequest(`Say why ${po.number}'s currency changes after it was issued`);
+    }
+    const changes: string[] = [];
+    if (rate.currency !== undefined && rate.currency !== po.currency) changes.push(`currency ${po.currency} → ${rate.currency}`);
+    if (rate.exchangeRate !== undefined && Number(rate.exchangeRate ?? 0) !== Number(po.exchangeRate ?? 0)) {
+      changes.push(`rate ${po.exchangeRate ?? '—'} → ${rate.exchangeRate ?? '—'}`);
+    }
+    const before = new Map(po.items.map((i) => [i.id, i.landedUnitCost === null ? null : Number(i.landedUnitCost)]));
+    const landed = body.lines.filter((l) => (l.landedUnitCost || null) !== before.get(l.id));
+    if (landed.length) changes.push(`landed cost on ${landed.length} line${landed.length === 1 ? '' : 's'}`);
+    let restated = 0;
+    await prisma.$transaction(async (tx) => {
+      if (rate.currency !== undefined) await tx.purchaseOrder.update({ where: { id: po.id }, data: rate });
+      for (const l of landed) {
+        await tx.purchaseOrderItem.update({ where: { id: l.id }, data: { landedUnitCost: l.landedUnitCost ? D(l.landedUnitCost) : null } });
+      }
+      if (!changes.length) return;
+      // Goods received at the old figure follow the new one.
+      const received = await tx.receivingItem.findMany({
+        where: { costTyped: false, receiving: { status: 'RECEIVED' }, orderItem: { orderId: po.id } },
+        select: RESTATE_SELECT,
+      });
+      for (const line of received) {
+        const cost = receiptUnitCost(line.orderItem!.order, line.orderItem!);
+        if (cost.unitCost === null || Math.abs(cost.unitCost - Number(line.unitCost)) < 0.005) continue;
+        const ok = await restateReceiptLine(tx, line, cost.unitCost, {
+          summary: `${line.receiving.number}: restated from ${Number(line.unitCost).toFixed(2)} to ${cost.unitCost.toFixed(2)} (PHP) — ${basisWords(cost)} on ${po.number}`,
+          after: { basis: cost.basis, rate: cost.rate },
+          actorId: me.id,
+        });
+        if (!ok) throw badRequest(`A report on ${po.number} changed a moment ago — reload and try again`);
+        restated++;
+      }
+      await recalcPo(po.id, tx);
+    });
+    if (changes.length) {
+      await audit(
+        {
+          entityType: 'purchase_order',
+          entityId: po.id,
+          action: 'UPDATED',
+          summary: `${po.number}: ${changes.join(', ')}${restated ? ` — ${restated} received line${restated === 1 ? '' : 's'} restated in pesos` : ''}${body.reason?.trim() ? ` — ${body.reason.trim()}` : ''}`,
+          after: { lines: landed, currency: rate.currency, exchangeRate: rate.exchangeRate === undefined ? undefined : Number(rate.exchangeRate ?? 0) || null, restated },
+        },
+        req,
+      );
+    }
+    res.json({ ...presentPo((await loadPo(po.id))!, me), restated });
   }),
 );
 

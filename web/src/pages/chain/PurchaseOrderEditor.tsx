@@ -179,7 +179,7 @@ const snapshot = (h: Header, lines: Line[]) =>
   JSON.stringify([{ ...h, supplier: h.supplier?.id ?? null }, lines.filter((l) => !isBlank(l)).map(({ key: _key, ...rest }) => rest)]);
 
 /** The quotation's currencies (shared/quotation.ts QUOTATION_CURRENCIES). */
-const PO_CURRENCIES = ['PHP', 'USD', 'EUR', 'JPY', 'SGD', 'CNY', 'GBP', 'AUD', 'HKD'];
+export const PO_CURRENCIES = ['PHP', 'USD', 'EUR', 'JPY', 'SGD', 'CNY', 'GBP', 'AUD', 'HKD'];
 
 export function PurchaseOrderEditor() {
   const { id } = useParams<{ id: string }>();
@@ -725,7 +725,7 @@ export function PurchaseOrderEditor() {
               {header.currency !== 'PHP' && (
                 <Field
                   label="Rate to PHP"
-                  hint={`Pesos per ${header.currency}. Goods are received and stocked in pesos — a line from a purchase request at its declared cost, any other at this rate. Blank takes Company Settings' rate.`}
+                  hint={`Pesos per ${header.currency}. Goods are received and stocked in pesos — at a line's landed cost once set on the order's page, else a line from a purchase request at its declared cost, any other at this rate. Blank takes Company Settings' rate.`}
                 >
                   <NumberInput
                     kind="decimal"
