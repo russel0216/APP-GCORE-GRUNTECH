@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
 import { Stat } from '../../components/charts';
@@ -401,6 +401,11 @@ export function ExpenseClaimDetail() {
         }
         print={`/api/expense-claims/${row.id}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The claim alone, without the receipts behind it',
+            onSelect: () => openPdf(`/api/expense-claims/${row.id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           canPullBack && {
             label: 'Pull back and edit',
             hint: 'Back to a draft; the approvers are told',
@@ -449,6 +454,17 @@ export function ExpenseClaimDetail() {
 
       <DecisionNote documentType="expense" documentId={row.id} reloadToken={reload} />
       <DocumentApproval documentType="expense" documentId={row.id} reloadToken={reload} />
+
+      {/* The receipts beside the decision: each file's first page is shown, so
+          the approver checks the ORs without opening them one by one. */}
+      <Attachments
+        entityType="expense_claim"
+        entityId={row.id}
+        title="Receipts and attachments"
+        hint="Scans or photos of the ORs listed under Receipts — the approver's reference. Click a page to open the whole file."
+        // Receipts change with the claim: on a draft, by whoever may modify it.
+        canEdit={canModify}
+      />
 
       <ErrorBox error={error} />
 
@@ -602,15 +618,6 @@ export function ExpenseClaimDetail() {
           )}
         </div>
       </div>
-
-      <Attachments
-        entityType="expense_claim"
-        entityId={row.id}
-        title="Receipts"
-        hint="Scans or photos of the ORs listed above."
-        // Receipts change with the claim: on a draft, by whoever may modify it.
-        canEdit={canModify}
-      />
 
       {paying && (
         <RecordPaymentModal

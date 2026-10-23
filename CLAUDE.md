@@ -677,8 +677,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,804 assertions across twenty-two scripts** (counted 2026-10-23, after
-2 on chain for the purchase order's discount, and before it 3 on delivery for the budget request against its budget line and the cost
+**4,806 assertions across twenty-two scripts** (counted 2026-10-23, after
+2 on finance for the approver reading a claim's receipts, and before it 2 on chain for the purchase order's discount, and before it 3 on delivery for the budget request against its budget line and the cost
 ledger by budget line, and before it 2 on pipeline for the Sales Order report, and before it 6 on chain for the landed cost in pesos and the typed Incoming cost, and
 before it 5 on chain for a foreign-currency order received in pesos, and before it
 2 on hr for the attendance correction in My Work, and before it
@@ -802,7 +802,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 430, masters 92, sales 643, costing 205, pipeline 123, calendar 103, numbering
 94, partners 120, delivery 216, chain 404, hr 661, plantilla 129, meetings
-114, evaluations 154, academy 145, finance 444, aftermarket 304, cad 122,
+114, evaluations 154, academy 145, finance 446, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -7525,6 +7525,16 @@ Team Leader.
   reimbursements, Pending process, For release, Total paid out — the counts
   equal their filters (verify-finance). "+ Add reimbursement" opens the
   one claim form, Attachments at its foot.
+- **The approver checks the receipts** (2026-10-23, the owner's call: "the
+  preview of the attachment … as reference by the approver"). The claim
+  page's **Receipts and attachments** card sits right under the Approval
+  panel, each file's first page shown (the one `Attachments` card); `GET
+  /expense-claims/:id` and `/:id/pdf` take `requireAnyOrDecider`, and the
+  `expense_claim` attachment guard admits whoever may decide its open
+  request (`mayDecide`) while it is PENDING_APPROVAL — so a Team Leader or
+  Back Support with no right to the register opens it from the bell; the
+  web route has no Guard. The paper prints the receipts behind the claim
+  (`withAttachments`; ⋯ "Print without attachments" is `?attachments=0`).
 - **The report** is the `reimbursements` kind (claims dated in the range,
   drafts out; by month, requester, team, kind, status; narrowed by
   `requestedById`, `teamId`, `status`; `gfin.expenses.view_all`).

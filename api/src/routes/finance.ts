@@ -24,7 +24,7 @@ import {
   conflict,
   type ListQuery,
 } from '../http/kit';
-import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
 import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
@@ -44,6 +44,7 @@ import {
   cancelOpenRequest,
   openSteps,
   stageWords,
+  mayDecide,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { postJobCost } from '../shared/inventory';
@@ -2863,7 +2864,13 @@ registerAttachmentGuard('expense_claim', async (user, id, mode: 'read' | 'write'
   const claim = await prisma.expenseClaim.findUnique({ where: { id }, select: { claimedById: true, status: true } });
   if (!claim) return false;
   if (mode === 'write') return claim.status === 'DRAFT' && canEditRecord(user, 'gfin', 'expenses', claim.claimedById);
-  return claim.claimedById === user.id || can(user, 'gfin.expenses.view_all');
+  // The approver checks the receipts: whoever may decide its open request
+  // reads them while it waits on them (2026-10-23, the owner's call).
+  return (
+    claim.claimedById === user.id ||
+    can(user, 'gfin.expenses.view_all') ||
+    (claim.status === 'PENDING_APPROVAL' && (await mayDecide(user.id, 'expense', [id])))
+  );
 });
 
 export const claimInclude = {
@@ -3201,7 +3208,7 @@ expenseRoutes.get(
 
 expenseRoutes.get(
   '/:id',
-  requireAny('gfin.expenses.view_all', 'gfin.expenses.view_own'),
+  requireAnyOrDecider('gfin.expenses.view_all', 'gfin.expenses.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await prisma.expenseClaim.findUnique({
@@ -3214,7 +3221,12 @@ expenseRoutes.get(
       },
     });
     if (!row) throw notFound('Expense claim not found');
+    // An approver with no right to the register opens it — and its receipts —
+    // while it waits on them, as every routed document does.
+    const decider = await mayDecide(me.id, 'expense', [row.id]);
+    if (res.locals.deciderOnly && !decider) throw forbidden('You may not open that claim');
     if (
+      !decider &&
       !visibleOwners(me, 'gfin', 'expenses').includes(row.claimedById) &&
       !me.isSuperAdmin &&
       !me.permissions.has('gfin.expenses.view_all')
@@ -3918,7 +3930,7 @@ expenseRoutes.delete(
  */
 expenseRoutes.get(
   '/:id/pdf',
-  requireAny('gfin.expenses.view_all', 'gfin.expenses.view_own'),
+  requireAnyOrDecider('gfin.expenses.view_all', 'gfin.expenses.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const claim = await prisma.expenseClaim.findUnique({
@@ -3926,7 +3938,14 @@ expenseRoutes.get(
       include: claimInclude,
     });
     if (!claim) throw notFound('Expense claim not found');
-    if (!visibleOwners(me, 'gfin', 'expenses').includes(claim.claimedById) && !me.isSuperAdmin && !me.permissions.has('gfin.expenses.view_all')) {
+    const decider = await mayDecide(me.id, 'expense', [claim.id]);
+    if (res.locals.deciderOnly && !decider) throw forbidden('You may not print that claim');
+    if (
+      !decider &&
+      !visibleOwners(me, 'gfin', 'expenses').includes(claim.claimedById) &&
+      !me.isSuperAdmin &&
+      !me.permissions.has('gfin.expenses.view_all')
+    ) {
       throw forbidden('That is someone else’s claim');
     }
 
@@ -4020,7 +4039,7 @@ expenseRoutes.get(
       // Submitted in the claimant's name, as the submit route does.
       claim.status === 'DRAFT' ? { amount: view.total, requesterId: claim.claimedById } : undefined,
     );
-    const pdf = await renderDocument({
+    const bare = await renderDocument({
       title: liquidated ? 'Liquidation Report' : 'Expense Claim',
       documentNumber: claim.number,
       date: claim.claimDate,
@@ -4032,8 +4051,22 @@ expenseRoutes.get(
       ],
     });
 
+    // The receipts print behind the claim unless `?attachments=0`, so the
+    // paper an approver checks carries the ORs it lists.
+    const files = req.query.attachments === '0' ? [] : await attachedFiles('expense_claim', claim.id);
+    const { pdf, listed } = await withAttachments(bare, files, {
+      title: liquidated ? 'Liquidation report' : 'Expense claim',
+      number: claim.number,
+      reference: claim.claimedBy.name,
+    });
+
     await audit(
-      { entityType: 'expense_claim', entityId: claim.id, action: 'EXPORTED', summary: `Printed ${claim.number}` },
+      {
+        entityType: 'expense_claim',
+        entityId: claim.id,
+        action: 'EXPORTED',
+        summary: `Printed ${claim.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}`,
+      },
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');

@@ -2455,6 +2455,28 @@ async function main() {
       String(mFinanceFiles.status),
     );
 
+    // The approver checks the receipts (2026-10-23): whoever may decide the
+    // open request opens the claim, lists its files and prints it with them —
+    // with or without a right to the register — while a stranger cannot.
+    {
+      const step = mNewRequest
+        ? await prisma.approvalStep.findFirst({ where: { workflowId: mNewRequest.workflowId ?? '', sequence: mNewRequest.currentSequence } })
+        : null;
+      const deciderIds = step ? (await approversForStep(step, engineer.id, prisma, {})).filter((id) => id !== engineer.id) : [];
+      const decider = deciderIds.length ? await prisma.user.findUnique({ where: { id: deciderIds[0] } }) : null;
+      const dClaim = decider ? await as(decider)('GET', `/expense-claims/${mId}`) : null;
+      const dFiles = decider ? await as(decider)('GET', `/attachments/expense_claim/${mId}`) : null;
+      const dPaper = decider ? await as(decider)('GET', `/expense-claims/${mId}/pdf`) : null;
+      check(
+        'the approver it waits on opens the claim, lists its receipts and prints it',
+        dClaim?.status === 200 && dFiles?.status === 200 && Array.isArray(dFiles.body) && dFiles.body.length === mReceipts && dPaper?.status === 200,
+        `${decider?.name ?? 'no approver'}: ${dClaim?.status} / ${dFiles?.status} / ${dPaper?.status}`,
+      );
+      const sClaim = await as(stranger)('GET', `/expense-claims/${mId}`);
+      const sPaper = await as(stranger)('GET', `/expense-claims/${mId}/pdf`);
+      check('a stranger opens neither the claim nor its paper', sClaim.status === 403 && sPaper.status === 403, `${sClaim.status} / ${sPaper.status}`);
+    }
+
     // The claim on paper (rule 6). Drafted, it prints the route submitting
     // would take — each step by its own name, "Pending" under who may sign it
     // (the engineer's supervisor by name); never "Checked by" / "Approved by".

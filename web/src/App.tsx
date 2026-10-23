@@ -1382,11 +1382,9 @@ function Routed() {
         />
         <Route
           path="/g-fin/expenses/:id"
-          element={
-            <GuardAny permissions={['gfin.expenses.view_all', 'gfin.expenses.view_own']}>
-              <ExpenseClaimDetail />
-            </GuardAny>
-          }
+          // No Guard: the API decides — an approver with no right to the
+          // register opens the claim and its receipts while it waits on them.
+          element={<ExpenseClaimDetail />}
         />
         {/* Money issued before it is spent; liquidated through an expense claim. */}
         <Route
