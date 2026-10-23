@@ -149,6 +149,7 @@ const SCREEN: Record<string, string> = {
   costing_template: '/g-ops/costing',
   // A report's paper and CSV audit as EXPORTED under its division's type.
   chain_report: '/g-chain/reports',
+  sales_report: '/g-ops/sales-orders/report',
   finance_report: '/g-fin/reports',
   hr_report: '/g-hr/reports',
 };

@@ -329,6 +329,7 @@ export function SalesOrders() {
         // Year to date on a bare visit (2026-10-11, the owner's call); a link that filters keeps its own set.
         defaultFilters={{ dateFrom: yearStartKey(new Date()) }}
         endpoint="/sales-orders"
+        reportPath="/g-ops/sales-orders/report"
         columns={columns}
         rowKey={(r) => r.id}
         scoped

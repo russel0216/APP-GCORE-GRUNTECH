@@ -121,6 +121,7 @@ import {
   academySettingsRoutes,
 } from './routes/academy';
 import { salesOrderRoutes } from './routes/salesOrders';
+import { salesReportRoutes } from './routes/salesReports';
 import { startActivityReminders } from './shared/activities';
 import { loadHolidays } from './shared/holidays';
 import { holidayRoutes } from './routes/holidays';
@@ -186,6 +187,7 @@ app.use('/api/quotations', quotationRoutes);
 app.use('/api/activities', activityRoutes);
 app.use('/api/pipeline', pipelineRoutes);
 app.use('/api/sales-orders', salesOrderRoutes);
+app.use('/api/sales-reports', salesReportRoutes);
 app.use('/api/partners', partnerRoutes);
 
 // Delivery (Phase 4)

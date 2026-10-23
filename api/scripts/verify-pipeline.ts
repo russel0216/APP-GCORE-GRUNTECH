@@ -28,6 +28,7 @@ import { signToken } from '../src/auth/middleware';
 import { nextNumber, previewNext } from '../src/shared/numbering';
 import { probabilityAfterMove, stageProbability } from '../src/shared/pipeline';
 import { isBold, pdfRuns, printed } from './lib/paper';
+import { manilaDate } from '../src/shared/day';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -1043,6 +1044,32 @@ async function main() {
     booked.status === 201 && completed?.stage === 'COMPLETED' && completed?.booked === true,
     `${booked.status} ${completed?.stage}`,
   );
+
+  // The Sales Order report (2026-10-23): the list's Report button, read off
+  // the same orders the list shows — under View Own, the reader's own.
+  {
+    const day = manilaDate(new Date()).toISOString().slice(0, 10);
+    const rep = await http(managerToken, 'GET', `/sales-reports/sales-orders?from=${day}&to=${day}`);
+    const listed = await http(managerToken, 'GET', `/sales-orders?scope=mine&dateFrom=${day}&dateTo=${day}&pageSize=1`);
+    const summary = (listed.body.summary ?? {}) as { count: number; cancelledCount: number; value: number };
+    const cards = (rep.body.cards ?? []) as { label: string; value: number }[];
+    const card = (l: string) => cards.find((c) => c.label === l)?.value;
+    check(
+      'the Sales Order report counts and books what the list shows for the same days — the order just booked among them',
+      rep.status === 200 &&
+        card('Sales orders') === summary.count - summary.cancelledCount &&
+        Math.abs((card('Booked (with VAT)') ?? -1) - summary.value) < 0.01 &&
+        (card('Sales orders') ?? 0) >= 1,
+      `${rep.status} ${JSON.stringify(cards)} vs ${JSON.stringify(summary)}`,
+    );
+    const csv = await http(managerToken, 'GET', `/sales-reports/sales-orders.csv?from=${day}&to=${day}`);
+    const bad = await http(managerToken, 'GET', `/sales-reports/sales-orders?status=NOPE`);
+    check(
+      'it exports as CSV, refuses an unknown status, and is closed to a salesperson with no sales order right',
+      csv.status === 200 && bad.status === 400 && (await http(sellerToken, 'GET', '/sales-reports/sales-orders')).status === 403,
+      `${csv.status} ${bad.status}`,
+    );
+  }
 
   check('a salesperson without the board cannot read the stages', (await http(sellerToken, 'GET', '/pipeline/stages')).status === 403);
   check('the board manager reads them but cannot change them', (await http(managerToken, 'GET', '/pipeline/stages')).status === 200 && (await http(managerToken, 'PUT', '/pipeline/stages', {})).status === 403);

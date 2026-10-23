@@ -26,6 +26,7 @@ import { Employees } from './pages/masters/Employees';
 import { Items } from './pages/masters/Items';
 import { Categories, Warehouses } from './pages/masters/Reference';
 import { SalesOrders, SalesOrderDetail, SalesOrderEditor } from './pages/sales/SalesOrders';
+import { SalesOrderReports } from './pages/sales/SalesOrderReports';
 import { Leads, LeadDetail } from './pages/sales/Leads';
 import { Costings } from './pages/sales/Costings';
 import { CostingDetailPage } from './pages/sales/CostingDetail';
@@ -422,6 +423,14 @@ function Routed() {
           element={
             <GuardAny permissions={['gops.sales_orders.view_all', 'gops.sales_orders.view_own']}>
               <SalesOrders />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/sales-orders/report"
+          element={
+            <GuardAny permissions={['gops.sales_orders.view_all', 'gops.sales_orders.view_own']}>
+              <SalesOrderReports />
             </GuardAny>
           }
         />

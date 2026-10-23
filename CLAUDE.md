@@ -677,8 +677,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,797 assertions across twenty-two scripts** (counted 2026-10-23, after
-6 on chain for the landed cost in pesos and the typed Incoming cost, and
+**4,799 assertions across twenty-two scripts** (counted 2026-10-23, after
+2 on pipeline for the Sales Order report, and before it 6 on chain for the landed cost in pesos and the typed Incoming cost, and
 before it 5 on chain for a foreign-currency order received in pesos, and before it
 2 on hr for the attendance correction in My Work, and before it
 4 on chain for the standalone order's kind, the project-less receipt that
@@ -799,7 +799,7 @@ and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
-430, masters 92, sales 643, costing 205, pipeline 121, calendar 103, numbering
+430, masters 92, sales 643, costing 205, pipeline 123, calendar 103, numbering
 94, partners 120, delivery 213, chain 402, hr 661, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 444, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
@@ -5557,6 +5557,24 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   (verify-foundation pins both a short order on one page and a 40-line
   one). An administrator's SAVED order layout keeps its own boxes: "Put
   the standard back" in Admin › PDF Templates brings the new one.
+- **The Sales Order report** (2026-10-23, the owner's call: "create a
+  button report for Sales Order"): the list's **Report** button
+  (`reportPath`) opens `/g-ops/sales-orders/report`
+  (`pages/sales/SalesOrderReports.tsx` on the shared `ReportPage`), the API
+  `routes/salesReports.ts` at `/api/sales-reports/sales-orders` (`.csv`,
+  `.pdf`) on `shared/reportKit.ts`, behind the list's own View keys
+  (`gops.sales_orders.view_own`, implied by Team and All), audited
+  `sales_report`. Orders DATED in the range under the list's visibility
+  (`salesOrdersReadable`), narrowed by `ownerId`, `teamId` (or `none`) and
+  `status`, in pesos at each quotation's rate: cards (orders, booked with
+  VAT, before VAT — the stored total less its VAT, what invoicing reads —
+  invoiced by live invoices, left to invoice, and the margin off the orders
+  whose cost the reader may see, saying on how many), the months, and By
+  team, salesperson, customer, product group (each line's share of the
+  order's net; an order with no lines under "No group", so the table adds
+  up to Before VAT), status and the largest orders. A cancelled order is
+  counted under By status alone. verify-pipeline reconciles it with the
+  list's own summary for the same days.
 - **The quotation page lists the orders booked from it** (2026-10-07, the
   owner's call, as SCORO lists a quote's invoices): `QuotationSalesOrders` in
   `pages/sales/Quotations.tsx`, under the Lines card, reads the ordinary
