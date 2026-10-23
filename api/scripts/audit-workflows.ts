@@ -23,6 +23,7 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   commission: ['sales', 'industry_specialist', 'team_leader'],
   leave_request: ['employee', 'supervisor', 'project_engineer', 'service_engineer'],
   overtime_request: ['employee', 'project_engineer', 'service_engineer'],
+  attendance_correction: ['employee', 'project_engineer', 'service_engineer'],
   // The routing sheet of 2026-10-13: Project Engineers, Industry
   // Specialists, Technical Managers and Team Leaders prepare requisitions.
   purchase_request: ['project_engineer', 'industry_specialist', 'technical_manager', 'team_leader', 'project_manager', 'service_engineer', 'procurement', 'project_lead'],

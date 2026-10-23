@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
+import { APPROVER_FILTERS } from './approverFilters';
 import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import {
   StatusBadge,
@@ -20,6 +21,7 @@ import {
 import { todayLocal } from '../../lib/day';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
+import { FilingRoute } from './FilingRoute';
 
 /**
  * Overtime — two filings against one record.
@@ -186,7 +188,7 @@ export function Overtime() {
         searchPlaceholder="Search number, reason, employee…"
         emptyTitle="No overtime filed yet"
         onRowClick={(r) => navigate(`/g-hr/overtime/${r.id}`)}
-        filters={[{ key: 'stage', label: 'Stage', options: STAGES }]}
+        filters={[{ key: 'stage', label: 'Stage', options: STAGES }, ...APPROVER_FILTERS]}
         actions={
           can('ghr.overtime.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setFiling(true)}>
@@ -465,6 +467,7 @@ export function PriorModal({
           </select>
         </Field>
       )}
+      <FilingRoute path="/overtime/route" />
     </Modal>
   );
 }

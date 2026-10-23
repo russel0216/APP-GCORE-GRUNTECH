@@ -280,6 +280,12 @@ function AttendanceTab({ data, onCutoff, onFiled }: { data: Records; onCutoff: (
                   <td>
                     <StatusBadge status={d.status} extra={DTR_TONES} label={d.status === 'OPEN' && !d.open ? 'No clock-out' : DTR_LABEL[d.status]} />
                     {d.note && <div className="faint">{d.note}</div>}
+                    {/* A wrong or missing punch is asked to be corrected (2026-10-23): supervisor, then HR. */}
+                    {can('ghr.attendance_corrections.create') && d.date <= dtr.today && d.status !== 'NOT_EMPLOYED' && d.status !== 'UPCOMING' && (
+                      <div>
+                        <Link to={`/g-hr/attendance-corrections?new=1&date=${d.date}`}>Request correction</Link>
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}

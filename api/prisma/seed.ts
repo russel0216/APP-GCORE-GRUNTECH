@@ -108,6 +108,16 @@ const WORKFLOWS: WorkflowSeed[] = [
     steps: [{ sequence: 1, name: 'Supervisor authorisation', approverType: 'SUPERVISOR' }],
   },
   {
+    // An attendance correction (2026-10-23): the supervisor who knows the
+    // day, then HR, who keeps the register. Approval writes the times.
+    documentType: 'attendance_correction',
+    name: 'Attendance correction — supervisor then HR',
+    steps: [
+      { sequence: 1, name: 'Supervisor approval', approverType: 'SUPERVISOR' },
+      { sequence: 2, name: 'HR approval', approverType: 'HR' },
+    ],
+  },
+  {
     documentType: 'overtime_request',
     name: 'Overtime — supervisor then HR',
     steps: [

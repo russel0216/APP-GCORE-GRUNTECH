@@ -677,7 +677,11 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,758 assertions across twenty-two scripts** (counted 2026-10-22, after
+**4,780 assertions across twenty-two scripts** (counted 2026-10-23, after
+22 on hr for the superior's door — the inactive "Reports to" stepped past,
+the Leave list's Waiting on me and direct reports, the form's warning, and
+the attendance correction asked, routed, applied and pulled back — and
+before it
 16 on delivery for the kick-off Gantt chart — the missing engineer and
 target refused, the engineer's Mine, the route to the project's Technical
 Manager, one A3 page with three Pending sign-offs, the decider's door, the
@@ -792,7 +796,7 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
 430, masters 92, sales 643, costing 205, pipeline 121, calendar 103, numbering
-94, partners 120, delivery 213, chain 387, hr 637, plantilla 129, meetings
+94, partners 120, delivery 213, chain 387, hr 659, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 444, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
@@ -3870,6 +3874,56 @@ the request's own pair and Create to whoever reads My Records
   `manpower_request`, `candidate`, `employment_contract` and
   `entrance_exam`; every register prints. Not built (deferred): My Work rows
   for exams and interviews scheduled today, and the online contract link.
+
+## The superior's door: leave, overtime and attendance corrections (2026-10-23)
+
+The owner's report: "approval of leave, overtime or attendance request not
+appearing to superior". Four causes, four changes:
+
+- **An inactive "Reports to" is stepped past.** A SUPERVISOR step read
+  `User.supervisorId` as it stood, so a manager deactivated or gone held every
+  request of their reports, telling and queueing nobody. `activeSupervisor()`
+  in `shared/approvals.ts` is the one reading now: the first ACTIVE login up
+  the line (six hops at most), null when the line holds nobody active — the
+  step then takes its fallback (the role, else HR) as a request with no
+  "Reports to" does. A "Reports to" naming the person themself is left as it
+  is, so submit still refuses it naming the cause.
+- **The Leave and Overtime lists show a superior what is theirs.** View Own
+  listed one's own filings only; now (`myHrListScope()` in routes/hr.ts) it
+  lists one's own, one's DIRECT REPORTS' ("Reports to" is me) and every
+  request whose open step waits on me, whoever raised it (`waitingOn()`, My
+  Work's own `pendingFor`). Two filters, `waiting=me` and `reports=true`
+  (`pages/hr/approverFilters.ts`), on both lists. A single leave or overtime
+  record opens for the superior and for a decider with no leave right
+  (`mayReadHrRecord` reads `isDirectReport`; the routes take
+  `requireAnyOrDecider`; the two `/:id` pages have no web Guard).
+- **The form says where a filing goes.** `GET /leave/route`, `/overtime/route`
+  (`?stage=actual` for the hours) and `/attendance-corrections/route`
+  (`filingRoute()` in routes/hr.ts): the route in the person's name and their
+  "Reports to" — set, inactive (naming who the step reaches instead), or not
+  set, in which case the form warns "this goes to HR instead of a superior"
+  (`pages/hr/FilingRoute.tsx` under each modal).
+- **An attendance correction is a routed request** (`ghr.attendance_corrections`,
+  G-HR › My day; `/g-hr/attendance-corrections[/:id]`,
+  `routes/attendanceCorrections.ts`, `AttendanceCorrection`, numbering
+  `attendance_correction` GT-ATC-2026-0001): an employee asks for a day's time
+  in and/or time out ("HH:MM", Manila; an out at or before the in is the next
+  morning) with the reason — "Request correction" on My Records' daily time
+  record, or "+ New attendance correction" — one open request per day, never a
+  day to come. Seeded "Attendance correction — supervisor then HR". DRAFT →
+  PENDING_APPROVAL → APPROVED | REJECTED, or CANCELLED; submit in the
+  EMPLOYEE's name, pull back, cancel, delete (a draft, a rejected or a
+  cancelled one). **Approval writes the day** (`settleAttendanceCorrection`, in
+  the claim's transaction): the row made if the day had none, MANUAL on the
+  side corrected, lateness, hours and undertime worked out again, the number
+  and reason on its note, the row as it stood kept on
+  `AttendanceCorrection.before`; a rejection leaves the day alone; the engine's
+  reopen puts the row back as it stood (or deletes the one it made). Who reads
+  one: the person, their direct superior, whoever may decide its open step,
+  View All; who changes one: the person (Edit Own) or Edit All.
+  `splitBorrowedRights()` gave the own set once to whoever reads their own
+  clock and View All / Edit All to whoever corrects the register. HR's direct
+  `PATCH /attendance/:id` stays for HR's own corrections.
 
 ## The notification bell (2026-10-20)
 

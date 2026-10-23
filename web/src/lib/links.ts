@@ -63,6 +63,7 @@ const DETAIL: Record<string, string> = {
   service_document: '/g-ops/service-documents',
   // G-HR › Records › Memos (2026-10-20).
   memo: '/g-hr/memos',
+  attendance_correction: '/g-hr/attendance-corrections',
   // G-HR › Records › Asset Management (2026-10-21).
   company_asset: '/g-hr/assets',
   manpower_request: '/g-hr/hiring/mpr',

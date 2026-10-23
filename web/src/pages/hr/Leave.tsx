@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
+import { APPROVER_FILTERS } from './approverFilters';
 import { DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
@@ -19,6 +20,7 @@ import {
   formatDateTime,
   useToast,
 } from '../../components/ui';
+import { FilingRoute } from './FilingRoute';
 
 /**
  * Leave — filing, balances and the approval that spends them.
@@ -201,7 +203,7 @@ function LeaveList() {
   // The Employee filter is declared even before its options arrive, so a
   // `?employeeId=` in the URL (a dashboard link, say) is honoured on the first
   // fetch rather than dropped.
-  const filters: FilterDef[] = [{ key: 'status', label: 'Status', options: STATUSES }];
+  const filters: FilterDef[] = [{ key: 'status', label: 'Status', options: STATUSES }, ...APPROVER_FILTERS];
   if (seesEveryone) {
     filters.push({
       key: 'employeeId',
@@ -517,6 +519,7 @@ function FileLeaveModal({
           />
         </Field>
       )}
+      <FilingRoute path={`/leave/route${existing ? `?requestId=${existing.id}` : ''}`} />
     </Modal>
   );
 }

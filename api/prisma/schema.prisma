@@ -173,17 +173,18 @@ model User {
 
   accountTokens AccountToken[]
 
-  lastLoginAt             DateTime?
-  createdAt               DateTime            @default(now())
-  updatedAt               DateTime            @updatedAt
-  minutesAgreements       MinutesAgreement[]  @relation("MinutesAgreement")
-  issuesReceived          StockIssue[]        @relation("IssueReceivedBy")
-  billingsPrepared        ProgressBilling[]   @relation("BillingPreparer")
-  invoiceRequestsRaised   InvoiceRequest[]    @relation("InvoiceRequestRequester")
-  invoiceRequestsCredited InvoiceRequest[]    @relation("InvoiceRequestSalesperson")
-  commissionsRaised       CommissionRequest[] @relation("CommissionRequester")
-  commissionsCredited     CommissionRequest[] @relation("CommissionSalesperson")
-  commissionShares        CommissionShare[]   @relation("CommissionBeneficiary")
+  lastLoginAt                 DateTime?
+  createdAt                   DateTime               @default(now())
+  updatedAt                   DateTime               @updatedAt
+  minutesAgreements           MinutesAgreement[]     @relation("MinutesAgreement")
+  issuesReceived              StockIssue[]           @relation("IssueReceivedBy")
+  billingsPrepared            ProgressBilling[]      @relation("BillingPreparer")
+  invoiceRequestsRaised       InvoiceRequest[]       @relation("InvoiceRequestRequester")
+  invoiceRequestsCredited     InvoiceRequest[]       @relation("InvoiceRequestSalesperson")
+  commissionsRaised           CommissionRequest[]    @relation("CommissionRequester")
+  commissionsCredited         CommissionRequest[]    @relation("CommissionSalesperson")
+  commissionShares            CommissionShare[]      @relation("CommissionBeneficiary")
+  attendanceCorrectionsRaised AttendanceCorrection[] @relation("AttendanceCorrectionRequester")
 
   @@index([isActive])
   @@index([supervisorId])
@@ -949,26 +950,27 @@ model Employee {
   userId String? @unique
   user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  departmentId   String?
-  department     Department?             @relation(fields: [departmentId], references: [id], onDelete: SetNull)
-  position       String?
+  departmentId          String?
+  department            Department?             @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  position              String?
   /// The plantilla slot. `position` (the string) is a MIRROR of positionRef.title,
   /// written only by setEmployeePosition() in shared/plantilla.ts; it stays free
   /// text only for an employee with no plantilla position (unclassified).
-  positionId     String?
-  positionRef    Position?               @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  positionId            String?
+  positionRef           Position?               @relation(fields: [positionId], references: [id], onDelete: SetNull)
   /// Positions held beside the main one (2026-10-19: one person, two
   /// managers' posts). Each counts as filled; `position` joins the titles.
-  extraPositions EmployeeExtraPosition[]
-  memos          MemoRecipient[]
-  assetIssuances AssetIssuance[]
+  extraPositions        EmployeeExtraPosition[]
+  memos                 MemoRecipient[]
+  attendanceCorrections AttendanceCorrection[]
+  assetIssuances        AssetIssuance[]
   /// The candidate this employee was hired as (G-HR › Hiring, 2026-10-21).
-  hiredFrom      Candidate?
+  hiredFrom             Candidate?
   /// The industry team the person works in (Utilities, Healthcare…), from the
   /// same Industry rows customers are classified by. Set by HR; shown to the
   /// person on their invitation and My Account, never edited by them.
-  industryId     String?
-  industry       Industry?               @relation(fields: [industryId], references: [id], onDelete: Restrict)
+  industryId            String?
+  industry              Industry?               @relation(fields: [industryId], references: [id], onDelete: Restrict)
 
   employmentType  EmploymentType @default(REGULAR)
   dateHired       DateTime?      @db.Date
@@ -6401,4 +6403,44 @@ enum EmploymentContractStatus {
   APPROVED
   SIGNED
   CANCELLED
+}
+
+// ── G-HR › Attendance Corrections (2026-10-23) ───────────────────────────
+// An employee asks for a day's time in / time out to be corrected (a
+// forgotten clock-out, a clock that refused them); their supervisor, then
+// HR, decide it through the one engine, and approval writes the times onto
+// the day's attendance row — never before.
+
+enum AttendanceCorrectionStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model AttendanceCorrection {
+  id            String                     @id @default(cuid())
+  number        String                     @unique
+  employeeId    String
+  employee      Employee                   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  /// The Manila day corrected.
+  date          DateTime                   @db.Date
+  /// What the person says the times were ("HH:MM", Manila); null leaves that side as it is.
+  timeIn        String?
+  timeOut       String?
+  reason        String
+  status        AttendanceCorrectionStatus @default(DRAFT)
+  cancelReason  String?
+  requestedById String?
+  requestedBy   User?                      @relation("AttendanceCorrectionRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  /// The day's row as it stood before approval wrote the correction, and the row written.
+  before        Json?
+  attendanceId  String?
+  appliedAt     DateTime?
+  createdAt     DateTime                   @default(now())
+  updatedAt     DateTime                   @updatedAt
+
+  @@index([employeeId, date])
+  @@index([status])
 }

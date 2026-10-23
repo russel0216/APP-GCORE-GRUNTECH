@@ -203,6 +203,34 @@ async function stepRoleId(step: ApprovalStep, ctx: ApprovalContext, tx: Prisma.T
 export const PROJECT_MANAGER_FALLBACK_ROLE = 'ceo';
 
 /**
+ * The requester's "Reports to" for a SUPERVISOR step: the first ACTIVE login
+ * up the reporting line (2026-10-23, the owner's report: leave and overtime
+ * "not appearing to the superior" — a "Reports to" who had been deactivated
+ * held every request of their reports, telling and queueing nobody). Steps
+ * past an inactive manager to theirs, six levels at most, never the
+ * requester themself; null when the line holds nobody active, so the step
+ * takes its fallback (the role, else HR) as a request with no "Reports to"
+ * does.
+ */
+export async function activeSupervisor(requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<string | null> {
+  const me = await tx.user.findUnique({ where: { id: requesterId }, select: { supervisorId: true } });
+  if (!me?.supervisorId) return null;
+  // A "Reports to" naming the person themself is left as it is: the step
+  // then routes to the requester alone and submit refuses, naming the cause.
+  if (me.supervisorId === requesterId) return requesterId;
+  const seen = new Set<string>([requesterId]);
+  let at: string | null = me.supervisorId;
+  for (let hop = 0; hop < 6 && at && !seen.has(at); hop++) {
+    seen.add(at);
+    const next: { id: string; isActive: boolean; supervisorId: string | null } | null = await tx.user.findUnique({ where: { id: at }, select: { id: true, isActive: true, supervisorId: true } });
+    if (!next) return null;
+    if (next.isActive) return next.id;
+    at = next.supervisorId;
+  }
+  return null;
+}
+
+/**
  * The set of user ids allowed to act on one step.
  *
  * SUPERVISOR falls back to HR when the requester has no supervisor set —
@@ -290,10 +318,10 @@ export async function approversForStep(
     }
 
     case 'SUPERVISOR': {
-      const requester = await tx.user.findUnique({
-        where: { id: requesterId },
-        select: { supervisorId: true },
-      });
+      // The requester's "Reports to" — the first ACTIVE one up the line
+      // (2026-10-23: a manager deactivated or gone left every request of
+      // their reports waiting on a login nobody uses).
+      const supervisorId = await activeSupervisor(requesterId, tx);
       let base: string[];
       // A step naming a TEAM_FIRST role (Team Leader) goes to the holders on
       // the requester's own team before their "Reports to" (2026-10-17, the
@@ -303,7 +331,7 @@ export async function approversForStep(
       // with no leader, keep the "Reports to".
       const onTeam = step.roleId ? await teamFirstHolders(step.roleId, requesterId, tx, ctx.teamId) : [];
       if (onTeam.length) base = onTeam;
-      else if (requester?.supervisorId) {
+      else if (supervisorId) {
         // A role that ALSO reports to other roles (Admin › Roles › Hierarchy,
         // 2026-10-20 — the Warehouse Supervisor to both Purchasing Managers)
         // sends the step to those roles' holders beside the "Reports to".
@@ -318,7 +346,7 @@ export async function approversForStep(
               select: { userId: true },
             })
           : [];
-        base = [...new Set([requester.supervisorId, ...extra.map((r) => r.userId)])];
+        base = [...new Set([supervisorId, ...extra.map((r) => r.userId)])];
       } else if (step.roleId) {
         const rows = await tx.userRole.findMany({
           where: { roleId: step.roleId, user: { isActive: true } },

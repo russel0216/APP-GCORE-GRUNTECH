@@ -105,6 +105,7 @@ import { operationsBudgetRoutes } from './routes/operationsBudget';
 import { procurementSettingsRoutes } from './routes/procurementSettings';
 import { myRecordsRoutes } from './routes/myRecords';
 import { memoRoutes } from './routes/memos';
+import { attendanceCorrectionRoutes } from './routes/attendanceCorrections';
 import { assetRoutes as companyAssetRoutes } from './routes/assets';
 import { hiringRoutes } from './routes/hiring';
 import { cadJobOrderRoutes } from './routes/cadJobOrders';
@@ -244,6 +245,7 @@ app.use('/api/operations-budget', operationsBudgetRoutes);
 app.use('/api/procurement-settings', procurementSettingsRoutes);
 app.use('/api/my-records', myRecordsRoutes);
 app.use('/api/memos', memoRoutes);
+app.use('/api/attendance-corrections', attendanceCorrectionRoutes);
 app.use('/api/assets', companyAssetRoutes);
 app.use('/api/hiring', hiringRoutes);
 

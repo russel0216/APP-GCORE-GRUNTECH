@@ -142,6 +142,8 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   // G-HR › Hiring (2026-10-21): the Man Power Request and the employment contract.
   { type: 'manpower_request', code: 'MPR', label: 'Man Power Request' },
   { type: 'employment_contract', code: 'EC', label: 'Employment Contract' },
+  // G-HR › Attendance Corrections (2026-10-23): GT-ATC-2026-0001.
+  { type: 'attendance_correction', code: 'ATC', label: 'Attendance Correction' },
 ];
 
 /** `2026` for a yearly counter, `2026-09` for a monthly one, '' for a flat one. */

@@ -76,6 +76,7 @@ import { ManpowerRequests, ManpowerRequestPage, Candidates, CandidatePage, Entra
 import { HrDashboard, AttendanceRegister } from './pages/hr/Dashboard';
 import { Leave } from './pages/hr/Leave';
 import { Overtime, OvertimeDetail } from './pages/hr/Overtime';
+import { AttendanceCorrections } from './pages/hr/AttendanceCorrections';
 import { HrSettingsPage } from './pages/hr/Settings';
 import { HrReports } from './pages/hr/Reports';
 import { Plantilla } from './pages/hr/Plantilla';
@@ -1119,15 +1120,22 @@ function Routed() {
           }
         />
         {/* A leave request has a URL of its own, so an approval notification
-            lands on the request rather than on the register. */}
+            lands on the request rather than on the register. No Guard: the
+            API lets in the owner, their superior and whoever decides it. */}
         <Route
           path="/g-hr/leave/:id"
+          element={<Leave />}
+        />
+        <Route
+          path="/g-hr/attendance-corrections"
           element={
-            <GuardAny permissions={['ghr.leave.view_all', 'ghr.leave.view_own']}>
-              <Leave />
+            <GuardAny permissions={['ghr.attendance_corrections.view_all', 'ghr.attendance_corrections.view_own']}>
+              <AttendanceCorrections />
             </GuardAny>
           }
         />
+        {/* No Guard: the API lets in the person, their superior, an approver and HR. */}
+        <Route path="/g-hr/attendance-corrections/:id" element={<AttendanceCorrections />} />
         <Route
           path="/g-hr/overtime"
           element={
@@ -1138,11 +1146,7 @@ function Routed() {
         />
         <Route
           path="/g-hr/overtime/:id"
-          element={
-            <GuardAny permissions={['ghr.overtime.view_all', 'ghr.overtime.view_own']}>
-              <OvertimeDetail />
-            </GuardAny>
-          }
+          element={<OvertimeDetail />}
         />
         <Route
           path="/g-hr/reports"

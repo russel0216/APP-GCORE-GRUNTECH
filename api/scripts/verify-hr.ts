@@ -35,10 +35,12 @@ import { prisma } from '../src/prisma';
 import { scanAccountabilities } from '../src/shared/clearance';
 import { CANDIDATE_FLOW, ENTRANCE_EXAMS, examPct, hiredBenchmark, nextStatuses, weightedScore } from '../src/shared/hiring';
 import { rolesLike } from './lib/roles';
+// For its `onApprovalSettled` subscriber: an in-process act() must reach it.
+import '../src/routes/attendanceCorrections';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
+import { submitForApproval, act, pendingFor, reopenApproved, mayReopen, activeSupervisor, routeBrief } from '../src/shared/approvals';
 import { resolveUser } from '../src/permissions/resolve';
 import {
   hrSettings,
@@ -609,6 +611,9 @@ async function main() {
     'ghr.leave.view_own',
     'ghr.overtime.create',
     'ghr.overtime.view_own',
+    'ghr.attendance_corrections.create',
+    'ghr.attendance_corrections.view_own',
+    'ghr.attendance_corrections.edit_own',
   ]);
   const hrRole = await prisma.role.findUnique({ where: { key: 'hr' } });
   if (!hrRole) throw new Error('The seeded HR role is missing — run the seed first');
@@ -5414,6 +5419,87 @@ async function main() {
       check('without My Records the page is refused', (await api(signToken(recNobody.id, recNobody.email), 'GET', '/my-records')).status === 403);
       check('a cutoff that is not one is a 400', (await api(recT, 'GET', '/my-records?cutoff=2026-09')).status === 400);
     }
+  }
+
+
+  // ══ The superior's door (2026-10-23) ═════════════════════════════════════
+  // The owner's report: "approval of leave, overtime or attendance request
+  // not appearing to superior". An inactive "Reports to" is stepped past;
+  // the Leave list shows a superior their direct reports' requests and what
+  // waits on them; the form says where a filing goes; and an attendance
+  // correction is a routed request — supervisor, then HR — whose approval
+  // writes the day.
+  if (await apiReachable()) {
+    console.log('\nThe superior’s door');
+    const atc = (key: string, hm: string) => new Date(`${key}T${hm}:00+08:00`);
+    const gone = await makeUser('ZZ Gone Boss', 'gone@verifyhr.local', [], supervisor.id);
+    await prisma.user.update({ where: { id: gone.id }, data: { isActive: false } });
+    const orphan = await makeUser('ZZ Orphan', 'orphan@verifyhr.local', [workerRole.id], gone.id);
+    const orphanEmp = await prisma.employee.create({ data: { employeeNo: `${TAG}-ORP`, firstName: `${TAG} Orly`, lastName: 'Orphan', userId: orphan.id } });
+    check('an inactive "Reports to" is stepped past to the next active one up', (await activeSupervisor(orphan.id)) === supervisor.id);
+    const leaveRoute = await routeBrief('leave_request', null, orphan.id);
+    check('the leave route goes to that person, not to HR', leaveRoute?.steps[0]?.approvers.map((p) => p.id).join() === supervisor.id, JSON.stringify(leaveRoute?.steps[0]?.approvers));
+    const orphanT = signToken(orphan.id, orphan.email);
+    const filing = await api(orphanT, 'GET', '/leave/route');
+    check(
+      'the leave form says the "Reports to" is inactive and who the request reaches instead',
+      filing.status === 200 && (filing.body.reportsTo as { active: boolean })?.active === false && filing.body.stepsUpTo === 'ZZ Supervisor',
+      JSON.stringify(filing.body),
+    );
+    const supRole = await makeRole('zzhr_sup', `${TAG} Superior`, ['ghr.leave.view_own', 'ghr.attendance_corrections.view_own']);
+    await prisma.userRole.create({ data: { userId: supervisor.id, roleId: supRole.id } });
+    const supT = signToken(supervisor.id, supervisor.email);
+    const orphanLeave = await prisma.leaveRequest.create({
+      data: { number: await nextNumber('leave_request'), employeeId: orphanEmp.id, leaveTypeId: leaveType.id, startDate: day('2026-11-02'), endDate: day('2026-11-02'), days: D(1), reason: `${TAG} orphan day`, status: 'DRAFT' },
+    });
+    const sent = await api(orphanT, 'POST', `/leave/${orphanLeave.id}/submit`);
+    check('the orphan’s leave goes out', sent.status === 200, JSON.stringify(sent.body));
+    const supList = await api(supT, 'GET', '/leave?waiting=me');
+    const supRows = (supList.body.rows ?? []) as { id: string }[];
+    check('the superior’s Leave list shows what waits on them under View Own', supList.status === 200 && supRows.some((r) => r.id === orphanLeave.id), JSON.stringify(supList.body).slice(0, 200));
+    const reports = await api(supT, 'GET', '/leave?reports=true');
+    check('…and their direct reports’ requests', ((reports.body.rows ?? []) as { id: string }[]).some((r) => r.id === first.request.id));
+    check('the superior opens the request with View Own alone', (await api(supT, 'GET', `/leave/${orphanLeave.id}`)).status === 200);
+
+    // Attendance correction: asked by the person, decided by the supervisor then HR, applied on approval.
+    const corrAdmin = await makeUser('ZZ Corr Admin', 'corradmin@verifyhr.local', [
+      (await makeRole('zzhr_corr', `${TAG} Corrections`, ['ghr.attendance_corrections.view_all', 'ghr.attendance_corrections.edit_all', 'ghr.attendance_corrections.create'])).id,
+    ]);
+    const corrEmp = await prisma.employee.create({ data: { employeeNo: `${TAG}-ATC`, firstName: `${TAG} Cora`, lastName: 'Correct', userId: (await makeUser('ZZ Cora', 'cora@verifyhr.local', [workerRole.id], supervisor.id)).id } });
+    const coraT = signToken(corrEmp.userId!, 'cora@verifyhr.local');
+    const raised = await api(coraT, 'POST', '/attendance-corrections', { date: '2026-09-18', timeIn: '08:00', timeOut: '17:00', reason: `${TAG} the clock refused me` });
+    check('an employee asks for a day’s punch to be corrected', raised.status === 201 && /^GT-ATC-/.test(String(raised.body.number)), JSON.stringify(raised.body).slice(0, 200));
+    const corrId = String(raised.body.id);
+    check('a second request on the same day is refused while one is open', (await api(coraT, 'POST', '/attendance-corrections', { date: '2026-09-18', timeOut: '18:00', reason: `${TAG} twice` })).status === 400);
+    check('a day still to come is refused', (await api(coraT, 'POST', '/attendance-corrections', { date: '2099-01-01', timeIn: '08:00', reason: `${TAG} future` })).status === 400);
+    const corrRoute = await api(coraT, 'GET', `/attendance-corrections/route?requestId=${corrId}`);
+    check('the form says it goes to the supervisor, then HR', (corrRoute.body.route as { steps: { approvers: { id: string }[] }[] })?.steps.length === 2 && (corrRoute.body.route as { steps: { approvers: { id: string }[] }[] }).steps[0].approvers[0]?.id === supervisor.id);
+    const sentCorr = await api(coraT, 'POST', `/attendance-corrections/${corrId}/submit`);
+    check('submitted in the employee’s name', sentCorr.status === 200 && sentCorr.body.status === 'PENDING_APPROVAL', JSON.stringify(sentCorr.body).slice(0, 200));
+    check('it sits in the supervisor’s queue', (await pendingFor(supervisor.id)).some((r) => r.documentId === corrId));
+    check('the supervisor opens it with no right to the register', (await api(supT, 'GET', `/attendance-corrections/${corrId}`)).status === 200);
+    check('a colleague is kept out', (await api(orphanT, 'GET', `/attendance-corrections/${corrId}`)).status === 404);
+    const corrApproval = await prisma.approvalRequest.findFirst({ where: { documentType: 'attendance_correction', documentId: corrId, status: 'PENDING' } });
+    await act({ requestId: corrApproval!.id, userId: supervisor.id, action: 'APPROVED' });
+    check('the supervisor’s approval alone writes nothing', (await prisma.attendance.findFirst({ where: { employeeId: corrEmp.id } })) === null);
+    await act({ requestId: corrApproval!.id, userId: hrOfficer.id, action: 'APPROVED' });
+    const dayRow = await prisma.attendance.findUnique({ where: { employeeId_date: { employeeId: corrEmp.id, date: new Date('2026-09-18T00:00:00Z') } } });
+    const applied = await prisma.attendanceCorrection.findUnique({ where: { id: corrId } });
+    check(
+      'HR’s approval writes the day — the times as asked, MANUAL, hours worked out, the request noted',
+      applied?.status === 'APPROVED' && !!dayRow && dayRow.timeIn?.getTime() === atc('2026-09-18', '08:00').getTime() && dayRow.timeOut?.getTime() === atc('2026-09-18', '17:00').getTime() && dayRow.timeInMethod === 'MANUAL' && dayRow.workedMinutes > 0 && (dayRow.notes ?? '').includes(applied.number),
+      JSON.stringify({ status: applied?.status, dayRow }),
+    );
+    check('the correction keeps which row it wrote', applied?.attendanceId === dayRow?.id && applied?.before === null);
+    check('a colleague may not pull it back; the register’s Edit All may', !(await mayReopen('attendance_correction', corrId, (await resolveUser(orphan.id))!)) && (await mayReopen('attendance_correction', corrId, (await resolveUser(corrAdmin.id))!)));
+    await reopenApproved('attendance_correction', corrId, (await resolveUser(corrAdmin.id))!, `${TAG} wrong day`);
+    const reopened = await prisma.attendanceCorrection.findUnique({ where: { id: corrId } });
+    check('pulled back, the day it made is gone and the request is a draft', reopened?.status === 'DRAFT' && reopened.attendanceId === null && (await prisma.attendance.findUnique({ where: { employeeId_date: { employeeId: corrEmp.id, date: new Date('2026-09-18T00:00:00Z') } } })) === null);
+    const adminList = await api(signToken(corrAdmin.id, corrAdmin.email), 'GET', '/attendance-corrections');
+    check('HR lists every correction', ((adminList.body.rows ?? []) as { id: string }[]).some((r) => r.id === corrId));
+    check('the list prints', (await fetch(`${BASE}/attendance-corrections/pdf`, { headers: { Authorization: `Bearer ${signToken(corrAdmin.id, corrAdmin.email)}` } })).status === 200);
+  } else {
+    check('API is reachable for the superior’s door checks', false, `nothing answered at ${BASE}`);
   }
 
   await cleanup();

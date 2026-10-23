@@ -307,6 +307,14 @@ export const REGISTRY: ModuleDef[] = [
       },
       { key: 'leave', group: 'My day', label: 'Leave', path: '/g-hr/leave', actions: OWNED_KEPT, phase: 6 },
       { key: 'overtime', group: 'My day', label: 'Overtime', path: '/g-hr/overtime', actions: OWNED_KEPT, phase: 6 },
+      // An employee asks for a day's punch to be corrected (2026-10-23); their
+      // supervisor, then HR, decide it, and approval writes the day's row.
+      // Own is one's own requests; a superior reads their direct reports'.
+      {
+        key: 'attendance_corrections', group: 'My day', label: 'Attendance Corrections', path: '/g-hr/attendance-corrections',
+        actions: ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete'], phase: 10,
+        note: 'Create asks for one\'s own; Edit All files and changes anyone\'s (HR); a superior and the approvers read them without a right',
+      },
       // An internal meeting with invitees. Sits in 'My day' because it is a
       // thing that happens to a person's day, not an HR control. The Meet link
       // is pasted from the organiser's own Google account — G-Core holds no

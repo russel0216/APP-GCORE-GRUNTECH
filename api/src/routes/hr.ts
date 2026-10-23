@@ -17,7 +17,7 @@ import {
   HttpError,
   type ListQuery,
 } from '../http/kit';
-import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
@@ -28,6 +28,9 @@ import {
   cancelOpenRequest,
   pickWorkflow,
   onApprovalReopened,
+  pendingFor,
+  activeSupervisor,
+  routeBrief,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
@@ -127,7 +130,61 @@ async function mayReadHrRecord(
   if (can(me, viewAllKey)) return true;
   const mine = await myEmployee(me.id);
   if (mine && mine.id === ownerEmployeeId) return true;
+  // A direct report's (2026-10-23): the superior reads their reports' leave
+  // and overtime as they read their days on the attendance register.
+  if (await isDirectReport(me.id, ownerEmployeeId)) return true;
   return isApproverOf(me.id, documentTypes, documentId);
+}
+
+/**
+ * Where a leave or overtime filing will go, said on the form before it is
+ * sent (2026-10-23, the owner's report: requests "not appearing to
+ * superior" — with no "Reports to" set, the Supervisor step goes to the HR
+ * Officer instead, and nobody filing could tell). The route the engine would
+ * take for the person filing, and what their "Reports to" is: set and
+ * active, set but inactive (the step goes to the next one up, else HR), or
+ * not set.
+ */
+export async function filingRoute(documentType: string, requesterId: string) {
+  const [route, me, effective] = await Promise.all([
+    routeBrief(documentType, null, requesterId),
+    prisma.user.findUnique({ where: { id: requesterId }, select: { supervisor: { select: { id: true, name: true, isActive: true } } } }),
+    activeSupervisor(requesterId),
+  ]);
+  const set = me?.supervisor ?? null;
+  return {
+    route,
+    reportsTo: set ? { name: set.name, active: set.isActive } : null,
+    /** The active person the Supervisor step reaches, when it is not the one set. */
+    stepsUpTo: set && !set.isActive && effective ? (await prisma.user.findUnique({ where: { id: effective }, select: { name: true } }))?.name ?? null : null,
+  };
+}
+
+/** Whether the employee's login reports to this user ("Reports to"). */
+async function isDirectReport(userId: string, employeeId: string): Promise<boolean> {
+  return !!(await prisma.employee.findFirst({ where: { id: employeeId, user: { supervisorId: userId } }, select: { id: true } }));
+}
+
+/**
+ * Who a leave or overtime list shows a caller who cannot read all of them
+ * (2026-10-23, the owner's report: "approval of leave, overtime … not
+ * appearing to superior" — View Own listed one's own filings only): their
+ * own, their direct reports' ("Reports to" is them), and every request
+ * whose open step is waiting on them, whoever raised it.
+ */
+async function myHrListScope(me: ResolvedUser, documentTypes: string[]) {
+  const mine = await myEmployee(me.id);
+  const waiting = await waitingOn(me.id, documentTypes);
+  return [
+    { employeeId: mine?.id ?? '__none__' },
+    { employee: { user: { supervisorId: me.id } } },
+    ...(waiting.length ? [{ id: { in: waiting } }] : []),
+  ];
+}
+
+/** The ids of the documents of these types whose open approval step is waiting on this user — My Work's own queue. */
+async function waitingOn(userId: string, documentTypes: string[]): Promise<string[]> {
+  return (await pendingFor(userId)).filter((r) => documentTypes.includes(r.documentType)).map((r) => r.documentId);
 }
 
 /**
@@ -1774,11 +1831,14 @@ leaveRoutes.get(
 async function leaveListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma.LeaveRequestWhereInput> {
   const and: Prisma.LeaveRequestWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('ghr.leave.view_all');
-  if (onlyOwn || q.scope === 'mine') {
+  const f = q.filters;
+  if (q.scope === 'mine') {
     const mine = await myEmployee(me.id);
     and.push({ employeeId: mine?.id ?? '__none__' });
-  }
-  const f = q.filters;
+  } else if (onlyOwn) and.push({ OR: await myHrListScope(me, ['leave_request']) });
+  const waiting = choice(f.waiting, { me: 'me' } as const, 'Waiting');
+  if (waiting) and.push({ id: { in: await waitingOn(me.id, ['leave_request']) } });
+  if (f.reports === 'true') and.push({ employee: { user: { supervisorId: me.id } } });
   const status = choice(f.status, LeaveStatus, 'Status');
   if (status) and.push({ status });
   if (f.employeeId) and.push({ employeeId: f.employeeId });
@@ -1906,8 +1966,21 @@ leaveRoutes.get(
  * what an approver of sick leave is actually deciding on.
  */
 leaveRoutes.get(
+  '/route',
+  requireAny('ghr.leave.create', 'ghr.leave.edit_own', 'ghr.leave.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    // A draft HR is modifying for somebody goes in that person's name.
+    const id = req.query.requestId ? String(req.query.requestId) : null;
+    const row = id ? await prisma.leaveRequest.findUnique({ where: { id }, select: { employee: { select: { userId: true } } } }) : null;
+    res.json(await filingRoute('leave_request', row?.employee.userId ?? me.id));
+  }),
+);
+
+leaveRoutes.get(
   '/:id',
-  requireAny('ghr.leave.view_all', 'ghr.leave.view_own'),
+  // Whoever may read it decides below — a superior or an approver may hold no leave right.
+  requireAnyOrDecider('ghr.leave.view_all', 'ghr.leave.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const request = await prisma.leaveRequest.findUnique({
@@ -2518,11 +2591,15 @@ function presentOt<T extends OtMoney>(ot: T) {
 async function overtimeListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma.OvertimeRequestWhereInput> {
   const and: Prisma.OvertimeRequestWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('ghr.overtime.view_all');
-  if (onlyOwn || q.scope === 'mine') {
+  const f = q.filters;
+  const types = ['overtime_prior', 'overtime_request'];
+  if (q.scope === 'mine') {
     const mine = await myEmployee(me.id);
     and.push({ employeeId: mine?.id ?? '__none__' });
-  }
-  const f = q.filters;
+  } else if (onlyOwn) and.push({ OR: await myHrListScope(me, types) });
+  const waiting = choice(f.waiting, { me: 'me' } as const, 'Waiting');
+  if (waiting) and.push({ id: { in: await waitingOn(me.id, types) } });
+  if (f.reports === 'true') and.push({ employee: { user: { supervisorId: me.id } } });
   const stage = choice(f.stage, OtStage, 'Stage', (st) => OT_STAGE_LABEL[st]);
   if (stage) and.push({ stage });
   if (f.jobId) and.push({ jobId: f.jobId });
@@ -2735,8 +2812,18 @@ overtimeRoutes.get(
 );
 
 overtimeRoutes.get(
+  '/route',
+  requireAny('ghr.overtime.create', 'ghr.overtime.edit_own', 'ghr.overtime.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    res.json(await filingRoute(req.query.stage === 'actual' ? 'overtime_request' : 'overtime_prior', me.id));
+  }),
+);
+
+overtimeRoutes.get(
   '/:id',
-  requireAny('ghr.overtime.view_all', 'ghr.overtime.view_own'),
+  // Whoever may read it decides below — a superior or an approver may hold no overtime right.
+  requireAnyOrDecider('ghr.overtime.view_all', 'ghr.overtime.view_own'),
   handler(async (req, res) => {
     const ot = await prisma.overtimeRequest.findUnique({
       where: { id: req.params.id },

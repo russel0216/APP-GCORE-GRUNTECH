@@ -59,6 +59,14 @@ export const ACCESS_SPLIT: { key: string; from: string; to: string[] }[] = [
     ],
   },
   { key: 'hiring-mpr-own', from: 'ghr.my_records.view_own', to: ['ghr.manpower_requests.view_own', 'ghr.manpower_requests.create', 'ghr.manpower_requests.edit_own'] },
+  // Attendance Corrections (2026-10-23): everyone who clocks in asks for their
+  // own; whoever corrects the register (HR) reads and files everyone's.
+  {
+    key: 'attendance-corrections',
+    from: 'ghr.clock.view_own',
+    to: ['ghr.attendance_corrections.view_own', 'ghr.attendance_corrections.create', 'ghr.attendance_corrections.edit_own', 'ghr.attendance_corrections.delete'],
+  },
+  { key: 'attendance-corrections-hr', from: 'ghr.attendance.edit_all', to: ['ghr.attendance_corrections.view_all', 'ghr.attendance_corrections.edit_all'] },
   // Procurement Settings (2026-10-21): kept by whoever may change every purchase order.
   { key: 'procurement-settings', from: 'gchain.purchase_orders.edit_all', to: ['gchain.settings.view_all', 'gchain.settings.edit_all'] },
 ];
