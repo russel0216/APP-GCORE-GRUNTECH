@@ -5470,6 +5470,9 @@ async function main() {
     const raised = await api(coraT, 'POST', '/attendance-corrections', { date: '2026-09-18', timeIn: '08:00', timeOut: '17:00', reason: `${TAG} the clock refused me` });
     check('an employee asks for a day’s punch to be corrected', raised.status === 201 && /^GT-ATC-/.test(String(raised.body.number)), JSON.stringify(raised.body).slice(0, 200));
     const corrId = String(raised.body.id);
+    type WorkRows = { myDrafts?: { id: string }[]; assignedToMe?: { id: string; subtitle?: string }[] };
+    const draftWork = (await api(coraT, 'GET', '/my-work')).body as WorkRows;
+    check('My Work lists the unsent correction under My drafts', !!draftWork.myDrafts?.some((r) => r.id === corrId) && !draftWork.assignedToMe?.some((r) => r.id === corrId));
     check('a second request on the same day is refused while one is open', (await api(coraT, 'POST', '/attendance-corrections', { date: '2026-09-18', timeOut: '18:00', reason: `${TAG} twice` })).status === 400);
     check('a day still to come is refused', (await api(coraT, 'POST', '/attendance-corrections', { date: '2099-01-01', timeIn: '08:00', reason: `${TAG} future` })).status === 400);
     const corrRoute = await api(coraT, 'GET', `/attendance-corrections/route?requestId=${corrId}`);
@@ -5477,6 +5480,12 @@ async function main() {
     const sentCorr = await api(coraT, 'POST', `/attendance-corrections/${corrId}/submit`);
     check('submitted in the employee’s name', sentCorr.status === 200 && sentCorr.body.status === 'PENDING_APPROVAL', JSON.stringify(sentCorr.body).slice(0, 200));
     check('it sits in the supervisor’s queue', (await pendingFor(supervisor.id)).some((r) => r.documentId === corrId));
+    const sentWork = (await api(coraT, 'GET', '/my-work')).body as WorkRows;
+    check(
+      'My Work shows the employee it is waiting on the supervisor’s step',
+      !!sentWork.assignedToMe?.some((r) => r.id === corrId && /waiting on/i.test(r.subtitle ?? '')) && !sentWork.myDrafts?.some((r) => r.id === corrId),
+      JSON.stringify(sentWork.assignedToMe?.find((r) => r.id === corrId) ?? null),
+    );
     check('the supervisor opens it with no right to the register', (await api(supT, 'GET', `/attendance-corrections/${corrId}`)).status === 200);
     check('a colleague is kept out', (await api(orphanT, 'GET', `/attendance-corrections/${corrId}`)).status === 404);
     const corrApproval = await prisma.approvalRequest.findFirst({ where: { documentType: 'attendance_correction', documentId: corrId, status: 'PENDING' } });

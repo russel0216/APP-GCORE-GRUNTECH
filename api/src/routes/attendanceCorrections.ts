@@ -12,6 +12,7 @@ import {
   mayDecide,
   onApprovalSettled,
   onApprovalReopened,
+  openSteps,
   pendingFor,
   routeBrief,
   submitForApproval,
@@ -392,6 +393,50 @@ attendanceCorrectionRoutes.delete(
     res.json({ ok: true });
   }),
 );
+
+/**
+ * My Work (2026-10-23): the person's own corrections. `open` is what is on
+ * its way — waiting for approval (naming the step) or rejected in the last
+ * seven days, so the reason is read — for "Assigned to me"; `drafts` is what
+ * was never sent, for "My drafts". The approver's side is already the
+ * approval queue (`pendingFor`).
+ */
+export async function attendanceCorrectionWork(me: ResolvedUser, which: 'open' | 'drafts') {
+  const since = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+  const rows = await prisma.attendanceCorrection.findMany({
+    where: {
+      OR: [{ employee: { userId: me.id } }, { requestedById: me.id }],
+      AND: [
+        which === 'drafts'
+          ? { status: 'DRAFT' }
+          : { OR: [{ status: 'PENDING_APPROVAL' }, { status: 'REJECTED', updatedAt: { gte: since } }] },
+      ],
+    },
+    select: { id: true, number: true, date: true, updatedAt: true, status: true, timeIn: true, timeOut: true, employee: { select: { userId: true, firstName: true, lastName: true } } },
+    orderBy: { date: 'desc' },
+    take: 10,
+  });
+  const steps = await openSteps(DOC, rows.filter((r) => r.status === 'PENDING_APPROVAL').map((r) => r.id));
+  return rows.map((r) => {
+    const times = [r.timeIn && `in ${r.timeIn}`, r.timeOut && `out ${r.timeOut}`].filter(Boolean).join(', ');
+    const forWhom = r.employee.userId === me.id ? '' : ` · for ${nameOf(r.employee)}`;
+    const state =
+      r.status === 'DRAFT'
+        ? 'draft — submit it for approval'
+        : r.status === 'REJECTED'
+          ? 'rejected — open it to read why'
+          : `waiting on ${steps.get(r.id) ?? 'approval'}`;
+    return {
+      id: r.id,
+      kind: DOC,
+      title: `Attendance correction for ${formatShortDate(r.date)}${times ? ` (${times})` : ''}`,
+      subtitle: `${r.number}${forWhom} · ${state}`,
+      // A draft sorts with the other drafts by when it was last touched.
+      when: which === 'drafts' ? r.updatedAt : r.date,
+      link: CORRECTION_LINK(r.id),
+    };
+  });
+}
 
 /**
  * Approval writes the times onto the day's row, in the claim's transaction:

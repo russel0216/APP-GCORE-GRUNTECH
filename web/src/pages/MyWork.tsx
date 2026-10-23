@@ -96,6 +96,7 @@ export function kindLabel(kind: string): string {
     expense_claim: 'Expense claim',
     cash_advance: 'Cash advance',
     leave_request: 'Leave',
+    attendance_correction: 'Attendance correction',
     meeting: 'Meeting',
     training: 'Training',
     celebration: 'Today',
