@@ -1,5 +1,5 @@
-import { QUOTATION_CURRENCY_CODES } from '../shared/quotation';
-import { noRateMessage, orderInPesos, orderLandedTotal, rateForOrder, receiptUnitCost, restateReceiptLine, RESTATE_SELECT, basisWords } from '../shared/receiptCost';
+import { QUOTATION_CURRENCY_CODES, quotationTotals } from '../shared/quotation';
+import { noRateMessage, orderInPesos, orderLandedTotal, rateForOrder, receiptUnitCost, restateReceiptLine, RESTATE_SELECT, basisWords, discountFactor } from '../shared/receiptCost';
 import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, PrStatus, PurchaseKind, PoStatus, CanvassStatus } from '@prisma/client';
@@ -2801,14 +2801,19 @@ async function recalcPo(orderId: string, tx: Prisma.TransactionClient = prisma) 
   });
   if (!order) return null;
 
-  const subtotal = cents(order.items.reduce((s, i) => s + num(i.amount), 0));
-  const rate = num(order.vatRate);
-  const vatAmount = order.vatInclusive ? cents(subtotal - subtotal / (1 + rate)) : cents(subtotal * rate);
-  const total = order.vatInclusive ? subtotal : cents(subtotal + vatAmount);
+  // The quotation's one arithmetic (2026-10-23, SCORO's discount on the
+  // order): subtotal before the discount, VAT on what is left, an inclusive
+  // order backing it out. At 0% it is exactly the order's old rule.
+  const t = quotationTotals({
+    lines: order.items.map((i) => ({ amount: i.amount })),
+    discountPct: order.discountPct,
+    vatRate: order.vatRate,
+    vatInclusive: order.vatInclusive,
+  });
 
   return tx.purchaseOrder.update({
     where: { id: orderId },
-    data: { subtotal: D(subtotal), vatAmount: D(vatAmount), total: D(total) },
+    data: { subtotal: D(t.subtotal), discountAmount: D(t.discountAmount), vatAmount: D(t.vatAmount), total: D(t.total) },
   });
 }
 
@@ -3117,6 +3122,8 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
     version: po.updatedAt.toISOString(),
     vatRate: num(po.vatRate),
     subtotal: num(po.subtotal),
+    discountPct: num(po.discountPct),
+    discountAmount: num(po.discountAmount),
     vatAmount: num(po.vatAmount),
     total: num(po.total),
     exchangeRate: po.exchangeRate === null ? null : num(po.exchangeRate),
@@ -3333,6 +3340,8 @@ const poSchema = z.object({
   terms: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   vatInclusive: z.boolean().default(false),
+  /** SCORO's discount on the whole order (2026-10-23): a percentage, six decimals. */
+  discountPct: z.number().min(0, 'A discount cannot be negative').max(100, 'A discount is at most 100%').optional(),
   /**
    * VAT on or off (2026-10-16, the owner's call: an importation order carries
    * no VAT). Off stores a 0% rate — no VAT row, the total is the subtotal; on
@@ -3356,6 +3365,9 @@ async function orderRateChange(
   const typed = body.exchangeRate === undefined ? kept : body.exchangeRate;
   return { currency, exchangeRate: await rateForOrder(currency, typed) };
 }
+
+/** A discount percentage as stored: six decimals. */
+const pct6 = (p: number) => Math.round(p * 1e6) / 1e6;
 
 async function poVat(applyVat: boolean | undefined): Promise<{ vatRate?: Prisma.Decimal; vatInclusive?: boolean }> {
   if (applyVat === undefined) return {};
@@ -3602,6 +3614,7 @@ purchaseOrderRoutes.post(
           notes: body.notes || null,
           vatRate: body.applyVat === false ? D(0) : (company?.vatRate ?? D(0.12)),
           vatInclusive: body.applyVat === false ? false : body.vatInclusive,
+          discountPct: D(pct6(body.discountPct ?? 0)),
         },
       });
       await writePoLines(tx, created.id, lines);
@@ -3619,7 +3632,7 @@ purchaseOrderRoutes.post(
       return totals ?? created;
     });
 
-    res.status(201).json({ ...po, total: num(po.total) });
+    res.status(201).json({ ...po, total: num(po.total), subtotal: num(po.subtotal), discountPct: num(po.discountPct), discountAmount: num(po.discountAmount) });
   }),
 );
 
@@ -3782,6 +3795,7 @@ purchaseOrderRoutes.patch(
         ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
         ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
+        ...(body.discountPct !== undefined ? { discountPct: D(pct6(body.discountPct)) } : {}),
         ...(await poVat(body.applyVat)),
       },
     });
@@ -3938,6 +3952,7 @@ purchaseOrderRoutes.put(
           terms: body.terms || null,
           notes: body.notes || null,
           vatInclusive: body.vatInclusive,
+          ...(body.discountPct !== undefined ? { discountPct: D(pct6(body.discountPct)) } : {}),
           ...(await poVat(body.applyVat)),
         },
       });
@@ -4128,7 +4143,7 @@ export async function settlePurchaseOrder(documentId: string, outcome: ApprovalO
       if (!line.costCategoryId) continue;
       byCategory.set(
         line.costCategoryId,
-        (byCategory.get(line.costCategoryId) ?? 0) + (orderInPesos(po, num(line.amount)) ?? num(line.amount)),
+        (byCategory.get(line.costCategoryId) ?? 0) + (orderInPesos(po, num(line.amount) * discountFactor(po)) ?? num(line.amount) * discountFactor(po)),
       );
     }
     for (const [costCategoryId, amount] of byCategory) {
@@ -4438,6 +4453,12 @@ purchaseOrderRoutes.get(
         kind: 'totals',
         rows: [
           { label: 'Subtotal', value: formatAmount(view.subtotal) },
+          ...(num(po.discountPct) > 0
+            ? [
+                { label: `Less: discount (${num(po.discountPct).toLocaleString('en-PH', { maximumFractionDigits: 6 })}%)`, value: formatAmount(num(po.discountAmount)) },
+                { label: 'Sum after discount', value: formatAmount(cents(view.subtotal - num(po.discountAmount))) },
+              ]
+            : []),
           num(po.vatRate) === 0
             ? { label: 'VAT — not applied', value: formatAmount(0) }
             : { label: po.vatInclusive ? `VAT included (${rate})` : `VAT (${rate})`, value: formatAmount(view.vatAmount) },

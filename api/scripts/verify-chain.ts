@@ -4614,6 +4614,61 @@ async function main() {
         `${legacyIn.status} ${legacySent.status} ${legacyOk.status} ${legacyRow?.status}; ${shelfBefore} → ${await onHand()}`,
       );
 
+      // SCORO's discount on the order (2026-10-23): the quotation's arithmetic —
+      // the subtotal before it, VAT on what is left — on the page, the record
+      // and the paper; and goods received at the price after it.
+      const discounted = await api(buyerToken, 'POST', '/purchase-orders', {
+        supplierId: supplier.id,
+        warehouseId: warehouse.id,
+        notes: `${TAG} discounted order`,
+        discountPct: 12.5,
+        lines: [{ itemId: item.id, description: `${TAG} Stainless pipe`, quantity: 4, unit: 'pcs', unitPrice: 75 }],
+      });
+      const discountedId = String(discounted.body.id);
+      const discountedRow = await prisma.purchaseOrder.findUnique({ where: { id: discountedId } });
+      const discountedPaper = discounted.status === 201 ? flat((await printed(buyerToken, `/purchase-orders/${discountedId}/pdf`)).text) : '';
+      const badDiscount = await api(buyerToken, 'PATCH', `/purchase-orders/${discountedId}`, { discountPct: 101 });
+      check(
+        'an order takes a discount: 300 less 12.5% is 262.50, VAT on that, and the paper prints the discount and the sum after it',
+        discounted.status === 201 &&
+          num(discountedRow?.subtotal) === 300 &&
+          num(discountedRow?.discountAmount) === 37.5 &&
+          num(discountedRow?.total) === Math.round(262.5 * (1 + num(discountedRow?.vatRate)) * 100) / 100 &&
+          discounted.body.discountPct === 12.5 &&
+          /less: discount \(12\.5%\)\s*37\.50/i.test(discountedPaper) &&
+          /sum after discount\s*262\.50/i.test(discountedPaper) &&
+          badDiscount.status === 400,
+        `${discounted.status} ${discountedRow?.subtotal} ${discountedRow?.discountAmount} ${discountedRow?.total} · ${badDiscount.status} · ${discountedPaper.match(/less: discount.{0,40}/i)?.[0] ?? 'no discount row'}`,
+      );
+      const discountedIssued = await prisma.purchaseOrder.create({
+        data: {
+          number: await nextNumber('purchase_order'),
+          status: 'ISSUED',
+          kind: 'STOCK_REPLENISHMENT',
+          supplierId: supplier.id,
+          createdById: procurement.id,
+          issuedAt: new Date(),
+          notes: `${TAG} discounted issued order`,
+          discountPct: D(10),
+          subtotal: D(300),
+          discountAmount: D(30),
+          total: D(270),
+          items: { create: [{ itemId: item.id, description: `${TAG} Stainless pipe`, quantity: D(4), unit: 'pcs', unitPrice: D(75), amount: D(300) }] },
+        },
+        include: { items: true },
+      });
+      const discIn = await api(receiverToken, 'POST', '/receivings', { orderId: discountedIssued.id, warehouseId: warehouse.id, items: [{ orderItemId: discountedIssued.items[0].id, quantity: 2 }] });
+      const discInId = String(discIn.body.id);
+      await api(receiverToken, 'POST', `/receivings/${discInId}/submit`);
+      const discReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'receiving', documentId: discInId, status: 'PENDING' } });
+      if (discReq) await api(bossToken, 'POST', `/approvals/${discReq.id}/act`, { action: 'APPROVED' });
+      const discLine = await prisma.receivingItem.findFirst({ where: { receivingId: discInId } });
+      check(
+        'goods received on a 10% discounted order are stocked at the price after the discount (75 → 67.50)',
+        discIn.status === 201 && num(discLine?.unitCost) === 67.5,
+        `${discIn.status} unit cost ${discLine?.unitCost}`,
+      );
+
       // The repair: a receipt that posted nowhere is put on the shelf once, and the order becomes the stock order it was.
       const orphanOrder = await prisma.purchaseOrder.create({
         data: {

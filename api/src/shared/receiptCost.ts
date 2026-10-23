@@ -29,7 +29,13 @@ import { postJobCost } from './inventory';
  * all of them for that receipt. A project's budget is charged the request's
  * declared value whatever this says (the 2026-10-22 rule).
  */
-export type CostedOrder = { number: string; currency: string; exchangeRate: Prisma.Decimal | number | null };
+export type CostedOrder = {
+  number: string;
+  currency: string;
+  exchangeRate: Prisma.Decimal | number | null;
+  /** The order's own discount (2026-10-23): its price is the price after it. */
+  discountPct?: Prisma.Decimal | number | null;
+};
 export type CostedLine = {
   unitPrice: Prisma.Decimal | number;
   landedUnitCost?: Prisma.Decimal | number | null;
@@ -54,14 +60,23 @@ export function orderInPesos(order: Pick<CostedOrder, 'currency' | 'exchangeRate
   return r === null ? null : centavo(value * r);
 }
 
+/** What a peso of the order's list price is worth after its discount: 1 with none. */
+export function discountFactor(order: Pick<CostedOrder, 'discountPct'>): number {
+  const pct = Math.min(100, Math.max(0, n(order.discountPct)));
+  return 1 - pct / 100;
+}
+
 export function receiptUnitCost(order: CostedOrder, line: CostedLine): LineCost {
   if (line.landedUnitCost != null && n(line.landedUnitCost) > 0) return { unitCost: centavo(n(line.landedUnitCost)), basis: 'landed', rate: null };
   const declared = n(line.requestItem?.estimatedCost);
   if (line.requestItem && declared > 0) return { unitCost: centavo(declared), basis: 'request', rate: null };
   const rate = orderRate(order);
-  if (rate === 1) return { unitCost: centavo(n(line.unitPrice)), basis: 'order', rate: null };
+  // The order's discount comes off every line's price pro rata — what the
+  // goods really cost (SCORO's order-level discount, 2026-10-23).
+  const price = n(line.unitPrice) * discountFactor(order);
+  if (rate === 1) return { unitCost: centavo(price), basis: 'order', rate: null };
   if (rate === null) return { unitCost: null, basis: 'no_rate', rate: null };
-  return { unitCost: centavo(n(line.unitPrice) * rate), basis: 'converted', rate };
+  return { unitCost: centavo(price * rate), basis: 'converted', rate };
 }
 
 /** What an order comes to in pesos, line by line through the rule — null while any line has no peso cost. */
@@ -132,7 +147,7 @@ export const RESTATE_SELECT = {
       landedUnitCost: true,
       costCategoryId: true,
       requestItem: { select: { estimatedCost: true } },
-      order: { select: { id: true, number: true, currency: true, exchangeRate: true, kind: true, jobId: true } },
+      order: { select: { id: true, number: true, currency: true, exchangeRate: true, discountPct: true, kind: true, jobId: true } },
     },
   },
 } satisfies Prisma.ReceivingItemSelect;

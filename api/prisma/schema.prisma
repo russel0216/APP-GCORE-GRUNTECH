@@ -2987,6 +2987,10 @@ model PurchaseOrder {
   /// Snapshotted so an old order still prints the tax it was issued with.
   vatRate      Decimal @default(0.12) @db.Decimal(6, 4)
   vatInclusive Boolean @default(false)
+  /// SCORO's order-level discount (2026-10-23), a percentage to six
+  /// decimals; `subtotal` stays BEFORE it, the quotation's arithmetic.
+  discountPct    Decimal @default(0) @db.Decimal(9, 6)
+  discountAmount Decimal @default(0) @db.Decimal(18, 2)
   subtotal     Decimal @default(0) @db.Decimal(18, 2)
   vatAmount    Decimal @default(0) @db.Decimal(18, 2)
   total        Decimal @default(0) @db.Decimal(18, 2)

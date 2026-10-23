@@ -155,6 +155,9 @@ interface PoDetailData {
   vatRate: number;
   vatInclusive: boolean;
   subtotal: number;
+  /** The order's discount (2026-10-23): a percentage, and what it takes off the subtotal. */
+  discountPct?: number;
+  discountAmount?: number;
   vatAmount: number;
   total: number;
   supplier: { id: string; name: string; paymentTerms: string | null };
@@ -409,18 +412,27 @@ export function PurchaseOrderDetail() {
 
       {po.status === 'ISSUED' && po.kind === 'SALES_ORDER' && (
         <div className="alert ok">
-          Issued for a sales order — {formatMoney(po.subtotal, po.currency ?? 'PHP')} is committed against the order's quoted cost. No project is charged.
+          Issued for a sales order — {formatMoney(po.subtotal - (po.discountAmount ?? 0), po.currency ?? 'PHP')} is committed against the order's quoted cost. No project is charged.
         </div>
       )}
       {po.status === 'ISSUED' && po.kind === 'DIRECT_TO_JOB' && (
         <div className="alert ok">
-          Issued — {formatMoney(po.subtotal)} is committed against the project at the agreed price.
+          Issued — {formatMoney(po.subtotal - (po.discountAmount ?? 0))} is committed against the project at the agreed price.
           The request's estimate has been released, so it is not counted twice.
         </div>
       )}
 
       <div className="kpi-grid proc-stats">
-        <Stat label="Subtotal" value={formatMoney(po.subtotal, po.currency ?? 'PHP')} figure />
+        <Stat
+          label="Subtotal"
+          value={formatMoney(po.subtotal, po.currency ?? 'PHP')}
+          sub={
+            po.discountAmount
+              ? `less ${Number(po.discountPct ?? 0).toLocaleString('en-PH', { maximumFractionDigits: 6 })}% discount: −${formatMoney(po.discountAmount, po.currency ?? 'PHP')}`
+              : undefined
+          }
+          figure
+        />
         <Stat
           label={po.vatRate > 0 ? `VAT ${(po.vatRate * 100).toFixed(0)}%` : 'VAT'}
           value={formatMoney(po.vatAmount, po.currency ?? 'PHP')}

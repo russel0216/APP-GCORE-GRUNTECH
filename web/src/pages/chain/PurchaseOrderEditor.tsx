@@ -9,6 +9,7 @@ import { ApprovalStepper, allHeld, previewSteps } from '../../components/Approva
 import { Meter } from '../../components/charts';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import { orderTotals, parseDelimited, prLineAmount, rowsToPrLines } from '../../lib/prLines';
+import { DiscountCalculator } from '../sales/editorParts';
 import { ItemCell, type BudgetLine, type Category, type Route, type Suggestion } from './PurchaseRequisitionEditor';
 
 /**
@@ -85,6 +86,8 @@ interface ExistingPo {
   notes: string | null;
   vatRate: number;
   vatInclusive: boolean;
+  /** The order's discount, a percentage to six decimals (2026-10-23). */
+  discountPct?: number;
   canEdit: boolean;
   version: string;
   supplier: { id: string; name: string; paymentTerms: string | null };
@@ -138,6 +141,8 @@ interface Header {
   notes: string;
   vatInclusive: boolean;
   applyVat: boolean;
+  /** SCORO's discount on the whole order, typed or set by the Σ calculator. */
+  discountPct: string;
 }
 
 let nextKey = 0;
@@ -230,6 +235,7 @@ export function PurchaseOrderEditor() {
     notes: '',
     vatInclusive: false,
     applyVat: true,
+    discountPct: '0',
   });
   const [lines, setLines] = useState<Line[]>(() => [blankLine()]);
   const [saved, setSaved] = useState<string | null>(null);
@@ -261,6 +267,7 @@ export function PurchaseOrderEditor() {
             notes: po.notes ?? '',
             vatInclusive: po.vatInclusive,
             applyVat: Number(po.vatRate) > 0,
+            discountPct: String(Number(po.discountPct ?? 0)),
           };
           ls = po.items.map((i) => ({
             key: newKey(),
@@ -350,6 +357,9 @@ export function PurchaseOrderEditor() {
   const warehouse = existing?.warehouse ?? draft?.warehouse ?? null;
   const companyRate = Number(existing?.vatRate) || Number(draft?.vatRate) || 0.12;
   const vatRate = header.applyVat ? companyRate : 0;
+  const discount = Number(header.discountPct || 0);
+  const discountOk = Number.isFinite(discount) && discount >= 0 && discount <= 100;
+  const [calcOpen, setCalcOpen] = useState(false);
 
   useEffect(() => {
     setBudget(null);
@@ -366,8 +376,8 @@ export function PurchaseOrderEditor() {
 
   const sent = lines.filter((l) => !isBlank(l));
   const money = useMemo(
-    () => orderTotals(sent.map(amountOf), vatRate, header.vatInclusive),
-    [sent, vatRate, header.vatInclusive],
+    () => orderTotals(sent.map(amountOf), vatRate, header.vatInclusive, discountOk ? discount : 0),
+    [sent, vatRate, header.vatInclusive, discount, discountOk],
   );
 
   useEffect(() => {
@@ -450,6 +460,7 @@ export function PurchaseOrderEditor() {
   };
   const problems: string[] = [];
   if (!header.supplier) problems.push('Choose the supplier');
+  if (!discountOk) problems.push('The discount is a percentage from 0 to 100');
   sent.forEach((l, i) => {
     const p = lineProblem(l);
     if (p) problems.push(`Line ${i + 1}: ${p}`);
@@ -470,6 +481,7 @@ export function PurchaseOrderEditor() {
       notes: header.notes.trim() || null,
       vatInclusive: header.applyVat && header.vatInclusive,
       applyVat: header.applyVat,
+      discountPct: discountOk ? Math.round(discount * 1e6) / 1e6 : 0,
       lines: sent.map((l) => ({
         id: l.id,
         requestItemId: l.requestItemId,
@@ -961,11 +973,59 @@ export function PurchaseOrderEditor() {
               <dd>{sent.length}</dd>
               <dt>Subtotal{header.vatInclusive ? ' (VAT included)' : ''}</dt>
               <dd className="mono">{formatMoney(money.subtotal, header.currency)}</dd>
+              <dt>
+                <label className="quote-discount" htmlFor="poe-discount">
+                  Discount
+                  <NumberInput
+                    kind="percent"
+                    id="poe-discount"
+                    min={0}
+                    max={100}
+                    step="any"
+                    value={header.discountPct}
+                    aria-invalid={discountOk ? undefined : true}
+                    onChange={(e) => setHeader((h) => ({ ...h, discountPct: e.target.value }))}
+                  />
+                  %
+                  <button
+                    type="button"
+                    className={`btn btn-sm${calcOpen ? ' is-on' : ''}`}
+                    aria-label="Discount calculator — set the sum you want"
+                    title="Discount calculator — set the sum you want"
+                    aria-expanded={calcOpen}
+                    onClick={() => setCalcOpen((o) => !o)}
+                  >
+                    Σ
+                  </button>
+                </label>
+              </dt>
+              <dd className="mono">
+                {money.discountAmount > 0 ? `−${formatMoney(money.discountAmount, header.currency)}` : formatMoney(0, header.currency)}
+              </dd>
+              {money.discountAmount > 0 && (
+                <>
+                  <dt>Sum after discount</dt>
+                  <dd className="mono">{formatMoney(money.net, header.currency)}</dd>
+                </>
+              )}
               <dt>{header.applyVat ? `VAT (${Math.round(vatRate * 10000) / 100}%)` : 'VAT — not applied'}</dt>
               <dd className="mono">{formatMoney(money.vatAmount, header.currency)}</dd>
               <dt className="prq-total-big">Order total</dt>
               <dd className="prq-total-big mono">{formatMoney(money.total, header.currency)}</dd>
             </dl>
+            {calcOpen && (
+              <DiscountCalculator
+                subtotal={money.subtotal}
+                vatRate={vatRate}
+                vatInclusive={header.applyVat && header.vatInclusive}
+                currency={header.currency}
+                onInsert={(v) => {
+                  setHeader((h) => ({ ...h, discountPct: v }));
+                  setCalcOpen(false);
+                }}
+                onClose={() => setCalcOpen(false)}
+              />
+            )}
           </section>
 
           {/* ── Approval ────────────────────────────────────────────────────── */}

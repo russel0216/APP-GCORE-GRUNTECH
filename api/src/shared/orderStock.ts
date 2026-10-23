@@ -173,6 +173,7 @@ export async function salesOrderSpend(salesOrderId: string, db: Tx | typeof pris
         number: true,
         currency: true,
         exchangeRate: true,
+        discountPct: true,
         items: { select: { quantity: true, receivedQty: true, unitPrice: true, landedUnitCost: true, requestItem: { select: { estimatedCost: true } } } },
       },
     }),

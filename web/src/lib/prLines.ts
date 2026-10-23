@@ -1,3 +1,4 @@
+import { quotationTotals } from './quotationMath';
 /**
  * The purchase requisition page's line rules (pages/chain/PurchaseRequisition
  * Editor.tsx) — DOM-free, so verify-foundation can pin them.
@@ -183,17 +184,15 @@ export function rowsToPrLines(rows: string[][], categories: CategoryRef[]): Pars
 }
 
 /**
- * A purchase order's money — `recalcPo()` in routes/procurement.ts, exactly:
- * the subtotal is the lines' amounts; VAT is added to it, or, when the
- * supplier's prices include VAT, taken out of it and the total is the
- * subtotal itself.
+ * A purchase order's money — `recalcPo()` in routes/procurement.ts, exactly,
+ * which is the quotation's arithmetic (`quotationTotals`): the subtotal is
+ * the lines' amounts; the order's discount comes off it (2026-10-23, SCORO's
+ * discount); VAT is added to what is left, or, when the supplier's prices
+ * include VAT, taken out of it and the total is what is left itself.
  */
-export function orderTotals(amounts: number[], vatRate: number, vatInclusive: boolean) {
-  const cents = (n: number) => Math.round(n * 100) / 100;
-  const subtotal = cents(amounts.reduce((s, a) => s + a, 0));
-  const vatAmount = vatInclusive ? cents(subtotal - subtotal / (1 + vatRate)) : cents(subtotal * vatRate);
-  const total = vatInclusive ? subtotal : cents(subtotal + vatAmount);
-  return { subtotal, vatAmount, total };
+export function orderTotals(amounts: number[], vatRate: number, vatInclusive: boolean, discountPct = 0) {
+  const t = quotationTotals({ lines: amounts.map((amount) => ({ amount })), discountPct, vatRate, vatInclusive });
+  return { subtotal: t.subtotal, discountAmount: t.discountAmount, net: t.net, vatAmount: t.vatAmount, total: t.total };
 }
 
 /**
