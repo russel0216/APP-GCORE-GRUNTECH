@@ -13,7 +13,7 @@
 import { repairProjectlessReceipts, repairTypedStockReceipts } from '../src/shared/typedItems';
 import { runImport } from '../src/shared/csv';
 import { mainWarehouse } from '../src/shared/mainWarehouse';
-import { NO_BRAND_LABEL, assetCategory, matchHolder, mergeOdooRows, odooBrand, odooGroup } from '../src/shared/odooMigration';
+import { HOLDER_ALIASES, NO_BRAND_LABEL, assetCategory, matchHolder, mergeOdooRows, odooBrand, odooGroup } from '../src/shared/odooMigration';
 import { odooAssetsSpec, odooAssetsWrite, odooInventorySpec, odooInventoryWrite } from '../src/routes/imports/odoo';
 import { receiptUnitCost, restateForeignReceipts } from '../src/shared/receiptCost';
 import bcrypt from 'bcryptjs';
@@ -164,7 +164,7 @@ async function cleanupOdoo() {
     await prisma.assetIssuance.deleteMany({ where: { assetId: { in: assets.map((a) => a.id) } } });
     await prisma.companyAsset.deleteMany({ where: { id: { in: assets.map((a) => a.id) } } });
   }
-  await prisma.employee.deleteMany({ where: { firstName: 'Zzodoo', lastName: 'Holder' } });
+  await prisma.employee.deleteMany({ where: { firstName: 'Zzodoo', lastName: { in: ['Holder', 'Later'] } } });
   await prisma.auditLog.deleteMany({ where: { entityId: 'list', actorName: `${TAG} odoo` } });
 }
 
@@ -6124,6 +6124,23 @@ async function odooMigration() {
       matchHolder('Martinez', people) === null &&
       matchHolder('Nobody Here', people) === null,
   );
+  const chart = [
+    { firstName: 'Rolando', lastName: 'Tagalog' },
+    { firstName: 'Rodrigo', lastName: 'Catuday' },
+    { firstName: 'Salvador', lastName: 'Ugaban' },
+    { firstName: 'Reagan', lastName: 'Cajoto' },
+    { firstName: 'Jhon Russel', lastName: 'Balicas' },
+  ];
+  check(
+    "Odoo's nicknames are read as the chart's full names: Rj Tagalog, Jhay-r Catuday, Bhadz Ugaban, Bhong Cayuto, John Russel",
+    matchHolder('Rj Tagalog', chart)?.firstName === 'Rolando' &&
+      matchHolder('Jhay-r Catuday', chart)?.firstName === 'Rodrigo' &&
+      matchHolder('Bhadz Ugaban', chart)?.firstName === 'Salvador' &&
+      matchHolder('Bhong Cayuto', chart)?.firstName === 'Reagan' &&
+      matchHolder('John Russel', chart)?.lastName === 'Balicas' &&
+      matchHolder('Jayson Duan', chart) === null &&
+      Object.keys(HOLDER_ALIASES).length === 5,
+  );
 
   // The file, as Odoo writes it.
   const holder = await prisma.employee.create({ data: { firstName: 'Zzodoo', lastName: 'Holder' } });
@@ -6202,6 +6219,26 @@ async function odooMigration() {
   );
   await runImport(csv, odooAssetsSpec, true, (records) => odooAssetsWrite(records, actor));
   check('the assets run again add nothing', (await prisma.companyAsset.count({ where: { importRef: { contains: TAG } } })) === 2);
+  const laterCsv = [
+    'Favorite,Name,Internal Reference,Responsible,Tags,Ribbon,Barcode,Sales Price,Cost,Product Category,Product Type,Quantity On Hand,Forecasted Quantity,Unit',
+    `FALSE,${TAG} ODOO DRILL,"MAKITA, DRILL",X,,,,500,500,Zzodoo Later Tools,Goods,1,1,Units`,
+  ].join('\n');
+  await runImport(laterCsv, odooAssetsSpec, true, (records) => odooAssetsWrite(records, actor));
+  const drillBefore = await prisma.companyAsset.findFirstOrThrow({ where: { importRef: { contains: `${TAG} ODOO DRILL` } } });
+  const later = await prisma.employee.create({ data: { firstName: 'Zzodoo', lastName: 'Later' } });
+  await runImport(laterCsv, odooAssetsSpec, true, (records) => odooAssetsWrite(records, actor));
+  const drill = await prisma.companyAsset.findUniqueOrThrow({ where: { id: drillBefore.id }, include: { issuances: true } });
+  check(
+    'a holder with no employee leaves the tools Available; once the employee is added, the file run again issues them to them, once',
+    drillBefore.status === 'AVAILABLE' &&
+      drill.status === 'ISSUED' &&
+      drill.issuances.length === 1 &&
+      drill.issuances[0].employeeId === later.id &&
+      !/no employee matched/.test(drill.notes ?? ''),
+    JSON.stringify({ before: drillBefore.status, after: drill.status, issuances: drill.issuances.length }),
+  );
+  await runImport(laterCsv, odooAssetsSpec, true, (records) => odooAssetsWrite(records, actor));
+  check('and a third run issues nothing more', (await prisma.assetIssuance.count({ where: { assetId: drill.id } })) === 1);
 
   // The valuation by brand, through the API.
   const token = signToken(admin.id, admin.email);

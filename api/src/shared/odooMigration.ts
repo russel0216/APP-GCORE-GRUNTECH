@@ -511,7 +511,24 @@ export function mergeOdooRows(rows: OdooRow[]): OdooItem {
 }
 
 /**
- * Who the category names, among the active employees: first and last name
+ * Odoo's tools categories name their holders by nickname (2026-10-25, the
+ * owner's call: "add Rj Tagalog and the other unmatched holders' names").
+ * Each Odoo spelling is read as the full name on the organisation chart; a
+ * holder with no employee record yet (Jayson Duan, Jc de Leon Tugay,
+ * Ramonito Rexcis) stays unmatched until HR adds one — the import run again
+ * then issues what it left Available. Keys are `flat`, values full names.
+ */
+export const HOLDER_ALIASES: Record<string, string> = {
+  rjtagalog: 'Rolando Tagalog',
+  jhayrcatuday: 'Rodrigo Catuday',
+  bhadzugaban: 'Salvador Ugaban',
+  bhongcayuto: 'Reagan Cajoto',
+  johnrussel: 'Jhon Russel Balicas',
+};
+
+/**
+ * Who the category names, among the active employees: an alias's full name
+ * (`HOLDER_ALIASES`) first, then first and last name
  * equal (case-, space- and punctuation-blind), else the one employee whose
  * last name is the holder's last word and whose first name starts as the
  * holder's first word does ("Ric Martinez" → Ricardo Martinez), else the
@@ -520,6 +537,8 @@ export function mergeOdooRows(rows: OdooRow[]): OdooItem {
  */
 export function matchHolder<T extends { firstName: string; lastName: string }>(holder: string, people: T[]): T | null {
   const flat = (s: string) => s.toLowerCase().replace(/[^a-z]/g, '');
+  const alias = HOLDER_ALIASES[flat(holder)];
+  if (alias) holder = alias;
   const words = tidy(holder).toLowerCase().split(' ').filter(Boolean);
   if (!words.length) return null;
   const whole = flat(holder);

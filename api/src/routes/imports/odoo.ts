@@ -388,11 +388,11 @@ export const odooAssetsSpec: ImportSpec<OdooAssetRecord> = {
         },
         {
           title: 'Who holds them',
-          note: 'Issued only where exactly one active employee answers to the name; anyone else, and every resigned holder, leaves the tools Available for HR to issue from the asset page.',
+          note: 'Issued only where exactly one active employee answers to the name (a nickname read through the list of Odoo names); anyone else, and every resigned holder, leaves the tools Available. Add the missing employee record and run the import again: it issues what it left Available.',
           head: ['In Odoo', 'Records', 'Units', 'Issued to'],
           rows: rows.map(([holder, h]) => {
             const match = h.resigned ? null : matchHolder(holder, people);
-            return [holder, h.lines, h.units, h.resigned ? 'Resigned — stays Available' : match ? `${match.firstName} ${match.lastName}` : 'No employee matched — stays Available'];
+            return [holder, h.lines, h.units, h.resigned ? 'Resigned — stays Available' : match ? `${match.firstName} ${match.lastName}` : 'No employee on file — stays Available until one is added'];
           }),
         },
       ],
@@ -490,12 +490,44 @@ export async function odooAssetsWrite(records: { record: OdooAssetRecord; existi
         })),
       });
     }
+    // An asset an earlier run left Available because nobody answered to its
+    // holder is issued now that somebody does — only while it was never issued
+    // since, so HR's own issue or return is never undone.
+    const waiting = records.filter((x) => x.existingId && holderOf(x.record));
+    const left = new Set(
+      (
+        await tx.companyAsset.findMany({
+          where: { id: { in: waiting.map((x) => x.existingId!) }, status: 'AVAILABLE', issuances: { none: {} } },
+          select: { id: true },
+        })
+      ).map((a) => a.id),
+    );
+    let late = 0;
+    for (const { record: r, existingId } of waiting) {
+      if (!left.has(existingId!)) continue;
+      const claimed = await tx.companyAsset.updateMany({
+        where: { id: existingId!, status: 'AVAILABLE', issuances: { none: {} } },
+        data: { status: 'ISSUED', notes: noteOf(r) },
+      });
+      if (!claimed.count) continue;
+      await tx.assetIssuance.create({
+        data: {
+          assetId: existingId!,
+          employeeId: holderOf(r)!.id,
+          issuedOn: today,
+          issuedById: actor.id,
+          conditionOut: 'As recorded in Odoo',
+          remarks: `From Odoo — ${r.category}`,
+        },
+      });
+      late += 1;
+    }
     await tx.auditLog.create({
       data: {
         entityType: 'company_asset',
         entityId: 'list',
         action: 'CREATED',
-        summary: `Imported Odoo's assets and tools: ${fresh.length} assets (${fresh.reduce((s, r) => s + r.quantity, 0)} units), ${issued.length} issued to their holders`,
+        summary: `Imported Odoo's assets and tools: ${fresh.length} assets (${fresh.reduce((s, r) => s + r.quantity, 0)} units), ${issued.length} issued to their holders${late ? `; ${late} left Available before issued now that their holder is on file` : ''}`,
         actorId: actor.id,
         actorName: actor.name,
       },
