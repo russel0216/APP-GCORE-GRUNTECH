@@ -135,6 +135,10 @@ export function orderBy(q: ListQuery, sortable: string[], fallback: Record<strin
 }
 
 export function errorMiddleware(err: unknown, req: Request, res: Response, _next: NextFunction) {
+  // An upload past its route's ceiling is the person's to fix, never "our side".
+  if (err && typeof err === 'object' && (err as { name?: string }).name === 'MulterError' && (err as { code?: string }).code === 'LIMIT_FILE_SIZE') {
+    err = new HttpError(413, 'That file is too large to upload here — make it smaller or split it, and try again');
+  }
   const status = err instanceof HttpError ? err.status : 500;
   const message = err instanceof HttpError ? err.message : 'Something went wrong on our side';
   if (!(err instanceof HttpError)) console.error(err);

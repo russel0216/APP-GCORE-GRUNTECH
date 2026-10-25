@@ -6350,6 +6350,23 @@ async function odooMigration() {
     up.ok && !!tapeAfter.photoId && off.ok && tapeOff.photoId === null && !(await prisma.attachment.findUnique({ where: { id: tapeAfter.photoId! } })),
     `${up.status} ${off.status}`,
   );
+  // A big Odoo export (2026-10-25, the owner's report: "Something went wrong
+  // on our side"): past the ordinary 8 MB the Odoo imports still read it, and
+  // an ordinary import says the file is too large instead of a 500.
+  const bigCsv = `${['Name', 'Internal Reference', 'Product Category', 'Cost', 'Quantity On Hand', 'Sales Price', 'Unit', 'image_1920'].join(',')}\n${TAG} ODOO BIG,"WIKA, GAUGE",Instruments,1,0,1,Units,${'A'.repeat(9 * 1024 * 1024)}\n`;
+  const bigUpload = async (entity: string) => {
+    const f = new FormData();
+    f.append('file', new Blob([bigCsv], { type: 'text/csv' }), 'Product (product.template).csv');
+    const r = await fetch(`${BASE}/imports/${entity}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: f });
+    return { status: r.status, body: (await r.json()) as { error?: string; total?: number } };
+  };
+  const bigOdoo = await bigUpload('odoo_inventory');
+  const bigItems = await bigUpload('items');
+  check(
+    'a 9 MB Odoo export is read by the Odoo import; an ordinary import refuses it as too large, in words, never a 500',
+    bigOdoo.status === 200 && bigOdoo.body.total === 1 && bigItems.status === 400 && /larger than 8 MB/.test(bigItems.body.error ?? ''),
+    `${bigOdoo.status} ${bigItems.status} ${bigItems.body.error}`,
+  );
   // The asset's photo: on its record and its register row, and its own two routes.
   const assetRead = await api(token, 'GET', `/assets/${wrench!.id}`);
   const assetList = await api(token, 'GET', `/assets?search=${encodeURIComponent(wrench!.tag)}&pageSize=5`);

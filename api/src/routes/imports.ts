@@ -40,10 +40,13 @@ importRoutes.use(authenticate);
 
 // Held in memory: these are operator-sized spreadsheets, not bulk data loads,
 // and nothing should linger on disk after a dry run the user abandons.
+const IMPORT_UPLOAD_MB = 8;
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 8 * 1024 * 1024 },
+  limits: { fileSize: IMPORT_UPLOAD_MB * 1024 * 1024 },
 });
+/** Imports fed by a whole Odoo export: its pictures, its products and its assets. */
+const LARGE_IMPORTS = new Set(['odoo_pictures', 'odoo_inventory', 'odoo_assets']);
 // Odoo's pictures ride in the CSV as base64 (2026-10-25): a batch of a few
 // hundred products is tens of MB, so that one import takes the larger ceiling.
 const pictureUpload = multer({
@@ -615,7 +618,20 @@ importRoutes.get(
 
 importRoutes.post(
   '/:entity',
-  (req, res, next) => (req.params.entity === 'odoo_pictures' ? pictureUpload : upload).single('file')(req, res, next),
+  (req, res, next) => {
+    // Odoo's own exports are big (2026-10-25: the owner's product export ran
+    // past 8 MB and read "Something went wrong"); they take the pictures'
+    // ceiling, and a file past any ceiling is said in words.
+    const large = LARGE_IMPORTS.has(req.params.entity);
+    (large ? pictureUpload : upload).single('file')(req, res, (err?: unknown) => {
+      if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+        const mb = large ? PICTURE_UPLOAD_MB : IMPORT_UPLOAD_MB;
+        next(badRequest(`That file is larger than ${mb} MB — split it into smaller files${large ? ' (a few hundred products each), or export it without the picture column' : ''} and import them one after another`));
+        return;
+      }
+      next(err);
+    });
+  },
   handler(async (req, res) => {
     const entry = REGISTRY[req.params.entity];
     if (!entry) throw notFound('Unknown import type');
