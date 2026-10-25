@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { placeOnShelf } from '../../shared/catalogue';
 import { prisma } from '../../prisma';
 import { badRequest } from '../../http/kit';
 import { SkipRow, type ImportSpec, type ImportActor } from '../../shared/csv';
@@ -293,6 +294,8 @@ export async function odooInventoryWrite(
         })),
       });
     }
+    // Every item is on the shelf list, stocked or not (2026-10-25): a placeholder line for the rest.
+    await placeOnShelf(tx, [...idOf.values()]);
     const value = cents(post.reduce((s, r) => s + r.quantity * r.unitCost, 0));
     await tx.auditLog.create({
       data: {

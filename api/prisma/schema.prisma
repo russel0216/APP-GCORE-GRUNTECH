@@ -1130,6 +1130,9 @@ model Item {
 
   isActive  Boolean  @default(true)
   notes     String?
+  /// The product's picture (2026-10-25, the owner's Inventory cards): an
+  /// attachment on `item_photo`, set on the item or by the Odoo pictures import.
+  photoId   String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -6180,6 +6183,8 @@ model CompanyAsset {
   assetType     AssetType       @relation(fields: [assetTypeId], references: [id], onDelete: Restrict)
   /// "Toyota Hilux 2.4L (2023)", "Dell Latitude 5440 i7 / 16GB".
   brandModel    String
+  /// Its picture (2026-10-25, the Odoo pictures import): an attachment on `asset_photo`.
+  photoId       String?
   serialNo      String?
   plateNo       String?
   description   String?

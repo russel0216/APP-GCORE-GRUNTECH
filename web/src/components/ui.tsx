@@ -785,6 +785,37 @@ export function Avatar({
 }
 
 /**
+ * A product's picture (2026-10-25, the owner's Inventory cards, gasiontech's
+ * dress): the item's photo — an attachment, fetched once with the token like
+ * an avatar's — else a solid tile with its initials, coloured by `toneKey`
+ * (the category), so one group always looks the same. Decorative: the card
+ * beside it names the product.
+ */
+export function ProductPicture({ photoId, name, toneKey, className }: { photoId?: string | null; name: string; toneKey?: string | null; className?: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!photoId) {
+      setUrl(null);
+      return;
+    }
+    let cancelled = false;
+    avatarUrl(photoId)
+      .then((u) => !cancelled && setUrl(u))
+      .catch(() => !cancelled && setUrl(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [photoId]);
+  let hash = 0;
+  for (const ch of toneKey || name) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return (
+    <span className={`product-picture${url ? ' has-photo' : ` pp-tone-${hash % 5}`}${className ? ` ${className}` : ''}`} aria-hidden="true">
+      {url ? <img src={url} alt="" loading="lazy" /> : <span className="pp-initials">{initials(name.replace(/[^A-Za-z0-9 ]+/g, ' ')) || '?'}</span>}
+    </span>
+  );
+}
+
+/**
  * A list row's PDF icon (2026-10-08, the owner's call, after SCORO's list of
  * quotes): opens the record's paper in a new tab without opening the record.
  * A real button, so the keyboard reaches it; its click and its keys stop at

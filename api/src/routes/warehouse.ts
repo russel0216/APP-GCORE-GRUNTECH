@@ -4364,6 +4364,41 @@ function brandWhere(brand: string | undefined): { item: Prisma.ItemWhereInput } 
   return { item: brand === 'none' ? { OR: [{ brand: null }, { brand: '' }] } : { brand: { equals: brand, mode: 'insensitive' } } };
 }
 
+/** Per item: what issued purchase orders still have to bring in. */
+async function incomingFor(itemIds: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (!itemIds.length) return out;
+  const open = await prisma.purchaseOrderItem.findMany({
+    where: { itemId: { in: [...new Set(itemIds)] }, order: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } } },
+    select: { itemId: true, quantity: true, receivedQty: true },
+  });
+  for (const o of open) {
+    const left = num(o.quantity) - num(o.receivedQty);
+    if (left > 0.0005) out.set(o.itemId!, cents((out.get(o.itemId!) ?? 0) + left));
+  }
+  return out;
+}
+
+/** Per item × warehouse: who has it on loan, on which slip, how many. */
+async function loansFor(keys: { itemId: string; warehouseId: string }[]): Promise<Map<string, { slipId: string; number: string; borrower: string; quantity: number }[]>> {
+  const out = new Map<string, { slipId: string; number: string; borrower: string; quantity: number }[]>();
+  if (!keys.length) return out;
+  const lines = await prisma.borrowSlipItem.findMany({
+    where: {
+      itemId: { in: [...new Set(keys.map((k) => k.itemId))] },
+      slip: { status: { in: ['OUT', 'PARTIALLY_RETURNED', 'OVERDUE'] }, warehouseId: { in: [...new Set(keys.map((k) => k.warehouseId))] } },
+    },
+    select: { itemId: true, quantity: true, returnedQty: true, slip: { select: { id: true, number: true, borrowerName: true, warehouseId: true } } },
+  });
+  for (const l of lines) {
+    const left = num(l.quantity) - num(l.returnedQty);
+    if (left <= 0.0005) continue;
+    const key = `${l.itemId}|${l.slip.warehouseId}`;
+    out.set(key, [...(out.get(key) ?? []), { slipId: l.slip.id, number: l.slip.number, borrower: l.slip.borrowerName, quantity: cents(left) }]);
+  }
+  return out;
+}
+
 async function inventoryListWhere(me: ResolvedUser, q: ListQuery): Promise<{ base: Prisma.InventoryBalanceWhereInput; where: Prisma.InventoryBalanceWhereInput }> {
   const and: Prisma.InventoryBalanceWhereInput[] = [];
   // View Own reads the stock of the items one added (2026-10-18) — first, so
@@ -4391,6 +4426,10 @@ async function inventoryListWhere(me: ResolvedUser, q: ListQuery): Promise<{ bas
   if (q.filters.categoryId) and.push({ item: { categoryId: q.filters.categoryId === 'none' ? null : q.filters.categoryId } });
   const brand = brandWhere(q.filters.brand);
   if (brand) and.push(brand);
+  // "In stock only" (2026-10-25): the catalogue lists every item, this the ones on the shelf.
+  const onHand = choice(q.filters.onHand, { yes: 'yes', no: 'no' } as const, 'On hand');
+  if (onHand === 'yes') and.push({ quantity: { gt: 0 } });
+  if (onHand === 'no') and.push({ quantity: { lte: 0 } });
   if (q.filters.needsReorder === 'true') {
     const candidates = await prisma.inventoryBalance.findMany({
       where: { AND: [...and, REORDER_CANDIDATES] },
@@ -4697,6 +4736,8 @@ inventoryRoutes.get(
               unit: true,
               minStock: true,
               reorderLevel: true,
+              photoId: true,
+              standardCost: true,
               category: { select: { id: true, name: true } },
               preferredSupplier: { select: { id: true, name: true } },
             },
@@ -4724,6 +4765,9 @@ inventoryRoutes.get(
       prisma.purchaseOrder.count({ where: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } } }),
     ]);
     const onOrder = await itemsOnOrder([...new Set([...everything.map((r) => r.itemId), ...inBase.map((r) => r.itemId)])]);
+    // What the page's cards show (2026-10-25): what is coming and who has it on loan.
+    const pageIncoming = await incomingFor(rows.map((r) => r.itemId));
+    const pageLoans = await loansFor(rows.filter((r) => Number(r.borrowedQty) > 0).map((r) => ({ itemId: r.itemId, warehouseId: r.warehouseId })));
     const valuation = everything.reduce((s, b) => s.add(b.quantity.mul(b.averageCost)), new Prisma.Decimal(0));
     const states = everything.map((b) => stockState(b, onOrder.has(b.itemId)));
 
@@ -4764,9 +4808,15 @@ inventoryRoutes.get(
             id: r.id,
             item: {
               ...r.item,
+              standardCost: r.item.standardCost == null ? null : num(r.item.standardCost),
               minStock: r.item.minStock == null ? null : num(r.item.minStock),
               reorderLevel: r.item.reorderLevel == null ? null : num(r.item.reorderLevel),
             },
+            // The card's price (2026-10-25, the owner's call): the average cost,
+            // else the item's standard cost while nothing is on the shelf.
+            unitPrice: quantity > 0 ? num(r.averageCost) : r.item.standardCost == null ? num(r.averageCost) : num(r.item.standardCost),
+            incoming: pageIncoming.get(r.itemId) ?? 0,
+            loans: pageLoans.get(`${r.itemId}|${r.warehouseId}`) ?? [],
             warehouse: r.warehouse,
             location: r.location,
             quantity,
@@ -4786,6 +4836,7 @@ inventoryRoutes.get(
         valuation: Number(valuation.toFixed(2)),
         lowStock: states.filter((st) => st === 'LOW_STOCK').length,
         critical: states.filter((st) => st === 'CRITICAL').length,
+        outOfStock: states.filter((st) => st === 'OUT_OF_STOCK').length,
         onOrder: states.filter((st) => st === 'ON_ORDER').length,
         pendingOrders,
         // The projects' own goods on the shelves — their card links to `?stock=project`.
@@ -4883,74 +4934,6 @@ inventoryRoutes.get(
         link: r.sourceId && LINKS[r.sourceType] ? `${LINKS[r.sourceType]}${r.sourceId}` : null,
       })),
     );
-  }),
-);
-
-/** The most cards a board column draws; the column says how many more it holds. */
-const BOARD_CAP = 200;
-
-/**
- * The Kanban view of the stock (2026-10-14, the owner's call: "Inventory —
- * can be switched to Kanban or List view"): a column per active warehouse
- * (and any other warehouse a row names) holding what it has AVAILABLE, and an
- * "Out of stock" column for every row with nothing available — none on hand,
- * or everything lent. The SAME query as the list (`inventoryListWhere`, every
- * filter and search), so the board's total is the list's; no dragging — a
- * card opens the stock card. Above `/:itemId/card`.
- */
-inventoryRoutes.get(
-  '/board',
-  requireView('gchain', 'inventory'),
-  handler(async (req, res) => {
-    const q = listQuery(req);
-    const { where } = await inventoryListWhere(currentUser(req), q);
-    const [rows, active] = await Promise.all([
-      prisma.inventoryBalance.findMany({
-        where,
-        include: {
-          item: { select: { id: true, code: true, partNumber: true, name: true, unit: true, reorderLevel: true } },
-          warehouse: { select: { id: true, name: true } },
-        },
-        orderBy: { item: { name: 'asc' } },
-      }),
-      prisma.warehouse.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-    ]);
-    const card = (r: (typeof rows)[number]) => {
-      const quantity = num(r.quantity);
-      return {
-        id: r.id,
-        item: { ...r.item, reorderLevel: r.item.reorderLevel == null ? null : num(r.item.reorderLevel) },
-        warehouse: r.warehouse,
-        quantity,
-        borrowedQty: num(r.borrowedQty),
-        available: availableOf(r),
-        value: cents(quantity * num(r.averageCost)),
-        needsReorder: belowReorder(r),
-      };
-    };
-    const inStock = rows.filter((r) => availableOf(r) > 0);
-    const empty = rows.filter((r) => availableOf(r) <= 0);
-    // Every active warehouse has its column — unless the list is narrowed to
-    // one, which is then the only one — and an inactive one still holding a
-    // row is shown too, so no row falls off the board.
-    const named = q.filters.warehouseId ? active.filter((w) => w.id === q.filters.warehouseId) : active;
-    const seen = new Map(named.map((w) => [w.id, w]));
-    for (const r of inStock) if (!seen.has(r.warehouseId)) seen.set(r.warehouseId, r.warehouse);
-    const columns = [...seen.values()].map((w) => {
-      const here = inStock.filter((r) => r.warehouseId === w.id);
-      return {
-        warehouse: w,
-        count: here.length,
-        value: cents(here.reduce((s, r) => s + num(r.quantity) * num(r.averageCost), 0)),
-        cards: here.slice(0, BOARD_CAP).map(card),
-      };
-    });
-    res.json({
-      total: rows.length,
-      columns,
-      outOfStock: { count: empty.length, cards: empty.slice(0, BOARD_CAP).map(card) },
-      cap: BOARD_CAP,
-    });
   }),
 );
 
@@ -5083,7 +5066,7 @@ inventoryRoutes.get(
       f.categoryId && f.categoryId !== 'none' ? prisma.itemCategory.findUnique({ where: { id: f.categoryId }, select: { name: true } }) : null,
     ]);
     const onOrder = await itemsOnOrder([...new Set(rows.map((r) => r.itemId))]);
-    const STATE_WORDS: Record<StockState, string> = { IN_STOCK: 'In stock', LOW_STOCK: 'Low stock', CRITICAL: 'Critical', ON_ORDER: 'On order' };
+    const STATE_WORDS: Record<StockState, string> = { IN_STOCK: 'In stock', LOW_STOCK: 'Low stock', CRITICAL: 'Critical', OUT_OF_STOCK: 'Out of stock', ON_ORDER: 'On order' };
     const reference = listReference(count, rows.length, ['stock line', 'stock lines'], [
       q.search && `search "${q.search}"`,
       f.warehouseId && `warehouse ${warehouse?.name ?? 'not found'}`,
@@ -5209,7 +5192,7 @@ inventoryRoutes.get(
     const [item, balances, moves] = await Promise.all([
       prisma.item.findUnique({
         where: { id: req.params.itemId },
-        select: { id: true, code: true, name: true, unit: true, reorderLevel: true, minStock: true, createdById: true },
+        select: { id: true, code: true, name: true, unit: true, reorderLevel: true, minStock: true, createdById: true, photoId: true, category: { select: { code: true } } },
       }),
       prisma.inventoryBalance.findMany({
         where: { itemId: req.params.itemId, ...(warehouseId ? { warehouseId } : {}) },
@@ -5235,6 +5218,8 @@ inventoryRoutes.get(
     res.json({
       // Edit All places any stock line in a bin; Edit Own the items one added (2026-10-18).
       canEdit: mayEdit(me, 'gchain', 'inventory', item.createdById === me.id, item.createdById),
+      // The product's picture is the item master's (2026-10-25): its editors set it.
+      canEditPhoto: mayEdit(me, 'gchain', 'items', item.createdById === me.id, item.createdById),
       item: {
         ...item,
         reorderLevel: item.reorderLevel == null ? null : num(item.reorderLevel),

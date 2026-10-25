@@ -744,6 +744,34 @@ textarea {
   object-fit: cover;
 }
 
+/* A product's picture (2026-10-25): the photo on white paper, kept whole,
+   else its initials on a tone picked from its group — never a broken image. */
+.product-picture {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.product-picture.has-photo {
+  background: var(--paper);
+}
+.product-picture.has-photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.pp-tone-0 { background: rgb(var(--warn-rgb) / 0.22); }
+.pp-tone-1 { background: rgb(var(--danger-rgb) / 0.22); }
+.pp-tone-2 { background: rgb(var(--magenta-rgb) / 0.22); }
+.pp-tone-3 { background: rgb(var(--info-rgb) / 0.22); }
+.pp-tone-4 { background: rgb(var(--neon-rgb) / 0.18); }
+.pp-initials {
+  font-size: var(--fs-2xl);
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.04em;
+}
+
 /* The topbar and Account page put an <Avatar> inside a clickable control.
    The circle's own look already comes from .avatar; this just strips the
    button chrome around it, without touching :focus-visible, which is global. */

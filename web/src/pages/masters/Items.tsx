@@ -275,7 +275,8 @@ function ItemForm({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const { can } = useAuth();
+  const { me } = useAuth();
+  const isSuperAdmin = me?.user.isSuperAdmin === true;
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -353,7 +354,8 @@ function ItemForm({
           cancelLabel={readOnly ? 'Close' : undefined}
           busy={busy}
           danger={
-            item && can('gchain.items.delete')
+            // Only a super admin deletes an item, and only one that never moved (2026-10-25).
+            item && isSuperAdmin
               ? {
                   label: 'Delete',
                   question: `Delete ${item.name}? It cannot be undone.`,

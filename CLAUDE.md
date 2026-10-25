@@ -677,8 +677,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,822 assertions across twenty-two scripts** (counted 2026-10-25, after
-3 on chain for the Odoo holders' nicknames and the tools issued on a re-run once their holder is on file, and before it 13 on chain for the Odoo migration — the brand, the group, the holder, the
+**4,830 assertions across twenty-two scripts** (counted 2026-10-25, after
+8 on chain for the inventory's product cards — the card's fields, Out of stock, In stock only, the catalogue line placed and dropped, the photo routes, delete for a super admin alone and Odoo's pictures filed once — replacing the board's 2, and before it 3 on chain for the Odoo holders' nicknames and the tools issued on a re-run once their holder is on file, and before it 13 on chain for the Odoo migration — the brand, the group, the holder, the
 merge, the opening balance posted once, the assets lot and the brand filter —
 and before it 2 on finance for the approver reading a claim's receipts, and before it 2 on chain for the purchase order's discount, and before it 3 on delivery for the budget request against its budget line and the cost
 ledger by budget line, and before it 2 on pipeline for the Sales Order report, and before it 6 on chain for the landed cost in pesos and the typed Incoming cost, and
@@ -803,7 +803,7 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
 430, masters 92, sales 643, costing 205, pipeline 123, calendar 103, numbering
-94, partners 120, delivery 216, chain 420, hr 661, plantilla 129, meetings
+94, partners 120, delivery 216, chain 428, hr 661, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 446, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
@@ -4129,6 +4129,64 @@ stocked item with no cost at 0; pcs; no reorder levels.
   import Inventory first, then Assets, and compare G-CORE's valuation with
   Odoo's on the same day.
 
+## Inventory as product cards (2026-10-25)
+
+The owner's call ("I want the Kanban style from gasiontech G-CORE"; his
+answers: every item listed with an "In stock only" filter, the price is the
+average cost, no delete on a card and an item deleted by a super admin
+alone, and Odoo's pictures imported from its CSV export).
+
+- **The catalogue is listed whole**: `shared/catalogue.ts`. An active,
+  stocked item with no stock line anywhere gets ONE zero line in the main
+  warehouse (`placeOnShelf()` — on `POST /items`, the item import, the Odoo
+  import, and `syncCatalogue()` in the seed every deploy); a first receipt
+  into ANOTHER warehouse takes it away (`dropPlaceholder()` in
+  `receiveStock` / `returnIssuedStock`, only while it is empty, unmoved and
+  binless). It is worth nothing: `stockOnHand` counts quantity above zero.
+  Inventory's Filters gain **On hand** (`?onHand=yes|no`, "In stock only").
+- **`OUT_OF_STOCK` is a stock state** (`stockState()` in `shared/chain.ts`):
+  nothing available and NO minimum or reorder level set — CRITICAL now needs
+  a level (the item asked to be kept, and is not); ON_ORDER still wins for
+  an empty, critical or low item with an issued order to come. The cards
+  over the list gain **Out of stock** (`summary.outOfStock`, `?state=
+  OUT_OF_STOCK`), seven in two even rows of four with the valuation across
+  two.
+- **Kanban is the list's own rows as cards** (`InventoryCards` in
+  `pages/chain/Warehouse.tsx` through DataList's `renderRows` — the same
+  query, filters, chips, summary and pager): the picture or its initials on
+  a tone picked from the group (`ProductPicture` in `components/ui.tsx`),
+  the name (three lines at most), part no., group · brand, the **price a
+  unit** — the row's average cost, else the item's standard cost while
+  nothing is on hand (`unitPrice`) — ON HAND and INCOMING (open PO
+  quantity still to arrive, `incoming`), who has it on loan (`loans`, from
+  slips OUT / PARTIALLY_RETURNED / OVERDUE), the state pill and ✎ to the
+  item for whoever may change items. No delete on a card.
+- **An item has a photo**: `Item.photoId` (and `CompanyAsset.photoId`), an
+  attachment on `item_photo` / `asset_photo` read by anyone signed in and
+  written only by its own routes — `POST /items/:id/photo` (an image, by
+  whoever may edit the item; `setPhoto()` turns it upright, fits it inside
+  800 px and keeps a JPEG, removing the old one) and `DELETE
+  /items/:id/photo`. The stock card shows it with Add / Change / Remove
+  (`ItemPhotoCard`, Remove asked in the confirm bar).
+- **An item is deleted by a super admin alone** (`requireSuperAdmin`),
+  refused while it has stock or any movement ("make it inactive instead");
+  Item Master is `SHARED_KEPT` (no delete key); the item form shows Delete
+  to a super admin only.
+- **Odoo's pictures** (`routes/imports/odooPictures.ts`, entity
+  `odoo_pictures`, `gchain.items.create`; Inventory ⋯ "Import pictures from
+  Odoo…"): Odoo's export with `name` and `image_1920` (base64; `id`,
+  `default_code`, `uom_id` ignored), rows grouped by Name. The Name finds
+  the ITEM whose part number it is, and the G-HR ASSETS the Odoo import
+  made from it (`importRef` after the `|`). **Once only**: an item or asset
+  with a photo is skipped and kept, so a re-run changes nothing; no picture
+  is skipped quietly, a Name nobody answers to is listed as skipped
+  (import the products first — an asset with nothing on hand in Odoo was
+  never imported). The upload limit for this import is 95 MB
+  (`PICTURE_UPLOAD_MB`, the tunnel's ceiling): **export in batches of a few
+  hundred products** — the owner's 80-row sample was 9 MB as sent and 1.6
+  MB stored. One audit row per run; a file sharp cannot read is named, the
+  rest go on.
+
 ## The notification bell (2026-10-20)
 
 Help ticket GT-HT-2026-0013: the drawer showed the newest 20 only, so older
@@ -7156,19 +7214,10 @@ previews `docs/mockups/chain-flow-*.png`), built push by push.
 - **Inventory switches between List and Kanban** (push 4d; the owner's
   call, like gasiontech's). A List / Kanban switch in the page head;
   `?view=kanban|list` in the URL (a link's view wins), and the viewer's last
-  CHOICE kept per browser in `gcore_view_inventory` (wrapped in try/catch —
-  a browser that keeps nothing still switches). `GET /inventory/board`
-  reads **the list's own query** (`inventoryListWhere`: search,
-  warehouse, below reorder level) and answers a column per active
-  warehouse (only the one a `warehouseId` narrows to; an inactive one still
-  holding a row is shown too) with what it has AVAILABLE, and **Out of
-  stock** for every row with nothing available (none on hand, or all lent),
-  each card naming its warehouse; `total` is the list's, which
-  verify-chain asserts, and a column draws 200 cards at most and says how
-  many more. No dragging — stock moves by documents; a card is a link to
-  the stock card. The board's toolbar writes the list's own URL keys (`q`,
-  `warehouseId`, `needsReorder`), so switching views keeps the filter. The
-  styles are the `inv-*` rules in `styles/procurement.css`.
+  CHOICE kept per browser in `gcore_view_inventory` (wrapped in try/catch).
+  **Since 2026-10-25 Kanban is gasiontech's PRODUCT CARDS, not warehouse
+  columns** — see "Inventory as product cards"; `GET /inventory/board` is
+  gone.
 
 ## Accounts Receivable and collections (2026-10-15)
 

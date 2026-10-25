@@ -1,4 +1,5 @@
 import { placeMainWarehouseAtOffice } from '../src/shared/mainWarehouse';
+import { syncCatalogue } from '../src/shared/catalogue';
 import { splitBorrowedRights } from '../src/shared/accessSplit';
 import { backfillProjectStock } from '../src/shared/projectStock';
 import { PrismaClient } from '@prisma/client';
@@ -1375,6 +1376,10 @@ async function main() {
   // Gruntech's one warehouse is at the main office (2026-10-25), once.
   const placedAtOffice = await placeMainWarehouseAtOffice();
   console.log(`  ✓ Warehouse${placedAtOffice ? ` (${placedAtOffice})` : ''}`);
+  // Every item on the Inventory list, stocked or not (2026-10-25): a
+  // placeholder line in the main warehouse for an item with none anywhere.
+  const catalogue = await syncCatalogue();
+  if (catalogue.placed || catalogue.dropped) console.log(`  ✓ Catalogue: ${catalogue.placed} placeholder line(s) placed, ${catalogue.dropped} dropped`);
 
   // ── Leave types ────────────────────────────────────────────────────────────
   // Philippine statutory minimum is five days of Service Incentive Leave. Most

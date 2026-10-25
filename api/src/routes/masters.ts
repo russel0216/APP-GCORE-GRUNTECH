@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { placeOnShelf } from '../shared/catalogue';
 import { z } from 'zod';
 import { Prisma, ItemType } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -15,9 +16,13 @@ import {
   badRequest,
   forbidden,
   idsFilter,
+  deleteOrRefuse,
   type ListQuery,
 } from '../http/kit';
-import { authenticate, require_, currentUser } from '../auth/middleware';
+import fs from 'fs';
+import { deleteAttachmentsOf, registerAttachmentGuard, upload } from '../shared/attachments';
+import { clearPhoto, setPhoto } from '../shared/catalogue';
+import { authenticate, require_, requireSuperAdmin, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { deleteGroup, deletedGroupKeys, FALLBACK_GROUP, groupKey, setDeletedGroupKeys } from '../shared/quotationGroups';
@@ -927,7 +932,7 @@ itemRoutes.post(
       if (await tx.item.findUnique({ where: { code } })) {
         throw conflict(`Item code "${code}" is already in use`);
       }
-      return tx.item.create({
+      const created = await tx.item.create({
         data: {
           code,
           partNumber: body.partNumber || null,
@@ -952,6 +957,9 @@ itemRoutes.post(
           createdById: me.id,
         },
       });
+      // On the Inventory list from the start, with nothing on hand (2026-10-25).
+      await placeOnShelf(tx, [created.id]);
+      return created;
     });
 
     await audit(
@@ -1023,13 +1031,24 @@ itemRoutes.patch(
   }),
 );
 
+/**
+ * Only a super admin deletes an item (2026-10-25, the owner's call), and only
+ * one that never moved: an item with stock or any movement is history the
+ * stock card and its documents read — deactivate it instead.
+ */
 itemRoutes.delete(
   '/:id',
-  require_('gchain.items.delete'),
+  requireSuperAdmin,
   handler(async (req, res) => {
     const item = await prisma.item.findUnique({ where: { id: req.params.id } });
     if (!item) throw notFound('Item not found');
-    await prisma.item.delete({ where: { id: req.params.id } });
+    const [moves, held] = await Promise.all([
+      prisma.inventoryTransaction.count({ where: { itemId: item.id } }),
+      prisma.inventoryBalance.count({ where: { itemId: item.id, OR: [{ quantity: { not: 0 } }, { borrowedQty: { not: 0 } }] } }),
+    ]);
+    if (moves || held) throw badRequest(`${item.code} has stock or stock movements on file, so it is kept — make it inactive instead`);
+    await deleteOrRefuse(`${item.code}`, () => prisma.item.delete({ where: { id: req.params.id } }));
+    await deleteAttachmentsOf('item_photo', [item.id]);
     await audit(
       {
         entityType: 'item',
@@ -1039,6 +1058,60 @@ itemRoutes.delete(
       },
       req,
     );
+    res.json({ ok: true });
+  }),
+);
+
+/*
+  The product's picture (2026-10-25, the owner's Inventory cards). Anyone
+  signed in sees it — it is a product photo, on the cards every stock reader
+  opens — and it is set or removed only here, by whoever may change the item:
+  the generic attachment routes never write it.
+*/
+registerAttachmentGuard('item_photo', async () => true, { write: async () => false });
+registerAttachmentGuard('asset_photo', async () => true, { write: async () => false });
+
+async function itemForPhoto(me: Me, id: string) {
+  const item = await prisma.item.findUnique({ where: { id }, select: { id: true, code: true, name: true, createdById: true } });
+  if (!item) throw notFound('Item not found');
+  assertCanEdit(me, 'gchain', 'items', item.createdById === me.id, item.createdById);
+  return item;
+}
+
+itemRoutes.post(
+  '/:id/photo',
+  requireEdit('gchain', 'items'),
+  upload.single('file'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const file = req.file;
+    try {
+      const item = await itemForPhoto(me, req.params.id);
+      if (!file) throw badRequest('Choose a picture');
+      if (!file.mimetype.startsWith('image/')) throw badRequest('A product photo is a picture — JPEG, PNG or WEBP');
+      let photoId: string;
+      try {
+        photoId = await setPhoto('item', item.id, fs.readFileSync(file.path), me.id, file.originalname);
+      } catch (err) {
+        if ((err as Error)?.message?.includes('Input')) throw badRequest('That file could not be read as a picture');
+        throw err;
+      }
+      await audit({ entityType: 'item', entityId: item.id, action: 'UPDATED', summary: `Set the photo of ${item.code} — ${item.name}` }, req);
+      res.json({ photoId });
+    } finally {
+      if (file) fs.rmSync(file.path, { force: true });
+    }
+  }),
+);
+
+itemRoutes.delete(
+  '/:id/photo',
+  requireEdit('gchain', 'items'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const item = await itemForPhoto(me, req.params.id);
+    await clearPhoto('item', item.id);
+    await audit({ entityType: 'item', entityId: item.id, action: 'UPDATED', summary: `Removed the photo of ${item.code} — ${item.name}` }, req);
     res.json({ ok: true });
   }),
 );

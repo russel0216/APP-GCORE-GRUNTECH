@@ -31,7 +31,11 @@ import { statusLabel } from '../src/shared/pdf';
 import { nextNumber } from '../src/shared/numbering';
 import { CANVASS_CODE_MOVED, moveCanvassCode } from '../src/shared/canvassCode';
 import { canvassFigures } from '../src/shared/canvassMath';
-import { deleteAttachment } from '../src/shared/attachments';
+import { attachmentPath, deleteAttachment, deleteAttachmentsOf } from '../src/shared/attachments';
+import { placeOnShelf } from '../src/shared/catalogue';
+import { receiveStock } from '../src/shared/inventory';
+import { odooPicturesSpec, odooPicturesWrite } from '../src/routes/imports/odooPictures';
+import sharp from 'sharp';
 import { PDFDocument } from 'pdf-lib';
 import { submitForApproval, act, pickWorkflow, reopenApproved, byHighestRole, withoutCoSignedRepeats, type ApprovalSlot } from '../src/shared/approvals';
 import { budgetPosition } from '../src/routes/jobs';
@@ -155,12 +159,14 @@ async function cleanupOdoo() {
   const items = await prisma.item.findMany({ where: { partNumber: { startsWith: `${TAG} ODOO` } }, select: { id: true } });
   const ids = items.map((i) => i.id);
   if (ids.length) {
+    await deleteAttachmentsOf('item_photo', ids);
     await prisma.inventoryTransaction.deleteMany({ where: { itemId: { in: ids } } });
     await prisma.inventoryBalance.deleteMany({ where: { itemId: { in: ids } } });
     await prisma.item.deleteMany({ where: { id: { in: ids } } });
   }
   const assets = await prisma.companyAsset.findMany({ where: { importRef: { contains: TAG } }, select: { id: true } });
   if (assets.length) {
+    await deleteAttachmentsOf('asset_photo', assets.map((a) => a.id));
     await prisma.assetIssuance.deleteMany({ where: { assetId: { in: assets.map((a) => a.id) } } });
     await prisma.companyAsset.deleteMany({ where: { id: { in: assets.map((a) => a.id) } } });
   }
@@ -4538,35 +4544,71 @@ async function main() {
       check('each CSV and PDF of a report is on the trail as EXPORTED', exported >= 2, String(exported));
     }
 
-    // ── Inventory as a board (2026-10-14) ────────────────────────────────
-    // The Kanban view reads the list's own query: the same rows, every
-    // warehouse a column of what it has available, the rest Out of stock.
-    console.log('\nInventory as a board (over HTTP)');
+    // ── Inventory as product cards (2026-10-25) ──────────────────────────
+    // The Kanban view is the list's own rows drawn as cards, so the list
+    // carries what a card shows: the price a unit (the average cost, else the
+    // standard cost while nothing is on hand), what is coming in, who has it
+    // on loan, and the state — Out of stock when nothing is available and no
+    // level is set. The catalogue is listed whole: an item stocked nowhere is
+    // a zero line in the main warehouse until its first receipt elsewhere.
+    console.log('\nInventory as product cards (over HTTP)');
     {
       const invRole = await makeRole('zzchain_stockview', 'ZZ Stock viewer', ['gchain.inventory.view_all']);
       const viewer = await mkUser('Verify Stock Viewer', 'stockview@verifyc.local', invRole.id);
       const viewerToken = signToken(viewer.id, viewer.email);
-      const outItem = await prisma.item.create({ data: { code: `${TAG}-OUT`, name: `${TAG} Spent gasket`, unit: 'pcs' } });
+      const outItem = await prisma.item.create({ data: { code: `${TAG}-OUT`, name: `${TAG} Spent gasket`, unit: 'pcs', standardCost: D(12.5) } });
       await prisma.inventoryBalance.create({ data: { itemId: outItem.id, warehouseId: warehouse.id, quantity: D(0), averageCost: D(10) } });
+      type CardRow = { item: { id: string }; state: string; unitPrice: number; incoming: number; loans: unknown[]; quantity: number };
       const listed = await api(viewerToken, 'GET', `/inventory?search=${TAG}&pageSize=200`);
-      const board = await api(viewerToken, 'GET', `/inventory/board?search=${TAG}`);
-      type BoardCol = { warehouse: { id: string }; count: number; cards: { id: string; available: number }[] };
-      const cols = (board.body.columns ?? []) as BoardCol[];
-      const out = (board.body.outOfStock ?? { count: 0, cards: [] }) as { count: number; cards: { id: string; available: number; item: { id: string } }[] };
-      const onBoard = cols.reduce((n, c) => n + c.count, 0) + out.count;
+      const rows = (listed.body.rows ?? []) as CardRow[];
+      const outRow = rows.find((r) => r.item.id === outItem.id);
       check(
-        'the board holds exactly the rows the list holds for the same search — every column counted, Out of stock included',
-        board.status === 200 && listed.status === 200 && board.body.total === listed.body.total && onBoard === listed.body.total,
-        `${board.body.total} / ${onBoard} vs ${listed.body.total}`,
+        'a card row carries its price a unit (the standard cost while nothing is on hand), what is incoming and the loans; nothing available and no level reads Out of stock',
+        listed.status === 200 &&
+          !!outRow &&
+          outRow.state === 'OUT_OF_STOCK' &&
+          outRow.unitPrice === 12.5 &&
+          typeof outRow.incoming === 'number' &&
+          Array.isArray(outRow.loans) &&
+          rows.every((r) => typeof r.unitPrice === 'number' && Array.isArray(r.loans)) &&
+          (listed.body.summary?.outOfStock ?? 0) >= 1,
+        JSON.stringify(outRow),
       );
+      const inStockOnly = await api(viewerToken, 'GET', `/inventory?search=${TAG}&pageSize=200&onHand=yes`);
+      const emptyOnly = await api(viewerToken, 'GET', `/inventory?search=${TAG}&pageSize=200&onHand=no`);
+      const outState = await api(viewerToken, 'GET', `/inventory?search=${TAG}&pageSize=200&state=OUT_OF_STOCK`);
+      const ids = (r: HttpResult) => ((r.body.rows ?? []) as CardRow[]).map((x) => x.item.id);
       check(
-        'a warehouse column holds only what is available there; a row with nothing available is Out of stock',
-        cols.every((c) => c.cards.every((k) => k.available > 0)) &&
-          out.cards.every((k) => k.available <= 0) &&
-          out.cards.some((k) => k.item.id === outItem.id) &&
-          cols.some((c) => c.warehouse.id === warehouse.id),
-        JSON.stringify(out.cards.map((k) => k.available)).slice(0, 120),
+        '"In stock only" leaves the empty line out, "nothing on hand" and the Out of stock state find it; the two halves add up to the list',
+        !ids(inStockOnly).includes(outItem.id) &&
+          ids(emptyOnly).includes(outItem.id) &&
+          ids(outState).includes(outItem.id) &&
+          inStockOnly.body.total + emptyOnly.body.total === listed.body.total,
+        `${inStockOnly.body.total} + ${emptyOnly.body.total} vs ${listed.body.total}`,
       );
+      const badOnHand = await api(viewerToken, 'GET', '/inventory?onHand=maybe');
+      check('an unknown "on hand" choice is a 400', badOnHand.status === 400, String(badOnHand.status));
+      // The catalogue: placed in the main warehouse, dropped by a first receipt elsewhere.
+      const main = await mainWarehouse();
+      const shelved = await prisma.item.create({ data: { code: `${TAG}-CAT`, name: `${TAG} Catalogue only`, unit: 'pcs' } });
+      const placed = await placeOnShelf(prisma, [shelved.id]);
+      const lineBefore = await prisma.inventoryBalance.findMany({ where: { itemId: shelved.id } });
+      if (main && main.id !== warehouse.id) {
+        await prisma.$transaction((tx) => receiveStock(tx, { itemId: shelved.id, warehouseId: warehouse.id, quantity: 2, unitCost: 5, sourceType: 'verify' }));
+      }
+      const lineAfter = await prisma.inventoryBalance.findMany({ where: { itemId: shelved.id } });
+      check(
+        'an item stocked nowhere gets one zero line in the main warehouse; its first receipt in another warehouse takes that line away',
+        placed === 1 &&
+          lineBefore.length === 1 &&
+          lineBefore[0].warehouseId === main?.id &&
+          Number(lineBefore[0].quantity) === 0 &&
+          (main?.id === warehouse.id || (lineAfter.length === 1 && lineAfter[0].warehouseId === warehouse.id && Number(lineAfter[0].quantity) === 2)),
+        JSON.stringify({ placed, before: lineBefore.map((l) => l.warehouseId), after: lineAfter.map((l) => [l.warehouseId, Number(l.quantity)]) }),
+      );
+      await prisma.inventoryTransaction.deleteMany({ where: { itemId: shelved.id } });
+      await prisma.inventoryBalance.deleteMany({ where: { itemId: shelved.id } });
+      await prisma.item.delete({ where: { id: shelved.id } });
     }
 
     // ── Incoming goes for approval (2026-10-14) ──────────────────────────
@@ -6184,8 +6226,12 @@ async function odooMigration() {
     JSON.stringify({ code: pump.code, brand: pump.brand, cat: pump.category?.code, bal: pump.balances, moves: pump.stockMoves.length }),
   );
   check(
-    'an item with nothing on hand comes in with no stock line, under Consumables and no brand',
-    tape.balances.length === 0 && tape.category?.code === 'CNS' && tape.brand === null,
+    'an item with nothing on hand comes in on the catalogue — one zero line in the main-office warehouse — under Consumables and no brand',
+    tape.balances.length === 1 &&
+      tape.balances[0].warehouseId === warehouse!.id &&
+      Number(tape.balances[0].quantity) === 0 &&
+      tape.category?.code === 'CNS' &&
+      tape.brand === null,
   );
   await runImport(csv, odooInventorySpec, true, (records) => odooInventoryWrite(records, actor));
   const again = await prisma.item.findMany({ where: { partNumber: { startsWith: `${TAG} ODOO` } }, include: { stockMoves: true, balances: true } });
@@ -6250,6 +6296,71 @@ async function odooMigration() {
     'Inventory\'s Brand filter finds the brand case-blind, and the valuation by brand names it with its value',
     res.ok && body.total === 1 && body.summary.valuation === 3900 && body.summary.brands.some((b) => b.value === 'WILO' && b.worth === 3900),
     JSON.stringify({ total: body.total, brands: body.summary?.brands?.slice(0, 3) }),
+  );
+
+  // Odoo's pictures (2026-10-25): base64 in image_1920, matched by Name.
+  console.log('\nOdoo product pictures');
+  const png = (await sharp({ create: { width: 1600, height: 1200, channels: 3, background: { r: 30, g: 120, b: 200 } } }).png().toBuffer()).toString('base64');
+  const picCsv = [
+    'id,name,default_code,uom_id,image_1920',
+    `__export__.a,${TAG} ODOO PUMP-1,"WILO, SUBMERSIBLE PUMP",Units,${png}`,
+    `__export__.b,${TAG} ODOO PUMP-1,"WILO, SUBMERSIBLE PUMP",Units,${png}`,
+    `__export__.c,${TAG} ODOO WRENCH,"STANLEY, WRENCH",Units,${png}`,
+    `__export__.d,${TAG} ODOO TAPE,MASKING TAPE 1 INCH,Units,`,
+    `__export__.e,${TAG} ODOO NOBODY,NOT IN G-CORE,Units,${png}`,
+  ].join('\n');
+  const picDry = await runImport(picCsv, odooPicturesSpec, false, () => Promise.resolve());
+  check(
+    'the pictures check: the pump (two rows, one picture) and the wrench asset to file; no picture and an unknown name skipped, nothing an error',
+    picDry.created === 2 && picDry.errors === 0 && picDry.skipped >= 2,
+    JSON.stringify({ created: picDry.created, skipped: picDry.skipped, errors: picDry.errors }),
+  );
+  check('a dry run files no picture', (await prisma.item.findUniqueOrThrow({ where: { id: pump.id } })).photoId === null);
+  await runImport(picCsv, odooPicturesSpec, true, (records) => odooPicturesWrite(records, actor));
+  const pumpPic = await prisma.item.findUniqueOrThrow({ where: { id: pump.id } });
+  const wrenchPic = await prisma.companyAsset.findUniqueOrThrow({ where: { id: wrench!.id } });
+  const stored = pumpPic.photoId ? await prisma.attachment.findUnique({ where: { id: pumpPic.photoId } }) : null;
+  const meta = stored ? await sharp(attachmentPath(stored.storedName)).metadata() : null;
+  check(
+    'the pump and the wrench take the picture, stored as a JPEG fitted inside 800 px',
+    !!pumpPic.photoId && !!wrenchPic.photoId && meta?.format === 'jpeg' && (meta.width ?? 0) <= 800 && (meta.height ?? 0) <= 800,
+    JSON.stringify({ pump: pumpPic.photoId, wrench: wrenchPic.photoId, meta: meta && [meta.format, meta.width, meta.height] }),
+  );
+  const picAgain = await runImport(picCsv, odooPicturesSpec, false, () => Promise.resolve());
+  await runImport(picCsv, odooPicturesSpec, true, (records) => odooPicturesWrite(records, actor));
+  check(
+    'the file run again files nothing: a picture already on file is kept',
+    picAgain.created === 0 && (await prisma.item.findUniqueOrThrow({ where: { id: pump.id } })).photoId === pumpPic.photoId,
+    JSON.stringify({ created: picAgain.created }),
+  );
+  // The photo routes, and delete for a super admin alone.
+  const editorRole = await makeRole('zzchain_itemeditor', 'ZZ Item editor', ['gchain.items.view_all', 'gchain.items.edit_all']);
+  const editor = await prisma.user.create({
+    data: { email: 'itemeditor@verifyc.local', name: `${TAG} Item Editor`, passwordHash: 'x', roles: { create: { roleId: editorRole.id } } },
+  });
+  const editorToken = signToken(editor.id, editor.email);
+  const form = new FormData();
+  form.append('file', new Blob([Buffer.from(png, 'base64')], { type: 'image/png' }), 'pump.png');
+  const up = await fetch(`${BASE}/items/${tape.id}/photo`, { method: 'POST', headers: { Authorization: `Bearer ${editorToken}` }, body: form });
+  const tapeAfter = await prisma.item.findUniqueOrThrow({ where: { id: tape.id } });
+  const off = await fetch(`${BASE}/items/${tape.id}/photo`, { method: 'DELETE', headers: { Authorization: `Bearer ${editorToken}` } });
+  const tapeOff = await prisma.item.findUniqueOrThrow({ where: { id: tape.id } });
+  check(
+    "whoever may change the item sets and removes its photo; the photo's file goes with it",
+    up.ok && !!tapeAfter.photoId && off.ok && tapeOff.photoId === null && !(await prisma.attachment.findUnique({ where: { id: tapeAfter.photoId! } })),
+    `${up.status} ${off.status}`,
+  );
+  const byEditor = await fetch(`${BASE}/items/${tape.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${editorToken}` } });
+  const stocked = await fetch(`${BASE}/items/${pump.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+  const emptyOne = await fetch(`${BASE}/items/${tape.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+  check(
+    'an item is deleted by a super admin alone, and only while it has no stock and no movements — its catalogue line goes with it',
+    byEditor.status === 403 &&
+      stocked.status === 400 &&
+      emptyOne.ok &&
+      !(await prisma.item.findUnique({ where: { id: tape.id } })) &&
+      (await prisma.inventoryBalance.count({ where: { itemId: tape.id } })) === 0,
+    `${byEditor.status} ${stocked.status} ${emptyOne.status}`,
   );
   await cleanupOdoo();
 }

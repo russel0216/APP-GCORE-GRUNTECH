@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { dropPlaceholder } from './catalogue';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
 import { queueReorderCheck } from './reorder';
@@ -63,6 +64,8 @@ export async function receiveStock(tx: Tx, input: MoveInput) {
       ? (onHand * average + input.quantity * unitCost) / newQty
       : unitCost;
 
+  // A first line in another warehouse takes the item's catalogue placeholder away.
+  if (!balance) await dropPlaceholder(tx, input.itemId, input.warehouseId);
   const updated = await tx.inventoryBalance.upsert({
     where: { itemId_warehouseId: { itemId: input.itemId, warehouseId: input.warehouseId } },
     create: {
@@ -424,6 +427,7 @@ export async function returnIssuedStock(tx: Tx, input: MoveInput & { unitCost: n
   const average = num(balance?.averageCost);
   const newQty = qty(onHand + input.quantity);
   const newAverage = onHand > 0 ? (onHand * average + input.quantity * input.unitCost) / newQty : input.unitCost;
+  if (!balance) await dropPlaceholder(tx, input.itemId, input.warehouseId);
   await tx.inventoryBalance.upsert({
     where: { itemId_warehouseId: { itemId: input.itemId, warehouseId: input.warehouseId } },
     create: { itemId: input.itemId, warehouseId: input.warehouseId, quantity: D(newQty), averageCost: D(Math.round(newAverage * 10000) / 10000) },

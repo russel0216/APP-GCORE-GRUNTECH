@@ -48,23 +48,30 @@ export function belowReorder(b: { quantity: Qty; borrowedQty: Qty; item: { reord
 /**
  * A stock line's state (2026-10-15, the owner's inventory screen):
  * CRITICAL — nothing available, or at or under the item's minimum stock
- * ("immediate PO needed"); LOW_STOCK — at or under the reorder level
- * ("reorder warning"); ON_ORDER — either of those with an issued purchase
- * order for the item still to arrive; IN_STOCK otherwise. The one rule for
- * the list's Status column and filter, the cards and the category tiles.
+ * ("immediate PO needed"), for an item that HAS a minimum or a reorder
+ * level; OUT_OF_STOCK — nothing available on an item that sets neither
+ * (2026-10-25, the Odoo catalogue: thousands of items listed with nothing on
+ * the shelf and no level, which "Critical" would have buried the real alarms
+ * under); LOW_STOCK — at or under the reorder level ("reorder warning");
+ * ON_ORDER — any of those with an issued purchase order for the item still to
+ * arrive; IN_STOCK otherwise. The one rule for the list's Status column and
+ * filter, the cards, the category tiles and the Inventory cards.
  */
-export type StockState = 'IN_STOCK' | 'LOW_STOCK' | 'CRITICAL' | 'ON_ORDER';
-export const STOCK_STATES: StockState[] = ['IN_STOCK', 'LOW_STOCK', 'CRITICAL', 'ON_ORDER'];
+export type StockState = 'IN_STOCK' | 'LOW_STOCK' | 'CRITICAL' | 'OUT_OF_STOCK' | 'ON_ORDER';
+export const STOCK_STATES: StockState[] = ['IN_STOCK', 'LOW_STOCK', 'CRITICAL', 'OUT_OF_STOCK', 'ON_ORDER'];
 
 export function stockState(
   b: { quantity: Qty; borrowedQty: Qty; item: { reorderLevel: Qty | null; minStock?: Qty | null } },
   onOrder: boolean,
 ): StockState {
   const available = availableOf(b);
-  const critical = available <= 0 || (b.item.minStock != null && available <= num(b.item.minStock));
+  const levelled = b.item.reorderLevel !== null || b.item.minStock != null;
+  const empty = available <= 0;
+  const critical = levelled && (empty || (b.item.minStock != null && available <= num(b.item.minStock)));
   const low = belowReorder(b);
-  if ((critical || low) && onOrder) return 'ON_ORDER';
+  if ((critical || low || empty) && onOrder) return 'ON_ORDER';
   if (critical) return 'CRITICAL';
+  if (empty) return 'OUT_OF_STOCK';
   if (low) return 'LOW_STOCK';
   return 'IN_STOCK';
 }

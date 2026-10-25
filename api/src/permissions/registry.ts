@@ -204,7 +204,7 @@ export const REGISTRY: ModuleDef[] = [
         note: 'Anyone may raise one (Create, View Own, Edit Own); View All and Edit All are the warehouse’s' },
       { key: 'borrow_slips', group: 'Warehouse', label: 'Borrow Slips', path: '/g-chain/borrow-slips', actions: [...OWNED_KEPT, 'delete'], phase: 5 },
       { key: 'stock_issuance', own: 'outgoing slips you issued', group: 'Warehouse', label: 'Outgoing', path: '/g-chain/outgoing', actions: SHARED, phase: 5 },
-      { key: 'items', own: 'items you added', group: 'Master data', label: 'Item Master', path: '/g-chain/items', actions: SHARED, phase: 2 },
+      { key: 'items', own: 'items you added', group: 'Master data', label: 'Item Master', path: '/g-chain/items', actions: SHARED_KEPT, phase: 2 },
       { key: 'suppliers', own: 'suppliers you added', group: 'Master data', label: 'Suppliers', path: '/g-chain/suppliers', actions: SHARED, phase: 2 },
       { key: 'warehouses', own: 'warehouses you added', group: 'Master data', label: 'Warehouses', path: '/g-chain/warehouses', actions: SHARED, phase: 2 },
       { key: 'reports', group: 'Analysis', label: 'Reports', path: '/g-chain/reports', actions: READ, phase: 5 },

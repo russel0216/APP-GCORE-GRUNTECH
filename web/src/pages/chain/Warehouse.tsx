@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -10,6 +10,7 @@ import {
   Loading,
   Modal,
   ModalFoot,
+  ProductPicture,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -713,9 +714,18 @@ interface StockRow {
     unit: string;
     minStock: number | null;
     reorderLevel: number | null;
+    /** The product's picture (2026-10-25). */
+    photoId?: string | null;
+    standardCost?: number | null;
     category: { id: string; name: string } | null;
     preferredSupplier: { id: string; name: string } | null;
   };
+  /** The card's price: the average cost, else the standard cost while the shelf is empty. */
+  unitPrice?: number;
+  /** What issued purchase orders still have to bring in. */
+  incoming?: number;
+  /** Who has it on loan, on which slip. */
+  loans?: { slipId: string; number: string; borrower: string; quantity: number }[];
   warehouse: { id: string; name: string };
   /** Its bin or rack. */
   location: { id: string; code: string; name: string | null } | null;
@@ -725,10 +735,16 @@ interface StockRow {
   salesOrder?: { id: string; number: string; customer: string };
 }
 
-type StockState = 'IN_STOCK' | 'LOW_STOCK' | 'CRITICAL' | 'ON_ORDER' | 'PROJECT_STOCK';
-const STOCK_STATE_LABEL: Record<Exclude<StockState, 'PROJECT_STOCK'>, string> = { IN_STOCK: 'In stock', LOW_STOCK: 'Low stock', CRITICAL: 'Critical', ON_ORDER: 'On order' };
+type StockState = 'IN_STOCK' | 'LOW_STOCK' | 'CRITICAL' | 'OUT_OF_STOCK' | 'ON_ORDER' | 'PROJECT_STOCK';
+const STOCK_STATE_LABEL: Record<Exclude<StockState, 'PROJECT_STOCK'>, string> = {
+  IN_STOCK: 'In stock',
+  LOW_STOCK: 'Low stock',
+  CRITICAL: 'Critical',
+  OUT_OF_STOCK: 'Out of stock',
+  ON_ORDER: 'On order',
+};
 const stateLabel = (st: StockState) => (st === 'PROJECT_STOCK' ? 'Project stock' : STOCK_STATE_LABEL[st]);
-const STOCK_STATE_TONES = { IN_STOCK: 'ok', LOW_STOCK: 'warn', CRITICAL: 'danger', ON_ORDER: 'info', PROJECT_STOCK: 'info' } as const;
+const STOCK_STATE_TONES = { IN_STOCK: 'ok', LOW_STOCK: 'warn', CRITICAL: 'danger', OUT_OF_STOCK: 'danger', ON_ORDER: 'info', PROJECT_STOCK: 'info' } as const;
 
 /** A category tile (2026-10-15, the owner's inventory screen): its items, their value, how many need reordering. */
 interface CategoryTile {
@@ -754,6 +770,7 @@ interface InventorySummary {
   valuation?: number;
   lowStock?: number;
   critical?: number;
+  outOfStock?: number;
   onOrder?: number;
   pendingOrders?: number;
   categories?: CategoryTile[];
@@ -870,7 +887,7 @@ export function Inventory() {
   // The category tiles and the chart come with the list's summary.
   const [categories, setCategories] = useState<CategoryTile[]>([]);
   const [brands, setBrands] = useState<BrandTile[]>([]);
-  const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
+  const [importing, setImporting] = useState<{ entity: string; label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
   const chosenCategory = params.get('categoryId') ?? '';
   /** The list's own URL with the brand set — the valuation by brand's links. */
@@ -1003,10 +1020,7 @@ export function Inventory() {
         </div>
       </div>
 
-      {view === 'kanban' ? (
-        <InventoryBoard warehouses={warehouses} />
-      ) : (
-        <DataList<StockRow>
+      <DataList<StockRow>
           listKey="inventory"
           endpoint="/inventory"
           printPath="/api/inventory/pdf"
@@ -1047,7 +1061,16 @@ export function Inventory() {
                     hint: "Odoo's product export as it comes (.xlsx or .csv) — the items, their brand and group, and the opening stock in the main-office warehouse; checked before anything is saved",
                     onSelect: () => {
                       void loadImportSpec('odoo_inventory').then((spec) => {
-                        if (spec) setImporting(spec as { label: string; columns: never[] });
+                        if (spec) setImporting({ entity: 'odoo_inventory', ...(spec as { label: string; columns: never[] }) });
+                      });
+                    },
+                  },
+                  {
+                    label: 'Import pictures from Odoo…',
+                    hint: "Odoo's export with Name and Image (image_1920) — a picture for each item and G-HR asset of that name that has none yet; export a few hundred products a file, under 95 MB",
+                    onSelect: () => {
+                      void loadImportSpec('odoo_pictures').then((spec) => {
+                        if (spec) setImporting({ entity: 'odoo_pictures', ...(spec as { label: string; columns: never[] }) });
                       });
                     },
                   },
@@ -1081,10 +1104,11 @@ export function Inventory() {
             }
             return (
               <>
-                <Stat label="Total items" value={sum.items ?? 0} sub="Stocked items" />
+                <Stat label="Total items" value={sum.items ?? 0} sub="Every item, stocked or not" />
                 <Stat label="Total valuation" value={formatMoney(sum.valuation ?? 0)} sub="Commercial stock" />
                 <Stat label="Reorder warning" value={sum.lowStock ?? 0} sub="Below reorder level" accent="warn" to="/g-chain/inventory?state=LOW_STOCK" />
                 <Stat label="Critical" value={sum.critical ?? 0} sub="Nothing left, or under the minimum" accent="danger" to="/g-chain/inventory?state=CRITICAL" />
+                <Stat label="Out of stock" value={sum.outOfStock ?? 0} sub="Nothing on the shelf, no level set" to="/g-chain/inventory?state=OUT_OF_STOCK" />
                 <Stat label="Pending POs" value={sum.pendingOrders ?? 0} sub={`In transit${sum.onOrder ? ` · ${sum.onOrder} low items on order` : ''}`} to="/g-chain/purchase-orders?awaiting=true" />
                 <Stat
                   label="Project stock"
@@ -1148,10 +1172,12 @@ export function Inventory() {
               label: 'Warehouse',
               options: warehouses.map((w) => ({ value: w.id, label: w.name })),
             },
+            { key: 'onHand', label: 'On hand', options: [{ value: 'yes', label: 'In stock only' }, { value: 'no', label: 'Nothing on hand' }] },
             { key: 'needsReorder', label: 'Reorder', options: [{ value: 'true', label: 'Below level' }] },
           ]}
+          // Kanban (2026-10-25, gasiontech's cards): the same rows, query and pages, drawn as product cards.
+          renderRows={view === 'kanban' ? (rows) => <InventoryCards rows={rows} canEditItems={can('gchain.items.edit_all') || can('gchain.items.edit_own')} /> : undefined}
         />
-      )}
       {view === 'list' && categories.some((c) => c.value > 0) && (
         <Panel title="Stock value by category" blurb="What each category holds, at moving average cost — and how many of its lines need reordering.">
           <BarList
@@ -1183,7 +1209,7 @@ export function Inventory() {
       )}
       {importing && (
         <ImportModal
-          entity="odoo_inventory"
+          entity={importing.entity}
           label={importing.label}
           columns={importing.columns}
           onClose={() => setImporting(null)}
@@ -1195,160 +1221,142 @@ export function Inventory() {
   );
 }
 
-interface BoardCard {
-  id: string;
-  item: { id: string; code: string; partNumber: string | null; name: string; unit: string; reorderLevel: number | null };
-  warehouse: { id: string; name: string };
-  quantity: number;
-  borrowedQty: number;
-  available: number;
-  value: number;
-  needsReorder: boolean;
-}
-
-interface Board {
-  total: number;
-  cap: number;
-  columns: { warehouse: { id: string; name: string }; count: number; value: number; cards: BoardCard[] }[];
-  outOfStock: { count: number; cards: BoardCard[] };
+/**
+ * The stock as product cards (2026-10-25, the owner's call: "the Kanban style
+ * from gasiontech G-CORE"): the list's own rows — its query, filters, search
+ * and pages — each a card with the product's picture (its photo, else its
+ * initials on its category's colour), the description, part number, group
+ * and brand, the price a unit, what is on hand and coming in, who has it on
+ * loan, and the stock state. The card opens the stock card; ✎ opens the item
+ * for whoever may change it. No delete: an item is deleted on its own form,
+ * by a super admin.
+ */
+function InventoryCards({ rows, canEditItems }: { rows: StockRow[]; canEditItems: boolean }) {
+  if (!rows.length) return null;
+  return (
+    <div className="inv-tiles">
+      {rows.map((s) => {
+        const href = `/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}${s.project ? `&jobId=${s.project.id}` : ''}${s.salesOrder ? `&salesOrderId=${s.salesOrder.id}` : ''}`;
+        return (
+          <article key={s.id} className="inv-tile">
+            <Link to={href} className="inv-tile-main">
+              <ProductPicture photoId={s.item.photoId} name={s.item.name} toneKey={s.item.category?.name ?? s.item.brand} className="inv-tile-pic" />
+              <span className="inv-tile-body">
+                <span className="inv-tile-name" title={s.item.name}>{s.item.name}</span>
+                <span className="inv-tile-code mono">{s.item.partNumber ?? s.item.code}</span>
+                {s.loans && s.loans.length > 0 && (
+                  <span className="inv-tile-loan">{s.loans.map((l) => `${l.quantity} on loan — ${l.borrower} (${l.number})`).join(' · ')}</span>
+                )}
+                <span className="inv-tile-group">
+                  {s.item.category?.name ?? 'Not categorised'}
+                  {s.item.brand ? ` · ${s.item.brand}` : ''}
+                </span>
+                <span className="inv-tile-price">
+                  <span className="mono">{formatMoney(s.unitPrice ?? s.averageCost)}</span> <span className="faint">/ {s.item.unit}</span>
+                </span>
+                <span className="inv-tile-figures">
+                  <span>
+                    <span className="inv-tile-label">On hand</span>
+                    <span className="mono inv-tile-qty">
+                      {s.quantity} {s.item.unit}
+                    </span>
+                  </span>
+                  <span className="inv-tile-in">
+                    <span className="inv-tile-label">Incoming</span>
+                    <span className="mono inv-tile-qty">{s.incoming ? `+${s.incoming} ${s.item.unit}` : '—'}</span>
+                  </span>
+                </span>
+                {s.project && <span className="faint">{s.project.number}'s own stock</span>}
+                {s.salesOrder && <span className="faint">{s.salesOrder.number}'s own stock</span>}
+              </span>
+            </Link>
+            <span className="inv-tile-foot">
+              <StatusBadge status={s.state} extra={STOCK_STATE_TONES} label={stateLabel(s.state)} />
+              {canEditItems && (
+                <Link to={`/g-chain/items/${s.item.id}`} className="btn btn-sm btn-icon btn-ghost" aria-label={`Modify item ${s.item.name}`} title="Modify item">
+                  ✎
+                </Link>
+              )}
+            </span>
+          </article>
+        );
+      })}
+    </div>
+  );
 }
 
 /**
- * The stock as a board: a column per warehouse holding what it has
- * available, and Out of stock for what has none — the list's own query
- * (`GET /inventory/board`), its search and filters read from and written to
- * the same URL keys, so switching views keeps them. No dragging: stock moves
- * by documents. A card opens the item's stock card.
+ * The product's picture on its stock card (2026-10-25): shown to every
+ * reader, set or removed by whoever may change the item. The server fits it
+ * inside 800 px and keeps a JPEG.
  */
-function InventoryBoard({ warehouses }: { warehouses: { id: string; name: string }[] }) {
-  const [params, setParams] = useSearchParams();
-  const q = params.get('q') ?? '';
-  const warehouseId = params.get('warehouseId') ?? '';
-  const needsReorder = params.get('needsReorder') === 'true';
-  const [typed, setTyped] = useState(q);
-  const [board, setBoard] = useState<Board | null>(null);
-  const [error, setError] = useState<unknown>(null);
-
-  const setParam = useCallback(
-    (key: string, value: string) => {
-      setParams(
-        (prev) => {
-          const p = new URLSearchParams(prev);
-          if (value) p.set(key, value);
-          else p.delete(key);
-          p.delete('page');
-          return p;
-        },
-        { replace: true },
-      );
-    },
-    [setParams],
-  );
-
-  // The search box writes `?q=` a moment after typing stops.
-  useEffect(() => {
-    if (typed === q) return;
-    const t = window.setTimeout(() => setParam('q', typed.trim()), 300);
-    return () => window.clearTimeout(t);
-  }, [typed, q, setParam]);
-
-  useEffect(() => {
-    let live = true;
-    api
-      .get<Board>(`/inventory/board${qs({ search: q || undefined, warehouseId: warehouseId || undefined, needsReorder: needsReorder ? 'true' : undefined })}`)
-      .then((b) => {
-        if (!live) return;
-        setBoard(b);
-        setError(null);
-      })
-      .catch((err) => live && setError(err));
-    return () => {
-      live = false;
-    };
-  }, [q, warehouseId, needsReorder]);
-
-  const cardOf = (c: BoardCard, showWarehouse: boolean) => (
-    <Link key={c.id} to={`/g-chain/inventory/${c.item.id}?warehouseId=${c.warehouse.id}`} className={`inv-card${c.needsReorder ? ' is-low' : ''}`}>
-      <span className="inv-card-name">{c.item.name}</span>
-      <span className="inv-card-code mono">
-        {c.item.code}
-        {c.item.partNumber ? ` · ${c.item.partNumber}` : ''}
-      </span>
-      <span className="inv-card-figures">
-        <span className="inv-card-available mono">
-          {c.available} {c.item.unit}
-        </span>
-        <span className="faint">available</span>
-      </span>
-      <span className="inv-card-foot faint">
-        {showWarehouse ? `${c.warehouse.name} · ` : ''}
-        {c.quantity} on hand{c.borrowedQty ? ` · ${c.borrowedQty} on loan` : ''}
-        {c.needsReorder && <span className="badge warn">reorder</span>}
-      </span>
-    </Link>
-  );
-
+function ItemPhotoCard({
+  itemId,
+  name,
+  photoId,
+  toneKey,
+  canEdit,
+  onChanged,
+  onError,
+}: {
+  itemId: string;
+  name: string;
+  photoId: string | null;
+  toneKey: string | null;
+  canEdit: boolean;
+  onChanged: (photoId: string | null) => void;
+  onError: (err: unknown) => void;
+}) {
+  const toast = useToast();
+  const input = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  async function upload(file: File) {
+    setBusy(true);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const saved = await api.post<{ photoId: string }>(`/items/${itemId}/photo`, form);
+      onChanged(saved.photoId);
+      toast('ok', 'Photo saved');
+    } catch (err) {
+      onError(err);
+    } finally {
+      setBusy(false);
+      if (input.current) input.current.value = '';
+    }
+  }
+  const confirm = useConfirm();
+  function remove() {
+    confirm.ask({
+      title: `Remove the photo of ${name}?`,
+      body: 'The cards and the stock card show its initials until another photo is added.',
+      confirmLabel: 'Remove photo',
+      onConfirm: async () => {
+        await api.del(`/items/${itemId}/photo`);
+        onChanged(null);
+        toast('ok', 'Photo removed');
+      },
+    });
+  }
+  if (!photoId && !canEdit) return null;
   return (
-    <div>
-      <div className="inv-board-tools">
-        <input
-          type="search"
-          className="inv-board-search"
-          aria-label="Search the stock"
-          placeholder="Search item name, code, part number…"
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-        />
-        <select aria-label="Warehouse" value={warehouseId} onChange={(e) => setParam('warehouseId', e.target.value)}>
-          <option value="">Every warehouse</option>
-          {warehouses.map((w) => (
-            <option key={w.id} value={w.id}>
-              {w.name}
-            </option>
-          ))}
-        </select>
-        <label className="row inv-board-check">
-          <input type="checkbox" checked={needsReorder} onChange={(e) => setParam('needsReorder', e.target.checked ? 'true' : '')} />
-          Below reorder level only
-        </label>
-        {board && <span className="faint">{board.total} stock line{board.total === 1 ? '' : 's'}</span>}
-      </div>
-      <ErrorBox error={error} />
-      {!board ? (
-        <Loading />
-      ) : (
-        <div className="inv-board" role="list" aria-label="Stock by warehouse">
-          {board.columns.map((col) => (
-            <section key={col.warehouse.id} className="inv-col" role="listitem" aria-label={col.warehouse.name}>
-              <header className="inv-col-head">
-                <span className="inv-col-name">{col.warehouse.name}</span>
-                <span className="faint">
-                  {col.count} item{col.count === 1 ? '' : 's'} · {formatMoney(col.value)}
-                </span>
-              </header>
-              <div className="inv-col-cards">
-                {col.cards.length ? col.cards.map((c) => cardOf(c, false)) : <p className="faint inv-col-empty">Nothing available here</p>}
-                {col.count > col.cards.length && <p className="faint inv-col-empty">{col.count - col.cards.length} more — narrow the search to see them</p>}
-              </div>
-            </section>
-          ))}
-          <section className="inv-col is-out" role="listitem" aria-label="Out of stock">
-            <header className="inv-col-head">
-              <span className="inv-col-name">Out of stock</span>
-              <span className="faint">
-                {board.outOfStock.count} item{board.outOfStock.count === 1 ? '' : 's'} · none available
-              </span>
-            </header>
-            <div className="inv-col-cards">
-              {board.outOfStock.cards.length ? board.outOfStock.cards.map((c) => cardOf(c, true)) : <p className="faint inv-col-empty">Nothing has run out</p>}
-              {board.outOfStock.count > board.outOfStock.cards.length && (
-                <p className="faint inv-col-empty">{board.outOfStock.count - board.outOfStock.cards.length} more — narrow the search to see them</p>
-              )}
-            </div>
-          </section>
+    <section className="card item-photo-card" aria-label="Product photo">
+      {confirm.bar}
+      <ProductPicture photoId={photoId} name={name} toneKey={toneKey} className="item-photo" />
+      {canEdit && (
+        <div className="row item-photo-actions">
+          <input ref={input} type="file" accept="image/*" hidden onChange={(e) => e.target.files?.[0] && void upload(e.target.files[0])} />
+          <button type="button" className="btn btn-sm" disabled={busy} onClick={() => input.current?.click()}>
+            {photoId ? 'Change photo' : 'Add photo'}
+          </button>
+          {photoId && (
+            <button type="button" className="btn btn-sm btn-ghost" disabled={busy || confirm.open} onClick={remove}>
+              Remove
+            </button>
+          )}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -1377,7 +1385,7 @@ export function StockCard() {
   if (loading) return <Loading />;
   if (!data) return <ErrorBox error={error ?? new Error('Not found')} />;
 
-  const item = data.item as { code: string; name: string; unit: string; reorderLevel: number | null };
+  const item = data.item as { code: string; name: string; unit: string; reorderLevel: number | null; photoId?: string | null; category?: { code: string } | null };
   const balances = data.balances as {
     id: string;
     quantity: number;
@@ -1448,6 +1456,18 @@ export function StockCard() {
       />
 
       <ErrorBox error={error} />
+
+      {!jobId && !salesOrderId && (
+        <ItemPhotoCard
+          itemId={itemId!}
+          name={item.name}
+          photoId={item.photoId ?? null}
+          toneKey={item.category?.code ?? null}
+          canEdit={data.canEditPhoto === true}
+          onChanged={(photoId) => setData({ ...data, item: { ...item, photoId } })}
+          onError={setError}
+        />
+      )}
 
       <div className="kpi-grid proc-stats">
         {balances.map((b) => (

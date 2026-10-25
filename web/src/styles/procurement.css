@@ -401,109 +401,110 @@
   flex-wrap: wrap;
 }
 
-/* ── Inventory as a board (2026-10-14): a column per warehouse, then Out of
-   stock. The board scrolls sideways inside the page; a column scrolls down. */
-.inv-board-tools {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s-3);
-  margin-bottom: var(--s-4);
-}
-.inv-board-tools .inv-board-search {
-  flex: 0 1 280px;
-  width: 280px;
-  max-width: 100%;
-}
-.inv-board-tools select {
-  width: auto;
-  min-width: 12rem;
-}
-.inv-board-check {
-  gap: var(--s-2);
-  font-size: var(--fs-sm);
-}
-.inv-board {
+/* ── Inventory as cards (2026-10-25, gasiontech's product cards): the
+   picture or its initials, the name, part no., group and brand, the price a
+   unit, On hand and Incoming, who has it on loan, the state and ✎. */
+.inv-tiles {
   display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(16rem, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
   gap: var(--s-4);
-  overflow-x: auto;
-  padding-bottom: var(--s-2);
 }
-.inv-col {
+.inv-tile {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: var(--surface-2);
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  overflow: hidden;
 }
-.inv-col.is-out {
-  border-color: rgb(var(--danger-rgb) / 0.45);
-  background: rgb(var(--danger-rgb) / 0.05);
+.inv-tile:hover {
+  border-color: var(--neon);
 }
-.inv-col-head {
+.inv-tile-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  color: inherit;
+  text-decoration: none;
+}
+.inv-tile-pic {
+  width: 100%;
+  height: 8.5rem;
+  border-bottom: 1px solid var(--line);
+}
+.inv-tile-body {
   display: flex;
   flex-direction: column;
   gap: var(--s-1);
   padding: var(--s-3) var(--s-4);
-  border-bottom: 1px solid var(--line);
-}
-.inv-col-name {
-  font-weight: 600;
-}
-.inv-col-cards {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  padding: var(--s-3);
-  max-height: 70vh;
-  overflow-y: auto;
-}
-.inv-col-empty {
-  margin: var(--s-2) 0;
   font-size: var(--fs-sm);
 }
-.inv-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-  padding: var(--s-3);
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  color: inherit;
-  text-decoration: none;
-}
-.inv-card:hover {
-  border-color: var(--neon);
-}
-.inv-card.is-low {
-  border-left: 3px solid rgb(var(--warn-rgb));
-}
-.inv-card-name {
+.inv-tile-name {
   font-weight: 600;
+  font-size: var(--fs-base);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
-.inv-card-code {
+.inv-tile-code {
   font-size: var(--fs-xs);
   color: var(--muted);
+  overflow-wrap: anywhere;
 }
-.inv-card-figures {
-  display: flex;
-  align-items: baseline;
-  gap: var(--s-2);
+.inv-tile-loan {
+  font-size: var(--fs-xs);
+  color: rgb(var(--warn-rgb));
 }
-.inv-card-available {
-  font-size: var(--fs-lg);
+.inv-tile-group {
+  color: var(--muted);
+}
+.inv-tile-price {
   font-weight: 600;
 }
-.inv-card-foot {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+.inv-tile-figures {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: var(--s-2);
+  margin-top: var(--s-1);
+}
+.inv-tile-figures > span {
+  display: flex;
+  flex-direction: column;
+}
+.inv-tile-label {
   font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.inv-tile-qty {
+  font-weight: 600;
+}
+.inv-tile-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-4);
+  border-top: 1px solid var(--line);
+}
+
+/* The product's picture on its stock card. */
+.item-photo-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-3);
+}
+.item-photo {
+  width: 16rem;
+  max-width: 100%;
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
 }
 
 /* The Incoming page (2026-10-14): against an order or without one. */
@@ -582,17 +583,15 @@ a.inv-move:hover .inv-move-what {
   The cards over the inventory share their grid with the category block,
   which spans every column — so auto-fit kept nine narrow tracks and the six
   cards stood thin, tall and short of the right edge (2026-10-18, the owner:
-  "card size are not standard"). With the block there the row is six equal
-  columns, as wide as the Incoming list's cards; narrower screens fold to
-  three, then two.
+  "card size are not standard"). With Out of stock (2026-10-25) there are
+  seven, so the row is FOUR equal columns with the valuation — the widest
+  figure — across two: two even rows; a phone folds to two.
 */
 .kpi-grid.list-summary:has(> .inv-cats) {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
-@media (max-width: 1100px) {
-  .kpi-grid.list-summary:has(> .inv-cats) {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
+.kpi-grid.list-summary:has(> .inv-cats) > :nth-child(2) {
+  grid-column: span 2;
 }
 @media (max-width: 640px) {
   .kpi-grid.list-summary:has(> .inv-cats) {

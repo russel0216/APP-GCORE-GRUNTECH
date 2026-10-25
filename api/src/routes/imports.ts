@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { placeOnShelf } from '../shared/catalogue';
 import multer from 'multer';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -23,6 +24,7 @@ import { employeesImport } from './imports/employees';
 import { scoroQuotesImport } from './imports/scoroQuotes';
 import { scoroInvoicesImport } from './imports/scoroInvoices';
 import { odooInventoryImport, odooAssetsImport } from './imports/odoo';
+import { odooPicturesImport, PICTURE_UPLOAD_MB } from './imports/odooPictures';
 import { courseImport } from './academy';
 import { makePartner, safeHttpUrl, type ResourceKind } from '../shared/partners';
 
@@ -41,6 +43,12 @@ importRoutes.use(authenticate);
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 8 * 1024 * 1024 },
+});
+// Odoo's pictures ride in the CSV as base64 (2026-10-25): a batch of a few
+// hundred products is tens of MB, so that one import takes the larger ceiling.
+const pictureUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: PICTURE_UPLOAD_MB * 1024 * 1024 },
 });
 
 // ── Specs ────────────────────────────────────────────────────────────────────
@@ -516,7 +524,8 @@ export async function itemWrite(
       void code;
       await prisma.item.update({ where: { id: existingId }, data: fields });
     } else {
-      await prisma.item.create({ data: record });
+      const made = await prisma.item.create({ data: record });
+      await placeOnShelf(prisma, [made.id]);
     }
   }
 }
@@ -570,6 +579,8 @@ const REGISTRY: Record<string, Registered> = {
   // opening stock, and — from the same file — the assets and tools for G-HR.
   odoo_inventory: odooInventoryImport,
   odoo_assets: odooAssetsImport,
+  // Odoo's product pictures (2026-10-25), base64 in the CSV, onto the items and assets.
+  odoo_pictures: odooPicturesImport,
 };
 
 importRoutes.get(
@@ -604,7 +615,7 @@ importRoutes.get(
 
 importRoutes.post(
   '/:entity',
-  upload.single('file'),
+  (req, res, next) => (req.params.entity === 'odoo_pictures' ? pictureUpload : upload).single('file')(req, res, next),
   handler(async (req, res) => {
     const entry = REGISTRY[req.params.entity];
     if (!entry) throw notFound('Unknown import type');
