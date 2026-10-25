@@ -6350,6 +6350,25 @@ async function odooMigration() {
     up.ok && !!tapeAfter.photoId && off.ok && tapeOff.photoId === null && !(await prisma.attachment.findUnique({ where: { id: tapeAfter.photoId! } })),
     `${up.status} ${off.status}`,
   );
+  // The asset's photo: on its record and its register row, and its own two routes.
+  const assetRead = await api(token, 'GET', `/assets/${wrench!.id}`);
+  const assetList = await api(token, 'GET', `/assets?search=${encodeURIComponent(wrench!.tag)}&pageSize=5`);
+  const assetOff = await api(token, 'DELETE', `/assets/${wrench!.id}/photo`);
+  const assetForm = new FormData();
+  assetForm.append('file', new Blob([Buffer.from(png, 'base64')], { type: 'image/png' }), 'wrench.png');
+  const assetUp = await fetch(`${BASE}/assets/${wrench!.id}/photo`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: assetForm });
+  const assetAfter = await prisma.companyAsset.findUniqueOrThrow({ where: { id: wrench!.id } });
+  check(
+    "an asset's photo reaches its page and its register row, and is removed and set again through its own routes",
+    assetRead.body.photoId === wrenchPic.photoId &&
+      ((assetList.body.rows ?? []) as { id: string; photoId: string | null }[]).some((r) => r.id === wrench!.id && r.photoId === wrenchPic.photoId) &&
+      assetOff.status === 200 &&
+      !(await prisma.attachment.findUnique({ where: { id: wrenchPic.photoId! } })) &&
+      assetUp.ok &&
+      !!assetAfter.photoId &&
+      assetAfter.photoId !== wrenchPic.photoId,
+    `${assetRead.body.photoId} ${assetOff.status} ${assetUp.status}`,
+  );
   const byEditor = await fetch(`${BASE}/items/${tape.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${editorToken}` } });
   const stocked = await fetch(`${BASE}/items/${pump.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
   const emptyOne = await fetch(`${BASE}/items/${tape.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });

@@ -7,7 +7,8 @@ import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { Attachments } from '../../components/Attachments';
 import { NumberInput } from '../../components/NumberInput';
-import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
+import { PhotoCard } from '../../components/PhotoCard';
+import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, ProductPicture, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 
@@ -55,6 +56,8 @@ interface AssetRow {
   brandModel: string;
   /** 1 for a tagged unit; a lot (the Odoo import's "120 swivel clamps") is issued and returned whole. */
   quantity: number;
+  /** Its picture — from the Odoo picture import or set on its page. */
+  photoId: string | null;
   serialNo: string | null;
   plateNo: string | null;
   description: string | null;
@@ -127,7 +130,16 @@ const stateBadge = (s: AssetState) => <StatusBadge status={s} extra={ASSET_TONES
 
 const columns: Column<AssetRow>[] = [
   { key: 'tag', label: 'Tag', sortKey: 'tag', optional: true, render: (r) => <span className="mono">{r.tag}</span> },
-  { key: 'type', label: 'Asset type', render: (r) => <strong>{r.assetType.name}</strong> },
+  {
+    key: 'type',
+    label: 'Asset type',
+    render: (r) => (
+      <span className="asset-type-cell">
+        <ProductPicture photoId={r.photoId} name={r.brandModel} toneKey={r.assetType.name} className="asset-thumb" />
+        <strong>{r.assetType.name}</strong>
+      </span>
+    ),
+  },
   { key: 'brandModel', label: 'Brand & model', sortKey: 'brandModel', render: (r) => (r.quantity > 1 ? `${r.brandModel} (lot of ${r.quantity})` : r.brandModel) },
   {
     key: 'details',
@@ -635,6 +647,17 @@ export function AssetPage() {
 
       <div className="stack">
         {r.returnNotice && <div className="alert danger">⚠ {r.returnNotice}</div>}
+        <PhotoCard
+          path={`/assets/${r.id}/photo`}
+          label="Asset photo"
+          shownOn="The register and this page show"
+          name={r.brandModel}
+          photoId={r.photoId}
+          toneKey={r.assetType.name}
+          canEdit={r.canEdit}
+          onChanged={(photoId) => setRow({ ...r, photoId })}
+          onError={setError}
+        />
         <div className="grid grid-2">
           <section className="card">
             <h3 className="card-title">The asset</h3>

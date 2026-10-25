@@ -3,7 +3,9 @@ import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, conflict, forbidden, idsFilter, deleteOrRefuse } from '../http/kit';
-import { deleteAttachmentsOf, registerAttachmentGuard } from '../shared/attachments';
+import fs from 'fs';
+import { deleteAttachmentsOf, registerAttachmentGuard, upload } from '../shared/attachments';
+import { clearPhoto, setPhoto } from '../shared/catalogue';
 import { authenticate, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, viewScope } from '../shared/ownScope';
@@ -515,7 +517,48 @@ assetRoutes.delete(
     if (issued) throw badRequest(`${row.tag} has been issued ${issued === 1 ? 'once' : `${issued} times`} — retire it instead, so its history stays`);
     await deleteOrRefuse(`Asset ${row.tag}`, () => prisma.companyAsset.delete({ where: { id: row.id } }));
     await deleteAttachmentsOf(DOC, [row.id]);
+    await deleteAttachmentsOf('asset_photo', [row.id]);
     await audit({ entityType: DOC, entityId: row.id, action: 'DELETED', summary: `Deleted asset ${row.tag} — ${row.brandModel}` }, req);
+    res.json({ ok: true });
+  }),
+);
+
+// ── The asset's photo (2026-10-25) ──────────────────────────────────────────
+// Set by the Odoo picture import or by hand here; read by anyone signed in
+// (the `asset_photo` guard in routes/masters.ts), written only by these two.
+
+assetRoutes.post(
+  '/:id/photo',
+  requireEdit('ghr', 'assets'),
+  upload.single('file'),
+  handler(async (req, res) => {
+    const file = req.file;
+    try {
+      const { me, row } = await forEdit(req);
+      if (!file) throw badRequest('Choose a picture');
+      if (!file.mimetype.startsWith('image/')) throw badRequest('An asset photo is a picture — JPEG, PNG or WEBP');
+      let photoId: string;
+      try {
+        photoId = await setPhoto('asset', row.id, fs.readFileSync(file.path), me.id, file.originalname);
+      } catch (err) {
+        if ((err as Error)?.message?.includes('Input')) throw badRequest('That file could not be read as a picture');
+        throw err;
+      }
+      await audit({ entityType: DOC, entityId: row.id, action: 'UPDATED', summary: `Set the photo of asset ${row.tag} — ${row.brandModel}` }, req);
+      res.json({ photoId });
+    } finally {
+      if (file) fs.rmSync(file.path, { force: true });
+    }
+  }),
+);
+
+assetRoutes.delete(
+  '/:id/photo',
+  requireEdit('ghr', 'assets'),
+  handler(async (req, res) => {
+    const { row } = await forEdit(req);
+    await clearPhoto('asset', row.id);
+    await audit({ entityType: DOC, entityId: row.id, action: 'UPDATED', summary: `Removed the photo of asset ${row.tag} — ${row.brandModel}` }, req);
     res.json({ ok: true });
   }),
 );

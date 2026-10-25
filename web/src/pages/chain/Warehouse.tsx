@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -24,6 +24,7 @@ import { useConfirm } from '../../components/Confirm';
 import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { NumberInput } from '../../components/NumberInput';
+import { PhotoCard } from '../../components/PhotoCard';
 import { label } from './PurchaseRequests';
 
 // ════════════════════════════════════════════════════════════════════
@@ -1285,81 +1286,6 @@ function InventoryCards({ rows, canEditItems }: { rows: StockRow[]; canEditItems
   );
 }
 
-/**
- * The product's picture on its stock card (2026-10-25): shown to every
- * reader, set or removed by whoever may change the item. The server fits it
- * inside 800 px and keeps a JPEG.
- */
-function ItemPhotoCard({
-  itemId,
-  name,
-  photoId,
-  toneKey,
-  canEdit,
-  onChanged,
-  onError,
-}: {
-  itemId: string;
-  name: string;
-  photoId: string | null;
-  toneKey: string | null;
-  canEdit: boolean;
-  onChanged: (photoId: string | null) => void;
-  onError: (err: unknown) => void;
-}) {
-  const toast = useToast();
-  const input = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
-  async function upload(file: File) {
-    setBusy(true);
-    try {
-      const form = new FormData();
-      form.append('file', file);
-      const saved = await api.post<{ photoId: string }>(`/items/${itemId}/photo`, form);
-      onChanged(saved.photoId);
-      toast('ok', 'Photo saved');
-    } catch (err) {
-      onError(err);
-    } finally {
-      setBusy(false);
-      if (input.current) input.current.value = '';
-    }
-  }
-  const confirm = useConfirm();
-  function remove() {
-    confirm.ask({
-      title: `Remove the photo of ${name}?`,
-      body: 'The cards and the stock card show its initials until another photo is added.',
-      confirmLabel: 'Remove photo',
-      onConfirm: async () => {
-        await api.del(`/items/${itemId}/photo`);
-        onChanged(null);
-        toast('ok', 'Photo removed');
-      },
-    });
-  }
-  if (!photoId && !canEdit) return null;
-  return (
-    <section className="card item-photo-card" aria-label="Product photo">
-      {confirm.bar}
-      <ProductPicture photoId={photoId} name={name} toneKey={toneKey} className="item-photo" />
-      {canEdit && (
-        <div className="row item-photo-actions">
-          <input ref={input} type="file" accept="image/*" hidden onChange={(e) => e.target.files?.[0] && void upload(e.target.files[0])} />
-          <button type="button" className="btn btn-sm" disabled={busy} onClick={() => input.current?.click()}>
-            {photoId ? 'Change photo' : 'Add photo'}
-          </button>
-          {photoId && (
-            <button type="button" className="btn btn-sm btn-ghost" disabled={busy || confirm.open} onClick={remove}>
-              Remove
-            </button>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
-
 export function StockCard() {
   const { itemId } = useParams<{ itemId: string }>();
   const toast = useToast();
@@ -1458,8 +1384,10 @@ export function StockCard() {
       <ErrorBox error={error} />
 
       {!jobId && !salesOrderId && (
-        <ItemPhotoCard
-          itemId={itemId!}
+        <PhotoCard
+          path={`/items/${itemId}/photo`}
+          label="Product photo"
+          shownOn="The cards and the stock card show"
           name={item.name}
           photoId={item.photoId ?? null}
           toneKey={item.category?.code ?? null}

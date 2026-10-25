@@ -772,6 +772,22 @@ textarea {
   letter-spacing: 0.04em;
 }
 
+/* An asset's picture in the G-HR register, beside its type. */
+.asset-type-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.asset-thumb {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+}
+.asset-thumb .pp-initials {
+  font-size: var(--fs-xs);
+}
+
 /* The topbar and Account page put an <Avatar> inside a clickable control.
    The circle's own look already comes from .avatar; this just strips the
    button chrome around it, without touching :focus-visible, which is global. */
