@@ -1,9 +1,55 @@
-import { useRef, useState } from 'react';
+import { Fragment, useRef, useState } from 'react';
 import { api, downloadBlob } from '../lib/api';
+import { extensionOf, type ViewWorkbook } from '../lib/spreadsheet';
 import { ErrorBox, Field, Modal, ModalFoot, StatusBadge, useToast, type Tone } from './ui';
 
 /** What the check says it would do with a row. */
-const IMPORT_TONES: Record<string, Tone> = { error: 'danger', create: 'ok', update: 'info' };
+const IMPORT_TONES: Record<string, Tone> = { error: 'danger', create: 'ok', update: 'info', skip: '' };
+
+/** Past this many rows the check lists every problem and skip, and only the first of the rest. */
+const ROWS_SHOWN = 200;
+
+/** A workbook the import reads directly (2026-10-25, Odoo's export is .xlsx) — its first sheet, made CSV here. */
+const WORKBOOK_EXTENSIONS = ['xlsx', 'xlsm', 'xls', 'ods'];
+
+/**
+ * The first sheet of a workbook as CSV text, from its headings row down:
+ * each cell as Excel shows it, parsed in the spreadsheet viewer's worker
+ * (an upload is untrusted input; the page never parses it).
+ */
+async function workbookToCsv(file: File, required: string[]): Promise<File> {
+  const bytes = await file.arrayBuffer();
+  const book = await new Promise<ViewWorkbook>((resolve, reject) => {
+    const worker = new Worker(new URL('../lib/spreadsheet.worker.ts', import.meta.url), { type: 'module' });
+    const timer = setTimeout(() => {
+      worker.terminate();
+      reject(new Error('Reading the workbook took too long — save it as CSV in Excel and choose that instead'));
+    }, 60_000);
+    worker.onmessage = (event: MessageEvent<{ ok: true; workbook: ViewWorkbook } | { ok: false; error: string }>) => {
+      clearTimeout(timer);
+      worker.terminate();
+      if (event.data.ok) resolve(event.data.workbook);
+      else reject(new Error('This file could not be read as a spreadsheet — save it as CSV in Excel and choose that instead'));
+    };
+    worker.onerror = () => {
+      clearTimeout(timer);
+      worker.terminate();
+      reject(new Error('This file could not be read as a spreadsheet — save it as CSV in Excel and choose that instead'));
+    };
+    worker.postMessage({ bytes, fileName: file.name }, [bytes]);
+  });
+  const sheet = book.sheets[0];
+  if (!sheet || !sheet.rows.length) throw new Error('The workbook’s first sheet is empty');
+  if (sheet.truncatedRows) throw new Error('The sheet is longer than the browser reads — save it as CSV in Excel and choose that instead');
+  const quote = (v: string) => (/[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const width = sheet.colCount;
+  // The headings are the first row carrying every required column (Odoo's
+  // are row 1), else the row the viewer guesses, else the top.
+  const named = sheet.rows.slice(0, 20).findIndex((row) => required.every((h) => row.some((cell) => cell.trim() === h)));
+  const top = named >= 0 ? named : (sheet.headerRow ?? 0);
+  const lines = sheet.rows.slice(top).map((row) => Array.from({ length: width }, (_, c) => quote(row[c] ?? '')).join(','));
+  return new File([lines.join('\r\n')], file.name.replace(/\.[^.]+$/, '.csv'), { type: 'text/csv' });
+}
 
 /**
  * CSV import, shared by every master screen.
@@ -22,7 +68,7 @@ interface ColumnDef {
 
 interface RowResult {
   row: number;
-  action: 'create' | 'update' | 'error';
+  action: 'create' | 'update' | 'error' | 'skip';
   key: string;
   message?: string;
 }
@@ -34,9 +80,23 @@ interface ImportReport {
   created: number;
   updated: number;
   errors: number;
+  /** Rows the import leaves to another on purpose (the Odoo file's assets, or its products). */
+  skipped?: number;
   rows: RowResult[];
-  /** What the dry run asks before the file is applied (the SCORO quotes' groups, and the team to tag them with). */
-  extra?: { groups?: GroupQuestion; teams?: TeamQuestion };
+  /**
+   * What the dry run asks before the file is applied (the SCORO quotes' groups,
+   * and the team to tag them with), and what it says the file holds (the Odoo
+   * import's facts and tables).
+   */
+  extra?: { groups?: GroupQuestion; teams?: TeamQuestion; facts?: { label: string; value: string }[]; tables?: ReportTable[] };
+}
+
+/** A small table the check draws over the rows: the Odoo import's groups, brands, holders. */
+interface ReportTable {
+  title: string;
+  note?: string;
+  head: string[];
+  rows: (string | number)[][];
 }
 
 /** "Allow me also to select which team it goes" (2026-10-12): the active teams, and how many quotations the file holds. */
@@ -92,7 +152,7 @@ export function ImportModal({
     setError(null);
     try {
       const form = new FormData();
-      form.append('file', file);
+      form.append('file', WORKBOOK_EXTENSIONS.includes(extensionOf(file.name)) ? await workbookToCsv(file, columns.filter((c) => c.required).map((c) => c.header)) : file);
       // The answers to what the check asked: each unlisted group's choice,
       // else the default; and the team, when one was picked.
       if (commit && (question?.unlisted.length || (teamQuestion && teamChoice))) {
@@ -107,7 +167,7 @@ export function ImportModal({
       );
       setReport(result);
       if (result.committed) {
-        toast('ok', `${result.created} created, ${result.updated} updated`);
+        toast('ok', `${result.created} created, ${result.updated} updated${result.skipped ? `, ${result.skipped} skipped` : ''}`);
         onImported();
       }
     } catch (err) {
@@ -163,12 +223,12 @@ export function ImportModal({
           </p>
 
           <div className="field">
-            <label>CSV file</label>
+            <label>CSV or Excel file</label>
             <div className="row">
               <input
                 ref={fileRef}
                 type="file"
-                accept=".csv,text/csv"
+                accept=".csv,text/csv,.xlsx,.xlsm,.xls,.ods"
                 style={{ display: 'none' }}
                 onChange={(e) => {
                   setFile(e.target.files?.[0] ?? null);
@@ -192,7 +252,7 @@ export function ImportModal({
           >
             {report.committed ? (
               <>
-                Imported — {report.created} created, {report.updated} updated.
+                Imported — {report.created} created, {report.updated} updated{report.skipped ? `, ${report.skipped} skipped` : ''}.
               </>
             ) : report.errors ? (
               <>
@@ -201,11 +261,53 @@ export function ImportModal({
               </>
             ) : (
               <>
-                Ready: {report.created} to create, {report.updated} to update. Nothing is saved
-                yet — press Import to apply.
+                Ready: {report.created} to create, {report.updated} to update
+                {report.skipped ? `, ${report.skipped} left for another import` : ''}. Nothing is saved yet — press Import to apply.
               </>
             )}
           </div>
+
+          {report.extra?.facts && report.extra.facts.length > 0 && (
+            <dl className="kv">
+              {report.extra.facts.map((f) => (
+                <Fragment key={f.label}>
+                  <dt>{f.label}</dt>
+                  <dd>{f.value}</dd>
+                </Fragment>
+              ))}
+            </dl>
+          )}
+
+          {report.extra?.tables?.map((t) => (
+            <section key={t.title} className="import-groups" aria-label={t.title}>
+              <h3 className="svc-subhead">{t.title}</h3>
+              {t.note && <p className="faint">{t.note}</p>}
+              <div className="table-wrap">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      {t.head.map((h, i) => (
+                        <th key={h} className={i > 0 && typeof t.rows[0]?.[i] === 'number' ? 'right' : undefined}>
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {t.rows.map((r, n) => (
+                      <tr key={n}>
+                        {r.map((c, i) => (
+                          <td key={i} className={typeof c === 'number' ? 'right mono' : undefined}>
+                            {c}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ))}
 
           {teamQuestion && teamQuestion.choices.length > 0 && (
             <section className="import-groups" aria-labelledby="import-team-title">
@@ -285,7 +387,7 @@ export function ImportModal({
                 </tr>
               </thead>
               <tbody>
-                {report.rows.map((r) => (
+                {shownRows(report.rows).map((r) => (
                   <tr key={r.row}>
                     <td className="mono">{r.row}</td>
                     <td>
@@ -298,6 +400,11 @@ export function ImportModal({
               </tbody>
             </table>
           </div>
+          {report.rows.length > shownRows(report.rows).length && (
+            <p className="faint">
+              Every row with a problem or skipped is listed; of the rest, the first {ROWS_SHOWN} of {report.rows.length.toLocaleString('en-US')} rows.
+            </p>
+          )}
         </div>
       )}
 
@@ -332,6 +439,14 @@ export function ImportModal({
       )}
     </Modal>
   );
+}
+
+/** A long file's rows: every problem and skip, then the first of the rest. */
+function shownRows(rows: RowResult[]): RowResult[] {
+  if (rows.length <= ROWS_SHOWN) return rows;
+  const loud = rows.filter((r) => r.action === 'error' || r.action === 'skip');
+  const quiet = rows.filter((r) => r.action !== 'error' && r.action !== 'skip').slice(0, ROWS_SHOWN);
+  return [...loud, ...quiet].sort((a, b) => a.row - b.row);
 }
 
 /** Fetches the column spec for an entity, so each screen doesn't hard-code it. */

@@ -6188,6 +6188,13 @@ model CompanyAsset {
   cost          Decimal?        @db.Decimal(18, 2)
   status        AssetStatusHr   @default(AVAILABLE)
   notes         String?
+  /// How many units the record stands for (2026-10-25, the Odoo migration):
+  /// 1 for a tagged unit; a LOT ("120 swivel clamps", a person's tool kit)
+  /// is issued and returned whole.
+  quantity      Int             @default(1)
+  /// What brought it in: "odoo:<Odoo category>|<Odoo name>" for an asset the
+  /// Odoo import made — the once-only key, never shown.
+  importRef     String?
   retiredAt     DateTime?
   retiredReason String?
   createdById   String
@@ -6198,6 +6205,7 @@ model CompanyAsset {
 
   @@index([assetTypeId])
   @@index([status])
+  @@index([importRef])
 }
 
 /// AVAILABLE in the office, ISSUED to someone, UNDER_REPAIR, RETIRED (kept,

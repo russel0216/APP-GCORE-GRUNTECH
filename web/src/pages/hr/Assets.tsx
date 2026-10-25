@@ -9,6 +9,7 @@ import { Attachments } from '../../components/Attachments';
 import { NumberInput } from '../../components/NumberInput';
 import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
 import { Stat } from '../../components/charts';
+import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 
 /**
  * G-HR › Records › Asset Management (2026-10-21, the owner's Asset
@@ -52,6 +53,8 @@ interface AssetRow {
   id: string;
   tag: string;
   brandModel: string;
+  /** 1 for a tagged unit; a lot (the Odoo import's "120 swivel clamps") is issued and returned whole. */
+  quantity: number;
   serialNo: string | null;
   plateNo: string | null;
   description: string | null;
@@ -125,7 +128,7 @@ const stateBadge = (s: AssetState) => <StatusBadge status={s} extra={ASSET_TONES
 const columns: Column<AssetRow>[] = [
   { key: 'tag', label: 'Tag', sortKey: 'tag', optional: true, render: (r) => <span className="mono">{r.tag}</span> },
   { key: 'type', label: 'Asset type', render: (r) => <strong>{r.assetType.name}</strong> },
-  { key: 'brandModel', label: 'Brand & model', sortKey: 'brandModel', render: (r) => r.brandModel },
+  { key: 'brandModel', label: 'Brand & model', sortKey: 'brandModel', render: (r) => (r.quantity > 1 ? `${r.brandModel} (lot of ${r.quantity})` : r.brandModel) },
   {
     key: 'details',
     label: 'Asset details / tag',
@@ -164,6 +167,8 @@ export function Assets() {
   const navigate = useNavigate();
   const types = useAssetTypes(false);
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
+  const [reload, setReload] = useState(0);
   const mayAdd = can('ghr.assets.create');
   return (
     <div>
@@ -185,6 +190,22 @@ export function Assets() {
         emptyTitle="No assets yet"
         emptyHint="Add the company's vehicles, laptops, tools and kits, then issue each to the person who holds it."
         onRowClick={(r) => navigate(`/g-hr/assets/${r.id}`)}
+        reloadToken={reload}
+        menuItems={
+          mayAdd
+            ? [
+                {
+                  label: 'Import from Odoo…',
+                  hint: "Odoo's product export as it comes (.xlsx or .csv) — vehicles, office property and the tools categories, issued to the person each names; checked before anything is saved",
+                  onSelect: () => {
+                    void loadImportSpec('odoo_assets').then((spec) => {
+                      if (spec) setImporting(spec as { label: string; columns: never[] });
+                    });
+                  },
+                },
+              ]
+            : []
+        }
         summary={(raw) => {
           const s = raw as unknown as Summary | undefined;
           return s ? (
@@ -214,6 +235,15 @@ export function Assets() {
         <strong>Exit clearance and asset return.</strong> When an employee files for separation, every asset under their name shows here as Pending return and as a line on their clearance, which
         stays open until the asset is taken back. <Link to="/g-hr/clearances">Turnover &amp; Clearance →</Link>
       </section>
+      {importing && (
+        <ImportModal
+          entity="odoo_assets"
+          label={importing.label}
+          columns={importing.columns}
+          onClose={() => setImporting(null)}
+          onImported={() => setReload((r) => r + 1)}
+        />
+      )}
       {adding && (
         <AssetModal
           onClose={() => setAdding(false)}
@@ -615,6 +645,12 @@ export function AssetPage() {
               <dd>{r.assetType.name}</dd>
               <dt>Brand & model</dt>
               <dd>{r.brandModel}</dd>
+              {r.quantity > 1 && (
+                <>
+                  <dt>Quantity</dt>
+                  <dd>A lot of {r.quantity} — issued and returned whole</dd>
+                </>
+              )}
               <dt>Serial no.</dt>
               <dd>{r.serialNo ?? '—'}</dd>
               <dt>Plate no.</dt>

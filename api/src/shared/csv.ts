@@ -167,6 +167,8 @@ export interface ImportSpec<T> {
    * comes back with the commit as the route's `options`.
    */
   summarize?(records: T[]): Promise<Record<string, unknown> | undefined>;
+  /** A line about what a created or updated row will be, shown beside it (the Odoo import's group and stock). */
+  describe?(record: T): string | undefined;
 }
 
 /** Who is running the import — for the audit rows a writer files inside its transactions. */
@@ -175,9 +177,25 @@ export interface ImportActor {
   name: string;
 }
 
+/**
+ * Thrown by a spec's `build` for a row the import leaves alone on purpose —
+ * not an error, so it never blocks the file (2026-10-25, the Odoo export:
+ * the assets go to G-HR, the products to inventory, from the one file).
+ * A `quiet` skip is counted, not listed: a file of six thousand rows need
+ * not name the four thousand another import takes.
+ */
+export class SkipRow extends Error {
+  constructor(
+    message: string,
+    readonly quiet = false,
+  ) {
+    super(message);
+  }
+}
+
 export interface RowResult {
   row: number;
-  action: 'create' | 'update' | 'error';
+  action: 'create' | 'update' | 'error' | 'skip';
   key: string;
   message?: string;
 }
@@ -189,6 +207,8 @@ export interface ImportReport {
   created: number;
   updated: number;
   errors: number;
+  /** Rows left alone on purpose (`SkipRow`), listed or not. */
+  skipped: number;
   rows: RowResult[];
   /** The spec's `summarize`: what is asked of the person importing. */
   extra?: Record<string, unknown>;
@@ -227,6 +247,7 @@ export async function runImport<T>(
   }
 
   const results: RowResult[] = [];
+  let skipped = 0;
   const staged: { record: T; existingId: string | null }[] = [];
   const seenKeys = new Set<string>();
 
@@ -281,8 +302,14 @@ export async function runImport<T>(
       const record =
         spec.groupBy && spec.buildGroup ? await spec.buildGroup(groupRows, rowNumber) : await spec.build(groupRows[0], rowNumber);
       staged.push({ record, existingId });
-      results.push({ row: rowNumber, action: existingId ? 'update' : 'create', key });
+      const message = spec.describe?.(record);
+      results.push({ row: rowNumber, action: existingId ? 'update' : 'create', key, ...(message ? { message } : {}) });
     } catch (err) {
+      if (err instanceof SkipRow) {
+        skipped += 1;
+        if (!err.quiet) results.push({ row: rowNumber, action: 'skip', key, message: err.message });
+        continue;
+      }
       results.push({
         row: rowNumber,
         action: 'error',
@@ -304,6 +331,7 @@ export async function runImport<T>(
     created: results.filter((r) => r.action === 'create').length,
     updated: results.filter((r) => r.action === 'update').length,
     errors,
+    skipped,
     rows: results,
     ...(extra ? { extra } : {}),
   };

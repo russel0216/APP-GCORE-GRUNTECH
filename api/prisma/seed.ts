@@ -1,3 +1,4 @@
+import { placeMainWarehouseAtOffice } from '../src/shared/mainWarehouse';
 import { splitBorrowedRights } from '../src/shared/accessSplit';
 import { backfillProjectStock } from '../src/shared/projectStock';
 import { PrismaClient } from '@prisma/client';
@@ -1371,7 +1372,9 @@ async function main() {
     create: { code: 'MAIN', name: 'Main Warehouse' },
     update: {},
   });
-  console.log('  ✓ Warehouse');
+  // Gruntech's one warehouse is at the main office (2026-10-25), once.
+  const placedAtOffice = await placeMainWarehouseAtOffice();
+  console.log(`  ✓ Warehouse${placedAtOffice ? ` (${placedAtOffice})` : ''}`);
 
   // ── Leave types ────────────────────────────────────────────────────────────
   // Philippine statutory minimum is five days of Service Incentive Leave. Most

@@ -392,6 +392,46 @@ export async function nextNumber(
   return number;
 }
 
+/**
+ * `count` numbers of one GLOBAL-scoped type in one move (2026-10-25, the Odoo
+ * migration: six thousand items in one transaction, where a number apiece
+ * would outrun the request). The counter is raised by `count` at once —
+ * the same row lock `nextNumber` takes — and a rendered number `isTaken`
+ * says is in use is stepped over, the counter raised past it. Pass the
+ * caller's transaction, as for `nextNumber`.
+ */
+export async function reserveNumbers(
+  documentType: string,
+  count: number,
+  tx: Prisma.TransactionClient,
+  isTaken: (numbers: string[]) => Promise<Set<string>>,
+): Promise<string[]> {
+  if (count <= 0) return [];
+  const at = new Date();
+  const { template, period, scope, emp, missingNumber } = await templateFor(documentType, tx, {});
+  if (missingNumber) throw badRequest(missingNumberMessage(missingNumber, template.label));
+  if (scope !== 'GLOBAL') throw badRequest(`${template.label} numbers are issued per person — they cannot be reserved in a block`);
+  const periodKey = scopedPeriodKey(period, scope, at, emp);
+  const prefix = await prefixFor(tx);
+  const out: string[] = [];
+  let want = count;
+  while (want > 0) {
+    const seq = await tx.numberSequence.upsert({
+      where: { documentType_periodKey: { documentType, periodKey } },
+      create: counterCreate(template, periodKey, want),
+      update: { lastNumber: { increment: want } },
+    });
+    const block: string[] = [];
+    for (let n = seq.lastNumber - want + 1; n <= seq.lastNumber; n++) {
+      block.push(renderPattern(seq.pattern, { prefix, typeCode: seq.typeCode, seq: n, padding: seq.padding, at, emp }));
+    }
+    const taken = await isTaken(block);
+    for (const number of block) if (!taken.has(number)) out.push(number);
+    want = count - out.length;
+  }
+  return out;
+}
+
 /** Renders what the next number would look like, without consuming it. */
 export function previewNumber(
   opts: { pattern: string; typeCode: string; padding: number; lastNumber: number; emp?: string },

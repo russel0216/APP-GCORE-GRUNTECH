@@ -22,6 +22,7 @@ import {
 import { employeesImport } from './imports/employees';
 import { scoroQuotesImport } from './imports/scoroQuotes';
 import { scoroInvoicesImport } from './imports/scoroInvoices';
+import { odooInventoryImport, odooAssetsImport } from './imports/odoo';
 import { courseImport } from './academy';
 import { makePartner, safeHttpUrl, type ResourceKind } from '../shared/partners';
 
@@ -565,6 +566,10 @@ const REGISTRY: Record<string, Registered> = {
   scoro_quotes: scoroQuotesImport,
   // SCORO's invoices export (2026-10-17): a real sales order per invoice, on its quotation.
   scoro_invoices: scoroInvoicesImport,
+  // Odoo's product export, as it comes (2026-10-25): the products and their
+  // opening stock, and — from the same file — the assets and tools for G-HR.
+  odoo_inventory: odooInventoryImport,
+  odoo_assets: odooAssetsImport,
 };
 
 importRoutes.get(

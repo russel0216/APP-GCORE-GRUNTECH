@@ -1,3 +1,4 @@
+import { NO_BRAND_LABEL } from '../shared/odooMigration';
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticate } from '../auth/middleware';
@@ -346,7 +347,7 @@ async function inventory(range: Range): Promise<Report> {
   const [balances, moves] = await Promise.all([
     prisma.inventoryBalance.findMany({
       include: {
-        item: { select: { id: true, code: true, name: true, isActive: true, category: { select: { name: true } } } },
+        item: { select: { id: true, code: true, name: true, isActive: true, brand: true, category: { select: { name: true } } } },
         warehouse: { select: { name: true } },
       },
     }),
@@ -384,6 +385,19 @@ async function inventory(range: Range): Promise<Report> {
   }
   const slow = live.filter((b) => num(b.quantity) > 0 && !movedOut.has(`${b.itemId}|${b.warehouseId}`)).sort((a, b) => valueOf(b) - valueOf(a));
   const byCategory = tally(live, (b) => b.item.category?.name ?? 'Uncategorised', (b) => [1, num(b.quantity), valueOf(b)]);
+  // By brand (2026-10-25, the owner's call): one spelling per brand, case-blind; none is Trading.
+  const brandName = new Map<string, string>();
+  const byBrand = tally(
+    live,
+    (b) => {
+      const raw = b.item.brand?.trim();
+      if (!raw) return NO_BRAND_LABEL;
+      const key = raw.toUpperCase();
+      if (!brandName.has(key)) brandName.set(key, raw);
+      return brandName.get(key)!;
+    },
+    (b) => [1, num(b.quantity), valueOf(b)],
+  );
   return {
     kind: 'inventory',
     title: 'Inventory',
@@ -398,6 +412,7 @@ async function inventory(range: Range): Promise<Report> {
     series: series.done(),
     tables: [
       table('Valuation by category', [{ label: 'Category' }, { label: 'Item lines', align: 'right' }, { label: 'On hand', align: 'right' }, { label: 'Value', money: true }], byValue(byCategory, 2, 30).map(([k, v]) => [k, v[0], round3(v[1]), cents(v[2])])),
+      table('Valuation by brand', [{ label: 'Brand' }, { label: 'Item lines', align: 'right' }, { label: 'On hand', align: 'right' }, { label: 'Value', money: true }], byValue(byBrand, 2, 40).map(([k, v]) => [k, v[0], round3(v[1]), cents(v[2])])),
       table('Top movers out', [{ label: 'Item' }, { label: 'Issued', align: 'right' }, { label: 'Value', money: true }], byValue(outByItem, 1, 15).map(([k, v]) => [k, round3(v[0]), cents(v[1])])),
       table(
         'Slow-moving stock by value',
@@ -405,7 +420,10 @@ async function inventory(range: Range): Promise<Report> {
         slow.slice(0, 15).map((b) => [`${b.item.name} (${b.item.code})`, b.warehouse.name, num(b.quantity), valueOf(b)]),
       ),
     ],
-    notes: ['Slow-moving ranks by value, not age: an idle compressor matters more than a thousand idle washers.'],
+    notes: [
+      'Slow-moving ranks by value, not age: an idle compressor matters more than a thousand idle washers.',
+      ...(byBrand.size > 40 ? [`Valuation by brand lists the first 40 of ${byBrand.size} brands by value; the Inventory list's Brand filter has every one.`] : []),
+    ],
   };
 }
 

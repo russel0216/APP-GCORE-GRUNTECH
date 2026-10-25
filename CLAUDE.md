@@ -677,8 +677,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,806 assertions across twenty-two scripts** (counted 2026-10-23, after
-2 on finance for the approver reading a claim's receipts, and before it 2 on chain for the purchase order's discount, and before it 3 on delivery for the budget request against its budget line and the cost
+**4,819 assertions across twenty-two scripts** (counted 2026-10-25, after
+13 on chain for the Odoo migration — the brand, the group, the holder, the
+merge, the opening balance posted once, the assets lot and the brand filter —
+and before it 2 on finance for the approver reading a claim's receipts, and before it 2 on chain for the purchase order's discount, and before it 3 on delivery for the budget request against its budget line and the cost
 ledger by budget line, and before it 2 on pipeline for the Sales Order report, and before it 6 on chain for the landed cost in pesos and the typed Incoming cost, and
 before it 5 on chain for a foreign-currency order received in pesos, and before it
 2 on hr for the attendance correction in My Work, and before it
@@ -801,7 +803,7 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
 430, masters 92, sales 643, costing 205, pipeline 123, calendar 103, numbering
-94, partners 120, delivery 216, chain 404, hr 661, plantilla 129, meetings
+94, partners 120, delivery 216, chain 417, hr 661, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 446, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
@@ -4055,6 +4057,68 @@ appearing to superior". Four causes, four changes:
   unsent one under My drafts, and under Assigned to me one waiting for
   approval ("waiting on <step>") or rejected in the last seven days; the
   approver's side is the approval queue.
+
+## Migrating the inventory from Odoo (2026-10-25)
+
+The owner's Odoo product export (`Product (product.template).xlsx`: Name,
+Internal Reference, Responsible, Sales Price, Cost, Product Category,
+Product Type, Quantity On Hand, Forecasted Quantity, Unit) and his answers:
+one warehouse, at the main office; vehicles, office property and every tools
+category to G-HR; every product as an item; G-CORE's eight groups, valued by
+BRAND too ("Trading" where none is declared); rows sharing a Name merged; a
+stocked item with no cost at 0; pcs; no reorder levels.
+
+- **Odoo's two fields are the other way round**: Name is the code ("OOP -
+  213.53-E 100PSI/0-7BAR", kept WHOLE as `Item.partNumber`, the once-only
+  key) and Internal Reference the description (`Item.name`). The rules are
+  `shared/odooMigration.ts`, pure: `odooBrand()` (a listed spelling at the
+  start of the description, misspellings folded in — `BRAND_SPELLINGS` —
+  else the category's maker, else none), `odooGroup()` (the Odoo category,
+  Omega by its prefix, the generic categories by their words; one of
+  `GROUP_CODES`, the owner's eight), `assetCategory()` (the property
+  categories and every "<name> Tools", the holder, "(Resigned)", "C/O",
+  a site), `mergeOdooRows()` (quantities added, a negative row read as 0,
+  the cost their weighted average), `matchHolder()` (one active employee or
+  none, never a guess). verify-chain pins them.
+- **One file, two imports** (`routes/imports/odoo.ts`, the ordinary
+  `ImportModal` — which now takes .xlsx/.xls/.ods, made CSV in the
+  spreadsheet viewer's worker, the headings row the first carrying every
+  required column): **`odoo_inventory`** (Inventory ⋯ "Import from Odoo…",
+  `gchain.items.create`) makes every product an item with G-CORE's code,
+  its brand, group, Materials and pcs, and posts what is on hand ONCE as
+  the opening balance in the main-office warehouse (`mainWarehouse()`:
+  `MAIN`, else the only active one) — one ADJUSTMENT movement, `sourceType`
+  `odoo_opening`, "Opening balance from Odoo", never on an item that
+  already moves stock there; an item already on file by part number is
+  left as it is (a blank brand or group filled). **`odoo_assets`** (Asset
+  Management ⋯, `ghr.assets.create`) makes one `CompanyAsset` per Odoo line
+  — `CompanyAsset.quantity` (a LOT, issued and returned whole) and
+  `importRef` (`odoo:<category>|<name>`, the once-only key) are new —
+  issued to the employee the category names when `matchHolder` finds
+  exactly one; resigned holders, the company's tools and property stay
+  Available, said on the asset's notes. Each import's rows not its own are
+  skipped (`SkipRow` in `shared/csv.ts`, quiet ones counted, not listed;
+  `report.skipped`); the dry run sends `extra.facts` and `extra.tables`
+  (warehouse, value, groups, brands, holders), which `ImportModal` draws.
+  Both write in ONE transaction, the codes and tags taken in a block by
+  `reserveNumbers()` (`shared/numbering.ts`, GLOBAL types, a taken number
+  stepped over) — the owner's 6,119 rows commit in about two seconds.
+- **The valuation by brand**: Inventory's `?brand=` filter (case-blind;
+  `none` is Trading — `brandWhere()`, for company, project and order stock
+  alike), `summary.brands` (every brand holding stock, by value) drawn as
+  "Stock value by brand" under the category chart, the paper's filter line,
+  and "Valuation by brand" on G-CHAIN › Reports › Inventory (the first 40,
+  said in its notes).
+- **The one warehouse is at the main office**: `placeMainWarehouseAtOffice()`
+  (`shared/mainWarehouse.ts`, the seed, once,
+  `seed.mainOfficeWarehouse20261025`) names the seeded "Main Warehouse"
+  "Main Office Warehouse" and gives it the company's address while it has
+  none.
+- **On the owner's file**: 5,358 items (63 merged), 1,557 stocked lines worth
+  ₱66,707,699.59 at Odoo cost (144 at ₱0), 18 template rows skipped; 584
+  assets (1,732 units, ₱13.77M; 8 vehicles). Freeze Odoo, export again,
+  import Inventory first, then Assets, and compare G-CORE's valuation with
+  Odoo's on the same day.
 
 ## The notification bell (2026-10-20)
 

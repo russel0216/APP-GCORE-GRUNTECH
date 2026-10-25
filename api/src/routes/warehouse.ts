@@ -71,6 +71,7 @@ import {
   reverseJobCost,
 } from '../shared/inventory';
 import { contentDisposition, paperFileName } from '../shared/paperName';
+import { NO_BRAND_LABEL } from '../shared/odooMigration';
 
 const D = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -4352,6 +4353,17 @@ inventoryRoutes.use(authenticate);
  * cannot, so it is decided over the candidates and named by id: the list then
  * pages and counts it like any other.
  */
+/**
+ * The brand filter (2026-10-25, the owner's valuation by brand): a brand's
+ * own stock, case-blind, or "none" — an item that declares no brand, what
+ * the valuation calls Trading. One rule for the company's, the projects'
+ * and the sales orders' stock.
+ */
+function brandWhere(brand: string | undefined): { item: Prisma.ItemWhereInput } | null {
+  if (!brand) return null;
+  return { item: brand === 'none' ? { OR: [{ brand: null }, { brand: '' }] } : { brand: { equals: brand, mode: 'insensitive' } } };
+}
+
 async function inventoryListWhere(me: ResolvedUser, q: ListQuery): Promise<{ base: Prisma.InventoryBalanceWhereInput; where: Prisma.InventoryBalanceWhereInput }> {
   const and: Prisma.InventoryBalanceWhereInput[] = [];
   // View Own reads the stock of the items one added (2026-10-18) — first, so
@@ -4377,6 +4389,8 @@ async function inventoryListWhere(me: ResolvedUser, q: ListQuery): Promise<{ bas
   const base: Prisma.InventoryBalanceWhereInput = and.length ? { AND: [...and] } : {};
 
   if (q.filters.categoryId) and.push({ item: { categoryId: q.filters.categoryId === 'none' ? null : q.filters.categoryId } });
+  const brand = brandWhere(q.filters.brand);
+  if (brand) and.push(brand);
   if (q.filters.needsReorder === 'true') {
     const candidates = await prisma.inventoryBalance.findMany({
       where: { AND: [...and, REORDER_CANDIDATES] },
@@ -4445,6 +4459,8 @@ function projectStockWhere(me: ResolvedUser, q: ListQuery): { base: Prisma.Proje
   if (ids) and.push({ id: { in: ids } });
   const base = { AND: [...and] };
   if (q.filters.categoryId) and.push({ item: { categoryId: q.filters.categoryId === 'none' ? null : q.filters.categoryId } });
+  const brand = brandWhere(q.filters.brand);
+  if (brand) and.push(brand);
   return { base, where: { AND: and } };
 }
 
@@ -4565,6 +4581,8 @@ function orderStockWhere(me: ResolvedUser, q: ListQuery): Prisma.SalesOrderStock
   const ids = idsFilter(q.filters.ids);
   if (ids) and.push({ id: { in: ids } });
   if (q.filters.categoryId) and.push({ item: { categoryId: q.filters.categoryId === 'none' ? null : q.filters.categoryId } });
+  const brand = brandWhere(q.filters.brand);
+  if (brand) and.push(brand);
   return { AND: and };
 }
 
@@ -4700,7 +4718,7 @@ inventoryRoutes.get(
       // so every tile still shows when one is chosen.
       prisma.inventoryBalance.findMany({
         where: base,
-        select: { itemId: true, quantity: true, borrowedQty: true, averageCost: true, item: { select: { categoryId: true, reorderLevel: true, minStock: true } } },
+        select: { itemId: true, quantity: true, borrowedQty: true, averageCost: true, item: { select: { categoryId: true, brand: true, reorderLevel: true, minStock: true } } },
       }),
       prisma.itemCategory.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, name: true, description: true } }),
       prisma.purchaseOrder.count({ where: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } } }),
@@ -4725,6 +4743,18 @@ inventoryRoutes.get(
       const t = tiles.get(id);
       return { id, name, description, items: t?.items.size ?? 0, value: t ? Number(t.value.toFixed(2)) : 0, low: t?.low ?? 0, critical: t?.critical ?? 0 };
     };
+    // The valuation by brand, under the same query as the tiles: one spelling
+    // per brand (the first met, case-blind), "none" for an item that declares
+    // none — Trading, the owner's word.
+    const brands = new Map<string, { name: string; items: Set<string>; value: Prisma.Decimal }>();
+    for (const b of inBase) {
+      const raw = b.item.brand?.trim();
+      const key = raw ? raw.toUpperCase() : 'none';
+      const t = brands.get(key) ?? { name: raw || NO_BRAND_LABEL, items: new Set<string>(), value: new Prisma.Decimal(0) };
+      t.items.add(b.itemId);
+      t.value = t.value.add(b.quantity.mul(b.averageCost));
+      brands.set(key, t);
+    }
 
     res.json({
       ...listResult(
@@ -4768,6 +4798,10 @@ inventoryRoutes.get(
           ...categories.filter((c, n) => n < 8 || tiles.has(c.id)).map((c) => tile(c.id, c.name, c.description)),
           ...(tiles.has('none') ? [tile('none', 'Not categorised', null)] : []),
         ],
+        // Every brand holding stock lines, the largest value first.
+        brands: [...brands.entries()]
+          .map(([key, t]) => ({ value: key === 'none' ? 'none' : t.name, label: t.name, items: t.items.size, worth: Number(t.value.toFixed(2)) }))
+          .sort((a, b) => b.worth - a.worth || a.label.localeCompare(b.label)),
       },
     });
   }),
@@ -5054,6 +5088,7 @@ inventoryRoutes.get(
       q.search && `search "${q.search}"`,
       f.warehouseId && `warehouse ${warehouse?.name ?? 'not found'}`,
       f.categoryId && (f.categoryId === 'none' ? 'not categorised' : `category ${category?.name ?? 'not found'}`),
+      f.brand && `brand ${f.brand === 'none' ? NO_BRAND_LABEL : f.brand}`,
       f.state && `status ${STATE_WORDS[f.state as StockState] ?? f.state}`,
       f.needsReorder === 'true' && 'below reorder level',
       f.ids && 'the rows selected',

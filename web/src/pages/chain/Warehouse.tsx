@@ -17,6 +17,7 @@ import {
   useToast,
 } from '../../components/ui';
 import { BarList, Panel, Stat } from '../../components/charts';
+import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { ApprovalStepper, DocumentApproval, DecisionNote, allHeld, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
@@ -740,6 +741,14 @@ interface CategoryTile {
   critical: number;
 }
 
+interface BrandTile {
+  /** The filter's value: the brand as spelt, or `none`. */
+  value: string;
+  label: string;
+  items: number;
+  worth: number;
+}
+
 interface InventorySummary {
   items?: number;
   valuation?: number;
@@ -748,6 +757,8 @@ interface InventorySummary {
   onOrder?: number;
   pendingOrders?: number;
   categories?: CategoryTile[];
+  /** The valuation by brand (2026-10-25): every brand holding stock lines; `none` is Trading. */
+  brands?: BrandTile[];
   /** On the company list: the projects' own goods on the shelves. */
   projectStock?: { lines: number; projects: number; value: number };
   /** On the project list (`?stock=project`) or the sales order list (`?stock=order`). */
@@ -858,7 +869,18 @@ export function Inventory() {
   }, []);
   // The category tiles and the chart come with the list's summary.
   const [categories, setCategories] = useState<CategoryTile[]>([]);
+  const [brands, setBrands] = useState<BrandTile[]>([]);
+  const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
+  const [reload, setReload] = useState(0);
   const chosenCategory = params.get('categoryId') ?? '';
+  /** The list's own URL with the brand set — the valuation by brand's links. */
+  const brandLink = (value: string) => {
+    const p = new URLSearchParams(params);
+    if (p.get('brand') === value) p.delete('brand');
+    else p.set('brand', value);
+    p.delete('page');
+    return `/g-chain/inventory?${p.toString()}`;
+  };
   // The projects' own goods (2026-10-18) — the same list on `?stock=project`.
   const projectStock = params.get('stock') === 'project';
   // What was bought for a sales order with no project (2026-10-21) — `?stock=order`.
@@ -1016,7 +1038,26 @@ export function Inventory() {
               </Link>
             ) : undefined
           }
-          onSummary={(raw) => setCategories(((raw as InventorySummary).categories ?? []) as CategoryTile[])}
+          reloadToken={reload}
+          menuItems={
+            can('gchain.items.create')
+              ? [
+                  {
+                    label: 'Import from Odoo…',
+                    hint: "Odoo's product export as it comes (.xlsx or .csv) — the items, their brand and group, and the opening stock in the main-office warehouse; checked before anything is saved",
+                    onSelect: () => {
+                      void loadImportSpec('odoo_inventory').then((spec) => {
+                        if (spec) setImporting(spec as { label: string; columns: never[] });
+                      });
+                    },
+                  },
+                ]
+              : []
+          }
+          onSummary={(raw) => {
+            setCategories(((raw as InventorySummary).categories ?? []) as CategoryTile[]);
+            setBrands((raw as InventorySummary).brands ?? []);
+          }}
           summary={(raw) => {
             const sum = raw as InventorySummary;
             const tiles = sum.categories ?? [];
@@ -1093,6 +1134,11 @@ export function Inventory() {
               options: [...categories.filter((c) => c.id !== 'none').map((c) => ({ value: c.id, label: c.name })), { value: 'none', label: 'Not categorised' }],
             },
             {
+              key: 'brand',
+              label: 'Brand',
+              options: brands.map((b) => ({ value: b.value, label: b.label })),
+            },
+            {
               key: 'state',
               label: 'Stock status',
               options: (Object.keys(STOCK_STATE_LABEL) as (keyof typeof STOCK_STATE_LABEL)[]).map((k) => ({ value: k, label: STOCK_STATE_LABEL[k] })),
@@ -1118,6 +1164,31 @@ export function Inventory() {
             }))}
           />
         </Panel>
+      )}
+      {view === 'list' && brands.some((b) => b.worth > 0) && (
+        <Panel
+          title="Stock value by brand"
+          blurb={`What each brand holds, at moving average cost — “Trading” is stock that declares no brand.${brands.length > 15 ? ` The first 15 of ${brands.length}; the Brand filter has every one.` : ''}`}
+        >
+          <BarList
+            slices={brands.slice(0, 15).map((b) => ({
+              label: `${b.label} · ${b.items} item${b.items === 1 ? '' : 's'}`,
+              value: b.worth,
+              display: formatMoney(b.worth),
+              tone: 'neon',
+              to: brandLink(b.value),
+            }))}
+          />
+        </Panel>
+      )}
+      {importing && (
+        <ImportModal
+          entity="odoo_inventory"
+          label={importing.label}
+          columns={importing.columns}
+          onClose={() => setImporting(null)}
+          onImported={() => setReload((r) => r + 1)}
+        />
       )}
       <InventoryFoot />
     </div>

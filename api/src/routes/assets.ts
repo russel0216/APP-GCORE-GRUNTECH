@@ -81,7 +81,8 @@ async function present(me: ResolvedUser, rows: Row[]) {
     const open = r.issuances[0] ?? null;
     const away = open ? leaving.get(open.employee.id) : undefined;
     const state = assetState(r.status, open ? { leaving: !!away } : null);
-    const { issuances: _i, cost: rawCost, ...rest } = r;
+    const { issuances: _i, cost: rawCost, importRef: _ref, ...rest } = r;
+    void _ref;
     return {
       ...rest,
       cost: cost && rawCost != null ? Number(rawCost) : null,
@@ -218,7 +219,7 @@ assetRoutes.get(
           rows: shown.map((r) => [
             r.tag,
             r.assetType.name,
-            r.brandModel,
+            r.quantity > 1 ? `${r.brandModel} (lot of ${r.quantity})` : r.brandModel,
             r.details || '—',
             r.holder ? formatShortDate(r.holder.issuedOn) : '—',
             r.holder ? { title: r.holder.name, body: [r.holder.team, r.holder.title].filter(Boolean).join(' · ') } : '—',

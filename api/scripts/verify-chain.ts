@@ -11,6 +11,10 @@
  */
 
 import { repairProjectlessReceipts, repairTypedStockReceipts } from '../src/shared/typedItems';
+import { runImport } from '../src/shared/csv';
+import { mainWarehouse } from '../src/shared/mainWarehouse';
+import { NO_BRAND_LABEL, assetCategory, matchHolder, mergeOdooRows, odooBrand, odooGroup } from '../src/shared/odooMigration';
+import { odooAssetsSpec, odooAssetsWrite, odooInventorySpec, odooInventoryWrite } from '../src/routes/imports/odoo';
 import { receiptUnitCost, restateForeignReceipts } from '../src/shared/receiptCost';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
@@ -146,7 +150,26 @@ async function makeRole(key: string, name: string, permissionKeys: string[]) {
   });
 }
 
+/** The Odoo migration's test rows (2026-10-25): items by part number, assets by their import key. */
+async function cleanupOdoo() {
+  const items = await prisma.item.findMany({ where: { partNumber: { startsWith: `${TAG} ODOO` } }, select: { id: true } });
+  const ids = items.map((i) => i.id);
+  if (ids.length) {
+    await prisma.inventoryTransaction.deleteMany({ where: { itemId: { in: ids } } });
+    await prisma.inventoryBalance.deleteMany({ where: { itemId: { in: ids } } });
+    await prisma.item.deleteMany({ where: { id: { in: ids } } });
+  }
+  const assets = await prisma.companyAsset.findMany({ where: { importRef: { contains: TAG } }, select: { id: true } });
+  if (assets.length) {
+    await prisma.assetIssuance.deleteMany({ where: { assetId: { in: assets.map((a) => a.id) } } });
+    await prisma.companyAsset.deleteMany({ where: { id: { in: assets.map((a) => a.id) } } });
+  }
+  await prisma.employee.deleteMany({ where: { firstName: 'Zzodoo', lastName: 'Holder' } });
+  await prisma.auditLog.deleteMany({ where: { entityId: 'list', actorName: `${TAG} odoo` } });
+}
+
 async function cleanup() {
+  await cleanupOdoo();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
@@ -6024,9 +6047,174 @@ async function main() {
     );
   }
 
+  await odooMigration();
+
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);
   if (failed > 0) process.exitCode = 1;
+}
+
+/**
+ * The Odoo migration (2026-10-25): the export as Odoo writes it — Name the
+ * code, Internal Reference the description — read into items with a brand
+ * and one of the eight groups, rows sharing a Name merged, the opening
+ * balance posted ONCE in the main-office warehouse, the assets and tools to
+ * G-HR, issued to the employee a "<name> Tools" category names.
+ */
+async function odooMigration() {
+  console.log('\nOdoo migration');
+  await cleanupOdoo();
+  // Pure rules first.
+  check(
+    'the brand is read off the description, a misspelling folded in, else the category\'s maker, else none (Trading)',
+    odooBrand('SCHNDEIDER ELECTRIC, CONTACTOR', 'SEP - LC1D09', 'Schneider Products and VFD') === 'SCHNEIDER ELECTRIC' &&
+      odooBrand('OMEGA AIR FILTER ELEMENT 0310', 'OFE - 0310', 'Omega') === 'OMEGA AIR' &&
+      odooBrand('Filter Element, 06050-A', 'OFE - 06050-A', 'Omega') === 'OMEGA AIR' &&
+      odooBrand('STAINLESS STEEL, NIPPLE 1"', 'OOP - SS NIPPLE', 'Other Product & Product for project') === null &&
+      odooBrand('ERASER, WHITE', 'OOP - ERASER', 'Consumables') === null &&
+      NO_BRAND_LABEL === 'Trading',
+  );
+  check(
+    'the group is G-CORE\'s own eight: by the Odoo category, Omega by its prefix, the generic categories by their words',
+    odooGroup('Schneider Products and VFD', 'SEP - X', '') === 'CTL' &&
+      odooGroup('Omega', 'OFE - 0310', '') === 'FLT' &&
+      odooGroup('Omega', 'OAD - A-DRY 105', '') === 'DRY' &&
+      odooGroup('Omega', 'ACP - MA SD 30', '') === 'PMP' &&
+      odooGroup('Omega', 'ODP - KIT', '') === 'PRT' &&
+      odooGroup('Other Product & Product for project', 'OOP - X', 'WIKA, BOURDON TUBE PRESSURE GAUGE') === 'INS' &&
+      odooGroup('Other Product & Product for project', 'OOP - X', 'GI ELBOW 2"') === 'PIP' &&
+      odooGroup('Trading', 'TRD - X', 'SOMETHING') === 'PRT',
+  );
+  const tools = assetCategory('Jo Tolentino Tools (Resigned)');
+  const careOf = assetCategory('Office Maintenance Tools (C/O Jeric)');
+  const site = assetCategory('Rj Tagalog Tools (OSMAK & GVMC )');
+  check(
+    'a tools category names its holder, a resigned one is never issued, "C/O" is the one in care, a site is kept; a product category is no asset',
+    tools?.holder === 'Jo Tolentino' &&
+      tools.resigned &&
+      careOf?.holder === 'Jeric' &&
+      !careOf.resigned &&
+      site?.holder === 'Rj Tagalog' &&
+      site.site === 'OSMAK & GVMC' &&
+      assetCategory('Asset Vehicle')?.kind === 'vehicle' &&
+      assetCategory('Shop Tools')?.holder === null &&
+      assetCategory('Omega') === null,
+    JSON.stringify({ tools, careOf, site }),
+  );
+  const merged = mergeOdooRows([
+    { name: 'TRD - CABLE', reference: 'PHELPS DODGE, CABLE', category: 'Trading', cost: 100, onHand: 2 },
+    { name: 'TRD - CABLE', reference: '', category: 'Trading', cost: 130, onHand: 1 },
+    { name: 'TRD - CABLE', reference: '', category: 'Trading', cost: 999, onHand: -1 },
+  ]);
+  check(
+    'rows sharing a Name merge: quantities added (a negative row read as 0), the cost their weighted average, the first description and brand',
+    merged.quantity === 3 && merged.unitCost === 110 && merged.rows === 3 && merged.negativeRows === 1 && merged.brand === 'PHELPS DODGE',
+    JSON.stringify(merged),
+  );
+  const people = [
+    { firstName: 'Ricardo', lastName: 'Martinez' },
+    { firstName: 'Emil', lastName: 'Martinez' },
+    { firstName: 'Jeric', lastName: 'Gasiong' },
+  ];
+  check(
+    'a holder is matched only when one employee answers to the name, never a guess between two',
+    matchHolder('Ric Martinez', people)?.firstName === 'Ricardo' &&
+      matchHolder('Emil martinez', people)?.firstName === 'Emil' &&
+      matchHolder('Jeric', people)?.lastName === 'Gasiong' &&
+      matchHolder('Martinez', people) === null &&
+      matchHolder('Nobody Here', people) === null,
+  );
+
+  // The file, as Odoo writes it.
+  const holder = await prisma.employee.create({ data: { firstName: 'Zzodoo', lastName: 'Holder' } });
+  const csv = [
+    'Favorite,Name,Internal Reference,Responsible,Tags,Ribbon,Barcode,Sales Price,Cost,Product Category,Product Type,Quantity On Hand,Forecasted Quantity,Unit',
+    `FALSE,${TAG} ODOO PUMP-1,"WILO, SUBMERSIBLE PUMP",X,,,,"1,500",1200,Wilo,Goods,2,2,Units`,
+    `FALSE,${TAG} ODOO PUMP-1,"WILO, SUBMERSIBLE PUMP",X,,,,1500,1500,Wilo,Goods,1,1,Units`,
+    `FALSE,${TAG} ODOO TAPE,MASKING TAPE 1 INCH,X,,,,50,50,Consumables,Goods,0,0,Units`,
+    `FALSE,${TAG} ODOO WRENCH,"STANLEY, WRENCH",X,,,,300,300,Zzodoo Holder Tools,Goods,2,2,Units`,
+    `FALSE,${TAG} ODOO CAR (ABC 1234),2020 SEDAN,X,,,,900000,900000,Asset Vehicle,Goods,1,1,Units`,
+    `FALSE,${TAG} ODOO TEMPLATE,,X,,,,0,0,Template,Goods,0,0,Units`,
+  ].join('\n');
+  const admin = await prisma.user.findFirstOrThrow({ where: { isSuperAdmin: true, isActive: true }, select: { id: true, email: true } });
+  const actor = { id: admin.id, name: `${TAG} odoo` };
+  const warehouse = await mainWarehouse();
+  const dry = await runImport(csv, odooInventorySpec, false, () => Promise.resolve());
+  check(
+    'the inventory check: two items (the pump merged from two rows), the template row listed as skipped, the tools and the car left to G-HR',
+    dry.created === 2 && dry.errors === 0 && dry.skipped === 3 && dry.rows.filter((r) => r.action === 'skip').length === 1 && !!warehouse,
+    JSON.stringify(dry.rows),
+  );
+  await runImport(csv, odooInventorySpec, true, (records) => odooInventoryWrite(records, actor));
+  const pump = await prisma.item.findFirstOrThrow({
+    where: { partNumber: `${TAG} ODOO PUMP-1` },
+    include: { category: true, balances: true, stockMoves: true },
+  });
+  const tape = await prisma.item.findFirstOrThrow({ where: { partNumber: `${TAG} ODOO TAPE` }, include: { balances: true, category: true } });
+  check(
+    'the pump is one item — G-CORE\'s code, Odoo\'s Name as its part number, WILO, Pumps & Motors, pcs — 3 on hand at the weighted 1,300.00 in the main-office warehouse, one opening movement',
+    /ITM/.test(pump.code) &&
+      pump.brand === 'WILO' &&
+      pump.category?.code === 'PMP' &&
+      pump.unit === 'pcs' &&
+      pump.balances.length === 1 &&
+      pump.balances[0].warehouseId === warehouse!.id &&
+      Number(pump.balances[0].quantity) === 3 &&
+      Number(pump.balances[0].averageCost) === 1300 &&
+      pump.stockMoves.length === 1 &&
+      pump.stockMoves[0].sourceType === 'odoo_opening' &&
+      pump.stockMoves[0].type === 'ADJUSTMENT',
+    JSON.stringify({ code: pump.code, brand: pump.brand, cat: pump.category?.code, bal: pump.balances, moves: pump.stockMoves.length }),
+  );
+  check(
+    'an item with nothing on hand comes in with no stock line, under Consumables and no brand',
+    tape.balances.length === 0 && tape.category?.code === 'CNS' && tape.brand === null,
+  );
+  await runImport(csv, odooInventorySpec, true, (records) => odooInventoryWrite(records, actor));
+  const again = await prisma.item.findMany({ where: { partNumber: { startsWith: `${TAG} ODOO` } }, include: { stockMoves: true, balances: true } });
+  check(
+    'the file run again adds nothing: the same two items, still one opening movement, still 3 on hand',
+    again.length === 2 &&
+      again.reduce((s, i) => s + i.stockMoves.length, 0) === 1 &&
+      Number(again.find((i) => i.id === pump.id)!.balances[0].quantity) === 3,
+  );
+
+  // The same file into G-HR.
+  const assetsDry = await runImport(csv, odooAssetsSpec, false, () => Promise.resolve());
+  check('the assets check: the tools and the car, the products left to inventory', assetsDry.created === 2 && assetsDry.errors === 0, JSON.stringify(assetsDry.rows));
+  await runImport(csv, odooAssetsSpec, true, (records) => odooAssetsWrite(records, actor));
+  const assets = await prisma.companyAsset.findMany({ where: { importRef: { contains: TAG } }, include: { assetType: true, issuances: true } });
+  const wrench = assets.find((a) => a.importRef!.includes('WRENCH'));
+  const car = assets.find((a) => a.importRef!.includes('CAR'));
+  check(
+    'the tools are one lot of 2 issued to the employee the category names; the car a Company Vehicle with its plate, Available',
+    !!wrench &&
+      wrench.quantity === 2 &&
+      wrench.status === 'ISSUED' &&
+      wrench.issuances.length === 1 &&
+      wrench.issuances[0].employeeId === holder.id &&
+      !!car &&
+      car.assetType.name === 'Company Vehicle' &&
+      car.plateNo === 'ABC 1234' &&
+      car.status === 'AVAILABLE' &&
+      Number(car.cost) === 900000,
+    JSON.stringify(assets.map((a) => ({ ref: a.importRef, q: a.quantity, s: a.status, t: a.assetType.name, p: a.plateNo }))),
+  );
+  await runImport(csv, odooAssetsSpec, true, (records) => odooAssetsWrite(records, actor));
+  check('the assets run again add nothing', (await prisma.companyAsset.count({ where: { importRef: { contains: TAG } } })) === 2);
+
+  // The valuation by brand, through the API.
+  const token = signToken(admin.id, admin.email);
+  const res = await fetch(`${BASE}/inventory?pageSize=5&brand=wilo&q=${encodeURIComponent(`${TAG} ODOO`)}&search=${encodeURIComponent(`${TAG} ODOO`)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const body = (await res.json()) as { total: number; summary: { valuation: number; brands: { value: string; worth: number }[] } };
+  check(
+    'Inventory\'s Brand filter finds the brand case-blind, and the valuation by brand names it with its value',
+    res.ok && body.total === 1 && body.summary.valuation === 3900 && body.summary.brands.some((b) => b.value === 'WILO' && b.worth === 3900),
+    JSON.stringify({ total: body.total, brands: body.summary?.brands?.slice(0, 3) }),
+  );
+  await cleanupOdoo();
 }
 
 main()
