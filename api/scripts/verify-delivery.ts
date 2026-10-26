@@ -94,6 +94,7 @@ async function cleanup() {
   const plans = await prisma.approvedPlan.findMany({ where: { job: { name: { startsWith: TAG } } }, select: { id: true } });
   await deleteAttachmentsOf('approved_plan', plans.map((p) => p.id));
   await prisma.job.deleteMany({ where: { name: { startsWith: TAG } } });
+  await prisma.salesOrder.deleteMany({ where: { number: { startsWith: TAG } } });
   await prisma.quotation.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
@@ -107,6 +108,8 @@ async function cleanup() {
     await prisma.approvalRequest.deleteMany({ where: { requesterId: { in: ids } } });
     await prisma.notification.deleteMany({ where: { userId: { in: ids } } });
     await prisma.auditLog.deleteMany({ where: { actorId: { in: ids } } });
+    // A payment a run recorded and could no longer reach through its document.
+    await prisma.payment.deleteMany({ where: { recordedById: { in: ids }, allocations: { none: {} } } });
     await prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
   await prisma.role.deleteMany({ where: { key: { startsWith: ROLE_PREFIX } } });
@@ -2408,6 +2411,175 @@ async function main() {
       narrowBudget.status === 403 && narrowProjects.status === 200,
       `${narrowBudget.status} / ${narrowProjects.status}`,
     );
+    // ── A budget request on a costing, a quotation or a sales order (2026-10-26) ──
+    // The owner's call: "valid not only for project but also on Sales Order,
+    // Quotation and Costing". Each is checked against the record's own cost,
+    // posts to no ledger, and is taken over by a project built from it.
+    {
+      const engT = signToken(engineer.id, engineer.email);
+      const release = async (id: string, amount: number) => {
+        await prisma.payment.create({
+          data: {
+            number: await nextNumber('disbursement'),
+            kind: 'DISBURSEMENT',
+            method: 'CASH',
+            paymentDate: new Date('2026-03-02'),
+            payeeUserId: engineer.id,
+            amount: d(amount),
+            clearedAt: new Date('2026-03-02'),
+            recordedById: finance.id,
+            allocations: { create: [{ budgetRequestId: id, amount: d(amount) }] },
+          },
+        });
+        await prisma.$transaction((tx) => refreshSettlement(tx, 'budget_request', id));
+        await prisma.budgetRequest.update({ where: { id }, data: {} });
+      };
+      const approve = (id: string) => prisma.budgetRequest.update({ where: { id }, data: { status: 'APPROVED', approvedAt: new Date() } });
+      const item = (unitCost: number) => [{ name: 'Fittings', quantity: 1, unit: 'lot', unitCost }];
+
+      // A costing takes a request only when FINAL; one source, never two or none.
+      const draftCosting = await readyCosting('BR draft costing', engineer.id, customer.id);
+      await prisma.costing.update({ where: { id: draftCosting.id }, data: { status: 'DRAFT' } });
+      const costingA = await readyCosting('BR costing', engineer.id, customer.id); // Materials 96,000
+      const onDraft = await http(engT, 'POST', '/budget-requests', { costingId: draftCosting.id, costCategoryId: materials.id, reason: `${TAG} BR on a draft costing`, items: item(1_000) });
+      const twoSources = await http(engT, 'POST', '/budget-requests', { costingId: costingA.id, jobId: job.id, costCategoryId: materials.id, reason: `${TAG} BR two sources`, items: item(1_000) });
+      const noSource = await http(engT, 'POST', '/budget-requests', { costCategoryId: materials.id, reason: `${TAG} BR no source`, items: item(1_000) });
+      check(
+        'a budget request takes a final costing only, and names exactly one record',
+        onDraft.status === 400 && twoSources.status === 400 && noSource.status === 400,
+        `${onDraft.status} ${onDraft.body?.error ?? ''} · ${twoSources.status} · ${noSource.status}`,
+      );
+
+      const onCosting = await http(engT, 'POST', '/budget-requests', { costingId: costingA.id, costCategoryId: materials.id, reason: `${TAG} BR on a costing`, items: item(30_000) });
+      const cId = onCosting.body?.id as string;
+      const cRead = cId ? await http(engT, 'GET', `/budget-requests/${cId}`) : null;
+      const cb = cRead?.body?.budget ?? {};
+      check(
+        'a request on a costing is checked against the costing’s own budget line, less the amount asked',
+        onCosting.status === 201 &&
+          onCosting.body.for?.kind === 'costing' &&
+          onCosting.body.job === null &&
+          cb.source === 'costing' &&
+          cb.perLine === true &&
+          money(cb.line?.budgeted ?? -1, 96_000) &&
+          money(cb.availableBefore, 96_000) &&
+          money(cb.thisRequest, 30_000) &&
+          money(cb.availableAfter, 66_000),
+        `${onCosting.status} ${onCosting.body?.error ?? ''} ${JSON.stringify({ for: onCosting.body?.for?.kind, src: cb.source, line: cb.line?.budgeted, before: cb.availableBefore, after: cb.availableAfter })}`,
+      );
+      if (cId) {
+        await approve(cId);
+        await release(cId, 30_000);
+      }
+      const cReleased = cId ? await prisma.budgetRequest.findUniqueOrThrow({ where: { id: cId } }) : null;
+      const cLedger = cId ? await prisma.jobCostEntry.count({ where: { sourceType: 'budget_request', sourceId: cId } }) : -1;
+      const second = await http(engT, 'POST', '/budget-requests', { costingId: costingA.id, costCategoryId: materials.id, reason: `${TAG} BR second on the costing`, items: item(10_000) });
+      const sb = second.body?.id ? (await http(engT, 'GET', `/budget-requests/${second.body.id}`)).body.budget ?? {} : {};
+      check(
+        'released cash on a costing posts to no ledger, and the next request on it sees it as committed',
+        cReleased?.status === 'RELEASED' && cLedger === 0 && money(sb.line?.committed ?? -1, 30_000) && money(sb.availableBefore, 66_000) && money(sb.availableAfter, 56_000),
+        `${cReleased?.status} ledger ${cLedger} · ${JSON.stringify({ committed: sb.line?.committed, before: sb.availableBefore, after: sb.availableAfter })}`,
+      );
+      const forCosting = await http(engT, 'GET', `/budget-requests?for=costing&pageSize=200`);
+      const ofCosting = await http(engT, 'GET', `/budget-requests?costingId=${costingA.id}&pageSize=200`);
+      check(
+        'the register filters by what a request is for and by the record',
+        forCosting.status === 200 &&
+          (forCosting.body.rows ?? []).some((r: { id: string }) => r.id === cId) &&
+          !(forCosting.body.rows ?? []).some((r: { job: unknown }) => r.job) &&
+          ofCosting.body.total === 2,
+        `${forCosting.status} ${forCosting.body?.total} · ${ofCosting.body?.total}`,
+      );
+
+      // A quotation (open or won) reads its costing's budget lines; a sales
+      // order (issued) its quoted cost less its spend — budget request cash too.
+      const costingQ = await readyCosting('BR quoted costing', engineer.id, customer.id);
+      const quotationB = await prisma.quotation.create({
+        data: {
+          number: await nextNumber('quotation', prisma, { ownerId: pm.id }),
+          customerId: customer.id,
+          ownerId: engineer.id,
+          subject: `${TAG} BR quoted plant`,
+          outcome: 'WON',
+          revisions: { create: [{ revision: 0, status: 'APPROVED', costingId: costingQ.id }] },
+        },
+        include: { revisions: true },
+      });
+      const order = await prisma.salesOrder.create({
+        data: {
+          number: `${TAG}-SO-BR`,
+          quotationId: quotationB.id,
+          customerId: customer.id,
+          ownerId: engineer.id,
+          status: 'ISSUED',
+          orderDate: new Date('2026-03-01'),
+          lines: { create: [{ title: 'Plant', quantity: d(1), unit: 'lot', unitPrice: d(80_000), amount: d(80_000), unitCost: d(50_000), costAmount: d(50_000) }] },
+        },
+      });
+      const onQuote = await http(engT, 'POST', '/budget-requests', { quotationId: quotationB.id, costCategoryId: materials.id, reason: `${TAG} BR on a quotation`, items: item(5_000) });
+      const onOrder = await http(engT, 'POST', '/budget-requests', { salesOrderId: order.id, costCategoryId: materials.id, reason: `${TAG} BR on a sales order`, items: item(8_000) });
+      const qb = onQuote.body?.id ? (await http(engT, 'GET', `/budget-requests/${onQuote.body.id}`)).body.budget ?? {} : {};
+      const ob = onOrder.body?.id ? (await http(engT, 'GET', `/budget-requests/${onOrder.body.id}`)).body.budget ?? {} : {};
+      check(
+        'a request on a quotation reads its costing’s budget line; one on a sales order its quoted cost as one row',
+        onQuote.status === 201 &&
+          qb.source === 'quotation' &&
+          qb.perLine === true &&
+          money(qb.line?.budgeted ?? -1, 96_000) &&
+          onOrder.status === 201 &&
+          ob.source === 'sales_order' &&
+          ob.perLine === false &&
+          money(ob.line?.budgeted ?? -1, 50_000) &&
+          money(ob.availableAfter, 42_000),
+        `${onQuote.status} ${onQuote.body?.error ?? ''} ${JSON.stringify({ q: qb.line?.budgeted, src: qb.source })} · ${onOrder.status} ${onOrder.body?.error ?? ''} ${JSON.stringify({ o: ob.line?.budgeted, per: ob.perLine, after: ob.availableAfter })}`,
+      );
+      if (onOrder.body?.id) {
+        await approve(onOrder.body.id);
+        await release(onOrder.body.id, 8_000);
+      }
+      const orderPanel = await http(engT, 'GET', `/budget-requests/budget?salesOrderId=${order.id}`);
+      check(
+        'released cash on a sales order counts in the order’s own spend',
+        orderPanel.status === 200 && money(orderPanel.body.lines?.[0]?.committed ?? -1, 8_000) && money(orderPanel.body.total?.available ?? -1, 42_000),
+        `${orderPanel.status} ${JSON.stringify(orderPanel.body?.lines?.[0] ?? orderPanel.body)}`,
+      );
+
+      // A project built from the quotation takes over the requests on the
+      // quotation, on its costing and on its sales order — released cash now
+      // committed on the project's ledger.
+      const built = await http(leadToken, 'POST', '/jobs', {
+        costingId: costingQ.id,
+        quotationRevisionId: quotationB.revisions[0].id,
+        name: `${TAG} BR built plant`,
+        customerId: customer.id,
+      });
+      const builtId = built.body?.id as string | undefined;
+      const adopted = await prisma.budgetRequest.findMany({ where: { id: { in: [onQuote.body?.id, onOrder.body?.id].filter(Boolean) } } });
+      const committed = builtId
+        ? await prisma.jobCostEntry.aggregate({ where: { jobId: builtId, sourceType: 'budget_request', sourceId: onOrder.body?.id, state: 'COMMITTED' }, _sum: { amount: true } })
+        : null;
+      const afterRead = onOrder.body?.id ? (await http(engT, 'GET', `/budget-requests/${onOrder.body.id}`)).body : {};
+      check(
+        'a project built from the quotation takes over its requests, its released cash committed on the project',
+        built.status === 201 &&
+          adopted.length === 2 &&
+          adopted.every((r) => r.jobId === builtId && (r.quotationId || r.salesOrderId)) &&
+          money(num(committed?._sum.amount), 8_000) &&
+          afterRead.for?.kind === 'project' &&
+          afterRead.raisedOn?.kind === 'sales_order' &&
+          afterRead.budget?.source === 'project',
+        `${built.status} ${built.body?.error ?? ''} · ${adopted.map((r) => r.jobId === builtId).join(',')} · ${num(committed?._sum.amount)} · ${afterRead.for?.kind}/${afterRead.raisedOn?.kind}/${afterRead.budget?.source}`,
+      );
+      const costingRequests = await prisma.budgetRequest.findMany({ where: { costingId: costingA.id } });
+      check('a request on a costing no project was built from stays on the costing', costingRequests.every((r) => r.jobId === null), costingRequests.map((r) => r.jobId).join(','));
+      // The releases go with their requests (an allocation cascades, its payment would not).
+      const brIds = (await prisma.budgetRequest.findMany({ where: { reason: { startsWith: `${TAG} BR` } }, select: { id: true } })).map((r) => r.id);
+      const brPayments = await prisma.paymentAllocation.findMany({ where: { budgetRequestId: { in: brIds } }, select: { paymentId: true } });
+      await prisma.payment.deleteMany({ where: { id: { in: brPayments.map((a) => a.paymentId) } } });
+      await prisma.budgetRequest.deleteMany({ where: { id: { in: brIds } } });
+      await prisma.salesOrder.delete({ where: { id: order.id } });
+    }
+
     // An unknown status is a 400 naming the choices — on the list and its paper — never a 500.
     const badStatus = await Promise.all(
       ['jobs', 'jobs/pdf', 'jobs/budget-monitoring/pdf', 'progress-reports', 'progress-reports/pdf', 'billings', 'billings/pdf'].map((path) =>

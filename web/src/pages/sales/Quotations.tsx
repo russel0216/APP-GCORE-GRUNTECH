@@ -16,6 +16,7 @@ import { loadPeople } from '../../components/People';
 import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, initials, useToast, type Tone } from '../../components/ui';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import type { CostPanel } from '../../lib/quotationMath';
+import { RecordBudgetRequests } from '../delivery/BudgetRequests';
 
 export const OUTCOMES = [
   { value: 'OPEN', label: 'Open' },
@@ -1584,6 +1585,13 @@ export function QuotationDetail() {
               canEdit={quotation.canEdit || can('gops.sales_orders.create')}
             />
           </div>
+
+          {/* Cash on an open or won quotation (2026-10-26), checked against its costing. */}
+          <RecordBudgetRequests
+            wrapClassName="sales-card-gap"
+            record={{ key: 'quotationId', id: quotation.id }}
+            open={['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'].includes(quotation.outcome)}
+          />
 
           <div className="sales-card-gap">
             <ActivityLog quotationId={quotation.id} canEdit={quotation.canEdit} />

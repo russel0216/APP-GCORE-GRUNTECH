@@ -118,6 +118,7 @@ import {
   parseTermsDays,
   termsLabel,
 } from '../shared/receivables';
+import { SOURCE_INCLUDE, sourceOf } from '../shared/budgetRequestSources';
 
 function asDate(value: string, label: string): Date {
   const date = new Date(value);
@@ -4748,7 +4749,7 @@ paymentRoutes.post(
     for (const br of requests) {
       const released = await prisma.budgetRequest.findUnique({
         where: { id: br.id },
-        select: { requestedById: true, liquidationDueDate: true, amountReleased: true, job: { select: { number: true } } },
+        select: { requestedById: true, liquidationDueDate: true, amountReleased: true, ...SOURCE_INCLUDE },
       });
       if (!released) continue;
       const due = released.liquidationDueDate ? formatDate(released.liquidationDueDate) : 'the due date';
@@ -4756,7 +4757,7 @@ paymentRoutes.post(
         userId: released.requestedById,
         type: 'system',
         title: `${br.number} released — liquidate by ${due}`,
-        body: `${num(released.amountReleased)} has been released for ${released.job.number}. File the receipts as a liquidation in Expenses before ${due}.`,
+        body: `${num(released.amountReleased)} has been released for ${sourceOf(released)?.number ?? ''}. File the receipts as a liquidation in Expenses before ${due}.`,
         link: `/g-ops/budget-requests/${br.id}`,
       });
       await audit(
@@ -4993,7 +4994,7 @@ paymentRoutes.get(
           status: kind === 'budget_request' ? 'APPROVED' : 'REFUND_DUE',
           ...(partyId ? { requestedById: partyId } : {}),
         },
-        include: { requestedBy: { select: { id: true, name: true } }, job: { select: { number: true } } },
+        include: { requestedBy: { select: { id: true, name: true } }, ...SOURCE_INCLUDE },
         orderBy: { createdAt: 'asc' },
       });
       res.json(
@@ -5007,7 +5008,7 @@ paymentRoutes.get(
             return {
               id: r.id,
               number: r.number,
-              purpose: `${r.job.number} — ${r.reason}`,
+              purpose: `${sourceOf(r)?.number ?? ''} — ${r.reason}`,
               status: r.status,
               requestedBy: r.requestedBy,
               amount: num(r.amount),

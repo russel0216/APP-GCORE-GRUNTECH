@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FocusEvent, type KeyboardEvent } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
+import { MemoryInput } from '../../components/MemoryInput';
 import { useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, formatMoney, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
@@ -1155,11 +1156,18 @@ export function ItemCell({
           ))}
         </ul>
       )}
-      <input
+      {/* The quotation's description box (2026-10-26): it grows with its lines,
+          drags taller at its corner and remembers what was written before. */}
+      <MemoryInput
+        multiline
         className="prq-desc"
+        source={`${suggestPath}/fields`}
+        field="description"
+        params={{ name: line.name.trim() || undefined }}
         aria-label={`Line ${n} description`}
         placeholder="Description (optional)"
         maxLength={4000}
+        rows={Math.min(10, Math.max(2, line.description.split('\n').length + 1))}
         value={line.description}
         onChange={(e) => onChange({ description: e.target.value })}
       />

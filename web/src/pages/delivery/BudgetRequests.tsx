@@ -78,7 +78,12 @@ export interface BudgetRequest {
   requestedBy: { id: string; name: string; email: string; position: string | null };
   /** The requester's team. */
   team: { label: string; title: string; teamId: string | null } | null;
-  job: { id: string; number: string; name: string; projectManager: { id: string; name: string } | null };
+  /** The project, once it has one — raised on it, or handed to it by a project built from its record. */
+  job: { id: string; number: string; name: string; projectManager: { id: string; name: string } | null } | null;
+  /** What the cash is for (2026-10-26): the project, else the sales order, quotation or costing. */
+  for: RequestSource | null;
+  /** The record it was raised on, kept once a project took it over. */
+  raisedOn: RequestSource | null;
   costCategory: { id: string; name: string };
   toRelease: number;
   spent: number;
@@ -115,7 +120,28 @@ interface BudgetLineFigures {
   available: number;
 }
 
+export interface RequestSource {
+  kind: 'project' | 'sales_order' | 'quotation' | 'costing';
+  id: string;
+  number: string;
+  name: string;
+  label: string;
+  link: string;
+}
+
+/** "Project", "Sales order", "Quotation", "Costing". */
+export const SOURCE_WORDS: Record<RequestSource['kind'], string> = {
+  project: 'Project',
+  sales_order: 'Sales order',
+  quotation: 'Quotation',
+  costing: 'Costing',
+};
+
 export interface RequestBudget {
+  /** What it is checked against: the project's Budget Monitoring, or the record's own cost. */
+  source: RequestSource['kind'];
+  /** False where the record carries no budget lines — one "whole cost" row. */
+  perLine: boolean;
   line: BudgetLineFigures | null;
   lines: BudgetLineFigures[];
   total: { budgeted: number; committed: number; incurred: number; available: number };
@@ -140,7 +166,7 @@ function RequestBudgetCard({ budget: b, lineName }: { budget: RequestBudget; lin
   return (
     <section className="card">
       <div className="card-head">
-        <h3 className="card-title">Against the project budget</h3>
+        <h3 className="card-title">{b.source === 'project' ? 'Against the project budget' : `Against the ${SOURCE_WORDS[b.source].toLowerCase()}'s cost`}</h3>
       </div>
       {b.over && !b.settled && (
         <div className="alert error">
@@ -150,6 +176,12 @@ function RequestBudgetCard({ budget: b, lineName }: { budget: RequestBudget; lin
       <dl className="kv">
         <dt>Budget line</dt>
         <dd>{lineName}</dd>
+        {!b.perLine && line && (
+          <>
+            <dt>Checked against</dt>
+            <dd>{line.name} — the record carries no budget lines</dd>
+          </>
+        )}
         <dt>Budgeted</dt>
         <dd className="mono">{formatMoney(line?.budgeted ?? 0)}</dd>
         <dt>Already committed</dt>
@@ -174,7 +206,9 @@ function RequestBudgetCard({ budget: b, lineName }: { budget: RequestBudget; lin
       <p className="muted del-lede">
         {b.settled
           ? 'This request takes nothing more from the budget: what it spent is on the ledger as incurred.'
-          : 'Budget Monitoring’s own figures, with this request’s own released cash left out so it is never counted twice.'}
+          : b.source === 'project'
+            ? 'Budget Monitoring’s own figures, with this request’s own released cash left out so it is never counted twice.'
+            : 'The record’s own cost, less what its purchasing and the other budget requests on it already hold — nothing posts to a project until one is built from it, which takes this request over.'}
       </p>
       {others.length > 0 && (
         <div className="table-wrap">
@@ -285,13 +319,11 @@ export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
     },
     {
       key: 'job',
-      label: 'Project / Purpose',
+      label: 'For / Purpose',
       render: (r) => (
         <div>
           <div>{r.reason}</div>
-          <div className="faint">
-            <span className="mono">{r.job.number}</span> {r.job.name}
-          </div>
+          <div className="faint">{r.for ? <ForLabel source={r.for} /> : '—'}</div>
         </div>
       ),
     },
@@ -340,6 +372,8 @@ export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
       options: [...teams.map((t) => ({ value: t.id, label: `${t.code} — ${t.name}` })), { value: 'none', label: 'No team' }],
     },
     { key: 'neededFrom', toKey: 'neededTo', label: 'Date needed', type: 'dateRange' },
+    // What the cash is for (2026-10-26).
+    { key: 'for', label: 'For', options: (Object.keys(SOURCE_WORDS) as RequestSource['kind'][]).map((k) => ({ value: k, label: SOURCE_WORDS[k] })) },
   ];
 
   return (
@@ -439,11 +473,11 @@ export function FinanceLiquidations() {
     },
     {
       key: 'job',
-      label: 'Project / Purpose',
+      label: 'For / Purpose',
       render: (r) => (
         <div>
           <div>{r.reason}</div>
-          <div className="faint mono">{r.job.number}</div>
+          <div className="faint">{r.for ? <ForLabel source={r.for} /> : '—'}</div>
         </div>
       ),
     },
@@ -570,25 +604,43 @@ export function FinanceLiquidations() {
  * released, spent and returned, when the receipts are due, and each one's
  * approval chain on demand — so the PM can see who is sitting on it.
  */
+/** "Sales order GT-SO-…" with its name, as a register cell says what a request is for. */
+function ForLabel({ source }: { source: RequestSource }) {
+  return (
+    <>
+      {source.kind !== 'project' && <>{SOURCE_WORDS[source.kind]} </>}
+      <span className="mono">{source.number}</span> {source.name}
+    </>
+  );
+}
+
 export function ProjectBudgetRequestsCard({
   job,
+  record,
   reloadToken,
   onRaise,
 }: {
-  job: { id: string };
+  job?: { id: string };
+  /**
+   * A sales order's, quotation's or costing's own requests (2026-10-26) —
+   * the same card on its page, in place of a project's.
+   */
+  record?: { key: 'salesOrderId' | 'quotationId' | 'costingId'; id: string };
   reloadToken: number;
   onRaise?: () => void;
 }) {
+  const filterKey = record?.key ?? 'jobId';
+  const filterId = record?.id ?? job?.id ?? '';
   const [rows, setRows] = useState<BudgetRequest[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [open, setOpen] = useState<string | null>(null);
 
   useEffect(() => {
     api
-      .get<ListResult<BudgetRequest>>(`/budget-requests?jobId=${job.id}&pageSize=100`)
+      .get<ListResult<BudgetRequest>>(`/budget-requests?${filterKey}=${filterId}&pageSize=100`)
       .then((r) => setRows(r.rows))
       .catch(setError);
-  }, [job.id, reloadToken]);
+  }, [filterKey, filterId, reloadToken]);
 
   const sum = (pick: (r: BudgetRequest) => number) => (rows ?? []).reduce((s, r) => s + pick(r), 0);
   const live = (rows ?? []).filter((r) => !['REJECTED', 'CANCELLED', 'DRAFT'].includes(r.status));
@@ -605,14 +657,16 @@ export function ProjectBudgetRequestsCard({
       </div>
       <p className="muted del-lede">
         Cash for the team to buy what it needs without a purchase requisition. The team leader, back
-        support and the finance manager allow it, finance releases it, and it is liquidated with receipts in Expenses — released cash
-        shows as committed on its budget line, and the liquidation turns what was spent into incurred.
+        support and the finance manager allow it, finance releases it, and it is liquidated with receipts in Expenses —{' '}
+        {record
+          ? 'checked against this record’s own cost; a project built from it takes the requests over.'
+          : 'released cash shows as committed on its budget line, and the liquidation turns what was spent into incurred.'}
       </p>
       <ErrorBox error={error} />
       {!rows && !error ? (
         <Loading />
       ) : rows && rows.length === 0 ? (
-        <p className="faint del-note">No budget requests raised on this project.</p>
+        <p className="faint del-note">No budget requests raised on this {record ? (record.key === 'salesOrderId' ? 'sales order' : record.key === 'quotationId' ? 'quotation' : 'costing') : 'project'}.</p>
       ) : rows ? (
         <>
           <dl className="kv del-br-sum">
@@ -745,8 +799,8 @@ export function BudgetRequestDetail() {
     (can('gops.projects.view_all') || can('gops.projects.view_own'));
   const financeSide = can('gfin.budget_requests.view_all');
   useBackLink(
-    row && projectSide ? `/g-ops/projects/${row.job.id}?tab=requests` : row && financeSide ? '/g-fin/budget-requests' : null,
-    row && projectSide ? `${row.job.number} Budget Requests` : row && financeSide ? 'Budget Requests' : null,
+    row && projectSide && row.job ? `/g-ops/projects/${row.job.id}?tab=requests` : row && (projectSide || !financeSide) && row.for ? row.for.link : row && financeSide ? '/g-fin/budget-requests' : null,
+    row && projectSide && row.job ? `${row.job.number} Budget Requests` : row && (projectSide || !financeSide) && row.for ? row.for.number : row && financeSide ? 'Budget Requests' : null,
   );
 
   const load = useCallback(async () => {
@@ -830,11 +884,9 @@ export function BudgetRequestDetail() {
             Requested by {row.requestedBy.name} on {formatDate(row.createdAt)}
             {row.neededBy && <> · needed by {formatDate(row.neededBy)}</>}
             {' · for '}
-            <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
-              {row.job.number}
-            </Link>{' '}
-            {row.job.name} · {row.costCategory.name}
-            {row.job.projectManager && <> · Technical Manager {row.job.projectManager.name}</>}
+            {row.for ? <Link to={row.for.link}>{row.for.label}</Link> : '—'} · {row.costCategory.name}
+            {row.job?.projectManager && <> · Technical Manager {row.job.projectManager.name}</>}
+            {row.job && row.raisedOn && <> · raised on <Link to={row.raisedOn.link}>{row.raisedOn.label}</Link></>}
           </>
         }
         actions={
@@ -950,7 +1002,7 @@ export function BudgetRequestDetail() {
       )}
       {row.status === 'LIQUIDATED' && (
         <div className="alert ok">
-          Liquidated. {formatMoney(row.spent)} spent and charged to {row.job.number}
+          Liquidated. {formatMoney(row.spent)} spent{row.job ? <> and charged to {row.job.number}</> : <> against {row.for?.label}</>}
           {row.excessDue > 0 && <>; the {formatMoney(row.excessDue)} over the cash released is reimbursed on the liquidation</>}
           {row.amountRefunded > 0 && <>; {formatMoney(row.amountRefunded)} of unspent cash came back</>}.
         </div>
@@ -1084,4 +1136,36 @@ export function BudgetRequestDetail() {
 
     </div>
   );
+}
+
+/**
+ * A sales order's, quotation's or costing's own budget requests (2026-10-26,
+ * the owner's call), with "+ New budget request" while the record may take
+ * one (an issued order, an open or won quotation, a final costing). Hidden
+ * from whoever may not read the register, as every cross-module card is.
+ */
+export function RecordBudgetRequests({
+  record,
+  open,
+  wrapClassName,
+}: {
+  record: { key: 'salesOrderId' | 'quotationId' | 'costingId'; id: string };
+  /** A wrapper's class where the page spaces its cards itself. */
+  wrapClassName?: string;
+  /** The record may take a new request now. */
+  open: boolean;
+}) {
+  const { can } = useAuth();
+  const navigate = useNavigate();
+  const reads =
+    can('gops.budget_requests.view_all') || can('gops.budget_requests.view_own') || can('gfin.budget_requests.view_all') || can('gfin.budget_liquidations.view_all');
+  if (!reads) return null;
+  const card = (
+    <ProjectBudgetRequestsCard
+      record={record}
+      reloadToken={0}
+      onRaise={open && can('gops.budget_requests.create') ? () => navigate(`/g-ops/budget-requests/new?${record.key}=${record.id}`) : undefined}
+    />
+  );
+  return wrapClassName ? <div className={wrapClassName}>{card}</div> : card;
 }

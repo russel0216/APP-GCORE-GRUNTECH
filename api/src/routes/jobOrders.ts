@@ -1309,6 +1309,7 @@ export async function settleJobOrder(
           // A project built on a quotation still under negotiation keeps the
           // link for later: only an APPROVED revision may stand behind a job.
           quotationRevisionId: rev.status === 'APPROVED' ? rev.id : null,
+          fromQuotationId: jo.quotationId,
           customerPoNumber: jo.customerPoNumber,
           startDate: t.targetStart,
           targetEndDate: t.targetFinish,

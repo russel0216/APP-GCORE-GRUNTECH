@@ -31,6 +31,7 @@ import { cleanCostingIds, costingIdsOf } from '../shared/costingSets';
 import { LIST_CAP, listReference, totalLabel, bracketed, bracketNote, listNotes, listDay, namedInFilter, choice, sendListPdf } from '../shared/listPaper';
 import { visibleOwners } from '../shared/team';
 import { projectBudgetByLine } from './procurement';
+import { adoptBudgetRequests } from '../shared/budgetRequestSources';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -739,6 +740,12 @@ export interface NewJobInput {
   /** The Project Engineer, who prepares the kick-off Gantt chart (2026-10-22). */
   projectEngineerId?: string | null;
   quotationRevisionId?: string | null;
+  /**
+   * The quotation the project comes from when no approved revision stands
+   * behind it (a job order on a quotation under negotiation): its budget
+   * requests, and its sales orders', move onto the project (2026-10-26).
+   */
+  fromQuotationId?: string | null;
   customerPoNumber?: string | null;
   customerPoDate?: Date | null;
   contractDate?: Date | null;
@@ -878,6 +885,15 @@ export async function createJobRecord(
       await tx.costing.update({ where: { id: costing.id }, data: { status: 'FINAL', finalAt: new Date() } });
     }
   }
+
+  // The budget requests raised on its costings, its quotation and that
+  // quotation's sales orders now count on the project (2026-10-26).
+  const quotationId =
+    input.fromQuotationId ??
+    (input.quotationRevisionId
+      ? (await tx.quotationRevision.findUnique({ where: { id: input.quotationRevisionId }, select: { quotationId: true } }))?.quotationId ?? null
+      : null);
+  await adoptBudgetRequests(tx, created.id, { costingIds: costings.map((c) => c.id), quotationId });
   return created;
 }
 

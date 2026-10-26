@@ -207,8 +207,25 @@
   font-weight: 600;
 }
 
-.prq-lines .prq-desc {
+/* The description is the quotation's box (2026-10-26): as tall as its lines,
+   dragged taller at its corner, its memory listed IN the cell — the table
+   scrolls sideways and would cut a floating list off. */
+.prq-lines .memory {
   margin-top: var(--s-1);
+}
+
+.prq-lines textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 3.5rem;
+  padding-inline: var(--s-2);
+}
+
+.prq-lines .memory-menu {
+  position: static;
+  max-height: 14rem;
+  margin-top: var(--s-1);
+  min-width: 0;
 }
 
 .prq-lines .field-error {
@@ -730,4 +747,11 @@ a.inv-move:hover .inv-move-what {
 /* Goods or a service under a line's budget line (2026-10-21). */
 .prq-nature {
   margin-top: var(--s-1);
+}
+
+/* The budget request's "For" picker (2026-10-26): a search over its select. */
+.br-source-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
 }

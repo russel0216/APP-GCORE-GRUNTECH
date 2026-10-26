@@ -67,6 +67,7 @@ import { contentDisposition, paperFileName } from '../shared/paperName';
 import { canvassFigures, MAX_SHEET_SUPPLIERS, type SheetLine } from '../shared/canvassMath';
 import { jobCostingIds } from '../shared/costingSets';
 import { salesOrderSpend } from '../shared/orderStock';
+import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
 
 /** What a purchase is for, in words — the lists, the papers and the trail. */
 export function purchaseKindLabel(kind: string): string {
@@ -616,6 +617,54 @@ purchaseRequestRoutes.get(
     res.json(
       await lineSuggestions(currentUser(req), String(req.query.q ?? '').trim(), String(req.query.jobId ?? ''), String(req.query.salesOrderId ?? '')),
     );
+  }),
+);
+
+/**
+ * A line's description remembers (2026-10-26, the owner's call: "Purchase
+ * Request and Purchase Order description … like in quotation"): what was
+ * written under a line before, newest first, on requests the caller may read
+ * (`prListWhere`'s own rule) and, for a holder of a purchase order View key,
+ * on orders — the item named on the line (`name`) first, then any. Values
+ * only, never a figure; each text once (`shared/memory.ts`).
+ */
+async function descriptionMemory(me: ResolvedUser, q: string, name: string): Promise<string[]> {
+  const like = q ? { contains: q, mode: 'insensitive' as const } : undefined;
+  const readsPr = me.isSuperAdmin || can(me, 'gchain.purchase_requests.view_all') || can(me, 'gchain.purchase_requests.view_own');
+  const readsPo = me.isSuperAdmin || can(me, 'gchain.purchase_orders.view_all') || can(me, 'gchain.purchase_orders.view_own');
+  const prWhere = readsPr ? prListWhere(me, { page: 1, pageSize: 1, search: '', sort: null, dir: 'desc', scope: 'all', filters: {} }).where : null;
+  const read = async (named: boolean) => {
+    const nameWhere = named && name ? { name: { equals: name, mode: 'insensitive' as const } } : {};
+    const [prLines, poLines] = await Promise.all([
+      prWhere
+        ? prisma.purchaseRequestItem.findMany({
+            where: { description: { not: '', ...(like ?? {}) }, ...nameWhere, request: prWhere },
+            select: { description: true },
+            orderBy: { request: { createdAt: 'desc' } },
+            take: MEMORY_SCAN,
+          })
+        : [],
+      readsPo
+        ? prisma.purchaseOrderItem.findMany({
+            where: { description: { not: '', ...(like ?? {}) }, ...nameWhere },
+            select: { description: true },
+            orderBy: { order: { createdAt: 'desc' } },
+            take: MEMORY_SCAN,
+          })
+        : [],
+    ]);
+    return [...prLines, ...poLines].map((l) => l.description);
+  };
+  const first = name ? await read(true) : [];
+  return distinctTexts([...first, ...(await read(false))], q);
+}
+
+purchaseRequestRoutes.get(
+  '/suggest/fields',
+  requireAny(...PR_WRITERS),
+  handler(async (req, res) => {
+    if (String(req.query.field ?? 'description') !== 'description') throw badRequest('Field must be description');
+    res.json(await descriptionMemory(currentUser(req), memoryTerm(req.query.q), memoryTerm(req.query.name)));
   }),
 );
 
@@ -3245,6 +3294,15 @@ purchaseOrderRoutes.get(
     res.json(
       await lineSuggestions(currentUser(req), String(req.query.q ?? '').trim(), String(req.query.jobId ?? ''), String(req.query.salesOrderId ?? '')),
     );
+  }),
+);
+
+purchaseOrderRoutes.get(
+  '/suggest/fields',
+  requireAny(...PO_WRITERS),
+  handler(async (req, res) => {
+    if (String(req.query.field ?? 'description') !== 'description') throw badRequest('Field must be description');
+    res.json(await descriptionMemory(currentUser(req), memoryTerm(req.query.q), memoryTerm(req.query.name)));
   }),
 );
 

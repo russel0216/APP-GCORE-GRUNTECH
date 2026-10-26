@@ -27,6 +27,17 @@ import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes,
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { USER_TEAM_SELECT, teamOfUser, userTeamWhere, visibleOwners } from '../shared/team';
 import { projectBudgetByLine } from './procurement';
+import {
+  SOURCE_INCLUDE,
+  checkSource,
+  raisedOn,
+  recordBudget,
+  sourceFilter,
+  sourceOf,
+  sourceSearch,
+  type RequestSource,
+  type SourceKind,
+} from '../shared/budgetRequestSources';
 
 /**
  * BUDGET REQUESTS — project cash (model §5.2, 2026-10-07, the owner's call).
@@ -52,7 +63,7 @@ export const budgetRequestRoutes = Router();
 budgetRequestRoutes.use(authenticate);
 
 const requestInclude = {
-  job: { select: { id: true, number: true, name: true, projectManager: { select: { id: true, name: true } } } },
+  ...SOURCE_INCLUDE,
   costCategory: { select: { id: true, name: true } },
   requestedBy: { select: { id: true, name: true, email: true, position: true, ...USER_TEAM_SELECT.select } },
   liquidations: {
@@ -81,6 +92,10 @@ export function presentBudgetRequest(row: RequestRow, today = dayKey(new Date())
     requestedBy: requester,
     /** The requester's team — the Team column. */
     team: teamOfUser(row.requestedBy),
+    /** What the cash is for (2026-10-26): the project, else the sales order, quotation or costing. */
+    for: sourceOf(row),
+    /** The record it was raised on, kept once a project took it over. */
+    raisedOn: raisedOn(row),
     amount,
     amountReleased: released,
     amountSpent: spent,
@@ -121,10 +136,10 @@ function seesAll(me: Me): boolean {
  * it, and by the project's manager — who is asked to decide it and must be
  * able to open what they decide.
  */
-function assertCanSee(me: Me, row: { requestedById: string; job: { projectManager: { id: string } | null } }) {
+function assertCanSee(me: Me, row: { requestedById: string; job: { projectManager: { id: string } | null } | null }) {
   if (seesAll(me)) return;
   if (visibleOwners(me, 'gops', 'budget_requests').includes(row.requestedById)) return;
-  if (row.job.projectManager?.id === me.id) return;
+  if (row.job?.projectManager?.id === me.id) return;
   throw forbidden('That is someone else’s budget request');
 }
 
@@ -142,9 +157,10 @@ export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, 
   else if (mine) people.push({ requestedById: { in: visibleOwners(me, 'gops', 'budget_requests') } });
   if (asked) people.push({ requestedById: asked });
   if (people.length) where.AND = people;
-  if (q.filters.jobId) where.jobId = q.filters.jobId;
   const f = q.filters;
-  const and: Prisma.BudgetRequestWhereInput[] = [];
+  // What it is for: a record's own requests (`?jobId=`, `?salesOrderId=`,
+  // `?quotationId=`, `?costingId=`) or a kind (`?for=`).
+  const and: Prisma.BudgetRequestWhereInput[] = [...sourceFilter(f)];
   if (f.teamId) and.push({ requestedBy: userTeamWhere(f.teamId) });
   if (f.neededFrom || f.neededTo) {
     and.push({ neededBy: { ...(f.neededFrom ? { gte: asDate(f.neededFrom, 'Needed from') } : {}), ...(f.neededTo ? { lte: asDate(f.neededTo, 'Needed to') } : {}) } });
@@ -166,8 +182,7 @@ export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, 
     where.OR = [
       { number: { contains: q.search, mode: 'insensitive' } },
       { reason: { contains: q.search, mode: 'insensitive' } },
-      { job: { name: { contains: q.search, mode: 'insensitive' } } },
-      { job: { number: { contains: q.search, mode: 'insensitive' } } },
+      ...sourceSearch(q.search),
       { requestedBy: { name: { contains: q.search, mode: 'insensitive' } } },
     ];
   }
@@ -286,7 +301,7 @@ budgetRequestRoutes.get(
       prisma.budgetRequest.findMany({
         where,
         include: {
-          job: { select: { number: true, name: true } },
+          ...SOURCE_INCLUDE,
           costCategory: { select: { name: true } },
           requestedBy: { select: { name: true } },
         },
@@ -320,7 +335,7 @@ budgetRequestRoutes.get(
         kind: 'table',
         head: [
           'Number',
-          'Project and budget line',
+          'For and budget line',
           'Requested by and purpose',
           'Raised',
           `Amount (${currency})`,
@@ -335,7 +350,7 @@ budgetRequestRoutes.get(
           const late = r.status === 'RELEASED' && r.liquidationDueDate ? daysBetween(r.liquidationDueDate, today) : 0;
           return [
             r.number,
-            { title: r.job.name, body: `${r.job.number} · ${r.costCategory.name}` },
+            { title: sourceOf(r)?.name ?? '', body: `${sourceOf(r)?.label.replace(/ — .*$/, '') ?? ''} · ${r.costCategory.name}` },
             { title: r.requestedBy.name, body: r.reason },
             formatShortDate(r.createdAt),
             bracketed(formatAmount(num(r.amount)), inSum),
@@ -408,11 +423,85 @@ budgetRequestRoutes.get(
   '/budget',
   requireAny(...REQUEST_WRITERS),
   handler(async (req, res) => {
-    const jobId = String(req.query.jobId ?? '');
-    if (!jobId) throw badRequest('Name the project');
-    const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true, number: true, name: true } });
-    if (!job) throw notFound('Project not found');
-    res.json({ job, ...(await projectBudgetByLine(jobId)) });
+    const source = await sourceFromQuery(req.query as Record<string, unknown>);
+    // The budget lines a request may name — every active one, whatever the
+    // record carries (a sales order's cost has no lines of its own).
+    const categories = await prisma.costCategory.findMany({ where: { isActive: true }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, name: true } });
+    if (source.kind === 'project') {
+      res.json({ source, categories, job: { id: source.id, number: source.number, name: source.name }, perLine: true, ...(await projectBudgetByLine(source.id)) });
+      return;
+    }
+    res.json({ source, categories, job: null, ...(await recordBudget(source, null)) });
+  }),
+);
+
+/** The record named in a query — `?jobId=`, `?salesOrderId=`, `?quotationId=` or `?costingId=`. */
+async function sourceFromQuery(query: Record<string, unknown>): Promise<RequestSource> {
+  const id = (k: string) => (query[k] ? String(query[k]) : null);
+  const row = {
+    job: id('jobId') ? await prisma.job.findUnique({ where: { id: id('jobId')! }, select: { id: true, number: true, name: true } }) : null,
+    salesOrder: id('salesOrderId')
+      ? await prisma.salesOrder.findUnique({ where: { id: id('salesOrderId')! }, select: { id: true, number: true, quotation: { select: { subject: true } } } })
+      : null,
+    quotation: id('quotationId') ? await prisma.quotation.findUnique({ where: { id: id('quotationId')! }, select: { id: true, number: true, subject: true } }) : null,
+    costing: id('costingId') ? await prisma.costing.findUnique({ where: { id: id('costingId')! }, select: { id: true, number: true, title: true } }) : null,
+  };
+  const source = sourceOf(row);
+  if (!source) throw badRequest('Name the project, sales order, quotation or costing');
+  return source;
+}
+
+/**
+ * What a new request may be raised on, for the request page's "For" picker
+ * (2026-10-26): issued sales orders, open or won quotations, final costings —
+ * the ones the caller may read (View All, else their Own / Team scope or a
+ * direct report's), numbers and names only. `?kind=` and `?q=`. Above `/:id`.
+ */
+budgetRequestRoutes.get(
+  '/sources',
+  require_('gops.budget_requests.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const kind = String(req.query.kind ?? '') as SourceKind;
+    const q = String(req.query.q ?? '').trim();
+    const like = q ? { contains: q, mode: 'insensitive' as const } : undefined;
+    const reports = async () => (await prisma.user.findMany({ where: { supervisorId: me.id }, select: { id: true } })).map((u) => u.id);
+    const owners = async (module: string) =>
+      me.isSuperAdmin || me.permissions.has(`gops.${module}.view_all`) ? null : [me.id, ...visibleOwners(me, 'gops', module), ...(await reports())];
+    if (kind === 'sales_order') {
+      const ids = await owners('sales_orders');
+      const rows = await prisma.salesOrder.findMany({
+        where: { status: 'ISSUED', ...(ids ? { ownerId: { in: ids } } : {}), ...(like ? { OR: [{ number: like }, { quotation: { subject: like } }, { customer: { name: like } }] } : {}) },
+        select: { id: true, number: true, quotation: { select: { subject: true } }, customer: { select: { name: true } } },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      });
+      res.json(rows.map((r) => ({ id: r.id, number: r.number, name: r.quotation.subject, sub: r.customer.name })));
+      return;
+    }
+    if (kind === 'quotation') {
+      const ids = await owners('quotations');
+      const rows = await prisma.quotation.findMany({
+        where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'] }, ...(ids ? { ownerId: { in: ids } } : {}), ...(like ? { OR: [{ number: like }, { subject: like }, { customer: { name: like } }] } : {}) },
+        select: { id: true, number: true, subject: true, customer: { select: { name: true } } },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      });
+      res.json(rows.map((r) => ({ id: r.id, number: r.number, name: r.subject, sub: r.customer.name })));
+      return;
+    }
+    if (kind === 'costing') {
+      const ids = await owners('costing');
+      const rows = await prisma.costing.findMany({
+        where: { status: 'FINAL', ...(ids ? { ownerId: { in: ids } } : {}), ...(like ? { OR: [{ number: like }, { title: like }, { customer: { name: like } }] } : {}) },
+        select: { id: true, number: true, title: true, customer: { select: { name: true } } },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      });
+      res.json(rows.map((r) => ({ id: r.id, number: r.number, name: r.title, sub: r.customer?.name ?? '' })));
+      return;
+    }
+    throw badRequest('Kind must be sales_order, quotation or costing');
   }),
 );
 
@@ -444,15 +533,37 @@ budgetRequestRoutes.get(
  * line shown as it stands. Every other budget line is sent too, so finance
  * sees where the rest of the money sits.
  */
-export async function requestBudget(row: { id: string; jobId: string; costCategoryId: string; status: RequestStatus; amount: Prisma.Decimal; amountReleased: Prisma.Decimal; amountRefunded: Prisma.Decimal }) {
-  const { lines, total } = await projectBudgetByLine(row.jobId, { exclude: { sourceType: 'budget_request', sourceId: row.id } });
+type BudgetRow = {
+  id: string;
+  jobId: string | null;
+  costCategoryId: string;
+  status: RequestStatus;
+  amount: Prisma.Decimal;
+  amountReleased: Prisma.Decimal;
+  amountRefunded: Prisma.Decimal;
+} & Parameters<typeof sourceOf>[0];
+
+export async function requestBudget(row: BudgetRow) {
+  // A project's request reads Budget Monitoring; one on a sales order,
+  // quotation or costing reads that record's cost (2026-10-26) — one budget
+  // line each, or one "whole cost" row where the record carries none.
+  const source = sourceOf(row);
+  const pool =
+    row.jobId || !source
+      ? { ...(await projectBudgetByLine(row.jobId!, { exclude: { sourceType: 'budget_request', sourceId: row.id } })), perLine: true }
+      : (await recordBudget(source, row.id)) ?? { lines: [], total: { budgeted: 0, committed: 0, incurred: 0, consumed: 0, available: 0 }, perLine: false };
+  const { lines, total, perLine } = pool;
   const settled = ['LIQUIDATED', 'REJECTED', 'CANCELLED'].includes(row.status);
   const out = ['RELEASED', 'REFUND_DUE'].includes(row.status);
   const thisRequest = settled ? 0 : out ? cents(Math.max(0, num(row.amountReleased) - num(row.amountRefunded))) : num(row.amount);
-  const line = lines.find((l) => l.id === row.costCategoryId) ?? null;
+  const line = (perLine ? lines.find((l) => l.id === row.costCategoryId) : lines[0]) ?? null;
   const before = line?.available ?? 0;
   const after = cents(before - thisRequest);
   return {
+    /** What it is checked against: the project's Budget Monitoring, or the record's cost. */
+    source: source?.kind ?? 'project',
+    /** False where the record carries no budget lines (a sales order; a quotation with no costing). */
+    perLine,
     line,
     lines,
     total,
@@ -476,8 +587,11 @@ export async function requestBudget(row: { id: string; jobId: string; costCatego
  */
 async function availableAfterFor(rows: Parameters<typeof requestBudget>[0][]): Promise<Map<string, number | null>> {
   const out = new Map<string, number | null>();
-  const open = rows.filter((r) => !['LIQUIDATED', 'REJECTED', 'CANCELLED'].includes(r.status));
+  const live = rows.filter((r) => !['LIQUIDATED', 'REJECTED', 'CANCELLED'].includes(r.status));
   for (const r of rows) out.set(r.id, null);
+  // A request on a sales order, quotation or costing reads its record's cost, one at a time.
+  for (const r of live.filter((r) => !r.jobId)) out.set(r.id, (await requestBudget(r)).availableAfter);
+  const open = live.filter((r): r is typeof r & { jobId: string } => !!r.jobId);
   if (!open.length) return out;
   const [ledger, own] = await Promise.all([
     prisma.jobCostEntry.groupBy({
@@ -514,7 +628,7 @@ function budgetSections(b: Awaited<ReturnType<typeof requestBudget>>, lineName: 
   return [
     {
       kind: 'table',
-      title: 'Against the project budget',
+      title: b.source === 'project' ? 'Against the project budget' : 'Against its cost',
       head: ['Budget line', `Budgeted (${currency})`, `Committed (${currency})`, `Spent (${currency})`, `Available (${currency})`],
       align: ['left', 'right', 'right', 'right', 'right'],
       rows: shown.map((l) => [
@@ -606,7 +720,11 @@ const itemSchema = z.object({
 });
 
 const requestSchema = z.object({
-  jobId: z.string().min(1, 'Which project?'),
+  /** Exactly one of the four (2026-10-26). */
+  jobId: z.string().optional().nullable(),
+  salesOrderId: z.string().optional().nullable(),
+  quotationId: z.string().optional().nullable(),
+  costingId: z.string().optional().nullable(),
   costCategoryId: z.string().min(1, 'Which budget line?'),
   /** Typed when there is no breakdown; with `items`, their sum and nothing else. */
   amount: z.number().optional(),
@@ -660,14 +778,12 @@ function asDate(value: string, label: string): Date {
   return dayKey(date);
 }
 
-/** The project must exist and still be running, and the budget line must be one of its lines. */
-async function checkCharging(body: { jobId: string; costCategoryId: string }) {
-  const job = await prisma.job.findUnique({ where: { id: body.jobId }, select: { id: true, number: true, status: true } });
-  if (!job) throw notFound('Project not found');
-  if (job.status === 'CANCELLED') throw badRequest(`${job.number} is cancelled — nothing can be requested against it`);
+/** The record must still stand (`checkSource`), and the budget line must exist. */
+async function checkCharging(me: Me, body: RequestBody) {
+  const source = await checkSource(me, body);
   const category = await prisma.costCategory.findUnique({ where: { id: body.costCategoryId }, select: { id: true } });
   if (!category) throw notFound('Budget line not found');
-  return job;
+  return source;
 }
 
 budgetRequestRoutes.post(
@@ -676,7 +792,7 @@ budgetRequestRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(requestSchema, req.body);
-    const job = await checkCharging(body);
+    const source = await checkCharging(me, body);
     const { lines, amount } = moneyOf(body);
 
     const request = await prisma.$transaction(async (tx) => {
@@ -684,7 +800,7 @@ budgetRequestRoutes.post(
       return tx.budgetRequest.create({
         data: {
           number,
-          jobId: body.jobId,
+          ...source.columns,
           costCategoryId: body.costCategoryId,
           amount: D(amount),
           items: { create: lines },
@@ -702,7 +818,7 @@ budgetRequestRoutes.post(
         entityType: 'budget_request',
         entityId: request.id,
         action: 'CREATED',
-        summary: `Raised ${request.number} — ${amount} for ${job.number}: ${body.reason}${lines.length ? ` (${lines.length} line${lines.length === 1 ? '' : 's'})` : ''}`,
+        summary: `Raised ${request.number} — ${amount} for ${source.number}: ${body.reason}${lines.length ? ` (${lines.length} line${lines.length === 1 ? '' : 's'})` : ''}`,
       },
       req,
     );
@@ -722,8 +838,11 @@ budgetRequestRoutes.put(
       throw forbidden('Only the person who raised this request can change it');
     }
     if (existing.status !== 'DRAFT') throw badRequest('Only a draft can be changed — this one has been submitted');
-    if (body.jobId !== existing.jobId) throw badRequest('A budget request stays on the project it was raised for — raise another');
-    await checkCharging(body);
+    const same = (a: string | null | undefined, b: string | null) => (a || null) === b;
+    if (!same(body.jobId, existing.jobId) || !same(body.salesOrderId, existing.salesOrderId) || !same(body.quotationId, existing.quotationId) || !same(body.costingId, existing.costingId)) {
+      throw badRequest('A budget request stays on what it was raised for — raise another');
+    }
+    await checkCharging(me, body);
     // Lines sent replace the breakdown whole; none sent keeps it, with the
     // amount still their sum (a typed amount counts only with no lines).
     const kept = body.items ? null : await prisma.budgetRequestItem.findMany({ where: { requestId: existing.id }, orderBy: { sortOrder: 'asc' } });
@@ -769,10 +888,11 @@ budgetRequestRoutes.post(
     const me = currentUser(req);
     const request = await prisma.budgetRequest.findUnique({
       where: { id: req.params.id },
-      include: { job: { select: { number: true } }, costCategory: { select: { name: true } } },
+      include: { ...SOURCE_INCLUDE, costCategory: { select: { name: true } } },
     });
     if (!request) throw notFound('Budget request not found');
     if (request.requestedById !== me.id && !me.isSuperAdmin) throw forbidden('Only the requester can submit this');
+    const forWhat = sourceOf(request)?.label.replace(/ — .*$/, '') ?? '';
     if (request.status !== 'DRAFT') throw badRequest('This request has already been submitted');
 
     // Claimed, never simply written: two Submit clicks file once.
@@ -790,7 +910,7 @@ budgetRequestRoutes.post(
         documentType: 'budget_request',
         documentId: request.id,
         documentNumber: request.number,
-        subject: `${request.job.number} — ${request.costCategory.name}: ${request.reason} (${request.costCategory.name}: ${position})`,
+        subject: `${forWhat} — ${request.costCategory.name}: ${request.reason} (${request.costCategory.name}: ${position})`,
         amount: num(request.amount),
         link: `/g-ops/budget-requests/${request.id}`,
         // The requester, even when a super admin presses the button: the
@@ -822,9 +942,10 @@ budgetRequestRoutes.post(
 export const settleBudgetRequest = async (approval: ApprovalRequest, outcome: ApprovalOutcome) => {
   const request = await prisma.budgetRequest.findUnique({
     where: { id: approval.documentId },
-    include: { requestedBy: { select: { name: true } }, job: { select: { number: true } } },
+    include: { requestedBy: { select: { name: true } }, ...SOURCE_INCLUDE },
   });
   if (!request) return;
+  const forWhat = sourceOf(request)?.label.replace(/ — .*$/, '') ?? '';
   const claimed = await prisma.budgetRequest.updateMany({
     where: { id: request.id, status: 'PENDING_APPROVAL' },
     data: outcome === 'APPROVED' ? { status: 'APPROVED', approvedAt: new Date() } : { status: 'REJECTED' },
@@ -852,7 +973,7 @@ export const settleBudgetRequest = async (approval: ApprovalRequest, outcome: Ap
     finance.map((userId) => ({
       userId,
       type: 'system' as const,
-      title: `${request.number} approved — ${formatMoney(num(request.amount))} to release for ${request.job.number}`,
+      title: `${request.number} approved — ${formatMoney(num(request.amount))} to release for ${forWhat}`,
       body: `${request.requestedBy.name}: ${request.reason}`,
       link: `/g-ops/budget-requests/${request.id}`,
     })),
@@ -861,7 +982,7 @@ export const settleBudgetRequest = async (approval: ApprovalRequest, outcome: Ap
     entityType: 'budget_request',
     entityId: request.id,
     action: 'APPROVED',
-    summary: `${request.number} approved — ${num(request.amount)} to release to ${request.requestedBy.name} for ${request.job.number}; nothing charged until liquidated`,
+    summary: `${request.number} approved — ${num(request.amount)} to release to ${request.requestedBy.name} for ${forWhat}; nothing charged until liquidated`,
   });
 };
 onApprovalSettled('budget_request', settleBudgetRequest);
@@ -978,7 +1099,7 @@ budgetRequestRoutes.get(
     const sections = cashRequestSections({
       requestedBy: row.requestedBy.name,
       neededBy: row.neededBy,
-      project: `${row.job.number} — ${row.job.name}`,
+      project: sourceOf(row)?.label ?? '',
       budgetLine: row.costCategory.name,
       status: row.status,
       purpose: row.reason,
@@ -1015,7 +1136,7 @@ budgetRequestRoutes.get(
       title: 'Budget Request',
       documentNumber: row.number,
       date: row.createdAt,
-      reference: `${row.job.number} — ${row.reason}`,
+      reference: `${sourceOf(row)?.label.replace(/ — .*$/, '') ?? ''} — ${row.reason}`,
       sections,
       signatories: await cashRequestSignatories({
         documentType: 'budget_request',
@@ -1049,11 +1170,11 @@ registerSearch({
         OR: [
           { number: { contains: term, mode: 'insensitive' } },
           { reason: { contains: term, mode: 'insensitive' } },
-          { job: { number: { contains: term, mode: 'insensitive' } } },
+          ...sourceSearch(term),
           { requestedBy: { name: { contains: term, mode: 'insensitive' } } },
         ],
       },
-      select: { id: true, number: true, reason: true, status: true, job: { select: { number: true } }, requestedBy: { select: { name: true } } },
+      select: { id: true, number: true, reason: true, status: true, ...SOURCE_INCLUDE, requestedBy: { select: { name: true } } },
       take: limit,
       orderBy: { createdAt: 'desc' },
     });
@@ -1061,7 +1182,7 @@ registerSearch({
       kind: 'budget_request',
       id: r.id,
       title: `${r.number} — ${r.reason}`,
-      subtitle: `${r.job.number} · ${r.requestedBy.name} · ${r.status.toLowerCase().replace(/_/g, ' ')}`,
+      subtitle: `${sourceOf(r)?.number ?? ''} · ${r.requestedBy.name} · ${r.status.toLowerCase().replace(/_/g, ' ')}`,
       link: `/g-ops/budget-requests/${r.id}`,
     }));
   },

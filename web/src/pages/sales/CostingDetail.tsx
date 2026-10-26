@@ -9,6 +9,7 @@ import { useConfirm } from '../../components/Confirm';
 import { Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
 import { COSTING_TONES, MarginBadge, type CostingRow } from './Costings';
 import { PlanBar, TemplateSavePanel } from './CostingSheet';
+import { RecordBudgetRequests } from '../delivery/BudgetRequests';
 
 /**
  * The costing, as the estimate reads: its details, the project budgeted cost
@@ -739,6 +740,9 @@ export function CostingDetailPage() {
           </section>
         </div>
       )}
+
+      {/* Cash on a final costing (2026-10-26) — taken over by a project built from it. */}
+      <RecordBudgetRequests record={{ key: 'costingId', id: costing.id }} open={isFinal} />
     </div>
   );
 }

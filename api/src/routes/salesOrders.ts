@@ -1318,7 +1318,7 @@ async function refuseWhileRequested(orderId: string, number: string, verb: strin
 async function documentsOnOrder(orderId: string): Promise<string[]> {
   const where = { salesOrderId: orderId };
   const sel = { select: { number: true, status: true } } as const;
-  const [invoices, invoiceRequests, commissions, requests, orders, issues, pullouts] = await Promise.all([
+  const [invoices, invoiceRequests, commissions, requests, orders, issues, pullouts, budgetRequests] = await Promise.all([
     prisma.invoice.findMany({ where, ...sel }),
     prisma.invoiceRequest.findMany({ where, ...sel }),
     prisma.commissionRequest.findMany({ where, ...sel }),
@@ -1326,6 +1326,7 @@ async function documentsOnOrder(orderId: string): Promise<string[]> {
     prisma.purchaseOrder.findMany({ where, ...sel }),
     prisma.stockIssue.findMany({ where, ...sel }),
     prisma.pulloutSlip.findMany({ where, ...sel }),
+    prisma.budgetRequest.findMany({ where, ...sel }),
   ]);
   const named = (kind: string, rows: { number: string | null; status: string }[]) =>
     rows.map((r) => `${kind} ${r.number ?? '(draft)'} (${statusLabel(r.status).toLowerCase()})`);
@@ -1337,6 +1338,7 @@ async function documentsOnOrder(orderId: string): Promise<string[]> {
     ...named('purchase order', orders),
     ...named('outgoing slip', issues),
     ...named('pull-out slip', pullouts),
+    ...named('budget request', budgetRequests),
   ];
 }
 

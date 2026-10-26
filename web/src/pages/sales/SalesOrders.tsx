@@ -61,6 +61,7 @@ import {
   type ProductSuggestion,
   type TaxOption,
 } from './editorParts';
+import { RecordBudgetRequests } from '../delivery/BudgetRequests';
 
 /**
  * SALES ORDERS — SCORO's "Create invoice" under its real name: the document
@@ -824,6 +825,9 @@ export function SalesOrderDetail() {
       <PulloutCard salesOrderId={order.id} />
 
       <CommissionsCard salesOrderId={order.id} />
+
+      {/* Cash on an issued order (2026-10-26), checked against its quoted cost. */}
+      <RecordBudgetRequests record={{ key: 'salesOrderId', id: order.id }} open={order.status === 'ISSUED'} />
 
       {requesting && (
         <InvoiceRequestModal

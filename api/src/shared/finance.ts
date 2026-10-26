@@ -369,13 +369,17 @@ export async function refreshBudgetRequest(
   // never counted twice. Re-derived like every figure here: the ledger's
   // net for this request is brought to what it should be, with a row for
   // the difference, so deleting the release voucher takes it off again.
+  // A request on a sales order, quotation or costing (2026-10-26) has no
+  // ledger until a project built from it takes it over.
   const shouldCommit = !frozen && !liquidation ? released : 0;
-  const ledger = await tx.jobCostEntry.aggregate({
-    where: { jobId: row.jobId, state: 'COMMITTED', sourceType: 'budget_request', sourceId: id },
-    _sum: { amount: true },
-  });
-  const delta = cents(shouldCommit - num(ledger._sum.amount));
-  if (Math.abs(delta) >= 0.005) {
+  const ledger = row.jobId
+    ? await tx.jobCostEntry.aggregate({
+        where: { jobId: row.jobId, state: 'COMMITTED', sourceType: 'budget_request', sourceId: id },
+        _sum: { amount: true },
+      })
+    : null;
+  const delta = row.jobId ? cents(shouldCommit - num(ledger?._sum.amount)) : 0;
+  if (row.jobId && Math.abs(delta) >= 0.005) {
     await postJobCost(tx, {
       jobId: row.jobId,
       costCategoryId: row.costCategoryId,

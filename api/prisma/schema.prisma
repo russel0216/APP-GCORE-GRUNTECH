@@ -1387,6 +1387,8 @@ model Costing {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  budgetRequests BudgetRequest[]
+
   @@index([ownerId])
   @@index([status])
   @@index([leadId])
@@ -1601,6 +1603,8 @@ model Quotation {
   updatedAt   DateTime     @updatedAt
   salesOrders SalesOrder[]
 
+  budgetRequests BudgetRequest[]
+
   @@index([customerId])
   @@index([ownerId])
   @@index([outcome])
@@ -1733,6 +1737,8 @@ model SalesOrder {
   updatedAt          DateTime            @updatedAt
   commissionRequests CommissionRequest[]
   invoiceRequests    InvoiceRequest[]
+
+  budgetRequests BudgetRequest[]
 
   @@index([quotationId])
   @@index([customerId])
@@ -2245,8 +2251,21 @@ model BudgetRequest {
   number String        @unique
   status RequestStatus @default(DRAFT)
 
-  jobId String
-  job   Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  /// What the cash is FOR — exactly one of the four (2026-10-26, the owner's
+  /// call: "valid not only for project but also on Sales Order, Quotation and
+  /// Costing"). A project's request is checked against Budget Monitoring and
+  /// commits on its ledger; the other three are checked against the record's
+  /// own cost and post nothing until a project built from it takes them over
+  /// (`adoptBudgetRequests()`, shared/budgetRequestSources.ts).
+  jobId String?
+  job   Job?    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  salesOrderId String?
+  salesOrder   SalesOrder? @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  quotationId  String?
+  quotation    Quotation?  @relation(fields: [quotationId], references: [id], onDelete: Restrict)
+  costingId    String?
+  costing      Costing?    @relation(fields: [costingId], references: [id], onDelete: Restrict)
 
   costCategoryId String
   costCategory   CostCategory @relation(fields: [costCategoryId], references: [id], onDelete: Restrict)
@@ -2285,6 +2304,9 @@ model BudgetRequest {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
+  @@index([salesOrderId])
+  @@index([quotationId])
+  @@index([costingId])
   @@index([jobId, status])
   @@index([requestedById, status])
   @@index([status])
@@ -2988,15 +3010,15 @@ model PurchaseOrder {
   notes          String?
 
   /// Snapshotted so an old order still prints the tax it was issued with.
-  vatRate      Decimal @default(0.12) @db.Decimal(6, 4)
-  vatInclusive Boolean @default(false)
+  vatRate        Decimal @default(0.12) @db.Decimal(6, 4)
+  vatInclusive   Boolean @default(false)
   /// SCORO's order-level discount (2026-10-23), a percentage to six
   /// decimals; `subtotal` stays BEFORE it, the quotation's arithmetic.
   discountPct    Decimal @default(0) @db.Decimal(9, 6)
   discountAmount Decimal @default(0) @db.Decimal(18, 2)
-  subtotal     Decimal @default(0) @db.Decimal(18, 2)
-  vatAmount    Decimal @default(0) @db.Decimal(18, 2)
-  total        Decimal @default(0) @db.Decimal(18, 2)
+  subtotal       Decimal @default(0) @db.Decimal(18, 2)
+  vatAmount      Decimal @default(0) @db.Decimal(18, 2)
+  total          Decimal @default(0) @db.Decimal(18, 2)
 
   issuedAt     DateTime?
   approvedAt   DateTime?
@@ -3034,24 +3056,24 @@ model PurchaseOrderItem {
   /// The bold name over the description and the part number — the
   /// requisition line's, carried over (2026-10-13). Null on a line typed
   /// before the order page: its description then serves as the name.
-  name        String?
-  partNumber  String?
-  description String
+  name           String?
+  partNumber     String?
+  description    String
   /// Goods or a service — the request line's, carried over (2026-10-21).
-  nature      LineNature @default(GOODS)
-  quantity    Decimal    @db.Decimal(18, 3)
-  unit        String     @default("pcs")
-  unitPrice   Decimal    @db.Decimal(18, 2)
-  amount      Decimal    @db.Decimal(18, 2)
+  nature         LineNature @default(GOODS)
+  quantity       Decimal    @db.Decimal(18, 3)
+  unit           String     @default("pcs")
+  unitPrice      Decimal    @db.Decimal(18, 2)
+  amount         Decimal    @db.Decimal(18, 2)
   /// The LANDED cost of one unit in pesos (2026-10-23, the owner's call:
   /// "Inventory unit cost should be the landed cost in PHP") — freight,
   /// duties and charges included, typed by the buyer. When set it is what
   /// the Incoming report, the stock and a sales order's spend take for this
   /// line (`receiptUnitCost()`); a project's budget still subtracts the
   /// request's declared value.
-  landedUnitCost Decimal? @db.Decimal(18, 2)
-  receivedQty Decimal    @default(0) @db.Decimal(18, 3)
-  sortOrder   Int        @default(0)
+  landedUnitCost Decimal?   @db.Decimal(18, 2)
+  receivedQty    Decimal    @default(0) @db.Decimal(18, 3)
+  sortOrder      Int        @default(0)
 
   receivingItems ReceivingItem[]
 
@@ -3139,14 +3161,14 @@ model ReceivingItem {
   categoryId String?
   category   ItemCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
 
-  quantity Decimal @db.Decimal(18, 3)
-  unitCost Decimal @db.Decimal(18, 2)
+  quantity  Decimal @db.Decimal(18, 3)
+  unitCost  Decimal @db.Decimal(18, 2)
   /// The unit cost (pesos) was typed on the Incoming report — over what the
   /// order says (2026-10-23) — so posting and the seed's restating keep it.
   costTyped Boolean @default(false)
-  serialNo String?
-  batchNo  String?
-  remarks  String?
+  serialNo  String?
+  batchNo   String?
+  remarks   String?
 
   @@index([receivingId])
 }

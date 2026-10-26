@@ -2726,11 +2726,15 @@ quotationRoutes.delete(
       include: {
         revisions: { select: { status: true, jobs: { select: { number: true }, take: 1 } } },
         _count: { select: { jobOrders: true } },
+        budgetRequests: { select: { number: true } },
       },
     });
     if (!quotation) throw notFound('Quotation not found');
     if (!canEditRecord(me, 'gops', 'quotations', quotation.ownerId)) {
       throw forbidden('Only the author can delete this quotation');
+    }
+    if (quotation.budgetRequests.length) {
+      throw badRequest(`Budget request ${quotation.budgetRequests.map((b) => b.number).join(', ')} was raised on ${quotation.number} — delete ${quotation.budgetRequests.length === 1 ? 'it' : 'them'} first`);
     }
     const job = quotation.revisions.flatMap((r) => r.jobs)[0];
     if (job) throw badRequest(`${quotation.number} became project ${job.number} — it stays as that project's record`);

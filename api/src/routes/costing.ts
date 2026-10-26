@@ -1715,6 +1715,10 @@ costingRoutes.delete(
       throw badRequest(`${onJobs} project(s) are built on this costing`);
     }
 
+    const budgetRequests = await prisma.budgetRequest.findMany({ where: { costingId: req.params.id }, select: { number: true } });
+    if (budgetRequests.length) {
+      throw badRequest(`Budget request ${budgetRequests.map((b) => b.number).join(', ')} was raised on this costing — delete ${budgetRequests.length === 1 ? 'it' : 'them'} first`);
+    }
     await prisma.costing.delete({ where: { id: req.params.id } });
     await audit(
       {

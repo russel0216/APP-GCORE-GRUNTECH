@@ -147,8 +147,8 @@ const PO_OPEN = ['ISSUED', 'PARTIALLY_RECEIVED'] as const;
  * - incurred: what incoming reports received (at the cost taken in);
  * - left: quoted − committed − incurred.
  */
-export async function salesOrderSpend(salesOrderId: string, db: Tx | typeof prisma = prisma) {
-  const [order, requests, orders, received] = await Promise.all([
+export async function salesOrderSpend(salesOrderId: string, db: Tx | typeof prisma = prisma, opts: { excludeBudgetRequestId?: string } = {}) {
+  const [order, requests, orders, received, cash] = await Promise.all([
     db.salesOrder.findUnique({
       where: { id: salesOrderId },
       select: {
@@ -181,6 +181,18 @@ export async function salesOrderSpend(salesOrderId: string, db: Tx | typeof pris
       where: { receiving: { status: 'RECEIVED', order: { salesOrderId, kind: 'SALES_ORDER' } } },
       select: { quantity: true, unitCost: true },
     }),
+    // Budget requests on the order (2026-10-26): released cash is committed
+    // until liquidated, then what was spent is incurred — Budget Monitoring's
+    // rule for a project's requests. One a project has taken over counts there.
+    db.budgetRequest.findMany({
+      where: {
+        salesOrderId,
+        jobId: null,
+        status: { in: ['RELEASED', 'REFUND_DUE', 'LIQUIDATED'] },
+        ...(opts.excludeBudgetRequestId ? { id: { not: opts.excludeBudgetRequestId } } : {}),
+      },
+      select: { amountReleased: true, amountRefunded: true, amountSpent: true, liquidatedAt: true },
+    }),
   ]);
   if (!order) return null;
   const quoted = inBase(
@@ -200,7 +212,11 @@ export async function salesOrderSpend(salesOrderId: string, db: Tx | typeof pris
     // the order's rate — what the goods will be taken in at when received.
     for (const i of o.items) committed += Math.max(0, num(i.quantity) - num(i.receivedQty)) * (receiptUnitCost(o, i).unitCost ?? num(i.unitPrice));
   }
-  const incurred = received.reduce((s, l) => s + num(l.quantity) * num(l.unitCost), 0);
+  let incurred = received.reduce((s, l) => s + num(l.quantity) * num(l.unitCost), 0);
+  for (const r of cash) {
+    if (r.liquidatedAt) incurred += num(r.amountSpent);
+    else committed += Math.max(0, num(r.amountReleased) - num(r.amountRefunded));
+  }
   return {
     salesOrderId: order.id,
     number: order.number,

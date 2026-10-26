@@ -142,7 +142,7 @@ export function ClaimEditor() {
             number: string;
             amountReleased: number;
             reason: string;
-            job: { id: string; number: string; name: string };
+            job: { id: string; number: string; name: string } | null;
             costCategory: Source['costCategory'];
           }>(`/budget-requests/${budgetRequestId}`);
           src = {
@@ -151,7 +151,8 @@ export function ClaimEditor() {
             number: b.number,
             amountReleased: b.amountReleased,
             purpose: b.reason,
-            job: { id: b.job.id, number: b.job.number, name: b.job.name },
+            // A request on a sales order, quotation or costing names no project (2026-10-26).
+            job: b.job ? { id: b.job.id, number: b.job.number, name: b.job.name } : null,
             costCategory: b.costCategory,
             to: `/g-ops/budget-requests/${b.id}`,
           };

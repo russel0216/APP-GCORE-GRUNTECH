@@ -677,8 +677,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,832 assertions across twenty-two scripts** (counted 2026-10-25, after
-one on chain for a big Odoo export read and an oversize file refused in words, and before it
+**4,840 assertions across twenty-two scripts** (counted 2026-10-26, after
+8 on delivery for a budget request on a costing, a quotation or a sales order and its hand-over to the project built from it, and before it one on chain for a big Odoo export read and an oversize file refused in words, and before it
 one on chain for the asset's photo on its page, its register row and its own routes, and before it
 8 on chain for the inventory's product cards — the card's fields, Out of stock, In stock only, the catalogue line placed and dropped, the photo routes, delete for a super admin alone and Odoo's pictures filed once — replacing the board's 2, and before it 3 on chain for the Odoo holders' nicknames and the tools issued on a re-run once their holder is on file, and before it 13 on chain for the Odoo migration — the brand, the group, the holder, the
 merge, the opening balance posted once, the assets lot and the brand filter —
@@ -805,7 +805,7 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
 430, masters 92, sales 643, costing 205, pipeline 123, calendar 103, numbering
-94, partners 120, delivery 216, chain 430, hr 661, plantilla 129, meetings
+94, partners 120, delivery 224, chain 430, hr 661, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 446, aftermarket 304, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145. The
 verify scripts share
@@ -7631,6 +7631,66 @@ operations project), and the liquidation stays itemised with attachments
   owed back; by requester, team, project; the overdue ones;
   `gfin.budget_liquidations.view_all`). The registers' Report buttons open
   them.
+
+## A budget request on a sales order, quotation or costing (2026-10-26)
+
+The owner's call: "valid not only for project but also on Sales Order,
+Quotation and Costing" — his answers: a FINAL costing, an OPEN or WON
+quotation, an ISSUED sales order; yes, a project built from it takes the
+requests over; the budget line stays required ("it can be allocated on
+cost"); raised by the record's preparer, their Team Leader or whoever may
+read it with the create right.
+
+- **A request names exactly ONE record**: `BudgetRequest.jobId` is optional
+  now, beside `salesOrderId`, `quotationId` and `costingId` (Restrict).
+  `checkSource()` in `shared/budgetRequestSources.ts` is the rule at create
+  (one and only one, the record still standing, `mayRaiseOn()`: the owner,
+  the module's View All, their Own / Team scope, or the owner's "Reports
+  to"); a Modify never moves it. The route, release, liquidation, refund and
+  both registers are unchanged.
+- **What it is checked against**: a project's request reads Budget
+  Monitoring as before; the others `recordBudget()` — a costing its cost per
+  budget line, a quotation the cost per line of the costings behind its
+  value revision (else its lines' whole cost in pesos, one "Quoted cost"
+  row), a sales order its quoted cost less `salesOrderSpend()` (one "Sales
+  order cost" row) — less the other requests on the same money (released
+  cash out is committed, a liquidated one's spend incurred; a costing and
+  the quotations costed from it share their requests). `requestBudget()`
+  returns `source` and `perLine` beside Budget Monitoring's shape, so the
+  page, the register's "Available after", the paper ("Against its cost")
+  and the approvers' subject read it alike. Over is said, never refused.
+- **Nothing posts to a ledger without a project**: `refreshBudgetRequest()`
+  commits only where `jobId` is set; the liquidation claim carries no project
+  and posts nothing. `salesOrderSpend()` counts a sales order's released
+  budget request cash (committed, then incurred once liquidated) — the
+  order's cost panel and the request's figures agree.
+- **The hand-over**: `createJobRecord()` calls `adoptBudgetRequests()` in
+  its transaction — the requests on its costings, on its quotation (the
+  approved revision's, else `fromQuotationId`, which a job order passes) and
+  on that quotation's sales orders take the project's `jobId`; released cash
+  is committed on the project, an approved liquidation charged INCURRED there
+  (`postedToJob`), a draft or pending one follows; one audit row each. The
+  record it was raised on stays on the request (`raisedOn`).
+- **Screens**: the request page's **For** (A project / A sales order / A
+  quotation / A costing, `GET /budget-requests/sources?kind=&q=`, the
+  readable ones, newest 50), its budget panel "Its cost"; `GET
+  /budget-requests/budget` takes any of the four keys and sends
+  `categories`. The Budget requests card (`RecordBudgetRequests`) with "+ New
+  budget request" sits on the sales order, quotation and costing pages
+  (`?salesOrderId=`, `?quotationId=`, `?costingId=` on `/new`). The
+  registers' **For / Purpose** column and a **For** filter (`?for=`); the
+  list paper and reports read "By project or record". A costing, quotation
+  or sales order is not deleted while a request names it (the refusal names
+  it). verify-delivery pins the refusals, the three budgets, no ledger, the
+  register filters and the hand-over.
+
+**The purchase request and order line's description** is the quotation's box
+(the same day): `MemoryInput multiline` in `ItemCell`, growing with its lines
+(2–10 rows), dragged taller at its corner, remembering what was written
+before through `GET /purchase-requests/suggest/fields` and `GET
+/purchase-orders/suggest/fields` (`?field=description&q=&name=` — the item
+named on the line first; requests the caller may read and, with a purchase
+order View key, orders), its list opening in the cell.
 
 ## Reimbursements (2026-10-15)
 

@@ -12,6 +12,7 @@ import { billTermsLabel } from '../shared/payables';
 import { USER_TEAM_SELECT, teamOfUser, userTeamWhere } from '../shared/team';
 import { CashAdvanceStatus, ExpenseStatus, RequestStatus } from '@prisma/client';
 import { Series, byValue, cents, dayOf, mountReports, monthsOf, num, table, tally, type Col, type Report, type ReportContext } from '../shared/reportKit';
+import { SOURCE_INCLUDE, sourceOf } from '../shared/budgetRequestSources';
 
 /**
  * G-FIN reports (2026-10-15, the owner's A/R sample: "Create Report" on the
@@ -469,7 +470,7 @@ const REQUEST_REPORT_SELECT = {
   releasedAt: true,
   liquidatedAt: true,
   liquidationDueDate: true,
-  job: { select: { number: true, name: true } },
+  ...SOURCE_INCLUDE,
   requestedBy: { select: { name: true, ...USER_TEAM_SELECT.select } },
 } satisfies Prisma.BudgetRequestSelect;
 type RequestRow = Prisma.BudgetRequestGetPayload<{ select: typeof REQUEST_REPORT_SELECT }>;
@@ -525,7 +526,7 @@ async function budgetRequests(range: Range, ctx: ReportContext): Promise<Report>
     tables: [
       table('By requester', [{ label: 'Requester' }, ...cols], rowsOf(tally(live, (r) => r.requestedBy.name, figures), 1)),
       table('By team', [{ label: 'Team' }, ...cols], rowsOf(tally(live, unitOf, figures), 1)),
-      table('By project', [{ label: 'Project' }, ...cols], rowsOf(tally(live, (r) => `${r.job.number} — ${r.job.name}`, figures), 1)),
+      table('By project or record', [{ label: 'For' }, ...cols], rowsOf(tally(live, (r) => sourceOf(r)?.label ?? '—', figures), 1)),
       table('By status', [{ label: 'Status' }, ...cols], rowsOf(tally(rows, (r) => statusLabel(r.status), figures), 1)),
     ],
     notes: ['Drafts are left out; a rejected or cancelled request is counted only under By status. A request with no date needed counts on the day it was raised.'],
@@ -578,7 +579,7 @@ async function liquidations(range: Range, ctx: ReportContext): Promise<Report> {
     tables: [
       table('By requester', [{ label: 'Requester' }, ...cols], rowsOf(tally(rows, (r) => r.requestedBy.name, figures), 1)),
       table('By team', [{ label: 'Team' }, ...cols], rowsOf(tally(rows, unitOf, figures), 1)),
-      table('By project', [{ label: 'Project' }, ...cols], rowsOf(tally(rows, (r) => `${r.job.number} — ${r.job.name}`, figures), 1)),
+      table('By project or record', [{ label: 'For' }, ...cols], rowsOf(tally(rows, (r) => sourceOf(r)?.label ?? '—', figures), 1)),
       table(
         'Liquidations overdue',
         [{ label: 'Request' }, { label: 'Requester' }, { label: 'Liquidate by' }, count('Days late'), money('Released')],

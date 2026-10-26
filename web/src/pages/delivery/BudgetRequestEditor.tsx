@@ -18,7 +18,7 @@ import { ApprovalStepper, allHeld, previewSteps } from '../../components/Approva
 import { Meter } from '../../components/charts';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import type { BudgetLine, Route } from '../chain/PurchaseRequisitionEditor';
-import type { BudgetRequest } from './BudgetRequests';
+import type { BudgetRequest, RequestSource } from './BudgetRequests';
 
 /**
  * The budget request as a PAGE (2026-10-19, the owner's call: "budget request
@@ -38,13 +38,36 @@ import type { BudgetRequest } from './BudgetRequests';
  */
 
 interface Budget {
-  job: { id: string; number: string; name: string };
+  source: RequestSource;
+  job: { id: string; number: string; name: string } | null;
+  /** Every budget line a request may name. */
+  categories: { id: string; name: string }[];
+  /** False where the record carries no budget lines — one "whole cost" row. */
+  perLine: boolean;
   lines: BudgetLine[];
   total: { budgeted: number; committed: number; incurred: number; available: number };
 }
 
+/** What the cash is for (2026-10-26): a project, a sales order, a quotation or a costing. */
+export type SourceKind = 'project' | 'sales_order' | 'quotation' | 'costing';
+
+export const SOURCE_KEY: Record<SourceKind, 'jobId' | 'salesOrderId' | 'quotationId' | 'costingId'> = {
+  project: 'jobId',
+  sales_order: 'salesOrderId',
+  quotation: 'quotationId',
+  costing: 'costingId',
+};
+
+const SOURCE_CHOICES: { kind: SourceKind; label: string; hint: string }[] = [
+  { kind: 'project', label: 'A project', hint: 'Checked against Budget Monitoring' },
+  { kind: 'sales_order', label: 'A sales order', hint: 'An issued order — checked against its quoted cost' },
+  { kind: 'quotation', label: 'A quotation', hint: 'Open or won — checked against its costing' },
+  { kind: 'costing', label: 'A costing', hint: 'A final costing — checked against its budget lines' },
+];
+
 interface Header {
-  jobId: string;
+  kind: SourceKind;
+  sourceId: string;
   costCategoryId: string;
   reason: string;
   neededBy: string;
@@ -60,17 +83,21 @@ export function BudgetRequestEditor() {
   const toast = useToast();
   const { can } = useAuth();
   const editing = Boolean(id);
-  const presetJobId = params.get('jobId');
+  // Opened from a record: `?jobId=`, `?salesOrderId=`, `?quotationId=` or `?costingId=`.
+  const preset = (Object.entries(SOURCE_KEY) as [SourceKind, string][]).find(([, key]) => params.get(key)) ?? null;
+  const presetKind = preset?.[0] ?? null;
+  const presetId = preset ? params.get(preset[1]) : null;
 
   const [existing, setExisting] = useState<BudgetRequest | null>(null);
-  const [projects, setProjects] = useState<{ id: string; number: string; name: string }[]>([]);
+  const [choices, setChoices] = useState<{ id: string; number: string; name: string; sub?: string }[]>([]);
+  const [search, setSearch] = useState('');
   const [budget, setBudget] = useState<Budget | null>(null);
   const [route, setRoute] = useState<Route | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [attempted, setAttempted] = useState(false);
-  const [header, setHeader] = useState<Header>({ jobId: presetJobId ?? '', costCategoryId: '', reason: '', neededBy: '', notes: '' });
+  const [header, setHeader] = useState<Header>({ kind: presetKind ?? 'project', sourceId: presetId ?? '', costCategoryId: '', reason: '', neededBy: '', notes: '' });
   const [lines, setLines] = useState<RequestLine[]>(() => [blankRequestLine()]);
   const [saved, setSaved] = useState<string | null>(null);
 
@@ -84,8 +111,10 @@ export function BudgetRequestEditor() {
           const row = await api.get<BudgetRequest>(`/budget-requests/${id}`);
           if (!live) return;
           setExisting(row);
+          const raised = row.raisedOn ?? row.for;
           h = {
-            jobId: row.job.id,
+            kind: row.job ? 'project' : (raised?.kind ?? 'project'),
+            sourceId: row.job?.id ?? raised?.id ?? '',
             costCategoryId: row.costCategory.id,
             reason: row.reason,
             neededBy: row.neededBy?.slice(0, 10) ?? '',
@@ -95,9 +124,6 @@ export function BudgetRequestEditor() {
           ls = linesFromItems(row.items, row.reason, row.amount);
           setHeader(h);
           setLines(ls);
-        } else if (!presetJobId) {
-          const list = await api.get<typeof projects>('/budget-requests/projects').catch(() => []);
-          if (live) setProjects(list);
         }
         setSaved(snapshot(h, ls));
       } catch (err) {
@@ -116,16 +142,34 @@ export function BudgetRequestEditor() {
   // The project's budget lines — the Budget line select and the live panel.
   useEffect(() => {
     setBudget(null);
-    if (!header.jobId) return;
+    if (!header.sourceId) return;
     let live = true;
     api
-      .get<Budget>(`/budget-requests/budget${qs({ jobId: header.jobId })}`)
+      .get<Budget>(`/budget-requests/budget${qs({ [SOURCE_KEY[header.kind]]: header.sourceId })}`)
       .then((b) => live && setBudget(b))
       .catch((err) => live && setError(err));
     return () => {
       live = false;
     };
-  }, [header.jobId]);
+  }, [header.kind, header.sourceId]);
+
+  // What may be picked for the kind chosen (a new request only).
+  useEffect(() => {
+    if (existing || preset) return;
+    let live = true;
+    const timer = window.setTimeout(() => {
+      const path = header.kind === 'project' ? '/budget-requests/projects' : `/budget-requests/sources${qs({ kind: header.kind, q: search.trim() || undefined })}`;
+      api
+        .get<typeof choices>(path)
+        .then((list) => live && setChoices(list))
+        .catch(() => live && setChoices([]));
+    }, 250);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [header.kind, search, existing]);
 
   const sent = lines.filter((l) => !isBlankLine(l));
   const total = useMemo(() => linesTotal(lines), [lines]);
@@ -133,24 +177,34 @@ export function BudgetRequestEditor() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       api
-        .get<{ route: Route | null }>(`/budget-requests/route${qs({ amount: String(total), jobId: header.jobId, requestId: id ?? '' })}`)
+        .get<{ route: Route | null }>(
+          `/budget-requests/route${qs({ amount: String(total), jobId: header.kind === 'project' ? header.sourceId : '', requestId: id ?? '' })}`,
+        )
         .then((r) => setRoute(r.route))
         .catch(() => setRoute(null));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [total, header.jobId, id]);
+  }, [total, header.kind, header.sourceId, id]);
 
   const dirty = saved !== null && snapshot(header, lines) !== saved;
   useUnsavedChanges(dirty && !busy);
 
-  const project = budget?.job ?? existing?.job ?? projects.find((p) => p.id === header.jobId) ?? null;
-  useBackLink(
-    existing ? `/g-ops/budget-requests/${existing.id}` : presetJobId ? `/g-ops/projects/${presetJobId}?tab=requests` : null,
-    existing ? existing.number : project ? `${project.number} Budget Requests` : null,
-  );
+  const source: RequestSource | null = budget?.source ?? existing?.for ?? null;
+  const backTo =
+    preset && presetKind === 'project'
+      ? `/g-ops/projects/${presetId}?tab=requests`
+      : preset && presetKind === 'sales_order'
+        ? `/g-ops/sales-orders/${presetId}`
+        : preset && presetKind === 'quotation'
+          ? `/g-ops/quotations/${presetId}`
+          : preset
+            ? `/g-ops/costing/${presetId}`
+            : null;
+  useBackLink(existing ? `/g-ops/budget-requests/${existing.id}` : backTo, existing ? existing.number : source ? source.number : null);
+  const kindWord = SOURCE_CHOICES.find((c) => c.kind === header.kind)!;
 
   const problems: string[] = [];
-  if (!header.jobId) problems.push('Choose the project');
+  if (!header.sourceId) problems.push(`Choose the ${kindWord.label.replace(/^An? /, '')}`);
   if (!header.costCategoryId) problems.push('Choose the budget line');
   if (header.reason.trim().length < 3) problems.push('Say what the cash is for');
   problems.push(...linesProblems(lines));
@@ -161,7 +215,7 @@ export function BudgetRequestEditor() {
     setBusy(true);
     setError(null);
     const body = {
-      jobId: header.jobId,
+      [SOURCE_KEY[header.kind]]: header.sourceId,
       costCategoryId: header.costCategoryId,
       reason: header.reason.trim(),
       neededBy: header.neededBy || null,
@@ -202,8 +256,10 @@ export function BudgetRequestEditor() {
     );
   }
 
-  const chosen = budget?.lines.find((b) => b.id === header.costCategoryId) ?? null;
-  const shownLines = (budget?.lines ?? []).filter((b) => b.budgeted > 0 || b.id === header.costCategoryId);
+  const perLine = budget?.perLine ?? true;
+  const chosen = (perLine ? budget?.lines.find((b) => b.id === header.costCategoryId) : budget?.lines[0]) ?? null;
+  const shownLines = (budget?.lines ?? []).filter((b) => !perLine || b.budgeted > 0 || b.id === header.costCategoryId);
+  const isChosenLine = (b: BudgetLine) => (perLine ? b.id === header.costCategoryId : true);
   const actions = (
     <>
       <button type="button" className="btn" onClick={() => void save(false)} disabled={busy}>
@@ -226,13 +282,13 @@ export function BudgetRequestEditor() {
               {existing ? `Modify budget request ${existing.number}` : 'New budget request'}
             </h1>
             <p className="muted qe-lead">
-              {project ? (
+              {source ? (
                 <>
-                  For <Link to={`/g-ops/projects/${project.id}`}>{project.number} — {project.name}</Link>.{' '}
+                  For <Link to={source.link}>{source.label}</Link>.{' '}
                 </>
               ) : null}
-              Cash for the project team to buy what it needs without a purchase requisition — released by finance in one
-              voucher once approved, and accounted for afterwards with receipts.
+              Cash for the team to buy what it needs without a purchase requisition — released by finance in one voucher once
+              approved, and accounted for afterwards with receipts.
             </p>
           </div>
           <div className="row qe-actions">{actions}</div>
@@ -253,26 +309,50 @@ export function BudgetRequestEditor() {
               <Field label="Number">
                 <div className="qe-static">{existing ? <span className="mono">{existing.number}</span> : <span className="muted">Given on save</span>}</div>
               </Field>
-              {presetJobId || existing ? (
-                <Field label="Project">
-                  <div className="qe-static">{project ? `${project.number} — ${project.name}` : '…'}</div>
+              {preset || existing ? (
+                <Field label="For">
+                  <div className="qe-static">{source ? <Link to={source.link}>{source.label}</Link> : '…'}</div>
                 </Field>
               ) : (
-                <Field
-                  label="Project"
-                  required
-                  hint="Every request names a project — office or operations cash goes against the operations budget's project"
-                  error={attempted && !header.jobId ? 'Choose the project' : null}
-                >
-                  <select value={header.jobId} onChange={(e) => setHeader((h) => ({ ...h, jobId: e.target.value, costCategoryId: '' }))}>
-                    <option value="">— choose —</option>
-                    {projects.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.number} — {p.name}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
+                <>
+                  <Field label="For" required hint={kindWord.hint}>
+                    <select
+                      value={header.kind}
+                      onChange={(e) => {
+                        setSearch('');
+                        setChoices([]);
+                        setHeader((h) => ({ ...h, kind: e.target.value as SourceKind, sourceId: '', costCategoryId: '' }));
+                      }}
+                    >
+                      {SOURCE_CHOICES.map((c) => (
+                        <option key={c.kind} value={c.kind}>
+                          {c.label}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field
+                    label={kindWord.label.replace(/^An? /, '').replace(/^./, (c) => c.toUpperCase())}
+                    required
+                    hint={header.kind === 'project' ? 'Running projects' : 'Type to search by number, name or customer'}
+                    error={attempted && !header.sourceId ? problems[0] : null}
+                  >
+                    <div className="br-source-pick">
+                      {header.kind !== 'project' && (
+                        <input type="search" value={search} placeholder="Search…" aria-label="Search" onChange={(e) => setSearch(e.target.value)} />
+                      )}
+                      <select value={header.sourceId} onChange={(e) => setHeader((h) => ({ ...h, sourceId: e.target.value, costCategoryId: '' }))}>
+                        <option value="">— choose —</option>
+                        {choices.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.number} — {p.name}
+                            {p.sub ? ` · ${p.sub}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </Field>
+                </>
               )}
               <Field
                 label="Budget line"
@@ -285,8 +365,8 @@ export function BudgetRequestEditor() {
                   disabled={!budget}
                   onChange={(e) => setHeader((h) => ({ ...h, costCategoryId: e.target.value }))}
                 >
-                  <option value="">{header.jobId ? '— choose —' : '— choose the project first —'}</option>
-                  {(budget?.lines ?? []).map((c, n) => (
+                  <option value="">{header.sourceId ? '— choose —' : '— choose the record first —'}</option>
+                  {(budget?.categories ?? []).map((c, n) => (
                     <option key={c.id} value={c.id}>
                       {n + 1} {c.name}
                     </option>
@@ -355,19 +435,27 @@ export function BudgetRequestEditor() {
 
         <aside className="card prq-budget" aria-labelledby="br-budget">
           <div className="card-head">
-            <h2 id="br-budget" className="card-title">Project budget</h2>
+            <h2 id="br-budget" className="card-title">{header.kind === 'project' ? 'Project budget' : 'Its cost'}</h2>
             <span className="muted prq-source">as it stands</span>
           </div>
-          {!header.jobId ? (
-            <p className="muted">Choose the project to see its budget.</p>
+          {!header.sourceId ? (
+            <p className="muted">Choose what the cash is for to see its budget.</p>
           ) : !budget ? (
             <Loading />
           ) : (
             <>
-              <p className="prq-hint">A budget request commits nothing; only what its liquidation shows was spent reaches the project.</p>
-              {shownLines.length === 0 && <p className="muted">This project has no budget lines yet.</p>}
+              <p className="prq-hint">
+                {header.kind === 'project'
+                  ? 'Released cash shows as committed on its budget line; the liquidation turns what was spent into incurred.'
+                  : header.kind === 'sales_order'
+                    ? "The order's quoted cost, less what its purchasing and other budget requests already hold."
+                    : perLine
+                      ? 'The costing\u2019s cost per budget line, less the cash other budget requests on it hold. A project built from it takes this request over.'
+                      : 'The quotation has no costing — its lines\u2019 whole cost, less the cash other budget requests on it hold.'}
+              </p>
+              {shownLines.length === 0 && <p className="muted">No cost on its budget lines yet.</p>}
               {shownLines.map((b) => {
-                const isChosen = b.id === header.costCategoryId;
+                const isChosen = isChosenLine(b);
                 const left = isChosen ? Math.round((b.available - total) * 100) / 100 : b.available;
                 const used = b.budgeted > 0 ? ((b.budgeted - left) / b.budgeted) * 100 : 100;
                 return (
