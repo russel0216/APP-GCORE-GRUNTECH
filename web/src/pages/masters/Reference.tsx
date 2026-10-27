@@ -107,6 +107,16 @@ export interface AssetTypeDef {
   _count?: { assets: number };
 }
 
+/** A brand an exhibition visitor may ask about (2026-10-27, Sales › Marketing), with how many asked. */
+export interface ExhibitionBrandDef {
+  id: string;
+  name: string;
+  sortOrder: number;
+  isSystem: boolean;
+  isActive: boolean;
+  visitors?: number;
+}
+
 export interface DocumentCategoryDef {
   id: string;
   name: string;
@@ -563,6 +573,43 @@ const DOCUMENT_CATEGORIES: CategorySpec<DocumentCategoryDef> = {
   },
 };
 
+const EXHIBITION_BRANDS: CategorySpec<ExhibitionBrandDef> = {
+  noun: 'exhibition brand',
+  title: 'Exhibition brands',
+  endpoint: '/reference/exhibition-brands',
+  columns: [
+    {
+      key: 'name',
+      head: 'Name',
+      render: (t) => (
+        <>
+          {t.name}
+          {t.isSystem && <span className="faint"> · built-in</span>}
+        </>
+      ),
+    },
+    { key: 'visitors', head: 'Visitors', headClass: 'right', cellClass: 'right', render: (t) => (t.visitors ?? 0).toLocaleString('en-US') },
+    { key: 'status', head: 'Status', render: (t) => activeBadge(t.isActive) },
+  ],
+  footnote:
+    'The brands a visitor at an exhibition may ask about, ticked on Sales › Marketing. The nine built-ins can be renamed but not deleted; a brand visitors asked about is deactivated rather than deleted, and keeps its visitors.',
+  blank: { name: '', sortOrder: 0, isActive: true },
+  fromRow: (t) => ({ name: t.name, sortOrder: t.sortOrder, isActive: t.isActive }),
+  fields: () => [
+    { kind: 'text', key: 'name', label: 'Name', hint: 'As it should read on the tick box, e.g. Atlas Copco', maxLength: 80 },
+    { kind: 'count', key: 'sortOrder', label: 'Sort order' },
+    { kind: 'check', key: 'isActive', label: 'Active — an inactive brand stays on its visitors but is not offered' },
+  ],
+  canSave: (f) => !!text(f.name).trim(),
+  deletable: (t) => !t.isSystem && (t.visitors ?? 0) === 0,
+  notice: (t) => {
+    if (t.isSystem) return 'A built-in brand: rename it, or untick Active to stop offering it.';
+    const inUse = t.visitors ?? 0;
+    if (inUse === 0) return null;
+    return `${inUse === 1 ? 'One visitor' : `${inUse.toLocaleString('en-US')} visitors`} asked about it, so it cannot be deleted — untick Active to stop offering it.`;
+  },
+};
+
 const ASSET_TYPES: CategorySpec<AssetTypeDef> = {
   noun: 'asset type',
   title: 'Asset types',
@@ -918,9 +965,10 @@ interface CategoryLists {
   documentCategories: DocumentCategoryDef[];
   assetTypes: AssetTypeDef[];
   courseCategories: CourseCategoryDef[];
+  exhibitionBrands: ExhibitionBrandDef[];
 }
 
-const NO_LISTS: CategoryLists = { cost: [], items: [], teams: [], subIndustries: [], groups: [], activityTypes: [], drawingTypes: [], documentCategories: [], courseCategories: [], assetTypes: [] };
+const NO_LISTS: CategoryLists = { cost: [], items: [], teams: [], subIndustries: [], groups: [], activityTypes: [], drawingTypes: [], documentCategories: [], courseCategories: [], assetTypes: [], exhibitionBrands: [] };
 
 export function Categories() {
   const [lists, setLists] = useState<CategoryLists>(NO_LISTS);
@@ -930,7 +978,7 @@ export function Categories() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories, courseCategories, assetTypes] = await Promise.all([
+      const [cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories, courseCategories, assetTypes, exhibitionBrands] = await Promise.all([
         api.get<CostCategory[]>('/reference/cost-categories'),
         api.get<ItemCategory[]>('/reference/item-categories'),
         api.get<Industry[]>('/reference/industries'),
@@ -941,8 +989,9 @@ export function Categories() {
         api.get<DocumentCategoryDef[]>('/reference/service-document-categories'),
         api.get<CourseCategoryDef[]>('/reference/course-categories'),
         api.get<AssetTypeDef[]>('/reference/asset-types'),
+        api.get<ExhibitionBrandDef[]>('/reference/exhibition-brands'),
       ]);
-      setLists({ cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories, courseCategories, assetTypes });
+      setLists({ cost, items, teams, subIndustries, groups, activityTypes, drawingTypes, documentCategories, courseCategories, assetTypes, exhibitionBrands });
       setError(null);
     } catch (err) {
       setError(err);
@@ -1000,6 +1049,7 @@ export function Categories() {
       <CategoryCard spec={ACTIVITY_TYPES} rows={lists.activityTypes} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={DRAWING_TYPES} rows={lists.drawingTypes} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={DOCUMENT_CATEGORIES} rows={lists.documentCategories} onChanged={changed} className="card m-industries" />
+      <CategoryCard spec={EXHIBITION_BRANDS} rows={lists.exhibitionBrands} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={ASSET_TYPES} rows={lists.assetTypes} onChanged={changed} className="card m-industries" />
       <CategoryCard spec={COURSE_CATEGORIES} rows={lists.courseCategories} onChanged={changed} className="card m-industries" />
     </div>

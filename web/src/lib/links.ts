@@ -61,6 +61,8 @@ const DETAIL: Record<string, string> = {
   // The Service JO under Aftermarket (2026-10-20) — the same table, its own register.
   service_job_order: '/g-ops/service-job-orders',
   service_document: '/g-ops/service-documents',
+  // Sales › Marketing (2026-10-27): an exhibition visitor's page.
+  exhibition_visitor: '/g-ops/marketing/visitors',
   // G-HR › Records › Memos (2026-10-20).
   memo: '/g-hr/memos',
   attendance_correction: '/g-hr/attendance-corrections',
@@ -108,6 +110,10 @@ const SCREEN: Record<string, string> = {
   // The stock-on-hand list's paper audits as EXPORTED under 'inventory'.
   inventory: '/g-chain/inventory',
   cost_category: '/admin/categories',
+  // An exhibition is set up on Sales › Marketing; its brands on Admin › Categories.
+  exhibition: '/g-ops/marketing',
+  exhibition_visitors: '/g-ops/marketing',
+  exhibition_brand: '/admin/categories',
   item_category: '/admin/categories',
   industry: '/admin/categories',
   sub_industry: '/admin/categories',
@@ -161,6 +167,7 @@ const SCREEN: Record<string, string> = {
  */
 const DETAIL_LIST: Record<string, string> = {
   progress_billing: '/g-ops/progress',
+  exhibition_visitor: '/g-ops/marketing',
 };
 
 /**

@@ -116,6 +116,7 @@ import { ServiceSchedule } from './pages/service/Schedule';
 import { JobOrders, JobOrderDetail } from './pages/service/JobOrders';
 import { ServiceJobOrders, ServiceJobOrderDetail } from './pages/service/ServiceJobOrders';
 import { ServiceDocuments, ServiceDocumentDetail } from './pages/service/ServiceDocuments';
+import { Marketing, VisitorPage } from './pages/sales/Marketing';
 import { CadJobOrders, CadJobOrderDetail } from './pages/delivery/CadJobOrders';
 import {
   ReportTemplates,
@@ -1611,6 +1612,24 @@ function Routed() {
           }
         />
         <Route path="/g-ops/service-job-orders/:id" element={<ServiceJobOrderDetail />} />
+        {/* Marketing (2026-10-27): exhibition visitors — the scanner, the bar
+            graphs and the list on one page, a visitor's page of their own. */}
+        <Route
+          path="/g-ops/marketing"
+          element={
+            <GuardAny permissions={['gops.marketing.view_all', 'gops.marketing.view_own']}>
+              <Marketing />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/marketing/visitors/:id"
+          element={
+            <GuardAny permissions={['gops.marketing.view_all', 'gops.marketing.view_own']}>
+              <VisitorPage />
+            </GuardAny>
+          }
+        />
         {/* Service Documents (2026-10-20): manuals, drawings, test reports
             filed against a machine or a model. */}
         <Route

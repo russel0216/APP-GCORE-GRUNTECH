@@ -142,6 +142,11 @@ export const REGISTRY: ModuleDef[] = [
         note: 'Principals whose equipment Gruntech sells and services: catalogues, price lists, software. One supplier record, seen from Sales.' },
       { key: 'calendar', group: 'Sales', label: 'Calendar', path: '/g-ops/calendar', actions: OWNED, phase: 3,
         note: 'Create books an activity; Edit Own and Delete cover the ones you are on (booked for, invited or booked by you); Edit All anyone’s' },
+      // Marketing (2026-10-27, the owner's call during PSECE 2026): exhibition
+      // visitors scanned from their badge's QR, the brands and products they
+      // asked about, and the bar graphs. Every role was given it once.
+      { key: 'marketing', own: 'visitors you added', group: 'Sales', label: 'Marketing', path: '/g-ops/marketing', actions: SHARED, phase: 10,
+        note: 'Exhibition visitors — scan a badge, tick the brands, name the products; bar graphs per brand, day and person' },
       // Project Management (2026-10-06, the owner's order): Costing, Job
       // Orders, Projects — the way the old gasiontech G-CORE arranged it. The
       // registers that follow are hidden (rule: hidden, never deleted): each

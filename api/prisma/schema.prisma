@@ -145,28 +145,30 @@ model User {
   reimbursements   Payment[]      @relation("Payee")
   cashAdvances     CashAdvance[]  @relation("AdvanceRequester")
 
-  assetsCreated         InstalledAsset[]  @relation("AssetCreator")
-  contractsCreated      ServiceContract[] @relation("ContractCreator")
-  visitsAssigned        ServiceVisit[]    @relation("VisitEngineer")
-  visitsConfirmed       ServiceVisit[]    @relation("VisitConfirmer")
-  serviceDocumentsFiled ServiceDocument[] @relation("ServiceDocumentFiler")
-  templatesAuthored     ReportTemplate[]  @relation("TemplateAuthor")
-  reportsPerformed      ServiceReport[]   @relation("ReportAuthor")
-  jobOrdersRequested    JobOrder[]        @relation("JobOrderRequester")
-  jobOrdersAssigned     JobOrder[]        @relation("JobOrderEngineer")
-  jobOrdersManaged      JobOrder[]        @relation("JobOrderProjectManager")
-  jobOrdersEngineered   JobOrder[]        @relation("JobOrderProjectEngineer")
-  jobOrdersLed          JobOrder[]        @relation("JobOrderProjectLead")
-  jobOrderSupport       JobOrderSupport[]
-  cadRequested          CadJobOrder[]     @relation("CadRequestedBy")
-  cadAssigned           CadJobOrder[]     @relation("CadAssignedTo")
-  cadCompleted          CadJobOrder[]     @relation("CadCompletedBy")
-  cadRevisions          CadRevision[]     @relation("CadRevisionSubmitter")
-  cadComments           CadComment[]      @relation("CadCommentAuthor")
-  helpTickets           HelpTicket[]      @relation("HelpTicketRaiser")
-  helpTicketReplies     HelpTicketReply[] @relation("HelpTicketReplyAuthor")
+  assetsCreated           InstalledAsset[]    @relation("AssetCreator")
+  contractsCreated        ServiceContract[]   @relation("ContractCreator")
+  visitsAssigned          ServiceVisit[]      @relation("VisitEngineer")
+  visitsConfirmed         ServiceVisit[]      @relation("VisitConfirmer")
+  serviceDocumentsFiled   ServiceDocument[]   @relation("ServiceDocumentFiler")
+  exhibitionVisitorsAdded ExhibitionVisitor[] @relation("ExhibitionVisitorAdder")
+  exhibitionScans         ExhibitionScan[]
+  templatesAuthored       ReportTemplate[]    @relation("TemplateAuthor")
+  reportsPerformed        ServiceReport[]     @relation("ReportAuthor")
+  jobOrdersRequested      JobOrder[]          @relation("JobOrderRequester")
+  jobOrdersAssigned       JobOrder[]          @relation("JobOrderEngineer")
+  jobOrdersManaged        JobOrder[]          @relation("JobOrderProjectManager")
+  jobOrdersEngineered     JobOrder[]          @relation("JobOrderProjectEngineer")
+  jobOrdersLed            JobOrder[]          @relation("JobOrderProjectLead")
+  jobOrderSupport         JobOrderSupport[]
+  cadRequested            CadJobOrder[]       @relation("CadRequestedBy")
+  cadAssigned             CadJobOrder[]       @relation("CadAssignedTo")
+  cadCompleted            CadJobOrder[]       @relation("CadCompletedBy")
+  cadRevisions            CadRevision[]       @relation("CadRevisionSubmitter")
+  cadComments             CadComment[]        @relation("CadCommentAuthor")
+  helpTickets             HelpTicket[]        @relation("HelpTicketRaiser")
+  helpTicketReplies       HelpTicketReply[]   @relation("HelpTicketReplyAuthor")
   /// The teams this person supports on a team-scoped approval step (Back Support).
-  supportTeams          UserSupportTeam[]
+  supportTeams            UserSupportTeam[]
 
   quoteLinesProvided QuotationItem[]  @relation("QuoteLineProvider")
   soLinesProvided    SalesOrderLine[] @relation("SoLineProvider")
@@ -1278,9 +1280,11 @@ model Lead {
   lostKind       LostKind?
   notes          String?
 
-  quotations Quotation[]
-  costings   Costing[]
-  activities SalesActivity[]
+  quotations         Quotation[]
+  costings           Costing[]
+  activities         SalesActivity[]
+  /// The exhibition visitors this lead was made from (2026-10-27, Marketing).
+  exhibitionVisitors ExhibitionVisitor[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -6497,4 +6501,105 @@ model AttendanceCorrection {
 
   @@index([employeeId, date])
   @@index([status])
+}
+
+// ── Marketing: exhibitions (2026-10-27) ──────────────────────────────────────
+//
+// The owner's call during PSECE 2026: "G-CORE › Sales › Marketing — a bar
+// graph, a QR scanner to save the info of the visitor, the brands they ask
+// about (several), the product under each brand; every account user can
+// scan." A visitor is one person at one event; what they asked about is one
+// row per brand and product; every scan of their badge is a row of its own,
+// so who scanned whom on which day is counted, never overwritten.
+
+/// An exhibition the company takes a booth at. Day 1 is `startDate`.
+model Exhibition {
+  id          String   @id @default(cuid())
+  name        String
+  venue       String?
+  startDate   DateTime @db.Date
+  endDate     DateTime @db.Date
+  isActive    Boolean  @default(true)
+  notes       String?
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  visitors ExhibitionVisitor[]
+}
+
+/// What a visitor may ask about — Admin › Categories › Exhibition brands. The
+/// owner's nine are system rows (renamable, never deleted, switched off).
+model ExhibitionBrand {
+  id          String   @id @default(cuid())
+  name        String
+  sortOrder   Int      @default(0)
+  isSystem    Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  interests ExhibitionInterest[]
+}
+
+/// One person at one exhibition, from their badge's QR (a vCard) or typed.
+model ExhibitionVisitor {
+  id           String     @id @default(cuid())
+  exhibitionId String
+  exhibition   Exhibition @relation(fields: [exhibitionId], references: [id], onDelete: Restrict)
+  /// Day 1, Day 2 … of the exhibition — the day they first came by.
+  day          Int
+  name         String
+  company      String?
+  position     String?
+  email        String?
+  mobile       String?
+  notes        String?
+  /// The badge's QR exactly as read, kept for what the form did not take.
+  qrText       String?
+  /// SCAN, MANUAL or IMPORT — how the visitor was first recorded.
+  source       String     @default("MANUAL")
+  leadId       String?
+  lead         Lead?      @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  createdById  String
+  createdBy    User       @relation("ExhibitionVisitorAdder", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  interests ExhibitionInterest[]
+  scans     ExhibitionScan[]
+
+  @@index([exhibitionId, day])
+  @@index([exhibitionId, email])
+  @@index([createdById])
+}
+
+/// A brand a visitor asked about, and the product under it (none named yet is null).
+model ExhibitionInterest {
+  id        String            @id @default(cuid())
+  visitorId String
+  visitor   ExhibitionVisitor @relation(fields: [visitorId], references: [id], onDelete: Cascade)
+  brandId   String
+  brand     ExhibitionBrand   @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  product   String?
+  sortOrder Int               @default(0)
+
+  @@index([visitorId])
+  @@index([brandId])
+}
+
+/// Somebody scanned (or entered) this visitor on this day — one row each time.
+model ExhibitionScan {
+  id        String            @id @default(cuid())
+  visitorId String
+  visitor   ExhibitionVisitor @relation(fields: [visitorId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User              @relation(fields: [userId], references: [id], onDelete: Restrict)
+  day       Int
+  /// SCAN, MANUAL or IMPORT.
+  source    String            @default("SCAN")
+  at        DateTime          @default(now())
+
+  @@index([visitorId])
+  @@index([userId])
 }

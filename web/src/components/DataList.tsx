@@ -461,7 +461,8 @@ export function DataList<T>({
   }
 
   function clearAll() {
-    setActive({});
+    // A preset is what the screen IS (rule 15) — clearing the filters keeps it.
+    setActive({ ...(initialFilters ?? {}) });
     setSearch('');
     setDebounced('');
     setPage(1);

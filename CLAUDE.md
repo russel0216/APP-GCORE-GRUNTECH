@@ -674,10 +674,14 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts marketing; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,840 assertions across twenty-two scripts** (counted 2026-10-26, after
+**4,892 assertions across twenty-three scripts** (counted 2026-10-27, after
+52 on the new verify-marketing for Sales › Marketing — the owner's PSECE
+badge read, the web copy pinned, brand matching, a re-scan joining one
+visitor, the rights, Modify, the bar graphs against the list, the lead
+made once and the spreadsheet import — and before it
 8 on delivery for a budget request on a costing, a quotation or a sales order and its hand-over to the project built from it, and before it one on chain for a big Odoo export read and an oversize file refused in words, and before it
 one on chain for the asset's photo on its page, its register row and its own routes, and before it
 8 on chain for the inventory's product cards — the card's fields, Out of stock, In stock only, the catalogue line placed and dropped, the photo routes, delete for a super admin alone and Odoo's pictures filed once — replacing the board's 2, and before it 3 on chain for the Odoo holders' nicknames and the tools issued on a re-run once their holder is on file, and before it 13 on chain for the Odoo migration — the brand, the group, the holder, the
@@ -807,7 +811,7 @@ foundation
 430, masters 92, sales 643, costing 205, pipeline 123, calendar 103, numbering
 94, partners 120, delivery 224, chain 430, hr 661, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 446, aftermarket 304, cad 122,
-insights 98, insights-brief 50, workspace 82, accounts 145. The
+insights 98, insights-brief 50, workspace 82, accounts 145, marketing 52. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -826,7 +830,7 @@ Phase 10's rules listed below.
 
 **Only `verify-foundation`, `verify-masters` and `verify-sales` run without the
 API** (and the SMTP half of `verify-accounts`, which talks to a fake mail server
-it starts on 127.0.0.1). The other nineteen check route guards and responses over HTTP against
+it starts on 127.0.0.1) and the badge half of `verify-marketing`. The other twenty check route guards and responses over HTTP against
 `http://localhost:5100`, and say so loudly — a failed "API is not reachable"
 line — rather than skipping them if the API is down or restarting (under
 `tsx watch` an edit elsewhere restarts it mid-run; rerun that script). All create
@@ -4200,6 +4204,77 @@ alone, and Odoo's pictures imported from its CSV export).
   hundred products** — the owner's 80-row sample was 9 MB as sent and 1.6
   MB stored. One audit row per run; a file sharp cannot read is named, the
   rest go on.
+
+## Sales › Marketing: exhibition visitors (2026-10-27)
+
+The owner's call during PSECE 2026 ("G-CORE › Sales › Marketing; a bar graph;
+a QR scanner to save the info of the visitor; the brands they are inquiring —
+several, tick boxes; every account user can scan and input the specific
+product under the brand; I will input the data of Day 1"; then "even though
+the entry is saved, make it editable"). Ninth on the Sales strip
+(verify-foundation pins it). `gops.marketing` (SHARED — own is the visitors
+one added), `/g-ops/marketing` (one page, `?tab=dashboard|scan|visitors`,
+`?exhibitionId=`) and `/g-ops/marketing/visitors/:id`, `routes/marketing.ts`
+at `/api/marketing`, `shared/marketing.ts`, `pages/sales/Marketing.tsx`,
+`styles/marketing.css`, verify-marketing.
+
+- **The records**: `Exhibition` (name, venue, Day 1 = `startDate`, the last
+  day, `isActive`; set up on the page's "Exhibition…" by Edit All; the page,
+  the scanner and the import open on the latest active one), `ExhibitionBrand`
+  (Admin › Categories › Exhibition brands — the owner's nine, Schneider
+  Electric, Horiba, Nidec Drives, Pentair, KSB, Suto-itec, Omega Air, Sure
+  Purity, Prevost, as system rows: renamed, never deleted, switched off),
+  `ExhibitionVisitor` (one person at one exhibition: name, company,
+  position, email, mobile, notes, the day first seen, the badge's raw QR),
+  `ExhibitionInterest` (one row per brand and product, a brand with none
+  named once) and `ExhibitionScan` (one row per scan or entry: who, which
+  day, SCAN / MANUAL / IMPORT). `seedMarketing()` adds the brands and PSECE
+  2026 (26–28 Oct) where missing and gave every role View All, Create and
+  Edit All ONCE (`seed.marketingAccess20261027`) — Delete was given to
+  nobody; a login with no role sees nothing until it has one.
+- **The badge is a vCard 3.0** (read off the owner's own PSECE badge: FN, N,
+  ORG, TITLE, EMAIL, TEL;CELL). `parseBadge()` reads it, a MECARD, or plain
+  text's email and number; `web/src/lib/badge.ts` is its copy, pinned equal.
+- **The scanner** is the phone's back camera, read every 250 ms by the
+  browser's BarcodeDetector, else jsQR 1.4.0 VENDORED in `web/public/jsqr/`
+  (README.txt, the registry integrity) and loaded with a script tag only
+  then (`lib/qrScan.ts`); "Take a photo of the badge" reads a still, "Type it
+  in instead" opens the form empty. The camera needs https. A read fills the
+  form; `GET /visitors/match` says when the person is already on file.
+- **The same person is ONE visitor** (`recordVisitor()`, shared with the
+  import): the same badge text, else the same email (case-blind), else —
+  neither having an email — the same name at the same company. A second
+  scan, by anyone on any day, fills blanks, appends a new note, joins the
+  brands and products (a product named replaces a bare tick), keeps the
+  earliest day, and adds a scan row; the POST answers `merged`.
+- **Editable once saved**: `PATCH /visitors/:id` changes every field, the
+  day and the brands (replaced whole), an email another visitor has a 409;
+  the visitor page's Modify. Delete needs `gops.marketing.delete`.
+- **The bar graphs** (`GET /dashboard`, read again every minute): visitors
+  per brand (each visitor once per brand), per day (first seen) with the
+  scans, scans per person, and the products under each brand — `BarList`,
+  each bar opening the list on the same filter (verify-marketing asserts a
+  bar equals its list's total). The list (DataList): Day, Visitor, Company,
+  Brands and products, Email, Mobile, Scanned by; filters day, brand,
+  product (a lookup), scanned by, lead, none ticked; a card per day; Print
+  (`GET /visitors/pdf`, landscape); Export CSV; "Import from a
+  spreadsheet…" in ⋯.
+- **The spreadsheet import** (`exhibition_visitors`,
+  `routes/imports/exhibitionVisitors.ts`, `gops.marketing.create`) reads the
+  file's own headings by name (Full Name, Company Name, Designation,
+  E-mail, Contact No. … — `ALIASES`), none required but a name; brands from
+  a Brands column (short forms: Schneider, Nidec, Omega, Suto —
+  `matchBrand()`, never a guess between two), a Products column ("Brand:
+  product; Brand: product", plain products going to the one brand named), or
+  a column per brand (ticked, or holding the products). A brand not on the
+  list stops the file naming it. Day from a Day column (1, "Day 1" or the
+  date), else Day 1; rows of one person are one visitor; a re-run adds no
+  second person.
+- **Make lead** (`POST /visitors/:id/lead`, `gops.leads.create`, once):
+  the ordinary numbered lead in the maker's name, its source
+  "Exhibition: <name>", what they asked about as its description.
+- `DataList`'s "Clear all" keeps a screen's preset (`initialFilters`) —
+  rule 15 — which the list's exhibition is.
 
 ## The notification bell (2026-10-20)
 

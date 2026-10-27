@@ -23,6 +23,7 @@ import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
 import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawingTypes';
 import { COURSE_CATEGORIES, seedCourseCategories } from '../src/shared/courseCategories';
 import { SERVICE_DOCUMENT_CATEGORIES, seedServiceDocumentCategories } from '../src/shared/serviceDocumentCategories';
+import { EXHIBITION_BRANDS, seedMarketing } from '../src/shared/marketing';
 import { ASSET_TYPES, moveAssetTagCode, seedAssetTypes } from '../src/shared/assets';
 import { ENTRANCE_EXAMS, seedEntranceExams } from '../src/shared/hiring';
 import { flushFaceSamples, migrateFaceThreshold } from '../src/shared/faceSamples';
@@ -1354,6 +1355,10 @@ async function main() {
   // What a service document is (2026-10-20): the six, system rows.
   const documentCategoriesAdded = await seedServiceDocumentCategories();
   console.log(`  ✓ Service document categories (${SERVICE_DOCUMENT_CATEGORIES.length}${documentCategoriesAdded ? `, ${documentCategoriesAdded} added` : ''})`);
+  // Marketing at an exhibition (2026-10-27, PSECE 2026): the owner's nine
+  // brands, the first exhibition, and — once — every role may scan.
+  const marketing = await seedMarketing();
+  console.log(`  ✓ Exhibition brands (${EXHIBITION_BRANDS.length}${marketing.brands ? `, ${marketing.brands} added` : ''})${marketing.exhibition ? ' · PSECE 2026 added' : ''}${marketing.granted !== null ? ` · Marketing given to every role (${marketing.granted} grant(s))` : ''}`);
   const assetTypesAdded = await seedAssetTypes();
   console.log(`  ✓ Asset types (${ASSET_TYPES.length}${assetTypesAdded ? `, ${assetTypesAdded} added` : ''})`);
   const tagMoved = await moveAssetTagCode();

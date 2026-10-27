@@ -2048,6 +2048,80 @@ referenceRoutes.delete(
   }),
 );
 
+// ── Exhibition brands ───────────────────────────────────────────────────────
+// What an exhibition visitor may ask about (2026-10-27, Marketing): the
+// owner's nine as system rows (renamable, never deleted, switched off), more
+// added here; anyone signed in may read the list.
+
+referenceRoutes.get(
+  '/exhibition-brands',
+  handler(async (req, res) => {
+    const activeOnly = String(req.query.active ?? '') === 'true';
+    const rows = await prisma.exhibitionBrand.findMany({
+      where: activeOnly ? { isActive: true } : {},
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    });
+    // Visitors asking about each (distinct), for the card's count and the delete rule.
+    const counts = await prisma.exhibitionInterest.groupBy({ by: ['brandId', 'visitorId'], where: { brandId: { in: rows.map((r) => r.id) } } });
+    res.json(rows.map((r) => ({ ...r, visitors: counts.filter((c) => c.brandId === r.id).length })));
+  }),
+);
+
+const exhibitionBrandSchema = z.object({
+  name: z.string().trim().min(2, 'Give it a name').max(80),
+  sortOrder: z.number().int().default(0),
+  isActive: z.boolean().default(true),
+});
+
+async function exhibitionBrandTaken(name: string, exceptId?: string): Promise<boolean> {
+  const key = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const rows = await prisma.exhibitionBrand.findMany({ where: exceptId ? { id: { not: exceptId } } : {}, select: { name: true } });
+  return rows.some((r) => r.name.toLowerCase().replace(/[^a-z0-9]/g, '') === key);
+}
+
+referenceRoutes.post(
+  '/exhibition-brands',
+  require_('admin.categories.create'),
+  handler(async (req, res) => {
+    const body = parseBody(exhibitionBrandSchema, req.body);
+    if (await exhibitionBrandTaken(body.name)) throw conflict(`The brand "${body.name}" is already on the list`);
+    const created = await prisma.exhibitionBrand.create({ data: { ...body, createdById: currentUser(req).id } });
+    await audit({ entityType: 'exhibition_brand', entityId: created.id, action: 'CREATED', summary: `Added the exhibition brand ${created.name}` }, req);
+    res.status(201).json(created);
+  }),
+);
+
+referenceRoutes.patch(
+  '/exhibition-brands/:id',
+  editCategory,
+  handler(async (req, res) => {
+    const body = parseBody(exhibitionBrandSchema.partial(), req.body);
+    const before = await prisma.exhibitionBrand.findUnique({ where: { id: req.params.id } });
+    if (!before) throw notFound('Brand not found');
+    assertCategoryEdit(currentUser(req), before);
+    if (body.name && body.name !== before.name && (await exhibitionBrandTaken(body.name, before.id))) {
+      throw conflict(`The brand "${body.name}" is already on the list`);
+    }
+    const updated = await prisma.exhibitionBrand.update({ where: { id: before.id }, data: body });
+    await audit({ entityType: 'exhibition_brand', entityId: updated.id, action: 'UPDATED', summary: `Updated the exhibition brand ${updated.name}`, before, after: updated }, req);
+    res.json(updated);
+  }),
+);
+
+referenceRoutes.delete(
+  '/exhibition-brands/:id',
+  require_('admin.categories.delete'),
+  handler(async (req, res) => {
+    const row = await prisma.exhibitionBrand.findUnique({ where: { id: req.params.id }, include: { _count: { select: { interests: true } } } });
+    if (!row) throw notFound('Brand not found');
+    if (row.isSystem) throw badRequest('The standard exhibition brands cannot be deleted — deactivate one instead');
+    if (row._count.interests > 0) throw badRequest('Visitors asked about this brand — deactivate it instead');
+    await prisma.exhibitionBrand.delete({ where: { id: row.id } });
+    await audit({ entityType: 'exhibition_brand', entityId: row.id, action: 'DELETED', summary: `Deleted the exhibition brand ${row.name}`, before: row }, req);
+    res.json({ ok: true });
+  }),
+);
+
 // ── Asset types ─────────────────────────────────────────────────────────────
 // What a company asset is (2026-10-21, G-HR › Asset Management): Admin ›
 // Categories › Asset types, the service document categories' contract.

@@ -24,6 +24,7 @@ import { employeesImport } from './imports/employees';
 import { scoroQuotesImport } from './imports/scoroQuotes';
 import { scoroInvoicesImport } from './imports/scoroInvoices';
 import { odooInventoryImport, odooAssetsImport } from './imports/odoo';
+import { exhibitionVisitorsImport } from './imports/exhibitionVisitors';
 import { odooPicturesImport, PICTURE_UPLOAD_MB } from './imports/odooPictures';
 import { courseImport } from './academy';
 import { makePartner, safeHttpUrl, type ResourceKind } from '../shared/partners';
@@ -584,6 +585,8 @@ const REGISTRY: Record<string, Registered> = {
   odoo_assets: odooAssetsImport,
   // Odoo's product pictures (2026-10-25), base64 in the CSV, onto the items and assets.
   odoo_pictures: odooPicturesImport,
+  // Exhibition visitors from a spreadsheet (2026-10-27, Marketing: PSECE's Day 1).
+  exhibition_visitors: exhibitionVisitorsImport,
 };
 
 importRoutes.get(
