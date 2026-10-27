@@ -479,6 +479,13 @@ export const itemSpec: ImportSpec<Prisma.ItemCreateInput> = {
 
 export interface Registered {
   spec: ImportSpec<never>;
+  /**
+   * The import as a screen asks for it (2026-10-27, Marketing: the visitors
+   * go to the exhibition being viewed): the route hands it the request's
+   * query (`?exhibitionId=`) and uses the import it returns, for the dry run
+   * and the commit alike.
+   */
+  forContext?: (context: Record<string, string>) => Registered;
   permission: string;
   /**
    * `actor` is who pressed Import, for a writer that files audit rows of its
@@ -636,8 +643,10 @@ importRoutes.post(
     });
   },
   handler(async (req, res) => {
-    const entry = REGISTRY[req.params.entity];
-    if (!entry) throw notFound('Unknown import type');
+    const registered = REGISTRY[req.params.entity];
+    if (!registered) throw notFound('Unknown import type');
+    const context = Object.fromEntries(Object.entries(req.query).filter((e): e is [string, string] => e[0] !== 'commit' && typeof e[1] === 'string'));
+    const entry = registered.forContext ? registered.forContext(context) : registered;
 
     const me = currentUser(req);
     const { can } = await import('../permissions/resolve');

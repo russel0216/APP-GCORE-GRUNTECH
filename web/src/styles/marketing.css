@@ -54,6 +54,9 @@
 .mk-hint {
   margin: var(--s-2) 0 var(--s-3);
   font-size: var(--fs-sm);
+}
+
+.mk-scanner .mk-hint {
   text-align: center;
 }
 
@@ -102,10 +105,6 @@
   width: 100%;
 }
 
-.mk-brands + .mk-hint {
-  text-align: left;
-}
-
 /* The list's brand chips. */
 .mk-chips {
   display: flex;
@@ -149,4 +148,59 @@
   .mk-brands {
     grid-template-columns: 1fr;
   }
+}
+
+/* The exhibitions register and its settings (2026-10-27, later exhibitions). */
+.mk-row-actions {
+  display: inline-flex;
+  gap: var(--s-2);
+}
+
+tr.is-current td {
+  background: var(--surface-2);
+}
+
+label.mk-brand {
+  flex-direction: row;
+  align-items: center;
+  font-weight: 600;
+  min-height: var(--btn-h);
+}
+
+.mk-qr-setup {
+  margin: var(--s-3) 0;
+}
+
+.mk-qr-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  align-items: flex-start;
+}
+
+.mk-qr-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.mk-qr-field select {
+  width: 200px;
+}
+
+.mk-qr-part {
+  padding: 0 var(--s-2);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.mk-preview {
+  margin: var(--s-3) 0;
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
 }

@@ -13,10 +13,10 @@ import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
-import { parseBadge, matchBrand, splitProducts, brandKey, EXHIBITION_BRANDS } from '../src/shared/marketing';
-import { parseBadge as webParseBadge } from '../../web/src/lib/badge';
+import { parseBadge, parseBadgeWith, matchBrand, splitProducts, brandKey, EXHIBITION_BRANDS } from '../src/shared/marketing';
+import { parseBadge as webParseBadge, parseBadgeWith as webParseBadgeWith } from '../../web/src/lib/badge';
 import { runImport } from '../src/shared/csv';
-import { exhibitionVisitorsSpec, exhibitionVisitorsWrite } from '../src/routes/imports/exhibitionVisitors';
+import { exhibitionVisitorsSpecFor, exhibitionVisitorsWrite } from '../src/routes/imports/exhibitionVisitors';
 import { dayKey } from '../src/shared/day';
 
 if (env.isProduction) {
@@ -112,6 +112,25 @@ async function main() {
   check('A MECARD reads too', m.name === 'Maria Santos' && m.company === 'XYZ Corp' && m.email === 'maria@xyz.com' && m.mobile === '09171234567', JSON.stringify(m));
   const p = parseBadge(fixtures[5]);
   check('Plain text gives its email and number, and no guessed name', p.email === 'ana@example.org' && p.mobile === '+63 917 555 0101' && p.name === null, JSON.stringify(p));
+
+  console.log('\nAnother exhibition’s badge');
+  const piped = { qrFormat: 'DELIMITED', qrSeparator: '|', qrFields: ['skip', 'name', 'position', 'company', 'email', 'mobile'] };
+  const d1 = parseBadgeWith('V-00123|Ana Reyes|Plant Engineer|Fab One Inc.|ana@fabone.ph|0917 000 0001', piped);
+  check('A text badge is read in the exhibition’s own order, a part skipped', d1.name === 'Ana Reyes' && d1.position === 'Plant Engineer' && d1.company === 'Fab One Inc.' && d1.email === 'ana@fabone.ph' && d1.mobile === '0917 000 0001', JSON.stringify(d1));
+  const split = { qrFormat: 'DELIMITED', qrSeparator: 'TAB', qrFields: ['firstName', 'lastName', 'position'] };
+  const d2 = parseBadgeWith('Ben\tCruz\tBuyer', split);
+  check('First and last names join; a tab separates', d2.name === 'Ben Cruz' && d2.position === 'Buyer', JSON.stringify(d2));
+  check('A vCard scanned at a text-badge exhibition is still read as a vCard', parseBadgeWith(OWNER_BADGE, piped).position === 'TECHNICAL HEAD');
+  check('A badge with fewer parts leaves the rest empty', parseBadgeWith('V-9|Carl', piped).name === 'Carl' && parseBadgeWith('V-9|Carl', piped).email === null);
+  const dfixtures: [string, typeof piped][] = [
+    ['V-00123|Ana Reyes|Plant Engineer|Fab One Inc.|ana@fabone.ph|0917 000 0001', piped],
+    ['Ben\tCruz\tBuyer', split],
+    [OWNER_BADGE, piped],
+    ['a;b;c', { qrFormat: 'DELIMITED', qrSeparator: ';', qrFields: ['company', 'name', 'position'] }],
+    ['x\ny', { qrFormat: 'DELIMITED', qrSeparator: 'NEWLINE', qrFields: ['name', 'company'] }],
+    [OWNER_BADGE, { qrFormat: 'AUTO', qrSeparator: null as unknown as string, qrFields: [] }],
+  ];
+  check('The web copy reads every exhibition’s badge as the API does', dfixtures.every(([t, f]) => JSON.stringify(parseBadgeWith(t, f)) === JSON.stringify(webParseBadgeWith(t, f))));
 
   console.log('\nBrands');
   const brands = EXHIBITION_BRANDS.map((name, i) => ({ id: String(i), name }));
@@ -239,18 +258,48 @@ async function main() {
     `1,${TAG} Ana Reyes,Fab One,Engineer,ana@fabone.ph,,,,UPS,,`,
     `Day 1,${TAG} Ben Cruz,Chip Two,,,,Pentair,pumps,,✓,`,
   ].join('\n');
-  const dry = await runImport(csv, exhibitionVisitorsSpec, false, async () => undefined);
+  const dry = await runImport(csv, exhibitionVisitorsSpecFor(ex.id), false, async () => undefined);
   check('The dry run reads the file’s own headings, two people (the same email is one)', dry.errors === 0 && dry.created === 2, JSON.stringify(dry.rows));
-  const bad = await runImport(['Name,Brands', `${TAG} X,Atlas Copco`].join('\n'), exhibitionVisitorsSpec, false, async () => undefined);
+  const bad = await runImport(['Name,Brands', `${TAG} X,Atlas Copco`].join('\n'), exhibitionVisitorsSpecFor(ex.id), false, async () => undefined);
   check('A brand not on the list stops the file, naming it', bad.errors === 1 && !!bad.rows[0].message?.includes('Atlas Copco'), JSON.stringify(bad.rows));
-  await runImport(csv, exhibitionVisitorsSpec, true, (records) => exhibitionVisitorsWrite(records as never, { id: all.user.id, name: all.user.name }));
+  await runImport(csv, exhibitionVisitorsSpecFor(ex.id), true, (records) => exhibitionVisitorsWrite(records as never, { id: all.user.id, name: all.user.name }, ex.id));
   const ana = await prisma.exhibitionVisitor.findFirst({ where: { exhibitionId: ex.id, email: 'ana@fabone.ph' }, include: { interests: { include: { brand: true } }, scans: true } });
   check('Imported: Ana on Day 1 with Nidec F600, Omega Dryer and Schneider UPS from its column', ana?.day === 1 && ana.interests.map((i) => `${i.brand.name}:${i.product}`).sort().join('|') === 'Nidec Drives:F600|Omega Air:Dryer|Schneider Electric:UPS', JSON.stringify(ana?.interests.map((i) => `${i.brand.name}:${i.product}`)));
   check('Her scan is marked imported, her remark kept', ana?.scans[0]?.source === 'IMPORT' && ana.notes === 'Hot lead');
   const ben = await prisma.exhibitionVisitor.findFirst({ where: { exhibitionId: ex.id, name: `${TAG} Ben Cruz` }, include: { interests: { include: { brand: true } } } });
   check('Ben: plain products go under the one brand named; a ticked brand column counts', ben?.interests.map((i) => `${i.brand.name}:${i.product ?? ''}`).sort().join('|') === 'Horiba:|Pentair:pumps', JSON.stringify(ben?.interests.map((i) => `${i.brand.name}:${i.product}`)));
-  await runImport(csv, exhibitionVisitorsSpec, true, (records) => exhibitionVisitorsWrite(records as never, { id: all.user.id, name: all.user.name }));
+  await runImport(csv, exhibitionVisitorsSpecFor(ex.id), true, (records) => exhibitionVisitorsWrite(records as never, { id: all.user.id, name: all.user.name }, ex.id));
   check('Importing the file again adds no second person', (await prisma.exhibitionVisitor.count({ where: { exhibitionId: ex.id, email: 'ana@fabone.ph' } })) === 1);
+
+  // Into the exhibition the screen names, through the route (`?exhibitionId=`), not the latest running one.
+  const other = await http(all.token, 'POST', '/marketing/exhibitions', { name: `${TAG} Older Fair`, startDate: plus(today, -40), endDate: plus(today, -38), isActive: false });
+  const form = new FormData();
+  form.append('file', new Blob([`Name,Position,Brands\n${TAG} Cara Lim,QA Lead,KSB`], { type: 'text/csv' }), 'day1.csv');
+  const viaRoute = await fetch(`${BASE}/imports/exhibition_visitors?exhibitionId=${other.body.id}&commit=true`, { method: 'POST', headers: { Authorization: `Bearer ${all.token}` }, body: form });
+  const cara = await prisma.exhibitionVisitor.findFirst({ where: { name: `${TAG} Cara Lim` } });
+  check('The import goes to the exhibition the screen names', viaRoute.status === 200 && cara?.exhibitionId === other.body.id && cara.position === 'QA Lead', `${viaRoute.status} ${cara?.exhibitionId}`);
+
+  console.log('\nPosition');
+  const dash2 = await http(all.token, 'GET', `/marketing/dashboard?exhibitionId=${ex.id}`);
+  const eng = dash2.body.byPosition?.find((x: { position: string }) => x.position.toUpperCase() === 'ENGINEER');
+  const engList = await http(all.token, 'GET', `/marketing/visitors?exhibitionId=${ex.id}&position=engineer`);
+  check('Visitors by position counts case-blind, and its bar equals its list', eng?.visitors === 1 && engList.body.total === 1, JSON.stringify({ eng, total: engList.body.total }));
+  check('Visitors with no position are counted apart', typeof dash2.body.noPosition === 'number' && dash2.body.noPosition >= 1, String(dash2.body.noPosition));
+  const pos = await http(all.token, 'GET', '/marketing/suggest/positions?field=position&q=qa');
+  check('The position box remembers positions typed at any exhibition', (pos.body as unknown as string[]).includes('QA Lead'), JSON.stringify(pos.body));
+
+  console.log('\nExhibitions');
+  check('A text-badge exhibition must say which part is the name', (await http(all.token, 'PATCH', `/marketing/exhibitions/${other.body.id}`, { qrFormat: 'DELIMITED', qrSeparator: '|', qrFields: ['company', 'email'] })).status === 400);
+  const setUp = await http(all.token, 'PATCH', `/marketing/exhibitions/${other.body.id}`, { qrFormat: 'DELIMITED', qrSeparator: '|', qrFields: ['skip', 'name', 'position'], brandIds: [omega.id, nidec.id] });
+  check('Its badge format and featured brands are kept', setUp.status === 200 && setUp.body.qrFormat === 'DELIMITED' && setUp.body.qrFields.join() === 'skip,name,position' && setUp.body.brandIds.length === 2 && setUp.body.when === 'ended', JSON.stringify(setUp.body).slice(0, 300));
+  const dash3 = await http(all.token, 'GET', `/marketing/dashboard?exhibitionId=${other.body.id}`);
+  check('Its graph lists the featured brands, and any a visitor asked about', dash3.body.byBrand?.map((b: { brand: string }) => b.brand).sort().join() === 'KSB,Nidec Drives,Omega Air', JSON.stringify(dash3.body.byBrand));
+  check('An unknown brand is refused', (await http(all.token, 'PATCH', `/marketing/exhibitions/${other.body.id}`, { brandIds: ['nope'] })).status === 400);
+  check('An exhibition with visitors is not deleted', (await http(all.token, 'DELETE', `/marketing/exhibitions/${other.body.id}`)).status === 400);
+  const empty = await http(all.token, 'POST', '/marketing/exhibitions', { name: `${TAG} Empty`, startDate: plus(today, 30), endDate: plus(today, 31) });
+  check('An upcoming one reads as upcoming, on Day 1', empty.body.when === 'upcoming' && empty.body.today === 1);
+  check('An exhibition nobody was recorded at is deleted', (await http(all.token, 'DELETE', `/marketing/exhibitions/${empty.body.id}`)).status === 200);
+  check('Only Edit All deletes one', (await http(own.token, 'DELETE', `/marketing/exhibitions/${other.body.id}`)).status === 403);
 
   console.log('\nRemoving');
   const del = await http(boss.token, 'DELETE', `/marketing/visitors/${ownVisitor.body.id}`);

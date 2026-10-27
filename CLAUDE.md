@@ -677,8 +677,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts marketing; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,892 assertions across twenty-three scripts** (counted 2026-10-27, after
-52 on the new verify-marketing for Sales › Marketing — the owner's PSECE
+**4,909 assertions across twenty-three scripts** (counted 2026-10-27, after
+17 on verify-marketing for later exhibitions — another exhibition's text
+badge, its featured brands, deleting an empty one, the import into the
+exhibition the screen names, and position — and before it 52 on the new verify-marketing for Sales › Marketing — the owner's PSECE
 badge read, the web copy pinned, brand matching, a re-scan joining one
 visitor, the rights, Modify, the bar graphs against the list, the lead
 made once and the spreadsheet import — and before it
@@ -811,7 +813,7 @@ foundation
 430, masters 92, sales 643, costing 205, pipeline 123, calendar 103, numbering
 94, partners 120, delivery 224, chain 430, hr 661, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 446, aftermarket 304, cad 122,
-insights 98, insights-brief 50, workspace 82, accounts 145, marketing 52. The
+insights 98, insights-brief 50, workspace 82, accounts 145, marketing 69. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -4275,6 +4277,34 @@ at `/api/marketing`, `shared/marketing.ts`, `pages/sales/Marketing.tsx`,
   "Exhibition: <name>", what they asked about as its description.
 - `DataList`'s "Clear all" keeps a screen's preset (`initialFilters`) —
   rule 15 — which the list's exhibition is.
+- **Later exhibitions** (the owner's call the same day: "not only this
+  exhibit — consider management for later exhibits; modify based on the
+  QR"; and "include the position"). The page's **Exhibitions** tab lists
+  every exhibition (dates, badge format, visitors, Running / Upcoming /
+  Ended / Closed — `when`, derived on Manila's day), Open and Modify each,
+  "+ New exhibition", and a bar graph of visitors per exhibition; the
+  selector at the top switches the whole page. Each exhibition keeps:
+  **its featured brands** (`Exhibition.brandIds`, empty = every active
+  brand; the scanner and Modify offer only these, a brand a visitor
+  already has staying on them; its graph lists them and any asked about)
+  and **how its badges are written** — `qrFormat` AUTO (vCard / MECARD,
+  PSECE's) or DELIMITED: `qrSeparator` (`QR_SEPARATORS`: | , ; TAB NEWLINE
+  ^ ~) and `qrFields` in order (`QR_FIELDS`: name, firstName, lastName,
+  company, position, email, mobile, skip; a name part required).
+  `parseBadgeWith(raw, exhibition)` is the one reading (a vCard is still a
+  vCard), its web copy pinned; Modify has "Try a badge" — paste or read a
+  photo — showing each part beside its field and what is read. A badge
+  that reads no name or email says so on the scanner. An exhibition with
+  no visitors is deleted (Edit All); one with visitors is closed. The
+  scanner warns when today is outside the chosen exhibition's dates.
+  **The import goes to the exhibition the screen shows**: `Registered.
+  forContext(query)` (routes/imports.ts) builds an import per request,
+  `ImportModal`'s `context` sends `?exhibitionId=` with the check and the
+  commit. **Position** sits beside the name on the form (remembered,
+  `GET /suggest/positions`), is a column and a filter (`?position=`,
+  case-blind, `none`) on the list, a column on the paper, and the graph
+  "Visitors by position" (top 15, the rest summed; those with none
+  counted apart).
 
 ## The notification bell (2026-10-20)
 

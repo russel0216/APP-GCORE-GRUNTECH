@@ -1,5 +1,5 @@
 import { Fragment, useRef, useState } from 'react';
-import { api, downloadBlob } from '../lib/api';
+import { api, downloadBlob, qs } from '../lib/api';
 import { extensionOf, type ViewWorkbook } from '../lib/spreadsheet';
 import { ErrorBox, Field, Modal, ModalFoot, StatusBadge, useToast, type Tone } from './ui';
 
@@ -126,12 +126,15 @@ export function ImportModal({
   columns,
   onClose,
   onImported,
+  context,
 }: {
   entity: string;
   label: string;
   columns: ColumnDef[];
   onClose: () => void;
   onImported: () => void;
+  /** What the screen imports into (`?exhibitionId=`), sent with the check and the commit alike. */
+  context?: Record<string, string>;
 }) {
   const toast = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -162,7 +165,7 @@ export function ImportModal({
         form.append('options', JSON.stringify({ ...(groups ? { groups } : {}), ...(teamQuestion && teamChoice ? { team: teamChoice } : {}) }));
       }
       const result = await api.post<ImportReport>(
-        `/imports/${entity}${commit ? '?commit=true' : ''}`,
+        `/imports/${entity}${qs({ ...(context ?? {}), ...(commit ? { commit: 'true' } : {}) })}`,
         form,
       );
       setReport(result);

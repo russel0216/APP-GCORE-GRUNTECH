@@ -1,7 +1,7 @@
 import { prisma } from '../../prisma';
 import { badRequest } from '../../http/kit';
 import type { ImportSpec, ImportActor } from '../../shared/csv';
-import { brandKey, exhibitionDays, matchBrand, parseBadge, splitProducts } from '../../shared/marketing';
+import { brandKey, exhibitionDays, matchBrand, parseBadgeWith, splitProducts } from '../../shared/marketing';
 import { recordVisitor } from '../marketing';
 import type { Registered } from '../imports';
 
@@ -53,15 +53,23 @@ interface Brand {
   name: string;
 }
 
-let cache: { at: number; brands: Brand[]; exhibition: { id: string; name: string; startDate: Date; endDate: Date } | null } | null = null;
-async function context() {
-  if (cache && Date.now() - cache.at < 10_000) return cache;
+type Context = { at: number; brands: Brand[]; exhibition: { id: string; name: string; startDate: Date; endDate: Date; qrFormat: string; qrSeparator: string | null; qrFields: string[] } | null };
+const caches = new Map<string, Context>();
+const EXHIBITION_SELECT = { id: true, name: true, startDate: true, endDate: true, qrFormat: true, qrSeparator: true, qrFields: true } as const;
+
+/** The exhibition the rows go to — the one the screen names (`?exhibitionId=`), else the latest running one — and the brands. Read once a run. */
+async function contextOf(exhibitionId: string): Promise<Context> {
+  const cached = caches.get(exhibitionId);
+  if (cached && Date.now() - cached.at < 10_000) return cached;
   const [brands, exhibition] = await Promise.all([
     prisma.exhibitionBrand.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
-    prisma.exhibition.findFirst({ where: { isActive: true }, orderBy: [{ startDate: 'desc' }, { createdAt: 'desc' }], select: { id: true, name: true, startDate: true, endDate: true } }),
+    exhibitionId
+      ? prisma.exhibition.findUnique({ where: { id: exhibitionId }, select: EXHIBITION_SELECT })
+      : prisma.exhibition.findFirst({ where: { isActive: true }, orderBy: [{ startDate: 'desc' }, { createdAt: 'desc' }], select: EXHIBITION_SELECT }),
   ]);
-  cache = { at: Date.now(), brands, exhibition };
-  return cache;
+  const made = { at: Date.now(), brands, exhibition };
+  caches.set(exhibitionId, made);
+  return made;
 }
 
 export interface VisitorRecord {
@@ -124,12 +132,12 @@ function brandsFromRow(row: Record<string, string>, brands: Brand[], rowNumber: 
   return [...out.values()];
 }
 
-async function buildOne(rows: Record<string, string>[], rowNumber: number): Promise<VisitorRecord> {
-  const { brands, exhibition } = await context();
+async function buildOne(exhibitionId: string, rows: Record<string, string>[], rowNumber: number): Promise<VisitorRecord> {
+  const { brands, exhibition } = await contextOf(exhibitionId);
   if (!exhibition) throw badRequest('No exhibition is on file — add one on Sales › Marketing first');
   const first = rows[0];
   const qrText = pick(first, 'qr') || null;
-  const badge = qrText ? parseBadge(qrText) : null;
+  const badge = qrText ? parseBadgeWith(qrText, exhibition) : null;
   const name = pick(first, 'name') || [pick(first, 'firstName'), pick(first, 'lastName')].filter(Boolean).join(' ') || badge?.name || '';
   if (name.length < 2) throw badRequest(`Row ${rowNumber}: no name — a Name column (or First name / Last name, or the badge's QR text) is needed`);
   const dayText = pick(first, 'day');
@@ -170,46 +178,51 @@ const groupKeyOf = (row: Record<string, string>) => {
   return `${name}|${pick(row, 'company')}`.toLowerCase().replace(/\s+/g, ' ');
 };
 
-export const exhibitionVisitorsSpec: ImportSpec<VisitorRecord> = {
-  entity: 'exhibition_visitors',
-  label: 'Exhibition visitors',
-  columns: [
-    { header: 'Day', example: '1', hint: '1, Day 1 or the date — blank is Day 1' },
-    { header: 'Name', example: 'Juan dela Cruz', hint: 'Or First name and Last name' },
-    { header: 'Company', example: 'ABC Semiconductor Inc.' },
-    { header: 'Position', example: 'Facilities Engineer' },
-    { header: 'Email', example: 'juan@abc.com', hint: 'The same email on two rows is one visitor' },
-    { header: 'Mobile', example: '+639171234567' },
-    { header: 'Brands', example: 'Schneider Electric, Nidec Drives', hint: 'Short forms work: Schneider, Nidec, Omega, Suto' },
-    { header: 'Products', example: 'Schneider Electric: UPS; Nidec Drives: F600', hint: 'Brand: product; or plain products when one brand is named' },
-    { header: 'Notes', example: 'Wants a quotation next week' },
-  ],
-  groupBy: groupKeyOf,
-  build: (row, n) => buildOne([row], n),
-  buildGroup: (rows, n) => buildOne(rows, n),
-  existing: async (row) => {
-    const { exhibition } = await context();
-    if (!exhibition) return null;
-    const email = pick(row, 'email').toLowerCase();
-    const name = pick(row, 'name') || [pick(row, 'firstName'), pick(row, 'lastName')].filter(Boolean).join(' ');
-    const hit = email
-      ? await prisma.exhibitionVisitor.findFirst({ where: { exhibitionId: exhibition.id, email: { equals: email, mode: 'insensitive' } }, select: { id: true } })
-      : name
-        ? await prisma.exhibitionVisitor.findFirst({ where: { exhibitionId: exhibition.id, email: null, name: { equals: name.trim(), mode: 'insensitive' }, company: pick(row, 'company') ? { equals: pick(row, 'company'), mode: 'insensitive' } : null }, select: { id: true } })
-        : null;
-    return hit?.id ?? null;
-  },
-  describe: (r) => `Day ${r.day}${r.interests.length ? ` · ${r.interests.map((i) => (i.products ? `${i.brand} — ${i.products}` : i.brand)).join('; ')}` : ' · no brand'}`,
-  summarize: async () => {
-    const { exhibition } = await context();
-    return exhibition ? { facts: [{ label: 'Exhibition', value: exhibition.name }] } : undefined;
-  },
-};
+/** The import into one exhibition (`''` is the latest running one). */
+export function exhibitionVisitorsSpecFor(exhibitionId: string): ImportSpec<VisitorRecord> {
+  return {
+    entity: 'exhibition_visitors',
+    label: 'Exhibition visitors',
+    columns: [
+      { header: 'Day', example: '1', hint: '1, Day 1 or the date — blank is Day 1' },
+      { header: 'Name', example: 'Juan dela Cruz', hint: 'Or First name and Last name' },
+      { header: 'Company', example: 'ABC Semiconductor Inc.' },
+      { header: 'Position', example: 'Facilities Engineer' },
+      { header: 'Email', example: 'juan@abc.com', hint: 'The same email on two rows is one visitor' },
+      { header: 'Mobile', example: '+639171234567' },
+      { header: 'Brands', example: 'Schneider Electric, Nidec Drives', hint: 'Short forms work: Schneider, Nidec, Omega, Suto' },
+      { header: 'Products', example: 'Schneider Electric: UPS; Nidec Drives: F600', hint: 'Brand: product; or plain products when one brand is named' },
+      { header: 'Notes', example: 'Wants a quotation next week' },
+    ],
+    groupBy: groupKeyOf,
+    build: (row, n) => buildOne(exhibitionId, [row], n),
+    buildGroup: (rows, n) => buildOne(exhibitionId, rows, n),
+    existing: async (row) => {
+      const { exhibition } = await contextOf(exhibitionId);
+      if (!exhibition) return null;
+      const email = pick(row, 'email').toLowerCase();
+      const name = pick(row, 'name') || [pick(row, 'firstName'), pick(row, 'lastName')].filter(Boolean).join(' ');
+      const hit = email
+        ? await prisma.exhibitionVisitor.findFirst({ where: { exhibitionId: exhibition.id, email: { equals: email, mode: 'insensitive' } }, select: { id: true } })
+        : name
+          ? await prisma.exhibitionVisitor.findFirst({ where: { exhibitionId: exhibition.id, email: null, name: { equals: name.trim(), mode: 'insensitive' }, company: pick(row, 'company') ? { equals: pick(row, 'company'), mode: 'insensitive' } : null }, select: { id: true } })
+          : null;
+      return hit?.id ?? null;
+    },
+    describe: (r) => `Day ${r.day}${r.interests.length ? ` · ${r.interests.map((i) => (i.products ? `${i.brand} — ${i.products}` : i.brand)).join('; ')}` : ' · no brand'}`,
+    summarize: async () => {
+      const { exhibition } = await contextOf(exhibitionId);
+      return exhibition ? { facts: [{ label: 'Exhibition', value: exhibition.name }] } : undefined;
+    },
+  };
+}
 
-export async function exhibitionVisitorsWrite(records: { record: VisitorRecord; existingId: string | null }[], actor?: ImportActor): Promise<void> {
+export const exhibitionVisitorsSpec = exhibitionVisitorsSpecFor('');
+
+export async function exhibitionVisitorsWrite(records: { record: VisitorRecord; existingId: string | null }[], actor?: ImportActor, exhibitionId = ''): Promise<void> {
   if (!actor) throw badRequest('Who is importing?');
-  cache = null;
-  const { exhibition } = await context();
+  caches.delete(exhibitionId);
+  const { exhibition } = await contextOf(exhibitionId);
   if (!exhibition) throw badRequest('No exhibition is on file');
   for (const { record } of records) {
     await prisma.$transaction((tx) =>
@@ -229,8 +242,12 @@ export async function exhibitionVisitorsWrite(records: { record: VisitorRecord; 
   }
 }
 
-export const exhibitionVisitorsImport: Registered = {
-  spec: exhibitionVisitorsSpec as ImportSpec<never>,
-  permission: 'gops.marketing.create',
-  write: exhibitionVisitorsWrite as unknown as Registered['write'],
-};
+function importInto(exhibitionId: string): Registered {
+  return {
+    spec: exhibitionVisitorsSpecFor(exhibitionId) as ImportSpec<never>,
+    permission: 'gops.marketing.create',
+    write: ((records: { record: VisitorRecord; existingId: string | null }[], actor?: ImportActor) => exhibitionVisitorsWrite(records, actor, exhibitionId)) as unknown as Registered['write'],
+  };
+}
+
+export const exhibitionVisitorsImport: Registered = { ...importInto(''), forContext: (ctx) => importInto(ctx.exhibitionId ?? '') };

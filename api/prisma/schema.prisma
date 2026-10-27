@@ -6521,6 +6521,16 @@ model Exhibition {
   endDate     DateTime @db.Date
   isActive    Boolean  @default(true)
   notes       String?
+  /// How this exhibition's badge QR is read (2026-10-27, "not only this
+  /// exhibit — modify based on the QR"): AUTO (a vCard or MECARD, PSECE's)
+  /// or DELIMITED (text split on `qrSeparator`, its parts named in order by
+  /// `qrFields`: name, firstName, lastName, company, position, email, mobile,
+  /// skip). `parseBadgeWith()` in shared/marketing.ts.
+  qrFormat    String   @default("AUTO")
+  qrSeparator String?
+  qrFields    String[] @default([])
+  /// The brands featured at this exhibition (ExhibitionBrand ids); empty is every active brand.
+  brandIds    String[] @default([])
   createdById String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

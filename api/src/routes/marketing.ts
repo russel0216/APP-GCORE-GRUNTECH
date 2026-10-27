@@ -13,7 +13,8 @@ import { notify } from '../shared/notifications';
 import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
 import { LIST_CAP, listReference, sendListPdf } from '../shared/listPaper';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit } from '../shared/ownScope';
-import { exhibitionDays, todaysDay, dateOfDay, splitProducts } from '../shared/marketing';
+import { exhibitionDays, todaysDay, dateOfDay, splitProducts, QR_FIELDS, QR_SEPARATORS } from '../shared/marketing';
+import { dayKey } from '../shared/day';
 
 /**
  * Marketing — exhibition visitors (2026-10-27, the owner's call during PSECE
@@ -92,12 +93,15 @@ async function exhibitionFor(id: string | undefined) {
   return e;
 }
 
-function presentExhibition(e: { id: string; name: string; venue: string | null; startDate: Date; endDate: Date; isActive: boolean; notes: string | null }) {
+function presentExhibition(e: { id: string; name: string; venue: string | null; startDate: Date; endDate: Date; isActive: boolean; notes: string | null; qrFormat: string; qrSeparator: string | null; qrFields: string[]; brandIds: string[] }) {
   const days = exhibitionDays(e);
+  const today = dayKey(new Date()).getTime();
   return {
     ...e,
     days: Array.from({ length: days }, (_, i) => ({ day: i + 1, date: dateOfDay(e, i + 1).toISOString().slice(0, 10) })),
     today: todaysDay(e),
+    /** Whether today falls inside it, on Manila's calendar: the scanner warns outside. */
+    when: today < e.startDate.getTime() ? 'upcoming' : today > e.endDate.getTime() ? 'ended' : 'running',
   };
 }
 
@@ -127,10 +131,11 @@ async function listWhere(me: ResolvedUser, q: ListQuery) {
   else if (f.lead === 'no') extra.push({ leadId: null });
   else if (f.lead) throw badRequest('Lead: yes or no');
   if (f.noBrand === 'true') extra.push({ interests: { none: {} } });
+  if (f.position) extra.push(f.position === 'none' ? { position: null } : { position: { equals: f.position, mode: 'insensitive' } });
   return { exhibition, base, where: extra.length ? { AND: [base, ...extra] } : base };
 }
 
-const SORTS = ['name', 'company', 'day', 'createdAt', 'updatedAt'];
+const SORTS = ['name', 'company', 'position', 'day', 'createdAt', 'updatedAt'];
 
 // ── Exhibitions ─────────────────────────────────────────────────────────────
 
@@ -152,9 +157,30 @@ const exhibitionSchema = z
     endDate: z.string().regex(DAY, 'The last day, as a date'),
     isActive: z.boolean().optional(),
     notes: z.string().trim().max(2000).optional().nullable(),
+    qrFormat: z.enum(['AUTO', 'DELIMITED']).optional(),
+    qrSeparator: z.enum(QR_SEPARATORS).optional().nullable(),
+    qrFields: z.array(z.enum(QR_FIELDS)).max(20).optional(),
+    brandIds: z.array(z.string()).max(200).optional(),
+  })
+  .refine((b) => b.qrFormat !== 'DELIMITED' || (b.qrFields ?? []).some((f) => f === 'name' || f === 'firstName' || f === 'lastName'), {
+    message: 'Say which part of the badge is the name',
+    path: ['qrFields'],
   })
   .refine((b) => b.endDate >= b.startDate, { message: 'The last day cannot come before Day 1', path: ['endDate'] })
   .refine((b) => (new Date(b.endDate).getTime() - new Date(b.startDate).getTime()) / 86_400_000 <= 30, { message: 'An exhibition runs 31 days at most', path: ['endDate'] });
+
+/** The brands named are on the list; empty keeps "every active brand". */
+async function checkBrandIds(ids: string[] | undefined) {
+  if (!ids?.length) return [];
+  const unique = [...new Set(ids)];
+  const found = await prisma.exhibitionBrand.count({ where: { id: { in: unique } } });
+  if (found !== unique.length) throw badRequest('One of the brands chosen is not on the list');
+  return unique;
+}
+
+/** The QR settings as stored: the separator and the order only for a DELIMITED exhibition. */
+const qrData = (b: { qrFormat?: string; qrSeparator?: string | null; qrFields?: string[] }) =>
+  b.qrFormat === 'DELIMITED' ? { qrFormat: 'DELIMITED', qrSeparator: b.qrSeparator || '|', qrFields: b.qrFields ?? [] } : { qrFormat: 'AUTO', qrSeparator: null, qrFields: [] };
 
 function mayRunExhibitions(me: ResolvedUser) {
   if (!can(me, 'gops.marketing.edit_all')) throw forbidden('You need "gops.marketing.edit_all" to set up an exhibition');
@@ -166,8 +192,9 @@ marketingRoutes.post(
     const me = currentUser(req);
     mayRunExhibitions(me);
     const b = parseBody(exhibitionSchema, req.body);
+    const brandIds = await checkBrandIds(b.brandIds);
     const row = await prisma.exhibition.create({
-      data: { name: b.name, venue: b.venue || null, startDate: new Date(`${b.startDate}T00:00:00Z`), endDate: new Date(`${b.endDate}T00:00:00Z`), isActive: b.isActive ?? true, notes: b.notes || null, createdById: me.id },
+      data: { name: b.name, venue: b.venue || null, startDate: new Date(`${b.startDate}T00:00:00Z`), endDate: new Date(`${b.endDate}T00:00:00Z`), isActive: b.isActive ?? true, notes: b.notes || null, ...qrData(b), brandIds, createdById: me.id },
     });
     await audit({ entityType: 'exhibition', entityId: row.id, action: 'CREATED', summary: `Added the exhibition ${row.name}` }, req);
     res.status(201).json(presentExhibition(row));
@@ -181,16 +208,43 @@ marketingRoutes.patch(
     mayRunExhibitions(me);
     const before = await prisma.exhibition.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Exhibition not found');
-    const b = parseBody(exhibitionSchema, { name: before.name, venue: before.venue, startDate: before.startDate.toISOString().slice(0, 10), endDate: before.endDate.toISOString().slice(0, 10), notes: before.notes, ...req.body });
+    const b = parseBody(exhibitionSchema, {
+      name: before.name,
+      venue: before.venue,
+      startDate: before.startDate.toISOString().slice(0, 10),
+      endDate: before.endDate.toISOString().slice(0, 10),
+      notes: before.notes,
+      qrFormat: before.qrFormat,
+      qrSeparator: before.qrSeparator,
+      qrFields: before.qrFields,
+      brandIds: before.brandIds,
+      ...req.body,
+    });
+    const brandIds = await checkBrandIds(b.brandIds);
     const days = Math.round((new Date(b.endDate).getTime() - new Date(b.startDate).getTime()) / 86_400_000) + 1;
     const beyond = await prisma.exhibitionVisitor.count({ where: { exhibitionId: before.id, day: { gt: days } } });
     if (beyond) throw badRequest(`${beyond} visitor(s) are on a day after the new last day — move them first`);
     const row = await prisma.exhibition.update({
       where: { id: before.id },
-      data: { name: b.name, venue: b.venue || null, startDate: new Date(`${b.startDate}T00:00:00Z`), endDate: new Date(`${b.endDate}T00:00:00Z`), ...(b.isActive !== undefined ? { isActive: b.isActive } : {}), notes: b.notes || null },
+      data: { name: b.name, venue: b.venue || null, startDate: new Date(`${b.startDate}T00:00:00Z`), endDate: new Date(`${b.endDate}T00:00:00Z`), ...(b.isActive !== undefined ? { isActive: b.isActive } : {}), notes: b.notes || null, ...qrData(b), brandIds },
     });
     await audit({ entityType: 'exhibition', entityId: row.id, action: 'UPDATED', summary: `Updated the exhibition ${row.name}`, before, after: row }, req);
     res.json(presentExhibition(row));
+  }),
+);
+
+/** An exhibition nobody was recorded at may be deleted; one with visitors is closed (`isActive` off) instead. */
+marketingRoutes.delete(
+  '/exhibitions/:id',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    mayRunExhibitions(me);
+    const row = await prisma.exhibition.findUnique({ where: { id: req.params.id }, include: { _count: { select: { visitors: true } } } });
+    if (!row) throw notFound('Exhibition not found');
+    if (row._count.visitors) throw badRequest(`${row._count.visitors} visitor(s) are recorded at ${row.name} — close it instead (untick Running)`);
+    await prisma.exhibition.delete({ where: { id: row.id } });
+    await audit({ entityType: 'exhibition', entityId: row.id, action: 'DELETED', summary: `Deleted the exhibition ${row.name}`, before: row }, req);
+    res.json({ ok: true });
   }),
 );
 
@@ -212,7 +266,7 @@ marketingRoutes.get(
     const [visitors, brands] = await Promise.all([
       prisma.exhibitionVisitor.findMany({
         where: base,
-        select: { id: true, day: true, leadId: true, createdById: true, interests: { select: { brandId: true, product: true } }, scans: { select: { userId: true, day: true } } },
+        select: { id: true, day: true, position: true, leadId: true, createdById: true, interests: { select: { brandId: true, product: true } }, scans: { select: { userId: true, day: true } } },
       }),
       prisma.exhibitionBrand.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, name: true, isActive: true } }),
     ]);
@@ -234,6 +288,22 @@ marketingRoutes.get(
     const scannerIds = new Map<string, number>();
     for (const v of visitors) for (const s of v.scans) scannerIds.set(s.userId, (scannerIds.get(s.userId) ?? 0) + 1);
     const people = await prisma.user.findMany({ where: { id: { in: [...scannerIds.keys()] } }, select: { id: true, name: true } });
+    // Positions as typed, counted case- and space-blind, the first spelling naming each.
+    const positions = new Map<string, { position: string; visitors: number }>();
+    let noPosition = 0;
+    for (const v of visitors) {
+      const p = v.position?.trim().replace(/\s+/g, ' ');
+      if (!p) {
+        noPosition++;
+        continue;
+      }
+      const k = p.toUpperCase();
+      const row = positions.get(k) ?? { position: p, visitors: 0 };
+      row.visitors++;
+      positions.set(k, row);
+    }
+    // The brands this exhibition features (all active ones when it names none), and any a visitor asked about.
+    const featured = (b: { id: string; isActive: boolean }) => (e.brandIds.length ? e.brandIds.includes(b.id) : b.isActive);
     res.json({
       exhibition: e,
       totals: {
@@ -244,13 +314,15 @@ marketingRoutes.get(
         leads: visitors.filter((v) => v.leadId).length,
       },
       byBrand: brands
-        .filter((b) => b.isActive || byBrand.has(b.id))
+        .filter((b) => featured(b) || byBrand.has(b.id))
         .map((b) => ({ brandId: b.id, brand: b.name, visitors: byBrand.get(b.id)?.size ?? 0 }))
         .sort((a, b) => b.visitors - a.visitors),
       byDay: e.days.map((d) => ({ ...d, visitors: visitors.filter((v) => v.day === d.day).length, scans: visitors.reduce((a, v) => a + v.scans.filter((s) => s.day === d.day).length, 0) })),
       products: brands
         .filter((b) => products.has(b.id))
         .map((b) => ({ brandId: b.id, brand: b.name, products: [...products.get(b.id)!.values()].sort((x, y) => y.count - x.count || x.product.localeCompare(y.product)) })),
+      byPosition: [...positions.values()].sort((a, b) => b.visitors - a.visitors || a.position.localeCompare(b.position)),
+      noPosition,
       byScanner: people.map((p) => ({ userId: p.id, name: p.name, scans: scannerIds.get(p.id) ?? 0 })).sort((a, b) => b.scans - a.scans),
     });
   }),
@@ -306,6 +378,7 @@ marketingRoutes.get(
       f.scannedBy ? `scanned by ${scanner?.name ?? 'not found'}` : null,
       f.lead === 'yes' ? 'made a lead' : f.lead === 'no' ? 'no lead yet' : null,
       f.noBrand === 'true' ? 'no brand ticked' : null,
+      f.position ? (f.position === 'none' ? 'no position given' : `position ${f.position}`) : null,
       q.scope === 'mine' ? 'mine' : null,
       f.ids ? 'the rows selected' : null,
     ]);
@@ -317,10 +390,11 @@ marketingRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Day', 'Visitor', 'Company', 'Email', 'Mobile', 'Brands and products', 'Scanned by'],
+          head: ['Day', 'Visitor', 'Position', 'Company', 'Email', 'Mobile', 'Brands and products', 'Scanned by'],
           rows: rows.map((r) => [
             `Day ${r.day}`,
-            { title: r.name, body: r.position ?? '' },
+            r.name,
+            r.position ?? '—',
             r.company ?? '—',
             r.email ?? '—',
             r.mobile ?? '—',
@@ -332,6 +406,22 @@ marketingRoutes.get(
     });
     await audit({ entityType: VISITOR, entityId: 'list', action: 'EXPORTED', summary: `Exported the exhibition visitors list as PDF (${listReference(count, rows.length, noun, [])})` }, req);
     sendListPdf(res, pdf, 'exhibition-visitors.pdf');
+  }),
+);
+
+/** Positions typed before, at any exhibition — the position box's memory and the list's filter. Declared above /:id. */
+marketingRoutes.get(
+  '/suggest/positions',
+  requireView('gops', 'marketing'),
+  handler(async (req, res) => {
+    const term = memoryTerm(req.query.q);
+    const rows = await prisma.exhibitionVisitor.findMany({
+      where: { position: term ? { contains: term, mode: 'insensitive' } : { not: null } },
+      select: { position: true },
+      orderBy: { updatedAt: 'desc' },
+      take: MEMORY_SCAN,
+    });
+    res.json(distinctTexts(rows.map((r) => r.position), term));
   }),
 );
 

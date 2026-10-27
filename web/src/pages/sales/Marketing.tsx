@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { parseBadge } from '../../lib/badge';
+import { QR_FIELDS, QR_SEPARATORS, parseBadgeWith, type Badge } from '../../lib/badge';
 import { qrReader, readQrFromFile } from '../../lib/qrScan';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -41,7 +41,25 @@ export interface Exhibition {
   notes: string | null;
   days: ExhibitionDay[];
   today: number;
+  /** Today against its dates, on Manila's calendar. */
+  when: 'upcoming' | 'running' | 'ended';
+  /** How its badges' QR is read — AUTO (vCard / MECARD) or DELIMITED. */
+  qrFormat: 'AUTO' | 'DELIMITED';
+  qrSeparator: string | null;
+  qrFields: string[];
+  /** The brands featured; empty is every active brand. */
+  brandIds: string[];
   visitors?: number;
+}
+
+/** The brands a form offers at this exhibition: its featured ones, else every active one. */
+const featuredBrands = (e: Exhibition, brands: Brand[]) => (e.brandIds.length ? brands.filter((b) => e.brandIds.includes(b.id)) : brands);
+
+/** Where the exhibition stands, in words, for the line under the title. */
+function whenLine(e: Exhibition) {
+  if (e.when === 'upcoming') return 'not started yet — a visitor added now goes on Day 1';
+  if (e.when === 'ended') return 'ended';
+  return `today is Day ${e.today}`;
 }
 
 interface Brand {
@@ -92,6 +110,8 @@ interface Dashboard {
   byDay: (ExhibitionDay & { visitors: number; scans: number })[];
   products: { brandId: string; brand: string; products: { product: string; count: number }[] }[];
   byScanner: { userId: string; name: string; scans: number }[];
+  byPosition: { position: string; visitors: number }[];
+  noPosition: number;
 }
 
 const BASE = '/g-ops/marketing';
@@ -110,12 +130,12 @@ function useBrands() {
 
 // ── The page ────────────────────────────────────────────────────────────────
 
-type Tab = 'dashboard' | 'scan' | 'visitors';
+type Tab = 'dashboard' | 'scan' | 'visitors' | 'exhibitions';
 
 export function Marketing() {
   const { can } = useAuth();
   const [params, setParams] = useSearchParams();
-  const tab = (['dashboard', 'scan', 'visitors'].includes(params.get('tab') ?? '') ? params.get('tab') : 'dashboard') as Tab;
+  const tab = (['dashboard', 'scan', 'visitors', 'exhibitions'].includes(params.get('tab') ?? '') ? params.get('tab') : 'dashboard') as Tab;
   const [exhibitions, setExhibitions] = useState<Exhibition[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [setting, setSetting] = useState<Exhibition | 'new' | null>(null);
@@ -148,7 +168,7 @@ export function Marketing() {
       else p.delete(k);
     }
     // A new view, or another exhibition, starts on its own filters — never the last list's.
-    for (const k of ['q', 'page', 'day', 'brandId', 'product', 'scannedBy', 'lead', 'noBrand', 'scope']) p.delete(k);
+    for (const k of ['q', 'page', 'day', 'brandId', 'product', 'position', 'scannedBy', 'lead', 'noBrand', 'scope']) p.delete(k);
     setParams(p, { replace: next.tab === undefined });
   }
 
@@ -162,7 +182,7 @@ export function Marketing() {
           {exhibition && (
             <p className="mk-event-line">
               {exhibition.name}
-              {exhibition.venue ? ` · ${exhibition.venue}` : ''} · {formatDate(exhibition.startDate)} – {formatDate(exhibition.endDate)} · today is Day {exhibition.today}
+              {exhibition.venue ? ` · ${exhibition.venue}` : ''} · {formatDate(exhibition.startDate)} – {formatDate(exhibition.endDate)} · {whenLine(exhibition)}
             </p>
           )}
         </div>
@@ -176,11 +196,6 @@ export function Marketing() {
                 </option>
               ))}
             </select>
-          )}
-          {canSetUp && (
-            <button type="button" className="btn" onClick={() => setSetting(exhibition ?? 'new')}>
-              Exhibition…
-            </button>
           )}
           {canAdd && exhibition && tab !== 'scan' && (
             <button type="button" className="btn btn-primary" onClick={() => go({ tab: 'scan' })}>
@@ -209,6 +224,7 @@ export function Marketing() {
                 ['dashboard', 'Bar graphs'],
                 ['scan', 'Scan'],
                 ['visitors', 'Visitors'],
+                ['exhibitions', 'Exhibitions'],
               ] as [Tab, string][]
             ).map(([key, label]) => (
               <button key={key} type="button" className={tab === key ? 'active' : ''} aria-pressed={tab === key} onClick={() => go({ tab: key })}>
@@ -219,6 +235,16 @@ export function Marketing() {
 
           {tab === 'dashboard' && <MarketingDashboard exhibition={exhibition} reload={reload} />}
           {tab === 'scan' && (canAdd ? <ScanPanel exhibition={exhibition} onSaved={() => setReload((r) => r + 1)} /> : <section className="card">You may read the visitors but not add one.</section>)}
+          {tab === 'exhibitions' && (
+            <ExhibitionsPanel
+              exhibitions={exhibitions}
+              current={exhibition}
+              canSetUp={canSetUp}
+              onOpen={(e) => go({ exhibitionId: e.id, tab: 'dashboard' })}
+              onModify={(e) => setSetting(e)}
+              onNew={() => setSetting('new')}
+            />
+          )}
           {tab === 'visitors' && (
             <VisitorList
               key={exhibition.id}
@@ -246,15 +272,17 @@ export function Marketing() {
           onSaved={(e) => {
             setSetting(null);
             loadExhibitions();
-            go({ exhibitionId: e.id });
+            if (e) go({ exhibitionId: e.id });
+            else go({ exhibitionId: null });
           }}
         />
       )}
       {importing && (
         <ImportModal
           entity="exhibition_visitors"
-          label={importing.label}
+          label={`${importing.label} — into ${exhibition?.name ?? 'the exhibition'}`}
           columns={importing.columns}
+          context={exhibition ? { exhibitionId: exhibition.id } : undefined}
           onClose={() => setImporting(null)}
           onImported={() => {
             setReload((r) => r + 1);
@@ -320,6 +348,15 @@ function MarketingDashboard({ exhibition, reload }: { exhibition: Exhibition; re
           <BarList slices={data.byScanner.map((s) => ({ label: s.name, value: s.scans, display: s.scans.toLocaleString('en-PH'), to: list({ scannedBy: s.userId }) }))} />
         </Panel>
       </div>
+
+      <Panel title="Visitors by position" blurb={`The positions on their badges, most first${data.noPosition ? ` — ${data.noPosition.toLocaleString('en-PH')} gave none` : ''}.`}>
+        <BarList
+          slices={[
+            ...data.byPosition.slice(0, 15).map((p) => ({ label: p.position, value: p.visitors, display: p.visitors.toLocaleString('en-PH'), to: list({ position: p.position }) })),
+            ...(data.byPosition.length > 15 ? [{ label: `${data.byPosition.length - 15} other positions`, value: data.byPosition.slice(15).reduce((a, p) => a + p.visitors, 0), tone: 'muted' as const, to: list({}) }] : []),
+          ]}
+        />
+      </Panel>
 
       <Panel title="Products asked about, by brand" blurb="The products named under each brand, most asked first.">
         {data.products.length === 0 ? (
@@ -387,7 +424,8 @@ function VisitorFields({ draft, onChange, exhibition, brands, extraBrands }: { d
   const id = useId();
   const set = <K extends keyof VisitorDraft>(k: K, v: VisitorDraft[K]) => onChange({ ...draft, [k]: v });
   // A brand switched off since stays offered on a visitor who asked about it.
-  const offered = [...brands, ...(extraBrands ?? []).filter((b) => !brands.some((x) => x.id === b.id))];
+  const shown = featuredBrands(exhibition, brands);
+  const offered = [...shown, ...(extraBrands ?? []).filter((b) => !shown.some((x) => x.id === b.id))];
   function tick(brandId: string, on: boolean) {
     const next = { ...draft.brands };
     if (on) next[brandId] = next[brandId] ?? '';
@@ -400,6 +438,12 @@ function VisitorFields({ draft, onChange, exhibition, brands, extraBrands }: { d
         <Field label="Name" htmlFor={`${id}-name`} required>
           <input id={`${id}-name`} value={draft.name} onChange={(e) => set('name', e.target.value)} autoComplete="off" />
         </Field>
+        <Field label="Position" htmlFor={`${id}-position`} hint="As on the badge — e.g. Facilities Engineer, Purchasing Head">
+          <MemoryInput id={`${id}-position`} source="/marketing/suggest/positions" field="position" value={draft.position} onChange={(e) => set('position', e.target.value)} autoComplete="off" />
+        </Field>
+        <Field label="Company" htmlFor={`${id}-company`}>
+          <input id={`${id}-company`} value={draft.company} onChange={(e) => set('company', e.target.value)} autoComplete="off" />
+        </Field>
         <Field label="Day" htmlFor={`${id}-day`}>
           <select id={`${id}-day`} value={draft.day} onChange={(e) => set('day', Number(e.target.value))}>
             {exhibition.days.map((d) => (
@@ -408,12 +452,6 @@ function VisitorFields({ draft, onChange, exhibition, brands, extraBrands }: { d
               </option>
             ))}
           </select>
-        </Field>
-        <Field label="Company" htmlFor={`${id}-company`}>
-          <input id={`${id}-company`} value={draft.company} onChange={(e) => set('company', e.target.value)} autoComplete="off" />
-        </Field>
-        <Field label="Position" htmlFor={`${id}-position`}>
-          <input id={`${id}-position`} value={draft.position} onChange={(e) => set('position', e.target.value)} autoComplete="off" />
         </Field>
         <Field label="Email" htmlFor={`${id}-email`}>
           <input id={`${id}-email`} type="email" value={draft.email} onChange={(e) => set('email', e.target.value)} autoComplete="off" />
@@ -492,7 +530,8 @@ function ScanPanel({ exhibition, onSaved }: { exhibition: Exhibition; onSaved: (
     async (text: string) => {
       stop();
       navigator.vibrate?.(120);
-      const badge = parseBadge(text);
+      // Read the way THIS exhibition writes its badges (Exhibitions › Modify › Badge QR).
+      const badge = parseBadgeWith(text, exhibition);
       const next: VisitorDraft = {
         ...blankDraft(exhibition.today),
         name: badge.name ?? '',
@@ -512,7 +551,7 @@ function ScanPanel({ exhibition, onSaved }: { exhibition: Exhibition; onSaved: (
         setMatch(null);
       }
     },
-    [exhibition.id, exhibition.today, stop],
+    [exhibition, stop],
   );
 
   // The camera, while the scanner shows: the back camera, read every 250 ms.
@@ -635,6 +674,12 @@ function ScanPanel({ exhibition, onSaved }: { exhibition: Exhibition; onSaved: (
         </div>
       )}
 
+      {exhibition.when !== 'running' && (
+        <div className="alert warn">
+          {exhibition.name} {exhibition.when === 'upcoming' ? `starts on ${formatDate(exhibition.startDate)}` : `ended on ${formatDate(exhibition.endDate)}`} — a visitor
+          saved now goes on Day {exhibition.today}. Scanning at another exhibition? Choose it at the top, or add it on Exhibitions.
+        </div>
+      )}
       {phase === 'camera' ? (
         <section className="card mk-scanner">
           <div className="card-head">
@@ -670,6 +715,12 @@ function ScanPanel({ exhibition, onSaved }: { exhibition: Exhibition; onSaved: (
               <button type="button" className="btn btn-sm" onClick={() => navigate(`${BASE}/visitors/${match.visitor!.id}`)}>
                 Open them instead
               </button>
+            </div>
+          )}
+          {draft.qrText && !draft.name && !draft.email && (
+            <div className="alert warn">
+              The badge was read, but its QR does not say who this is in a way {exhibition.name} is set to read. Type the details below — and set how this
+              exhibition’s badges are written on Exhibitions › Modify › Badge QR.
             </div>
           )}
           {match?.exists && !match.visitor && <div className="alert warn">This badge is already on file under a colleague — saving adds this scan to it.</div>}
@@ -716,13 +767,9 @@ function VisitorList({ exhibition, reload, onImport }: { exhibition: Exhibition;
       key: 'name',
       label: 'Visitor',
       sortKey: 'name',
-      render: (r) => (
-        <div>
-          <strong>{r.name}</strong>
-          {r.position && <div className="faint">{r.position}</div>}
-        </div>
-      ),
+      render: (r) => <strong>{r.name}</strong>,
     },
+    { key: 'position', label: 'Position', sortKey: 'position', render: (r) => r.position ?? <span className="faint">—</span> },
     { key: 'company', label: 'Company', sortKey: 'company', render: (r) => r.company ?? <span className="faint">—</span> },
     {
       key: 'brands',
@@ -761,7 +808,7 @@ function VisitorList({ exhibition, reload, onImport }: { exhibition: Exhibition;
       defaultScope="all"
       mineLabel="Scanned by me"
       onRowClick={(r) => navigate(`${BASE}/visitors/${r.id}`)}
-      searchPlaceholder="Search name, company, email, product…"
+      searchPlaceholder="Search name, position, company, email, product…"
       emptyTitle="No visitors yet"
       emptyHint="Scan a badge, or import the spreadsheet of a day already past."
       printPath="/api/marketing/visitors/pdf"
@@ -789,6 +836,14 @@ function VisitorList({ exhibition, reload, onImport }: { exhibition: Exhibition;
           type: 'lookup',
           placeholder: 'Type a product…',
           search: (term) => api.get<string[]>(`/marketing/suggest/products${qs({ field: 'product', q: term })}`).then((rows) => rows.map((p) => ({ value: p, label: p }))),
+          describe: async (value) => value,
+        },
+        {
+          key: 'position',
+          label: 'Position',
+          type: 'lookup',
+          placeholder: 'Type a position…',
+          search: (term) => api.get<string[]>(`/marketing/suggest/positions${qs({ field: 'position', q: term })}`).then((rows) => rows.map((p) => ({ value: p, label: p }))),
           describe: async (value) => value,
         },
         { key: 'scannedBy', label: 'Scanned by', options: scanners },
@@ -1002,11 +1057,126 @@ function VisitorModal({ visitor, onClose, onSaved }: { visitor: VisitorDetail; o
   );
 }
 
-// ── The exhibition ──────────────────────────────────────────────────────────
+// ── The exhibitions ────────────────────────────────────────────────────────
 
-function ExhibitionModal({ existing, onClose, onSaved, onNew }: { existing: Exhibition | null; onClose: () => void; onSaved: (e: Exhibition) => void; onNew: () => void }) {
+/**
+ * Every exhibition the company takes a booth at (2026-10-27, "not only this
+ * exhibit — management for later exhibits"): its dates, visitors and state,
+ * opened here, set up and modified here, and compared in one bar graph.
+ */
+function ExhibitionsPanel({
+  exhibitions,
+  current,
+  canSetUp,
+  onOpen,
+  onModify,
+  onNew,
+}: {
+  exhibitions: Exhibition[];
+  current: Exhibition;
+  canSetUp: boolean;
+  onOpen: (e: Exhibition) => void;
+  onModify: (e: Exhibition) => void;
+  onNew: () => void;
+}) {
+  const state = (e: Exhibition) => (!e.isActive ? 'CLOSED' : e.when === 'running' ? 'RUNNING' : e.when === 'upcoming' ? 'UPCOMING' : 'ENDED');
+  const stateLabel: Record<string, string> = { CLOSED: 'Closed', RUNNING: 'Running', UPCOMING: 'Upcoming', ENDED: 'Ended' };
+  return (
+    <div className="stack">
+      <section className="card">
+        <div className="card-head">
+          <h3 className="card-title">Exhibitions</h3>
+          {canSetUp && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={onNew}>
+              + New exhibition
+            </button>
+          )}
+        </div>
+        <table className="data">
+          <thead>
+            <tr>
+              <th>Exhibition</th>
+              <th>Dates</th>
+              <th>Badge QR</th>
+              <th className="right">Visitors</th>
+              <th>Status</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {exhibitions.map((e) => (
+              <tr key={e.id} className={e.id === current.id ? 'is-current' : undefined}>
+                <td>
+                  <strong>{e.name}</strong>
+                  {e.venue && <div className="faint">{e.venue}</div>}
+                </td>
+                <td>
+                  {formatDate(e.startDate)} – {formatDate(e.endDate)}
+                  <div className="faint">
+                    {e.days.length} day{e.days.length === 1 ? '' : 's'}
+                  </div>
+                </td>
+                <td>{e.qrFormat === 'DELIMITED' ? `Text, split on ${separatorLabel(e.qrSeparator)}` : 'vCard / MECARD'}</td>
+                <td className="right mono">{(e.visitors ?? 0).toLocaleString('en-PH')}</td>
+                <td>
+                  <StatusBadge status={state(e)} extra={{ RUNNING: 'ok', UPCOMING: 'info', ENDED: '', CLOSED: '' }} label={stateLabel[state(e)]} />
+                </td>
+                <td className="right">
+                  <div className="mk-row-actions">
+                    <button type="button" className="btn btn-sm" onClick={() => onOpen(e)} disabled={e.id === current.id}>
+                      {e.id === current.id ? 'Open now' : 'Open'}
+                    </button>
+                    {canSetUp && (
+                      <button type="button" className="btn btn-sm" onClick={() => onModify(e)}>
+                        Modify
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+      {exhibitions.length > 1 && (
+        <Panel title="Visitors per exhibition" blurb="Every exhibition side by side — a bar opens its graphs.">
+          <BarList slices={exhibitions.map((e) => ({ label: e.name, value: e.visitors ?? 0, display: (e.visitors ?? 0).toLocaleString('en-PH'), to: `${BASE}${qs({ exhibitionId: e.id })}` }))} />
+        </Panel>
+      )}
+    </div>
+  );
+}
+
+const SEPARATOR_LABELS: Record<string, string> = { '|': 'a bar  |', ',': 'a comma  ,', ';': 'a semicolon  ;', TAB: 'a tab', NEWLINE: 'a new line', '^': 'a caret  ^', '~': 'a tilde  ~' };
+const separatorLabel = (s: string | null) => SEPARATOR_LABELS[s ?? '|'] ?? (s ?? '|');
+const FIELD_LABELS: Record<string, string> = { name: 'Full name', firstName: 'First name', lastName: 'Last name', company: 'Company', position: 'Position', email: 'Email', mobile: 'Mobile', skip: '(skip this part)' };
+
+/** What a sample badge reads as under the settings being edited — the form's preview. */
+function BadgePreview({ badge }: { badge: Badge }) {
+  const rows: [string, string | null][] = [
+    ['Name', badge.name],
+    ['Position', badge.position],
+    ['Company', badge.company],
+    ['Email', badge.email],
+    ['Mobile', badge.mobile],
+  ];
+  return (
+    <dl className="kv mk-preview">
+      {rows.map(([k, v]) => (
+        <div key={k} className="mk-kv-row">
+          <dt>{k}</dt>
+          <dd>{v ?? <span className="faint">not read</span>}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function ExhibitionModal({ existing, onClose, onSaved, onNew }: { existing: Exhibition | null; onClose: () => void; onSaved: (e: Exhibition | null) => void; onNew: () => void }) {
   const toast = useToast();
   const id = useId();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const allBrands = useBrands();
   const [form, setForm] = useState(() => ({
     name: existing?.name ?? '',
     venue: existing?.venue ?? '',
@@ -1014,10 +1184,40 @@ function ExhibitionModal({ existing, onClose, onSaved, onNew }: { existing: Exhi
     endDate: existing?.endDate.slice(0, 10) ?? '',
     isActive: existing?.isActive ?? true,
     notes: existing?.notes ?? '',
+    qrFormat: existing?.qrFormat ?? 'AUTO',
+    qrSeparator: existing?.qrSeparator ?? '|',
+    qrFields: existing?.qrFields.length ? existing.qrFields : ['name', 'position', 'company', 'email', 'mobile'],
+    brandIds: existing?.brandIds ?? [],
   }));
+  const [sample, setSample] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm((f) => ({ ...f, [k]: v }));
+  const preview = sample.trim() ? parseBadgeWith(sample, { qrFormat: form.qrFormat, qrSeparator: form.qrSeparator, qrFields: form.qrFields }) : null;
+  // A sample in the text format shows its parts, so the order can be matched to it.
+  const sampleParts =
+    sample.trim() && form.qrFormat === 'DELIMITED' && !/^(BEGIN:VCARD|MECARD:)/i.test(sample.trim())
+      ? sample.trim().replace(/\r\n?/g, '\n').split(form.qrSeparator === 'TAB' ? '\t' : form.qrSeparator === 'NEWLINE' ? '\n' : form.qrSeparator || '|')
+      : [];
+
+  async function readPhoto(file: File | undefined) {
+    if (!file) return;
+    try {
+      const text = await readQrFromFile(file);
+      if (text) setSample(text);
+      else toast('error', 'No QR code was found in that photo — hold the phone closer, keep the code flat and in focus.');
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : 'That photo could not be read');
+    } finally {
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  }
+
+  function setField(i: number, value: string) {
+    const next = [...form.qrFields];
+    next[i] = value;
+    set('qrFields', next);
+  }
 
   async function save() {
     setBusy(true);
@@ -1033,12 +1233,33 @@ function ExhibitionModal({ existing, onClose, onSaved, onNew }: { existing: Exhi
     }
   }
 
+  const deletable = !!existing && (existing.visitors ?? 0) === 0;
+
   return (
     <Modal
       title={existing ? `Modify exhibition ${existing.name}` : 'New exhibition'}
+      wide
       onClose={onClose}
       footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            existing
+              ? {
+                  label: 'Delete',
+                  question: `Delete ${existing.name}? It has no visitors.`,
+                  disabled: !deletable,
+                  disabledReason: 'Visitors are recorded at it — untick Running to close it instead',
+                  onConfirm: async () => {
+                    await api.del(`/marketing/exhibitions/${existing.id}`);
+                    toast('ok', `${existing.name} deleted`);
+                    onSaved(null);
+                  },
+                }
+              : undefined
+          }
+        >
           {existing && (
             <button type="button" className="btn" onClick={onNew} disabled={busy}>
               + New exhibition
@@ -1051,13 +1272,13 @@ function ExhibitionModal({ existing, onClose, onSaved, onNew }: { existing: Exhi
       }
     >
       <ErrorBox error={error} />
-      <Field label="Name" htmlFor={`${id}-name`} required>
-        <input id={`${id}-name`} value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="PSECE 2026" />
-      </Field>
-      <Field label="Venue" htmlFor={`${id}-venue`}>
-        <input id={`${id}-venue`} value={form.venue} onChange={(e) => set('venue', e.target.value)} />
-      </Field>
       <div className="grid grid-2">
+        <Field label="Name" htmlFor={`${id}-name`} required>
+          <input id={`${id}-name`} value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="PSECE 2026" />
+        </Field>
+        <Field label="Venue" htmlFor={`${id}-venue`}>
+          <input id={`${id}-venue`} value={form.venue} onChange={(e) => set('venue', e.target.value)} />
+        </Field>
         <Field label="Day 1" htmlFor={`${id}-start`} required>
           <input id={`${id}-start`} type="date" value={form.startDate} onChange={(e) => set('startDate', e.target.value)} />
         </Field>
@@ -1067,8 +1288,79 @@ function ExhibitionModal({ existing, onClose, onSaved, onNew }: { existing: Exhi
       </div>
       <label className="checkbox">
         <input type="checkbox" checked={form.isActive} onChange={(e) => set('isActive', e.target.checked)} />
-        <span>Running — the scanner and the bar graphs open on the latest running exhibition</span>
+        <span>Running — the page opens on the latest running exhibition; untick to close one that is over</span>
       </label>
+
+      <h4 className="svc-subhead">Brands at this exhibition</h4>
+      <p className="faint mk-hint">Tick the brands the booth features — the scanner offers only these. None ticked offers every brand on the list.</p>
+      <div className="mk-brands" role="group" aria-label="Brands at this exhibition">
+        {allBrands.map((b) => (
+          <label key={b.id} className={`checkbox mk-brand${form.brandIds.includes(b.id) ? ' is-on' : ''}`}>
+            <input
+              type="checkbox"
+              checked={form.brandIds.includes(b.id)}
+              onChange={(e) => set('brandIds', e.target.checked ? [...form.brandIds, b.id] : form.brandIds.filter((x) => x !== b.id))}
+            />
+            <span>{b.name}</span>
+          </label>
+        ))}
+      </div>
+
+      <h4 className="svc-subhead">Badge QR</h4>
+      <p className="faint mk-hint">How this exhibition writes its badges. Scan or paste one badge below to see what is read.</p>
+      <div className="scope-switch" role="group" aria-label="Badge QR format">
+        <button type="button" className={form.qrFormat === 'AUTO' ? 'active' : ''} aria-pressed={form.qrFormat === 'AUTO'} onClick={() => set('qrFormat', 'AUTO')}>
+          Contact card (vCard / MECARD)
+        </button>
+        <button type="button" className={form.qrFormat === 'DELIMITED' ? 'active' : ''} aria-pressed={form.qrFormat === 'DELIMITED'} onClick={() => set('qrFormat', 'DELIMITED')}>
+          Text with a separator
+        </button>
+      </div>
+      {form.qrFormat === 'DELIMITED' && (
+        <div className="mk-qr-setup">
+          <Field label="The parts are separated by" htmlFor={`${id}-sep`}>
+            <select id={`${id}-sep`} value={form.qrSeparator} onChange={(e) => set('qrSeparator', e.target.value)}>
+              {QR_SEPARATORS.map((s) => (
+                <option key={s} value={s}>
+                  {separatorLabel(s)}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <div className="mk-qr-fields">
+            {form.qrFields.map((f, i) => (
+              <div key={i} className="mk-qr-field">
+                <span className="faint">Part {i + 1}</span>
+                <select aria-label={`Part ${i + 1}`} value={f} onChange={(e) => setField(i, e.target.value)}>
+                  {QR_FIELDS.map((x) => (
+                    <option key={x} value={x}>
+                      {FIELD_LABELS[x]}
+                    </option>
+                  ))}
+                </select>
+                {sampleParts[i] !== undefined && <span className="mono mk-qr-part">{sampleParts[i] || '(empty)'}</span>}
+                <button type="button" className="btn btn-sm" onClick={() => set('qrFields', form.qrFields.filter((_, j) => j !== i))} aria-label={`Remove part ${i + 1}`}>
+                  Remove
+                </button>
+              </div>
+            ))}
+            <button type="button" className="btn btn-sm" onClick={() => set('qrFields', [...form.qrFields, 'skip'])}>
+              + Add a part
+            </button>
+          </div>
+        </div>
+      )}
+      <Field label="Try a badge" htmlFor={`${id}-sample`} hint="Paste what a QR app shows for one badge, or read a photo of it">
+        <textarea id={`${id}-sample`} rows={3} value={sample} onChange={(e) => setSample(e.target.value)} placeholder="BEGIN:VCARD … or Juan Cruz|Engineer|ABC Inc|juan@abc.com|0917…" />
+      </Field>
+      <div className="mk-scan-actions">
+        <input ref={fileRef} type="file" accept="image/*" capture="environment" hidden onChange={(e) => void readPhoto(e.target.files?.[0])} />
+        <button type="button" className="btn btn-sm" onClick={() => fileRef.current?.click()}>
+          Read a photo of a badge
+        </button>
+      </div>
+      {preview && <BadgePreview badge={preview} />}
+
       <Field label="Notes" htmlFor={`${id}-notes`}>
         <textarea id={`${id}-notes`} rows={2} value={form.notes} onChange={(e) => set('notes', e.target.value)} />
       </Field>
