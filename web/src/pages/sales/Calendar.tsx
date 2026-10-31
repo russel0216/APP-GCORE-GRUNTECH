@@ -83,7 +83,7 @@ function celebrationToEvent(c: Celebration): CalendarEvent {
     id: `${PERSON_PREFIX}${c.kind}:${c.employeeId}:${c.day}`,
     date: c.day,
     time: null,
-    label: birthday ? `🎂 ${c.name} turns ${c.years}` : `🎉 ${c.name} · ${c.years} year${c.years === 1 ? '' : 's'} with us`,
+    label: birthday ? `Birthday · ${c.name} turns ${c.years}` : `Anniversary · ${c.name} · ${c.years} year${c.years === 1 ? '' : 's'} with us`,
     detail: birthday ? 'Birthday' : 'Work anniversary',
     tone: '',
   };

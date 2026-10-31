@@ -1,3 +1,4 @@
+import { Icon } from '../../components/Icon';
 import { useCallback, useEffect, useId, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, openPdf, qs } from '../../lib/api';
@@ -170,7 +171,7 @@ const columns: Column<AssetRow>[] = [
     key: 'remarks',
     label: 'Remarks & clearance note',
     render: (r) =>
-      r.returnNotice ? <span className="asset-notice">⚠ {r.returnNotice}</span> : (r.holder?.remarks ?? r.notes ?? <span className="faint">—</span>),
+      r.returnNotice ? <span className="asset-notice"><Icon name="alert" size={14} /> {r.returnNotice}</span> : (r.holder?.remarks ?? r.notes ?? <span className="faint">—</span>),
   },
 ];
 
@@ -646,7 +647,7 @@ export function AssetPage() {
       <ErrorBox error={error} />
 
       <div className="stack">
-        {r.returnNotice && <div className="alert danger">⚠ {r.returnNotice}</div>}
+        {r.returnNotice && <div className="alert danger"><Icon name="alert" size={16} /> {r.returnNotice}</div>}
         <PhotoCard
           path={`/assets/${r.id}/photo`}
           label="Asset photo"

@@ -220,7 +220,7 @@ export function PurchaseRequisitionEditor() {
       try {
         const [cats, whs] = await Promise.all([
           api.get<Category[]>('/reference/cost-categories'),
-          api.get<{ id: string; name: string }[]>('/warehouses').catch(() => []),
+          api.get<{ id: string; name: string }[]>('/warehouses/lookup').catch(() => []),
         ]);
         if (!live) return;
         const active = cats.filter((c) => (c as Category & { isActive?: boolean }).isActive !== false);

@@ -420,7 +420,7 @@
 
 /* ── Inventory as cards (2026-10-25, gasiontech's product cards): the
    picture or its initials, the name, part no., group and brand, the price a
-   unit, On hand and Incoming, who has it on loan, the state and ✎. */
+   unit, On hand and Incoming, who has it on loan, the state and the pencil. */
 .inv-tiles {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));

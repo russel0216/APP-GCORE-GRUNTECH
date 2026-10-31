@@ -11,6 +11,7 @@ import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicke
 import { PersonSelect, loadPeople, type PersonRow } from '../../components/People';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
+import { Icon } from '../../components/Icon';
 import { Checkbox, ErrorBox, Field, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
 import {
   CostPanelBlock,
@@ -1967,7 +1968,7 @@ function NumberField({
         </div>
         {error && (
           <div className="field-error">
-            <span aria-hidden="true">⚠</span>
+            <Icon name="alert" size={14} className="field-error-icon" />
             {error}
           </div>
         )}

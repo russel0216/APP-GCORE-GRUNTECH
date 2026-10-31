@@ -16,6 +16,7 @@ import {
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
+import { requireCustomerPicker } from '../shared/pickers';
 import { nextNumber, previewNext, setCounter } from '../shared/numbering';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { formatShortDate, renderDocument } from '../shared/pdf';
@@ -279,7 +280,8 @@ customerRoutes.get(
 /** Lightweight lookup for pickers in other modules. */
 customerRoutes.get(
   '/lookup',
-  require_('gops.customers.view_all'),
+  // Names only: open to whoever fills a form that picks a customer (2026-10-31).
+  requireCustomerPicker,
   handler(async (req, res) => {
     const term = String(req.query.q ?? '').trim();
     res.json(

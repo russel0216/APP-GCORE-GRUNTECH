@@ -1,3 +1,4 @@
+import { Icon } from '../../components/Icon';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
@@ -883,7 +884,7 @@ export function Inventory() {
   }
 
   useEffect(() => {
-    api.get<typeof warehouses>('/warehouses').then(setWarehouses).catch(() => {});
+    api.get<typeof warehouses>('/warehouses/lookup').then(setWarehouses).catch(() => {});
   }, []);
   // The category tiles and the chart come with the list's summary.
   const [categories, setCategories] = useState<CategoryTile[]>([]);
@@ -1228,7 +1229,7 @@ export function Inventory() {
  * and pages — each a card with the product's picture (its photo, else its
  * initials on its category's colour), the description, part number, group
  * and brand, the price a unit, what is on hand and coming in, who has it on
- * loan, and the stock state. The card opens the stock card; ✎ opens the item
+ * loan, and the stock state. The card opens the stock card; the pencil opens the item
  * for whoever may change it. No delete: an item is deleted on its own form,
  * by a super admin.
  */
@@ -1275,7 +1276,7 @@ function InventoryCards({ rows, canEditItems }: { rows: StockRow[]; canEditItems
               <StatusBadge status={s.state} extra={STOCK_STATE_TONES} label={stateLabel(s.state)} />
               {canEditItems && (
                 <Link to={`/g-chain/items/${s.item.id}`} className="btn btn-sm btn-icon btn-ghost" aria-label={`Modify item ${s.item.name}`} title="Modify item">
-                  ✎
+                  <Icon name="pencil" size={16} />
                 </Link>
               )}
             </span>

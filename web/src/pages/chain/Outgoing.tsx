@@ -60,7 +60,7 @@ export function StockIssues() {
   const navigate = useNavigate();
   const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
   useEffect(() => {
-    api.get<{ id: string; name: string }[]>('/warehouses').then(setWarehouses).catch(() => {});
+    api.get<{ id: string; name: string }[]>('/warehouses/lookup').then(setWarehouses).catch(() => {});
   }, []);
 
   const columns: Column<IssueRow>[] = [

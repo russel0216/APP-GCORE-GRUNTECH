@@ -485,7 +485,7 @@ export function Field({
       )}
       {error && (
         <div className="field-error" id={errorId}>
-          <span aria-hidden="true">⚠</span>
+          <Icon name="alert" size={14} className="field-error-icon" />
           {error}
         </div>
       )}

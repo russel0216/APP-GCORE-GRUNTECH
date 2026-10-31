@@ -349,7 +349,7 @@ export function PurchaseOrderEditor() {
       .then(setJobChoices)
       .catch(() => setJobChoices([]));
     api
-      .get<typeof warehouseChoices>('/warehouses')
+      .get<typeof warehouseChoices>('/warehouses/lookup')
       .then(setWarehouseChoices)
       .catch(() => setWarehouseChoices([]));
   }, [standalone]);

@@ -1839,6 +1839,26 @@ referenceRoutes.delete(
 export const warehouseRoutes = Router();
 warehouseRoutes.use(authenticate);
 
+/**
+ * The warehouse picker (2026-10-31, help ticket: "No option for Warehouse" on
+ * a purchase requisition raised by someone without the warehouse master's
+ * right). Active warehouses' names only, to anyone signed in — every form that
+ * names a warehouse (requests, orders, Incoming, Outgoing, pull-outs, borrow
+ * slips, the inventory filter) reads it.
+ */
+warehouseRoutes.get(
+  '/lookup',
+  handler(async (_req, res) => {
+    res.json(
+      await prisma.warehouse.findMany({
+        where: { isActive: true },
+        select: { id: true, code: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
+    );
+  }),
+);
+
 warehouseRoutes.get(
   '/',
   requireView('gchain', 'warehouses'),

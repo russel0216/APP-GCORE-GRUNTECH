@@ -2980,7 +2980,26 @@ async function main() {
       userLists.length === 0,
       userLists.join(', '),
     );
+    // Help tickets of 2026-10-31: the warehouse picker, the customer picker
+    // and the emoji.
+    const masterWarehouses = offenders(/\.get(<[^(]*>)?\(\s*['"]\/warehouses['"]/, ['pages/masters/Reference.tsx']);
+    check(
+      'a form names a warehouse through /warehouses/lookup, never the master list its raiser may not read',
+      masterWarehouses.length === 0,
+      masterWarehouses.join(', '),
+    );
+    const emoji = offenders(/[\u{1F000}-\u{1FAFF}\u{26A0}\u{270E}]/u);
+    check('no emoji in the web app: an Icon or a plain symbol instead', emoji.length === 0, emoji.join(', '));
     check('the source scan found the web app', files.length > 100, `${files.length} files`);
+  }
+  {
+    const { CUSTOMER_PICKER_KEYS } = await import('../src/shared/pickers');
+    check(
+      'the customer picker opens to whoever registers a machine, raises a service JO or a lead — not only the customer master',
+      ['gops.installed_base.create', 'gops.service_job_orders.create', 'gops.leads.create', 'gops.customers.view_all'].every((k) => CUSTOMER_PICKER_KEYS.includes(k)) &&
+        !CUSTOMER_PICKER_KEYS.some((k) => k.startsWith('ghr.') || k.startsWith('gchain.')),
+      CUSTOMER_PICKER_KEYS.length,
+    );
   }
 
   // A printed list audits as EXPORTED with entityId 'list'; that row opens

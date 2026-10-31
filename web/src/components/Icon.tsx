@@ -43,7 +43,11 @@ export type IconName =
   | 'building'
   | 'funnel'
   | 'wallet'
-  | 'trend';
+  | 'trend'
+  | 'bell'
+  | 'search'
+  | 'pin'
+  | 'pencil';
 
 /** Path data only — the wrapper supplies the canvas and the stroke. */
 const PATHS: Record<IconName, string> = {
@@ -83,6 +87,14 @@ const PATHS: Record<IconName, string> = {
   wallet: 'M4 7h15a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h12v3M16 13h.01',
   // A rising line: performance over time.
   trend: 'M3 17l6-6 4 4 8-8m0 0h-5m5 0v5',
+  // A bell: notifications (2026-10-31, in place of the emoji).
+  bell: 'M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9m4.3 13a1.94 1.94 0 0 0 3.4 0',
+  // A magnifying glass: search.
+  search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14m5-2 5 5',
+  // A map pin: where something is.
+  pin: 'M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21m0-9a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5',
+  // A pencil: modify.
+  pencil: 'M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16zm9.5-13.5 4 4',
   // An open book: two pages meeting at the spine, for the Academy.
   book: 'M12 7c-1.5-1.5-4-2-9-2v13c5 0 7.5.5 9 2m0-13c1.5-1.5 4-2 9-2v13c-5 0-7.5.5-9 2m0-13v13',
 };

@@ -5701,3 +5701,16 @@ a.icon-row:hover {
 .import-col-action {
   width: 6rem;
 }
+
+/* Icons that replaced the emoji (2026-10-31): sit on the text's line. */
+.bell {
+  display: inline-flex;
+  align-items: center;
+}
+
+.field-error-icon,
+.asset-notice svg,
+.alert.danger > svg {
+  flex: none;
+  vertical-align: -2px;
+}

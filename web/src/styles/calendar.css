@@ -134,8 +134,10 @@
   font-size: var(--fs-md);
 }
 
-.act-where::before {
-  content: '📍 ';
+.act-where {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
 }
 
 /* "Participants" with the Google hand-off beside it; "Responses" with the viewer's answer. */

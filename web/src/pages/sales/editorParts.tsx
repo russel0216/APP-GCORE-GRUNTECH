@@ -226,7 +226,7 @@ export function LooseField({
       {children}
       {error && (
         <div className="field-error" id={`${htmlFor}-error`}>
-          <span aria-hidden="true">⚠</span>
+          <Icon name="alert" size={14} className="field-error-icon" />
           {error}
         </div>
       )}
@@ -238,7 +238,7 @@ export function CellError({ id, message }: { id?: string; message?: string }) {
   if (!message) return null;
   return (
     <div className="qe-cell-error" id={id}>
-      <span aria-hidden="true">⚠</span> {message}
+      <Icon name="alert" size={14} className="field-error-icon" /> {message}
     </div>
   );
 }

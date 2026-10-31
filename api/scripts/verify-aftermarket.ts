@@ -1719,6 +1719,29 @@ async function main() {
     const nobody = await makeUser('ZZAM nobody', 'nobody@verifya.local', []);
     const nobodyFeed = await api(signToken(nobody.id, nobody.email), 'GET', sept);
     check('somebody with no schedule permission cannot read the feed', nobodyFeed.status === 403, String(nobodyFeed.status));
+
+    // Help tickets of 2026-10-31: the Installation Base form listed no
+    // customer for whoever registers a machine without the customer master,
+    // and a requisition offered no warehouse.
+    const registrar = await makeUser('ZZAM registrar', 'registrar@verifya.local', []);
+    await grantKeys(registrar.id, ['gops.installed_base.view_own', 'gops.installed_base.create']);
+    const registrarToken = signToken(registrar.id, registrar.email);
+    const picked = await api(registrarToken, 'GET', `/customers/lookup?q=${encodeURIComponent(customer.name.slice(0, 6))}`);
+    check(
+      'whoever registers a machine may look its customer up by name',
+      picked.status === 200 && (picked.body as { id: string }[]).some((c) => c.id === customer.id),
+      String(picked.status),
+    );
+    const nobodyCustomers = await api(signToken(nobody.id, nobody.email), 'GET', '/customers/lookup?q=a');
+    check('somebody who picks no customer anywhere still cannot list them', nobodyCustomers.status === 403, String(nobodyCustomers.status));
+    const warehousePick = await api(signToken(nobody.id, nobody.email), 'GET', '/warehouses/lookup');
+    check(
+      'the warehouse picker answers anyone signed in, names only',
+      warehousePick.status === 200 &&
+        Array.isArray(warehousePick.body) &&
+        (warehousePick.body as Record<string, unknown>[]).every((w) => Object.keys(w).sort().join() === 'code,id,name'),
+      String(warehousePick.status),
+    );
     const mine = await api(engineerToken, 'GET', `/service-visits/calendar?from=2019-09-01&to=2019-09-30&scope=mine`);
     check(
       '"mine" is what is booked on me',

@@ -386,7 +386,7 @@ export function Shell() {
         )}
 
         <button className="search-trigger" onClick={() => setPaletteOpen(true)}>
-          <span>⌕</span>
+          <Icon name="search" size={16} />
           <span className="label">Search everything</span>
           <div style={{ flex: 1 }} />
           <span className="kbd">Ctrl K</span>
@@ -400,7 +400,7 @@ export function Shell() {
           aria-expanded={drawerOpen}
           aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'}
         >
-          🔔
+          <Icon name="bell" size={20} />
           {unread > 0 && (
             <span className="bell-dot" aria-hidden="true">
               {unread > 99 ? '99+' : unread}

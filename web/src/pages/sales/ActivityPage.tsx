@@ -7,6 +7,7 @@ import { Attachments } from '../../components/Attachments';
 import { RecordHeader, type MoreItem } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
+import { Icon } from '../../components/Icon';
 import { Avatar, ErrorBox, Loading, durationLabel, formatDateTime, formatTime, useToast } from '../../components/ui';
 import { usePeople } from '../../components/People';
 import { ActivityModal } from './ActivityForm';
@@ -343,9 +344,10 @@ export function ActivityPage() {
             <strong>{activity.allDay ? (activity.durationMinutes > 1440 ? `All day, ${activity.durationMinutes / 1440} days` : 'All day') : whenText}</strong>
             {!activity.allDay && <span className="faint"> · {durationLabel(activity.durationMinutes)}</span>}
           </p>
-          {activity.location && <p className="act-where">{activity.location}</p>}
+          {activity.location && <p className="act-where"><Icon name="pin" size={16} />{activity.location}</p>}
           {!activity.masked && (activity.location || activity.mapUrl) && (
             <p className="act-where">
+              <Icon name="pin" size={16} />
               <MapLink place={activity.location} mapUrl={activity.mapUrl} />
             </p>
           )}
