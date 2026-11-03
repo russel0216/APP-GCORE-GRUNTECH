@@ -1962,6 +1962,31 @@ async function main() {
         'route' in routeAnswer.body,
       `${lined.status} ${lined.body?.amount} ${lined.body?.items?.length} · ${modified?.status} ${modified?.body?.amount} · pdf ${linedPdf?.status} · ${panel.status} · ${routeAnswer.status}`,
     );
+    // A budget request takes attachments (2026-11-03): filed on the
+    // requester's draft, read by the requester and finance, not a stranger,
+    // printed behind the request; its files go when it is deleted.
+    if (linedId) {
+      const form = new FormData();
+      form.append('files', new Blob([Buffer.from('%PDF-1.4\n%verify\n')], { type: 'application/pdf' }), 'ZZDELIVERY-quote.pdf');
+      const up = await fetch(`${BASE}/attachments/budget_request/${linedId}`, { method: 'POST', headers: { Authorization: `Bearer ${engToken}` }, body: form });
+      const ownList = await http(engToken, 'GET', `/attachments/budget_request/${linedId}`);
+      const finList = await http(signToken(finance.id, finance.email), 'GET', `/attachments/budget_request/${linedId}`);
+      const brStranger = await prisma.user.create({ data: { name: `${TAG} BR Stranger`, email: 'brstranger@verifyd.local', passwordHash: await bcrypt.hash('x', 10) } });
+      const strangerList = await http(signToken(brStranger.id, brStranger.email), 'GET', `/attachments/budget_request/${linedId}`);
+      const withFiles = await printed(engToken, `/budget-requests/${linedId}/pdf`);
+      const bare = await printed(engToken, `/budget-requests/${linedId}/pdf?attachments=0`);
+      check(
+        'a budget request takes attachments on its draft; the requester and finance read them, a stranger does not, and the paper lists them',
+        up.status === 201 &&
+          ownList.status === 200 && Array.isArray(ownList.body) && ownList.body.length === 1 &&
+          finList.status === 200 && Array.isArray(finList.body) && finList.body.length === 1 &&
+          (strangerList.status === 404 || strangerList.status === 403) &&
+          withFiles.text.includes('ZZDELIVERY-quote.pdf') &&
+          !bare.text.includes('ZZDELIVERY-quote.pdf'),
+        `${up.status} · ${ownList.status} ${finList.status} ${strangerList.status} · listed ${withFiles.text.includes('ZZDELIVERY-quote.pdf')} bare ${bare.text.includes('ZZDELIVERY-quote.pdf')}`,
+      );
+      await deleteAttachmentsOf('budget_request', [linedId]);
+    }
     // "Against the project budget" (2026-10-23): the request's budget line as
     // Budget Monitoring has it, less this request, and what is left — on the
     // page, the register's column and the paper; a released request's own

@@ -97,6 +97,7 @@ export function BudgetRequestEditor() {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [attempted, setAttempted] = useState(false);
+  const [files, setFiles] = useState<File[]>([]);
   const [header, setHeader] = useState<Header>({ kind: presetKind ?? 'project', sourceId: presetId ?? '', costCategoryId: '', reason: '', neededBy: '', notes: '' });
   const [lines, setLines] = useState<RequestLine[]>(() => [blankRequestLine()]);
   const [saved, setSaved] = useState<string | null>(null);
@@ -186,7 +187,7 @@ export function BudgetRequestEditor() {
     return () => window.clearTimeout(timer);
   }, [total, header.kind, header.sourceId, id]);
 
-  const dirty = saved !== null && snapshot(header, lines) !== saved;
+  const dirty = saved !== null && (snapshot(header, lines) !== saved || files.length > 0);
   useUnsavedChanges(dirty && !busy);
 
   const source: RequestSource | null = budget?.source ?? existing?.for ?? null;
@@ -227,6 +228,17 @@ export function BudgetRequestEditor() {
         ? (await api.put<{ id: string }>(`/budget-requests/${existing.id}`, body)).id
         : (await api.post<{ id: string }>('/budget-requests', body)).id;
       setSaved(snapshot(header, lines));
+      // Filed before a submit, so the approvers see them from the first step.
+      if (files.length) {
+        const form = new FormData();
+        for (const f of files) form.append('files', f);
+        try {
+          await api.post(`/attachments/budget_request/${savedId}`, form);
+          setFiles([]);
+        } catch {
+          toast('error', 'Saved, but the attachments could not be filed — add them on the budget request');
+        }
+      }
       if (submit) {
         try {
           await api.post(`/budget-requests/${savedId}/submit`);
@@ -409,6 +421,37 @@ export function BudgetRequestEditor() {
               <dt className="prq-total-big">Amount requested</dt>
               <dd className="prq-total-big mono">{formatMoney(total)}</dd>
             </dl>
+          </section>
+
+          <section className="card" aria-labelledby="br-files">
+            <h2 id="br-files" className="card-title">Attachments</h2>
+            <p className="prq-hint">
+              Quotations, a breakdown or anything that supports the request — they go with it, so the approvers see them.
+              {existing ? ' Files already on it stay; add more here or on its page.' : ''}
+            </p>
+            <input
+              type="file"
+              multiple
+              accept="image/*,application/pdf,.xlsx,.xls,.csv,.docx,.doc"
+              aria-label="Attach supporting papers"
+              onChange={(e) => {
+                const picked = Array.from(e.target.files ?? []);
+                setFiles((cur) => [...cur, ...picked]);
+                e.target.value = '';
+              }}
+            />
+            {files.length > 0 && (
+              <ul className="fin-files">
+                {files.map((f, i) => (
+                  <li key={`${f.name}-${i}`}>
+                    <span>{f.name}</span>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => setFiles(files.filter((_, j) => j !== i))}>
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
 
           <section className="card" aria-labelledby="br-approval">

@@ -14,6 +14,7 @@ import { ErrorBox, Loading, StatusBadge, formatDate, formatMoney, humanise, useT
 import { RecordPaymentModal, paymentLink } from '../finance/Receivables';
 import { CLAIM_TONES } from '../finance/Expenses';
 import { RequestItemsCard, type RequestItem } from '../../components/RequestLines';
+import { Attachments } from '../../components/Attachments';
 
 /**
  * Budget requests — PROJECT CASH (2026-10-07, the owner's call).
@@ -1113,6 +1114,14 @@ export function BudgetRequestDetail() {
           </div>
         </div>
       </div>
+
+      <Attachments
+        entityType="budget_request"
+        entityId={row.id}
+        hint="Quotations, a breakdown or anything the approvers need to check the request. Printed behind the request."
+        // Changed while it is a draft or with the approvers, by whoever may modify it.
+        canEdit={(row.status === 'DRAFT' || row.status === 'PENDING_APPROVAL') && ((own && can('gops.budget_requests.edit_own')) || editAll)}
+      />
 
       {modal === 'release' && (
         <RecordPaymentModal

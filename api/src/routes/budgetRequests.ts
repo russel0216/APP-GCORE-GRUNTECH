@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, RequestStatus, type ApprovalRequest } from '@prisma/client';
 import { prisma } from '../prisma';
-import { deleteAttachmentsOf } from '../shared/attachments';
+import { deleteAttachmentsOf, registerAttachmentGuard } from '../shared/attachments';
+import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
 import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { canEditRecord } from '../permissions/resolve';
@@ -1151,10 +1152,23 @@ budgetRequestRoutes.get(
       }),
     });
 
-    await audit({ entityType: 'budget_request', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.number}` }, req);
+    // The quotations, receipts and papers filed for the approvers go behind
+    // the request (2026-11-03); `?attachments=0` prints it bare.
+    const files = req.query.attachments === '0' ? [] : await attachedFiles('budget_request', row.id);
+    const { pdf: withFiles, listed } = await withAttachments(pdf, files, { title: 'Budget Request', number: row.number, reference: row.reason });
+
+    await audit(
+      {
+        entityType: 'budget_request',
+        entityId: row.id,
+        action: 'EXPORTED',
+        summary: `Printed ${row.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}`,
+      },
+      req,
+    );
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Budget Request', number: row.number, author: row.requestedBy.name, date: row.createdAt })));
-    res.send(pdf);
+    res.send(withFiles);
   }),
 );
 
@@ -1187,3 +1201,34 @@ registerSearch({
     }));
   },
 });
+
+/**
+ * A budget request's papers (2026-11-03, the owner's call: "on budget request
+ * add attachment option") — a quotation, a breakdown, a photo — read by
+ * whoever reads the request (its register's readers, the project's Technical
+ * Manager) and by whoever may decide its open approval; filed while it is a
+ * draft or with the approvers, by whoever may change it.
+ */
+registerAttachmentGuard(
+  'budget_request',
+  async (user, id) => {
+    const row = await prisma.budgetRequest.findUnique({
+      where: { id },
+      select: { requestedById: true, job: { select: { projectManager: { select: { id: true } } } } },
+    });
+    if (!row) return false;
+    try {
+      assertCanSee(user, row);
+      return true;
+    } catch {
+      return mayDecide(user.id, 'budget_request', [id]);
+    }
+  },
+  {
+    write: async (user, id) => {
+      const row = await prisma.budgetRequest.findUnique({ where: { id }, select: { status: true, requestedById: true } });
+      if (!row || !['DRAFT', 'PENDING_APPROVAL'].includes(row.status)) return false;
+      return canEditRecord(user, 'gops', 'budget_requests', row.requestedById);
+    },
+  },
+);
