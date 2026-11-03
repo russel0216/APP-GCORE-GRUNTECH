@@ -956,21 +956,45 @@ async function main() {
     });
     check('a task cannot be moved onto another project’s scope line', moved.status === 400, String(moved.status));
 
-    // A phase's own dates (2026-11-03): typed, refused backwards, then fitted
-    // back to its tasks' span; `all` fits every phase.
+    // A phase's own dates (2026-11-03): proposed, refused backwards, sent to
+    // the project's Technical Manager, applied only on approval; `all`
+    // proposes every phase on its tasks' span.
     const phasePath = `/jobs/${job.id}/scope-items/${fabrication!.id}`;
     const typed = await http(leadToken, 'PATCH', phasePath, { plannedStart: '2026-02-02', plannedEnd: '2026-02-10' });
     const backwards = await http(leadToken, 'PATCH', phasePath, { plannedStart: '2026-02-10', plannedEnd: '2026-02-02' });
     const afterTyped = await prisma.jobScopeItem.findUnique({ where: { id: fabrication!.id } });
-    const fitted = await http(leadToken, 'PATCH', `/jobs/${job.id}/scope-items/all`, { fromTasks: true });
-    const afterFit = await prisma.jobScopeItem.findUnique({ where: { id: fabrication!.id } });
     check(
-      'a phase’s dates are typed, refused backwards, and fitted back to its tasks',
-      typed.status === 200 && iso(afterTyped?.plannedStart?.toISOString()) === '2026-02-02' && iso(afterTyped?.plannedEnd?.toISOString()) === '2026-02-10' &&
-        backwards.status === 400 && fitted.status === 200 && fitted.body.changed >= 1 &&
-        iso(afterFit?.plannedStart?.toISOString()) === '2026-01-01' && iso(afterFit?.plannedEnd?.toISOString()) === '2026-01-06',
-      `${typed.status} ${backwards.status} ${JSON.stringify(fitted.body)} ${afterFit?.plannedStart?.toISOString()} ${afterFit?.plannedEnd?.toISOString()}`,
+      'a phase’s new dates are only PROPOSED — its planned dates stand until approved; backwards is refused',
+      typed.status === 200 && typed.body.scheduleChange?.status === 'DRAFT' && afterTyped?.proposalPending === true &&
+        iso(afterTyped.proposedStart!) === '2026-02-02' && iso(afterTyped.plannedStart!) === '2026-01-01' && backwards.status === 400,
+      `${typed.status} ${JSON.stringify(typed.body)} ${backwards.status}`,
     );
+    const sentChange = await http(leadToken, 'POST', `/jobs/${job.id}/schedule-change/submit`);
+    const changeReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'schedule_change', documentId: job.id, status: 'PENDING' } });
+    const lockedEdit = await http(leadToken, 'PATCH', phasePath, { plannedStart: '2026-02-03' });
+    check(
+      'sent, it waits on the project’s Technical Manager, and no more changes go in behind them',
+      sentChange.status === 200 && sentChange.body.scheduleChange?.status === 'PENDING_APPROVAL' && !!changeReq && lockedEdit.status === 400,
+      `${sentChange.status} ${JSON.stringify(sentChange.body)} ${lockedEdit.status}`,
+    );
+    await act({ requestId: changeReq!.id, userId: pm.id, action: 'APPROVED' });
+    const approvedPhase = await prisma.jobScopeItem.findUnique({ where: { id: fabrication!.id } });
+    const changeJob = await prisma.job.findUnique({ where: { id: job.id }, select: { dateChangeStatus: true } });
+    check(
+      'the Technical Manager’s approval puts the dates on the phase',
+      iso(approvedPhase!.plannedStart!) === '2026-02-02' && iso(approvedPhase!.plannedEnd!) === '2026-02-10' && approvedPhase!.proposalPending === false && changeJob?.dateChangeStatus === null,
+      JSON.stringify({ approvedPhase, changeJob }),
+    );
+    const fitted = await http(leadToken, 'PATCH', `/jobs/${job.id}/scope-items/all`, { fromTasks: true });
+    const discarded = await http(leadToken, 'POST', `/jobs/${job.id}/schedule-change/discard`);
+    const afterDiscard = await prisma.jobScopeItem.findUnique({ where: { id: fabrication!.id } });
+    check(
+      'fitting to the tasks is proposed too, and a change not yet sent is discarded whole',
+      fitted.status === 200 && fitted.body.changed >= 1 && discarded.status === 200 && afterDiscard?.proposalPending === false && iso(afterDiscard.plannedStart!) === '2026-02-02',
+      `${fitted.status} ${JSON.stringify(fitted.body)} ${discarded.status}`,
+    );
+    // Put the phase back on its tasks for the checks that follow.
+    await prisma.jobScopeItem.update({ where: { id: fabrication!.id }, data: { plannedStart: new Date('2026-01-01'), plannedEnd: new Date('2026-01-06') } });
 
     // The Scope of Work tab on paper (2026-10-21): phases, their tasks and
     // the Gantt chart as a landscape appendix.

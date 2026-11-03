@@ -44,6 +44,7 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   plan_approval: ['project_engineer', 'project_manager', 'technical_manager'],
   // The project's kick-off Gantt chart is prepared by its Project Engineer (2026-10-22).
   gantt_chart: ['project_engineer', 'project_lead'],
+  schedule_change: ['project_engineer', 'project_lead'],
   // G-HR › Hiring (2026-10-21): the hiring manager raises the request; HR prepares the contract.
   manpower_request: ['technical_manager', 'team_leader', 'service_manager'],
   employment_contract: ['hr'],

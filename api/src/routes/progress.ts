@@ -1916,19 +1916,27 @@ planRoutes.post(
 
 /**
  * A phase's own planned dates (2026-11-03, the owner's report: "i cannot edit
- * the date of sub heading when the project started"). A project's scope lines
- * are placed on the costing's plan when the project is built, and nothing
- * moved them after — so tasks planned by hand on other days left each phase
- * showing the costing's days. `{ plannedStart, plannedEnd }` sets them as
- * typed; `{ fromTasks: true }` takes its tasks' span (the first start to the
- * last due date); `{ itemId: 'all', fromTasks: true }` — `/scope-items/all` —
- * does that for every phase with dated tasks. The planned S-curve, the Scope
- * of Work paper and the kick-off chart read the same two columns.
+ * the date of sub heading when the project started"; then his call: "make
+ * sure that it has approval from technical manager"). A project's scope lines
+ * are placed on the costing's plan when the project is built; a change to
+ * them is PROPOSED here (`JobScopeItem.proposed*`, `Job.dateChangeStatus`
+ * DRAFT) and reaches `plannedStart` / `plannedEnd` — what the S-curve, the
+ * Scope of Work paper and the kick-off chart read — only when the project's
+ * Technical Manager approves the `schedule_change` request (the engine's
+ * PROJECT_MANAGER step). `{ plannedStart, plannedEnd }` proposes those days;
+ * `{ fromTasks: true }` proposes the tasks' span; `/scope-items/all` with
+ * `fromTasks` does it for every phase with dated tasks. Refused while a
+ * change waits on the Technical Manager: pull it back first.
  */
+const SCHEDULE_CHANGE = 'schedule_change';
+const dayIso = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : '—');
+const sameDay = (a: Date | null, b: Date | null) => (a?.getTime() ?? null) === (b?.getTime() ?? null);
+
 planRoutes.patch(
   '/:jobId/scope-items/:itemId',
   require_('gops.projects.edit_all'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(
       z.object({
         plannedStart: z.string().optional().nullable(),
@@ -1942,21 +1950,35 @@ planRoutes.patch(
       select: {
         id: true,
         number: true,
+        dateChangeStatus: true,
         scopeItems: {
           orderBy: { sortOrder: 'asc' },
-          select: { id: true, name: true, plannedStart: true, plannedEnd: true, tasks: { select: { startDate: true, dueDate: true } } },
+          select: {
+            id: true,
+            name: true,
+            plannedStart: true,
+            plannedEnd: true,
+            proposalPending: true,
+            proposedStart: true,
+            proposedEnd: true,
+            tasks: { select: { startDate: true, dueDate: true } },
+          },
         },
       },
     });
     if (!job) throw notFound('Job not found');
+    if (job.dateChangeStatus === 'PENDING_APPROVAL') {
+      throw badRequest('A change to the phase dates is waiting for the Technical Manager — pull it back to change it');
+    }
     const all = req.params.itemId === 'all';
     if (all && !body.fromTasks) throw badRequest('Only "fit to their tasks" applies to every phase at once');
     const items = all ? job.scopeItems : job.scopeItems.filter((s) => s.id === req.params.itemId);
     if (!items.length) throw notFound('That scope line is not on this project');
 
-    const day = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : '—');
-    const changes: { id: string; name: string; plannedStart: Date | null; plannedEnd: Date | null; before: string }[] = [];
+    const changes: { id: string; name: string; start: Date | null; end: Date | null; drop: boolean }[] = [];
     for (const item of items) {
+      const curStart = item.proposalPending ? item.proposedStart : item.plannedStart;
+      const curEnd = item.proposalPending ? item.proposedEnd : item.plannedEnd;
       let start: Date | null;
       let end: Date | null;
       if (body.fromTasks) {
@@ -1969,20 +1991,35 @@ planRoutes.patch(
         start = new Date(Math.min(...starts.map((d) => d.getTime())));
         end = new Date(Math.max(...ends.map((d) => d.getTime())));
       } else {
-        start = body.plannedStart !== undefined ? asDate(body.plannedStart) : item.plannedStart;
-        end = body.plannedEnd !== undefined ? asDate(body.plannedEnd) : item.plannedEnd;
+        start = body.plannedStart !== undefined ? asDate(body.plannedStart) : curStart;
+        end = body.plannedEnd !== undefined ? asDate(body.plannedEnd) : curEnd;
         if (start && !end) end = start;
         if (end && !start) start = end;
       }
       if (start && end && end < start) throw badRequest(`${item.name} would end before it starts`);
-      if ((start?.getTime() ?? null) === (item.plannedStart?.getTime() ?? null) && (end?.getTime() ?? null) === (item.plannedEnd?.getTime() ?? null)) continue;
-      changes.push({ id: item.id, name: item.name, plannedStart: start, plannedEnd: end, before: `${day(item.plannedStart)} – ${day(item.plannedEnd)}` });
+      if (sameDay(start, curStart) && sameDay(end, curEnd)) continue;
+      // Back to the approved days: the proposal for this phase goes.
+      const drop = sameDay(start, item.plannedStart) && sameDay(end, item.plannedEnd);
+      changes.push({ id: item.id, name: item.name, start, end, drop });
     }
 
     if (changes.length) {
-      await prisma.$transaction(
-        changes.map((c) => prisma.jobScopeItem.update({ where: { id: c.id }, data: { plannedStart: c.plannedStart, plannedEnd: c.plannedEnd } })),
-      );
+      await prisma.$transaction(async (tx) => {
+        for (const c of changes) {
+          await tx.jobScopeItem.update({
+            where: { id: c.id },
+            data: c.drop
+              ? { proposalPending: false, proposedStart: null, proposedEnd: null, proposedById: null, proposedAt: null }
+              : { proposalPending: true, proposedStart: c.start, proposedEnd: c.end, proposedById: me.id, proposedAt: new Date() },
+          });
+        }
+        const left = await tx.jobScopeItem.count({ where: { jobId: job.id, proposalPending: true } });
+        const moved = await tx.job.updateMany({
+          where: { id: job.id, OR: [{ dateChangeStatus: null }, { dateChangeStatus: 'DRAFT' }] },
+          data: { dateChangeStatus: left ? 'DRAFT' : null },
+        });
+        if (!moved.count) throw badRequest('The change was sent a moment ago — reload');
+      });
       await audit(
         {
           entityType: 'job',
@@ -1990,17 +2027,179 @@ planRoutes.patch(
           action: 'UPDATED',
           summary:
             changes.length === 1
-              ? `${job.number}: ${changes[0].name} planned ${day(changes[0].plannedStart)} – ${day(changes[0].plannedEnd)} (was ${changes[0].before})${body.fromTasks ? ', fitted to its tasks' : ''}`
-              : `${job.number}: ${changes.length} phases fitted to their tasks' dates`,
-          before: { phases: changes.map((c) => ({ id: c.id, dates: c.before })) },
-          after: { phases: changes.map((c) => ({ id: c.id, dates: `${day(c.plannedStart)} – ${day(c.plannedEnd)}` })) },
+              ? `${job.number}: ${changes[0].name} ${changes[0].drop ? 'back to its approved dates' : `proposed ${dayIso(changes[0].start)} – ${dayIso(changes[0].end)}`}${body.fromTasks ? ' (fitted to its tasks)' : ''} — for the Technical Manager's approval`
+              : `${job.number}: ${changes.length} phases proposed on their tasks' dates — for the Technical Manager's approval`,
+          after: { phases: changes.map((c) => ({ id: c.id, dates: `${dayIso(c.start)} – ${dayIso(c.end)}`, dropped: c.drop })) },
         },
         req,
       );
     }
-    res.json({ changed: changes.length });
+    res.json({ changed: changes.length, scheduleChange: await scheduleChangeOf(me, job.id) });
   }),
 );
+
+/** The phases' change waiting to be sent or decided, for the Scope of Work tab. */
+async function scheduleChangeOf(me: ResolvedUser, jobId: string) {
+  const job = await prisma.job.findUnique({
+    where: { id: jobId },
+    select: {
+      dateChangeStatus: true,
+      scopeItems: { where: { proposalPending: true }, select: { id: true, name: true, plannedStart: true, plannedEnd: true, proposedStart: true, proposedEnd: true, proposedAt: true } },
+    },
+  });
+  if (!job?.dateChangeStatus) return null;
+  return {
+    status: job.dateChangeStatus,
+    phases: job.scopeItems,
+    canSubmit: job.dateChangeStatus === 'DRAFT' && can(me, 'gops.projects.edit_all') && job.scopeItems.length > 0,
+    canWithdraw: job.dateChangeStatus === 'PENDING_APPROVAL' && can(me, 'gops.projects.edit_all'),
+    canDiscard: job.dateChangeStatus === 'DRAFT' && can(me, 'gops.projects.edit_all'),
+    approvalRoute: job.dateChangeStatus === 'DRAFT' ? await routeBrief(SCHEDULE_CHANGE, null, me.id, null, { jobId }) : null,
+  };
+}
+
+planRoutes.get(
+  '/:jobId/schedule-change',
+  requireAnyOrDecider('gops.projects.view_all', 'gops.projects.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    if (res.locals.deciderOnly === true && !(await mayDecide(me.id, SCHEDULE_CHANGE, [req.params.jobId]))) throw notFound('Project not found');
+    res.json({ scheduleChange: await scheduleChangeOf(me, req.params.jobId) });
+  }),
+);
+
+/** Sent to the Technical Manager: claimed on DRAFT, back to DRAFT if the engine refuses. */
+planRoutes.post(
+  '/:jobId/schedule-change/submit',
+  require_('gops.projects.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const job = await prisma.job.findUnique({
+      where: { id: req.params.jobId },
+      select: { id: true, number: true, name: true, scopeItems: { where: { proposalPending: true }, select: { name: true, proposedStart: true, proposedEnd: true } } },
+    });
+    if (!job) throw notFound('Job not found');
+    if (!job.scopeItems.length) throw badRequest('No phase date has been changed');
+    const claimed = await prisma.job.updateMany({ where: { id: job.id, dateChangeStatus: 'DRAFT' }, data: { dateChangeStatus: 'PENDING_APPROVAL' } });
+    if (!claimed.count) throw badRequest('It was sent a moment ago — reload');
+    const what = job.scopeItems.map((p) => `${p.name} ${dayIso(p.proposedStart)} – ${dayIso(p.proposedEnd)}`).join('; ');
+    try {
+      await submitForApproval({
+        documentType: SCHEDULE_CHANGE,
+        documentId: job.id,
+        documentNumber: job.number,
+        subject: `${job.number} — ${job.name}: phase dates changed (${what})`.slice(0, 480),
+        link: `/g-ops/projects/${job.id}?tab=scope`,
+        requesterId: me.id,
+        jobId: job.id,
+      });
+    } catch (err) {
+      await prisma.job.updateMany({ where: { id: job.id, dateChangeStatus: 'PENDING_APPROVAL' }, data: { dateChangeStatus: 'DRAFT' } });
+      throw err;
+    }
+    await audit({ entityType: 'job', entityId: job.id, action: 'SUBMITTED', summary: `${job.number}: phase date change sent to the Technical Manager (${what})`.slice(0, 480) }, req);
+    res.json({ scheduleChange: await scheduleChangeOf(me, job.id) });
+  }),
+);
+
+/** Pulled back before the Technical Manager decides — the request withdrawn in the same transaction. */
+planRoutes.post(
+  '/:jobId/schedule-change/withdraw',
+  require_('gops.projects.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const job = await prisma.job.findUnique({ where: { id: req.params.jobId }, select: { id: true, number: true } });
+    if (!job) throw notFound('Job not found');
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.job.updateMany({ where: { id: job.id, dateChangeStatus: 'PENDING_APPROVAL' }, data: { dateChangeStatus: 'DRAFT' } });
+      if (!claimed.count) throw badRequest('It was decided a moment ago — the decision stands');
+      await cancelOpenRequest(SCHEDULE_CHANGE, job.id, tx, `pulled back by ${me.name}`, me.id);
+    });
+    await audit({ entityType: 'job', entityId: job.id, action: 'UPDATED', summary: `${job.number}: phase date change pulled back` }, req);
+    res.json({ scheduleChange: await scheduleChangeOf(me, job.id) });
+  }),
+);
+
+/** A change not yet sent, thrown away: every phase keeps its approved dates. */
+planRoutes.post(
+  '/:jobId/schedule-change/discard',
+  require_('gops.projects.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const job = await prisma.job.findUnique({ where: { id: req.params.jobId }, select: { id: true, number: true } });
+    if (!job) throw notFound('Job not found');
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.job.updateMany({ where: { id: job.id, dateChangeStatus: 'DRAFT' }, data: { dateChangeStatus: null } });
+      if (!claimed.count) throw badRequest('Only a change not yet sent is discarded — pull it back first');
+      await tx.jobScopeItem.updateMany({
+        where: { jobId: job.id, proposalPending: true },
+        data: { proposalPending: false, proposedStart: null, proposedEnd: null, proposedById: null, proposedAt: null },
+      });
+    });
+    await audit({ entityType: 'job', entityId: job.id, action: 'UPDATED', summary: `${job.number}: proposed phase dates discarded` }, req);
+    res.json({ scheduleChange: null });
+  }),
+);
+
+/**
+ * The Technical Manager's decision. Approved, every proposed phase takes its
+ * dates in the claim's transaction; returned or rejected, the proposal stays
+ * a draft to change, send again or discard. A decision after a pull-back
+ * changes nothing.
+ */
+export async function settleScheduleChange(approval: ApprovalRequest, outcome: ApprovalOutcome): Promise<void> {
+  const job = await prisma.job.findUnique({ where: { id: approval.documentId }, select: { id: true, number: true } });
+  if (!job) return;
+  const applied = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.job.updateMany({
+      where: { id: job.id, dateChangeStatus: 'PENDING_APPROVAL' },
+      data: { dateChangeStatus: outcome === 'APPROVED' ? null : 'DRAFT' },
+    });
+    if (!claimed.count) return null;
+    if (outcome !== 'APPROVED') return [];
+    const items = await tx.jobScopeItem.findMany({ where: { jobId: job.id, proposalPending: true } });
+    for (const item of items) {
+      await tx.jobScopeItem.update({
+        where: { id: item.id },
+        data: {
+          plannedStart: item.proposedStart,
+          plannedEnd: item.proposedEnd,
+          proposalPending: false,
+          proposedStart: null,
+          proposedEnd: null,
+          proposedById: null,
+          proposedAt: null,
+        },
+      });
+    }
+    return items.map((i) => ({ id: i.id, name: i.name, before: `${dayIso(i.plannedStart)} – ${dayIso(i.plannedEnd)}`, after: `${dayIso(i.proposedStart)} – ${dayIso(i.proposedEnd)}` }));
+  });
+  if (applied === null) {
+    await audit({ entityType: 'job', entityId: job.id, action: 'UPDATED', summary: `${job.number}: phase date change ${outcome.toLowerCase()} after it was pulled back — not applied` });
+    return;
+  }
+  await audit({
+    entityType: 'job',
+    entityId: job.id,
+    action: outcome === 'APPROVED' ? 'APPROVED' : 'REJECTED',
+    summary:
+      outcome === 'APPROVED'
+        ? `${job.number}: phase dates approved by the Technical Manager — ${applied.map((a) => `${a.name} ${a.after}`).join('; ')}`.slice(0, 480)
+        : `${job.number}: phase date change returned — still a draft`,
+    before: outcome === 'APPROVED' ? { phases: applied.map((a) => ({ id: a.id, dates: a.before })) } : undefined,
+    after: outcome === 'APPROVED' ? { phases: applied.map((a) => ({ id: a.id, dates: a.after })) } : undefined,
+  });
+}
+onApprovalSettled(SCHEDULE_CHANGE, settleScheduleChange);
+
+// An approved change is already the phases' dates; changing them again is a
+// new proposal, so there is nothing to pull back.
+onApprovalReopened(SCHEDULE_CHANGE, {
+  may: async () => false,
+  reopen: async () => {
+    throw badRequest('An approved date change is already on the phases — propose the dates again to change them');
+  },
+});
 
 planRoutes.delete(
   '/:jobId/tasks/:taskId',

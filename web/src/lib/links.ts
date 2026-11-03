@@ -30,6 +30,8 @@ const DETAIL: Record<string, string> = {
   job: '/g-ops/projects',
   // The kick-off Gantt chart's approval is filed under the project's id (2026-10-22).
   gantt_chart: '/g-ops/projects',
+  // A phase date change is filed under the project's id too (2026-11-03).
+  schedule_change: '/g-ops/projects',
   project: '/g-ops/projects',
   progress_report: '/g-ops/progress',
   progress_billing: '/g-ops/billings',

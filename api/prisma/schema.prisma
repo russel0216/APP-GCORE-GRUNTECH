@@ -2100,6 +2100,9 @@ model Job {
   /// `gantt_chart` (the job's id is the document), approved by the customer
   /// at the kick-off meeting — their answer recorded below, the record being
   /// the signature.
+  /// The phases' date change waiting for the Technical Manager: null when none,
+  /// DRAFT while proposed and not yet sent, PENDING_APPROVAL once sent (2026-11-03).
+  dateChangeStatus             ScheduleStatus?
   scheduleStatus               ScheduleStatus @default(DRAFT)
   scheduleSubmittedAt          DateTime?
   scheduleApprovedAt           DateTime?
@@ -2175,6 +2178,15 @@ model JobScopeItem {
   /// These drive the PLANNED curve.
   plannedStart DateTime? @db.Date
   plannedEnd   DateTime? @db.Date
+
+  /// A change to the planned dates waiting for the Technical Manager
+  /// (2026-11-03, the owner's call): proposed here, applied to plannedStart /
+  /// plannedEnd only when the `schedule_change` request is approved.
+  proposalPending Boolean   @default(false)
+  proposedStart   DateTime? @db.Date
+  proposedEnd     DateTime? @db.Date
+  proposedById    String?
+  proposedAt      DateTime?
 
   sortOrder Int @default(0)
 

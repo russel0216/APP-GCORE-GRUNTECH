@@ -1,10 +1,12 @@
-import { useId, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { api, openPdf } from '../../lib/api';
 import { addDays, daysBetween, mondayOf, parseDay, todayLocal } from '../../lib/day';
 import { Empty, ErrorBox, Field, ModalFoot, StatusBadge, formatDate, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
 import { useHolidayKeys } from '../../lib/holidays';
+import { useConfirm } from '../../components/Confirm';
+import { ApprovalStepper, DecisionNote, DocumentApproval, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 
 /**
  * The Scope of Work as a Gantt chart (2026-10-06) — the old gasiontech
@@ -25,6 +27,20 @@ export interface GanttScopeItem {
   plannedStart: string | null;
   plannedEnd: string | null;
   durationDays: number;
+  /** A change to its dates waiting for the Technical Manager (2026-11-03). */
+  proposalPending?: boolean;
+  proposedStart?: string | null;
+  proposedEnd?: string | null;
+}
+
+/** The phases' date change waiting to be sent or decided (`GET /jobs/:id/schedule-change`). */
+interface ScheduleChange {
+  status: 'DRAFT' | 'PENDING_APPROVAL';
+  phases: { id: string; name: string; plannedStart: string | null; plannedEnd: string | null; proposedStart: string | null; proposedEnd: string | null }[];
+  canSubmit: boolean;
+  canWithdraw: boolean;
+  canDiscard: boolean;
+  approvalRoute: PreviewRoute | null;
 }
 
 export interface GanttTask {
@@ -58,7 +74,7 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const keyOf = (iso: string | null | undefined): string | null => (iso ? iso.slice(0, 10) : null);
 
 type Row =
-  | { kind: 'phase'; item: GanttScopeItem; start: string | null; end: string | null; pct: number | null; tasks: number }
+  | { kind: 'phase'; item: GanttScopeItem; start: string | null; end: string | null; pct: number | null; tasks: number; proposed: { start: string | null; end: string | null } | null }
   | { kind: 'task'; task: GanttTask; start: string | null; end: string | null }
   | { kind: 'heading'; label: string };
 
@@ -88,6 +104,37 @@ export function ProjectGantt({
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<GanttTask | 'new' | null>(null);
   const [editingPhase, setEditingPhase] = useState<{ item: GanttScopeItem; start: string | null; end: string | null; tasks: number } | null>(null);
+  const [change, setChange] = useState<ScheduleChange | null>(null);
+  const [changeReload, setChangeReload] = useState(0);
+  const confirm = useConfirm();
+  const loadChange = useCallback(async () => {
+    try {
+      setChange((await api.get<{ scheduleChange: ScheduleChange | null }>(`/jobs/${jobId}/schedule-change`)).scheduleChange);
+    } catch {
+      setChange(null);
+    }
+  }, [jobId]);
+  const proposalKey = scopeItems.map((s) => `${s.id}:${s.proposalPending ? 1 : 0}:${s.proposedStart}:${s.proposedEnd}`).join('|');
+  useEffect(() => {
+    loadChange();
+  }, [loadChange, proposalKey]);
+  const waiting = change?.status === 'PENDING_APPROVAL';
+
+  async function changeAction(path: 'submit' | 'withdraw' | 'discard', message: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.post<{ scheduleChange: ScheduleChange | null }>(`/jobs/${jobId}/schedule-change/${path}`);
+      setChange(r.scheduleChange);
+      setChangeReload((n) => n + 1);
+      toast('ok', message);
+      await onChanged();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   // Phases in order, each with its tasks; tasks on no phase at the end.
   const rows = useMemo<Row[]>(() => {
@@ -113,6 +160,7 @@ export function ProjectGantt({
         end: keyOf(item.plannedEnd) ?? (ends.length ? ends.sort()[ends.length - 1] : null),
         pct,
         tasks: own.length,
+        proposed: item.proposalPending ? { start: keyOf(item.proposedStart), end: keyOf(item.proposedEnd) } : null,
       });
       for (const t of own) out.push({ kind: 'task', task: t, start: keyOf(t.startDate), end: keyOf(t.dueDate) ?? keyOf(t.startDate) });
     }
@@ -183,7 +231,7 @@ export function ProjectGantt({
     setError(null);
     try {
       const r = await api.patch<{ changed: number }>(`/jobs/${jobId}/scope-items/all`, { fromTasks: true });
-      toast('ok', r.changed ? `${r.changed} phase${r.changed === 1 ? '' : 's'} moved to their tasks’ dates` : 'Every phase already matches its tasks');
+      toast('ok', r.changed ? `${r.changed} phase${r.changed === 1 ? '' : 's'} proposed on their tasks’ dates — send the change to the Technical Manager` : 'Every phase already matches its tasks');
       await onChanged();
     } catch (err) {
       setError(err);
@@ -198,7 +246,9 @@ export function ProjectGantt({
     const own = tasks.filter((t) => t.scopeItemId === r.item.id);
     const s = own.map((t) => keyOf(t.startDate) ?? keyOf(t.dueDate)).filter((k): k is string => !!k).sort();
     const e = own.map((t) => keyOf(t.dueDate) ?? keyOf(t.startDate)).filter((k): k is string => !!k).sort();
-    return s.length > 0 && (s[0] !== r.start || e[e.length - 1] !== r.end);
+    const start = r.proposed ? r.proposed.start : r.start;
+    const end = r.proposed ? r.proposed.end : r.end;
+    return s.length > 0 && (s[0] !== start || e[e.length - 1] !== end);
   });
 
   const wide = axis.days.length;
@@ -239,7 +289,7 @@ export function ProjectGantt({
                 Plan from costing
               </button>
             )}
-          {canEdit && offTasks && (
+          {canEdit && offTasks && !waiting && (
             <button
               type="button"
               className="btn btn-sm"
@@ -260,9 +310,77 @@ export function ProjectGantt({
       <p className="muted del-lede">
         Each scope line is a phase; its tasks sit under it. A bar runs from a task’s start to its due date and fills
         to its percent complete. A phase’s planned dates come from the costing’s scope of work, in working days from
-        the start date — click a phase to change them or fit them to its tasks; the planned S-curve reads the same dates.
+        the start date — click a phase to propose new dates or fit them to its tasks. A change takes effect once the
+        project’s Technical Manager approves it; the planned S-curve reads the approved dates.
       </p>
+      {confirm.bar}
       <ErrorBox error={error} />
+      {change && (
+        <div className={`alert ${waiting ? 'info' : 'warn'}`}>
+          <strong>
+            {waiting
+              ? 'Phase date change — waiting for the Technical Manager’s approval'
+              : `Phase date change not yet sent — ${change.phases.length} phase${change.phases.length === 1 ? '' : 's'}`}
+          </strong>
+          <ul>
+            {change.phases.map((p) => (
+              <li key={p.id}>
+                {p.name}: {p.plannedStart ? `${formatDate(p.plannedStart)} – ${formatDate(p.plannedEnd ?? p.plannedStart)}` : 'no dates'} →{' '}
+                <strong>{p.proposedStart ? `${formatDate(p.proposedStart)} – ${formatDate(p.proposedEnd ?? p.proposedStart)}` : 'no dates'}</strong>
+              </li>
+            ))}
+          </ul>
+          {change.status === 'DRAFT' && change.approvalRoute && change.approvalRoute.steps.length > 0 && (
+            <div className="qd-route">
+              <span className="qd-route-label">Sending it goes to</span>
+              <ApprovalStepper steps={previewSteps(change.approvalRoute)} />
+            </div>
+          )}
+          <div className="row">
+            {change.canSubmit && (
+              <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => changeAction('submit', 'Sent to the Technical Manager for approval')}>
+                Send to the Technical Manager
+              </button>
+            )}
+            {change.canWithdraw && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={busy}
+                onClick={() =>
+                  confirm.ask({
+                    title: 'Pull the date change back?',
+                    body: 'The Technical Manager’s request is withdrawn and they are told. The proposed dates stay, to change and send again.',
+                    confirmLabel: 'Pull it back',
+                    onConfirm: () => changeAction('withdraw', 'Pulled back — change it and send it again'),
+                  })
+                }
+              >
+                Pull back
+              </button>
+            )}
+            {change.canDiscard && (
+              <button
+                type="button"
+                className="btn btn-sm btn-danger"
+                disabled={busy}
+                onClick={() =>
+                  confirm.ask({
+                    title: 'Discard the proposed dates?',
+                    body: 'Every phase keeps its approved dates.',
+                    confirmLabel: 'Discard',
+                    onConfirm: () => changeAction('discard', 'Proposed dates discarded'),
+                  })
+                }
+              >
+                Discard
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+      <DecisionNote documentType="schedule_change" documentId={jobId} reloadToken={changeReload} />
+      {waiting && <DocumentApproval documentType="schedule_change" documentId={jobId} reloadToken={changeReload} compact />}
 
       {rows.length === 0 ? (
         <Empty title="No scope of work yet" hint="The project’s scope lines come from its costing." />
@@ -330,12 +448,14 @@ export function ProjectGantt({
                   return (
                     <tr key={r.item.id} className="gantt-phase">
                       <th scope="row" className="gantt-name">
-                        {canEdit ? (
+                        {canEdit && !waiting ? (
                           <button
                             type="button"
                             className="gantt-edit"
-                            onClick={() => setEditingPhase({ item: r.item, start: r.start, end: r.end, tasks: r.tasks })}
-                            title="Change this phase’s dates"
+                            onClick={() =>
+                              setEditingPhase({ item: r.item, start: r.proposed ? r.proposed.start : r.start, end: r.proposed ? r.proposed.end : r.end, tasks: r.tasks })
+                            }
+                            title="Propose new dates for this phase — the Technical Manager approves them"
                           >
                             {r.item.name}
                           </button>
@@ -343,6 +463,13 @@ export function ProjectGantt({
                           r.item.name
                         )}
                         {r.tasks === 0 && <span className="faint"> · no tasks</span>}
+                        {r.proposed && (
+                          <span className="faint">
+                            {' '}
+                            · proposed {r.proposed.start ? `${formatDate(r.proposed.start)} – ${formatDate(r.proposed.end ?? r.proposed.start)}` : 'no dates'}
+                            {waiting ? ', waiting for approval' : ', not yet sent'}
+                          </span>
+                        )}
                       </th>
                       <td className="gantt-date">{r.start ? formatDate(r.start) : <span className="faint">—</span>}</td>
                       <td className="gantt-date">{r.end ? formatDate(r.end) : <span className="faint">—</span>}</td>
@@ -466,6 +593,7 @@ function PhaseEditor({
   return (
     <section className="gantt-editor" aria-label={`Modify phase ${phase.item.name}`}>
       <h4 className="card-title">Modify phase — {phase.item.name}</h4>
+      <p className="faint">The new dates are proposed; they take effect once the project’s Technical Manager approves the change.</p>
       <ErrorBox error={error} />
       <div className="grid grid-2">
         <Field label="Planned start">
@@ -481,7 +609,7 @@ function PhaseEditor({
             <button
               type="button"
               className="btn"
-              onClick={() => send({ fromTasks: true }, 'Phase fitted to its tasks')}
+              onClick={() => send({ fromTasks: true }, 'Proposed on its tasks’ dates — send the change to the Technical Manager')}
               disabled={busy}
               title="The first task’s start to the last task’s due date"
             >
@@ -491,10 +619,10 @@ function PhaseEditor({
           <button
             type="button"
             className="btn btn-primary"
-            onClick={() => send({ plannedStart: start || null, plannedEnd: end || null }, 'Phase dates saved')}
+            onClick={() => send({ plannedStart: start || null, plannedEnd: end || null }, 'Dates proposed — send the change to the Technical Manager')}
             disabled={busy || backwards}
           >
-            Save
+            Propose
           </button>
         </ModalFoot>
       </div>
