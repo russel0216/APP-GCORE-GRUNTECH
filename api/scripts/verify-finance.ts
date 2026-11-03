@@ -673,10 +673,51 @@ async function main() {
     'input VAT is recoverable, so the project bears 200,000 and not 224,000',
   );
 
+  // A downpayment bill on the order before anything is received (2026-11-03):
+  // payable, but the Incoming charges the goods, so it posts nothing.
+  const advanceBill = await prisma.supplierBill.create({
+    data: {
+      number: await nextNumber('supplier_bill'),
+      supplierId: supplier.id,
+      orderId: order.id,
+      jobId: job.id,
+      costCategoryId: materials.id,
+      status: 'PENDING_APPROVAL',
+      supplierInvoiceNo: `${TAG}-SI-003`,
+      billDate: dayKey(new Date()),
+      dueDate: dayKey(new Date()),
+      subtotal: D(50_000),
+      vatAmount: D(6_000),
+      total: D(56_000),
+      ewtRate: D(0),
+      ewtAmount: D(0),
+      netPayable: D(56_000),
+      createdById: finance.id,
+      lines: { create: [{ sortOrder: 0, description: `${TAG} 50% downpayment`, quantity: D(1), unitPrice: D(50_000), amount: D(50_000) }] },
+    },
+  });
+  const advanceBefore = await availableBudget(prisma, job.id, materials.id);
+  const advanceApproval = await submitForApproval({
+    documentType: 'supplier_bill',
+    documentId: advanceBill.id,
+    documentNumber: advanceBill.number,
+    subject: `${TAG} downpayment bill`,
+    amount: 56_000,
+    requesterId: finance.id,
+  });
+  await settle(advanceApproval.id);
+  const advanceAfter = await prisma.supplierBill.findUnique({ where: { id: advanceBill.id } });
+  const advanceIncurred = await availableBudget(prisma, job.id, materials.id);
+  check(
+    'a downpayment bill on a purchase order, before delivery, is payable but posts no cost — the Incoming will',
+    advanceAfter?.status === 'APPROVED' && advanceAfter.postedToJob === false && money(advanceIncurred.incurred, advanceBefore.incurred),
+    `${advanceAfter?.status} posted ${advanceAfter?.postedToJob}, incurred ${advanceBefore.incurred} → ${advanceIncurred.incurred}`,
+  );
+
   const ledgerRows = await prisma.jobCostEntry.count({
     where: { jobId: job.id, sourceType: 'supplier_bill' },
   });
-  check('exactly one of the two bills reached the ledger', ledgerRows === 1, `${ledgerRows} rows`);
+  check('exactly one of the three bills reached the ledger', ledgerRows === 1, `${ledgerRows} rows`);
 
   const rejectedBill = await prisma.supplierBill.create({
     data: {

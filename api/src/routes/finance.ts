@@ -2682,8 +2682,14 @@ onApprovalSettled('supplier_bill', async (approval, outcome) => {
     return;
   }
 
+  // A bill on a purchase order never posts (2026-11-03, the owner's question
+  // on a PO needing an advance payment): matched to its receiving, the
+  // Incoming already charged the goods; billed BEFORE delivery — a downpayment
+  // or a proforma — the Incoming will charge them when they arrive, so posting
+  // here charged the project twice.
   const alreadyIncurred = bill.receivingId !== null;
-  const postable = !alreadyIncurred && bill.jobId && bill.costCategoryId && num(bill.subtotal) > 0;
+  const onOrder = bill.orderId !== null;
+  const postable = !alreadyIncurred && !onOrder && bill.jobId && bill.costCategoryId && num(bill.subtotal) > 0;
 
   const applied = await prisma.$transaction(async (tx) => {
     const claimed = await tx.supplierBill.updateMany({
@@ -2723,7 +2729,9 @@ onApprovalSettled('supplier_bill', async (approval, outcome) => {
       ? `${bill.number} approved — ${num(bill.subtotal)} charged to ${bill.job?.number}`
       : alreadyIncurred
         ? `${bill.number} approved — no cost posted, ${bill.receiving?.number} already incurred it`
-        : `${bill.number} approved — no project or category, so nothing was charged`,
+        : onOrder
+          ? `${bill.number} approved — no cost posted, the order's Incoming charges the goods when they are received`
+          : `${bill.number} approved — no project or category, so nothing was charged`,
   });
 });
 

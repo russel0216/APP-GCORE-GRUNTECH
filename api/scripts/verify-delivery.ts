@@ -956,6 +956,22 @@ async function main() {
     });
     check('a task cannot be moved onto another project’s scope line', moved.status === 400, String(moved.status));
 
+    // A phase's own dates (2026-11-03): typed, refused backwards, then fitted
+    // back to its tasks' span; `all` fits every phase.
+    const phasePath = `/jobs/${job.id}/scope-items/${fabrication!.id}`;
+    const typed = await http(leadToken, 'PATCH', phasePath, { plannedStart: '2026-02-02', plannedEnd: '2026-02-10' });
+    const backwards = await http(leadToken, 'PATCH', phasePath, { plannedStart: '2026-02-10', plannedEnd: '2026-02-02' });
+    const afterTyped = await prisma.jobScopeItem.findUnique({ where: { id: fabrication!.id } });
+    const fitted = await http(leadToken, 'PATCH', `/jobs/${job.id}/scope-items/all`, { fromTasks: true });
+    const afterFit = await prisma.jobScopeItem.findUnique({ where: { id: fabrication!.id } });
+    check(
+      'a phase’s dates are typed, refused backwards, and fitted back to its tasks',
+      typed.status === 200 && iso(afterTyped?.plannedStart?.toISOString()) === '2026-02-02' && iso(afterTyped?.plannedEnd?.toISOString()) === '2026-02-10' &&
+        backwards.status === 400 && fitted.status === 200 && fitted.body.changed >= 1 &&
+        iso(afterFit?.plannedStart?.toISOString()) === '2026-01-01' && iso(afterFit?.plannedEnd?.toISOString()) === '2026-01-06',
+      `${typed.status} ${backwards.status} ${JSON.stringify(fitted.body)} ${afterFit?.plannedStart?.toISOString()} ${afterFit?.plannedEnd?.toISOString()}`,
+    );
+
     // The Scope of Work tab on paper (2026-10-21): phases, their tasks and
     // the Gantt chart as a landscape appendix.
     const scopePaper = await printed(leadToken, `/jobs/${job.id}/scope/pdf`);

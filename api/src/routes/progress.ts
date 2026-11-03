@@ -1914,6 +1914,94 @@ planRoutes.post(
   }),
 );
 
+/**
+ * A phase's own planned dates (2026-11-03, the owner's report: "i cannot edit
+ * the date of sub heading when the project started"). A project's scope lines
+ * are placed on the costing's plan when the project is built, and nothing
+ * moved them after — so tasks planned by hand on other days left each phase
+ * showing the costing's days. `{ plannedStart, plannedEnd }` sets them as
+ * typed; `{ fromTasks: true }` takes its tasks' span (the first start to the
+ * last due date); `{ itemId: 'all', fromTasks: true }` — `/scope-items/all` —
+ * does that for every phase with dated tasks. The planned S-curve, the Scope
+ * of Work paper and the kick-off chart read the same two columns.
+ */
+planRoutes.patch(
+  '/:jobId/scope-items/:itemId',
+  require_('gops.projects.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(
+      z.object({
+        plannedStart: z.string().optional().nullable(),
+        plannedEnd: z.string().optional().nullable(),
+        fromTasks: z.boolean().optional(),
+      }),
+      req.body,
+    );
+    const job = await prisma.job.findUnique({
+      where: { id: req.params.jobId },
+      select: {
+        id: true,
+        number: true,
+        scopeItems: {
+          orderBy: { sortOrder: 'asc' },
+          select: { id: true, name: true, plannedStart: true, plannedEnd: true, tasks: { select: { startDate: true, dueDate: true } } },
+        },
+      },
+    });
+    if (!job) throw notFound('Job not found');
+    const all = req.params.itemId === 'all';
+    if (all && !body.fromTasks) throw badRequest('Only "fit to their tasks" applies to every phase at once');
+    const items = all ? job.scopeItems : job.scopeItems.filter((s) => s.id === req.params.itemId);
+    if (!items.length) throw notFound('That scope line is not on this project');
+
+    const day = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : '—');
+    const changes: { id: string; name: string; plannedStart: Date | null; plannedEnd: Date | null; before: string }[] = [];
+    for (const item of items) {
+      let start: Date | null;
+      let end: Date | null;
+      if (body.fromTasks) {
+        const starts = item.tasks.map((t) => t.startDate ?? t.dueDate).filter((d): d is Date => !!d);
+        const ends = item.tasks.map((t) => t.dueDate ?? t.startDate).filter((d): d is Date => !!d);
+        if (!starts.length) {
+          if (all) continue;
+          throw badRequest(`${item.name} has no dated tasks to fit to`);
+        }
+        start = new Date(Math.min(...starts.map((d) => d.getTime())));
+        end = new Date(Math.max(...ends.map((d) => d.getTime())));
+      } else {
+        start = body.plannedStart !== undefined ? asDate(body.plannedStart) : item.plannedStart;
+        end = body.plannedEnd !== undefined ? asDate(body.plannedEnd) : item.plannedEnd;
+        if (start && !end) end = start;
+        if (end && !start) start = end;
+      }
+      if (start && end && end < start) throw badRequest(`${item.name} would end before it starts`);
+      if ((start?.getTime() ?? null) === (item.plannedStart?.getTime() ?? null) && (end?.getTime() ?? null) === (item.plannedEnd?.getTime() ?? null)) continue;
+      changes.push({ id: item.id, name: item.name, plannedStart: start, plannedEnd: end, before: `${day(item.plannedStart)} – ${day(item.plannedEnd)}` });
+    }
+
+    if (changes.length) {
+      await prisma.$transaction(
+        changes.map((c) => prisma.jobScopeItem.update({ where: { id: c.id }, data: { plannedStart: c.plannedStart, plannedEnd: c.plannedEnd } })),
+      );
+      await audit(
+        {
+          entityType: 'job',
+          entityId: job.id,
+          action: 'UPDATED',
+          summary:
+            changes.length === 1
+              ? `${job.number}: ${changes[0].name} planned ${day(changes[0].plannedStart)} – ${day(changes[0].plannedEnd)} (was ${changes[0].before})${body.fromTasks ? ', fitted to its tasks' : ''}`
+              : `${job.number}: ${changes.length} phases fitted to their tasks' dates`,
+          before: { phases: changes.map((c) => ({ id: c.id, dates: c.before })) },
+          after: { phases: changes.map((c) => ({ id: c.id, dates: `${day(c.plannedStart)} – ${day(c.plannedEnd)}` })) },
+        },
+        req,
+      );
+    }
+    res.json({ changed: changes.length });
+  }),
+);
+
 planRoutes.delete(
   '/:jobId/tasks/:taskId',
   require_('gops.projects.edit_all'),

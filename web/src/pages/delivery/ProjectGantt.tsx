@@ -87,6 +87,7 @@ export function ProjectGantt({
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<GanttTask | 'new' | null>(null);
+  const [editingPhase, setEditingPhase] = useState<{ item: GanttScopeItem; start: string | null; end: string | null; tasks: number } | null>(null);
 
   // Phases in order, each with its tasks; tasks on no phase at the end.
   const rows = useMemo<Row[]>(() => {
@@ -176,6 +177,30 @@ export function ProjectGantt({
     }
   }
 
+  /** Every phase with dated tasks takes its tasks' span (2026-11-03). */
+  async function fitAllPhases() {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.patch<{ changed: number }>(`/jobs/${jobId}/scope-items/all`, { fromTasks: true });
+      toast('ok', r.changed ? `${r.changed} phase${r.changed === 1 ? '' : 's'} moved to their tasks’ dates` : 'Every phase already matches its tasks');
+      await onChanged();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // A phase whose stored dates differ from its tasks' span — worth a nudge.
+  const offTasks = rows.some((r) => {
+    if (r.kind !== 'phase' || !r.tasks) return false;
+    const own = tasks.filter((t) => t.scopeItemId === r.item.id);
+    const s = own.map((t) => keyOf(t.startDate) ?? keyOf(t.dueDate)).filter((k): k is string => !!k).sort();
+    const e = own.map((t) => keyOf(t.dueDate) ?? keyOf(t.startDate)).filter((k): k is string => !!k).sort();
+    return s.length > 0 && (s[0] !== r.start || e[e.length - 1] !== r.end);
+  });
+
   const wide = axis.days.length;
 
   function Bar({ start, end, pct, tone }: { start: string | null; end: string | null; pct: number | null; tone: string }) {
@@ -214,6 +239,17 @@ export function ProjectGantt({
                 Plan from costing
               </button>
             )}
+          {canEdit && offTasks && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={fitAllPhases}
+              disabled={busy}
+              title="Move every phase to its tasks’ dates — the first task’s start to the last task’s due date"
+            >
+              Fit phases to tasks
+            </button>
+          )}
           {canEdit && (
             <button type="button" className="btn btn-sm" onClick={() => setEditing('new')} disabled={busy}>
               + Add task
@@ -223,8 +259,8 @@ export function ProjectGantt({
       </div>
       <p className="muted del-lede">
         Each scope line is a phase; its tasks sit under it. A bar runs from a task’s start to its due date and fills
-        to its percent complete. Planned dates come from the costing’s scope of work, in working days from the start
-        date; the planned S-curve reads the same dates.
+        to its percent complete. A phase’s planned dates come from the costing’s scope of work, in working days from
+        the start date — click a phase to change them or fit them to its tasks; the planned S-curve reads the same dates.
       </p>
       <ErrorBox error={error} />
 
@@ -294,7 +330,18 @@ export function ProjectGantt({
                   return (
                     <tr key={r.item.id} className="gantt-phase">
                       <th scope="row" className="gantt-name">
-                        {r.item.name}
+                        {canEdit ? (
+                          <button
+                            type="button"
+                            className="gantt-edit"
+                            onClick={() => setEditingPhase({ item: r.item, start: r.start, end: r.end, tasks: r.tasks })}
+                            title="Change this phase’s dates"
+                          >
+                            {r.item.name}
+                          </button>
+                        ) : (
+                          r.item.name
+                        )}
                         {r.tasks === 0 && <span className="faint"> · no tasks</span>}
                       </th>
                       <td className="gantt-date">{r.start ? formatDate(r.start) : <span className="faint">—</span>}</td>
@@ -352,6 +399,19 @@ export function ProjectGantt({
         bar is the percent complete · the red line is today · ◆ a milestone
       </p>
 
+      {editingPhase && (
+        <PhaseEditor
+          key={editingPhase.item.id}
+          jobId={jobId}
+          phase={editingPhase}
+          onClose={() => setEditingPhase(null)}
+          onSaved={async () => {
+            setEditingPhase(null);
+            await onChanged();
+          }}
+        />
+      )}
+
       {editing && (
         // A fresh form (and a fresh Remove question) for each task: without
         // the key, opening task B over task A kept A's values and saved them on B.
@@ -368,6 +428,77 @@ export function ProjectGantt({
         />
       )}
     </div>
+  );
+}
+
+/** A phase's planned dates, edited in place under the chart (2026-11-03). */
+function PhaseEditor({
+  jobId,
+  phase,
+  onClose,
+  onSaved,
+}: {
+  jobId: string;
+  phase: { item: GanttScopeItem; start: string | null; end: string | null; tasks: number };
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [start, setStart] = useState(phase.start ?? '');
+  const [end, setEnd] = useState(phase.end ?? '');
+  const backwards = !!start && !!end && end < start;
+
+  async function send(body: object, message: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.patch(`/jobs/${jobId}/scope-items/${phase.item.id}`, body);
+      toast('ok', message);
+      await onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="gantt-editor" aria-label={`Modify phase ${phase.item.name}`}>
+      <h4 className="card-title">Modify phase — {phase.item.name}</h4>
+      <ErrorBox error={error} />
+      <div className="grid grid-2">
+        <Field label="Planned start">
+          <input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+        </Field>
+        <Field label="Planned finish" error={backwards ? 'It ends before it starts' : null}>
+          <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
+        </Field>
+      </div>
+      <div className="panel-foot">
+        <ModalFoot onCancel={onClose} busy={busy}>
+          {phase.tasks > 0 && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => send({ fromTasks: true }, 'Phase fitted to its tasks')}
+              disabled={busy}
+              title="The first task’s start to the last task’s due date"
+            >
+              Fit to its tasks
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => send({ plannedStart: start || null, plannedEnd: end || null }, 'Phase dates saved')}
+            disabled={busy || backwards}
+          >
+            Save
+          </button>
+        </ModalFoot>
+      </div>
+    </section>
   );
 }
 
