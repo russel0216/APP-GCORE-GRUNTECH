@@ -34,6 +34,7 @@ import { loadPeople } from '../../components/People';
 import { PulloutCard } from '../chain/PulloutSlips';
 import { OrderSpendPanel, type OrderSpend } from '../chain/PurchaseRequisitionEditor';
 import { InvoiceRequestModal, REQUEST_TONES } from '../finance/InvoiceRequests';
+import { useTeams } from '../finance/Receivables';
 import {
   DiscountCalculator,
   ProductCells,
@@ -208,6 +209,7 @@ export function SalesOrders() {
   const [reload, setReload] = useState(0);
 
   const seesAll = can('gops.sales_orders.view_all');
+  const teams = useTeams();
   // Whoever may edit sales orders opens on their own; a reader — finance,
   // releasing what was booked — opens on all of them. A link's ?scope= wins.
   const mayEdit = can('gops.sales_orders.edit_own') || can('gops.sales_orders.edit_all');
@@ -305,6 +307,9 @@ export function SalesOrders() {
         ]
       : []),
     { key: 'dateFrom', toKey: 'dateTo', label: 'Order date', type: 'dateRange' },
+    // The team the order counts under — its quotation's (the Sales Order report's rows open on it).
+    { key: 'teamId', label: 'Team', options: [...teams.map((t) => ({ value: t.id, label: t.code })), { value: 'none', label: 'No team' }] },
+    { key: 'booked', label: 'Booked', options: [{ value: 'yes', label: 'Not cancelled' }] },
     {
       key: 'released',
       label: 'Released',

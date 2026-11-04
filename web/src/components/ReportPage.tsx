@@ -40,8 +40,9 @@ interface Report {
   to: string;
   filterLine?: string;
   cards: { label: string; value: number; money?: boolean; sub?: string }[];
-  series: { title: string; head?: string; columns: ReportColumn[]; rows: { label: string; values: number[] }[] };
-  tables: { title: string; columns: ReportColumn[]; rows: (string | number | null)[][] }[];
+  series: { title: string; head?: string; columns: ReportColumn[]; rows: { label: string; values: number[]; link?: string | null }[] };
+  /** `links`, parallel to `rows`: where each row opens (2026-11-04) — its first cell is the link. */
+  tables: { title: string; columns: ReportColumn[]; rows: (string | number | null)[][]; links?: (string | null)[] }[];
   notes?: string[];
 }
 
@@ -258,8 +259,8 @@ export function ReportPage({
                   </thead>
                   <tbody>
                     {report.series.rows.map((r) => (
-                      <tr key={r.label}>
-                        <td>{r.label}</td>
+                      <tr key={r.label} className={r.link ? 'rep-link-row' : undefined}>
+                        <td>{r.link ? <Link to={r.link}>{r.label}</Link> : r.label}</td>
                         {r.values.map((v, i) => (
                           <td key={i} className={report.series.columns[i]?.align === 'left' ? undefined : 'right mono'}>
                             {i === firstMoney ? (
@@ -300,10 +301,10 @@ export function ReportPage({
                       </thead>
                       <tbody>
                         {t.rows.map((row, n) => (
-                          <tr key={n}>
+                          <tr key={n} className={t.links?.[n] ? 'rep-link-row' : undefined}>
                             {row.map((v, i) => (
                               <td key={i} className={t.columns[i]?.align === 'right' || t.columns[i]?.money ? 'right mono' : undefined}>
-                                {cell(v, t.columns[i]?.money)}
+                                {i === 0 && t.links?.[n] ? <Link to={t.links[n]!}>{cell(v, t.columns[i]?.money)}</Link> : cell(v, t.columns[i]?.money)}
                               </td>
                             ))}
                           </tr>

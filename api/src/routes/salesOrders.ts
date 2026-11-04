@@ -264,6 +264,13 @@ export function salesOrderListWhere(
   if (f.customerId) and.push({ customerId: f.customerId });
   if (f.quotationId) and.push({ quotationId: f.quotationId });
   if (f.ownerId) and.push({ ownerId: f.ownerId });
+  // The team the order counts under — its quotation's (2026-11-04: the Sales
+  // Order report's rows open the list on it), `none` for no team at all.
+  if (f.teamId === 'none') and.push({ quotation: { teamId: null, owner: { OR: [{ employee: null }, { employee: { industryId: null } }] } } });
+  else if (f.teamId) and.push({ quotation: quotationTeamWhere(f.teamId) });
+  // Booked: every order but a cancelled one — what the report counts.
+  if (f.booked === 'yes') and.push({ status: { not: 'CANCELLED' } });
+  else if (f.booked) throw badRequest('Booked is yes (every order but a cancelled one)');
   // The order date is a DATE: UTC-midnight edges of the days named.
   const from = filterDay(f.dateFrom, 'Date from');
   const to = filterDay(f.dateTo, 'Date to');
@@ -500,6 +507,8 @@ salesOrderRoutes.get(
       f.quotationId ? `quotation ${quotation?.number ?? 'not found'}` : null,
       rangeNamed('dated', f.dateFrom, f.dateTo),
       f.released === 'yes' ? 'released' : f.released === 'no' ? 'not yet released' : null,
+      f.teamId === 'none' ? 'no team' : f.teamId ? `team ${(await prisma.industry.findUnique({ where: { id: f.teamId }, select: { code: true } }))?.code ?? 'not found'}` : null,
+      f.booked === 'yes' ? 'booked (not cancelled)' : null,
       scopeNamed(q.scope, team, !me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all')),
       f.ids ? 'the rows selected' : null,
     ]);

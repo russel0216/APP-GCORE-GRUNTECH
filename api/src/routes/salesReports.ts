@@ -8,7 +8,7 @@ import { inBase, rateOf, RATE_SELECT } from '../shared/exchangeRates';
 import { quotationTotals } from '../shared/quotation';
 import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, quotationTeamWhere, salesOrdersReadable } from '../shared/team';
 import { badRequest } from '../http/kit';
-import { Series, byValue, cents, monthsOf, mountReports, num, pct, table, tally, type Report, type ReportContext } from '../shared/reportKit';
+import { Series, byValue, cents, linkTo, monthsOf, mountReports, num, pct, table, tally, type Report, type ReportContext } from '../shared/reportKit';
 import { canSeeOrderCost } from './salesOrders';
 
 /**
@@ -64,6 +64,7 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
       status: true,
       orderDate: true,
       ownerId: true,
+      customerId: true,
       total: true,
       vatAmount: true,
       discountPct: true,
@@ -99,6 +100,7 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
     return {
       o,
       team: team ? team.code : 'No team',
+      teamId: team ? team.id : 'none',
       total: cents(inBase(num(o.total), o.quotation)),
       // Before VAT is the order's stored total less its VAT — what invoicing reads (orderNet).
       net: cents((num(o.total) - num(o.vatAmount)) * rate),
@@ -141,9 +143,33 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
   const shareRows = (m: Map<string, number[]>, top = 15) =>
     byValue(m, 1, top).map(([k, v]) => [k, v[0], cents(v[1]), cents(v[2]), cents(v[3]), pct(v[1], booked)]);
 
-  const byTeam = tally(figures, (x) => x.team, four);
-  const byOwner = tally(figures, (x) => x.o.owner.name, four);
-  const byCustomer = tally(figures, (x) => x.o.customer.name, four);
+  // Keyed by id, named for the row: each row opens the list on the same slice (2026-11-04).
+  const byTeam = tally(figures, (x) => x.teamId, four);
+  const byOwner = tally(figures, (x) => x.o.ownerId, four);
+  const byCustomer = tally(figures, (x) => x.o.customerId, four);
+  const teamName = new Map(figures.map((x) => [x.teamId, x.team]));
+  const ownerName = new Map(figures.map((x) => [x.o.ownerId, x.o.owner.name]));
+  const customerName = new Map(figures.map((x) => [x.o.customerId, x.o.customer.name]));
+  const named = (rows: ReturnType<typeof shareRows>, names: Map<string, string>) => rows.map(([k, ...rest]) => [names.get(String(k)) ?? String(k), ...rest]);
+  const keysOf = (rows: ReturnType<typeof shareRows>) => rows.map((r) => String(r[0]));
+
+  // Every link opens the Sales Orders list on the report's own slice: its
+  // dates, every order the reader may see, the orders it counts (booked —
+  // not cancelled — unless a status narrowed it), and its narrowing.
+  const day = (d: Date) => d.toISOString().slice(0, 10);
+  const listLink = (extra: Record<string, string | null | undefined>) =>
+    linkTo('/g-ops/sales-orders', {
+      dateFrom: day(range.from),
+      dateTo: day(range.to),
+      scope: 'all',
+      ownerId: q.ownerId || null,
+      teamId: q.teamId || null,
+      ...(q.status ? { status: q.status } : { booked: 'yes' }),
+      ...extra,
+    });
+  const teamRows = shareRows(byTeam, 10);
+  const ownerRows = shareRows(byOwner);
+  const customerRows = shareRows(byCustomer);
 
   // A product group's share of each order's net, in pesos (the lines'
   // amounts carry the order's discount pro rata).
@@ -164,9 +190,9 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
   }
 
   const tables = [
-    table('By team', [{ label: 'Team' }, ...shareCols], shareRows(byTeam, 10)),
-    table('By salesperson', [{ label: 'Booked by' }, ...shareCols], shareRows(byOwner)),
-    table('By customer', [{ label: 'Customer' }, ...shareCols], shareRows(byCustomer)),
+    table('By team', [{ label: 'Team' }, ...shareCols], named(teamRows, teamName), keysOf(teamRows).map((k) => listLink({ teamId: k }))),
+    table('By salesperson', [{ label: 'Booked by' }, ...shareCols], named(ownerRows, ownerName), keysOf(ownerRows).map((k) => listLink({ ownerId: k }))),
+    table('By customer', [{ label: 'Customer' }, ...shareCols], named(customerRows, customerName), keysOf(customerRows).map((k) => listLink({ customerId: k }))),
     table(
       'By product group (before VAT)',
       [{ label: 'Group' }, { label: 'Before VAT', money: true }, { label: 'Share %', align: 'right' }],
@@ -176,11 +202,13 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
       'By status',
       [{ label: 'Status' }, { label: 'Orders', align: 'right' }, { label: 'Total', money: true }],
       STATUSES.filter((s) => byStatus.has(s)).map((s) => [statusLabel(s), byStatus.get(s)![0], cents(byStatus.get(s)![1])]),
+      STATUSES.filter((s) => byStatus.has(s)).map((s) => listLink({ status: s, booked: null })),
     ),
     table(
       'Largest orders',
       [{ label: 'Number' }, { label: 'Customer' }, { label: 'Booked by' }, { label: 'Status' }, { label: 'Booked', money: true }, { label: 'Invoiced', money: true }],
       [...figures].sort((a, b) => b.total - a.total).slice(0, 15).map((x) => [x.o.number, x.o.customer.name, x.o.owner.name, statusLabel(x.o.status), x.total, x.invoiced]),
+      [...figures].sort((a, b) => b.total - a.total).slice(0, 15).map((x) => `/g-ops/sales-orders/${x.o.id}`),
     ),
   ];
 
@@ -204,7 +232,22 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
       { label: 'Left to invoice', value: cents(Math.max(0, net - billed)), money: true },
       ...(seenCount ? [{ label: 'Margin', value: margin, money: true, sub: `${pct(margin, marginBase)}% on ${seenCount} order${seenCount === 1 ? '' : 's'}` }] : []),
     ],
-    series: series.done(),
+    // Each month opens the list on its days, clipped to the range.
+    series: (() => {
+      const done = series.done();
+      return {
+        ...done,
+        rows: done.rows.map((r, i) => {
+          const m = months[i];
+          if (!m) return r;
+          const first = `${m.key}-01`;
+          const lastDay = new Date(Date.UTC(Number(m.key.slice(0, 4)), Number(m.key.slice(5, 7)), 0)).toISOString().slice(0, 10);
+          const from = first < day(range.from) ? day(range.from) : first;
+          const to = lastDay > day(range.to) ? day(range.to) : lastDay;
+          return { ...r, link: listLink({ dateFrom: from, dateTo: to }) };
+        }),
+      };
+    })(),
     tables,
     ...(notes.length ? { notes } : {}),
   };

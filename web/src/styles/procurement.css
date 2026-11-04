@@ -776,3 +776,19 @@ a.inv-move:hover .inv-move-what {
   flex-direction: column;
   gap: var(--s-1);
 }
+
+/* A report row that opens its list (2026-11-04): the first cell's link
+   stretches over the whole row, so the row is the click target and the
+   link is the keyboard's. */
+.rep-link-row {
+  position: relative;
+  cursor: pointer;
+}
+.rep-link-row:hover td {
+  background: rgb(var(--tint-rgb) / 0.04);
+}
+.rep-link-row a::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}

@@ -30,6 +30,13 @@ export interface Table {
   title: string;
   columns: Col[];
   rows: Cell[][];
+  /**
+   * Where each row opens (2026-11-04, the owner's call: "make this a
+   * clickable report") — an app path, parallel to `rows`; null where a row
+   * has nowhere to go. The page draws the row's first cell as the link; the
+   * CSV and the paper leave it out.
+   */
+  links?: (string | null)[];
 }
 export interface Report {
   kind: string;
@@ -39,7 +46,7 @@ export interface Report {
   /** The filters that narrowed it, in words — printed under the title. */
   filterLine?: string;
   cards: { label: string; value: number; money?: boolean; sub?: string }[];
-  series: { title: string; head?: string; columns: Col[]; rows: { label: string; values: number[] }[] };
+  series: { title: string; head?: string; columns: Col[]; rows: { label: string; values: number[]; link?: string | null }[] };
   tables: Table[];
   notes?: string[];
 }
@@ -103,7 +110,15 @@ export function tally<T>(rows: T[], keyOf: (r: T) => string, figuresOf: (r: T) =
   return out;
 }
 export const byValue = (m: Map<string, number[]>, col: number, top = 10) => [...m.entries()].sort((a, b) => b[1][col] - a[1][col]).slice(0, top);
-export const table = (title: string, columns: Col[], rows: Cell[][]): Table => ({ title, columns, rows });
+export const table = (title: string, columns: Col[], rows: Cell[][], links?: (string | null)[]): Table => ({ title, columns, rows, ...(links ? { links } : {}) });
+
+/** An app path with its query, the empty values left out. */
+export function linkTo(path: string, params: Record<string, string | null | undefined>): string {
+  const search = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v) search.set(k, v);
+  const q = search.toString();
+  return q ? `${path}?${q}` : path;
+}
 export const pct = (part: number, whole: number) => (whole > 0 ? Math.round((part / whole) * 1000) / 10 : 0);
 
 /** What a report builder is handed: the range of Manila days, the query, and who asked. */

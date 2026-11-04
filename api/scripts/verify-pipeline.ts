@@ -1062,6 +1062,41 @@ async function main() {
         (card('Sales orders') ?? 0) >= 1,
       `${rep.status} ${JSON.stringify(cards)} vs ${JSON.stringify(summary)}`,
     );
+    // A clickable report (2026-11-04): every team, salesperson, customer and
+    // month row opens the Sales Orders list on its slice, and that list counts
+    // exactly the row's orders; a largest order opens the order itself.
+    {
+      type T = { title: string; rows: (string | number | null)[][]; links?: (string | null)[] };
+      const tables = (rep.body.tables ?? []) as T[];
+      const mismatches: string[] = [];
+      let followed = 0;
+      for (const title of ['By team', 'By salesperson', 'By customer']) {
+        const t = tables.find((x) => x.title === title);
+        for (const [n, row] of (t?.rows ?? []).entries()) {
+          const link = t?.links?.[n];
+          if (!link || !link.startsWith('/g-ops/sales-orders?')) {
+            mismatches.push(`${title} row ${n} has no list link`);
+            continue;
+          }
+          const listedSlice = await http(managerToken, 'GET', `/sales-orders?${link.split('?')[1]}&pageSize=1`);
+          followed++;
+          if (listedSlice.body.total !== row[1]) mismatches.push(`${title} ${row[0]}: report ${row[1]}, list ${listedSlice.body.total}`);
+        }
+      }
+      const series = (rep.body.series?.rows ?? []) as { label: string; values: number[]; link?: string }[];
+      for (const r of series) {
+        if (!r.link) { mismatches.push(`month ${r.label} has no link`); continue; }
+        const m = await http(managerToken, 'GET', `/sales-orders?${r.link.split('?')[1]}&pageSize=1`);
+        followed++;
+        if (m.body.total !== r.values[0]) mismatches.push(`month ${r.label}: report ${r.values[0]}, list ${m.body.total}`);
+      }
+      const largest = tables.find((x) => x.title === 'Largest orders');
+      check(
+        'the Sales Order report is clickable: each team, salesperson, customer and month row opens the list on its slice, counting the same orders; a largest order opens itself',
+        followed > 0 && mismatches.length === 0 && !!largest?.links?.length && largest.links.every((l) => /^\/g-ops\/sales-orders\/[a-z0-9]+$/.test(l ?? '')),
+        `${followed} followed — ${mismatches.join('; ')}`,
+      );
+    }
     const csv = await http(managerToken, 'GET', `/sales-reports/sales-orders.csv?from=${day}&to=${day}`);
     const bad = await http(managerToken, 'GET', `/sales-reports/sales-orders?status=NOPE`);
     check(
