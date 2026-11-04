@@ -1239,6 +1239,18 @@ async function main() {
       const company = await api(buyerToken, 'GET', `/inventory?warehouseId=${warehouse.id}`);
       const companyBody = company.body as { summary?: { projectStock?: { lines: number } } };
       check('and the company list counts it on its Project stock card', (companyBody.summary?.projectStock?.lines ?? 0) >= 1, JSON.stringify(companyBody.summary?.projectStock));
+      // The company row of the same item on the same shelf names the project's
+      // goods beside its own (2026-11-04), never in its quantity.
+      const had = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+      if (!had) await prisma.inventoryBalance.create({ data: { itemId: item.id, warehouseId: warehouse.id, quantity: 0 } });
+      const rowList = await api(buyerToken, 'GET', `/inventory?warehouseId=${warehouse.id}&search=${encodeURIComponent(item.code)}`);
+      const companyRow = (rowList.body as { rows?: { item: { id: string }; quantity: number; held?: { kind: string; id: string; quantity: number }[] }[] }).rows?.find((r) => r.item.id === item.id);
+      check(
+        'the company row shows the project\'s goods held on the same shelf, not in its own quantity',
+        !!companyRow && companyRow.held?.some((h) => h.kind === 'project' && h.id === job.id && h.quantity === 4) === true && companyRow.quantity === (had ? Number(had.quantity) : 0),
+        JSON.stringify(companyRow),
+      );
+      if (!had) await prisma.inventoryBalance.deleteMany({ where: { itemId: item.id, warehouseId: warehouse.id, quantity: 0 } });
       // A sales order's own stock (2026-10-21) under the same Stock filter.
       const { receiveOrderStock } = await import('../src/shared/orderStock');
       await prisma.$transaction((tx) =>

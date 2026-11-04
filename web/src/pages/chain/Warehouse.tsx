@@ -695,6 +695,34 @@ function ReceivingRefsModal({
 //  INVENTORY
 // ════════════════════════════════════════════════════════════════════
 
+interface HeldStock {
+  kind: 'project' | 'order';
+  id: string;
+  number: string;
+  quantity: number;
+}
+
+/** "4 pc — GT-PRJ-2026-0007's stock", linking to that stock card. */
+function HeldLines({ s }: { s: StockRow }) {
+  if (!s.held?.length) return null;
+  return (
+    <>
+      {s.held.map((h) => (
+        <Link
+          key={`${h.kind}${h.id}`}
+          className="inv-tile-held"
+          to={`/g-chain/inventory/${s.item.id}?warehouseId=${s.warehouse.id}&${h.kind === 'project' ? 'jobId' : 'salesOrderId'}=${h.id}`}
+        >
+          + {h.quantity} {s.item.unit} — {h.number}'s stock
+        </Link>
+      ))}
+    </>
+  );
+}
+
+/** Nothing of the company's here, but a project or a sales order holds it on this shelf. */
+const heldOnly = (s: StockRow) => s.quantity <= 0 && !!s.held?.length;
+
 interface StockRow {
   id: string;
   quantity: number;
@@ -728,6 +756,8 @@ interface StockRow {
   incoming?: number;
   /** Who has it on loan, on which slip. */
   loans?: { slipId: string; number: string; borrower: string; quantity: number }[];
+  /** The same item on this shelf as a project's or a sales order's own stock — not in the quantity. */
+  held?: HeldStock[];
   warehouse: { id: string; name: string };
   /** Its bin or rack. */
   location: { id: string; code: string; name: string | null } | null;
@@ -980,6 +1010,11 @@ export function Inventory() {
         <span className={`mono${s.needsReorder ? ' proc-short' : ''}`}>
           {s.available} {s.item.unit}
           {s.borrowedQty ? <div className="faint">{s.borrowedQty} on loan</div> : null}
+          {s.held?.length ? (
+            <div>
+              <HeldLines s={s} />
+            </div>
+          ) : null}
         </span>
       ),
     },
@@ -1001,7 +1036,8 @@ export function Inventory() {
     {
       key: 'status',
       label: 'Status',
-      render: (s) => <StatusBadge status={s.state} extra={STOCK_STATE_TONES} label={stateLabel(s.state)} />,
+      render: (s) =>
+        heldOnly(s) ? <StatusBadge status="HELD" extra={{ HELD: 'info' }} label="Held for a project" /> : <StatusBadge status={s.state} extra={STOCK_STATE_TONES} label={stateLabel(s.state)} />,
     },
   ];
 
@@ -1272,8 +1308,18 @@ function InventoryCards({ rows, canEditItems }: { rows: StockRow[]; canEditItems
                 {s.salesOrder && <span className="faint">{s.salesOrder.number}'s own stock</span>}
               </span>
             </Link>
+            {s.held?.length ? (
+              <span className="inv-tile-helds">
+                <span className="inv-tile-label">Project / sales order stock here</span>
+                <HeldLines s={s} />
+              </span>
+            ) : null}
             <span className="inv-tile-foot">
-              <StatusBadge status={s.state} extra={STOCK_STATE_TONES} label={stateLabel(s.state)} />
+              {heldOnly(s) ? (
+                <StatusBadge status="HELD" extra={{ HELD: 'info' }} label="Held for a project" />
+              ) : (
+                <StatusBadge status={s.state} extra={STOCK_STATE_TONES} label={stateLabel(s.state)} />
+              )}
               {canEditItems && (
                 <Link to={`/g-chain/items/${s.item.id}`} className="btn btn-sm btn-icon btn-ghost" aria-label={`Modify item ${s.item.name}`} title="Modify item">
                   <Icon name="pencil" size={16} />

@@ -4704,6 +4704,30 @@ async function orderStockList(me: ResolvedUser, q: ListQuery) {
   };
 }
 
+/**
+ * A page's items held on a shelf as a project's or a sales order's own stock,
+ * keyed `itemId|warehouseId` — shown on the company row, never counted in its
+ * quantity or value (Phase 5: the two never mix).
+ */
+async function heldElsewhere(itemIds: string[]) {
+  const out = new Map<string, { kind: 'project' | 'order'; id: string; number: string; quantity: number }[]>();
+  if (!itemIds.length) return out;
+  const [projects, orders] = await Promise.all([
+    prisma.projectStock.findMany({
+      where: { itemId: { in: itemIds }, quantity: { gt: 0 } },
+      select: { itemId: true, warehouseId: true, quantity: true, job: { select: { id: true, number: true } } },
+    }),
+    prisma.salesOrderStock.findMany({
+      where: { itemId: { in: itemIds }, quantity: { gt: 0 } },
+      select: { itemId: true, warehouseId: true, quantity: true, salesOrder: { select: { id: true, number: true } } },
+    }),
+  ]);
+  const add = (key: string, v: { kind: 'project' | 'order'; id: string; number: string; quantity: number }) => out.set(key, [...(out.get(key) ?? []), v]);
+  for (const p of projects) add(`${p.itemId}|${p.warehouseId}`, { kind: 'project', id: p.job.id, number: p.job.number, quantity: num(p.quantity) });
+  for (const o of orders) add(`${o.itemId}|${o.warehouseId}`, { kind: 'order', id: o.salesOrder.id, number: o.salesOrder.number, quantity: num(o.quantity) });
+  return out;
+}
+
 inventoryRoutes.get(
   '/',
   requireView('gchain', 'inventory'),
@@ -4768,6 +4792,7 @@ inventoryRoutes.get(
     // What the page's cards show (2026-10-25): what is coming and who has it on loan.
     const pageIncoming = await incomingFor(rows.map((r) => r.itemId));
     const pageLoans = await loansFor(rows.filter((r) => Number(r.borrowedQty) > 0).map((r) => ({ itemId: r.itemId, warehouseId: r.warehouseId })));
+    const pageHeld = await heldElsewhere(rows.map((r) => r.itemId));
     const valuation = everything.reduce((s, b) => s.add(b.quantity.mul(b.averageCost)), new Prisma.Decimal(0));
     const states = everything.map((b) => stockState(b, onOrder.has(b.itemId)));
 
@@ -4817,6 +4842,10 @@ inventoryRoutes.get(
             unitPrice: quantity > 0 ? num(r.averageCost) : r.item.standardCost == null ? num(r.averageCost) : num(r.item.standardCost),
             incoming: pageIncoming.get(r.itemId) ?? 0,
             loans: pageLoans.get(`${r.itemId}|${r.warehouseId}`) ?? [],
+            // The same item on the same shelf as a project's or a sales
+            // order's own stock (2026-11-04: the owner's Incoming showed in the
+            // movements but the card read 0 — it was GT-PRJ-…'s stock).
+            held: pageHeld.get(`${r.itemId}|${r.warehouseId}`) ?? [],
             warehouse: r.warehouse,
             location: r.location,
             quantity,
