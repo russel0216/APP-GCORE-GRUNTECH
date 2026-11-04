@@ -681,6 +681,15 @@
   border-right: 1px solid var(--line);
 }
 
+.pm-table .pm-caption {
+  display: block;
+  max-width: 18rem;
+  font-weight: 400;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: normal;
+}
+
 .pm-table thead .pm-screen {
   z-index: 3;
 }

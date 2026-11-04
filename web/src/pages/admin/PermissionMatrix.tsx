@@ -32,7 +32,7 @@ export interface MatrixCatalog {
   modules: {
     key: string;
     label: string;
-    submodules: { key: string; label: string; note?: string; own?: string; actions: { action: string; key: string }[] }[];
+    submodules: { key: string; label: string; note?: string; own?: string; caption?: string; actions: { action: string; key: string }[] }[];
   }[];
 }
 
@@ -43,6 +43,7 @@ interface Screen {
   prefix: string;
   label: string;
   hint?: string;
+  caption?: string;
   actions: string[];
 }
 
@@ -53,6 +54,7 @@ function screensOf(catalog: MatrixCatalog): Screen[] {
       moduleLabel: m.label,
       prefix: `${m.key}.${s.key}`,
       label: s.label,
+      caption: s.caption,
       hint: [s.note, s.own ? `Own here means ${s.own}` : null].filter(Boolean).join(' — ') || undefined,
       actions: s.actions.map((a) => a.action),
     })),
@@ -139,7 +141,7 @@ export function LevelsTable({
 }) {
   const screens = useMemo(() => screensOf(catalog), [catalog]);
   const term = (search ?? '').trim().toLowerCase();
-  const shown = screens.filter((s) => (!moduleKey || s.module === moduleKey) && (!term || s.label.toLowerCase().includes(term)));
+  const shown = screens.filter((s) => (!moduleKey || s.module === moduleKey) && (!term || s.label.toLowerCase().includes(term) || (s.caption ?? '').toLowerCase().includes(term)));
   const modules = [...new Set(shown.map((s) => s.module))];
   return (
     <div className="pm-scroll">
@@ -207,6 +209,7 @@ function ModuleRows({
         <tr key={s.prefix}>
           <th className="pm-screen" scope="row" title={s.hint}>
             {s.label}
+            {s.caption && <span className="pm-caption">{s.caption}</span>}
           </th>
           {roles.map((r) => (
             <td key={r.id}>

@@ -104,6 +104,14 @@ export interface SubmoduleDef {
    */
   hidden?: boolean;
   /**
+   * One short line printed under the screen's name on Admin › Roles' matrix
+   * (2026-11-04: the owner set G-FIN › Budget Requests and still nobody could
+   * raise one — the right is the hidden G-OPS entry's, and the two rows read
+   * alike). A hidden entry with none reads "No menu entry — inside <group>".
+   * Presentational; takes no part in permission keys.
+   */
+  caption?: string;
+  /**
    * What View Own and Edit Own mean on this screen (2026-10-18), shown on
    * Admin › Roles beside the two boxes — "records you added", "your own
    * employee record", "the page itself (it keeps no records of anybody's)".
@@ -163,7 +171,9 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'plans', group: 'Project Management', label: 'Request for Approval', path: '/g-ops/plans', actions: OWNED, phase: 4, hidden: true, note: 'Raised from a project’s Request for Approval tab; decided through the approval engine' },
       { key: 'budget_monitoring', group: 'Project Management', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4, hidden: true },
       { key: 'purchase_requests', group: 'Project Management', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: ['view_own', 'view_team', 'view_all', 'edit_own', 'edit_team', 'edit_all'], phase: 5, hidden: true },
-      { key: 'budget_requests', group: 'Project Management', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED, phase: 4, hidden: true },
+      { key: 'budget_requests', group: 'Project Management', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED, phase: 4, hidden: true,
+        caption: 'Raising a request — Manage Own lets a role raise one',
+        note: 'Raising a budget request: Manage Own here is what puts “+ New budget request” on every register (G-FIN’s too) and on projects, sales orders, quotations and costings. G-FIN › Budget Requests is finance’s window only.' },
       { key: 'progress_billing', group: 'Project Management', label: 'Progress & Billing', path: '/g-ops/progress', actions: OWNED, phase: 4, hidden: true },
       // Aftermarket (Phase 8). The installed base is what turns a finished
       // project into a renewal pipeline — without it nobody can answer "what
@@ -245,7 +255,9 @@ export const REGISTRY: ModuleDef[] = [
       // liquidate. Raised on the project (gops.budget_requests); this is
       // finance's window on every one of them — awaiting release, out with a
       // team, overdue, done.
-      { key: 'budget_requests', group: 'Money out', label: 'Budget Requests', path: '/g-fin/budget-requests', actions: READ, phase: 7, note: 'Every project’s budget requests: approved ones to release, released ones awaiting liquidation. Releasing is the A/P create right.' },
+      { key: 'budget_requests', group: 'Money out', label: 'Budget Requests', path: '/g-fin/budget-requests', actions: READ, phase: 7,
+        caption: 'Finance’s window — to raise one, use G-OPS › Budget Requests',
+        note: 'Every project’s budget requests: approved ones to release, released ones awaiting liquidation. Releasing is the A/P create right. To let a role RAISE one, set G-OPS › Project Management › Budget Requests (raised in projects) › Manage Own.' },
       // The owner's module 5 (2026-10-15): the requests whose cash went out —
       // released, spent, returned — with the actual entry and the refund.
       { key: 'budget_liquidations', group: 'Money out', label: 'Budget Liquidations', path: '/g-fin/budget-liquidations', actions: READ, phase: 7 },

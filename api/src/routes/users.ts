@@ -853,6 +853,7 @@ roleRoutes.get(
           phase: s.phase,
           note: s.note,
           own: s.own,
+          caption: s.caption ?? (s.hidden ? `No menu entry — used inside ${s.group ?? m.label}` : undefined),
           actions: s.actions.map((a) => ({
             action: a,
             label: ACTION_LABELS[a],
