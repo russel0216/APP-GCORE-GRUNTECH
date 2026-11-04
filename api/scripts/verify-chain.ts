@@ -3105,6 +3105,64 @@ async function main() {
         await prisma.purchaseOrder.delete({ where: { id: stalePo.id } });
       }
 
+      // The award LINE BY LINE (2026-11-04, the owner's call: a request is a
+      // bundle bought from several suppliers): the tray to the partial
+      // supplier, the brackets to the full one; a pick on a line a supplier
+      // did not quote is refused; each winner's order takes only its lines.
+      {
+        await api(sheetToken, 'POST', `/canvasses/${sheetId}/reopen`, { reason: 'split the award' });
+        const badPick = await api(sheetToken, 'POST', `/canvasses/${sheetId}/award`, { lines: { [bracketLine.id]: partCol.id } });
+        const split = await api(sheetToken, 'POST', `/canvasses/${sheetId}/award`, { lines: { [trayLine.id]: partCol.id, [bracketLine.id]: fullCol.id } });
+        const view = (await api(sheetToken, 'GET', `/canvasses/${sheetId}`)).body as {
+          award: { winners: { supplierId: string; lineIds: string[]; total: number }[]; total: number; budget: number; savings: number; savingsPct: number; notAwarded: string[] } | null;
+          awards: Record<string, string>;
+          suppliers: { id: string; isSelected: boolean }[];
+        };
+        const a = view.award;
+        check(
+          'a canvass is awarded line by line: each line to one supplier that quoted it, the award\'s figures summed over the winners\' own lines',
+          badPick.status === 400 && /did not quote/.test(String(badPick.body.error)) && split.status === 200 &&
+            !!a && a.winners.length === 2 && a.total === 55_200 && a.budget === 60_000 && a.savings === 4_800 && a.savingsPct === 8 &&
+            a.notAwarded.length === 0 && view.awards[trayLine.id] === partCol.id && view.awards[bracketLine.id] === fullCol.id &&
+            view.suppliers.every((r) => r.isSelected),
+          `${badPick.status} ${String(badPick.body.error)} ${split.status} ${JSON.stringify(a)}`,
+        );
+        const noSupplier = await api(buyerToken, 'GET', `/purchase-orders/draft?canvassId=${sheetId}`);
+        const fullDraft = await api(buyerToken, 'GET', `/purchase-orders/draft?canvassId=${sheetId}&supplierId=${supplier.id}`);
+        const partDraft = await api(buyerToken, 'GET', `/purchase-orders/draft?canvassId=${sheetId}&supplierId=${otherSupplier.id}`);
+        const linesOf = (r: { body: Record<string, unknown> }) => ((r.body.lines as { requestItemId: string; unitPrice: number }[] | undefined) ?? []);
+        check(
+          'an order from a split award names its winner, and takes only that winner\'s lines at its prices',
+          noSupplier.status === 400 && /2 suppliers/.test(String(noSupplier.body.error)) &&
+            fullDraft.status === 200 && linesOf(fullDraft).length === 1 && linesOf(fullDraft)[0].requestItemId === bracketLine.id && linesOf(fullDraft)[0].unitPrice === 140 &&
+            partDraft.status === 200 && linesOf(partDraft).length === 1 && linesOf(partDraft)[0].requestItemId === trayLine.id && linesOf(partDraft)[0].unitPrice === 1_100,
+          `${noSupplier.status} ${String(noSupplier.body.error)} ${fullDraft.status} ${JSON.stringify(linesOf(fullDraft))} ${partDraft.status} ${JSON.stringify(linesOf(partDraft))}`,
+        );
+        const splitPaper = flat((await printed(sheetToken, `/canvasses/${sheetId}/pdf`)).text);
+        check(
+          'the split award prints: each awarded cell marked, and an Award table with each winner and the total awarded',
+          /AWARD\b/.test(splitPaper) && /TOTAL AWARDED/.test(splitPaper) && splitPaper.includes('55,200.00') && /Awarded/.test(splitPaper),
+          splitPaper.slice(-900),
+        );
+        // Reopened and awarded again with the brackets left for later: the
+        // full supplier wins nothing now, so its draft order is cancelled.
+        const draftPo = await prisma.purchaseOrder.create({
+          data: { number: `${TAG}-PO-SPLIT-${Date.now()}`, status: 'DRAFT', kind: 'DIRECT_TO_JOB', requestId: rfqPr.id, jobId: job.id, supplierId: supplier.id, createdById: sheetBuyer.id, notes: `${TAG} split`, items: { create: [{ requestItemId: bracketLine.id, description: 'brackets', quantity: 1, unit: 'pcs', unitPrice: 140, amount: 140 }] } },
+        });
+        await api(sheetToken, 'POST', `/canvasses/${sheetId}/reopen`, { reason: 'leave the brackets' });
+        const partly = await api(sheetToken, 'POST', `/canvasses/${sheetId}/award`, { lines: { [trayLine.id]: partCol.id, [bracketLine.id]: null } });
+        const draftAfter = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: draftPo.id } });
+        const partlyView = (await api(sheetToken, 'GET', `/canvasses/${sheetId}`)).body as { award: { winners: unknown[]; notAwarded: string[] } | null };
+        check(
+          'a line may be left unawarded to buy later; awarded again, a draft order whose supplier no longer wins its lines is cancelled',
+          partly.status === 200 && partly.body.notAwarded === 1 && partlyView.award?.winners.length === 1 &&
+            partlyView.award.notAwarded[0] === bracketLine.id && draftAfter.status === 'CANCELLED',
+          `${partly.status} ${JSON.stringify(partly.body)} ${draftAfter.status}`,
+        );
+        await prisma.auditLog.deleteMany({ where: { entityType: 'purchase_order', entityId: draftPo.id } });
+        await prisma.purchaseOrder.delete({ where: { id: draftPo.id } });
+      }
+
       const sheetCancel = await api(sheetToken, 'POST', `/canvasses/${sheetId}/cancel`, { reason: 'the scope changed' });
       const rfqAfterCancel = await prisma.rfq.findUniqueOrThrow({ where: { id: rfqId } });
       check(

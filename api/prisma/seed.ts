@@ -34,6 +34,7 @@ import { fillBillTerms } from '../src/shared/payables';
 import { renumberProgressDocs } from '../src/shared/progressReport';
 import { repairProjectlessReceipts, repairTypedStockReceipts } from '../src/shared/typedItems';
 import { fillOrderRates, restateForeignReceipts } from '../src/shared/receiptCost';
+import { backfillLineAwards } from '../src/shared/canvassAwards';
 import { backfillLoginMirrors, linkAdminEmployees } from '../src/shared/personMirror';
 import { CHART_DEPARTMENTS, applyOrgChart, grantSupervisorRole } from '../src/shared/orgChart';
 import { applyEmployeeNumbering, clearEmployeeNumbers } from '../src/shared/employeeNumbers';
@@ -1094,6 +1095,10 @@ async function main() {
     const restated = await restateForeignReceipts();
     if (restated.lines) console.log(`  · Restated ${restated.lines} received line(s) of foreign-currency orders in pesos`);
     if (restated.waiting) console.log(`  · ${restated.waiting} received line(s) of foreign-currency orders wait for a rate to PHP (Company Settings › Exchange rates)`);
+    // The canvass award is line by line (2026-11-04): an award made before
+    // marks its winner's quotes — shared/canvassAwards.ts.
+    const lineAwards = await backfillLineAwards();
+    if (lineAwards) console.log(`  · Marked the awarded lines of ${lineAwards} canvass(es) awarded before the award went line by line`);
     const closedIncreases = await closeLegacyBudgetIncreases();
     if (closedIncreases) console.log(`  · Closed ${closedIncreases} budget request(s) approved as budget increases under the old rule`);
     const committedRequests = await syncBudgetRequestCommitments();

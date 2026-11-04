@@ -64,7 +64,7 @@ import {
   overBudgetIsBlocked,
 } from '../shared/inventory';
 import { contentDisposition, paperFileName } from '../shared/paperName';
-import { canvassFigures, MAX_SHEET_SUPPLIERS, type SheetLine } from '../shared/canvassMath';
+import { awardSummary, canvassFigures, MAX_SHEET_SUPPLIERS, type SheetColumn, type SheetLine } from '../shared/canvassMath';
 import { jobCostingIds } from '../shared/costingSets';
 import { salesOrderSpend } from '../shared/orderStock';
 import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
@@ -1809,6 +1809,23 @@ export function figuresOf(canvass: { lineIds: string[] }, items: FigureItem[], s
   );
 }
 
+type AwardSupplier = { id: string; quotes: { requestItemId: string; unitPrice: Prisma.Decimal; awarded?: boolean }[] };
+
+/**
+ * The award on a sheet, line by line (2026-11-04): each line to the supplier
+ * whose quote on it is `awarded`, and the award's figures through
+ * `awardSummary()`. `picks` is lineId → supplier row id.
+ */
+export function awardOf(canvass: { lineIds: string[] }, items: FigureItem[], suppliers: AwardSupplier[]) {
+  const sheet = sheetLinesOf(canvass, items);
+  const onSheet = new Set(sheet.map((i) => i.id));
+  const picks: Record<string, string> = {};
+  for (const s of suppliers) for (const q of s.quotes) if (q.awarded && onSheet.has(q.requestItemId)) picks[q.requestItemId] = s.id;
+  const lines: SheetLine[] = sheet.map((i) => ({ id: i.id, quantity: num(i.quantity), estimatedCost: num(i.estimatedCost), estimatedAmount: num(i.estimatedAmount) }));
+  const columns: SheetColumn[] = suppliers.map((s) => ({ id: s.id, prices: Object.fromEntries(s.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)])) }));
+  return { picks, summary: awardSummary(lines, columns, picks) };
+}
+
 const LIST_INCLUDE = {
   request: {
     select: {
@@ -1823,7 +1840,7 @@ const LIST_INCLUDE = {
   createdBy: { select: { id: true, name: true } },
   suppliers: {
     orderBy: { id: 'asc' },
-    select: { id: true, isSelected: true, supplier: { select: { name: true } }, quotes: { select: { requestItemId: true, unitPrice: true } } },
+    select: { id: true, isSelected: true, supplier: { select: { name: true } }, quotes: { select: { requestItemId: true, unitPrice: true, awarded: true } } },
   },
 } satisfies Prisma.CanvassInclude;
 
@@ -1832,10 +1849,18 @@ type ListedCanvass = Prisma.CanvassGetPayload<{ include: typeof LIST_INCLUDE }>;
 /** A list row: the awarded supplier, else the lowest complete quote, with its saving against the request's estimate. */
 function canvassRow(c: ListedCanvass) {
   const figures = figuresOf(c, c.request.items, c.suppliers);
-  const awarded = c.suppliers.find((s) => s.isSelected);
-  const pickId = awarded?.id ?? figures.lowestCompleteId;
-  const pick = pickId ? figures.columns.find((col) => col.id === pickId) : undefined;
-  const pickName = pickId ? c.suppliers.find((s) => s.id === pickId)?.supplier.name ?? null : null;
+  // The award is line by line (2026-11-04): its winners and its own totals.
+  const award = c.status === 'AWARDED' ? awardOf(c, c.request.items, c.suppliers).summary : null;
+  const winnerNames = award ? award.winners.map((w) => c.suppliers.find((s) => s.id === w.id)?.supplier.name ?? '') : [];
+  const awarded = award && award.winners.length ? { name: winnerNames.join(', ') } : null;
+  const pickId = figures.lowestCompleteId;
+  const lowest = pickId ? figures.columns.find((col) => col.id === pickId) : undefined;
+  const pick = award && award.winners.length
+    ? { total: award.total, savings: award.savings, savingsPct: award.savingsPct, complete: !award.notAwarded.length }
+    : lowest
+      ? { total: lowest.total, savings: lowest.savings, savingsPct: lowest.savingsPct, complete: lowest.complete }
+      : undefined;
+  const pickName = awarded ? awarded.name : pickId ? c.suppliers.find((s) => s.id === pickId)?.supplier.name ?? null : null;
   const { items: _items, ...request } = c.request;
   return {
     id: c.id,
@@ -1848,7 +1873,7 @@ function canvassRow(c: ListedCanvass) {
     createdBy: c.createdBy,
     supplierCount: c.suppliers.length,
     suppliers: c.suppliers.map((s) => s.supplier.name),
-    awarded: awarded?.supplier.name ?? null,
+    awarded: awarded?.name ?? null,
     budget: figures.budget,
     /** The awarded supplier, else the lowest complete quote: what the sheet's saving is read off. */
     pick: pick && pickName ? { name: pickName, total: pick.total, savings: pick.savings, savingsPct: pick.savingsPct, awarded: !!awarded, complete: pick.complete } : null,
@@ -1987,19 +2012,20 @@ function assertCanvassVisible(me: ResolvedUser, canvass: { createdById: string }
   if (!seesAllCanvasses(me) && !visibleOwners(me, 'gchain', 'canvass').includes(canvass.createdById)) throw notFound('Canvass not found');
 }
 
-/** The purchase orders placed on an award: the request's live orders with the winner. */
+/** The purchase orders placed on an award: the request's live orders with any of its winners (several since 2026-11-04). */
 async function ordersOnAward(canvass: { requestId: string; status: CanvassStatus; suppliers: { supplierId: string; isSelected: boolean }[] }) {
-  const winner = canvass.suppliers.find((s) => s.isSelected);
-  if (canvass.status !== 'AWARDED' || !winner) return [];
+  const winners = canvass.suppliers.filter((s) => s.isSelected).map((s) => s.supplierId);
+  if (canvass.status !== 'AWARDED' || !winners.length) return [];
   return prisma.purchaseOrder.findMany({
-    where: { requestId: canvass.requestId, supplierId: winner.supplierId, status: { not: 'CANCELLED' } },
-    select: { id: true, number: true, status: true, createdAt: true },
+    where: { requestId: canvass.requestId, supplierId: { in: winners }, status: { not: 'CANCELLED' } },
+    select: { id: true, number: true, status: true, createdAt: true, supplierId: true },
     orderBy: { createdAt: 'asc' },
   });
 }
 
-function presentCanvass(canvass: LoadedCanvass, me: ResolvedUser, orders: { id: string; number: string; status: string; createdAt: Date }[] = []) {
+function presentCanvass(canvass: LoadedCanvass, me: ResolvedUser, orders: { id: string; number: string; status: string; createdAt: Date; supplierId: string }[] = []) {
   const figures = figuresOf(canvass, canvass.request.items, canvass.suppliers);
+  const award = awardOf(canvass, canvass.request.items, canvass.suppliers);
   const byId = new Map(figures.columns.map((c) => [c.id, c]));
   const lineIds = new Set(sheetLinesOf(canvass, canvass.request.items).map((i) => i.id));
   const suppliers = canvass.suppliers.map((s) => {
@@ -2025,6 +2051,19 @@ function presentCanvass(canvass: LoadedCanvass, me: ResolvedUser, orders: { id: 
     budget: figures.budget,
     lowestSupplierId: figures.lowestCompleteId,
     orders,
+    // The award line by line (2026-11-04): each line's winning row, the
+    // winners' figures and the lines left to buy later; per winner the
+    // orders already raised with it (one order per winning supplier).
+    awards: award.picks,
+    award: canvass.status === 'AWARDED'
+      ? {
+          ...award.summary,
+          winners: award.summary.winners.map((w) => {
+            const row = canvass.suppliers.find((s) => s.id === w.id)!;
+            return { ...w, supplierId: row.supplierId, name: row.supplier.name, orders: orders.filter((o) => o.supplierId === row.supplierId).map((o) => ({ id: o.id, number: o.number, status: o.status })) };
+          }),
+        }
+      : null,
     // The routes' own rules: while OPEN, the notes and the recommendation
     // are the opener's (or edit_all's), the supplier rows and the award
     // edit_all's. An award is the record.
@@ -2182,7 +2221,8 @@ canvassRoutes.post(
         `Purchase order ${placed.map((o) => `${o.number} (${statusLabel(o.status).toLowerCase()})`).join(', ')} stands on this award — pull it back to draft or cancel it first`,
       );
     }
-    const winner = canvass.suppliers.find((s) => s.isSelected);
+    const winnerNames = canvass.suppliers.filter((s) => s.isSelected).map((s) => s.supplier.name).join(', ');
+    const winner = winnerNames ? { supplier: { name: winnerNames } } : null;
     await prisma.$transaction(async (tx) => {
       const claimed = await tx.canvass.updateMany({
         where: { id: canvass.id, status: 'AWARDED' },
@@ -2195,6 +2235,7 @@ canvassRoutes.post(
       });
       if (!claimed.count) throw badRequest(`${canvass.number} changed a moment ago — reload to see it`);
       await tx.canvassSupplier.updateMany({ where: { canvassId: canvass.id }, data: { isSelected: false } });
+      await tx.canvassQuote.updateMany({ where: { canvassSupplier: { canvassId: canvass.id } }, data: { awarded: false } });
       if (canvass.rfqId) await tx.rfq.updateMany({ where: { id: canvass.rfqId, status: 'CLOSED' }, data: { status: 'QUOTED' } });
     });
     await audit(
@@ -2620,74 +2661,123 @@ canvassRoutes.delete(
 );
 
 /**
- * Awarding the canvass marks the winner, records who awarded it and when
- * (AWARDED BY on the sheet), and closes the RFQ it compares; the purchase
- * order is raised from it after, at the awarded prices. A supplier that
- * quoted none of the sheet's lines cannot win; a partial winner can, and
- * the order takes only the lines it quoted. Claimed on OPEN, so two awards
- * cannot both land.
+ * The award is LINE BY LINE (2026-11-04, the owner's call: "the purchase
+ * request is a bundle of materials that can be purchased from different
+ * suppliers"): each line of the sheet goes to ONE supplier that quoted it
+ * (its quote marked `awarded`), and a line may be left unawarded — bought
+ * later, on another canvass. Every supplier winning a line is `isSelected`;
+ * an order is raised per winner, taking only its own lines at its quoted
+ * prices. AWARDED BY and the date are the sheet's, one for the whole award,
+ * and the RFQ it compares closes. Claimed on OPEN, so two awards cannot both
+ * land. A reopened canvass awarded again cancels the DRAFT orders it no
+ * longer stands behind: a supplier that won nothing now, or an order holding
+ * a sheet line that supplier no longer wins.
  */
+async function awardLines(req: Parameters<typeof currentUser>[0], canvassId: string, picks: Record<string, string | null | undefined>) {
+  const me = currentUser(req);
+  const canvass = await prisma.canvass.findUnique({
+    where: { id: canvassId },
+    include: { request: { include: { items: true } }, suppliers: { include: { supplier: { select: { id: true, name: true } }, quotes: true } } },
+  });
+  if (!canvass) throw notFound('Canvass not found');
+  if (canvass.status !== 'OPEN') throw badRequest('This canvass has already been awarded');
+  const sheet = sheetLinesOf(canvass, canvass.request.items);
+  const lineName = (id: string) => {
+    const l = sheet.find((i) => i.id === id);
+    return l ? l.name || l.description : 'that line';
+  };
+  const onSheet = new Set(sheet.map((i) => i.id));
+  // Each pick: a sheet line, a supplier row on this canvass that quoted it.
+  const won = new Map<string, string[]>(); // supplier row id → line ids
+  for (const [lineId, rowId] of Object.entries(picks)) {
+    if (!rowId) continue;
+    if (!onSheet.has(lineId)) throw badRequest('A line awarded is not on this canvass sheet');
+    const row = canvass.suppliers.find((s) => s.id === rowId);
+    if (!row) throw badRequest(`The supplier picked for ${lineName(lineId)} is not on this canvass`);
+    if (!row.quotes.some((qq) => qq.requestItemId === lineId)) throw badRequest(`${row.supplier.name} did not quote ${lineName(lineId)} — award it to a supplier that did`);
+    won.set(rowId, [...(won.get(rowId) ?? []), lineId]);
+  }
+  if (!won.size) throw badRequest('Award at least one line to a supplier');
+  const winners = canvass.suppliers.filter((s) => won.has(s.id));
+  const wonBySupplier = new Map(winners.map((s) => [s.supplierId, new Set(won.get(s.id))]));
+
+  // Draft orders the award no longer stands behind (a reopened canvass).
+  const drafts = await prisma.purchaseOrder.findMany({
+    where: { requestId: canvass.requestId, supplierId: { in: canvass.suppliers.map((s) => s.supplierId) }, status: 'DRAFT' },
+    select: { id: true, number: true, supplierId: true, items: { select: { requestItemId: true } } },
+  });
+  const staleOrders = drafts.filter((o) => {
+    const mine = wonBySupplier.get(o.supplierId);
+    if (!mine) return true;
+    return o.items.some((i) => i.requestItemId && onSheet.has(i.requestItemId) && !mine.has(i.requestItemId));
+  });
+  const names = winners.map((w) => w.supplier.name);
+  const reasonFor = (supplierId: string) =>
+    wonBySupplier.has(supplierId)
+      ? `${canvass.number} was awarded again — this order holds lines its supplier no longer wins`
+      : `${canvass.number} was awarded to ${names.join(', ')} instead`;
+
+  await prisma.$transaction(async (tx) => {
+    const claimed = await tx.canvass.updateMany({
+      where: { id: canvass.id, status: 'OPEN' },
+      data: { status: 'AWARDED', awardedAt: new Date(), awardedById: me.id },
+    });
+    if (!claimed.count) throw badRequest('This canvass was awarded a moment ago — reload to see it');
+    for (const o of staleOrders) {
+      await tx.purchaseOrder.updateMany({ where: { id: o.id, status: 'DRAFT' }, data: { status: 'CANCELLED', cancelReason: reasonFor(o.supplierId) } });
+    }
+    const rowIds = canvass.suppliers.map((s) => s.id);
+    await tx.canvassSupplier.updateMany({ where: { canvassId: canvass.id }, data: { isSelected: false } });
+    await tx.canvassQuote.updateMany({ where: { canvassSupplierId: { in: rowIds } }, data: { awarded: false } });
+    for (const [rowId, lineIds] of won) {
+      await tx.canvassSupplier.update({ where: { id: rowId }, data: { isSelected: true } });
+      await tx.canvassQuote.updateMany({ where: { canvassSupplierId: rowId, requestItemId: { in: lineIds } }, data: { awarded: true } });
+    }
+    if (canvass.rfqId) await tx.rfq.updateMany({ where: { id: canvass.rfqId, status: { in: ['SENT', 'QUOTED'] } }, data: { status: 'CLOSED' } });
+  });
+
+  const left = sheet.length - [...won.values()].reduce((n, l) => n + l.length, 0);
+  const split = winners.map((w) => `${w.supplier.name} (${won.get(w.id)!.length} line${won.get(w.id)!.length === 1 ? '' : 's'})`).join(', ');
+  await audit(
+    {
+      entityType: 'canvass',
+      entityId: canvass.id,
+      action: 'APPROVED',
+      summary: `${canvass.number} awarded to ${split}${left ? ` — ${left} line${left === 1 ? '' : 's'} not awarded` : ''}`,
+      after: { awards: Object.fromEntries([...won].flatMap(([rowId, lineIds]) => lineIds.map((l) => [l, canvass.suppliers.find((s) => s.id === rowId)!.supplier.name]))) },
+    },
+    req,
+  );
+  for (const o of staleOrders) {
+    await audit({ entityType: 'purchase_order', entityId: o.id, action: 'CANCELLED', summary: `${o.number} cancelled — ${reasonFor(o.supplierId)}` }, req);
+  }
+  return { ok: true, supplier: names.join(', '), suppliers: names, notAwarded: left, cancelledOrders: staleOrders.map((o) => o.number) };
+}
+
+/** Awards line by line: `{ lines: { <request line id>: <supplier row id> | null } }`. */
+canvassRoutes.post(
+  '/:id/award',
+  require_('gchain.canvass.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(z.object({ lines: z.record(z.string(), z.string().nullable()) }), req.body);
+    res.json(await awardLines(req, req.params.id, body.lines));
+  }),
+);
+
+/** Awards every line a supplier quoted to it — the whole sheet to one supplier, as before 2026-11-04. */
 canvassRoutes.post(
   '/:id/award/:supplierRowId',
   require_('gchain.canvass.edit_all'),
   handler(async (req, res) => {
-    const me = currentUser(req);
     const row = await prisma.canvassSupplier.findFirst({
       where: { id: req.params.supplierRowId, canvassId: req.params.id },
-      include: { supplier: true, quotes: true, canvass: { include: { request: { include: { items: true } } } } },
+      include: { quotes: { select: { requestItemId: true } }, canvass: { select: { lineIds: true } } },
     });
     if (!row) throw notFound('Supplier not on this canvass');
-    if (row.canvass.status !== 'OPEN') throw badRequest('This canvass has already been awarded');
-    const onSheet = new Set(sheetLinesOf(row.canvass, row.canvass.request.items).map((i) => i.id));
-    if (!row.quotes.some((qq) => onSheet.has(qq.requestItemId))) throw badRequest('That supplier has not quoted anything');
-    // A reopened canvass awarded to ANOTHER supplier: the draft order raised
-    // on the old award goes (2026-10-20) — nothing was sent on it.
-    const others = await prisma.canvassSupplier.findMany({ where: { canvassId: row.canvassId, supplierId: { not: row.supplierId } }, select: { supplierId: true } });
-    const staleOrders = others.length
-      ? await prisma.purchaseOrder.findMany({
-          where: { requestId: row.canvass.requestId, supplierId: { in: others.map((o) => o.supplierId) }, status: 'DRAFT' },
-          select: { id: true, number: true },
-        })
-      : [];
-
-    await prisma.$transaction(async (tx) => {
-      const claimed = await tx.canvass.updateMany({
-        where: { id: row.canvassId, status: 'OPEN' },
-        data: { status: 'AWARDED', awardedAt: new Date(), awardedById: me.id },
-      });
-      if (!claimed.count) throw badRequest('This canvass was awarded a moment ago — reload to see it');
-      for (const o of staleOrders) {
-        await tx.purchaseOrder.updateMany({
-          where: { id: o.id, status: 'DRAFT' },
-          data: { status: 'CANCELLED', cancelReason: `${row.canvass.number} was awarded to ${row.supplier.name} instead` },
-        });
-      }
-      await tx.canvassSupplier.updateMany({ where: { canvassId: row.canvassId }, data: { isSelected: false } });
-      await tx.canvassSupplier.update({ where: { id: row.id }, data: { isSelected: true } });
-      if (row.canvass.rfqId) await tx.rfq.updateMany({ where: { id: row.canvass.rfqId, status: { in: ['SENT', 'QUOTED'] } }, data: { status: 'CLOSED' } });
-    });
-
-    await audit(
-      {
-        entityType: 'canvass',
-        entityId: req.params.id,
-        action: 'APPROVED',
-        summary: `${row.canvass.number} awarded to ${row.supplier.name}`,
-      },
-      req,
-    );
-    for (const o of staleOrders) {
-      await audit(
-        {
-          entityType: 'purchase_order',
-          entityId: o.id,
-          action: 'CANCELLED',
-          summary: `${o.number} cancelled — ${row.canvass.number} was awarded to ${row.supplier.name} instead`,
-        },
-        req,
-      );
-    }
-    res.json({ ok: true, supplier: row.supplier.name, cancelledOrders: staleOrders.map((o) => o.number) });
+    const sheet = new Set(row.canvass.lineIds);
+    const quoted = row.quotes.filter((qq) => !sheet.size || sheet.has(qq.requestItemId));
+    if (!quoted.length) throw badRequest('That supplier has not quoted anything');
+    res.json(await awardLines(req, req.params.id, Object.fromEntries(quoted.map((qq) => [qq.requestItemId, row.id]))));
   }),
 );
 
@@ -2753,7 +2843,9 @@ canvassRoutes.get(
             money(l.estimatedAmount),
             ...chunk.flatMap((s): PdfCell[] => {
               const q = s.quotes.find((qq) => qq.requestItemId === l.id);
-              return q ? [money(q.unitPrice), money(s.amounts[l.id] ?? 0)] : ['—', 'not quoted'];
+              if (!q) return ['—', 'not quoted'];
+              // The line's winner (2026-11-04): the amount in bold, "Awarded" under it.
+              return q.awarded ? [money(q.unitPrice), { title: money(s.amounts[l.id] ?? 0), body: 'Awarded' }] : [money(q.unitPrice), money(s.amounts[l.id] ?? 0)];
             }),
           ]),
           // Each supplier's figures take its two columns: the count of lines
@@ -2784,6 +2876,34 @@ canvassRoutes.get(
       });
     });
 
+    // The award, line by line: each winner's lines, total and saving, and the lines left to buy later.
+    if (view.award && view.award.winners.length) {
+      const a = view.award;
+      const lineLabel = (id: string) => {
+        const l = lines.find((x) => x.id === id);
+        return l ? [l.partNumber, l.name || l.description].filter(Boolean).join(' — ') : '';
+      };
+      sections.push({
+        kind: 'table',
+        title: 'Award',
+        head: ['Supplier', 'Lines awarded', `Reference budget (${currency})`, `Awarded (${currency})`, `Savings (${currency})`, 'Savings %'],
+        align: ['left', 'left', 'right', 'right', 'right', 'right'],
+        widths: [150, 300, 90, 90, 90, 60],
+        rows: [
+          ...a.winners.map((w): PdfCell[] => [
+            { title: w.name },
+            w.lineIds.map(lineLabel).join('\n'),
+            money(w.budget),
+            money(w.total),
+            money(w.savings),
+            pct(w.savingsPct),
+          ]),
+          [{ title: 'TOTAL AWARDED' }, `${a.winners.length} supplier${a.winners.length === 1 ? '' : 's'}`, { title: money(a.budget) }, { title: money(a.total) }, { title: money(a.savings) }, { title: pct(a.savingsPct) }],
+          ...(a.notAwarded.length ? [[{ title: 'Not awarded' }, a.notAwarded.map(lineLabel).join('\n'), '', '', '', ''] as PdfCell[]] : []),
+        ],
+      });
+    }
+
     const recommended = view.suppliers.find((s) => s.id === view.recommendedRowId);
     const remarks = [
       recommended && !recommended.isSelected ? `Recommended: ${recommended.supplier.name}.` : null,
@@ -2794,7 +2914,9 @@ canvassRoutes.get(
       sections.push({
         kind: 'text',
         title: 'Purchase order',
-        body: orders.map((o) => `${o.number} — raised at the awarded prices (${statusLabel(o.status).toLowerCase()})`).join('\n'),
+        body: orders
+          .map((o) => `${o.number} — ${view.suppliers.find((x) => x.supplierId === o.supplierId)?.supplier.name ?? ''}, raised at the awarded prices (${statusLabel(o.status).toLowerCase()})`)
+          .join('\n'),
       });
     }
 
@@ -3237,7 +3359,8 @@ purchaseOrderRoutes.get(
   handler(async (req, res) => {
     const requestId = req.query.requestId ? String(req.query.requestId) : null;
     const canvassId = req.query.canvassId ? String(req.query.canvassId) : null;
-    const source = await orderSource(requestId, canvassId);
+    const supplierId = req.query.supplierId ? String(req.query.supplierId) : null;
+    const source = await orderSource(requestId, canvassId, supplierId);
     const pr = source.pr;
     if (pr && !source.lines.length) throw badRequest('Everything on that request has already been ordered');
     const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
@@ -3474,7 +3597,7 @@ interface OrderLine {
  * request's estimates otherwise. ONE rule for `POST /` and the page's
  * `GET /draft`, so the page shows exactly what a save would write.
  */
-async function orderSource(requestId: string | null | undefined, canvassId: string | null | undefined) {
+async function orderSource(requestId: string | null | undefined, canvassId: string | null | undefined, supplierId?: string | null) {
   if (canvassId) {
     const canvass = await prisma.canvass.findUnique({
       where: { id: canvassId },
@@ -3485,9 +3608,19 @@ async function orderSource(requestId: string | null | undefined, canvassId: stri
     });
     if (!canvass) throw notFound('Canvass not found');
     if (canvass.status !== 'AWARDED') throw badRequest('Award the canvass before raising the order');
-    const winner = canvass.suppliers[0];
-    if (!winner) throw badRequest('That canvass has no awarded supplier');
-    const priced = new Map(winner.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)]));
+    // Several suppliers may win lines (2026-11-04): the order is one winner's.
+    if (!canvass.suppliers.length) throw badRequest('That canvass has no awarded supplier');
+    const winner = supplierId ? canvass.suppliers.find((s) => s.supplierId === supplierId) : canvass.suppliers.length === 1 ? canvass.suppliers[0] : null;
+    if (!winner) {
+      throw badRequest(
+        supplierId
+          ? 'That supplier won no line of the canvass'
+          : `${canvass.number} was awarded to ${canvass.suppliers.length} suppliers — raise an order for each from the canvass`,
+      );
+    }
+    // Its own lines: the quotes marked awarded (all it quoted on an award older than the line awards).
+    const mine = winner.quotes.some((qq) => qq.awarded) ? winner.quotes.filter((qq) => qq.awarded) : winner.quotes;
+    const priced = new Map(mine.map((qq) => [qq.requestItemId, num(qq.unitPrice)]));
     const pr = canvass.request;
     const lines: OrderLine[] = pr.items
       .filter((i) => priced.has(i.id))
@@ -3622,7 +3755,7 @@ purchaseOrderRoutes.post(
     const body = parseBody(poSchema.extend({ lines: z.array(poLineSchema).max(500).optional() }), req.body);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
 
-    const source = await orderSource(body.requestId, body.canvassId);
+    const source = await orderSource(body.requestId, body.canvassId, body.canvassId ? body.supplierId : null);
     const pr = source.pr;
     if (source.supplier && source.supplier.id !== body.supplierId) {
       throw badRequest('The order supplier does not match the awarded supplier');

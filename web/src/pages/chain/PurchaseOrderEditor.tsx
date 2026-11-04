@@ -195,6 +195,8 @@ export function PurchaseOrderEditor() {
   const editing = Boolean(id);
   const fromRequest = params.get('fromRequest');
   const fromCanvass = params.get('fromCanvass');
+  // A canvass awarded line by line (2026-11-04): the order is one winner's.
+  const canvassSupplier = params.get('supplier');
 
   const [existing, setExisting] = useState<ExistingPo | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -286,7 +288,7 @@ export function PurchaseOrderEditor() {
         } else {
           const ship = await api.get<{ name: string; address: string }>('/purchase-orders/ship-to').catch(() => ({ name: '', address: '' }));
           const d = await api.get<Draft>(
-            `/purchase-orders/draft${qs({ requestId: fromRequest ?? '', canvassId: fromCanvass ?? '' })}`,
+            `/purchase-orders/draft${qs({ requestId: fromRequest ?? '', canvassId: fromCanvass ?? '', supplierId: fromCanvass ? (canvassSupplier ?? '') : '' })}`,
           );
           if (!live) return;
           setDraft(d);
@@ -319,7 +321,7 @@ export function PurchaseOrderEditor() {
     };
     // Loaded once per page; from then on the header and lines are the page's.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, fromRequest, fromCanvass]);
+  }, [id, fromRequest, fromCanvass, canvassSupplier]);
 
   const request = existing?.request ?? draft?.request ?? null;
   // Raised with no request, the buyer may name the sales order it is for.

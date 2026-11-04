@@ -2941,7 +2941,8 @@ model CanvassSupplier {
   supplierId String
   supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
 
-  /// Set when this supplier wins the canvass. Only one per canvass.
+  /// Set while this supplier wins at least one line of the award (its
+  /// quotes' `awarded`); several may be, since 2026-11-04.
   isSelected   Boolean @default(false)
   leadTimeDays Int?
   terms        String?
@@ -2969,6 +2970,11 @@ model CanvassQuote {
 
   unitPrice Decimal @db.Decimal(18, 2)
   remarks   String?
+  /// The line is awarded to this supplier (2026-11-04, the owner's call: a
+  /// request is a bundle bought from several suppliers — the award is per
+  /// line, one supplier each). Its supplier row is `isSelected` while it
+  /// wins any line.
+  awarded   Boolean @default(false)
 
   @@unique([canvassSupplierId, requestItemId])
 }

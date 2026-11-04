@@ -93,3 +93,79 @@ export function canvassFigures(lines: SheetLine[], columns: SheetColumn[]): Shee
 
 /** At most six suppliers on one sheet: the paper sets three to a table, two tables at most. */
 export const MAX_SHEET_SUPPLIERS = 6;
+
+/**
+ * The award, line by line (2026-11-04, the owner's call: "a purchase request
+ * is a bundle of materials bought from different suppliers"). `picks` gives
+ * each request line the column that wins it (missing or null: not awarded —
+ * bought later). A winner's figures are taken over ITS lines only: its total
+ * at its own prices, the reference budget of those lines, the saving; the
+ * award's figures are their sums. A pick on a column that did not quote the
+ * line counts for nothing (the route refuses it before).
+ */
+export interface AwardWinner {
+  id: string;
+  lineIds: string[];
+  total: number;
+  budget: number;
+  savings: number;
+  savingsPct: number | null;
+}
+
+export interface AwardSummary {
+  winners: AwardWinner[];
+  total: number;
+  budget: number;
+  savings: number;
+  savingsPct: number | null;
+  /** The lines no supplier was awarded, in the sheet's order. */
+  notAwarded: string[];
+}
+
+export function awardSummary(lines: SheetLine[], columns: SheetColumn[], picks: Record<string, string | null | undefined>): AwardSummary {
+  const by = new Map<string, { lineIds: string[]; total: number; budget: number }>();
+  const notAwarded: string[] = [];
+  let total = 0;
+  let budget = 0;
+  for (const l of lines) {
+    const col = columns.find((c) => c.id === picks[l.id]);
+    const price = col?.prices[l.id];
+    if (!col || price === undefined || price === null || !Number.isFinite(price)) {
+      notAwarded.push(l.id);
+      continue;
+    }
+    const amount = lineAmountCents(l.quantity, price);
+    const b = toCents(l.estimatedAmount);
+    const w = by.get(col.id) ?? { lineIds: [], total: 0, budget: 0 };
+    w.lineIds.push(l.id);
+    w.total += amount;
+    w.budget += b;
+    by.set(col.id, w);
+    total += amount;
+    budget += b;
+  }
+  const pctOf = (save: number, base: number) => (base ? Math.round((save / base) * 10_000) / 100 : null);
+  const winners = columns
+    .filter((c) => by.has(c.id))
+    .map((c) => {
+      const w = by.get(c.id)!;
+      return { id: c.id, lineIds: w.lineIds, total: w.total / 100, budget: w.budget / 100, savings: (w.budget - w.total) / 100, savingsPct: pctOf(w.budget - w.total, w.budget) };
+    });
+  return { winners, total: total / 100, budget: budget / 100, savings: (budget - total) / 100, savingsPct: pctOf(budget - total, budget), notAwarded };
+}
+
+/** Each line to the column with the lowest price above zero (the first on a tie); a line nobody priced is left out. */
+export function lowestPerLine(lines: SheetLine[], columns: SheetColumn[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const l of lines) {
+    let best: { id: string; cents: number } | null = null;
+    for (const c of columns) {
+      const price = c.prices[l.id];
+      if (price === undefined || price === null || !Number.isFinite(price) || price <= 0) continue;
+      const v = toCents(price);
+      if (!best || v < best.cents) best = { id: c.id, cents: v };
+    }
+    if (best) out[l.id] = best.id;
+  }
+  return out;
+}

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -9,6 +9,7 @@ import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { NumberInput } from '../../components/NumberInput';
 import { SupplierPicker, type SupplierRef } from '../../components/SupplierPicker';
+import { awardSummary, lowestPerLine, type SheetColumn, type SheetLine } from '../../lib/canvassMath';
 
 /**
  * The canvass is the COMPARISON SHEET (2026-10-14, the owner's sample
@@ -277,6 +278,7 @@ export function Canvasses() {
 
 interface SheetSupplier {
   id: string;
+  supplierId: string;
   isSelected: boolean;
   leadTimeDays: number | null;
   terms: string | null;
@@ -292,7 +294,17 @@ interface SheetSupplier {
   savings: number;
   savingsPct: number | null;
   supplier: { id: string; code: string; name: string; paymentTerms: string | null; phone: string | null; email: string | null };
-  quotes: { id: string; requestItemId: string; unitPrice: number }[];
+  quotes: { id: string; requestItemId: string; unitPrice: number; awarded: boolean }[];
+}
+
+/** The award line by line (2026-11-04): each winner's lines and figures, and the orders raised with it. */
+interface AwardData {
+  winners: { id: string; supplierId: string; name: string; lineIds: string[]; total: number; budget: number; savings: number; savingsPct: number | null; orders: { id: string; number: string; status: string }[] }[];
+  total: number;
+  budget: number;
+  savings: number;
+  savingsPct: number | null;
+  notAwarded: string[];
 }
 
 interface CanvassDetailData {
@@ -316,7 +328,10 @@ interface CanvassDetailData {
   createdBy: { id: string; name: string };
   awardedBy: { id: string; name: string } | null;
   rfq: { id: string; number: string; status: string } | null;
-  orders: { id: string; number: string; status: string }[];
+  orders: { id: string; number: string; status: string; supplierId: string }[];
+  /** Each line's winning supplier row (request line id → row id). */
+  awards: Record<string, string>;
+  award: AwardData | null;
   request: {
     id: string;
     number: string;
@@ -355,6 +370,8 @@ export function CanvassDetail() {
   const [adding, setAdding] = useState(false);
   const [modifying, setModifying] = useState(false);
   const [editingRow, setEditingRow] = useState<SheetSupplier | null>(null);
+  // The award being set on an open sheet: request line id → supplier row id ('' = not awarded).
+  const [picks, setPicks] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -372,14 +389,42 @@ export function CanvassDetail() {
     void load();
   }, [load]);
 
+  // An open sheet starts its award on the recommended supplier's lines, else on nothing.
+  const pickKey = canvass ? `${canvass.id}:${canvass.status}:${canvass.recommendedRowId ?? ''}:${canvass.suppliers.map((x) => `${x.id}/${x.quotes.length}`).join(',')}` : '';
+  useEffect(() => {
+    if (!canvass) return;
+    if (canvass.status !== 'OPEN') {
+      setPicks(canvass.awards ?? {});
+      return;
+    }
+    const rec = canvass.suppliers.find((x) => x.id === canvass.recommendedRowId);
+    setPicks(rec ? Object.fromEntries(rec.quotes.map((q) => [q.requestItemId, rec.id])) : {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickKey]);
+
+  const sheetLines: SheetLine[] = useMemo(
+    () => (canvass?.request.items ?? []).map((l) => ({ id: l.id, quantity: l.quantity, estimatedCost: l.estimatedCost, estimatedAmount: l.estimatedAmount })),
+    [canvass],
+  );
+  const columns: SheetColumn[] = useMemo(
+    () => (canvass?.suppliers ?? []).map((x) => ({ id: x.id, prices: Object.fromEntries(x.quotes.map((q) => [q.requestItemId, q.unitPrice])) })),
+    [canvass],
+  );
+  const preview = useMemo(() => awardSummary(sheetLines, columns, picks), [sheetLines, columns, picks]);
+
   if (loading) return <Loading />;
   if (!canvass) return <ErrorBox error={error ?? new Error('Canvass not found')} />;
 
   /** Asked in the confirm bar, which shows a refusal — so these throw rather than catching. */
-  async function award(rowId: string) {
+  async function award() {
     if (!canvass) return;
-    const res = await api.post<{ supplier: string }>(`/canvasses/${canvass.id}/award/${rowId}`);
-    toast('ok', `Awarded to ${res.supplier}`);
+    const res = await api.post<{ supplier: string; notAwarded: number; cancelledOrders: string[] }>(`/canvasses/${canvass.id}/award`, {
+      lines: Object.fromEntries(canvass.request.items.map((l) => [l.id, picks[l.id] || null])),
+    });
+    toast(
+      'ok',
+      `Awarded to ${res.supplier}${res.notAwarded ? ` — ${res.notAwarded} line${res.notAwarded === 1 ? '' : 's'} not awarded` : ''}${res.cancelledOrders.length ? ` · cancelled ${res.cancelledOrders.join(', ')}` : ''}`,
+    );
     await load();
   }
   async function recommend(rowId: string | null) {
@@ -411,11 +456,32 @@ export function CanvassDetail() {
   }
 
   const lines = canvass.request.items;
-  const winner = canvass.suppliers.find((s) => s.isSelected);
   const recommended = canvass.suppliers.find((s) => s.id === canvass.recommendedRowId);
   const lowest = canvass.suppliers.find((s) => s.id === canvass.lowestSupplierId);
   const mayEditRows = canvass.canEditSuppliers;
-  const raiseOrder = winner && !canvass.orders.length && can('gchain.purchase_orders.create');
+  const awardData = canvass.award;
+  const winnerNames = awardData?.winners.map((w) => w.name) ?? [];
+  // One order per winning supplier: those still without a live order.
+  const mayOrder = can('gchain.purchase_orders.create');
+  const toOrder = mayOrder ? (awardData?.winners ?? []).filter((w) => !w.orders.length) : [];
+  const orderPath = (supplierId: string) => `/g-chain/purchase-orders/new?fromCanvass=${canvass.id}&supplier=${supplierId}`;
+  const picking = canvass.canAward;
+  const rowName = (rowId: string) => canvass.suppliers.find((x) => x.id === rowId)?.supplier.name ?? '';
+  const lineLabel = (id: string) => {
+    const l = lines.find((x) => x.id === id);
+    return l ? titleOf(l) : '';
+  };
+  const awardBody = () =>
+    [
+      preview.winners.map((w) => `${rowName(w.id)}: ${w.lineIds.length} line${w.lineIds.length === 1 ? '' : 's'}, ${formatMoney(w.total)}`).join(' · '),
+      `Awarded total ${formatMoney(preview.total)} (${pctText(preview.savingsPct)} under the reference budget on those lines).`,
+      preview.notAwarded.length
+        ? `Not awarded, left to buy later: ${preview.notAwarded.map(lineLabel).join(', ')}.`
+        : null,
+      'The RFQ closes; an order is raised for each supplier with only its own lines.',
+    ]
+      .filter(Boolean)
+      .join(' ');
 
   const addSupplierButton =
     mayEditRows && canvass.suppliers.length < 6 ? (
@@ -432,8 +498,8 @@ export function CanvassDetail() {
         title={canvass.request.purpose}
         status={canvass.status}
         statusExtra={CANVASS_TONES}
-        amount={formatMoney(winner ? winner.total : canvass.budget)}
-        amountLabel={winner ? 'Awarded total' : 'Reference budget'}
+        amount={formatMoney(awardData && awardData.winners.length ? awardData.total : canvass.budget)}
+        amountLabel={awardData && awardData.winners.length ? 'Awarded total' : 'Reference budget'}
         meta={
           <>
             For <Link to={`/g-chain/purchase-requests/${canvass.request.id}`}>{canvass.request.number}</Link>
@@ -453,30 +519,32 @@ export function CanvassDetail() {
               </>
             )}{' '}
             · canvassed by {canvass.createdBy.name} on {formatDate(canvass.createdAt)}
-            {winner && canvass.awardedBy && canvass.awardedAt
-              ? ` · awarded to ${winner.supplier.name} by ${canvass.awardedBy.name} on ${formatDate(canvass.awardedAt)}`
+            {winnerNames.length && canvass.awardedBy && canvass.awardedAt
+              ? ` · awarded to ${winnerNames.join(', ')} by ${canvass.awardedBy.name} on ${formatDate(canvass.awardedAt)}`
               : ''}
           </>
         }
         actions={
-          raiseOrder ? (
-            <button className="btn btn-primary" onClick={() => navigate(`/g-chain/purchase-orders/new?fromCanvass=${canvass.id}`)}>
-              Raise order
+          toOrder.length === 1 ? (
+            <button className="btn btn-primary" onClick={() => navigate(orderPath(toOrder[0].supplierId))}>
+              Raise order — {toOrder[0].name}
             </button>
-          ) : canvass.canAward && recommended ? (
+          ) : picking ? (
             <button
               className="btn btn-primary"
+              disabled={!preview.winners.length}
+              title={preview.winners.length ? undefined : 'Pick a supplier for at least one line'}
               onClick={() =>
                 confirm.ask({
-                  title: `Award ${canvass.number} to ${recommended.supplier.name}?`,
-                  body: `${recommended.complete ? 'Their quote' : 'Their quote, on the lines they quoted,'} totals ${formatMoney(recommended.total)}. The RFQ closes and the purchase order is raised from the award.`,
+                  title: `Award ${canvass.number}?`,
+                  body: awardBody(),
                   confirmLabel: 'Award',
                   tone: 'primary',
-                  onConfirm: () => award(recommended.id),
+                  onConfirm: award,
                 })
               }
             >
-              Award to {recommended.supplier.name}
+              Award{preview.winners.length > 1 ? ` to ${preview.winners.length} suppliers` : preview.winners.length ? ` to ${rowName(preview.winners[0].id)}` : ''}
             </button>
           ) : null
         }
@@ -499,7 +567,7 @@ export function CanvassDetail() {
             confirm: {
               title: `Reopen ${canvass.number}?`,
               body:
-                'The award is withdrawn so the prices, the recommendation and the award can change. The draft order stays: awarded again to the same supplier it carries on; awarded to another, it is cancelled.',
+                'The award is withdrawn so the prices, the recommendation and the award can change. The draft orders stay: a supplier awarded the same lines again carries on with its order; an order holding lines its supplier no longer wins is cancelled.',
               confirmLabel: 'Reopen',
               tone: 'primary',
               reason: 'required',
@@ -567,6 +635,10 @@ export function CanvassDetail() {
                     <div>Reference budget</div>
                     <div className="faint cvs-group-sub">approved PR estimate</div>
                   </th>
+                  <th className="cvs-group">
+                    <div>Award</div>
+                    <div className="faint cvs-group-sub">one supplier a line</div>
+                  </th>
                   {canvass.suppliers.map((s) => (
                     <th key={s.id} colSpan={2} className={`cvs-group${s.isSelected ? ' cvs-awarded' : ''}`}>
                       <div>
@@ -595,6 +667,7 @@ export function CanvassDetail() {
                   <th className="right">Qty</th>
                   <th className="right">Unit cost</th>
                   <th className="right">Amount</th>
+                  <th className="cvs-award">Awarded to</th>
                   {canvass.suppliers.map((s) => (
                     <Fragment key={s.id}>
                       <th className={`right${s.isSelected ? ' cvs-awarded' : ''}`}>Unit cost</th>
@@ -619,9 +692,34 @@ export function CanvassDetail() {
                       <td className="right mono">{l.quantity}</td>
                       <td className="right mono faint">{formatMoney(l.estimatedCost)}</td>
                       <td className="right mono faint">{formatMoney(l.estimatedAmount)}</td>
+                      <td className="cvs-award">
+                        {picking ? (
+                          <select
+                            aria-label={`Award ${titleOf(l)} to`}
+                            value={picks[l.id] ?? ''}
+                            onChange={(e) => setPicks((p) => ({ ...p, [l.id]: e.target.value }))}
+                          >
+                            <option value="">— not awarded —</option>
+                            {canvass.suppliers
+                              .filter((x) => x.quotes.some((q) => q.requestItemId === l.id))
+                              .map((x) => (
+                                <option key={x.id} value={x.id}>
+                                  {x.supplier.name}
+                                </option>
+                              ))}
+                          </select>
+                        ) : canvass.awards?.[l.id] ? (
+                          <strong>{rowName(canvass.awards[l.id])}</strong>
+                        ) : canvass.status === 'AWARDED' ? (
+                          <span className="faint">not awarded</span>
+                        ) : (
+                          <span className="faint">—</span>
+                        )}
+                      </td>
                       {canvass.suppliers.map((s, i) => {
                         const price = prices[i];
-                        const tint = s.isSelected ? ' cvs-awarded' : '';
+                        // The line's winner — picked on an open sheet, awarded on a decided one.
+                        const tint = (picking ? picks[l.id] : canvass.awards?.[l.id]) === s.id ? ' cvs-awarded' : '';
                         return price === undefined ? (
                           <Fragment key={s.id}>
                             <td className={`right faint${tint}`}>—</td>
@@ -649,6 +747,7 @@ export function CanvassDetail() {
                   <td className="right mono">
                     <strong>{formatMoney(canvass.budget)}</strong>
                   </td>
+                  <td />
                   {canvass.suppliers.map((s) => (
                     <td key={s.id} colSpan={2} className={`right mono${s.isSelected ? ' cvs-awarded' : ''}`}>
                       <strong>{s.quotedCount ? formatMoney(s.total) : '—'}</strong>
@@ -661,7 +760,7 @@ export function CanvassDetail() {
                   ))}
                 </tr>
                 <tr>
-                  <td colSpan={6} className="right">
+                  <td colSpan={7} className="right">
                     <strong>Savings vs reference budget</strong>
                   </td>
                   {canvass.suppliers.map((s) => (
@@ -680,7 +779,7 @@ export function CanvassDetail() {
                   ))}
                 </tr>
                 <tr>
-                  <td colSpan={6} className="right faint">
+                  <td colSpan={7} className="right faint">
                     Lead time · Terms
                   </td>
                   {canvass.suppliers.map((s) => (
@@ -693,7 +792,7 @@ export function CanvassDetail() {
                 </tr>
                 {canvass.suppliers.some((s) => s.remarks || s.quoteRef) && (
                   <tr>
-                    <td colSpan={6} className="right faint">
+                    <td colSpan={7} className="right faint">
                       Quotation · Remarks
                     </td>
                     {canvass.suppliers.map((s) => (
@@ -703,9 +802,9 @@ export function CanvassDetail() {
                     ))}
                   </tr>
                 )}
-                {(mayEditRows || canvass.canEdit) && (
+                {(mayEditRows || canvass.canEdit || picking) && (
                   <tr>
-                    <td colSpan={6} />
+                    <td colSpan={7} />
                     {canvass.suppliers.map((s) => (
                       <td key={s.id} colSpan={2} className="right">
                         <div className="proc-row-actions cvs-actions">
@@ -724,24 +823,15 @@ export function CanvassDetail() {
                               {canvass.recommendedRowId === s.id ? 'Recommended' : 'Recommend'}
                             </button>
                           )}
-                          {canvass.canAward && (
+                          {picking && (
                             <button
                               className="btn btn-sm"
-                              aria-label={`Award to ${s.supplier.name}`}
+                              aria-label={`Award every line ${s.supplier.name} quoted to it`}
                               disabled={!s.quotedCount}
-                              onClick={() =>
-                                confirm.ask({
-                                  title: `Award ${canvass.number} to ${s.supplier.name}?`,
-                                  body: s.complete
-                                    ? `Their quote totals ${formatMoney(s.total)}. The RFQ closes and the purchase order is raised from the award.`
-                                    : `Their quote prices ${s.quotedCount} of ${lines.length} lines. The order takes those lines; the rest are left to order.`,
-                                  confirmLabel: 'Award',
-                                  tone: 'primary',
-                                  onConfirm: () => award(s.id),
-                                })
-                              }
+                              title="Picks this supplier on every line it quoted"
+                              onClick={() => setPicks((p) => ({ ...p, ...Object.fromEntries(s.quotes.map((q) => [q.requestItemId, s.id])) }))}
                             >
-                              Award
+                              All its lines
                             </button>
                           )}
                         </div>
@@ -762,6 +852,122 @@ export function CanvassDetail() {
         )}
       </section>
 
+      {(picking || (awardData && awardData.winners.length > 0)) && canvass.suppliers.length > 0 && (
+        <section className="card" aria-labelledby="cvs-award">
+          <div className="card-head">
+            <h3 id="cvs-award" className="card-title">
+              {picking ? 'Award by line' : 'Award'}
+            </h3>
+            {picking && (
+              <div className="proc-row-actions">
+                <button className="btn btn-sm" onClick={() => setPicks(lowestPerLine(sheetLines, columns))}>
+                  Lowest price per line
+                </button>
+                {recommended && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => setPicks(Object.fromEntries(recommended.quotes.map((q) => [q.requestItemId, recommended.id])))}
+                  >
+                    All to {recommended.supplier.name}
+                  </button>
+                )}
+                <button className="btn btn-sm" onClick={() => setPicks({})}>
+                  Clear
+                </button>
+              </div>
+            )}
+          </div>
+          {(() => {
+            const sum = picking ? preview : awardData!;
+            const winners = picking
+              ? preview.winners.map((w) => ({ ...w, name: rowName(w.id), supplierId: canvass.suppliers.find((x) => x.id === w.id)?.supplierId ?? '', orders: [] as AwardData['winners'][number]['orders'] }))
+              : awardData!.winners;
+            if (!winners.length) {
+              return <p className="faint">Pick a supplier for each line in the "Awarded to" column — a line may go to a different supplier, or be left for later.</p>;
+            }
+            return (
+              <div className="table-wrap">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th>Supplier</th>
+                      <th>Lines</th>
+                      <th className="right">Reference budget</th>
+                      <th className="right">Awarded</th>
+                      <th className="right">Savings</th>
+                      {!picking && <th>Purchase order</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {winners.map((w) => (
+                      <tr key={w.id}>
+                        <td>
+                          <strong>{w.name}</strong>
+                        </td>
+                        <td>
+                          {w.lineIds.length} of {lines.length}
+                          <div className="faint">{w.lineIds.map(lineLabel).join(', ')}</div>
+                        </td>
+                        <td className="right mono">{formatMoney(w.budget)}</td>
+                        <td className="right mono">{formatMoney(w.total)}</td>
+                        <td className={`right mono ${w.savings < 0 ? 'proc-over' : 'proc-best'}`}>
+                          {formatMoney(w.savings)} · {pctText(w.savingsPct)}
+                        </td>
+                        {!picking && (
+                          <td>
+                            {w.orders.length ? (
+                              w.orders.map((o) => (
+                                <div key={o.id}>
+                                  <Link to={`/g-chain/purchase-orders/${o.id}`} className="mono">
+                                    {o.number}
+                                  </Link>{' '}
+                                  <StatusBadge status={o.status} />
+                                </div>
+                              ))
+                            ) : mayOrder ? (
+                              <button className="btn btn-sm" onClick={() => navigate(orderPath(w.supplierId))}>
+                                Raise order
+                              </button>
+                            ) : (
+                              <span className="faint">not yet raised</span>
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                    <tr className="cvs-total">
+                      <td>
+                        <strong>Total</strong>
+                      </td>
+                      <td>
+                        {winners.length} supplier{winners.length === 1 ? '' : 's'}
+                      </td>
+                      <td className="right mono">
+                        <strong>{formatMoney(sum.budget)}</strong>
+                      </td>
+                      <td className="right mono">
+                        <strong>{formatMoney(sum.total)}</strong>
+                      </td>
+                      <td className="right mono">
+                        <strong>
+                          {formatMoney(sum.savings)} · {pctText(sum.savingsPct)}
+                        </strong>
+                      </td>
+                      {!picking && <td />}
+                    </tr>
+                  </tbody>
+                </table>
+                {sum.notAwarded.length > 0 && (
+                  <div className="alert warn proc-card-note">
+                    Not awarded — left on the request to buy later: {sum.notAwarded.map(lineLabel).join(', ')}.
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </section>
+      )}
+
       {(canvass.notes || canvass.orders.length > 0) && (
         <div className="grid grid-2">
           {canvass.notes && (
@@ -772,13 +978,15 @@ export function CanvassDetail() {
           )}
           {canvass.orders.length > 0 && (
             <section className="card proc-card">
-              <h3 className="card-title">Purchase order</h3>
+              <h3 className="card-title">Purchase orders</h3>
               <div className="stack">
                 {canvass.orders.map((o) => (
                   <Link key={o.id} to={`/g-chain/purchase-orders/${o.id}`} className="row">
                     <span className="mono">{o.number}</span>
                     <StatusBadge status={o.status} />
-                    <span className="faint">raised at the awarded prices</span>
+                    <span className="faint">
+                      {canvass.suppliers.find((x) => x.supplierId === o.supplierId)?.supplier.name ?? ''} · raised at the awarded prices
+                    </span>
                   </Link>
                 ))}
               </div>

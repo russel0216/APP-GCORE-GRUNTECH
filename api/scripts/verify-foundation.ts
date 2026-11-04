@@ -121,6 +121,8 @@ import { workingDayDate } from '../src/shared/day';
 import { ARCHIVE_ATTACHMENT, ARCHIVE_LIST_KEY, SCORO_ARCHIVE_REMOVED, removeScoroArchive } from '../src/shared/scoroArchive';
 import { recordLink } from '../../web/src/lib/links';
 import { parseDelimited, rowsToPrLines, prLineAmount, matchCategory, orderTotals, preferredFrom } from '../../web/src/lib/prLines';
+import * as webCanvassMath from '../../web/src/lib/canvassMath';
+import * as apiCanvassMath from '../src/shared/canvassMath';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
 import { contentStreams, pdfRuns, pdfText, runWidth, shown, type PdfRun } from './lib/paper';
@@ -2879,6 +2881,43 @@ async function main() {
         inside.subtotal === 2626.5 && inside.vatAmount === 281.41 && inside.total === 2626.5,
       JSON.stringify([added, inside]),
     );
+    // The canvass award line by line (2026-11-04): the web copy is the API's rule.
+    {
+      let seed = 7;
+      const rnd = () => ((seed = (seed * 9301 + 49297) % 233280) / 233280);
+      let same = true;
+      for (let n = 0; n < 200 && same; n++) {
+        const lines = Array.from({ length: 1 + Math.floor(rnd() * 6) }, (_, i) => ({
+          id: `l${i}`,
+          quantity: Math.round(rnd() * 100_000) / 1000,
+          estimatedCost: Math.round(rnd() * 500_000) / 100,
+          estimatedAmount: Math.round(rnd() * 5_000_000) / 100,
+        }));
+        const cols = Array.from({ length: 1 + Math.floor(rnd() * 4) }, (_, c) => ({
+          id: `c${c}`,
+          prices: Object.fromEntries(lines.filter(() => rnd() > 0.3).map((l) => [l.id, Math.round(rnd() * 500_000) / 100])),
+        }));
+        const picks = Object.fromEntries(lines.map((l) => [l.id, rnd() > 0.2 ? cols[Math.floor(rnd() * cols.length)].id : null]));
+        same =
+          JSON.stringify(apiCanvassMath.awardSummary(lines, cols, picks)) === JSON.stringify(webCanvassMath.awardSummary(lines, cols, picks)) &&
+          JSON.stringify(apiCanvassMath.lowestPerLine(lines, cols)) === JSON.stringify(webCanvassMath.lowestPerLine(lines, cols));
+      }
+      const a = apiCanvassMath.awardSummary(
+        [
+          { id: 'a', quantity: 2, estimatedCost: 100, estimatedAmount: 200 },
+          { id: 'b', quantity: 0.5, estimatedCost: 10.01, estimatedAmount: 5.01 },
+          { id: 'c', quantity: 1, estimatedCost: 50, estimatedAmount: 50 },
+        ],
+        [{ id: 'x', prices: { a: 90, b: 10.01 } }, { id: 'y', prices: { a: 95, b: 9, c: 40 } }],
+        { a: 'x', b: 'y', c: null },
+      );
+      check(
+        'the canvass award is summed line by line, each winner over its own lines, a line with no pick left to buy later — the web copy pinned equal',
+        same && a.total === 184.5 && a.budget === 205.01 && a.savings === 20.51 && a.winners.length === 2 &&
+          a.winners[0].id === 'x' && a.winners[0].total === 180 && a.winners[1].total === 4.5 && a.notAwarded.join() === 'c',
+        JSON.stringify(a),
+      );
+    }
     const many = Array.from({ length: 30 }, (_, i) => `SUPPLIER NUMBER ${i}`);
     check(
       'lines from the costing fill an empty preferred supplier with their suppliers, each once, and never overwrite one typed',

@@ -7,7 +7,7 @@ import { manilaDate, manilaMonthKey } from '../shared/day';
 import { availableOf, belowReorder } from '../shared/chain';
 import { statusLabel } from '../shared/pdf';
 import { Series, byValue, cents, dayOf, mountReports, monthsOf, num, pct, round3, table, tally, type Report, type Table } from '../shared/reportKit';
-import { figuresOf } from './procurement';
+import { awardOf, figuresOf } from './procurement';
 import { PULLOUT_PURPOSES, purposeOf } from './pullouts';
 import { BORROW_TYPES } from './warehouse';
 
@@ -186,14 +186,15 @@ async function canvass(range: Range): Promise<Report> {
     where: { createdAt: { gte: range.fromAt, lte: range.toAt } },
     include: {
       request: { select: { number: true, items: { select: { id: true, quantity: true, estimatedCost: true, estimatedAmount: true } } } },
-      suppliers: { select: { id: true, isSelected: true, supplier: { select: { name: true } }, quotes: { select: { requestItemId: true, unitPrice: true } } } },
+      suppliers: { select: { id: true, isSelected: true, supplier: { select: { name: true } }, quotes: { select: { requestItemId: true, unitPrice: true, awarded: true } } } },
     },
   });
+  // The award is line by line (2026-11-04): each canvass's own award figures, and each winner's share.
   const figured = rows.map((c) => {
     const f = figuresOf(c, c.request.items, c.suppliers);
-    const winner = c.suppliers.find((s) => s.isSelected);
-    const col = winner ? f.columns.find((x) => x.id === winner.id) : undefined;
-    return { c, budget: f.budget, winner, total: col?.total ?? 0, savings: col?.savings ?? 0, budgetOnQuoted: col?.budgetOnQuoted ?? 0 };
+    const a = awardOf(c, c.request.items, c.suppliers).summary;
+    const winners = a.winners.map((w) => ({ name: c.suppliers.find((s) => s.id === w.id)?.supplier.name ?? '', total: w.total, savings: w.savings }));
+    return { c, budget: f.budget, winner: winners.length ? winners : null, total: a.total, savings: a.savings, budgetOnQuoted: a.budget };
   });
   const awarded = figured.filter((x) => x.c.status === 'AWARDED' && x.winner);
   const series = new Series('Canvasses by month', [{ label: 'Opened' }, { label: 'Awarded' }, { label: 'Reference budget', money: true }, { label: 'Awarded total', money: true }, { label: 'Savings', money: true }], monthsOf(range));
@@ -209,7 +210,11 @@ async function canvass(range: Range): Promise<Report> {
   const awardedBudget = cents(awarded.reduce((s, x) => s + x.budgetOnQuoted, 0));
   const awardedTotal = cents(awarded.reduce((s, x) => s + x.total, 0));
   const savings = cents(awarded.reduce((s, x) => s + x.savings, 0));
-  const bySupplier = tally(awarded, (x) => x.winner!.supplier.name, (x) => [1, x.total, x.savings]);
+  const bySupplier = tally(
+    awarded.flatMap((x) => x.winner!),
+    (w) => w.name,
+    (w) => [1, w.total, w.savings],
+  );
   return {
     kind: 'canvass',
     title: 'Canvass Sheets',

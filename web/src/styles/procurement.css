@@ -408,6 +408,14 @@
 }
 /* The description keeps room to read; the item code stays on one line; a
    supplier's buttons wrap under one another rather than widening its column. */
+.cvs-sheet .cvs-award {
+  min-width: 12rem;
+}
+
+.cvs-sheet .cvs-award select {
+  width: 100%;
+}
+
 .cvs-sheet .cvs-desc {
   min-width: 14rem;
 }
