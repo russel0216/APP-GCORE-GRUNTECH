@@ -202,6 +202,8 @@ async function cleanup() {
         { warehouse: { name: { startsWith: TAG } } },
         { salesOrder: { number: { startsWith: TAG } } },
         { reason: { startsWith: TAG } },
+        // A slip confirming goods delivered to site names the shared "Delivered to site" row (2026-11-06).
+        { notes: { startsWith: TAG } },
       ],
     },
     select: { id: true },
@@ -985,6 +987,84 @@ async function main() {
       'posting CONSUMED only',
       pullCost.length === 1 && pullCost[0].state === 'CONSUMED' && money(num(pullCost[0].amount), 400),
       pullCost.map((c) => `${c.state} ${num(c.amount)}`).join(', '),
+    );
+  }
+
+  // ── 10b2. Delivered to site (2026-11-06) ─────────────────────────────────
+  // A project's goods received straight to site are held as its stock at
+  // "Delivered to site" until the requestor confirms them with a pull-out
+  // slip; nothing is charged twice, and no company-stock picker lists it.
+  console.log('\nDelivered to site');
+  {
+    const { siteWarehouse } = await import('../src/shared/siteWarehouse');
+    const site = await siteWarehouse();
+    const sitePo = await prisma.purchaseOrder.create({
+      data: {
+        number: await nextNumber('purchase_order'),
+        kind: 'DIRECT_TO_JOB',
+        status: 'ISSUED',
+        jobId: job.id,
+        supplierId: supplier.id,
+        createdById: procurement.id,
+        notes: `${TAG} delivered to site`,
+        subtotal: D(300),
+        total: D(300),
+        items: { create: [{ itemId: item.id, costCategoryId: materials.id, description: `${TAG} Site pipe`, quantity: D(3), unit: 'pcs', unitPrice: D(100), amount: D(300) }] },
+      },
+      include: { items: true },
+    });
+    const siteIn = await prisma.receiving.create({
+      data: {
+        number: await nextNumber('receiving'),
+        status: 'PENDING_APPROVAL',
+        orderId: sitePo.id,
+        receivedById: procurement.id,
+        items: { create: [{ orderItemId: sitePo.items[0].id, quantity: D(3), unitCost: D(100) }] },
+      },
+    });
+    const companyBefore = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+    await settleReceiving(siteIn.id, 'APPROVED');
+    const siteInRow = await prisma.receiving.findUniqueOrThrow({ where: { id: siteIn.id } });
+    const atSite = await prisma.projectStock.findUnique({ where: { jobId_itemId_warehouseId: { jobId: job.id, itemId: item.id, warehouseId: site.id } } });
+    const companyAfter = await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } });
+    check(
+      'a project receipt with no warehouse is "Delivered to site": the goods are held there as the project\'s stock (3), never the company\'s',
+      siteInRow.warehouseId === site.id && !!atSite && money(num(atSite.quantity), 3) && num(companyAfter?.quantity) === num(companyBefore?.quantity),
+      `${siteInRow.warehouseId === site.id} ${num(atSite?.quantity)}`,
+    );
+    check(
+      'and whoever asked for the goods is told to confirm them with a pull-out slip on the project',
+      (await prisma.notification.count({ where: { userId: procurement.id, type: 'pullout.to_confirm', link: `/g-chain/pullout-slips/new?project=${job.id}` } })) >= 1,
+    );
+    const procToken = signToken(procurement.id, procurement.email);
+    const lookup = await api(procToken, 'GET', '/warehouses/lookup');
+    check(
+      '"Delivered to site" is on no company-stock picker',
+      lookup.status === 200 && !((lookup.body as unknown as { id: string }[]) ?? []).some((w) => w.id === site.id),
+    );
+    const slip = await prisma.pulloutSlip.create({
+      data: {
+        number: await nextNumber('pullout_slip'),
+        kind: 'PROJECT_STOCK',
+        status: 'PENDING_APPROVAL',
+        jobId: job.id,
+        warehouseId: site.id,
+        preparedById: pm.id,
+        pulloutDate: new Date(),
+        notes: `${TAG} confirmed at site`,
+        items: { create: [{ itemId: item.id, quantity: D(3), unitCost: D(100), amount: D(300) }] },
+      },
+    });
+    const incurredBefore = (await position()).incurred;
+    await settlePullout(slip.id, 'APPROVED');
+    const left = await prisma.projectStock.findUnique({ where: { id: atSite!.id } });
+    check(
+      'the requestor\'s pull-out slip confirms it: off the site, CONSUMED only, the project\'s incurred cost unmoved',
+      (await prisma.pulloutSlip.findUniqueOrThrow({ where: { id: slip.id } })).status === 'PULLED_OUT' &&
+        money(num(left!.quantity), 0) &&
+        money((await position()).incurred, incurredBefore) &&
+        (await prisma.jobCostEntry.count({ where: { sourceType: 'pullout_slip', sourceId: slip.id, state: 'INCURRED' } })) === 0,
+      `${num(left?.quantity)}`,
     );
   }
 

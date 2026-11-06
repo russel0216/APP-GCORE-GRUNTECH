@@ -1168,6 +1168,11 @@ model Warehouse {
   address  String?
   city     String?
   isActive Boolean @default(true)
+  /// "Delivered to site" (2026-11-06): not a building — where a project's goods
+  /// delivered straight to its site are held as its own stock until the
+  /// requestor confirms them with a pull-out slip. One row, made by
+  /// `siteWarehouse()`, kept inactive so no company-stock picker lists it.
+  isSite   Boolean @default(false)
 
   locations Location[]
 

@@ -25,6 +25,8 @@ export type NotificationType =
   | 'borrow.released'
   | 'borrow.cancelled'
   | 'pullout.done'
+  /** A project's goods were delivered to site: the requestor confirms them with a pull-out slip (2026-11-06). */
+  | 'pullout.to_confirm'
   // An approved invoice request raised a draft invoice, or could not (2026-10-15).
   | 'invoice_request.invoiced'
   | 'invoice_request.not_invoiced'

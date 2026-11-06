@@ -2,6 +2,7 @@ import { placeMainWarehouseAtOffice } from '../src/shared/mainWarehouse';
 import { syncCatalogue } from '../src/shared/catalogue';
 import { splitBorrowedRights } from '../src/shared/accessSplit';
 import { backfillProjectStock } from '../src/shared/projectStock';
+import { shelveSiteDeliveries } from '../src/shared/siteWarehouse';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { allPermissions, permissionsFor } from '../src/permissions/registry';
@@ -767,6 +768,13 @@ async function main() {
     // project's own stock (2026-10-18) go on the shelf, once — no cost posted.
     const stocked = await backfillProjectStock(prisma);
     if (stocked) console.log(`  · Put ${stocked} earlier project receipt line(s) on the shelf as project stock`);
+  }
+  {
+    // A project's goods delivered straight to site are held at "Delivered to
+    // site" until the requestor's pull-out slip confirms them (2026-11-06);
+    // the ones received before, once — no cost posted.
+    const atSite = await shelveSiteDeliveries(prisma);
+    if (atSite?.receipts) console.log(`  · Held ${atSite.lines} line(s) of ${atSite.receipts} earlier site deliveries as project stock at "Delivered to site"`);
   }
   {
     const split = await splitBorrowedRights();

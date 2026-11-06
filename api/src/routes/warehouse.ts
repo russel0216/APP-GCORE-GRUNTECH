@@ -23,6 +23,7 @@ import { registerSearch } from '../shared/search';
 import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES, stockState, itemsOnOrder, STOCK_STATES, type StockState } from '../shared/chain';
 import { nextNumber } from '../shared/numbering';
 import { issueProjectStock, projectHoldings, receiveProjectStock } from '../shared/projectStock';
+import { isSiteWarehouse, siteWarehouse } from '../shared/siteWarehouse';
 import { issueOrderStock, orderHoldings, receiveOrderStock } from '../shared/orderStock';
 import { itemForTypedLine, matchTypedItem } from '../shared/typedItems';
 import { noRateMessage, orderInPesos, receiptUnitCost, restateReceiptLine, RESTATE_SELECT } from '../shared/receiptCost';
@@ -512,7 +513,7 @@ async function loadReceiving(id: string) {
         },
       },
       supplier: { select: { id: true, name: true } },
-      warehouse: { select: { id: true, name: true } },
+      warehouse: { select: { id: true, name: true, isSite: true } },
       receivedBy: { select: { id: true, name: true } },
       // The bill that covers these goods. Its presence is what stops the
       // bill posting job cost a second time (Phase 7), so it is worth seeing.
@@ -730,6 +731,12 @@ const receivingSchema = z.object({
   sourceName: z.string().trim().max(200).optional().nullable(),
   reason: z.string().trim().max(2000).optional().nullable(),
   warehouseId: z.string().optional().nullable(),
+  /**
+   * Goods for a project delivered straight to its site (2026-11-06): held as
+   * the project's own stock at "Delivered to site" until the requestor
+   * confirms them with a pull-out slip — shared/siteWarehouse.ts.
+   */
+  toSite: z.boolean().optional(),
   receivedDate: z.string().optional().nullable(),
   deliveryRefNo: z.string().trim().optional().nullable(),
   invoiceRefNo: z.string().trim().optional().nullable(),
@@ -801,10 +808,12 @@ async function checkOutstanding(
  * the modify.
  */
 async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: string) {
-  const warehouseId = body.warehouseId || null;
-  if (warehouseId && !(await prisma.warehouse.findFirst({ where: { id: warehouseId }, select: { id: true } }))) {
-    throw badRequest('That warehouse is not on file');
-  }
+  let warehouseId = body.warehouseId || null;
+  const named = warehouseId ? await prisma.warehouse.findFirst({ where: { id: warehouseId }, select: { id: true, isSite: true } }) : null;
+  if (warehouseId && !named) throw badRequest('That warehouse is not on file');
+  // "Delivered to site" is chosen as such, never as a warehouse picked from a list.
+  const toSite = body.toSite === true || !!named?.isSite;
+  if (toSite) warehouseId = null;
   const misc = {
     warehouseId,
     receivedDate: asDate(body.receivedDate) ?? today(),
@@ -839,10 +848,21 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     if (order.status === 'RECEIVED') throw badRequest(`${order.number} has been received in full`);
     await checkOutstanding(prisma, order.items, body.items, exceptReceivingId);
     const byOrderItem = new Map(order.items.map((i) => [i.id, i]));
+    // Where a PROJECT order's goods land is a choice (2026-11-06): a warehouse,
+    // or "Delivered to site" — held there as the project's stock until the
+    // requestor's pull-out slip confirms it. Nothing named (a script, a draft
+    // from before) is the site.
+    const forProject = order.kind === 'DIRECT_TO_JOB' && !!order.jobId;
+    if (toSite && !forProject) {
+      throw badRequest(`${order.number} is not for a project — only a project's goods are delivered to site; choose the warehouse`);
+    }
+    let landing = warehouseId ?? (toSite ? null : order.warehouseId) ?? null;
+    if (forProject && !landing) landing = (await siteWarehouse()).id;
     // A line the order typed without an item becomes one in the item master
     // when it reaches a warehouse — unless one already matches, it needs its
-    // product group (2026-10-20).
-    if (warehouseId ?? order.warehouseId) {
+    // product group (2026-10-20). Delivered to site, it is filed without one.
+    const atSite = forProject && (await isSiteWarehouse(prisma, landing));
+    if (landing && !atSite) {
       for (const [n, l] of body.items.entries()) {
         const oi = byOrderItem.get(l.orderItemId!);
         // A service is rendered, never shelved: it files no item.
@@ -872,7 +892,7 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
       };
     });
     return {
-      header: { orderId: order.id, supplierId: null, sourceName: null, reason: null, ...misc, warehouseId: warehouseId ?? order.warehouseId ?? null },
+      header: { orderId: order.id, supplierId: null, sourceName: null, reason: null, ...misc, warehouseId: landing },
       rows,
       newItems: new Map<number, { name: string; partNumber: string | null; unit: string; categoryId: string | null }>(),
       label: `against ${order.number}`,
@@ -886,6 +906,7 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     if (!supplier) throw badRequest('That supplier is not on file');
     supplierName = supplier.name;
   }
+  if (toSite) throw badRequest('Goods received without a purchase order go into a warehouse — choose one');
   if (!supplierName && !body.sourceName?.trim()) throw badRequest('Say where the goods came from — a supplier, or a name');
   if (!body.reason?.trim()) throw badRequest('Say why there is no purchase order');
   if (!warehouseId) throw badRequest('Goods received without a purchase order go into a warehouse — choose one');
@@ -1009,6 +1030,14 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     throw badRequest(`${order.number} names no project and no warehouse — modify the order to say what it is for first`);
   }
   const buildsStock = order.kind === 'STOCK_REPLENISHMENT' || projectless;
+  // A project's goods are always held somewhere (2026-11-06): a report saved
+  // before with no warehouse is "Delivered to site", held there as the
+  // project's stock until the requestor's pull-out slip confirms it.
+  if (order.kind === 'DIRECT_TO_JOB' && order.jobId && !receiving.warehouseId) {
+    const site = await siteWarehouse(tx);
+    await tx.receiving.update({ where: { id: receiving.id }, data: { warehouseId: site.id } });
+    receiving.warehouseId = site.id;
+  }
   const byOrderItem = new Map(order.items.map((i) => [i.id, i]));
   // What the project is charged per budget line. A line ordered from a
   // request is charged at the request's DECLARED estimate for the quantity
@@ -1212,6 +1241,40 @@ async function tellReceived(receivingId: string, userId: string) {
     title: `Goods received — ${r.order.number}`,
     body: `${forWhat} · ${r.number}`,
     link: `/g-chain/incoming/${r.id}`,
+  });
+  await tellToConfirmAtSite(receivingId);
+}
+
+/**
+ * Delivered to site (2026-11-06): the person who asked for the goods — the
+ * request's requester, else whoever raised the order — is told to confirm
+ * them with a pull-out slip, the form opening on the project's goods.
+ */
+async function tellToConfirmAtSite(receivingId: string) {
+  const r = await prisma.receiving.findUnique({
+    where: { id: receivingId },
+    select: {
+      number: true,
+      status: true,
+      warehouse: { select: { isSite: true } },
+      order: {
+        select: {
+          number: true,
+          createdById: true,
+          request: { select: { requestedById: true } },
+          job: { select: { id: true, number: true } },
+        },
+      },
+    },
+  });
+  if (!r || r.status !== 'RECEIVED' || !r.warehouse?.isSite || !r.order?.job) return;
+  const asker = r.order.request?.requestedById ?? r.order.createdById;
+  await notify({
+    userId: asker,
+    type: 'pullout.to_confirm',
+    title: `Delivered to site — confirm with a pull-out slip`,
+    body: `${r.number} (${r.order.number}) for ${r.order.job.number} was delivered to site. Raise a pull-out slip to confirm what you received.`,
+    link: `/g-chain/pullout-slips/new?project=${r.order.job.id}`,
   });
 }
 
@@ -1713,7 +1776,7 @@ receivingRoutes.get(
       ? await prisma.supplier.findUnique({ where: { id: supplierId }, select: { name: true, address: true, city: true, phone: true, email: true } })
       : null;
     const warehouse = receiving.warehouseId
-      ? await prisma.warehouse.findUnique({ where: { id: receiving.warehouseId }, select: { name: true, address: true, city: true } })
+      ? await prisma.warehouse.findUnique({ where: { id: receiving.warehouseId }, select: { name: true, address: true, city: true, isSite: true } }).then((w) => (w?.isSite ? null : w))
       : null;
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
     const place = (...parts: (string | null | undefined)[]) => parts.filter((p) => p?.trim()).join(', ');
@@ -1725,7 +1788,12 @@ receivingRoutes.get(
     ].filter((l) => l.trim());
     const atLines = warehouse
       ? [company?.legalName || company?.name || '', warehouse.name, place(warehouse.address, warehouse.city) || place(company?.address, company?.city)]
-      : [company?.legalName || company?.name || '', 'Straight to site', receiving.order?.job ? `${receiving.order.job.number} — ${receiving.order.job.name}` : ''];
+      : [
+          company?.legalName || company?.name || '',
+          'Delivered to site',
+          receiving.order?.job ? `${receiving.order.job.number} — ${receiving.order.job.name}` : '',
+          receiving.order?.job ? 'Held as the project’s stock until the requestor confirms it with a pull-out slip' : '',
+        ];
 
     const sections: PdfSection[] = [
       { kind: 'blocks', titleSize: 11, blocks: [{ title: 'Received from', lines: fromLines }, { title: 'Received at', lines: atLines.filter((l) => l.trim()) }] },

@@ -395,8 +395,10 @@ async function checkSheet(body: z.infer<typeof sheetSchema>, exceptSlipId?: stri
   if (body.requestedById && !(await prisma.user.findUnique({ where: { id: body.requestedById }, select: { id: true } }))) {
     throw badRequest('The person who asked for it is not on file');
   }
-  const warehouse = await prisma.warehouse.findUnique({ where: { id: body.warehouseId }, select: { isActive: true, name: true } });
-  if (!warehouse || !warehouse.isActive) throw badRequest('That warehouse is not available');
+  const warehouse = await prisma.warehouse.findUnique({ where: { id: body.warehouseId }, select: { isActive: true, isSite: true, name: true } });
+  // "Delivered to site" holds a project's goods only (2026-11-06): its own-stock slip is the one way out of it.
+  const usable = warehouse && (warehouse.isSite ? body.kind === 'PROJECT_STOCK' : warehouse.isActive);
+  if (!usable) throw badRequest('That warehouse is not available');
   const byLine = new Map(source.lines.map((l) => [l.id, l]));
   const items = await prisma.item.findMany({
     where: { id: { in: [...new Set(body.lines.map((l) => l.itemId))] } },
@@ -706,11 +708,30 @@ pulloutRoutes.get(
           projectStock: { some: { quantity: { gt: 0 } } },
           ...(term ? { OR: [{ number: { contains: term, mode: 'insensitive' } }, { name: { contains: term, mode: 'insensitive' } }] } : {}),
         },
-        select: { id: true, number: true, name: true, createdAt: true },
+        select: {
+          id: true,
+          number: true,
+          name: true,
+          createdAt: true,
+          projectStock: { where: { quantity: { gt: 0 } }, select: { itemId: true, warehouse: { select: { name: true, isSite: true } } } },
+        },
         orderBy: { createdAt: 'desc' },
         take: 30,
       });
-      res.json(rows.map((r) => ({ id: r.id, number: r.number, label: r.name, date: r.createdAt })));
+      // Where each project's goods are, in words (2026-11-06): "3 items delivered to site · 1 in Main Office Warehouse".
+      const where = (stock: { itemId: string; warehouse: { name: string; isSite: boolean } }[]) => {
+        const by = new Map<string, { site: boolean; items: Set<string> }>();
+        for (const s of stock) {
+          const w = by.get(s.warehouse.name) ?? { site: s.warehouse.isSite, items: new Set<string>() };
+          w.items.add(s.itemId);
+          by.set(s.warehouse.name, w);
+        }
+        return [...by.entries()]
+          .sort((a, b) => Number(b[1].site) - Number(a[1].site))
+          .map(([name, w]) => `${w.items.size} item${w.items.size === 1 ? '' : 's'} ${w.site ? 'delivered to site' : `in ${name}`}`)
+          .join(' · ');
+      };
+      res.json(rows.map((r) => ({ id: r.id, number: r.number, label: r.name, held: where(r.projectStock), date: r.createdAt })));
       return;
     }
     if (kind === 'SALES_ORDER') {
@@ -772,15 +793,18 @@ pulloutRoutes.get(
       const [held, warehouses] = await Promise.all([
         warehouseId ? projectHoldings(prisma, jobId, warehouseId) : Promise.resolve(new Map()),
         prisma.warehouse.findMany({
-          where: { isActive: true, projectStock: { some: { jobId, quantity: { gt: 0 } } } },
-          select: { id: true, code: true, name: true },
+          where: { OR: [{ isActive: true }, { isSite: true }], projectStock: { some: { jobId, quantity: { gt: 0 } } } },
+          select: { id: true, code: true, name: true, isSite: true, _count: { select: { projectStock: { where: { jobId, quantity: { gt: 0 } } } } } },
           orderBy: { name: 'asc' },
         }),
       ]);
       res.json({
         source,
         purposes: Object.entries(PULLOUT_PURPOSES).map(([key, label]) => ({ key, label, noSource: OTHER_PURPOSES.includes(key as PulloutPurpose) })),
-        warehouses,
+        // Where the project's goods are, with how many items each place holds — "Delivered to site" first (2026-11-06).
+        warehouses: warehouses
+          .map((w) => ({ id: w.id, code: w.code, name: w.name, isSite: w.isSite, items: w._count.projectStock }))
+          .sort((a, b) => Number(b.isSite) - Number(a.isSite) || a.name.localeCompare(b.name)),
         items: [...held.values()].map((r) => ({
           id: r.item.id,
           code: r.item.code,
@@ -816,11 +840,23 @@ pulloutRoutes.get(
       available: num(r.quantity),
       orderStock: true,
     }));
+    // A project request pulls from the COMPANY's shelf. Goods already bought
+    // for the project sit apart, as its own stock — said, so the person is
+    // pointed at "Goods bought for a project" rather than an empty shelf (2026-11-06).
+    const held = source.kind === 'PURCHASE_REQUEST' && source.jobId
+      ? await prisma.projectStock.findMany({
+          where: { jobId: source.jobId, quantity: { gt: 0 } },
+          select: { itemId: true, warehouse: { select: { name: true } } },
+        })
+      : [];
     res.json({
       source,
       purposes: Object.entries(PULLOUT_PURPOSES).map(([key, label]) => ({ key, label, noSource: OTHER_PURPOSES.includes(key as PulloutPurpose) })),
       warehouses,
       items: [...orderItems, ...companyItems],
+      projectHolds: held.length
+        ? { items: new Set(held.map((h) => h.itemId)).size, itemIds: [...new Set(held.map((h) => h.itemId))], places: [...new Set(held.map((h) => h.warehouse.name))] }
+        : null,
     });
   }),
 );

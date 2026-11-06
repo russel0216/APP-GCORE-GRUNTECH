@@ -70,7 +70,7 @@ export function PulloutSlips() {
     { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (r) => <span className="mono">{r.number}</span> },
     {
       key: 'against',
-      label: 'Against',
+      label: 'For',
       render: (r) =>
         r.salesOrder ? (
           <div>
@@ -82,8 +82,10 @@ export function PulloutSlips() {
             <div className="mono">{r.request.number}</div>
             <div className="faint">Purchase request</div>
           </div>
+        ) : r.kind === 'PROJECT_STOCK' ? (
+          <span className="faint">Goods bought for {r.job?.number ?? 'the project'}</span>
         ) : (
-          <span className="faint">No source document</span>
+          <span className="faint">Something else</span>
         ),
     },
     { key: 'purpose', label: 'Purpose', render: (r) => r.purposeLabel },
@@ -117,7 +119,7 @@ export function PulloutSlips() {
         searchPlaceholder="Search number, document, destination, courier…"
         onRowClick={(r) => navigate(`/g-chain/pullout-slips/${r.id}`)}
         emptyTitle="No pull-out slips yet"
-        emptyHint="Raise one against an issued sales order, an approved project request, or with no source document."
+        emptyHint="Raise one for goods bought for a project, company stock for a project, a sales order, or something else."
         selectable
         filters={[
           {
@@ -132,12 +134,12 @@ export function PulloutSlips() {
           },
           {
             key: 'kind',
-            label: 'Against',
+            label: 'For',
             options: [
-              { value: 'SALES_ORDER', label: 'Sales orders' },
-              { value: 'PURCHASE_REQUEST', label: 'Purchase requests' },
-              { value: 'PROJECT_STOCK', label: 'Project stock' },
-              { value: 'OTHER', label: 'No source document' },
+              { value: 'PROJECT_STOCK', label: 'Goods bought for a project' },
+              { value: 'PURCHASE_REQUEST', label: 'Company stock for a project' },
+              { value: 'SALES_ORDER', label: 'Goods for a sales order' },
+              { value: 'OTHER', label: 'Something else' },
             ],
           },
           { key: 'purpose', label: 'Purpose', options: PURPOSE_OPTIONS },
@@ -206,8 +208,11 @@ interface SourceData {
     lines: SourceLine[];
   };
   purposes: { key: string; label: string; noSource: boolean }[];
-  warehouses: { id: string; code: string; name: string }[];
+  /** For a project's own goods: where they are, "Delivered to site" first, with how many items each place holds. */
+  warehouses: { id: string; code: string; name: string; isSite?: boolean; items?: number }[];
   items: StockItem[];
+  /** A project request: goods already bought for its project, kept apart as its own stock (2026-11-06). */
+  projectHolds?: { items: number; itemIds: string[]; places: string[] } | null;
 }
 
 interface Pick {
@@ -267,15 +272,59 @@ const BLANK: Header = {
   notes: '',
 };
 
-/** Asks which document a new slip pulls against, when the link named none — or none at all. */
+/**
+ * The four kinds of pull-out, in words anyone can follow (2026-11-06, the
+ * owner's call: "make it user friendly and anyone can follow"). Each names the
+ * SHELF the goods come off, not the document behind it.
+ */
 type PickKind = 'SALES_ORDER' | 'PURCHASE_REQUEST' | 'PROJECT_STOCK';
+const CHOICES: { kind: PickKind | 'OTHER'; title: string; text: string }[] = [
+  {
+    kind: 'PROJECT_STOCK',
+    title: 'Goods bought for a project',
+    text: 'Materials purchased for a project — kept in the warehouse, or delivered to site. Already charged to the project, so nothing is charged again.',
+  },
+  {
+    kind: 'PURCHASE_REQUEST',
+    title: 'Company stock for a project',
+    text: 'The project takes items the company already has on its shelf, against its approved purchase request, instead of buying them. The project is charged.',
+  },
+  {
+    kind: 'SALES_ORDER',
+    title: 'Goods for a sales order',
+    text: 'Items released for a customer’s issued sales order.',
+  },
+  {
+    kind: 'OTHER',
+    title: 'Something else',
+    text: 'A supplier return, testing, a repair, a loan to site — you say why on the slip.',
+  },
+];
+
+/** How a pull-out goes, start to finish — shown on the first step and over the form. */
+function PulloutSteps({ at }: { at: 1 | 2 }) {
+  const steps = ['What is it for?', 'Who takes it, and where', 'Tick the items', 'Save, then submit for approval'];
+  return (
+    <ol className="po-steps" aria-label="How a pull-out slip goes">
+      {steps.map((t, n) => (
+        <li key={t} className={n + 1 < at ? 'is-done' : n + 1 === at || (at === 2 && n > 0) ? 'is-now' : ''}>
+          <span className="po-step-no">{n + 1}</span>
+          {t}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** Asks what a new slip is for — then which project, request or order. */
 function PickSource({ onPick, onNone, start }: { onPick: (kind: PickKind, id: string) => void; onNone: () => void; start?: PickKind }) {
-  const [kind, setKind] = useState<PickKind>(start ?? 'SALES_ORDER');
+  const [kind, setKind] = useState<PickKind>(start ?? 'PROJECT_STOCK');
   const [term, setTerm] = useState('');
-  const [rows, setRows] = useState<{ id: string; number: string; label: string; date: string }[] | null>(null);
+  const [rows, setRows] = useState<{ id: string; number: string; label: string; held?: string; date: string }[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   useEffect(() => {
     let live = true;
+    setRows(null);
     const t = window.setTimeout(() => {
       api
         .get<typeof rows>(`/pullout-slips/sources${qs({ kind, q: term.trim() || undefined })}`)
@@ -287,66 +336,81 @@ function PickSource({ onPick, onNone, start }: { onPick: (kind: PickKind, id: st
       window.clearTimeout(t);
     };
   }, [kind, term]);
+  const choice = CHOICES.find((c) => c.kind === kind)!;
   return (
-    <section className="card" aria-labelledby="po-pick">
-      <h2 id="po-pick" className="card-title">
-        What does it pull out against?
-      </h2>
-      <div className="scope-switch" role="group" aria-label="Against">
-        <button type="button" className={kind === 'SALES_ORDER' ? 'active' : ''} aria-pressed={kind === 'SALES_ORDER'} onClick={() => setKind('SALES_ORDER')}>
-          An issued sales order
-        </button>
-        <button type="button" className={kind === 'PURCHASE_REQUEST' ? 'active' : ''} aria-pressed={kind === 'PURCHASE_REQUEST'} onClick={() => setKind('PURCHASE_REQUEST')}>
-          An approved project request
-        </button>
-        <button type="button" className={kind === 'PROJECT_STOCK' ? 'active' : ''} aria-pressed={kind === 'PROJECT_STOCK'} onClick={() => setKind('PROJECT_STOCK')}>
-          A project's own stock
-        </button>
-        <button type="button" onClick={onNone}>
-          No source document
-        </button>
-      </div>
-      <p className="faint">
-        A project's own stock: goods bought for the project and received into a warehouse, released to its site — already charged to it, so
-        nothing is charged again. No source document: a supplier return, testing, a repair — you say why on the slip.
-      </p>
-      <div className="qe-rows">
-        <Field label="Find">
-          <input value={term} onChange={(e) => setTerm(e.target.value)} placeholder={kind === 'SALES_ORDER' ? 'Order number, customer or PO no.' : kind === 'PROJECT_STOCK' ? 'Project number or name' : 'Request number, project or purpose'} />
-        </Field>
-      </div>
-      <ErrorBox error={error} />
-      {rows === null ? (
-        <Loading />
-      ) : rows.length === 0 ? (
-        <Empty title="Nothing to pull out against" hint={
-            kind === 'SALES_ORDER'
-              ? 'Only an issued sales order is pulled out against.'
-              : kind === 'PROJECT_STOCK'
-                ? 'No project holds goods of its own in a warehouse yet — they arrive on an approved incoming report into a warehouse.'
-                : 'Only an approved project request not yet wholly ordered.'
-          } />
-      ) : (
-        <div className="table-wrap">
-          <table className="data">
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.id}>
-                  <td className="mono">{r.number}</td>
-                  <td>{r.label}</td>
-                  <td>{formatDate(r.date)}</td>
-                  <td className="right">
-                    <button type="button" className="btn btn-sm btn-primary" onClick={() => onPick(kind, r.id)}>
-                      Choose
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+    <>
+      <section className="card" aria-labelledby="po-pick">
+        <h2 id="po-pick" className="card-title">
+          1. What is it for?
+        </h2>
+        <div className="po-choices" role="group" aria-label="What the pull-out is for">
+          {CHOICES.map((c) => (
+            <button
+              key={c.kind}
+              type="button"
+              className={`po-choice${c.kind === kind ? ' is-active' : ''}`}
+              aria-pressed={c.kind === kind}
+              onClick={() => (c.kind === 'OTHER' ? onNone() : setKind(c.kind))}
+            >
+              <span className="po-choice-title">{c.title}</span>
+              <span className="po-choice-text">{c.text}</span>
+            </button>
+          ))}
         </div>
-      )}
-    </section>
+      </section>
+      <section className="card" aria-labelledby="po-which">
+        <h2 id="po-which" className="card-title">
+          {kind === 'PROJECT_STOCK' ? 'Which project?' : kind === 'PURCHASE_REQUEST' ? 'Which purchase request?' : 'Which sales order?'}
+        </h2>
+        <p className="faint">{choice.title}: {choice.text}</p>
+        <div className="qe-rows">
+          <Field label="Find">
+            <input
+              value={term}
+              onChange={(e) => setTerm(e.target.value)}
+              placeholder={kind === 'SALES_ORDER' ? 'Order number, customer or PO no.' : kind === 'PROJECT_STOCK' ? 'Project number or name' : 'Request number, project or purpose'}
+            />
+          </Field>
+        </div>
+        <ErrorBox error={error} />
+        {rows === null ? (
+          <Loading />
+        ) : rows.length === 0 ? (
+          <Empty
+            title={kind === 'PROJECT_STOCK' ? 'No project has goods waiting to be pulled out' : 'Nothing to pull out against'}
+            hint={
+              kind === 'SALES_ORDER'
+                ? 'Only an issued sales order is pulled out against.'
+                : kind === 'PROJECT_STOCK'
+                  ? 'A project’s goods appear here once their Incoming report is approved — received into a warehouse, or delivered to site.'
+                  : 'Only an approved project request not yet wholly ordered.'
+            }
+          />
+        ) : (
+          <div className="table-wrap">
+            <table className="data">
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.id}>
+                    <td className="mono">{r.number}</td>
+                    <td>
+                      <div>{r.label}</div>
+                      {r.held && <div className="faint">{r.held}</div>}
+                    </td>
+                    <td>{formatDate(r.date)}</td>
+                    <td className="right">
+                      <button type="button" className="btn btn-sm btn-primary" onClick={() => onPick(kind, r.id)}>
+                        Choose
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </>
   );
 }
 
@@ -381,6 +445,8 @@ export function PulloutEditor() {
   const [form, setForm] = useState<Header>(BLANK);
   const [picks, setPicks] = useState<Record<string, Pick>>({});
   const [free, setFree] = useState<FreeLine[]>([blankFree()]);
+  // A project's own goods are ticked off the list of what it holds, by item (2026-11-06).
+  const [ownPicks, setOwnPicks] = useState<Record<string, Pick>>({});
   // The projects a slip with no source document may charge — for whoever may see projects; nothing listed hides the box.
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
   useEffect(() => {
@@ -452,7 +518,13 @@ export function PulloutEditor() {
             jobId: none ? ((slip.job as { id: string } | null)?.id ?? '') : '',
           });
           const items = slip.items as { sourceLineId: string | null; item: { id: string }; quantity: number; serialNo: string | null; condition: string | null }[];
-          if (none || jobId) {
+          if (jobId) {
+            setOwnPicks(
+              Object.fromEntries(
+                items.map((i) => [i.item.id, { include: true, itemId: i.item.id, quantity: String(i.quantity), serialNo: i.serialNo ?? '', condition: i.condition ?? '' }]),
+              ),
+            );
+          } else if (none) {
             setFree(
               items.length
                 ? items.map((i) => ({ key: `f${++freeSeq}`, itemId: i.item.id, quantity: String(i.quantity), serialNo: i.serialNo ?? '', condition: i.condition ?? '' }))
@@ -515,9 +587,13 @@ export function PulloutEditor() {
           <div className="qe-head">
             <div>
               <h1 className="qe-heading">New pull-out slip</h1>
-              <p className="muted qe-lead">The warehouse's authority to release stock — against an issued sales order, an approved project request, a project's own stock, or no source document.</p>
+              <p className="muted qe-lead">
+                The paper that lets the warehouse release goods. Say what it is for, who takes it, tick the items and save — then submit it for
+                approval. Once approved, the warehouse releases the goods and prints the slip for the gate.
+              </p>
             </div>
           </div>
+          <PulloutSteps at={1} />
         </section>
         <PickSource
           start={params.get('kind') === 'project' ? 'PROJECT_STOCK' : undefined}
@@ -538,18 +614,33 @@ export function PulloutEditor() {
 
   const { source } = data;
   const none = source.kind === 'OTHER';
-  // A project's own stock is chosen line by line like a slip with no source document.
+  // A project's own goods are ticked off what it holds (2026-11-06); a slip with no source document picks any item line by line.
   const own = source.kind === 'PROJECT_STOCK';
-  const freeMode = none || own;
+  const freeMode = none;
+  const ownPick = (it: StockItem): Pick => ownPicks[it.id] ?? { include: false, itemId: it.id, quantity: String(it.available), serialNo: '', condition: 'Brand new' };
+  const ownChosen = own ? data.items.map(ownPick).filter((p) => p.include) : [];
+  const setOwn = (it: StockItem, patch: Partial<Pick>) => {
+    setOwnPicks((ps) => ({ ...ps, [it.id]: { ...ownPick(it), ...patch } }));
+    setDirty(true);
+  };
+  const atSite = own && !!data.warehouses.find((w) => w.id === form.warehouseId)?.isSite;
   const purposes = data.purposes.filter((p) => !none || p.noSource);
   const chosen = source.lines.filter((l) => picks[l.id]?.include);
   const freeSent = free.filter((l) => l.itemId || l.quantity);
   const problems: string[] = [];
-  if (!form.warehouseId) problems.push('choose the warehouse');
+  if (!form.warehouseId) problems.push(own ? 'say where the goods are' : 'choose the warehouse');
   if (!form.purpose) problems.push('say what it is for');
   if (none && form.reason.trim().length < 3) problems.push('say why there is no source document');
   if (none && form.purpose === 'PROJECT_USE' && !form.jobId) problems.push('name the project the stock is for');
-  if (freeMode) {
+  if (own) {
+    if (form.warehouseId && !ownChosen.length) problems.push('tick at least one item');
+    for (const p of ownChosen) {
+      const it = itemById.get(p.itemId);
+      const q = Number(p.quantity);
+      if (!(q > 0)) problems.push(`give a quantity for ${it?.name ?? 'a ticked item'}`);
+      else if (it && q > it.available + 0.0005) problems.push(`only ${it.available} ${it.unit} of ${it.name} is there`);
+    }
+  } else if (freeMode) {
     if (!freeSent.length) problems.push('add at least one item');
     const asked = new Map<string, number>();
     for (const l of freeSent) asked.set(l.itemId, (asked.get(l.itemId) ?? 0) + (Number(l.quantity) || 0));
@@ -599,7 +690,9 @@ export function PulloutEditor() {
       returnBy: form.returnBy || null,
       reason: none ? t(form.reason) : null,
       notes: t(form.notes),
-      lines: freeMode
+      lines: own
+        ? ownChosen.map((p) => ({ itemId: p.itemId, quantity: Number(p.quantity), serialNo: t(p.serialNo), condition: t(p.condition) }))
+        : freeMode
         ? freeSent.map((l) => ({ itemId: l.itemId, quantity: Number(l.quantity), serialNo: t(l.serialNo), condition: t(l.condition) }))
         : chosen.map((l) => ({
             sourceLineId: l.id,
@@ -668,11 +761,11 @@ export function PulloutEditor() {
             </h1>
             <p className="muted qe-lead">
               {none ? (
-                'No source document — say why below. No project is charged.'
+                'Something else — a supplier return, testing, a repair. Say why below; no project is charged unless you name one.'
               ) : own ? (
                 <>
-                  {source.job ? <Link to={`/g-ops/projects/${source.job.id}`}>{source.job.number}</Link> : 'The project'}'s own stock — bought for it and
-                  charged to it when it arrived, so releasing it charges nothing again.
+                  Goods bought for {source.job ? <Link to={`/g-ops/projects/${source.job.id}`}>{source.job.number} — {source.job.name}</Link> : 'the project'}. They were
+                  charged to the project when they arrived, so releasing them charges nothing again.
                 </>
               ) : (
                 <>
@@ -685,7 +778,7 @@ export function PulloutEditor() {
                   {source.job ? (
                     <>
                       {' '}
-                      — {source.job.number} is charged at the warehouse's average cost
+                      — company stock for {source.job.number}, charged to it at the warehouse's average cost
                     </>
                   ) : source.kind === 'SALES_ORDER' ? (
                     ' — no project was built from its quotation, so the order is the whole reference'
@@ -697,10 +790,25 @@ export function PulloutEditor() {
           </div>
           <div className="row qe-actions">{saveButton}</div>
         </div>
+        <PulloutSteps at={2} />
         <ErrorBox error={error} />
         {attempted && problems.length > 0 && (
           <div className="alert error" role="alert">
-            Not saved yet — {problems.join('; ')}.
+            Not saved yet:
+            <ul className="po-problems">
+              {problems.map((p) => (
+                <li key={p}>{p[0].toUpperCase() + p.slice(1)}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {source.kind === 'PURCHASE_REQUEST' && data.projectHolds && source.job && (
+          <div className="alert info">
+            {source.job.number} already has goods bought for it — {data.projectHolds.items} item{data.projectHolds.items === 1 ? '' : 's'} (
+            {data.projectHolds.places.join(', ')}). This slip takes from the <strong>company's</strong> shelf. To release the goods bought for the
+            project,{' '}
+            <Link to={`/g-chain/pullout-slips/new?project=${source.job.id}`}>pull out “Goods bought for a project” instead</Link>
+            .
           </div>
         )}
       </section>
@@ -710,7 +818,7 @@ export function PulloutEditor() {
           Pull-out details
         </h2>
         <div className="qe-header qe-rows prq-rows">
-          <Field label="Purpose / transaction" required error={attempted && !form.purpose ? 'Say what it is for' : null}>
+          <Field label="Purpose" required error={attempted && !form.purpose ? 'Say what it is for' : null}>
             <select value={form.purpose} onChange={set('purpose')}>
               <option value="">— choose —</option>
               {purposes.map((p) => (
@@ -720,7 +828,7 @@ export function PulloutEditor() {
               ))}
             </select>
           </Field>
-          <Field label="Requested by" hint="Sales or the project — their manager approves the release">
+          <Field label="Requested by" hint="Who asked for the goods — their superior approves the release">
             <PersonSelect
               value={form.requestedById}
               onChange={(v) => {
@@ -733,12 +841,17 @@ export function PulloutEditor() {
               self={me?.user.id}
             />
           </Field>
-          <Field label="Warehouse source" required error={attempted && !form.warehouseId ? 'Choose the warehouse' : null}>
+          <Field
+            label={own ? 'Where are the goods?' : 'From which warehouse?'}
+            required
+            hint={own ? (atSite ? 'Delivered to site — this slip confirms the project received them' : 'Kept in the warehouse for the project') : undefined}
+            error={attempted && !form.warehouseId ? (own ? 'Say where the goods are' : 'Choose the warehouse') : null}
+          >
             <select value={form.warehouseId} required onChange={(e) => void chooseWarehouse(e.target.value)}>
               <option value="">— choose —</option>
               {data.warehouses.map((w) => (
                 <option key={w.id} value={w.id}>
-                  {w.name}
+                  {own && w.items !== undefined ? `${w.name} — ${w.items} item${w.items === 1 ? '' : 's'}` : w.name}
                 </option>
               ))}
             </select>
@@ -786,10 +899,10 @@ export function PulloutEditor() {
 
       <section className="card" aria-labelledby="po-courier">
         <h2 id="po-courier" className="card-title">
-          Courier and destination
+          Who takes it, and where to
         </h2>
         <div className="qe-header qe-rows prq-rows">
-          <Field label="Authorized person / courier" hint="Who takes it out — signs Pulled out / received by">
+          <Field label="Who takes it out" hint={atSite ? 'The person at site who received the goods — signs Received by' : 'The person or courier collecting it — signs Received by'}>
             <input value={form.receivedByName} maxLength={200} onChange={set('receivedByName')} />
           </Field>
           <Field label="Company / logistics provider">
@@ -804,7 +917,7 @@ export function PulloutEditor() {
           <Field label="Destination / site" hint={source.job ? `Blank prints ${source.job.number}` : 'Where it goes'}>
             <input value={form.destination} maxLength={300} onChange={set('destination')} />
           </Field>
-          <Field label="Expected back" hint="For testing, a repair or a temporary deployment">
+          <Field label="Expected back" hint="Only if it comes back — testing, a repair, a loan">
             <input type="date" value={form.returnBy} onChange={set('returnBy')} />
           </Field>
         </div>
@@ -818,8 +931,21 @@ export function PulloutEditor() {
       <section className="card" aria-labelledby="po-lines">
         <div className="card-head">
           <h2 id="po-lines" className="card-title">
-            {none ? 'Items to pull out' : own ? `${source.number}'s stock to pull out` : `Lines of ${source.number}`}
+            {none ? 'Items to pull out' : own ? 'Tick the items going out' : `Tick the lines of ${source.number} going out`}
           </h2>
+          {own && form.warehouseId && data.items.length > 0 && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => {
+                const all = data.items.every((it) => ownPick(it).include);
+                setOwnPicks(Object.fromEntries(data.items.map((it) => [it.id, { ...ownPick(it), include: !all }])));
+                setDirty(true);
+              }}
+            >
+              {data.items.every((it) => ownPick(it).include) ? 'Untick all' : 'Tick all'}
+            </button>
+          )}
           {freeMode && form.warehouseId && (
             <button type="button" className="btn btn-sm" onClick={() => setFree((ls) => [...ls, blankFree()])}>
               + Add line
@@ -827,7 +953,75 @@ export function PulloutEditor() {
           )}
         </div>
         {!form.warehouseId ? (
-          <Empty title="Choose the warehouse first" hint="What it holds, and how much is free, appears beside each line." />
+          <Empty
+            title={own ? 'Say where the goods are first' : 'Choose the warehouse first'}
+            hint={own ? 'Pick "Delivered to site" or the warehouse above — the project’s goods there are listed to tick.' : 'What it holds, and how much is free, appears beside each line.'}
+          />
+        ) : own ? (
+          data.items.length === 0 ? (
+            <Empty
+              title={`Nothing of ${source.number}'s is there now`}
+              hint="Everything received there has already gone out. Pick another place above, or check the project's Incoming reports."
+            />
+          ) : (
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th aria-label="Pull out" />
+                    <th>Item</th>
+                    <th className="right">There now</th>
+                    <th className="right proc-col-input">Quantity</th>
+                    <th>Serial / batch</th>
+                    <th>Condition</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.items.map((it) => {
+                    const p = ownPick(it);
+                    return (
+                      <tr key={it.id}>
+                        <td>
+                          <input type="checkbox" aria-label={`Pull out ${it.name}`} checked={p.include} onChange={(e) => setOwn(it, { include: e.target.checked })} />
+                        </td>
+                        <td>
+                          <div>{it.name}</div>
+                          <div className="faint">{it.partNumber ?? it.code}</div>
+                        </td>
+                        <td className="right mono">
+                          {it.available} {it.unit}
+                        </td>
+                        <td>
+                          <NumberInput
+                            kind="quantity"
+                            className="mono proc-cell-input"
+                            step="0.001"
+                            aria-label={`Quantity of ${it.name}`}
+                            value={p.quantity}
+                            disabled={!p.include}
+                            onChange={(e) => setOwn(it, { quantity: e.target.value })}
+                          />
+                        </td>
+                        <td className="inc-unit-cell">
+                          <input aria-label={`Serial or batch of ${it.name}`} value={p.serialNo} maxLength={120} disabled={!p.include} onChange={(e) => setOwn(it, { serialNo: e.target.value })} />
+                        </td>
+                        <td className="inc-unit-cell">
+                          <input
+                            aria-label={`Condition of ${it.name}`}
+                            list="pullout-conditions"
+                            value={p.condition}
+                            maxLength={80}
+                            disabled={!p.include}
+                            onChange={(e) => setOwn(it, { condition: e.target.value })}
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )
         ) : freeMode ? (
           <div className="table-wrap">
             <table className="data">
@@ -940,6 +1134,14 @@ export function PulloutEditor() {
                       <td className="right mono">
                         {it ? `${it.available} ${it.unit}` : <span className="faint">—</span>}
                         {it?.orderStock && <div className="faint">held for the order</div>}
+                        {/* Said, so an empty company shelf never reads as a fault (2026-11-06). */}
+                        {p.include && (!it || it.available <= 0) && (
+                          <div className="faint">
+                            {source.kind === 'PURCHASE_REQUEST' && data.projectHolds?.itemIds.includes(p.itemId)
+                              ? 'none on the company shelf — it is in the project’s own goods'
+                              : 'none on the company shelf'}
+                          </div>
+                        )}
                       </td>
                       <td>
                         <NumberInput
@@ -979,6 +1181,10 @@ export function PulloutEditor() {
         </datalist>
       </section>
 
+      <p className="faint po-next">
+        Save keeps it as a draft. On its page, <strong>Submit for approval</strong> — the requester’s superior approves — then the warehouse releases the
+        goods and prints the slip for the gate.
+      </p>
       <div className="page-foot">{saveButton}</div>
     </div>
   );
@@ -1085,8 +1291,10 @@ export function PulloutDetail() {
               <>
                 against <Link to={`/g-chain/purchase-requests/${pr.id}`}>{pr.number}</Link>
               </>
+            ) : String(slip.kind) === 'PROJECT_STOCK' ? (
+              'goods bought for the project'
             ) : (
-              'no source document'
+              'something else — no source document'
             )}
             {job && (
               <>

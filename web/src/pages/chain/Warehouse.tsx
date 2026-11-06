@@ -335,7 +335,10 @@ export function ReceivingDetail() {
     navigate('/g-chain/incoming');
   }
 
-  const warehouse = rec.warehouse as { name: string } | null;
+  const placed = rec.warehouse as { name: string; isSite?: boolean } | null;
+  // "Delivered to site" is the project's site, not a building (2026-11-06).
+  const atSite = !!placed?.isSite;
+  const warehouse = atSite ? null : placed;
   const refs = {
     number: String(rec.number),
     deliveryRefNo: typeof rec.deliveryRefNo === 'string' ? rec.deliveryRefNo : null,
@@ -355,29 +358,32 @@ export function ReceivingDetail() {
         amountLabel={received ? 'Value received' : 'Value'}
         meta={
           <>
+            {/* Each fact says what it is (2026-11-06, the owner's call: "make this easier to understand"). */}
             {order ? (
               <>
-                Against <Link to={`/g-chain/purchase-orders/${order.id}`}>{order.number}</Link> ·{' '}
+                Purchase order <Link to={`/g-chain/purchase-orders/${order.id}`}>{order.number}</Link>
                 {order.job ? (
-                  <Link to={`/g-ops/projects/${order.job.id}`}>
-                    {order.job.number} — {order.job.name}
-                  </Link>
+                  <>
+                    {' '}
+                    · Project{' '}
+                    <Link to={`/g-ops/projects/${order.job.id}`}>
+                      {order.job.number} — {order.job.name}
+                    </Link>
+                  </>
                 ) : (
-                  'Stock'
-                )}{' '}
-                · from <Link to={`/g-chain/suppliers/${order.supplier.id}`}>{order.supplier.name}</Link>
+                  ' · For stock'
+                )}
               </>
             ) : (
               <>
-                No purchase order · from{' '}
+                No purchase order · From{' '}
                 {fromSupplier ? <Link to={`/g-chain/suppliers/${fromSupplier.id}`}>{fromSupplier.name}</Link> : from}
               </>
-            )}{' '}
-            · received{' '}
-            {formatDate(String(rec.receivedDate))}
-            {warehouse ? ` into ${warehouse.name}` : ''}
-            {refs.deliveryRefNo ? ` · DR ${refs.deliveryRefNo}` : ''}
-            {refs.invoiceRefNo ? ` · invoice ${refs.invoiceRefNo}` : ''}
+            )}
+            {' · '}Received {formatDate(String(rec.receivedDate))}
+            {atSite ? ' — delivered to site' : warehouse ? ` — into ${warehouse.name}` : ''}
+            {refs.deliveryRefNo ? ` · DR no. ${refs.deliveryRefNo}` : ''}
+            {refs.invoiceRefNo ? ` · Supplier invoice no. ${refs.invoiceRefNo}` : ''}
             {bills.length > 0 && (
               <>
                 {' '}
@@ -416,14 +422,23 @@ export function ReceivingDetail() {
             </button>
           ) : (
             received &&
-            order &&
-            canEnterBill && (
-              // The bill picks up the supplier, order and these goods from the
-              // receiving, and — because it names the receiving — posts no job
-              // cost a second time.
-              <Link to={`/g-fin/ap?fromReceiving=${recId}`} className="btn btn-primary">
-                Enter supplier bill
-              </Link>
+            order && (
+              <>
+                {/* Delivered to site: the requestor confirms it with a pull-out slip (2026-11-06). */}
+                {atSite && order.job && (
+                  <Link to={`/g-chain/pullout-slips/new?project=${order.job.id}`} className={canEnterBill ? 'btn' : 'btn btn-primary'}>
+                    Confirm with a pull-out slip
+                  </Link>
+                )}
+                {canEnterBill && (
+                  // The bill picks up the supplier, order and these goods from the
+                  // receiving, and — because it names the receiving — posts no job
+                  // cost a second time.
+                  <Link to={`/g-fin/ap?fromReceiving=${recId}`} className="btn btn-primary">
+                    Enter supplier bill
+                  </Link>
+                )}
+              </>
             )
           )
         }
@@ -485,7 +500,13 @@ export function ReceivingDetail() {
           {order?.kind === 'SALES_ORDER'
             ? `${formatMoney(Number(rec.value))} received for sales order ${order.salesOrder?.number ?? ''} — no project charged.${warehouse ? ` The goods are held in ${warehouse.name} for the order, released by a pull-out or Outgoing slip.` : ' Delivered straight to the customer.'}`
             : order?.kind === 'DIRECT_TO_JOB'
-            ? `${formatMoney(Number(rec.value))} charged to ${order.job?.number ?? 'the project'}, and the same released from committed.${warehouse ? ` The goods are in ${warehouse.name} as the project's own stock.` : ''}`
+            ? `${formatMoney(Number(rec.value))} charged to ${order.job?.number ?? 'the project'}, and the same released from committed.${
+                atSite
+                  ? ` Delivered to site: the goods are held as ${order.job?.number ?? 'the project'}'s stock until the person who asked for them confirms receipt with a pull-out slip (Pull-out Slips › Goods bought for a project).`
+                  : warehouse
+                    ? ` The goods are in ${warehouse.name} as the project's own stock, released by a pull-out slip (Goods bought for a project) or an Outgoing slip.`
+                    : ''
+              }`
             : `${formatMoney(Number(rec.value))} added to stock. No project has been charged — that happens at issuance.`}
         </div>
       ) : status === 'CANCELLED' ? (
@@ -503,7 +524,7 @@ export function ReceivingDetail() {
             : order?.kind === 'DIRECT_TO_JOB'
             ? warehouse
               ? `Approved, it is charged to ${order.job?.number ?? 'the project'} and the goods sit in ${warehouse.name} as the project's own stock (Inventory › Stock: Project stock), released by Outgoing or a pull-out slip without being charged again.`
-              : `Approved, it is charged to ${order.job?.number ?? 'the project'}. Delivered to site, nothing enters a warehouse — receive it into a warehouse to keep it as the project's stock.`
+              : `Approved, it is charged to ${order.job?.number ?? 'the project'}. Delivered to site, the goods are held as the project's stock until the person who asked for them confirms receipt with a pull-out slip.`
             : 'Approved, the goods are added to the warehouse’s stock and show on Inventory.'}
         </div>
       )}

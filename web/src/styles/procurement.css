@@ -792,3 +792,82 @@ a.inv-move:hover .inv-move-what {
   position: absolute;
   inset: 0;
 }
+
+/* The pull-out slip in words anyone can follow (2026-11-06): four choices
+   that name the shelf, and a strip saying how the slip goes. */
+.po-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--s-3);
+}
+.po-choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  text-align: left;
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.po-choice:hover {
+  border-color: var(--magenta-soft);
+}
+.po-choice.is-active {
+  border-color: var(--magenta);
+  background: rgb(var(--magenta-rgb) / 0.08);
+}
+.po-choice-title {
+  font-weight: 600;
+  font-size: var(--fs-md);
+}
+.po-choice-text {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+.po-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-4);
+  list-style: none;
+  margin: var(--s-3) 0 0;
+  padding: 0;
+  color: var(--faint);
+  font-size: var(--fs-sm);
+}
+.po-steps li {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.po-steps li.is-now {
+  color: var(--text);
+}
+.po-steps li.is-done {
+  color: var(--muted);
+}
+.po-step-no {
+  display: inline-grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: var(--fs-xs);
+}
+.po-steps li.is-now .po-step-no {
+  background: var(--magenta);
+  border-color: var(--magenta);
+  color: #fff;
+}
+.po-problems {
+  margin: var(--s-1) 0 0;
+  padding-left: var(--s-5);
+}
+.po-next {
+  margin: 0;
+}

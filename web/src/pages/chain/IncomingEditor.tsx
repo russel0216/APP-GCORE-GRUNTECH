@@ -115,6 +115,8 @@ interface Existing {
   sourceName: string | null;
   reason: string | null;
   warehouseId: string | null;
+  /** "Delivered to site" is the project's site, not a building (2026-11-06). */
+  warehouse?: { id: string; name: string; isSite?: boolean } | null;
   receivedDate: string;
   deliveryRefNo: string | null;
   invoiceRefNo: string | null;
@@ -142,6 +144,12 @@ let keySeq = 0;
 const newKey = () => `l${++keySeq}`;
 const blankFree = (): FreeLine => ({ key: newKey(), item: null, partNumber: '', description: '', unit: '', quantity: '', unitCost: '', categoryId: '' });
 const cents = (n: number) => Math.round(n * 100) / 100;
+/**
+ * The "Delivered to site" choice on a project's order (2026-11-06): the goods
+ * are held as the project's stock at its site until the requestor confirms
+ * them with a pull-out slip. Sent as `toSite`, never as a warehouse.
+ */
+const SITE = '__site__';
 const qtyText = (n: number) => new Intl.NumberFormat('en-PH', { maximumFractionDigits: 3 }).format(n);
 
 export function IncomingEditor() {
@@ -204,7 +212,7 @@ export function IncomingEditor() {
           const h = {
             sourceName: r.sourceName ?? '',
             reason: r.reason ?? '',
-            warehouseId: r.warehouseId ?? '',
+            warehouseId: r.warehouse?.isSite ? SITE : (r.warehouseId ?? ''),
             receivedDate: String(r.receivedDate).slice(0, 10),
             deliveryRefNo: r.deliveryRefNo ?? '',
             invoiceRefNo: r.invoiceRefNo ?? '',
@@ -299,13 +307,17 @@ export function IncomingEditor() {
   // ── Checking and saving ────────────────────────────────────────────────────
 
   const problems: string[] = [];
+  // A project's goods land where somebody chose (2026-11-06): a warehouse, or delivered to site.
+  const forProject = mode === 'order' && order?.kind === 'DIRECT_TO_JOB' && !!order.job;
+  const intoWarehouse = !!header.warehouseId && header.warehouseId !== SITE;
   if (mode === 'order') {
     if (!order) problems.push('Choose the purchase order');
+    else if (forProject && !header.warehouseId) problems.push('Say where the goods went — into a warehouse, or delivered to site');
     else if (order.costProblem && orderLinesSent.some((l) => costOf(l) === null)) problems.push(`${order.costProblem} — or type the unit cost in pesos on the line`);
     else if (!orderLinesSent.length) problems.push('Type what came in on at least one line');
     for (const l of orderLinesSent) {
       if (Number(receive[l.id]) > l.left + 0.0005) problems.push(`${l.name ?? l.description}: only ${qtyText(l.left)} left to receive`);
-      else if (l.newItem && header.warehouseId && !groups[l.id]) problems.push(`${l.name ?? l.description}: choose its product group — it is a new item`);
+      else if (l.newItem && intoWarehouse && !groups[l.id]) problems.push(`${l.name ?? l.description}: choose its product group — it is a new item`);
     }
   } else {
     if (fromSupplier ? !supplier : !header.sourceName.trim()) problems.push('Say where the goods came from');
@@ -322,7 +334,8 @@ export function IncomingEditor() {
 
   function body() {
     const common = {
-      warehouseId: header.warehouseId || null,
+      warehouseId: intoWarehouse ? header.warehouseId : null,
+      ...(header.warehouseId === SITE ? { toSite: true } : {}),
       receivedDate: header.receivedDate || null,
       deliveryRefNo: header.deliveryRefNo.trim() || null,
       invoiceRefNo: header.invoiceRefNo.trim() || null,
@@ -545,16 +558,37 @@ export function IncomingEditor() {
               )}
 
               <Field
-                label="Into warehouse"
-                required={mode === 'none'}
-                hint={mode === 'order' ? 'Leave blank if it went straight to site' : 'Goods without an order go into stock'}
-                error={attempted && mode === 'none' && !header.warehouseId ? 'Choose the warehouse' : null}
+                label={forProject ? 'Where did it go?' : 'Into warehouse'}
+                required={mode === 'none' || forProject}
+                hint={
+                  forProject
+                    ? header.warehouseId === SITE
+                      ? `Held as ${order?.job?.number ?? 'the project'}'s stock at site — the person who asked for it confirms it with a pull-out slip`
+                      : header.warehouseId
+                        ? `Kept in the warehouse as ${order?.job?.number ?? 'the project'}'s own stock, released later by a pull-out slip`
+                        : 'Choose one — into a warehouse, or delivered straight to the project site'
+                    : mode === 'order'
+                      ? order?.kind === 'SALES_ORDER'
+                        ? 'Leave blank if it went straight to the customer'
+                        : 'Where the goods are kept'
+                      : 'Goods without an order go into stock'
+                }
+                error={
+                  attempted && mode === 'none' && !header.warehouseId
+                    ? 'Choose the warehouse'
+                    : attempted && forProject && !header.warehouseId
+                      ? 'Say where the goods went'
+                      : null
+                }
               >
                 <select value={header.warehouseId} onChange={(e) => setHeader((h) => ({ ...h, warehouseId: e.target.value }))}>
-                  <option value="">{mode === 'order' ? '— straight to site —' : '— choose —'}</option>
+                  <option value="">
+                    {forProject ? '— choose —' : mode === 'order' ? (order?.kind === 'SALES_ORDER' ? '— straight to the customer —' : '— as on the order —') : '— choose —'}
+                  </option>
+                  {forProject && <option value={SITE}>Delivered to site (the project site)</option>}
                   {warehouses.map((w) => (
                     <option key={w.id} value={w.id}>
-                      {w.name}
+                      {forProject ? `Into ${w.name}` : w.name}
                     </option>
                   ))}
                 </select>
@@ -646,7 +680,7 @@ export function IncomingEditor() {
                                   label={`Product group — ${l.name ?? l.description}`}
                                   categories={categories}
                                   value={groups[l.id] ?? ''}
-                                  required={l.newItem && !!header.warehouseId}
+                                  required={l.newItem && intoWarehouse}
                                   onChange={(v) => setGroups((g) => ({ ...g, [l.id]: v }))}
                                 />
                               )}

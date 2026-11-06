@@ -1866,7 +1866,8 @@ warehouseRoutes.get(
     const me = currentUser(req);
     // View Own lists the warehouses the caller added (2026-10-18).
     const rows = await prisma.warehouse.findMany({
-      where: ownOnly(me, 'gchain', 'warehouses', {}, (ids) => ({ createdById: { in: ids } })),
+      // "Delivered to site" is not a building — it has no master row to keep (2026-11-06).
+      where: { AND: [{ isSite: false }, ownOnly(me, 'gchain', 'warehouses', {}, (ids) => ({ createdById: { in: ids } }))] },
       include: { locations: { orderBy: { code: 'asc' } } },
       orderBy: { name: 'asc' },
     });
@@ -1877,7 +1878,7 @@ warehouseRoutes.get(
 /** One warehouse for a change: Edit Own changes only the warehouses the caller added; a bin is a change to its warehouse (2026-10-18). */
 async function warehouseForEdit(me: Me, id: string) {
   const warehouse = await prisma.warehouse.findUnique({ where: { id } });
-  if (!warehouse) throw notFound('Warehouse not found');
+  if (!warehouse || warehouse.isSite) throw notFound('Warehouse not found');
   assertCanEdit(me, 'gchain', 'warehouses', warehouse.createdById === me.id, warehouse.createdById);
   return warehouse;
 }
@@ -1940,7 +1941,7 @@ warehouseRoutes.delete(
   require_('gchain.warehouses.delete'),
   handler(async (req, res) => {
     const warehouse = await prisma.warehouse.findUnique({ where: { id: req.params.id } });
-    if (!warehouse) throw notFound('Warehouse not found');
+    if (!warehouse || warehouse.isSite) throw notFound('Warehouse not found');
     await prisma.warehouse.delete({ where: { id: req.params.id } });
     await audit(
       {
