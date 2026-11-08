@@ -4613,8 +4613,9 @@ SCORO.
   owner's file: "could you add this to the database so I can check if it's
   possible to migrate data of SCORO from a CSV file"). The entity is
   `scoro_quotes` (`routes/imports/scoroQuotes.ts`, registered in `REGISTRY`,
-  `gops.quotations.create`; the quotation list's ⋯ menu "Import from
-  SCORO…" opens the ordinary `ImportModal` on it), and it takes SCORO's
+  `gops.quotations.create`; its "Import from SCORO…" button was taken off
+  the quotation list's ⋯ menu on 2026-11-08, the owner's call — the import
+  stays registered for `POST /imports/scoro_quotes`), and it takes SCORO's
   quotes export AS IT COMES: the columns are SCORO's own headers (`doc_no`,
   `payer`, `quote_name`, `doc_date`, `owner_name` …), matched by name, and
   the file is **UTF-16 LE with a BOM and TAB-separated** — `decodeCsv()` in
@@ -4709,8 +4710,9 @@ SCORO.
   grouping.
 - **SCORO's invoices arrive as SALES ORDERS** (2026-10-17, the owner's
   invoices export): entity `scoro_invoices` (`routes/imports/
-  scoroInvoices.ts`, `gops.sales_orders.create`; the sales order list's ⋯
-  "Import from SCORO…"), the same file shape as the quotes export (UTF-16,
+  scoroInvoices.ts`, `gops.sales_orders.create`; its "Import from SCORO…" button
+  was taken off the sales order list's ⋯ on 2026-11-08 — the team types
+  SCORO's orders in through the temporary direct order instead), the same file shape as the quotes export (UTF-16,
   tabs, SCORO's headers, one row per line grouped by `doc_no`, the helpers
   exported from `scoroQuotes.ts`). **Import the quotes first**: an
   invoice's `quote_no` must be a quotation in G-CORE — none is an error
