@@ -445,6 +445,8 @@ function DirectOrderForm({ door, onCreated, onBack }: { door: DirectOpen; onCrea
   const [rate, setRate] = useState('');
   const [orderDate, setOrderDate] = useState('');
   const [poNumber, setPoNumber] = useState('');
+  const [orderNumber, setOrderNumber] = useState('');
+  const [quotationNumber, setQuotationNumber] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [attempted, setAttempted] = useState(false);
@@ -464,6 +466,8 @@ function DirectOrderForm({ door, onCreated, onBack }: { door: DirectOpen; onCrea
         exchangeRate: foreign && Number(rate) > 0 ? Number(rate) : null,
         orderDate: orderDate || undefined,
         poNumber: poNumber.trim() || null,
+        orderNumber: orderNumber.trim() || null,
+        quotationNumber: quotationNumber.trim() || null,
       });
       onCreated(made.id);
     } catch (err) {
@@ -480,6 +484,12 @@ function DirectOrderForm({ door, onCreated, onBack }: { door: DirectOpen; onCrea
       </p>
       <ErrorBox error={error} />
       <div className="grid-2">
+        <Field label="SCORO sales order no." hint="As SCORO numbered it. Blank: G-CORE's next number">
+          <input value={orderNumber} maxLength={60} className="mono" onChange={(e) => setOrderNumber(e.target.value)} />
+        </Field>
+        <Field label="SCORO quotation no." hint="The reference number of SCORO's quotation for this deal. Blank: Q-<order no.>">
+          <input value={quotationNumber} maxLength={60} className="mono" onChange={(e) => setQuotationNumber(e.target.value)} />
+        </Field>
         <Field label="Customer" required error={attempted && !customer ? 'Choose the customer' : null}>
           <CustomerPicker value={customer} onChange={setCustomer} required />
         </Field>

@@ -5819,7 +5819,13 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   is for, team, currency (rate), order date (never a day to come) and PO,
   and `POST /sales-orders/direct` makes in ONE transaction an empty DRAFT
   order and a STAND-IN quotation behind it — `Quotation.directOrder`,
-  numbered `Q-<order number>` (no salesperson's series used), WON on an
+  numbered `Q-<order number>` (no salesperson's series used) — or, typed
+  by hand, **SCORO's own numbers** (the owner's call the same day):
+  `orderNumber` for the order and `quotationNumber` for the stand-in, each
+  letters, digits and . - / _ only, refused case-blind when G-CORE already
+  holds it (a real quotation's number says to raise the order from it), a
+  number fitting G-CORE's pattern raising its series (`setCounter` …
+  `raise`) — WON on an
   APPROVED revision 0 (the SCORO import's precedent), the team picked or
   the creator's. The person adds the lines on the ordinary order editor;
   every `PUT /sales-orders/:id` runs `mirrorDirectQuotation()`, which copies

@@ -34,7 +34,7 @@ import { can, canEditRecord } from '../permissions/resolve';
 import { viewScope } from '../shared/ownScope';
 import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
-import { nextNumber } from '../shared/numbering';
+import { nextNumber, setCounter } from '../shared/numbering';
 import { manilaDate } from '../shared/day';
 import { rememberGroups } from '../shared/quotationGroups';
 import {
@@ -781,7 +781,14 @@ const directSchema = z.object({
   exchangeRate: z.number().positive().optional().nullable(),
   orderDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   poNumber: z.string().trim().max(120).optional().nullable(),
+  /** SCORO's own number for the order, typed by hand (2026-11-08); blank takes the next G-CORE number. */
+  orderNumber: z.string().trim().max(60).optional().nullable(),
+  /** SCORO's quotation number for the deal, typed by hand; blank is "Q-<order number>". */
+  quotationNumber: z.string().trim().max(60).optional().nullable(),
 });
+
+/** A number as typed: letters, digits and . - / _ only. */
+const TYPED_NUMBER = /^[A-Za-z0-9][A-Za-z0-9.\-/_]*$/;
 
 /**
  * A DRAFT sales order with no quotation behind it (2026-11-08, the owner's
@@ -821,11 +828,38 @@ salesOrderRoutes.post(
     if (orderDate.getTime() > today.getTime()) throw badRequest('The order date cannot be a day to come');
     const vatRate = company?.vatRate ?? d(0.12);
 
+    // SCORO's own numbers, typed by hand (2026-11-08, the owner's call): each
+    // checked for its shape and, case-blind, against what G-CORE already holds
+    // before anything is written, so a refusal burns no number.
+    const typedOrder = body.orderNumber?.trim() || null;
+    const typedQuote = body.quotationNumber?.trim() || null;
+    for (const [label, value] of [['Sales order no.', typedOrder], ['Quotation no.', typedQuote]] as const) {
+      if (value && !TYPED_NUMBER.test(value)) throw badRequest(`${label}: letters, digits and . - / _ only`);
+    }
+    if (typedOrder) {
+      const taken = await prisma.salesOrder.findFirst({ where: { number: { equals: typedOrder, mode: 'insensitive' } }, select: { number: true } });
+      if (taken) throw badRequest(`Sales order ${taken.number} is already in G-CORE — open it instead of entering it again`);
+    }
+    if (typedQuote) {
+      const taken = await prisma.quotation.findFirst({ where: { number: { equals: typedQuote, mode: 'insensitive' } }, select: { number: true, directOrder: true } });
+      if (taken) {
+        throw badRequest(
+          taken.directOrder
+            ? `Quotation no. ${taken.number} is already behind another sales order entered without a quotation — open that order, or type the number SCORO gave this one`
+            : `Quotation ${taken.number} is already in G-CORE — raise the sales order from it (Sales Orders › + New sales order, then pick it) instead`,
+        );
+      }
+    }
+
     const order = await prisma.$transaction(async (tx) => {
-      const number = await nextNumber('sales_order', tx);
+      const number = typedOrder ?? (await nextNumber('sales_order', tx));
+      // A typed number that fits G-CORE's own pattern raises its series, so
+      // an automatic number never repeats it; one outside the pattern moves nothing.
+      if (typedOrder) await setCounter('sales_order', typedOrder.split('.')[0], tx, { mode: 'raise' });
+      if (typedQuote) await setCounter('quotation', typedQuote, tx, { mode: 'raise' });
       const quotation = await tx.quotation.create({
         data: {
-          number: `Q-${number}`,
+          number: typedQuote ?? `Q-${number}`,
           directOrder: true,
           customerId: customer.id,
           contactId: body.contactId || null,
@@ -853,6 +887,7 @@ salesOrderRoutes.post(
           vatRate,
           vatInclusive: false,
         },
+        include: { quotation: { select: { number: true } } },
       });
     });
     await audit(
@@ -860,7 +895,7 @@ salesOrderRoutes.post(
         entityType: 'sales_order',
         entityId: order.id,
         action: 'CREATED',
-        summary: `Created sales order ${order.number} for ${customer.name} without a quotation (stand-in Q-${order.number}; the SCORO migration, open until ${DIRECT_ORDERS_UNTIL})`,
+        summary: `Created sales order ${order.number} for ${customer.name} without a quotation (stand-in ${order.quotation.number}${typedOrder || typedQuote ? ', SCORO numbers typed' : ''}; the SCORO migration, open until ${DIRECT_ORDERS_UNTIL})`,
       },
       req,
     );
