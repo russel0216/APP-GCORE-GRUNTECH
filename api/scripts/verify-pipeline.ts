@@ -239,6 +239,7 @@ async function main() {
     'insights.pipeline.view_all',
     'gops.sales_orders.create',
     'gops.sales_orders.view_own',
+    'gops.dashboard.view_all',
   ]);
   const stageAdminRole = await makeRole('zzpipe_admin', 'Verify stage administrator', ['admin.pipeline_stages.view_all', 'admin.pipeline_stages.edit_all']);
   await setStagesAside();
@@ -1103,6 +1104,86 @@ async function main() {
       'it exports as CSV, refuses an unknown status, and is closed to a salesperson with no sales order right',
       csv.status === 200 && bad.status === 400 && (await http(sellerToken, 'GET', '/sales-reports/sales-orders')).status === 403,
       `${csv.status} ${bad.status}`,
+    );
+  }
+
+  // The G-OPS dashboard's sales performance (2026-11-08, the owner's PDF):
+  // booked sales orders before VAT through the report's own rows, the
+  // Gruntech → team → person flow conserving, a person once whatever roles
+  // they hold, and the monthly matrix adding up to the same year.
+  {
+    console.log('\nG-OPS sales performance');
+    const day = manilaDate(new Date()).toISOString().slice(0, 10);
+    const year = day.slice(0, 4);
+    // The manager holds two selling roles — one node on the Sankey all the same.
+    const selling = await prisma.role.findMany({ where: { key: { in: ['team_leader', 'industry_specialist'] } }, select: { id: true } });
+    for (const r of selling) await prisma.userRole.upsert({ where: { userId_roleId: { userId: manager.id, roleId: r.id } }, create: { userId: manager.id, roleId: r.id }, update: {} });
+    type Sales = {
+      total: number;
+      orders: number;
+      months: { key: string; current: number; previous: number; state: string }[];
+      customers: { id: string; revenue: number; to: string }[];
+      people: { id: string; range: number; to: string }[];
+      sankey: { root: { value: number }; teams: { id: string; value: number; pct: number }[]; people: { id: string; value: number; pct: number }[]; links: { team: string; person: string; value: number }[] };
+    };
+    const dash = await http(managerToken, 'GET', `/gops/sales?from=${day}&to=${day}`);
+    const d = dash.body as unknown as Sales;
+    const rep = await http(managerToken, 'GET', `/sales-reports/sales-orders?from=${day}&to=${day}`);
+    const beforeVat = ((rep.body.cards ?? []) as { label: string; value: number }[]).find((c) => c.label === 'Before VAT')?.value;
+    check(
+      "the dashboard's revenue is the Sales Order report's Before VAT for the same days — one arithmetic, printed twice",
+      dash.status === 200 && typeof beforeVat === 'number' && Math.abs(d.total - beforeVat) < 0.01 && d.total > 0 && d.orders >= 1,
+      `${dash.status} ${d?.total} vs ${beforeVat}`,
+    );
+    const sum = (xs: { value: number }[]) => Math.round(xs.reduce((s, x) => s + x.value, 0) * 100) / 100;
+    const ids = d.sankey.people.map((p) => p.id);
+    check(
+      'the Sankey conserves: Gruntech = the teams = the people = the bands, each node carrying its share',
+      Math.abs(d.sankey.root.value - d.total) < 0.01 &&
+        Math.abs(sum(d.sankey.teams) - d.total) < 0.01 &&
+        Math.abs(sum(d.sankey.people) - d.total) < 0.01 &&
+        Math.abs(sum(d.sankey.links) - d.total) < 0.01 &&
+        Math.abs(d.sankey.teams.reduce((s, t) => s + t.pct, 0) - 100) < 0.5 &&
+        d.sankey.people.every((p) => p.pct >= 0 && p.pct <= 100),
+      JSON.stringify(d.sankey),
+    );
+    check(
+      'a person holding two selling roles is ONE node, keyed by login, and the people match the personnel table',
+      new Set(ids).size === ids.length && ids.includes(manager.id) && d.people.map((p) => p.id).join() === ids.join(),
+      ids.join(','),
+    );
+    const mine = await http(managerToken, 'GET', `/sales-orders?scope=mine&dateFrom=${day}&dateTo=${day}&pageSize=1`);
+    const personLink = d.people.find((p) => p.id === manager.id)?.to ?? '';
+    const viaLink = await http(managerToken, 'GET', `/sales-orders?${personLink.split('?')[1]}&pageSize=1`);
+    check(
+      'a View Own holder is shown their own orders alone, and their node opens the list on exactly those',
+      d.orders === (mine.body.summary?.count ?? -1) - (mine.body.summary?.cancelledCount ?? 0) && viaLink.body.total === d.orders,
+      `${d.orders} vs ${JSON.stringify(mine.body.summary)} / ${viaLink.body.total}`,
+    );
+    const thisMonth = d.months.find((m) => m.key === day.slice(0, 7));
+    check(
+      "the month running is marked partial and carries today's booking; a month to come is future",
+      !!thisMonth && thisMonth.state === 'partial' && thisMonth.current >= d.total && d.months.filter((m) => m.key > day.slice(0, 7)).every((m) => m.state === 'future' && m.current === 0),
+      JSON.stringify(d.months),
+    );
+    const matrix = await http(managerToken, 'GET', `/sales-reports/sales-matrix?from=${year}-01-01&to=${year}-12-31`);
+    type T = { rows: (string | number | null)[][]; links?: (string | null)[] };
+    const mt = ((matrix.body.tables ?? []) as T[])[0];
+    const gruntech = mt?.rows.find((r) => r[0] === 'Gruntech');
+    const yearTotal = Math.round(d.months.reduce((s, m) => s + m.current, 0) * 100) / 100;
+    const personRow = mt?.rows.find((r) => String(r[0]).startsWith('↳'));
+    check(
+      "the monthly matrix's Gruntech row adds up to the chart's year, with each person under their team and every row a link",
+      matrix.status === 200 && !!gruntech && Math.abs(Number(gruntech[gruntech.length - 1]) - yearTotal) < 0.01 && !!personRow && (mt?.links ?? []).every((l) => !!l),
+      `${matrix.status} ${JSON.stringify(gruntech)} vs ${yearTotal}`,
+    );
+    const byCustomer = await http(managerToken, 'GET', `/sales-reports/sales-matrix?from=${year}-01-01&to=${year}-12-31&by=customer`);
+    const badBy = await http(managerToken, 'GET', `/sales-reports/sales-matrix?by=region`);
+    const matrixPdf = await http(managerToken, 'GET', `/sales-reports/sales-matrix.pdf?from=${year}-01-01&to=${year}-12-31`);
+    check(
+      'by customer lists the key customers, an unknown grouping is a 400, the paper prints, and a salesperson without the dashboard is kept out',
+      byCustomer.status === 200 && ((byCustomer.body.tables as T[])[0]?.rows.some((r) => r[0] === customer.name) ?? false) && badBy.status === 400 && matrixPdf.status === 200 && (await http(sellerToken, 'GET', '/gops/sales')).status === 403,
+      `${byCustomer.status} ${badBy.status} ${matrixPdf.status}`,
     );
   }
 

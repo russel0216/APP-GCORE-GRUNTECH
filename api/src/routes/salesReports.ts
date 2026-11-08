@@ -4,11 +4,12 @@ import { prisma } from '../prisma';
 import { authenticate, currentUser } from '../auth/middleware';
 import { type Range } from '../shared/insights';
 import { statusLabel } from '../shared/pdf';
-import { inBase, rateOf, RATE_SELECT } from '../shared/exchangeRates';
 import { quotationTotals } from '../shared/quotation';
-import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, quotationTeamWhere, salesOrdersReadable } from '../shared/team';
+import { quotationTeamWhere } from '../shared/team';
+import { live as liveRows, salesOrderRows } from '../shared/salesFigures';
+import { salesMatrix } from '../shared/gops';
 import { badRequest } from '../http/kit';
-import { Series, byValue, cents, linkTo, monthsOf, mountReports, num, pct, table, tally, type Report, type ReportContext } from '../shared/reportKit';
+import { Series, byValue, cents, linkTo, monthsOf, mountReports, num, pct, table, tally, type Cell, type Report, type ReportContext } from '../shared/reportKit';
 import { canSeeOrderCost } from './salesOrders';
 
 /**
@@ -34,8 +35,6 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
   const me = currentUser(ctx.req);
   const q = ctx.query;
   const and: Prisma.SalesOrderWhereInput[] = [{ orderDate: { gte: range.from, lte: range.to } }];
-  const readable = salesOrdersReadable(me);
-  if (readable) and.push(readable);
   const words: string[] = [];
   if (q.ownerId) {
     and.push({ ownerId: q.ownerId });
@@ -56,27 +55,11 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
     words.push(`status ${statusLabel(q.status)}`);
   }
 
-  const orders = await prisma.salesOrder.findMany({
-    where: { AND: and },
-    select: {
-      id: true,
-      number: true,
-      status: true,
-      orderDate: true,
-      ownerId: true,
-      customerId: true,
-      total: true,
-      vatAmount: true,
-      discountPct: true,
-      vatRate: true,
-      vatInclusive: true,
-      owner: { select: { name: true } },
-      customer: { select: { name: true } },
-      quotation: { select: { ...RATE_SELECT, team: TEAM_REF_SELECT, owner: OWNER_TEAM_SELECT } },
-    },
-    orderBy: { orderDate: 'asc' },
-  });
-  const live = orders.filter((o) => o.status !== 'CANCELLED');
+  // The rows and their pesos are shared/salesFigures.ts — the G-OPS dashboard
+  // reads the same, so the two cannot disagree (2026-11-08). The range's
+  // own `orderDate` filter is the shared function's first condition.
+  const orders = await salesOrderRows(me, range.from, range.to, and.slice(1));
+  const live = liveRows(orders);
   const liveIds = live.map((o) => o.id);
   const [lines, invoiced] = await Promise.all([
     liveIds.length
@@ -93,17 +76,16 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
   // Each live order in pesos: its total (with VAT), its net before VAT, what
   // live invoices bill of it (before VAT), and its margin where seen.
   const figures = live.map((o) => {
-    const rate = rateOf(o.quotation);
-    const t = quotationTotals({ lines: (linesOf.get(o.id) ?? []).filter((l) => !l.isHeading), discountPct: o.discountPct, vatRate: o.vatRate, vatInclusive: o.vatInclusive });
+    const rate = o.rate;
+    const t = quotationTotals({ lines: (linesOf.get(o.id) ?? []).filter((l) => !l.isHeading), discountPct: o.raw.discountPct, vatRate: o.raw.vatRate, vatInclusive: o.raw.vatInclusive });
     const seen = canSeeOrderCost(me, o.ownerId) && t.cost.costedLines > 0;
-    const team = quotationTeamOf(o.quotation);
     return {
       o,
-      team: team ? team.code : 'No team',
-      teamId: team ? team.id : 'none',
-      total: cents(inBase(num(o.total), o.quotation)),
+      team: o.team ? o.team.code : 'No team',
+      teamId: o.team ? o.team.id : 'none',
+      total: o.total,
       // Before VAT is the order's stored total less its VAT — what invoicing reads (orderNet).
-      net: cents((num(o.total) - num(o.vatAmount)) * rate),
+      net: o.net,
       invoiced: cents((invoicedOf.get(o.id) ?? 0) * rate),
       margin: seen ? cents(t.cost.totalMargin * rate) : 0,
       marginBase: seen ? cents(t.netOfTax * rate) : 0,
@@ -112,7 +94,7 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
       groups: (linesOf.get(o.id) ?? [])
         .filter((l) => !l.isHeading)
         .map((l) => ({ group: l.group?.trim() || 'No group', amount: num(l.amount) })),
-      netRaw: num(o.total) - num(o.vatAmount),
+      netRaw: o.raw.total - o.raw.vatAmount,
       subtotalRaw: t.subtotal,
       rate,
     };
@@ -148,8 +130,8 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
   const byOwner = tally(figures, (x) => x.o.ownerId, four);
   const byCustomer = tally(figures, (x) => x.o.customerId, four);
   const teamName = new Map(figures.map((x) => [x.teamId, x.team]));
-  const ownerName = new Map(figures.map((x) => [x.o.ownerId, x.o.owner.name]));
-  const customerName = new Map(figures.map((x) => [x.o.customerId, x.o.customer.name]));
+  const ownerName = new Map(figures.map((x) => [x.o.ownerId, x.o.ownerName]));
+  const customerName = new Map(figures.map((x) => [x.o.customerId, x.o.customerName]));
   const named = (rows: ReturnType<typeof shareRows>, names: Map<string, string>) => rows.map(([k, ...rest]) => [names.get(String(k)) ?? String(k), ...rest]);
   const keysOf = (rows: ReturnType<typeof shareRows>) => rows.map((r) => String(r[0]));
 
@@ -186,7 +168,7 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
   const byStatus = new Map<string, number[]>();
   for (const o of orders) {
     const cur = byStatus.get(o.status) ?? [0, 0];
-    byStatus.set(o.status, [cur[0] + 1, cur[1] + inBase(num(o.total), o.quotation)]);
+    byStatus.set(o.status, [cur[0] + 1, cur[1] + o.total]);
   }
 
   const tables = [
@@ -207,7 +189,7 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
     table(
       'Largest orders',
       [{ label: 'Number' }, { label: 'Customer' }, { label: 'Booked by' }, { label: 'Status' }, { label: 'Booked', money: true }, { label: 'Invoiced', money: true }],
-      [...figures].sort((a, b) => b.total - a.total).slice(0, 15).map((x) => [x.o.number, x.o.customer.name, x.o.owner.name, statusLabel(x.o.status), x.total, x.invoiced]),
+      [...figures].sort((a, b) => b.total - a.total).slice(0, 15).map((x) => [x.o.number, x.o.customerName, x.o.ownerName, statusLabel(x.o.status), x.total, x.invoiced]),
       [...figures].sort((a, b) => b.total - a.total).slice(0, 15).map((x) => `/g-ops/sales-orders/${x.o.id}`),
     ),
   ];
@@ -215,7 +197,7 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
   const cancelled = orders.length - live.length;
   const notes: string[] = [];
   if (cancelled) notes.push(`${cancelled} cancelled order${cancelled === 1 ? '' : 's'} in the period book${cancelled === 1 ? 's' : ''} nothing and ${cancelled === 1 ? 'is' : 'are'} counted under By status only.`);
-  if (figures.some((x) => x.o.quotation.currency !== 'PHP')) notes.push('Orders in a foreign currency are converted to pesos at their quotation’s own rate.');
+  if (figures.some((x) => x.o.currency !== 'PHP')) notes.push('Orders in a foreign currency are converted to pesos at their quotation’s own rate.');
   if (live.length && seenCount < live.length) notes.push(`The margin is read off the ${seenCount} of ${live.length} orders whose cost you may see.`);
 
   return {
@@ -253,5 +235,52 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
   };
 }
 
+/**
+ * The G-OPS dashboard's monthly sales analysis (2026-11-08, page 2 of the
+ * owner's `G-OPS_Dashboard_1.pdf`): the months of the range across, the
+ * teams down with each person under their team — or the key customers
+ * (`?by=customer`) — every figure booked sales orders BEFORE VAT in pesos,
+ * the dashboard's own rows (`salesMatrix` in shared/gops.ts). `?teamId=`
+ * narrows to one team or `none`. The series is Gruntech's month by month;
+ * the one table is the matrix, a person's row under their team marked "↳".
+ */
+async function salesMatrixReport(range: Range, ctx: ReportContext): Promise<Report> {
+  const me = currentUser(ctx.req);
+  const by = ctx.query.by === 'customer' ? 'customer' : ctx.query.by === 'team' || !ctx.query.by ? 'team' : null;
+  if (!by) throw badRequest('Grouping is one of team, customer');
+  const m = await salesMatrix(me, range.from, range.to, { by, teamId: ctx.query.teamId });
+  const periods = m.months.map((x) => ({ key: x.key, label: x.label }));
+  const series = new Series('Sales by month', [{ label: 'Before VAT', money: true }], periods);
+  m.months.forEach((x, i) => series.addTo(x.key, 0, m.total[i]));
+  const monthCols = m.months.map((x) => ({ label: x.label, money: true }));
+  const rows: Cell[][] = [];
+  const links: (string | null)[] = [];
+  const day = (d: Date) => d.toISOString().slice(0, 10);
+  const listLink = (extra: Record<string, string | null | undefined>) =>
+    linkTo('/g-ops/sales-orders', { dateFrom: day(range.from), dateTo: day(range.to), scope: 'all', booked: 'yes', ...extra });
+  for (const g of m.groups) {
+    rows.push([g.label, ...g.values, g.total]);
+    links.push(by === 'team' ? listLink({ teamId: g.id }) : listLink({ customerId: g.id }));
+    for (const c of g.children) {
+      rows.push([`↳ ${c.label}`, ...c.values, c.total]);
+      links.push(listLink({ ownerId: c.id, teamId: g.id }));
+    }
+  }
+  rows.push(['Gruntech', ...m.total, cents(m.total.reduce((s, v) => s + v, 0))]);
+  links.push(listLink({}));
+  const grand = cents(m.total.reduce((s, v) => s + v, 0));
+  return {
+    kind: 'sales-matrix',
+    title: 'Monthly Sales Performance Analysis',
+    from: day(range.from),
+    to: day(range.to),
+    filterLine: m.filterLine,
+    cards: [{ label: 'Before VAT', value: grand, money: true }, { label: by === 'team' ? 'Teams' : 'Customers', value: m.groups.length }],
+    series: series.done(),
+    tables: [table(by === 'team' ? 'By sales team and personnel' : 'Key customers', [{ label: by === 'team' ? 'Team / personnel' : 'Customer' }, ...monthCols, { label: 'Total', money: true }], rows, links)],
+    notes: ['Booked sales orders before VAT, in pesos at each quotation’s own rate; a cancelled order books nothing.'],
+  };
+}
+
 // View Own is implied by View Team and View All (withImpliedLevels), so one key opens it for every reader of the list.
-mountReports(salesReportRoutes, { view: 'gops.sales_orders.view_own', auditType: 'sales_report', kinds: { 'sales-orders': salesOrdersReport } });
+mountReports(salesReportRoutes, { view: 'gops.sales_orders.view_own', auditType: 'sales_report', kinds: { 'sales-orders': salesOrdersReport, 'sales-matrix': salesMatrixReport } });

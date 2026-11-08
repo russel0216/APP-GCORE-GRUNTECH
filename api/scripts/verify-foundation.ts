@@ -122,6 +122,7 @@ import { ARCHIVE_ATTACHMENT, ARCHIVE_LIST_KEY, SCORO_ARCHIVE_REMOVED, removeScor
 import { recordLink } from '../../web/src/lib/links';
 import { parseDelimited, rowsToPrLines, prLineAmount, matchCategory, orderTotals, preferredFrom } from '../../web/src/lib/prLines';
 import * as webCanvassMath from '../../web/src/lib/canvassMath';
+import { layoutSankey } from '../../web/src/lib/sankey';
 import * as apiCanvassMath from '../src/shared/canvassMath';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
@@ -2844,6 +2845,58 @@ async function main() {
     'and a selector with nothing left to say is not stored as an empty rule',
     editor.rules['.empty'] === undefined,
   );
+
+  // ── The Sankey layout (web/src/lib/sankey.ts, 2026-11-08) ──────────────────
+  {
+    console.log('\nThe Sankey layout');
+    const lay = layoutSankey(
+      {
+        root: { label: 'Gruntech', value: 1000 },
+        teams: [
+          { id: 'hit', label: 'HIT', value: 600 },
+          { id: 'kat', label: 'KAT', value: 400 },
+        ],
+        // Ricardo books under both teams — one node, two bands in.
+        people: [
+          { id: 'ric', label: 'Ricardo', value: 500 },
+          { id: 'aye', label: 'Ayessa', value: 300 },
+          { id: 'eri', label: 'Erica', value: 200 },
+        ],
+        links: [
+          { team: 'hit', person: 'ric', value: 400 },
+          { team: 'hit', person: 'aye', value: 200 },
+          { team: 'kat', person: 'ric', value: 100 },
+          { team: 'kat', person: 'aye', value: 100 },
+          { team: 'kat', person: 'eri', value: 200 },
+        ],
+      },
+      { width: 600, height: 300, nodeWidth: 10, gap: 10 },
+    );
+    const col = (c: number) => lay.nodes.filter((n) => n.column === c);
+    const height = (ns: typeof lay.nodes) => ns.reduce((s, n) => s + n.h, 0);
+    check(
+      'three columns stand equally tall: the root, the teams and the people each add up to the whole',
+      col(0).length === 1 && col(1).length === 2 && col(2).length === 3 && Math.abs(height(col(0)) - height(col(1))) < 0.05 && Math.abs(height(col(1)) - height(col(2))) < 0.05,
+      `${height(col(0))} ${height(col(1))} ${height(col(2))}`,
+    );
+    const ric = col(2).find((n) => n.id === '2:ric');
+    check(
+      'a person booking under two teams is one node worth both, with two bands in, their share of the root printed',
+      !!ric && ric.value === 500 && ric.pct === 50 && lay.links.filter((l) => l.target === '2:ric').length === 2 && col(1).find((n) => n.id === '1:hit')?.pct === 60,
+      JSON.stringify(ric),
+    );
+    const overlap = (ns: typeof lay.nodes) => ns.slice(1).some((n, i) => n.y < ns[i].y + ns[i].h);
+    const bands = lay.links.reduce((s, l) => s + l.value, 0);
+    const landed = new Map<string, number>();
+    for (const l of lay.links) landed.set(l.target, (landed.get(l.target) ?? 0) + l.h);
+    check(
+      'nodes in a column never overlap, every band lands inside its target, and the bands carry the whole twice (root → teams, teams → people)',
+      !overlap(col(1)) && !overlap(col(2)) && bands === 2000 && lay.nodes.filter((n) => n.column > 0).every((n) => Math.abs((landed.get(n.id) ?? 0) - n.h) < 0.05) && lay.links.every((l) => l.path.startsWith('M') && l.path.endsWith('Z')),
+      `${bands}`,
+    );
+    const empty = layoutSankey({ root: { label: 'Gruntech', value: 0 }, teams: [], people: [], links: [] });
+    check('nothing booked draws nothing', empty.nodes.length === 0 && empty.links.length === 0);
+  }
 
   // ── The requisition page's lines (web/src/lib/prLines.ts) ─────────────────
   {

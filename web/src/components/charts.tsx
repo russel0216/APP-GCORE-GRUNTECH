@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { IconBadge, type IconName } from './Icon';
+import { layoutSankey, type SankeyInput } from '../lib/sankey';
 
 /**
  * The chart set.
@@ -478,6 +479,203 @@ export function Brief({ lines, caption }: { lines: BriefLine[]; caption?: string
     </div>
   );
 }
+
+// ── Grouped bars ─────────────────────────────────────────────────────────────
+
+/** One group of bars — a month — with a value per series. */
+export interface BarGroup {
+  label: string;
+  values: number[];
+  /** A mark after the label ("*" for a month still running) with its meaning. */
+  mark?: string;
+  note?: string;
+  /** Drawn fainter: a month not yet over, a forecast. */
+  faint?: boolean;
+}
+
+/**
+ * Vertical bars, a group per period and a bar per series inside it — this
+ * year against last, month by month (2026-11-08, the owner's G-OPS
+ * dashboard). The ONE vertical chart in the set: the labels are months,
+ * three letters that sit under a bar. Every bar prints its own figure, so
+ * the two series are told apart by the legend and the numbers, never by
+ * colour alone; an empty chart says so.
+ */
+export function GroupedBars({
+  groups,
+  series,
+  format,
+  caption,
+}: {
+  groups: BarGroup[];
+  series: { label: string; tone: Tone | string }[];
+  format: (v: number) => string;
+  caption?: string;
+}) {
+  const peak = Math.max(0, ...groups.flatMap((g) => g.values));
+  if (peak === 0) return <Empty caption={caption} />;
+  const W = 960;
+  const H = 300;
+  const padL = 56;
+  const padB = 28;
+  const padT = 22;
+  const plotW = W - padL - 8;
+  const plotH = H - padT - padB;
+  const groupW = plotW / groups.length;
+  const barW = Math.min(26, (groupW - 10) / series.length);
+  const inner = barW * series.length;
+  const y = (v: number) => padT + plotH - (v / peak) * plotH;
+  // Four gridlines at round figures.
+  const step = niceStep(peak / 4);
+  const ticks: number[] = [];
+  for (let t = step; t <= peak * 1.001 && ticks.length < 8; t += step) ticks.push(t);
+  const colour = (t: Tone | string) => TONE_VAR[t as Tone] ?? t;
+  return (
+    <div className="chart">
+      {caption && <div className="chart-caption">{caption}</div>}
+      <ul className="gbar-legend">
+        {series.map((s) => (
+          <li key={s.label}>
+            <span className="swatch" style={{ background: colour(s.tone) }} />
+            {s.label}
+          </li>
+        ))}
+      </ul>
+      <svg viewBox={`0 0 ${W} ${H}`} className="gbar" role="img" aria-label={caption ?? 'Bars'}>
+        {ticks.map((t) => (
+          <g key={t}>
+            <line x1={padL} x2={W - 8} y1={y(t)} y2={y(t)} className="gbar-grid" />
+            <text x={padL - 6} y={y(t) + 3} className="gbar-tick">
+              {format(t)}
+            </text>
+          </g>
+        ))}
+        {groups.map((g, gi) => {
+          const x0 = padL + gi * groupW + (groupW - inner) / 2;
+          return (
+            <g key={g.label} className={g.faint ? 'is-faint' : undefined}>
+              {g.values.map((v, si) => {
+                const x = x0 + si * barW;
+                const top = y(v);
+                return (
+                  <g key={si}>
+                    <rect x={x + 1} y={top} width={barW - 2} height={Math.max(0, padT + plotH - top)} rx={3} fill={colour(series[si].tone)} className="gbar-bar">
+                      <title>{`${g.label}${g.mark ?? ''} · ${series[si].label}: ${format(v)}`}</title>
+                    </rect>
+                    {v > 0 && (
+                      <text x={x + barW / 2} y={top - 4} className="gbar-value">
+                        {format(v)}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+              <text x={x0 + inner / 2} y={H - 8} className="gbar-label">
+                {g.label}
+                {g.mark ?? ''}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+      {groups.some((g) => g.note) && <div className="chart-note">{[...new Set(groups.map((g) => g.note).filter(Boolean))].join(' · ')}</div>}
+    </div>
+  );
+}
+
+function niceStep(raw: number): number {
+  if (raw <= 0) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / mag;
+  const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
+  return step * mag;
+}
+
+// ── Sankey ───────────────────────────────────────────────────────────────────
+
+/**
+ * The flow of a whole through its parts — Gruntech → team → person
+ * (2026-11-08, the owner's call). The geometry is `lib/sankey.ts`, pure and
+ * pinned; this draws it: a band per flow, a bar per node, and beside every
+ * node its name, its figure and its share of the root, so the picture is
+ * readable without colour and the Sankey's one claim — the parts add up to
+ * the whole — can be checked by eye. A team or a person opens the list it
+ * counted.
+ */
+export function Sankey({ input, format, caption }: { input: SankeyInput; format: (v: number) => string; caption?: string }) {
+  const W = 960;
+  // Two lines of label per node (the name, then the figure and share), so
+  // every node needs about 40 units of height whatever its value; a margin
+  // top and bottom keeps the end nodes' labels on the canvas.
+  const rows = Math.max(input.teams.filter((t) => t.value > 0).length, input.people.filter((p) => p.value > 0).length, 1);
+  const pad = 16;
+  const H = Math.max(300, 42 * rows + pad * 2);
+  const labelW = 210;
+  const lay = layoutSankey(input, { width: W - labelW * 2, height: H - pad * 2, nodeWidth: 14, gap: 14 });
+  if (lay.nodes.length === 0) return <Empty caption={caption} />;
+  const navigate = useNavigate();
+  const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, SANKEY_TONES[i % SANKEY_TONES.length]]));
+  // A person takes the colour of the team that gives them most.
+  const personTone = new Map<string, string>();
+  for (const l of lay.links) {
+    if (!l.target.startsWith('2:')) continue;
+    const cur = personTone.get(l.target);
+    const best = lay.links.filter((x) => x.target === l.target).sort((a, b) => b.value - a.value)[0];
+    if (!cur && best) personTone.set(l.target, teamTone.get(best.source) ?? 'var(--neon)');
+  }
+  const toneOf = (id: string) => teamTone.get(id) ?? personTone.get(id) ?? 'var(--neon)';
+  return (
+    <div className="chart">
+      {caption && <div className="chart-caption">{caption}</div>}
+      <svg viewBox={`0 0 ${W} ${H}`} className="sankey" role="img" aria-label={caption ?? 'Flow'}>
+        <g transform={`translate(${labelW},${pad})`}>
+          {lay.links.map((l) => (
+            <path key={`${l.source}-${l.target}`} d={l.path} className="sankey-band" fill={toneOf(l.source.startsWith('0:') ? l.target : l.source)}>
+              <title>{`${lay.nodes.find((n) => n.id === l.source)?.label} → ${lay.nodes.find((n) => n.id === l.target)?.label}: ${format(l.value)}`}</title>
+            </path>
+          ))}
+          {lay.nodes.map((n) => {
+            const left = n.column === 2;
+            const tx = left ? n.x + lay.nodeWidth + 8 : n.x - 8;
+            const anchor = left ? 'start' : 'end';
+            const words = n.column === 0 ? `${format(n.value)} · 100%` : `${format(n.value)} · ${n.pct}%`;
+            const label = (
+              <text x={tx} y={n.y + n.h / 2} className="sankey-label" textAnchor={anchor}>
+                <tspan className="sankey-name">{n.label}</tspan>
+                <tspan className="sankey-figure" x={tx} dy="1.2em">
+                  {words}
+                </tspan>
+              </text>
+            );
+            return (
+              <g key={n.id}>
+                <rect x={n.x} y={n.y} width={lay.nodeWidth} height={Math.max(2, n.h)} rx={2} fill={n.column === 0 ? 'var(--text)' : toneOf(n.id)} className="sankey-node">
+                  <title>{`${n.label}: ${format(n.value)} (${n.pct}%)`}</title>
+                </rect>
+                {n.to ? (
+                  <a
+                    href={n.to}
+                    className="sankey-link"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigate(n.to!);
+                    }}
+                  >
+                    {label}
+                  </a>
+                ) : (
+                  label
+                )}
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+const SANKEY_TONES = ['var(--neon)', 'var(--info)', 'var(--magenta)', 'var(--warn)', '#2E9A4B', '#5B2A8C'];
 
 // ── Shared ───────────────────────────────────────────────────────────────────
 

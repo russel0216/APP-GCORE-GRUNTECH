@@ -688,6 +688,20 @@ export function formatMoney(value: number | null | undefined, currency = 'PHP'):
   return new Intl.NumberFormat('en-PH', { style: 'currency', currency }).format(value);
 }
 
+/**
+ * Money where a bar's label has no room for centavos (2026-11-08, the G-OPS
+ * dashboard's "₱11.20M"): millions to two decimals, thousands to one, under
+ * a thousand whole. Pesos only — a chart on the dashboard is always pesos.
+ */
+export function formatCompactMoney(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—';
+  const abs = Math.abs(value);
+  const sign = value < 0 ? '−' : '';
+  if (abs >= 1_000_000) return `${sign}₱${(abs / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${sign}₱${(abs / 1_000).toFixed(1)}K`;
+  return `${sign}₱${Math.round(abs)}`;
+}
+
 export function relativeTime(value: string | Date): string {
   const d = typeof value === 'string' ? new Date(value) : value;
   const seconds = Math.round((Date.now() - d.getTime()) / 1000);

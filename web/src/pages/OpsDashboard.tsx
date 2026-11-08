@@ -5,6 +5,7 @@ import { todayLocal } from '../lib/day';
 import { ErrorBox, Loading } from '../components/ui';
 import { BarList, Donut, Funnel, Panel, Stat, type Slice } from '../components/charts';
 import { RangePicker } from './insights/Overview';
+import { OpsSales } from './OpsSales';
 
 /**
  * G-OPS — the module overview.
@@ -20,9 +21,15 @@ import { RangePicker } from './insights/Overview';
  *   Aftermarket  What cover are we carrying on the sites we have installed,
  *                and how much maintenance actually got done?
  *
- * It is COUNTS, not money. Value lives in Insights, which reconciles every
- * figure against the documents behind it (model §11). Two places adding up the
- * pipeline is two pipeline figures, and one of them will be wrong.
+ * The counts below are COUNTS, not money — value lives in Insights, which
+ * reconciles every figure against the documents behind it (model §11).
+ * Since 2026-11-08 (the owner's `G-OPS_Dashboard_1.pdf`) the page OPENS on
+ * money all the same: `OpsSales` — booked sales orders before VAT, by month
+ * against last year, the top customers, who booked, and the Gruntech → team
+ * → person flow — read through the Sales Order report's own rows, so the
+ * two cannot disagree (verify-pipeline asserts it). Two places adding up the
+ * same thing with two arithmetics is what would be wrong; one arithmetic
+ * printed twice is not.
  *
  * One request to `/gops/overview`, which groups each entity once — and every
  * bar, slice and tile links to the list it counted, because a figure you
@@ -131,12 +138,10 @@ export function OpsDashboard() {
     <div>
       <div className="page-head">
         <div>
-          <h1>G-OPS</h1>
+          <h1>G-OPS Overview</h1>
           <p>
             Sales, delivery and aftermarket — one road, three stretches. A lead becomes a
             quotation, a quotation becomes a job, and a job becomes something to look after.
-            Counts only; the money is in Insights, which reconciles it against the documents
-            behind it.
           </p>
         </div>
 
@@ -144,11 +149,10 @@ export function OpsDashboard() {
           The range sits with the page title, not inside a panel — so the line
           under it says what it reaches, because a control in the page head
           reads as governing the whole page unless it says otherwise. Shown to
-          anyone holding either block it affects, not Sales alone: someone with
-          Aftermarket and no Sales still needs to pick the period their PM
-          count is measured over.
+          everyone: the sales figures, the funnel and the PM count all read it,
+          and which of them a reader holds is the API's to decide.
         */}
-        {(sales || aftermarket) && (
+        {
           <div>
             <RangePicker
               from={from}
@@ -159,10 +163,10 @@ export function OpsDashboard() {
               }}
             />
             <div className="faint" style={{ fontSize: 'var(--fs-xs)', textAlign: 'right' }}>
-              Sales and PM accomplished — everything else shows what is open now
+              Sales figures and PM accomplished — the project and contract counts show what is open now
             </div>
           </div>
-        )}
+        }
       </div>
 
       {!sales && !delivery && !aftermarket ? (
@@ -172,6 +176,7 @@ export function OpsDashboard() {
         </div>
       ) : (
         <div className="stack">
+          <OpsSales from={from} to={to} />
           {sales && (
             <Panel
               title="Sales"

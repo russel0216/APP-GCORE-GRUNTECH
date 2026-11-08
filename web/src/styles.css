@@ -3424,6 +3424,150 @@ a.bar-row:hover .bar-label {
   font-weight: 600;
 }
 
+/* ── Grouped bars (this year against last, by month) ─────────────────────── */
+
+.gbar {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.gbar-grid {
+  stroke: rgb(var(--tint-rgb) / 0.08);
+  stroke-dasharray: 3 4;
+}
+
+.gbar-tick {
+  fill: var(--faint);
+  font-size: 11px;
+  text-anchor: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.gbar-label {
+  fill: var(--muted);
+  font-size: 12px;
+  text-anchor: middle;
+}
+
+.gbar-value {
+  fill: var(--text);
+  font-size: 10px;
+  text-anchor: middle;
+  font-variant-numeric: tabular-nums;
+}
+
+.gbar .is-faint .gbar-bar {
+  opacity: 0.45;
+}
+
+.gbar-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: var(--s-4);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.gbar-legend li {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.gbar-legend .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.chart-note {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+/* ── Sankey (Gruntech → team → person) ───────────────────────────────────── */
+
+.sankey {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.sankey-band {
+  opacity: 0.28;
+  transition: opacity 0.15s ease;
+}
+
+.sankey-band:hover {
+  opacity: 0.55;
+}
+
+.sankey-node {
+  opacity: 0.95;
+}
+
+.sankey-label {
+  font-size: 12px;
+  fill: var(--text);
+  dominant-baseline: middle;
+}
+
+.sankey-name {
+  font-weight: 600;
+}
+
+.sankey-figure {
+  fill: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sankey-link:hover .sankey-name,
+.sankey-link:focus-visible .sankey-name {
+  fill: var(--neon);
+  text-decoration: underline;
+}
+
+/* ── The monthly sales matrix (G-OPS dashboard, page 2) ─────────────────── */
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+table.matrix {
+  font-size: var(--fs-xs);
+}
+
+table.matrix th,
+table.matrix td {
+  white-space: nowrap;
+}
+
+table.matrix td:first-child,
+table.matrix th:first-child {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+table.matrix .matrix-group td {
+  font-weight: 600;
+}
+
+table.matrix .matrix-child td:first-child {
+  padding-left: var(--s-6);
+  color: var(--muted);
+  font-weight: 400;
+}
+
+table.matrix .matrix-total td {
+  border-top: 2px solid var(--line);
+  font-weight: 700;
+}
+
 /* ── Funnel ───────────────────────────────────────────────────────────────── */
 
 .funnel {
