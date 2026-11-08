@@ -5810,6 +5810,25 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   `linkLegacyBookings()` on every deploy: orders made before this link up
   to the quotation lines they match (product, price, unit), and a lone
   summarised line is marked as booking every line in full. Idempotent.
+- **TEMPORARY: a sales order WITHOUT a quotation** (2026-11-08, the
+  owner's call: "my team is adding sales orders from SCORO — a temporary
+  access to enter a sales order without a quotation for this year"). Open
+  until `DIRECT_ORDERS_UNTIL` (2026-12-31, Manila's day;
+  `shared/directOrders.ts`), for any `gops.sales_orders.create` holder:
+  "+ New sales order" › **Without a quotation…** asks the customer, what it
+  is for, team, currency (rate), order date (never a day to come) and PO,
+  and `POST /sales-orders/direct` makes in ONE transaction an empty DRAFT
+  order and a STAND-IN quotation behind it — `Quotation.directOrder`,
+  numbered `Q-<order number>` (no salesperson's series used), WON on an
+  APPROVED revision 0 (the SCORO import's precedent), the team picked or
+  the creator's. The person adds the lines on the ordinary order editor;
+  every `PUT /sales-orders/:id` runs `mirrorDirectQuotation()`, which copies
+  the order's lines, discount and tax onto the stand-in and links each order
+  line to its mirror, so the stand-in is worth the order and has nothing
+  left to book. Deleting the order drops its stand-in (`dropStandIn`). The
+  order goes for approval on its own route as any other. After the date the
+  button is gone and the route refuses; orders made stay. Remove the door
+  (the route, the panel, the constant) once the migration is done.
 - **One quotation, one number family**: the first order takes the next
   `sales_order` number; every later one is `<base>.1`, `<base>.2`…
   (progress booking), computed inside the creating transaction

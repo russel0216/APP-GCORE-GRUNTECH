@@ -1557,6 +1557,10 @@ enum LostKind {
 model Quotation {
   id     String @id @default(cuid())
   number String @unique
+  /// A stand-in made for a sales order entered WITHOUT a quotation
+  /// (2026-11-08, the owner's call for the SCORO migration, open until
+  /// 31 Dec 2026 — shared/directOrders.ts). Its lines mirror the order's.
+  directOrder Boolean @default(false)
 
   customerId String
   customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)

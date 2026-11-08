@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import { CommissionsCard } from '../finance/Commissions';
 import { ContactPicker, type ContactRef } from '../../components/ContactPicker';
+import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { MemoryInput, ORDER_MEMORY } from '../../components/MemoryInput';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, openPdf, qs } from '../../lib/api';
@@ -328,7 +329,13 @@ export function SalesOrders() {
         </div>
       </div>
 
-      {picking && <PickQuotationPanel onClose={() => setPicking(false)} onPick={(qid) => navigate(`/g-ops/quotations/${qid}?order=1`)} />}
+      {picking && (
+        <PickQuotationPanel
+          onClose={() => setPicking(false)}
+          onPick={(qid) => navigate(`/g-ops/quotations/${qid}?order=1`)}
+          onDirect={(id) => navigate(`/g-ops/sales-orders/${id}/edit`)}
+        />
+      )}
 
       <DataList<SalesOrderListRow>
         listKey="sales-orders"
@@ -416,7 +423,138 @@ export function SalesOrders() {
  * its Create Sales Order panel already open (`?order=1`). No second create
  * path: the panel on the quotation page is still the one way an order starts.
  */
-function PickQuotationPanel({ onClose, onPick }: { onClose: () => void; onPick: (quotationId: string) => void }) {
+interface DirectOpen {
+  open: boolean;
+  until: string;
+  currency: string;
+  currencies: { code: string; label: string }[];
+}
+
+/**
+ * A sales order WITHOUT a quotation (2026-11-08, the owner's call for the
+ * SCORO migration; open until the API's DIRECT_ORDERS_UNTIL). The customer,
+ * what it is for, the team and currency, then the order editor for the lines.
+ * The API makes a stand-in quotation behind it (shared/directOrders.ts).
+ */
+function DirectOrderForm({ door, onCreated, onBack }: { door: DirectOpen; onCreated: (id: string) => void; onBack: () => void }) {
+  const teams = useTeams();
+  const [customer, setCustomer] = useState<CustomerRef | null>(null);
+  const [subject, setSubject] = useState('');
+  const [teamId, setTeamId] = useState('');
+  const [currency, setCurrency] = useState(door.currency);
+  const [rate, setRate] = useState('');
+  const [orderDate, setOrderDate] = useState('');
+  const [poNumber, setPoNumber] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [attempted, setAttempted] = useState(false);
+  const foreign = currency !== door.currency;
+
+  async function create() {
+    setAttempted(true);
+    if (!customer || subject.trim().length < 2) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const made = await api.post<{ id: string; number: string }>('/sales-orders/direct', {
+        customerId: customer.id,
+        subject: subject.trim(),
+        teamId: teamId || null,
+        currency,
+        exchangeRate: foreign && Number(rate) > 0 ? Number(rate) : null,
+        orderDate: orderDate || undefined,
+        poNumber: poNumber.trim() || null,
+      });
+      onCreated(made.id);
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="stack">
+      <p className="faint">
+        For orders brought over from SCORO. G-CORE keeps a stand-in quotation behind the order so its team, currency and reports work; you add the
+        lines on the next page, then submit it for approval as usual. Available until {formatDate(door.until)}.
+      </p>
+      <ErrorBox error={error} />
+      <div className="grid-2">
+        <Field label="Customer" required error={attempted && !customer ? 'Choose the customer' : null}>
+          <CustomerPicker value={customer} onChange={setCustomer} required />
+        </Field>
+        <Field label="What it is for" required hint="The order's name — e.g. the project or the SCORO quote name" error={attempted && subject.trim().length < 2 ? 'Say what the order is for' : null}>
+          <input value={subject} maxLength={300} className="caps-input" onChange={(e) => setSubject(e.target.value)} />
+        </Field>
+        <Field label="Team" hint="Blank: your own team">
+          <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
+            <option value="">— my team —</option>
+            {teams.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.code} — {t.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Currency">
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+            {door.currencies.map((c) => (
+              <option key={c.code} value={c.code}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {foreign && (
+          <Field label={`Rate to ${door.currency}`} hint="Blank: Company Settings' rate">
+            <NumberInput kind="decimal" value={rate} onChange={(e) => setRate(e.target.value)} />
+          </Field>
+        )}
+        <Field label="Order date" hint="Blank: today; never a day to come">
+          <input type="date" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+        </Field>
+        <Field label="Customer PO no.">
+          <input value={poNumber} maxLength={120} onChange={(e) => setPoNumber(e.target.value)} />
+        </Field>
+      </div>
+      <div className="row">
+        <button type="button" className="btn btn-sm" onClick={onBack}>
+          Back to quotations
+        </button>
+        <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => void create()}>
+          {busy ? 'Creating…' : 'Create and add lines'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PickQuotationPanel({ onClose, onPick, onDirect }: { onClose: () => void; onPick: (quotationId: string) => void; onDirect: (orderId: string) => void }) {
+  const [door, setDoor] = useState<DirectOpen | null>(null);
+  const [direct, setDirect] = useState(false);
+  useEffect(() => {
+    api
+      .get<DirectOpen>('/sales-orders/direct/open')
+      .then(setDoor)
+      .catch(() => setDoor(null));
+  }, []);
+  if (direct && door?.open) {
+    return (
+      <section className="qe-append so-pick" aria-label="New sales order without a quotation">
+        <div className="row qe-append-head">
+          <span className="qe-append-title">New sales order without a quotation</span>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <DirectOrderForm door={door} onCreated={onDirect} onBack={() => setDirect(false)} />
+      </section>
+    );
+  }
+  return <PickQuotationList onClose={onClose} onPick={onPick} onDirect={door?.open ? () => setDirect(true) : undefined} until={door?.until} />;
+}
+
+function PickQuotationList({ onClose, onPick, onDirect, until }: { onClose: () => void; onPick: (quotationId: string) => void; onDirect?: () => void; until?: string }) {
   const [text, setText] = useState('');
   const [rows, setRows] = useState<QuotationPick[] | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -437,9 +575,16 @@ function PickQuotationPanel({ onClose, onPick }: { onClose: () => void; onPick: 
         <label htmlFor="so-pick-find" className="qe-append-title">
           Which quotation does the order book?
         </label>
-        <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
-          Close
-        </button>
+        <div className="row">
+          {onDirect && (
+            <button type="button" className="btn btn-sm" onClick={onDirect} title={until ? `For the SCORO migration — until ${formatDate(until)}` : undefined}>
+              Without a quotation…
+            </button>
+          )}
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
+            Close
+          </button>
+        </div>
       </div>
       <ErrorBox error={error} />
       <input

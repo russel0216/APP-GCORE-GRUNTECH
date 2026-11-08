@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { salesOrderSpend } from '../shared/orderStock';
 import { refreshAdvance } from '../shared/finance';
-import { inBase, RATE_SELECT, rateOf } from '../shared/exchangeRates';
+import { exchangeRates, inBase, RATE_SELECT, rateOf, storedRate } from '../shared/exchangeRates';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -45,7 +45,10 @@ import {
   QUOTATION_EXTRA_TAX_RATES,
   productTitle,
   capsParts,
+  QUOTATION_CURRENCIES,
+  upperText,
 } from '../shared/quotation';
+import { DIRECT_ORDERS_UNTIL, directOrdersOpen, dropStandIn, mirrorDirectQuotation } from '../shared/directOrders';
 import { valueRevision } from '../shared/pipeline';
 import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
 import { attachedFiles, copyAttachments, withAttachments } from '../shared/pdfAttachments';
@@ -757,6 +760,114 @@ async function orderInvoicing(me: ReturnType<typeof currentUser>, order: { id: s
   };
 }
 
+// ── Create WITHOUT a quotation (temporary, 2026) ─────────────────────────────
+
+/** Whether the "without a quotation" door is still open, and until when. */
+salesOrderRoutes.get(
+  '/direct/open',
+  require_('gops.sales_orders.create'),
+  handler(async (_req, res) => {
+    res.json({ open: directOrdersOpen(), until: DIRECT_ORDERS_UNTIL, currency: await companyCurrency(), currencies: QUOTATION_CURRENCIES });
+  }),
+);
+
+const directSchema = z.object({
+  customerId: z.string().min(1),
+  contactId: z.string().optional().nullable(),
+  /** What the order is for — the stand-in quotation's name. */
+  subject: z.string().trim().min(2).max(300),
+  teamId: z.string().optional().nullable(),
+  currency: z.string().trim().length(3).optional(),
+  exchangeRate: z.number().positive().optional().nullable(),
+  orderDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  poNumber: z.string().trim().max(120).optional().nullable(),
+});
+
+/**
+ * A DRAFT sales order with no quotation behind it (2026-11-08, the owner's
+ * call for the SCORO migration; until `DIRECT_ORDERS_UNTIL`). Makes the
+ * stand-in quotation and the empty order in one transaction; the person adds
+ * the lines on the order editor, which mirrors them onto the stand-in
+ * (shared/directOrders.ts). The order then goes for approval as any other.
+ */
+salesOrderRoutes.post(
+  '/direct',
+  require_('gops.sales_orders.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    if (!directOrdersOpen()) {
+      throw badRequest(`Entering a sales order without a quotation closed on ${DIRECT_ORDERS_UNTIL} — raise it from a quotation`);
+    }
+    const body = parseBody(directSchema, req.body);
+    const customer = await prisma.customer.findUnique({ where: { id: body.customerId }, select: { id: true, name: true } });
+    if (!customer) throw badRequest('That customer is not on file');
+    if (body.contactId && !(await prisma.customerContact.findFirst({ where: { id: body.contactId, customerId: customer.id }, select: { id: true } }))) {
+      throw badRequest('That contact person is not one of the customer’s');
+    }
+    const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+    const home = await companyCurrency();
+    const currency = (body.currency ?? home).toUpperCase();
+    if (!QUOTATION_CURRENCIES.some((c) => c.code === currency)) throw badRequest(`${currency} is not a currency G-CORE quotes in`);
+    let teamId: string | null = null;
+    if (body.teamId) {
+      const team = await prisma.industry.findFirst({ where: { id: body.teamId, isActive: true }, select: { id: true } });
+      if (!team) throw badRequest('teamId: that team was not found or is switched off');
+      teamId = team.id;
+    } else {
+      teamId = (await teamOf(me.id))?.id ?? null;
+    }
+    const today = manilaDate(new Date());
+    const orderDate = body.orderDate ? new Date(`${body.orderDate}T00:00:00Z`) : today;
+    if (orderDate.getTime() > today.getTime()) throw badRequest('The order date cannot be a day to come');
+    const vatRate = company?.vatRate ?? d(0.12);
+
+    const order = await prisma.$transaction(async (tx) => {
+      const number = await nextNumber('sales_order', tx);
+      const quotation = await tx.quotation.create({
+        data: {
+          number: `Q-${number}`,
+          directOrder: true,
+          customerId: customer.id,
+          contactId: body.contactId || null,
+          ownerId: me.id,
+          subject: upperText(body.subject),
+          outcome: 'WON',
+          probability: 100,
+          decidedAt: new Date(),
+          currency,
+          exchangeRate: currency === home ? null : storedRate(currency, body.exchangeRate ?? null, await exchangeRates(tx)),
+          teamId,
+          revisions: { create: [{ revision: 0, status: 'APPROVED', vatRate, discountPct: d(0), prNumber: body.poNumber || null }] },
+        },
+      });
+      return tx.salesOrder.create({
+        data: {
+          number,
+          quotationId: quotation.id,
+          customerId: customer.id,
+          contactId: body.contactId || null,
+          ownerId: me.id,
+          orderDate,
+          poNumber: body.poNumber || null,
+          discountPct: d(0),
+          vatRate,
+          vatInclusive: false,
+        },
+      });
+    });
+    await audit(
+      {
+        entityType: 'sales_order',
+        entityId: order.id,
+        action: 'CREATED',
+        summary: `Created sales order ${order.number} for ${customer.name} without a quotation (stand-in Q-${order.number}; the SCORO migration, open until ${DIRECT_ORDERS_UNTIL})`,
+      },
+      req,
+    );
+    res.status(201).json({ id: order.id, number: order.number });
+  }),
+);
+
 // ── Create from a quotation ──────────────────────────────────────────────────
 
 const createSchema = z.object({
@@ -1089,6 +1200,8 @@ salesOrderRoutes.put(
         await rememberGroups(tx, body.lines.map((l) => l.group));
       }
       await recalcOrder(order.id, tx);
+      // An order entered without a quotation keeps its stand-in in step (2026-11-08).
+      await mirrorDirectQuotation(tx, order.id);
     });
 
     const fresh = await prisma.salesOrder.findUniqueOrThrow({
@@ -1452,6 +1565,12 @@ salesOrderRoutes.delete(
     }
     await deleteOrRefuse(`Sales order ${order.number}`, () => prisma.salesOrder.delete({ where: { id: order.id } }));
     await deleteAttachmentsOf('sales_order', [order.id]);
+    // Its stand-in quotation goes with it when the order was entered without one.
+    try {
+      await dropStandIn(order.quotationId);
+    } catch (err) {
+      console.error(`[sales-order] removing ${order.number}'s stand-in quotation failed`, err);
+    }
     await audit(
       { entityType: 'sales_order', entityId: order.id, action: 'DELETED', summary: `Deleted sales order ${order.number}`, before: order },
       req,
