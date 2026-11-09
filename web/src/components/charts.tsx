@@ -514,7 +514,7 @@ export function GroupedBars({
 }) {
   const peak = Math.max(0, ...groups.flatMap((g) => g.values));
   if (peak === 0) return <Empty caption={caption} />;
-  const W = 960;
+  const W = 1200;
   const H = 300;
   const padL = 56;
   const padB = 28;
@@ -609,8 +609,8 @@ export function Sankey({ input, format, caption }: { input: SankeyInput; format:
   // top and bottom keeps the end nodes' labels on the canvas.
   const rows = Math.max(input.teams.filter((t) => t.value > 0).length, input.people.filter((p) => p.value > 0).length, 1);
   const pad = 16;
-  const H = Math.max(300, 42 * rows + pad * 2);
-  const labelW = 210;
+  const H = Math.max(320, 46 * rows + pad * 2);
+  const labelW = 230;
   const lay = layoutSankey(input, { width: W - labelW * 2, height: H - pad * 2, nodeWidth: 14, gap: 14 });
   if (lay.nodes.length === 0) return <Empty caption={caption} />;
   const navigate = useNavigate();
@@ -624,6 +624,22 @@ export function Sankey({ input, format, caption }: { input: SankeyInput; format:
     if (!cur && best) personTone.set(l.target, teamTone.get(best.source) ?? 'var(--neon)');
   }
   const toneOf = (id: string) => teamTone.get(id) ?? personTone.get(id) ?? 'var(--neon)';
+  // Labels never overlap (2026-11-09, the owner's report): each column's
+  // labels are spread to at least two lines apart, top to bottom, then pulled
+  // back up from the bottom edge if the last ran off the canvas.
+  const LINE = 40;
+  const labelY = new Map<string, number>();
+  for (const col of [0, 1, 2] as const) {
+    const ns = lay.nodes.filter((n) => n.column === col).sort((a, b) => a.y - b.y);
+    const ys = ns.map((n) => n.y + n.h / 2);
+    for (let i = 1; i < ys.length; i++) ys[i] = Math.max(ys[i], ys[i - 1] + LINE);
+    const max = H - pad * 2 - LINE / 2;
+    if (ys.length && ys[ys.length - 1] > max) {
+      ys[ys.length - 1] = max;
+      for (let i = ys.length - 2; i >= 0; i--) ys[i] = Math.min(ys[i], ys[i + 1] - LINE);
+    }
+    ns.forEach((n, i) => labelY.set(n.id, ys[i] - 8));
+  }
   return (
     <div className="chart">
       {caption && <div className="chart-caption">{caption}</div>}
@@ -640,7 +656,7 @@ export function Sankey({ input, format, caption }: { input: SankeyInput; format:
             const anchor = left ? 'start' : 'end';
             const words = n.column === 0 ? `${format(n.value)} · 100%` : `${format(n.value)} · ${n.pct}%`;
             const label = (
-              <text x={tx} y={n.y + n.h / 2} className="sankey-label" textAnchor={anchor}>
+              <text x={tx} y={labelY.get(n.id) ?? n.y + n.h / 2} className="sankey-label" textAnchor={anchor}>
                 <tspan className="sankey-name">{n.label}</tspan>
                 <tspan className="sankey-figure" x={tx} dy="1.2em">
                   {words}
