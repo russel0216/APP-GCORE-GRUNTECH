@@ -1,7 +1,14 @@
 import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { authenticate, currentUser } from '../auth/middleware';
+import { authenticate, currentUser, require_ } from '../auth/middleware';
+import { can } from '../permissions/resolve';
+import { audit } from '../shared/audit';
+import { parseRange } from '../shared/insights';
+import { gopsSales } from '../shared/gops';
+import { renderSalesReport, companyCurrency, formatAmount, formatDate } from '../shared/pdf';
+import { contentDisposition, paperFileName } from '../shared/paperName';
+import { handler, forbidden } from '../http/kit';
 import { type Range } from '../shared/insights';
 import { statusLabel } from '../shared/pdf';
 import { quotationTotals } from '../shared/quotation';
@@ -283,4 +290,134 @@ async function salesMatrixReport(range: Range, ctx: ReportContext): Promise<Repo
 }
 
 // View Own is implied by View Team and View All (withImpliedLevels), so one key opens it for every reader of the list.
+// ── The one-page Sales Report (2026-11-09) ──────────────────────────────────
+//
+// The owner's "2026 GRUNTECHNOLOGY MONTHLY SALE REPORT" (his
+// Sale_Report_October_31_2026.pdf): the Sales Order report's Print is ONE
+// landscape page — every salesperson by month with their team and the year's
+// total, the team summary, the date, who printed it, the year's target and
+// the achievement, then the month bars against last year and the Sankey.
+// The year is the one the report's range ends in, January to December; the
+// figures are the dashboard's own (`salesOrderRows`, before VAT, pesos), so
+// the paper, the dashboard and the report agree. Declared before
+// mountReports so it answers `/sales-orders.pdf` in place of the generic
+// paper. The target is one Setting per year, `sales.target.<year>`.
+
+const TARGET_KEY = (year: number) => `sales.target.${year}`;
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+async function yearTarget(year: number): Promise<number | null> {
+  const row = await prisma.setting.findUnique({ where: { key: TARGET_KEY(year) } });
+  const v = row ? Number((row.value as { amount?: unknown })?.amount) : NaN;
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+salesReportRoutes.get(
+  '/target/:year',
+  require_('gops.sales_orders.view_own'),
+  handler(async (req, res) => {
+    const year = Number(req.params.year);
+    if (!Number.isInteger(year) || year < 2000 || year > 2100) throw badRequest('Name a year');
+    res.json({ year, amount: await yearTarget(year), canEdit: canSetTarget(currentUser(req)) });
+  }),
+);
+
+function canSetTarget(me: ReturnType<typeof currentUser>) {
+  return me.isSuperAdmin || can(me, 'gops.sales_orders.edit_all') || can(me, 'gops.dashboard.edit_all');
+}
+
+salesReportRoutes.put(
+  '/target/:year',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    if (!canSetTarget(me)) throw forbidden('Setting the sales target needs Sales Orders › Edit All');
+    const year = Number(req.params.year);
+    if (!Number.isInteger(year) || year < 2000 || year > 2100) throw badRequest('Name a year');
+    const amount = req.body?.amount == null || req.body.amount === '' ? null : Number(req.body.amount);
+    if (amount !== null && (!Number.isFinite(amount) || amount < 0)) throw badRequest('The target is an amount in pesos');
+    const before = await yearTarget(year);
+    if (amount) await prisma.setting.upsert({ where: { key: TARGET_KEY(year) }, create: { key: TARGET_KEY(year), value: { amount } }, update: { value: { amount } } });
+    else await prisma.setting.deleteMany({ where: { key: TARGET_KEY(year) } });
+    await audit({ entityType: 'setting', entityId: TARGET_KEY(year), action: 'UPDATED', summary: `${year} sales target: ${before ?? 'none'} → ${amount ?? 'none'}` }, req);
+    res.json({ year, amount: amount || null });
+  }),
+);
+
+salesReportRoutes.get(
+  '/sales-orders.pdf',
+  require_('gops.sales_orders.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = Object.fromEntries(Object.entries(req.query).map(([k, v]) => [k, typeof v === 'string' ? v : undefined]));
+    const range = parseRange(q.from, q.to);
+    const year = range.to.getUTCFullYear();
+    const from = new Date(Date.UTC(year, 0, 1));
+    const to = new Date(Date.UTC(year, 11, 31, 23, 59, 59, 999));
+    const rows = liveRows(await salesOrderRows(me, from, to));
+    const month = (d: Date) => Number(d.toISOString().slice(5, 7)) - 1;
+    const zero = () => MONTHS.map(() => 0);
+
+    type Line = { name: string; team: string; values: number[]; total: number; teams: Map<string, number> };
+    const people = new Map<string, Line>();
+    const teams = new Map<string, { name: string; code: string; values: number[]; total: number }>();
+    const total = zero();
+    for (const o of rows) {
+      const m = month(o.orderDate);
+      const p = people.get(o.ownerId) ?? { name: o.ownerName, team: '', values: zero(), total: 0, teams: new Map() };
+      p.values[m] += o.net;
+      p.total += o.net;
+      const code = o.team?.code ?? o.ownerTeam?.code ?? '';
+      p.teams.set(code, (p.teams.get(code) ?? 0) + o.net);
+      people.set(o.ownerId, p);
+      const tid = o.team?.id ?? 'none';
+      const t = teams.get(tid) ?? { name: o.team?.name ?? 'No team', code: o.team?.code ?? '', values: zero(), total: 0 };
+      t.values[m] += o.net;
+      t.total += o.net;
+      teams.set(tid, t);
+      total[m] += o.net;
+    }
+    const peopleRows = [...people.values()]
+      .filter((p) => Math.abs(p.total) >= 0.005)
+      .map((p) => ({ name: p.name, team: [...p.teams.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '', values: p.values.map(cents), total: cents(p.total) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    // Every active team, even at zero, in the master's order; "No team" last.
+    const master = await prisma.industry.findMany({ where: { isActive: true }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, code: true, name: true } });
+    const teamRows = [
+      ...master.map((t) => teams.get(t.id) ?? { name: t.name, code: t.code, values: zero(), total: 0 }),
+      ...[...teams.entries()].filter(([id]) => !master.some((t) => t.id === id)).map(([, t]) => t),
+    ].map((t) => ({ ...t, values: t.values.map(cents), total: cents(t.total) }));
+    const grand = cents(total.reduce((a, b) => a + b, 0));
+
+    const sales = await gopsSales(me, { from: `${year}-01-01`, to: q.to ?? `${year}-12-31` });
+    const target = await yearTarget(year);
+    const currency = await companyCurrency();
+    const pdf = await renderSalesReport({
+      title: `${year} Monthly Sale Report`,
+      subtitle: `Booked sales orders before VAT, in ${currency} · January to December ${year}`,
+      months: MONTHS,
+      people: peopleRows,
+      teams: teamRows,
+      total: total.map(cents),
+      grandTotal: grand,
+      facts: {
+        left: [
+          { label: 'Date of report', value: formatDate(new Date()) },
+          { label: 'Data gathered by', value: me.name },
+        ],
+        right: [
+          { label: `${year} Target`, value: target ? formatAmount(target) : 'Not set' },
+          { label: '% Achievement', value: target ? `${((grand / target) * 100).toFixed(2)}%` : '—' },
+        ],
+      },
+      bars: sales.months.map((m) => ({ label: m.label, current: m.state === 'future' ? 0 : m.current, previous: m.previous, partial: m.state === 'partial' })),
+      barSeries: [`${year}`, `${year - 1}`],
+      sankey: sales.sankey.root.value > 0 ? sales.sankey : null,
+    });
+    await audit({ entityType: 'sales_report', entityId: 'sales-orders', action: 'EXPORTED', summary: `${year} sales report printed (one page)` }, req);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Sales Report', number: String(year), author: me.name, date: new Date() })));
+    res.send(pdf);
+  }),
+);
+
 mountReports(salesReportRoutes, { view: 'gops.sales_orders.view_own', auditType: 'sales_report', kinds: { 'sales-orders': salesOrdersReport, 'sales-matrix': salesMatrixReport } });

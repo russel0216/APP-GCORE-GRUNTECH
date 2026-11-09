@@ -2,6 +2,7 @@ import PDFDocument from 'pdfkit';
 import fs from 'node:fs';
 import { prisma } from '../prisma';
 import { isWorkingDay, workingDayDate } from './day';
+import { layoutSankey, type SankeyInput } from './sankey';
 
 /**
  * The document engine (model §7).
@@ -2217,4 +2218,232 @@ export function formatQuantity(value: number | string | { toString(): string }):
   return new Intl.NumberFormat('en-PH', { minimumFractionDigits: 0, maximumFractionDigits: 3 }).format(
     Number.isFinite(n) ? n : 0,
   );
+}
+
+// ── The one-page sales report (2026-11-09) ───────────────────────────────────
+//
+// The owner's "2026 GRUNTECHNOLOGY MONTHLY SALE REPORT": one landscape page —
+// every salesperson by month with their team and the year's total, the team
+// summary under it, the date, who gathered it, the year's target and the
+// achievement, and beneath them the month-by-month bars against last year
+// and the Gruntech → team → person flow. The engine's fourth door beside
+// renderDocument, renderDesigned and renderSchedule: the route supplies the
+// figures and the flow's layout (shared/sankey.ts), this draws every line.
+
+export interface SalesReportSpec {
+  title: string;
+  subtitle: string;
+  months: string[];
+  people: { name: string; team: string; values: number[]; total: number }[];
+  teams: { name: string; code: string; values: number[]; total: number }[];
+  total: number[];
+  grandTotal: number;
+  facts: { left: { label: string; value: string }[]; right: { label: string; value: string }[] };
+  bars: { label: string; current: number; previous: number; partial?: boolean }[];
+  barSeries: [string, string];
+  /** Gruntech → team → person; laid out here, to the room the page leaves. */
+  sankey: SankeyInput | null;
+}
+
+const FLOW_TONES = ['#2E9A4B', '#3B6FD8', '#A62CB5', '#B07A1A', '#1F7A4D', '#5B2A8C'];
+
+const compactPeso = (v: number) =>
+  Math.abs(v) >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : Math.abs(v) >= 1e3 ? `${(v / 1e3).toFixed(1)}K` : v ? v.toFixed(0) : '0';
+
+export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer> {
+  const spec: SalesReportSpec = {
+    ...input,
+    title: pdfSafe(input.title),
+    subtitle: pdfSafe(input.subtitle),
+    people: input.people.map((p) => ({ ...p, name: pdfSafe(p.name), team: pdfSafe(p.team) })),
+    teams: input.teams.map((t) => ({ ...t, name: pdfSafe(t.name), code: pdfSafe(t.code) })),
+    facts: {
+      left: input.facts.left.map((f) => ({ label: pdfSafe(f.label), value: pdfSafe(f.value) })),
+      right: input.facts.right.map((f) => ({ label: pdfSafe(f.label), value: pdfSafe(f.value) })),
+    },
+    barSeries: [pdfSafe(input.barSeries[0]), pdfSafe(input.barSeries[1])],
+    sankey: input.sankey && {
+      ...input.sankey,
+      root: { ...input.sankey.root, label: pdfSafe(input.sankey.root.label) },
+      teams: input.sankey.teams.map((t) => ({ ...t, label: pdfSafe(t.label) })),
+      people: input.sankey.people.map((p) => ({ ...p, label: pdfSafe(p.label) })),
+    },
+  };
+  const row = await prisma.company.findUnique({ where: { id: 'company' } });
+  const company = row && safeCompany(row);
+  const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 }, info: { Title: spec.title, Author: company?.name ?? 'G-CORE' } });
+  const chunks: Buffer[] = [];
+  doc.on('data', (c: Buffer) => chunks.push(c));
+  const done = new Promise<Buffer>((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
+
+  const M = 24;
+  const left = M;
+  const right = doc.page.width - M;
+  const W = right - left;
+  const bottom = doc.page.height - M;
+
+  // ── Head: the company top-left, the report's title top-right, a green rule.
+  const name = caps(company?.legalName?.trim() || company?.name || '');
+  if (name) drawLine(doc, fitLine(doc, name, W * 0.4, true, 12), left, M, W * 0.4, 'left', true, 12, PURPLE);
+  drawLine(doc, fitLine(doc, caps(spec.title), W * 0.6, true, 13), left + W * 0.4, M - 1, W * 0.6, 'right', true, 13, PURPLE);
+  drawLine(doc, fitLine(doc, spec.subtitle, W * 0.6, false, 7), left + W * 0.4, M + 15, W * 0.6, 'right', false, 7, GREY);
+  const ruleY = M + 26;
+  doc.moveTo(left, ruleY).lineTo(right, ruleY).strokeColor(GREEN).lineWidth(1.2).stroke();
+
+  // ── The two tables share one grid: a name column, a team column, the months, the year.
+  // The charts take whatever the tables leave, never less than 150.
+  const chartMin = spec.sankey || spec.bars.length ? 150 : 0;
+  const factsH = 24;
+  const tablesTop = ruleY + 6;
+  const tablesBottom = bottom - chartMin - factsH - 6;
+  const lineCount = spec.people.length + 2 + spec.teams.length + 2;
+  const gap = 8;
+  const rowH = Math.max(6.5, Math.min(12, (tablesBottom - tablesTop - gap) / lineCount));
+  const size = Math.max(4.5, Math.min(7, rowH - 3.5));
+  const nameW = 128;
+  const teamW = 30;
+  const n = spec.months.length + 1;
+  const cellW = (W - nameW - teamW) / n;
+  const colX = (i: number) => left + nameW + teamW + i * cellW;
+  const money = (v: number) => formatAmount(v);
+
+  const drawRow = (y: number, cells: { first: string; second: string; values: string[] }, opts: { head?: boolean; bold?: boolean; shade?: boolean }) => {
+    if (opts.shade) doc.rect(left, y, W, rowH).fill('#F3EFF7');
+    const color = opts.head ? PURPLE : INK;
+    const bold = !!opts.head || !!opts.bold;
+    const ty = y + (rowH - size) / 2 + 0.5;
+    drawLine(doc, fitLine(doc, cells.first, nameW - 4, bold, size), left + 2, ty, nameW - 4, 'left', bold, size, color);
+    drawLine(doc, cells.second, left + nameW, ty, teamW - 2, 'left', bold, size, color);
+    cells.values.forEach((v, i) => {
+      const s = Math.min(size, fitSize(doc, v, cellW - 4, size));
+      drawLine(doc, v, colX(i) + 1, ty + (size - s) / 2, cellW - 4, opts.head ? 'right' : 'right', bold, s, color);
+    });
+    doc.moveTo(left, y + rowH).lineTo(right, y + rowH).strokeColor(RULE).lineWidth(0.4).stroke();
+  };
+  const monthHeads = [...spec.months.map((m) => caps(m)), 'ANNUAL'];
+  let y = tablesTop;
+  drawRow(y, { first: 'SALES PERSONNEL', second: 'TEAM', values: monthHeads }, { head: true });
+  doc.moveTo(left, y + rowH).lineTo(right, y + rowH).strokeColor(PURPLE).lineWidth(0.8).stroke();
+  y += rowH;
+  for (const p of spec.people) {
+    drawRow(y, { first: p.name, second: p.team, values: [...p.values.map(money), money(p.total)] }, {});
+    y += rowH;
+  }
+  drawRow(y, { first: 'TOTAL', second: '', values: [...spec.total.map(money), money(spec.grandTotal)] }, { bold: true, shade: true });
+  y += rowH + gap;
+  drawRow(y, { first: 'TEAM SUMMARY', second: '', values: monthHeads }, { head: true });
+  doc.moveTo(left, y + rowH).lineTo(right, y + rowH).strokeColor(PURPLE).lineWidth(0.8).stroke();
+  y += rowH;
+  for (const t of spec.teams) {
+    drawRow(y, { first: t.name, second: t.code, values: [...t.values.map(money), money(t.total)] }, {});
+    y += rowH;
+  }
+  drawRow(y, { first: 'TOTAL', second: '', values: [...spec.total.map(money), money(spec.grandTotal)] }, { bold: true, shade: true });
+  y += rowH + 6;
+
+  // ── The facts: the date and who gathered it on the left, the target and achievement on the right.
+  const factLine = (items: { label: string; value: string }[], x: number, align: Align) => {
+    items.forEach((f, i) => {
+      const fy = y + i * 10;
+      if (align === 'left') {
+        drawLine(doc, f.label, x, fy, 90, 'left', false, 7, GREY);
+        drawLine(doc, f.value, x + 90, fy, 200, 'left', true, 7, INK);
+      } else {
+        drawLine(doc, f.label, x - 210, fy, 110, 'left', false, 7, GREY);
+        drawLine(doc, f.value, x - 100, fy, 100, 'right', true, 7, INK);
+      }
+    });
+  };
+  factLine(spec.facts.left, left, 'left');
+  factLine(spec.facts.right, right, 'right');
+
+  // ── The charts, side by side under everything, down to the foot.
+  const cTop = y + factsH;
+  const chartH = bottom - cTop;
+  if (chartMin) {
+    const half = (W - 16) / 2;
+    // Bars: this year against last, a group per month.
+    const bx = left;
+    drawLine(doc, 'MONTHLY SALES — BEFORE VAT', bx, cTop, half, 'left', true, 7.5, PURPLE);
+    const legendY = cTop + 11;
+    doc.rect(bx, legendY + 1, 6, 6).fill(PURPLE);
+    drawLine(doc, spec.barSeries[0], bx + 9, legendY, 120, 'left', false, 6.5, INK);
+    doc.rect(bx + 130, legendY + 1, 6, 6).fill('#BBBBBB');
+    drawLine(doc, spec.barSeries[1], bx + 139, legendY, 120, 'left', false, 6.5, INK);
+    const plotTop = cTop + 34;
+    const plotBottom = bottom - 12;
+    const plotH = plotBottom - plotTop;
+    const max = Math.max(1, ...spec.bars.flatMap((b) => [b.current, b.previous]));
+    const gw = half / Math.max(1, spec.bars.length);
+    const bw = Math.min(14, (gw - 6) / 2);
+    doc.moveTo(bx, plotBottom).lineTo(bx + half, plotBottom).strokeColor(RULE).lineWidth(0.6).stroke();
+    spec.bars.forEach((b, i) => {
+      const gx = bx + i * gw + (gw - bw * 2 - 2) / 2;
+      const hc = (b.current / max) * plotH;
+      const hp = (b.previous / max) * plotH;
+      if (hc > 0) doc.rect(gx, plotBottom - hc, bw, hc).fillOpacity(b.partial ? 0.55 : 1).fill(PURPLE).fillOpacity(1);
+      if (hp > 0) doc.rect(gx + bw + 2, plotBottom - hp, bw, hp).fill('#BBBBBB');
+      if (b.current > 0) drawLine(doc, compactPeso(b.current), bx + i * gw, plotBottom - hc - 8, gw, 'center', false, 5, INK);
+      drawLine(doc, b.label + (b.partial ? '*' : ''), bx + i * gw, plotBottom + 3, gw, 'center', false, 6, GREY);
+    });
+
+    // The flow, scaled into the right half.
+    const sx = left + half + 16;
+    drawLine(doc, 'WHERE THE SALES COME FROM — GRUNTECH > TEAM > PERSON', sx, cTop, half, 'left', true, 7.5, PURPLE);
+    const input = spec.sankey;
+    const labelL = 70;
+    const labelR = 112;
+    const areaTop = cTop + 18;
+    const areaH = bottom - areaTop;
+    const areaW = half - labelL - labelR;
+    const LINE_H = 14;
+    const rows = input ? Math.max(input.people.filter((p) => p.value > 0).length, input.teams.filter((t) => t.value > 0).length, 1) : 1;
+    const sk = input ? layoutSankey(input, { width: areaW, height: areaH, nodeWidth: 8, gap: Math.max(3, Math.min(LINE_H, (areaH * 0.45) / rows)) }) : null;
+    if (input && sk && sk.nodes.length) {
+      const ox = sx + labelL;
+      const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, FLOW_TONES[i % FLOW_TONES.length]]));
+      const toneOf = (id: string) => {
+        if (id.startsWith('0:')) return INK;
+        if (teamTone.has(id)) return teamTone.get(id)!;
+        const best = sk.links.filter((l) => l.target === id).sort((a, b) => b.value - a.value)[0];
+        return (best && teamTone.get(best.source)) ?? PURPLE;
+      };
+      doc.save();
+      doc.translate(ox, areaTop);
+      for (const l of sk.links) doc.path(l.path).fillOpacity(0.3).fill(toneOf(l.source.startsWith('0:') ? l.target : l.source));
+      doc.fillOpacity(1);
+      for (const nd of sk.nodes) doc.rect(nd.x, nd.y, sk.nodeWidth, Math.max(1.5, nd.h)).fill(toneOf(nd.id));
+      doc.restore();
+      // Labels never overlap: each column's spread to two lines apart.
+      for (const col of [0, 1, 2] as const) {
+        const ns = sk.nodes.filter((nd) => nd.column === col).sort((a, b) => a.y - b.y);
+        const ys = ns.map((nd) => areaTop + nd.y + nd.h / 2);
+        for (let i = 1; i < ys.length; i++) ys[i] = Math.max(ys[i], ys[i - 1] + LINE_H);
+        const maxY = bottom - LINE_H / 2;
+        if (ys.length && ys[ys.length - 1] > maxY) {
+          ys[ys.length - 1] = maxY;
+          for (let i = ys.length - 2; i >= 0; i--) ys[i] = Math.min(ys[i], ys[i + 1] - LINE_H);
+        }
+        ns.forEach((nd, i) => {
+          const cy = ys[i] - 6.5;
+          const figure = `${compactPeso(nd.value)} · ${col === 0 ? 100 : nd.pct}%`;
+          if (col === 2) {
+            const lx = ox + nd.x + sk.nodeWidth + 4;
+            drawLine(doc, fitLine(doc, nd.label, labelR - 6, true, 6.5), lx, cy, labelR - 6, 'left', true, 6.5, INK);
+            drawLine(doc, figure, lx, cy + 7, labelR - 6, 'left', false, 5.8, GREY);
+          } else {
+            const w = col === 0 ? labelL - 4 : 66;
+            const rx = ox + nd.x - 4 - w;
+            drawLine(doc, fitLine(doc, nd.label, w, true, 6.5), rx, cy, w, 'right', true, 6.5, INK);
+            drawLine(doc, figure, rx, cy + 7, w, 'right', false, 5.8, GREY);
+          }
+        });
+      }
+    } else {
+      drawLine(doc, 'Nothing booked in the range.', sx, cTop + 30, half, 'left', false, 7, GREY);
+    }
+  }
+
+  doc.end();
+  return done;
 }

@@ -677,7 +677,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts marketing; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,957 assertions across twenty-three scripts** (counted 2026-11-09, after
+**4,958 assertions across twenty-three scripts** (counted 2026-11-09, after
+one on pipeline for the one-page Sales Report, and before it
 14 on finance for a reimbursement against the project budget — the claim's card
 Budget Monitoring's own figures, the pending claim under Requested, the
 approvers' subject, the paper, approval moving it to Incurred, a loan showing
@@ -828,7 +829,7 @@ and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
-438, masters 92, sales 643, costing 205, pipeline 131, calendar 103, numbering
+438, masters 92, sales 643, costing 205, pipeline 132, calendar 103, numbering
 94, partners 120, delivery 229, chain 439, hr 661, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 461, aftermarket 307, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145, marketing 69. The
@@ -6141,6 +6142,27 @@ the owner's call — and keeps its Sales / Project / Aftermarket counts below.
   CSV, Print). `formatCompactMoney()` in `components/ui.tsx` is the chart's
   "₱11.20M". The RangePicker in the page head governs the sales figures,
   the funnel and the PM count alike.
+
+## The one-page Sales Report (2026-11-09)
+
+The owner's `Sale_Report_October_31_2026.pdf`: the Sales Order report's
+Print (`GET /sales-reports/sales-orders.pdf`, declared before `mountReports`
+so it answers in place of the generic paper) is ONE landscape A4 page —
+"<year> MONTHLY SALE REPORT": every salesperson by month with their team
+(the team most of their orders were booked under) and the year's total, the
+TEAM SUMMARY (every active team, even at zero, by the quotation's team), the
+date and who printed it, the year's target and % achievement, then the
+month bars against last year and the Gruntech → team → person Sankey. The
+year is the one the report's range ends in, January to December, before VAT
+in pesos (`salesOrderRows`, the dashboard's own figures). The engine's
+fourth door, `renderSalesReport()` in `shared/pdf.ts`: rows and type shrink
+to keep one page, the charts take what the tables leave, the Sankey is laid
+out there (`shared/sankey.ts`, the API's copy of `web/src/lib/sankey.ts`)
+and its labels are spread so none overlap. **The target is one Setting per
+year**, `sales.target.<year>` (`{ amount }`), read and set by `GET/PUT
+/sales-reports/target/:year` (Sales Orders › Edit All, or the G-OPS
+dashboard's), audited; the report page's "<year> target" box. The
+dashboard's Sankey spreads its labels the same way (≥ 40 units apart).
 
 ## The list of quotations (2026-10-08)
 

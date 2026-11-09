@@ -1105,6 +1105,21 @@ async function main() {
       csv.status === 200 && bad.status === 400 && (await http(sellerToken, 'GET', '/sales-reports/sales-orders')).status === 403,
       `${csv.status} ${bad.status}`,
     );
+    // The one-page Sales Report (2026-11-09, the owner's sample): ONE
+    // landscape A4 page naming the year's monthly sale report, the team
+    // summary and the target; closed to a seller with no sales order right.
+    const paper = await fetch(`${BASE}/sales-reports/sales-orders.pdf?from=${day}&to=${day}`, { headers: { Authorization: `Bearer ${managerToken}` } });
+    const bytes = Buffer.from(await paper.arrayBuffer());
+    const { PDFDocument } = await import('pdf-lib');
+    const doc = paper.status === 200 ? await PDFDocument.load(bytes) : null;
+    const page = doc?.getPage(0).getSize();
+    const words = bytes.toString('latin1');
+    const sellerPaper = await fetch(`${BASE}/sales-reports/sales-orders.pdf`, { headers: { Authorization: `Bearer ${sellerToken}` } });
+    check(
+      'the Sales Order report prints as ONE landscape page — the year by salesperson and team, the target, the bars and the flow',
+      paper.status === 200 && doc?.getPageCount() === 1 && !!page && page.width > page.height && sellerPaper.status === 403 && words.length > 2000,
+      `${paper.status} ${doc?.getPageCount()} pages ${page?.width}x${page?.height} seller ${sellerPaper.status}`,
+    );
   }
 
   // The G-OPS dashboard's sales performance (2026-11-08, the owner's PDF):

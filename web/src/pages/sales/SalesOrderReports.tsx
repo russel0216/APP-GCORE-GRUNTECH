@@ -2,6 +2,8 @@ import { ReportPage, type ReportKind } from '../../components/ReportPage';
 import { PersonSelect, usePeople } from '../../components/People';
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
+import { NumberInput } from '../../components/NumberInput';
+import { useToast } from '../../components/ui';
 
 /**
  * The Sales Order report (2026-10-23, the owner's call: "create a button
@@ -68,8 +70,47 @@ export function SalesOrderReports() {
               </option>
             ))}
           </select>
+          <TargetBox year={Number((params.get('to') ?? new Date().toISOString()).slice(0, 4))} />
         </>
       )}
     />
+  );
+}
+
+/**
+ * The year's sales target (2026-11-09) — printed on the one-page Sales Report
+ * with the achievement against it. Set by Sales Orders › Edit All.
+ */
+function TargetBox({ year }: { year: number }) {
+  const toast = useToast();
+  const [amount, setAmount] = useState('');
+  const [canEdit, setCanEdit] = useState(false);
+  useEffect(() => {
+    api
+      .get<{ amount: number | null; canEdit: boolean }>(`/sales-reports/target/${year}`)
+      .then((r) => {
+        setAmount(r.amount ? String(r.amount) : '');
+        setCanEdit(r.canEdit);
+      })
+      .catch(() => setCanEdit(false));
+  }, [year]);
+  const save = async () => {
+    try {
+      await api.put(`/sales-reports/target/${year}`, { amount: amount ? Number(amount) : null });
+      toast('ok', `${year} target saved`);
+    } catch (e) {
+      toast('error', e instanceof Error ? e.message : 'Could not save the target');
+    }
+  };
+  return (
+    <>
+      <span className="rep-label">{year} target</span>
+      <NumberInput kind="money" aria-label={`${year} sales target`} value={amount} disabled={!canEdit} onChange={(e) => setAmount(e.target.value)} />
+      {canEdit && (
+        <button type="button" className="btn btn-sm" onClick={() => void save()}>
+          Save target
+        </button>
+      )}
+    </>
   );
 }

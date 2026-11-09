@@ -609,9 +609,9 @@ export function Sankey({ input, format, caption }: { input: SankeyInput; format:
   // top and bottom keeps the end nodes' labels on the canvas.
   const rows = Math.max(input.teams.filter((t) => t.value > 0).length, input.people.filter((p) => p.value > 0).length, 1);
   const pad = 16;
-  const H = Math.max(320, 46 * rows + pad * 2);
+  const H = Math.max(320, 52 * rows + pad * 2);
   const labelW = 230;
-  const lay = layoutSankey(input, { width: W - labelW * 2, height: H - pad * 2, nodeWidth: 14, gap: 14 });
+  const lay = layoutSankey(input, { width: W - labelW * 2, height: H - pad * 2, nodeWidth: 14, gap: 22 });
   if (lay.nodes.length === 0) return <Empty caption={caption} />;
   const navigate = useNavigate();
   const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, SANKEY_TONES[i % SANKEY_TONES.length]]));
