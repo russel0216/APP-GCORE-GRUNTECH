@@ -30,7 +30,7 @@ import { planTasks } from '../shared/costingMath';
 import { cleanCostingIds, costingIdsOf } from '../shared/costingSets';
 import { LIST_CAP, listReference, totalLabel, bracketed, bracketNote, listNotes, listDay, namedInFilter, choice, sendListPdf } from '../shared/listPaper';
 import { visibleOwners } from '../shared/team';
-import { projectBudgetByLine } from './procurement';
+import { projectBudgetByLine, requestedByLine } from '../shared/projectBudget';
 import { adoptBudgetRequests } from '../shared/budgetRequestSources';
 
 const d = (v: number | string | null | undefined) =>
@@ -56,6 +56,8 @@ export interface CategoryPosition {
   committed: number;
   incurred: number;
   consumed: number;
+  /** Asked on the line and not yet posted — pending claims, advances out, budget requests not yet released (2026-11-09). */
+  requested: number;
   available: number;
   usedPct: number;
 }
@@ -69,15 +71,20 @@ export interface CategoryPosition {
  * was already counted as Incurred when it was received. Subtracting both would
  * charge the same peso twice. Consumed answers a different question — how much
  * of what we bought is actually in the work.
+ *
+ * REQUESTED (2026-11-09) is shown beside Available and not subtracted either:
+ * what is asked on the line and has posted nothing yet (`requestedByLine()` in
+ * shared/projectBudget.ts) — a figure that may still be returned or refused.
  */
 export async function budgetPosition(jobId: string): Promise<CategoryPosition[]> {
-  const [categories, entries] = await Promise.all([
+  const [categories, entries, requested] = await Promise.all([
     prisma.costCategory.findMany({ orderBy: { sortOrder: 'asc' } }),
     prisma.jobCostEntry.groupBy({
       by: ['costCategoryId', 'state'],
       where: { jobId },
       _sum: { amount: true },
     }),
+    requestedByLine(jobId),
   ]);
 
   const key = (categoryId: string, state: string) => `${categoryId}:${state}`;
@@ -101,6 +108,7 @@ export async function budgetPosition(jobId: string): Promise<CategoryPosition[]>
       committed: cents(committed),
       incurred: cents(incurred),
       consumed: cents(consumed),
+      requested: cents(requested.get(c.id) ?? 0),
       available,
       usedPct: budgeted > 0 ? cents(((committed + incurred) / budgeted) * 100) : 0,
     };
@@ -1138,6 +1146,7 @@ jobRoutes.get(
     const budgeted = position.reduce((s, p) => s + p.budgeted, 0);
     const committed = position.reduce((s, p) => s + p.committed, 0);
     const incurred = position.reduce((s, p) => s + p.incurred, 0);
+    const requested = position.reduce((s, p) => s + p.requested, 0);
     const billed = job.billings
       .filter((b) => b.status === 'APPROVED' || b.status === 'INVOICED')
       .reduce((s, b) => s + num(b.grossAmount), 0);
@@ -1178,6 +1187,8 @@ jobRoutes.get(
         budgeted: cents(budgeted),
         committed: cents(committed),
         incurred: cents(incurred),
+        /** Waiting for approval on the lines — shown, never subtracted (2026-11-09). */
+        requested: cents(requested),
         available: cents(budgeted - committed - incurred),
         actualCost,
 

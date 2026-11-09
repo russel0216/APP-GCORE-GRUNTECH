@@ -53,6 +53,7 @@ import { statusLabel } from '../src/shared/pdf';
 // one twice and prove the second call does nothing.
 import { settleExpense } from '../src/routes/finance';
 import { settleAdvance } from '../src/routes/advances';
+import { budgetPosition } from '../src/routes/jobs';
 // Side-effect import: registers the budget_request approval subscriber.
 import '../src/routes/budgetRequests';
 import '../src/routes/procurement';
@@ -2018,6 +2019,120 @@ async function main() {
     check('both prints are on the request’s trail as EXPORTED', (await exportsOf('budget_request', raisedId)) === 2);
     const reversal = await fin('DELETE', `/payments/${whole.body.id}`);
     check('the release cannot be reversed while a liquidation accounts for it', reversal.status === 400, String(reversal.status));
+
+    // ── "Against the project budget" on a reimbursement (2026-11-09) ─────────
+    // The owner's question: an approver could not see whether a claim charged
+    // to a project was already allocated in Budget Monitoring, or what was
+    // left. The claim page carries the line as Budget Monitoring reads it;
+    // the pending claim shows under Requested there; approval moves it to
+    // Incurred.
+    console.log('\nA reimbursement against the project budget');
+    const matBefore = (await budgetPosition(job.id)).find((p) => p.costCategoryId === materials.id)!;
+    const rb = await eng('POST', '/expense-claims', {
+      purpose: `${TAG} site consumables`,
+      jobId: job.id,
+      costCategoryId: materials.id,
+      lines: [{ spentOn: todayIso, description: 'Consumables', receiptNo: 'OR-C1', amount: 1_750 }],
+    });
+    check('a reimbursement is charged to the project and a budget line', rb.status === 201 && rb.body.job?.id === job.id, `${rb.status} ${JSON.stringify(rb.body).slice(0, 120)}`);
+    const rbId = String(rb.body.id);
+    const rbDraft = await eng('GET', `/expense-claims/${rbId}`);
+    const rbBudget = rbDraft.body.budget;
+    check(
+      'its page reads the budget line as Budget Monitoring does — budgeted, committed, spent, available',
+      rbDraft.status === 200 &&
+        rbBudget?.line?.id === materials.id &&
+        money(rbBudget.line.budgeted, matBefore.budgeted) &&
+        money(rbBudget.line.incurred, matBefore.incurred) &&
+        money(rbBudget.availableBefore, matBefore.available),
+      JSON.stringify(rbBudget).slice(0, 200),
+    );
+    check(
+      'and says what this claim takes and what is left after it',
+      money(rbBudget?.thisRequest, 1_750) && money(rbBudget?.availableAfter, cents(matBefore.available - 1_750)) && rbBudget?.basis === 'asked',
+      `${rbBudget?.thisRequest} → ${rbBudget?.availableAfter}`,
+    );
+    check('a draft is not yet counted as requested on the line', money((await budgetPosition(job.id)).find((p) => p.costCategoryId === materials.id)!.requested, matBefore.requested));
+    const rbSubmit = await eng('POST', `/expense-claims/${rbId}/submit`);
+    check('submitted, it goes for approval', rbSubmit.status === 200, `${rbSubmit.status} ${JSON.stringify(rbSubmit.body).slice(0, 120)}`);
+    const matPending = (await budgetPosition(job.id)).find((p) => p.costCategoryId === materials.id)!;
+    check(
+      'Budget Monitoring shows the pending claim under Requested — and subtracts nothing yet',
+      money(matPending.requested, cents(matBefore.requested + 1_750)) && money(matPending.incurred, matBefore.incurred) && money(matPending.available, matBefore.available),
+      `requested ${matBefore.requested} → ${matPending.requested}, incurred ${matPending.incurred}, available ${matPending.available}`,
+    );
+    const rbReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'expense', documentId: rbId, status: 'PENDING' } });
+    check(
+      'the approvers’ bell and queue say where the line stands',
+      rbReq.subject.includes(materials.name) && rbReq.subject.includes('available') && rbReq.subject.includes(peso(matBefore.available)),
+      rbReq.subject,
+    );
+    const rbSeen = await manager('GET', `/expense-claims/${rbId}`);
+    check(
+      'the approver opens it and sees the card — their own view leaves the claim itself out of Requested',
+      rbSeen.status === 200 && rbSeen.body.budget?.line?.id === materials.id && money(rbSeen.body.budget.requested, matBefore.requested),
+      `${rbSeen.status} requested ${rbSeen.body.budget?.requested}`,
+    );
+    const rbPaper = await manager('GET', `/expense-claims/${rbId}/pdf?attachments=0`);
+    const rbPaperText = rbPaper.bytes ? flat(pdfText(rbPaper.bytes)) : '';
+    check(
+      'and the paper prints the position — Available before, This claim, Available after',
+      rbPaper.status === 200 && rbPaperText.includes('AGAINST THE PROJECT BUDGET') && rbPaperText.includes('This claim') && rbPaperText.includes('Available after') && rbPaperText.includes(peso(1_750)),
+      `${rbPaper.status} ${rbPaperText.slice(0, 240)}`,
+    );
+    await settle(rbReq.id);
+    const rbDone = await eng('GET', `/expense-claims/${rbId}`);
+    const matAfter = (await budgetPosition(job.id)).find((p) => p.costCategoryId === materials.id)!;
+    check(
+      'approved, the claim moves from Requested to Incurred',
+      rbDone.body.status === 'APPROVED' &&
+        money(matAfter.requested, matBefore.requested) &&
+        money(matAfter.incurred, cents(matBefore.incurred + 1_750)) &&
+        money(matAfter.available, cents(matBefore.available - 1_750)),
+      `${rbDone.body.status} requested ${matAfter.requested}, incurred ${matAfter.incurred}, available ${matAfter.available}`,
+    );
+    check(
+      'and its card says it takes nothing more — what it spent is on the ledger',
+      rbDone.body.budget?.settled === true && rbDone.body.budget?.basis === 'settled' && money(rbDone.body.budget.availableBefore, matAfter.available),
+      JSON.stringify(rbDone.body.budget).slice(0, 160),
+    );
+    // A cash advance to be LIQUIDATED to the line counts the same way while
+    // it is out; a loan (every advance raised since 2026-10-15 is repayable)
+    // is never liquidated to a project and shows no card. The engineer still
+    // holds an unliquidated advance, so the one-at-a-time rule is set aside
+    // for this ask and put back.
+    await saveFinanceSettings({ blockAdvanceWhileUnliquidated: false });
+    const rbAdvance = await eng('POST', '/cash-advances', { purpose: `${TAG} consumables float`, jobId: job.id, costCategoryId: materials.id, amount: 900 });
+    await saveFinanceSettings({ blockAdvanceWhileUnliquidated: settings.blockAdvanceWhileUnliquidated });
+    const rbAdvanceId = String(rbAdvance.body?.id ?? '');
+    const rbAdvanceSubmit = rbAdvance.status === 201 ? await eng('POST', `/cash-advances/${rbAdvanceId}/submit`) : { status: rbAdvance.status };
+    const matWithLoan = (await budgetPosition(job.id)).find((p) => p.costCategoryId === materials.id)!;
+    const loanPage = await eng('GET', `/cash-advances/${rbAdvanceId}`);
+    check(
+      'a loan charged to the line is never liquidated to the project: no card, nothing under Requested',
+      rbAdvanceSubmit.status === 200 && loanPage.body?.repayable === true && loanPage.body?.budget === null && money(matWithLoan.requested, matAfter.requested),
+      `${rbAdvance.status}/${rbAdvanceSubmit.status} repayable ${loanPage.body?.repayable} requested ${matAfter.requested} → ${matWithLoan.requested}`,
+    );
+    if (rbAdvanceId) await eng('POST', `/cash-advances/${rbAdvanceId}/cancel`, { reason: `${TAG} not needed` });
+    // An advance to be liquidated (the kind raised before 2026-10-15) counts.
+    const floatAdvance = await newAdvance(engineer, 900, 'consumables float');
+    await submitAdvance(floatAdvance);
+    const matWithAdvance = (await budgetPosition(job.id)).find((p) => p.costCategoryId === floatAdvance.costCategoryId)!;
+    const subBeforeFloat = cents(matWithAdvance.requested - 900);
+    const floatPage = await eng('GET', `/cash-advances/${floatAdvance.id}`);
+    const floatBudget = floatPage.body?.budget;
+    check(
+      'an advance to be liquidated to the line shows under Requested while it waits, and its page carries the card',
+      floatPage.status === 200 &&
+        floatBudget?.line?.id === floatAdvance.costCategoryId &&
+        money(floatBudget.thisRequest, 900) &&
+        floatBudget.basis === 'asked' &&
+        money(floatBudget.requested, subBeforeFloat) &&
+        money(floatBudget.availableBefore, matWithAdvance.available),
+      `${floatPage.status} ${JSON.stringify(floatBudget ?? floatPage.body).slice(0, 160)}`,
+    );
+    await eng('POST', `/cash-advances/${floatAdvance.id}/cancel`, { reason: `${TAG} not needed` });
+    check('cancelled, it leaves Requested', money((await budgetPosition(job.id)).find((p) => p.costCategoryId === floatAdvance.costCategoryId)!.requested, subBeforeFloat));
 
     // (8) One advance at a time, unless finance switches the rule off.
     const blocked = await eng('POST', '/cash-advances', { purpose: `${TAG} second trip`, amount: 500 });

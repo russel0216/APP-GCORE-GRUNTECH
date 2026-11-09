@@ -56,6 +56,8 @@ interface Position {
   committed: number;
   incurred: number;
   consumed: number;
+  /** Waiting for approval on the line — pending claims, advances out, budget requests not yet released (2026-11-09). */
+  requested?: number;
   available: number;
   usedPct: number;
 }
@@ -162,6 +164,7 @@ interface Job {
     budgeted: number;
     committed: number;
     incurred: number;
+    requested?: number;
     available: number;
     actualCost: number;
     expectedProfit: number;
@@ -1372,7 +1375,9 @@ function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
         <p className="muted del-lede">
           Available = budgeted − committed − incurred. Consumed is shown but not subtracted — stock
           issued to this job was already counted when it was received, and subtracting both would
-          charge the same peso twice.
+          charge the same peso twice. Requested is what is waiting for approval on the line
+          (reimbursements and liquidations pending, cash advances out, budget requests not yet
+          released) — shown and not subtracted either, since it may still be refused or returned.
         </p>
 
         <div className="table-wrap">
@@ -1384,6 +1389,7 @@ function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
                 <th className="right">Committed</th>
                 <th className="right">Incurred</th>
                 <th className="right">Consumed</th>
+                <th className="right">Requested</th>
                 <th className="right">Available</th>
                 <th className="del-col-meter">Used</th>
               </tr>
@@ -1412,6 +1418,9 @@ function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
                   <td className="right mono">{p.committed ? formatMoney(p.committed) : <span className="faint">—</span>}</td>
                   <td className="right mono">{p.incurred ? formatMoney(p.incurred) : <span className="faint">—</span>}</td>
                   <td className="right mono faint">{p.consumed ? formatMoney(p.consumed) : '—'}</td>
+                  <td className="right mono faint" title="Waiting for approval — not yet on the ledger">
+                    {p.requested ? formatMoney(p.requested) : '—'}
+                  </td>
                   <td className={`right mono${p.available < 0 ? ' del-danger' : ''}`}>{formatMoney(p.available)}</td>
                   <td>
                     <ProgressBar
@@ -1431,6 +1440,7 @@ function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
                 <td className="right mono">{formatMoney(s.committed)}</td>
                 <td className="right mono">{formatMoney(s.incurred)}</td>
                 <td />
+                <td className="right mono faint">{s.requested ? formatMoney(s.requested) : '—'}</td>
                 <td className="right mono">
                   <strong>{formatMoney(s.available)}</strong>
                 </td>
@@ -1444,7 +1454,8 @@ function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
           Committed fills from approved purchase requests, issued orders and released budget
           requests (until they are liquidated); incurred from
           receiving, posted overtime, supplier bills with no receiving, and approved expense claims
-          and liquidations.
+          and liquidations. A reimbursement or liquidation still waiting for approval shows under
+          Requested and moves to Incurred on its last signature.
         </div>
       </section>
 

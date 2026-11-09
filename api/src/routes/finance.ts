@@ -119,6 +119,7 @@ import {
   termsLabel,
 } from '../shared/receivables';
 import { SOURCE_INCLUDE, sourceOf } from '../shared/budgetRequestSources';
+import { claimBudget, budgetPosition, type ChargeBudget } from '../shared/projectBudget';
 
 function asDate(value: string, label: string): Date {
   const date = new Date(value);
@@ -219,6 +220,44 @@ export function cashRequestSections(input: {
   }
   if (input.notes) sections.push({ kind: 'text', title: 'Notes', body: input.notes });
   return sections;
+}
+
+/**
+ * "Against the project budget" on paper (2026-11-09): the budget line as
+ * Budget Monitoring reads it, this document and what is left after it —
+ * the same figures as the card on the page, so the approver's printout
+ * carries the position too. A settled or closed document prints the line
+ * as it stands and says it takes nothing more.
+ */
+export function budgetSections(b: ChargeBudget, lineName: string, noun: 'This claim' | 'This advance' | 'This request', currency: string): PdfSection[] {
+  const money = (n: number) => formatMoney(n, currency);
+  const rows: PdfTotal[] = [
+    { label: `Budgeted — ${lineName}`, value: money(b.line?.budgeted ?? 0) },
+    { label: 'Already committed', value: money(b.line?.committed ?? 0) },
+    { label: 'Already spent', value: money(b.line?.incurred ?? 0) },
+    ...(b.requested > 0 ? [{ label: 'Also waiting for approval', value: money(b.requested) }] : []),
+    { label: b.settled ? 'Available now' : 'Available before', value: money(b.availableBefore) },
+  ];
+  if (!b.settled) {
+    rows.push(
+      { label: b.basis === 'released' ? `${noun} (cash still out)` : noun, value: money(b.thisRequest) },
+      { label: b.over ? 'Over by' : 'Available after', value: money(b.over ? b.overBy : b.availableAfter), bold: true },
+    );
+  } else {
+    rows[rows.length - 1].bold = true;
+  }
+  return [
+    {
+      kind: 'text',
+      title: 'Against the project budget',
+      body: b.settled
+        ? b.basis === 'settled'
+          ? `${noun} takes nothing more from the budget: what it spent is on the ledger as incurred.`
+          : `${noun} takes nothing from the budget.`
+        : `Budget Monitoring's own figures for ${lineName}. Available = budgeted - committed - spent; what is waiting for approval is shown and not subtracted.`,
+    },
+    { kind: 'totals', rows },
+  ];
 }
 
 /**
@@ -3245,6 +3284,10 @@ expenseRoutes.get(
     res.json({
       ...presentClaim(row),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
+      // "Against the project budget" (2026-11-09): the claim's budget line as
+      // Budget Monitoring reads it, this claim and what is left after — so the
+      // approver sees the remaining budget before anything posts.
+      budget: await claimBudget(row),
     });
   }),
 );
@@ -3590,11 +3633,17 @@ expenseRoutes.post(
     const me = currentUser(req);
     const claim = await prisma.expenseClaim.findUnique({
       where: { id: req.params.id },
-      include: { lines: true, claimedBy: { select: { name: true } } },
+      include: { lines: true, claimedBy: { select: { name: true } }, costCategory: { select: { name: true } } },
     });
     if (!claim) throw notFound('Expense claim not found');
     if (claim.claimedById !== me.id && !me.isSuperAdmin) throw forbidden('That is someone else’s claim');
     if (claim.status !== 'DRAFT') throw badRequest('This claim has already been submitted');
+
+    // The approvers' bell and queue say where the budget line stands at
+    // submit (the page has the live figures) — 2026-11-09.
+    const budget = await claimBudget(claim);
+    const currency = await companyCurrency();
+    const position = budget && claim.costCategory ? ` (${budgetPosition(budget, claim.costCategory.name, (n) => formatMoney(n, currency))})` : '';
 
     // A claim without receipt numbers is not claimable, and finding that out at
     // approval time wastes the approver's round trip.
@@ -3624,7 +3673,7 @@ expenseRoutes.post(
         documentId: claim.id,
         documentNumber: claim.number,
         // Named for the claimant, whoever pressed the button.
-        subject: `${claim.claimedBy.name} — ${claim.purpose}`,
+        subject: `${claim.claimedBy.name} — ${claim.purpose}${position}`,
         amount: num(claim.total),
         link: `/g-fin/expenses/${claim.id}`,
         // The claimant, even when a super admin presses the button for them:
@@ -4039,6 +4088,10 @@ expenseRoutes.get(
       },
       { kind: 'totals', rows: totals },
     ];
+    // "Against the project budget" (2026-11-09): the approver's paper says
+    // where the budget line stands and what this claim takes from it.
+    const budget = await claimBudget(claim);
+    if (budget) sections.push(...budgetSections(budget, claim.costCategory?.name ?? '—', 'This claim', currency));
     if (claim.notes) sections.push({ kind: 'text', title: 'Notes', body: claim.notes });
 
     const claimant = await contactOf(claim.claimedById);

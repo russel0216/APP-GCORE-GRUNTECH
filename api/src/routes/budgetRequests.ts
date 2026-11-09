@@ -27,7 +27,7 @@ import { cashRequestSections, cashRequestSignatories } from './finance';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { USER_TEAM_SELECT, teamOfUser, userTeamWhere, visibleOwners } from '../shared/team';
-import { projectBudgetByLine } from './procurement';
+import { projectBudgetByLine } from '../shared/projectBudget';
 import {
   SOURCE_INCLUDE,
   checkSource,
@@ -551,7 +551,7 @@ export async function requestBudget(row: BudgetRow) {
   const source = sourceOf(row);
   const pool =
     row.jobId || !source
-      ? { ...(await projectBudgetByLine(row.jobId!, { exclude: { sourceType: 'budget_request', sourceId: row.id } })), perLine: true }
+      ? { ...(await projectBudgetByLine(row.jobId!, { exclude: { sourceType: 'budget_request', sourceId: row.id }, own: { budgetRequestId: row.id } })), perLine: true }
       : (await recordBudget(source, row.id)) ?? { lines: [], total: { budgeted: 0, committed: 0, incurred: 0, consumed: 0, available: 0 }, perLine: false };
   const { lines, total, perLine } = pool;
   const settled = ['LIQUIDATED', 'REJECTED', 'CANCELLED'].includes(row.status);
@@ -573,6 +573,8 @@ export async function requestBudget(row: BudgetRow) {
     availableAfter: after,
     over: after < 0,
     overBy: after < 0 ? cents(-after) : 0,
+    /** Also waiting on this line, besides this request (2026-11-09) — shown, never subtracted. */
+    requested: perLine ? ((line as { requested?: number } | null)?.requested ?? 0) : 0,
     settled,
     /** What the figure "This request" means at this status. */
     basis: settled ? 'settled' : out ? 'released' : 'asked',

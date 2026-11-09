@@ -21,6 +21,7 @@ import {
   type Tone,
 } from '../../components/ui';
 import { RecordPaymentModal, paymentLink, useTeams } from './Receivables';
+import { BudgetCard, type RequestBudget } from '../../components/BudgetCard';
 
 /**
  * Expense claims — money someone spent out of their own pocket — and
@@ -115,6 +116,8 @@ export interface Claim {
     amount: number;
     payment: { id: string; number: string; paymentDate: string; method: string };
   }[];
+  /** "Against the project budget" (GET /:id, 2026-11-09) — null on an overheads claim. */
+  budget?: RequestBudget | null;
 }
 
 interface ClaimsSummary {
@@ -454,6 +457,10 @@ export function ExpenseClaimDetail() {
 
       <DecisionNote documentType="expense" documentId={row.id} reloadToken={reload} />
       <DocumentApproval documentType="expense" documentId={row.id} reloadToken={reload} />
+
+      {/* Where the budget line stands, beside the decision (2026-11-09): the
+          approver sees the remaining budget before anything posts. */}
+      {row.budget && row.costCategory && <BudgetCard budget={row.budget} lineName={row.costCategory.name} noun="This claim" />}
 
       {/* The receipts beside the decision: each file's first page is shown, so
           the approver checks the ORs without opening them one by one. */}

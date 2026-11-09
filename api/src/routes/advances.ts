@@ -33,7 +33,8 @@ import { USER_TEAM_SELECT, teamOfUser, userTeamWhere, visibleOwners } from '../s
 import { registerSearch } from '../shared/search';
 import { renderDocument, companyCurrency, formatAmount, formatMoney, formatQuantity, formatShortDate, statusLabel, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween, financeSettings } from '../shared/finance';
-import { claimInclude, presentClaim, cashRequestSections, cashRequestSignatories } from './finance';
+import { claimInclude, presentClaim, cashRequestSections, cashRequestSignatories, budgetSections } from './finance';
+import { advanceBudget, budgetPosition } from '../shared/projectBudget';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { registerAttachmentGuard } from '../shared/attachments';
@@ -434,6 +435,9 @@ advanceRoutes.get(
     res.json({
       ...presentAdvance(row),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
+      // "Against the project budget" (2026-11-09): the advance's budget line
+      // as Budget Monitoring reads it, this advance and what is left after.
+      budget: await advanceBudget(row),
     });
   }),
 );
@@ -586,11 +590,17 @@ advanceRoutes.post(
     const me = currentUser(req);
     const advance = await prisma.cashAdvance.findUnique({
       where: { id: req.params.id },
-      include: { requestedBy: { select: { name: true } } },
+      include: { requestedBy: { select: { name: true } }, costCategory: { select: { name: true } } },
     });
     if (!advance) throw notFound('Cash advance not found');
     if (advance.requestedById !== me.id && !me.isSuperAdmin) throw forbidden('That is someone else’s advance');
     if (advance.status !== 'DRAFT') throw badRequest('This advance has already been submitted');
+
+    // The approvers' bell and queue say where the budget line stands at
+    // submit (2026-11-09); a loan or an overheads advance names none.
+    const budget = await advanceBudget(advance);
+    const currency = await companyCurrency();
+    const position = budget && advance.costCategory ? ` (${budgetPosition(budget, advance.costCategory.name, (n) => formatMoney(n, currency))})` : '';
 
     // Claimed on the advance exactly as read — still a draft, and not changed
     // since — never simply written: two Submit clicks file once, and a Modify
@@ -606,7 +616,7 @@ advanceRoutes.post(
         documentType: 'cash_advance',
         documentId: advance.id,
         documentNumber: advance.number,
-        subject: `${advance.requestedBy.name} — ${advance.purpose}`,
+        subject: `${advance.requestedBy.name} — ${advance.purpose}${position}`,
         amount: num(advance.amount),
         link: `/g-fin/cash-advances/${advance.id}`,
         // The requester, even when a super admin presses the button for
@@ -794,6 +804,12 @@ advanceRoutes.get(
           formatAmount(num(i.amount)),
         ]),
       });
+    }
+    // "Against the project budget" (2026-11-09), before the notes.
+    const budget = await advanceBudget(row);
+    if (budget) {
+      const at = sections.findIndex((s) => s.kind === 'text' && s.title === 'Notes');
+      sections.splice(at < 0 ? sections.length : at, 0, ...budgetSections(budget, row.costCategory?.name ?? '—', 'This advance', await companyCurrency()));
     }
 
     const pdf = await renderDocument({

@@ -677,7 +677,11 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts marketing; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,943 assertions across twenty-three scripts** (counted 2026-11-08, after
+**4,957 assertions across twenty-three scripts** (counted 2026-11-09, after
+14 on finance for a reimbursement against the project budget — the claim's card
+Budget Monitoring's own figures, the pending claim under Requested, the
+approvers' subject, the paper, approval moving it to Incurred, a loan showing
+none and a liquidatable advance counted — and before them
 7 on pipeline and 4 on foundation for the G-OPS dashboard's sales performance —
 the dashboard's revenue the Sales Order report's own, the Sankey conserving,
 a two-role person one node, the matrix adding up to the chart — and before them
@@ -826,7 +830,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 438, masters 92, sales 643, costing 205, pipeline 131, calendar 103, numbering
 94, partners 120, delivery 229, chain 439, hr 661, plantilla 129, meetings
-114, evaluations 154, academy 145, finance 447, aftermarket 307, cad 122,
+114, evaluations 154, academy 145, finance 461, aftermarket 307, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145, marketing 69. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -7963,6 +7967,53 @@ operations project), and the liquidation stays itemised with attachments
   owed back; by requester, team, project; the overdue ones;
   `gfin.budget_liquidations.view_all`). The registers' Report buttons open
   them.
+
+## A reimbursement against the project budget (2026-11-09)
+
+The owner's question: "how can we see if the request in Reimbursement
+appear or allocated already in budget monitoring prior approval to see if
+there is remaining budget". It did not: a claim charged to a project posts
+INCURRED on its last signature (`settleExpense`) and nothing before, so the
+approver had no figure for the line and Budget Monitoring no trace of the
+claim.
+
+- **One rule: `shared/projectBudget.ts`.** `projectBudgetByLine(jobId, {
+  exclude, own })` moved there from routes/procurement.ts (re-exported) and
+  every line carries **`requested`** — what is asked on the line and has
+  posted nothing yet: expense claims (reimbursements and liquidations)
+  PENDING_APPROVAL, cash advances charged to the line and still to be
+  liquidated (pending, approved or released; a released one whose
+  liquidation is already pending counts once, as the liquidation; a LOAN —
+  `repayable`, every advance raised since 2026-10-15 — is never liquidated
+  to a project and is left out), and budget requests approved or pending
+  but not yet released (released cash is COMMITTED). `requestedByLine()` is
+  the reading; `budgetPosition()` in routes/jobs.ts (Budget Monitoring,
+  `GET /jobs/:id` → `position[].requested`, `summary.requested`) reads it
+  too. **Shown, never subtracted**: Available stays budgeted − committed −
+  incurred (Phase 4's rule) — a figure that may yet be refused or returned
+  never reads as spent. The project's Budget tab has a **Requested** column.
+- **`chargeAgainstBudget()`** is the one card for a document charging one
+  line — `claimBudget(claim)` and `advanceBudget(advance)` — the line as it
+  stands with the document's own rows and its own `requested` left out
+  (`own`), "this document", what is left after, `over`, and `requested`
+  (what else waits on the line); `basis` is `asked`, `released` (an
+  advance's cash out), `settled` (posted — the line read as it stands, its
+  rows on the ledger) or `closed` (refused or withdrawn). `GET
+  /expense-claims/:id` and `GET /cash-advances/:id` send it as `budget`
+  (null on an overheads document or a loan); the submit routes put the
+  line's position in the approval SUBJECT (`budgetPosition()`: "Materials:
+  PHP 120,000.00 available → PHP 95,000.00 left"), so the bell and My Work
+  carry it; both papers print "Against the project budget"
+  (`budgetSections()` in routes/finance.ts) before the notes. The budget
+  request's `requestBudget()` reads the same module (`own:
+  { budgetRequestId }`) and sends `requested` too.
+- **The web card is one component**, `components/BudgetCard.tsx`
+  (`BudgetCard`, `RequestBudget`, `SOURCE_WORDS`, `RequestSource` — moved
+  out of BudgetRequests.tsx, which re-exports the two types): "Also waiting
+  for approval" under Already spent, the other lines' Waiting column, the
+  noun "This request" / "This claim" / "This advance". On the claim page and
+  the advance page it sits under the Approval panel, as on the budget
+  request's. verify-finance pins the figures against `budgetPosition()`.
 
 ## A budget request on a sales order, quotation or costing (2026-10-26)
 

@@ -25,6 +25,7 @@ import { RecordPaymentModal, paymentLink, useTeams } from './Receivables';
 import { CLAIM_TONES } from './Expenses';
 import { RequestItemsCard, type RequestItem } from '../../components/RequestLines';
 import { Attachments } from '../../components/Attachments';
+import { BudgetCard, type RequestBudget } from '../../components/BudgetCard';
 
 /**
  * Cash advances — money handed to a person BEFORE it is spent.
@@ -117,6 +118,8 @@ export interface Advance {
   liquidations: Liquidation[];
   /** The breakdown — what the cash buys (2026-10-19); none on an advance from before. */
   items?: RequestItem[];
+  /** "Against the project budget" (GET /:id, 2026-11-09) — null on a loan or an overheads advance. */
+  budget?: RequestBudget | null;
   allocations?: {
     id: string;
     amount: number;
@@ -536,6 +539,9 @@ export function CashAdvanceDetail() {
 
       <DecisionNote documentType="cash_advance" documentId={row.id} reloadToken={reload} />
       <DocumentApproval documentType="cash_advance" documentId={row.id} reloadToken={reload} />
+
+      {/* Where the budget line stands, beside the decision (2026-11-09). */}
+      {row.budget && row.costCategory && <BudgetCard budget={row.budget} lineName={row.costCategory.name} noun="This advance" />}
 
       <ErrorBox error={error} />
 

@@ -15,6 +15,8 @@ import { RecordPaymentModal, paymentLink } from '../finance/Receivables';
 import { CLAIM_TONES } from '../finance/Expenses';
 import { RequestItemsCard, type RequestItem } from '../../components/RequestLines';
 import { Attachments } from '../../components/Attachments';
+import { BudgetCard, SOURCE_WORDS, type RequestBudget, type RequestSource } from '../../components/BudgetCard';
+export { SOURCE_WORDS, type RequestSource };
 
 /**
  * Budget requests — PROJECT CASH (2026-10-07, the owner's call).
@@ -110,147 +112,10 @@ export interface BudgetRequest {
   }[];
 }
 
-interface BudgetLineFigures {
-  id: string;
-  code: string;
-  name: string;
-  budgeted: number;
-  committed: number;
-  incurred: number;
-  consumed: number;
-  available: number;
-}
-
-export interface RequestSource {
-  kind: 'project' | 'sales_order' | 'quotation' | 'costing';
-  id: string;
-  number: string;
-  name: string;
-  label: string;
-  link: string;
-}
-
-/** "Project", "Sales order", "Quotation", "Costing". */
-export const SOURCE_WORDS: Record<RequestSource['kind'], string> = {
-  project: 'Project',
-  sales_order: 'Sales order',
-  quotation: 'Quotation',
-  costing: 'Costing',
-};
-
-export interface RequestBudget {
-  /** What it is checked against: the project's Budget Monitoring, or the record's own cost. */
-  source: RequestSource['kind'];
-  /** False where the record carries no budget lines — one "whole cost" row. */
-  perLine: boolean;
-  line: BudgetLineFigures | null;
-  lines: BudgetLineFigures[];
-  total: { budgeted: number; committed: number; incurred: number; available: number };
-  availableBefore: number;
-  thisRequest: number;
-  availableAfter: number;
-  over: boolean;
-  overBy: number;
-  settled: boolean;
-  basis: 'asked' | 'released' | 'settled';
-}
-
-/**
- * "Against the project budget" (2026-10-23, the owner's call: approvers and
- * finance see where the money is allocated): the request's budget line —
- * budgeted, committed, spent, available before — less this request, and what
- * is left after; under it the project's other budget lines.
- */
-function RequestBudgetCard({ budget: b, lineName }: { budget: RequestBudget; lineName: string }) {
-  const others = b.lines.filter((l) => l.id !== b.line?.id && (l.budgeted || l.committed || l.incurred));
-  const line = b.line;
-  return (
-    <section className="card">
-      <div className="card-head">
-        <h3 className="card-title">{b.source === 'project' ? 'Against the project budget' : `Against the ${SOURCE_WORDS[b.source].toLowerCase()}'s cost`}</h3>
-      </div>
-      {b.over && !b.settled && (
-        <div className="alert error">
-          This request takes {lineName} {formatMoney(b.overBy)} over its budget line.
-        </div>
-      )}
-      <dl className="kv">
-        <dt>Budget line</dt>
-        <dd>{lineName}</dd>
-        {!b.perLine && line && (
-          <>
-            <dt>Checked against</dt>
-            <dd>{line.name} — the record carries no budget lines</dd>
-          </>
-        )}
-        <dt>Budgeted</dt>
-        <dd className="mono">{formatMoney(line?.budgeted ?? 0)}</dd>
-        <dt>Already committed</dt>
-        <dd className="mono">{formatMoney(line?.committed ?? 0)}</dd>
-        <dt>Already spent</dt>
-        <dd className="mono">{formatMoney(line?.incurred ?? 0)}</dd>
-        <dt>{b.settled ? 'Available now' : 'Available before'}</dt>
-        <dd className="mono">
-          <strong>{formatMoney(b.availableBefore)}</strong>
-        </dd>
-        {!b.settled && (
-          <>
-            <dt>{b.basis === 'released' ? 'This request (cash still out)' : 'This request'}</dt>
-            <dd className="mono">− {formatMoney(b.thisRequest)}</dd>
-            <dt>{b.over ? 'Over by' : 'Available after'}</dt>
-            <dd className={`mono${b.over ? ' del-danger' : ''}`}>
-              <strong>{formatMoney(b.over ? b.overBy : b.availableAfter)}</strong>
-            </dd>
-          </>
-        )}
-      </dl>
-      <p className="muted del-lede">
-        {b.settled
-          ? 'This request takes nothing more from the budget: what it spent is on the ledger as incurred.'
-          : b.source === 'project'
-            ? 'Budget Monitoring’s own figures, with this request’s own released cash left out so it is never counted twice.'
-            : 'The record’s own cost, less what its purchasing and the other budget requests on it already hold — nothing posts to a project until one is built from it, which takes this request over.'}
-      </p>
-      {others.length > 0 && (
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr>
-                <th>Other budget lines</th>
-                <th className="right">Budgeted</th>
-                <th className="right">Committed</th>
-                <th className="right">Spent</th>
-                <th className="right">Available</th>
-              </tr>
-            </thead>
-            <tbody>
-              {others.map((l) => (
-                <tr key={l.id}>
-                  <td>{l.name}</td>
-                  <td className="right mono">{formatMoney(l.budgeted)}</td>
-                  <td className="right mono">{formatMoney(l.committed)}</td>
-                  <td className="right mono">{formatMoney(l.incurred)}</td>
-                  <td className={`right mono${l.available < 0 ? ' del-danger' : ''}`}>{formatMoney(l.available)}</td>
-                </tr>
-              ))}
-              <tr>
-                <td>
-                  <strong>Project</strong>
-                </td>
-                <td className="right mono">{formatMoney(b.total.budgeted)}</td>
-                <td className="right mono">{formatMoney(b.total.committed)}</td>
-                <td className="right mono">{formatMoney(b.total.incurred)}</td>
-                <td className="right mono">
-                  <strong>{formatMoney(b.total.available)}</strong>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
+// The budget types and the "Against the project budget" card are
+// `components/BudgetCard.tsx` since 2026-11-09 — shared with the expense claim
+// and the cash advance.
+const RequestBudgetCard = BudgetCard;
 
 /** When the receipts are due, and whether that has passed. */
 function Deadline({ row }: { row: BudgetRequest }) {
