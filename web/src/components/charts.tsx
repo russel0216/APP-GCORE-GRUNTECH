@@ -603,15 +603,19 @@ function niceStep(raw: number): number {
  * counted.
  */
 export function Sankey({ input, format, caption }: { input: SankeyInput; format: (v: number) => string; caption?: string }) {
-  const W = 960;
+  const W = 1080;
   // Two lines of label per node (the name, then the figure and share), so
   // every node needs about 40 units of height whatever its value; a margin
   // top and bottom keeps the end nodes' labels on the canvas.
   const rows = Math.max(input.teams.filter((t) => t.value > 0).length, input.people.filter((p) => p.value > 0).length, 1);
   const pad = 16;
   const H = Math.max(320, 52 * rows + pad * 2);
-  const labelW = 230;
-  const lay = layoutSankey(input, { width: W - labelW * 2, height: H - pad * 2, nodeWidth: 14, gap: 22 });
+  // Only Gruntech's label sits left of the flow and only the people's right
+  // of it (2026-11-09, the owner's call: "widen, maximizing the left and
+  // right space"), so each side keeps just the room its own labels need.
+  const labelW = 130;
+  const labelR = 190;
+  const lay = layoutSankey(input, { width: W - labelW - labelR, height: H - pad * 2, nodeWidth: 14, gap: 22 });
   if (lay.nodes.length === 0) return <Empty caption={caption} />;
   const navigate = useNavigate();
   const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, SANKEY_TONES[i % SANKEY_TONES.length]]));

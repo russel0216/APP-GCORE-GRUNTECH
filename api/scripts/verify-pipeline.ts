@@ -1116,8 +1116,8 @@ async function main() {
     const words = bytes.toString('latin1');
     const sellerPaper = await fetch(`${BASE}/sales-reports/sales-orders.pdf`, { headers: { Authorization: `Bearer ${sellerToken}` } });
     check(
-      'the Sales Order report prints as ONE landscape page — the year by salesperson and team, the target, the bars and the flow',
-      paper.status === 200 && doc?.getPageCount() === 1 && !!page && page.width > page.height && sellerPaper.status === 403 && words.length > 2000,
+      'the Sales Order report prints landscape — the year by salesperson and team, the target and the bars on page 1, the flow on page 2',
+      paper.status === 200 && doc?.getPageCount() === 2 && doc.getPage(1).getSize().width > doc.getPage(1).getSize().height && !!page && page.width > page.height && sellerPaper.status === 403 && words.length > 2000,
       `${paper.status} ${doc?.getPageCount()} pages ${page?.width}x${page?.height} seller ${sellerPaper.status}`,
     );
   }

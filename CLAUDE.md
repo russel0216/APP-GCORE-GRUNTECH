@@ -6147,22 +6147,26 @@ the owner's call — and keeps its Sales / Project / Aftermarket counts below.
 
 The owner's `Sale_Report_October_31_2026.pdf`: the Sales Order report's
 Print (`GET /sales-reports/sales-orders.pdf`, declared before `mountReports`
-so it answers in place of the generic paper) is ONE landscape A4 page —
+so it answers in place of the generic paper) is landscape A4 — page 1
 "<year> MONTHLY SALE REPORT": every salesperson by month with their team
 (the team most of their orders were booked under) and the year's total, the
 TEAM SUMMARY (every active team, even at zero, by the quotation's team), the
 date and who printed it, the year's target and % achievement, then the
-month bars against last year and the Gruntech → team → person Sankey. The
+month bars against last year across the whole width down to the foot; page
+2 is the Gruntech → team → person Sankey across the whole page (2026-11-09,
+the owner's call; no page 2 when nothing was booked). The
 year is the one the report's range ends in, January to December, before VAT
 in pesos (`salesOrderRows`, the dashboard's own figures). The engine's
 fourth door, `renderSalesReport()` in `shared/pdf.ts`: rows and type shrink
-to keep one page, the charts take what the tables leave, the Sankey is laid
+to keep page 1 one page, the bars take what the tables leave, the Sankey is laid
 out there (`shared/sankey.ts`, the API's copy of `web/src/lib/sankey.ts`)
 and its labels are spread so none overlap. **The target is one Setting per
 year**, `sales.target.<year>` (`{ amount }`), read and set by `GET/PUT
 /sales-reports/target/:year` (Sales Orders › Edit All, or the G-OPS
 dashboard's), audited; the report page's "<year> target" box. The
-dashboard's Sankey spreads its labels the same way (≥ 40 units apart).
+dashboard's Sankey spreads its labels the same way (≥ 40 units apart), and
+keeps only the room its labels need either side (130 left for Gruntech, 190
+right for the people) so the flow takes the width.
 
 ## The list of quotations (2026-10-08)
 

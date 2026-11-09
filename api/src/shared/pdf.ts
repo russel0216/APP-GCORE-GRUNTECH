@@ -2292,7 +2292,7 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
 
   // ── The two tables share one grid: a name column, a team column, the months, the year.
   // The charts take whatever the tables leave, never less than 150.
-  const chartMin = spec.sankey || spec.bars.length ? 150 : 0;
+  const chartMin = spec.bars.length ? 170 : 0;
   const factsH = 24;
   const tablesTop = ruleY + 6;
   const tablesBottom = bottom - chartMin - factsH - 6;
@@ -2357,11 +2357,11 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
   factLine(spec.facts.left, left, 'left');
   factLine(spec.facts.right, right, 'right');
 
-  // ── The charts, side by side under everything, down to the foot.
+  // ── The bars across the whole width under the details, down to the foot
+  // (2026-11-09, the owner's call); the flow takes page 2 of its own.
   const cTop = y + factsH;
-  const chartH = bottom - cTop;
   if (chartMin) {
-    const half = (W - 16) / 2;
+    const half = W;
     // Bars: this year against last, a group per month.
     const bx = left;
     drawLine(doc, 'MONTHLY SALES — BEFORE VAT', bx, cTop, half, 'left', true, 7.5, PURPLE);
@@ -2375,7 +2375,7 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
     const plotH = plotBottom - plotTop;
     const max = Math.max(1, ...spec.bars.flatMap((b) => [b.current, b.previous]));
     const gw = half / Math.max(1, spec.bars.length);
-    const bw = Math.min(14, (gw - 6) / 2);
+    const bw = Math.min(26, (gw - 10) / 2);
     doc.moveTo(bx, plotBottom).lineTo(bx + half, plotBottom).strokeColor(RULE).lineWidth(0.6).stroke();
     spec.bars.forEach((b, i) => {
       const gx = bx + i * gw + (gw - bw * 2 - 2) / 2;
@@ -2383,23 +2383,33 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
       const hp = (b.previous / max) * plotH;
       if (hc > 0) doc.rect(gx, plotBottom - hc, bw, hc).fillOpacity(b.partial ? 0.55 : 1).fill(PURPLE).fillOpacity(1);
       if (hp > 0) doc.rect(gx + bw + 2, plotBottom - hp, bw, hp).fill('#BBBBBB');
-      if (b.current > 0) drawLine(doc, compactPeso(b.current), bx + i * gw, plotBottom - hc - 8, gw, 'center', false, 5, INK);
-      drawLine(doc, b.label + (b.partial ? '*' : ''), bx + i * gw, plotBottom + 3, gw, 'center', false, 6, GREY);
+      if (b.current > 0) drawLine(doc, compactPeso(b.current), gx - 6, plotBottom - hc - 8, bw + 12, 'center', false, 5.5, INK);
+      if (b.previous > 0) drawLine(doc, compactPeso(b.previous), gx + bw + 2 - 6, plotBottom - hp - 8, bw + 12, 'center', false, 5.5, GREY);
+      drawLine(doc, b.label + (b.partial ? '*' : ''), bx + i * gw, plotBottom + 3, gw, 'center', false, 7, GREY);
     });
+  }
 
-    // The flow, scaled into the right half.
-    const sx = left + half + 16;
-    drawLine(doc, 'WHERE THE SALES COME FROM — GRUNTECH > TEAM > PERSON', sx, cTop, half, 'left', true, 7.5, PURPLE);
+  // ── Page 2: the flow, across the whole page.
+  if (spec.sankey) {
+    doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
+    if (name) drawLine(doc, fitLine(doc, name, W * 0.4, true, 12), left, M, W * 0.4, 'left', true, 12, PURPLE);
+    drawLine(doc, fitLine(doc, caps(spec.title), W * 0.6, true, 13), left + W * 0.4, M - 1, W * 0.6, 'right', true, 13, PURPLE);
+    drawLine(doc, fitLine(doc, spec.subtitle, W * 0.6, false, 7), left + W * 0.4, M + 15, W * 0.6, 'right', false, 7, GREY);
+    doc.moveTo(left, ruleY).lineTo(right, ruleY).strokeColor(GREEN).lineWidth(1.2).stroke();
+    const sTop = ruleY + 10;
+    const sx = left;
+    const half = W;
+    drawLine(doc, 'WHERE THE SALES COME FROM — GRUNTECH > TEAM > PERSON', sx, sTop, half, 'left', true, 9, PURPLE);
     const input = spec.sankey;
-    const labelL = 70;
-    const labelR = 112;
-    const areaTop = cTop + 18;
+    const labelL = 96;
+    const labelR = 130;
+    const areaTop = sTop + 26;
     const areaH = bottom - areaTop;
     const areaW = half - labelL - labelR;
-    const LINE_H = 14;
-    const rows = input ? Math.max(input.people.filter((p) => p.value > 0).length, input.teams.filter((t) => t.value > 0).length, 1) : 1;
-    const sk = input ? layoutSankey(input, { width: areaW, height: areaH, nodeWidth: 8, gap: Math.max(3, Math.min(LINE_H, (areaH * 0.45) / rows)) }) : null;
-    if (input && sk && sk.nodes.length) {
+    const LINE_H = 20;
+    const rows = Math.max(input.people.filter((p) => p.value > 0).length, input.teams.filter((t) => t.value > 0).length, 1);
+    const sk = layoutSankey(input, { width: areaW, height: areaH, nodeWidth: 12, gap: Math.max(4, Math.min(LINE_H, (areaH * 0.45) / rows)) });
+    if (sk.nodes.length) {
       const ox = sx + labelL;
       const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, FLOW_TONES[i % FLOW_TONES.length]]));
       const toneOf = (id: string) => {
@@ -2425,22 +2435,20 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
           for (let i = ys.length - 2; i >= 0; i--) ys[i] = Math.min(ys[i], ys[i + 1] - LINE_H);
         }
         ns.forEach((nd, i) => {
-          const cy = ys[i] - 6.5;
+          const cy = ys[i] - 9;
           const figure = `${compactPeso(nd.value)} · ${col === 0 ? 100 : nd.pct}%`;
           if (col === 2) {
-            const lx = ox + nd.x + sk.nodeWidth + 4;
-            drawLine(doc, fitLine(doc, nd.label, labelR - 6, true, 6.5), lx, cy, labelR - 6, 'left', true, 6.5, INK);
-            drawLine(doc, figure, lx, cy + 7, labelR - 6, 'left', false, 5.8, GREY);
+            const lx = ox + nd.x + sk.nodeWidth + 5;
+            drawLine(doc, fitLine(doc, nd.label, labelR - 8, true, 8.5), lx, cy, labelR - 8, 'left', true, 8.5, INK);
+            drawLine(doc, figure, lx, cy + 10, labelR - 8, 'left', false, 7.5, GREY);
           } else {
-            const w = col === 0 ? labelL - 4 : 66;
-            const rx = ox + nd.x - 4 - w;
-            drawLine(doc, fitLine(doc, nd.label, w, true, 6.5), rx, cy, w, 'right', true, 6.5, INK);
-            drawLine(doc, figure, rx, cy + 7, w, 'right', false, 5.8, GREY);
+            const w = col === 0 ? labelL - 6 : 110;
+            const rx = ox + nd.x - 5 - w;
+            drawLine(doc, fitLine(doc, nd.label, w, true, 8.5), rx, cy, w, 'right', true, 8.5, INK);
+            drawLine(doc, figure, rx, cy + 10, w, 'right', false, 7.5, GREY);
           }
         });
       }
-    } else {
-      drawLine(doc, 'Nothing booked in the range.', sx, cTop + 30, half, 'left', false, 7, GREY);
     }
   }
 
