@@ -30,7 +30,8 @@ export interface BudgetLineFigures {
 }
 
 export interface RequestSource {
-  kind: 'project' | 'sales_order' | 'quotation' | 'costing';
+  /** `office` (2026-11-10): an office budget line — shared/officeBudget.ts on the API. */
+  kind: 'project' | 'sales_order' | 'quotation' | 'costing' | 'office';
   id: string;
   number: string;
   name: string;
@@ -44,6 +45,7 @@ export const SOURCE_WORDS: Record<RequestSource['kind'], string> = {
   sales_order: 'Sales order',
   quotation: 'Quotation',
   costing: 'Costing',
+  office: 'Office budget',
 };
 
 export interface RequestBudget {
@@ -64,24 +66,35 @@ export interface RequestBudget {
   settled: boolean;
   /** `asked` before anything moved, `released` while cash is out, `settled` once posted, `closed` refused or withdrawn. */
   basis: 'asked' | 'released' | 'settled' | 'closed';
+  /** An office budget line's card: the budget it belongs to. */
+  office?: { id: string; year: number; name: string };
+  /** Over an office line: the other lines of the same budget with room for this document. */
+  suggest?: { id: string; code: string; name: string; remaining: number }[];
 }
 
 /** What the document is called in the card: "This request", "This claim", "This advance". */
-export type BudgetNoun = 'This request' | 'This claim' | 'This advance';
+export type BudgetNoun = 'This request' | 'This claim' | 'This advance' | 'This bill';
 
 export function BudgetCard({ budget: b, lineName, noun = 'This request' }: { budget: RequestBudget; lineName: string; noun?: BudgetNoun }) {
   const others = b.lines.filter((l) => l.id !== b.line?.id && (l.budgeted || l.committed || l.incurred || l.requested));
   const line = b.line;
   const waiting = b.requested ?? 0;
   const what = noun.toLowerCase();
+  const office = b.source === 'office';
   return (
     <section className="card">
       <div className="card-head">
-        <h3 className="card-title">{b.source === 'project' ? 'Against the project budget' : `Against the ${SOURCE_WORDS[b.source].toLowerCase()}'s cost`}</h3>
+        <h3 className="card-title">
+          {office ? `Against the office budget${b.office ? ` — ${b.office.name}` : ''}` : b.source === 'project' ? 'Against the project budget' : `Against the ${SOURCE_WORDS[b.source].toLowerCase()}'s cost`}
+        </h3>
       </div>
       {b.over && !b.settled && (
         <div className="alert error">
           {noun} takes {lineName} {formatMoney(b.overBy)} over its budget line.
+          {office &&
+            (b.suggest?.length
+              ? ` It may be charged to a line with room instead: ${b.suggest.map((x) => `${x.code} ${x.name} (${formatMoney(x.remaining)} left)`).join('; ')}.`
+              : ' No other line of this budget has room for it.')}
         </div>
       )}
       <dl className="kv">
@@ -95,9 +108,9 @@ export function BudgetCard({ budget: b, lineName, noun = 'This request' }: { bud
         )}
         <dt>Budgeted</dt>
         <dd className="mono">{formatMoney(line?.budgeted ?? 0)}</dd>
-        <dt>Already committed</dt>
+        <dt>{office ? 'Cash out, to be accounted for' : 'Already committed'}</dt>
         <dd className="mono">{formatMoney(line?.committed ?? 0)}</dd>
-        <dt>Already spent</dt>
+        <dt>{office ? 'Actual to date' : 'Already spent'}</dt>
         <dd className="mono">{formatMoney(line?.incurred ?? 0)}</dd>
         {waiting > 0 && (
           <>
@@ -126,8 +139,12 @@ export function BudgetCard({ budget: b, lineName, noun = 'This request' }: { bud
         {b.settled
           ? b.basis === 'closed'
             ? `${noun} takes nothing from the budget.`
-            : `${noun} takes nothing more from the budget: what it spent is on the ledger as incurred.`
-          : b.source === 'project'
+            : office
+              ? `${noun} takes nothing more from the budget: what it spent is in the line’s actual.`
+              : `${noun} takes nothing more from the budget: what it spent is on the ledger as incurred.`
+          : office
+            ? `The Office Budget monitor’s own figures, with ${what}’s own money left out so it is never counted twice. Available = budget − cash out − actual; what else is waiting for approval is shown and not subtracted.`
+            : b.source === 'project'
             ? `Budget Monitoring’s own figures, with ${what}’s own money left out so it is never counted twice. What else is waiting for approval is shown and not subtracted — it may still be returned or refused.`
             : 'The record’s own cost, less what its purchasing and the other budget requests on it already hold — nothing posts to a project until one is built from it, which takes this request over.'}
       </p>
@@ -138,8 +155,8 @@ export function BudgetCard({ budget: b, lineName, noun = 'This request' }: { bud
               <tr>
                 <th>Other budget lines</th>
                 <th className="right">Budgeted</th>
-                <th className="right">Committed</th>
-                <th className="right">Spent</th>
+                <th className="right">{office ? 'Cash out' : 'Committed'}</th>
+                <th className="right">{office ? 'Actual' : 'Spent'}</th>
                 <th className="right">Waiting</th>
                 <th className="right">Available</th>
               </tr>
@@ -157,7 +174,7 @@ export function BudgetCard({ budget: b, lineName, noun = 'This request' }: { bud
               ))}
               <tr>
                 <td>
-                  <strong>Project</strong>
+                  <strong>{office ? 'Whole budget' : 'Project'}</strong>
                 </td>
                 <td className="right mono">{formatMoney(b.total.budgeted)}</td>
                 <td className="right mono">{formatMoney(b.total.committed)}</td>

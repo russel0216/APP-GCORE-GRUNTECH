@@ -93,7 +93,7 @@ import { Passport } from './pages/hr/academy/Passport';
 import { Passports } from './pages/hr/academy/Passports';
 import { InvoiceRequests, InvoiceRequestPage } from './pages/finance/InvoiceRequests';
 import { Receivables, InvoiceDetail, Payments, PaymentDetail } from './pages/finance/Receivables';
-import { OperationsBudget } from './pages/finance/OperationsBudget';
+import { OfficeBudgets } from './pages/finance/OfficeBudgets';
 import { Payables, BillDetail } from './pages/finance/Payables';
 import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
 import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
@@ -437,11 +437,9 @@ function Routed() {
         />
         <Route
           path="/g-ops/sales-orders/:id"
-          element={
-            <GuardAny permissions={['gops.sales_orders.view_all', 'gops.sales_orders.view_own']}>
-              <SalesOrderDetail />
-            </GuardAny>
-          }
+          // No Guard: the API decides — its readers, whoever may decide its open
+          // request, and the Back Support handling its team (the SI / DR door).
+          element={<SalesOrderDetail />}
         />
         <Route
           path="/g-ops/sales-orders/:id/edit"
@@ -1512,7 +1510,7 @@ function Routed() {
           path="/g-fin/operations-budget"
           element={
             <GuardAny permissions={['gfin.operations_budget.view_all', 'gfin.operations_budget.view_own']}>
-              <OperationsBudget />
+              <OfficeBudgets />
             </GuardAny>
           }
         />

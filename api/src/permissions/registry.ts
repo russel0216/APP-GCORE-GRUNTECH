@@ -271,12 +271,14 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'payments', group: 'Money in', label: 'Collections', path: '/g-fin/payments', actions: READ, phase: 7 },
       { key: 'cashflow', group: 'Analysis', label: 'Cash Flow', path: '/g-fin/cash-flow', actions: READ, phase: 7 },
       { key: 'budget_vs_actual', group: 'Analysis', label: 'Budget vs Actual', path: '/g-fin/budget-vs-actual', actions: READ, phase: 7 },
-      // The office's own budget by year and cost category, apart from any
-      // project's (2026-10-20): spent is read off the claims and bills that
-      // name no project.
+      // The office budgets (2026-11-10; the Operations Budget of 2026-10-20
+      // before, whose key and path it keeps): named yearly budgets of coded
+      // lines that reimbursements, budget requests, cash advances and bills
+      // with no purchase order charge. Edit is whoever maintains them — the
+      // Finance Manager, by the owner's call.
       {
         key: 'operations_budget', own: 'the page itself — it keeps no record of anybody’s', group: 'Analysis',
-        label: 'Operations Budget',
+        label: 'Office Budget',
         path: '/g-fin/operations-budget',
         actions: SETTINGS,
         phase: 7,

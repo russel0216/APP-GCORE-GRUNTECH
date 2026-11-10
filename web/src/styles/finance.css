@@ -116,3 +116,8 @@
   gap: var(--s-1);
   min-width: 12rem;
 }
+
+/* Office Budget (2026-11-10): the line's code is a short box beside its name. */
+.ob-code {
+  width: 6rem;
+}

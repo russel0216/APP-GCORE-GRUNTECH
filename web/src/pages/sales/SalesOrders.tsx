@@ -136,6 +136,8 @@ type ApprovalRoute = PreviewRoute;
 interface SalesOrderDetailRow extends SalesOrderRow {
   lines: SoLine[];
   canEdit: boolean;
+  /** May type the SI / BS and DR numbers: the editor, or the Back Support handling its team. */
+  canRelease?: boolean;
   /** Its creator (with the delete right) or a super admin: delete a sample with everything on it. */
   canPurge?: boolean;
   canSeeCost: boolean;
@@ -1157,12 +1159,16 @@ function ReleaseCard({ order, onSaved }: { order: SalesOrderDetailRow; onSaved: 
   const [dr, setDr] = useState(order.drNumber ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const editable = order.canEdit && order.status !== 'CANCELLED';
+  // The release door (2026-11-10): Back Support writes these two at any stage but cancelled.
+  const editable = (order.canRelease ?? order.canEdit) && order.status !== 'CANCELLED';
 
   return (
     <div className="card">
       <h3 className="card-title">Released by</h3>
-      <p className="faint">The sales invoice / billing statement and delivery receipt this order went out under.</p>
+      <p className="faint">
+        The sales invoice / billing statement and delivery receipt this order went out under.
+        {editable ? ' Entered by whoever may edit the order, or the Back Support handling its team — at any stage.' : ' Entered by whoever may edit the order, or the Back Support handling its team.'}
+      </p>
       <ErrorBox error={error} />
       <div className="grid grid-2">
         <Field label="SI / BS No.">
@@ -1182,7 +1188,7 @@ function ReleaseCard({ order, onSaved }: { order: SalesOrderDetailRow; onSaved: 
               setBusy(true);
               setError(null);
               try {
-                await api.patch(`/sales-orders/${order.id}`, { siNumber: si.trim() || null, drNumber: dr.trim() || null });
+                await api.post(`/sales-orders/${order.id}/release`, { siNumber: si.trim() || null, drNumber: dr.trim() || null });
                 toast('ok', 'Release references saved');
                 await onSaved();
               } catch (err) {

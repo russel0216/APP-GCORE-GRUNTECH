@@ -23,7 +23,8 @@ import {
 import { registerSearch } from '../shared/search';
 import { renderDocument, formatMoney, formatAmount, formatQuantity, formatShortDate, statusLabel, companyCurrency, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween } from '../shared/finance';
-import { cashRequestSections, cashRequestSignatories } from './finance';
+import { cashRequestSections, cashRequestSignatories, budgetSections as chargeSections } from './finance';
+import { officeBudgetPosition, officePosition, requestOffice } from '../shared/officeBudget';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { USER_TEAM_SELECT, teamOfUser, userTeamWhere, visibleOwners } from '../shared/team';
@@ -351,7 +352,7 @@ budgetRequestRoutes.get(
           const late = r.status === 'RELEASED' && r.liquidationDueDate ? daysBetween(r.liquidationDueDate, today) : 0;
           return [
             r.number,
-            { title: sourceOf(r)?.name ?? '', body: `${sourceOf(r)?.label.replace(/ — .*$/, '') ?? ''} · ${r.costCategory.name}` },
+            { title: sourceOf(r)?.name ?? '', body: r.officeBudgetLine ? `Office budget · ${r.officeBudgetLine.budget.name}` : `${sourceOf(r)?.label.replace(/ — .*$/, '') ?? ''} · ${r.costCategory.name}` },
             { title: r.requestedBy.name, body: r.reason },
             formatShortDate(r.createdAt),
             bracketed(formatAmount(num(r.amount)), inSum),
@@ -424,6 +425,22 @@ budgetRequestRoutes.get(
   '/budget',
   requireAny(...REQUEST_WRITERS),
   handler(async (req, res) => {
+    // An office budget line (2026-11-10): its budget's lines in the panel's shape.
+    if (req.query.officeBudgetLineId) {
+      const line = await prisma.officeBudgetLine.findUnique({ where: { id: String(req.query.officeBudgetLineId) }, select: { budgetId: true } });
+      const pool = line ? await officeBudgetPosition(line.budgetId) : null;
+      if (!pool) throw badRequest('That office budget line is not on file');
+      const shape = (l: (typeof pool.lines)[number]) => ({ id: l.id, code: l.code, name: `${l.code} ${l.name}`, budgeted: l.budget, committed: l.released, incurred: l.actual, consumed: 0, requested: l.requested, available: l.remaining });
+      res.json({
+        source: { kind: 'office', id: String(req.query.officeBudgetLineId), number: '', name: pool.budget.name, label: `Office budget ${pool.budget.name}`, link: `/g-fin/operations-budget?budget=${pool.budget.id}` },
+        categories: [],
+        job: null,
+        perLine: true,
+        lines: pool.lines.filter((l) => l.isActive).map(shape),
+        total: { budgeted: pool.total.budget, committed: pool.total.released, incurred: pool.total.actual, consumed: 0, requested: pool.total.requested, available: pool.total.remaining },
+      });
+      return;
+    }
     const source = await sourceFromQuery(req.query as Record<string, unknown>);
     // The budget lines a request may name — every active one, whatever the
     // record carries (a sales order's cost has no lines of its own).
@@ -542,9 +559,19 @@ type BudgetRow = {
   amount: Prisma.Decimal;
   amountReleased: Prisma.Decimal;
   amountRefunded: Prisma.Decimal;
+  officeBudgetLineId?: string | null;
 } & Parameters<typeof sourceOf>[0];
 
 export async function requestBudget(row: BudgetRow) {
+  // Office cash (2026-11-10): the office budget line's own position.
+  if (row.officeBudgetLineId) {
+    const office = await requestOffice({ ...row, officeBudgetLineId: row.officeBudgetLineId });
+    if (office) return office;
+  }
+  return recordOrProjectBudget(row);
+}
+
+async function recordOrProjectBudget(row: BudgetRow) {
   // A project's request reads Budget Monitoring; one on a sales order,
   // quotation or costing reads that record's cost (2026-10-26) — one budget
   // line each, or one "whole cost" row where the record carries none.
@@ -562,7 +589,7 @@ export async function requestBudget(row: BudgetRow) {
   const after = cents(before - thisRequest);
   return {
     /** What it is checked against: the project's Budget Monitoring, or the record's cost. */
-    source: source?.kind ?? 'project',
+    source: (source?.kind ?? 'project') as Exclude<SourceKind, 'office'>,
     /** False where the record carries no budget lines (a sales order; a quotation with no costing). */
     perLine,
     line,
@@ -626,6 +653,7 @@ async function availableAfterFor(rows: Parameters<typeof requestBudget>[0][]): P
  * request's line marked, then the subtraction as a totals block.
  */
 function budgetSections(b: Awaited<ReturnType<typeof requestBudget>>, lineName: string, currency: string): PdfSection[] {
+  if (b.source === 'office') return chargeSections(b, b.line.name, 'This request', currency);
   const shown = b.lines.filter((l) => l.id === b.line?.id || l.budgeted || l.committed || l.incurred);
   const words = b.basis === 'released' ? 'This request (cash still out)' : 'This request';
   return [
@@ -728,7 +756,9 @@ const requestSchema = z.object({
   salesOrderId: z.string().optional().nullable(),
   quotationId: z.string().optional().nullable(),
   costingId: z.string().optional().nullable(),
-  costCategoryId: z.string().min(1, 'Which budget line?'),
+  /** An office budget line instead of the four (2026-11-10); it needs no cost category. */
+  officeBudgetLineId: z.string().optional().nullable(),
+  costCategoryId: z.string().optional().nullable(),
   /** Typed when there is no breakdown; with `items`, their sum and nothing else. */
   amount: z.number().optional(),
   reason: z.string().trim().min(3, 'What is the cash for?'),
@@ -782,11 +812,21 @@ function asDate(value: string, label: string): Date {
 }
 
 /** The record must still stand (`checkSource`), and the budget line must exist. */
-async function checkCharging(me: Me, body: RequestBody) {
-  const source = await checkSource(me, body);
+async function checkCharging(me: Me, body: RequestBody, keepOfficeLine?: string | null) {
+  const source = await checkSource(me, body, keepOfficeLine);
+  if (source.kind === 'office') {
+    // The column is required and means nothing here: office cash is read by
+    // its office line. Indirect Cost, a system row, stands in.
+    const standIn =
+      (await prisma.costCategory.findFirst({ where: { code: 'IND' }, select: { id: true } })) ??
+      (await prisma.costCategory.findFirst({ orderBy: { sortOrder: 'asc' }, select: { id: true } }));
+    if (!standIn) throw badRequest('No cost category is on file');
+    return { ...source, costCategoryId: standIn.id };
+  }
+  if (!body.costCategoryId) throw badRequest('Which budget line?');
   const category = await prisma.costCategory.findUnique({ where: { id: body.costCategoryId }, select: { id: true } });
   if (!category) throw notFound('Budget line not found');
-  return source;
+  return { ...source, costCategoryId: category.id };
 }
 
 budgetRequestRoutes.post(
@@ -804,7 +844,7 @@ budgetRequestRoutes.post(
         data: {
           number,
           ...source.columns,
-          costCategoryId: body.costCategoryId,
+          costCategoryId: source.costCategoryId,
           amount: D(amount),
           items: { create: lines },
           reason: body.reason,
@@ -845,7 +885,10 @@ budgetRequestRoutes.put(
     if (!same(body.jobId, existing.jobId) || !same(body.salesOrderId, existing.salesOrderId) || !same(body.quotationId, existing.quotationId) || !same(body.costingId, existing.costingId)) {
       throw badRequest('A budget request stays on what it was raised for — raise another');
     }
-    await checkCharging(me, body);
+    // An office request may move to another line of the office budgets while
+    // a draft (over its line, the card suggests one); never to or from a record.
+    if (!!body.officeBudgetLineId !== !!existing.officeBudgetLineId) throw badRequest('A budget request stays on what it was raised for — raise another');
+    const source = await checkCharging(me, body, existing.officeBudgetLineId);
     // Lines sent replace the breakdown whole; none sent keeps it, with the
     // amount still their sum (a typed amount counts only with no lines).
     const kept = body.items ? null : await prisma.budgetRequestItem.findMany({ where: { requestId: existing.id }, orderBy: { sortOrder: 'asc' } });
@@ -858,7 +901,8 @@ budgetRequestRoutes.put(
       const claimed = await tx.budgetRequest.updateMany({
         where: { id: existing.id, status: 'DRAFT' },
         data: {
-          costCategoryId: body.costCategoryId,
+          costCategoryId: source.costCategoryId,
+          officeBudgetLineId: source.columns.officeBudgetLineId,
           amount: D(amount),
           reason: body.reason,
           neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
@@ -905,15 +949,20 @@ budgetRequestRoutes.post(
     // budget line, as it stood at submit (the page has the live figures).
     const budget = await requestBudget(request);
     const currency = await companyCurrency();
-    const position = budget.over
-      ? `${formatMoney(budget.availableBefore, currency)} available, over by ${formatMoney(budget.overBy, currency)}`
-      : `${formatMoney(budget.availableBefore, currency)} available → ${formatMoney(budget.availableAfter, currency)} left`;
+    const position =
+      budget.source === 'office'
+        ? officePosition(budget, (n) => formatMoney(n, currency))
+        : budget.over
+          ? `${formatMoney(budget.availableBefore, currency)} available, over by ${formatMoney(budget.overBy, currency)}`
+          : `${formatMoney(budget.availableBefore, currency)} available → ${formatMoney(budget.availableAfter, currency)} left`;
     try {
       await submitForApproval({
         documentType: 'budget_request',
         documentId: request.id,
         documentNumber: request.number,
-        subject: `${forWhat} — ${request.costCategory.name}: ${request.reason} (${request.costCategory.name}: ${position})`,
+        subject: request.officeBudgetLine
+          ? `Office budget — ${request.officeBudgetLine.code} ${request.officeBudgetLine.name}: ${request.reason} (${position})`
+          : `${forWhat} — ${request.costCategory.name}: ${request.reason} (${request.costCategory.name}: ${position})`,
         amount: num(request.amount),
         link: `/g-ops/budget-requests/${request.id}`,
         // The requester, even when a super admin presses the button: the
@@ -1102,8 +1151,8 @@ budgetRequestRoutes.get(
     const sections = cashRequestSections({
       requestedBy: row.requestedBy.name,
       neededBy: row.neededBy,
-      project: sourceOf(row)?.label ?? '',
-      budgetLine: row.costCategory.name,
+      project: row.officeBudgetLine ? `Office budget — ${row.officeBudgetLine.budget.name}` : (sourceOf(row)?.label ?? ''),
+      budgetLine: row.officeBudgetLine ? `${row.officeBudgetLine.code} ${row.officeBudgetLine.name}` : row.costCategory.name,
       status: row.status,
       purpose: row.reason,
       release: release ? release.payment : null,

@@ -677,7 +677,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts marketing; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,958 assertions across twenty-three scripts** (counted 2026-11-09, after
+**4,962 assertions across twenty-three scripts** (counted 2026-11-10, after a net
+4 on finance for the office budgets — created, read off the documents, the
+card and its suggestion, a budget request on an office line, saved whole — and
+Back Support's SI / DR door, replacing the operations budget's 2, and before them
 one on pipeline for the one-page Sales Report, and before it
 14 on finance for a reimbursement against the project budget — the claim's card
 Budget Monitoring's own figures, the pending claim under Requested, the
@@ -831,7 +834,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 438, masters 92, sales 643, costing 205, pipeline 132, calendar 103, numbering
 94, partners 120, delivery 229, chain 439, hr 661, plantilla 129, meetings
-114, evaluations 154, academy 145, finance 461, aftermarket 307, cad 122,
+114, evaluations 154, academy 145, finance 465, aftermarket 307, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145, marketing 69. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -7997,6 +8000,79 @@ operations project), and the liquidation stays itemised with attachments
   owed back; by requester, team, project; the overdue ones;
   `gfin.budget_liquidations.view_all`). The registers' Report buttons open
   them.
+
+## Office budgets, and Back Support's SI / DR door (2026-11-10)
+
+The owner's two questions, with his two Builk monitors ("2026 GRUNTECH YEARLY
+BUDGET", "2026 GRUNTECHLIFE BUDGET") as the sample; his answers: opening
+actuals from Builk, over budget is SUGGESTED another line (never blocked), the
+Finance Manager maintains the budgets, the Operations Budget page is replaced,
+and supplier bills with no purchase order and cash advances charge a line too.
+
+- **The records**: `OfficeBudget` (year, name, notes, `isActive`) and
+  `OfficeBudgetLine` (code, name, `amount`, `openingActual` — what the old
+  monitor had spent when brought over — notes, `isActive`; unique budget ×
+  code). `officeBudgetLineId` (nullable, Restrict) on `ExpenseClaim`,
+  `BudgetRequest`, `SupplierBill` and `CashAdvance` — a project OR an office
+  line, never both (`assertOneCharge`). `OperationsBudget` stays on the
+  schema, unread. `seedOfficeBudgets()` (the seed, once,
+  `seed.officeBudgets2026`) made the owner's two 2026 budgets with their
+  amounts and Builk's actual to date as each line's opening actual.
+- **One rule: `shared/officeBudget.ts`** — nothing is stored on a line but its
+  budget and opening actual. `officeFigures()` reads the documents:
+  **requested** (reimbursements and bills PENDING_APPROVAL, budget requests and
+  advances pending or approved — shown, never subtracted), **released** (a
+  RELEASED budget request until its liquidation is approved; a released advance
+  — a loan by what is still owed), **actual** (opening actual + approved
+  reimbursements and liquidations at their total + approved bills at the
+  SUBTOTAL), **remaining** = budget − released − actual. A liquidation takes
+  its request's or advance's line and a pending one is not counted beside the
+  cash it accounts for. `chargeAgainstOffice()` returns the project card's
+  shape (`source: 'office'`, committed = cash out, incurred = actual) plus
+  `office` (the budget) and `suggest` — over its line, the open lines of the
+  same budget that could take the document whole. `claimOffice` /
+  `requestOffice` / `advanceOffice` / `billOffice` are the four documents'
+  cards; `officePosition()` the approval subject's words ("… over by …; room
+  on 214 TRAVEL EXPENSE"); `officeLineFor()` refuses a closed line except the
+  one a document already carries.
+- **The documents**: each create / modify takes `officeBudgetLineId`; GET sends
+  `budget` (the project card, else the office one) and `officeBudgetLine`;
+  submit puts the position in the subject; the papers print "Against the
+  office budget — <name>" (finance's `budgetSections()` reads either card).
+  A bill takes a line only with no order, receiving or project
+  (`billOfficeLine`). **A budget request's fifth source is `office`**
+  (`shared/budgetRequestSources.ts`: `sourceOf`, `checkSource`, `?for=office`):
+  the line IS its source, `costCategoryId` is filled with Indirect Cost as a
+  stand-in (the column is required and means nothing there), a draft may move
+  to another office line, never to or from a record; `GET
+  /budget-requests/budget?officeBudgetLineId=` feeds the editor's panel.
+  Nothing office posts to a job ledger.
+- **`/api/office-budgets`** (`routes/officeBudgets.ts`; the permission key and
+  menu path are still `gfin.operations_budget` and `/g-fin/operations-budget`,
+  labelled **Office Budget**; audit type `office_budget`): `GET /lines` (the
+  forms' picker — open lines of open budgets with what is left, anyone signed
+  in), `GET /?year=`, `GET /:id` (lines, totals, the documents, `?lineId=`),
+  `POST` (blank or `copyFromId` — lines and amounts, actuals at zero), `PUT
+  /:id` (saved whole; a line left out is deleted, or CLOSED when documents
+  charge it), `DELETE` (only a budget nothing charges), `GET /:id/pdf`.
+  `routes/operationsBudget.ts` and its page are gone.
+- **The web**: `pages/finance/OfficeBudgets.tsx` (the year's budgets, the
+  monitor — Code, Budget line, Budget, Requested, Cash out, Actual, Remaining,
+  Used — Modify in place, "+ New budget", the documents charged, a line's row
+  narrowing them; `?year=&budget=&line=`); `components/OfficeLine.tsx`
+  (`useOfficeLines`, `OfficeLineSelect` — a `fieldControl` — and
+  `OfficeLineAdvice`, the words under it: what is left, or over by how much
+  and the lines with room as buttons) on the claim, cash advance, budget
+  request ("For: An office budget") and supplier bill forms; `BudgetCard`
+  draws `source: 'office'` and its suggestion on the four record pages.
+- **The SI / DR door**: the SI / BS No. and DR No. of a sales order are written
+  through `POST /sales-orders/:id/release` — whoever may edit the order, or
+  the **Back Support handling its team** (`mayReleaseOrder()`:
+  `supportersFor()` on the quotation's team, the approval step's own rule) —
+  at any stage but cancelled, those two boxes only, audited with before and
+  after. `GET /sales-orders/:id` sends `canRelease` and opens for such a Back
+  Support (`assertOrderVisible`); the web route has no Guard. The old `PATCH`
+  stays the editor's.
 
 ## A reimbursement against the project budget (2026-11-09)
 

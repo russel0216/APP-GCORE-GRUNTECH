@@ -86,6 +86,7 @@ import {
   preparedAt,
   slotSignatories,
   type ApprovalSlot,
+  supportersFor,
 } from '../shared/approvals';
 import { bracketNote, bracketed, LIST_CAP, listNotes, listReference, rangeNamed, recordNamed, scopeNamed, filterDay, choice, sendListPdf, totalLabel, ratePct } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
@@ -673,6 +674,8 @@ salesOrderRoutes.get(
     res.json({
       ...presentOrder(order as unknown as Record<string, unknown>, showCost),
       canEdit: canEditRecord(me, 'gops', 'sales_orders', order.ownerId),
+      /** May type the SI / BS and DR numbers — the editor, or the Back Support handling its team. */
+      canRelease: order.status !== 'CANCELLED' && (await mayReleaseOrder(me, order)),
       canPurge: mayPurgeOrder(me, order.ownerId),
       canSeeCost: showCost,
       taxOptions,
@@ -1284,6 +1287,67 @@ salesOrderRoutes.patch(
   }),
 );
 
+/**
+ * THE RELEASE DOOR (2026-11-10, the owner's question: "why can't the back
+ * support enter the SI and DR when the sales order is already issued, even
+ * under approval"). The SI / BS No. and the DR No. are written by whoever
+ * releases the goods and the invoice — Back Support — who is not the order's
+ * author and holds no right to edit it. So those two boxes, and nothing else,
+ * open to the Back Support handling the order's team (`supportersFor()`, the
+ * approval step's own rule: the teams ticked under "Supports teams", else
+ * their own), beside whoever may edit the order. At any stage but cancelled:
+ * a draft, under approval, issued. Audited with the numbers before and after.
+ */
+async function mayReleaseOrder(me: ReturnType<typeof currentUser>, order: { ownerId: string; quotationId: string }): Promise<boolean> {
+  if (me.isSuperAdmin || canEditRecord(me, 'gops', 'sales_orders', order.ownerId)) return true;
+  const holders = (
+    await prisma.userRole.findMany({ where: { role: { key: 'back_support' }, user: { isActive: true } }, select: { userId: true } })
+  ).map((r) => r.userId);
+  if (!holders.includes(me.id)) return false;
+  // The order's team is its quotation's (the tag, else the author's).
+  const quotation = await prisma.quotation.findUnique({
+    where: { id: order.quotationId },
+    select: { teamId: true, owner: { select: { employee: { select: { industryId: true } } } } },
+  });
+  const teamId = quotation?.teamId ?? quotation?.owner.employee?.industryId ?? null;
+  return (await supportersFor(holders, order.ownerId, prisma, teamId)).includes(me.id);
+}
+
+salesOrderRoutes.post(
+  '/:id/release',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const order = await prisma.salesOrder.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, number: true, status: true, ownerId: true, quotationId: true, siNumber: true, drNumber: true },
+    });
+    if (!order) throw notFound('Sales order not found');
+    if (!(await mayReleaseOrder(me, order))) throw forbidden('The SI and DR numbers are entered by whoever may edit this order, or the Back Support handling its team');
+    if (order.status === 'CANCELLED') throw badRequest('A cancelled sales order stays as it was');
+    const body = parseBody(
+      z.object({ siNumber: z.string().trim().max(60).optional().nullable(), drNumber: z.string().trim().max(60).optional().nullable() }),
+      req.body,
+    );
+    const next = {
+      siNumber: body.siNumber === undefined ? order.siNumber : body.siNumber || null,
+      drNumber: body.drNumber === undefined ? order.drNumber : body.drNumber || null,
+    };
+    await prisma.salesOrder.update({ where: { id: order.id }, data: next });
+    await audit(
+      {
+        entityType: 'sales_order',
+        entityId: order.id,
+        action: 'UPDATED',
+        summary: `${order.number} — SI / BS No. ${next.siNumber ?? 'none'}, DR No. ${next.drNumber ?? 'none'}`,
+        before: { siNumber: order.siNumber, drNumber: order.drNumber },
+        after: next,
+      },
+      req,
+    );
+    res.json({ ok: true, ...next });
+  }),
+);
+
 // ── Status: issue, reopen, cancel ────────────────────────────────────────────
 
 salesOrderRoutes.post(
@@ -1813,6 +1877,8 @@ async function assertOrderVisible(
       : null;
   const visible = !deciderOnly && (me.isSuperAdmin || readsSalesOrder(me, { ownerId: order.ownerId, quotation }));
   if (visible || (await mayDecide(me.id, 'sales_order', [order.id]))) return;
+  // Back Support opens the orders of the teams it handles — it writes their SI and DR numbers.
+  if (await mayReleaseOrder(me, order)) return;
   throw forbidden(deciderOnly ? 'You need one of: gops.sales_orders.view_all, gops.sales_orders.view_own' : 'This sales order is someone else\u2019s');
 }
 

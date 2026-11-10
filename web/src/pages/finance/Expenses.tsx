@@ -76,6 +76,8 @@ function liquidationSource(row: { advance: ClaimAdvance | null; budgetRequest: C
   return null;
 }
 
+import type { CurrentOfficeLine } from '../../components/OfficeLine';
+
 export interface Claim {
   id: string;
   number: string;
@@ -100,6 +102,8 @@ export interface Claim {
   stage?: string;
   job: { id: string; number: string; name: string } | null;
   costCategory: { id: string; name: string } | null;
+  /** An office budget line instead of a project (2026-11-10). */
+  officeBudgetLine?: CurrentOfficeLine | null;
   advance: ClaimAdvance | null;
   budgetRequest: ClaimAdvance | null;
   lines: {
@@ -176,7 +180,7 @@ export function Expenses() {
           <div>
             <div>{r.purpose}</div>
             <div className="faint">
-              {r.job ? <span className="mono">{r.job.number}</span> : 'Overheads'}
+              {r.job ? <span className="mono">{r.job.number}</span> : r.officeBudgetLine ? `Office · ${r.officeBudgetLine.code} ${r.officeBudgetLine.name}` : 'Overheads'}
               {source && (
                 <>
                   {' · liquidation of '}
@@ -383,6 +387,13 @@ export function ExpenseClaimDetail() {
                 </Link>{' '}
                 {row.costCategory ? `· ${row.costCategory.name}` : ''}
               </>
+            ) : row.officeBudgetLine ? (
+              <>
+                {' · charged to the office budget, '}
+                <Link to={`/g-fin/operations-budget?budget=${row.officeBudgetLine.budget.id}&line=${row.officeBudgetLine.id}`}>
+                  {row.officeBudgetLine.code} {row.officeBudgetLine.name}
+                </Link>
+              </>
             ) : (
               ' · overheads'
             )}
@@ -460,7 +471,9 @@ export function ExpenseClaimDetail() {
 
       {/* Where the budget line stands, beside the decision (2026-11-09): the
           approver sees the remaining budget before anything posts. */}
-      {row.budget && row.costCategory && <BudgetCard budget={row.budget} lineName={row.costCategory.name} noun="This claim" />}
+      {row.budget && (row.budget.source === 'office' || row.costCategory) && (
+        <BudgetCard budget={row.budget} lineName={row.budget.source === 'office' ? (row.budget.line?.name ?? '') : (row.costCategory?.name ?? '')} noun="This claim" />
+      )}
 
       {/* The receipts beside the decision: each file's first page is shown, so
           the approver checks the ORs without opening them one by one. */}
@@ -591,6 +604,14 @@ export function ExpenseClaimDetail() {
                 <>
                   <span className="mono">{row.job.number}</span>
                   <span className="faint"> · {row.costCategory?.name ?? 'no budget line'}</span>
+                </>
+              ) : row.officeBudgetLine ? (
+                <>
+                  {row.officeBudgetLine.budget.name}
+                  <span className="faint">
+                    {' '}
+                    · {row.officeBudgetLine.code} {row.officeBudgetLine.name}
+                  </span>
                 </>
               ) : (
                 <span className="faint">overheads — no project charged</span>

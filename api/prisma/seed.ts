@@ -13,6 +13,7 @@ import { backfillPositions } from '../src/shared/plantilla';
 import { markUnchangedScoroImports, withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
 import { closeLegacyBudgetIncreases, syncBudgetRequestCommitments } from '../src/shared/budgetRequests';
+import { seedOfficeBudgets } from '../src/shared/officeBudget';
 import { applyDeclaredValueRule } from '../src/shared/declaredValue';
 import { migrateCostingMargins } from '../src/shared/costingLegacy';
 import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGroups';
@@ -1384,6 +1385,9 @@ async function main() {
   // brands, the first exhibition, and — once — every role may scan.
   const marketing = await seedMarketing();
   console.log(`  ✓ Exhibition brands (${EXHIBITION_BRANDS.length}${marketing.brands ? `, ${marketing.brands} added` : ''})${marketing.exhibition ? ' · PSECE 2026 added' : ''}${marketing.granted !== null ? ` · Marketing given to every role (${marketing.granted} grant(s))` : ''}`);
+  // The office budgets (2026-11-10): the owner's two Builk monitors for 2026, once.
+  const officeBudgets = await seedOfficeBudgets();
+  if (officeBudgets) console.log(`  ✓ Office budgets 2026 brought over from Builk (${officeBudgets})`);
   const assetTypesAdded = await seedAssetTypes();
   console.log(`  ✓ Asset types (${ASSET_TYPES.length}${assetTypesAdded ? `, ${assetTypesAdded} added` : ''})`);
   const tagMoved = await moveAssetTagCode();

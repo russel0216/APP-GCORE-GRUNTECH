@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { OfficeLineAdvice, OfficeLineSelect, useOfficeLines } from '../../components/OfficeLine';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -49,13 +50,15 @@ interface Budget {
 }
 
 /** What the cash is for (2026-10-26): a project, a sales order, a quotation or a costing. */
-export type SourceKind = 'project' | 'sales_order' | 'quotation' | 'costing';
+export type SourceKind = 'project' | 'sales_order' | 'quotation' | 'costing' | 'office';
 
-export const SOURCE_KEY: Record<SourceKind, 'jobId' | 'salesOrderId' | 'quotationId' | 'costingId'> = {
+export const SOURCE_KEY: Record<SourceKind, 'jobId' | 'salesOrderId' | 'quotationId' | 'costingId' | 'officeBudgetLineId'> = {
   project: 'jobId',
   sales_order: 'salesOrderId',
   quotation: 'quotationId',
   costing: 'costingId',
+  // An office expense (2026-11-10): the source IS the office budget line.
+  office: 'officeBudgetLineId',
 };
 
 const SOURCE_CHOICES: { kind: SourceKind; label: string; hint: string }[] = [
@@ -63,6 +66,7 @@ const SOURCE_CHOICES: { kind: SourceKind; label: string; hint: string }[] = [
   { kind: 'sales_order', label: 'A sales order', hint: 'An issued order — checked against its quoted cost' },
   { kind: 'quotation', label: 'A quotation', hint: 'Open or won — checked against its costing' },
   { kind: 'costing', label: 'A costing', hint: 'A final costing — checked against its budget lines' },
+  { kind: 'office', label: 'An office budget', hint: 'An office expense — charged to a line of the Office Budget' },
 ];
 
 interface Header {
@@ -140,6 +144,8 @@ export function BudgetRequestEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  const officeBudgets = useOfficeLines();
+
   // The project's budget lines — the Budget line select and the live panel.
   useEffect(() => {
     setBudget(null);
@@ -156,7 +162,7 @@ export function BudgetRequestEditor() {
 
   // What may be picked for the kind chosen (a new request only).
   useEffect(() => {
-    if (existing || preset) return;
+    if (existing || preset || header.kind === 'office') return;
     let live = true;
     const timer = window.setTimeout(() => {
       const path = header.kind === 'project' ? '/budget-requests/projects' : `/budget-requests/sources${qs({ kind: header.kind, q: search.trim() || undefined })}`;
@@ -205,8 +211,9 @@ export function BudgetRequestEditor() {
   const kindWord = SOURCE_CHOICES.find((c) => c.kind === header.kind)!;
 
   const problems: string[] = [];
-  if (!header.sourceId) problems.push(`Choose the ${kindWord.label.replace(/^An? /, '')}`);
-  if (!header.costCategoryId) problems.push('Choose the budget line');
+  const office = header.kind === 'office';
+  if (!header.sourceId) problems.push(office ? 'Choose the office budget line' : `Choose the ${kindWord.label.replace(/^An? /, '')}`);
+  if (!office && !header.costCategoryId) problems.push('Choose the budget line');
   if (header.reason.trim().length < 3) problems.push('Say what the cash is for');
   problems.push(...linesProblems(lines));
 
@@ -217,7 +224,7 @@ export function BudgetRequestEditor() {
     setError(null);
     const body = {
       [SOURCE_KEY[header.kind]]: header.sourceId,
-      costCategoryId: header.costCategoryId,
+      costCategoryId: office ? null : header.costCategoryId,
       reason: header.reason.trim(),
       neededBy: header.neededBy || null,
       notes: header.notes.trim() || null,
@@ -269,9 +276,18 @@ export function BudgetRequestEditor() {
   }
 
   const perLine = budget?.perLine ?? true;
-  const chosen = (perLine ? budget?.lines.find((b) => b.id === header.costCategoryId) : budget?.lines[0]) ?? null;
-  const shownLines = (budget?.lines ?? []).filter((b) => !perLine || b.budgeted > 0 || b.id === header.costCategoryId);
-  const isChosenLine = (b: BudgetLine) => (perLine ? b.id === header.costCategoryId : true);
+  // An office request's line is its source; a record's is the cost category chosen.
+  const lineKey = office ? header.sourceId : header.costCategoryId;
+  const chosen = (perLine ? budget?.lines.find((b) => b.id === lineKey) : budget?.lines[0]) ?? null;
+  const isChosenLine = (b: BudgetLine) => (perLine ? b.id === lineKey : true);
+  // Over its office line: the lines of the same budget that could take it whole.
+  const officeRoom =
+    office && chosen && chosen.available - total < -0.004
+      ? (budget?.lines ?? []).filter((b) => b.id !== chosen.id && b.available >= total).sort((a, b) => b.available - a.available).slice(0, 4)
+      : [];
+  const shownLines = office
+    ? (budget?.lines ?? []).filter((b) => b.id === lineKey || officeRoom.some((r) => r.id === b.id))
+    : (budget?.lines ?? []).filter((b) => !perLine || b.budgeted > 0 || b.id === header.costCategoryId);
   const actions = (
     <>
       <button type="button" className="btn" onClick={() => void save(false)} disabled={busy}>
@@ -321,7 +337,44 @@ export function BudgetRequestEditor() {
               <Field label="Number">
                 <div className="qe-static">{existing ? <span className="mono">{existing.number}</span> : <span className="muted">Given on save</span>}</div>
               </Field>
-              {preset || existing ? (
+              {office && !preset ? (
+                <>
+                  <Field label="For" required={!existing} hint={kindWord.hint}>
+                    {existing ? (
+                      <div className="qe-static">An office budget</div>
+                    ) : (
+                      <select
+                        value={header.kind}
+                        onChange={(e) => {
+                          setSearch('');
+                          setChoices([]);
+                          setHeader((h) => ({ ...h, kind: e.target.value as SourceKind, sourceId: '', costCategoryId: '' }));
+                        }}
+                      >
+                        {SOURCE_CHOICES.map((c) => (
+                          <option key={c.kind} value={c.kind}>
+                            {c.label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </Field>
+                  <Field
+                    label="Office budget line"
+                    required
+                    hint={<OfficeLineAdvice budgets={officeBudgets} value={header.sourceId} amount={total} onPick={(lineId) => setHeader((h) => ({ ...h, sourceId: lineId }))} />}
+                    error={attempted && !header.sourceId ? 'Choose the office budget line' : null}
+                  >
+                    <OfficeLineSelect
+                      budgets={officeBudgets}
+                      value={header.sourceId}
+                      current={existing?.officeBudgetLine}
+                      none="— choose —"
+                      onChange={(lineId) => setHeader((h) => ({ ...h, sourceId: lineId }))}
+                    />
+                  </Field>
+                </>
+              ) : preset || existing ? (
                 <Field label="For">
                   <div className="qe-static">{source ? <Link to={source.link}>{source.label}</Link> : '…'}</div>
                 </Field>
@@ -366,6 +419,7 @@ export function BudgetRequestEditor() {
                   </Field>
                 </>
               )}
+              {!office && (
               <Field
                 label="Budget line"
                 required
@@ -385,6 +439,7 @@ export function BudgetRequestEditor() {
                   ))}
                 </select>
               </Field>
+              )}
               <Field label="Needed by" hint="When the team needs the cash in hand">
                 <input type="date" value={header.neededBy} onChange={(e) => setHeader((h) => ({ ...h, neededBy: e.target.value }))} />
               </Field>
@@ -478,7 +533,7 @@ export function BudgetRequestEditor() {
 
         <aside className="card prq-budget" aria-labelledby="br-budget">
           <div className="card-head">
-            <h2 id="br-budget" className="card-title">{header.kind === 'project' ? 'Project budget' : 'Its cost'}</h2>
+            <h2 id="br-budget" className="card-title">{header.kind === 'project' ? 'Project budget' : office ? 'Office budget' : 'Its cost'}</h2>
             <span className="muted prq-source">as it stands</span>
           </div>
           {!header.sourceId ? (
@@ -488,7 +543,9 @@ export function BudgetRequestEditor() {
           ) : (
             <>
               <p className="prq-hint">
-                {header.kind === 'project'
+                {office
+                  ? 'What is left on the line: its budget less the cash out and the actual to date. Released, this request is cash out on the line; its liquidation turns what was spent into actual.'
+                  : header.kind === 'project'
                   ? 'Released cash shows as committed on its budget line; the liquidation turns what was spent into incurred.'
                   : header.kind === 'sales_order'
                     ? "The order's quoted cost, less what its purchasing and other budget requests already hold."
@@ -509,14 +566,27 @@ export function BudgetRequestEditor() {
                     </div>
                     <Meter pct={used} tone={left < 0 ? 'danger' : used > 85 ? 'warn' : undefined} />
                     <div className="prq-bud-sub">
-                      <span>{isChosen ? `this request ${formatMoney(total)}` : 'not touched'}</span>
+                      <span>
+                        {isChosen ? (
+                          `this request ${formatMoney(total)}`
+                        ) : office ? (
+                          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setHeader((h) => ({ ...h, sourceId: b.id }))}>
+                            Charge this line instead
+                          </button>
+                        ) : (
+                          'not touched'
+                        )}
+                      </span>
                       <span>{left < 0 ? 'over by ' + formatMoney(-left) : isChosen ? 'left once spent' : 'available'}</span>
                     </div>
                   </div>
                 );
               })}
               {chosen && chosen.available - total < -0.004 && (
-                <div className="alert warn">More than is left on {chosen.name} — the approvers will see it.</div>
+                <div className="alert warn">
+                  More than is left on {chosen.name} — the approvers will see it.
+                  {office && (officeRoom.length ? ' The lines above still have room for it.' : ' No other line of this budget has room for it.')}
+                </div>
               )}
             </>
           )}

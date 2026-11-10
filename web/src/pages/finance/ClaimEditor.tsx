@@ -9,6 +9,7 @@ import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import { todayLocal } from '../../lib/day';
 import type { Route } from '../chain/PurchaseRequisitionEditor';
 import type { Claim } from './Expenses';
+import { OfficeLineAdvice, OfficeLineSelect, useOfficeLines, type CurrentOfficeLine } from '../../components/OfficeLine';
 
 /**
  * The reimbursement as a PAGE (2026-10-19, the owner's call: "do the same for
@@ -37,6 +38,7 @@ interface Source {
   purpose: string;
   job: { id: string; number: string; name: string } | null;
   costCategory: { id: string; name: string } | null;
+  officeBudgetLine?: CurrentOfficeLine | null;
   to: string;
 }
 
@@ -55,6 +57,7 @@ interface Header {
   purpose: string;
   jobId: string;
   costCategoryId: string;
+  officeBudgetLineId: string;
 }
 
 let nextKey = 0;
@@ -85,7 +88,8 @@ export function ClaimEditor() {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [attempted, setAttempted] = useState(false);
-  const [header, setHeader] = useState<Header>({ claimDate: today, purpose: '', jobId: '', costCategoryId: '' });
+  const [header, setHeader] = useState<Header>({ claimDate: today, purpose: '', jobId: '', costCategoryId: '', officeBudgetLineId: '' });
+  const officeBudgets = useOfficeLines();
   const [lines, setLines] = useState<Line[]>(() => [blankLine(today)]);
   const [files, setFiles] = useState<File[]>([]);
   const [saved, setSaved] = useState<string | null>(null);
@@ -111,10 +115,11 @@ export function ClaimEditor() {
               purpose: row.purpose,
               job: row.job,
               costCategory: row.costCategory,
+              officeBudgetLine: row.officeBudgetLine,
               to: row.advance ? `/g-fin/cash-advances/${from.id}` : `/g-ops/budget-requests/${from.id}`,
             };
           }
-          h = { claimDate: row.claimDate.slice(0, 10), purpose: row.purpose, jobId: row.job?.id ?? '', costCategoryId: row.costCategory?.id ?? '' };
+          h = { claimDate: row.claimDate.slice(0, 10), purpose: row.purpose, jobId: row.job?.id ?? '', costCategoryId: row.costCategory?.id ?? '', officeBudgetLineId: row.officeBudgetLine?.id ?? '' };
           ls = row.lines.length
             ? row.lines.map((l) => ({
                 key: newKey(),
@@ -134,6 +139,7 @@ export function ClaimEditor() {
             purpose: string;
             job: Source['job'];
             costCategory: Source['costCategory'];
+            officeBudgetLine?: CurrentOfficeLine | null;
           }>(`/cash-advances/${advanceId}`);
           src = { kind: 'advance', ...a, to: `/g-fin/cash-advances/${a.id}` };
         } else if (budgetRequestId) {
@@ -144,6 +150,7 @@ export function ClaimEditor() {
             reason: string;
             job: { id: string; number: string; name: string } | null;
             costCategory: Source['costCategory'];
+            officeBudgetLine?: CurrentOfficeLine | null;
           }>(`/budget-requests/${budgetRequestId}`);
           src = {
             kind: 'budgetRequest',
@@ -154,6 +161,7 @@ export function ClaimEditor() {
             // A request on a sales order, quotation or costing names no project (2026-10-26).
             job: b.job ? { id: b.job.id, number: b.job.number, name: b.job.name } : null,
             costCategory: b.costCategory,
+            officeBudgetLine: b.officeBudgetLine,
             to: `/g-ops/budget-requests/${b.id}`,
           };
         }
@@ -248,6 +256,7 @@ export function ClaimEditor() {
       budgetRequestId: source?.kind === 'budgetRequest' ? source.id : null,
       jobId: source ? source.job?.id ?? null : header.jobId || null,
       costCategoryId: source ? source.costCategory?.id ?? null : header.jobId ? header.costCategoryId || null : null,
+      officeBudgetLineId: source ? null : header.jobId ? null : header.officeBudgetLineId || null,
       lines: sent.map((l) => ({
         spentOn: l.spentOn,
         description: l.description.trim(),
@@ -393,14 +402,21 @@ export function ClaimEditor() {
               {source ? (
                 <Field label="Charged to">
                   <div className="qe-static">
-                    {source.job ? `${source.job.number} — ${source.job.name} · ${source.costCategory?.name ?? 'no budget line'}` : 'Overheads'}
+                    {source.job
+                      ? `${source.job.number} — ${source.job.name} · ${source.costCategory?.name ?? 'no budget line'}`
+                      : source.officeBudgetLine
+                        ? `Office budget — ${source.officeBudgetLine.budget.name} · ${source.officeBudgetLine.code} ${source.officeBudgetLine.name}`
+                        : 'Overheads'}
                   </div>
                 </Field>
               ) : (
                 <>
-                  <Field label="Charge to project" hint="Leave empty if it belongs to overheads">
-                    <select value={header.jobId} onChange={(e) => setHeader((h) => ({ ...h, jobId: e.target.value, costCategoryId: e.target.value ? h.costCategoryId : '' }))}>
-                      <option value="">— none (overheads) —</option>
+                  <Field label="Charge to project" hint="Leave empty for an office expense — then choose its office budget line">
+                    <select
+                      value={header.jobId}
+                      onChange={(e) => setHeader((h) => ({ ...h, jobId: e.target.value, costCategoryId: e.target.value ? h.costCategoryId : '', officeBudgetLineId: e.target.value ? '' : h.officeBudgetLineId }))}
+                    >
+                      <option value="">— none (office) —</option>
                       {existing?.job && !jobs.some((j) => j.id === existing.job?.id) && (
                         <option value={existing.job.id}>
                           {existing.job.number} — {existing.job.name}
@@ -423,6 +439,20 @@ export function ClaimEditor() {
                           </option>
                         ))}
                       </select>
+                    </Field>
+                  )}
+                  {!header.jobId && (officeBudgets.length > 0 || header.officeBudgetLineId) && (
+                    <Field
+                      label="Office budget line"
+                      hint={<OfficeLineAdvice budgets={officeBudgets} value={header.officeBudgetLineId} amount={total} onPick={(id) => setHeader((h) => ({ ...h, officeBudgetLineId: id }))} />}
+                    >
+                      <OfficeLineSelect
+                        budgets={officeBudgets}
+                        value={header.officeBudgetLineId}
+                        current={existing?.officeBudgetLine}
+                        none="— none (overheads, no budget) —"
+                        onChange={(id) => setHeader((h) => ({ ...h, officeBudgetLineId: id }))}
+                      />
                     </Field>
                   )}
                 </>

@@ -120,6 +120,7 @@ import {
 } from '../shared/receivables';
 import { SOURCE_INCLUDE, sourceOf } from '../shared/budgetRequestSources';
 import { claimBudget, budgetPosition, type ChargeBudget } from '../shared/projectBudget';
+import { OFFICE_LINE_SELECT, assertOneCharge, billOffice, claimOffice, officeLineFor, officePosition, type OfficeCharge } from '../shared/officeBudget';
 
 function asDate(value: string, label: string): Date {
   const date = new Date(value);
@@ -229,12 +230,13 @@ export function cashRequestSections(input: {
  * carries the position too. A settled or closed document prints the line
  * as it stands and says it takes nothing more.
  */
-export function budgetSections(b: ChargeBudget, lineName: string, noun: 'This claim' | 'This advance' | 'This request', currency: string): PdfSection[] {
+export function budgetSections(b: ChargeBudget | OfficeCharge, lineName: string, noun: 'This claim' | 'This advance' | 'This request', currency: string): PdfSection[] {
   const money = (n: number) => formatMoney(n, currency);
+  const office = b.source === 'office' ? b : null;
   const rows: PdfTotal[] = [
     { label: `Budgeted — ${lineName}`, value: money(b.line?.budgeted ?? 0) },
-    { label: 'Already committed', value: money(b.line?.committed ?? 0) },
-    { label: 'Already spent', value: money(b.line?.incurred ?? 0) },
+    { label: office ? 'Cash out, to be accounted for' : 'Already committed', value: money(b.line?.committed ?? 0) },
+    { label: office ? 'Actual to date' : 'Already spent', value: money(b.line?.incurred ?? 0) },
     ...(b.requested > 0 ? [{ label: 'Also waiting for approval', value: money(b.requested) }] : []),
     { label: b.settled ? 'Available now' : 'Available before', value: money(b.availableBefore) },
   ];
@@ -249,12 +251,21 @@ export function budgetSections(b: ChargeBudget, lineName: string, noun: 'This cl
   return [
     {
       kind: 'text',
-      title: 'Against the project budget',
+      title: office ? `Against the office budget — ${office.office.name}` : 'Against the project budget',
       body: b.settled
         ? b.basis === 'settled'
-          ? `${noun} takes nothing more from the budget: what it spent is on the ledger as incurred.`
+          ? office
+            ? `${noun} takes nothing more from the budget: what it spent is in the line's actual.`
+            : `${noun} takes nothing more from the budget: what it spent is on the ledger as incurred.`
           : `${noun} takes nothing from the budget.`
-        : `Budget Monitoring's own figures for ${lineName}. Available = budgeted - committed - spent; what is waiting for approval is shown and not subtracted.`,
+        : office
+          ? `The office budget's own figures for ${lineName}. Available = budget - cash out - actual; what is waiting for approval is shown and not subtracted.` +
+            (office.over
+              ? office.suggest.length
+                ? ` Over this line — room on: ${office.suggest.map((x) => `${x.code} ${x.name} (${money(x.remaining)})`).join('; ')}.`
+                : ' Over this line, and no other line of this budget has room for it.'
+              : '')
+          : `Budget Monitoring's own figures for ${lineName}. Available = budgeted - committed - spent; what is waiting for approval is shown and not subtracted.`,
     },
     { kind: 'totals', rows },
   ];
@@ -1881,6 +1892,7 @@ const billInclude = {
   receiving: { select: { id: true, number: true, receivedDate: true } },
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
+  officeBudgetLine: OFFICE_LINE_SELECT,
   purchaser: { select: { id: true, name: true } },
   lines: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.SupplierBillInclude;
@@ -2202,6 +2214,8 @@ billRoutes.get(
     res.json({
       ...presentBill(row),
       canEdit: mayEdit(me, 'gfin', 'ap', row.createdById === me.id, row.createdById),
+      // Charged to an office budget line (2026-11-10): where that line stands.
+      budget: await billOffice(row),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
     });
   }),
@@ -2213,6 +2227,8 @@ const billSchema = z.object({
   receivingId: z.string().optional().nullable(),
   jobId: z.string().optional().nullable(),
   costCategoryId: z.string().optional().nullable(),
+  /** An office budget line — only on a bill with no purchase order, receiving or project (2026-11-10). */
+  officeBudgetLineId: z.string().optional().nullable(),
   supplierInvoiceNo: z.string().optional().nullable(),
   billDate: z.string().optional(),
   dueDate: z.string().optional(),
@@ -2292,6 +2308,23 @@ function billMoney(body: Pick<BillBody, 'lines' | 'vatInclusive' | 'ewtRate'>, v
  * goods received always lends the bill one, and a receiving named outright
  * must be of that order and that supplier.
  */
+/**
+ * The office budget line a bill may charge: office spending is a bill with
+ * nothing received behind it and no project — goods on a purchase order are
+ * stock or a project's.
+ */
+async function billOfficeLine(
+  links: { orderId: string | null; receivingId: string | null; jobId: string | null },
+  lineId: string | null,
+  keepId?: string | null,
+): Promise<string | null> {
+  if (!lineId) return null;
+  if (links.orderId || links.receivingId) throw badRequest('A bill on a purchase order is stock or a project’s — it is not charged to an office budget line');
+  assertOneCharge(links.jobId, lineId);
+  await officeLineFor(lineId, keepId);
+  return lineId;
+}
+
 async function billLinks(input: {
   supplierId: string;
   orderId: string | null;
@@ -2379,6 +2412,7 @@ billRoutes.post(
     const purchaserName = !body.purchaserId && body.purchaserName ? body.purchaserName : null;
     const purchaserId = purchaserName ? null : body.purchaserId || buyerId;
     await checkPurchaser(purchaserId);
+    const officeBudgetLineId = await billOfficeLine(links, body.officeBudgetLineId || null);
 
     const bill = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('supplier_bill', tx);
@@ -2388,6 +2422,7 @@ billRoutes.post(
           supplierId: body.supplierId,
           ...links,
           costCategoryId: body.costCategoryId || null,
+          officeBudgetLineId,
           supplierInvoiceNo: body.supplierInvoiceNo || null,
           billDate,
           dueDate,
@@ -2514,6 +2549,16 @@ billRoutes.put(
         ? existing.purchaserId ?? buyerId
         : body.purchaserId || buyerId;
     await checkPurchaser(purchaserId);
+    // Left out, the line stays — unless the bill now names an order or a project.
+    const officeBudgetLineId = await billOfficeLine(
+      links,
+      body.officeBudgetLineId === undefined
+        ? links.orderId || links.receivingId || links.jobId
+          ? null
+          : existing.officeBudgetLineId
+        : body.officeBudgetLineId || null,
+      existing.officeBudgetLineId,
+    );
 
     const updated = await prisma.$transaction(async (tx) => {
       const claimed = await tx.supplierBill.updateMany({
@@ -2522,6 +2567,7 @@ billRoutes.put(
           supplierId,
           ...links,
           costCategoryId: keep(body.costCategoryId, existing.costCategoryId),
+          officeBudgetLineId,
           supplierInvoiceNo: keep(body.supplierInvoiceNo, existing.supplierInvoiceNo),
           billDate,
           dueDate,
@@ -2925,14 +2971,15 @@ export const claimInclude = {
   claimedBy: { select: { id: true, name: true, email: true, ...USER_TEAM_SELECT.select } },
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
+  officeBudgetLine: OFFICE_LINE_SELECT,
   // `amountRefunded`: unspent cash already handed back — the liquidation
   // report's paper takes it off what it says is owed back.
   advance: {
-    select: { id: true, number: true, amountReleased: true, amountRefunded: true, status: true, jobId: true, costCategoryId: true },
+    select: { id: true, number: true, amountReleased: true, amountRefunded: true, status: true, jobId: true, costCategoryId: true, officeBudgetLineId: true },
   },
   // Project cash liquidated the same way — a claim names one or the other.
   budgetRequest: {
-    select: { id: true, number: true, amountReleased: true, amountRefunded: true, status: true, jobId: true, costCategoryId: true },
+    select: { id: true, number: true, amountReleased: true, amountRefunded: true, status: true, jobId: true, costCategoryId: true, officeBudgetLineId: true },
   },
   lines: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.ExpenseClaimInclude;
@@ -3171,6 +3218,7 @@ expenseRoutes.get(
           claimedBy: { select: { name: true } },
           job: { select: { number: true } },
           costCategory: { select: { name: true } },
+          officeBudgetLine: { select: { code: true, name: true } },
           ...LIQUIDATION_SOURCES,
         },
         orderBy: orderBy(q, CLAIM_SORTS, { claimDate: 'desc' }),
@@ -3223,7 +3271,7 @@ expenseRoutes.get(
             { title: r.claimedBy.name, body: r.purpose },
             source ? { title: 'Liquidation', body: source.number } : 'Reimbursement',
             formatShortDate(r.claimDate),
-            r.job ? { title: r.job.number, body: r.costCategory?.name ?? undefined } : 'Overheads',
+            r.job ? { title: r.job.number, body: r.costCategory?.name ?? undefined } : r.officeBudgetLine ? { title: r.officeBudgetLine.code, body: r.officeBudgetLine.name } : 'Overheads',
             bracketed(formatAmount(num(r.total)), inSum),
             owed > 0 ? formatAmount(owed) : '',
             statusLabel(r.status),
@@ -3287,7 +3335,8 @@ expenseRoutes.get(
       // "Against the project budget" (2026-11-09): the claim's budget line as
       // Budget Monitoring reads it, this claim and what is left after — so the
       // approver sees the remaining budget before anything posts.
-      budget: await claimBudget(row),
+      // Charged to an office budget line instead (2026-11-10): that line's position.
+      budget: (await claimBudget(row)) ?? (await claimOffice(row)),
     });
   }),
 );
@@ -3297,6 +3346,8 @@ const claimSchema = z.object({
   purpose: z.string().trim().min(3, 'What was the expense for?'),
   jobId: z.string().optional().nullable(),
   costCategoryId: z.string().optional().nullable(),
+  /** An office budget line instead of a project (2026-11-10). */
+  officeBudgetLineId: z.string().optional().nullable(),
   /** Set when this claim liquidates a cash advance. */
   advanceId: z.string().optional().nullable(),
   /** Set when this claim liquidates a budget request (project cash). Never both. */
@@ -3350,6 +3401,7 @@ expenseRoutes.post(
     // nobody approved.
     let jobId = body.jobId || null;
     let costCategoryId = body.costCategoryId || null;
+    let officeBudgetLineId = body.officeBudgetLineId || null;
     let advanceNumber: string | null = null;
     if (body.advanceId) {
       const advance = await prisma.cashAdvance.findUnique({
@@ -3381,6 +3433,7 @@ expenseRoutes.post(
       }
       jobId = advance.jobId;
       costCategoryId = advance.costCategoryId;
+      officeBudgetLineId = advance.officeBudgetLineId;
       advanceNumber = advance.number;
     }
     if (body.advanceId && body.budgetRequestId) {
@@ -3418,7 +3471,14 @@ expenseRoutes.post(
       }
       jobId = request.jobId;
       costCategoryId = request.costCategoryId;
+      officeBudgetLineId = request.officeBudgetLineId;
       advanceNumber = request.number;
+    }
+    // A reimbursement charged to the office: a line still open, and no project beside it.
+    if (!body.advanceId && !body.budgetRequestId && officeBudgetLineId) {
+      assertOneCharge(jobId, officeBudgetLineId);
+      await officeLineFor(officeBudgetLineId);
+      costCategoryId = null;
     }
 
     const { total, lines } = claimLines(body.lines);
@@ -3430,6 +3490,7 @@ expenseRoutes.post(
           claimedById: me.id,
           jobId,
           costCategoryId,
+          officeBudgetLineId,
           advanceId: body.advanceId || null,
           budgetRequestId: body.budgetRequestId || null,
           claimDate: body.claimDate ? asDate(body.claimDate, 'Claim date') : dayKey(new Date()),
@@ -3478,8 +3539,8 @@ expenseRoutes.put(
     const existing = await prisma.expenseClaim.findUnique({
       where: { id: req.params.id },
       include: {
-        advance: { select: { number: true, jobId: true, costCategoryId: true } },
-        budgetRequest: { select: { number: true, jobId: true, costCategoryId: true } },
+        advance: { select: { number: true, jobId: true, costCategoryId: true, officeBudgetLineId: true } },
+        budgetRequest: { select: { number: true, jobId: true, costCategoryId: true, officeBudgetLineId: true } },
       },
     });
     if (!existing) throw notFound('Expense claim not found');
@@ -3510,15 +3571,24 @@ expenseRoutes.put(
 
     let jobId: string | null;
     let costCategoryId: string | null;
+    let officeBudgetLineId: string | null;
     if (source) {
       if (body.jobId && source.jobId && body.jobId !== source.jobId) {
         throw badRequest(`${source.number} was approved against a different project — the liquidation charges that one`);
       }
       jobId = source.jobId;
       costCategoryId = source.costCategoryId;
+      officeBudgetLineId = source.officeBudgetLineId;
     } else {
       jobId = body.jobId || null;
       costCategoryId = body.costCategoryId || null;
+      // Left out, the line stays; null clears it.
+      officeBudgetLineId = body.officeBudgetLineId === undefined ? (jobId ? null : existing.officeBudgetLineId) : body.officeBudgetLineId || null;
+      if (officeBudgetLineId) {
+        assertOneCharge(jobId, officeBudgetLineId);
+        await officeLineFor(officeBudgetLineId, existing.officeBudgetLineId);
+        costCategoryId = null;
+      }
       if (jobId && jobId !== existing.jobId) {
         const job = await prisma.job.findUnique({ where: { id: jobId }, select: { status: true } });
         if (!job || job.status === 'CANCELLED') throw badRequest('That project cannot be charged');
@@ -3533,6 +3603,7 @@ expenseRoutes.put(
         data: {
           jobId,
           costCategoryId,
+          officeBudgetLineId,
           claimDate,
           purpose: body.purpose,
           total: D(total),
@@ -3643,7 +3714,13 @@ expenseRoutes.post(
     // submit (the page has the live figures) — 2026-11-09.
     const budget = await claimBudget(claim);
     const currency = await companyCurrency();
-    const position = budget && claim.costCategory ? ` (${budgetPosition(budget, claim.costCategory.name, (n) => formatMoney(n, currency))})` : '';
+    const office = budget ? null : await claimOffice(claim);
+    const position =
+      budget && claim.costCategory
+        ? ` (${budgetPosition(budget, claim.costCategory.name, (n) => formatMoney(n, currency))})`
+        : office
+          ? ` (${officePosition(office, (n) => formatMoney(n, currency))})`
+          : '';
 
     // A claim without receipt numbers is not claimable, and finding that out at
     // approval time wastes the approver's round trip.
@@ -4065,7 +4142,14 @@ expenseRoutes.get(
         fields: [
           { label: 'Claimed by', value: claim.claimedBy.name },
           { label: 'Purpose', value: claim.purpose },
-          { label: 'Project', value: claim.job ? `${claim.job.number} — ${claim.job.name}` : 'Overheads' },
+          {
+            label: claim.officeBudgetLine ? 'Office budget' : 'Project',
+            value: claim.job
+              ? `${claim.job.number} — ${claim.job.name}`
+              : claim.officeBudgetLine
+                ? `${claim.officeBudgetLine.budget.name} — ${claim.officeBudgetLine.code} ${claim.officeBudgetLine.name}`
+                : 'Overheads',
+          },
           { label: 'Budget line', value: claim.costCategory?.name ?? '—' },
           ...(claim.advance ? [{ label: 'Liquidates', value: claim.advance.number }] : []),
           ...(claim.budgetRequest ? [{ label: 'Liquidates', value: `Budget request ${claim.budgetRequest.number}` }] : []),
@@ -4092,6 +4176,8 @@ expenseRoutes.get(
     // where the budget line stands and what this claim takes from it.
     const budget = await claimBudget(claim);
     if (budget) sections.push(...budgetSections(budget, claim.costCategory?.name ?? '—', 'This claim', currency));
+    const office = budget ? null : await claimOffice(claim);
+    if (office) sections.push(...budgetSections(office, office.line.name, 'This claim', currency));
     if (claim.notes) sections.push({ kind: 'text', title: 'Notes', body: claim.notes });
 
     const claimant = await contactOf(claim.claimedById);

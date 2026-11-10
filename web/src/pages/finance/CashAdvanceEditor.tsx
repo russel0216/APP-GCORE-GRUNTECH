@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { OfficeLineAdvice, OfficeLineSelect, useOfficeLines } from '../../components/OfficeLine';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -38,6 +39,7 @@ interface Header {
   purpose: string;
   jobId: string;
   costCategoryId: string;
+  officeBudgetLineId: string;
   notes: string;
 }
 
@@ -60,7 +62,8 @@ export function CashAdvanceEditor() {
   const [attempted, setAttempted] = useState(false);
   // Supporting papers for finance's check, filed with the save (2026-10-21).
   const [files, setFiles] = useState<File[]>([]);
-  const [header, setHeader] = useState<Header>({ requestDate: todayLocal(), neededBy: '', purpose: '', jobId: '', costCategoryId: '', notes: '' });
+  const [header, setHeader] = useState<Header>({ requestDate: todayLocal(), neededBy: '', purpose: '', jobId: '', costCategoryId: '', officeBudgetLineId: '', notes: '' });
+  const officeBudgets = useOfficeLines();
   const [lines, setLines] = useState<RequestLine[]>(() => [blankRequestLine()]);
   const [saved, setSaved] = useState<string | null>(null);
 
@@ -83,6 +86,7 @@ export function CashAdvanceEditor() {
             purpose: row.purpose,
             jobId: row.job?.id ?? '',
             costCategoryId: row.costCategory?.id ?? '',
+            officeBudgetLineId: row.officeBudgetLine?.id ?? '',
             notes: row.notes ?? '',
           };
           // An advance asked for before the breakdown: its amount as one line.
@@ -141,6 +145,7 @@ export function CashAdvanceEditor() {
       purpose: header.purpose.trim(),
       jobId: header.jobId || null,
       costCategoryId: header.jobId ? header.costCategoryId || null : null,
+      officeBudgetLineId: header.jobId ? null : header.officeBudgetLineId || null,
       notes: header.notes.trim() || null,
       items: linesPayload(lines),
     };
@@ -254,9 +259,12 @@ export function CashAdvanceEditor() {
               <Field label="Needed by" hint="When you need the cash in hand">
                 <input type="date" value={header.neededBy} onChange={(e) => setHeader((h) => ({ ...h, neededBy: e.target.value }))} />
               </Field>
-              <Field label="Charge to project" hint="Leave empty if it belongs to overheads">
-                <select value={header.jobId} onChange={(e) => setHeader((h) => ({ ...h, jobId: e.target.value, costCategoryId: e.target.value ? h.costCategoryId : '' }))}>
-                  <option value="">— none (overheads) —</option>
+              <Field label="Charge to project" hint="Leave empty for the office — then choose its office budget line">
+                <select
+                  value={header.jobId}
+                  onChange={(e) => setHeader((h) => ({ ...h, jobId: e.target.value, costCategoryId: e.target.value ? h.costCategoryId : '', officeBudgetLineId: e.target.value ? '' : h.officeBudgetLineId }))}
+                >
+                  <option value="">— none (office) —</option>
                   {job && !jobs.some((j) => j.id === job.id) && (
                     <option value={job.id}>
                       {job.number} — {job.name}
@@ -279,6 +287,20 @@ export function CashAdvanceEditor() {
                       </option>
                     ))}
                   </select>
+                </Field>
+              )}
+              {!header.jobId && (officeBudgets.length > 0 || header.officeBudgetLineId) && (
+                <Field
+                  label="Office budget line"
+                  hint={<OfficeLineAdvice budgets={officeBudgets} value={header.officeBudgetLineId} amount={total} onPick={(id) => setHeader((h) => ({ ...h, officeBudgetLineId: id }))} />}
+                >
+                  <OfficeLineSelect
+                    budgets={officeBudgets}
+                    value={header.officeBudgetLineId}
+                    current={existing?.officeBudgetLine}
+                    none="— none (overheads, no budget) —"
+                    onChange={(id) => setHeader((h) => ({ ...h, officeBudgetLineId: id }))}
+                  />
                 </Field>
               )}
             </div>

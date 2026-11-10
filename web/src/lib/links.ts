@@ -132,6 +132,7 @@ const SCREEN: Record<string, string> = {
   payment: '/g-fin/payments',
   disbursement: '/g-fin/payments-out',
   operations_budget: '/g-fin/operations-budget',
+  office_budget: '/g-fin/operations-budget',
   attendance: '/g-hr/attendance',
   report_template: '/g-ops/report-templates',
   number_sequence: '/admin/numbering',

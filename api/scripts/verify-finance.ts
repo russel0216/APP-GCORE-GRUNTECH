@@ -203,6 +203,10 @@ async function cleanup() {
   await prisma.cashAdvance.deleteMany({ where: { id: { in: advances.map((a) => a.id) } } });
   await prisma.auditLog.deleteMany({ where: { entityType: 'budget_request', entityId: { in: requests.map((r) => r.id) } } });
   await prisma.budgetRequest.deleteMany({ where: { id: { in: requests.map((r) => r.id) } } });
+  // Office budgets, after every document that charged their lines (Restrict).
+  const officeBudgets = await prisma.officeBudget.findMany({ where: { name: { startsWith: TAG } }, select: { id: true } });
+  await prisma.auditLog.deleteMany({ where: { entityType: 'office_budget', entityId: { in: officeBudgets.map((b) => b.id) } } });
+  await prisma.officeBudget.deleteMany({ where: { id: { in: officeBudgets.map((b) => b.id) } } });
 
   await prisma.progressBilling.deleteMany({ where: { job: { name: { startsWith: TAG } } } });
   await prisma.progressReport.deleteMany({ where: { job: { name: { startsWith: TAG } } } });
@@ -4519,56 +4523,130 @@ async function main() {
       `${outList.status} ${outRows.length} ${outOne.status} ${outCollection.status}`,
     );
 
-    // ══ The operations budget (2026-10-20) ═════════════════════════════════
-    // The office's budget by year and cost category; spent is read off the
-    // claims and bills that name NO project — a project's claim and a bill
-    // for goods on an order are never counted. 2004 is the fixture year.
+    // ══ Office budgets (2026-11-10; the operations budget before) ═════════
+    // A named year of coded lines that reimbursements, budget requests, cash
+    // advances and bills with no purchase order charge. The monitor is read
+    // off the documents; over its line a document is told where there is
+    // room, never refused. 2004 is the fixture year.
     {
-      const OPS_YEAR = 2004;
-      const opsDay = new Date(Date.UTC(OPS_YEAR, 5, 15));
-      const opsClaim = await prisma.expenseClaim.create({
-        data: { number: await nextNumber('expense'), claimedById: engineer.id, costCategoryId: materials.id, claimDate: opsDay, purpose: `${TAG} office supplies`, total: D(1_200), status: 'APPROVED' },
+      const OB_YEAR = 2004;
+      await throwaway('zzfin_opsview', ['gfin.operations_budget.view_all']);
+      await throwaway('zzfin_opsedit', ['gfin.operations_budget.view_all', 'gfin.operations_budget.edit_all']);
+      const obViewer = as(await makeUser('ZZ Ops Viewer', 'opsview@verifyf.local', ['zzfin_opsview']));
+      const obEditor = as(await makeUser('ZZ Ops Editor', 'opsedit@verifyf.local', ['zzfin_opsedit']));
+      const obBody = {
+        year: OB_YEAR,
+        name: `${TAG} OFFICE BUDGET`,
+        lines: [
+          { code: '901', name: 'SUPPLIES', amount: 10_000, openingActual: 1_000 },
+          { code: '902', name: 'TRAVEL', amount: 50_000 },
+        ],
+      };
+      const viewerMake = await obViewer('POST', '/office-budgets', obBody);
+      const made = await obEditor('POST', '/office-budgets', obBody);
+      const twice = await obEditor('POST', '/office-budgets', obBody);
+      const obId = made.body.id as string;
+      const obLines = await prisma.officeBudgetLine.findMany({ where: { budgetId: obId }, orderBy: { code: 'asc' } });
+      const [lineA, lineB] = obLines;
+      check(
+        'an office budget is created by its editor with its coded lines (a viewer is refused; the same name in a year is a 400)',
+        viewerMake.status === 403 && made.status === 201 && twice.status === 400 && obLines.length === 2 && money(Number(lineA.openingActual), 1_000),
+        `${viewerMake.status} ${made.status} ${twice.status} ${obLines.length}`,
+      );
+
+      // The documents: a reimbursement over HTTP (then approved), one pending,
+      // a bill with no order approved, a budget request released, an advance pending.
+      const receipt = [{ spentOn: `${OB_YEAR}-06-15`, description: 'paper', receiptNo: 'OR-1', amount: 1_200 }];
+      const both = await eng('POST', '/expense-claims', { purpose: `${TAG} office both`, jobId: job.id, costCategoryId: materials.id, officeBudgetLineId: lineA.id, lines: receipt });
+      const filed = await eng('POST', '/expense-claims', { purpose: `${TAG} office supplies`, officeBudgetLineId: lineA.id, lines: receipt });
+      await prisma.expenseClaim.update({ where: { id: filed.body.id as string }, data: { status: 'APPROVED' } });
+      const obPending = await prisma.expenseClaim.create({
+        data: { number: await nextNumber('expense'), claimedById: engineer.id, officeBudgetLineId: lineA.id, claimDate: dayKey(new Date()), purpose: `${TAG} office pending`, total: D(300), status: 'PENDING_APPROVAL' },
       });
-      const opsPending = await prisma.expenseClaim.create({
-        data: { number: await nextNumber('expense'), claimedById: engineer.id, costCategoryId: materials.id, claimDate: opsDay, purpose: `${TAG} office pending`, total: D(300), status: 'PENDING_APPROVAL' },
-      });
-      const projectClaim = await prisma.expenseClaim.create({
-        data: { number: await nextNumber('expense'), claimedById: engineer.id, jobId: job.id, costCategoryId: materials.id, claimDate: opsDay, purpose: `${TAG} project trip`, total: D(5_000), status: 'APPROVED' },
-      });
-      const opsBill = await prisma.supplierBill.create({
+      const obBill = await prisma.supplierBill.create({
         data: {
-          number: await nextNumber('supplier_bill'), supplierId: supplier.id, costCategoryId: null, status: 'APPROVED', billDate: opsDay, dueDate: opsDay,
+          number: await nextNumber('supplier_bill'), supplierId: supplier.id, officeBudgetLineId: lineA.id, status: 'APPROVED', billDate: dayKey(new Date()), dueDate: dayKey(new Date()),
           subtotal: D(2_000), vatAmount: D(240), total: D(2_240), ewtRate: D(0), ewtAmount: D(0), netPayable: D(2_240), createdById: finance.id,
         },
       });
-      await throwaway('zzfin_opsview', ['gfin.operations_budget.view_all']);
-      await throwaway('zzfin_opsedit', ['gfin.operations_budget.view_all', 'gfin.operations_budget.edit_all']);
-      const opsViewer = as(await makeUser('ZZ Ops Viewer', 'opsview@verifyf.local', ['zzfin_opsview']));
-      const opsEditor = as(await makeUser('ZZ Ops Editor', 'opsedit@verifyf.local', ['zzfin_opsedit']));
-      const viewerSet = await opsViewer('PUT', `/operations-budget/${OPS_YEAR}`, { lines: [{ costCategoryId: materials.id, amount: 10_000 }] });
-      const badYear = await opsEditor('PUT', '/operations-budget/1999', { lines: [] });
-      const set = await opsEditor('PUT', `/operations-budget/${OPS_YEAR}`, { lines: [{ costCategoryId: materials.id, amount: 10_000, notes: `${TAG} supplies` }] });
-      const read = await opsViewer('GET', `/operations-budget?year=${OPS_YEAR}`);
-      const line = (read.body.lines as { costCategory: { id: string }; budget: number; spent: number; pending: number; left: number }[] | undefined)?.find((l) => l.costCategory.id === materials.id);
+      const obRequest = await prisma.budgetRequest.create({
+        data: {
+          number: await nextNumber('budget_request'), officeBudgetLineId: lineB.id, costCategoryId: materials.id, amount: D(4_000), amountReleased: D(4_000),
+          reason: `${TAG} office trip cash`, requestedById: engineer.id, status: 'RELEASED',
+        },
+      });
+      await prisma.cashAdvance.create({
+        data: { number: await nextNumber('cash_advance'), requestedById: engineer.id, officeBudgetLineId: lineB.id, requestDate: dayKey(new Date()), purpose: `${TAG} office advance`, amount: D(700), status: 'PENDING_APPROVAL', repayable: true },
+      });
+      const projectClaim = await prisma.expenseClaim.create({
+        data: { number: await nextNumber('expense'), claimedById: engineer.id, jobId: job.id, costCategoryId: materials.id, claimDate: dayKey(new Date()), purpose: `${TAG} project trip`, total: D(5_000), status: 'APPROVED' },
+      });
+
+      type ObLine = { id: string; budget: number; requested: number; released: number; actual: number; remaining: number; documents: number };
+      const read = await obViewer('GET', `/office-budgets/${obId}`);
+      const a = (read.body.lines as ObLine[] | undefined)?.find((l) => l.id === lineA.id);
+      const b = (read.body.lines as ObLine[] | undefined)?.find((l) => l.id === lineB.id);
       const docs = (read.body.documents as { id: string }[] | undefined) ?? [];
       check(
-        'the operations budget is set by its editor (a viewer is refused, 1999 is a 400); spent counts the office claim and the uncategorised bill, pending the one waiting, never the project’s claim',
-        viewerSet.status === 403 && badYear.status === 400 && set.status === 200 &&
-          read.status === 200 && read.body.canEdit === false &&
-          money(line?.budget, 10_000) && money(line?.spent, 1_200) && money(line?.pending, 300) && money(line?.left, 8_500) &&
-          money(read.body.uncategorised?.spent, 2_000) && money(read.body.totals?.spent, 3_200) && money(read.body.totals?.left, 6_500) &&
-          docs.some((d) => d.id === opsClaim.id) && docs.some((d) => d.id === opsBill.id) && docs.some((d) => d.id === opsPending.id) && !docs.some((d) => d.id === projectClaim.id),
-        `${viewerSet.status} ${badYear.status} ${set.status} ${read.status} ${JSON.stringify(line)} ${JSON.stringify(read.body.uncategorised)} ${JSON.stringify(read.body.totals)}`,
+        'the monitor reads the documents: actual is the opening actual, the approved reimbursement and the bill before VAT; requested is what waits; cash out the released request; remaining = budget − cash out − actual; a claim naming a project AND a line is refused',
+        both.status === 400 && filed.status === 201 && read.status === 200 && read.body.canEdit === false &&
+          money(a?.actual ?? -1, 4_200) && money(a?.requested ?? -1, 300) && money(a?.released ?? -1, 0) && money(a?.remaining ?? -1, 5_800) &&
+          money(b?.actual ?? -1, 0) && money(b?.requested ?? -1, 700) && money(b?.released ?? -1, 4_000) && money(b?.remaining ?? -1, 46_000) &&
+          money(read.body.total?.remaining, 51_800) &&
+          docs.some((d) => d.id === obBill.id) && docs.some((d) => d.id === obRequest.id) && docs.some((d) => d.id === obPending.id) && !docs.some((d) => d.id === projectClaim.id),
+        `${both.status} ${filed.status} ${read.status} ${JSON.stringify(a)} ${JSON.stringify(b)} ${JSON.stringify(read.body.total)}`,
       );
-      const opsPaper = await fetch(`${BASE}/operations-budget/pdf?year=${OPS_YEAR}`, { headers: { Authorization: `Bearer ${token}` } });
-      const opsText = (opsPaper.ok ? pdfText(Buffer.from(await opsPaper.arrayBuffer())) : '').replace(/\s+/g, ' ');
+
+      // The card on a document, and the suggestion when it goes over its line.
+      const pendingCard = (await fin('GET', `/expense-claims/${obPending.id}`)).body.budget as Record<string, any> | null;
+      const big = await eng('POST', '/expense-claims', { purpose: `${TAG} office big`, officeBudgetLineId: lineA.id, lines: [{ ...receipt[0], amount: 9_000 }] });
+      const bigCard = (await fin('GET', `/expense-claims/${big.body.id}`)).body.budget as Record<string, any> | null;
+      const picker = await eng('GET', '/office-budgets/lines');
+      const picked = (picker.body.budgets as { id: string; lines: { id: string; remaining: number }[] }[] | undefined)?.find((x) => x.id === obId)?.lines.find((l) => l.id === lineA.id);
       check(
-        'the operations budget prints: the year, the category with its budget, spent and left, and the uncategorised row',
-        opsPaper.status === 200 && opsText.includes(`OPERATIONS BUDGET ${OPS_YEAR}`) && opsText.includes('10,000.00') && opsText.includes('8,500.00') && opsText.includes('Not categorised'),
-        `${opsPaper.status} ${opsText.slice(0, 300)}`,
+        'a reimbursement shows its office line — left before, itself, left after — and over its line names the line with room; the forms’ picker carries what is left',
+        pendingCard?.source === 'office' && money(pendingCard.availableBefore, 5_800) && money(pendingCard.thisRequest, 300) && money(pendingCard.availableAfter, 5_500) && pendingCard.over === false &&
+          big.status === 201 && bigCard?.over === true && money(bigCard.overBy, 3_200) && (bigCard.suggest as { id: string }[]).some((x) => x.id === lineB.id) &&
+          picker.status === 200 && money(picked?.remaining ?? -1, 5_800),
+        `${JSON.stringify(pendingCard && { b: pendingCard.availableBefore, t: pendingCard.thisRequest, a: pendingCard.availableAfter })} ${big.status} ${JSON.stringify(bigCard && { o: bigCard.overBy, s: bigCard.suggest })} ${picked?.remaining}`,
       );
-      await prisma.operationsBudget.deleteMany({ where: { year: OPS_YEAR } });
-      await prisma.auditLog.deleteMany({ where: { entityType: 'operations_budget', entityId: String(OPS_YEAR) } });
+
+      // A budget request for the office: its line is its source, it needs no cost
+      // category, it may move to another office line while a draft, never to a project.
+      const obAsk = await eng('POST', '/budget-requests', { officeBudgetLineId: lineB.id, reason: `${TAG} office request`, amount: 2_500 });
+      const obAsked = await eng('GET', `/budget-requests/${obAsk.body.id}`);
+      const obMoved = await eng('PUT', `/budget-requests/${obAsk.body.id}`, { officeBudgetLineId: lineA.id, reason: `${TAG} office request`, amount: 2_500 });
+      const obToJob = await eng('PUT', `/budget-requests/${obAsk.body.id}`, { jobId: job.id, costCategoryId: materials.id, reason: `${TAG} office request`, amount: 2_500 });
+      const obTwo = await eng('POST', '/budget-requests', { officeBudgetLineId: lineB.id, jobId: job.id, costCategoryId: materials.id, reason: `${TAG} office two`, amount: 100 });
+      const askCard = obAsked.body.budget as Record<string, any> | undefined;
+      check(
+        'a budget request charges an office line: checked against that line (46,000 left → 43,500), moved to another line as a draft, never onto a project, and never for a line and a project at once',
+        obAsk.status === 201 && obAsked.body.for?.kind === 'office' && askCard?.source === 'office' && money(askCard.availableBefore, 46_000) && money(askCard.availableAfter, 43_500) &&
+          obMoved.status === 200 && obMoved.body.officeBudgetLine?.id === lineA.id && obToJob.status === 400 && obTwo.status === 400,
+        `${obAsk.status} ${JSON.stringify(obAsk.body).slice(0, 200)} ${obAsked.body.for?.kind} ${askCard?.availableBefore} ${askCard?.availableAfter} ${obMoved.status} ${obToJob.status} ${obTwo.status}`,
+      );
+
+      // Edited whole: a line in use left out is closed, not removed; a new one is added. A budget in use is not deleted.
+      const edited = await obEditor('PUT', `/office-budgets/${obId}`, {
+        name: `${TAG} OFFICE BUDGET`,
+        lines: [
+          { id: lineA.id, code: '901', name: 'SUPPLIES', amount: 12_000, openingActual: 1_000 },
+          { code: '903', name: 'TRAINING', amount: 5_000 },
+        ],
+      });
+      const after = await prisma.officeBudgetLine.findMany({ where: { budgetId: obId } });
+      const closedB = after.find((l) => l.id === lineB.id);
+      const refusedDelete = await obEditor('DELETE', `/office-budgets/${obId}`);
+      const closedLine = await eng('POST', '/expense-claims', { purpose: `${TAG} office closed line`, officeBudgetLineId: lineB.id, lines: receipt });
+      const obPaper = await fetch(`${BASE}/office-budgets/${obId}/pdf`, { headers: { Authorization: `Bearer ${token}` } });
+      const obText = (obPaper.ok ? pdfText(Buffer.from(await obPaper.arrayBuffer())) : '').replace(/\s+/g, ' ');
+      check(
+        'an office budget is saved whole: an amount changes, a line is added, a line documents charge is closed (never removed) and takes no new document; a budget in use is not deleted; its paper prints the lines and what is left',
+        edited.status === 200 && after.length === 3 && closedB?.isActive === false && money(Number(after.find((l) => l.id === lineA.id)?.amount), 12_000) &&
+          refusedDelete.status === 400 && closedLine.status === 400 &&
+          obPaper.status === 200 && obText.includes('SUPPLIES') && obText.includes('12,000.00') && obText.includes('7,800.00'),
+        `${edited.status} ${after.length} ${closedB?.isActive} ${refusedDelete.status} ${closedLine.status} ${obPaper.status} ${obText.slice(0, 200)}`,
+      );
     }
 
     const caRep = await fin('GET', `/fin-reports/cash-advances?from=${todayIso}&to=${todayIso}&requestedById=${engineer.id}`);
@@ -4615,6 +4693,27 @@ async function main() {
         createdById: finance.id,
       },
     });
+    // The release door (2026-11-10): Back Support writes an order's SI / BS and
+    // DR numbers — and nothing else — whoever wrote the order; a colleague who
+    // may not edit it does not.
+    {
+      const support = as(irSupport);
+      const supportReads = await support('GET', `/sales-orders/${irOrder.id}`);
+      const supportWrites = await support('POST', `/sales-orders/${irOrder.id}/release`, { siNumber: `${TAG}-SI-9`, drNumber: `${TAG}-DR-9` });
+      const supportEdits = await support('PATCH', `/sales-orders/${irOrder.id}`, { paymentMethod: 'cash' });
+      const strangerWrites = await as(irStranger)('POST', `/sales-orders/${irOrder.id}/release`, { siNumber: 'X' });
+      const written = await prisma.salesOrder.findUniqueOrThrow({ where: { id: irOrder.id }, select: { siNumber: true, drNumber: true } });
+      const trail = await prisma.auditLog.findFirst({ where: { entityType: 'sales_order', entityId: irOrder.id, actorId: irSupport.id }, orderBy: { at: 'desc' } });
+      check(
+        'Back Support opens an issued order of the team it handles and enters its SI and DR numbers (audited) — it cannot edit the order, and a colleague with no right to the order enters nothing',
+        supportReads.status === 200 && supportReads.body.canRelease === true && supportReads.body.canEdit === false &&
+          supportWrites.status === 200 && written.siNumber === `${TAG}-SI-9` && written.drNumber === `${TAG}-DR-9` && !!trail?.summary.includes(`${TAG}-SI-9`) &&
+          supportEdits.status === 403 && strangerWrites.status === 403,
+        `${supportReads.status} ${supportReads.body.canRelease} ${supportReads.body.canEdit} ${supportWrites.status} ${written.siNumber} ${supportEdits.status} ${strangerWrites.status}`,
+      );
+      await prisma.salesOrder.update({ where: { id: irOrder.id }, data: { siNumber: null, drNumber: null } });
+    }
+
     const irBilling = async (n: number, gross: number, status: 'APPROVED' | 'DRAFT' = 'APPROVED') => {
       const report = await prisma.progressReport.create({
         data: {

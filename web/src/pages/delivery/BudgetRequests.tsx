@@ -15,6 +15,7 @@ import { RecordPaymentModal, paymentLink } from '../finance/Receivables';
 import { CLAIM_TONES } from '../finance/Expenses';
 import { RequestItemsCard, type RequestItem } from '../../components/RequestLines';
 import { Attachments } from '../../components/Attachments';
+import type { CurrentOfficeLine } from '../../components/OfficeLine';
 import { BudgetCard, SOURCE_WORDS, type RequestBudget, type RequestSource } from '../../components/BudgetCard';
 export { SOURCE_WORDS, type RequestSource };
 
@@ -88,6 +89,8 @@ export interface BudgetRequest {
   /** The record it was raised on, kept once a project took it over. */
   raisedOn: RequestSource | null;
   costCategory: { id: string; name: string };
+  /** An office budget line instead of a record (2026-11-10); the cost category then means nothing. */
+  officeBudgetLine?: CurrentOfficeLine | null;
   toRelease: number;
   spent: number;
   excessDue: number;
@@ -209,12 +212,12 @@ export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
         r.availableAfter == null ? (
           <span className="faint">—</span>
         ) : (
-          <span className={`mono${r.availableAfter < 0 ? ' del-danger' : ''}`} title={`${r.costCategory.name} after this request`}>
+          <span className={`mono${r.availableAfter < 0 ? ' del-danger' : ''}`} title={`${r.officeBudgetLine ? `${r.officeBudgetLine.code} ${r.officeBudgetLine.name}` : r.costCategory.name} after this request`}>
             {formatMoney(r.availableAfter)}
           </span>
         ),
     },
-    { key: 'category', label: 'Budget line', render: (r) => r.costCategory.name, optional: true },
+    { key: 'category', label: 'Budget line', render: (r) => (r.officeBudgetLine ? `${r.officeBudgetLine.code} ${r.officeBudgetLine.name}` : r.costCategory.name), optional: true },
     { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', render: (r) => formatDate(r.createdAt), optional: true },
     {
       key: 'amountReleased',
@@ -587,7 +590,7 @@ export function ProjectBudgetRequestsCard({
                             </div>
                           )}
                         </td>
-                        <td>{r.costCategory.name}</td>
+                        <td>{r.officeBudgetLine ? `${r.officeBudgetLine.code} ${r.officeBudgetLine.name}` : r.costCategory.name}</td>
                         <td>
                           {r.requestedBy.name}
                           <div className="faint">{formatDate(r.createdAt)}</div>
@@ -750,7 +753,8 @@ export function BudgetRequestDetail() {
             Requested by {row.requestedBy.name} on {formatDate(row.createdAt)}
             {row.neededBy && <> · needed by {formatDate(row.neededBy)}</>}
             {' · for '}
-            {row.for ? <Link to={row.for.link}>{row.for.label}</Link> : '—'} · {row.costCategory.name}
+            {row.for ? <Link to={row.for.link}>{row.for.label}</Link> : '—'}
+            {!row.officeBudgetLine && <> · {row.costCategory.name}</>}
             {row.job?.projectManager && <> · Technical Manager {row.job.projectManager.name}</>}
             {row.job && row.raisedOn && <> · raised on <Link to={row.raisedOn.link}>{row.raisedOn.label}</Link></>}
           </>
@@ -828,7 +832,7 @@ export function BudgetRequestDetail() {
       )}
       <DecisionNote documentType="budget_request" documentId={row.id} reloadToken={reload} />
       {row.status !== 'DRAFT' && <DocumentApproval documentType="budget_request" documentId={row.id} reloadToken={reload} />}
-      {row.budget && <RequestBudgetCard budget={row.budget} lineName={row.costCategory.name} />}
+      {row.budget && <RequestBudgetCard budget={row.budget} lineName={row.budget.source === 'office' ? (row.budget.line?.name ?? '') : row.costCategory.name} />}
 
       <ErrorBox error={error} />
 

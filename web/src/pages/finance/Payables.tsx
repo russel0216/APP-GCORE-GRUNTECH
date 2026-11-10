@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
+import { OfficeLineAdvice, OfficeLineSelect, useOfficeLines, type CurrentOfficeLine } from '../../components/OfficeLine';
+import { BudgetCard, type RequestBudget } from '../../components/BudgetCard';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -81,6 +83,10 @@ interface Bill {
   receiving: { id: string; number: string; receivedDate: string } | null;
   job: { id: string; number: string; name: string } | null;
   costCategory: { id: string; name: string } | null;
+  /** An office budget line — a bill with no purchase order and no project (2026-11-10). */
+  officeBudgetLine?: CurrentOfficeLine | null;
+  /** Where that line stands (GET /:id). */
+  budget?: RequestBudget | null;
   lines: { id: string; description: string; quantity: number; unitPrice: number; amount: number }[];
   allocations?: {
     id: string;
@@ -504,9 +510,11 @@ function NewBillModal({
         ? { id: from.order.supplier.id, name: from.order.supplier.name }
         : null,
   );
+  const officeBudgets = useOfficeLines();
   const [form, setForm] = useState({
     jobId: existing?.job?.id ?? from?.order.job?.id ?? '',
     costCategoryId: existing?.costCategory?.id ?? '',
+    officeBudgetLineId: existing?.officeBudgetLine?.id ?? '',
     supplierInvoiceNo: existing?.supplierInvoiceNo ?? from?.invoiceRefNo ?? '',
     billDate: existing?.billDate.slice(0, 10) ?? today,
     // The receiving's date, else typed: the terms run from it.
@@ -582,6 +590,7 @@ function NewBillModal({
         receivingId: existing ? existing.receiving?.id ?? null : from?.id ?? null,
         jobId: form.jobId || null,
         costCategoryId: form.costCategoryId || null,
+        officeBudgetLineId: onOrder || form.jobId ? null : form.officeBudgetLineId || null,
         supplierInvoiceNo: form.supplierInvoiceNo || null,
         billDate: form.billDate,
         deliveryDate: form.deliveryDate || null,
@@ -751,6 +760,21 @@ function NewBillModal({
           </select>
         </Field>
       </div>
+
+      {!onOrder && !form.jobId && (officeBudgets.length > 0 || form.officeBudgetLineId) && (
+        <Field
+          label="Office budget line"
+          hint={<OfficeLineAdvice budgets={officeBudgets} value={form.officeBudgetLineId} amount={subtotal} onPick={(lineId) => setForm({ ...form, officeBudgetLineId: lineId })} />}
+        >
+          <OfficeLineSelect
+            budgets={officeBudgets}
+            value={form.officeBudgetLineId}
+            current={existing?.officeBudgetLine}
+            none="— none (not charged to an office budget) —"
+            onChange={(lineId) => setForm({ ...form, officeBudgetLineId: lineId })}
+          />
+        </Field>
+      )}
 
       <h4 className="fin-section-title">Lines</h4>
       <div className="table-wrap">
@@ -1005,6 +1029,7 @@ export function BillDetail() {
 
       <DecisionNote documentType="supplier_bill" documentId={row.id} reloadToken={reload} />
       <DocumentApproval documentType="supplier_bill" documentId={row.id} reloadToken={reload} />
+      {row.budget && <BudgetCard budget={row.budget} lineName={row.budget.line?.name ?? ''} noun="This bill" />}
 
       <ErrorBox error={error} />
 
@@ -1113,7 +1138,15 @@ export function BillDetail() {
                 )}
               </dd>
               <dt>Budget line</dt>
-              <dd>{row.costCategory?.name ?? <span className="faint">none</span>}</dd>
+              <dd>
+                {row.officeBudgetLine ? (
+                  <Link to={`/g-fin/operations-budget?budget=${row.officeBudgetLine.budget.id}&line=${row.officeBudgetLine.id}`}>
+                    Office · {row.officeBudgetLine.code} {row.officeBudgetLine.name}
+                  </Link>
+                ) : (
+                  (row.costCategory?.name ?? <span className="faint">none</span>)
+                )}
+              </dd>
               <dt>Paid</dt>
               <dd className="mono">{formatMoney(row.amountPaid)}</dd>
               <dt>Outstanding</dt>

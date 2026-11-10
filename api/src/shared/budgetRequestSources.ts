@@ -10,6 +10,7 @@ import { valueRevision } from './pipeline';
 import { salesOrderSpend } from './orderStock';
 import { visibleOwners } from './team';
 import type { ResolvedUser } from '../permissions/resolve';
+import { OFFICE_LINE_SELECT, officeLineFor } from './officeBudget';
 
 /**
  * WHAT A BUDGET REQUEST IS FOR (2026-10-26, the owner's call: "valid not only
@@ -41,15 +42,17 @@ import type { ResolvedUser } from '../permissions/resolve';
 type Tx = Prisma.TransactionClient;
 type Db = Tx | typeof prisma;
 
-export type SourceKind = 'project' | 'sales_order' | 'quotation' | 'costing';
+/** `office` (2026-11-10): an office budget line — no project, no record; read by shared/officeBudget.ts. */
+export type SourceKind = 'project' | 'sales_order' | 'quotation' | 'costing' | 'office';
 
-export const SOURCE_KINDS: SourceKind[] = ['project', 'sales_order', 'quotation', 'costing'];
+export const SOURCE_KINDS: SourceKind[] = ['project', 'sales_order', 'quotation', 'costing', 'office'];
 
 export const SOURCE_WORDS: Record<SourceKind, string> = {
   project: 'Project',
   sales_order: 'Sales order',
   quotation: 'Quotation',
   costing: 'Costing',
+  office: 'Office budget',
 };
 
 /** What a request's reads include to say what it is for. */
@@ -58,6 +61,7 @@ export const SOURCE_INCLUDE = {
   salesOrder: { select: { id: true, number: true, ownerId: true, quotation: { select: { subject: true } } } },
   quotation: { select: { id: true, number: true, subject: true, ownerId: true } },
   costing: { select: { id: true, number: true, title: true, ownerId: true } },
+  officeBudgetLine: OFFICE_LINE_SELECT,
 } satisfies Prisma.BudgetRequestInclude;
 
 type SourceRow = {
@@ -65,6 +69,7 @@ type SourceRow = {
   salesOrder?: { id: string; number: string; quotation: { subject: string } } | null;
   quotation?: { id: string; number: string; subject: string } | null;
   costing?: { id: string; number: string; title: string } | null;
+  officeBudgetLine?: { id: string; code: string; name: string; budget: { id: string; name: string; year: number } } | null;
 };
 
 export interface RequestSource {
@@ -93,6 +98,10 @@ export function sourceOf(r: SourceRow): RequestSource | null {
   if (r.costing) {
     return { kind: 'costing', id: r.costing.id, number: r.costing.number, name: r.costing.title, label: `Costing ${r.costing.number} — ${r.costing.title}`, link: `/g-ops/costing/${r.costing.id}` };
   }
+  if (r.officeBudgetLine) {
+    const l = r.officeBudgetLine;
+    return { kind: 'office', id: l.id, number: l.code, name: `${l.code} ${l.name}`, label: `Office budget ${l.budget.name} — ${l.code} ${l.name}`, link: `/g-fin/operations-budget?budget=${l.budget.id}` };
+  }
   return null;
 }
 
@@ -108,10 +117,12 @@ export function sourceFilter(f: Record<string, string>): Prisma.BudgetRequestWhe
   if (f.salesOrderId) and.push({ salesOrderId: f.salesOrderId });
   if (f.quotationId) and.push({ quotationId: f.quotationId });
   if (f.costingId) and.push({ costingId: f.costingId });
+  if (f.officeBudgetLineId) and.push({ officeBudgetLineId: f.officeBudgetLineId });
   if (f.for) {
     const kind = f.for as SourceKind;
     if (!SOURCE_KINDS.includes(kind)) throw badRequest(`For must be one of ${SOURCE_KINDS.join(', ')}`);
     if (kind === 'project') and.push({ jobId: { not: null } });
+    else if (kind === 'office') and.push({ officeBudgetLineId: { not: null } });
     else and.push({ jobId: null, [kind === 'sales_order' ? 'salesOrderId' : kind === 'quotation' ? 'quotationId' : 'costingId']: { not: null } });
   }
   return and;
@@ -128,6 +139,8 @@ export function sourceSearch(term: string): Prisma.BudgetRequestWhereInput[] {
     { quotation: { subject: like } },
     { costing: { number: like } },
     { costing: { title: like } },
+    { officeBudgetLine: { name: like } },
+    { officeBudgetLine: { code: like } },
   ];
 }
 
@@ -136,6 +149,7 @@ export interface SourceInput {
   salesOrderId?: string | null;
   quotationId?: string | null;
   costingId?: string | null;
+  officeBudgetLineId?: string | null;
 }
 
 const OPEN_OR_WON = ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'] as const;
@@ -160,11 +174,16 @@ async function mayRaiseOn(me: ResolvedUser, module: 'sales_orders' | 'quotations
  * and one the caller may raise it on. Returns the columns to write and the
  * number to name it by.
  */
-export async function checkSource(me: ResolvedUser, body: SourceInput) {
-  const given = (['jobId', 'salesOrderId', 'quotationId', 'costingId'] as const).filter((k) => body[k]);
-  if (given.length === 0) throw badRequest('What is the cash for? Name a project, a sales order, a quotation or a costing');
+export async function checkSource(me: ResolvedUser, body: SourceInput, keepOfficeLine?: string | null) {
+  const given = (['jobId', 'salesOrderId', 'quotationId', 'costingId', 'officeBudgetLineId'] as const).filter((k) => body[k]);
+  if (given.length === 0) throw badRequest('What is the cash for? Name a project, a sales order, a quotation, a costing or an office budget line');
   if (given.length > 1) throw badRequest('A budget request is for one thing — a project, a sales order, a quotation or a costing, not several');
-  const columns = { jobId: null as string | null, salesOrderId: null as string | null, quotationId: null as string | null, costingId: null as string | null };
+  const columns = { jobId: null as string | null, salesOrderId: null as string | null, quotationId: null as string | null, costingId: null as string | null, officeBudgetLineId: null as string | null };
+  if (body.officeBudgetLineId) {
+    // Office cash: anyone who may raise a request names a line still open.
+    const line = await officeLineFor(body.officeBudgetLineId, keepOfficeLine);
+    return { columns: { ...columns, officeBudgetLineId: line.id }, number: `${line.budget.name} ${line.code}`, kind: 'office' as const };
+  }
   if (body.jobId) {
     const job = await prisma.job.findUnique({ where: { id: body.jobId }, select: { id: true, number: true, status: true } });
     if (!job) throw notFound('Project not found');

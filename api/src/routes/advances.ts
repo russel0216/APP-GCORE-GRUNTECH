@@ -35,6 +35,7 @@ import { renderDocument, companyCurrency, formatAmount, formatMoney, formatQuant
 import { cents, D, num, dayKey, daysBetween, financeSettings } from '../shared/finance';
 import { claimInclude, presentClaim, cashRequestSections, cashRequestSignatories, budgetSections } from './finance';
 import { advanceBudget, budgetPosition } from '../shared/projectBudget';
+import { OFFICE_LINE_SELECT, advanceOffice, assertOneCharge, officeLineFor, officePosition } from '../shared/officeBudget';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { registerAttachmentGuard } from '../shared/attachments';
@@ -63,6 +64,7 @@ const advanceInclude = {
   requestedBy: { select: { id: true, name: true, email: true, position: true, ...USER_TEAM_SELECT.select } },
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
+  officeBudgetLine: OFFICE_LINE_SELECT,
   liquidations: {
     select: { id: true, number: true, status: true, total: true, amountPaid: true, claimDate: true, approvedAt: true },
     orderBy: { createdAt: 'desc' },
@@ -437,7 +439,8 @@ advanceRoutes.get(
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
       // "Against the project budget" (2026-11-09): the advance's budget line
       // as Budget Monitoring reads it, this advance and what is left after.
-      budget: await advanceBudget(row),
+      // Charged to an office budget line instead (2026-11-10): that line's.
+      budget: (await advanceBudget(row)) ?? (await advanceOffice(row)),
     });
   }),
 );
@@ -445,6 +448,8 @@ advanceRoutes.get(
 const advanceSchema = z.object({
   jobId: z.string().optional().nullable(),
   costCategoryId: z.string().optional().nullable(),
+  /** An office budget line instead of a project (2026-11-10). */
+  officeBudgetLineId: z.string().optional().nullable(),
   requestDate: z.string().optional(),
   neededBy: z.string().optional().nullable(),
   purpose: z.string().trim().min(3, 'What is the cash for?'),
@@ -464,10 +469,11 @@ function asDate(value: string, label: string): Date {
  * Naming a project means naming a budget line: the liquidation that follows
  * charges exactly that line, and it is too late to ask by then.
  */
-function checkCharging(body: { jobId?: string | null; costCategoryId?: string | null }) {
+function checkCharging(body: { jobId?: string | null; costCategoryId?: string | null; officeBudgetLineId?: string | null }) {
   if (body.jobId && !body.costCategoryId) {
     throw badRequest('An advance charged to a project needs a budget line');
   }
+  assertOneCharge(body.jobId, body.officeBudgetLineId);
 }
 
 advanceRoutes.post(
@@ -478,6 +484,7 @@ advanceRoutes.post(
     const body = parseBody(advanceSchema, req.body);
     checkCharging(body);
     const money = requestMoney(body.items, body.amount);
+    if (body.officeBudgetLineId) await officeLineFor(body.officeBudgetLineId);
 
     // One advance at a time: a person still holding unaccounted cash does not
     // get more until the receipts are in. Finance can switch this off.
@@ -504,6 +511,7 @@ advanceRoutes.post(
           requestedById: me.id,
           jobId: body.jobId || null,
           costCategoryId: body.jobId ? body.costCategoryId || null : null,
+          officeBudgetLineId: body.officeBudgetLineId || null,
           requestDate: body.requestDate ? asDate(body.requestDate, 'Request date') : dayKey(new Date()),
           neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
           purpose: body.purpose,
@@ -545,6 +553,9 @@ advanceRoutes.put(
     if (existing.status !== 'DRAFT') throw badRequest('Only a draft can be changed — this one has been submitted');
     // Sent without lines, the breakdown on file stays and the typed amount
     // counts only where there is none.
+    // Left out, the office line stays (unless a project is named now); null clears it.
+    const officeBudgetLineId = body.officeBudgetLineId === undefined ? (body.jobId ? null : existing.officeBudgetLineId) : body.officeBudgetLineId || null;
+    if (officeBudgetLineId) await officeLineFor(officeBudgetLineId, existing.officeBudgetLineId);
     const kept = body.items === undefined ? await prisma.cashAdvanceItem.count({ where: { advanceId: existing.id } }) : 0;
     const money = kept ? null : requestMoney(body.items, body.amount ?? num(existing.amount));
 
@@ -554,6 +565,7 @@ advanceRoutes.put(
         data: {
           jobId: body.jobId || null,
           costCategoryId: body.jobId ? body.costCategoryId || null : null,
+          officeBudgetLineId,
           requestDate: body.requestDate ? asDate(body.requestDate, 'Request date') : existing.requestDate,
           neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
           purpose: body.purpose,
@@ -600,7 +612,13 @@ advanceRoutes.post(
     // submit (2026-11-09); a loan or an overheads advance names none.
     const budget = await advanceBudget(advance);
     const currency = await companyCurrency();
-    const position = budget && advance.costCategory ? ` (${budgetPosition(budget, advance.costCategory.name, (n) => formatMoney(n, currency))})` : '';
+    const office = budget ? null : await advanceOffice(advance);
+    const position =
+      budget && advance.costCategory
+        ? ` (${budgetPosition(budget, advance.costCategory.name, (n) => formatMoney(n, currency))})`
+        : office
+          ? ` (${officePosition(office, (n) => formatMoney(n, currency))})`
+          : '';
 
     // Claimed on the advance exactly as read — still a draft, and not changed
     // since — never simply written: two Submit clicks file once, and a Modify
@@ -775,8 +793,8 @@ advanceRoutes.get(
     const sections = cashRequestSections({
       requestedBy: row.requestedBy.name,
       neededBy: row.neededBy,
-      project: row.job ? `${row.job.number} — ${row.job.name}` : 'Overheads',
-      budgetLine: row.costCategory?.name ?? '—',
+      project: row.job ? `${row.job.number} — ${row.job.name}` : row.officeBudgetLine ? `Office budget — ${row.officeBudgetLine.budget.name}` : 'Overheads',
+      budgetLine: row.officeBudgetLine ? `${row.officeBudgetLine.code} ${row.officeBudgetLine.name}` : (row.costCategory?.name ?? '—'),
       status: row.status,
       purpose: row.purpose,
       release: release ? release.payment : null,
@@ -806,10 +824,11 @@ advanceRoutes.get(
       });
     }
     // "Against the project budget" (2026-11-09), before the notes.
-    const budget = await advanceBudget(row);
+    const budget = (await advanceBudget(row)) ?? (await advanceOffice(row));
     if (budget) {
       const at = sections.findIndex((s) => s.kind === 'text' && s.title === 'Notes');
-      sections.splice(at < 0 ? sections.length : at, 0, ...budgetSections(budget, row.costCategory?.name ?? '—', 'This advance', await companyCurrency()));
+      const lineName = budget.source === 'office' ? budget.line.name : (row.costCategory?.name ?? '—');
+      sections.splice(at < 0 ? sections.length : at, 0, ...budgetSections(budget, lineName, 'This advance', await companyCurrency()));
     }
 
     const pdf = await renderDocument({

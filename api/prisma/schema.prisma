@@ -113,6 +113,7 @@ model User {
   plansUploaded         ApprovedPlan[]     @relation("PlanUploader")
   plansCustomerRecorded ApprovedPlan[]     @relation("PlanCustomerRecorder")
   operationsBudgetsSet  OperationsBudget[] @relation("OperationsBudgetEditor")
+  officeBudgetsMade     OfficeBudget[]     @relation("OfficeBudgetAuthor")
   tasksAssigned         JobTask[]          @relation("TaskAssignee")
 
   prsRequested      PurchaseRequest[]      @relation("PrRequester")
@@ -1555,8 +1556,8 @@ enum LostKind {
 /// overwritten — "preserve quotation revisions rather than overwriting
 /// important commercial records" (model §2.5).
 model Quotation {
-  id     String @id @default(cuid())
-  number String @unique
+  id          String  @id @default(cuid())
+  number      String  @unique
   /// A stand-in made for a sales order entered WITHOUT a quotation
   /// (2026-11-08, the owner's call for the SCORO migration, open until
   /// 31 Dec 2026 — shared/directOrders.ts). Its lines mirror the order's.
@@ -2112,13 +2113,13 @@ model Job {
   /// The phases' date change waiting for the Technical Manager: null when none,
   /// DRAFT while proposed and not yet sent, PENDING_APPROVAL once sent (2026-11-03).
   dateChangeStatus             ScheduleStatus?
-  scheduleStatus               ScheduleStatus @default(DRAFT)
+  scheduleStatus               ScheduleStatus  @default(DRAFT)
   scheduleSubmittedAt          DateTime?
   scheduleApprovedAt           DateTime?
   scheduleCustomerDecision     String?
   scheduleCustomerName         String?
   scheduleCustomerPosition     String?
-  scheduleCustomerDecidedOn    DateTime?      @db.Date
+  scheduleCustomerDecidedOn    DateTime?       @db.Date
   scheduleCustomerRemarks      String?
   scheduleCustomerRecordedAt   DateTime?
   scheduleCustomerRecordedById String?
@@ -2295,6 +2296,11 @@ model BudgetRequest {
   costCategoryId String
   costCategory   CostCategory @relation(fields: [costCategoryId], references: [id], onDelete: Restrict)
 
+  /// The OFFICE budget line it is charged to (2026-11-10) — instead of a
+  /// project, never beside one. Read by `shared/officeBudget.ts`.
+  officeBudgetLineId String?
+  officeBudgetLine   OfficeBudgetLine? @relation(fields: [officeBudgetLineId], references: [id], onDelete: Restrict)
+
   amount Decimal @db.Decimal(18, 2)
   /// What the cash is for.
   reason String
@@ -2335,6 +2341,7 @@ model BudgetRequest {
   @@index([jobId, status])
   @@index([requestedById, status])
   @@index([status])
+  @@index([officeBudgetLineId])
 }
 
 /// One line of a budget request's breakdown — what the cash buys.
@@ -4720,6 +4727,11 @@ model SupplierBill {
   costCategoryId String?
   costCategory   CostCategory? @relation("BillCategory", fields: [costCategoryId], references: [id], onDelete: SetNull)
 
+  /// The OFFICE budget line it is charged to (2026-11-10) — instead of a
+  /// project, never beside one. Read by `shared/officeBudget.ts`.
+  officeBudgetLineId String?
+  officeBudgetLine   OfficeBudgetLine? @relation(fields: [officeBudgetLineId], references: [id], onDelete: Restrict)
+
   /// Theirs, not ours — printed on their invoice.
   supplierInvoiceNo String?
   billDate          DateTime @db.Date
@@ -4775,6 +4787,7 @@ model SupplierBill {
   @@index([dueDate])
   @@index([jobId])
   @@index([purchaserId])
+  @@index([officeBudgetLineId])
 }
 
 model SupplierBillLine {
@@ -4821,6 +4834,11 @@ model ExpenseClaim {
   costCategoryId String?
   costCategory   CostCategory? @relation("ExpenseCategory", fields: [costCategoryId], references: [id], onDelete: SetNull)
 
+  /// The OFFICE budget line it is charged to (2026-11-10) — instead of a
+  /// project, never beside one. Read by `shared/officeBudget.ts`.
+  officeBudgetLineId String?
+  officeBudgetLine   OfficeBudgetLine? @relation(fields: [officeBudgetLineId], references: [id], onDelete: Restrict)
+
   /// Set when this claim LIQUIDATES a cash advance. The lines are the receipts
   /// against it; total − advance.amountReleased is the excess owed to the
   /// person (settled here like any claim) or, when negative, the unspent cash
@@ -4857,6 +4875,7 @@ model ExpenseClaim {
   @@index([claimedById, status])
   @@index([jobId])
   @@index([advanceId])
+  @@index([officeBudgetLineId])
 }
 
 model ExpenseClaimLine {
@@ -4915,6 +4934,11 @@ model CashAdvance {
   costCategoryId String?
   costCategory   CostCategory? @relation("AdvanceCategory", fields: [costCategoryId], references: [id], onDelete: SetNull)
 
+  /// The OFFICE budget line it is charged to (2026-11-10) — instead of a
+  /// project, never beside one. Read by `shared/officeBudget.ts`.
+  officeBudgetLineId String?
+  officeBudgetLine   OfficeBudgetLine? @relation(fields: [officeBudgetLineId], references: [id], onDelete: Restrict)
+
   requestDate DateTime  @db.Date
   neededBy    DateTime? @db.Date
   purpose     String
@@ -4958,6 +4982,7 @@ model CashAdvance {
   @@index([status])
   @@index([requestedById, status])
   @@index([jobId])
+  @@index([officeBudgetLineId])
 }
 
 enum PaymentKind {
@@ -6137,6 +6162,53 @@ model OperationsBudget {
   updatedAt      DateTime     @updatedAt
 
   @@unique([year, costCategoryId])
+}
+
+/// An OFFICE BUDGET (2026-11-10, the owner's call, his two Builk monitors as
+/// the sample: "2026 GRUNTECH YEARLY BUDGET", "2026 GRUNTECHLIFE BUDGET"):
+/// a named budget for one year, made of coded lines. Budget requests,
+/// reimbursements, cash advances and supplier bills with no purchase order
+/// may charge a line instead of a project; what is asked, out and spent is
+/// READ off those documents (`shared/officeBudget.ts`), never stored here.
+/// It replaced the per-category `OperationsBudget`, which stays unread.
+model OfficeBudget {
+  id          String             @id @default(cuid())
+  year        Int
+  name        String
+  notes       String?
+  isActive    Boolean            @default(true)
+  createdById String?
+  createdBy   User?              @relation("OfficeBudgetAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+  lines       OfficeBudgetLine[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([year])
+}
+
+model OfficeBudgetLine {
+  id            String       @id @default(cuid())
+  budgetId      String
+  budget        OfficeBudget @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+  code          String
+  name          String
+  amount        Decimal      @default(0) @db.Decimal(18, 2)
+  /// Spent before G-CORE kept the documents (the monitor's actual to date
+  /// when the budget was brought over) — added to what the documents say.
+  openingActual Decimal      @default(0) @db.Decimal(18, 2)
+  notes         String?
+  sortOrder     Int          @default(0)
+  isActive      Boolean      @default(true)
+
+  expenseClaims  ExpenseClaim[]
+  budgetRequests BudgetRequest[]
+  supplierBills  SupplierBill[]
+  cashAdvances   CashAdvance[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([budgetId, code])
 }
 
 /// A memorandum (2026-10-20, the owner's G-HR Records spec). HR drafts it,

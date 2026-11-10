@@ -26,6 +26,7 @@ import { CLAIM_TONES } from './Expenses';
 import { RequestItemsCard, type RequestItem } from '../../components/RequestLines';
 import { Attachments } from '../../components/Attachments';
 import { BudgetCard, type RequestBudget } from '../../components/BudgetCard';
+import type { CurrentOfficeLine } from '../../components/OfficeLine';
 
 /**
  * Cash advances — money handed to a person BEFORE it is spent.
@@ -107,6 +108,8 @@ export interface Advance {
   requestedBy: { id: string; name: string; email: string; position: string | null };
   job: { id: string; number: string; name: string } | null;
   costCategory: { id: string; name: string } | null;
+  /** An office budget line instead of a project (2026-11-10). */
+  officeBudgetLine?: CurrentOfficeLine | null;
   toRelease: number;
   spent: number;
   excessDue: number;
@@ -197,7 +200,7 @@ export function CashAdvances() {
       render: (r) => (
         <div>
           <div>{r.purpose}</div>
-          <div className="faint">{r.job ? <span className="mono">{r.job.number}</span> : 'Overheads'}</div>
+          <div className="faint">{r.job ? <span className="mono">{r.job.number}</span> : r.officeBudgetLine ? `Office · ${r.officeBudgetLine.code} ${r.officeBudgetLine.name}` : 'Overheads'}</div>
         </div>
       ),
     },
@@ -479,6 +482,13 @@ export function CashAdvanceDetail() {
                 {row.job.name}
                 {row.costCategory && ` · ${row.costCategory.name}`}
               </>
+            ) : row.officeBudgetLine ? (
+              <>
+                {' · charged to the office budget, '}
+                <Link to={`/g-fin/operations-budget?budget=${row.officeBudgetLine.budget.id}&line=${row.officeBudgetLine.id}`}>
+                  {row.officeBudgetLine.code} {row.officeBudgetLine.name}
+                </Link>
+              </>
             ) : (
               ' · overheads'
             )}
@@ -541,7 +551,9 @@ export function CashAdvanceDetail() {
       <DocumentApproval documentType="cash_advance" documentId={row.id} reloadToken={reload} />
 
       {/* Where the budget line stands, beside the decision (2026-11-09). */}
-      {row.budget && row.costCategory && <BudgetCard budget={row.budget} lineName={row.costCategory.name} noun="This advance" />}
+      {row.budget && (row.budget.source === 'office' || row.costCategory) && (
+        <BudgetCard budget={row.budget} lineName={row.budget.source === 'office' ? (row.budget.line?.name ?? '') : (row.costCategory?.name ?? '')} noun="This advance" />
+      )}
 
       <ErrorBox error={error} />
 
