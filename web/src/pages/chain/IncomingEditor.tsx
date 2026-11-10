@@ -71,6 +71,8 @@ interface OrderData {
   number: string;
   status: string;
   kind: string;
+  /** One order for several requests (2026-11-10): its lines may be for different projects. */
+  batch?: boolean;
   receivable: boolean;
   supplier: { id: string; name: string };
   job: { id: string; number: string; name: string } | null;
@@ -308,7 +310,7 @@ export function IncomingEditor() {
 
   const problems: string[] = [];
   // A project's goods land where somebody chose (2026-11-06): a warehouse, or delivered to site.
-  const forProject = mode === 'order' && order?.kind === 'DIRECT_TO_JOB' && !!order.job;
+  const forProject = mode === 'order' && order?.kind === 'DIRECT_TO_JOB' && (!!order.job || !!order.batch);
   const intoWarehouse = !!header.warehouseId && header.warehouseId !== SITE;
   if (mode === 'order') {
     if (!order) problems.push('Choose the purchase order');

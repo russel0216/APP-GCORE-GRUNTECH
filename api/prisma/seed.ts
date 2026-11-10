@@ -181,6 +181,37 @@ const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
+    // TRAVEL REQUEST (2026-11-10, the owner's call: "it should be recognized
+    // by the team leader also"): the Technical Manager on the preparer's
+    // team, the Team Leader, Admin Back Support, the Finance Manager — and
+    // the CEO / President above ₱100,000, as for a budget request.
+    documentType: 'travel_request',
+    name: 'Travel request — technical manager, team leader, back support, finance manager',
+    maxAmount: 100_000,
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 3, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+    ],
+  },
+  {
+    documentType: 'travel_request',
+    name: 'Travel request — technical manager, team leader, back support, finance manager, then CEO / President over ₱100,000',
+    minAmount: 100_000.01,
+    preparerSigns: true,
+    standIns: true,
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 3, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 4, name: 'Finance Manager', approverType: 'ROLE', roleKey: 'finance_manager' },
+      { sequence: 5, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+  },
+  {
     // COSTING (the sheet of 2026-10-13): Technical Manager, then Team Leader —
     // prepared by a Project Engineer or a Technical Manager. The three-step
     // route with the CEO (CTG) is RETIRED: the step count changed, which

@@ -168,6 +168,14 @@ export const REGISTRY: ModuleDef[] = [
       // assign and reassign requests, set priority on any, close any.
       { key: 'cad_job_orders', group: 'Project Management', label: 'CAD J.O.', path: '/g-ops/cad-job-orders', actions: ['view_own', 'view_team', 'view_all', 'create', 'edit_own', 'edit_team', 'edit_all', 'delete', 'export', 'approve'], phase: 9,
         note: 'Requests to the design team: files, revisions (R0, R1…), progress, priority and a comment thread. Edit All = the design team (progress, revisions, priority on what is assigned to them); Approve = the Designer Lead (assigns, reassigns, closes any).' },
+      // Travel requests (2026-11-10, the owner's call): a ticket, a fare or a
+      // shipping-line booking, charged to a project, sales order, quotation,
+      // costing or office budget line. A budget request with a journey on
+      // it — RAISED with Budget Requests › Manage Own; these two keys only
+      // read: one's own, or everyone's.
+      { key: 'travel_requests', group: 'Project Management', label: 'Travel Requests', path: '/g-ops/travel-requests', actions: ['view_own', 'view_all'], phase: 10,
+        caption: 'Reading only — to raise one, set Budget Requests › Manage Own',
+        note: 'Travel by shipping line, land transportation or air flight. View Own lists the travel requests one raised, View All everyone’s. Raising one is Budget Requests › Manage Own; finance releases the cash or books and pays it directly (the A/P create right).' },
       { key: 'plans', group: 'Project Management', label: 'Request for Approval', path: '/g-ops/plans', actions: OWNED, phase: 4, hidden: true, note: 'Raised from a project’s Request for Approval tab; decided through the approval engine' },
       { key: 'budget_monitoring', group: 'Project Management', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4, hidden: true },
       { key: 'purchase_requests', group: 'Project Management', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: ['view_own', 'view_team', 'view_all', 'edit_own', 'edit_team', 'edit_all'], phase: 5, hidden: true },
@@ -260,6 +268,10 @@ export const REGISTRY: ModuleDef[] = [
         note: 'Every project’s budget requests: approved ones to release, released ones awaiting liquidation. Releasing is the A/P create right. To let a role RAISE one, set G-OPS › Project Management › Budget Requests (raised in projects) › Manage Own.' },
       // The owner's module 5 (2026-10-15): the requests whose cash went out —
       // released, spent, returned — with the actual entry and the refund.
+      // Finance's window on every travel request (2026-11-10): approved ones
+      // to release or to book and pay directly (the company card).
+      { key: 'travel_requests', group: 'Money out', label: 'Travel Requests', path: '/g-fin/travel-requests', actions: READ, phase: 10,
+        caption: 'Finance’s window — booking and paying is the A/P create right' },
       { key: 'budget_liquidations', group: 'Money out', label: 'Budget Liquidations', path: '/g-fin/budget-liquidations', actions: READ, phase: 7 },
       // Money out, and money a person pays back — a cash advance's repayment,
       // a salary or commission deduction, unspent budget returned (2026-10-20,

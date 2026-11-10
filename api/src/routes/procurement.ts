@@ -67,11 +67,12 @@ import { contentDisposition, paperFileName } from '../shared/paperName';
 import { awardSummary, canvassFigures, MAX_SHEET_SUPPLIERS, type SheetColumn, type SheetLine } from '../shared/canvassMath';
 import { jobCostingIds } from '../shared/costingSets';
 import { salesOrderSpend } from '../shared/orderStock';
+import { checkQuotationTarget, quotationSpend } from '../shared/quotationBuying';
 import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
 
 /** What a purchase is for, in words — the lists, the papers and the trail. */
 export function purchaseKindLabel(kind: string): string {
-  return kind === 'DIRECT_TO_JOB' ? 'Direct to project' : kind === 'SALES_ORDER' ? 'For a sales order' : 'Stock replenishment';
+  return kind === 'DIRECT_TO_JOB' ? 'Direct to project' : kind === 'SALES_ORDER' ? 'For a sales order' : kind === 'QUOTATION' ? 'For a quotation' : 'Stock replenishment';
 }
 
 /**
@@ -153,6 +154,7 @@ function prListWhere(me: ResolvedUser, q: ListQuery): { where: Prisma.PurchaseRe
   if (kind) and.push({ kind });
   if (f.jobId) and.push({ jobId: f.jobId });
   if (f.salesOrderId) and.push({ salesOrderId: f.salesOrderId });
+  if (f.quotationId) and.push({ quotationId: f.quotationId });
   if (q.search) {
     and.push({
       OR: [
@@ -160,6 +162,7 @@ function prListWhere(me: ResolvedUser, q: ListQuery): { where: Prisma.PurchaseRe
         { purpose: { contains: q.search, mode: 'insensitive' } },
         { job: { name: { contains: q.search, mode: 'insensitive' } } },
         { salesOrder: { number: { contains: q.search, mode: 'insensitive' } } },
+        { quotation: { number: { contains: q.search, mode: 'insensitive' } } },
       ],
     });
   }
@@ -182,6 +185,7 @@ purchaseRequestRoutes.get(
         include: {
           job: { select: { id: true, number: true, name: true } },
           salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } },
+          quotation: { select: { id: true, number: true, subject: true, customer: { select: { name: true } } } },
           requestedBy: { select: { id: true, name: true } },
           warehouse: { select: { id: true, name: true } },
           items: { select: { estimatedAmount: true } },
@@ -287,7 +291,7 @@ purchaseRequestRoutes.get(
                 ? `${r.salesOrder.number} — ${r.salesOrder.customer.name}`
                 : (r.warehouse?.name ?? 'Stock'),
           },
-          r.kind === 'DIRECT_TO_JOB' ? 'Direct to job' : r.kind === 'SALES_ORDER' ? 'Sales order' : 'Stock',
+          r.kind === 'DIRECT_TO_JOB' ? 'Direct to job' : r.kind === 'SALES_ORDER' ? 'Sales order' : r.kind === 'QUOTATION' ? 'Quotation' : 'Stock',
           String(r.items.length),
           bracketed(formatAmount(estimated(r).toFixed(2)), !PR_CLOSED.includes(r.status)),
           r.requestedBy.name,
@@ -358,6 +362,38 @@ purchaseRequestRoutes.get(
   }),
 );
 
+/**
+ * The quotations a request may buy ahead for (2026-11-10): still open, or won
+ * with no sales order issued yet — number, customer and subject only, behind
+ * the request's own rights. `?q=` searches the three.
+ */
+purchaseRequestRoutes.get(
+  '/quotations',
+  requireAny(...PR_WRITERS),
+  handler(async (req, res) => {
+    const q = String(req.query.q ?? '').trim();
+    const rows = await prisma.quotation.findMany({
+      where: {
+        outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'] },
+        salesOrders: { none: { status: 'ISSUED' } },
+        ...(q
+          ? {
+              OR: [
+                { number: { contains: q, mode: 'insensitive' } },
+                { subject: { contains: q, mode: 'insensitive' } },
+                { customer: { name: { contains: q, mode: 'insensitive' } } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+      select: { id: true, number: true, subject: true, customer: { select: { name: true } } },
+    });
+    res.json(rows.map((r) => ({ id: r.id, number: r.number, customer: r.customer.name, subject: r.subject ?? '' })));
+  }),
+);
+
 /** The issued sales orders a purchase may be for — the request's and the order's pickers. */
 async function issuedSalesOrders(q: string) {
   const rows = await prisma.salesOrder.findMany({
@@ -399,6 +435,16 @@ purchaseRequestRoutes.get(
       });
       if (!so) throw notFound('Sales order not found');
       res.json({ salesOrder: { id: so.id, number: so.number, status: so.status, customer: so.customer.name }, spend: await salesOrderSpend(so.id) });
+      return;
+    }
+    // Bought ahead for a quotation (2026-11-10): its quoted cost and what was spent on it.
+    if (req.query.quotationId) {
+      const q = await prisma.quotation.findUnique({
+        where: { id: String(req.query.quotationId) },
+        select: { id: true, number: true, subject: true, outcome: true, customer: { select: { name: true } } },
+      });
+      if (!q) throw notFound('Quotation not found');
+      res.json({ quotation: { id: q.id, number: q.number, subject: q.subject, outcome: q.outcome, customer: q.customer.name }, spend: await quotationSpend(q.id) });
       return;
     }
     const jobId = String(req.query.jobId ?? '');
@@ -648,6 +694,7 @@ async function loadPr(id: string) {
     include: {
       job: { select: { id: true, number: true, name: true } },
       salesOrder: { select: { id: true, number: true, customer: { select: { name: true } }, quotation: { select: { subject: true } } } },
+      quotation: { select: { id: true, number: true, subject: true, customer: { select: { name: true } } } },
       warehouse: { select: { id: true, name: true } },
       requestedBy: { select: { id: true, name: true, position: true } },
       items: {
@@ -714,7 +761,7 @@ purchaseRequestRoutes.get(
       orders: pr.orders.map((o) => ({ ...o, total: num(o.total) })),
       budget,
       // A sales order's purchase is measured against the order's quoted cost.
-      spend: pr.salesOrderId ? await salesOrderSpend(pr.salesOrderId) : null,
+      spend: pr.kind === 'QUOTATION' && pr.quotationId ? await quotationSpend(pr.quotationId) : pr.salesOrderId ? await salesOrderSpend(pr.salesOrderId) : null,
       // The routes' own rules (prForEdit, /withdraw): a draft is changed, and
       // a pending one pulled back, by its requester or an edit_all holder.
       canEdit: pr.status === 'DRAFT' && mayEditPr(me, pr),
@@ -849,12 +896,13 @@ async function writePrLines(tx: Prisma.TransactionClient, requestId: string, lin
   }
 }
 
-const PR_KINDS = ['DIRECT_TO_JOB', 'STOCK_REPLENISHMENT', 'SALES_ORDER'] as const;
+const PR_KINDS = ['DIRECT_TO_JOB', 'STOCK_REPLENISHMENT', 'SALES_ORDER', 'QUOTATION'] as const;
 
 const prSchema = z.object({
   kind: z.enum(PR_KINDS).default('DIRECT_TO_JOB'),
   jobId: z.string().optional().nullable(),
   salesOrderId: z.string().optional().nullable(),
+  quotationId: z.string().optional().nullable(),
   warehouseId: z.string().optional().nullable(),
   purpose: z.string().trim().min(3, 'Say what this is for'),
   neededBy: z.string().optional().nullable(),
@@ -880,7 +928,11 @@ function checkPrTarget(
   jobId: string | null | undefined,
   warehouseId: string | null | undefined,
   salesOrderId?: string | null,
+  quotationId?: string | null,
 ) {
+  if (kind === 'QUOTATION' && !quotationId) {
+    throw badRequest('A request for a quotation must name the quotation it buys ahead for');
+  }
   if (kind === 'DIRECT_TO_JOB' && !jobId) {
     throw badRequest('A direct-to-job request must name the project it is for');
   }
@@ -893,10 +945,11 @@ function checkPrTarget(
 }
 
 /** Which of the three a request names, by its kind — never a job on a sales order's, never a sales order on a project's. */
-function prTargets(kind: string, jobId: string | null | undefined, salesOrderId: string | null | undefined) {
+function prTargets(kind: string, jobId: string | null | undefined, salesOrderId: string | null | undefined, quotationId?: string | null) {
   return {
     jobId: kind === 'DIRECT_TO_JOB' ? jobId || null : null,
     salesOrderId: kind === 'SALES_ORDER' ? salesOrderId || null : null,
+    quotationId: kind === 'QUOTATION' ? quotationId || null : null,
   };
 }
 
@@ -906,8 +959,9 @@ purchaseRequestRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(prSchema.extend({ lines: z.array(prLineSchema).max(500).optional() }), req.body);
-    checkPrTarget(body.kind, body.jobId, body.warehouseId, body.salesOrderId);
-    const targets = prTargets(body.kind, body.jobId, body.salesOrderId);
+    checkPrTarget(body.kind, body.jobId, body.warehouseId, body.salesOrderId, body.quotationId);
+    const targets = prTargets(body.kind, body.jobId, body.salesOrderId, body.quotationId);
+    if (targets.quotationId) await checkQuotationTarget(targets.quotationId);
     if (targets.jobId) {
       const job = await prisma.job.findUnique({ where: { id: targets.jobId }, select: { id: true } });
       if (!job) throw badRequest('That project does not exist');
@@ -984,6 +1038,7 @@ purchaseRequestRoutes.patch(
         kind: z.enum(PR_KINDS).optional(),
         jobId: z.string().optional().nullable(),
         salesOrderId: z.string().optional().nullable(),
+        quotationId: z.string().optional().nullable(),
         warehouseId: z.string().optional().nullable(),
         purpose: z.string().trim().min(3, 'Say what this is for').optional(),
         neededBy: z.string().optional().nullable(),
@@ -994,14 +1049,16 @@ purchaseRequestRoutes.patch(
     );
 
     const kind = body.kind ?? pr.kind;
-    const { jobId, salesOrderId } = prTargets(
+    const { jobId, salesOrderId, quotationId } = prTargets(
       kind,
       body.jobId !== undefined ? body.jobId : pr.jobId,
       body.salesOrderId !== undefined ? body.salesOrderId : pr.salesOrderId,
+      body.quotationId !== undefined ? body.quotationId : pr.quotationId,
     );
     const warehouseId = body.warehouseId !== undefined ? body.warehouseId || null : pr.warehouseId;
-    checkPrTarget(kind, jobId, warehouseId, salesOrderId);
+    checkPrTarget(kind, jobId, warehouseId, salesOrderId, quotationId);
     if (salesOrderId && salesOrderId !== pr.salesOrderId) await checkSalesOrderTarget(salesOrderId);
+    if (quotationId && quotationId !== pr.quotationId) await checkQuotationTarget(quotationId);
 
     if (jobId && jobId !== pr.jobId) {
       const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true } });
@@ -1034,7 +1091,7 @@ purchaseRequestRoutes.patch(
 
     const changed: string[] = [];
     if (kind !== pr.kind) {
-      changed.push(kind === 'DIRECT_TO_JOB' ? 'now for a project' : kind === 'SALES_ORDER' ? 'now for a sales order' : 'now for warehouse stock');
+      changed.push(kind === 'DIRECT_TO_JOB' ? 'now for a project' : kind === 'SALES_ORDER' ? 'now for a sales order' : kind === 'QUOTATION' ? 'now for a quotation' : 'now for warehouse stock');
     }
     if (jobId !== pr.jobId && kind === pr.kind) changed.push('project');
     if (salesOrderId !== pr.salesOrderId && kind === pr.kind) changed.push('sales order');
@@ -1057,6 +1114,7 @@ purchaseRequestRoutes.patch(
           kind,
           jobId,
           salesOrderId,
+          quotationId,
           warehouseId,
           ...(body.purpose !== undefined ? { purpose: body.purpose } : {}),
           ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
@@ -1221,10 +1279,11 @@ purchaseRequestRoutes.put(
       req.body,
     );
     const kind = body.kind;
-    const { jobId, salesOrderId } = prTargets(kind, body.jobId, body.salesOrderId);
+    const { jobId, salesOrderId, quotationId } = prTargets(kind, body.jobId, body.salesOrderId, body.quotationId);
     const warehouseId = body.warehouseId || null;
-    checkPrTarget(kind, jobId, warehouseId, salesOrderId);
+    checkPrTarget(kind, jobId, warehouseId, salesOrderId, quotationId);
     if (salesOrderId && salesOrderId !== pr.salesOrderId) await checkSalesOrderTarget(salesOrderId);
+    if (quotationId && quotationId !== pr.quotationId) await checkQuotationTarget(quotationId);
     if (jobId && jobId !== pr.jobId) {
       const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true } });
       if (!job) throw badRequest('That project does not exist');
@@ -1244,6 +1303,7 @@ purchaseRequestRoutes.put(
           kind,
           jobId,
           salesOrderId,
+          quotationId,
           warehouseId,
           purpose: body.purpose,
           neededBy: asDate(body.neededBy),
@@ -1299,6 +1359,7 @@ purchaseRequestRoutes.post(
     if (pr.kind === 'SALES_ORDER' && pr.salesOrder && pr.salesOrder.status !== 'ISSUED') {
       throw badRequest(`${pr.salesOrder.number} is ${statusLabel(pr.salesOrder.status).toLowerCase()} — buy for an issued sales order`);
     }
+    if (pr.kind === 'QUOTATION' && pr.quotationId) await checkQuotationTarget(pr.quotationId);
     if (!pr.items.length) throw badRequest('Add at least one line before submitting');
 
     const total = cents(pr.items.reduce((s, i) => s + num(i.estimatedAmount), 0));
@@ -2991,6 +3052,8 @@ purchaseOrderRoutes.get(
           supplier: { select: { id: true, name: true } },
           job: { select: { id: true, number: true, name: true } },
           request: { select: { id: true, number: true } },
+          salesOrder: { select: { id: true, number: true } },
+          quotation: { select: { id: true, number: true } },
           items: { select: { quantity: true, receivedQty: true, unitPrice: true, landedUnitCost: true, requestItem: { select: { estimatedCost: true } } } },
         },
         orderBy: orderBy(q, PO_SORTS, { createdAt: 'desc' }),
@@ -3010,6 +3073,9 @@ purchaseOrderRoutes.get(
           supplier: r.supplier,
           job: r.job,
           request: r.request,
+          batch: r.batch,
+          salesOrder: r.salesOrder,
+          quotation: r.quotation,
           orderDate: r.orderDate,
           deliveryDate: r.deliveryDate,
           total: num(r.total),
@@ -3129,6 +3195,7 @@ async function loadPo(id: string) {
       supplier: true,
       job: { select: { id: true, number: true, name: true } },
       salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } },
+      quotation: { select: { id: true, number: true, subject: true, customer: { select: { name: true } } } },
       warehouse: { select: { id: true, name: true } },
       request: {
         select: {
@@ -3154,7 +3221,8 @@ async function loadPo(id: string) {
         include: {
           item: { select: { id: true, code: true, name: true } },
           costCategory: { select: { id: true, name: true } },
-          requestItem: { select: { estimatedCost: true } },
+          // Its own request and project — a batch order's line names them (2026-11-10).
+          requestItem: { select: { estimatedCost: true, request: { select: { id: true, number: true, job: { select: { id: true, number: true, name: true } } } } } },
         },
       },
       bills: {
@@ -3267,8 +3335,12 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
         pesoBasis: peso.basis,
         receivedQty: num(i.receivedQty),
         outstandingQty: cents(num(i.quantity) - num(i.receivedQty)),
+        /** The request (and its project) the line buys for — what a batch order's line is charged to. */
+        fromRequest: requestItem?.request ?? null,
       };
     }),
+    /** Every request the order's lines buy for, each once (a batch order names several). */
+    requests: [...new Map(po.items.flatMap((i) => (i.requestItem?.request ? [[i.requestItem.request.id, i.requestItem.request] as const] : []))).values()],
   };
 }
 
@@ -3305,6 +3377,49 @@ purchaseOrderRoutes.get(
   }),
 );
 
+/**
+ * The approved requests with something still to order — the order page's
+ * "From purchase requests…" panel, where several are ticked onto ONE order
+ * (2026-11-10). Above `/:id`.
+ */
+purchaseOrderRoutes.get(
+  '/batchable',
+  require_('gchain.purchase_orders.create'),
+  handler(async (req, res) => {
+    const q = String(req.query.q ?? '').trim();
+    const like = { contains: q, mode: 'insensitive' as const };
+    const rows = await prisma.purchaseRequest.findMany({
+      where: {
+        status: { in: ['APPROVED', 'PARTIALLY_ORDERED'] },
+        ...(q ? { OR: [{ number: like }, { purpose: like }, { job: { number: like } }, { job: { name: like } }, { salesOrder: { number: like } }, { quotation: { number: like } }] } : {}),
+      },
+      include: { items: true, requestedBy: { select: { name: true } }, ...REQUEST_FOR },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+    res.json(
+      rows
+        .map((pr) => {
+          const left = pr.items.filter((i) => num(i.quantity) - num(i.orderedQty) - num(i.pulledQty) > 0.0005);
+          return {
+            id: pr.id,
+            number: pr.number,
+            kind: pr.kind,
+            purpose: pr.purpose,
+            requestedBy: pr.requestedBy.name,
+            neededBy: pr.neededBy,
+            for: forLabelOf(pr),
+            /** Requests that may share an order carry the same key (projects mix; the others share their target). */
+            groupKey: pr.kind === 'DIRECT_TO_JOB' ? 'DIRECT_TO_JOB' : `${pr.kind}:${pr.salesOrderId ?? pr.quotationId ?? pr.warehouseId ?? ''}`,
+            linesLeft: left.length,
+            amountLeft: cents(left.reduce((t, i) => t + (num(i.quantity) - num(i.orderedQty) - num(i.pulledQty)) * num(i.estimatedCost), 0)),
+          };
+        })
+        .filter((r) => r.linesLeft > 0),
+    );
+  }),
+);
+
 purchaseOrderRoutes.get(
   '/draft',
   require_('gchain.purchase_orders.create'),
@@ -3312,10 +3427,32 @@ purchaseOrderRoutes.get(
     const requestId = req.query.requestId ? String(req.query.requestId) : null;
     const canvassId = req.query.canvassId ? String(req.query.canvassId) : null;
     const supplierId = req.query.supplierId ? String(req.query.supplierId) : null;
-    const source = await orderSource(requestId, canvassId, supplierId);
+    const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+    // ONE order from SEVERAL requests (2026-11-10): `?requestIds=a,b`.
+    const requestIds = String(req.query.requestIds ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+    if (requestIds.length > 1) {
+      const batch = await batchSource(requestIds);
+      res.json({
+        vatRate: company ? num(company.vatRate) : 0.12,
+        kind: batch.kind,
+        batch: true,
+        requests: batch.requests,
+        request: null,
+        job: batch.job,
+        salesOrder: batch.salesOrder,
+        quotation: batch.quotation,
+        warehouse: batch.warehouse,
+        canvass: null,
+        supplier: null,
+        quoteRef: null,
+        neededBy: batch.neededBy,
+        lines: batch.lines,
+      });
+      return;
+    }
+    const source = await orderSource(requestId ?? requestIds[0] ?? null, canvassId, supplierId);
     const pr = source.pr;
     if (pr && !source.lines.length) throw badRequest('Everything on that request has already been ordered');
-    const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
     res.json({
       vatRate: company ? num(company.vatRate) : 0.12,
       // A standalone draft starts as the warehouse's stock; the page may name a project or a sales order instead.
@@ -3323,6 +3460,7 @@ purchaseOrderRoutes.get(
       request: pr ? { id: pr.id, number: pr.number, purpose: pr.purpose, preferredSupplier: pr.preferredSupplier } : null,
       job: pr?.job ?? null,
       salesOrder: pr?.salesOrder ?? null,
+      quotation: pr?.quotation ?? null,
       warehouse: pr?.warehouse ?? null,
       canvass: source.canvass,
       supplier: source.supplier,
@@ -3452,6 +3590,8 @@ async function standaloneTarget(
 const poSchema = z.object({
   supplierId: z.string().min(1, 'Choose a supplier'),
   requestId: z.string().optional().nullable(),
+  /** Several approved requests on ONE order (2026-11-10) — see `batchSource()`. */
+  requestIds: z.array(z.string()).max(30).optional(),
   canvassId: z.string().optional().nullable(),
   deliveryDate: z.string().optional().nullable(),
   deliverTo: z.string().optional().nullable(),
@@ -3540,6 +3680,105 @@ interface OrderLine {
   unit: string;
   unitPrice: number;
   landedUnitCost?: number | null;
+  /** A batch order's line says which request, and what, it buys for. */
+  requestNumber?: string;
+  forLabel?: string;
+}
+
+const REQUEST_FOR = {
+  job: { select: { id: true, number: true, name: true } },
+  salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } },
+  quotation: { select: { id: true, number: true, subject: true, customer: { select: { name: true } } } },
+  warehouse: { select: { id: true, name: true } },
+} as const;
+
+function forLabelOf(pr: { kind: string; job: { number: string; name: string } | null; salesOrder: { number: string } | null; quotation: { number: string } | null; warehouse: { name: string } | null }) {
+  return pr.kind === 'DIRECT_TO_JOB'
+    ? pr.job
+      ? `${pr.job.number} — ${pr.job.name}`
+      : 'Project'
+    : pr.kind === 'SALES_ORDER'
+      ? `Sales order ${pr.salesOrder?.number ?? ''}`
+      : pr.kind === 'QUOTATION'
+        ? `Quotation ${pr.quotation?.number ?? ''}`
+        : `Stock${pr.warehouse ? ` — ${pr.warehouse.name}` : ''}`;
+}
+
+/**
+ * ONE order to one supplier for lines of SEVERAL approved requests
+ * (2026-11-10, the owner's call: "if there are multiple purchase requests
+ * allow to create a batch purchase order … also mixed projects, this is only
+ * for one supplier"). The requests share a KIND — projects may differ, each
+ * line charged to its own request's project; a sales order's, a quotation's
+ * or a warehouse's requests share that one target — because the shelf the
+ * goods land on and the rule that charges them follow the kind.
+ */
+async function batchSource(requestIds: string[]) {
+  const ids = [...new Set(requestIds)];
+  if (ids.length > 30) throw badRequest('At most 30 requests on one order');
+  const prs = await prisma.purchaseRequest.findMany({
+    where: { id: { in: ids } },
+    include: { items: { orderBy: { sortOrder: 'asc' } }, requestedBy: { select: { name: true } }, ...REQUEST_FOR },
+    orderBy: { number: 'asc' },
+  });
+  if (prs.length !== ids.length) throw notFound('A purchase request named is not on file');
+  for (const pr of prs) {
+    if (pr.status !== 'APPROVED' && pr.status !== 'PARTIALLY_ORDERED') throw badRequest(`${pr.number} is ${statusLabel(pr.status).toLowerCase()} — only an approved request can be ordered`);
+  }
+  const kind = prs[0].kind;
+  if (prs.some((p) => p.kind !== kind)) {
+    throw badRequest('One order takes requests of one kind — for projects, for warehouse stock, for one sales order or for one quotation. Raise a separate order for the others');
+  }
+  if (kind === 'SALES_ORDER' && prs.some((p) => p.salesOrderId !== prs[0].salesOrderId)) throw badRequest('One order buys for one sales order — these requests are for different ones');
+  if (kind === 'QUOTATION' && prs.some((p) => p.quotationId !== prs[0].quotationId)) throw badRequest('One order buys for one quotation — these requests are for different ones');
+  if (kind === 'STOCK_REPLENISHMENT' && prs.some((p) => p.warehouseId !== prs[0].warehouseId)) throw badRequest('One stock order is for one warehouse — these requests are for different ones');
+  const oneJob = prs.every((p) => p.jobId === prs[0].jobId);
+  const lines: OrderLine[] = prs.flatMap((pr) =>
+    pr.items
+      .map((i) => ({ ...fromRequestItem(i, num(i.estimatedCost)), requestNumber: pr.number, forLabel: forLabelOf(pr) }))
+      .filter((l) => l.quantity > 0),
+  );
+  if (!lines.length) throw badRequest('Everything on those requests has already been ordered');
+  const needed = prs.map((p) => p.neededBy).filter((d): d is Date => !!d).sort((a, b) => a.getTime() - b.getTime());
+  return {
+    prs,
+    kind,
+    lines,
+    itemIds: prs.flatMap((p) => p.items.map((i) => i.id)),
+    jobId: kind === 'DIRECT_TO_JOB' && oneJob ? prs[0].jobId : null,
+    job: kind === 'DIRECT_TO_JOB' && oneJob ? prs[0].job : null,
+    salesOrderId: kind === 'SALES_ORDER' ? prs[0].salesOrderId : null,
+    salesOrder: kind === 'SALES_ORDER' ? prs[0].salesOrder : null,
+    quotationId: kind === 'QUOTATION' ? prs[0].quotationId : null,
+    quotation: kind === 'QUOTATION' ? prs[0].quotation : null,
+    warehouseId: kind === 'STOCK_REPLENISHMENT' ? prs[0].warehouseId : null,
+    warehouse: kind === 'STOCK_REPLENISHMENT' ? prs[0].warehouse : null,
+    neededBy: needed[0] ?? null,
+    requests: prs.map((p) => ({ id: p.id, number: p.number, purpose: p.purpose, requestedBy: p.requestedBy.name, for: forLabelOf(p) })),
+  };
+}
+
+/** The request-line ids a batch order may carry: every line of the requests its lines already name. */
+async function batchItemIds(orderId: string): Promise<string[]> {
+  const named = await prisma.purchaseOrderItem.findMany({ where: { orderId, requestItemId: { not: null } }, select: { requestItem: { select: { requestId: true } } } });
+  const requestIds = [...new Set(named.map((n) => n.requestItem?.requestId).filter((v): v is string => !!v))];
+  if (!requestIds.length) return [];
+  return (await prisma.purchaseRequestItem.findMany({ where: { requestId: { in: requestIds } }, select: { id: true } })).map((i) => i.id);
+}
+
+/** After an order's lines moved their requests' ordered quantities: each request named says how far it is ordered. */
+async function refreshRequestsOrdered(tx: Prisma.TransactionClient, orderId: string, fallbackRequestId: string | null) {
+  const named = await tx.purchaseOrderItem.findMany({ where: { orderId, requestItemId: { not: null } }, select: { requestItem: { select: { requestId: true } } } });
+  const requestIds = [...new Set([fallbackRequestId, ...named.map((n) => n.requestItem?.requestId ?? null)].filter((v): v is string => !!v))];
+  for (const requestId of requestIds) {
+    const reqItems = await tx.purchaseRequestItem.findMany({ where: { requestId } });
+    const none = reqItems.every((i) => num(i.orderedQty) + num(i.pulledQty) < 0.0005);
+    const fully = reqItems.every((i) => num(i.orderedQty) + num(i.pulledQty) >= num(i.quantity) - 0.0005);
+    await tx.purchaseRequest.updateMany({
+      where: { id: requestId, status: { in: ['APPROVED', 'PARTIALLY_ORDERED', 'ORDERED'] } },
+      data: { status: none ? 'APPROVED' : fully ? 'ORDERED' : 'PARTIALLY_ORDERED' },
+    });
+  }
 }
 
 /**
@@ -3554,7 +3793,7 @@ async function orderSource(requestId: string | null | undefined, canvassId: stri
     const canvass = await prisma.canvass.findUnique({
       where: { id: canvassId },
       include: {
-        request: { include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } }, warehouse: { select: { id: true, name: true } } } },
+        request: { include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } }, quotation: { select: { id: true, number: true, subject: true, customer: { select: { name: true } } } }, warehouse: { select: { id: true, name: true } } } },
         suppliers: { where: { isSelected: true }, include: { quotes: true, supplier: { select: { id: true, name: true, paymentTerms: true } } } },
       },
     });
@@ -3583,7 +3822,7 @@ async function orderSource(requestId: string | null | undefined, canvassId: stri
   if (requestId) {
     const pr = await prisma.purchaseRequest.findUnique({
       where: { id: requestId },
-      include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } }, warehouse: { select: { id: true, name: true } } },
+      include: { items: { orderBy: { sortOrder: 'asc' } }, job: { select: { id: true, number: true, name: true } }, salesOrder: { select: { id: true, number: true, customer: { select: { name: true } } } }, quotation: { select: { id: true, number: true, subject: true, customer: { select: { name: true } } } }, warehouse: { select: { id: true, name: true } } },
     });
     if (!pr) throw notFound('Purchase request not found');
     if (pr.status !== 'APPROVED' && pr.status !== 'PARTIALLY_ORDERED') {
@@ -3707,7 +3946,10 @@ purchaseOrderRoutes.post(
     const body = parseBody(poSchema.extend({ lines: z.array(poLineSchema).max(500).optional() }), req.body);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
 
-    const source = await orderSource(body.requestId, body.canvassId, body.canvassId ? body.supplierId : null);
+    const batch = !body.canvassId && body.requestIds && new Set(body.requestIds).size > 1 ? await batchSource(body.requestIds) : null;
+    const source = batch
+      ? { pr: null, canvass: null, supplier: null, quoteRef: null as string | null, lines: batch.lines }
+      : await orderSource(body.requestId ?? body.requestIds?.[0], body.canvassId, body.canvassId ? body.supplierId : null);
     const pr = source.pr;
     if (source.supplier && source.supplier.id !== body.supplierId) {
       throw badRequest('The order supplier does not match the awarded supplier');
@@ -3717,17 +3959,23 @@ purchaseOrderRoutes.post(
     }
     // Raised with no request, an order may still be for a sales order — then
     // it buys for that deal; from a request it takes the request's.
-    if (!pr && body.salesOrderId) await checkSalesOrderTarget(body.salesOrderId);
-    const salesOrderId = pr ? pr.salesOrderId : body.salesOrderId || null;
-    const target = pr ? { jobId: pr.jobId, warehouseId: pr.warehouseId } : await standaloneTarget(salesOrderId, body.jobId, body.warehouseId);
-    const kind = pr?.kind ?? standaloneKind(salesOrderId, target.jobId);
+    if (!pr && !batch && body.salesOrderId) await checkSalesOrderTarget(body.salesOrderId);
+    const salesOrderId = batch ? batch.salesOrderId : pr ? pr.salesOrderId : body.salesOrderId || null;
+    const quotationId = batch ? batch.quotationId : (pr?.quotationId ?? null);
+    const target = batch
+      ? { jobId: batch.jobId, warehouseId: batch.warehouseId }
+      : pr
+        ? { jobId: pr.jobId, warehouseId: pr.warehouseId }
+        : await standaloneTarget(salesOrderId, body.jobId, body.warehouseId);
+    const kind = batch?.kind ?? pr?.kind ?? standaloneKind(salesOrderId, target.jobId);
     // The page sends the lines as it shows them; a caller that sends none
     // gets the source's lines, as before. Every line is checked before the
     // number is issued.
     const lines = body.lines
-      ? await checkPoLines(kind, body.lines, [], pr ? pr.items.map((i) => i.id) : [])
+      ? await checkPoLines(kind, body.lines, [], batch ? batch.itemIds : pr ? pr.items.map((i) => i.id) : [])
       : source.lines;
-    if (pr && !lines.length) throw badRequest('An order from a request needs at least one of its lines');
+    if ((pr || batch) && !lines.length) throw badRequest('An order from a request needs at least one of its lines');
+    if (batch && lines.some((l) => !l.requestItemId)) throw badRequest('Every line of an order raised from several requests is one of their lines');
 
     const po = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('purchase_order', tx);
@@ -3737,8 +3985,10 @@ purchaseOrderRoutes.post(
           kind,
           supplierId: body.supplierId,
           requestId: pr?.id ?? null,
+          batch: !!batch,
           jobId: target.jobId,
           salesOrderId,
+          quotationId,
           warehouseId: target.warehouseId,
           createdById: me.id,
           // Set here rather than left to the column's now(), which the
@@ -3767,7 +4017,7 @@ purchaseOrderRoutes.post(
           entityType: 'purchase_order',
           entityId: created.id,
           action: 'CREATED',
-          summary: `Raised ${created.number}${pr ? ` from ${pr.number}` : ''}${body.lines ? ` (${lines.length} line${lines.length === 1 ? '' : 's'})` : ''}`,
+          summary: `Raised ${created.number}${batch ? ` from ${batch.prs.map((p) => p.number).join(', ')}` : pr ? ` from ${pr.number}` : ''}${body.lines ? ` (${lines.length} line${lines.length === 1 ? '' : 's'})` : ''}`,
         },
         req,
         tx,
@@ -4066,14 +4316,16 @@ purchaseOrderRoutes.put(
       const supplier = await prisma.supplier.findUnique({ where: { id: body.supplierId }, select: { id: true } });
       if (!supplier) throw badRequest('That supplier does not exist');
     }
-    const requestItemIds = po.requestId
-      ? (await prisma.purchaseRequestItem.findMany({ where: { requestId: po.requestId }, select: { id: true } })).map((i) => i.id)
-      : [];
+    const requestItemIds = po.batch
+      ? await batchItemIds(po.id)
+      : po.requestId
+        ? (await prisma.purchaseRequestItem.findMany({ where: { requestId: po.requestId }, select: { id: true } })).map((i) => i.id)
+        : [];
     // A standalone draft may still change what it is for (2026-10-23): the
     // sales order stays as made; a project, a warehouse or neither re-decides
     // the kind, and the lines are checked under it.
     let retarget: { kind: PurchaseKind; jobId: string | null; warehouseId: string | null } | null = null;
-    if (!po.requestId && !po.salesOrderId && (body.jobId !== undefined || body.warehouseId !== undefined)) {
+    if (!po.requestId && !po.batch && !po.salesOrderId && !po.quotationId && (body.jobId !== undefined || body.warehouseId !== undefined)) {
       const target = await standaloneTarget(null, body.jobId ?? null, body.warehouseId ?? null);
       retarget = { kind: standaloneKind(null, target.jobId), ...target };
     }
@@ -4265,20 +4517,15 @@ export async function settlePurchaseOrder(documentId: string, outcome: ApprovalO
       });
     }
 
-    if (po.requestId) {
-      const reqItems = await tx.purchaseRequestItem.findMany({ where: { requestId: po.requestId } });
-      const fully = reqItems.every((i) => num(i.orderedQty) + num(i.pulledQty) >= num(i.quantity) - 0.0005);
-      await tx.purchaseRequest.update({
-        where: { id: po.requestId },
-        data: { status: fully ? 'ORDERED' : 'PARTIALLY_ORDERED' },
-      });
-    }
+    // Every request the order's lines name says how far it is ordered — one
+    // for an ordinary order, several for a batch (2026-11-10).
+    await refreshRequestsOrdered(tx, po.id, po.requestId);
 
     if (po.kind !== 'DIRECT_TO_JOB' || !po.jobId) return true;
 
     // From a request: its declared value stays committed; the order's price
     // is the supplier's business and touches no budget line.
-    if (po.requestId) return true;
+    if (po.requestId || po.batch) return true;
 
     // Committed in PESOS (2026-10-23): a foreign order's lines at its rate.
     const byCategory = new Map<string, number>();
@@ -4393,15 +4640,7 @@ onApprovalReopened('purchase_order', {
         data: { orderedQty: D(Math.max(0, Math.round((num(reqItem.orderedQty) - num(line.quantity)) * 1000) / 1000)) },
       });
     }
-    if (po.requestId) {
-      const reqItems = await tx.purchaseRequestItem.findMany({ where: { requestId: po.requestId } });
-      const none = reqItems.every((i) => num(i.orderedQty) + num(i.pulledQty) < 0.0005);
-      const fully = reqItems.every((i) => num(i.orderedQty) + num(i.pulledQty) >= num(i.quantity) - 0.0005);
-      await tx.purchaseRequest.updateMany({
-        where: { id: po.requestId, status: { in: ['APPROVED', 'PARTIALLY_ORDERED', 'ORDERED'] } },
-        data: { status: none ? 'APPROVED' : fully ? 'ORDERED' : 'PARTIALLY_ORDERED' },
-      });
-    }
+    await refreshRequestsOrdered(tx, po.id, po.requestId);
 
     if (po.kind === 'DIRECT_TO_JOB' && po.jobId) {
       const why = `${po.number} pulled back to draft by ${actor.name}: ${reason}`;

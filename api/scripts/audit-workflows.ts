@@ -29,6 +29,7 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   purchase_request: ['project_engineer', 'industry_specialist', 'technical_manager', 'team_leader', 'project_manager', 'service_engineer', 'procurement', 'project_lead'],
   // Project cash: the team asks — engineers, specialists, Back Support,
   // Team Leaders and the Finance Manager (the sheet of 2026-10-13).
+  travel_request: ['project_engineer', 'industry_specialist', 'back_support', 'team_leader', 'finance_manager', 'project_manager', 'project_lead'],
   budget_request: ['project_engineer', 'industry_specialist', 'back_support', 'team_leader', 'finance_manager', 'project_manager', 'project_lead'],
   // The routing sheet (2026-10-12): Industry Specialists, Team Leaders and
   // the CEO / President all prepare them, on the one route.

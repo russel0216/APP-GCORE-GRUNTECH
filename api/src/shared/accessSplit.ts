@@ -67,6 +67,10 @@ export const ACCESS_SPLIT: { key: string; from: string; to: string[] }[] = [
     to: ['ghr.attendance_corrections.view_own', 'ghr.attendance_corrections.create', 'ghr.attendance_corrections.edit_own', 'ghr.attendance_corrections.delete'],
   },
   { key: 'attendance-corrections-hr', from: 'ghr.attendance.edit_all', to: ['ghr.attendance_corrections.view_all', 'ghr.attendance_corrections.edit_all'] },
+  // Travel Requests (2026-11-10): read where the budget requests are read.
+  { key: 'travel-own', from: 'gops.budget_requests.view_own', to: ['gops.travel_requests.view_own'] },
+  { key: 'travel-all', from: 'gops.budget_requests.view_all', to: ['gops.travel_requests.view_all'] },
+  { key: 'travel-fin', from: 'gfin.budget_requests.view_all', to: ['gfin.travel_requests.view_all'] },
   // Procurement Settings (2026-10-21): kept by whoever may change every purchase order.
   { key: 'procurement-settings', from: 'gchain.purchase_orders.edit_all', to: ['gchain.settings.view_all', 'gchain.settings.edit_all'] },
 ];

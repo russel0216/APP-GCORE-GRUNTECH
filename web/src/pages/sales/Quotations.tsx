@@ -16,6 +16,7 @@ import { loadPeople } from '../../components/People';
 import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, initials, useToast, type Tone } from '../../components/ui';
 import type { CostPanel } from '../../lib/quotationMath';
 import { RecordBudgetRequests } from '../delivery/BudgetRequests';
+import { QuotationBuying, type QuotationBuyingData } from './QuotationBuying';
 
 export const OUTCOMES = [
   { value: 'OPEN', label: 'Open' },
@@ -720,6 +721,8 @@ export interface QuotationDetail {
   canEdit: boolean;
   /** Whether the server sent the cost half of each line. */
   canSeeCost: boolean;
+  /** Bought ahead for it, and — lost — what must be re-allocated (2026-11-10). */
+  buying?: QuotationBuyingData;
   customer: {
     id: string;
     name: string;
@@ -1559,6 +1562,8 @@ export function QuotationDetail() {
               canEdit={quotation.canEdit || can('gops.sales_orders.create')}
             />
           </div>
+
+          {quotation.buying && <QuotationBuying quotationId={quotation.id} buying={quotation.buying} onChanged={() => void load()} />}
 
           {/* Cash on an open or won quotation (2026-10-26), checked against its costing. */}
           <RecordBudgetRequests

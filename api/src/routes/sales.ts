@@ -1,4 +1,5 @@
 import { assertCostingsExist, cleanCostingIds, costingIdsOf, revisionCostingIds, setRevisionCostings } from '../shared/costingSets';
+import { costsToReallocate, quotationSpend, reallocateBudgetRequest, reallocatePurchasing } from '../shared/quotationBuying';
 import { Router } from 'express';
 import { z } from 'zod';
 import { LeadStatus, Prisma, QuotationOutcome } from '@prisma/client';
@@ -1979,6 +1980,14 @@ quotationRoutes.get(
       closedInDays,
       stage: stageKey,
       stageLabel: cancelledLabel(pipeline.find((s) => s.key === stageKey)?.label ?? null, quotation.lostKind),
+      // Bought ahead for it (2026-11-10): what was spent, never charged until
+      // a sales order or a project takes it — and, lost, what must be re-allocated.
+      buying: {
+        spend: await quotationSpend(quotation.id),
+        canRequest: can(me, 'gchain.purchase_requests.create') && ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'].includes(quotation.outcome),
+        toReallocate: quotation.outcome === 'LOST' ? await costsToReallocate(quotation.id) : null,
+        canReallocate: quotation.outcome === 'LOST' && (canEditRecord(me, 'gops', 'quotations', quotation.ownerId) || can(me, 'gfin.budget_requests.view_all')),
+      },
       quotationStages: quotationStages(pipeline).map((st) => ({
         key: st.key,
         label: st.label,
@@ -2615,6 +2624,59 @@ quotationRoutes.patch(
  * supplier bill, a PR, a PO, a stock issue, a claim, an advance) refuses the
  * whole purge, naming what blocks it — money on file is never purged.
  */
+/**
+ * A LOST quotation's costs are re-allocated by hand (2026-11-10, the owner's
+ * call: "if declared lost, they are required to allocate to a project with
+ * remaining budget, or it can be charged to an office budget line"): its
+ * purchasing whole — to a project and budget line with enough left, or to
+ * the warehouse's stock — and each budget or travel request — to a project
+ * with budget left, or to an office budget line. Its owner (or whoever may
+ * edit it), or finance.
+ */
+quotationRoutes.post(
+  '/:id/reallocate',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(
+      z.object({
+        what: z.enum(['purchasing', 'budget_request']),
+        requestId: z.string().optional(),
+        jobId: z.string().optional().nullable(),
+        costCategoryId: z.string().optional().nullable(),
+        officeBudgetLineId: z.string().optional().nullable(),
+        stock: z.boolean().optional(),
+      }),
+      req.body,
+    );
+    const quotation = await prisma.quotation.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, ownerId: true } });
+    if (!quotation) throw notFound('Quotation not found');
+    if (!canEditRecord(me, 'gops', 'quotations', quotation.ownerId) && !can(me, 'gfin.budget_requests.view_all')) {
+      throw forbidden('Its owner or finance re-allocates what was spent on a lost quotation');
+    }
+    const actor = { id: me.id, name: me.name };
+    const toProject = body.jobId && body.costCategoryId ? { jobId: body.jobId, costCategoryId: body.costCategoryId } : null;
+    const moved = await prisma.$transaction(async (tx) => {
+      if (body.what === 'purchasing') {
+        if (!toProject && !body.stock) throw badRequest('Choose the project and budget line, or the warehouse’s stock');
+        return reallocatePurchasing(tx, quotation.id, toProject ?? { stock: true }, actor);
+      }
+      if (!body.requestId) throw badRequest('Name the request');
+      if (!toProject && !body.officeBudgetLineId) throw badRequest('Choose the project and budget line, or an office budget line');
+      return [await reallocateBudgetRequest(tx, quotation.id, body.requestId, toProject ?? { officeBudgetLineId: body.officeBudgetLineId! }, actor)];
+    });
+    await audit(
+      {
+        entityType: 'quotation',
+        entityId: quotation.id,
+        action: 'UPDATED',
+        summary: `${quotation.number} (lost): re-allocated ${moved.join(', ') || 'its held goods'} ${toProject ? 'to a project' : body.what === 'purchasing' ? 'to warehouse stock' : 'to an office budget line'}`,
+      },
+      req,
+    );
+    res.json({ ok: true, moved, toReallocate: await costsToReallocate(quotation.id) });
+  }),
+);
+
 quotationRoutes.delete(
   '/:id/purge',
   handler(async (req, res) => {

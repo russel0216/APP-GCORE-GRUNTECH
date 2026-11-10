@@ -4627,6 +4627,78 @@ async function main() {
       );
 
       // Edited whole: a line in use left out is closed, not removed; a new one is added. A budget in use is not deleted.
+      // ══ Travel requests (2026-11-10) ═════════════════════════════════════
+      // A budget request with a journey on it: its own number and route (the
+      // Technical Manager and the Team Leader first), charged to a project or
+      // an office line — and finance may book and pay it directly, with
+      // nothing left to liquidate.
+      {
+        const journey = { mode: 'AIR', from: 'Manila', to: 'Cebu', departOn: '2027-01-12', returnOn: '2027-01-15', travellers: 'ZZ Engineer', carrier: 'ZZ Air' };
+        const trBody = { jobId: job.id, costCategoryId: materials.id, reason: `${TAG} site survey trip`, amount: 5_000, travel: journey };
+        const backwards = await eng('POST', '/budget-requests', { ...trBody, travel: { ...journey, returnOn: '2027-01-10' } });
+        const tr = await eng('POST', '/budget-requests', trBody);
+        const trId = String(tr.body.id);
+        const notTravel = await eng('PUT', `/budget-requests/${trId}`, { jobId: job.id, costCategoryId: materials.id, reason: `${TAG} site survey trip`, amount: 5_000 });
+        const inTravel = await fin('GET', `/budget-requests?travel=yes&search=${encodeURIComponent(`${TAG} site survey trip`)}`);
+        const inCash = await fin('GET', `/budget-requests?travel=no&search=${encodeURIComponent(`${TAG} site survey trip`)}`);
+        check(
+          'a travel request is a budget request with a journey: its own TR number, a return before the departure refused, never turned into a plain request — and listed on Travel Requests alone',
+          tr.status === 201 && tr.body.isTravel === true && /-TR-/.test(String(tr.body.number)) && tr.body.travelFrom === 'Manila' && backwards.status === 400 && notTravel.status === 400 &&
+            inTravel.body.total === 1 && inCash.body.total === 0,
+          `${tr.status} ${tr.body.number} ${backwards.status} ${notTravel.status} ${inTravel.body.total} ${inCash.body.total} ${JSON.stringify(tr.body).slice(0, 160)}`,
+        );
+        const trSent = await eng('POST', `/budget-requests/${trId}/submit`);
+        const trApproval = await prisma.approvalRequest.findFirst({
+          where: { documentId: trId, status: 'PENDING' },
+          include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } } },
+        });
+        check(
+          'it goes on its own route — Technical Manager, then Team Leader, Back Support and the Finance Manager',
+          trSent.status === 200 && trApproval?.documentType === 'travel_request' &&
+            trApproval.workflow.steps.map((st) => st.name).join(' › ') === 'Technical Manager › Team Leader › Admin Back Support › Finance Manager',
+          `${trSent.status} ${JSON.stringify(trSent.body).slice(0, 160)} ${trApproval?.documentType} ${trApproval?.workflow.steps.map((st) => st.name).join(' › ')}`,
+        );
+        if (trApproval) await prisma.approvalRequest.update({ where: { id: trApproval.id }, data: { status: 'APPROVED' } });
+        await prisma.budgetRequest.update({ where: { id: trId }, data: { status: 'APPROVED', approvedAt: new Date() } });
+        const overBook = await fin('POST', `/budget-requests/${trId}/book`, { amount: 5_500, method: 'CREDIT_CARD' });
+        const strangerBook = await eng('POST', `/budget-requests/${trId}/book`, { amount: 4_200, method: 'CREDIT_CARD' });
+        const booked = await fin('POST', `/budget-requests/${trId}/book`, { amount: 4_200, method: 'CREDIT_CARD', reference: 'ZZ-PNR-1' });
+        const again = await fin('POST', `/budget-requests/${trId}/book`, { amount: 4_200, method: 'CREDIT_CARD' });
+        const trRow = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: trId } });
+        const ledgerOf = async (state: 'COMMITTED' | 'INCURRED') =>
+          Number((await prisma.jobCostEntry.aggregate({ where: { jobId: job.id, state, sourceType: 'budget_request', sourceId: trId }, _sum: { amount: true } }))._sum.amount ?? 0);
+        const voucher = booked.body.paymentId ? await prisma.payment.findUnique({ where: { id: String(booked.body.paymentId) } }) : null;
+        check(
+          'finance books and pays it directly on the card — never more than approved, once, with the A/P right: paid is spent, the project is charged at once, nothing waits for a liquidation',
+          overBook.status === 400 && strangerBook.status === 403 && booked.status === 200 && again.status === 400 &&
+            trRow.status === 'LIQUIDATED' && trRow.paidDirect === true && money(Number(trRow.amountSpent), 4_200) &&
+            money(await ledgerOf('INCURRED'), 4_200) && money(await ledgerOf('COMMITTED'), 0) &&
+            voucher?.method === 'CREDIT_CARD' && voucher.kind === 'DISBURSEMENT' && money(Number(voucher.amount), 4_200),
+          `${overBook.status} ${strangerBook.status} ${booked.status} ${JSON.stringify(booked.body).slice(0, 160)} ${again.status} ${trRow.status} ${trRow.paidDirect} ${Number(trRow.amountSpent)} ${await ledgerOf('INCURRED')} ${voucher?.method}`,
+        );
+        const trPaper = await fetch(`${BASE}/budget-requests/${trId}/pdf`, { headers: { Authorization: `Bearer ${token}` } });
+        const trText = (trPaper.ok ? pdfText(Buffer.from(await trPaper.arrayBuffer())) : '').replace(/\s+/g, ' ');
+        check(
+          'its paper is a Travel Request with the journey on it',
+          trPaper.status === 200 && /TRAVEL REQUEST/i.test(trText) && /JOURNEY/i.test(trText) && trText.includes('Air flight') && trText.includes('Manila') && trText.includes('Cebu'),
+          `${trPaper.status} ${trText.slice(0, 240)}`,
+        );
+        // On an office line: what finance paid counts as the line's actual.
+        const actualB = async () => {
+          const r = await obViewer('GET', `/office-budgets/${obId}`);
+          return Number((r.body.lines as { id: string; actual: number }[] | undefined)?.find((l) => l.id === lineB.id)?.actual ?? NaN);
+        };
+        const beforeB = await actualB();
+        const trOffice = await eng('POST', '/budget-requests', { officeBudgetLineId: lineB.id, reason: `${TAG} office flight`, amount: 3_000, travel: { ...journey, mode: 'SHIPPING' } });
+        await prisma.budgetRequest.update({ where: { id: String(trOffice.body.id) }, data: { status: 'APPROVED', approvedAt: new Date() } });
+        const officeBooked = await fin('POST', `/budget-requests/${trOffice.body.id}/book`, { amount: 3_000, method: 'CREDIT_CARD' });
+        check(
+          'a travel request charges an office budget line too, and a direct booking is that line\'s actual',
+          trOffice.status === 201 && officeBooked.status === 200 && money((await actualB()) - beforeB, 3_000),
+          `${trOffice.status} ${officeBooked.status} ${beforeB} → ${await actualB()}`,
+        );
+      }
+
       const edited = await obEditor('PUT', `/office-budgets/${obId}`, {
         name: `${TAG} OFFICE BUDGET`,
         lines: [

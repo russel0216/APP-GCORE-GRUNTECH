@@ -218,6 +218,11 @@ async function cleanup() {
   await prisma.purchaseOrder.updateMany({ where: { salesOrder: { number: { startsWith: TAG } } }, data: { salesOrderId: null } });
   await prisma.purchaseRequest.updateMany({ where: { salesOrder: { number: { startsWith: TAG } } }, data: { salesOrderId: null } });
   await prisma.stockIssue.updateMany({ where: { salesOrder: { number: { startsWith: TAG } } }, data: { salesOrderId: null } });
+  // …and so do the ones bought ahead for its quotations (2026-11-10).
+  await prisma.purchaseOrder.updateMany({ where: { quotation: { subject: { startsWith: TAG } } }, data: { quotationId: null } });
+  await prisma.purchaseRequest.updateMany({ where: { quotation: { subject: { startsWith: TAG } } }, data: { quotationId: null } });
+  await prisma.quotationStock.deleteMany({ where: { quotation: { subject: { startsWith: TAG } } } });
+  await prisma.salesOrderStock.deleteMany({ where: { salesOrder: { number: { startsWith: TAG } } } });
   await prisma.salesOrder.deleteMany({ where: { number: { startsWith: TAG } } });
   await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
   // The warehouse's bells about this script's borrow slips name the slip,
@@ -6240,6 +6245,228 @@ async function main() {
   }
 
   await odooMigration();
+
+  // ── 10d. Buying ahead for a quotation, and one order for several requests (2026-11-10) ──
+  // The owner's calls: a purchase request may name an open quotation, through
+  // the order and the Incoming, charged to nothing until a sales order or a
+  // project takes it — and, lost, re-allocated by hand; and several approved
+  // requests, even of different projects, go on ONE order for one supplier,
+  // each line charged to its own request's project.
+  console.log('\nBuying ahead for a quotation; a batch purchase order');
+  {
+    const { quotationSpend, handOverToSalesOrder, handOverToProject } = await import('../src/shared/quotationBuying');
+    // The buyer here holds exactly what the flow needs — never what an install's roles happen to hold.
+    const aheadRole = await makeRole('zzchain_ahead', 'ZZ Buys Ahead', [
+      'gchain.purchase_requests.view_all', 'gchain.purchase_requests.create', 'gchain.purchase_requests.edit_all',
+      'gchain.purchase_orders.view_all', 'gchain.purchase_orders.create', 'gchain.purchase_orders.edit_all',
+      'gops.quotations.view_all', 'gops.quotations.edit_all',
+    ]);
+    await prisma.userRole.create({ data: { userId: procurement.id, roleId: aheadRole.id } });
+    const token = signToken(procurement.id, procurement.email);
+    const stamp = Date.now();
+    const quote = (n: string, outcome: 'OPEN' | 'LOST' = 'OPEN') =>
+      prisma.quotation.create({ data: { number: `${TAG}-QA${n}-${stamp}`, customerId: customer.id, ownerId: procurement.id, subject: `${TAG} bought-ahead quote ${n}`, outcome } });
+    const companyQty = async () => num((await prisma.inventoryBalance.findUnique({ where: { itemId_warehouseId: { itemId: item.id, warehouseId: warehouse.id } } }))?.quantity);
+    /** An approved request for the quotation, its order issued and two received into the warehouse. */
+    const buyAhead = async (quotationId: string, receive: boolean) => {
+      const made = await api(token, 'POST', '/purchase-requests', {
+        kind: 'QUOTATION',
+        quotationId,
+        purpose: `${TAG} bought ahead`,
+        lines: [{ itemId: item.id, name: `${TAG} Stainless pipe`, quantity: 2, unit: 'pcs', estimatedCost: 250 }],
+      });
+      if (made.status !== 201) throw new Error(`A request for a quotation was refused: ${made.status} ${JSON.stringify(made.body).slice(0, 300)}`);
+      const prId = String(made.body.id);
+      await prisma.purchaseRequest.update({ where: { id: prId }, data: { status: 'APPROVED' } });
+      const pr = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: prId }, include: { items: true } });
+      if (!receive) return { made, pr, po: null };
+      const po = await prisma.purchaseOrder.create({
+        data: {
+          number: await nextNumber('purchase_order'),
+          kind: 'QUOTATION',
+          status: 'ISSUED',
+          supplierId: supplier.id,
+          requestId: pr.id,
+          quotationId,
+          createdById: procurement.id,
+          notes: `${TAG} order bought ahead`,
+          subtotal: D(560),
+          vatAmount: D(0),
+          total: D(560),
+          items: { create: [{ requestItemId: pr.items[0].id, itemId: item.id, description: `${TAG} Stainless pipe`, quantity: D(2), unit: 'pcs', unitPrice: D(280), amount: D(560) }] },
+        },
+        include: { items: true },
+      });
+      await prisma.purchaseRequestItem.update({ where: { id: pr.items[0].id }, data: { orderedQty: D(2) } });
+      const rec = await prisma.receiving.create({
+        data: {
+          number: await nextNumber('receiving'),
+          status: 'PENDING_APPROVAL',
+          orderId: po.id,
+          warehouseId: warehouse.id,
+          receivedById: procurement.id,
+          items: { create: [{ orderItemId: po.items[0].id, itemId: item.id, quantity: D(2), unitCost: D(280) }] },
+        },
+      });
+      await settleReceiving(rec.id, 'APPROVED');
+      return { made, pr, po };
+    };
+
+    // A. An open quotation: requested, ordered, received — charged to nothing.
+    const qa = await quote('1');
+    const lostQ = await quote('0', 'LOST');
+    const refused = await api(token, 'POST', '/purchase-requests', { kind: 'QUOTATION', quotationId: lostQ.id, purpose: `${TAG} refused`, lines: [] });
+    const ledgerBefore = await prisma.jobCostEntry.count();
+    const shelfBefore = await companyQty();
+    const a = await buyAhead(qa.id, true);
+    const heldA = await prisma.quotationStock.findUnique({ where: { quotationId_itemId_warehouseId: { quotationId: qa.id, itemId: item.id, warehouseId: warehouse.id } } });
+    const spendA = await quotationSpend(qa.id);
+    check(
+      'a purchase request names an open quotation (a lost one is refused), and reads back as bought ahead for it',
+      a.made.status === 201 && a.pr.kind === 'QUOTATION' && a.pr.quotationId === qa.id && a.pr.jobId === null && refused.status === 400,
+      `${a.made.status} ${a.pr.kind} ${refused.status} ${JSON.stringify(a.made.body).slice(0, 120)}`,
+    );
+    check(
+      'ordered and received, the goods are held for the QUOTATION at the declared cost — no project charged, the company shelf unmoved',
+      !!heldA && money(num(heldA.quantity), 2) && money(num(heldA.averageCost), 250) && (await prisma.jobCostEntry.count()) === ledgerBefore && money(await companyQty(), shelfBefore) && money(spendA.incurred, 500),
+      `${num(heldA?.quantity)} @ ${num(heldA?.averageCost)}; ledger ${ledgerBefore} → ${await prisma.jobCostEntry.count()}; spend ${JSON.stringify(spendA)}`,
+    );
+    const soA = await prisma.salesOrder.create({
+      data: { number: `${TAG}-SOQ-${stamp}`, status: 'ISSUED', quotationId: qa.id, customerId: customer.id, ownerId: procurement.id, orderDate: new Date() },
+    });
+    await prisma.$transaction((tx) => handOverToSalesOrder(tx, soA.id));
+    const prA = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: a.pr.id } });
+    const poA = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: a.po!.id } });
+    const orderStock = await prisma.salesOrderStock.findUnique({ where: { salesOrderId_itemId_warehouseId: { salesOrderId: soA.id, itemId: item.id, warehouseId: warehouse.id } } });
+    check(
+      'a sales order issued on the quotation takes it over: the request and order are the sales order\'s, the held goods its own stock',
+      prA.kind === 'SALES_ORDER' && prA.salesOrderId === soA.id && poA.kind === 'SALES_ORDER' && poA.salesOrderId === soA.id && money(num(orderStock?.quantity), 2) && (await prisma.quotationStock.count({ where: { quotationId: qa.id } })) === 0,
+      `${prA.kind} ${poA.kind} ${num(orderStock?.quantity)}`,
+    );
+
+    // B. A project built from the quotation takes the request's declared value as its commitment.
+    const qb = await quote('2');
+    const b = await buyAhead(qb.id, false);
+    await prisma.$transaction((tx) => handOverToProject(tx, job.id, qb.id));
+    const prB = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: b.pr.id } });
+    const committedB = num((await prisma.jobCostEntry.aggregate({ where: { jobId: job.id, state: 'COMMITTED', sourceType: 'purchase_request', sourceId: b.pr.id }, _sum: { amount: true } }))._sum.amount);
+    check(
+      'a project built from the quotation takes it over: direct to the project, its declared value (500) committed on the budget line',
+      prB.kind === 'DIRECT_TO_JOB' && prB.jobId === job.id && money(committedB, 500),
+      `${prB.kind} ${committedB}`,
+    );
+
+    // C. Lost: listed on the quotation, re-allocated — a project needs budget left, the warehouse takes the goods.
+    const qc = await quote('3');
+    const c = await buyAhead(qc.id, true);
+    await prisma.quotation.update({ where: { id: qc.id }, data: { outcome: 'LOST' } });
+    const lostPage = await api(token, 'GET', `/quotations/${qc.id}`);
+    const pendingC = (lostPage.body.buying as { toReallocate: { purchasing: { requests: unknown[]; heldValue: number } } | null } | undefined)?.toReallocate;
+    const noBudget = await api(token, 'POST', `/quotations/${qc.id}/reallocate`, { what: 'purchasing', jobId: job.id, costCategoryId: categories[categories.length - 1].id });
+    const shelfC = await companyQty();
+    const toStock = await api(token, 'POST', `/quotations/${qc.id}/reallocate`, { what: 'purchasing', stock: true });
+    const prC = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: c.pr.id } });
+    check(
+      'a LOST quotation lists what was bought ahead; a project with no budget left on the line is refused; re-allocated to stock, the goods join the company shelf',
+      (lostPage.status !== 200 || (!!pendingC && pendingC.purchasing.requests.length === 1 && money(pendingC.purchasing.heldValue, 500))) &&
+        noBudget.status === 400 &&
+        toStock.status === 200 &&
+        prC.kind === 'STOCK_REPLENISHMENT' &&
+        money((await companyQty()) - shelfC, 2) &&
+        (await prisma.quotationStock.count({ where: { quotationId: qc.id } })) === 0,
+      `${lostPage.status} ${JSON.stringify(pendingC)?.slice(0, 120)}; ${noBudget.status} ${JSON.stringify(noBudget.body).slice(0, 120)}; ${toStock.status} ${JSON.stringify(toStock.body).slice(0, 120)}; ${prC.kind}; shelf ${shelfC} → ${await companyQty()}`,
+    );
+
+    // D. One order for two projects' requests.
+    const job2 = await prisma.job.create({
+      data: {
+        number: await nextNumber('project'),
+        name: `${TAG} Second plant`,
+        customerId: customer.id,
+        costingId: costing.id,
+        createdById: pm.id,
+        projectManagerId: pm.id,
+        contractValue: D(100_000),
+        costEntries: { create: [{ costCategoryId: materials.id, state: 'BUDGETED', amount: D(80_000), sourceType: 'costing', sourceNumber: costing.number }] },
+      },
+    });
+    const approvedFor = async (jobId: string, estimate: number) => {
+      const pr = await prisma.purchaseRequest.create({
+        data: {
+          number: await nextNumber('purchase_request'),
+          status: 'APPROVED',
+          kind: 'DIRECT_TO_JOB',
+          jobId,
+          requestedById: engineer.id,
+          purpose: `${TAG} batch request`,
+          items: { create: [{ itemId: item.id, costCategoryId: materials.id, description: `${TAG} Stainless pipe`, quantity: D(2), unit: 'pcs', estimatedCost: D(estimate), estimatedAmount: D(estimate * 2) }] },
+        },
+        include: { items: true },
+      });
+      await prisma.jobCostEntry.create({
+        data: { jobId, costCategoryId: materials.id, state: 'COMMITTED', amount: D(estimate * 2), sourceType: 'purchase_request', sourceId: pr.id, sourceNumber: pr.number, description: 'Approved' },
+      });
+      return pr;
+    };
+    const pr1 = await approvedFor(job.id, 100);
+    const pr2 = await approvedFor(job2.id, 150);
+    const batchable = await api(token, 'GET', `/purchase-orders/batchable?q=${encodeURIComponent(`${TAG} batch request`)}`);
+    const offered = (Array.isArray(batchable.body) ? batchable.body : []) as { id: string; groupKey: string }[];
+    const mixedKinds = await api(token, 'POST', '/purchase-orders', { supplierId: supplier.id, requestIds: [pr1.id, prA.id] });
+    const batchPo = await api(token, 'POST', '/purchase-orders', { supplierId: supplier.id, requestIds: [pr1.id, pr2.id], notes: `${TAG} batch order` });
+    const batchId = String(batchPo.body.id);
+    const batchRow = batchPo.status === 201 ? await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: batchId }, include: { items: true } }) : null;
+    check(
+      'two projects\' approved requests are offered together (one group), requests of different kinds are refused, and one order takes both — no single project on its header',
+      offered.filter((r) => r.id === pr1.id || r.id === pr2.id).length === 2 &&
+        new Set(offered.filter((r) => r.id === pr1.id || r.id === pr2.id).map((r) => r.groupKey)).size === 1 &&
+        mixedKinds.status === 400 &&
+        batchPo.status === 201 &&
+        !!batchRow &&
+        batchRow.batch === true &&
+        batchRow.jobId === null &&
+        batchRow.requestId === null &&
+        batchRow.items.length === 2 &&
+        batchRow.items.every((i) => !!i.requestItemId),
+      `${offered.length} ${mixedKinds.status} ${batchPo.status} ${JSON.stringify(batchPo.body).slice(0, 160)}`,
+    );
+    if (batchRow) {
+      await prisma.purchaseOrder.update({ where: { id: batchId }, data: { status: 'PENDING_APPROVAL' } });
+      await settlePurchaseOrder(batchId, 'APPROVED');
+      const issued = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: batchId } });
+      const [r1, r2] = await Promise.all([pr1.id, pr2.id].map((id) => prisma.purchaseRequest.findUniqueOrThrow({ where: { id } })));
+      const rec = await prisma.receiving.create({
+        data: {
+          number: await nextNumber('receiving'),
+          status: 'PENDING_APPROVAL',
+          orderId: batchId,
+          warehouseId: warehouse.id,
+          receivedById: procurement.id,
+          items: { create: batchRow.items.map((i) => ({ orderItemId: i.id, itemId: item.id, quantity: D(2), unitCost: i.unitPrice })) },
+        },
+      });
+      await settleReceiving(rec.id, 'APPROVED');
+      const incurredOn = async (jobId: string) =>
+        num((await prisma.jobCostEntry.aggregate({ where: { jobId, state: 'INCURRED', sourceType: 'receiving', sourceId: rec.id }, _sum: { amount: true } }))._sum.amount);
+      const stockOn = async (jobId: string) =>
+        num((await prisma.projectStock.findUnique({ where: { jobId_itemId_warehouseId: { jobId, itemId: item.id, warehouseId: warehouse.id } } }))?.quantity);
+      const committedOn = async (pr: { id: string }) =>
+        num((await prisma.jobCostEntry.aggregate({ where: { state: 'COMMITTED', sourceType: 'purchase_request', sourceId: pr.id }, _sum: { amount: true } }))._sum.amount);
+      check(
+        'issued, both requests are ordered; received, each line charges its OWN request\'s project at its declared value and frees that request\'s commitment',
+        issued.status === 'ISSUED' &&
+          r1.status === 'ORDERED' &&
+          r2.status === 'ORDERED' &&
+          (await prisma.receiving.findUniqueOrThrow({ where: { id: rec.id } })).status === 'RECEIVED' &&
+          money(await incurredOn(job.id), 200) &&
+          money(await incurredOn(job2.id), 300) &&
+          (await stockOn(job2.id)) === 2 &&
+          money(await committedOn(pr1), 0) &&
+          money(await committedOn(pr2), 0),
+        `${issued.status} ${r1.status} ${r2.status}; incurred ${await incurredOn(job.id)} / ${await incurredOn(job2.id)}; stock ${await stockOn(job2.id)}; committed ${await committedOn(pr1)} / ${await committedOn(pr2)}`,
+      );
+    }
+  }
 
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);

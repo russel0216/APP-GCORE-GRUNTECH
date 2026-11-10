@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { handOverToSalesOrder } from '../shared/quotationBuying';
 import { salesOrderSpend } from '../shared/orderStock';
 import { refreshAdvance } from '../shared/finance';
 import { exchangeRates, inBase, RATE_SELECT, rateOf, storedRate } from '../shared/exchangeRates';
@@ -1366,6 +1367,9 @@ salesOrderRoutes.post(
       data: { status: 'ISSUED' },
     });
     if (!claimed.count) throw badRequest('This sales order moved a moment ago — reload to see where it stands');
+    // What was bought ahead for its quotation is the order's now (2026-11-10).
+    const me = currentUser(req);
+    await prisma.$transaction((tx) => handOverToSalesOrder(tx, order.id, { id: me.id, name: me.name }));
     await audit(
       { entityType: 'sales_order', entityId: order.id, action: 'COMPLETED', summary: `Issued sales order ${order.number} — booked at ${formatAmount(num(order.total))}` },
       req,
@@ -1464,6 +1468,8 @@ export async function settleSalesOrder(documentId: string, outcome: 'APPROVED' |
     });
     return;
   }
+  // Issued: what was bought ahead for its quotation is the order's now (2026-11-10).
+  if (outcome === 'APPROVED') await prisma.$transaction((tx) => handOverToSalesOrder(tx, documentId));
   await audit({
     entityType: 'sales_order',
     entityId: documentId,

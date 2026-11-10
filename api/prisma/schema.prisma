@@ -1147,6 +1147,7 @@ model Item {
   balances             InventoryBalance[]
   projectStock         ProjectStock[]
   orderStock           SalesOrderStock[]
+  quotationStock       QuotationStock[]
   pulloutItems         PulloutItem[]
   stockMoves           InventoryTransaction[]
   installedAssets      InstalledAsset[]
@@ -1186,6 +1187,7 @@ model Warehouse {
   balances         InventoryBalance[]
   projectStock     ProjectStock[]
   orderStock       SalesOrderStock[]
+  quotationStock   QuotationStock[]
   stockMoves       InventoryTransaction[]
 
   createdAt   DateTime @default(now())
@@ -1208,6 +1210,7 @@ model Location {
   balances       InventoryBalance[]
   projectStock   ProjectStock[]
   orderStock     SalesOrderStock[]
+  quotationStock QuotationStock[]
 
   createdAt DateTime @default(now())
 
@@ -1556,12 +1559,17 @@ enum LostKind {
 /// overwritten — "preserve quotation revisions rather than overwriting
 /// important commercial records" (model §2.5).
 model Quotation {
-  id          String  @id @default(cuid())
-  number      String  @unique
+  /// Bought ahead for it (2026-11-10).
+  purchaseRequestsFor PurchaseRequest[]      @relation("PrQuotation")
+  purchaseOrdersFor   PurchaseOrder[]        @relation("PoQuotation")
+  heldStock           QuotationStock[]
+  heldStockMoves      InventoryTransaction[] @relation("QuotationStockMoves")
+  id                  String                 @id @default(cuid())
+  number              String                 @unique
   /// A stand-in made for a sales order entered WITHOUT a quotation
   /// (2026-11-08, the owner's call for the SCORO migration, open until
   /// 31 Dec 2026 — shared/directOrders.ts). Its lines mirror the order's.
-  directOrder Boolean @default(false)
+  directOrder         Boolean                @default(false)
 
   customerId String
   customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)
@@ -2324,6 +2332,24 @@ model BudgetRequest {
   liquidatedAt       DateTime?
   cancelReason       String?
 
+  /// A TRAVEL REQUEST (2026-11-10) is a budget request with its journey:
+  /// numbered GT-TR, routed as `travel_request`, listed under Project
+  /// Management and G-FIN › Money out.
+  isTravel   Boolean   @default(false)
+  /// SHIPPING (a shipping line), LAND (transportation) or AIR (a flight).
+  travelMode String?
+  travelFrom String?
+  travelTo   String?
+  departOn   DateTime? @db.Date
+  returnOn   DateTime? @db.Date
+  /// Who travels, or what is shipped.
+  travellers String?
+  carrier    String?
+  /// Finance booked and paid it directly (the company's card): no cash was
+  /// handed to the requester and nothing is liquidated — the vouchers are
+  /// the spend.
+  paidDirect Boolean   @default(false)
+
   liquidations ExpenseClaim[]
   allocations  PaymentAllocation[]
   /// The breakdown of what the cash buys (2026-10-19, the owner's call: a full
@@ -2693,6 +2719,11 @@ enum PurchaseKind {
   /// "purchase request till purchase order without the need to create a
   /// project, a sales order only"): the deal bears the cost, never a job.
   SALES_ORDER
+  /// Bought ahead for a QUOTATION, open or won (2026-11-10, the owner's
+  /// call): nothing is charged until a sales order is issued on it or a
+  /// project built from it, which takes its requests, orders and goods over
+  /// (`shared/quotationBuying.ts`). Lost, it is re-allocated by hand.
+  QUOTATION
 }
 
 enum PrStatus {
@@ -2722,6 +2753,9 @@ model PurchaseRequest {
   /// Required when kind is SALES_ORDER — the issued order it buys for.
   salesOrderId String?
   salesOrder   SalesOrder? @relation("PrSalesOrder", fields: [salesOrderId], references: [id], onDelete: Restrict)
+  /// Required when kind is QUOTATION — the open or won quotation it buys ahead for.
+  quotationId  String?
+  quotation    Quotation?  @relation("PrQuotation", fields: [quotationId], references: [id], onDelete: Restrict)
 
   requestedById String
   requestedBy   User   @relation("PrRequester", fields: [requestedById], references: [id], onDelete: Restrict)
@@ -3023,6 +3057,13 @@ model PurchaseOrder {
   /// The sales order a SALES_ORDER-kind order buys for (from its request).
   salesOrderId String?
   salesOrder   SalesOrder? @relation("PoSalesOrder", fields: [salesOrderId], references: [id], onDelete: Restrict)
+  /// The quotation a QUOTATION-kind order buys ahead for (from its request).
+  quotationId  String?
+  quotation    Quotation?  @relation("PoQuotation", fields: [quotationId], references: [id], onDelete: Restrict)
+  /// ONE order to one supplier for lines of SEVERAL requests (2026-11-10):
+  /// `requestId` is null and each line's own request (through its
+  /// `requestItemId`) says which project it is charged to.
+  batch        Boolean     @default(false)
 
   warehouseId String?
   warehouse   Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
@@ -3628,6 +3669,31 @@ model SalesOrderStock {
   @@index([itemId])
 }
 
+/// Goods bought ahead for a QUOTATION and received into a warehouse
+/// (2026-11-10): held for it — never the company's stock — until a sales
+/// order or a project takes them over, or they are re-allocated when it is lost.
+model QuotationStock {
+  id          String    @id @default(cuid())
+  quotationId String
+  quotation   Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  quantity    Decimal @default(0) @db.Decimal(18, 3)
+  averageCost Decimal @default(0) @db.Decimal(18, 4)
+
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([quotationId, itemId, warehouseId])
+  @@index([warehouseId])
+  @@index([itemId])
+}
+
 enum StockMoveType {
   RECEIPT
   ISSUE
@@ -3664,6 +3730,9 @@ model InventoryTransaction {
   /// A movement of a sales order's own stock (SalesOrderStock, 2026-10-21).
   salesOrderId String?
   salesOrder   SalesOrder? @relation("SalesOrderStockMoves", fields: [salesOrderId], references: [id], onDelete: SetNull)
+  /// Goods bought ahead for a quotation and held for it (2026-11-10).
+  quotationId  String?
+  quotation    Quotation?  @relation("QuotationStockMoves", fields: [quotationId], references: [id], onDelete: SetNull)
 
   createdById String?
   createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
@@ -5005,6 +5074,8 @@ enum PaymentMethod {
   /// A cash advance repaid out of a commission payout (2026-10-16) —
   /// written only by the commission's payout, cleared as recorded.
   COMMISSION_DEDUCTION
+  /// The company's credit card (2026-11-10) — a travel booking paid by finance.
+  CREDIT_CARD
 }
 
 /// One movement of money, allocated across one or more documents.

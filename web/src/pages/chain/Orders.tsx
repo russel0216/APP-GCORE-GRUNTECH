@@ -40,12 +40,16 @@ interface PoRow {
   supplier: { id: string; name: string };
   job: { id: string; number: string; name: string } | null;
   request: { id: string; number: string } | null;
+  batch?: boolean;
+  salesOrder?: { id: string; number: string } | null;
+  quotation?: { id: string; number: string } | null;
 }
 
 export function PurchaseOrders() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const [params] = useSearchParams();
+  const [batching, setBatching] = useState(false);
   // An old `?fromRequest=` / `?fromCanvass=` link opens the order page with the same preset.
   if (params.has('fromRequest') || params.has('fromCanvass')) {
     return <Navigate to={`/g-chain/purchase-orders/new?${params.toString()}`} replace />;
@@ -59,7 +63,17 @@ export function PurchaseOrders() {
       render: (o) => (
         <div>
           <div>{o.supplier.name}</div>
-          <div className="faint">{o.job ? `${o.job.number} — ${o.job.name}` : 'Stock'}</div>
+          <div className="faint">
+            {o.job
+              ? `${o.job.number} — ${o.job.name}`
+              : o.salesOrder
+                ? `Sales order ${o.salesOrder.number}`
+                : o.quotation
+                  ? `Quotation ${o.quotation.number}`
+                  : o.batch && o.kind === 'DIRECT_TO_JOB'
+                    ? 'Several projects'
+                    : 'Stock'}
+          </div>
         </div>
       ),
     },
@@ -86,7 +100,7 @@ export function PurchaseOrders() {
       width: '120px',
       render: (o) => <ProgressBar pct={o.receivedPct} />,
     },
-    { key: 'request', label: 'From', render: (o) => o.request ? <span className="mono faint">{o.request.number}</span> : <span className="faint">—</span>, optional: true },
+    { key: 'request', label: 'From', render: (o) => o.request ? <span className="mono faint">{o.request.number}</span> : o.batch ? <span className="faint">several requests</span> : <span className="faint">—</span>, optional: true },
     {
       key: 'status',
       label: 'Status',
@@ -101,6 +115,8 @@ export function PurchaseOrders() {
           <h1>Purchase Orders</h1>
         </div>
       </div>
+
+      {batching && <BatchRequestsPanel onClose={() => setBatching(false)} />}
 
       <DataList<PoRow>
         listKey="purchase-orders"
@@ -130,14 +146,160 @@ export function PurchaseOrders() {
         ]}
         actions={
           can('gchain.purchase_orders.create') ? (
-            <Link className="btn btn-primary btn-sm" to="/g-chain/purchase-orders/new">
-              + New purchase order
-            </Link>
+            <>
+              <Link className="btn btn-primary btn-sm" to="/g-chain/purchase-orders/new">
+                + New purchase order
+              </Link>
+              <button type="button" className="btn btn-sm" onClick={() => setBatching((v) => !v)} aria-expanded={batching}>
+                From purchase requests…
+              </button>
+            </>
           ) : null
         }
       />
 
     </div>
+  );
+}
+
+/**
+ * ONE order from SEVERAL approved requests (2026-11-10, the owner's call:
+ * "if there are multiple purchase requests allow to create a batch purchase
+ * order … also mixed projects, this is only for one supplier"). The requests
+ * ticked must be of one kind — projects mix freely, each line charged to its
+ * own request's project; a sales order's, a quotation's or a warehouse's
+ * requests share that one target (`groupKey`). Nothing is written here: the
+ * order page opens with their lines.
+ */
+interface Batchable {
+  id: string;
+  number: string;
+  kind: string;
+  purpose: string;
+  requestedBy: string;
+  neededBy: string | null;
+  for: string;
+  groupKey: string;
+  linesLeft: number;
+  amountLeft: number;
+}
+
+function BatchRequestsPanel({ onClose }: { onClose: () => void }) {
+  const navigate = useNavigate();
+  const [rows, setRows] = useState<Batchable[] | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [q, setQ] = useState('');
+  const [picked, setPicked] = useState<Batchable[]>([]);
+
+  useEffect(() => {
+    let live = true;
+    const timer = window.setTimeout(() => {
+      api
+        .get<Batchable[]>(`/purchase-orders/batchable?q=${encodeURIComponent(q.trim())}`)
+        .then((r) => live && setRows(r))
+        .catch((e) => live && setError(e));
+    }, 250);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [q]);
+
+  const group = picked[0]?.groupKey ?? null;
+  const total = Math.round(picked.reduce((t, r) => t + r.amountLeft * 100, 0)) / 100;
+  const toggle = (r: Batchable) => setPicked((p) => (p.some((x) => x.id === r.id) ? p.filter((x) => x.id !== r.id) : [...p, r]));
+
+  return (
+    <section className="card" aria-labelledby="po-batch">
+      <div className="card-head">
+        <h2 id="po-batch" className="card-title">One order from several purchase requests</h2>
+        <button type="button" className="btn btn-sm" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <p className="muted">
+        Tick the approved requests this supplier will fill. Requests for different projects may share one order — each line is charged
+        to its own request's project. Requests for a sales order, a quotation or warehouse stock share an order only with requests for
+        the same one.
+      </p>
+      <input
+        type="search"
+        aria-label="Search approved requests"
+        placeholder="Search number, purpose, project…"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+      />
+      <ErrorBox error={error} />
+      {!rows ? (
+        <Loading />
+      ) : rows.length === 0 ? (
+        <Empty title="No approved request is waiting to be ordered" hint="A request appears here once approved, while any of its lines is still to order." />
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th aria-label="Tick" />
+                <th>Request</th>
+                <th>For</th>
+                <th>Requested by</th>
+                <th>Needed by</th>
+                <th className="num">Lines left</th>
+                <th className="num">Estimate left</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const on = picked.some((x) => x.id === r.id);
+                const blocked = !on && group !== null && r.groupKey !== group;
+                return (
+                  <tr key={r.id}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        aria-label={`Order ${r.number}`}
+                        checked={on}
+                        disabled={blocked}
+                        title={blocked ? 'Of another kind than the requests ticked — it needs an order of its own' : undefined}
+                        onChange={() => toggle(r)}
+                      />
+                    </td>
+                    <td>
+                      <div className="mono">{r.number}</div>
+                      <div className="faint">{r.purpose}</div>
+                    </td>
+                    <td>{r.for}</td>
+                    <td>{r.requestedBy}</td>
+                    <td>{r.neededBy ? formatDate(r.neededBy) : '—'}</td>
+                    <td className="num">{r.linesLeft}</td>
+                    <td className="num mono">{formatMoney(r.amountLeft)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="row card-foot">
+        <span className="muted">
+          {picked.length ? `${picked.length} request${picked.length === 1 ? '' : 's'} ticked · ${formatMoney(total)} at their estimates` : 'Nothing ticked yet'}
+        </span>
+        <button
+          type="button"
+          className="btn btn-primary btn-sm"
+          disabled={!picked.length}
+          onClick={() =>
+            navigate(
+              picked.length === 1
+                ? `/g-chain/purchase-orders/new?fromRequest=${picked[0].id}`
+                : `/g-chain/purchase-orders/new?fromRequests=${picked.map((p) => p.id).join(',')}`,
+            )
+          }
+        >
+          Raise one order
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -165,6 +327,9 @@ interface PoDetailData {
   job: { id: string; number: string; name: string } | null;
   warehouse: { id: string; name: string } | null;
   request: { id: string; number: string; purpose: string } | null;
+  batch?: boolean;
+  quotation?: { id: string; number: string; customer: { name: string } } | null;
+  requests?: { id: string; number: string; job: { id: string; number: string; name: string } | null }[];
   createdBy: { id: string; name: string };
   items: PoLine[];
   receivings: { id: string; number: string; status: string; receivedDate: string; receivedBy: { name: string } }[];
@@ -214,6 +379,7 @@ interface PoLine {
   landedUnitCost?: number | null;
   pesoUnitCost?: number | null;
   pesoBasis?: string;
+  fromRequest?: { id: string; number: string; job: { id: string; number: string; name: string } | null } | null;
 }
 
 export function PurchaseOrderDetail() {
@@ -297,10 +463,33 @@ export function PurchaseOrderDetail() {
               <Link to={`/g-ops/projects/${po.job.id}`}>
                 {po.job.number} — {po.job.name}
               </Link>
+            ) : po.quotation ? (
+              <>
+                bought ahead for quotation{' '}
+                <Link to={`/g-ops/quotations/${po.quotation.id}`}>
+                  {po.quotation.number} — {po.quotation.customer.name}
+                </Link>
+              </>
+            ) : po.batch && po.kind === 'DIRECT_TO_JOB' ? (
+              'Several projects — each line charged to its own request’s project'
             ) : (
               po.kind === 'DIRECT_TO_JOB'
                 ? 'Direct to project — no project named'
-                : `Stock replenishment${po.warehouse ? ` for ${po.warehouse.name}` : ''}`
+                : po.kind === 'SALES_ORDER'
+                  ? 'For a sales order'
+                  : `Stock replenishment${po.warehouse ? ` for ${po.warehouse.name}` : ''}`
+            )}
+            {po.batch && (po.requests ?? []).length > 0 && (
+              <>
+                {' '}
+                · from{' '}
+                {(po.requests ?? []).map((r, i) => (
+                  <span key={r.id}>
+                    {i > 0 && ', '}
+                    <Link to={`/g-chain/purchase-requests/${r.id}`}>{r.number}</Link>
+                  </span>
+                ))}
+              </>
             )}
             {po.request && (
               <>
@@ -524,6 +713,12 @@ export function PurchaseOrderDetail() {
                       <strong>{i.name ?? i.description}</strong>
                     )}
                       {i.nature === 'SERVICE' && <div className="faint">Service</div>}
+                      {po.batch && i.fromRequest && (
+                        <div className="faint">
+                          For <Link to={`/g-chain/purchase-requests/${i.fromRequest.id}`}>{i.fromRequest.number}</Link>
+                          {i.fromRequest.job ? ` · ${i.fromRequest.job.number} — ${i.fromRequest.job.name}` : ''}
+                        </div>
+                      )}
                   </td>
                   <td className="right mono">{i.quantity}</td>
                   <td>{i.unit}</td>

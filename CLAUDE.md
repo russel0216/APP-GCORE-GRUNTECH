@@ -677,7 +677,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts marketing; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,962 assertions across twenty-three scripts** (counted 2026-11-10, after a net
+**4,974 assertions across twenty-three scripts** (counted 2026-11-10, after 7 on
+chain for buying ahead for a quotation and the batch purchase order and 5 on
+finance for travel requests — the TR number and route, finance's direct booking,
+the paper, an office line's actual — and before them a net
 4 on finance for the office budgets — created, read off the documents, the
 card and its suggestion, a budget request on an office line, saved whole — and
 Back Support's SI / DR door, replacing the operations budget's 2, and before them
@@ -833,8 +836,8 @@ borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
 438, masters 92, sales 643, costing 205, pipeline 132, calendar 103, numbering
-94, partners 120, delivery 229, chain 439, hr 661, plantilla 129, meetings
-114, evaluations 154, academy 145, finance 465, aftermarket 307, cad 122,
+94, partners 120, delivery 229, chain 446, hr 661, plantilla 129, meetings
+114, evaluations 154, academy 145, finance 470, aftermarket 307, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145, marketing 69. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -8073,6 +8076,87 @@ and supplier bills with no purchase order and cash advances charge a line too.
   after. `GET /sales-orders/:id` sends `canRelease` and opens for such a Back
   Support (`assertOrderVisible`); the web route has no Guard. The old `PATCH`
   stays the editor's.
+
+## Buying ahead for a quotation, batch purchase orders, travel requests (2026-11-10)
+
+The owner's three ("on Purchase Request allow to request also reference by
+Quotation"; "if there is multiple purchase request allow to create batch
+purchase order"; "Travel Request for shipping lines, transportation or air
+flight … redirected to G-FIN › Money out, charged to project / sales order /
+quotation / costing / office budget") and his answers: an OPEN quotation may
+be bought for through the order and the Incoming; lost, what was spent is
+allocated to a project with budget left or an office line; one order mixes
+projects, for one supplier; finance may pay a booking itself by credit card;
+the Team Leader recognises a travel request too.
+
+- **`PurchaseKind.QUOTATION`** (`shared/quotationBuying.ts`): a request names
+  a quotation still OPEN / SUBMITTED / NEGOTIATION, or WON with no sales
+  order issued (`checkQuotationTarget`; `GET /purchase-requests/quotations`
+  is the picker), and its order (`PurchaseOrder.quotationId`) and Incoming
+  follow. **Charged to nothing**: no job ledger row, and goods received into
+  a warehouse are the QUOTATION's own stock (`QuotationStock`,
+  `receiveQuoteStock`, movements carrying `quotationId`) at the declared
+  cost. `quotationSpend()` reads what was spent (the sales order's shape,
+  `OrderSpendPanel`). **It finds its home by itself**: issuing a sales order
+  on the quotation runs `handOverToSalesOrder()` (requests, orders and cash
+  requests become the order's, the held goods `SalesOrderStock`); a project
+  built from it runs `handOverToProject()` in `createJobRecord` (direct to
+  the project, each live request's declared value still to come COMMITTED,
+  what was received INCURRED on its receiving, the goods `ProjectStock`).
+  **Lost**, nothing moves by itself: `GET /quotations/:id` sends `buying`
+  (`spend`, `canRequest`, `toReallocate`, `canReallocate`) and `POST
+  /quotations/:id/reallocate` (its owner / editor, or finance) moves the
+  purchasing to a project and budget line WITH BUDGET LEFT
+  (`assertBudgetLeft`, refused otherwise) or to warehouse stock (the goods
+  join the company shelf at their cost), and each budget or travel request
+  to a project or an OFFICE budget line. Purchasing never goes to an office
+  line — goods are stock or a project's. The quotation page's "Bought ahead
+  for this quotation" card (`pages/sales/QuotationBuying.tsx`) has "+ New
+  purchase request" (`/g-chain/purchase-requests/new?quotation=`) and the
+  re-allocation forms.
+- **One order from several requests** (`PurchaseOrder.batch`, `requestId`
+  null): `GET /purchase-orders/batchable?q=` lists approved requests with
+  lines left and a `groupKey`; `GET /purchase-orders/draft?requestIds=a,b`
+  and `POST /purchase-orders { requestIds }` go through `batchSource()` —
+  the requests share a KIND; projects mix freely, a sales order's, a
+  quotation's or a warehouse's requests share that one target. Every line
+  is one of the requests' lines (no added lines). **Each line is charged to
+  its OWN request's project**: `postReceiving` buckets by job × budget line
+  × request (INCURRED at the declared value, that request's commitment
+  released, the goods that project's stock), `refreshRequestsOrdered()`
+  says how far each request named is ordered, and a pull-back reverses per
+  request. The order page lists "From purchase requests…" (a panel of tick
+  boxes, a request of another group greyed) → `/g-chain/purchase-orders/new
+  ?fromRequests=a,b`; lines say "For GT-PR-… · project"; the Incoming asks
+  where the goods went as for any project order.
+- **A travel request is a `BudgetRequest` with a journey** (`isTravel`,
+  `travelMode` SHIPPING | LAND | AIR, `travelFrom`, `travelTo`, `departOn`,
+  `returnOn`, `travellers`, `carrier`; `travel: {…}` on `POST` / `PUT
+  /budget-requests`, never added to or taken off an existing request): the
+  same five sources, release, liquidation and attachments, its own number
+  (`travel_request`, GT-TR-…) and its own approval document type
+  `travel_request` (`docType(row)` in routes/budgetRequests.ts; settle and
+  reopen registered for both) — seeded "Travel request — technical manager,
+  team leader, back support, finance manager", the CEO / President above
+  ₱100,000, `preparerSigns`, `standIns`. **Finance may book and pay it
+  itself**: `POST /budget-requests/:id/book { amount, method, reference }`
+  (`gfin.ap.create`; APPROVED, never more than approved, once) writes one
+  DISBURSEMENT voucher (`PaymentMethod.CREDIT_CARD` is new) and sets
+  `paidDirect`; `refreshBudgetRequest()` then reads paid as SPENT — status
+  LIQUIDATED, no commitment, a project charged INCURRED under the request's
+  own source, an office line counting it as actual (`officeFigures`), a
+  deleted voucher putting it back to approved. Released as cash instead, it
+  is liquidated like any budget request. **Menus**: G-OPS › Project
+  Management › Travel Requests (`gops.travel_requests`, View Own / View All,
+  `/g-ops/travel-requests`; the strip is Costing, Projects, Job Orders, CAD
+  J.O., Travel Requests) and G-FIN › Money out › Travel Requests
+  (`gfin.travel_requests`, READ) — the budget request register on
+  `?travel=yes` (`BudgetRequestsList travel`; the cash registers send
+  `travel=no`; a reader holding only the travel keys lists travel alone).
+  Raising one is still Budget Requests › Manage Own (`/g-ops/budget-requests
+  /new?kind=travel`); `splitBorrowedRights()` gave the new boxes once to the
+  budget request readers. The paper is "Travel Request" with a Journey
+  section.
 
 ## A reimbursement against the project budget (2026-11-09)
 

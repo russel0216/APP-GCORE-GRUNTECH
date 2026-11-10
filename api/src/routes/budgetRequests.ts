@@ -22,7 +22,7 @@ import {
 } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
 import { renderDocument, formatMoney, formatAmount, formatQuantity, formatShortDate, statusLabel, companyCurrency, type PdfSection } from '../shared/pdf';
-import { cents, D, num, dayKey, daysBetween } from '../shared/finance';
+import { cents, D, num, dayKey, daysBetween, refreshBudgetRequest } from '../shared/finance';
 import { cashRequestSections, cashRequestSignatories, budgetSections as chargeSections } from './finance';
 import { officeBudgetPosition, officePosition, requestOffice } from '../shared/officeBudget';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
@@ -123,6 +123,28 @@ export function presentBudgetRequest(row: RequestRow, today = dayKey(new Date())
 
 type Me = ReturnType<typeof currentUser>;
 
+/**
+ * A TRAVEL request (2026-11-10, the owner's call: "Travel Request for
+ * shipping lines, transportation or air flight … redirected to G-FIN › Money
+ * out") is a budget request with a journey on it: the same sources, release,
+ * liquidation and registers, its own number (GT-TR-…) and its own approval
+ * route (`travel_request` — the Technical Manager and the Team Leader first).
+ */
+const docType = (row: { isTravel?: boolean | null }) => (row.isTravel ? ('travel_request' as const) : ('budget_request' as const));
+const docWord = (row: { isTravel?: boolean | null }) => (row.isTravel ? 'travel request' : 'budget request');
+/** Whoever may decide its open approval — under either route's name. */
+const decides = async (userId: string, id: string) => (await mayDecide(userId, 'budget_request', [id])) || (await mayDecide(userId, 'travel_request', [id]));
+/** The Travel Requests screens' own readers: every travel request, never the other cash requests. */
+const TRAVEL_ALL = ['gops.travel_requests.view_all', 'gfin.travel_requests.view_all'];
+const seesAllTravel = (me: Me) => seesAll(me) || TRAVEL_ALL.some((k) => me.permissions.has(k));
+const readsCashRegister = (me: Me) => me.isSuperAdmin || BUDGET_LIST_PERMISSIONS.some((k) => me.permissions.has(k));
+const TRAVEL_MODES = ['SHIPPING', 'LAND', 'AIR'] as const;
+export const TRAVEL_MODE_WORDS: Record<string, string> = { SHIPPING: 'Shipping line', LAND: 'Land transportation', AIR: 'Air flight' };
+/** "Air flight: Manila → Cebu, Nov 12, 2026 (back Nov 15, 2026)". */
+function journeyOf(row: { travelMode: string | null; travelFrom: string | null; travelTo: string | null; departOn: Date | null; returnOn: Date | null }) {
+  return `${TRAVEL_MODE_WORDS[row.travelMode ?? ''] ?? 'Travel'}: ${row.travelFrom ?? ''} → ${row.travelTo ?? ''}${row.departOn ? `, ${formatShortDate(row.departOn)}` : ''}${row.returnOn ? ` (back ${formatShortDate(row.returnOn)})` : ''}`;
+}
+
 /** Everyone's requests: the project side's view_all, or finance's. */
 function seesAll(me: Me): boolean {
   return (
@@ -138,8 +160,10 @@ function seesAll(me: Me): boolean {
  * it, and by the project's manager — who is asked to decide it and must be
  * able to open what they decide.
  */
-function assertCanSee(me: Me, row: { requestedById: string; job: { projectManager: { id: string } | null } | null }) {
+function assertCanSee(me: Me, row: { requestedById: string; isTravel?: boolean | null; job: { projectManager: { id: string } | null } | null }) {
   if (seesAll(me)) return;
+  if (row.isTravel && seesAllTravel(me)) return;
+  if (row.requestedById === me.id) return;
   if (visibleOwners(me, 'gops', 'budget_requests').includes(row.requestedById)) return;
   if (row.job?.projectManager?.id === me.id) return;
   throw forbidden('That is someone else’s budget request');
@@ -148,7 +172,10 @@ function assertCanSee(me: Me, row: { requestedById: string; job: { projectManage
 /** The list's where-builder — the project tab and the G-FIN screen read the same rows. */
 export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, today = dayKey(new Date())) {
   const where: Prisma.BudgetRequestWhereInput = {};
-  const mine = !seesAll(me) || q.scope === 'mine';
+  // The Travel Requests screens (`?travel=yes`), and a reader who holds only
+  // their right, list travel requests alone.
+  const travelOnly = q.filters.travel === 'yes' || !readsCashRegister(me);
+  const mine = !(travelOnly ? seesAllTravel(me) : seesAll(me)) || q.scope === 'mine';
   // Who asked: the visibility rule and the `requestedById` filter are ANDed,
   // never one written over the other — so the filter can only narrow. A
   // requester who sees only their own, naming somebody else, gets nothing.
@@ -156,13 +183,16 @@ export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, 
   const people: Prisma.BudgetRequestWhereInput[] = [];
   // View Team reads the team's requests (2026-10-19); "Mine" is one's own.
   if (q.scope === 'mine') people.push({ requestedById: me.id });
-  else if (mine) people.push({ requestedById: { in: visibleOwners(me, 'gops', 'budget_requests') } });
+  else if (mine) people.push({ requestedById: { in: [...new Set([me.id, ...visibleOwners(me, 'gops', 'budget_requests')])] } });
   if (asked) people.push({ requestedById: asked });
   if (people.length) where.AND = people;
   const f = q.filters;
   // What it is for: a record's own requests (`?jobId=`, `?salesOrderId=`,
   // `?quotationId=`, `?costingId=`) or a kind (`?for=`).
   const and: Prisma.BudgetRequestWhereInput[] = [...sourceFilter(f)];
+  if (travelOnly) and.push({ isTravel: true });
+  else if (f.travel === 'no') and.push({ isTravel: false });
+  if (f.travelMode) and.push({ travelMode: choice(f.travelMode, Object.fromEntries(TRAVEL_MODES.map((m) => [m, m])) as Record<string, string>, 'Travel by') ?? undefined });
   if (f.teamId) and.push({ requestedBy: userTeamWhere(f.teamId) });
   if (f.neededFrom || f.neededTo) {
     and.push({ neededBy: { ...(f.neededFrom ? { gte: asDate(f.neededFrom, 'Needed from') } : {}), ...(f.neededTo ? { lte: asDate(f.neededTo, 'Needed to') } : {}) } });
@@ -186,6 +216,9 @@ export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, 
       { reason: { contains: q.search, mode: 'insensitive' } },
       ...sourceSearch(q.search),
       { requestedBy: { name: { contains: q.search, mode: 'insensitive' } } },
+      { travelFrom: { contains: q.search, mode: 'insensitive' } },
+      { travelTo: { contains: q.search, mode: 'insensitive' } },
+      { carrier: { contains: q.search, mode: 'insensitive' } },
     ];
   }
   // The rows ticked — ANDed with the visibility rule above, so a ticked id
@@ -249,7 +282,9 @@ async function budgetRequestListSummary(where: Prisma.BudgetRequestWhereInput) {
   };
 }
 
-const LIST_PERMISSIONS = ['gops.budget_requests.view_all', 'gops.budget_requests.view_own', 'gfin.budget_requests.view_all', 'gfin.budget_liquidations.view_all'];
+const BUDGET_LIST_PERMISSIONS = ['gops.budget_requests.view_all', 'gops.budget_requests.view_own', 'gfin.budget_requests.view_all', 'gfin.budget_liquidations.view_all'];
+/** The registers' doors: the cash registers', and the Travel Requests screens' (which list travel requests alone). */
+const LIST_PERMISSIONS = [...BUDGET_LIST_PERMISSIONS, 'gops.travel_requests.view_all', 'gops.travel_requests.view_own', 'gfin.travel_requests.view_all'];
 
 const REQUEST_SORTS = ['number', 'amount', 'createdAt', 'neededBy', 'liquidationDueDate'];
 
@@ -322,7 +357,8 @@ budgetRequestRoutes.get(
     ]);
 
     const f = q.filters;
-    const reference = listReference(count, rows.length, ['budget request', 'budget requests'], [
+    const travelPaper = q.filters.travel === 'yes';
+    const reference = listReference(count, rows.length, travelPaper ? ['travel request', 'travel requests'] : ['budget request', 'budget requests'], [
       q.search && `search "${q.search}"`,
       f.overdue === 'true' ? 'liquidation overdue' : status && `status ${statusLabel(status)}`,
       project,
@@ -378,7 +414,7 @@ budgetRequestRoutes.get(
     ];
     sections.push(...listNotes([bracketNote(closed, ['rejected or cancelled request', 'rejected or cancelled requests'])]));
 
-    const pdf = await renderDocument({ title: 'Budget Requests', date: new Date(), reference, landscape: true, sections });
+    const pdf = await renderDocument({ title: travelPaper ? 'Travel Requests' : 'Budget Requests', date: new Date(), reference, landscape: true, sections });
     await audit(
       {
         entityType: 'budget_request',
@@ -532,10 +568,11 @@ budgetRequestRoutes.get(
     const amount = Number(req.query.amount ?? 0);
     if (!Number.isFinite(amount) || amount < 0) throw badRequest('The amount is not a number');
     const requestId = req.query.requestId ? String(req.query.requestId) : null;
-    const row = requestId ? await prisma.budgetRequest.findUnique({ where: { id: requestId }, select: { requestedById: true, jobId: true } }) : null;
+    const row = requestId ? await prisma.budgetRequest.findUnique({ where: { id: requestId }, select: { requestedById: true, jobId: true, isTravel: true } }) : null;
     if (requestId && !row) throw notFound('Budget request not found');
     const jobId = row?.jobId ?? (req.query.jobId ? String(req.query.jobId) : null);
-    res.json({ route: await routeBrief('budget_request', amount, row?.requestedById ?? me.id, null, { jobId }) });
+    const type = docType({ isTravel: row ? row.isTravel : String(req.query.travel ?? '') === '1' });
+    res.json({ route: await routeBrief(type, amount, row?.requestedById ?? me.id, null, { jobId }) });
   }),
 );
 
@@ -712,11 +749,11 @@ async function assertCanOpen(me: Me, row: Parameters<typeof assertCanSee>[1] & {
       assertCanSee(me, row);
       return;
     } catch (err) {
-      if (!(await mayDecide(me.id, 'budget_request', [row.id]))) throw err;
+      if (!(await decides(me.id, row.id))) throw err;
       return;
     }
   }
-  if (!(await mayDecide(me.id, 'budget_request', [row.id]))) throw forbidden('That is someone else’s budget request');
+  if (!(await decides(me.id, row.id))) throw forbidden('That is someone else’s budget request');
 }
 
 budgetRequestRoutes.get(
@@ -731,11 +768,14 @@ budgetRequestRoutes.get(
     // manager (and the CEO / President above ₱100,000) —
     // named before anybody presses Submit (names only).
     const approvalRoute =
-      row.status === 'DRAFT' ? await routeBrief('budget_request', num(row.amount), row.requestedById, null, { jobId: row.jobId }) : null;
+      row.status === 'DRAFT' ? await routeBrief(docType(row), num(row.amount), row.requestedById, null, { jobId: row.jobId }) : null;
     res.json({
       ...presentBudgetRequest(row),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
       canEdit: row.status === 'DRAFT' && canEditRecord(me, 'gops', 'budget_requests', row.requestedById),
+      /** Finance may book and pay an approved travel request itself — the company card (2026-11-10). */
+      canBook: row.isTravel && row.status === 'APPROVED' && (me.isSuperAdmin || me.permissions.has('gfin.ap.create')),
+      approvalType: docType(row),
       approvalRoute,
       budget: await requestBudget(row),
     });
@@ -766,7 +806,30 @@ const requestSchema = z.object({
   notes: z.string().optional().nullable(),
   /** The breakdown (2026-10-19). Sent, it replaces the request's lines whole. */
   items: z.array(itemSchema).max(200).optional(),
+  /** The journey: sent, the request is a TRAVEL request (2026-11-10). */
+  travel: z
+    .object({
+      mode: z.enum(TRAVEL_MODES),
+      from: z.string().trim().min(2, 'Where from?').max(200),
+      to: z.string().trim().min(2, 'Where to?').max(200),
+      departOn: z.string().min(1, 'When does it leave?'),
+      returnOn: z.string().optional().nullable(),
+      travellers: z.string().trim().max(1000).optional().nullable(),
+      carrier: z.string().trim().max(200).optional().nullable(),
+    })
+    .optional()
+    .nullable(),
 });
+
+/** The journey's columns, checked: a return never before the departure. */
+function travelColumns(body: RequestBody) {
+  const t = body.travel;
+  if (!t) return { isTravel: false, travelMode: null, travelFrom: null, travelTo: null, departOn: null, returnOn: null, travellers: null, carrier: null };
+  const departOn = asDate(t.departOn, 'Departure');
+  const returnOn = t.returnOn ? asDate(t.returnOn, 'Return') : null;
+  if (returnOn && returnOn < departOn) throw badRequest('The return is before the departure');
+  return { isTravel: true, travelMode: t.mode, travelFrom: t.from, travelTo: t.to, departOn, returnOn, travellers: t.travellers || null, carrier: t.carrier || null };
+}
 
 type RequestBody = z.infer<typeof requestSchema>;
 
@@ -837,12 +900,14 @@ budgetRequestRoutes.post(
     const body = parseBody(requestSchema, req.body);
     const source = await checkCharging(me, body);
     const { lines, amount } = moneyOf(body);
+    const travel = travelColumns(body);
 
     const request = await prisma.$transaction(async (tx) => {
-      const number = await nextNumber('budget_request', tx);
+      const number = await nextNumber(docType(travel), tx);
       return tx.budgetRequest.create({
         data: {
           number,
+          ...travel,
           ...source.columns,
           costCategoryId: source.costCategoryId,
           amount: D(amount),
@@ -888,6 +953,8 @@ budgetRequestRoutes.put(
     // An office request may move to another line of the office budgets while
     // a draft (over its line, the card suggests one); never to or from a record.
     if (!!body.officeBudgetLineId !== !!existing.officeBudgetLineId) throw badRequest('A budget request stays on what it was raised for — raise another');
+    if (!!body.travel !== existing.isTravel) throw badRequest(existing.isTravel ? 'A travel request keeps its journey — say where and when' : 'This is a budget request, not a travel request — raise a travel request instead');
+    const travel = travelColumns(body);
     const source = await checkCharging(me, body, existing.officeBudgetLineId);
     // Lines sent replace the breakdown whole; none sent keeps it, with the
     // amount still their sum (a typed amount counts only with no lines).
@@ -903,6 +970,7 @@ budgetRequestRoutes.put(
         data: {
           costCategoryId: source.costCategoryId,
           officeBudgetLineId: source.columns.officeBudgetLineId,
+          ...travel,
           amount: D(amount),
           reason: body.reason,
           neededBy: body.neededBy ? asDate(body.neededBy, 'Needed by') : null,
@@ -957,12 +1025,14 @@ budgetRequestRoutes.post(
           : `${formatMoney(budget.availableBefore, currency)} available → ${formatMoney(budget.availableAfter, currency)} left`;
     try {
       await submitForApproval({
-        documentType: 'budget_request',
+        documentType: docType(request),
         documentId: request.id,
         documentNumber: request.number,
-        subject: request.officeBudgetLine
-          ? `Office budget — ${request.officeBudgetLine.code} ${request.officeBudgetLine.name}: ${request.reason} (${position})`
-          : `${forWhat} — ${request.costCategory.name}: ${request.reason} (${request.costCategory.name}: ${position})`,
+        subject:
+          (request.isTravel ? `${journeyOf(request)} — ` : '') +
+          (request.officeBudgetLine
+            ? `Office budget — ${request.officeBudgetLine.code} ${request.officeBudgetLine.name}: ${request.reason} (${position})`
+            : `${forWhat} — ${request.costCategory.name}: ${request.reason} (${request.costCategory.name}: ${position})`),
         amount: num(request.amount),
         link: `/g-ops/budget-requests/${request.id}`,
         // The requester, even when a super admin presses the button: the
@@ -1025,7 +1095,7 @@ export const settleBudgetRequest = async (approval: ApprovalRequest, outcome: Ap
     finance.map((userId) => ({
       userId,
       type: 'system' as const,
-      title: `${request.number} approved — ${formatMoney(num(request.amount))} to release for ${forWhat}`,
+      title: `${request.number} approved — ${formatMoney(num(request.amount))} to ${request.isTravel ? 'book or release' : 'release'} for ${forWhat}`,
       body: `${request.requestedBy.name}: ${request.reason}`,
       link: `/g-ops/budget-requests/${request.id}`,
     })),
@@ -1038,13 +1108,14 @@ export const settleBudgetRequest = async (approval: ApprovalRequest, outcome: Ap
   });
 };
 onApprovalSettled('budget_request', settleBudgetRequest);
+onApprovalSettled('travel_request', settleBudgetRequest);
 
 /**
  * Pulled back after approval (2026-10-16): back to DRAFT while finance has
  * released nothing. Approval moved no money and charged nothing, so there is
  * nothing to undo — only refused once cash has gone out on it.
  */
-onApprovalReopened('budget_request', {
+const reopenRequest: Parameters<typeof onApprovalReopened>[1] = {
   may: async (actor, id) => {
     const row = await prisma.budgetRequest.findUnique({ where: { id }, select: { status: true, requestedById: true } });
     return !!row && !['DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED'].includes(row.status) && canEditRecord(actor, 'gops', 'budget_requests', row.requestedById);
@@ -1064,7 +1135,95 @@ onApprovalReopened('budget_request', {
       tx,
     );
   },
-});
+};
+onApprovalReopened('budget_request', reopenRequest);
+onApprovalReopened('travel_request', reopenRequest);
+
+/**
+ * Finance books and pays the trip itself (2026-11-10, the owner's call:
+ * "finance can also pay, particularly the booking of an airline using a
+ * credit card"). An APPROVED travel request, the A/P create right: one
+ * payment voucher for what the booking cost — never more than was approved —
+ * allocated to the request and marked `paidDirect`. Nobody holds cash, so
+ * `refreshBudgetRequest()` reads what was paid as what was spent: the request
+ * is LIQUIDATED at once, a project is charged INCURRED, an office line counts
+ * it as actual. Deleting the voucher puts the request back to approved.
+ */
+budgetRequestRoutes.post(
+  '/:id/book',
+  require_('gfin.ap.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(
+      z.object({
+        amount: z.number().positive('What did the booking cost?'),
+        method: z.enum(['CREDIT_CARD', 'BANK_TRANSFER', 'ONLINE', 'CASH', 'CHECK']).default('CREDIT_CARD'),
+        paymentDate: z.string().optional().nullable(),
+        reference: z.string().trim().max(200).optional().nullable(),
+        carrier: z.string().trim().max(200).optional().nullable(),
+        notes: z.string().trim().max(2000).optional().nullable(),
+      }),
+      req.body,
+    );
+    const request = await prisma.budgetRequest.findUnique({ where: { id: req.params.id }, include: { requestedBy: { select: { id: true, name: true } } } });
+    if (!request) throw notFound('Travel request not found');
+    if (!request.isTravel) throw badRequest('Only a travel request is booked and paid by finance — a budget request is released to its requester');
+    if (request.status !== 'APPROVED') throw badRequest(`${request.number} is ${statusLabel(request.status).toLowerCase()} — only an approved travel request can be booked`);
+    const amount = cents(body.amount);
+    if (amount > num(request.amount) + 0.005) {
+      throw badRequest(`${request.number} was approved for ${formatMoney(num(request.amount))} — the booking cannot cost more. Raise another request for the difference`);
+    }
+    const paymentDate = body.paymentDate ? asDate(body.paymentDate, 'Payment date') : dayKey(new Date());
+    if (paymentDate > dayKey(new Date())) throw badRequest('The payment date is still to come');
+
+    const payment = await prisma.$transaction(async (tx) => {
+      // Claimed on APPROVED with nothing paid: two clicks book once.
+      const claimed = await tx.budgetRequest.updateMany({
+        where: { id: request.id, status: 'APPROVED', paidDirect: false },
+        data: { paidDirect: true, ...(body.carrier ? { carrier: body.carrier } : {}) },
+      });
+      if (!claimed.count) throw badRequest('This request moved a moment ago — reload to see where it stands');
+      const number = await nextNumber('disbursement', tx);
+      const created = await tx.payment.create({
+        data: {
+          number,
+          kind: 'DISBURSEMENT',
+          method: body.method,
+          paymentDate,
+          amount: D(amount),
+          reference: body.reference || null,
+          // A cheque is a promise until it clears; a card or a transfer is paid on the day.
+          clearedAt: body.method === 'CHECK' ? null : paymentDate,
+          notes: `Booked and paid directly for ${request.number} — ${journeyOf(request)}${body.notes ? `. ${body.notes}` : ''}`,
+          recordedById: me.id,
+          allocations: { create: [{ budgetRequestId: request.id, amount: D(amount) }] },
+        },
+      });
+      await refreshBudgetRequest(tx, request.id);
+      return created;
+    });
+    await notify([
+      {
+        userId: request.requestedById,
+        type: 'system' as const,
+        title: `${request.number} booked — ${formatMoney(amount)} paid by finance`,
+        body: `${journeyOf(request)}${body.reference ? ` · ref. ${body.reference}` : ''}. Nothing to liquidate.`,
+        link: `/g-ops/budget-requests/${request.id}`,
+      },
+    ]);
+    await audit(
+      {
+        entityType: 'budget_request',
+        entityId: request.id,
+        action: 'UPDATED',
+        summary: `${request.number} booked and paid directly by finance — ${amount} (${payment.number}, ${statusLabel(body.method).toLowerCase()}); nothing to liquidate`,
+        after: { paymentId: payment.id, amount, method: body.method },
+      },
+      req,
+    );
+    res.json({ ok: true, paymentId: payment.id, paymentNumber: payment.number });
+  }),
+);
 
 budgetRequestRoutes.post(
   '/:id/cancel',
@@ -1094,7 +1253,7 @@ budgetRequestRoutes.post(
       if (!claimed.count) throw badRequest('This request moved a moment ago — reload to see where it stands');
       // Still with an approver: withdrawn through the engine, so it leaves
       // their queue and they are told.
-      await cancelOpenRequest('budget_request', request.id, tx, `cancelled by ${me.name}${body.reason ? `: ${body.reason}` : ''}`, me.id);
+      await cancelOpenRequest(docType(request), request.id, tx, `cancelled by ${me.name}${body.reason ? `: ${body.reason}` : ''}`, me.id);
     });
     await audit(
       { entityType: 'budget_request', entityId: request.id, action: 'CANCELLED', summary: `${request.number} cancelled${body.reason ? ` — ${body.reason}` : ''}` },
@@ -1181,17 +1340,36 @@ budgetRequestRoutes.get(
         ]),
       });
     }
+    if (row.isTravel) {
+      // The journey, right under the request's details.
+      sections.splice(1, 0, {
+        kind: 'fields',
+        title: 'Journey',
+        columns: 3,
+        fields: [
+          { label: 'Travel by', value: TRAVEL_MODE_WORDS[row.travelMode ?? ''] ?? '—' },
+          { label: 'From', value: row.travelFrom ?? '—' },
+          { label: 'To', value: row.travelTo ?? '—' },
+          { label: 'Departure', value: row.departOn ? formatShortDate(row.departOn) : '—' },
+          { label: 'Return', value: row.returnOn ? formatShortDate(row.returnOn) : 'One way' },
+          { label: 'Carrier', value: row.carrier ?? '—' },
+          { label: 'Travellers / cargo', value: row.travellers ?? '—' },
+          ...(row.paidDirect ? [{ label: 'Paid', value: 'Booked and paid directly by finance — nothing to liquidate' }] : []),
+        ],
+      });
+    }
     if (row.cancelReason) sections.push({ kind: 'text', title: 'Cancelled', body: row.cancelReason });
     sections.push(...budgetSections(await requestBudget(row), row.costCategory.name, await companyCurrency()));
 
+    const paperTitle = row.isTravel ? 'Travel Request' : 'Budget Request';
     const pdf = await renderDocument({
-      title: 'Budget Request',
+      title: paperTitle,
       documentNumber: row.number,
       date: row.createdAt,
       reference: `${sourceOf(row)?.label.replace(/ — .*$/, '') ?? ''} — ${row.reason}`,
       sections,
       signatories: await cashRequestSignatories({
-        documentType: 'budget_request',
+        documentType: docType(row),
         id: row.id,
         status: row.status,
         amount: view.amount,
@@ -1206,7 +1384,7 @@ budgetRequestRoutes.get(
     // The quotations, receipts and papers filed for the approvers go behind
     // the request (2026-11-03); `?attachments=0` prints it bare.
     const files = req.query.attachments === '0' ? [] : await attachedFiles('budget_request', row.id);
-    const { pdf: withFiles, listed } = await withAttachments(pdf, files, { title: 'Budget Request', number: row.number, reference: row.reason });
+    const { pdf: withFiles, listed } = await withAttachments(pdf, files, { title: paperTitle, number: row.number, reference: row.reason });
 
     await audit(
       {
@@ -1218,7 +1396,7 @@ budgetRequestRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Budget Request', number: row.number, author: row.requestedBy.name, date: row.createdAt })));
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: paperTitle, number: row.number, author: row.requestedBy.name, date: row.createdAt })));
     res.send(withFiles);
   }),
 );
@@ -1226,7 +1404,7 @@ budgetRequestRoutes.get(
 registerSearch({
   kind: 'budget_request',
   label: 'Budget requests',
-  permission: LIST_PERMISSIONS,
+  permission: BUDGET_LIST_PERMISSIONS,
   ownWhere: (user) => ({ requestedById: user.id }),
   async search(term, _user, limit, own) {
     const rows = await prisma.budgetRequest.findMany({
@@ -1265,14 +1443,14 @@ registerAttachmentGuard(
   async (user, id) => {
     const row = await prisma.budgetRequest.findUnique({
       where: { id },
-      select: { requestedById: true, job: { select: { projectManager: { select: { id: true } } } } },
+      select: { requestedById: true, isTravel: true, job: { select: { projectManager: { select: { id: true } } } } },
     });
     if (!row) return false;
     try {
       assertCanSee(user, row);
       return true;
     } catch {
-      return mayDecide(user.id, 'budget_request', [id]);
+      return decides(user.id, id);
     }
   },
   {

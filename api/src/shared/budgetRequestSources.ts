@@ -88,6 +88,11 @@ export interface RequestSource {
  */
 export function sourceOf(r: SourceRow): RequestSource | null {
   if (r.job) return { kind: 'project', id: r.job.id, number: r.job.number, name: r.job.name, label: `${r.job.number} — ${r.job.name}`, link: `/g-ops/projects/${r.job.id}` };
+  // An office line wins over the record it was raised on: a lost quotation's request re-allocated to the office (2026-11-10).
+  if (r.officeBudgetLine) {
+    const l = r.officeBudgetLine;
+    return { kind: 'office', id: l.id, number: l.code, name: `${l.code} ${l.name}`, label: `Office budget ${l.budget.name} — ${l.code} ${l.name}`, link: `/g-fin/operations-budget?budget=${l.budget.id}` };
+  }
   if (r.salesOrder) {
     const name = r.salesOrder.quotation.subject;
     return { kind: 'sales_order', id: r.salesOrder.id, number: r.salesOrder.number, name, label: `Sales order ${r.salesOrder.number} — ${name}`, link: `/g-ops/sales-orders/${r.salesOrder.id}` };
@@ -97,10 +102,6 @@ export function sourceOf(r: SourceRow): RequestSource | null {
   }
   if (r.costing) {
     return { kind: 'costing', id: r.costing.id, number: r.costing.number, name: r.costing.title, label: `Costing ${r.costing.number} — ${r.costing.title}`, link: `/g-ops/costing/${r.costing.id}` };
-  }
-  if (r.officeBudgetLine) {
-    const l = r.officeBudgetLine;
-    return { kind: 'office', id: l.id, number: l.code, name: `${l.code} ${l.name}`, label: `Office budget ${l.budget.name} — ${l.code} ${l.name}`, link: `/g-fin/operations-budget?budget=${l.budget.id}` };
   }
   return null;
 }

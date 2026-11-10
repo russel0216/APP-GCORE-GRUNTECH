@@ -52,6 +52,9 @@ interface SourceLine {
   quantity: number;
   unit: string;
   unitPrice: number;
+  /** A batch order's line: the request, and what, it buys for (2026-11-10). */
+  requestNumber?: string;
+  forLabel?: string;
 }
 
 interface Draft {
@@ -60,6 +63,10 @@ interface Draft {
   request: { id: string; number: string; purpose: string; preferredSupplier: string | null } | null;
   job: { id: string; number: string; name: string } | null;
   salesOrder?: { id: string; number: string; customer: { name: string } } | null;
+  quotation?: { id: string; number: string; customer: { name: string } } | null;
+  /** One order from several requests (2026-11-10). */
+  batch?: boolean;
+  requests?: { id: string; number: string; purpose: string; for: string }[];
   warehouse: { id: string; name: string } | null;
   canvass: { id: string; number: string } | null;
   supplier: { id: string; name: string; paymentTerms: string | null } | null;
@@ -93,6 +100,9 @@ interface ExistingPo {
   supplier: { id: string; name: string; paymentTerms: string | null };
   job: { id: string; number: string; name: string } | null;
   salesOrder?: { id: string; number: string; customer: { name: string } } | null;
+  quotation?: { id: string; number: string; customer: { name: string } } | null;
+  batch?: boolean;
+  requests?: { id: string; number: string; job: { id: string; number: string; name: string } | null }[];
   warehouse: { id: string; name: string } | null;
   request: { id: string; number: string; purpose: string } | null;
   fromCanvass: { id: string; number: string } | null;
@@ -109,6 +119,7 @@ interface ExistingPo {
     nature?: 'GOODS' | 'SERVICE';
     item: { id: string } | null;
     costCategory: { id: string } | null;
+    fromRequest?: { id: string; number: string; job: { id: string; number: string; name: string } | null } | null;
   }[];
 }
 
@@ -126,6 +137,8 @@ interface Line {
   unitPrice: string;
   /** Goods or a service (2026-10-21); a request line keeps the request's. */
   nature: 'GOODS' | 'SERVICE';
+  /** Which request the line came from, and what it buys for — shown, never sent. */
+  from?: string;
 }
 
 interface Header {
@@ -176,6 +189,7 @@ const fromSource = (l: SourceLine): Line => ({
   quantity: String(l.quantity),
   unitPrice: String(l.unitPrice),
   nature: l.nature ?? 'GOODS',
+  from: l.requestNumber ? `${l.requestNumber}${l.forLabel ? ` · ${l.forLabel}` : ''}` : '',
 });
 
 const amountOf = (l: Line) => prLineAmount(Number(l.quantity) || 0, Number(l.unitPrice) || 0);
@@ -197,6 +211,9 @@ export function PurchaseOrderEditor() {
   const fromCanvass = params.get('fromCanvass');
   // A canvass awarded line by line (2026-11-04): the order is one winner's.
   const canvassSupplier = params.get('supplier');
+  // Several approved requests on ONE order (2026-11-10): `?fromRequests=a,b`.
+  const fromRequests = (params.get('fromRequests') ?? '').split(',').filter(Boolean);
+  const fromBatch = fromRequests.length > 1;
 
   const [existing, setExisting] = useState<ExistingPo | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -284,11 +301,12 @@ export function PurchaseOrderEditor() {
             quantity: String(i.quantity),
             unitPrice: String(i.unitPrice),
             nature: i.nature ?? 'GOODS',
+            from: i.fromRequest ? `${i.fromRequest.number}${i.fromRequest.job ? ` · ${i.fromRequest.job.number}` : ''}` : '',
           }));
         } else {
           const ship = await api.get<{ name: string; address: string }>('/purchase-orders/ship-to').catch(() => ({ name: '', address: '' }));
           const d = await api.get<Draft>(
-            `/purchase-orders/draft${qs({ requestId: fromRequest ?? '', canvassId: fromCanvass ?? '', supplierId: fromCanvass ? (canvassSupplier ?? '') : '' })}`,
+            `/purchase-orders/draft${qs({ requestId: fromRequest ?? (fromRequests.length === 1 ? fromRequests[0] : ''), requestIds: fromBatch ? fromRequests.join(',') : '', canvassId: fromCanvass ?? '', supplierId: fromCanvass ? (canvassSupplier ?? '') : '' })}`,
           );
           if (!live) return;
           setDraft(d);
@@ -321,11 +339,14 @@ export function PurchaseOrderEditor() {
     };
     // Loaded once per page; from then on the header and lines are the page's.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, fromRequest, fromCanvass, canvassSupplier]);
+  }, [id, fromRequest, fromCanvass, canvassSupplier, params.get('fromRequests')]);
 
   const request = existing?.request ?? draft?.request ?? null;
   // Raised with no request, the buyer may name the sales order it is for.
-  const standalone = !existing && !request;
+  const batch = existing?.batch ?? draft?.batch ?? false;
+  const batchRequests: { id: string; number: string }[] = existing?.requests ?? draft?.requests ?? [];
+  const quotation = existing?.quotation ?? draft?.quotation ?? null;
+  const standalone = !existing && !request && !batch;
   const kind =
     existing?.kind ??
     (standalone
@@ -500,7 +521,8 @@ export function PurchaseOrderEditor() {
       ...(existing
         ? { version: existing.version }
         : {
-            requestId: fromCanvass ? null : fromRequest,
+            requestId: fromCanvass || fromBatch ? null : (fromRequest ?? fromRequests[0] ?? null),
+            requestIds: fromBatch ? fromRequests : undefined,
             canvassId: fromCanvass,
             salesOrderId: standalone && forMode === 'order' ? pickedOrderId || null : null,
             jobId: standalone && forMode === 'project' ? pickedJobId || null : null,
@@ -589,6 +611,18 @@ export function PurchaseOrderEditor() {
               {existing ? `Modify purchase order ${existing.number}` : 'New purchase order'}
             </h1>
             <p className="muted qe-lead">
+              {batch ? (
+                <>
+                  One order for{' '}
+                  {batchRequests.map((r, i) => (
+                    <span key={r.id}>
+                      {i > 0 && ', '}
+                      <Link to={`/g-chain/purchase-requests/${r.id}`}>{r.number}</Link>
+                    </span>
+                  ))}
+                  . Every line stays with its own request.{' '}
+                </>
+              ) : null}
               {request ? (
                 <>
                   From <Link to={`/g-chain/purchase-requests/${request.id}`}>{request.number}</Link> — {request.purpose}
@@ -707,8 +741,14 @@ export function PurchaseOrderEditor() {
                       <Link to={`/g-ops/sales-orders/${salesOrder.id}`}>
                         Sales order {salesOrder.number} — {salesOrder.customer.name}
                       </Link>
+                    ) : quotation ? (
+                      <Link to={`/g-ops/quotations/${quotation.id}`}>
+                        Quotation {quotation.number} — {quotation.customer.name} (bought ahead)
+                      </Link>
                     ) : warehouse ? (
                       `Stock for ${warehouse.name}`
+                    ) : batch && kind === 'DIRECT_TO_JOB' ? (
+                      'Several projects — each line is charged to its own request’s project'
                     ) : kind === 'DIRECT_TO_JOB' ? (
                       <span className="muted">Direct to project — no project named</span>
                     ) : (
@@ -797,9 +837,11 @@ export function PurchaseOrderEditor() {
           <section className="card" aria-labelledby="poe-lines">
             <div className="card-head">
               <h2 id="poe-lines" className="card-title">Lines</h2>
-              <button type="button" className="btn btn-sm" onClick={() => fileRef.current?.click()}>
-                Import CSV
-              </button>
+              {!batch && (
+                <button type="button" className="btn btn-sm" onClick={() => fileRef.current?.click()}>
+                  Import CSV
+                </button>
+              )}
               <input
                 ref={fileRef}
                 type="file"
@@ -813,9 +855,11 @@ export function PurchaseOrderEditor() {
                   if (file) void file.text().then((t) => importRows(t)).catch(setError);
                 }}
               />
-              <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls.filter((l) => !isBlank(l)), blankLine(lastCategory())])}>
-                + Add line
-              </button>
+              {!batch && (
+                <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls.filter((l) => !isBlank(l)), blankLine(lastCategory())])}>
+                  + Add line
+                </button>
+              )}
             </div>
 
             <div className="table-wrap qe-table-wrap">
@@ -852,7 +896,7 @@ export function PurchaseOrderEditor() {
                         <td className="mono">
                           {i + 1}
                           {l.requestItemId && (
-                            <span className="faint prq-from" title={`From ${request?.number ?? 'the request'}`}>
+                            <span className="faint prq-from" title={`From ${l.from || request?.number || 'the request'}`}>
                               PR
                             </span>
                           )}
@@ -911,6 +955,7 @@ export function PurchaseOrderEditor() {
                             onPick={(sg) => fromSuggestion(l.key, sg)}
                             onPasteRows={(text) => importRows(text, l.key)}
                           />
+                          {batch && l.from && <div className="faint">For {l.from}</div>}
                           {problem && <div className="field-error">{problem}</div>}
                         </td>
                         <td>

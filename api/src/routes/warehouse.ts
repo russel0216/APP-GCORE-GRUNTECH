@@ -25,6 +25,7 @@ import { nextNumber } from '../shared/numbering';
 import { issueProjectStock, projectHoldings, receiveProjectStock } from '../shared/projectStock';
 import { isSiteWarehouse, siteWarehouse } from '../shared/siteWarehouse';
 import { issueOrderStock, orderHoldings, receiveOrderStock } from '../shared/orderStock';
+import { receiveQuoteStock, unreceiveQuoteStock } from '../shared/quotationBuying';
 import { itemForTypedLine, matchTypedItem } from '../shared/typedItems';
 import { noRateMessage, orderInPesos, receiptUnitCost, restateReceiptLine, RESTATE_SELECT } from '../shared/receiptCost';
 import { notify } from '../shared/notifications';
@@ -386,6 +387,8 @@ receivingRoutes.get(
       kind: order.kind,
       supplier: order.supplier,
       job: order.job,
+      /** One order for several requests (2026-11-10): its lines name their own projects. */
+      batch: order.batch,
       warehouse: order.warehouse,
       receivable: order.status === 'ISSUED' || order.status === 'PARTIALLY_RECEIVED',
       // An importation order (no VAT): its goods go to the Purchasing Manager (Importation).
@@ -852,7 +855,7 @@ async function checkReceivingSheet(body: ReceivingBody, exceptReceivingId?: stri
     // or "Delivered to site" — held there as the project's stock until the
     // requestor's pull-out slip confirms it. Nothing named (a script, a draft
     // from before) is the site.
-    const forProject = order.kind === 'DIRECT_TO_JOB' && !!order.jobId;
+    const forProject = order.kind === 'DIRECT_TO_JOB' && (!!order.jobId || order.batch);
     if (toSite && !forProject) {
       throw badRequest(`${order.number} is not for a project — only a project's goods are delivered to site; choose the warehouse`);
     }
@@ -996,7 +999,7 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
     where: { id: receivingId },
     include: {
       items: true,
-      order: { include: { items: { include: { requestItem: { select: { estimatedCost: true } } } }, supplier: { select: { name: true } } } },
+      order: { include: { items: { include: { requestItem: { select: { estimatedCost: true, requestId: true, request: { select: { jobId: true } } } } } }, supplier: { select: { name: true } } } },
     },
   });
   const order = receiving.order;
@@ -1025,7 +1028,8 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
   // An order "direct to project" that names no project (raised standalone
   // before 2026-10-23) builds the company's stock when received into a
   // warehouse — a receipt never posts nowhere — and is refused otherwise.
-  const projectless = order.kind === 'DIRECT_TO_JOB' && !order.jobId;
+  // A batch order (2026-11-10) names its projects line by line, through each line's request.
+  const projectless = order.kind === 'DIRECT_TO_JOB' && !order.jobId && !order.batch;
   if (projectless && !receiving.warehouseId && !order.warehouseId) {
     throw badRequest(`${order.number} names no project and no warehouse — modify the order to say what it is for first`);
   }
@@ -1033,7 +1037,7 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
   // A project's goods are always held somewhere (2026-11-06): a report saved
   // before with no warehouse is "Delivered to site", held there as the
   // project's stock until the requestor's pull-out slip confirms it.
-  if (order.kind === 'DIRECT_TO_JOB' && order.jobId && !receiving.warehouseId) {
+  if (order.kind === 'DIRECT_TO_JOB' && (order.jobId || order.batch) && !receiving.warehouseId) {
     const site = await siteWarehouse(tx);
     await tx.receiving.update({ where: { id: receiving.id }, data: { warehouseId: site.id } });
     receiving.warehouseId = site.id;
@@ -1046,9 +1050,9 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
   // business), and that much of the request's commitment is released. A line
   // with no request behind it is charged at the receipt's own cost, and the
   // order's own commitment released, as before.
-  const byCategory = new Map<string, number>();
-  const declaredByCategory = new Map<string, number>();
-  const pricedByCategory = new Map<string, number>();
+  // Bucketed by the PROJECT each line is for (its own request's on a batch
+  // order — 2026-11-10 — else the order's), its budget line and its request.
+  const buckets = new Map<string, { jobId: string; costCategoryId: string; requestId: string | null; charged: number; priced: number; declared: number }>();
 
   for (const line of receiving.items) {
     const orderItem = line.orderItemId ? byOrderItem.get(line.orderItemId) : undefined;
@@ -1113,26 +1117,28 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
       });
     }
 
-    if (order.kind === 'DIRECT_TO_JOB' && orderItem.costCategoryId) {
+    const lineJobId = orderItem.requestItem?.request.jobId ?? order.jobId;
+    if (order.kind === 'DIRECT_TO_JOB' && orderItem.costCategoryId && lineJobId) {
       const declared = orderItem.requestItem ? cents(quantity * num(orderItem.requestItem.estimatedCost)) : null;
-      const charged = declared ?? amount;
-      byCategory.set(orderItem.costCategoryId, (byCategory.get(orderItem.costCategoryId) ?? 0) + charged);
-      pricedByCategory.set(orderItem.costCategoryId, (pricedByCategory.get(orderItem.costCategoryId) ?? 0) + orderedPesos);
-      if (declared !== null) {
-        declaredByCategory.set(orderItem.costCategoryId, (declaredByCategory.get(orderItem.costCategoryId) ?? 0) + declared);
-      }
+      const requestId = orderItem.requestItem?.requestId ?? order.requestId;
+      const k = `${lineJobId}|${orderItem.costCategoryId}|${requestId ?? ''}`;
+      const b = buckets.get(k) ?? { jobId: lineJobId, costCategoryId: orderItem.costCategoryId, requestId: requestId ?? null, charged: 0, priced: 0, declared: 0 };
+      b.charged += declared ?? amount;
+      b.priced += orderedPesos;
+      b.declared += declared ?? 0;
+      buckets.set(k, b);
     }
 
     // Project goods received into a WAREHOUSE (not to site) sit on its shelf
     // as the project's own stock (2026-10-18): charged below, as ever, and
     // never again when they leave — shared/projectStock.ts.
-    if (order.kind === 'DIRECT_TO_JOB' && order.jobId && shelfWarehouseId) {
+    if (order.kind === 'DIRECT_TO_JOB' && lineJobId && shelfWarehouseId) {
       if (!orderItem.itemId) {
         orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId, line.categoryId);
         await tx.purchaseOrderItem.update({ where: { id: orderItem.id }, data: { itemId: orderItem.itemId } });
       }
       await receiveProjectStock(tx, {
-        jobId: order.jobId,
+        jobId: lineJobId,
         itemId: orderItem.itemId,
         warehouseId: shelfWarehouseId,
         quantity,
@@ -1168,17 +1174,40 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
         createdById: actorId,
       });
     }
+
+    // Bought ahead for a QUOTATION (2026-11-10): received into a warehouse,
+    // the goods are held for it — never the company's — until a sales order
+    // or a project takes them over. Nothing is charged anywhere.
+    if (order.kind === 'QUOTATION' && order.quotationId && shelfWarehouseId) {
+      if (!orderItem.itemId) {
+        orderItem.itemId = await itemForTypedLine(tx, orderItem, actorId, line.categoryId);
+        await tx.purchaseOrderItem.update({ where: { id: orderItem.id }, data: { itemId: orderItem.itemId } });
+      }
+      await receiveQuoteStock(tx, {
+        quotationId: order.quotationId,
+        itemId: orderItem.itemId,
+        warehouseId: shelfWarehouseId,
+        quantity,
+        unitCost,
+        locationId: line.locationId,
+        sourceType: 'receiving',
+        sourceId: receiving.id,
+        sourceNumber: receiving.number,
+        createdById: actorId,
+      });
+    }
   }
 
-  if (order.kind === 'DIRECT_TO_JOB' && order.jobId) {
-    for (const [costCategoryId, amount] of byCategory) {
-      const declared = declaredByCategory.get(costCategoryId) ?? 0;
+  if (order.kind === 'DIRECT_TO_JOB') {
+    for (const b of buckets.values()) {
+      const { costCategoryId, declared } = b;
+      const amount = b.charged;
       // The request's commitment comes off by the declared value received…
-      if (declared > 0 && order.requestId) {
+      if (declared > 0 && b.requestId) {
         await releaseCommitment(tx, {
-          jobId: order.jobId,
+          jobId: b.jobId,
           sourceType: 'purchase_request',
-          sourceId: order.requestId,
+          sourceId: b.requestId,
           costCategoryId,
           amount: declared,
           reason: `Received on ${receiving.number}`,
@@ -1188,9 +1217,9 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
       // …and the order's own, at its price, where the order committed one
       // (no request behind it, or issued before 2026-10-22 under the price
       // rule and not yet put right by the seed).
-      const priced = pricedByCategory.get(costCategoryId) ?? amount;
+      const priced = b.priced || amount;
       await releaseCommitment(tx, {
-        jobId: order.jobId,
+        jobId: b.jobId,
         sourceType: 'purchase_order',
         sourceId: order.id,
         costCategoryId,
@@ -1199,7 +1228,7 @@ async function postReceiving(tx: Prisma.TransactionClient, receivingId: string, 
         createdById: actorId,
       });
       await postJobCost(tx, {
-        jobId: order.jobId,
+        jobId: b.jobId,
         costCategoryId,
         state: 'INCURRED',
         amount,
@@ -1641,7 +1670,7 @@ onApprovalReopened(RECEIVING_DOC, {
       where: { id: documentId },
       include: {
         items: true,
-        order: { include: { items: true } },
+        order: { include: { items: { include: { requestItem: { select: { requestId: true, request: { select: { jobId: true } } } } } } } },
         bills: { where: { status: { not: 'CANCELLED' } }, select: { number: true } },
       },
     });
@@ -1662,10 +1691,25 @@ onApprovalReopened(RECEIVING_DOC, {
       const orderItem = line.orderItemId ? byOrderItem.get(line.orderItemId) : undefined;
       // What came into stock: every line without an order, a replenishment's lines with an item.
       const itemId = order ? (order.kind === 'STOCK_REPLENISHMENT' ? orderItem?.itemId : null) : line.itemId;
-      if (order?.kind === 'DIRECT_TO_JOB' && order.jobId && receiving.warehouseId && orderItem?.itemId) {
+      const lineJobId = orderItem?.requestItem?.request.jobId ?? order?.jobId ?? null;
+      if (order?.kind === 'QUOTATION' && order.quotationId && receiving.warehouseId && orderItem?.itemId) {
+        // The goods held for the quotation go back out — refused once a sales order or project took them.
+        await unreceiveQuoteStock(tx, {
+          quotationId: order.quotationId,
+          itemId: orderItem.itemId,
+          warehouseId: receiving.warehouseId,
+          quantity: num(line.quantity),
+          sourceType: 'receiving',
+          sourceId: receiving.id,
+          sourceNumber: receiving.number,
+          notes: why,
+          createdById: actor.id,
+        });
+      }
+      if (order?.kind === 'DIRECT_TO_JOB' && lineJobId && receiving.warehouseId && orderItem?.itemId) {
         // The project's own stock goes back out — refused, naming it, once some left the shelf.
         await issueProjectStock(tx, {
-          jobId: order.jobId,
+          jobId: lineJobId,
           itemId: orderItem.itemId,
           warehouseId: receiving.warehouseId,
           quantity: num(line.quantity),
@@ -1729,10 +1773,12 @@ onApprovalReopened(RECEIVING_DOC, {
         createdById: actor.id,
       });
       // The request's declared value this receipt released goes back on it.
-      if (order.requestId) {
+      const requestIds = new Set<string>(order.requestId ? [order.requestId] : []);
+      for (const i of order.items) if (i.requestItem) requestIds.add(i.requestItem.requestId);
+      for (const requestId of requestIds) {
         await reverseJobCost(tx, {
           sourceType: 'purchase_request',
-          sourceId: order.requestId,
+          sourceId: requestId,
           states: ['COMMITTED'],
           description: `Received on ${receiving.number}`,
           reason: why,

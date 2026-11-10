@@ -63,6 +63,7 @@ interface PrRow {
   createdAt: string;
   job: { id: string; number: string; name: string } | null;
   salesOrder?: { id: string; number: string; customer: { name: string } } | null;
+  quotation?: { id: string; number: string; customer: { name: string } } | null;
   warehouse: { id: string; name: string } | null;
   requestedBy: { id: string; name: string };
   itemCount: number;
@@ -96,7 +97,9 @@ export function PurchaseRequests() {
               ? `${r.job.number} — ${r.job.name}`
               : r.salesOrder
                 ? `${r.salesOrder.number} — ${r.salesOrder.customer.name}`
-                : (r.warehouse?.name ?? 'Stock')}
+                : r.quotation
+                  ? `Quotation ${r.quotation.number} — ${r.quotation.customer.name}`
+                  : (r.warehouse?.name ?? 'Stock')}
           </div>
         </div>
       ),
@@ -112,10 +115,12 @@ export function PurchaseRequests() {
               ? 'Charges the project when received'
               : r.kind === 'SALES_ORDER'
                 ? 'Bought for a sales order — no project'
-                : 'Charges a project when issued from stock'
+                : r.kind === 'QUOTATION'
+                  ? 'Bought ahead for a quotation — charged once it has a sales order or a project'
+                  : 'Charges a project when issued from stock'
           }
         >
-          {r.kind === 'DIRECT_TO_JOB' ? 'direct to job' : r.kind === 'SALES_ORDER' ? 'sales order' : 'stock'}
+          {r.kind === 'DIRECT_TO_JOB' ? 'direct to job' : r.kind === 'SALES_ORDER' ? 'sales order' : r.kind === 'QUOTATION' ? 'quotation' : 'stock'}
         </span>
       ),
     },
@@ -176,6 +181,7 @@ export function PurchaseRequests() {
             options: [
               { value: 'DIRECT_TO_JOB', label: 'Direct to job' },
               { value: 'SALES_ORDER', label: 'For a sales order' },
+              { value: 'QUOTATION', label: 'For a quotation' },
               { value: 'STOCK_REPLENISHMENT', label: 'Stock replenishment' },
             ],
           },
@@ -232,6 +238,7 @@ interface PrDetail {
   estimatedTotal: number;
   job: { id: string; number: string; name: string } | null;
   salesOrder?: { id: string; number: string; customer: { name: string } } | null;
+  quotation?: { id: string; number: string; customer: { name: string } } | null;
   warehouse: { id: string; name: string } | null;
   requestedBy: { id: string; name: string };
   items: PrItem[];
@@ -385,7 +392,7 @@ export function PurchaseRequestDetail() {
         amountLabel="Estimated total"
         meta={
           <>
-            {pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : pr.kind === 'SALES_ORDER' ? 'For a sales order' : 'Stock replenishment'}
+            {pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : pr.kind === 'SALES_ORDER' ? 'For a sales order' : pr.kind === 'QUOTATION' ? 'For a quotation' : 'Stock replenishment'}
             {pr.job ? (
               <>
                 {' '}
@@ -406,7 +413,16 @@ export function PurchaseRequestDetail() {
               ` · ${pr.warehouse.name}`
             ) : (
               ''
-            )}{' '}
+            )}
+            {pr.quotation ? (
+              <>
+                {' '}
+                · {pr.kind === 'QUOTATION' ? '' : 'raised on quotation '}
+                <Link to={`/g-ops/quotations/${pr.quotation.id}`}>
+                  {pr.quotation.number} — {pr.quotation.customer.name}
+                </Link>
+              </>
+            ) : null}{' '}
             · requested by {pr.requestedBy.name}
             {pr.neededBy ? ` · needed by ${formatDate(pr.neededBy)}` : ''}
             {pr.preferredSupplier ? ` · preferred supplier ${pr.preferredSupplier}` : ''}
@@ -506,6 +522,18 @@ export function PurchaseRequestDetail() {
         <div className="alert ok">
           Approved — {formatMoney(pr.estimatedTotal)} is now committed against the project's budget
           at its declared prices — what Budget Monitoring counts until the goods arrive. The order's own prices move no budget line.
+        </div>
+      )}
+      {pr.kind === 'QUOTATION' && (
+        <div className="card">
+          <div className="card-head">
+            <h3 className="card-title">Bought ahead for the quotation</h3>
+          </div>
+          <p className="muted">
+            Nothing is charged yet. It moves to the sales order when one is issued on the quotation, or to the project built from it;
+            if the quotation is lost, it is re-allocated to a project or to warehouse stock from the quotation's page.
+          </p>
+          {pr.spend && <OrderSpendPanel spend={pr.spend} asked={pr.status === 'DRAFT' ? pr.estimatedTotal : undefined} />}
         </div>
       )}
       {pr.kind === 'SALES_ORDER' && pr.spend && (

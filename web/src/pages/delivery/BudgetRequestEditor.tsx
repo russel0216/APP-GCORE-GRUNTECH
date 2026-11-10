@@ -76,7 +76,22 @@ interface Header {
   reason: string;
   neededBy: string;
   notes: string;
+  /** The journey of a TRAVEL request (2026-11-10). */
+  travelMode: 'SHIPPING' | 'LAND' | 'AIR';
+  travelFrom: string;
+  travelTo: string;
+  departOn: string;
+  returnOn: string;
+  travellers: string;
+  carrier: string;
 }
+
+const NO_JOURNEY = { travelMode: 'AIR' as const, travelFrom: '', travelTo: '', departOn: '', returnOn: '', travellers: '', carrier: '' };
+const TRAVEL_MODES: [Header['travelMode'], string][] = [
+  ['AIR', 'Air flight'],
+  ['SHIPPING', 'Shipping line'],
+  ['LAND', 'Land transportation'],
+];
 
 const snapshot = (h: Header, lines: RequestLine[]) => JSON.stringify([h, linesSnapshot(lines)]);
 
@@ -102,7 +117,7 @@ export function BudgetRequestEditor() {
   const [busy, setBusy] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
-  const [header, setHeader] = useState<Header>({ kind: presetKind ?? 'project', sourceId: presetId ?? '', costCategoryId: '', reason: '', neededBy: '', notes: '' });
+  const [header, setHeader] = useState<Header>({ kind: presetKind ?? 'project', sourceId: presetId ?? '', costCategoryId: '', reason: '', neededBy: '', notes: '', ...NO_JOURNEY });
   const [lines, setLines] = useState<RequestLine[]>(() => [blankRequestLine()]);
   const [saved, setSaved] = useState<string | null>(null);
 
@@ -124,6 +139,13 @@ export function BudgetRequestEditor() {
             reason: row.reason,
             neededBy: row.neededBy?.slice(0, 10) ?? '',
             notes: row.notes ?? '',
+            travelMode: row.travelMode ?? 'AIR',
+            travelFrom: row.travelFrom ?? '',
+            travelTo: row.travelTo ?? '',
+            departOn: row.departOn?.slice(0, 10) ?? '',
+            returnOn: row.returnOn?.slice(0, 10) ?? '',
+            travellers: row.travellers ?? '',
+            carrier: row.carrier ?? '',
           };
           // A request raised before the breakdown: its amount as one line.
           ls = linesFromItems(row.items, row.reason, row.amount);
@@ -178,6 +200,9 @@ export function BudgetRequestEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [header.kind, search, existing]);
 
+  // A travel request: opened as one (`?kind=travel`), or the draft is one.
+  const travel = existing ? !!existing.isTravel : params.get('kind') === 'travel';
+  const word = travel ? 'travel request' : 'budget request';
   const sent = lines.filter((l) => !isBlankLine(l));
   const total = useMemo(() => linesTotal(lines), [lines]);
 
@@ -185,7 +210,7 @@ export function BudgetRequestEditor() {
     const timer = window.setTimeout(() => {
       api
         .get<{ route: Route | null }>(
-          `/budget-requests/route${qs({ amount: String(total), jobId: header.kind === 'project' ? header.sourceId : '', requestId: id ?? '' })}`,
+          `/budget-requests/route${qs({ amount: String(total), jobId: header.kind === 'project' ? header.sourceId : '', requestId: id ?? '', travel: travel ? '1' : '' })}`,
         )
         .then((r) => setRoute(r.route))
         .catch(() => setRoute(null));
@@ -214,7 +239,13 @@ export function BudgetRequestEditor() {
   const office = header.kind === 'office';
   if (!header.sourceId) problems.push(office ? 'Choose the office budget line' : `Choose the ${kindWord.label.replace(/^An? /, '')}`);
   if (!office && !header.costCategoryId) problems.push('Choose the budget line');
-  if (header.reason.trim().length < 3) problems.push('Say what the cash is for');
+  if (header.reason.trim().length < 3) problems.push(travel ? 'Say what the trip is for' : 'Say what the cash is for');
+  if (travel) {
+    if (header.travelFrom.trim().length < 2) problems.push('Say where the trip starts');
+    if (header.travelTo.trim().length < 2) problems.push('Say where it goes');
+    if (!header.departOn) problems.push('Give the departure date');
+    if (header.returnOn && header.departOn && header.returnOn < header.departOn) problems.push('The return is before the departure');
+  }
   problems.push(...linesProblems(lines));
 
   async function save(submit: boolean) {
@@ -229,6 +260,19 @@ export function BudgetRequestEditor() {
       neededBy: header.neededBy || null,
       notes: header.notes.trim() || null,
       items: linesPayload(lines),
+      ...(travel
+        ? {
+            travel: {
+              mode: header.travelMode,
+              from: header.travelFrom.trim(),
+              to: header.travelTo.trim(),
+              departOn: header.departOn,
+              returnOn: header.returnOn || null,
+              travellers: header.travellers.trim() || null,
+              carrier: header.carrier.trim() || null,
+            },
+          }
+        : {}),
     };
     try {
       const savedId = existing
@@ -307,7 +351,7 @@ export function BudgetRequestEditor() {
         <div className="qe-head">
           <div>
             <h1 id="br-heading" className="qe-heading">
-              {existing ? `Modify budget request ${existing.number}` : 'New budget request'}
+              {existing ? `Modify ${word} ${existing.number}` : `New ${word}`}
             </h1>
             <p className="muted qe-lead">
               {source ? (
@@ -315,8 +359,9 @@ export function BudgetRequestEditor() {
                   For <Link to={source.link}>{source.label}</Link>.{' '}
                 </>
               ) : null}
-              Cash for the team to buy what it needs without a purchase requisition — released by finance in one voucher once
-              approved, and accounted for afterwards with receipts.
+              {travel
+                ? 'A ticket, a fare or a shipping-line booking. Once approved, finance either books and pays it directly (the company card) — nothing to liquidate — or releases the cash to you, accounted for afterwards with receipts.'
+                : 'Cash for the team to buy what it needs without a purchase requisition — released by finance in one voucher once approved, and accounted for afterwards with receipts.'}
             </p>
           </div>
           <div className="row qe-actions">{actions}</div>
@@ -332,7 +377,7 @@ export function BudgetRequestEditor() {
       <div className="prq-grid">
         <div className="prq-main">
           <section className="card" aria-labelledby="br-details">
-            <h2 id="br-details" className="card-title">Budget request details</h2>
+            <h2 id="br-details" className="card-title">{travel ? 'Travel request details' : 'Budget request details'}</h2>
             <div className="qe-header qe-rows prq-rows">
               <Field label="Number">
                 <div className="qe-static">{existing ? <span className="mono">{existing.number}</span> : <span className="muted">Given on save</span>}</div>
@@ -440,15 +485,46 @@ export function BudgetRequestEditor() {
                 </select>
               </Field>
               )}
-              <Field label="Needed by" hint="When the team needs the cash in hand">
+              {travel && (
+                <>
+                  <Field label="Travel by" required>
+                    <select value={header.travelMode} onChange={(e) => setHeader((h) => ({ ...h, travelMode: e.target.value as Header['travelMode'] }))}>
+                      {TRAVEL_MODES.map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="From" required error={attempted && header.travelFrom.trim().length < 2 ? 'Say where the trip starts' : null}>
+                    <input value={header.travelFrom} maxLength={200} placeholder="e.g. Manila" onChange={(e) => setHeader((h) => ({ ...h, travelFrom: e.target.value }))} />
+                  </Field>
+                  <Field label="To" required error={attempted && header.travelTo.trim().length < 2 ? 'Say where it goes' : null}>
+                    <input value={header.travelTo} maxLength={200} placeholder="e.g. Cebu" onChange={(e) => setHeader((h) => ({ ...h, travelTo: e.target.value }))} />
+                  </Field>
+                  <Field label="Departure" required error={attempted && !header.departOn ? 'Give the departure date' : null}>
+                    <input type="date" value={header.departOn} onChange={(e) => setHeader((h) => ({ ...h, departOn: e.target.value }))} />
+                  </Field>
+                  <Field label="Return" hint="Blank for one way" error={attempted && header.returnOn && header.returnOn < header.departOn ? 'Before the departure' : null}>
+                    <input type="date" value={header.returnOn} min={header.departOn || undefined} onChange={(e) => setHeader((h) => ({ ...h, returnOn: e.target.value }))} />
+                  </Field>
+                  <Field label="Carrier" hint="The airline, shipping line or bus / van operator, if known">
+                    <input value={header.carrier} maxLength={200} onChange={(e) => setHeader((h) => ({ ...h, carrier: e.target.value }))} />
+                  </Field>
+                  <Field label="Travellers / cargo" hint="Who is travelling, or what is being shipped">
+                    <input value={header.travellers} maxLength={1000} onChange={(e) => setHeader((h) => ({ ...h, travellers: e.target.value }))} />
+                  </Field>
+                </>
+              )}
+              <Field label="Needed by" hint={travel ? 'When the booking has to be made' : 'When the team needs the cash in hand'}>
                 <input type="date" value={header.neededBy} onChange={(e) => setHeader((h) => ({ ...h, neededBy: e.target.value }))} />
               </Field>
-              <Field label="What is the cash for?" required error={attempted && header.reason.trim().length < 3 ? 'Say what the cash is for' : null}>
+              <Field label={travel ? 'What is the trip for?' : 'What is the cash for?'} required error={attempted && header.reason.trim().length < 3 ? (travel ? 'Say what the trip is for' : 'Say what the cash is for') : null}>
                 <input
                   value={header.reason}
                   maxLength={300}
                   autoFocus={!editing}
-                  placeholder="e.g. consumables and fittings for the Batangas tie-in"
+                  placeholder={travel ? 'e.g. site survey at the Mactan plant' : 'e.g. consumables and fittings for the Batangas tie-in'}
                   onChange={(e) => setHeader((h) => ({ ...h, reason: e.target.value }))}
                 />
               </Field>
@@ -465,7 +541,11 @@ export function BudgetRequestEditor() {
             lines={lines}
             onChange={setLines}
             attempted={attempted}
-            hint="The amount requested is the sum of the lines. Receipts for what is actually spent are filed in the liquidation."
+            hint={
+              travel
+                ? 'The fare, fees, baggage, freight — the amount requested is the sum of the lines.'
+                : 'The amount requested is the sum of the lines. Receipts for what is actually spent are filed in the liquidation.'
+            }
           />
 
           <section className="card" aria-labelledby="br-summary">

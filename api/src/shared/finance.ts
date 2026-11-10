@@ -323,14 +323,19 @@ export async function refreshBudgetRequest(
     orderBy: { approvedAt: 'desc' },
     select: { total: true, approvedAt: true },
   });
-  const spent = liquidation ? num(liquidation.total) : 0;
-  const liquidatedAt = liquidation ? liquidation.approvedAt : null;
+  // Paid by finance directly (2026-11-10: a travel booking on the company
+  // card): nobody holds cash, so what was paid IS what was spent and there is
+  // nothing to liquidate. A deleted voucher puts it back to approved.
+  const direct = row.paidDirect && !liquidation && released > 0.005;
+  const spent = liquidation ? num(liquidation.total) : direct ? released : 0;
+  const liquidatedAt = liquidation ? liquidation.approvedAt : direct ? (row.liquidatedAt ?? new Date()) : null;
   const amount = num(row.amount);
 
   const frozen = ['DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED'].includes(row.status);
   let status: string = row.status;
   if (!frozen) {
-    if (!liquidation) {
+    if (direct) status = 'LIQUIDATED';
+    else if (!liquidation) {
       status = released + 0.005 >= amount ? 'RELEASED' : 'APPROVED';
     } else {
       const refundDue = cents(Math.max(0, released - spent));
@@ -359,6 +364,7 @@ export async function refreshBudgetRequest(
       releasedAt,
       liquidationDueDate,
       status: status as never,
+      ...(row.paidDirect && !direct && !liquidation ? { paidDirect: false } : {}),
     },
   });
 
@@ -371,7 +377,7 @@ export async function refreshBudgetRequest(
   // the difference, so deleting the release voucher takes it off again.
   // A request on a sales order, quotation or costing (2026-10-26) has no
   // ledger until a project built from it takes it over.
-  const shouldCommit = !frozen && !liquidation ? released : 0;
+  const shouldCommit = !frozen && !liquidation && !direct ? released : 0;
   const ledger = row.jobId
     ? await tx.jobCostEntry.aggregate({
         where: { jobId: row.jobId, state: 'COMMITTED', sourceType: 'budget_request', sourceId: id },
@@ -397,7 +403,29 @@ export async function refreshBudgetRequest(
     });
   }
 
-  const payable = status === 'REFUND_DUE' ? cents(Math.max(0, released - spent)) : amount;
+  // A direct payment is the project's cost at once: INCURRED under the
+  // request's own source, re-derived like the commitment above.
+  if (row.jobId) {
+    const posted = await tx.jobCostEntry.aggregate({
+      where: { jobId: row.jobId, state: 'INCURRED', sourceType: 'budget_request', sourceId: id },
+      _sum: { amount: true },
+    });
+    const gap = cents((direct ? released : 0) - num(posted._sum.amount));
+    if (Math.abs(gap) >= 0.005) {
+      await postJobCost(tx, {
+        jobId: row.jobId,
+        costCategoryId: row.costCategoryId,
+        state: 'INCURRED',
+        amount: gap,
+        sourceType: 'budget_request',
+        sourceId: id,
+        sourceNumber: row.number,
+        description: gap > 0 ? `Paid directly by finance — ${row.reason}` : 'Direct payment reversed',
+      });
+    }
+  }
+
+  const payable = status === 'REFUND_DUE' ? cents(Math.max(0, released - spent)) : direct ? released : amount;
   const paid = status === 'REFUND_DUE' ? refunded : released;
   return { paid, outstanding: cents(payable - paid), status };
 }

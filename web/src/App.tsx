@@ -100,7 +100,7 @@ import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
 import { CashAdvanceEditor } from './pages/finance/CashAdvanceEditor';
 import { ClaimEditor } from './pages/finance/ClaimEditor';
 import { Commissions, CommissionEditor, CommissionPage } from './pages/finance/Commissions';
-import { BudgetRequests, BudgetRequestDetail, FinanceBudgetRequests, FinanceLiquidations } from './pages/delivery/BudgetRequests';
+import { BudgetRequests, BudgetRequestDetail, FinanceBudgetRequests, FinanceLiquidations, FinanceTravelRequests, TravelRequests } from './pages/delivery/BudgetRequests';
 import { BudgetRequestEditor } from './pages/delivery/BudgetRequestEditor';
 import {
   FinanceDashboard,
@@ -627,6 +627,15 @@ function Routed() {
           element={
             <GuardAny permissions={['gops.budget_requests.view_all', 'gops.budget_requests.view_own']}>
               <BudgetRequests />
+            </GuardAny>
+          }
+        />
+        {/* Travel requests (2026-11-10): the budget request register, travel alone. */}
+        <Route
+          path="/g-ops/travel-requests"
+          element={
+            <GuardAny permissions={['gops.travel_requests.view_all', 'gops.travel_requests.view_own']}>
+              <TravelRequests />
             </GuardAny>
           }
         />
@@ -1451,6 +1460,14 @@ function Routed() {
           element={
             <Guard permission="gfin.budget_requests.view_all">
               <FinanceBudgetRequests />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/travel-requests"
+          element={
+            <Guard permission="gfin.travel_requests.view_all">
+              <FinanceTravelRequests />
             </Guard>
           }
         />

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { handOverToProject } from '../shared/quotationBuying';
 import { z } from 'zod';
 import { Prisma, JobStatus, JobType, CostState } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -902,6 +903,9 @@ export async function createJobRecord(
       ? (await tx.quotationRevision.findUnique({ where: { id: input.quotationRevisionId }, select: { quotationId: true } }))?.quotationId ?? null
       : null);
   await adoptBudgetRequests(tx, created.id, { costingIds: costings.map((c) => c.id), quotationId });
+  // Purchasing still held on the quotation — bought ahead, no sales order
+  // issued in between — is the project's from now on (2026-11-10).
+  if (quotationId) await handOverToProject(tx, created.id, quotationId);
   return created;
 }
 

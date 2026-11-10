@@ -1894,6 +1894,7 @@ export function RecordPaymentModal({
             <option value="CHECK">Cheque</option>
             <option value="CASH">Cash</option>
             <option value="ONLINE">Online</option>
+            <option value="CREDIT_CARD">Credit card</option>
             <option value="OFFSET">Offset</option>
             {/* A cash advance repaid out of the person's pay (2026-10-15). */}
             {targetKind === 'advance_refund' && <option value="SALARY_DEDUCTION">Salary deduction</option>}
@@ -2292,6 +2293,7 @@ export function Payments({ register = 'collections' }: { register?: 'collections
         { value: 'CHECK', label: 'Cheque' },
         { value: 'CASH', label: 'Cash' },
         { value: 'ONLINE', label: 'Online' },
+        { value: 'CREDIT_CARD', label: 'Credit card' },
         { value: 'OFFSET', label: 'Offset' },
         ...(collections
           ? []

@@ -102,6 +102,7 @@ interface ExistingPr {
   version: string;
   job: { id: string; number: string; name: string } | null;
   salesOrder: { id: string; number: string; customer: { name: string } } | null;
+  quotation?: { id: string; number: string; subject: string | null; customer: { name: string } } | null;
   warehouse: { id: string; name: string } | null;
   requestedBy: { id: string; name: string };
   items: {
@@ -125,8 +126,10 @@ interface Line extends PrLineDraft {
 }
 
 interface Header {
-  kind: 'DIRECT_TO_JOB' | 'STOCK_REPLENISHMENT' | 'SALES_ORDER';
+  kind: 'DIRECT_TO_JOB' | 'STOCK_REPLENISHMENT' | 'SALES_ORDER' | 'QUOTATION';
   jobId: string;
+  /** The quotation a QUOTATION request buys ahead for — charged once it has a sales order or a project (2026-11-10). */
+  quotationId: string;
   /** The issued sales order a SALES_ORDER request buys for — no project (2026-10-21). */
   salesOrderId: string;
   warehouseId: string;
@@ -185,6 +188,8 @@ export function PurchaseRequisitionEditor() {
   const [budget, setBudget] = useState<Budget | null>(null);
   const [orderBudget, setOrderBudget] = useState<OrderBudget | null>(null);
   const [orders, setOrders] = useState<OrderOption[]>([]);
+  const [quotes, setQuotes] = useState<OrderOption[]>([]);
+  const [quoteBudget, setQuoteBudget] = useState<{ quotation: { id: string; number: string; customer: string }; spend: OrderSpend | null } | null>(null);
   const [costing, setCosting] = useState<Suggestion[] | null>(null);
   const [route, setRoute] = useState<Route | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -198,9 +203,12 @@ export function PurchaseRequisitionEditor() {
   const presetJobId = params.get('jobId');
   // Opened from a sales order's "Request purchase" (2026-10-21): bought for it, no project.
   const presetSalesOrderId = params.get('salesOrder');
+  // Opened from a quotation's "Request purchase" (2026-11-10): bought ahead of the order.
+  const presetQuotationId = params.get('quotation');
   const [header, setHeader] = useState<Header>({
-    kind: presetSalesOrderId ? 'SALES_ORDER' : 'DIRECT_TO_JOB',
+    kind: presetSalesOrderId ? 'SALES_ORDER' : presetQuotationId ? 'QUOTATION' : 'DIRECT_TO_JOB',
     jobId: presetJobId ?? '',
+    quotationId: presetQuotationId ?? '',
     salesOrderId: presetSalesOrderId ?? '',
     warehouseId: '',
     purpose: '',
@@ -233,8 +241,9 @@ export function PurchaseRequisitionEditor() {
           if (!live) return;
           setExisting(pr);
           h = {
-            kind: pr.kind === 'STOCK_REPLENISHMENT' || pr.kind === 'SALES_ORDER' ? pr.kind : 'DIRECT_TO_JOB',
+            kind: pr.kind === 'STOCK_REPLENISHMENT' || pr.kind === 'SALES_ORDER' || pr.kind === 'QUOTATION' ? pr.kind : 'DIRECT_TO_JOB',
             jobId: pr.job?.id ?? '',
+            quotationId: pr.quotation?.id ?? '',
             salesOrderId: pr.salesOrder?.id ?? '',
             warehouseId: pr.warehouse?.id ?? '',
             purpose: pr.purpose,
@@ -279,6 +288,30 @@ export function PurchaseRequisitionEditor() {
   const jobFixed = Boolean(presetJobId) || (editing && Boolean(existing?.job));
   // So is the sales order, opened from its page.
   const orderFixed = Boolean(presetSalesOrderId);
+  const forQuote = header.kind === 'QUOTATION';
+  const quoteFixed = Boolean(presetQuotationId);
+
+  useEffect(() => {
+    if (quoteFixed || !forQuote) return;
+    api
+      .get<OrderOption[]>('/purchase-requests/quotations')
+      .then(setQuotes)
+      .catch(() => setQuotes([]));
+  }, [quoteFixed, forQuote]);
+
+  // What was already bought ahead for the quotation, whenever it changes.
+  useEffect(() => {
+    setQuoteBudget(null);
+    if (!forQuote || !header.quotationId) return;
+    let live = true;
+    api
+      .get<NonNullable<typeof quoteBudget>>(`/purchase-requests/budget${qs({ quotationId: header.quotationId })}`)
+      .then((b) => live && setQuoteBudget(b))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [forQuote, header.quotationId]);
 
   useEffect(() => {
     if (orderFixed || !forOrder) return;
@@ -357,6 +390,11 @@ export function PurchaseRequisitionEditor() {
     (existing?.salesOrder ? { ...existing.salesOrder, customer: existing.salesOrder.customer.name } : null) ??
     orders.find((o) => o.id === header.salesOrderId) ??
     null;
+  const quoteName =
+    quoteBudget?.quotation ??
+    (existing?.quotation ? { id: existing.quotation.id, number: existing.quotation.number, customer: existing.quotation.customer.name } : null) ??
+    quotes.find((o) => o.id === header.quotationId) ??
+    null;
   useBackLink(
     editing && existing
       ? `${base}/${existing.id}`
@@ -364,7 +402,9 @@ export function PurchaseRequisitionEditor() {
         ? `/g-ops/projects/${presetJobId}?tab=procurement`
         : presetSalesOrderId
           ? `/g-ops/sales-orders/${presetSalesOrderId}`
-          : null,
+          : presetQuotationId
+            ? `/g-ops/quotations/${presetQuotationId}`
+            : null,
     editing && existing
       ? existing.number
       : projectName
@@ -447,6 +487,7 @@ export function PurchaseRequisitionEditor() {
   if (header.purpose.trim().length < 3) problems.push('Say what this request is for (Purpose)');
   if (direct && !header.jobId) problems.push('Choose the project');
   if (forOrder && !header.salesOrderId) problems.push('Choose the sales order');
+  if (forQuote && !header.quotationId) problems.push('Choose the quotation');
   if (header.kind === 'STOCK_REPLENISHMENT' && !header.warehouseId) problems.push('Choose the warehouse');
   sent.forEach((l, i) => {
     const p = lineProblem(l);
@@ -458,6 +499,7 @@ export function PurchaseRequisitionEditor() {
       kind: header.kind,
       jobId: direct ? header.jobId || null : null,
       salesOrderId: forOrder ? header.salesOrderId || null : null,
+      quotationId: forQuote ? header.quotationId || null : null,
       warehouseId: header.warehouseId || null,
       purpose: header.purpose.trim(),
       neededBy: header.neededBy || null,
@@ -568,6 +610,12 @@ export function PurchaseRequisitionEditor() {
                   project.{' '}
                 </>
               ) : null}
+              {forQuote && quoteName ? (
+                <>
+                  Bought ahead for quotation <Link to={`/g-ops/quotations/${quoteName.id}`}>{quoteName.number} — {quoteName.customer}</Link>:
+                  charged once it has a sales order or a project.{' '}
+                </>
+              ) : null}
               {existing
                 ? 'Change what you need and Save — the header and the lines are saved together.'
                 : 'The header and the lines are saved together; the number is issued on the first save.'}
@@ -592,7 +640,7 @@ export function PurchaseRequisitionEditor() {
               <Field label="Number">
                 <div className="qe-static">{existing ? <span className="mono">{existing.number}</span> : <span className="muted">Given on save</span>}</div>
               </Field>
-              {!jobFixed && !orderFixed ? (
+              {!jobFixed && !orderFixed && !quoteFixed ? (
                 <Field label="Kind">
                   <select
                     value={header.kind}
@@ -604,17 +652,42 @@ export function PurchaseRequisitionEditor() {
                         kind,
                         jobId: kind === 'DIRECT_TO_JOB' ? h.jobId : '',
                         salesOrderId: kind === 'SALES_ORDER' ? h.salesOrderId : '',
+                        quotationId: kind === 'QUOTATION' ? h.quotationId : '',
                       }));
                     }}
                   >
                     <option value="DIRECT_TO_JOB">Direct to project (charged to its budget)</option>
                     <option value="SALES_ORDER">For a sales order (no project)</option>
+                    <option value="QUOTATION">For a quotation (bought ahead, charged once won)</option>
                     <option value="STOCK_REPLENISHMENT">Warehouse stock (charged when issued)</option>
                   </select>
                 </Field>
               ) : (
                 <Field label="Kind">
-                  <div className="qe-static">{orderFixed ? 'For a sales order' : 'Direct to project'}</div>
+                  <div className="qe-static">{orderFixed ? 'For a sales order' : quoteFixed ? 'For a quotation' : 'Direct to project'}</div>
+                </Field>
+              )}
+              {forQuote && !quoteFixed && (
+                <Field
+                  label="Quotation"
+                  required
+                  error={attempted && !header.quotationId ? 'Choose the quotation' : null}
+                  hint="Open, or won with no sales order yet. Nothing is charged until it has a sales order or a project."
+                >
+                  <select value={header.quotationId} required onChange={(e) => setHeader((h) => ({ ...h, quotationId: e.target.value }))}>
+                    <option value="">— choose a quotation —</option>
+                    {existing?.quotation && !quotes.some((o) => o.id === existing.quotation!.id) && (
+                      <option value={existing.quotation.id}>
+                        {existing.quotation.number} — {existing.quotation.customer.name}
+                      </option>
+                    )}
+                    {quotes.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.number} — {o.customer}
+                        {o.subject ? ` · ${o.subject}` : ''}
+                      </option>
+                    ))}
+                  </select>
                 </Field>
               )}
               {forOrder && !orderFixed && (
@@ -697,7 +770,9 @@ export function PurchaseRequisitionEditor() {
                 ? 'Each line is charged to a budget line (cost category) of the project. Only an approved request commits the budget; receiving incurs it.'
                 : forOrder
                   ? "This buys for the sales order — no project is needed. What it costs is measured against the order's quoted cost; received into a warehouse, the goods are held for the order until they go out."
-                  : 'This buys for the warehouse. No project is charged until the stock is issued to one.'}
+                  : forQuote
+                    ? 'This buys ahead for the quotation — before the customer confirms. Nothing is charged until a sales order is issued on it or a project is built from it; received into a warehouse, the goods are held for the quotation. If it is lost, they are re-allocated to a project or to warehouse stock.'
+                    : 'This buys for the warehouse. No project is charged until the stock is issued to one.'}
             </p>
           </section>
 
@@ -953,6 +1028,28 @@ export function PurchaseRequisitionEditor() {
               <Loading />
             ) : (
               <OrderSpendPanel spend={orderBudget.spend} asked={total} />
+            )}
+          </aside>
+        )}
+
+        {forQuote && (
+          <aside className="card prq-budget" aria-labelledby="prq-quote-budget">
+            <div className="card-head">
+              <h2 id="prq-quote-budget" className="card-title">Quotation cost — live</h2>
+              <span className="muted prq-source">as you type</span>
+            </div>
+            {!header.quotationId ? (
+              <p className="muted">Choose the quotation to see what was bought ahead for it.</p>
+            ) : !quoteBudget ? (
+              <Loading />
+            ) : (
+              <>
+                <p className="prq-hint">
+                  Bought ahead of the order: nothing is charged until the quotation has a sales order or a project. If it is lost, what
+                  was bought is re-allocated to a project or to warehouse stock.
+                </p>
+                <OrderSpendPanel spend={quoteBudget.spend} asked={total} />
+              </>
             )}
           </aside>
         )}

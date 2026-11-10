@@ -71,8 +71,9 @@ export async function officeFigures(lineIds: string[], own: OfficeOwn = {}): Pro
       select: { officeBudgetLineId: true, status: true, subtotal: true },
     }),
     prisma.budgetRequest.findMany({
-      where: { ...on, status: { in: [...ASKED, 'RELEASED'] }, ...not(own.budgetRequestId) },
-      select: { officeBudgetLineId: true, status: true, amount: true, amountReleased: true },
+      // A request finance paid directly (a travel booking) is spent with no claim behind it.
+      where: { ...on, OR: [{ status: { in: [...ASKED, 'RELEASED'] } }, { status: 'LIQUIDATED', paidDirect: true }], ...not(own.budgetRequestId) },
+      select: { officeBudgetLineId: true, status: true, amount: true, amountReleased: true, amountSpent: true },
     }),
     prisma.cashAdvance.findMany({
       where: { ...on, status: { in: [...ASKED, 'RELEASED'] }, ...not(own.cashAdvanceId) },
@@ -94,7 +95,8 @@ export async function officeFigures(lineIds: string[], own: OfficeOwn = {}): Pro
   }
   for (const r of requests) {
     const f = at(r.officeBudgetLineId);
-    if (r.status === 'RELEASED') f.released += num(r.amountReleased);
+    if (r.status === 'LIQUIDATED') f.spent += num(r.amountSpent);
+    else if (r.status === 'RELEASED') f.released += num(r.amountReleased);
     else f.requested += num(r.amount);
   }
   for (const a of advances) {
@@ -325,7 +327,8 @@ export async function requestOffice(request: { id: string; officeBudgetLineId: s
     lineId: request.officeBudgetLineId,
     amount: released ? num(request.amountReleased) : num(request.amount),
     basis: released ? 'released' : asked ? 'asked' : closed ? 'closed' : 'settled',
-    own: { budgetRequestId: request.id },
+    // Settled, the line is read as it stands — a direct payment's own spend with it.
+    own: released || asked ? { budgetRequestId: request.id } : {},
   });
 }
 

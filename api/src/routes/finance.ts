@@ -291,7 +291,7 @@ const awaitsApproval = (status: string) => status === 'DRAFT' || status === 'PEN
  * a receipt that has not happened.
  */
 export async function cashRequestSignatories(input: {
-  documentType: 'cash_advance' | 'budget_request';
+  documentType: 'cash_advance' | 'budget_request' | 'travel_request';
   id: string;
   status: string;
   amount: number;
@@ -4680,7 +4680,7 @@ paymentRoutes.get(
 
 const paymentSchema = z.object({
   kind: z.enum(['RECEIPT', 'DISBURSEMENT']),
-  method: z.enum(['CASH', 'CHECK', 'BANK_TRANSFER', 'ONLINE', 'OFFSET', 'SALARY_DEDUCTION']).default('BANK_TRANSFER'),
+  method: z.enum(['CASH', 'CHECK', 'BANK_TRANSFER', 'ONLINE', 'CREDIT_CARD', 'OFFSET', 'SALARY_DEDUCTION']).default('BANK_TRANSFER'),
   paymentDate: z.string().optional(),
   customerId: z.string().optional().nullable(),
   supplierId: z.string().optional().nullable(),

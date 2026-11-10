@@ -8,6 +8,7 @@ import { usePeople } from '../../components/People';
 import { useTeams } from '../finance/Receivables';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
+import { NumberInput } from '../../components/NumberInput';
 import { useBackLink } from '../../components/Navigation';
 import { ApprovalStepper, DocumentApproval, DecisionNote } from '../../components/ApprovalStepper';
 import { ErrorBox, Loading, StatusBadge, formatDate, formatMoney, humanise, useToast, type Tone } from '../../components/ui';
@@ -106,6 +107,18 @@ export interface BudgetRequest {
   approvalRoute?: { name: string; steps: { name: string; approvers: { id: string; name: string }[] }[] } | null;
   /** The register's "Available after" on the request's budget line; null once it takes nothing more. */
   availableAfter?: number | null;
+  /** A TRAVEL request (2026-11-10): the journey, and whether finance booked and paid it itself. */
+  isTravel?: boolean;
+  travelMode?: 'SHIPPING' | 'LAND' | 'AIR' | null;
+  travelFrom?: string | null;
+  travelTo?: string | null;
+  departOn?: string | null;
+  returnOn?: string | null;
+  travellers?: string | null;
+  carrier?: string | null;
+  paidDirect?: boolean;
+  canBook?: boolean;
+  approvalType?: 'budget_request' | 'travel_request';
   /** "Against the project budget" (GET /:id) — Budget Monitoring's figures, this request's own commitment left out. */
   budget?: RequestBudget;
   allocations?: {
@@ -172,20 +185,44 @@ interface RequestsSummary {
  * approval and To release. One query, one component, so the two can never
  * list different sets.
  */
-export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
+export const TRAVEL_MODE_WORDS: Record<string, string> = { SHIPPING: 'Shipping line', LAND: 'Land transportation', AIR: 'Air flight' };
+
+export function BudgetRequestsList({ finance = false, travel = false }: { finance?: boolean; travel?: boolean }) {
   const navigate = useNavigate();
+  const base = `${finance ? '/g-fin' : '/g-ops'}/${travel ? 'travel-requests' : 'budget-requests'}`;
+  const word = travel ? 'travel request' : 'budget request';
   const { can } = useAuth();
   const { people } = usePeople('gops.budget_requests.create');
   const teams = useTeams();
 
   const columns: Column<BudgetRequest>[] = [
-    { key: 'number', label: 'BR No.', sortKey: 'number', width: '150px', render: (r) => <span className="mono">{r.number}</span> },
+    { key: 'number', label: travel ? 'TR No.' : 'BR No.', sortKey: 'number', width: '150px', render: (r) => <span className="mono">{r.number}</span> },
     { key: 'requestedBy', label: 'Requester', render: (r) => r.requestedBy.name },
     {
       key: 'team',
       label: 'Team',
       render: (r) => (r.team ? <span title={r.team.title}>{r.team.label}</span> : <span className="faint">—</span>),
     },
+    ...(travel
+      ? ([
+          {
+            key: 'journey',
+            label: 'Journey',
+            render: (r) => (
+              <div>
+                <div>
+                  {r.travelFrom} → {r.travelTo}
+                </div>
+                <div className="faint">
+                  {TRAVEL_MODE_WORDS[r.travelMode ?? ''] ?? 'Travel'}
+                  {r.departOn ? ` · ${formatDate(r.departOn)}` : ''}
+                  {r.returnOn ? ` – ${formatDate(r.returnOn)}` : ''}
+                </div>
+              </div>
+            ),
+          },
+        ] as Column<BudgetRequest>[])
+      : []),
     {
       key: 'job',
       label: 'For / Purpose',
@@ -243,59 +280,68 @@ export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
     { key: 'neededFrom', toKey: 'neededTo', label: 'Date needed', type: 'dateRange' },
     // What the cash is for (2026-10-26).
     { key: 'for', label: 'For', options: (Object.keys(SOURCE_WORDS) as RequestSource['kind'][]).map((k) => ({ value: k, label: SOURCE_WORDS[k] })) },
+    ...(travel
+      ? [{ key: 'travelMode', label: 'Travel by', options: Object.entries(TRAVEL_MODE_WORDS).map(([value, label]) => ({ value, label })) } as FilterDef]
+      : []),
   ];
 
   return (
     <div>
       <div className="page-head">
         <div>
-          <h1>Budget Requests</h1>
+          <h1>{travel ? 'Travel Requests' : 'Budget Requests'}</h1>
         </div>
       </div>
 
       <DataList<BudgetRequest>
-        listKey={finance ? 'fin-budget-requests' : 'budget-requests'}
+        listKey={`${finance ? 'fin-' : ''}${travel ? 'travel-requests' : 'budget-requests'}`}
         endpoint="/budget-requests"
+        // The two registers are one list (rule 15): a travel request has its own menu entry.
+        initialFilters={{ travel: travel ? 'yes' : 'no' }}
         printPath="/api/budget-requests/pdf"
-        reportPath={finance ? '/g-fin/reports?kind=budget-requests' : undefined}
+        reportPath={finance && !travel ? '/g-fin/reports?kind=budget-requests' : undefined}
         columns={columns}
         rowKey={(r) => r.id}
         scoped={!finance}
         selectable
-        searchPlaceholder="Search BR no., purpose, project, requester…"
+        searchPlaceholder={travel ? 'Search TR no., purpose, route, carrier, requester…' : 'Search BR no., purpose, project, requester…'}
         onRowClick={(r) => navigate(`/g-ops/budget-requests/${r.id}`)}
-        emptyTitle="No budget requests"
-        emptyHint="Every request names a project — for office or operations cash, raise it against the operations budget's project."
+        emptyTitle={`No ${word}s`}
+        emptyHint={
+          travel
+            ? 'A ticket, a fare or a shipping-line booking — charged to a project, a sales order, a quotation, a costing or an office budget line.'
+            : 'A request is charged to a project, a sales order, a quotation, a costing or an office budget line.'
+        }
         filters={filters}
         summary={(raw) => {
           const sum = raw as unknown as RequestsSummary | undefined;
           if (!sum) return null;
           return (
             <>
-              <Stat label="Sum of all budget requests" value={formatMoney(sum.total)} figure sub={`${sum.count} request${sum.count === 1 ? '' : 's'}, rejected and cancelled left out`} />
-              <Stat label="Approved funds" value={formatMoney(sum.approved)} figure accent="ok" sub={`${sum.approvedCount} approved`} to={`${finance ? '/g-fin' : '/g-ops'}/budget-requests?approved=true`} />
+              <Stat label={`Sum of all ${word}s`} value={formatMoney(sum.total)} figure sub={`${sum.count} request${sum.count === 1 ? '' : 's'}, rejected and cancelled left out`} />
+              <Stat label="Approved funds" value={formatMoney(sum.approved)} figure accent="ok" sub={`${sum.approvedCount} approved`} to={`${base}?approved=true`} />
               <Stat
                 label="Pending approval"
                 value={formatMoney(sum.pending)}
                 figure
                 accent={sum.pending > 0 ? 'warn' : undefined}
                 sub={`${sum.pendingCount} waiting`}
-                to={`${finance ? '/g-fin' : '/g-ops'}/budget-requests?pending=true`}
+                to={`${base}?pending=true`}
               />
               <Stat
                 label="To release"
                 value={formatMoney(sum.toRelease)}
                 figure
-                sub={`${sum.toReleaseCount} approved, not yet released`}
-                to={`${finance ? '/g-fin' : '/g-ops'}/budget-requests?status=APPROVED`}
+                sub={`${sum.toReleaseCount} approved, not yet ${travel ? 'released or booked' : 'released'}`}
+                to={`${base}?status=APPROVED`}
               />
             </>
           );
         }}
         actions={
           can('gops.budget_requests.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => navigate('/g-ops/budget-requests/new')}>
-              + Add budget request
+            <button className="btn btn-primary btn-sm" onClick={() => navigate(`/g-ops/budget-requests/new${travel ? '?kind=travel' : ''}`)}>
+              + New {word}
             </button>
           ) : null
         }
@@ -311,6 +357,101 @@ export function BudgetRequests() {
 
 export function FinanceBudgetRequests() {
   return <BudgetRequestsList finance />;
+}
+
+/**
+ * Finance books and pays an approved travel request itself (2026-11-10, the
+ * owner's call: "finance can also pay, particularly the booking of an airline
+ * using a credit card"): what the booking cost — never more than approved —
+ * the method, the reference. One voucher; nothing to liquidate.
+ */
+function BookTravelPanel({ row, onDone, onCancel }: { row: BudgetRequest; onDone: () => void; onCancel: () => void }) {
+  const toast = useToast();
+  const [amount, setAmount] = useState(String(row.amount));
+  const [method, setMethod] = useState('CREDIT_CARD');
+  const [paymentDate, setPaymentDate] = useState('');
+  const [reference, setReference] = useState('');
+  const [carrier, setCarrier] = useState(row.carrier ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const over = Number(amount) > row.amount + 0.005;
+
+  async function book() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.post<{ paymentNumber: string }>(`/budget-requests/${row.id}/book`, {
+        amount: Number(amount),
+        method,
+        paymentDate: paymentDate || null,
+        reference: reference.trim() || null,
+        carrier: carrier.trim() || null,
+      });
+      toast('ok', `Booked — ${res.paymentNumber}`);
+      onDone();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card" aria-labelledby="br-book">
+      <h3 id="br-book" className="card-title">Book and pay directly</h3>
+      <p className="muted">
+        Finance pays the carrier itself — nobody holds cash, so there is nothing to liquidate. What is paid is charged at once to what
+        the request is for.
+      </p>
+      <div className="grid grid-2">
+        <label className="field">
+          <span>What the booking cost</span>
+          <NumberInput kind="money" value={amount} min={0.01} onChange={(e) => setAmount(e.target.value)} />
+          {over && <span className="field-error">More than the {formatMoney(row.amount)} approved</span>}
+        </label>
+        <label className="field">
+          <span>Paid by</span>
+          <select value={method} onChange={(e) => setMethod(e.target.value)}>
+            <option value="CREDIT_CARD">Company credit card</option>
+            <option value="BANK_TRANSFER">Bank transfer</option>
+            <option value="ONLINE">Online</option>
+            <option value="CHECK">Cheque</option>
+            <option value="CASH">Cash</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>Paid on</span>
+          <input type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Booking reference</span>
+          <input value={reference} maxLength={200} placeholder="e.g. the ticket or booking number" onChange={(e) => setReference(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Carrier</span>
+          <input value={carrier} maxLength={200} onChange={(e) => setCarrier(e.target.value)} />
+        </label>
+      </div>
+      <ErrorBox error={error} />
+      <div className="row card-foot">
+        <button type="button" className="btn btn-sm" disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+        <button type="button" className="btn btn-primary btn-sm" disabled={busy || over || !(Number(amount) > 0)} onClick={() => void book()}>
+          Book and pay
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/** Travel Requests (2026-11-10): the same register, travel requests alone — G-OPS's and G-FIN's entries. */
+export function TravelRequests() {
+  return <BudgetRequestsList travel />;
+}
+
+export function FinanceTravelRequests() {
+  return <BudgetRequestsList finance travel />;
 }
 
 /**
@@ -654,6 +795,7 @@ export function BudgetRequestDetail() {
   const [error, setError] = useState<unknown>(null);
   const [reload, setReload] = useState(0);
   const [modal, setModal] = useState<null | 'release' | 'refund'>(null);
+  const [booking, setBooking] = useState(false);
   // `?act=liquidate|refund` — Budget Liquidations' "Actual entry" and
   // "Process" land here with the form open, read once and dropped.
   const [params, setParams] = useSearchParams();
@@ -711,6 +853,7 @@ export function BudgetRequestDetail() {
 
   const done = () => {
     setModal(null);
+    setBooking(false);
     setReload((r) => r + 1);
     load();
   };
@@ -741,7 +884,7 @@ export function BudgetRequestDetail() {
   return (
     <div>
       <RecordHeader
-        type="Budget Request"
+        type={row.isTravel ? 'Travel Request' : 'Budget Request'}
         code={row.number}
         title={row.reason}
         status={row.liquidationOverdue ? 'OVERDUE' : row.status}
@@ -766,8 +909,13 @@ export function BudgetRequestDetail() {
                 Submit for approval
               </button>
             )}
+            {row.canBook && !booking && (
+              <button className="btn btn-primary" onClick={() => setBooking(true)}>
+                Book and pay directly
+              </button>
+            )}
             {row.status === 'APPROVED' && row.toRelease > 0 && can('gfin.ap.create') && (
-              <button className="btn btn-primary" onClick={() => setModal('release')}>
+              <button className={row.canBook ? 'btn' : 'btn btn-primary'} onClick={() => setModal('release')}>
                 Release cash
               </button>
             )}
@@ -786,7 +934,7 @@ export function BudgetRequestDetail() {
         print={`/api/budget-requests/${row.id}/pdf`}
         more={[
           canCancel && {
-            label: 'Cancel budget request',
+            label: row.isTravel ? 'Cancel travel request' : 'Cancel budget request',
             danger: true,
             confirm: {
               title: `Cancel ${row.number}?`,
@@ -796,7 +944,7 @@ export function BudgetRequestDetail() {
                   : row.status === 'APPROVED'
                     ? 'Nothing has been released, so nothing needs to come back.'
                     : 'Nothing has been approved or released yet.',
-              confirmLabel: 'Cancel budget request',
+              confirmLabel: row.isTravel ? 'Cancel travel request' : 'Cancel budget request',
               reason: 'optional',
               reasonLabel: 'Why? Kept on the request',
               onConfirm: cancel,
@@ -830,8 +978,38 @@ export function BudgetRequestDetail() {
           />
         </div>
       )}
-      <DecisionNote documentType="budget_request" documentId={row.id} reloadToken={reload} />
-      {row.status !== 'DRAFT' && <DocumentApproval documentType="budget_request" documentId={row.id} reloadToken={reload} />}
+      <DecisionNote documentType={row.approvalType ?? 'budget_request'} documentId={row.id} reloadToken={reload} />
+      {row.status !== 'DRAFT' && <DocumentApproval documentType={row.approvalType ?? 'budget_request'} documentId={row.id} reloadToken={reload} />}
+      {booking && row.canBook && <BookTravelPanel row={row} onDone={done} onCancel={() => setBooking(false)} />}
+      {row.isTravel && (
+        <div className="card">
+          <h3 className="card-title">Journey</h3>
+          <dl className="kv">
+            <dt>Travel by</dt>
+            <dd>{TRAVEL_MODE_WORDS[row.travelMode ?? ''] ?? '—'}</dd>
+            <dt>Route</dt>
+            <dd>
+              {row.travelFrom} → {row.travelTo}
+            </dd>
+            <dt>Departure</dt>
+            <dd>{row.departOn ? formatDate(row.departOn) : '—'}</dd>
+            <dt>Return</dt>
+            <dd>{row.returnOn ? formatDate(row.returnOn) : 'One way'}</dd>
+            {row.carrier && (
+              <>
+                <dt>Carrier</dt>
+                <dd>{row.carrier}</dd>
+              </>
+            )}
+            {row.travellers && (
+              <>
+                <dt>Travellers / cargo</dt>
+                <dd>{row.travellers}</dd>
+              </>
+            )}
+          </dl>
+        </div>
+      )}
       {row.budget && <RequestBudgetCard budget={row.budget} lineName={row.budget.source === 'office' ? (row.budget.line?.name ?? '') : row.costCategory.name} />}
 
       <ErrorBox error={error} />
@@ -842,7 +1020,9 @@ export function BudgetRequestDetail() {
       )}
       {row.status === 'APPROVED' && (
         <div className="alert info">
-          Approved. Finance releases {formatMoney(row.toRelease)} in one voucher. Nothing is charged to the project until the receipts are in.
+          {row.isTravel
+            ? `Approved. Finance either books and pays the trip directly (the company card — nothing to liquidate) or releases ${formatMoney(row.toRelease)} in one voucher.`
+            : `Approved. Finance releases ${formatMoney(row.toRelease)} in one voucher. Nothing is charged to the project until the receipts are in.`}
         </div>
       )}
       {row.status === 'RELEASED' && !row.liquidation && (
@@ -872,7 +1052,7 @@ export function BudgetRequestDetail() {
       )}
       {row.status === 'LIQUIDATED' && (
         <div className="alert ok">
-          Liquidated. {formatMoney(row.spent)} spent{row.job ? <> and charged to {row.job.number}</> : <> against {row.for?.label}</>}
+          {row.paidDirect ? 'Booked and paid directly by finance — nothing to liquidate.' : 'Liquidated.'} {formatMoney(row.spent)} spent{row.job ? <> and charged to {row.job.number}</> : <> against {row.for?.label}</>}
           {row.excessDue > 0 && <>; the {formatMoney(row.excessDue)} over the cash released is reimbursed on the liquidation</>}
           {row.amountRefunded > 0 && <>; {formatMoney(row.amountRefunded)} of unspent cash came back</>}.
         </div>
