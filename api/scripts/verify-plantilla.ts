@@ -645,22 +645,21 @@ async function main() {
   const openPdf = await pdfOf(cid);
   const openSlots = signoffSlots(openPdf.text, 'PREPARED BY');
   check(
-    'an open clearance prints the route it would take: Prepared by HR, dated, then every step in its own name in capitals, Pending',
+    'an open clearance prints the route it would take: Prepared by HR, dated, then every step headed APPROVED BY, Pending',
     openPdf.status === 200 &&
       steps.length === 3 &&
       openSlots.length === 1 + steps.length &&
       signs(openSlots[0], 'Prepared by', hr.name) &&
       openSlots[0].signed &&
-      steps.every((st, i) => openSlots[i + 1].text.startsWith(roleWords(st.name)) && !openSlots[i + 1].signed) &&
+      steps.every((st, i) => openSlots[i + 1].text.startsWith('APPROVED BY') && !openSlots[i + 1].signed) &&
       signedCount(openPdf.text) === 1 &&
       pendingCount(openPdf.text) === steps.length,
     `${openPdf.status} ${steps.length} steps: ${slotsSaid(openSlots)}`,
   );
   check(
-    "…step 1 waits on the leaver's supervisor and nobody else; no \"Approved by\" and no \"Received by\" nobody fills",
-    signs(openSlots[1], steps[0]?.name ?? '', supervisor.name) &&
+    "…step 1 waits on the leaver's supervisor and nobody else; no \"Received by\" nobody fills",
+    signs(openSlots[1], 'Approved by', supervisor.name) &&
       !openSlots[1].text.includes(' or ') &&
-      !flat(openPdf.text).includes('APPROVED BY') &&
       !flat(openPdf.text).includes('RECEIVED BY'),
     slotsSaid(openSlots.slice(1, 2)),
   );
@@ -710,14 +709,13 @@ async function main() {
   const clearedSlots = signoffSlots(pdf.text, 'PREPARED BY');
   const signers = [supervisor, finance, hr];
   check(
-    'signed off, every step prints in its own name over the one who signed it, dated — the supervisor, finance, then HR — and nothing Pending',
+    'signed off, every step prints APPROVED BY over the one who signed it, dated — the supervisor, finance, then HR — and nothing Pending',
     clearedSlots.length === 1 + steps.length &&
       clearedSlots.every((sl) => sl.signed) &&
       signs(clearedSlots[0], 'Prepared by', hr.name) &&
-      steps.every((st, i) => signs(clearedSlots[i + 1], st.name, signers[i].name)) &&
+      steps.every((st, i) => signs(clearedSlots[i + 1], 'Approved by', signers[i].name)) &&
       signedCount(pdf.text) === 1 + steps.length &&
       pendingCount(pdf.text) === 0 &&
-      !flat(pdf.text).includes('APPROVED BY') &&
       !flat(pdf.text).includes('RECEIVED BY'),
     slotsSaid(clearedSlots),
   );
@@ -751,7 +749,7 @@ async function main() {
       signs(rejectedSlots[0], 'Prepared by', hr.name) &&
       rejectedSlots[0].signed &&
       rejectedSlots.slice(1).every((sl) => !sl.signed) &&
-      signs(rejectedSlots[1], steps[0]?.name ?? '', supervisor.name) &&
+      signs(rejectedSlots[1], 'Approved by', supervisor.name) &&
       signedCount(rejectedPdf.text) === 1 &&
       pendingCount(rejectedPdf.text) === steps.length &&
       flat(rejectedPdf.text).includes('Status: Rejected'),
@@ -825,7 +823,7 @@ async function main() {
       signs(cancelledSlots[0], 'Prepared by', hr.name) &&
       signedCount(cancelledPdf.text) === 1 &&
       pendingCount(cancelledPdf.text) === 0 &&
-      !steps.some((st) => printsRole(cancelledPdf.text, st.name)) &&
+      !flat(cancelledPdf.text).includes('APPROVED BY') &&
       flat(cancelledPdf.text).includes('Status: Cancelled'),
     `${cancelledPdf.status} ${signedCount(cancelledPdf.text)} signed, ${pendingCount(cancelledPdf.text)} pending`,
   );
@@ -880,11 +878,10 @@ async function main() {
       signedSlots.length === 2 &&
       signedSlots.every((sl) => sl.signed) &&
       signs(signedSlots[0], 'Prepared by', hr.name) &&
-      signs(signedSlots[1], steps[0]?.name ?? '', supervisor.name) &&
+      signs(signedSlots[1], 'Approved by', supervisor.name) &&
       signedCount(signedPdf.text) === 2 &&
       pendingCount(signedPdf.text) === 0 &&
-      !steps.slice(1).some((st) => printsRole(signedPdf.text, st.name)) &&
-      !flat(signedPdf.text).includes('APPROVED BY') &&
+      (flat(signedPdf.text).match(/APPROVED BY/g) ?? []).length === 1 &&
       flat(signedPdf.text).includes('Status: Cancelled'),
     `${signedPdf.status} ${slotsSaid(signedSlots)}`,
   );

@@ -6257,6 +6257,20 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
 The owner approved the review's A3–A5 (2026-10-10). Rule 6 is the dress;
 these are what every document and list says in it.
 
+- **Every approval sign-off is headed "APPROVED BY"** (2026-11-10, the
+  owner's call: "make all approval Approved By" — reversing the step-name
+  headings described below). `slotSignatories()` in `shared/approvals.ts`
+  gives every route step the one role `APPROVAL_SIGNOFF` ('Approved by'),
+  whatever the step is called; the signer's name, contact lines and date —
+  or who is assigned, with "Pending" — under it are unchanged, and so are a
+  document's own slots (Prepared by, Requested by, Received by, Released by,
+  the kick-off chart's Checked by …), `onePerPerson`, `byHighestRole` and
+  what a draft, a cancelled or a rejected document prints. The step's NAME
+  stays where it routes: Admin › Approval Workflows, the Approval panel,
+  the bells and the status words (TL Approval …). The sales order's and the
+  costing's sample layouts print the same heading. Where this section or
+  another says a paper prints "the step's name as the role", read "Approved
+  by".
 - **Sign-offs say who really acted.** A routed document prints its own first
   slot (Prepared by / Requested by / Filed by — the author, dated, with their
   contact lines) and then one slot per step of its route through

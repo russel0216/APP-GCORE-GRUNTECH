@@ -2117,7 +2117,7 @@ async function main() {
       )?.workflow?.steps ?? [];
     const joPrintsBefore = await prisma.auditLog.count({ where: { entityType: 'job_order', entityId: raised.body.id, action: 'EXPORTED' } });
     const pendingPaper = await printed(salesToken, `/job-orders/${raised.body.id}/pdf`);
-    const roleOrder = (t: string) => ['REQUESTED BY', ...joSteps.map((st) => st.name.toUpperCase()), 'ACKNOWLEDGED BY (CUSTOMER)'].map((r) => flat(t).indexOf(r));
+    const roleOrder = (t: string) => ['REQUESTED BY', 'APPROVED BY', 'ACKNOWLEDGED BY (CUSTOMER)'].map((r) => flat(t).indexOf(r));
     // The order's PERSONNEL TO SEND names the project manager and the
     // support too, so who signs is read off the slots, never the whole page:
     // [requester, project manager's step, team leader's step, customer].
@@ -2128,10 +2128,10 @@ async function main() {
         sl.length === 4 &&
         signs(sl[0], 'Requested by', sales.name) &&
         sl[0].signed &&
-        signs(sl[1], joSteps[0].name, director.name) &&
+        signs(sl[1], 'Approved by', director.name) &&
         sl[1].signed === pmSigned &&
         !names(sl[1], manager.name) &&
-        printsRole(sl[2].text, joSteps[1].name) &&
+        printsRole(sl[2].text, 'Approved by') &&
         names(sl[2], manager.name) &&
         !names(sl[2], director.name) &&
         !sl[2].signed &&
@@ -2140,11 +2140,11 @@ async function main() {
       );
     };
     check(
-      'pending, it prints the requester dated, then each step in its own name under who may sign it — Pending — and the customer last',
+      'pending, it prints the requester dated, then each approval step headed APPROVED BY under who may sign it — Pending — and the customer last',
       pendingPaper.status === 200 &&
         joSteps.length === 2 &&
         roleOrder(pendingPaper.text).every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1])) &&
-        !flat(pendingPaper.text).includes('APPROVED BY') &&
+        (flat(pendingPaper.text).match(/APPROVED BY/g) ?? []).length === joSteps.length &&
         routeSigned(pendingPaper.text, false) &&
         signedCount(pendingPaper.text) === 1 &&
         pendingCount(pendingPaper.text) === 3,
@@ -2167,13 +2167,13 @@ async function main() {
     const returnedPaper = await printed(salesToken, `/job-orders/${raised.body.id}/pdf`);
     const returnedPage = await api(salesToken, 'GET', `/job-orders/${raised.body.id}`);
     check(
-      'a returned order prints the route it would take again, every step Pending under its names — no stale signature',
+      'a returned order prints the route it would take again, every step Pending under APPROVED BY — no stale signature',
       returnedPaper.status === 200 &&
         returnedPage.body.status === 'REJECTED' &&
         routeSigned(returnedPaper.text, false) &&
         signedCount(returnedPaper.text) === 1 &&
         pendingCount(returnedPaper.text) === 3 &&
-        joSteps.every((st) => flat(returnedPaper.text).includes(st.name.toUpperCase())),
+        (flat(returnedPaper.text).match(/APPROVED BY/g) ?? []).length === joSteps.length,
       `${returnedPaper.status} ${returnedPage.body.status} ${slotsSaid(joSlots(returnedPaper.text))}`,
     );
     check(

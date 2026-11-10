@@ -135,6 +135,17 @@ function money(a: number, b: number): boolean {
 }
 
 const d = (v: number) => new Prisma.Decimal(v);
+/**
+ * How many approval sign-offs a paper prints. Every one is headed
+ * "APPROVED BY" (2026-11-10, the owner's call) — never the step's own name —
+ * so the count of that heading is the count of approval slots.
+ */
+const approvedBy = (text: string) => text.replace(/\s+/g, ' ').split('APPROVED BY').length - 1;
+/** Whether any of these step names heads a sign-off (none may, any more). */
+const namesStep = (text: string, steps: string[]) => {
+  const one = text.replace(/\s+/g, ' ');
+  return steps.some((n) => one.includes(n.toUpperCase()));
+};
 
 const TAG = 'ZZSALES';
 
@@ -3064,14 +3075,19 @@ async function main() {
       'the currency is named once, in the total, and the figures carry none',
       text.includes('Total Price (PHP):') && !text.includes('PHP 3,240.00'),
     );
-    // Rule 6: a routed document prints its route as the workflow names its
-    // steps, in capitals, nothing added — never "APPROVED BY — <step>".
+    // Rule 6: a routed document prints one "APPROVED BY" per step of its
+    // route — never the step's own name, never "APPROVED BY — <step>".
     const rev0Route = await pickWorkflow('quotation', Number((await prisma.quotationRevision.findUniqueOrThrow({ where: { id: rev0.id } })).total));
     const rev0Steps = (rev0Route?.steps ?? []).map((st) => st.name.toUpperCase());
     check(
-      'it keeps the dated sign-offs — prepared, then the route by its steps’ own names — and no Conforme',
-      text.includes('PREPARED BY') && rev0Steps.length > 0 && rev0Steps.every((n) => text.includes(n)) && !text.includes('APPROVED BY —') && !/CONFORME/i.test(text),
-      rev0Steps.join(' · '),
+      'it keeps the dated sign-offs — prepared, then one APPROVED BY per step of the route, never a step’s own name — and no Conforme',
+      text.includes('PREPARED BY') &&
+        rev0Steps.length > 0 &&
+        approvedBy(text) === rev0Steps.length &&
+        !namesStep(text, rev0Steps) &&
+        !text.includes('APPROVED BY —') &&
+        !/CONFORME/i.test(text),
+      `${rev0Steps.join(' · ')} — APPROVED BY ×${approvedBy(text)}`,
     );
     check(
       "the author's sign-off is the name on its own, with their email under it",
@@ -4099,8 +4115,13 @@ async function main() {
     ).replace(/\n/g, ' ');
     const ceoStep = 'CEO / PRESIDENT';
     check(
-      'a draft’s PDF names both who will sign, pending, under the steps’ own names',
-      draftText.includes(manager.name) && draftText.includes(ceo.name) && draftText.includes(ceoStep) && draftText.includes('Pending') && !draftText.includes('APPROVED BY'),
+      'a draft’s PDF names both who will sign, pending, each under APPROVED BY — never the step’s own name',
+      draftText.includes(manager.name) &&
+        draftText.includes(ceo.name) &&
+        approvedBy(draftText) === 2 &&
+        !namesStep(draftText, [ceoStep, 'TEAM LEADER']) &&
+        draftText.includes('Pending'),
+      `APPROVED BY ×${approvedBy(draftText)}`,
     );
     const bigSubmit = await http(salesToken, 'POST', `/quotations/${big.body.id}/revisions/${bigRev.id}/submit`);
     const ceoRequest = await prisma.approvalRequest.findFirstOrThrow({
@@ -4118,7 +4139,14 @@ async function main() {
         await (await fetch(`${BASE}/quotations/${big.body.id}/revisions/${bigRev.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer(),
       ),
     );
-    check('halfway, the PDF dates the team leader and says the CEO is pending', halfway.includes(manager.name) && halfway.includes('Pending') && halfway.includes(ceoStep));
+    check(
+      'halfway, the PDF dates the team leader and says the CEO is pending — two APPROVED BY, one Pending',
+      halfway.includes(manager.name) &&
+        approvedBy(halfway) === 2 &&
+        halfway.split('Pending').length - 1 === 1 &&
+        !namesStep(halfway, [ceoStep, 'TEAM LEADER']),
+      `APPROVED BY ×${approvedBy(halfway)}`,
+    );
     // flat(): a real CEO on the install shares the step ("A or B"), and the
     // names wrap inside the sign-off column.
     check('naming the CEO who will sign', flat(halfway).includes(ceo.name));
@@ -4215,10 +4243,11 @@ async function main() {
     check('the signature is dated the submit instant itself', tlReq.actions[0]?.actedAt.getTime() === tlReq.createdAt.getTime());
     const tlPaper = await paperOf(String(tlQuote.body.id), tlRev.id, managerToken);
     // One name per person on paper (2026-10-13): the preparer's own step is
-    // their Prepared by, so the Team Leader slot is not printed again.
+    // their Prepared by, so the Team Leader slot is not printed again — no
+    // APPROVED BY at all.
     check(
-      'its PDF prints the preparer once — Prepared by at the submit instant, no Team Leader slot, nothing Pending',
-      timesIn(tlPaper, tlReq.createdAt) === 1 && !tlPaper.includes('TEAM LEADER') && !tlPaper.includes('Pending'),
+      'its PDF prints the preparer once — Prepared by at the submit instant, no approval slot, nothing Pending',
+      timesIn(tlPaper, tlReq.createdAt) === 1 && approvedBy(tlPaper) === 0 && !tlPaper.includes('TEAM LEADER') && !tlPaper.includes('Pending'),
       `${formatDateTime(tlReq.createdAt)} ×${timesIn(tlPaper, tlReq.createdAt)}`,
     );
 
@@ -4266,13 +4295,14 @@ async function main() {
     );
     const ceoHalf = await paperOf(String(ceoQuote.body.id), ceoRev.id, ceoToken);
     check(
-      'halfway, its PDF prints the CEO once, as Prepared by — not again under CEO / President — and the Team Leader Pending',
+      'halfway, its PDF prints the CEO once, as Prepared by — not again as an approver — and the Team Leader Pending under the one APPROVED BY',
       timesIn(ceoHalf, ceoReq.createdAt) === 1 &&
-        !ceoHalf.includes('CEO / PRESIDENT') &&
-        ceoHalf.includes('TEAM LEADER') &&
+        flat(ceoHalf).split(ceo.name).length - 1 === 1 &&
+        approvedBy(ceoHalf) === 1 &&
+        !namesStep(ceoHalf, ['CEO / PRESIDENT', 'TEAM LEADER']) &&
         ceoHalf.includes('Pending') &&
         flat(ceoHalf).includes(sitLeader.name),
-      `${formatDateTime(ceoReq.createdAt)} ×${timesIn(ceoHalf, ceoReq.createdAt)}`,
+      `${formatDateTime(ceoReq.createdAt)} ×${timesIn(ceoHalf, ceoReq.createdAt)} — APPROVED BY ×${approvedBy(ceoHalf)}`,
     );
     const ceoCanAct = async (token: string) =>
       ((await http(token, 'GET', `/approvals/history/quotation/${ceoRev.id}`)).body as unknown as { canAct?: boolean }[])[0]?.canAct;
@@ -4291,11 +4321,16 @@ async function main() {
     const ceoPaper = await paperOf(String(ceoQuote.body.id), ceoRev.id, ceoToken);
     check(
       'and the signed PDF keeps the one timestamp, the Team Leader signed, nothing Pending',
-      ceoPaper.split(ceo.name).length - 1 === 1 && !ceoPaper.includes('CEO / PRESIDENT') && !ceoPaper.includes('Pending') && ceoPaper.includes(sitLeader.name),
+      ceoPaper.split(ceo.name).length - 1 === 1 &&
+        approvedBy(ceoPaper) === 1 &&
+        !namesStep(ceoPaper, ['CEO / PRESIDENT', 'TEAM LEADER']) &&
+        !ceoPaper.includes('Pending') &&
+        ceoPaper.includes(sitLeader.name),
     );
 
     // An approver holding both steps signs both with one Approve, and the
-    // paper names them once — under Team Leader (2026-10-13, the owner's call).
+    // paper names them once — under one APPROVED BY (2026-10-13, the owner's
+    // call; the heading since 2026-11-10).
     const ceoRole = await prisma.role.findUniqueOrThrow({ where: { key: 'ceo' } });
     await prisma.userRole.create({ data: { userId: manager.id, roleId: ceoRole.id } });
     try {
@@ -4307,8 +4342,11 @@ async function main() {
       const bothRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(both.body.id) } });
       const bothDraft = await paperOf(String(both.body.id), bothRev.id, salesToken);
       check(
-        'a draft whose Team Leader is also the CEO / President prints them once, under Team Leader',
-        bothDraft.includes('TEAM LEADER') && !bothDraft.includes('CEO / PRESIDENT') && bothDraft.split(manager.name).length - 1 === 1,
+        'a draft whose Team Leader is also the CEO / President prints them once, under one APPROVED BY',
+        approvedBy(bothDraft) === 1 &&
+          !namesStep(bothDraft, ['TEAM LEADER', 'CEO / PRESIDENT']) &&
+          bothDraft.split(manager.name).length - 1 === 1,
+        `APPROVED BY ×${approvedBy(bothDraft)}`,
       );
       await http(salesToken, 'POST', `/quotations/${both.body.id}/revisions/${bothRev.id}/submit`);
       const bothReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'quotation', documentId: bothRev.id, status: 'PENDING' } });
@@ -4316,14 +4354,14 @@ async function main() {
       const bothDone = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: bothReq.id }, include: { actions: true } });
       const bothPaper = await paperOf(String(both.body.id), bothRev.id, salesToken);
       check(
-        'approved with one Approve (the CEO / President step co-signed), the paper names them once, under Team Leader',
+        'approved with one Approve (the CEO / President step co-signed), the paper names them once, under one APPROVED BY',
         bothDone.status === 'APPROVED' &&
           bothDone.actions.length === 2 &&
           bothPaper.split(manager.name).length - 1 === 1 &&
-          bothPaper.includes('TEAM LEADER') &&
-          !bothPaper.includes('CEO / PRESIDENT') &&
+          approvedBy(bothPaper) === 1 &&
+          !namesStep(bothPaper, ['TEAM LEADER', 'CEO / PRESIDENT']) &&
           !bothPaper.includes('Pending'),
-        `${bothDone.status} ${bothDone.actions.length}`,
+        `${bothDone.status} ${bothDone.actions.length} — APPROVED BY ×${approvedBy(bothPaper)}`,
       );
     } finally {
       await prisma.userRole.deleteMany({ where: { userId: manager.id, roleId: ceoRole.id } });
@@ -4755,9 +4793,12 @@ async function main() {
       soSignLine.slice(-400),
     );
     check(
-      'each under its step’s own name, in capitals — nothing added, never "APPROVED BY — …"',
-      soSteps.every((st) => soSignLine.includes(st.name.toUpperCase())) && !soSignLine.includes('APPROVED BY'),
-      soSignLine.slice(-400),
+      'each under APPROVED BY — one per step, never the step’s own name, never "APPROVED BY — …"',
+      soSteps.length === 4 &&
+        approvedBy(soSignLine) === soSteps.length &&
+        !namesStep(soSignLine, soSteps.map((st) => st.name)) &&
+        !soSignLine.includes('APPROVED BY —'),
+      `APPROVED BY ×${approvedBy(soSignLine)} of ${soSteps.length}`,
     );
     check(
       'and the paper is A4 on its side — the cost columns are why it is landscape',
@@ -4887,7 +4928,7 @@ async function main() {
     check(
       'reopened and issued again with no route, it prints ISSUED BY whoever issued it — never the approval it was reopened from, nor Pending',
       soReopened.status === 200 && soReissued.includes(`ISSUED BY ${sales.name}`) &&
-        !soSteps.some((st) => soReissued.includes(st.name.toUpperCase())) && !soReissued.includes('Pending'),
+        approvedBy(soReissued) === 0 && !soSteps.some((st) => soReissued.includes(st.name.toUpperCase())) && !soReissued.includes('Pending'),
       soReissued.slice(-400),
     );
     // Cancelled while it waits (rule 6): the request goes with it, and the
@@ -4905,10 +4946,10 @@ async function main() {
     check(
       'cancelled while it waits, its PDF keeps the team leader’s signature, dated, and leaves the other three steps off — nothing Pending',
       so3Submit.status === 200 && so3Cancel.status === 200 &&
-        so3Text.includes(`${soSteps[0].name.toUpperCase()}`) && so3Text.includes(manager.name) &&
-        !soSteps.slice(1).some((st) => so3Text.includes(st.name.toUpperCase())) &&
+        approvedBy(so3Text) === 1 && so3Text.includes(manager.name) &&
+        !namesStep(so3Text, soSteps.map((st) => st.name)) &&
         ![backSupport, costController, ceo].some((p) => so3Text.includes(p.name)) && !so3Text.includes('Pending'),
-      so3Text.slice(-400),
+      `APPROVED BY ×${approvedBy(so3Text)}`,
     );
     // Pulled back to draft after a signature, then cancelled from the draft:
     // that signature stood behind a request withdrawn before the cancel, so
@@ -5315,8 +5356,12 @@ async function main() {
     ).replace(/\n/g, ' ');
     const pulledStep = ((await pickWorkflow('quotation', Number(pulledBack.total)))?.steps[0]?.name ?? '').toUpperCase();
     check(
-      'pulled back, its PDF prints the route submitting it NOW would take — the step by name, who will sign it, Pending — never the withdrawn request',
-      !!pulledStep && pulledPdf.includes(pulledStep) && pulledPdf.includes(manager.name) && pulledPdf.includes('Pending'),
+      'pulled back, its PDF prints the route submitting it NOW would take — one APPROVED BY, who will sign it, Pending — never the step’s name nor the withdrawn request',
+      !!pulledStep &&
+        approvedBy(pulledPdf) === 1 &&
+        !pulledPdf.includes(pulledStep) &&
+        pulledPdf.includes(manager.name) &&
+        pulledPdf.split('Pending').length - 1 === 1,
       pulledPdf.slice(-300),
     );
     check('and gone from the approver’s queue', !(await pendingFor(manager.id)).some((r) => r.id === pulledRequest.id));

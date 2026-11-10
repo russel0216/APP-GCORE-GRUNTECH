@@ -62,10 +62,37 @@ import {
   pendingCount,
   PORTRAIT,
   printed,
+  names,
   saysCount,
   signedCount,
+  signoffSlots,
+  signs,
+  slotsSaid,
   splittingValue,
+  type Slot,
 } from './lib/paper';
+
+// ── Approval sign-offs on paper (2026-11-10, the owner's call) ──────────────
+// Every approval prints under ONE heading, "APPROVED BY" (slotSignatories'
+// APPROVAL_SIGNOFF) — once per printed approval slot, the signer's name and
+// date (or who may sign, over "Pending") under it. A step's own name
+// (TECHNICAL MANAGER, PURCHASING MANAGER, BACK SUPPORT …) is never a sign-off
+// heading; a document's own slots (Prepared by, Requested by, Released by …)
+// keep theirs.
+const APPROVED_BY = 'Approved by';
+/** How many sign-offs are headed "APPROVED BY" — the heading is a run of its own. */
+const approvedByCount = (t: string) => t.split('\n').filter((l) => l === APPROVED_BY.toUpperCase()).length;
+/** The step's name printed in capitals, as a sign-off heading used to be. */
+const headedByStep = (t: string, step: string) => flat(t).includes(step.toUpperCase());
+/** The slot is an approval's: headed "APPROVED BY", dated when signed, "Pending" when not. */
+const approvalSlot = (slot: Slot | undefined, signed: boolean) => !!slot && slot.text.startsWith('APPROVED BY ') && slot.signed === signed;
+/** A signed approval: "APPROVED BY", this person straight under it, dated. */
+const approvedBy = (slot: Slot | undefined, name: string) => approvalSlot(slot, true) && signs(slot, APPROVED_BY, name);
+/** An open approval: "APPROVED BY", this person among who may sign it, over "Pending". */
+const awaits = (slot: Slot | undefined, name: string) => approvalSlot(slot, false) && names(slot, name);
+/** One of the document's own slots: its own heading, this person in it. */
+const ownSlot = (slot: Slot | undefined, role: string, name: string, signed: boolean) =>
+  !!slot && slot.text.startsWith(`${role} `) && names(slot, name) && slot.signed === signed;
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -2325,23 +2352,30 @@ async function main() {
     // and a dated sign-off prints "Oct 10, 2026, 6:07 AM" under its name, the
     // requester's always and each step's once it has signed.
     const currency = (await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } }))?.currency?.trim() || 'PHP';
+    const pendingSlots = signoffSlots(pendingText, 'REQUESTED BY');
     check(
-      'pending at step 2 of two, the paper prints the technical manager who signed, dated, and the team leader still to sign as Pending',
+      'pending at step 2 of two, the paper prints the technical manager who signed, dated, under "Approved by", and the team leader still to sign as Pending',
       big.submitted === 200 &&
         bigSteps.length === 2 &&
         pendingText.includes('Verify PM') &&
         signedCount(pendingText) === 2 &&
         pendingCount(pendingText) === 1 &&
-        bigSteps.every((st) => flat(pendingText).includes(st.name.toUpperCase())),
-      `${big.submitted} ${bigSteps.length} steps, ${signedCount(pendingText)} signed, ${pendingCount(pendingText)} pending, PM ${pendingText.includes('Verify PM')}`,
+        pendingSlots.length === 3 &&
+        pendingSlots[0].signed &&
+        approvedBy(pendingSlots[1], 'Verify PM') &&
+        approvalSlot(pendingSlots[2], false),
+      `${big.submitted} ${bigSteps.length} steps, ${signedCount(pendingText)} signed, ${pendingCount(pendingText)} pending, PM ${pendingText.includes('Verify PM')} — ${slotsSaid(pendingSlots)}`,
     );
-    // The sign-offs are the engine's one mapping (slotSignatories): the step's
-    // name alone is the role — never "Approved by — Team Leader" — and the
-    // team leader's step still open names who may sign it over its Pending.
+    // The sign-offs are the engine's one mapping (slotSignatories): every
+    // approval is headed "Approved by" (2026-11-10, the owner's call) — one
+    // heading a step, never the step's own name — and the team leader's step
+    // still open names who may sign it over its Pending.
     check(
-      'each step signs in its own name — no "Approved by —" prefix — and an open step names who may sign it',
-      !flat(pendingText).includes('APPROVED BY') && flat(pendingText).includes('Verify Team Leader'),
-      `approved-by ${flat(pendingText).includes('APPROVED BY')}, leader named ${flat(pendingText).includes('Verify Team Leader')}`,
+      'each step signs under "Approved by" — once a step, never under the step\'s own name — and an open step names who may sign it',
+      approvedByCount(pendingText) === bigSteps.length &&
+        !bigSteps.some((st) => headedByStep(pendingText, st.name)) &&
+        awaits(pendingSlots[2], 'Verify Team Leader'),
+      `approved-by ${approvedByCount(pendingText)}, step named ${bigSteps.some((st) => headedByStep(pendingText, st.name))}, leader named ${flat(pendingText).includes('Verify Team Leader')}`,
     );
     check(
       'the paper says "Pending approval" (never the enum), heads its lines "No." and names the currency in the column head, and prints its money as a totals block',
@@ -2357,16 +2391,22 @@ async function main() {
     const bigPulled = await api(requesterToken, 'POST', `/purchase-requests/${big.id}/withdraw`);
     const draftPdf = await printed(requesterToken, `/purchase-requests/${big.id}/pdf`);
     const draftText = draftPdf.text;
+    const draftSlots = signoffSlots(draftText, 'REQUESTED BY');
     check(
-      'pulled back after the project manager signed, it prints no sign-off but the requester\'s: every step of the route it would take is Pending, under who may sign it',
+      'pulled back after the project manager signed, it prints no sign-off but the requester\'s: every step of the route it would take is Pending under "Approved by", under who may sign it',
       bigPulled.status === 200 &&
         draftPdf.status === 200 &&
         signedCount(draftText) === 1 &&
         flat(draftText).includes('Verify PM') &&
         flat(draftText).includes('Status: Draft') &&
         pendingCount(draftText) === bigSteps.length &&
-        bigSteps.every((st) => flat(draftText).includes(st.name.toUpperCase())),
-      `${bigPulled.status} ${draftPdf.status} ${signedCount(draftText)} signed, ${pendingCount(draftText)} pending, PM ${draftText.includes('Verify PM')}`,
+        draftSlots.length === bigSteps.length + 1 &&
+        draftSlots[0].signed &&
+        awaits(draftSlots[1], 'Verify PM') &&
+        awaits(draftSlots[2], 'Verify Team Leader') &&
+        approvedByCount(draftText) === bigSteps.length &&
+        !bigSteps.some((st) => headedByStep(draftText, st.name)),
+      `${bigPulled.status} ${draftPdf.status} ${signedCount(draftText)} signed, ${pendingCount(draftText)} pending, PM ${draftText.includes('Verify PM')} — ${slotsSaid(draftSlots)}`,
     );
     const prPrints = await prisma.auditLog.count({ where: { entityType: 'purchase_request', entityId: big.id, action: 'EXPORTED' } });
     check('both prints of the request are on its trail as EXPORTED', prPrints === 2, String(prPrints));
@@ -2395,7 +2435,8 @@ async function main() {
     // A rejection is final for a request (settlePurchaseRequest), so nobody
     // will ever sign the steps still unsigned: the paper prints no "Pending"
     // under them — "Pending" only where it is the truth — and no open
-    // "Approved by" either. What a step DID sign before the refusal stands.
+    // "Approved by" either. What a step DID sign before the refusal stands,
+    // under "Approved by" like every approval; a step's name heads nothing.
     const stepNamed = (t: string, name: string) => flat(t).includes(name.toUpperCase());
     const rejectedFirst = await raisePr('rejected at the first step', 60_000);
     const rejectedFirstSteps = rejectedFirst.request?.workflow?.steps ?? [];
@@ -2429,18 +2470,21 @@ async function main() {
     const rejectedLaterNow = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: rejectedLater.id } });
     const rejectedLaterPdf = await printed(requesterToken, `/purchase-requests/${rejectedLater.id}/pdf`);
     const rejectedLaterText = rejectedLaterPdf.text;
+    const rejectedLaterSlots = signoffSlots(rejectedLaterText, 'REQUESTED BY');
     check(
-      'rejected by the team leader after the technical manager signed, it prints his dated sign-off and nothing for the step nobody will sign',
+      'rejected by the team leader after the technical manager signed, it prints his dated sign-off under "Approved by" and nothing for the step nobody will sign',
       rejectedLaterSteps.length === 2 &&
         rejectedLaterNow.status === 'REJECTED' &&
         rejectedLaterPdf.status === 200 &&
         pendingCount(rejectedLaterText) === 0 &&
         signedCount(rejectedLaterText) === 2 &&
         rejectedLaterText.includes('Verify PM') &&
-        stepNamed(rejectedLaterText, rejectedLaterSteps[0].name) &&
-        !rejectedLaterSteps.slice(1).some((st) => stepNamed(rejectedLaterText, st.name)) &&
+        rejectedLaterSlots.length === 2 &&
+        approvedBy(rejectedLaterSlots[1], 'Verify PM') &&
+        approvedByCount(rejectedLaterText) === 1 &&
+        !rejectedLaterSteps.some((st) => stepNamed(rejectedLaterText, st.name)) &&
         !flat(rejectedLaterText).includes('Verify Team Leader'),
-      `${rejectedLaterNow.status} ${rejectedLaterPdf.status}: ${signedCount(rejectedLaterText)} signed, ${pendingCount(rejectedLaterText)} pending`,
+      `${rejectedLaterNow.status} ${rejectedLaterPdf.status}: ${signedCount(rejectedLaterText)} signed, ${pendingCount(rejectedLaterText)} pending — ${slotsSaid(rejectedLaterSlots)}`,
     );
 
     // ── The purchase order's submit and settle, hardened the same way ─────
@@ -2498,9 +2542,9 @@ async function main() {
 
     // ── The printed order: every step of its route, and the money block ──
     // The order was signed by the Purchasing Manager (its route under
-    // ₱100,000, the sheet of 2026-10-13); the paper prints the step, dated, in
-    // its own name — never under "Approved by". Nothing waits on a "Received
-    // by": receiving is its own document.
+    // ₱100,000, the sheet of 2026-10-13); the paper prints the step, dated,
+    // under "Approved by" (2026-11-10) — never under the step's own name.
+    // Nothing waits on a "Received by": receiving is its own document.
     console.log('\nThe printed purchase order and supplier list');
     const poPrintsBefore = await prisma.auditLog.count({ where: { entityType: 'purchase_order', entityId: po.id, action: 'EXPORTED' } });
     const poPdf = await printed(buyerToken, `/purchase-orders/${po.id}/pdf`);
@@ -2510,17 +2554,21 @@ async function main() {
       orderBy: { createdAt: 'desc' },
       include: { workflow: { select: { steps: { orderBy: { sequence: 'asc' } } } } },
     })).workflow?.steps ?? [];
+    const poSlots = signoffSlots(poText, 'PREPARED BY');
     check(
-      'an issued order prints every step of its route — the purchasing manager under ₱100,000, dated — and nothing Pending',
+      'an issued order prints every step of its route under "Approved by" — the purchasing manager under ₱100,000, dated — and nothing Pending',
       poPdf.status === 200 &&
         poSteps.length === 1 &&
-        poSteps.every((st) => flat(poText).includes(st.name.toUpperCase())) &&
+        poSlots.length === poSteps.length + 1 &&
+        poSlots[0].signed &&
+        approvedBy(poSlots[1], 'Verify Purchasing Manager') &&
+        approvedByCount(poText) === poSteps.length &&
+        !poSteps.some((st) => headedByStep(poText, st.name)) &&
         flat(poText).includes('Verify Purchasing Manager') &&
         signedCount(poText) === 2 &&
         pendingCount(poText) === 0 &&
-        !flat(poText).includes('APPROVED BY') &&
         !flat(poText).includes('RECEIVED BY'),
-      `${poPdf.status} ${poSteps.length} steps, ${signedCount(poText)} signed, ${pendingCount(poText)} pending`,
+      `${poPdf.status} ${poSteps.length} steps, ${signedCount(poText)} signed, ${pendingCount(poText)} pending — ${slotsSaid(poSlots)}`,
     );
     check(
       'its money is the quotation\'s block — Subtotal, VAT (12%), Total — bare figures, the currency named under Order details, never a TOTAL row in the lines',
@@ -2542,15 +2590,20 @@ async function main() {
     // whoever may sign it; only the buyer's own sign-off is dated.
     const poDraftPdf = await printed(buyerToken, `/purchase-orders/${poDraftId}/pdf`);
     const poDraftText = poDraftPdf.text;
+    const poDraftSlots = signoffSlots(poDraftText, 'PREPARED BY');
     check(
-      'a draft order prints the route it would take: its step Pending under who may sign it, the buyer\'s the only dated sign-off',
+      'a draft order prints the route it would take: its step Pending under "Approved by" and who may sign it, the buyer\'s the only dated sign-off',
       poDraftPdf.status === 200 &&
-        poSteps.every((st) => flat(poDraftText).includes(st.name.toUpperCase())) &&
+        poDraftSlots.length === poSteps.length + 1 &&
+        poDraftSlots[0].signed &&
+        awaits(poDraftSlots[1], 'Verify Purchasing Manager') &&
+        approvedByCount(poDraftText) === poSteps.length &&
+        !poSteps.some((st) => headedByStep(poDraftText, st.name)) &&
         pendingCount(poDraftText) === 1 &&
         signedCount(poDraftText) === 1 &&
         flat(poDraftText).includes('Verify Purchasing Manager') &&
         flat(poDraftText).includes('DRAFT — NOT YET ISSUED.'),
-      `${poDraftPdf.status} ${signedCount(poDraftText)} signed, ${pendingCount(poDraftText)} pending`,
+      `${poDraftPdf.status} ${signedCount(poDraftText)} signed, ${pendingCount(poDraftText)} pending — ${slotsSaid(poDraftSlots)}`,
     );
 
     // The supplier list on paper: ten columns, so landscape, each column
@@ -2644,12 +2697,23 @@ async function main() {
     const handedOnPdf = await printed(buyerPmToken, `/purchase-orders/${handedOnId}/pdf`);
     const handedOnText = handedOnPdf.text;
     const preparedLine = (t: string) => (flat(t).match(/PREPARED BY Verify Buyer PM .*?(\w{3} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M)/) ?? [])[1];
-    const managerLine = (t: string) => (flat(t).match(/PURCHASING MANAGER Verify Buyer PM .*?(\w{3} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M)/) ?? [])[1];
+    // The Purchasing Manager's step — the buyer's own, signed at submit — is
+    // the first "Approved by"; the CEO / President's the second, still open.
+    const managerLine = (t: string) => (flat(t).match(/APPROVED BY Verify Buyer PM .*?(\w{3} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M)/) ?? [])[1];
+    const handedOnSlots = signoffSlots(handedOnText, 'PREPARED BY');
+    const handedOnStepNames = handedOnRequest?.workflow?.steps.map((st) => st.name) ?? [];
     check(
-      'and its paper prints the buyer as who prepared it and as the Purchasing Manager, under ONE timestamp, with the CEO / President Pending',
+      'and its paper prints the buyer as who prepared it and as the first "Approved by" (the Purchasing Manager\'s step), under ONE timestamp, with the CEO / President\'s "Approved by" Pending',
       handedOnPdf.status === 200 &&
         !!preparedLine(handedOnText) &&
         preparedLine(handedOnText) === managerLine(handedOnText) &&
+        handedOnSlots.length === 3 &&
+        ownSlot(handedOnSlots[0], 'PREPARED BY', 'Verify Buyer PM', true) &&
+        approvedBy(handedOnSlots[1], 'Verify Buyer PM') &&
+        awaits(handedOnSlots[2], 'Verify CEO') &&
+        approvedByCount(handedOnText) === 2 &&
+        handedOnStepNames.length === 2 &&
+        !handedOnStepNames.some((n) => headedByStep(handedOnText, n)) &&
         flat(handedOnText).includes('Verify CEO') &&
         pendingCount(handedOnText) === 1,
       `${handedOnPdf.status}: prepared ${preparedLine(handedOnText)}, manager ${managerLine(handedOnText)}, ${pendingCount(handedOnText)} pending — ${flat(handedOnText).slice(-400)}`,
@@ -3558,8 +3622,9 @@ async function main() {
     // Outgoing goes for approval (2026-10-14, the owner's call): the issuer's
     // "Reports to" decides — here the keeper reports to the store supervisor —
     // and the approval issues it. The draft on paper: who raised it, dated,
-    // then the route submitting would take and the person it goes to, each
-    // "Pending" under the name. Never an "Issued by" on a routed slip (the
+    // then the route submitting would take — its step under "Approved by",
+    // never the step's own name — and the person it goes to, each "Pending"
+    // under the name. Never an "Issued by" on a routed slip (the
     // approval moved the stock) and never the "Noted by" nobody fills.
     check(
       'a draft says it goes for approval, to the issuer’s supervisor, and offers Submit — not Issue',
@@ -3574,13 +3639,19 @@ async function main() {
     const issuePrintsBefore = await prisma.auditLog.count({ where: { entityType: 'stock_issue', entityId: draftIssueId, action: 'EXPORTED' } });
     const draftIssuePdf = await printed(bossToken, `/stock-issues/${draftIssueId}/pdf`);
     const draftIssueText = draftIssuePdf.text;
+    const draftIssueSlots = signoffSlots(draftIssueText, 'PREPARED');
     check(
-      'a draft outgoing slip is a Delivery Receipt: who prepared it, dated, then the supervisor and the receiver over Pending — no "Issued by", no "Noted by", and DRAFT in its foot',
+      'a draft outgoing slip is a Delivery Receipt: who prepared it, dated, then the supervisor under "Approved by" and the receiver, each over Pending — no "Issued by", no "Noted by", and DRAFT in its foot',
       draftIssuePdf.status === 200 &&
         // The title, in capitals, wraps in its box: DELIVERY over RECEIPT.
         /DELIVERY\s+RECEIPT/.test(draftIssueText) &&
         flat(draftIssueText).includes('PREPARED & DISPATCHED BY') &&
-        flat(draftIssueText).includes('SUPERVISOR') &&
+        draftIssueSlots.length === 3 &&
+        ownSlot(draftIssueSlots[0], 'PREPARED DISPATCHED BY', 'Verify Keeper', true) &&
+        awaits(draftIssueSlots[1], 'Verify Store Supervisor') &&
+        ownSlot(draftIssueSlots[2], 'RECEIVED IN GOOD ORDER BY', 'Verify Rigger', false) &&
+        approvedByCount(draftIssueText) === 1 &&
+        !flat(draftIssueText).includes('SUPERVISOR') &&
         flat(draftIssueText).includes('RECEIVED IN GOOD ORDER BY') &&
         !flat(draftIssueText).includes('ISSUED BY') &&
         !flat(draftIssueText).includes('NOTED BY') &&
@@ -3752,22 +3823,29 @@ async function main() {
       );
     }
     // Issued, the paper dates who prepared it and the supervisor who approved
-    // it; "Received in good order by" waits for the receiver to confirm it
+    // it — under "Approved by", never the step's name; "Received in good order by" waits for the receiver to confirm it
     // (2026-10-15, the owner's call: Outgoing is the internal receive proof).
     // A receipt prints no prices.
     const issuedPdf = await printed(bossToken, `/stock-issues/${draftIssueId}/pdf`);
     const issuedText = issuedPdf.text;
     const issuePrintsAfter = await prisma.auditLog.count({ where: { entityType: 'stock_issue', entityId: draftIssueId, action: 'EXPORTED' } });
+    const issuedSlots = signoffSlots(issuedText, 'PREPARED');
     check(
-      'an issued outgoing slip dates who prepared it and the supervisor who approved it; the receiver is Pending until they confirm',
+      'an issued outgoing slip dates who prepared it and the supervisor who approved it, under "Approved by"; the receiver is Pending until they confirm',
       issuedPdf.status === 200 &&
-        ['PREPARED & DISPATCHED BY', 'SUPERVISOR', 'RECEIVED IN GOOD ORDER BY'].every((r) => flat(issuedText).includes(r)) &&
+        ['PREPARED & DISPATCHED BY', 'APPROVED BY', 'RECEIVED IN GOOD ORDER BY'].every((r) => flat(issuedText).includes(r)) &&
+        issuedSlots.length === 3 &&
+        ownSlot(issuedSlots[0], 'PREPARED DISPATCHED BY', 'Verify Keeper', true) &&
+        approvedBy(issuedSlots[1], 'Verify Store Supervisor') &&
+        ownSlot(issuedSlots[2], 'RECEIVED IN GOOD ORDER BY', 'Verify Rigger', false) &&
+        approvedByCount(issuedText) === 1 &&
+        !flat(issuedText).includes('SUPERVISOR') &&
         !flat(issuedText).includes('NOTED BY') &&
         !flat(issuedText).includes('ISSUED BY') &&
         signedCount(issuedText) === 2 &&
         pendingCount(issuedText) === 1 &&
         !flat(issuedText).includes('DRAFT — NOT YET ISSUED.'),
-      `${issuedPdf.status} ${signedCount(issuedText)} signed, ${pendingCount(issuedText)} pending`,
+      `${issuedPdf.status} ${signedCount(issuedText)} signed, ${pendingCount(issuedText)} pending — ${slotsSaid(issuedSlots)}`,
     );
     check(
       'the receipt lists serial and condition and prints no price, cost or total',
@@ -4150,14 +4228,25 @@ async function main() {
         `${released.status} ${releasedRow.status} ${releasedRow.issuedById === keeper.id}; ${freeBefore} → ${await available()}; ${releasedBell} ${twiceReleased.status}`,
       );
       const slipPaper = await printed(borrowerToken, `/borrow-slips/${askedId}/pdf`);
+      // The route's two steps (Team Leader / Technical Manager, Warehouse
+      // Supervisor) each print under "Approved by" — never their own names.
+      const slipSlots = signoffSlots(slipPaper.text, 'REQUESTED BY');
       check(
-        'its paper signs REQUESTED BY, the Team Leader / Technical Manager, the Warehouse Supervisor and RELEASED BY — each dated',
+        'its paper signs REQUESTED BY, two APPROVED BY — the Team Leader / Technical Manager\'s step, then the Warehouse Supervisor\'s — and RELEASED BY — each dated',
         slipPaper.status === 200 &&
-          ['REQUESTED BY', 'TEAM LEADER / TECHNICAL MANAGER', 'WAREHOUSE SUPERVISOR', 'RELEASED BY'].every((r) => flat(slipPaper.text).includes(r)) &&
+          ['REQUESTED BY', 'APPROVED BY', 'RELEASED BY'].every((r) => flat(slipPaper.text).includes(r)) &&
+          slipSlots.length === 4 &&
+          slipSlots[0].signed &&
+          approvedBy(slipSlots[1], 'Verify Borrow TM') &&
+          approvalSlot(slipSlots[2], true) &&
+          slipSlots[3].text.startsWith('RELEASED BY ') &&
+          slipSlots[3].signed &&
+          approvedByCount(slipPaper.text) === 2 &&
+          !['TEAM LEADER / TECHNICAL MANAGER', 'WAREHOUSE SUPERVISOR'].some((r) => flat(slipPaper.text).includes(r)) &&
           flat(slipPaper.text).includes('Verify Borrow TM') &&
           signedCount(slipPaper.text) === 4 &&
           pendingCount(slipPaper.text) === 0,
-        `${slipPaper.status} ${signedCount(slipPaper.text)} signed, ${pendingCount(slipPaper.text)} pending`,
+        `${slipPaper.status} ${signedCount(slipPaper.text)} signed, ${pendingCount(slipPaper.text)} pending — ${slotsSaid(slipSlots)}`,
       );
       // The borrower's slip (2026-10-15, the owner's form): the paper's five
       // sections, the clearance lines blank while anything is out; the
@@ -4430,15 +4519,25 @@ async function main() {
         'no bell',
       );
       const pullPaper = await printed(pullerToken, `/pullout-slips/${slipId}/pdf`);
+      const pullSlots = signoffSlots(pullPaper.text, 'REQUESTED BY');
       check(
-        'its paper signs REQUESTED BY, the supervisor, WAREHOUSE RELEASED BY and PULLED OUT / RECEIVED BY — each dated — and prints no cost',
+        'its paper signs REQUESTED BY, the supervisor under APPROVED BY, WAREHOUSE RELEASED BY and PULLED OUT / RECEIVED BY — each dated — and prints no cost',
         pullPaper.status === 200 &&
-          ['REQUESTED BY', 'SUPERVISOR', 'WAREHOUSE RELEASED BY', 'PULLED OUT / RECEIVED BY'].every((r) => flat(pullPaper.text).includes(r)) &&
+          ['REQUESTED BY', 'APPROVED BY', 'WAREHOUSE RELEASED BY', 'PULLED OUT / RECEIVED BY'].every((r) => flat(pullPaper.text).includes(r)) &&
+          pullSlots.length === 4 &&
+          pullSlots[0].signed &&
+          approvalSlot(pullSlots[1], true) &&
+          pullSlots[2].text.startsWith('WAREHOUSE RELEASED BY ') &&
+          pullSlots[2].signed &&
+          ownSlot(pullSlots[3], 'PULLED OUT RECEIVED BY', 'Verify Site Foreman', true) &&
+          approvedByCount(pullPaper.text) === 1 &&
+          // The step's own name heads nothing: the only SUPERVISOR in capitals was its heading.
+          !flat(pullPaper.text).includes('SUPERVISOR') &&
           flat(pullPaper.text).includes('Verify Site Foreman') &&
           signedCount(pullPaper.text) === 4 &&
           pendingCount(pullPaper.text) === 0 &&
           !/COST|AMOUNT/.test(pullPaper.text),
-        `${pullPaper.status} ${signedCount(pullPaper.text)} signed, ${pendingCount(pullPaper.text)} pending`,
+        `${pullPaper.status} ${signedCount(pullPaper.text)} signed, ${pendingCount(pullPaper.text)} pending — ${slotsSaid(pullSlots)}`,
       );
       await settlePullout(slipId, 'APPROVED');
       check(
@@ -5191,12 +5290,18 @@ async function main() {
     const draftInPdf = await printed(bossToken, `/receivings/${firstInId}/pdf`);
     // The report, its Attachments page, then the packing list's own page.
     const draftInPages = draftInPdf.bytes ? (await PDFDocument.load(draftInPdf.bytes)).getPageCount() : 0;
+    const draftInSlots = signoffSlots(draftInPdf.text, 'PREPARED BY');
     check(
-      'the Incoming Report prints who prepared it, dated, Back Support and the Purchasing Manager over Pending, and the packing list behind it',
+      'the Incoming Report prints who prepared it, dated, Back Support\'s and the Purchasing Manager\'s steps each under "Approved by" over Pending, and the packing list behind it',
       draftInPdf.status === 200 &&
         flat(draftInPdf.text).includes('PREPARED BY') &&
-        flat(draftInPdf.text).includes('BACK SUPPORT') &&
-        flat(draftInPdf.text).includes('PURCHASING MANAGER') &&
+        draftInSlots.length === 3 &&
+        ownSlot(draftInSlots[0], 'PREPARED BY', 'Verify Receiver', true) &&
+        approvalSlot(draftInSlots[1], false) &&
+        approvalSlot(draftInSlots[2], false) &&
+        draftInSlots.slice(1).some((sl) => names(sl, 'Verify Store Supervisor')) &&
+        approvedByCount(draftInPdf.text) === 2 &&
+        !['BACK SUPPORT', 'PURCHASING MANAGER'].some((r) => flat(draftInPdf.text).includes(r)) &&
         flat(draftInPdf.text).includes('Verify Receiver') &&
         flat(draftInPdf.text).includes('Verify Store Supervisor') &&
         signedCount(draftInPdf.text) === 1 &&
@@ -5204,7 +5309,7 @@ async function main() {
         draftInPdf.text.includes(`${TAG}-packing-list.pdf`) &&
         draftInPages === 3,
       `${draftInPdf.status} ${signedCount(draftInPdf.text)} signed, ${pendingCount(draftInPdf.text)} pending, ${draftInPages} page(s); ` +
-        `listed ${draftInPdf.text.includes(`${TAG}-packing-list.pdf`)}`,
+        `listed ${draftInPdf.text.includes(`${TAG}-packing-list.pdf`)} — ${slotsSaid(draftInSlots)}`,
     );
 
     const inRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'receiving', documentId: firstInId, status: 'PENDING' } });

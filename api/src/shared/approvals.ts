@@ -1463,15 +1463,23 @@ export async function approvalSignoffs(
  * own first slot (Prepared by / Requested by, the author, dated) goes before
  * them, and "Approved by" alone only where no route exists.
  */
+/** The heading every approval sign-off prints under. */
+export const APPROVAL_SIGNOFF = 'Approved by';
+
 export function slotSignatories(slots: ApprovalSlot[]): Signatory[] {
+  // Every approval prints under ONE heading, "Approved by" (2026-11-10, the
+  // owner's call: "make all approval Approved By") — the signer's name and
+  // the date and time under it say who and when. The step's own name stays
+  // in Admin › Approval Workflows, the Approval panel and the status words.
   // The position travels too: the house dress never prints one, but a
   // designed layout (the quotation's, the sales order's) may tick
   // `showPosition`, and a slot is the same slot on either.
+  const role = APPROVAL_SIGNOFF;
   return slots.map((s) => {
-    if (s.name) return { role: s.step, name: s.name, position: s.position, phone: s.phone, email: s.email, at: s.at };
+    if (s.name) return { role, name: s.name, position: s.position, phone: s.phone, email: s.email, at: s.at };
     const who = s.assigned ?? [];
-    if (who.length === 1) return { role: s.step, name: who[0].name, position: who[0].position, phone: who[0].phone, email: who[0].email };
-    return { role: s.step, name: who.length ? who.map((p) => p.name).join(' or ') : undefined };
+    if (who.length === 1) return { role, name: who[0].name, position: who[0].position, phone: who[0].phone, email: who[0].email };
+    return { role, name: who.length ? who.map((p) => p.name).join(' or ') : undefined };
   });
 }
 

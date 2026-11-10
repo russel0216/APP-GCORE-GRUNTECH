@@ -75,14 +75,14 @@ const money = (a: number, b: number) => Math.abs(a - b) < 0.005;
 
 /** The sign-off block's text — from PREPARED BY to the strapline — one line, a wrapped name read whole. */
 /**
- * The Technical Manager slot of a paper's sign-offs: everything from its role
- * to the next role. Who else holds the role in the database (and how their
+ * The first approval slot (the Technical Manager's step) of a paper's sign-offs:
+ * everything from its APPROVED BY heading to the next. Who else holds the role in the database (and how their
  * names sort) is not these checks' business — only whether ours is named.
  */
 function tmSlot(text: string): string {
-  const at = text.indexOf('TECHNICAL MANAGER');
+  const at = text.indexOf('APPROVED BY');
   if (at < 0) return '';
-  const end = text.indexOf('TEAM LEADER', at);
+  const end = text.indexOf('APPROVED BY', at + 1);
   return text.slice(at, end < 0 ? undefined : end);
 }
 
@@ -1350,7 +1350,7 @@ async function main() {
   const reopened = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
   check(
     'a reopened costing prints the route anew — both steps Pending, none of the old signatures dated',
-    (reopened.match(/Pending/g) ?? []).length === 2 && /TECHNICAL MANAGER [^]*?Pending/.test(reopened) && tmSlot(reopened).includes(reviewer.name),
+    (reopened.match(/Pending/g) ?? []).length === 2 && /APPROVED BY [^]*?Pending/.test(reopened) && tmSlot(reopened).includes(reviewer.name),
     reopened,
   );
   await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
@@ -1388,12 +1388,13 @@ async function main() {
   const runs = pdfPieces(pdf);
   const signed = signoffs(runs);
   check(
-    'the estimate signs off PREPARED BY the author, then TECHNICAL MANAGER and TEAM LEADER by their steps’ names, and no CEO (CTG)',
+    'the estimate signs off PREPARED BY the author, then APPROVED BY the technical manager and APPROVED BY the team leader, and no CEO (CTG)',
     signed.startsWith(`PREPARED BY ${estimator.name} `) &&
-      signed.includes(`TECHNICAL MANAGER ${reviewer.name} `) &&
-      signed.includes(`TEAM LEADER ${teamLeader.name} `) &&
+      signed.includes(`APPROVED BY ${reviewer.name} `) &&
+      signed.includes(`APPROVED BY ${teamLeader.name} `) &&
       !signed.includes('CEO (CTG)') &&
-      !signed.includes('APPROVED BY') &&
+      !signed.includes('TECHNICAL MANAGER') &&
+      !signed.includes('TEAM LEADER') &&
       !signed.includes('Pending'),
     signed,
   );
@@ -1494,7 +1495,7 @@ async function main() {
   // A draft names who will sign each step, "Pending" under them.
   const drafted = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${empty.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
   check(
-    'a draft prints the route it would take: each step by name, who is assigned, Pending under them — never the author',
+    'a draft prints the route it would take: each step headed APPROVED BY, who is assigned, Pending under them — never the author',
     tmSlot(drafted).includes(reviewer.name) && (drafted.match(/Pending/g) ?? []).length === 2 && !tmSlot(drafted).includes(estimator.name),
     drafted,
   );
@@ -1523,7 +1524,7 @@ async function main() {
   // ever sign that route, so neither the old signatures nor "Pending" print.
   const finalSignoffs = async (id: string) =>
     signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
-  const noRoute = (s: string) => s.startsWith(`PREPARED BY ${estimator.name}`) && !/TECHNICAL MANAGER|TEAM LEADER|CEO \(CTG\)|APPROVED BY|Pending/.test(s);
+  const noRoute = (s: string) => s.startsWith(`PREPARED BY ${estimator.name}`) && !/CEO \(CTG\)|APPROVED BY|Pending/.test(s);
   const reopenAgain = await api(tEstimator, 'PATCH', `/costings/${sheetId}`, { status: 'DRAFT' });
   await prisma.costing.update({ where: { id: sheetId }, data: { status: 'FINAL', finalAt: new Date() } });
   const staleFinal = await finalSignoffs(sheetId);
@@ -1575,7 +1576,7 @@ async function main() {
   const twoStepPaper = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${twoSteps.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator2}` } })).arrayBuffer())));
   check(
     'and the estimate prints the one name under both steps, with no Pending',
-    twoStepPaper.includes(`TECHNICAL MANAGER ${tmLeader.name} `) && twoStepPaper.includes(`TEAM LEADER ${tmLeader.name} `) && !twoStepPaper.includes('Pending'),
+    (twoStepPaper.match(new RegExp(`APPROVED BY ${tmLeader.name} `, 'g')) ?? []).length === 2 && !twoStepPaper.includes('Pending'),
     twoStepPaper,
   );
 

@@ -1324,13 +1324,14 @@ async function main() {
     const rfaPaper = await printed(rfaEngToken, `/plans/${rfaId}/pdf?attachments=0`);
     const rfaText = flat(rfaPaper.text);
     check(
-      'the paper is a Request for Approval: the drawing reference, then Requested by, Technical Manager and Team Leader, each signed and dated',
+      'the paper is a Request for Approval: the drawing reference, then Requested by and two APPROVED BY sign-offs, each signed and dated',
       rfaPaper.status === 200 &&
         /Request for Approval/i.test(rfaText) &&
         rfaText.includes('ZZ-M-101') &&
         rfaText.includes('REQUESTED BY') &&
-        rfaText.includes('TECHNICAL MANAGER') &&
-        rfaText.includes('TEAM LEADER') &&
+        (rfaText.match(/APPROVED BY/g) ?? []).length === 2 &&
+        !rfaText.includes('TECHNICAL MANAGER') &&
+        !rfaText.includes('TEAM LEADER') &&
         signedCount(rfaPaper.text) === 3 &&
         pendingCount(rfaPaper.text) === 0,
       `${rfaPaper.status} ${signedCount(rfaPaper.text)} signed, ${pendingCount(rfaPaper.text)} pending`,
@@ -1563,8 +1564,7 @@ async function main() {
       'a draft billing prints who raised it, dated, and its route Pending — never the creator as its approver',
       draftBill.status === 200 &&
         draftBillText.includes(`${TAG} Biller`) &&
-        flat(draftBillText).includes('TECHNICAL MANAGER') &&
-        flat(draftBillText).includes('TEAM LEADER') &&
+        (flat(draftBillText).match(/APPROVED BY/g) ?? []).length === 2 &&
         signedCount(draftBillText) === 1 &&
         pendingCount(draftBillText) === 2 &&
         (draftBillText.match(new RegExp(`${TAG} Biller`, 'g')) ?? []).length === 1 &&
@@ -1838,12 +1838,11 @@ async function main() {
     const brFlat = flat(brText);
     const brSteps = brWorkflow.steps.map((st) => st.name.toUpperCase());
     check(
-      'the printed request signs every step of its route by the step’s own name, then who received the cash — all dated',
+      'the printed request signs every step of its route as APPROVED BY, then who received the cash — all dated',
       brPdf.status === 200 &&
         brFlat.includes('REQUESTED BY') &&
-        brSteps.every((st) => brFlat.includes(st)) &&
+        (brFlat.match(/APPROVED BY/g) ?? []).length === brSteps.length &&
         brFlat.includes('RECEIVED BY') &&
-        !brFlat.includes('APPROVED BY') &&
         brText.includes('Verify Engineer') &&
         brText.includes('Verify PM') &&
         brText.includes('Verify Back Support') &&

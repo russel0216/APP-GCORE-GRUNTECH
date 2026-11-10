@@ -140,10 +140,10 @@ export function salesOrderSample(long = false): DesignData {
         email: 'maria.santos@gruntech.com',
         at: new Date('2026-10-07T01:30:00Z'),
       },
-      { role: 'Team Leader', name: 'Jose Reyes', at: new Date('2026-10-07T02:10:00Z') },
-      { role: 'Back Support', name: 'Ana Cruz' },
-      { role: 'Cost Controller', name: 'Ben Lim' },
-      { role: 'CEO / President', name: 'Carter Gasiong' },
+      { role: 'Approved by', name: 'Jose Reyes', at: new Date('2026-10-07T02:10:00Z') },
+      { role: 'Approved by', name: 'Ana Cruz' },
+      { role: 'Approved by', name: 'Ben Lim' },
+      { role: 'Approved by', name: 'Carter Gasiong' },
     ],
   };
 }

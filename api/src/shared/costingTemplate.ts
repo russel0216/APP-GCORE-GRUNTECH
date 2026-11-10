@@ -126,8 +126,8 @@ export function costingSample(long = false): DesignData {
     ],
     signatories: [
       { role: 'Prepared by', name: 'Juan Dela Cruz', phone: '0917 555 0100', email: 'juan.delacruz@gruntech.com', at: new Date('2026-10-13T01:30:00Z') },
-      { role: 'Technical Manager', name: 'Ana Cruz', at: new Date('2026-10-13T03:10:00Z') },
-      { role: 'Team Leader', name: 'Jose Reyes' },
+      { role: 'Approved by', name: 'Ana Cruz', at: new Date('2026-10-13T03:10:00Z') },
+      { role: 'Approved by', name: 'Jose Reyes' },
     ],
   };
 }

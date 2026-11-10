@@ -1510,8 +1510,9 @@ async function main() {
   check('a document never submitted has no slots', (await approvalSlots(`${TAG}_opt_doc`, `${TAG}-never`)).length === 0);
   const asSigned = slotSignatories(slotsAfter);
   check(
-    'a slot maps to a sign-off with the step as the role and the signer’s name, contact lines and date',
-    asSigned[0].role === 'Manager' && asSigned[0].name === pm.name && asSigned[0].email === pm.email && !!asSigned[0].at,
+    // Every approval prints under "Approved by" (2026-11-10, the owner's call) — never the step's own name.
+    'a slot maps to a sign-off headed "Approved by" — whatever its step is called — with the signer’s name, contact lines and date',
+    asSigned.every((sg) => sg.role === 'Approved by') && asSigned[0].name === pm.name && asSigned[0].email === pm.email && !!asSigned[0].at,
     JSON.stringify(asSigned[0]),
   );
   const mapped = slotSignatories([

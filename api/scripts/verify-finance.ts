@@ -287,11 +287,20 @@ async function makeUser(name: string, email: string, roleKeys: string[], supervi
   });
 }
 
-/** A workflow's step names as the paper prints them, in capitals. */
+/**
+ * A workflow's step names in capitals — what a sign-off was headed with until
+ * 2026-11-10. Every approval sign-off is headed "APPROVED BY" now (the
+ * owner's call), so these must NOT print as a heading; they still count the
+ * slots a route prints.
+ */
 const stepNames = async (workflowId: string | null) =>
   (await prisma.approvalStep.findMany({ where: { workflowId: workflowId ?? '' }, orderBy: { sequence: 'asc' } })).map((st) =>
     st.name.toUpperCase(),
   );
+/** The approval sign-offs on a paper: each is headed by a run reading exactly "APPROVED BY". */
+const approvedByCount = (t: string) => t.split('\n').filter((l) => l === 'APPROVED BY').length;
+/** No sign-off is headed with a step's own name (TEAM LEADER, FINANCE MANAGER …). */
+const noStepHeading = (t: string, steps: string[]) => steps.every((st) => !flat(t).includes(st));
 const exportsOf = (entityType: string, entityId: string) =>
   prisma.auditLog.count({ where: { entityType, entityId, action: 'EXPORTED' } });
 
@@ -1942,18 +1951,18 @@ async function main() {
     const brDraftText = brDraftPdf.bytes ? pdfText(brDraftPdf.bytes) : '';
     const brSteps = ((draftPage.body.approvalRoute?.steps ?? []) as { name: string }[]).map((st) => st.name.toUpperCase());
     check(
-      'and prints it: each step by its own name — never "Approved by — …" — "Pending" under each',
+      'and prints it: one "APPROVED BY" per step — never the step’s own name as a heading — "Pending" under each',
       brDraftPdf.status === 200 &&
         brSteps.length === 3 &&
-        brSteps.every((st) => flat(brDraftText).includes(st)) &&
-        !flat(brDraftText).includes('APPROVED BY') &&
+        approvedByCount(brDraftText) === brSteps.length &&
+        noStepHeading(brDraftText, brSteps) &&
         !flat(brDraftText).includes('RECEIVED BY') &&
         // "A or B" wraps where the names run long: read them across the breaks.
         flat(brDraftText).includes(pm.name) &&
         flat(brDraftText).includes(finMgr.name) &&
         signedCount(brDraftText) === 1 &&
         pendingCount(brDraftText) === 3,
-      `${brDraftPdf.status} ${brSteps.join(' / ')} · ${signedCount(brDraftText)} signed, ${pendingCount(brDraftText)} pending`,
+      `${brDraftPdf.status} ${brSteps.join(' / ')} · ${approvedByCount(brDraftText)} APPROVED BY · ${signedCount(brDraftText)} signed, ${pendingCount(brDraftText)} pending`,
     );
     const bothKinds = await eng('POST', '/expense-claims', { purpose: `${TAG} both`, advanceId: a4.id, budgetRequestId: raisedId, lines: receipt1 });
     check('a claim cannot liquidate an advance and a budget request at once', bothKinds.status === 400, String(bothKinds.status));
@@ -2000,16 +2009,16 @@ async function main() {
     // Whitespace folded: a long sign-off role wraps onto a second line.
     const brText = flat(brRaw);
     check(
-      'the request prints with every step signed and dated, and who received the cash',
+      'the request prints with every step signed and dated under "APPROVED BY", and who received the cash',
       brPdf.status === 200 &&
         // The document names itself in capitals, in the quotation's dress.
         brText.includes('BUDGET REQUEST') &&
-        brSteps.every((st) => brText.includes(st)) &&
+        approvedByCount(brRaw) === brSteps.length &&
+        noStepHeading(brRaw, brSteps) &&
         brText.includes('RECEIVED BY') &&
-        !brText.includes('APPROVED BY') &&
         signedCount(brRaw) === 5 &&
         pendingCount(brRaw) === 0,
-      `${brPdf.status} ${signedCount(brRaw)} signed, ${pendingCount(brRaw)} pending · ${brText.slice(0, 300)}`,
+      `${brPdf.status} ${approvedByCount(brRaw)} APPROVED BY · ${signedCount(brRaw)} signed, ${pendingCount(brRaw)} pending · ${brText.slice(0, 300)}`,
     );
     const brMoney = labelRuns(brPdf.bytes, ['Amount requested', 'Released']);
     check(
@@ -2218,24 +2227,24 @@ async function main() {
       if (lined.status === 201) await eng('POST', `/cash-advances/${lined.body.id}/cancel`, { reason: 'verify' });
 
       // A draft prints the route submitting it WOULD take (rule 6): every step
-      // by its own name, open, with "Pending" under who may sign it — the
+      // an "APPROVED BY" slot, open, with "Pending" under who may sign it — the
       // engineer's supervisor by name — and no receipt that has not happened.
       const draftAdvancePdf = await eng('GET', `/cash-advances/${allowed.body.id}/pdf`);
       const draftAdvanceText = draftAdvancePdf.bytes ? pdfText(draftAdvancePdf.bytes) : '';
       const advanceSteps = await stepNames(a1Request.workflowId);
       check(
-        'a draft advance prints the route it would take: each step by its name, "Pending" under who may sign it',
+        'a draft advance prints the route it would take: one "APPROVED BY" per step, never the step’s name, "Pending" under who may sign it',
         draftAdvancePdf.status === 200 &&
           flat(draftAdvanceText).includes('REQUESTED BY') &&
           advanceSteps.length > 0 &&
-          advanceSteps.every((st) => flat(draftAdvanceText).includes(st)) &&
+          approvedByCount(draftAdvanceText) === advanceSteps.length &&
+          noStepHeading(draftAdvanceText, advanceSteps) &&
           !flat(draftAdvanceText).includes('CHECKED BY') &&
-          !flat(draftAdvanceText).includes('APPROVED BY') &&
           !flat(draftAdvanceText).includes('RECEIVED BY') &&
           draftAdvanceText.includes(pm.name) &&
           signedCount(draftAdvanceText) === 1 &&
           pendingCount(draftAdvanceText) === advanceSteps.length,
-        `${draftAdvancePdf.status} ${advanceSteps.join(' / ')} · ${signedCount(draftAdvanceText)} signed, ${pendingCount(draftAdvanceText)} pending`,
+        `${draftAdvancePdf.status} ${advanceSteps.join(' / ')} · ${approvedByCount(draftAdvanceText)} APPROVED BY · ${signedCount(draftAdvanceText)} signed, ${pendingCount(draftAdvanceText)} pending`,
       );
       check(
         'and its money is a totals block of one row, the amount requested',
@@ -2638,8 +2647,9 @@ async function main() {
     }
 
     // The claim on paper (rule 6). Drafted, it prints the route submitting
-    // would take — each step by its own name, "Pending" under who may sign it
-    // (the engineer's supervisor by name); never "Checked by" / "Approved by".
+    // would take — one "APPROVED BY" slot per step, "Pending" under who may
+    // sign it (the engineer's supervisor by name); never "Checked by", never
+    // the step's own name as the heading (2026-11-10).
     // Signed at step 1 and then pulled back, it prints that route again: the
     // CANCELLED request's signature is not an approval anybody now gives.
     const pClaim = await eng('POST', '/expense-claims', {
@@ -2659,18 +2669,18 @@ async function main() {
     const pRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: pId, status: 'PENDING' } });
     const claimSteps = await stepNames(pRequest?.workflowId ?? null);
     check(
-      'a draft claim prints its route: PREPARED BY, then each step by its name, "Pending" under the supervisor by name',
+      'a draft claim prints its route: PREPARED BY, then one "APPROVED BY" per step, never the step’s name, "Pending" under the supervisor by name',
       pClaim.status === 201 &&
         pDraft.status === 200 &&
         flat(pDraft.text).includes('PREPARED BY') &&
         claimSteps.length > 0 &&
-        claimSteps.every((st) => flat(pDraft.text).includes(st)) &&
+        approvedByCount(pDraft.text) === claimSteps.length &&
+        noStepHeading(pDraft.text, claimSteps) &&
         !flat(pDraft.text).includes('CHECKED BY') &&
-        !flat(pDraft.text).includes('APPROVED BY') &&
         pDraft.text.includes(pm.name) &&
         signedCount(pDraft.text) === 1 &&
         pendingCount(pDraft.text) === claimSteps.length,
-      `${pClaim.status} ${pDraft.status} ${claimSteps.join(' / ')} · ${signedCount(pDraft.text)} signed, ${pendingCount(pDraft.text)} pending`,
+      `${pClaim.status} ${pDraft.status} ${claimSteps.join(' / ')} · ${approvedByCount(pDraft.text)} APPROVED BY · ${signedCount(pDraft.text)} signed, ${pendingCount(pDraft.text)} pending`,
     );
     check(
       'its receipts add up in the totals block — "Claimed", in bold, and no "Still owed" before anyone approved it — never a TOTAL row in the table',
@@ -2717,18 +2727,19 @@ async function main() {
     const pCancel = await eng('POST', `/expense-claims/${pId}/cancel`);
     const pCancelled = await claimPaper();
     check(
-      'cancelled after step 1 signed, it prints PREPARED BY and that signature, both dated — no step "Pending"',
+      'cancelled after step 1 signed, it prints PREPARED BY and that one signature under "APPROVED BY", both dated — no step "Pending"',
       pResubmit.status === 200 &&
         !!pRequest2 &&
         pCancel.status === 200 &&
         flat(pCancelled.text).includes('PREPARED BY') &&
-        flat(pCancelled.text).includes(claimSteps[0] ?? '?') &&
+        claimSteps.length > 0 &&
+        approvedByCount(pCancelled.text) === 1 &&
         pCancelled.text.includes(pm.name) &&
-        claimSteps.slice(1).every((st) => !flat(pCancelled.text).includes(st)) &&
+        noStepHeading(pCancelled.text, claimSteps) &&
         signedCount(pCancelled.text) === 2 &&
         pendingCount(pCancelled.text) === 0 &&
         pCancelled.text.includes('Cancelled'),
-      `${pResubmit.status} ${pCancel.status} · ${signedCount(pCancelled.text)} signed, ${pendingCount(pCancelled.text)} pending`,
+      `${pResubmit.status} ${pCancel.status} · ${approvedByCount(pCancelled.text)} APPROVED BY · ${signedCount(pCancelled.text)} signed, ${pendingCount(pCancelled.text)} pending`,
     );
     check(
       'and its money states the claim — "Claimed" — with no "Still owed"',
@@ -2777,10 +2788,12 @@ async function main() {
     const okPaper = await eng('GET', `/expense-claims/${okId}/pdf`);
     const okText = okPaper.bytes ? pdfText(okPaper.bytes) : '';
     check(
-      'an approved claim prints every step signed and dated, then Total, Reimbursed and Still owed',
+      'an approved claim prints every step signed and dated under "APPROVED BY", then Total, Reimbursed and Still owed',
       okClaim.status === 201 &&
         okSubmit.status === 200 &&
-        okSteps.every((st) => flat(okText).includes(st)) &&
+        okSteps.length > 0 &&
+        approvedByCount(okText) === okSteps.length &&
+        noStepHeading(okText, okSteps) &&
         signedCount(okText) === okSteps.length + 1 &&
         pendingCount(okText) === 0 &&
         okText.includes('Approved') &&
@@ -2792,7 +2805,7 @@ async function main() {
         !hasLine(okText, 'Claimed') &&
         // In the money block's order, only the last — what is still owed — bold.
         labelsSaid(labelRuns(okPaper.bytes, CLAIM_MONEY)) === 'Total, Reimbursed, Still owed*',
-      `${okClaim.status} ${okSubmit.status} · ${signedCount(okText)} signed, ${pendingCount(okText)} pending · ${labelsSaid(labelRuns(okPaper.bytes, CLAIM_MONEY))} · ` +
+      `${okClaim.status} ${okSubmit.status} · ${approvedByCount(okText)} APPROVED BY · ${signedCount(okText)} signed, ${pendingCount(okText)} pending · ${labelsSaid(labelRuns(okPaper.bytes, CLAIM_MONEY))} · ` +
         okText.split('\n').filter((l) => /Total|Reimbursed|owed|Claimed/.test(l)).join(' | '),
     );
 
@@ -3166,16 +3179,17 @@ async function main() {
     const advText = advancePdf.bytes ? pdfText(advancePdf.bytes) : '';
     const advSteps = await stepNames(a1Request.workflowId);
     check(
-      'the advance prints REQUESTED BY, each step by its own name, RECEIVED BY — all dated, none "Checked by"',
+      'the advance prints REQUESTED BY, one "APPROVED BY" per step (never the step’s name), RECEIVED BY — all dated, none "Checked by"',
       flat(advText).includes('REQUESTED BY') &&
-        advSteps.every((st) => flat(advText).includes(st)) &&
+        advSteps.length > 0 &&
+        approvedByCount(advText) === advSteps.length &&
+        noStepHeading(advText, advSteps) &&
         flat(advText).includes('RECEIVED BY') &&
         !flat(advText).includes('CHECKED BY') &&
-        !flat(advText).includes('APPROVED BY') &&
         advText.includes(pm.name) &&
         signedCount(advText) === advSteps.length + 2 &&
         pendingCount(advText) === 0,
-      `${advSteps.join(' / ')} · ${signedCount(advText)} signed, ${pendingCount(advText)} pending`,
+      `${advSteps.join(' / ')} · ${approvedByCount(advText)} APPROVED BY · ${signedCount(advText)} signed, ${pendingCount(advText)} pending`,
     );
     check(
       'its money: requested, released, spent, owed back, refunded, still to refund — statuses in words',
@@ -3198,14 +3212,15 @@ async function main() {
     const liqText = liquidationPdf.bytes ? pdfText(liquidationPdf.bytes) : '';
     const liqSteps = await stepNames(l1Request.workflowId);
     check(
-      'the liquidation report prints PREPARED BY and each step by its name, signed and dated',
+      'the liquidation report prints PREPARED BY and one "APPROVED BY" per step (never the step’s name), signed and dated',
       flat(liqText).includes('PREPARED BY') &&
-        liqSteps.every((st) => flat(liqText).includes(st)) &&
+        liqSteps.length > 0 &&
+        approvedByCount(liqText) === liqSteps.length &&
+        noStepHeading(liqText, liqSteps) &&
         !flat(liqText).includes('CHECKED BY') &&
-        !flat(liqText).includes('APPROVED BY') &&
         signedCount(liqText) === liqSteps.length + 1 &&
         pendingCount(liqText) === 0,
-      `${liqSteps.join(' / ')} · ${signedCount(liqText)} signed, ${pendingCount(liqText)} pending`,
+      `${liqSteps.join(' / ')} · ${approvedByCount(liqText)} APPROVED BY · ${signedCount(liqText)} signed, ${pendingCount(liqText)} pending`,
     );
     check(
       'and its receipts add up in the totals block: Total, Advance released, the unspent owed back, less what came back — nothing still to refund',
@@ -4857,17 +4872,19 @@ async function main() {
     const directWhileLive = await fin('POST', `/invoices/from-billing/${irB1.id}`, {});
     check('finance’s direct door waits while the request is open', directWhileLive.status === 400 && String(directWhileLive.body.error).includes(String(ir.body.number)), JSON.stringify(directWhileLive.body));
     const irDraftPdf = await seller('GET', `/invoice-requests/${irId}/pdf`);
-    const irDraftText = (irDraftPdf.bytes ? pdfText(irDraftPdf.bytes) : '').replace(/\s+/g, ' ');
+    const irDraftRaw = irDraftPdf.bytes ? pdfText(irDraftPdf.bytes) : '';
+    const irDraftText = irDraftRaw.replace(/\s+/g, ' ');
     check(
-      'its paper, in the standard dress: the order, the PO, the particulars, the totals, and Back Support Pending',
+      'its paper, in the standard dress: the order, the PO, the particulars, the totals, and one "APPROVED BY" Pending — never headed "BACK SUPPORT"',
       irDraftPdf.status === 200 &&
         irDraftText.includes('INVOICE REQUEST') &&
         irDraftText.includes(`${TAG}-SO-IR1`) &&
         irDraftText.includes(`${TAG}-PO-IR`) &&
         irDraftText.includes('Net collectible') &&
-        irDraftText.includes('BACK SUPPORT') &&
-        irDraftText.includes('Pending'),
-      irDraftText.slice(0, 600),
+        approvedByCount(irDraftRaw) === 1 &&
+        !irDraftText.includes('BACK SUPPORT') &&
+        pendingCount(irDraftRaw) === 1,
+      `${approvedByCount(irDraftRaw)} APPROVED BY, ${pendingCount(irDraftRaw)} pending · ${irDraftText.slice(0, 600)}`,
     );
     const irSubmit = await seller('POST', `/invoice-requests/${irId}/submit`);
     const irReq = await prisma.approvalRequest.findFirst({
