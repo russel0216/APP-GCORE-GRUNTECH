@@ -64,9 +64,15 @@ const round = (n: number) => Math.round(n * 100) / 100;
  * people are grouped under the team that gives them most, then by value, so
  * the bands cross as little as a stacked layout allows.
  */
-export function layoutSankey(input: SankeyInput, opts: { width: number; height: number; nodeWidth?: number; gap?: number } = { width: 720, height: 360 }): SankeyLayout {
+export function layoutSankey(input: SankeyInput, opts: { width: number; height: number; nodeWidth?: number; gap?: number; pitch?: number } = { width: 720, height: 360 }): SankeyLayout {
   const nodeWidth = opts.nodeWidth ?? 14;
   const gap = opts.gap ?? 10;
+  // `pitch` (2026-11-10, the owner's report: the names drifted off their
+  // bars) is the least room from one node's top to the next's, so a label
+  // as tall as `pitch` sits beside its own node: a small node keeps its
+  // height and is given that room, the scale shrinking until every column
+  // still fits.
+  const pitch = opts.pitch ?? 0;
   const total = input.root.value;
   const teams = input.teams.filter((t) => t.value > 0);
   const linkValue = (team: string, person: string) => input.links.filter((l) => l.team === team && l.person === person).reduce((s, l) => s + l.value, 0);
@@ -95,14 +101,31 @@ export function layoutSankey(input: SankeyInput, opts: { width: number; height: 
   // room left for bands, and the root must stand as tall as the others.
   const most = Math.max(1, teams.length, people.length);
   const usable = Math.max(1, opts.height - gap * (most - 1));
-  const scale = usable / total;
+  const step = (h: number) => Math.max(h + gap, pitch);
+  const columnH = (items: { value: number }[], s: number) =>
+    items.reduce((sum, i, k) => sum + (k === items.length - 1 ? i.value * s : step(i.value * s)), 0);
+  let scale = usable / total;
+  if (pitch > 0) {
+    // The largest scale at which every column, its pitches kept, fits.
+    const fits = (s: number) => [[{ value: total }], teams, people].every((c) => columnH(c, s) <= opts.height + 0.01);
+    if (!fits(scale)) {
+      let lo = 0;
+      let hi = scale;
+      for (let k = 0; k < 40; k++) {
+        const mid = (lo + hi) / 2;
+        if (fits(mid)) lo = mid;
+        else hi = mid;
+      }
+      scale = lo;
+    }
+  }
   const stack = (items: { id: string; label: string; value: number; to?: string }[], column: 0 | 1 | 2, x: number): SankeyNode[] => {
-    const totalH = items.reduce((s, i) => s + i.value * scale, 0) + gap * (items.length - 1);
+    const totalH = columnH(items, scale);
     let y = Math.max(0, (opts.height - totalH) / 2);
     return items.map((i) => {
       const h = i.value * scale;
       const node: SankeyNode = { id: `${column}:${i.id}`, column, label: i.label, value: round(i.value), pct: share(i.value, total), x, y: round(y), h: round(h), to: i.to };
-      y += h + gap;
+      y += step(h);
       return node;
     });
   };

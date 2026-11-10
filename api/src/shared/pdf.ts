@@ -2408,7 +2408,7 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
     const areaW = half - labelL - labelR;
     const LINE_H = 20;
     const rows = Math.max(input.people.filter((p) => p.value > 0).length, input.teams.filter((t) => t.value > 0).length, 1);
-    const sk = layoutSankey(input, { width: areaW, height: areaH, nodeWidth: 12, gap: Math.max(4, Math.min(LINE_H, (areaH * 0.45) / rows)) });
+    const sk = layoutSankey(input, { width: areaW, height: areaH, nodeWidth: 12, gap: Math.max(4, Math.min(LINE_H, (areaH * 0.45) / rows)), pitch: LINE_H });
     if (sk.nodes.length) {
       const ox = sx + labelL;
       const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, FLOW_TONES[i % FLOW_TONES.length]]));

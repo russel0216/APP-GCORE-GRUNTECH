@@ -608,14 +608,19 @@ export function Sankey({ input, format, caption }: { input: SankeyInput; format:
   // every node needs about 40 units of height whatever its value; a margin
   // top and bottom keeps the end nodes' labels on the canvas.
   const rows = Math.max(input.teams.filter((t) => t.value > 0).length, input.people.filter((p) => p.value > 0).length, 1);
-  const pad = 16;
-  const H = Math.max(320, 52 * rows + pad * 2);
+  // Room above and below for half a label, so the end nodes' names fit.
+  const pad = 28;
+  // Every node is given at least two lines of label (PITCH), so each name
+  // sits beside its own bar (2026-11-10, the owner's report); the canvas
+  // grows with the people so the large nodes keep room of their own.
+  const PITCH = 44;
+  const H = Math.max(360, 64 * rows + pad * 2);
   // Only Gruntech's label sits left of the flow and only the people's right
   // of it (2026-11-09, the owner's call: "widen, maximizing the left and
   // right space"), so each side keeps just the room its own labels need.
   const labelW = 130;
   const labelR = 190;
-  const lay = layoutSankey(input, { width: W - labelW - labelR, height: H - pad * 2, nodeWidth: 14, gap: 22 });
+  const lay = layoutSankey(input, { width: W - labelW - labelR, height: H - pad * 2, nodeWidth: 14, gap: 22, pitch: PITCH });
   if (lay.nodes.length === 0) return <Empty caption={caption} />;
   const navigate = useNavigate();
   const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, SANKEY_TONES[i % SANKEY_TONES.length]]));
@@ -631,13 +636,13 @@ export function Sankey({ input, format, caption }: { input: SankeyInput; format:
   // Labels never overlap (2026-11-09, the owner's report): each column's
   // labels are spread to at least two lines apart, top to bottom, then pulled
   // back up from the bottom edge if the last ran off the canvas.
-  const LINE = 40;
+  const LINE = PITCH - 4;
   const labelY = new Map<string, number>();
   for (const col of [0, 1, 2] as const) {
     const ns = lay.nodes.filter((n) => n.column === col).sort((a, b) => a.y - b.y);
     const ys = ns.map((n) => n.y + n.h / 2);
     for (let i = 1; i < ys.length; i++) ys[i] = Math.max(ys[i], ys[i - 1] + LINE);
-    const max = H - pad * 2 - LINE / 2;
+    const max = H - pad - 16;
     if (ys.length && ys[ys.length - 1] > max) {
       ys[ys.length - 1] = max;
       for (let i = ys.length - 2; i >= 0; i--) ys[i] = Math.min(ys[i], ys[i + 1] - LINE);

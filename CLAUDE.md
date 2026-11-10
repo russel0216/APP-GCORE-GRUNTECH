@@ -6166,7 +6166,11 @@ year**, `sales.target.<year>` (`{ amount }`), read and set by `GET/PUT
 dashboard's), audited; the report page's "<year> target" box. The
 dashboard's Sankey spreads its labels the same way (≥ 40 units apart), and
 keeps only the room its labels need either side (130 left for Gruntech, 190
-right for the people) so the flow takes the width.
+right for the people) so the flow takes the width. **Every name sits beside its own
+bar** (2026-11-10, the owner's report: small nodes packed tighter than two
+lines of label pushed the names off their bars): `layoutSankey`'s `pitch`
+gives every node at least a label's height from the next, shrinking the
+scale until each column fits — 44 on the dashboard, 20 on the paper.
 
 ## The list of quotations (2026-10-08)
 
