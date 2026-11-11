@@ -2906,6 +2906,38 @@ async function main() {
           (await prisma.customer.count({ where: { name: `${TAG} STAND-IN PAYER` } })) === 1,
         JSON.stringify({ created: standAgain.created }),
       );
+      // The check asks where each SCORO owner's invoices go, and a re-run
+      // with the answer moves what was imported (2026-11-11, the owner's
+      // report: an owner with no login landed on the importer, with no team).
+      const askedOwners = (standCheck.extra as { owners?: { rows: { key: string; invoices: number; loginId: string | null }[]; teams: unknown[]; people: unknown[] } } | undefined)?.owners;
+      const askedRow = askedOwners?.rows.find((r) => r.key === 'nobody by this name');
+      check(
+        'the check asks who each SCORO owner’s invoices go under: the owner with no login is listed with its two invoices, the logins and the teams to pick',
+        !!askedRow && askedRow.loginId === null && askedRow.invoices === 2 && (askedOwners?.people.length ?? 0) > 0 && (askedOwners?.teams.length ?? 0) > 0,
+        JSON.stringify(askedOwners?.rows),
+      );
+      const pickTeam = await prisma.industry.findFirst({ where: { isActive: true }, orderBy: { code: 'desc' }, select: { id: true } });
+      const withChoice = (owners: Record<string, unknown>) =>
+        runImport(decodeCsv(invFile(standRows)), scoroInvoiceSpec, true, (records) => writeScoroInvoices(records as never, actor, { owners }));
+      await withChoice({ 'Nobody By This Name': { userId: sales.id, teamId: pickTeam?.id } });
+      const standMoved = await prisma.quotation.findFirst({
+        where: { number: standNo },
+        select: { ownerId: true, teamId: true, salesOrders: { select: { id: true, ownerId: true, invoices: { select: { salespersonId: true, teamId: true } } } } },
+      });
+      const movedInvoices = standMoved?.salesOrders.flatMap((o) => o.invoices) ?? [];
+      check(
+        'run again with the answer, the invoices already imported move: both orders, their stand-in and their A/R invoices under the salesperson and team picked',
+        !!pickTeam && standMoved?.ownerId === sales.id && standMoved.teamId === pickTeam.id && standMoved.salesOrders.every((o) => o.ownerId === sales.id) &&
+          movedInvoices.length === 2 && movedInvoices.every((i) => i.salespersonId === sales.id && i.teamId === pickTeam.id),
+        JSON.stringify(standMoved),
+      );
+      const movedRows = () =>
+        prisma.auditLog.count({ where: { entityType: 'sales_order', entityId: { in: standMoved?.salesOrders.map((o) => o.id) ?? [] }, action: 'UPDATED', summary: { startsWith: 'Salesperson and team set' } } });
+      const movedOnce = await movedRows();
+      await withChoice({ 'Nobody By This Name': { userId: sales.id, teamId: pickTeam?.id } });
+      check('each move is audited once — the same answer again writes nothing', movedOnce === 2 && (await movedRows()) === 2, String(movedOnce));
+      const refusedTeam = await withChoice({ 'Nobody By This Name': { teamId: 'no-such-team' } }).then(() => null, (e: { status?: number }) => e.status ?? 0);
+      check('a team that is not on the list is refused before anything is written', refusedTeam === 400, String(refusedTeam));
     } finally {
       // The series as it stood before the section, whatever happened.
       await setSeries(seriesWas);

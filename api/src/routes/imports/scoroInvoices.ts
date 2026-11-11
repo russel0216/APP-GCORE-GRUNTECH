@@ -137,6 +137,10 @@ interface ScoroInvoiceRecord {
   ownerId: string | null;
   /** SCORO's owner_name where no login carries it; the quotation's owner is used. */
   ownerNote: string | null;
+  /** SCORO's owner_name as the file spells it — what the check asks about. */
+  scoroOwner: string | null;
+  /** The login of that name, where there is one. */
+  ownerLogin: string | null;
   contact: { id: string | null; name: string } | null;
   status: SalesOrderStatus;
   scoroStatus: string;
@@ -260,11 +264,12 @@ const scoroInvoiceSpec: ImportSpec<ScoroInvoiceRecord> = {
     const ownerName = optional(row, 'owner_name');
     let ownerId: string | null = quotation?.ownerId ?? null;
     let ownerNote: string | null = null;
+    let ownerLogin: string | null = null;
     if (ownerName) {
       const users = await prisma.user.findMany({ select: { id: true, name: true, isActive: true } });
       const named = users.filter((u) => sameName(u.name, ownerName));
       const owner = named.find((u) => u.isActive) ?? named[0];
-      if (owner) ownerId = owner.id;
+      if (owner) ownerId = ownerLogin = owner.id;
       else ownerNote = collapse(ownerName);
     }
 
@@ -297,6 +302,8 @@ const scoroInvoiceSpec: ImportSpec<ScoroInvoiceRecord> = {
       standIn,
       ownerId,
       ownerNote,
+      scoroOwner: ownerName ? collapse(ownerName) : null,
+      ownerLogin,
       contact,
       status,
       scoroStatus: statusName,
@@ -318,9 +325,78 @@ const scoroInvoiceSpec: ImportSpec<ScoroInvoiceRecord> = {
   },
   summarize: async (records) => {
     const unlisted = await unlistedScoroGroups(records);
-    return unlisted.length ? { groups: { unlisted, choices: (await listedGroups()).map((g) => g.name), fallback: FALLBACK_GROUP } } : {};
+    return {
+      ...(unlisted.length ? { groups: { unlisted, choices: (await listedGroups()).map((g) => g.name), fallback: FALLBACK_GROUP } } : {}),
+      owners: await ownerQuestion(records),
+    };
   },
 };
+
+/** One SCORO owner's key in the answers: the name, single-spaced, case-blind. */
+function ownerKey(name: string | null): string {
+  return collapse(name ?? '').toLowerCase();
+}
+
+/**
+ * "The check didn't ask me where it will go" (2026-11-11, the owner's report:
+ * invoices whose SCORO owner has no login landed on the importer with no
+ * team). The check lists every owner_name in the file — the login of that
+ * name and its team, or that there is none — with the logins and teams to
+ * choose from; the commit answers `options.owners[key] = { userId?, teamId? }`.
+ */
+async function ownerQuestion(records: ScoroInvoiceRecord[]) {
+  const people = await prisma.user.findMany({
+    where: { isActive: true },
+    orderBy: { name: 'asc' },
+    select: { id: true, name: true, employee: { select: { industry: { select: { id: true, code: true } } } } },
+  });
+  const teams = await prisma.industry.findMany({ where: { isActive: true }, orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }], select: { id: true, code: true, name: true } });
+  const rows = new Map<string, { key: string; name: string; invoices: number; standIns: number; loginId: string | null }>();
+  for (const r of records) {
+    const key = ownerKey(r.scoroOwner);
+    const row = rows.get(key) ?? { key, name: r.scoroOwner ?? '', invoices: 0, standIns: 0, loginId: r.ownerLogin };
+    row.invoices++;
+    if (r.standIn) row.standIns++;
+    rows.set(key, row);
+  }
+  return {
+    rows: [...rows.values()].map((row) => {
+      const login = people.find((u) => u.id === row.loginId) ?? null;
+      return { ...row, loginName: login?.name ?? null, loginTeam: login?.employee?.industry?.code ?? null };
+    }),
+    people: people.map((u) => ({ id: u.id, name: u.name, team: u.employee?.industry?.code ?? null })),
+    teams,
+  };
+}
+
+interface OwnerChoice {
+  userId?: string;
+  teamId?: string;
+}
+
+/** The answers to the owner question, each login and team checked to be on file and active. */
+async function ownerChoices(options?: Record<string, unknown>): Promise<Map<string, OwnerChoice>> {
+  const out = new Map<string, OwnerChoice>();
+  const raw = options?.owners;
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue;
+    const { userId, teamId } = value as Record<string, unknown>;
+    const choice: OwnerChoice = {};
+    if (typeof userId === 'string' && userId) {
+      const user = await prisma.user.findFirst({ where: { id: userId, isActive: true }, select: { id: true } });
+      if (!user) throw new HttpError(400, `The salesperson chosen for "${key}" is not an active login.`);
+      choice.userId = user.id;
+    }
+    if (typeof teamId === 'string' && teamId) {
+      const team = await prisma.industry.findFirst({ where: { id: teamId, isActive: true }, select: { id: true } });
+      if (!team) throw new HttpError(400, `The team chosen for "${key}" is not an active team.`);
+      choice.teamId = team.id;
+    }
+    if (choice.userId || choice.teamId) out.set(ownerKey(key), choice);
+  }
+  return out;
+}
 
 async function writeScoroInvoices(
   records: { record: ScoroInvoiceRecord; existingId: string | null }[],
@@ -329,6 +405,8 @@ async function writeScoroInvoices(
 ): Promise<void> {
   const by = { actorId: actor?.id ?? null, actorName: actor?.name ?? null };
   const groupOf = await groupResolver(options);
+  const choices = await ownerChoices(options);
+  const choiceOf = (record: ScoroInvoiceRecord) => choices.get(ownerKey(record.scoroOwner)) ?? null;
 
   let written = 0;
   for (const { record, existingId } of records) {
@@ -355,9 +433,10 @@ async function writeScoroInvoices(
   }
 
   async function writeOne(tx: Tx, record: ScoroInvoiceRecord) {
-    const ownerId = record.ownerId ?? actor?.id ?? null;
+    const choice = choiceOf(record);
+    const ownerId = choice?.userId ?? record.ownerId ?? actor?.id ?? null;
     if (!ownerId) throw new Error(`invoice ${record.number}: no login named ${record.ownerNote ?? 'its owner'} — add them in Admin › Users first`);
-    const quotation = record.quotation ?? (await standInFor(tx, record, ownerId));
+    const quotation = record.quotation ?? (await standInFor(tx, record, ownerId, choice?.teamId ?? null));
     let contactId = record.contact?.id ?? (record.contact ? (await findContact(tx, quotation.customerId, record.contact.name))?.id : null) ?? quotation.contactId;
     if (!contactId && record.contact && quotation.directOrder) {
       // A stand-in's customer takes the contact SCORO names, as the quotes import does.
@@ -465,7 +544,7 @@ async function writeScoroInvoices(
    * of this file (or an earlier run) made for the same quote_no, looked for
    * again inside the transaction.
    */
-  async function standInFor(tx: Tx, record: ScoroInvoiceRecord, ownerId: string): Promise<QuoteRef> {
+  async function standInFor(tx: Tx, record: ScoroInvoiceRecord, ownerId: string, teamId: string | null): Promise<QuoteRef> {
     const s = record.standIn!;
     const select = { id: true, number: true, customerId: true, contactId: true, ownerId: true, currency: true, directOrder: true } as const;
     const again = await tx.quotation.findFirst({ where: { number: { equals: s.number, mode: 'insensitive' } }, select });
@@ -509,7 +588,7 @@ async function writeScoroInvoices(
         probability: 100,
         decidedAt: record.orderDate,
         currency: s.currency,
-        teamId: team?.id ?? null,
+        teamId: teamId ?? team?.id ?? null,
         createdAt: record.orderDate,
         revisions: { create: [{ revision: 0, status: 'APPROVED', vatRate: record.vatRate, discountPct: record.discountPct, createdAt: record.orderDate }] },
       },
@@ -532,15 +611,73 @@ async function writeScoroInvoices(
   }
 
   async function catchUp(tx: Tx, orderId: string, record: ScoroInvoiceRecord) {
-    if (record.status !== 'ISSUED') return;
-    const order = await tx.salesOrder.findUnique({ where: { id: orderId }, select: { status: true } });
-    if (order?.status !== 'ISSUED') return;
     const ours = await tx.auditLog.findFirst({
       where: { entityType: 'sales_order', entityId: orderId, action: 'CREATED', summary: { startsWith: 'Imported from SCORO invoice' } },
       select: { id: true },
     });
     if (!ours) return;
+    await reassign(tx, orderId, record);
+    if (record.status !== 'ISSUED') return;
+    const order = await tx.salesOrder.findUnique({ where: { id: orderId }, select: { status: true } });
+    if (order?.status !== 'ISSUED') return;
     await writeReceivable(tx, orderId, record, by);
+  }
+
+  /**
+   * A re-run with an answer for the order's SCORO owner puts an order this
+   * import made under the salesperson and team chosen: the order, its
+   * stand-in quotation (a real quotation keeps its own owner and team) and
+   * its SCORO invoices in A/R. Nothing is touched where no answer was given
+   * or nothing differs.
+   */
+  async function reassign(tx: Tx, orderId: string, record: ScoroInvoiceRecord) {
+    const choice = choiceOf(record);
+    if (!choice) return;
+    const order = await tx.salesOrder.findUnique({
+      where: { id: orderId },
+      select: { id: true, number: true, ownerId: true, quotation: { select: { id: true, directOrder: true, ownerId: true, teamId: true } } },
+    });
+    if (!order) return;
+    const ownerId = choice.userId ?? order.ownerId;
+    const standIn = order.quotation.directOrder ? order.quotation : null;
+    // The team: the one chosen, else — when the salesperson changed — theirs.
+    const teamId = standIn ? (choice.teamId ?? (choice.userId && choice.userId !== standIn.ownerId ? ((await teamOf(ownerId))?.id ?? null) : standIn.teamId)) : null;
+    const moved: string[] = [];
+    if (ownerId !== order.ownerId) {
+      await tx.salesOrder.update({ where: { id: order.id }, data: { ownerId } });
+      moved.push('salesperson');
+    }
+    if (standIn && (standIn.ownerId !== ownerId || standIn.teamId !== teamId)) {
+      await tx.quotation.update({ where: { id: standIn.id }, data: { ownerId, teamId } });
+      if (standIn.teamId !== teamId) moved.push('team');
+      if (standIn.ownerId !== ownerId && !moved.includes('salesperson')) moved.push('salesperson');
+    }
+    const invoices = await tx.invoice.findMany({
+      where: { salesOrderId: order.id, importedFrom: 'SCORO' },
+      select: { id: true, salespersonId: true, teamId: true },
+    });
+    for (const inv of invoices) {
+      const data = { salespersonId: ownerId, teamId: standIn ? teamId : inv.teamId };
+      if (inv.salespersonId === data.salespersonId && inv.teamId === data.teamId) continue;
+      await tx.invoice.update({ where: { id: inv.id }, data });
+      if (!moved.includes('invoice')) moved.push('invoice');
+    }
+    if (!moved.length) return;
+    const owner = await tx.user.findUnique({ where: { id: ownerId }, select: { name: true } });
+    const team = teamId ? await tx.industry.findUnique({ where: { id: teamId }, select: { code: true } }) : null;
+    await audit(
+      {
+        entityType: 'sales_order',
+        entityId: order.id,
+        action: 'UPDATED',
+        summary: `Salesperson and team set from ${SOURCE}: ${owner?.name ?? '—'}${standIn ? `, team ${team?.code ?? 'none'}` : ''}`,
+        before: { ownerId: order.ownerId, ...(standIn ? { teamId: standIn.teamId } : {}) },
+        after: { ownerId, ...(standIn ? { teamId } : {}), scoroOwner: record.scoroOwner, changed: moved },
+        ...by,
+      },
+      undefined,
+      tx,
+    );
   }
 }
 

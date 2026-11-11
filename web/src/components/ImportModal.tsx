@@ -88,7 +88,7 @@ interface ImportReport {
    * and the team to tag them with), and what it says the file holds (the Odoo
    * import's facts and tables).
    */
-  extra?: { groups?: GroupQuestion; teams?: TeamQuestion; facts?: { label: string; value: string }[]; tables?: ReportTable[] };
+  extra?: { groups?: GroupQuestion; teams?: TeamQuestion; owners?: OwnerQuestion; facts?: { label: string; value: string }[]; tables?: ReportTable[] };
 }
 
 /** A small table the check draws over the rows: the Odoo import's groups, brands, holders. */
@@ -103,6 +103,17 @@ interface ReportTable {
 interface TeamQuestion {
   choices: { id: string; code: string; name: string }[];
   quotations: number;
+}
+
+/**
+ * "The check didn't ask me where it will go" (2026-11-11): each SCORO owner in
+ * an invoices file — the login of that name and its team, or that there is
+ * none — with the logins and teams to choose from.
+ */
+interface OwnerQuestion {
+  rows: { key: string; name: string; invoices: number; standIns: number; loginId: string | null; loginName: string | null; loginTeam: string | null }[];
+  people: { id: string; name: string; team: string | null }[];
+  teams: { id: string; code: string; name: string }[];
 }
 
 /** A SCORO group not on Admin › Categories › Quotation groups, and how many lines use it. */
@@ -148,6 +159,10 @@ export function ImportModal({
   // The team the file's quotations are tagged with; '' follows each owner's team.
   const [teamChoice, setTeamChoice] = useState('');
   const teamQuestion = report && !report.committed ? report.extra?.teams : undefined;
+  // Who each SCORO owner's invoices go under: a login and a team, where picked.
+  const [ownerChoice, setOwnerChoice] = useState<Record<string, { userId?: string; teamId?: string }>>({});
+  const ownerQuestion = report && !report.committed ? report.extra?.owners : undefined;
+  const pickOwner = (key: string, part: { userId?: string; teamId?: string }) => setOwnerChoice((c) => ({ ...c, [key]: { ...c[key], ...part } }));
 
   async function send(commit: boolean) {
     if (!file) return;
@@ -158,11 +173,22 @@ export function ImportModal({
       form.append('file', WORKBOOK_EXTENSIONS.includes(extensionOf(file.name)) ? await workbookToCsv(file, columns.filter((c) => c.required).map((c) => c.header)) : file);
       // The answers to what the check asked: each unlisted group's choice,
       // else the default; and the team, when one was picked.
-      if (commit && (question?.unlisted.length || (teamQuestion && teamChoice))) {
+      const owners = ownerQuestion
+        ? Object.fromEntries(
+            ownerQuestion.rows
+              .map((r) => [r.key, { ...(ownerChoice[r.key]?.userId ? { userId: ownerChoice[r.key].userId } : {}), ...(ownerChoice[r.key]?.teamId ? { teamId: ownerChoice[r.key].teamId } : {}) }] as const)
+              .filter(([, v]) => Object.keys(v).length > 0),
+          )
+        : {};
+      const hasOwners = Object.keys(owners).length > 0;
+      if (commit && (question?.unlisted.length || (teamQuestion && teamChoice) || hasOwners)) {
         const groups = question?.unlisted.length
           ? Object.fromEntries(question.unlisted.map((g) => [g.key, groupChoice[g.key] ?? question.fallback]))
           : undefined;
-        form.append('options', JSON.stringify({ ...(groups ? { groups } : {}), ...(teamQuestion && teamChoice ? { team: teamChoice } : {}) }));
+        form.append(
+          'options',
+          JSON.stringify({ ...(groups ? { groups } : {}), ...(teamQuestion && teamChoice ? { team: teamChoice } : {}), ...(hasOwners ? { owners } : {}) }),
+        );
       }
       const result = await api.post<ImportReport>(
         `/imports/${entity}${qs({ ...(context ?? {}), ...(commit ? { commit: 'true' } : {}) })}`,
@@ -332,6 +358,77 @@ export function ImportModal({
                   ))}
                 </select>
               </Field>
+            </section>
+          )}
+
+          {ownerQuestion && ownerQuestion.rows.length > 0 && (
+            <section className="import-groups" aria-labelledby="import-owners-title">
+              <h3 id="import-owners-title" className="svc-subhead">
+                Salesperson and team
+              </h3>
+              <p className="faint">
+                Who each SCORO owner’s invoices go under. An owner with no login of that name goes under you unless you pick the
+                salesperson; the team is the salesperson’s unless you pick one. Invoices this import already brought in take what you
+                pick here too.
+              </p>
+              <div className="table-wrap">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th>Owner in SCORO</th>
+                      <th className="right">Invoices</th>
+                      <th>Salesperson</th>
+                      <th>Team</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ownerQuestion.rows.map((r) => {
+                      const picked = ownerQuestion.people.find((u) => u.id === ownerChoice[r.key]?.userId);
+                      const ownTeam = picked ? picked.team : r.loginTeam;
+                      return (
+                        <tr key={r.key}>
+                          <td>
+                            <div>{r.name || 'No owner named'}</div>
+                            {!r.loginName && <div className="faint">No login of that name</div>}
+                          </td>
+                          <td className="right mono">{r.invoices}</td>
+                          <td>
+                            <select
+                              aria-label={`Salesperson for ${r.name || 'invoices with no owner'}`}
+                              value={ownerChoice[r.key]?.userId ?? ''}
+                              onChange={(e) => pickOwner(r.key, { userId: e.target.value })}
+                            >
+                              <option value="">{r.loginName ? r.loginName : '— you, who imports —'}</option>
+                              {ownerQuestion.people
+                                .filter((u) => u.id !== r.loginId)
+                                .map((u) => (
+                                  <option key={u.id} value={u.id}>
+                                    {u.name}
+                                    {u.team ? ` (${u.team})` : ''}
+                                  </option>
+                                ))}
+                            </select>
+                          </td>
+                          <td>
+                            <select
+                              aria-label={`Team for ${r.name || 'invoices with no owner'}`}
+                              value={ownerChoice[r.key]?.teamId ?? ''}
+                              onChange={(e) => pickOwner(r.key, { teamId: e.target.value })}
+                            >
+                              <option value="">{ownTeam ? `— the salesperson’s team (${ownTeam}) —` : '— none: the salesperson has no team —'}</option>
+                              {ownerQuestion.teams.map((t) => (
+                                <option key={t.id} value={t.id}>
+                                  {t.code} — {t.name}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </section>
           )}
 
