@@ -132,7 +132,7 @@ interface ScoroInvoiceRecord {
   /** The quotation in G-CORE it books; null makes a stand-in (`standIn`). */
   quotation: QuoteRef | null;
   /** SCORO's quotation, made in G-CORE as a stand-in when it is not there. */
-  standIn: { number: string; customerId: string | null; payerId: string | null; currency: string; subject: string } | null;
+  standIn: { number: string; customerId: string | null; payerId: string | null; currency: string; subject: string; noQuote: boolean } | null;
   /** The owner's login; null takes the quotation's owner, else whoever imports. */
   ownerId: string | null;
   /** SCORO's owner_name where no login carries it; the quotation's owner is used. */
@@ -235,8 +235,11 @@ const scoroInvoiceSpec: ImportSpec<ScoroInvoiceRecord> = {
     if (!/^[A-Za-z0-9./_-]{1,40}$/.test(number)) throw new Error(`doc_no "${number}" is not an order number — letters, digits and - / _ . only, up to 40 characters`);
 
     // The quotation it books: a sales order is raised from a quotation only.
-    const quoteNo = (optional(row, 'quote_no') ?? '').trim();
-    if (!quoteNo) throw new Error(`invoice ${number} names no quote_no — a sales order books a quotation`);
+    // An invoice SCORO raised with no quotation (a service billing, 2026-11-11)
+    // gets a stand-in of its own, numbered after the invoice.
+    const typedQuote = (optional(row, 'quote_no') ?? '').trim();
+    const noQuote = !typedQuote;
+    const quoteNo = typedQuote || `SCORO-${number}`;
     if (!/^[A-Za-z0-9./_-]{1,40}$/.test(quoteNo)) throw new Error(`quote_no "${quoteNo}" is not a quotation number — letters, digits and - / _ . only`);
     const quotation = await prisma.quotation.findFirst({
       where: { number: { equals: quoteNo, mode: 'insensitive' } },
@@ -256,7 +259,7 @@ const scoroInvoiceSpec: ImportSpec<ScoroInvoiceRecord> = {
       const payerId = optional(row, 'payer_id');
       const customer = await findCustomer(prisma, payer, payerId);
       const subject = collapse(optional(row, 'doc_description') ?? '') || collapse(optional(row, 'product_name') ?? '') || `Invoiced in SCORO — ${payer}`;
-      standIn = { number: quoteNo, customerId: customer?.id ?? null, payerId, currency, subject: upperText(subject).slice(0, 200) };
+      standIn = { number: quoteNo, customerId: customer?.id ?? null, payerId, currency, subject: upperText(subject).slice(0, 200), noQuote };
     }
 
     // Who booked it: the login SCORO names, else the quotation's own owner
@@ -600,7 +603,9 @@ async function writeScoroInvoices(
         entityType: 'quotation',
         entityId: made.id,
         action: 'CREATED',
-        summary: `Stand-in for SCORO quotation ${s.number}, made by ${SOURCE} for invoice ${record.number} — SCORO’s quotation was not in G-CORE`,
+        summary: s.noQuote
+          ? `Stand-in quotation ${s.number}, made by ${SOURCE} for invoice ${record.number} — SCORO invoiced it with no quotation`
+          : `Stand-in for SCORO quotation ${s.number}, made by ${SOURCE} for invoice ${record.number} — SCORO’s quotation was not in G-CORE`,
         after: { number: s.number, payer: record.payer, ...(counter ? { counter } : {}) },
         ...by,
       },

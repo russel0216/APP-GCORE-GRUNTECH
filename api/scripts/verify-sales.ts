@@ -2906,6 +2906,22 @@ async function main() {
           (await prisma.customer.count({ where: { name: `${TAG} STAND-IN PAYER` } })) === 1,
         JSON.stringify({ created: standAgain.created }),
       );
+      // An invoice SCORO raised with NO quotation (blank quote_no — the
+      // owner's service billings) gets a stand-in of its own, SCORO-<doc_no>.
+      const bareRows = [
+        invRow({ doc_no: `${TAG}6200`, quote_no: '', quote_id: '', payer: `${TAG} STAND-IN PAYER`, payer_id: '987654', doc_description: `${TAG} SEMI ANNUAL PMS` }),
+      ];
+      const bareCheck = await importInvoices(bareRows, false);
+      const bareDone = await importInvoices(bareRows, true);
+      const bare = await prisma.quotation.findFirst({ where: { number: `SCORO-${TAG}6200` }, include: { salesOrders: true } });
+      const bareAgain = await importInvoices(bareRows, true);
+      check(
+        'an invoice with no quote_no gets a stand-in numbered SCORO-<invoice>, its order on it, and a re-run makes no second',
+        bareCheck.errors === 0 && bareDone.created === 1 && !!bare && bare.directOrder && bare.outcome === 'WON' &&
+          bare.salesOrders.length === 1 && bareAgain.created === 0 &&
+          (await prisma.quotation.count({ where: { number: `SCORO-${TAG}6200` } })) === 1,
+        JSON.stringify({ check: bareCheck.rows, created: bareDone.created, again: bareAgain.created, orders: bare?.salesOrders.length }),
+      );
       // An imported order is changed with no approval (2026-11-11, the
       // owner's call): reopened though its SCORO invoice stands in A/R, and
       // issued again even while the sales order route is active.
