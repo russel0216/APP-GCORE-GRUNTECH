@@ -27,9 +27,10 @@ import { deleteAttachment } from '../src/shared/attachments';
 import { rolesLike } from './lib/roles';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, approversForStep, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
+import { submitForApproval, act, approversForStep, ctxOf, pendingFor, reopenApproved, mayReopen } from '../src/shared/approvals';
 import { resolveUser } from '../src/permissions/resolve';
 import { postJobCost, availableBudget } from '../src/shared/inventory';
+import { requestedByLine } from '../src/shared/projectBudget';
 import {
   taxBreakdown,
   bucketFor,
@@ -259,7 +260,7 @@ async function settle(approvalId: string, outcome: 'APPROVED' | 'REJECTED' = 'AP
     if (!step) throw new Error(`No step ${request.currentSequence} on that workflow`);
 
     // With the request's project: a PROJECT_MANAGER step resolves against it.
-    const eligible = (await approversForStep(step, request.requesterId, prisma, { jobId: request.jobId })).filter(
+    const eligible = (await approversForStep(step, request.requesterId, prisma, ctxOf(request))).filter(
       (id) => id !== request.requesterId,
     );
     if (!eligible.length) {
@@ -293,10 +294,11 @@ async function makeUser(name: string, email: string, roleKeys: string[], supervi
  * owner's call), so these must NOT print as a heading; they still count the
  * slots a route prints.
  */
-const stepNames = async (workflowId: string | null) =>
-  (await prisma.approvalStep.findMany({ where: { workflowId: workflowId ?? '' }, orderBy: { sequence: 'asc' } })).map((st) =>
-    st.name.toUpperCase(),
-  );
+const stepNames = async (workflowId: string | null, jobIds: string[] = []) =>
+  (await prisma.approvalStep.findMany({ where: { workflowId: workflowId ?? '' }, orderBy: { sequence: 'asc' } }))
+    // The project budget agreement (2026-11-11) is passed over on a document charging no project.
+    .filter((st) => st.approverType !== 'PROJECT_MANAGERS' || jobIds.length > 0)
+    .map((st) => st.name.toUpperCase());
 /** The approval sign-offs on a paper: each is headed by a run reading exactly "APPROVED BY". */
 const approvedByCount = (t: string) => t.split('\n').filter((l) => l === 'APPROVED BY').length;
 /** No sign-off is headed with a step's own name (TEAM LEADER, FINANCE MANAGER …). */
@@ -1034,7 +1036,7 @@ async function main() {
   const subMidClaim = await availableBudget(prisma, job.id, subcontract.id);
   check(
     'the supervisor alone does not settle a claim — finance is still to come',
-    claimMidApproval?.status === 'PENDING' && claimMidApproval.currentSequence === 2,
+    claimMidApproval?.status === 'PENDING' && claimMidApproval.currentSequence > 1,
     `approval ${claimMidApproval?.status} at step ${claimMidApproval?.currentSequence}`,
   );
   check('the claim is still pending, not approved', claimMid?.status === 'PENDING_APPROVAL', `status ${claimMid?.status}`);
@@ -1961,8 +1963,8 @@ async function main() {
       'the draft names its route — the team leader, back support, the finance manager — before it is submitted',
       draftPage.status === 200 &&
         draftPage.body.approvalRoute?.steps?.[0]?.approvers?.some((p: { id: string }) => p.id === pm.id) &&
-        draftPage.body.approvalRoute?.steps?.[1]?.approvers?.some((p: { id: string }) => p.id === backSup.id) &&
-        draftPage.body.approvalRoute?.steps?.[2]?.approvers?.some((p: { id: string }) => p.id === finMgr.id),
+        draftPage.body.approvalRoute?.steps?.some((st: { name: string; approvers: { id: string }[] }) => st.name === 'Admin Back Support' && st.approvers.some((p) => p.id === backSup.id)) &&
+        draftPage.body.approvalRoute?.steps?.some((st: { name: string; approvers: { id: string }[] }) => st.name === 'Finance Manager' && st.approvers.some((p) => p.id === finMgr.id)),
       String(JSON.stringify(draftPage.body.approvalRoute ?? draftPage.body)).slice(0, 200),
     );
     const brDraftPdf = await eng('GET', `/budget-requests/${raisedId}/pdf`);
@@ -1971,7 +1973,7 @@ async function main() {
     check(
       'and prints it: one "APPROVED BY" per step — never the step’s own name as a heading — "Pending" under each',
       brDraftPdf.status === 200 &&
-        brSteps.length === 3 &&
+        brSteps.length === 4 &&
         approvedByCount(brDraftText) === brSteps.length &&
         noStepHeading(brDraftText, brSteps) &&
         !flat(brDraftText).includes('RECEIVED BY') &&
@@ -1979,7 +1981,8 @@ async function main() {
         flat(brDraftText).includes(pm.name) &&
         flat(brDraftText).includes(finMgr.name) &&
         signedCount(brDraftText) === 1 &&
-        pendingCount(brDraftText) === 3,
+        // Team Leader, the project's Technical Manager (2026-11-11), Back Support, Finance Manager.
+        pendingCount(brDraftText) === 4,
       `${brDraftPdf.status} ${brSteps.join(' / ')} · ${approvedByCount(brDraftText)} APPROVED BY · ${signedCount(brDraftText)} signed, ${pendingCount(brDraftText)} pending`,
     );
     const bothKinds = await eng('POST', '/expense-claims', { purpose: `${TAG} both`, advanceId: a4.id, budgetRequestId: raisedId, lines: receipt1 });
@@ -2034,7 +2037,7 @@ async function main() {
         approvedByCount(brRaw) === brSteps.length &&
         noStepHeading(brRaw, brSteps) &&
         brText.includes('RECEIVED BY') &&
-        signedCount(brRaw) === 5 &&
+        signedCount(brRaw) === 6 &&
         pendingCount(brRaw) === 0,
       `${brPdf.status} ${approvedByCount(brRaw)} APPROVED BY · ${signedCount(brRaw)} signed, ${pendingCount(brRaw)} pending · ${brText.slice(0, 300)}`,
     );
@@ -2249,7 +2252,7 @@ async function main() {
       // engineer's supervisor by name — and no receipt that has not happened.
       const draftAdvancePdf = await eng('GET', `/cash-advances/${allowed.body.id}/pdf`);
       const draftAdvanceText = draftAdvancePdf.bytes ? pdfText(draftAdvancePdf.bytes) : '';
-      const advanceSteps = await stepNames(a1Request.workflowId);
+      const advanceSteps = await stepNames(a1Request.workflowId, a1Request.jobIds ?? []);
       check(
         'a draft advance prints the route it would take: one "APPROVED BY" per step, never the step’s name, "Pending" under who may sign it',
         draftAdvancePdf.status === 200 &&
@@ -2685,7 +2688,7 @@ async function main() {
     const pDraft = await claimPaper();
     const pSubmit = await eng('POST', `/expense-claims/${pId}/submit`);
     const pRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: pId, status: 'PENDING' } });
-    const claimSteps = await stepNames(pRequest?.workflowId ?? null);
+    const claimSteps = await stepNames(pRequest?.workflowId ?? null, pRequest?.jobIds ?? []);
     check(
       'a draft claim prints its route: PREPARED BY, then one "APPROVED BY" per step, never the step’s name, "Pending" under the supervisor by name',
       pClaim.status === 201 &&
@@ -2775,7 +2778,7 @@ async function main() {
     const rId = String(rClaim.body.id ?? '');
     const rSubmit = await eng('POST', `/expense-claims/${rId}/submit`);
     const rRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: rId, status: 'PENDING' } });
-    const rSteps = await stepNames(rRequest?.workflowId ?? null);
+    const rSteps = await stepNames(rRequest?.workflowId ?? null, rRequest?.jobIds ?? []);
     if (rRequest) await settle(rRequest.id, 'REJECTED');
     const rPaper = await eng('GET', `/expense-claims/${rId}/pdf`);
     const rText = rPaper.bytes ? pdfText(rPaper.bytes) : '';
@@ -2801,7 +2804,7 @@ async function main() {
     const okId = String(okClaim.body.id ?? '');
     const okSubmit = await eng('POST', `/expense-claims/${okId}/submit`);
     const okRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: okId, status: 'PENDING' } });
-    const okSteps = await stepNames(okRequest?.workflowId ?? null);
+    const okSteps = await stepNames(okRequest?.workflowId ?? null, okRequest?.jobIds ?? []);
     if (okRequest) await settle(okRequest.id);
     const okPaper = await eng('GET', `/expense-claims/${okId}/pdf`);
     const okText = okPaper.bytes ? pdfText(okPaper.bytes) : '';
@@ -3218,7 +3221,7 @@ async function main() {
     // supervisor by name), who received the cash, and the money in the
     // totals block down to what is still to refund — nothing, now.
     const advText = advancePdf.bytes ? pdfText(advancePdf.bytes) : '';
-    const advSteps = await stepNames(a1Request.workflowId);
+    const advSteps = await stepNames(a1Request.workflowId, a1Request.jobIds ?? []);
     check(
       'the advance prints REQUESTED BY, one "APPROVED BY" per step (never the step’s name), RECEIVED BY — all dated, none "Checked by"',
       flat(advText).includes('REQUESTED BY') &&
@@ -3251,7 +3254,7 @@ async function main() {
       advText.split('\n').filter((l) => /requested|Released|Spent|refund|Liquidated|Settled/i.test(l)).join(' | ').slice(0, 300),
     );
     const liqText = liquidationPdf.bytes ? pdfText(liquidationPdf.bytes) : '';
-    const liqSteps = await stepNames(l1Request.workflowId);
+    const liqSteps = await stepNames(l1Request.workflowId, l1Request.jobIds ?? []);
     check(
       'the liquidation report prints PREPARED BY and one "APPROVED BY" per step (never the step’s name), signed and dated',
       flat(liqText).includes('PREPARED BY') &&
@@ -4401,10 +4404,10 @@ async function main() {
       include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } } },
     });
     check(
-      'a reimbursement goes Team Leader › Back Support › Checking (Account Payable / Credit and Collection) › Finance Manager › CEO / President',
+      'a reimbursement goes Team Leader › Project budget agreed › Back Support › Checking (Account Payable / Credit and Collection) › Finance Manager › CEO / President',
       rmbSubmit.status === 200 &&
         JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)) ===
-          JSON.stringify(['Team Leader', 'Back Support', 'Checking (Account Payable / Credit and Collection)', 'Finance Manager', 'CEO / President']),
+          JSON.stringify(['Team Leader', 'Project budget agreed', 'Back Support', 'Checking (Account Payable / Credit and Collection)', 'Finance Manager', 'CEO / President']),
       JSON.stringify(rmbReq?.workflow?.steps.map((st) => st.name)),
     );
     const stageOf = async () =>
@@ -4418,10 +4421,10 @@ async function main() {
       // An approver who decides no later step: one who does would co-sign it
       // ("one signature per person") and the walk would skip a stage — which
       // one the database lists first is not this check's business.
-      const eligible = (await approversForStep(st, r.requesterId, prisma, {})).filter((id) => id !== r.requesterId);
+      const eligible = (await approversForStep(st, r.requesterId, prisma, ctxOf(r))).filter((id) => id !== r.requesterId);
       const later = new Set<string>();
       for (const ls of r.workflow!.steps.filter((x) => x.sequence > r.currentSequence)) {
-        for (const id of await approversForStep(ls, r.requesterId, prisma, {})) later.add(id);
+        for (const id of await approversForStep(ls, r.requesterId, prisma, ctxOf(r))) later.add(id);
       }
       const who = eligible.find((id) => !later.has(id)) ?? eligible[0];
       await act({ requestId: r.id, userId: who, action: 'APPROVED' });
@@ -4464,7 +4467,7 @@ async function main() {
     const loan = await eng('POST', '/cash-advances', { purpose: `${TAG} roadshow allowance`, amount: 3_500 });
     await eng('POST', `/cash-advances/${loan.body.id}/submit`);
     const loanReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'cash_advance', documentId: String(loan.body.id), status: 'PENDING' } });
-    const loanRoute = await stepNames(loanReq?.workflowId ?? null);
+    const loanRoute = await stepNames(loanReq?.workflowId ?? null, loanReq?.jobIds ?? []);
     await settle(loanReq!.id);
     const loanRelease = await fin('POST', '/payments', {
       kind: 'DISBURSEMENT',
@@ -4683,6 +4686,138 @@ async function main() {
       );
 
       // Edited whole: a line in use left out is closed, not removed; a new one is added. A budget in use is not deleted.
+      // ══ Charged line by line (2026-11-11) ═══════════════════════════════
+      // A credit card statement spread over two projects: each receipt names
+      // its own project and budget line, each project's Technical Manager
+      // agrees, and on approval each project is charged its own share. A
+      // budget request's items do the same, its released cash committed by
+      // share. Lines that all land in one place keep the document whole.
+      {
+        const tm2 = await makeUser('ZZ Fin TM Two', 'tm2@verifyf.local', ['technical_manager']);
+        const costing2 = await prisma.costing.create({
+          data: { number: await nextNumber('costing'), title: `${TAG} Second plant`, ownerId: pm.id, totalCost: D(80_000), contractValue: D(100_000) },
+        });
+        const job2 = await prisma.job.create({
+          data: {
+            number: await nextNumber('project'),
+            name: `${TAG} Second plant`,
+            customerId: customer.id,
+            costingId: costing2.id,
+            createdById: pm.id,
+            projectManagerId: tm2.id,
+            contractValue: D(100_000),
+            costEntries: { create: [{ costCategoryId: materials.id, state: 'BUDGETED', amount: D(80_000), sourceType: 'costing', sourceNumber: costing2.number }] },
+          },
+        });
+        const day = dayKey(new Date()).toISOString().slice(0, 10);
+        const soa = await eng('POST', '/expense-claims', {
+          purpose: `${TAG} card statement`,
+          jobId: job.id,
+          costCategoryId: materials.id,
+          lines: [
+            { spentOn: day, description: 'Anchor bolts', receiptNo: 'SOA-1', amount: 1_000 },
+            { spentOn: day, description: 'Flight to site', receiptNo: 'SOA-2', amount: 2_000, jobId: job2.id, costCategoryId: materials.id },
+          ],
+        });
+        const soaId = String(soa.body.id ?? '');
+        const soaRow = await prisma.expenseClaim.findUnique({ where: { id: soaId }, include: { lines: { orderBy: { sortOrder: 'asc' } } } });
+        const soaPage = await eng('GET', `/expense-claims/${soaId}`);
+        check(
+          'a claim whose receipts name two projects is charged line by line: no project of its own, each receipt its own, a budget card per place',
+          soa.status === 201 && soaRow?.split === true && soaRow.jobId === null && soaRow.lines[0].jobId === job.id && soaRow.lines[1].jobId === job2.id &&
+            (soaPage.body.budgets as unknown[] | undefined)?.length === 2 && soaPage.body.budget === null,
+          `${soa.status} ${JSON.stringify(soa.body).slice(0, 160)} split=${soaRow?.split} ${(soaPage.body.budgets as unknown[] | undefined)?.length}`,
+        );
+        const whole = await eng('POST', '/expense-claims', {
+          purpose: `${TAG} one place`,
+          lines: [{ spentOn: day, description: 'Gloves', receiptNo: 'W-1', amount: 100, jobId: job2.id, costCategoryId: materials.id }],
+        });
+        const wholeRow = await prisma.expenseClaim.findUnique({ where: { id: String(whole.body.id ?? '') }, include: { lines: true } });
+        check(
+          'receipts that all land in one place keep the claim whole: the project on the claim, none on its lines',
+          whole.status === 201 && wholeRow?.split === false && wholeRow.jobId === job2.id && wholeRow.costCategoryId === materials.id && wholeRow.lines.every((l) => l.jobId === null),
+          `${whole.status} ${wholeRow?.split} ${wholeRow?.jobId}`,
+        );
+        const noLine = await eng('POST', '/expense-claims', {
+          purpose: `${TAG} no line`,
+          lines: [{ spentOn: day, description: 'x', receiptNo: 'N-1', amount: 10, jobId: job2.id }],
+        });
+        check('a receipt on a project must name its budget line', noLine.status === 400, `${noLine.status} ${JSON.stringify(noLine.body).slice(0, 120)}`);
+
+        const soaSubmit = await eng('POST', `/expense-claims/${soaId}/submit`);
+        const soaReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: soaId, status: 'PENDING' } });
+        const waiting2 = (await requestedByLine(job2.id)).get(materials.id) ?? 0;
+        check(
+          'submitted, it names both projects for the agreement and Budget Monitoring shows each project its own share as Requested',
+          soaSubmit.status === 200 && !!soaReq && soaReq.jobIds.includes(job.id) && soaReq.jobIds.includes(job2.id) && money(waiting2, 2_000),
+          `${soaSubmit.status} ${JSON.stringify(soaSubmit.body).slice(0, 120)} ${soaReq?.jobIds} ${waiting2}`,
+        );
+        if (soaReq) {
+          // Step 1 — the engineer's Team Leader ("Reports to": the PM).
+          await act({ requestId: soaReq.id, userId: pm.id, action: 'APPROVED' });
+          const atAgree = await prisma.approvalRequest.findUnique({ where: { id: soaReq.id }, include: { workflow: { include: { steps: true } } } });
+          const agreeStep = atAgree?.workflow?.steps.find((st) => st.sequence === atAgree.currentSequence);
+          // The first project's manager agrees; the step stays open for the second.
+          await act({ requestId: soaReq.id, userId: pm.id, action: 'APPROVED' });
+          const halfway = await prisma.approvalRequest.findUnique({ where: { id: soaReq.id } });
+          const again = await act({ requestId: soaReq.id, userId: pm.id, action: 'APPROVED' }).then(() => 'acted', (e: Error) => e.message);
+          await act({ requestId: soaReq.id, userId: tm2.id, action: 'APPROVED' });
+          const agreed = await prisma.approvalRequest.findUnique({ where: { id: soaReq.id } });
+          check(
+            'each project’s Technical Manager agrees to their own lines: the step waits for the second, the first cannot agree twice, then it moves on',
+            agreeStep?.approverType === 'PROJECT_MANAGERS' &&
+              halfway?.currentSequence === agreeStep.sequence && halfway.status === 'PENDING' &&
+              again !== 'acted' &&
+              agreed?.status === 'PENDING' && (agreed.currentSequence ?? 0) > agreeStep.sequence,
+            `${agreeStep?.approverType} ${halfway?.currentSequence} ${again} → ${agreed?.status} ${agreed?.currentSequence}`,
+          );
+          await settle(soaReq.id);
+        }
+        const posted = await prisma.jobCostEntry.findMany({ where: { sourceType: 'expense_claim', sourceId: soaId, state: 'INCURRED' } });
+        const on = (jobId: string) => posted.filter((p) => p.jobId === jobId).reduce((s, p) => s + Number(p.amount), 0);
+        check(
+          'approved, each project is charged its own receipts — 1,000 on the first, 2,000 on the second',
+          money(on(job.id), 1_000) && money(on(job2.id), 2_000),
+          `${on(job.id)} ${on(job2.id)}`,
+        );
+
+        // A budget request's items over two projects: its released cash committed by share.
+        const brSplit = await eng('POST', '/budget-requests', {
+          jobId: job.id,
+          costCategoryId: materials.id,
+          reason: `${TAG} split cash`,
+          items: [
+            { name: 'Sealant', quantity: 1, unitCost: 3_000 },
+            { name: 'Site rental', quantity: 1, unitCost: 1_000, jobId: job2.id, costCategoryId: materials.id },
+          ],
+        });
+        const brId = String(brSplit.body.id ?? '');
+        const brRow = await prisma.budgetRequest.findUnique({ where: { id: brId }, include: { items: { orderBy: { sortOrder: 'asc' } } } });
+        const travelSplit = await eng('POST', '/budget-requests', {
+          jobId: job.id,
+          costCategoryId: materials.id,
+          reason: `${TAG} split trip`,
+          items: [{ name: 'Fare', quantity: 1, unitCost: 500, jobId: job2.id, costCategoryId: materials.id }],
+          travel: { mode: 'AIR', from: 'Manila', to: 'Cebu', departOn: '2027-02-01' },
+        });
+        check(
+          'a budget request’s items name two projects: charged item by item, no project of its own — a travel request stays whole',
+          brSplit.status === 201 && brRow?.split === true && brRow.jobId === null && brRow.items[1].jobId === job2.id && travelSplit.status === 400,
+          `${brSplit.status} ${JSON.stringify(brSplit.body).slice(0, 160)} ${brRow?.split} ${travelSplit.status}`,
+        );
+        await eng('POST', `/budget-requests/${brId}/submit`);
+        const brReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'budget_request', documentId: brId, status: 'PENDING' } });
+        if (brReq) await settle(brReq.id);
+        const release = await fin('POST', '/payments', { kind: 'DISBURSEMENT', method: 'CASH', payeeUserId: engineer.id, allocations: [{ kind: 'budget_request', id: brId, amount: 4_000 }] });
+        const committed = await prisma.jobCostEntry.findMany({ where: { sourceType: 'budget_request', sourceId: brId, state: 'COMMITTED' } });
+        const c = (jobId: string) => committed.filter((p) => p.jobId === jobId).reduce((s, p) => s + Number(p.amount), 0);
+        check(
+          'approved by both projects’ managers and released, each project commits its own share — 3,000 and 1,000',
+          brReq?.jobIds.length === 2 && release.status === 201 && money(c(job.id), 3_000) && money(c(job2.id), 1_000),
+          `${brReq?.jobIds} ${release.status} ${JSON.stringify(release.body).slice(0, 120)} ${c(job.id)} ${c(job2.id)}`,
+        );
+      }
+
       // ══ Travel requests (2026-11-10) ═════════════════════════════════════
       // A budget request with a journey on it: its own number and route (the
       // Technical Manager and the Team Leader first), charged to a project or
@@ -5293,7 +5428,7 @@ async function main() {
     );
     await cmAs('POST', `/commissions/${rfc.body.id}/submit`);
     const cmReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'commission', documentId: String(rfc.body.id), status: 'PENDING' } });
-    const cmRoute = await stepNames(cmReq?.workflowId ?? null);
+    const cmRoute = await stepNames(cmReq?.workflowId ?? null, cmReq?.jobIds ?? []);
     check('the route is the Finance Manager, then the CEO / President', JSON.stringify(cmRoute) === JSON.stringify(['FINANCE MANAGER', 'CEO / PRESIDENT']), JSON.stringify(cmRoute));
     const earlyPay = await fin('POST', `/commissions/${rfc.body.id}/pay`, {});
     await settle(cmReq!.id);

@@ -182,6 +182,7 @@
 .prq-col-unit { width: 5rem; }
 .prq-col-qty { width: 6rem; }
 .prq-col-cost { width: 7rem; }
+.prq-col-charge { width: 16rem; }
 .prq-col-amount { width: 7.5rem; }
 .prq-col-remove { width: 3rem; }
 

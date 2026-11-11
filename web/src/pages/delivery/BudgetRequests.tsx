@@ -120,7 +120,11 @@ export interface BudgetRequest {
   canBook?: boolean;
   approvalType?: 'budget_request' | 'travel_request';
   /** "Against the project budget" (GET /:id) — Budget Monitoring's figures, this request's own commitment left out. */
-  budget?: RequestBudget;
+  budget?: RequestBudget | null;
+  /** Charged item by item (2026-11-11): each item names its place, and a card per place. */
+  split?: boolean;
+  places?: number | null;
+  budgets?: { title: string; budget: RequestBudget }[];
   allocations?: {
     id: string;
     amount: number;
@@ -229,7 +233,7 @@ export function BudgetRequestsList({ finance = false, travel = false }: { financ
       render: (r) => (
         <div>
           <div>{r.reason}</div>
-          <div className="faint">{r.for ? <ForLabel source={r.for} /> : '—'}</div>
+          <div className="faint">{r.for ? <ForLabel source={r.for} /> : r.split ? `Several places (${r.places ?? '?'})` : '—'}</div>
         </div>
       ),
     },
@@ -487,7 +491,7 @@ export function FinanceLiquidations() {
       render: (r) => (
         <div>
           <div>{r.reason}</div>
-          <div className="faint">{r.for ? <ForLabel source={r.for} /> : '—'}</div>
+          <div className="faint">{r.for ? <ForLabel source={r.for} /> : r.split ? `Several places (${r.places ?? '?'})` : '—'}</div>
         </div>
       ),
     },
@@ -896,7 +900,7 @@ export function BudgetRequestDetail() {
             Requested by {row.requestedBy.name} on {formatDate(row.createdAt)}
             {row.neededBy && <> · needed by {formatDate(row.neededBy)}</>}
             {' · for '}
-            {row.for ? <Link to={row.for.link}>{row.for.label}</Link> : '—'}
+            {row.for ? <Link to={row.for.link}>{row.for.label}</Link> : row.split ? `Several places (${row.places ?? '?'}) — each line says its own` : '—'}
             {!row.officeBudgetLine && <> · {row.costCategory.name}</>}
             {row.job?.projectManager && <> · Technical Manager {row.job.projectManager.name}</>}
             {row.job && row.raisedOn && <> · raised on <Link to={row.raisedOn.link}>{row.raisedOn.label}</Link></>}
@@ -1011,6 +1015,9 @@ export function BudgetRequestDetail() {
         </div>
       )}
       {row.budget && <RequestBudgetCard budget={row.budget} lineName={row.budget.source === 'office' ? (row.budget.line?.name ?? '') : row.costCategory.name} />}
+      {(row.budgets ?? []).map((c) => (
+        <RequestBudgetCard key={c.title} budget={c.budget} lineName={c.budget.line?.name ?? ''} title={c.title} />
+      ))}
 
       <ErrorBox error={error} />
 
@@ -1059,7 +1066,7 @@ export function BudgetRequestDetail() {
       )}
       {row.status === 'CANCELLED' && row.cancelReason && <div className="alert warn">Cancelled — {row.cancelReason}</div>}
 
-      <RequestItemsCard items={row.items ?? []} total={row.amount} />
+      <RequestItemsCard items={row.items ?? []} total={row.amount} split={!!row.split} />
 
       <div className="grid grid-2">
         <div className="card">

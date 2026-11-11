@@ -63,7 +63,7 @@ const REQUEST_IN_FLIGHT = ['PENDING_APPROVAL', 'APPROVED'] as const;
  * (three queries, whatever the project holds). `own` leaves one document out.
  */
 export async function requestedByLine(jobId: string, own: OwnDocument = {}): Promise<Map<string, number>> {
-  const [claims, advances, requests] = await Promise.all([
+  const [claims, advances, requests, splitClaimLines, splitItems] = await Promise.all([
     prisma.expenseClaim.findMany({
       where: { jobId, costCategoryId: { not: null }, status: 'PENDING_APPROVAL', ...(own.expenseClaimId ? { id: { not: own.expenseClaimId } } : {}) },
       select: { costCategoryId: true, total: true, advanceId: true },
@@ -82,6 +82,15 @@ export async function requestedByLine(jobId: string, own: OwnDocument = {}): Pro
       where: { jobId, status: { in: [...REQUEST_IN_FLIGHT] }, ...(own.budgetRequestId ? { id: { not: own.budgetRequestId } } : {}) },
       select: { costCategoryId: true, amount: true },
     }),
+    // Charged line by line (2026-11-11): the receipts and items on this project.
+    prisma.expenseClaimLine.findMany({
+      where: { jobId, costCategoryId: { not: null }, claim: { split: true, status: 'PENDING_APPROVAL', ...(own.expenseClaimId ? { id: { not: own.expenseClaimId } } : {}) } },
+      select: { costCategoryId: true, amount: true },
+    }),
+    prisma.budgetRequestItem.findMany({
+      where: { jobId, costCategoryId: { not: null }, request: { split: true, status: { in: [...REQUEST_IN_FLIGHT] }, ...(own.budgetRequestId ? { id: { not: own.budgetRequestId } } : {}) } },
+      select: { costCategoryId: true, amount: true },
+    }),
   ]);
   const out = new Map<string, number>();
   const add = (categoryId: string, amount: number) => out.set(categoryId, cents((out.get(categoryId) ?? 0) + amount));
@@ -94,6 +103,8 @@ export async function requestedByLine(jobId: string, own: OwnDocument = {}): Pro
     add(a.costCategoryId!, a.status === 'RELEASED' ? num(a.amountReleased) : num(a.amount));
   }
   for (const r of requests) add(r.costCategoryId, num(r.amount));
+  for (const l of splitClaimLines) add(l.costCategoryId!, num(l.amount));
+  for (const i of splitItems) add(i.costCategoryId!, num(i.amount));
   return out;
 }
 

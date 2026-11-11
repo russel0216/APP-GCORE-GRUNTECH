@@ -3,6 +3,7 @@ import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
 import { addDays, dayKey, daysBetween, manilaDate } from './day';
 import { postJobCost } from './inventory';
+import { requestGroups, spreadOver } from './budgetRequestCharges';
 
 /**
  * The money arithmetic G-FIN shares, in one place.
@@ -378,43 +379,56 @@ export async function refreshBudgetRequest(
   // A request on a sales order, quotation or costing (2026-10-26) has no
   // ledger until a project built from it takes it over.
   const shouldCommit = !frozen && !liquidation && !direct ? released : 0;
-  const ledger = row.jobId
-    ? await tx.jobCostEntry.aggregate({
-        where: { jobId: row.jobId, state: 'COMMITTED', sourceType: 'budget_request', sourceId: id },
-        _sum: { amount: true },
-      })
-    : null;
-  const delta = row.jobId ? cents(shouldCommit - num(ledger?._sum.amount)) : 0;
-  if (row.jobId && Math.abs(delta) >= 0.005) {
-    await postJobCost(tx, {
-      jobId: row.jobId,
-      costCategoryId: row.costCategoryId,
-      state: 'COMMITTED',
-      amount: delta,
-      sourceType: 'budget_request',
-      sourceId: id,
-      sourceNumber: row.number,
-      description:
-        delta > 0
-          ? `Cash released to the team — ${row.reason}`
-          : liquidation
-            ? 'Liquidated — the spend is posted as incurred'
-            : 'Release reversed',
-    });
-  }
-
-  // A direct payment is the project's cost at once: INCURRED under the
-  // request's own source, re-derived like the commitment above.
-  if (row.jobId) {
-    const posted = await tx.jobCostEntry.aggregate({
-      where: { jobId: row.jobId, state: 'INCURRED', sourceType: 'budget_request', sourceId: id },
+  // A request charged item by item (2026-11-11) commits each project's share
+  // of the cash on its own budget line — the items' amounts per place, the
+  // released cash spread over them (`spreadOver`); one charged whole, its own.
+  const places: { jobId: string; costCategoryId: string; amount: number }[] = row.split
+    ? (await requestGroups(id, tx))
+        .filter((g) => g.charge.jobId && g.charge.costCategoryId)
+        .map((g) => ({ jobId: g.charge.jobId!, costCategoryId: g.charge.costCategoryId!, amount: g.amount }))
+    : row.jobId
+      ? [{ jobId: row.jobId, costCategoryId: row.costCategoryId, amount }]
+      : [];
+  // A split request's office items take their share too, off the projects' total.
+  const asked = row.split ? amount : places.reduce((s, p) => s + p.amount, 0);
+  const projectShare = (sum: number) => (asked > 0 ? cents((sum * places.reduce((s, p) => s + p.amount, 0)) / asked) : 0);
+  const commitShares = spreadOver(places, row.split ? projectShare(shouldCommit) : shouldCommit);
+  const incurShares = spreadOver(places, row.split ? projectShare(direct ? released : 0) : direct ? released : 0);
+  for (const [i, place] of places.entries()) {
+    const ledger = await tx.jobCostEntry.aggregate({
+      where: { jobId: place.jobId, costCategoryId: place.costCategoryId, state: 'COMMITTED', sourceType: 'budget_request', sourceId: id },
       _sum: { amount: true },
     });
-    const gap = cents((direct ? released : 0) - num(posted._sum.amount));
+    const delta = cents(commitShares[i].share - num(ledger._sum.amount));
+    if (Math.abs(delta) >= 0.005) {
+      await postJobCost(tx, {
+        jobId: place.jobId,
+        costCategoryId: place.costCategoryId,
+        state: 'COMMITTED',
+        amount: delta,
+        sourceType: 'budget_request',
+        sourceId: id,
+        sourceNumber: row.number,
+        description:
+          delta > 0
+            ? `Cash released to the team — ${row.reason}`
+            : liquidation
+              ? 'Liquidated — the spend is posted as incurred'
+              : 'Release reversed',
+      });
+    }
+
+    // A direct payment is the project's cost at once: INCURRED under the
+    // request's own source, re-derived like the commitment above.
+    const posted = await tx.jobCostEntry.aggregate({
+      where: { jobId: place.jobId, costCategoryId: place.costCategoryId, state: 'INCURRED', sourceType: 'budget_request', sourceId: id },
+      _sum: { amount: true },
+    });
+    const gap = cents(incurShares[i].share - num(posted._sum.amount));
     if (Math.abs(gap) >= 0.005) {
       await postJobCost(tx, {
-        jobId: row.jobId,
-        costCategoryId: row.costCategoryId,
+        jobId: place.jobId,
+        costCategoryId: place.costCategoryId,
         state: 'INCURRED',
         amount: gap,
         sourceType: 'budget_request',

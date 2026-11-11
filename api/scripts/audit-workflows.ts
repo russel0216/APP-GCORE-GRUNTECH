@@ -188,7 +188,7 @@ async function main() {
       // (the CEO / President unless another is named) when there is none or the manager
       // raised the document. The fallback has to be held: a PM's own request,
       // or one on an unmanaged project, goes there.
-      if (step.approverType === 'PROJECT_MANAGER') {
+      if (step.approverType === 'PROJECT_MANAGER' || step.approverType === 'PROJECT_MANAGERS') {
         const fallbackKey = step.role?.key ?? 'ceo';
         const fallback = roleMembers.get(fallbackKey) ?? [];
         if (fallback.length === 0) {
@@ -214,7 +214,9 @@ async function main() {
           ? `${s.sequence}. ${s.role && TEAM_FIRST_ROLES.includes(s.role.key) ? `the team's ${s.role.key}, else ` : ''}supervisor, else ${s.role?.key ?? 'hr'}${
               s.alsoRoleIds.length ? ` (also ${s.alsoRoleIds.map((id) => roleKeyById.get(id) ?? '?').join(', ')} on the team)` : ''
             }`
-          : s.approverType === 'PROJECT_MANAGER'
+          : s.approverType === 'PROJECT_MANAGERS'
+            ? `${s.sequence}. every charged project's manager, else ${s.role?.key ?? 'ceo'}`
+            : s.approverType === 'PROJECT_MANAGER'
             ? `${s.sequence}. the project's manager, else ${s.role?.key ?? 'ceo'}`
             : `${s.sequence}. ${s.role?.key ?? s.user?.name ?? s.approverType.toLowerCase()}`,
       )

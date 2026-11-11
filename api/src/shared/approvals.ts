@@ -167,15 +167,83 @@ export interface ApprovalContext {
    * request's team). Null or absent: the requester's team, as always.
    */
   teamId?: string | null;
+  /**
+   * Every project the document's lines charge, for a PROJECT_MANAGERS step
+   * (2026-11-11): the manager of each must agree. Empty: the step is passed over.
+   */
+  jobIds?: string[];
+  /** The stored request, so a PROJECT_MANAGERS step knows who has already agreed. */
+  requestId?: string | null;
 }
 
 /** The context a stored request carries. */
-export const ctxOf = (r: { jobId: string | null; projectManagerId?: string | null; importation?: boolean; teamId?: string | null }): ApprovalContext => ({
+export const ctxOf = (r: { id?: string; jobId: string | null; projectManagerId?: string | null; importation?: boolean; teamId?: string | null; jobIds?: string[] }): ApprovalContext => ({
   jobId: r.jobId,
   projectManagerId: r.projectManagerId ?? null,
   importation: r.importation ?? false,
   teamId: r.teamId ?? null,
+  jobIds: r.jobIds ?? [],
+  requestId: r.id ?? null,
 });
+
+/**
+ * Whether a step applies to a document at all: a PROJECT_MANAGERS step is
+ * passed over when the document charges no project (an office-only claim).
+ * Every other step always applies.
+ */
+export const stepApplies = (step: Pick<ApprovalStep, 'approverType'>, ctx: ApprovalContext): boolean =>
+  step.approverType !== 'PROJECT_MANAGERS' || (ctx.jobIds?.length ?? 0) > 0;
+
+/**
+ * The groups a PROJECT_MANAGERS step waits on (2026-11-11): one per project
+ * the document charges — its manager, when active and not the requester; else
+ * the step's role (the Technical Manager on the requester's team, the
+ * PROJECT_MANAGER step's own fallback), else the CEO / President. A group is
+ * done once any of its people has agreed; the step is done when every group is.
+ */
+export async function projectAgreementGroups(
+  step: ApprovalStep,
+  requesterId: string,
+  tx: Prisma.TransactionClient,
+  ctx: ApprovalContext,
+): Promise<{ jobId: string; people: string[] }[]> {
+  const ids = [...new Set(ctx.jobIds ?? [])];
+  if (!ids.length) return [];
+  const jobs = await tx.job.findMany({ where: { id: { in: ids } }, select: { id: true, projectManager: { select: { id: true, isActive: true } } } });
+  let fallback: string[] | null = null;
+  const out: { jobId: string; people: string[] }[] = [];
+  for (const id of ids) {
+    const m = jobs.find((j) => j.id === id)?.projectManager;
+    if (m && m.isActive && m.id !== requesterId) {
+      out.push({ jobId: id, people: [m.id] });
+      continue;
+    }
+    if (!fallback) fallback = await approversForStep({ ...step, approverType: 'PROJECT_MANAGER' }, requesterId, tx, { ...ctx, jobId: null, projectManagerId: null });
+    out.push({ jobId: id, people: fallback });
+  }
+  return out;
+}
+
+/** Who has agreed on a PROJECT_MANAGERS step of a stored request (a stand-in counts for the one they stood in for). */
+async function agreedOn(requestId: string | null | undefined, sequence: number, tx: Prisma.TransactionClient): Promise<Set<string>> {
+  if (!requestId) return new Set();
+  const rows = await tx.approvalAction.findMany({ where: { requestId, sequence, action: 'APPROVED' }, select: { approverId: true, onBehalfOfId: true } });
+  return new Set(rows.flatMap((r) => [r.approverId, ...(r.onBehalfOfId ? [r.onBehalfOfId] : [])]));
+}
+
+/** The groups of a PROJECT_MANAGERS step still waiting, given who has agreed (and who is agreeing now). */
+export async function projectAgreementOpen(
+  step: ApprovalStep,
+  requesterId: string,
+  tx: Prisma.TransactionClient,
+  ctx: ApprovalContext,
+  alsoAgreeing: string[] = [],
+): Promise<{ jobId: string; people: string[] }[]> {
+  const groups = await projectAgreementGroups(step, requesterId, tx, ctx);
+  const agreed = await agreedOn(ctx.requestId, step.sequence, tx);
+  for (const id of alsoAgreeing) agreed.add(id);
+  return groups.filter((g) => !g.people.some((p) => agreed.has(p)));
+}
 
 /** The team a step is scoped to: the document's (`ctx.teamId`), else the requester's. */
 const teamFor = async (requesterId: string, tx: Prisma.TransactionClient, ctx: ApprovalContext) => ctx.teamId ?? (await teamOfRequester(requesterId, tx));
@@ -256,6 +324,11 @@ export async function approversForStep(
   ctx: ApprovalContext = {},
 ): Promise<string[]> {
   switch (step.approverType) {
+    case 'PROJECT_MANAGERS': {
+      // Those still to agree: every project's manager who has not yet.
+      const open = await projectAgreementOpen(step, requesterId, tx, ctx);
+      return [...new Set(open.flatMap((g) => g.people))];
+    }
     case 'PROJECT_MANAGER': {
       const named = ctx.projectManagerId
         ? await tx.user.findUnique({ where: { id: ctx.projectManagerId }, select: { id: true, isActive: true } })
@@ -495,6 +568,8 @@ export async function holdsStep(
   ctx: ApprovalContext = {},
 ): Promise<boolean> {
   if (step.approverType === 'USER') return step.userId === requesterId;
+  // Each project's manager agrees to their own project's lines: never the preparer's to sign.
+  if (step.approverType === 'PROJECT_MANAGERS') return false;
   // A job order's Technical Manager step (2026-10-16, the owner's report:
   // Brian Jay, UIT's Technical Manager, raised one and was not on it): held
   // when the order names the preparer as its Technical Manager, or names
@@ -663,7 +738,7 @@ export async function routePreview(
     workflowId: workflow.id,
     name: workflow.name,
     steps: await Promise.all(
-      workflow.steps.map(async (st) =>
+      workflow.steps.filter((st) => stepApplies(st, ctx)).map(async (st) =>
         held.has(st.sequence)
           ? { sequence: st.sequence, name: st.name, roleId: st.roleId, held: true, approvers: selfPerson }
           : { sequence: st.sequence, name: st.name, roleId: st.roleId, held: false, approvers: await namedApprovers(st, requesterId, prisma, ctx) },
@@ -733,6 +808,8 @@ export interface SubmitInput {
   importation?: boolean;
   /** The team the document is for, in place of the requester's own (`ApprovalContext.teamId`). */
   teamId?: string | null;
+  /** Every project the document's lines charge, for a PROJECT_MANAGERS step. */
+  jobIds?: string[];
 }
 
 export async function submitForApproval(input: SubmitInput): Promise<ApprovalRequest> {
@@ -792,9 +869,16 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
   // (`preparerSigns`): signed at submit, dated the request's own instant, so
   // "Prepared by" and those steps print one timestamp. The document waits
   // only on the steps other people hold.
-  const submitCtx: ApprovalContext = { jobId: input.jobId ?? null, projectManagerId: input.projectManagerId ?? null, importation: input.importation ?? false, teamId: input.teamId ?? null };
+  const submitCtx: ApprovalContext = {
+    jobId: input.jobId ?? null,
+    projectManagerId: input.projectManagerId ?? null,
+    importation: input.importation ?? false,
+    teamId: input.teamId ?? null,
+    jobIds: input.jobIds ?? [],
+  };
   const held = await heldSequences(workflow, input.requesterId, prisma, submitCtx);
-  const open = workflow.steps.filter((st) => !held.has(st.sequence));
+  // A step that does not apply (no project to agree to) is passed over.
+  const open = workflow.steps.filter((st) => !held.has(st.sequence) && stepApplies(st, submitCtx));
 
   // A step whose only eligible approver is the requester can never be acted on:
   // segregation of duties refuses self-approval, so the document would sit
@@ -834,6 +918,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
         projectManagerId: input.projectManagerId ?? null,
         importation: input.importation ?? false,
         teamId: input.teamId ?? null,
+        jobIds: input.jobIds ?? [],
         workflowId: workflow.id,
         currentSequence: (firstStep ?? workflow.steps[workflow.steps.length - 1]).sequence,
         status: firstStep ? 'PENDING' : 'APPROVED',
@@ -971,7 +1056,18 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     ),
   );
   const steps = request.workflow!.steps;
-  const later = steps.slice(steps.findIndex((s) => s.sequence === step.sequence) + 1).filter((s) => !signed.has(s.sequence));
+  const actCtx = ctxOf(request);
+  const later = steps
+    .slice(steps.findIndex((s) => s.sequence === step.sequence) + 1)
+    .filter((s) => !signed.has(s.sequence) && stepApplies(s, actCtx));
+
+  // A PROJECT_MANAGERS step is done only when every project's manager has
+  // agreed (2026-11-11): an Approve that leaves another project waiting
+  // records this one's agreement and keeps the step open.
+  const stillWaiting =
+    input.action === 'APPROVED' && step.approverType === 'PROJECT_MANAGERS'
+      ? (await projectAgreementOpen(step, request.requesterId, prisma, actCtx, [input.userId, ...(decider.onBehalfOfId ? [decider.onBehalfOfId] : [])])).length > 0
+      : false;
 
   // One signature per person (2026-10-13, the owner's call: "the time stamp
   // of the same employee with multiple roles … make it uniform"). On a route
@@ -981,8 +1077,10 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
   // person is asked once and prints one timestamp. A stand-in signs only the
   // step they stood in for.
   const coSigned: ApprovalStep[] = [];
-  if (input.action === 'APPROVED' && request.workflow?.preparerSigns && !decider.onBehalfOfId) {
+  if (input.action === 'APPROVED' && request.workflow?.preparerSigns && !decider.onBehalfOfId && !stillWaiting) {
     for (const st of later) {
+      // A project agreement is each project's own, never carried by another step's signature.
+      if (st.approverType === 'PROJECT_MANAGERS') continue;
       const eligible = await approversForStep(st, request.requesterId, prisma, ctxOf(request));
       if (eligible.includes(input.userId)) coSigned.push(st);
     }
@@ -1001,9 +1099,11 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
       data:
         input.action !== 'APPROVED'
           ? { status: input.action === 'REJECTED' ? 'REJECTED' : 'CANCELLED', closedAt: at }
-          : next
-            ? { currentSequence: next.sequence }
-            : { status: 'APPROVED', closedAt: at },
+          : stillWaiting
+            ? { currentSequence: step.sequence }
+            : next
+              ? { currentSequence: next.sequence }
+              : { status: 'APPROVED', closedAt: at },
     });
     if (!claimed.count) {
       throw badRequest('This request was decided or withdrawn a moment ago — reload to see where it stands');
@@ -1055,7 +1155,8 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
   }
 
   if (settled.status === 'PENDING') {
-    await notifyCurrentStep(settled);
+    // An agreement that leaves the step open tells nobody new: the others were told when it opened.
+    if (!stillWaiting) await notifyCurrentStep(settled);
   } else {
     const approved = settled.status === 'APPROVED';
     await notify({
@@ -1405,9 +1506,11 @@ export async function historyFor(documentType: string, documentId: string) {
   return Promise.all(
     named.map(async (r) => {
       if (r.status !== 'PENDING' || !r.workflow) return r;
-      const taken = new Set(r.actions.map((a) => a.sequence));
+      const rctx = ctxOf(r);
+      // A project agreement partly given is still open at its step.
+      const taken = new Set(r.actions.filter((a) => a.sequence !== r.currentSequence).map((a) => a.sequence));
       const steps = await Promise.all(
-        r.workflow.steps.map(async (st) =>
+        r.workflow.steps.filter((st) => stepApplies(st, rctx)).map(async (st) =>
           taken.has(st.sequence)
             ? st
             : { ...st, approvers: (await namedApprovers(st, r.requesterId, prisma, ctxOf(r))).map((p) => ({ id: p.id, name: p.name })) },
@@ -1615,6 +1718,8 @@ export interface DraftRoute {
   importation?: boolean;
   /** The team the document is for (`ApprovalContext.teamId`). */
   teamId?: string | null;
+  /** Every project the document's lines charge, for a PROJECT_MANAGERS step. */
+  jobIds?: string[];
 }
 
 /**
@@ -1660,7 +1765,7 @@ export async function approvalSlots(documentType: string, documentId: string, dr
   const open = request?.status === 'PENDING';
   if (draft && !open) {
     // An option the document no longer qualifies for falls back to the standard route.
-    const ctx: ApprovalContext = { jobId: draft.jobId, projectManagerId: draft.projectManagerId, importation: draft.importation ?? false, teamId: draft.teamId ?? null };
+    const ctx: ApprovalContext = { jobId: draft.jobId, projectManagerId: draft.projectManagerId, importation: draft.importation ?? false, teamId: draft.teamId ?? null, jobIds: draft.jobIds ?? [] };
     const route =
       (draft.optionId ? await routePreview(documentType, draft.amount, draft.requesterId, draft.optionId, ctx) : null) ??
       (await routePreview(documentType, draft.amount, draft.requesterId, null, ctx));
@@ -1668,8 +1773,29 @@ export async function approvalSlots(documentType: string, documentId: string, dr
   }
   if (!request) return [];
   const bySeq = new Map(request.actions.map((a) => [a.sequence, a]));
+  const reqCtx = ctxOf(request);
+  const signedSlot = (st: ApprovalStep, a: (typeof request.actions)[number]): ApprovalSlot => ({
+    step: st.name,
+    stepRoleId: st.roleId,
+    userId: a.approverId,
+    name: a.approver.name,
+    position: a.approver.position ?? undefined,
+    phone: contactPhone(a.approver),
+    email: a.approver.email,
+    at: a.actedAt,
+  });
   const slots = await Promise.all(
-    (request.workflow?.steps ?? []).map(async (st): Promise<ApprovalSlot | null> => {
+    (request.workflow?.steps ?? []).filter((st) => stepApplies(st, reqCtx)).map(async (st): Promise<ApprovalSlot[] | ApprovalSlot | null> => {
+      // A project agreement (2026-11-11): one slot per manager who agreed,
+      // and — while it is open — one for those still to agree.
+      if (st.approverType === 'PROJECT_MANAGERS') {
+        const agreed = request.actions.filter((x) => x.sequence === st.sequence).map((x) => signedSlot(st, x));
+        const waiting = open && request.currentSequence === st.sequence ? await namedApprovers(st, request.requesterId, prisma, reqCtx) : [];
+        const pending = open && (request.currentSequence <= st.sequence) && (waiting.length || !agreed.length)
+          ? [{ step: st.name, stepRoleId: st.roleId, assigned: request.currentSequence === st.sequence ? waiting : await namedApprovers(st, request.requesterId, prisma, reqCtx) }]
+          : [];
+        return [...agreed, ...pending];
+      }
       const a = bySeq.get(st.sequence);
       if (a) {
         return {
@@ -1688,7 +1814,7 @@ export async function approvalSlots(documentType: string, documentId: string, dr
       return open ? { step: st.name, stepRoleId: st.roleId, assigned: await namedApprovers(st, request.requesterId, prisma, ctxOf(request)) } : null;
     }),
   );
-  return slots.filter((s): s is ApprovalSlot => s !== null);
+  return slots.flat().filter((s): s is ApprovalSlot => s !== null);
 }
 
 /**

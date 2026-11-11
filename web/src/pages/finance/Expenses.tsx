@@ -65,6 +65,15 @@ interface ClaimAdvance {
   status: string;
   jobId: string | null;
   costCategoryId: string | null;
+  /** A budget request charged item by item (2026-11-11): its liquidation's receipts each name their place. */
+  split?: boolean;
+}
+
+/** A line's own place, on a claim charged line by line (2026-11-11). */
+export function linePlace(l: { job?: { number: string } | null; costCategory?: { name: string } | null; officeBudgetLine?: { code: string; name: string } | null }) {
+  if (l.officeBudgetLine) return `Office · ${l.officeBudgetLine.code} ${l.officeBudgetLine.name}`;
+  if (l.job) return `${l.job.number}${l.costCategory ? ` · ${l.costCategory.name}` : ''}`;
+  return 'Overheads';
 }
 
 /** Where the cash a liquidation accounts for came from, and where its page is. */
@@ -114,7 +123,13 @@ export interface Claim {
     receiptNo: string | null;
     vendor: string | null;
     amount: number;
+    /** Its own place, on a claim charged line by line (2026-11-11). */
+    job?: { id: string; number: string; name: string } | null;
+    costCategory?: { id: string; name: string } | null;
+    officeBudgetLine?: CurrentOfficeLine | null;
   }[];
+  /** Charged line by line: each receipt names its own place. */
+  split?: boolean;
   allocations?: {
     id: string;
     amount: number;
@@ -122,6 +137,8 @@ export interface Claim {
   }[];
   /** "Against the project budget" (GET /:id, 2026-11-09) — null on an overheads claim. */
   budget?: RequestBudget | null;
+  /** Charged line by line (2026-11-11): one card per place. */
+  budgets?: { title: string; budget: RequestBudget }[];
 }
 
 interface ClaimsSummary {
@@ -180,7 +197,7 @@ export function Expenses() {
           <div>
             <div>{r.purpose}</div>
             <div className="faint">
-              {r.job ? <span className="mono">{r.job.number}</span> : r.officeBudgetLine ? `Office · ${r.officeBudgetLine.code} ${r.officeBudgetLine.name}` : 'Overheads'}
+              {r.split ? 'Several places' : r.job ? <span className="mono">{r.job.number}</span> : r.officeBudgetLine ? `Office · ${r.officeBudgetLine.code} ${r.officeBudgetLine.name}` : 'Overheads'}
               {source && (
                 <>
                   {' · liquidation of '}
@@ -379,7 +396,9 @@ export function ExpenseClaimDetail() {
                 </Link>
               </>
             )}
-            {row.job ? (
+            {row.split ? (
+              ' · charged line by line to several places'
+            ) : row.job ? (
               <>
                 {' · charged to '}
                 <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
@@ -471,6 +490,9 @@ export function ExpenseClaimDetail() {
 
       {/* Where the budget line stands, beside the decision (2026-11-09): the
           approver sees the remaining budget before anything posts. */}
+      {(row.budgets ?? []).map((c) => (
+        <BudgetCard key={c.title} budget={c.budget} lineName={c.budget.line?.name ?? ''} noun="This claim" title={c.title} />
+      ))}
       {row.budget && (row.budget.source === 'office' || row.costCategory) && (
         <BudgetCard budget={row.budget} lineName={row.budget.source === 'office' ? (row.budget.line?.name ?? '') : (row.costCategory?.name ?? '')} noun="This claim" />
       )}
@@ -540,6 +562,7 @@ export function ExpenseClaimDetail() {
                     <td>
                       <div>{l.description}</div>
                       {l.category && <div className="faint">{l.category}</div>}
+                      {row.split && <div className="faint">Charged to {linePlace(l)}</div>}
                     </td>
                     <td className="right mono">{formatMoney(l.amount)}</td>
                   </tr>
@@ -600,7 +623,9 @@ export function ExpenseClaimDetail() {
             )}
             <dt>Charged to</dt>
             <dd>
-              {row.job ? (
+              {row.split ? (
+                <span>Several places — each receipt says its own</span>
+              ) : row.job ? (
                 <>
                   <span className="mono">{row.job.number}</span>
                   <span className="faint"> · {row.costCategory?.name ?? 'no budget line'}</span>

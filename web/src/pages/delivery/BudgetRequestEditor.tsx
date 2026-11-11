@@ -20,6 +20,7 @@ import { Meter } from '../../components/charts';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import type { BudgetLine, Route } from '../chain/PurchaseRequisitionEditor';
 import type { BudgetRequest, RequestSource } from './BudgetRequests';
+import { NO_CHARGE, chargeKey, type LineCharge } from '../../components/LineCharge';
 
 /**
  * The budget request as a PAGE (2026-10-19, the owner's call: "budget request
@@ -133,7 +134,7 @@ export function BudgetRequestEditor() {
           setExisting(row);
           const raised = row.raisedOn ?? row.for;
           h = {
-            kind: row.job ? 'project' : (raised?.kind ?? 'project'),
+            kind: row.job ? 'project' : row.split ? 'project' : (raised?.kind ?? 'project'),
             sourceId: row.job?.id ?? raised?.id ?? '',
             costCategoryId: row.costCategory.id,
             reason: row.reason,
@@ -148,7 +149,7 @@ export function BudgetRequestEditor() {
             carrier: row.carrier ?? '',
           };
           // A request raised before the breakdown: its amount as one line.
-          ls = linesFromItems(row.items, row.reason, row.amount);
+          ls = linesFromItems(row.items, row.reason, row.amount, !!row.split);
           setHeader(h);
           setLines(ls);
         }
@@ -167,6 +168,17 @@ export function BudgetRequestEditor() {
   }, [id]);
 
   const officeBudgets = useOfficeLines();
+  // Where an item may be charged (2026-11-11): the running projects and every budget line.
+  const [placeJobs, setPlaceJobs] = useState<{ id: string; number: string; name: string }[]>([]);
+  const [placeCategories, setPlaceCategories] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    let live = true;
+    api.get<typeof placeJobs>('/budget-requests/projects').then((j) => live && setPlaceJobs(j)).catch(() => {});
+    api.get<typeof placeCategories>('/reference/cost-categories').then((c) => live && setPlaceCategories(c)).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // The project's budget lines — the Budget line select and the live panel.
   useEffect(() => {
@@ -205,18 +217,36 @@ export function BudgetRequestEditor() {
   const word = travel ? 'travel request' : 'budget request';
   const sent = lines.filter((l) => !isBlankLine(l));
   const total = useMemo(() => linesTotal(lines), [lines]);
+  // Each item's place (2026-11-11): a project's or the office's request may
+  // spread its items over several projects and office lines; the request's
+  // own place is every item's default. A request on a record, and a travel
+  // request, are charged whole.
+  const perItem = !travel && (header.kind === 'project' || header.kind === 'office');
+  const headerCharge: LineCharge =
+    header.kind === 'project' && header.sourceId
+      ? { jobId: header.sourceId, costCategoryId: header.costCategoryId, officeBudgetLineId: '' }
+      : header.kind === 'office' && header.sourceId
+        ? { jobId: '', costCategoryId: '', officeBudgetLineId: header.sourceId }
+        : NO_CHARGE;
+  const placeOf = (l: (typeof lines)[number]): LineCharge => l.charge ?? headerCharge;
+  const itemPlaces = new Set(sent.map((l) => chargeKey(placeOf(l))));
+  const chargedJobIds = perItem
+    ? [...new Set(sent.map((l) => placeOf(l).jobId).filter(Boolean))]
+    : header.kind === 'project' && header.sourceId
+      ? [header.sourceId]
+      : [];
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       api
         .get<{ route: Route | null }>(
-          `/budget-requests/route${qs({ amount: String(total), jobId: header.kind === 'project' ? header.sourceId : '', requestId: id ?? '', travel: travel ? '1' : '' })}`,
+          `/budget-requests/route${qs({ amount: String(total), jobId: header.kind === 'project' ? header.sourceId : '', jobIds: chargedJobIds.join(','), requestId: id ?? '', travel: travel ? '1' : '' })}`,
         )
         .then((r) => setRoute(r.route))
         .catch(() => setRoute(null));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [total, header.kind, header.sourceId, id]);
+  }, [total, header.kind, header.sourceId, id, chargedJobIds.join(',')]);
 
   const dirty = saved !== null && (snapshot(header, lines) !== saved || files.length > 0);
   useUnsavedChanges(dirty && !busy);
@@ -237,8 +267,16 @@ export function BudgetRequestEditor() {
 
   const problems: string[] = [];
   const office = header.kind === 'office';
-  if (!header.sourceId) problems.push(office ? 'Choose the office budget line' : `Choose the ${kindWord.label.replace(/^An? /, '')}`);
-  if (!office && !header.costCategoryId) problems.push('Choose the budget line');
+  // Every item naming its own place, the request needs none of its own.
+  const headerNeeded = !perItem || sent.some((l) => !l.charge);
+  if (headerNeeded && !header.sourceId) problems.push(office ? 'Choose the office budget line' : `Choose the ${kindWord.label.replace(/^An? /, '')}`);
+  if (headerNeeded && !office && !header.costCategoryId) problems.push('Choose the budget line');
+  if (perItem) {
+    sent.forEach((l, i) => {
+      const c = placeOf(l);
+      if (c.jobId && !c.costCategoryId) problems.push(`Line ${i + 1}: choose the project's budget line`);
+    });
+  }
   if (header.reason.trim().length < 3) problems.push(travel ? 'Say what the trip is for' : 'Say what the cash is for');
   if (travel) {
     if (header.travelFrom.trim().length < 2) problems.push('Say where the trip starts');
@@ -254,12 +292,12 @@ export function BudgetRequestEditor() {
     setBusy(true);
     setError(null);
     const body = {
-      [SOURCE_KEY[header.kind]]: header.sourceId,
-      costCategoryId: office ? null : header.costCategoryId,
+      [SOURCE_KEY[header.kind]]: header.sourceId || null,
+      costCategoryId: office ? null : header.costCategoryId || null,
       reason: header.reason.trim(),
       neededBy: header.neededBy || null,
       notes: header.notes.trim() || null,
-      items: linesPayload(lines),
+      items: linesPayload(lines, perItem ? placeOf : undefined),
       ...(travel
         ? {
             travel: {
@@ -541,10 +579,30 @@ export function BudgetRequestEditor() {
             lines={lines}
             onChange={setLines}
             attempted={attempted}
+            charging={
+              perItem
+                ? {
+                    choices: {
+                      jobs: placeJobs,
+                      categories: placeCategories,
+                      officeBudgets,
+                      kept: (existing?.items ?? []).flatMap((x) => [
+                        ...(x.job ? [{ value: `p:${x.job.id}`, label: `${x.job.number} — ${x.job.name}` }] : []),
+                        ...(x.officeBudgetLine ? [{ value: `o:${x.officeBudgetLine.id}`, label: `${x.officeBudgetLine.code} ${x.officeBudgetLine.name} (closed)` }] : []),
+                      ]),
+                    },
+                    placeOf,
+                    isDefault: (l) => !l.charge && !!header.sourceId,
+                    required: !header.sourceId,
+                  }
+                : undefined
+            }
             hint={
               travel
                 ? 'The fare, fees, baggage, freight — the amount requested is the sum of the lines.'
-                : 'The amount requested is the sum of the lines. Receipts for what is actually spent are filed in the liquidation.'
+                : perItem
+                  ? `The amount requested is the sum of the lines. Each line is charged to the request's own place unless you change it — one request can spread over several projects and office lines${itemPlaces.size > 1 ? ` (this one: ${itemPlaces.size} places)` : ''}. Receipts for what is actually spent are filed in the liquidation.`
+                  : 'The amount requested is the sum of the lines. Receipts for what is actually spent are filed in the liquidation.'
             }
           />
 

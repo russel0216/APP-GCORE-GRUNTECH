@@ -1,5 +1,6 @@
 import { NumberInput } from './NumberInput';
 import { formatMoney } from './ui';
+import { ChargeCell, chargeBody, chargeOf, type ChargeChoices, type LineCharge } from './LineCharge';
 
 /**
  * The breakdown of a cash request — what the money buys, line by line — on
@@ -15,6 +16,8 @@ export interface RequestLine {
   quantity: string;
   unit: string;
   unitCost: string;
+  /** Its own place (2026-11-11, a budget request charged item by item); null takes the request's own. */
+  charge?: LineCharge | null;
 }
 
 /** A stored line, as the API sends it. */
@@ -26,6 +29,10 @@ export interface RequestItem {
   unit: string;
   unitCost: number;
   amount: number;
+  /** Its own place, on a request charged item by item (2026-11-11). */
+  job?: { id: string; number: string; name: string } | null;
+  costCategory?: { id: string; name: string } | null;
+  officeBudgetLine?: { id: string; code: string; name: string } | null;
 }
 
 let nextKey = 0;
@@ -33,7 +40,7 @@ const newKey = () => `rl${++nextKey}`;
 export const blankRequestLine = (): RequestLine => ({ key: newKey(), name: '', description: '', quantity: '1', unit: 'pcs', unitCost: '' });
 
 /** Stored lines as the page edits them; none gives one line worth the amount (a request from before the breakdown). */
-export function linesFromItems(items: RequestItem[] | undefined, fallbackName: string, fallbackAmount: number): RequestLine[] {
+export function linesFromItems(items: RequestItem[] | undefined, fallbackName: string, fallbackAmount: number, split = false): RequestLine[] {
   if (items?.length) {
     return items.map((i) => ({
       key: newKey(),
@@ -42,6 +49,7 @@ export function linesFromItems(items: RequestItem[] | undefined, fallbackName: s
       quantity: String(i.quantity),
       unit: i.unit,
       unitCost: String(i.unitCost),
+      charge: split ? chargeOf(i) : null,
     }));
   }
   return fallbackAmount > 0 ? [{ ...blankRequestLine(), name: fallbackName, unitCost: String(fallbackAmount) }] : [blankRequestLine()];
@@ -86,8 +94,8 @@ export function linesProblems(lines: RequestLine[]): string[] {
   return out;
 }
 
-/** The lines as the API takes them. */
-export const linesPayload = (lines: RequestLine[]) =>
+/** The lines as the API takes them; with `placeOf`, each line's place too (2026-11-11). */
+export const linesPayload = (lines: RequestLine[], placeOf?: (l: RequestLine) => LineCharge) =>
   lines
     .filter((l) => !isBlankLine(l))
     .map((l) => ({
@@ -96,7 +104,18 @@ export const linesPayload = (lines: RequestLine[]) =>
       quantity: Number(l.quantity),
       unit: l.unit.trim() || 'pcs',
       unitCost: Number(l.unitCost) || 0,
+      ...(placeOf ? chargeBody(placeOf(l)) : {}),
     }));
+
+/** A budget request's lines charged item by item: where they go, and the request's own place each takes by default. */
+export interface LineCharging {
+  choices: ChargeChoices;
+  placeOf: (l: RequestLine) => LineCharge;
+  /** Whether a line takes the request's own place (shows "default"). */
+  isDefault: (l: RequestLine) => boolean;
+  /** A line must name somewhere (the request names no place of its own). */
+  required: boolean;
+}
 
 /** The Breakdown card: one row per line, + Add line in its head. */
 export function RequestLinesCard({
@@ -105,12 +124,15 @@ export function RequestLinesCard({
   onChange,
   attempted,
   hint,
+  charging,
 }: {
   id: string;
   lines: RequestLine[];
   onChange: (next: RequestLine[]) => void;
   attempted: boolean;
   hint: string;
+  /** Each line names its own place (2026-11-11, the budget request). */
+  charging?: LineCharging;
 }) {
   const setLine = (key: string, patch: Partial<RequestLine>) => onChange(lines.map((l) => (l.key === key ? { ...l, ...patch } : l)));
   const removeLine = (key: string) => {
@@ -121,9 +143,16 @@ export function RequestLinesCard({
     <section className="card" aria-labelledby={id}>
       <div className="card-head">
         <h2 id={id} className="card-title">Breakdown</h2>
-        <button type="button" className="btn btn-sm" onClick={() => onChange([...lines.filter((l) => !isBlankLine(l)), blankRequestLine()])}>
-          + Add line
-        </button>
+        <div className="row">
+          {charging && !charging.required && lines.some((l) => l.charge) && (
+            <button type="button" className="btn btn-sm" onClick={() => onChange(lines.map((l) => ({ ...l, charge: null })))}>
+              Apply the default to all lines
+            </button>
+          )}
+          <button type="button" className="btn btn-sm" onClick={() => onChange([...lines.filter((l) => !isBlankLine(l)), blankRequestLine()])}>
+            + Add line
+          </button>
+        </div>
       </div>
       <div className="table-wrap qe-table-wrap">
         <table className="data prq-lines">
@@ -133,6 +162,7 @@ export function RequestLinesCard({
             <col className="prq-col-unit" />
             <col className="prq-col-qty" />
             <col className="prq-col-cost" />
+            {charging && <col className="prq-col-charge" />}
             <col className="prq-col-amount" />
             <col className="prq-col-remove" />
           </colgroup>
@@ -143,6 +173,7 @@ export function RequestLinesCard({
               <th>Unit</th>
               <th className="right">Qty</th>
               <th className="right">Unit cost</th>
+              {charging && <th>Charged to</th>}
               <th className="right">Amount</th>
               <th aria-label="Remove" />
             </tr>
@@ -188,6 +219,23 @@ export function RequestLinesCard({
                   <td>
                     <NumberInput kind="money" aria-label={`Line ${i + 1} unit cost`} value={l.unitCost} min={0} onChange={(e) => setLine(l.key, { unitCost: e.target.value })} />
                   </td>
+                  {charging && (
+                    <td>
+                      <ChargeCell
+                        label={`Line ${i + 1}`}
+                        value={charging.placeOf(l)}
+                        isDefault={charging.isDefault(l)}
+                        invalid={
+                          attempted &&
+                          !isBlankLine(l) &&
+                          ((!!charging.placeOf(l).jobId && !charging.placeOf(l).costCategoryId) ||
+                            (charging.required && !charging.placeOf(l).jobId && !charging.placeOf(l).officeBudgetLineId))
+                        }
+                        choices={charging.choices}
+                        onChange={(c) => setLine(l.key, { charge: c })}
+                      />
+                    </td>
+                  )}
                   <td className="right mono">{formatMoney(lineAmount(l))}</td>
                   <td>
                     <button type="button" className="btn btn-sm btn-icon" aria-label={`Remove line ${i + 1}`} title="Remove" onClick={() => removeLine(l.key)}>
@@ -206,7 +254,7 @@ export function RequestLinesCard({
 }
 
 /** The Breakdown card on a record page: the lines read-only, with their total. */
-export function RequestItemsCard({ items, total }: { items: RequestItem[]; total: number }) {
+export function RequestItemsCard({ items, total, split = false }: { items: RequestItem[]; total: number; split?: boolean }) {
   if (!items.length) return null;
   return (
     <div className="card">
@@ -230,6 +278,16 @@ export function RequestItemsCard({ items, total }: { items: RequestItem[]; total
                 <td>
                   <strong>{i.name}</strong>
                   {i.description && <div className="faint">{i.description}</div>}
+                  {split && (
+                    <div className="faint">
+                      Charged to{' '}
+                      {i.officeBudgetLine
+                        ? `Office · ${i.officeBudgetLine.code} ${i.officeBudgetLine.name}`
+                        : i.job
+                          ? `${i.job.number}${i.costCategory ? ` · ${i.costCategory.name}` : ''}`
+                          : '—'}
+                    </div>
+                  )}
                 </td>
                 <td className="right mono">{i.quantity.toLocaleString('en-PH', { maximumFractionDigits: 3 })}</td>
                 <td>{i.unit}</td>

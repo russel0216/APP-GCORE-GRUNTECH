@@ -121,6 +121,9 @@ import {
 import { SOURCE_INCLUDE, sourceOf } from '../shared/budgetRequestSources';
 import { claimBudget, budgetPosition, type ChargeBudget } from '../shared/projectBudget';
 import { OFFICE_LINE_SELECT, assertOneCharge, billOffice, claimOffice, officeLineFor, officePosition, type OfficeCharge } from '../shared/officeBudget';
+import { NO_CHARGE, chargeGroups, chargeKey, checkLineCharges, collapse, jobIdsOf, linesAsCharges, type LineCharge } from '../shared/lineCharges';
+import { requestPlaces } from '../shared/budgetRequestCharges';
+import { cardsPosition, claimCards } from '../shared/chargeCards';
 
 function asDate(value: string, label: string): Date {
   const date = new Date(value);
@@ -297,6 +300,8 @@ export async function cashRequestSignatories(input: {
   amount: number;
   requester: { id: string; name: string };
   jobId: string | null;
+  /** Every project the lines charge (2026-11-11). */
+  jobIds?: string[];
   raisedAt: Date;
   releasedOn: Date | null;
 }): Promise<Signatory[]> {
@@ -304,7 +309,7 @@ export async function cashRequestSignatories(input: {
   const slots = await approvalSlots(
     input.documentType,
     input.id,
-    input.status === 'DRAFT' ? { amount: input.amount, requesterId: input.requester.id, jobId: input.jobId } : undefined,
+    input.status === 'DRAFT' ? { amount: input.amount, requesterId: input.requester.id, jobId: input.jobId, jobIds: input.jobIds ?? (input.jobId ? [input.jobId] : []) } : undefined,
   );
   return [
     // One timestamp per person: a preparer who signed a step at submit (a
@@ -3087,7 +3092,11 @@ export const claimInclude = {
   budgetRequest: {
     select: { id: true, number: true, amountReleased: true, amountRefunded: true, status: true, jobId: true, costCategoryId: true, officeBudgetLineId: true },
   },
-  lines: { orderBy: { sortOrder: 'asc' } },
+  // Each receipt's own place, on a claim charged line by line (2026-11-11).
+  lines: {
+    orderBy: { sortOrder: 'asc' },
+    include: { job: { select: { id: true, number: true, name: true } }, costCategory: { select: { id: true, name: true } }, officeBudgetLine: OFFICE_LINE_SELECT },
+  },
 } satisfies Prisma.ExpenseClaimInclude;
 
 type ClaimRow = Prisma.ExpenseClaimGetPayload<{ include: typeof claimInclude }>;
@@ -3151,7 +3160,9 @@ expenseRoutes.get(
     const claimId = req.query.claimId ? String(req.query.claimId) : null;
     const row = claimId ? await prisma.expenseClaim.findUnique({ where: { id: claimId }, select: { claimedById: true } }) : null;
     if (claimId && !row) throw notFound('Claim not found');
-    res.json({ route: await routeBrief('expense', amount, row?.claimedById ?? me.id, null) });
+    // The projects the page's lines charge (2026-11-11): each one's Technical Manager agrees.
+    const jobIds = req.query.jobIds ? String(req.query.jobIds).split(',').filter(Boolean) : [];
+    res.json({ route: await routeBrief('expense', amount, row?.claimedById ?? me.id, null, { jobIds }) });
   }),
 );
 
@@ -3442,7 +3453,9 @@ expenseRoutes.get(
       // Budget Monitoring reads it, this claim and what is left after — so the
       // approver sees the remaining budget before anything posts.
       // Charged to an office budget line instead (2026-11-10): that line's position.
-      budget: (await claimBudget(row)) ?? (await claimOffice(row)),
+      budget: row.split ? null : ((await claimBudget(row)) ?? (await claimOffice(row))),
+      // Charged line by line (2026-11-11): one card per place its receipts land.
+      budgets: await claimCards(row),
     });
   }),
 );
@@ -3468,6 +3481,10 @@ const claimSchema = z.object({
         receiptNo: z.string().optional().nullable(),
         vendor: z.string().trim().max(200).optional().nullable(),
         amount: z.number().positive('Every line must be more than zero'),
+        /** Where this receipt is charged (2026-11-11); left out, the claim's own. */
+        jobId: z.string().optional().nullable(),
+        costCategoryId: z.string().optional().nullable(),
+        officeBudgetLineId: z.string().optional().nullable(),
       }),
     )
     .min(1, 'A claim needs at least one line'),
@@ -3478,7 +3495,7 @@ const claimSchema = z.object({
  * for modifying a draft. Each line is taken to the centavo first, so the total
  * is exactly the sum of the lines stored under it.
  */
-function claimLines(input: z.infer<typeof claimSchema>['lines']) {
+function claimLines(input: z.infer<typeof claimSchema>['lines'], charges?: LineCharge[]) {
   const rows = input.map((l, i) => ({
     sortOrder: i,
     spentOn: asDate(l.spentOn, 'Spent on'),
@@ -3487,11 +3504,38 @@ function claimLines(input: z.infer<typeof claimSchema>['lines']) {
     receiptNo: l.receiptNo || null,
     vendor: l.vendor || null,
     amount: cents(l.amount),
+    ...(charges?.[i] ?? NO_CHARGE),
   }));
   return {
     total: cents(rows.reduce((s, l) => s + l.amount, 0)),
     lines: rows.map((l) => ({ ...l, amount: D(l.amount) })),
   };
+}
+
+/**
+ * Where a claim's money lands (2026-11-11): the claim's own place as its
+ * default, each receipt's own where the form says, collapsed to one place
+ * when they agree (`collapse()`). A liquidation of a request or advance
+ * charged whole keeps that place on every line; one of a request charged
+ * item by item names each receipt's place, which must be one of the request's.
+ */
+async function claimCharges(
+  body: z.infer<typeof claimSchema>,
+  header: LineCharge,
+  opts: { forced?: boolean; splitSource?: { number: string; places: LineCharge[] } | null; keepOffice?: (string | null)[] },
+) {
+  if (opts.forced) return { split: false, header, lines: body.lines.map(() => NO_CHARGE) };
+  const sent = body.lines.map((l) => ({ jobId: l.jobId || null, costCategoryId: l.costCategoryId || null, officeBudgetLineId: l.officeBudgetLineId || null }));
+  const out = collapse(sent, header);
+  const places = out.split ? out.lines : [out.header];
+  await checkLineCharges(places, { keepOffice: opts.keepOffice, requireCharge: !!opts.splitSource });
+  if (opts.splitSource) {
+    const allowed = new Set(opts.splitSource.places.map(chargeKey));
+    for (const [i, c] of places.entries()) {
+      if (!allowed.has(chargeKey(c))) throw badRequest(`Line ${i + 1}: ${opts.splitSource.number} was approved for other places — charge one of them`);
+    }
+  }
+  return out;
 }
 
 expenseRoutes.post(
@@ -3509,6 +3553,7 @@ expenseRoutes.post(
     let costCategoryId = body.costCategoryId || null;
     let officeBudgetLineId = body.officeBudgetLineId || null;
     let advanceNumber: string | null = null;
+    let splitSource: { number: string; places: LineCharge[] } | null = null;
     if (body.advanceId) {
       const advance = await prisma.cashAdvance.findUnique({
         where: { id: body.advanceId },
@@ -3579,15 +3624,20 @@ expenseRoutes.post(
       costCategoryId = request.costCategoryId;
       officeBudgetLineId = request.officeBudgetLineId;
       advanceNumber = request.number;
+      if (request.split) splitSource = { number: request.number, places: await requestPlaces(request.id) };
     }
     // A reimbursement charged to the office: a line still open, and no project beside it.
     if (!body.advanceId && !body.budgetRequestId && officeBudgetLineId) {
       assertOneCharge(jobId, officeBudgetLineId);
-      await officeLineFor(officeBudgetLineId);
       costCategoryId = null;
     }
 
-    const { total, lines } = claimLines(body.lines);
+    const charged = await claimCharges(body, { jobId, costCategoryId, officeBudgetLineId }, {
+      forced: !!body.advanceId || (!!body.budgetRequestId && !splitSource),
+      splitSource,
+    });
+    ({ jobId, costCategoryId, officeBudgetLineId } = charged.header);
+    const { total, lines } = claimLines(body.lines, charged.lines);
     const claim = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('expense', tx);
       return tx.expenseClaim.create({
@@ -3597,6 +3647,7 @@ expenseRoutes.post(
           jobId,
           costCategoryId,
           officeBudgetLineId,
+          split: charged.split,
           advanceId: body.advanceId || null,
           budgetRequestId: body.budgetRequestId || null,
           claimDate: body.claimDate ? asDate(body.claimDate, 'Claim date') : dayKey(new Date()),
@@ -3646,7 +3697,8 @@ expenseRoutes.put(
       where: { id: req.params.id },
       include: {
         advance: { select: { number: true, jobId: true, costCategoryId: true, officeBudgetLineId: true } },
-        budgetRequest: { select: { number: true, jobId: true, costCategoryId: true, officeBudgetLineId: true } },
+        budgetRequest: { select: { id: true, number: true, jobId: true, costCategoryId: true, officeBudgetLineId: true, split: true } },
+        lines: { select: { officeBudgetLineId: true } },
       },
     });
     if (!existing) throw notFound('Expense claim not found');
@@ -3692,16 +3744,19 @@ expenseRoutes.put(
       officeBudgetLineId = body.officeBudgetLineId === undefined ? (jobId ? null : existing.officeBudgetLineId) : body.officeBudgetLineId || null;
       if (officeBudgetLineId) {
         assertOneCharge(jobId, officeBudgetLineId);
-        await officeLineFor(officeBudgetLineId, existing.officeBudgetLineId);
         costCategoryId = null;
       }
-      if (jobId && jobId !== existing.jobId) {
-        const job = await prisma.job.findUnique({ where: { id: jobId }, select: { status: true } });
-        if (!job || job.status === 'CANCELLED') throw badRequest('That project cannot be charged');
-      }
     }
+    const splitSource =
+      existing.budgetRequest?.split ? { number: existing.budgetRequest.number, places: await requestPlaces(existing.budgetRequest.id) } : null;
+    const charged = await claimCharges(body, { jobId, costCategoryId, officeBudgetLineId }, {
+      forced: !!source && !splitSource,
+      splitSource,
+      keepOffice: [existing.officeBudgetLineId, ...existing.lines.map((l) => l.officeBudgetLineId)],
+    });
+    ({ jobId, costCategoryId, officeBudgetLineId } = charged.header);
 
-    const { total, lines } = claimLines(body.lines);
+    const { total, lines } = claimLines(body.lines, charged.lines);
     const claimDate = body.claimDate ? asDate(body.claimDate, 'Claim date') : existing.claimDate;
     const updated = await prisma.$transaction(async (tx) => {
       const claimed = await tx.expenseClaim.updateMany({
@@ -3710,6 +3765,7 @@ expenseRoutes.put(
           jobId,
           costCategoryId,
           officeBudgetLineId,
+          split: charged.split,
           claimDate,
           purpose: body.purpose,
           total: D(total),
@@ -3818,15 +3874,18 @@ expenseRoutes.post(
 
     // The approvers' bell and queue say where the budget line stands at
     // submit (the page has the live figures) — 2026-11-09.
-    const budget = await claimBudget(claim);
+    const budget = claim.split ? null : await claimBudget(claim);
     const currency = await companyCurrency();
-    const office = budget ? null : await claimOffice(claim);
+    const office = budget || claim.split ? null : await claimOffice(claim);
+    const cards = await claimCards(claim);
     const position =
       budget && claim.costCategory
         ? ` (${budgetPosition(budget, claim.costCategory.name, (n) => formatMoney(n, currency))})`
         : office
           ? ` (${officePosition(office, (n) => formatMoney(n, currency))})`
-          : '';
+          : cards.length
+            ? ` (${cardsPosition(cards, (n) => formatMoney(n, currency))})`
+            : '';
 
     // A claim without receipt numbers is not claimable, and finding that out at
     // approval time wastes the approver's round trip.
@@ -3862,6 +3921,8 @@ expenseRoutes.post(
         // The claimant, even when a super admin presses the button for them:
         // the self-approval rule has to see whose money this is.
         requesterId: claim.claimedById,
+        // Every project charged: each one's Technical Manager agrees (2026-11-11).
+        jobIds: jobIdsOf(claim, claim.lines),
       });
     } catch (err) {
       // The engine refused (no workflow, a self-approval trap). The claim goes
@@ -3963,7 +4024,14 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
   }
 
   const total = num(claim.total);
-  const postable = claim.jobId && claim.costCategoryId && total > 0;
+  // Each place the receipts are charged (2026-11-11): one INCURRED row per
+  // project and budget line; the office lines read the claim off the lines.
+  const claimLinesNow = await prisma.expenseClaimLine.findMany({ where: { claimId: claim.id }, include: { job: { select: { number: true } } } });
+  const groups = chargeGroups(linesAsCharges(claim, claimLinesNow)).filter((g) => g.charge.jobId && g.charge.costCategoryId && g.amount > 0);
+  const postable = groups.length > 0 && total > 0;
+  const chargedTo = claim.split
+    ? [...new Set(claimLinesNow.filter((l) => l.jobId).map((l) => l.job!.number))].join(', ')
+    : claim.job?.number ?? '';
   const payable = claimPayable(claim);
   const released = source ? num(source.amountReleased) : 0;
   const refundDue = source ? cents(Math.max(0, released - total)) : 0;
@@ -3981,12 +4049,12 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
       },
     });
     if (!claimed.count) return false;
-    if (postable) {
+    for (const g of groups) {
       await postJobCost(tx, {
-        jobId: claim.jobId!,
-        costCategoryId: claim.costCategoryId!,
+        jobId: g.charge.jobId!,
+        costCategoryId: g.charge.costCategoryId!,
         state: 'INCURRED',
-        amount: total,
+        amount: g.amount,
         sourceType: 'expense_claim',
         sourceId: claim.id,
         sourceNumber: claim.number,
@@ -4022,9 +4090,9 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
     entityId: claim.id,
     action: 'APPROVED',
     summary: source
-      ? `${claim.number} approved — ${total} spent against ${source.number}${postable ? `, charged to ${claim.job?.number}` : ''}; ${payable > 0 ? `${payable} owed to ${claim.claimedBy.name}` : refundDue > 0 ? `${refundDue} owed back` : 'settled exactly'}`
+      ? `${claim.number} approved — ${total} spent against ${source.number}${postable ? `, charged to ${chargedTo}` : ''}; ${payable > 0 ? `${payable} owed to ${claim.claimedBy.name}` : refundDue > 0 ? `${refundDue} owed back` : 'settled exactly'}`
       : postable
-        ? `${claim.number} approved — ${total} charged to ${claim.job?.number} and owed to ${claim.claimedBy.name}`
+        ? `${claim.number} approved — ${total} charged to ${chargedTo} and owed to ${claim.claimedBy.name}`
         : `${claim.number} approved — ${total} owed to ${claim.claimedBy.name}, no project charged`,
   });
 };
@@ -4280,10 +4348,12 @@ expenseRoutes.get(
     ];
     // "Against the project budget" (2026-11-09): the approver's paper says
     // where the budget line stands and what this claim takes from it.
-    const budget = await claimBudget(claim);
+    const budget = claim.split ? null : await claimBudget(claim);
     if (budget) sections.push(...budgetSections(budget, claim.costCategory?.name ?? '—', 'This claim', currency));
-    const office = budget ? null : await claimOffice(claim);
+    const office = budget || claim.split ? null : await claimOffice(claim);
     if (office) sections.push(...budgetSections(office, office.line.name, 'This claim', currency));
+    // Charged line by line: one block per place.
+    for (const card of await claimCards(claim)) sections.push(...budgetSections(card.budget, card.title, 'This claim', currency));
     if (claim.notes) sections.push({ kind: 'text', title: 'Notes', body: claim.notes });
 
     const claimant = await contactOf(claim.claimedById);
@@ -4291,7 +4361,7 @@ expenseRoutes.get(
       'expense',
       claim.id,
       // Submitted in the claimant's name, as the submit route does.
-      claim.status === 'DRAFT' ? { amount: view.total, requesterId: claim.claimedById } : undefined,
+      claim.status === 'DRAFT' ? { amount: view.total, requesterId: claim.claimedById, jobIds: jobIdsOf(claim, claim.lines) } : undefined,
     );
     const bare = await renderDocument({
       title: liquidated ? 'Liquidation Report' : 'Expense Claim',

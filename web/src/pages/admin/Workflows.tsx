@@ -10,7 +10,7 @@ interface Step {
   id?: string;
   sequence: number;
   name: string;
-  approverType: 'ROLE' | 'USER' | 'SUPERVISOR' | 'HR' | 'PROJECT_MANAGER';
+  approverType: 'ROLE' | 'USER' | 'SUPERVISOR' | 'HR' | 'PROJECT_MANAGER' | 'PROJECT_MANAGERS';
   roleId: string | null;
   userId: string | null;
   /** SUPERVISOR only: roles whose holders on the requester's team decide it too. */
@@ -49,6 +49,7 @@ interface DocType {
 const APPROVER_LABELS: Record<Step['approverType'], string> = {
   SUPERVISOR: 'The requester’s supervisor',
   PROJECT_MANAGER: 'The Technical Manager on the document or project',
+  PROJECT_MANAGERS: 'The Technical Manager of every project the lines charge (each agrees)',
   HR: 'HR',
   ROLE: 'Anyone with a role',
   USER: 'One specific person',
@@ -173,8 +174,8 @@ export function Workflows() {
                                 ? ` · also ${s.alsoRoleIds.map((rid) => roles.find((r) => r.id === rid)?.name ?? 'a role').join(', ')} on the team`
                                 : ''
                             }`
-                          : s.approverType === 'PROJECT_MANAGER'
-                            ? `${APPROVER_LABELS.PROJECT_MANAGER}, else ${s.role?.name ?? 'Executive / Management'}`
+                          : s.approverType === 'PROJECT_MANAGER' || s.approverType === 'PROJECT_MANAGERS'
+                            ? `${APPROVER_LABELS[s.approverType]}, else ${s.role?.name ?? 'Executive / Management'}`
                             : (s.role?.name ?? s.user?.name ?? APPROVER_LABELS[s.approverType])}
                       </span>
                       {s.approverCount === 0 && (
@@ -489,7 +490,7 @@ function WorkflowEditor({
                 label="Also decides it, on the requester's team"
               />
             </div>
-          ) : step.approverType === 'PROJECT_MANAGER' ? (
+          ) : step.approverType === 'PROJECT_MANAGER' || step.approverType === 'PROJECT_MANAGERS' ? (
             /* The project's manager decides; when the project has none, or the manager raised it, this role does. */
             <select
               value={step.roleId ?? ''}

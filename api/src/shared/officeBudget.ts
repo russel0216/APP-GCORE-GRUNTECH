@@ -104,6 +104,29 @@ export async function officeFigures(lineIds: string[], own: OfficeOwn = {}): Pro
     if (a.status === 'RELEASED') f.released += Math.max(0, num(a.amountReleased) - (a.repayable ? num(a.amountRefunded) : 0));
     else f.requested += num(a.amount);
   }
+  // Charged line by line (2026-11-11): each receipt and item on its own office line.
+  const [claimLines, items] = await Promise.all([
+    prisma.expenseClaimLine.findMany({
+      where: { ...on, claim: { split: true, status: { in: ['PENDING_APPROVAL', ...SPENT_CLAIM] }, ...not(own.expenseClaimId) } },
+      select: { officeBudgetLineId: true, amount: true, claim: { select: { status: true, budgetRequestId: true } } },
+    }),
+    prisma.budgetRequestItem.findMany({
+      where: { ...on, request: { split: true, status: { in: [...ASKED, 'RELEASED'] }, ...not(own.budgetRequestId) } },
+      select: { officeBudgetLineId: true, amount: true, request: { select: { status: true, amount: true, amountReleased: true } } },
+    }),
+  ]);
+  for (const l of claimLines) {
+    const f = at(l.officeBudgetLineId);
+    if (l.claim.status === 'PENDING_APPROVAL') {
+      if (!l.claim.budgetRequestId) f.requested += num(l.amount);
+    } else f.spent += num(l.amount);
+  }
+  for (const i of items) {
+    const f = at(i.officeBudgetLineId);
+    const asked = num(i.request.amount);
+    if (i.request.status === 'RELEASED') f.released += asked > 0 ? (num(i.request.amountReleased) * num(i.amount)) / asked : 0;
+    else f.requested += num(i.amount);
+  }
   for (const f of out.values()) {
     f.requested = cents(f.requested);
     f.released = cents(f.released);

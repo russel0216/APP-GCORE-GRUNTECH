@@ -25,6 +25,9 @@ import { renderDocument, formatMoney, formatAmount, formatQuantity, formatShortD
 import { cents, D, num, dayKey, daysBetween, refreshBudgetRequest } from '../shared/finance';
 import { cashRequestSections, cashRequestSignatories, budgetSections as chargeSections } from './finance';
 import { officeBudgetPosition, officePosition, requestOffice } from '../shared/officeBudget';
+import { OFFICE_LINE_SELECT } from '../shared/officeBudget';
+import { NO_CHARGE, checkLineCharges, collapse, jobIdsOf, type LineCharge } from '../shared/lineCharges';
+import { cardsPosition, requestCards } from '../shared/chargeCards';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import { contentDisposition, paperFileName } from '../shared/paperName';
 import { USER_TEAM_SELECT, teamOfUser, userTeamWhere, visibleOwners } from '../shared/team';
@@ -72,7 +75,11 @@ const requestInclude = {
     select: { id: true, number: true, status: true, total: true, amountPaid: true, claimDate: true, approvedAt: true },
     orderBy: { createdAt: 'desc' },
   },
-  items: { orderBy: { sortOrder: 'asc' } },
+  // Each item's own place, on a request charged item by item (2026-11-11).
+  items: {
+    orderBy: { sortOrder: 'asc' },
+    include: { job: { select: { id: true, number: true, name: true } }, costCategory: { select: { id: true, name: true } }, officeBudgetLine: OFFICE_LINE_SELECT },
+  },
 } satisfies Prisma.BudgetRequestInclude;
 
 type RequestRow = Prisma.BudgetRequestGetPayload<{ include: typeof requestInclude }>;
@@ -94,8 +101,10 @@ export function presentBudgetRequest(row: RequestRow, today = dayKey(new Date())
     requestedBy: requester,
     /** The requester's team — the Team column. */
     team: teamOfUser(row.requestedBy),
-    /** What the cash is for (2026-10-26): the project, else the sales order, quotation or costing. */
+    /** What the cash is for (2026-10-26): the project, else the sales order, quotation or costing; none when charged item by item. */
     for: sourceOf(row),
+    /** Charged item by item (2026-11-11): how many places its items name. */
+    places: row.split ? new Set(row.items.map((i) => i.officeBudgetLineId ?? `${i.jobId}:${i.costCategoryId}`)).size : null,
     /** The record it was raised on, kept once a project took it over. */
     raisedOn: raisedOn(row),
     amount,
@@ -571,8 +580,10 @@ budgetRequestRoutes.get(
     const row = requestId ? await prisma.budgetRequest.findUnique({ where: { id: requestId }, select: { requestedById: true, jobId: true, isTravel: true } }) : null;
     if (requestId && !row) throw notFound('Budget request not found');
     const jobId = row?.jobId ?? (req.query.jobId ? String(req.query.jobId) : null);
+    // The projects the page's lines charge (2026-11-11), else the one project.
+    const jobIds = req.query.jobIds ? String(req.query.jobIds).split(',').filter(Boolean) : jobId ? [jobId] : [];
     const type = docType({ isTravel: row ? row.isTravel : String(req.query.travel ?? '') === '1' });
-    res.json({ route: await routeBrief(type, amount, row?.requestedById ?? me.id, null, { jobId }) });
+    res.json({ route: await routeBrief(type, amount, row?.requestedById ?? me.id, null, { jobId, jobIds }) });
   }),
 );
 
@@ -597,9 +608,12 @@ type BudgetRow = {
   amountReleased: Prisma.Decimal;
   amountRefunded: Prisma.Decimal;
   officeBudgetLineId?: string | null;
+  split?: boolean;
 } & Parameters<typeof sourceOf>[0];
 
 export async function requestBudget(row: BudgetRow) {
+  // Charged item by item (2026-11-11): one card per place, `requestCards()`.
+  if (row.split) return null;
   // Office cash (2026-11-10): the office budget line's own position.
   if (row.officeBudgetLineId) {
     const office = await requestOffice({ ...row, officeBudgetLineId: row.officeBudgetLineId });
@@ -656,9 +670,10 @@ async function availableAfterFor(rows: Parameters<typeof requestBudget>[0][]): P
   const out = new Map<string, number | null>();
   const live = rows.filter((r) => !['LIQUIDATED', 'REJECTED', 'CANCELLED'].includes(r.status));
   for (const r of rows) out.set(r.id, null);
-  // A request on a sales order, quotation or costing reads its record's cost, one at a time.
-  for (const r of live.filter((r) => !r.jobId)) out.set(r.id, (await requestBudget(r)).availableAfter);
-  const open = live.filter((r): r is typeof r & { jobId: string } => !!r.jobId);
+  // A request on a sales order, quotation or costing reads its record's cost, one at a time;
+  // one charged item by item has no single line to say (its page has a card per place).
+  for (const r of live.filter((r) => !r.jobId && !r.split)) out.set(r.id, (await requestBudget(r))?.availableAfter ?? null);
+  const open = live.filter((r): r is typeof r & { jobId: string } => !!r.jobId && !r.split);
   if (!open.length) return out;
   const [ledger, own] = await Promise.all([
     prisma.jobCostEntry.groupBy({
@@ -689,7 +704,7 @@ async function availableAfterFor(rows: Parameters<typeof requestBudget>[0][]): P
  * Budget Monitoring has them (this request's own commitment left out), the
  * request's line marked, then the subtraction as a totals block.
  */
-function budgetSections(b: Awaited<ReturnType<typeof requestBudget>>, lineName: string, currency: string): PdfSection[] {
+function budgetSections(b: NonNullable<Awaited<ReturnType<typeof requestBudget>>>, lineName: string, currency: string): PdfSection[] {
   if (b.source === 'office') return chargeSections(b, b.line.name, 'This request', currency);
   const shown = b.lines.filter((l) => l.id === b.line?.id || l.budgeted || l.committed || l.incurred);
   const words = b.basis === 'released' ? 'This request (cash still out)' : 'This request';
@@ -768,7 +783,7 @@ budgetRequestRoutes.get(
     // manager (and the CEO / President above ₱100,000) —
     // named before anybody presses Submit (names only).
     const approvalRoute =
-      row.status === 'DRAFT' ? await routeBrief(docType(row), num(row.amount), row.requestedById, null, { jobId: row.jobId }) : null;
+      row.status === 'DRAFT' ? await routeBrief(docType(row), num(row.amount), row.requestedById, null, { jobId: row.jobId, jobIds: jobIdsOf(row, row.items) }) : null;
     res.json({
       ...presentBudgetRequest(row),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
@@ -778,6 +793,8 @@ budgetRequestRoutes.get(
       approvalType: docType(row),
       approvalRoute,
       budget: await requestBudget(row),
+      // Charged item by item (2026-11-11): one card per place.
+      budgets: await requestCards(row),
     });
   }),
 );
@@ -788,6 +805,10 @@ const itemSchema = z.object({
   quantity: z.number().positive('A line’s quantity must be more than zero'),
   unit: z.string().trim().max(40).optional().nullable(),
   unitCost: z.number().min(0, 'A unit cost cannot be negative'),
+  /** Where this item is charged (2026-11-11); left out, the request's own. */
+  jobId: z.string().optional().nullable(),
+  costCategoryId: z.string().optional().nullable(),
+  officeBudgetLineId: z.string().optional().nullable(),
 });
 
 const requestSchema = z.object({
@@ -853,7 +874,7 @@ export function requestLineAmount(quantity: number, unitCost: number): number {
   return Number(rounded) / 100;
 }
 
-function moneyOf(body: RequestBody) {
+function moneyOf(body: RequestBody, charges: LineCharge[] = []) {
   const lines = (body.items ?? []).map((i, n) => ({
     sortOrder: n,
     name: i.name,
@@ -862,6 +883,7 @@ function moneyOf(body: RequestBody) {
     unit: i.unit?.trim() || 'pcs',
     unitCost: D(Math.round(i.unitCost * 100) / 100),
     amount: D(requestLineAmount(i.quantity, i.unitCost)),
+    ...(charges[n] ?? NO_CHARGE),
   }));
   const amount = lines.length ? cents(lines.reduce((s, l) => s + num(l.amount), 0)) : cents(body.amount ?? 0);
   if (!(amount > 0)) throw badRequest(lines.length ? 'The lines add up to nothing — give them a unit cost' : 'A budget request must be for more than zero');
@@ -872,6 +894,43 @@ function asDate(value: string, label: string): Date {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) throw badRequest(`${label} is not a valid date`);
   return dayKey(date);
+}
+
+/** Indirect Cost, a system row: the stand-in for a request whose `costCategoryId` means nothing (office cash, or charged item by item). */
+async function standInCategory() {
+  const standIn =
+    (await prisma.costCategory.findFirst({ where: { code: 'IND' }, select: { id: true } })) ??
+    (await prisma.costCategory.findFirst({ orderBy: { sortOrder: 'asc' }, select: { id: true } }));
+  if (!standIn) throw badRequest('No cost category is on file');
+  return standIn.id;
+}
+
+/**
+ * Where a request's money goes (2026-11-11): its own place as the items'
+ * default, each item's own where the form says — collapsed to one place when
+ * they agree (`collapse()`), else charged item by item (`split`). Only a
+ * project's or the office's request is split: one on a sales order, quotation
+ * or costing, and a travel request, are charged whole.
+ */
+async function requestCharging(me: Me, body: RequestBody, keepOffice: (string | null)[] = []) {
+  const sent = (body.items ?? []).map((i) => ({ jobId: i.jobId || null, costCategoryId: i.costCategoryId || null, officeBudgetLineId: i.officeBudgetLineId || null }));
+  const whole = async (b: RequestBody) => ({ ...(await checkCharging(me, b, keepOffice.find((x) => x === b.officeBudgetLineId) ?? null)), split: false, itemCharges: sent.map(() => NO_CHARGE) });
+  if (!sent.some((c) => c.jobId || c.officeBudgetLineId)) return whole(body);
+  if (body.travel || body.salesOrderId || body.quotationId || body.costingId) {
+    throw badRequest(body.travel ? 'A travel request is charged whole — leave its lines on the request’s own project or office line' : 'A request on a sales order, quotation or costing is charged whole — its lines cannot name other places');
+  }
+  const header = { jobId: body.jobId || null, costCategoryId: body.jobId ? body.costCategoryId || null : null, officeBudgetLineId: body.jobId ? null : body.officeBudgetLineId || null };
+  const c = collapse(sent, header);
+  if (!c.split) return whole({ ...body, jobId: c.header.jobId, costCategoryId: c.header.costCategoryId, officeBudgetLineId: c.header.officeBudgetLineId });
+  await checkLineCharges(c.lines, { keepOffice, requireCharge: true });
+  return {
+    columns: { jobId: null, salesOrderId: null, quotationId: null, costingId: null, officeBudgetLineId: null },
+    number: 'several places',
+    kind: 'split' as const,
+    costCategoryId: await standInCategory(),
+    split: true,
+    itemCharges: c.lines,
+  };
 }
 
 /** The record must still stand (`checkSource`), and the budget line must exist. */
@@ -898,8 +957,8 @@ budgetRequestRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(requestSchema, req.body);
-    const source = await checkCharging(me, body);
-    const { lines, amount } = moneyOf(body);
+    const source = await requestCharging(me, body);
+    const { lines, amount } = moneyOf(body, source.itemCharges);
     const travel = travelColumns(body);
 
     const request = await prisma.$transaction(async (tx) => {
@@ -910,6 +969,7 @@ budgetRequestRoutes.post(
           ...travel,
           ...source.columns,
           costCategoryId: source.costCategoryId,
+          split: source.split,
           amount: D(amount),
           items: { create: lines },
           reason: body.reason,
@@ -947,21 +1007,33 @@ budgetRequestRoutes.put(
     }
     if (existing.status !== 'DRAFT') throw badRequest('Only a draft can be changed — this one has been submitted');
     const same = (a: string | null | undefined, b: string | null) => (a || null) === b;
-    if (!same(body.jobId, existing.jobId) || !same(body.salesOrderId, existing.salesOrderId) || !same(body.quotationId, existing.quotationId) || !same(body.costingId, existing.costingId)) {
+    // A request on a record stays on it. One for a project, the office or
+    // several places (2026-11-11) may move between them while a draft — its
+    // lines say where the money goes.
+    const onRecord = !!(existing.salesOrderId || existing.quotationId || existing.costingId);
+    if (onRecord && (!same(body.salesOrderId, existing.salesOrderId) || !same(body.quotationId, existing.quotationId) || !same(body.costingId, existing.costingId))) {
       throw badRequest('A budget request stays on what it was raised for — raise another');
     }
-    // An office request may move to another line of the office budgets while
-    // a draft (over its line, the card suggests one); never to or from a record.
-    if (!!body.officeBudgetLineId !== !!existing.officeBudgetLineId) throw badRequest('A budget request stays on what it was raised for — raise another');
+    if (!onRecord && (body.salesOrderId || body.quotationId || body.costingId)) throw badRequest('A budget request stays on what it was raised for — raise another');
     if (!!body.travel !== existing.isTravel) throw badRequest(existing.isTravel ? 'A travel request keeps its journey — say where and when' : 'This is a budget request, not a travel request — raise a travel request instead');
     const travel = travelColumns(body);
-    const source = await checkCharging(me, body, existing.officeBudgetLineId);
     // Lines sent replace the breakdown whole; none sent keeps it, with the
     // amount still their sum (a typed amount counts only with no lines).
     const kept = body.items ? null : await prisma.budgetRequestItem.findMany({ where: { requestId: existing.id }, orderBy: { sortOrder: 'asc' } });
+    if (kept?.length && existing.split) throw badRequest('Send the lines: this request is charged line by line');
+    const oldOffice = [existing.officeBudgetLineId, ...(await prisma.budgetRequestItem.findMany({ where: { requestId: existing.id }, select: { officeBudgetLineId: true } })).map((i) => i.officeBudgetLineId)];
+    const source = await requestCharging(me, body, oldOffice);
+    // Charged whole before and after, a request stays on what it was raised
+    // for (an office request may move to another office line); spreading its
+    // lines over several places, or gathering them again, is the draft's to do.
+    if (!existing.split && !source.split) {
+      if ((existing.jobId || null) !== (source.columns.jobId || null) || !!existing.officeBudgetLineId !== !!source.columns.officeBudgetLineId) {
+        throw badRequest('A budget request stays on what it was raised for — raise another');
+      }
+    }
     const { lines, amount } = kept?.length
       ? { lines: null, amount: cents(kept.reduce((s, l) => s + num(l.amount), 0)) }
-      : moneyOf(body);
+      : moneyOf(body, source.itemCharges);
 
     const request = await prisma.$transaction(async (tx) => {
       // Claimed on DRAFT: a submit that landed first wins.
@@ -969,7 +1041,9 @@ budgetRequestRoutes.put(
         where: { id: existing.id, status: 'DRAFT' },
         data: {
           costCategoryId: source.costCategoryId,
+          jobId: source.columns.jobId,
           officeBudgetLineId: source.columns.officeBudgetLineId,
+          split: source.split,
           ...travel,
           amount: D(amount),
           reason: body.reason,
@@ -1017,12 +1091,15 @@ budgetRequestRoutes.post(
     // budget line, as it stood at submit (the page has the live figures).
     const budget = await requestBudget(request);
     const currency = await companyCurrency();
-    const position =
-      budget.source === 'office'
+    const cards = await requestCards(request);
+    const position = !budget
+      ? cardsPosition(cards, (n) => formatMoney(n, currency))
+      : budget.source === 'office'
         ? officePosition(budget, (n) => formatMoney(n, currency))
         : budget.over
           ? `${formatMoney(budget.availableBefore, currency)} available, over by ${formatMoney(budget.overBy, currency)}`
           : `${formatMoney(budget.availableBefore, currency)} available → ${formatMoney(budget.availableAfter, currency)} left`;
+    const items = await prisma.budgetRequestItem.findMany({ where: { requestId: request.id }, select: { jobId: true } });
     try {
       await submitForApproval({
         documentType: docType(request),
@@ -1030,9 +1107,11 @@ budgetRequestRoutes.post(
         documentNumber: request.number,
         subject:
           (request.isTravel ? `${journeyOf(request)} — ` : '') +
-          (request.officeBudgetLine
-            ? `Office budget — ${request.officeBudgetLine.code} ${request.officeBudgetLine.name}: ${request.reason} (${position})`
-            : `${forWhat} — ${request.costCategory.name}: ${request.reason} (${request.costCategory.name}: ${position})`),
+          (request.split
+            ? `Several places — ${request.reason} (${position})`
+            : request.officeBudgetLine
+              ? `Office budget — ${request.officeBudgetLine.code} ${request.officeBudgetLine.name}: ${request.reason} (${position})`
+              : `${forWhat} — ${request.costCategory.name}: ${request.reason} (${request.costCategory.name}: ${position})`),
         amount: num(request.amount),
         link: `/g-ops/budget-requests/${request.id}`,
         // The requester, even when a super admin presses the button: the
@@ -1040,6 +1119,8 @@ budgetRequestRoutes.post(
         // request this is.
         requesterId: request.requestedById,
         jobId: request.jobId,
+        // Every project its items charge: each one's Technical Manager agrees (2026-11-11).
+        jobIds: jobIdsOf(request, items),
       });
     } catch (err) {
       // The engine refused (no workflow, a self-approval trap, nobody to
@@ -1359,7 +1440,11 @@ budgetRequestRoutes.get(
       });
     }
     if (row.cancelReason) sections.push({ kind: 'text', title: 'Cancelled', body: row.cancelReason });
-    sections.push(...budgetSections(await requestBudget(row), row.costCategory.name, await companyCurrency()));
+    const one = await requestBudget(row);
+    const currency = await companyCurrency();
+    if (one) sections.push(...budgetSections(one, row.costCategory.name, currency));
+    // Charged item by item (2026-11-11): one block per place.
+    for (const card of await requestCards(row)) sections.push(...chargeSections(card.budget, card.title, 'This request', currency));
 
     const paperTitle = row.isTravel ? 'Travel Request' : 'Budget Request';
     const pdf = await renderDocument({
@@ -1376,6 +1461,7 @@ budgetRequestRoutes.get(
         requester: row.requestedBy,
         // The project the submit names, for its PROJECT_MANAGER step.
         jobId: row.jobId,
+        jobIds: jobIdsOf(row, row.items),
         raisedAt: row.createdAt,
         releasedOn: release?.createdAt ?? null,
       }),

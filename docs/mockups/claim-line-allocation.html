@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Allocation per line</title>
+<style>
+  :root { --ink:#1f2933; --muted:#5b6670; --line:#d9dde2; --bg:#eef1f4; --card:#fff; --purple:#5b2a8c; --green:#2e9a4b; --warn:#9a5b00; --warn-bg:#fff4e0; --red:#b42318; --new:#fff7d6; --new-line:#e3b82a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); font:13px/1.45 "Segoe UI", system-ui, sans-serif; color:var(--ink); padding:22px; width:1500px; }
+  .caption { font-weight:700; font-size:12px; color:var(--muted); margin:0 0 8px; text-transform:uppercase; letter-spacing:.04em; }
+  .page { display:grid; grid-template-columns:1fr 360px; gap:16px; }
+  .card { background:var(--card); border-radius:10px; box-shadow:0 2px 8px rgba(0,0,0,.08); padding:16px; margin-bottom:16px; position:relative; }
+  .card h2 { font-size:14px; margin:0 0 10px; }
+  .rows { display:grid; grid-template-columns:11rem 1fr; gap:8px 14px; align-items:center; }
+  .rows label { font-weight:600; }
+  .box { height:38px; border:1px solid var(--line); border-radius:6px; padding:0 10px; display:flex; align-items:center; justify-content:space-between; background:#fff; }
+  .box.sm { height:32px; font-size:12px; }
+  .caret::after { content:"▾"; color:var(--muted); margin-left:6px; }
+  .hint { color:var(--muted); font-size:12px; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; font-size:11px; text-transform:uppercase; color:var(--purple); border-bottom:1px solid var(--line); padding:8px; }
+  td { padding:6px 8px; border-bottom:1px solid #eef0f2; vertical-align:top; }
+  .r { text-align:right; } .mono { font-family:Consolas, monospace; }
+  .new { outline:2px dashed var(--new-line); outline-offset:2px; background:var(--new); }
+  .tag { position:absolute; top:-10px; right:12px; background:var(--new-line); color:#3a2c00; font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px; }
+  .pill { display:inline-block; font-size:11px; padding:1px 7px; border-radius:10px; background:#eef0f2; color:var(--muted); }
+  .pill.def { background:#e9f6ee; color:var(--green); }
+  .btn { height:29px; padding:0 10px; border:1px solid var(--line); border-radius:6px; background:#fff; font:inherit; font-size:12px; }
+  .alloc td { padding-top:8px; }
+  .bud { border-top:1px solid var(--line); padding:8px 0; }
+  .bud:first-of-type { border-top:none; }
+  .bud .t { font-weight:600; }
+  .bud dl { display:grid; grid-template-columns:1fr auto; gap:2px 10px; margin:4px 0 0; }
+  .bud dt { color:var(--muted); } .bud dd { margin:0; text-align:right; font-family:Consolas, monospace; }
+  .over { color:var(--red); font-weight:700; }
+  .step { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid #eef0f2; }
+  .step small { color:var(--muted); display:block; }
+  .menu { position:absolute; background:#fff; border:1px solid var(--line); border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.15); width:330px; z-index:2; font-size:12px; }
+  .menu input { width:100%; border:none; border-bottom:1px solid var(--line); padding:8px 10px; font:inherit; }
+  .menu div { padding:6px 10px; }
+  .menu .g { color:var(--purple); font-weight:700; font-size:11px; text-transform:uppercase; padding-top:8px; }
+  .menu .on { background:#f3ecfa; }
+</style>
+</head>
+<body>
+<p class="caption">New reimbursement — a credit card statement spread over two projects and the office (the budget request page gets the same columns)</p>
+<div class="page">
+  <div>
+    <div class="card">
+      <h2>Reimbursement details</h2>
+      <div class="rows">
+        <label>Claimant</label><div class="box">Maria Santos</div>
+        <label>Purpose</label><div class="box">BPI credit card — statement of account, October 2026</div>
+        <label>Charge to</label>
+        <div class="new" style="position:relative;padding:6px;border-radius:6px">
+          <span class="tag">NEW</span>
+          <div style="display:flex;gap:8px">
+            <div class="box caret" style="flex:1">Several projects / office — set per line</div>
+          </div>
+          <div class="hint" style="margin-top:4px">Pick one project (or office line) and every line takes it as its default; choose "Several" and each line says its own. A line can always be changed.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card new">
+      <span class="tag">NEW columns</span>
+      <h2>What was spent</h2>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <span class="hint">Default for new lines:</span>
+        <div class="box sm caret" style="width:300px">GT-PRJ-2026-0112 — The Village at Lipa</div>
+        <div class="box sm caret" style="width:150px">Materials</div>
+        <button class="btn">Apply to all lines</button>
+      </div>
+      <table>
+        <thead><tr><th>#</th><th>Date</th><th>Company / receipt</th><th>Item / purpose</th><th style="width:270px">Charge to</th><th style="width:140px">Budget line</th><th class="r">Amount</th><th></th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>10/03</td><td>Wilcon Depot<br><span class="hint">OR 55120</span></td><td>Anchor bolts, sealant</td>
+              <td><div class="box sm caret">GT-PRJ-2026-0112 — Village at Lipa</div><span class="pill def">default</span></td>
+              <td><div class="box sm caret">Materials</div></td><td class="r mono">8,450.00</td><td><button class="btn">✕</button></td></tr>
+          <tr><td>2</td><td>10/07</td><td>Cebu Pacific<br><span class="hint">Booking K9XL2</span></td><td>Flight MNL–CEB, site survey</td>
+              <td style="position:relative"><div class="box sm caret" style="border-color:var(--purple)">GT-PRJ-2026-0120 — SM Seaside UPS</div>
+                <div class="menu" style="top:36px;left:0">
+                  <input value="seaside">
+                  <div class="g">Projects</div>
+                  <div class="on">GT-PRJ-2026-0120 — SM Seaside UPS <span class="hint">· HIT</span></div>
+                  <div>GT-PRJ-2026-0098 — Seaside Cold Storage <span class="hint">· GIB</span></div>
+                  <div class="g">Office budget</div>
+                  <div>2026 GRUNTECH YEARLY · 214 TRAVEL EXPENSE</div>
+                </div></td>
+              <td><div class="box sm caret">Indirect Cost</div></td><td class="r mono">6,980.00</td><td><button class="btn">✕</button></td></tr>
+          <tr style="height:120px"><td>3</td><td>10/12</td><td>Shell Select<br><span class="hint">OR 00431</span></td><td>Fuel, delivery van</td>
+              <td><div class="box sm caret">GT-PRJ-2026-0120 — SM Seaside UPS</div></td>
+              <td><div class="box sm caret">Indirect Cost</div></td><td class="r mono">2,150.00</td><td><button class="btn">✕</button></td></tr>
+          <tr><td>4</td><td>10/18</td><td>Microsoft<br><span class="hint">Invoice E0441</span></td><td>Office 365, 5 seats</td>
+              <td><div class="box sm caret">Office · 2026 GRUNTECH YEARLY · 221 SOFTWARE</div></td>
+              <td><span class="hint">— (the office line)</span></td><td class="r mono">4,990.00</td><td><button class="btn">✕</button></td></tr>
+        </tbody>
+      </table>
+      <button class="btn" style="margin-top:8px">+ Add line</button>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Summary</h2>
+      <div class="rows" style="grid-template-columns:1fr auto"><span>Total</span><strong class="mono">PHP 22,570.00</strong></div>
+    </div>
+    <div class="card new">
+      <span class="tag">NEW</span>
+      <h2>Against the budgets</h2>
+      <div class="hint" style="margin-bottom:6px">One block per project and budget line, or office line, this claim charges.</div>
+      <div class="bud"><div class="t">GT-PRJ-2026-0112 · Materials</div><dl><dt>Available</dt><dd>120,000.00</dd><dt>This claim</dt><dd>8,450.00</dd><dt>Left after</dt><dd>111,550.00</dd></dl></div>
+      <div class="bud"><div class="t">GT-PRJ-2026-0120 · Indirect Cost</div><dl><dt>Available</dt><dd>7,500.00</dd><dt>This claim</dt><dd>9,130.00</dd><dt>Left after</dt><dd class="over">(1,630.00) over</dd></dl></div>
+      <div class="bud"><div class="t">Office · 221 SOFTWARE</div><dl><dt>Remaining</dt><dd>38,200.00</dd><dt>This claim</dt><dd>4,990.00</dd><dt>Left after</dt><dd>33,210.00</dd></dl></div>
+    </div>
+    <div class="card new">
+      <span class="tag">NEW step</span>
+      <h2>Approval</h2>
+      <div class="hint" style="margin-bottom:4px">Submit for approval sends it to:</div>
+      <div class="step"><span>1. Team Leader<small>Juan Dela Cruz</small></span></div>
+      <div class="step" style="background:var(--new)"><span>2. Project budget agreed<small>GT-PRJ-0112: Ricardo Ramos (Technical Manager)<br>GT-PRJ-0120: Brian Jay Santos (Technical Manager)</small></span></div>
+      <div class="step"><span>3. Back Support<small>Mylin Reyes</small></span></div>
+      <div class="step"><span>4. Checking (Finance Staff)<small>Ana Cruz</small></span></div>
+      <div class="step"><span>5. Finance Manager<small>Dina Gasiong</small></span></div>
+      <div class="step"><span>6. CEO / President<small>Carter Gasiong</small></span></div>
+      <div class="hint" style="margin-top:6px">Step 2 appears only when a line charges a project: each project's Technical Manager (the one who keeps its budget monitoring) agrees to its own lines. Office lines need no extra step.</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

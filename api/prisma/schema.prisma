@@ -413,6 +413,12 @@ enum ApproverType {
   /// the step's role — Executive by default — when the project has none or
   /// the requester is that manager.
   PROJECT_MANAGER
+  /// Every project a document's lines charge (ApprovalRequest.jobIds): the
+  /// manager of EACH must agree before the step is done (2026-11-11, the
+  /// owner's call: the Technical Manager who keeps a project's budget
+  /// monitoring agrees to the lines charged to it). Skipped when the
+  /// document charges no project.
+  PROJECT_MANAGERS
 }
 
 enum ApprovalStatus {
@@ -522,6 +528,9 @@ model ApprovalRequest {
   /// The team the document is FOR, read in place of the requester's own (the
   /// hiring contract, 2026-10-21: HR prepares it for the manpower request's team).
   teamId           String?
+  /// Every project the document's lines charge — what a PROJECT_MANAGERS
+  /// step resolves against (2026-11-11). Empty: that step is passed over.
+  jobIds           String[] @default([])
 
   workflowId String?
   workflow   ApprovalWorkflow? @relation(fields: [workflowId], references: [id], onDelete: SetNull)
@@ -1055,6 +1064,8 @@ model CostCategory {
   supplierBills     SupplierBill[]        @relation("BillCategory")
   expenseClaims     ExpenseClaim[]        @relation("ExpenseCategory")
   cashAdvances      CashAdvance[]         @relation("AdvanceCategory")
+  claimLines        ExpenseClaimLine[]    @relation("ClaimLineCategory")
+  requestItems      BudgetRequestItem[]   @relation("RequestItemCategory")
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -2152,11 +2163,13 @@ model Job {
   invoices         Invoice[]
   supplierBills    SupplierBill[]
   expenseClaims    ExpenseClaim[]
+  claimLines       ExpenseClaimLine[]  @relation("ClaimLineJob")
+  requestItems     BudgetRequestItem[] @relation("RequestItemJob")
   cashAdvances     CashAdvance[]
-  installedAssets  InstalledAsset[]  @relation("AssetInstaller")
+  installedAssets  InstalledAsset[]    @relation("AssetInstaller")
   serviceContract  ServiceContract?
-  serviceReports   ServiceReport[]   @relation("ServiceReportJob")
-  jobOrders        JobOrder[]        @relation("JobOrderChargeTo")
+  serviceReports   ServiceReport[]     @relation("ServiceReportJob")
+  jobOrders        JobOrder[]          @relation("JobOrderChargeTo")
   salesActivities  SalesActivity[]
   cadJobOrders     CadJobOrder[]
 
@@ -2350,6 +2363,10 @@ model BudgetRequest {
   /// the spend.
   paidDirect Boolean   @default(false)
 
+  /// Charged item by item (2026-11-11): each item names its own project or
+  /// office line; the header names neither (its `costCategoryId` a stand-in).
+  split Boolean @default(false)
+
   liquidations ExpenseClaim[]
   allocations  PaymentAllocation[]
   /// The breakdown of what the cash buys (2026-10-19, the owner's call: a full
@@ -2383,7 +2400,20 @@ model BudgetRequestItem {
   unitCost    Decimal       @db.Decimal(18, 2)
   amount      Decimal       @db.Decimal(18, 2)
 
+  /// Where this line is charged (2026-11-11, the owner's call: one statement
+  /// of account across several projects and the office): a project and its
+  /// budget line, or an office budget line. Null on a document charged whole
+  /// (its header says where).
+  jobId              String?
+  job                Job?              @relation("RequestItemJob", fields: [jobId], references: [id], onDelete: Restrict)
+  costCategoryId     String?
+  costCategory       CostCategory?     @relation("RequestItemCategory", fields: [costCategoryId], references: [id], onDelete: Restrict)
+  officeBudgetLineId String?
+  officeBudgetLine   OfficeBudgetLine? @relation("RequestItemOffice", fields: [officeBudgetLineId], references: [id], onDelete: Restrict)
+
   @@index([requestId])
+  @@index([jobId])
+  @@index([officeBudgetLineId])
 }
 
 enum ProgressStatus {
@@ -4931,6 +4961,11 @@ model ExpenseClaim {
   postedToJob Boolean   @default(false)
   postedAt    DateTime?
 
+  /// Charged line by line (2026-11-11): each line names its own project or
+  /// office line, and the header's project, budget line and office line are
+  /// null. False: the header says where the whole claim goes.
+  split Boolean @default(false)
+
   notes      String?
   approvedAt DateTime?
 
@@ -4964,7 +4999,20 @@ model ExpenseClaimLine {
   vendor      String?
   amount      Decimal  @db.Decimal(18, 2)
 
+  /// Where this line is charged (2026-11-11, the owner's call: one statement
+  /// of account across several projects and the office): a project and its
+  /// budget line, or an office budget line. Null on a document charged whole
+  /// (its header says where).
+  jobId              String?
+  job                Job?              @relation("ClaimLineJob", fields: [jobId], references: [id], onDelete: Restrict)
+  costCategoryId     String?
+  costCategory       CostCategory?     @relation("ClaimLineCategory", fields: [costCategoryId], references: [id], onDelete: Restrict)
+  officeBudgetLineId String?
+  officeBudgetLine   OfficeBudgetLine? @relation("ClaimLineOffice", fields: [officeBudgetLineId], references: [id], onDelete: Restrict)
+
   @@index([claimId])
+  @@index([jobId])
+  @@index([officeBudgetLineId])
 }
 
 /// Money issued to a person BEFORE it is spent. It is a receivable from that
@@ -6275,6 +6323,8 @@ model OfficeBudgetLine {
   budgetRequests BudgetRequest[]
   supplierBills  SupplierBill[]
   cashAdvances   CashAdvance[]
+  claimLines     ExpenseClaimLine[]  @relation("ClaimLineOffice")
+  requestItems   BudgetRequestItem[] @relation("RequestItemOffice")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

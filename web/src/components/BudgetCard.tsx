@@ -75,7 +75,18 @@ export interface RequestBudget {
 /** What the document is called in the card: "This request", "This claim", "This advance". */
 export type BudgetNoun = 'This request' | 'This claim' | 'This advance' | 'This bill';
 
-export function BudgetCard({ budget: b, lineName, noun = 'This request' }: { budget: RequestBudget; lineName: string; noun?: BudgetNoun }) {
+export function BudgetCard({
+  budget: b,
+  lineName,
+  noun = 'This request',
+  title,
+}: {
+  budget: RequestBudget;
+  lineName: string;
+  noun?: BudgetNoun;
+  /** One of several places a document charged line by line (2026-11-11) names it. */
+  title?: string;
+}) {
   const others = b.lines.filter((l) => l.id !== b.line?.id && (l.budgeted || l.committed || l.incurred || l.requested));
   const line = b.line;
   const waiting = b.requested ?? 0;
@@ -85,7 +96,13 @@ export function BudgetCard({ budget: b, lineName, noun = 'This request' }: { bud
     <section className="card">
       <div className="card-head">
         <h3 className="card-title">
-          {office ? `Against the office budget${b.office ? ` — ${b.office.name}` : ''}` : b.source === 'project' ? 'Against the project budget' : `Against the ${SOURCE_WORDS[b.source].toLowerCase()}'s cost`}
+          {title
+            ? `Against the budget — ${title}`
+            : office
+              ? `Against the office budget${b.office ? ` — ${b.office.name}` : ''}`
+              : b.source === 'project'
+                ? 'Against the project budget'
+                : `Against the ${SOURCE_WORDS[b.source].toLowerCase()}'s cost`}
         </h3>
       </div>
       {b.over && !b.settled && (

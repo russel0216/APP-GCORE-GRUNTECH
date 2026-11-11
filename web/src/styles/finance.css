@@ -130,3 +130,19 @@
 .fin-line-note.is-missing {
   color: var(--warn);
 }
+
+/* Where one line is charged (2026-11-11): a project and its budget line, or an office line. */
+.line-charge {
+  min-width: 15rem;
+}
+.line-charge select {
+  width: 100%;
+}
+.pill-default {
+  align-self: flex-start;
+  font-size: var(--fs-xs);
+  padding: 0 var(--s-2);
+  border-radius: 999px;
+  background: var(--ok-bg, var(--surface-2));
+  color: var(--ok, var(--muted));
+}

@@ -8303,6 +8303,62 @@ before through `GET /purchase-requests/suggest/fields` and `GET
 named on the line first; requests the caller may read and, with a purchase
 order View key, orders), its list opening in the cell.
 
+## Charged line by line: reimbursements and budget requests (2026-11-11)
+
+The owner's call: "allow a multiple allocation for different project — a
+Statement of Account for a credit card used on different projects or the
+office; if created for a specific project make it the default per item";
+and "make sure the TM … who handles the budget monitoring agree". Mockup
+first: `docs/mockups/claim-line-allocation.html`.
+
+- **Each line names its place**: `ExpenseClaimLine` and `BudgetRequestItem`
+  carry `jobId` + `costCategoryId`, or `officeBudgetLineId`.
+  `shared/lineCharges.ts` is the ONE rule, `collapse()`: every line in one
+  place (or none named) keeps the document WHOLE — the header carries the
+  place, the lines none, `split` false, so every reader written before works
+  unchanged; lines in different places make it `split` (header names no
+  project and no office line; a budget request's `costCategoryId` is the
+  Indirect stand-in). `checkLineCharges()` checks each place (a project not
+  cancelled with a budget line; an office line open, or the one it carries).
+  Only a project's or the office's request is split — one on a sales order,
+  quotation or costing, and a travel request, are charged whole (a 400).
+- **Where the money lands, per place**: `settleExpense` posts one INCURRED
+  row per project and budget line (`chargeGroups`); `refreshBudgetRequest()`
+  commits the released cash by each place's share (`spreadOver()` in
+  `shared/budgetRequestCharges.ts`, exact to the centavo), a direct payment
+  the same; `requestedByLine()` (Budget Monitoring's Requested) and
+  `officeFigures()` read split claims' lines and split requests' items. A
+  liquidation of a split request names each receipt's place, one of the
+  request's (`requestPlaces()`); of a whole one, the place stays forced.
+- **One card per place**: `shared/chargeCards.ts` — `claimCards()` /
+  `requestCards()` (`budgets` on the GETs; `budget` is null when split), the
+  approvers' subject (`cardsPosition`) and the papers print a block each.
+- **The project budget agreement**: a new approver type,
+  `PROJECT_MANAGERS` — every project the document charges
+  (`ApprovalRequest.jobIds`, `SubmitInput.jobIds`, `jobIdsOf()`) must have its
+  manager (its Technical Manager; else the step's role on the requester's
+  team, else the CEO / President) agree. `projectAgreementOpen()` in
+  `shared/approvals.ts`: `approversForStep` lists only those still to agree,
+  an Approve that leaves another project waiting keeps the step open
+  (`act()`'s `stillWaiting`; nobody newly told), a manager never agrees twice,
+  never co-signed by another step and never the preparer's (`holdsStep`).
+  `stepApplies()` passes the step over when nothing charges a project
+  (submit, `act()`, `routePreview`, `approvalSlots`, `historyFor`); the paper
+  prints one slot per manager who agreed. Seeded on "Reimbursement — team
+  leader, project budget agreed, back support, checking, finance manager,
+  CEO / President" and both "Budget Request — team leader, project budget
+  agreed, …" routes, step 2 after the Team Leader; the routes before are
+  RETIRED. A verify script reading a step passes `ctxOf(request)`, never a
+  bare `{ jobId }`.
+- **The forms**: the "Charge to" on the claim and the budget request is every
+  line's default; each line has a **Charged to** column (`ChargeCell` in
+  `components/LineCharge.tsx`: projects, then office lines, and the project's
+  budget line), "default" under a line that takes it, "Apply the default to
+  all lines". The record pages list each line's place and a card per place;
+  the registers say "Several places". verify-finance pins the split claim,
+  the agreement step, the per-project posting and the request's committed
+  shares.
+
 ## Reimbursements (2026-10-15)
 
 The owner's module 6, on the expense claim (`gfin.expenses`, the menu now

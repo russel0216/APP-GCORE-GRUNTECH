@@ -441,8 +441,8 @@ async function main() {
     include: { steps: { orderBy: { sequence: 'asc' } } },
   });
   check(
-    'a ₱50,000 request takes the three signatures of the sheet: Team Leader, Admin Back Support, Finance Manager',
-    brWorkflow.steps.map((st) => st.name).join(' › ') === 'Team Leader › Admin Back Support › Finance Manager',
+    'a ₱50,000 request takes the sheet’s signatures — Team Leader, (each charged project’s Technical Manager, 2026-11-11,) Admin Back Support, Finance Manager',
+    brWorkflow.steps.map((st) => st.name).join(' › ') === 'Team Leader › Project budget agreed › Admin Back Support › Finance Manager',
     brWorkflow.steps.map((st) => st.name).join(' › '),
   );
   const step1 = await approversForStep(brWorkflow.steps[0], engineer.id, prisma, { jobId: job.id });
@@ -452,12 +452,14 @@ async function main() {
   check('a pending request does not change the budget', money(mat().budgeted, 400_000));
 
   await act({ requestId: request.id, userId: pm.id, action: 'APPROVED' });
-  const step2 = await approversForStep(brWorkflow.steps[1], engineer.id, prisma, { jobId: job.id });
+  // Submitted naming no projects, the agreement step is passed over.
+  const stepNamed = (name: string) => brWorkflow.steps.find((st) => st.name === name)!;
+  const step2 = await approversForStep(stepNamed('Admin Back Support'), engineer.id, prisma, { jobId: job.id });
   check('then Admin Back Support', step2.includes(backSupport.id) && !step2.includes(pm.id), step2.join(','));
   position = await budgetPosition(job.id);
   check('the budget does not move after the team leader’s approval', money(mat().budgeted, 400_000), String(mat().budgeted));
   await act({ requestId: request.id, userId: backSupport.id, action: 'APPROVED' });
-  const step3 = await approversForStep(brWorkflow.steps[2], engineer.id, prisma, { jobId: job.id });
+  const step3 = await approversForStep(stepNamed('Finance Manager'), engineer.id, prisma, { jobId: job.id });
   check('then the Finance Manager decides', step3.includes(finMgr.id) && !step3.includes(finance.id), step3.join(','));
 
   await act({ requestId: request.id, userId: finMgr.id, action: 'APPROVED' });
@@ -471,8 +473,8 @@ async function main() {
   const brRoute = async (amount: number) => (await pickWorkflow('budget_request', amount))?.steps.map((st) => st.name).join(' › ');
   check(
     'up to ₱100,000.00 it stops at the Finance Manager; above it the CEO / President signs last',
-    (await brRoute(100_000)) === 'Team Leader › Admin Back Support › Finance Manager' &&
-      (await brRoute(100_000.01)) === 'Team Leader › Admin Back Support › Finance Manager › CEO / President',
+    (await brRoute(100_000)) === 'Team Leader › Project budget agreed › Admin Back Support › Finance Manager' &&
+      (await brRoute(100_000.01)) === 'Team Leader › Project budget agreed › Admin Back Support › Finance Manager › CEO / President',
     `${await brRoute(100_000)} | ${await brRoute(100_000.01)}`,
   );
   const loner = await makeUser('Verify Loner Engineer', 'loner@verifyd.local', ['project_engineer']);
@@ -516,8 +518,8 @@ async function main() {
   check(
     'a team leader who is also the Finance Manager signs both with one Approve, at one instant — Back Support still between',
     twoHatsNow.status === 'PENDING' &&
-      twoHatsNow.currentSequence === 2 &&
-      twoHatsNow.actions.map((a) => a.sequence).join() === '1,3' &&
+      twoHatsNow.currentSequence === stepNamed('Admin Back Support').sequence &&
+      twoHatsNow.actions.map((a) => a.sequence).join() === `1,${stepNamed('Finance Manager').sequence}` &&
       twoHatsNow.actions[1].coSignedWith === 1 &&
       twoHatsNow.actions[0].actedAt.getTime() === twoHatsNow.actions[1].actedAt.getTime(),
     JSON.stringify(twoHatsNow.actions.map((a) => [a.sequence, a.coSignedWith])),
@@ -1836,7 +1838,8 @@ async function main() {
     const brPdf = await printed(financeToken, `/budget-requests/${br.id}/pdf`);
     const brText = brPdf.text;
     const brFlat = flat(brText);
-    const brSteps = brWorkflow.steps.map((st) => st.name.toUpperCase());
+    // The agreement step applies only where the request named its projects (this one was submitted without).
+    const brSteps = brWorkflow.steps.filter((st) => st.approverType !== 'PROJECT_MANAGERS').map((st) => st.name.toUpperCase());
     check(
       'the printed request signs every step of its route as APPROVED BY, then who received the cash — all dated',
       brPdf.status === 200 &&

@@ -10,6 +10,7 @@ import { todayLocal } from '../../lib/day';
 import type { Route } from '../chain/PurchaseRequisitionEditor';
 import type { Claim } from './Expenses';
 import { OfficeLineAdvice, OfficeLineSelect, useOfficeLines, type CurrentOfficeLine } from '../../components/OfficeLine';
+import { ChargeCell, chargeBody, chargeKey, chargeOf, type LineCharge } from '../../components/LineCharge';
 
 /**
  * The reimbursement as a PAGE (2026-10-19, the owner's call: "do the same for
@@ -40,6 +41,8 @@ interface Source {
   costCategory: { id: string; name: string } | null;
   officeBudgetLine?: CurrentOfficeLine | null;
   to: string;
+  /** A budget request charged item by item (2026-11-11): each receipt names its place. */
+  split?: boolean;
 }
 
 interface Line {
@@ -50,6 +53,8 @@ interface Line {
   description: string;
   category: string;
   amount: string;
+  /** Its own place (2026-11-11); null takes the claim's "Charge to". */
+  charge: LineCharge | null;
 }
 
 interface Header {
@@ -62,7 +67,7 @@ interface Header {
 
 let nextKey = 0;
 const newKey = () => `cl${++nextKey}`;
-const blankLine = (spentOn: string): Line => ({ key: newKey(), spentOn, vendor: '', receiptNo: '', description: '', category: '', amount: '' });
+const blankLine = (spentOn: string): Line => ({ key: newKey(), spentOn, vendor: '', receiptNo: '', description: '', category: '', amount: '', charge: null });
 const isBlank = (l: Line) => !l.description.trim() && !l.vendor.trim() && !l.receiptNo.trim() && !(Number(l.amount) > 0);
 const cents = (l: Line) => Math.round((Number(l.amount) || 0) * 100);
 const snapshot = (h: Header, lines: Line[]) =>
@@ -117,6 +122,7 @@ export function ClaimEditor() {
               costCategory: row.costCategory,
               officeBudgetLine: row.officeBudgetLine,
               to: row.advance ? `/g-fin/cash-advances/${from.id}` : `/g-ops/budget-requests/${from.id}`,
+              split: !!from.split,
             };
           }
           h = { claimDate: row.claimDate.slice(0, 10), purpose: row.purpose, jobId: row.job?.id ?? '', costCategoryId: row.costCategory?.id ?? '', officeBudgetLineId: row.officeBudgetLine?.id ?? '' };
@@ -129,6 +135,7 @@ export function ClaimEditor() {
                 description: l.description,
                 category: l.category ?? '',
                 amount: String(l.amount),
+                charge: row.split ? chargeOf(l) : null,
               }))
             : [blankLine(today)];
         } else if (advanceId) {
@@ -151,6 +158,7 @@ export function ClaimEditor() {
             job: { id: string; number: string; name: string } | null;
             costCategory: Source['costCategory'];
             officeBudgetLine?: CurrentOfficeLine | null;
+            split?: boolean;
           }>(`/budget-requests/${budgetRequestId}`);
           src = {
             kind: 'budgetRequest',
@@ -163,10 +171,11 @@ export function ClaimEditor() {
             costCategory: b.costCategory,
             officeBudgetLine: b.officeBudgetLine,
             to: `/g-ops/budget-requests/${b.id}`,
+            split: !!b.split,
           };
         }
         if (src && !id) h = { ...h, purpose: `Liquidation of ${src.number} — ${src.purpose}` };
-        if (!src) {
+        if (!src || src.split) {
           // Not /jobs/lookup: naming the project you spent money on is not the
           // same right as project-management access, and the filing roles hold none.
           const c = await api
@@ -195,6 +204,14 @@ export function ClaimEditor() {
   }, [id, advanceId, budgetRequestId]);
 
   const sent = lines.filter((l) => !isBlank(l));
+  // Each receipt's place (2026-11-11): its own, else the claim's "Charge to".
+  // A liquidation of something charged whole keeps that place; one of a
+  // request charged item by item names each receipt's.
+  const perLine = !source || !!source.split;
+  const headerCharge: LineCharge = { jobId: header.jobId, costCategoryId: header.jobId ? header.costCategoryId : '', officeBudgetLineId: header.jobId ? '' : header.officeBudgetLineId };
+  const placeOf = (l: Line): LineCharge => l.charge ?? headerCharge;
+  const places = new Set(sent.map((l) => chargeKey(placeOf(l))));
+  const chargedJobIds = [...new Set((perLine ? sent.map(placeOf) : [source?.job ? { jobId: source.job.id } : { jobId: '' }]).map((c) => c.jobId).filter(Boolean))];
   const totalCents = sent.reduce((s, l) => s + cents(l), 0);
   const total = totalCents / 100;
   const missingReceipts = sent.filter((l) => l.description.trim() && !l.receiptNo.trim()).length;
@@ -206,12 +223,12 @@ export function ClaimEditor() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       api
-        .get<{ route: Route | null }>(`/expense-claims/route${qs({ amount: String(total), claimId: id ?? '' })}`)
+        .get<{ route: Route | null }>(`/expense-claims/route${qs({ amount: String(total), claimId: id ?? '', jobIds: chargedJobIds.join(',') })}`)
         .then((r) => setRoute(r.route))
         .catch(() => setRoute(null));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [total, id]);
+  }, [total, id, chargedJobIds.join(',')]);
 
   const dirty = (saved !== null && snapshot(header, lines) !== saved) || files.length > 0;
   useUnsavedChanges(dirty && !busy);
@@ -237,6 +254,13 @@ export function ClaimEditor() {
   const problems: string[] = [];
   if (header.purpose.trim().length < 3) problems.push('Say what it was for');
   if (!source && header.jobId && !header.costCategoryId) problems.push('Choose the budget line');
+  if (perLine) {
+    sent.forEach((l, i) => {
+      const c = placeOf(l);
+      if (c.jobId && !c.costCategoryId) problems.push(`Line ${i + 1}: choose the project's budget line`);
+      if (source?.split && !c.jobId && !c.officeBudgetLineId) problems.push(`Line ${i + 1}: say where it is charged`);
+    });
+  }
   if (!sent.length) problems.push('Add at least one receipt');
   sent.forEach((l, i) => {
     const p = lineProblem(l);
@@ -264,6 +288,7 @@ export function ClaimEditor() {
         receiptNo: l.receiptNo.trim() || null,
         vendor: l.vendor.trim() || null,
         amount: cents(l) / 100,
+        ...(perLine ? chargeBody(placeOf(l)) : {}),
       })),
     };
     try {
@@ -411,7 +436,7 @@ export function ClaimEditor() {
                 </Field>
               ) : (
                 <>
-                  <Field label="Charge to project" hint="Leave empty for an office expense — then choose its office budget line">
+                  <Field label="Charge to project" hint="Every receipt takes this unless its own line says otherwise. Leave empty for an office expense — then choose its office budget line">
                     <select
                       value={header.jobId}
                       onChange={(e) => setHeader((h) => ({ ...h, jobId: e.target.value, costCategoryId: e.target.value ? h.costCategoryId : '', officeBudgetLineId: e.target.value ? '' : h.officeBudgetLineId }))}
@@ -463,10 +488,25 @@ export function ClaimEditor() {
           <section className="card" aria-labelledby="cl-lines">
             <div className="card-head">
               <h2 id="cl-lines" className="card-title">What was spent</h2>
-              <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls.filter((l) => !isBlank(l)), blankLine(today)])}>
-                + Add line
-              </button>
+              <div className="row">
+                {perLine && lines.some((l) => l.charge) && !source?.split && (
+                  <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => ls.map((l) => ({ ...l, charge: null })))}>
+                    Apply the default to all lines
+                  </button>
+                )}
+                <button type="button" className="btn btn-sm" onClick={() => setLines((ls) => [...ls.filter((l) => !isBlank(l)), blankLine(today)])}>
+                  + Add line
+                </button>
+              </div>
             </div>
+            {perLine && (
+              <p className="prq-hint">
+                {source?.split
+                  ? `${source.number} was approved for several places — say which one each receipt is charged to.`
+                  : 'Each receipt is charged to the claim’s “Charge to” unless you change its own line — a credit card statement can spread over several projects and the office.'}
+                {places.size > 1 ? ` This claim is charged to ${places.size} places.` : ''}
+              </p>
+            )}
             <div className="table-wrap qe-table-wrap">
               <table className="data">
                 <thead>
@@ -475,6 +515,7 @@ export function ClaimEditor() {
                     <th>Date</th>
                     <th>Company / receipt</th>
                     <th>Item / purpose</th>
+                    {perLine && <th>Charged to</th>}
                     <th className="right">Amount</th>
                     <th aria-label="Remove" />
                   </tr>
@@ -515,6 +556,27 @@ export function ClaimEditor() {
                           </div>
                           {problem && <div className="field-error">{problem}</div>}
                         </td>
+                        {perLine && (
+                          <td>
+                            <ChargeCell
+                              label={`Line ${i + 1}`}
+                              value={placeOf(l)}
+                              isDefault={!l.charge && !source?.split}
+                              invalid={attempted && ((!!placeOf(l).jobId && !placeOf(l).costCategoryId) || (!!source?.split && !placeOf(l).jobId && !placeOf(l).officeBudgetLineId))}
+                              choices={{
+                                jobs,
+                                categories,
+                                officeBudgets,
+                                allowNone: !source,
+                                kept: existing?.lines.flatMap((x) => [
+                                  ...(x.job ? [{ value: `p:${x.job.id}`, label: `${x.job.number} — ${x.job.name}` }] : []),
+                                  ...(x.officeBudgetLine ? [{ value: `o:${x.officeBudgetLine.id}`, label: `${x.officeBudgetLine.code} ${x.officeBudgetLine.name} (closed)` }] : []),
+                                ]),
+                              }}
+                              onChange={(c) => setLine(l.key, { charge: c })}
+                            />
+                          </td>
+                        )}
                         <td>
                           <NumberInput kind="money" min={0} aria-label={`Line ${i + 1} amount`} value={l.amount} onChange={(e) => setLine(l.key, { amount: e.target.value })} />
                         </td>
