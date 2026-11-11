@@ -12,3 +12,9 @@ web/dist/
 api/dist/
 tsconfig.tsbuildinfo
 data/
+
+# graphify: the graph, its report and its build config are shared;
+# the cache and the working files (local paths, raw extraction) are not.
+graphify-out/cache/
+graphify-out/.graphify_*
+!graphify-out/.graphify_build.json
