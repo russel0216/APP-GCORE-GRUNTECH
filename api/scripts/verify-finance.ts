@@ -3066,6 +3066,29 @@ async function main() {
       lines: [bLine('Hauling', 1, 2_000)],
     });
     const bSpareId = String(bSpare.body.id ?? '');
+    // A bill takes its papers from the start (2026-11-11): filed on the draft
+    // by whoever entered it, read by finance, never by a stranger.
+    {
+      const form = new FormData();
+      form.append('files', new Blob([Buffer.from('%PDF-1.4\n%verify\n')], { type: 'application/pdf' }), `${TAG}-supplier-invoice.pdf`);
+      const up = await fetch(`${BASE}/attachments/supplier_bill/${bSpareId}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${signToken(finance.id, finance.email)}` },
+        body: form,
+      });
+      const finList = await fin('GET', `/attachments/supplier_bill/${bSpareId}`);
+      const strangerList = await as(stranger)('GET', `/attachments/supplier_bill/${bSpareId}`);
+      check(
+        'a supplier bill takes attachments on its draft; finance reads them, a stranger does not',
+        up.status === 201 &&
+          finList.status === 200 && Array.isArray(finList.body) && finList.body.length === 1 &&
+          strangerList.status === 404,
+        `${up.status} · ${finList.status} ${strangerList.status}`,
+      );
+      for (const a of await prisma.attachment.findMany({ where: { entityType: 'supplier_bill', entityId: bSpareId }, select: { id: true } })) {
+        await deleteAttachment(a.id);
+      }
+    }
     // The engine refusing a submit — here because a request is already open
     // for the bill — leaves it a draft, never pending with nothing behind it.
     const bStray = await prisma.approvalRequest.create({
