@@ -142,6 +142,16 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'forecast', group: 'Sales', label: 'Forecast', path: '/g-ops/forecast', actions: REPORT, phase: 3,
         note: 'Consolidated expected closing dates of the open quotations — weekly, monthly, quarterly, annually' },
       { key: 'leads', group: 'Sales', label: 'Leads', path: '/g-ops/leads', actions: OWNED, phase: 3 },
+      // On the Sales strip between Leads and Quotations since 2026-11-11 (the
+      // owner's call); a project's own travel requests are a tab inside it.
+      // Travel requests (2026-11-10, the owner's call): a ticket, a fare or a
+      // shipping-line booking, charged to a project, sales order, quotation,
+      // costing or office budget line. A budget request with a journey on
+      // it — RAISED with Budget Requests › Manage Own; these two keys only
+      // read: one's own, or everyone's.
+      { key: 'travel_requests', group: 'Sales', label: 'Travel Requests', path: '/g-ops/travel-requests', actions: ['view_own', 'view_all'], phase: 10,
+        caption: 'Reading only — to raise one, set Budget Requests › Manage Own',
+        note: 'Travel by shipping line, land transportation or air flight. View Own lists the travel requests one raised, View All everyone’s. Raising one is Budget Requests › Manage Own; finance releases the cash or books and pays it directly (the A/P create right).' },
       { key: 'quotations', group: 'Sales', label: 'Quotations', path: '/g-ops/quotations', actions: OWNED, phase: 3 },
       { key: 'sales_orders', group: 'Sales', label: 'Sales Orders', path: '/g-ops/sales-orders', actions: OWNED, phase: 9,
         note: 'Books a quotation in operations — SCORO\'s "Create invoice"' },
@@ -168,14 +178,6 @@ export const REGISTRY: ModuleDef[] = [
       // assign and reassign requests, set priority on any, close any.
       { key: 'cad_job_orders', group: 'Project Management', label: 'CAD J.O.', path: '/g-ops/cad-job-orders', actions: ['view_own', 'view_team', 'view_all', 'create', 'edit_own', 'edit_team', 'edit_all', 'delete', 'export', 'approve'], phase: 9,
         note: 'Requests to the design team: files, revisions (R0, R1…), progress, priority and a comment thread. Edit All = the design team (progress, revisions, priority on what is assigned to them); Approve = the Designer Lead (assigns, reassigns, closes any).' },
-      // Travel requests (2026-11-10, the owner's call): a ticket, a fare or a
-      // shipping-line booking, charged to a project, sales order, quotation,
-      // costing or office budget line. A budget request with a journey on
-      // it — RAISED with Budget Requests › Manage Own; these two keys only
-      // read: one's own, or everyone's.
-      { key: 'travel_requests', group: 'Project Management', label: 'Travel Requests', path: '/g-ops/travel-requests', actions: ['view_own', 'view_all'], phase: 10,
-        caption: 'Reading only — to raise one, set Budget Requests › Manage Own',
-        note: 'Travel by shipping line, land transportation or air flight. View Own lists the travel requests one raised, View All everyone’s. Raising one is Budget Requests › Manage Own; finance releases the cash or books and pays it directly (the A/P create right).' },
       { key: 'plans', group: 'Project Management', label: 'Request for Approval', path: '/g-ops/plans', actions: OWNED, phase: 4, hidden: true, note: 'Raised from a project’s Request for Approval tab; decided through the approval engine' },
       { key: 'budget_monitoring', group: 'Project Management', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4, hidden: true },
       { key: 'purchase_requests', group: 'Project Management', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: ['view_own', 'view_team', 'view_all', 'edit_own', 'edit_team', 'edit_all'], phase: 5, hidden: true },

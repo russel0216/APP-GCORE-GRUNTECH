@@ -156,6 +156,7 @@ interface Job {
     isMilestone?: boolean;
   }[];
   budgetRequestCount: number;
+  travelRequestCount?: number;
   installedAssetCount: number;
   position: Position[];
   curve: CurvePoint[];
@@ -189,6 +190,7 @@ type Tab =
   | 'costing'
   | 'joborders'
   | 'requests'
+  | 'travel'
   | 'scope'
   | 'progress';
 
@@ -202,7 +204,7 @@ type Tab =
  * Orders follow Overview (2026-10-15, the owner's call): the costing the
  * project was built from, and the job orders raised for it.
  */
-const TABS: Tab[] = ['overview', 'costing', 'joborders', 'meetings', 'plans', 'budget', 'procurement', 'requests', 'scope', 'progress'];
+const TABS: Tab[] = ['overview', 'costing', 'joborders', 'meetings', 'plans', 'budget', 'procurement', 'requests', 'travel', 'scope', 'progress'];
 
 /** Where the tabs that used to exist went, so an old link or notification still lands. */
 const TAB_ALIASES: Record<string, Tab> = {
@@ -292,6 +294,12 @@ export function ProjectWorkspace() {
     budget: true,
     procurement: procurementKeys.some(can),
     requests: can('gops.budget_requests.view_all') || can('gops.budget_requests.view_own'),
+    // The project's own travel requests (2026-11-11) — their register is under Sales.
+    travel:
+      can('gops.travel_requests.view_all') ||
+      can('gops.travel_requests.view_own') ||
+      can('gops.budget_requests.view_all') ||
+      can('gops.budget_requests.view_own'),
     scope: true,
     progress: true,
   };
@@ -314,6 +322,7 @@ export function ProjectWorkspace() {
     budget: 'Budget Monitoring',
     procurement: 'Purchase Requisition',
     requests: `Budget Requests (${job.budgetRequestCount})`,
+    travel: `Travel Requests (${job.travelRequestCount ?? 0})`,
     scope: 'Scope of Work (Gantt)',
     progress: `Progress & Billing (${job.progressReports.length})`,
   };
@@ -674,8 +683,22 @@ export function ProjectWorkspace() {
       {current === 'requests' && (
         <ProjectBudgetRequestsCard
           job={job}
+          travel={false}
           reloadToken={reloadToken}
           onRaise={can('gops.budget_requests.create') ? () => navigate(`/g-ops/budget-requests/new?jobId=${job.id}`) : undefined}
+        />
+      )}
+
+      {current === 'travel' && (
+        <ProjectBudgetRequestsCard
+          job={job}
+          travel
+          reloadToken={reloadToken}
+          onRaise={
+            can('gops.budget_requests.create') && job.status !== 'CANCELLED'
+              ? () => navigate(`/g-ops/budget-requests/new?kind=travel&jobId=${job.id}`)
+              : undefined
+          }
         />
       )}
 
@@ -1240,6 +1263,13 @@ function ProcurementTab({ job }: { job: Job }) {
           jobId={job.id}
           belongs={(r) => onJob(r.job)}
           empty="No orders placed for this project."
+          action={
+            can('gchain.purchase_orders.create') && job.status !== 'CANCELLED' ? (
+              <Link className="btn btn-sm" to={`/g-chain/purchase-orders/new?project=${job.id}`}>
+                + New purchase order
+              </Link>
+            ) : undefined
+          }
           columns={[
             { label: 'Number', render: (r) => <DocLink to={`/g-chain/purchase-orders/${r.id}`}>{r.number}</DocLink> },
             { label: 'Supplier', render: (r) => <Link to={`/g-chain/suppliers/${r.supplier.id}`}>{r.supplier.name}</Link> },

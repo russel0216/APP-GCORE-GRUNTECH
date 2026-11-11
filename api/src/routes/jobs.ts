@@ -1158,6 +1158,7 @@ jobRoutes.get(
     const contractValue = num(job.contractValue);
     const actualCost = cents(committed + incurred);
 
+    const travelRequestCount = await prisma.budgetRequest.count({ where: { jobId: job.id, isTravel: true } });
     res.json({
       ...job,
       contractValue,
@@ -1181,7 +1182,9 @@ jobRoutes.get(
         grossAmount: num(b.grossAmount),
         netCollectible: num(b.netCollectible),
       })),
-      budgetRequestCount: job._count.budgetRequests,
+      // Travel requests sit on a tab of their own (2026-11-11).
+      budgetRequestCount: job._count.budgetRequests - travelRequestCount,
+      travelRequestCount,
       installedAssetCount: job._count.installedAssets,
       schedule: scheduleTally(job),
       position,

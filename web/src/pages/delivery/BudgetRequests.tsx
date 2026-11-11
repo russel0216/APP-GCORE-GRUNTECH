@@ -633,6 +633,8 @@ export function ProjectBudgetRequestsCard({
   record,
   reloadToken,
   onRaise,
+  travel,
+  onRaiseTravel,
 }: {
   job?: { id: string };
   /**
@@ -642,7 +644,15 @@ export function ProjectBudgetRequestsCard({
   record?: { key: 'salesOrderId' | 'quotationId' | 'costingId'; id: string };
   reloadToken: number;
   onRaise?: () => void;
+  /**
+   * A project keeps its travel requests on a tab of their own (2026-11-11):
+   * true lists travel alone, false the cash requests alone; left out, both.
+   */
+  travel?: boolean;
+  /** "+ New travel request" beside the cash request's button (a record's card). */
+  onRaiseTravel?: () => void;
 }) {
+  const word = travel ? 'travel request' : 'budget request';
   const filterKey = record?.key ?? 'jobId';
   const filterId = record?.id ?? job?.id ?? '';
   const [rows, setRows] = useState<BudgetRequest[] | null>(null);
@@ -651,10 +661,10 @@ export function ProjectBudgetRequestsCard({
 
   useEffect(() => {
     api
-      .get<ListResult<BudgetRequest>>(`/budget-requests?${filterKey}=${filterId}&pageSize=100`)
+      .get<ListResult<BudgetRequest>>(`/budget-requests?${filterKey}=${filterId}&pageSize=100${travel === undefined ? '' : `&travel=${travel ? 'yes' : 'no'}`}`)
       .then((r) => setRows(r.rows))
       .catch(setError);
-  }, [filterKey, filterId, reloadToken]);
+  }, [filterKey, filterId, reloadToken, travel]);
 
   const sum = (pick: (r: BudgetRequest) => number) => (rows ?? []).reduce((s, r) => s + pick(r), 0);
   const live = (rows ?? []).filter((r) => !['REJECTED', 'CANCELLED', 'DRAFT'].includes(r.status));
@@ -662,16 +672,28 @@ export function ProjectBudgetRequestsCard({
   return (
     <section className="card">
       <div className="card-head">
-        <h3 className="card-title">Budget requests{rows && rows.length ? ` (${rows.length})` : ''}</h3>
-        {onRaise && (
-          <button className="btn btn-primary btn-sm" onClick={onRaise}>
-            + New budget request
-          </button>
+        <h3 className="card-title">{travel ? 'Travel requests' : 'Budget requests'}{rows && rows.length ? ` (${rows.length})` : ''}</h3>
+        {(onRaise || onRaiseTravel) && (
+          <div className="card-actions">
+            {onRaise && (
+              <button className="btn btn-primary btn-sm" onClick={onRaise}>
+                + New {word}
+              </button>
+            )}
+            {onRaiseTravel && (
+              <button className="btn btn-sm" onClick={onRaiseTravel}>
+                + New travel request
+              </button>
+            )}
+          </div>
         )}
       </div>
       <p className="muted del-lede">
-        Cash for the team to buy what it needs without a purchase requisition. The team leader, back
-        support and the finance manager allow it, finance releases it, and it is liquidated with receipts in Expenses —{' '}
+        {travel
+          ? 'Travel by shipping line, land transportation or air flight, charged to this project. Finance releases the cash, or books and pays it directly — '
+          : null}
+        {travel ? null : <>Cash for the team to buy what it needs without a purchase requisition. The team leader, back
+        support and the finance manager allow it, finance releases it, and it is liquidated with receipts in Expenses —{' '}</>}
         {record
           ? 'checked against this record’s own cost; a project built from it takes the requests over.'
           : 'released cash shows as committed on its budget line, and the liquidation turns what was spent into incurred.'}
@@ -680,7 +702,7 @@ export function ProjectBudgetRequestsCard({
       {!rows && !error ? (
         <Loading />
       ) : rows && rows.length === 0 ? (
-        <p className="faint del-note">No budget requests raised on this {record ? (record.key === 'salesOrderId' ? 'sales order' : record.key === 'quotationId' ? 'quotation' : 'costing') : 'project'}.</p>
+        <p className="faint del-note">No {word}s raised on this {record ? (record.key === 'salesOrderId' ? 'sales order' : record.key === 'quotationId' ? 'quotation' : 'costing') : 'project'}.</p>
       ) : rows ? (
         <>
           <dl className="kv del-br-sum">
@@ -1230,6 +1252,12 @@ export function RecordBudgetRequests({
       record={record}
       reloadToken={0}
       onRaise={open && can('gops.budget_requests.create') ? () => navigate(`/g-ops/budget-requests/new?${record.key}=${record.id}`) : undefined}
+      // A journey charged to the same record (2026-11-11).
+      onRaiseTravel={
+        open && can('gops.budget_requests.create')
+          ? () => navigate(`/g-ops/budget-requests/new?kind=travel&${record.key}=${record.id}`)
+          : undefined
+      }
     />
   );
   return wrapClassName ? <div className={wrapClassName}>{card}</div> : card;

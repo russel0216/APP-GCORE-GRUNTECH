@@ -362,6 +362,29 @@ purchaseRequestRoutes.get(
   }),
 );
 
+/** Quotations that may be bought ahead for: open, or won with no sales order issued. */
+async function buyableQuotations(q: string) {
+  const rows = await prisma.quotation.findMany({
+    where: {
+      outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'] },
+      salesOrders: { none: { status: 'ISSUED' } },
+      ...(q
+        ? {
+            OR: [
+              { number: { contains: q, mode: 'insensitive' } },
+              { subject: { contains: q, mode: 'insensitive' } },
+              { customer: { name: { contains: q, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 50,
+    select: { id: true, number: true, subject: true, customer: { select: { name: true } } },
+  });
+  return rows.map((r) => ({ id: r.id, number: r.number, customer: r.customer.name, subject: r.subject ?? '' }));
+}
+
 /**
  * The quotations a request may buy ahead for (2026-11-10): still open, or won
  * with no sales order issued yet — number, customer and subject only, behind
@@ -371,26 +394,7 @@ purchaseRequestRoutes.get(
   '/quotations',
   requireAny(...PR_WRITERS),
   handler(async (req, res) => {
-    const q = String(req.query.q ?? '').trim();
-    const rows = await prisma.quotation.findMany({
-      where: {
-        outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'] },
-        salesOrders: { none: { status: 'ISSUED' } },
-        ...(q
-          ? {
-              OR: [
-                { number: { contains: q, mode: 'insensitive' } },
-                { subject: { contains: q, mode: 'insensitive' } },
-                { customer: { name: { contains: q, mode: 'insensitive' } } },
-              ],
-            }
-          : {}),
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-      select: { id: true, number: true, subject: true, customer: { select: { name: true } } },
-    });
-    res.json(rows.map((r) => ({ id: r.id, number: r.number, customer: r.customer.name, subject: r.subject ?? '' })));
+    res.json(await buyableQuotations(String(req.query.q ?? '').trim()));
   }),
 );
 
@@ -3368,6 +3372,15 @@ purchaseOrderRoutes.get(
   }),
 );
 
+/** An order raised with no request may be bought ahead for a quotation (2026-11-11): the request's own list. */
+purchaseOrderRoutes.get(
+  '/quotations',
+  require_('gchain.purchase_orders.create'),
+  handler(async (req, res) => {
+    res.json(await buyableQuotations(String(req.query.q ?? '').trim()));
+  }),
+);
+
 /** An order raised with no request may be for a sales order (2026-10-21): the issued ones, names only. */
 purchaseOrderRoutes.get(
   '/sales-orders',
@@ -3599,6 +3612,12 @@ const poSchema = z.object({
   quoteRef: z.string().max(120).optional().nullable(),
   /** An order raised with no request, for a sales order (2026-10-21). */
   salesOrderId: z.string().optional().nullable(),
+  /**
+   * An order raised with no request, bought AHEAD for a quotation still open
+   * or won with no sales order yet (2026-11-11) — the purchase request's own
+   * rule, `checkQuotationTarget`. One of sales order, quotation, project.
+   */
+  quotationId: z.string().optional().nullable(),
   /**
    * An order raised with no request (2026-10-23): for a PROJECT (`jobId` —
    * charged to it, a budget line per line) or for the WAREHOUSE'S STOCK
@@ -3961,13 +3980,21 @@ purchaseOrderRoutes.post(
     // it buys for that deal; from a request it takes the request's.
     if (!pr && !batch && body.salesOrderId) await checkSalesOrderTarget(body.salesOrderId);
     const salesOrderId = batch ? batch.salesOrderId : pr ? pr.salesOrderId : body.salesOrderId || null;
-    const quotationId = batch ? batch.quotationId : (pr?.quotationId ?? null);
+    // … or bought ahead for a quotation (2026-11-11) — one target, never two.
+    const ownQuotationId = !pr && !batch ? body.quotationId || null : null;
+    if (ownQuotationId) {
+      if (salesOrderId || body.jobId) throw badRequest('An order is for a quotation, a sales order or a project — choose one');
+      await checkQuotationTarget(ownQuotationId);
+    }
+    const quotationId = batch ? batch.quotationId : pr ? pr.quotationId : ownQuotationId;
     const target = batch
       ? { jobId: batch.jobId, warehouseId: batch.warehouseId }
       : pr
         ? { jobId: pr.jobId, warehouseId: pr.warehouseId }
-        : await standaloneTarget(salesOrderId, body.jobId, body.warehouseId);
-    const kind = batch?.kind ?? pr?.kind ?? standaloneKind(salesOrderId, target.jobId);
+        : ownQuotationId
+          ? { jobId: null, warehouseId: null }
+          : await standaloneTarget(salesOrderId, body.jobId, body.warehouseId);
+    const kind = batch?.kind ?? pr?.kind ?? (ownQuotationId ? 'QUOTATION' : standaloneKind(salesOrderId, target.jobId));
     // The page sends the lines as it shows them; a caller that sends none
     // gets the source's lines, as before. Every line is checked before the
     // number is issued.

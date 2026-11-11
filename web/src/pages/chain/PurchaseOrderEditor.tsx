@@ -221,11 +221,20 @@ export function PurchaseOrderEditor() {
   const [budget, setBudget] = useState<Budget | null>(null);
   // An order raised with no request may be for a sales order (2026-10-21).
   const [orderChoices, setOrderChoices] = useState<{ id: string; number: string; customer: string; subject: string }[]>([]);
-  const [pickedOrderId, setPickedOrderId] = useState('');
+  const [pickedOrderId, setPickedOrderId] = useState(() => new URLSearchParams(window.location.search).get('salesOrder') ?? '');
   // What a standalone order is for (2026-10-23): the warehouse's stock, a
   // project, or a sales order — never "direct to project" with no project.
-  const [forMode, setForMode] = useState<'stock' | 'project' | 'order'>('stock');
-  const [pickedJobId, setPickedJobId] = useState('');
+  // … or bought ahead for an open quotation (2026-11-11). A record's own
+  // "+ New purchase order" opens the page on it: ?project=, ?salesOrder=, ?quotation=.
+  const presetJob = params.get('project') ?? '';
+  const presetOrder = params.get('salesOrder') ?? '';
+  const presetQuotation = params.get('quotation') ?? '';
+  const [forMode, setForMode] = useState<'stock' | 'project' | 'order' | 'quotation'>(
+    presetJob ? 'project' : presetOrder ? 'order' : presetQuotation ? 'quotation' : 'stock',
+  );
+  const [pickedQuotationId, setPickedQuotationId] = useState(presetQuotation);
+  const [quotationChoices, setQuotationChoices] = useState<{ id: string; number: string; customer: string; subject: string }[]>([]);
+  const [pickedJobId, setPickedJobId] = useState(presetJob);
   const [pickedWarehouseId, setPickedWarehouseId] = useState('');
   const [jobChoices, setJobChoices] = useState<{ id: string; number: string; name: string }[]>([]);
   const [warehouseChoices, setWarehouseChoices] = useState<{ id: string; name: string }[]>([]);
@@ -352,6 +361,8 @@ export function PurchaseOrderEditor() {
     (standalone
       ? forMode === 'order' && pickedOrderId
         ? 'SALES_ORDER'
+        : forMode === 'quotation' && pickedQuotationId
+          ? 'QUOTATION'
         : forMode === 'project' && pickedJobId
           ? 'DIRECT_TO_JOB'
           : 'STOCK_REPLENISHMENT'
@@ -367,6 +378,10 @@ export function PurchaseOrderEditor() {
       .get<typeof orderChoices>('/purchase-orders/sales-orders')
       .then(setOrderChoices)
       .catch(() => setOrderChoices([]));
+    api
+      .get<typeof quotationChoices>('/purchase-orders/quotations')
+      .then(setQuotationChoices)
+      .catch(() => setQuotationChoices([]));
     api
       .get<typeof jobChoices>('/jobs/lookup')
       .then(setJobChoices)
@@ -484,6 +499,10 @@ export function PurchaseOrderEditor() {
   const problems: string[] = [];
   if (!header.supplier) problems.push('Choose the supplier');
   if (!discountOk) problems.push('The discount is a percentage from 0 to 100');
+  // Saying what it is for and naming nothing would save it as warehouse stock.
+  if (standalone && forMode === 'project' && !pickedJobId) problems.push('Choose the project');
+  if (standalone && forMode === 'order' && !pickedOrderId) problems.push('Choose the sales order');
+  if (standalone && forMode === 'quotation' && !pickedQuotationId) problems.push('Choose the quotation');
   sent.forEach((l, i) => {
     const p = lineProblem(l);
     if (p) problems.push(`Line ${i + 1}: ${p}`);
@@ -525,6 +544,7 @@ export function PurchaseOrderEditor() {
             requestIds: fromBatch ? fromRequests : undefined,
             canvassId: fromCanvass,
             salesOrderId: standalone && forMode === 'order' ? pickedOrderId || null : null,
+            quotationId: standalone && forMode === 'quotation' ? pickedQuotationId || null : null,
             jobId: standalone && forMode === 'project' ? pickedJobId || null : null,
             warehouseId: standalone && forMode === 'stock' ? pickedWarehouseId || null : null,
           }),
@@ -689,7 +709,9 @@ export function PurchaseOrderEditor() {
                       ? 'The goods go on the warehouse’s shelf when received — released later by a pull-out or Outgoing slip; nothing is charged to a project'
                       : forMode === 'project'
                         ? 'Charged to the project when received; each line names its budget line'
-                        : 'Bought for the deal — its spend, never a project; the goods sit as the order’s own stock when received into a warehouse'
+                        : forMode === 'quotation'
+                          ? 'Bought ahead for a deal not yet booked — charged to no project; the goods are held as the quotation’s own stock, and follow it to its sales order or project'
+                          : 'Bought for the deal — its spend, never a project; the goods sit as the order’s own stock when received into a warehouse'
                     : undefined
                 }
               >
@@ -699,7 +721,19 @@ export function PurchaseOrderEditor() {
                       <option value="stock">Warehouse stock</option>
                       <option value="project">A project</option>
                       <option value="order">An issued sales order</option>
+                      <option value="quotation">An open quotation</option>
                     </select>
+                    {forMode === 'quotation' && (
+                      <select value={pickedQuotationId} onChange={(e) => setPickedQuotationId(e.target.value)}>
+                        <option value="">— choose the quotation —</option>
+                        {quotationChoices.map((q) => (
+                          <option key={q.id} value={q.id}>
+                            Quotation {q.number} — {q.customer}
+                            {q.subject ? ` · ${q.subject}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                     {forMode === 'stock' && (
                       <select value={pickedWarehouseId} onChange={(e) => setPickedWarehouseId(e.target.value)}>
                         <option value="">— the warehouse named on the Incoming —</option>

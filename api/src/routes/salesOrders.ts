@@ -711,6 +711,7 @@ async function orderPurchasing(me: ReturnType<typeof currentUser>, order: { id: 
   ]);
   return {
     canRequest: order.status === 'ISSUED' && can(me, 'gchain.purchase_requests.create'),
+    canOrder: order.status === 'ISSUED' && can(me, 'gchain.purchase_orders.create'),
     spend: showCost ? await salesOrderSpend(order.id) : null,
     requests: requests.map((r) => ({
       id: r.id,

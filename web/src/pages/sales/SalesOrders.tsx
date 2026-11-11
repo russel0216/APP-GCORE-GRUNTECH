@@ -156,6 +156,7 @@ interface SalesOrderDetailRow extends SalesOrderRow {
   /** What was bought for the order with no project (2026-10-21). */
   purchasing?: {
     canRequest: boolean;
+    canOrder?: boolean;
     spend: OrderSpend | null;
     requests: { id: string; number: string; status: string; purpose: string | null; estimated: number }[];
     orders: { id: string; number: string; status: string; supplier: string; total: number; currency: string | null }[];
@@ -1000,11 +1001,18 @@ function PurchasingCard({ orderId, purchasing }: { orderId: string; purchasing: 
     <section className="card sales-card-gap">
       <div className="card-head">
         <h3 className="card-title">Purchasing</h3>
-        {purchasing.canRequest && (
+        {(purchasing.canRequest || purchasing.canOrder) && (
           <div className="card-actions">
-            <Link to={`/g-chain/purchase-requests/new?salesOrder=${orderId}`} className="btn btn-sm">
-              + New purchase request
-            </Link>
+            {purchasing.canRequest && (
+              <Link to={`/g-chain/purchase-requests/new?salesOrder=${orderId}`} className="btn btn-sm">
+                + New purchase request
+              </Link>
+            )}
+            {purchasing.canOrder && (
+              <Link to={`/g-chain/purchase-orders/new?salesOrder=${orderId}`} className="btn btn-sm">
+                + New purchase order
+              </Link>
+            )}
           </div>
         )}
       </div>

@@ -6449,6 +6449,45 @@ async function main() {
       `${prA.kind} ${poA.kind} ${num(orderStock?.quantity)}`,
     );
 
+    // A2. An order with NO request may be bought ahead for a quotation too (2026-11-11).
+    const qd = await quote('4');
+    const directLines = [{ itemId: item.id, name: `${TAG} Stainless pipe`, description: `${TAG} Stainless pipe`, quantity: 3, unit: 'pcs', unitPrice: 300 }];
+    const direct = await api(token, 'POST', '/purchase-orders', { supplierId: supplier.id, quotationId: qd.id, notes: `${TAG} direct order ahead`, lines: directLines });
+    const directLost = await api(token, 'POST', '/purchase-orders', { supplierId: supplier.id, quotationId: lostQ.id, lines: directLines });
+    const directTwo = await api(token, 'POST', '/purchase-orders', { supplierId: supplier.id, quotationId: qd.id, jobId: job.id, lines: directLines });
+    const pickable = await api(token, 'GET', `/purchase-orders/quotations?q=${encodeURIComponent(qd.number)}`);
+    const directPo = direct.status === 201 ? await prisma.purchaseOrder.findUnique({ where: { id: String(direct.body.id) }, include: { items: true } }) : null;
+    check(
+      'a purchase order with no request names an open quotation: bought ahead, no project — a lost quotation and two targets are refused, the picker lists it',
+      direct.status === 201 && directPo?.kind === 'QUOTATION' && directPo.quotationId === qd.id && directPo.jobId === null && directPo.requestId === null &&
+        directLost.status === 400 && directTwo.status === 400 &&
+        pickable.status === 200 && (pickable.body as unknown as { id: string }[]).some((r) => r.id === qd.id),
+      `${direct.status} ${JSON.stringify(direct.body).slice(0, 160)} ${directPo?.kind} lost ${directLost.status} two ${directTwo.status} picker ${pickable.status}`,
+    );
+    if (directPo) {
+      await prisma.purchaseOrder.update({ where: { id: directPo.id }, data: { status: 'ISSUED' } });
+      const ledgerD = await prisma.jobCostEntry.count();
+      const shelfD = await companyQty();
+      const recD = await prisma.receiving.create({
+        data: {
+          number: await nextNumber('receiving'),
+          status: 'PENDING_APPROVAL',
+          orderId: directPo.id,
+          warehouseId: warehouse.id,
+          receivedById: procurement.id,
+          items: { create: [{ orderItemId: directPo.items[0].id, itemId: item.id, quantity: D(3), unitCost: D(300) }] },
+        },
+      });
+      await settleReceiving(recD.id, 'APPROVED');
+      const heldD = await prisma.quotationStock.findUnique({ where: { quotationId_itemId_warehouseId: { quotationId: qd.id, itemId: item.id, warehouseId: warehouse.id } } });
+      const spendD = await quotationSpend(qd.id);
+      check(
+        'received, its goods are the quotation’s own stock at the order’s price — no project charged, the company shelf unmoved, counted in the quotation’s spend',
+        money(num(heldD?.quantity), 3) && money(num(heldD?.averageCost), 300) && (await prisma.jobCostEntry.count()) === ledgerD && money(await companyQty(), shelfD) && money(spendD?.incurred ?? 0, 900),
+        `${num(heldD?.quantity)} @ ${num(heldD?.averageCost)}; spend ${JSON.stringify(spendD)}`,
+      );
+    }
+
     // B. A project built from the quotation takes the request's declared value as its commitment.
     const qb = await quote('2');
     const b = await buyAhead(qb.id, false);

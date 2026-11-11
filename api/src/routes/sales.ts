@@ -1985,6 +1985,8 @@ quotationRoutes.get(
       buying: {
         spend: await quotationSpend(quotation.id),
         canRequest: can(me, 'gchain.purchase_requests.create') && ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'].includes(quotation.outcome),
+        // An order with no request may be bought ahead for it too (2026-11-11).
+        canOrder: can(me, 'gchain.purchase_orders.create') && ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'].includes(quotation.outcome),
         toReallocate: quotation.outcome === 'LOST' ? await costsToReallocate(quotation.id) : null,
         canReallocate: quotation.outcome === 'LOST' && (canEditRecord(me, 'gops', 'quotations', quotation.ownerId) || can(me, 'gfin.budget_requests.view_all')),
       },

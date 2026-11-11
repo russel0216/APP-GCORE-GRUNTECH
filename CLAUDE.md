@@ -677,7 +677,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts marketing; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,974 assertions across twenty-three scripts** (counted 2026-11-10, after 7 on
+**4,976 assertions across twenty-three scripts** (counted 2026-11-11, after 2 on
+chain for a purchase order with no request bought ahead for a quotation, and before them 7 on
 chain for buying ahead for a quotation and the batch purchase order and 5 on
 finance for travel requests — the TR number and route, finance's direct booking,
 the paper, an office line's actual — and before them a net
@@ -8186,6 +8187,44 @@ the Team Leader recognises a travel request too.
   /new?kind=travel`); `splitBorrowedRights()` gave the new boxes once to the
   budget request readers. The paper is "Travel Request" with a Journey
   section.
+
+## A direct order on a quotation; Travel Requests under Sales (2026-11-11)
+
+The owner's three: "Purchase Order can be linked even to Open Quotation,
+Sales Order or Project — check what is missing"; "remove the travel request
+on the project management menu, it should be inside the individual project";
+"on Sales add between Leads and Quotation the Travel Request".
+
+- **An order with no request may be bought ahead for a quotation** — the one
+  link that was missing (a project, an issued sales order and warehouse
+  stock already were). `POST /purchase-orders { quotationId }` with no
+  request: `checkQuotationTarget` (the request's own rule), kind QUOTATION,
+  no project and no warehouse; a quotation WITH a sales order or a project
+  is a 400 ("choose one"). `GET /purchase-orders/quotations` is the picker
+  (`buyableQuotations()`, shared with the request's). Nothing new
+  downstream: the Incoming, the quotation's own stock, `quotationSpend()`,
+  the hand-over and the re-allocation read orders by `quotationId`. The
+  editor's "For" gains **An open quotation**, refuses a target chosen and
+  not named, and opens preset from `?project=`, `?salesOrder=` or
+  `?quotation=`. A draft is not re-pointed on Modify (the page never did).
+- **"+ New purchase order" on the record**: the project's Purchase
+  Requisition tab (Purchase orders card, `gchain.purchase_orders.create`),
+  the sales order's Purchasing card and the quotation's "Bought ahead" card
+  (`canOrder` beside `canRequest` on both reads).
+- **Travel Requests is on the Sales strip, between Leads and Quotations**
+  (the registry entry's `group`; the key `gops.travel_requests`, the path
+  `/g-ops/travel-requests` and every right unchanged). Project Management
+  is Costing, Projects, Job Orders, CAD J.O. again; verify-foundation pins
+  both strips. The register still lists every travel request the reader
+  may see, whatever it is charged to.
+- **A project has a Travel Requests tab** after Budget Requests
+  (`?tab=travel`): `ProjectBudgetRequestsCard travel` — the project's
+  travel requests alone (`?travel=yes`), "+ New travel request" opening
+  `/g-ops/budget-requests/new?kind=travel&jobId=`. The Budget Requests tab
+  lists the cash requests alone (`travel={false}`), and `GET /jobs/:id`
+  sends `travelRequestCount` beside a `budgetRequestCount` without them.
+  The Budget requests card on a sales order, quotation and costing keeps
+  both kinds and gains "+ New travel request" (`onRaiseTravel`).
 
 ## A reimbursement against the project budget (2026-11-09)
 

@@ -19,6 +19,7 @@ import { OrderSpendPanel, type OrderSpend } from '../chain/PurchaseRequisitionEd
 export interface QuotationBuyingData {
   spend: (OrderSpend & { charged?: boolean }) | null;
   canRequest: boolean;
+  canOrder?: boolean;
   toReallocate: {
     purchasing: {
       requests: { id: string; number: string; status: string; amount: number }[];
@@ -42,16 +43,25 @@ export function QuotationBuying({ quotationId, buying, onChanged }: { quotationI
   const touched = !!spend && spend.requested + spend.committed + spend.incurred > 0;
   const pending = buying.toReallocate;
   const owes = !!pending && (pending.purchasing.requests.length > 0 || pending.purchasing.orders.length > 0 || pending.purchasing.heldValue > 0 || pending.cash.length > 0);
-  if (!touched && !buying.canRequest && !owes) return null;
+  if (!touched && !buying.canRequest && !buying.canOrder && !owes) return null;
 
   return (
     <div className="card sales-card-gap">
       <div className="card-head">
         <h2 className="card-title">Bought ahead for this quotation</h2>
-        {buying.canRequest && (
-          <Link className="btn btn-sm" to={`/g-chain/purchase-requests/new?quotation=${quotationId}`}>
-            + New purchase request
-          </Link>
+        {(buying.canRequest || buying.canOrder) && (
+          <div className="card-actions">
+            {buying.canRequest && (
+              <Link className="btn btn-sm" to={`/g-chain/purchase-requests/new?quotation=${quotationId}`}>
+                + New purchase request
+              </Link>
+            )}
+            {buying.canOrder && (
+              <Link className="btn btn-sm" to={`/g-chain/purchase-orders/new?quotation=${quotationId}`}>
+                + New purchase order
+              </Link>
+            )}
+          </div>
         )}
       </div>
       {touched && spend ? (

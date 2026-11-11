@@ -537,7 +537,7 @@ async function main() {
     .find((m) => m.key === 'gops')!
     .submodules.filter((s) => s.group === 'Project Management' && !s.hidden)
     .map((s) => s.label);
-  check('Project Management shows Costing, Projects, Job Orders, CAD J.O., Travel Requests in that order', pmStrip.join() === 'Costing,Projects,Job Orders,CAD J.O.,Travel Requests', pmStrip.join());
+  check('Project Management shows Costing, Projects, Job Orders, CAD J.O. in that order', pmStrip.join() === 'Costing,Projects,Job Orders,CAD J.O.', pmStrip.join());
   // The owner's order of 2026-10-14: the divisions G-OPS, G-CHAIN, G-FIN,
   // G-HR, and G-CHAIN's two flows.
   const divisions = menuFor(superUser).map((m) => m.key).filter((k) => ['gops', 'gchain', 'gfin', 'ghr'].includes(k));
@@ -565,8 +565,8 @@ async function main() {
     .submodules.filter((s) => s.group === 'Sales' && !s.hidden)
     .map((s) => s.label);
   check(
-    'Sales shows Sales Pipeline, Forecast, Leads, Quotations, Sales Orders, Customers, Partners, Calendar, Marketing in that order',
-    salesStrip.join() === 'Sales Pipeline,Forecast,Leads,Quotations,Sales Orders,Customers,Partners,Calendar,Marketing',
+    'Sales shows Sales Pipeline, Forecast, Leads, Travel Requests, Quotations, Sales Orders, Customers, Partners, Calendar, Marketing in that order',
+    salesStrip.join() === 'Sales Pipeline,Forecast,Leads,Travel Requests,Quotations,Sales Orders,Customers,Partners,Calendar,Marketing',
     salesStrip.join(),
   );
   // Working days on real dates: Thursday 1 Jan 2026.
