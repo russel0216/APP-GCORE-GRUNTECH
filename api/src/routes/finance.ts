@@ -26,7 +26,7 @@ import {
 } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
-import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
+import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit, viewScope, onMyTeam } from '../shared/ownScope';
 import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { assertSiNumberFree } from '../shared/siNumbers';
 import { audit } from '../shared/audit';
@@ -3008,6 +3008,35 @@ billRoutes.get(
       })),
     );
   }),
+);
+
+/**
+ * A supplier bill's papers (2026-11-11, the owner's call: "allow add
+ * attachment when creating it") — the supplier's invoice, the delivery
+ * receipt. Read as the bill is read (View All, one's own or one's team's), and
+ * by whoever may decide its open request while it waits on them; filed while
+ * it is a draft or waiting for approval by whoever may change it, so what the
+ * approver decided on does not change under them afterwards.
+ */
+registerAttachmentGuard(
+  'supplier_bill',
+  async (user, id) => {
+    const bill = await prisma.supplierBill.findUnique({ where: { id }, select: { createdById: true, status: true } });
+    if (!bill) return false;
+    if (user.isSuperAdmin) return true;
+    const scope = viewScope(user, 'gfin', 'ap');
+    if (scope === 'all') return true;
+    if (scope && bill.createdById === user.id) return true;
+    if (scope === 'team' && onMyTeam(user, bill.createdById)) return true;
+    return bill.status === 'PENDING_APPROVAL' && mayDecide(user.id, 'supplier_bill', [id]);
+  },
+  {
+    write: async (user, id) => {
+      const bill = await prisma.supplierBill.findUnique({ where: { id }, select: { createdById: true, status: true } });
+      if (!bill || !['DRAFT', 'PENDING_APPROVAL'].includes(bill.status)) return false;
+      return user.isSuperAdmin || mayEdit(user, 'gfin', 'ap', bill.createdById === user.id, bill.createdById);
+    },
+  },
 );
 
 // ════════════════════════════════════════════════════════════════════

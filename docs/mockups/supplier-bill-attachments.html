@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Supplier bill attachments</title>
+<style>
+  :root { --ink:#1f2933; --muted:#5b6670; --line:#d9dde2; --bg:#eef1f4; --card:#fff; --purple:#5b2a8c; --green:#2e9a4b; --info:#e8f1fb; --info-ink:#1d4f8a; --new:#fff7d6; --new-line:#e3b82a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); font:13px/1.45 "Segoe UI", system-ui, sans-serif; color:var(--ink); padding:24px; }
+  .label-row { display:flex; gap:24px; align-items:flex-start; }
+  .modal { width:900px; background:var(--card); border-radius:10px; box-shadow:0 12px 40px rgba(0,0,0,.18); overflow:hidden; }
+  .m-head { display:flex; justify-content:space-between; align-items:center; padding:14px 20px; border-bottom:1px solid var(--line); }
+  .m-head h1 { font-size:16px; margin:0; }
+  .m-body { padding:16px 20px; }
+  .m-foot { display:flex; justify-content:flex-end; gap:8px; padding:12px 20px; border-top:1px solid var(--line); }
+  .btn { height:35px; padding:0 14px; border:1px solid var(--line); border-radius:6px; background:#fff; font:inherit; font-size:14px; }
+  .btn-primary { background:var(--purple); border-color:var(--purple); color:#fff; }
+  .btn-sm { height:29px; padding:0 10px; font-size:12px; }
+  .btn-ghost { border-color:transparent; background:transparent; color:var(--purple); }
+  .alert { padding:10px 12px; border-radius:6px; background:var(--info); color:var(--info-ink); margin-bottom:14px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:12px; }
+  label.f { display:block; font-weight:600; margin-bottom:4px; }
+  .box { height:38px; border:1px solid var(--line); border-radius:6px; padding:0 12px; display:flex; align-items:center; background:#fff; }
+  .hint { color:var(--muted); font-size:12px; margin-top:3px; }
+  h4 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--purple); margin:16px 0 8px; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; font-size:11px; text-transform:uppercase; color:var(--purple); border-bottom:1px solid var(--line); padding:8px 12px; }
+  td { padding:8px 12px; border-bottom:1px solid #eef0f2; height:46px; }
+  .r { text-align:right; } .mono { font-family:Consolas, monospace; }
+  .faded { opacity:.55; }
+  .new { background:var(--new); border:2px dashed var(--new-line); border-radius:8px; padding:12px 14px; margin-top:16px; position:relative; }
+  .tag { position:absolute; top:-11px; right:12px; background:var(--new-line); color:#3a2c00; font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px; }
+  .drop { border:1px dashed #b7bec6; border-radius:6px; padding:14px; text-align:center; color:var(--muted); background:#fff; }
+  .files { list-style:none; margin:10px 0 0; padding:0; }
+  .files li { display:flex; justify-content:space-between; align-items:center; padding:6px 10px; background:#fff; border:1px solid var(--line); border-radius:6px; margin-top:6px; }
+  .files .meta { color:var(--muted); font-size:12px; margin-left:8px; }
+  .kv { display:grid; grid-template-columns:10rem 1fr; gap:4px 12px; }
+  .side { width:520px; }
+  .card { background:var(--card); border-radius:10px; box-shadow:0 2px 8px rgba(0,0,0,.08); padding:16px; margin-bottom:16px; }
+  .card-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+  .card-head h2 { font-size:14px; margin:0; }
+  .att { border:1px solid var(--line); border-radius:8px; margin-top:10px; overflow:hidden; }
+  .att-h { display:flex; justify-content:space-between; padding:8px 10px; background:#f7f8fa; font-size:12px; }
+  .thumb { height:150px; background:repeating-linear-gradient(0deg,#fff 0 14px,#f1f3f5 14px 15px); display:flex; align-items:center; justify-content:center; color:#9aa3ab; font-size:12px; }
+  .caption { font-weight:700; font-size:12px; color:var(--muted); margin:0 0 8px; text-transform:uppercase; letter-spacing:.04em; }
+</style>
+</head>
+<body>
+<div class="label-row">
+  <div>
+    <p class="caption">1 · "+ New supplier bill" — the form</p>
+    <div class="modal">
+      <div class="m-head"><h1>New supplier bill for GT-RR-2026-0042</h1><span>✕</span></div>
+      <div class="m-body">
+        <div class="alert">This bill is matched to <span class="mono">GT-RR-2026-0042</span>. The goods were already charged to the project when they arrived, so approving this bill makes it payable and charges nothing further.</div>
+        <div class="grid faded">
+          <div><label class="f">Supplier *</label><div class="box">ACME Industrial Supply</div></div>
+          <div><label class="f">Their invoice number</label><div class="box">SI-88213</div></div>
+        </div>
+        <div class="grid faded">
+          <div><label class="f">Bill date</label><div class="box">11/11/2026</div></div>
+          <div><label class="f">Date of delivery</label><div class="box">11/07/2026</div></div>
+        </div>
+        <h4 class="faded">Lines</h4>
+        <table class="faded">
+          <thead><tr><th>Description</th><th class="r">Qty</th><th class="r">Unit price</th><th class="r">Amount</th></tr></thead>
+          <tbody>
+            <tr><td>OMEGA AIR, FILTER ELEMENT, FE-0350</td><td class="r mono">4.00</td><td class="r mono">3,250.00</td><td class="r mono">13,000.00</td></tr>
+            <tr><td>Pressure gauge 0–16 bar</td><td class="r mono">2.00</td><td class="r mono">1,480.00</td><td class="r mono">2,960.00</td></tr>
+          </tbody>
+        </table>
+        <div class="grid faded" style="margin-top:12px">
+          <div><label class="f">Notes</label><div class="box" style="height:52px"></div></div>
+          <dl class="kv"><dt>Subtotal</dt><dd class="mono">PHP 15,960.00</dd><dt>VAT 12%</dt><dd class="mono">PHP 1,915.20</dd><dt><strong>Net payable</strong></dt><dd class="mono"><strong>PHP 17,875.20</strong></dd></dl>
+        </div>
+
+        <div class="new">
+          <span class="tag">NEW</span>
+          <h4 style="margin-top:0">Attachments</h4>
+          <div class="hint" style="margin:0 0 8px">The supplier's invoice, the delivery receipt or anything that supports the bill — filed with the bill when you save, so the approvers see them from the first step.</div>
+          <div class="drop"><button class="btn btn-sm">Choose files…</button> &nbsp; PDF, pictures, Excel or Word</div>
+          <ul class="files">
+            <li><span>ACME_SI-88213.pdf <span class="meta">212 KB</span></span><button class="btn btn-ghost btn-sm">Remove</button></li>
+            <li><span>DR-55120_signed.jpg <span class="meta">1.4 MB</span></span><button class="btn btn-ghost btn-sm">Remove</button></li>
+          </ul>
+        </div>
+      </div>
+      <div class="m-foot"><button class="btn">Cancel</button><button class="btn btn-primary">Save</button></div>
+    </div>
+  </div>
+
+  <div class="side">
+    <p class="caption">2 · The bill's own page, after saving</p>
+    <div class="card faded">
+      <div class="card-head"><h2>BILL • GT-BILL-2026-0118 &nbsp;<span style="font-weight:400;color:var(--muted)">Draft</span></h2></div>
+      <div class="kv"><dt>Supplier</dt><dd>ACME Industrial Supply</dd><dt>Net payable</dt><dd class="mono">PHP 17,875.20</dd></div>
+    </div>
+    <div class="card new" style="background:#fff">
+      <span class="tag">NEW</span>
+      <div class="card-head"><h2>Attachments</h2><button class="btn btn-sm">+ Add file</button></div>
+      <div class="att"><div class="att-h"><span><strong>ACME_SI-88213.pdf</strong> · 212 KB · Maria Santos · Nov 11</span><a style="color:var(--purple)">Remove</a></div><div class="thumb">first page of the PDF shown here</div></div>
+      <div class="att"><div class="att-h"><span><strong>DR-55120_signed.jpg</strong> · 1.4 MB · Maria Santos · Nov 11</span><a style="color:var(--purple)">Remove</a></div><div class="thumb">the picture shown here</div></div>
+      <div class="hint" style="margin-top:8px">Files can be added or removed while the bill is a draft or waiting for approval. Print puts them behind the bill.</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

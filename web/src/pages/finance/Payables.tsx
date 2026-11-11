@@ -29,6 +29,7 @@ import { qs } from '../../lib/api';
 import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
 import { SupplierPicker, type SupplierRef } from '../../components/SupplierPicker';
+import { Attachments } from '../../components/Attachments';
 
 /**
  * Accounts Payable — supplier bills and expense claims.
@@ -575,6 +576,8 @@ function NewBillModal({
   // (2026-11-11, the owner's call): every line at the ordered quantity and
   // price, what was received beside it, and the order's discount and VAT.
   const [orderLines, setOrderLines] = useState<OrderLines | null>(null);
+  // Files picked on the form, filed on the bill when it is saved (2026-11-11).
+  const [files, setFiles] = useState<File[]>([]);
   useEffect(() => {
     if (existing || !from) return;
     api
@@ -676,6 +679,18 @@ function NewBillModal({
       const saved = existing
         ? await api.put<{ id: string }>(`/supplier-bills/${existing.id}`, body)
         : await api.post<{ id: string }>('/supplier-bills', body);
+      if (files.length) {
+        const upload = new FormData();
+        for (const f of files) upload.append('files', f);
+        try {
+          await api.post(`/attachments/supplier_bill/${saved.id}`, upload);
+        } catch (err) {
+          // The bill stands; say the files did not go, and open it so they can be added there.
+          toast('error', `Bill saved, but the files were not attached — add them on the bill's page`);
+          onCreated(saved.id);
+          return void err;
+        }
+      }
       toast('ok', existing ? 'Saved' : 'Bill entered — submit it for approval next');
       onCreated(saved.id);
     } catch (err) {
@@ -1023,6 +1038,36 @@ function NewBillModal({
           </dd>
         </dl>
       </div>
+
+      <h4 className="fin-section-title">Attachments</h4>
+      <p className="muted">
+        The supplier's invoice, the delivery receipt or anything that supports the bill — filed with the bill when you
+        save, so the approvers see them from the first step.
+        {existing ? ' Files already on it stay; add more here or on its page.' : ''}
+      </p>
+      <input
+        type="file"
+        multiple
+        accept="image/*,application/pdf,.xlsx,.xls,.csv,.docx,.doc"
+        aria-label="Attach supporting papers"
+        onChange={(e) => {
+          const picked = Array.from(e.target.files ?? []);
+          setFiles((cur) => [...cur, ...picked]);
+          e.target.value = '';
+        }}
+      />
+      {files.length > 0 && (
+        <ul className="fin-files">
+          {files.map((f, i) => (
+            <li key={`${f.name}-${i}`}>
+              <span>{f.name}</span>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setFiles(files.filter((_, j) => j !== i))}>
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </Modal>
   );
 }
@@ -1304,6 +1349,15 @@ export function BillDetail() {
           </div>
         </div>
       </div>
+
+      {/* The supplier's invoice, the delivery receipt (2026-11-11): changed
+          while a draft or with the approvers, by whoever may edit the bill. */}
+      <Attachments
+        entityType="supplier_bill"
+        entityId={row.id}
+        hint="The supplier's invoice, the delivery receipt or anything that supports the bill."
+        canEdit={(row.status === 'DRAFT' || row.status === 'PENDING_APPROVAL') && !!row.canEdit}
+      />
 
       {editing && (
         <NewBillModal
