@@ -345,10 +345,10 @@ function ownerKey(name: string | null): string {
  * choose from; the commit answers `options.owners[key] = { userId?, teamId? }`.
  */
 async function ownerQuestion(records: ScoroInvoiceRecord[]) {
+  // Inactive logins too: a salesperson who has resigned still made the sale.
   const people = await prisma.user.findMany({
-    where: { isActive: true },
-    orderBy: { name: 'asc' },
-    select: { id: true, name: true, employee: { select: { industry: { select: { id: true, code: true } } } } },
+    orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
+    select: { id: true, name: true, isActive: true, employee: { select: { industry: { select: { id: true, code: true } } } } },
   });
   const teams = await prisma.industry.findMany({ where: { isActive: true }, orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }], select: { id: true, code: true, name: true } });
   const rows = new Map<string, { key: string; name: string; invoices: number; standIns: number; loginId: string | null }>();
@@ -364,7 +364,7 @@ async function ownerQuestion(records: ScoroInvoiceRecord[]) {
       const login = people.find((u) => u.id === row.loginId) ?? null;
       return { ...row, loginName: login?.name ?? null, loginTeam: login?.employee?.industry?.code ?? null };
     }),
-    people: people.map((u) => ({ id: u.id, name: u.name, team: u.employee?.industry?.code ?? null })),
+    people: people.map((u) => ({ id: u.id, name: u.isActive ? u.name : `${u.name} — inactive`, team: u.employee?.industry?.code ?? null })),
     teams,
   };
 }
@@ -384,8 +384,8 @@ async function ownerChoices(options?: Record<string, unknown>): Promise<Map<stri
     const { userId, teamId } = value as Record<string, unknown>;
     const choice: OwnerChoice = {};
     if (typeof userId === 'string' && userId) {
-      const user = await prisma.user.findFirst({ where: { id: userId, isActive: true }, select: { id: true } });
-      if (!user) throw new HttpError(400, `The salesperson chosen for "${key}" is not an active login.`);
+      const user = await prisma.user.findFirst({ where: { id: userId }, select: { id: true } });
+      if (!user) throw new HttpError(400, `The salesperson chosen for "${key}" is not a login in G-CORE.`);
       choice.userId = user.id;
     }
     if (typeof teamId === 'string' && teamId) {

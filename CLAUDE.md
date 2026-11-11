@@ -4807,8 +4807,10 @@ SCORO.
   Salesperson and a Team select per owner, the defaults the login of that
   name (else whoever imports) and the salesperson's team. The commit posts
   `options.owners = { <owner name, case-blind>: { userId?, teamId? } }`,
-  only what was picked; `ownerChoices()` refuses a login or team not active
-  (400) before anything is written. A new order takes the salesperson, a
+  only what was picked; `ownerChoices()` refuses an unknown login or a team
+  not active (400) before anything is written. **A resigned salesperson is
+  picked too**: the list carries INACTIVE logins after the active ones,
+  marked "— inactive" (they made the sale; nobody signs in with them). A new order takes the salesperson, a
   new stand-in the team picked (else the salesperson's). **A re-run with an
   answer moves what this import already made** (`reassign()`, from
   `catchUp`): the order's owner, its STAND-IN quotation's owner and team (a
