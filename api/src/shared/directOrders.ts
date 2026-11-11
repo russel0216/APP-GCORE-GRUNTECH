@@ -33,30 +33,34 @@ export function directOrdersOpen(now: Date = new Date()): boolean {
 const d = (v: number | string | Prisma.Decimal) => new Prisma.Decimal(v);
 
 /**
- * Brings a direct order's stand-in quotation in step with the order: its
- * revision 0 takes the order's lines, discount and tax, each order line
- * linked to its mirror (so the stand-in shows nothing left to book), and the
- * revision's totals are worked out again. Does nothing for an order on a real
- * quotation. Inside the caller's transaction.
+ * Brings a stand-in quotation in step with the orders on it: its revision 0
+ * takes the lines of EVERY order booking it, in order number (a SCORO invoice
+ * and its .1 progress bill share one stand-in since 2026-11-11), each order
+ * line linked to its mirror (so the stand-in shows nothing left to book), the
+ * first order's discount and tax, and the revision's totals worked out again.
+ * Does nothing for an order on a real quotation. Inside the caller's
+ * transaction.
  */
 export async function mirrorDirectQuotation(tx: Prisma.TransactionClient, orderId: string) {
   const order = await tx.salesOrder.findUnique({
     where: { id: orderId },
     select: {
-      discountPct: true,
-      vatRate: true,
-      vatInclusive: true,
       quotation: { select: { id: true, directOrder: true, revisions: { where: { revision: 0 }, select: { id: true } } } },
-      lines: { orderBy: { sortOrder: 'asc' } },
     },
   });
   if (!order?.quotation.directOrder) return;
   const revisionId = order.quotation.revisions[0]?.id;
   if (!revisionId) return;
+  const orders = await tx.salesOrder.findMany({
+    where: { quotationId: order.quotation.id },
+    orderBy: [{ number: 'asc' }],
+    select: { id: true, discountPct: true, vatRate: true, vatInclusive: true, lines: { orderBy: { sortOrder: 'asc' } } },
+  });
+  const first = orders[0];
 
-  await tx.salesOrderLine.updateMany({ where: { orderId }, data: { quotationItemId: null } });
+  await tx.salesOrderLine.updateMany({ where: { orderId: { in: orders.map((o) => o.id) } }, data: { quotationItemId: null } });
   await tx.quotationItem.deleteMany({ where: { revisionId } });
-  for (const [i, l] of order.lines.entries()) {
+  for (const [i, l] of orders.flatMap((o) => o.lines).entries()) {
     const item = await tx.quotationItem.create({
       data: {
         revisionId,
@@ -84,7 +88,7 @@ export async function mirrorDirectQuotation(tx: Prisma.TransactionClient, orderI
   }
   await tx.quotationRevision.update({
     where: { id: revisionId },
-    data: { discountPct: d(order.discountPct), vatRate: d(order.vatRate), vatInclusive: order.vatInclusive },
+    data: { discountPct: d(first.discountPct), vatRate: d(first.vatRate), vatInclusive: first.vatInclusive },
   });
   await recalcQuotationRevision(revisionId, tx);
 }

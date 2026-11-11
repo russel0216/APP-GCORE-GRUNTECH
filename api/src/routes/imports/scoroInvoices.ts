@@ -12,12 +12,16 @@ import { nextNumber } from '../../shared/numbering';
 import { cents, num, refreshSettlement } from '../../shared/finance';
 import { invoiceCredit, termsLabel } from '../../shared/receivables';
 import { addDays } from '../../shared/day';
+import { mirrorDirectQuotation } from '../../shared/directOrders';
+import { QUOTATION_CURRENCY_CODES, upperText } from '../../shared/quotation';
+import { teamOf } from '../../shared/team';
 import type { Registered } from '../imports';
 import {
   ROW_TRANSACTION,
   collapse,
   daysApart,
   findContact,
+  findCustomer,
   groupResolver,
   hasLineContent,
   listedGroups,
@@ -63,6 +67,17 @@ import {
  * of the same file, once — never a second one (`writeReceivable`). Each order's lines are
  * linked to the quotation lines they book (`linkOrderBookings`), so the
  * quotation's Booked and Outstanding read right.
+ *
+ * **An invoice whose quotation is not in G-CORE gets a STAND-IN** (2026-11-11,
+ * the owner's call on his January file, whose 17 SCORO quotations were never
+ * brought across): the quotation is made with the first order on it, the
+ * temporary direct order's shape (`Quotation.directOrder`) — numbered with
+ * SCORO's `quote_no` (the series raised to it, never lowered), WON on an
+ * APPROVED revision 0, the payer as its customer (by SCORO id, else by name,
+ * else created by name with the SCORO id in its notes), the owner's login
+ * and team, the file's currency. Its lines MIRROR the lines of every order
+ * on it (`mirrorDirectQuotation`), so an invoice and its .1 progress bill
+ * share one stand-in and nothing is left on it to book.
  */
 
 type Tx = Prisma.TransactionClient;
@@ -101,11 +116,25 @@ export function scoroPoNumber(value: string | null): string | null {
   return stripped || v;
 }
 
+interface QuoteRef {
+  id: string;
+  number: string;
+  customerId: string;
+  contactId: string | null;
+  ownerId: string;
+  currency: string;
+  directOrder?: boolean;
+}
+
 interface ScoroInvoiceRecord {
   scoroId: string | null;
   number: string;
-  quotation: { id: string; number: string; customerId: string; contactId: string | null; ownerId: string; currency: string };
-  ownerId: string;
+  /** The quotation in G-CORE it books; null makes a stand-in (`standIn`). */
+  quotation: QuoteRef | null;
+  /** SCORO's quotation, made in G-CORE as a stand-in when it is not there. */
+  standIn: { number: string; customerId: string | null; payerId: string | null; currency: string; subject: string } | null;
+  /** The owner's login; null takes the quotation's owner, else whoever imports. */
+  ownerId: string | null;
   /** SCORO's owner_name where no login carries it; the quotation's owner is used. */
   ownerNote: string | null;
   contact: { id: string | null; name: string } | null;
@@ -144,7 +173,7 @@ const scoroInvoiceSpec: ImportSpec<ScoroInvoiceRecord> = {
       header: 'quote_no',
       required: true,
       example: '0022605106',
-      hint: 'The quotation the invoice books — it must already be in G-CORE (import SCORO’s quotes first). The order takes its customer and team',
+      hint: 'The quotation the invoice books — the order takes its customer and team. One not in G-CORE is made as a stand-in under this number, its customer the payer, shared by an invoice and its .1',
     },
     { header: 'doc_date', example: '2026-09-30', hint: 'The order date' },
     { header: 'doc_deadline', example: '2026-10-30', hint: 'With doc_date, the payment terms in days; 30 when either is missing' },
@@ -204,18 +233,32 @@ const scoroInvoiceSpec: ImportSpec<ScoroInvoiceRecord> = {
     // The quotation it books: a sales order is raised from a quotation only.
     const quoteNo = (optional(row, 'quote_no') ?? '').trim();
     if (!quoteNo) throw new Error(`invoice ${number} names no quote_no — a sales order books a quotation`);
+    if (!/^[A-Za-z0-9./_-]{1,40}$/.test(quoteNo)) throw new Error(`quote_no "${quoteNo}" is not a quotation number — letters, digits and - / _ . only`);
     const quotation = await prisma.quotation.findFirst({
       where: { number: { equals: quoteNo, mode: 'insensitive' } },
-      select: { id: true, number: true, customerId: true, contactId: true, ownerId: true, currency: true },
+      select: { id: true, number: true, customerId: true, contactId: true, ownerId: true, currency: true, directOrder: true },
     });
-    if (!quotation) throw new Error(`Quotation ${quoteNo} is not in G-CORE — import SCORO’s quotes first`);
 
-    const currency = (optional(row, 'currency') ?? '').toUpperCase() || quotation.currency;
-    if (currency !== quotation.currency) throw new Error(`currency ${currency} is not quotation ${quotation.number}’s (${quotation.currency})`);
+    const home = await prisma.company.findUniqueOrThrow({ where: { id: 'company' }, select: { currency: true } });
+    const currency = (optional(row, 'currency') ?? '').toUpperCase() || quotation?.currency || home.currency;
+    if (quotation && currency !== quotation.currency) throw new Error(`currency ${currency} is not quotation ${quotation.number}’s (${quotation.currency})`);
+    if (!quotation && !QUOTATION_CURRENCY_CODES.includes(currency)) throw new Error(`currency ${currency} is not one G-CORE quotes in (${QUOTATION_CURRENCY_CODES.join(', ')})`);
 
-    // Who booked it: the login SCORO names, else the quotation's own owner.
+    // Not in G-CORE: a stand-in quotation is made with the order (2026-11-11).
+    const payer = collapse(optional(row, 'payer') ?? '');
+    let standIn: ScoroInvoiceRecord['standIn'] = null;
+    if (!quotation) {
+      if (!payer) throw new Error(`invoice ${number} names no payer — the customer of the quotation made for it`);
+      const payerId = optional(row, 'payer_id');
+      const customer = await findCustomer(prisma, payer, payerId);
+      const subject = collapse(optional(row, 'doc_description') ?? '') || collapse(optional(row, 'product_name') ?? '') || `Invoiced in SCORO — ${payer}`;
+      standIn = { number: quoteNo, customerId: customer?.id ?? null, payerId, currency, subject: upperText(subject).slice(0, 200) };
+    }
+
+    // Who booked it: the login SCORO names, else the quotation's own owner
+    // (a stand-in's: whoever imports).
     const ownerName = optional(row, 'owner_name');
-    let ownerId = quotation.ownerId;
+    let ownerId: string | null = quotation?.ownerId ?? null;
     let ownerNote: string | null = null;
     if (ownerName) {
       const users = await prisma.user.findMany({ select: { id: true, name: true, isActive: true } });
@@ -227,7 +270,7 @@ const scoroInvoiceSpec: ImportSpec<ScoroInvoiceRecord> = {
 
     const contactName = optional(row, 'contact_person');
     const contact = contactName
-      ? { id: (await findContact(prisma, quotation.customerId, contactName))?.id ?? null, name: collapse(contactName) }
+      ? { id: quotation ? ((await findContact(prisma, quotation.customerId, contactName))?.id ?? null) : null, name: collapse(contactName) }
       : null;
 
     const statusName = collapse(optional(row, 'status_name') ?? 'unpaid');
@@ -251,6 +294,7 @@ const scoroInvoiceSpec: ImportSpec<ScoroInvoiceRecord> = {
       scoroId: optional(row, 'id'),
       number,
       quotation,
+      standIn,
       ownerId,
       ownerNote,
       contact,
@@ -264,7 +308,7 @@ const scoroInvoiceSpec: ImportSpec<ScoroInvoiceRecord> = {
       comment: optional(row, 'doc_description'),
       discountPct: discount,
       vatRate,
-      payer: collapse(optional(row, 'payer') ?? ''),
+      payer,
       paidSum: optional(row, 'paid_sum'),
       deadline,
       receivedOn: scoroDate(row, 'latest_receipt_date'),
@@ -311,7 +355,16 @@ async function writeScoroInvoices(
   }
 
   async function writeOne(tx: Tx, record: ScoroInvoiceRecord) {
-    const contactId = record.contact?.id ?? (record.contact ? (await findContact(tx, record.quotation.customerId, record.contact.name))?.id : null) ?? record.quotation.contactId;
+    const ownerId = record.ownerId ?? actor?.id ?? null;
+    if (!ownerId) throw new Error(`invoice ${record.number}: no login named ${record.ownerNote ?? 'its owner'} — add them in Admin › Users first`);
+    const quotation = record.quotation ?? (await standInFor(tx, record, ownerId));
+    let contactId = record.contact?.id ?? (record.contact ? (await findContact(tx, quotation.customerId, record.contact.name))?.id : null) ?? quotation.contactId;
+    if (!contactId && record.contact && quotation.directOrder) {
+      // A stand-in's customer takes the contact SCORO names, as the quotes import does.
+      const made = await tx.customerContact.create({ data: { customerId: quotation.customerId, name: record.contact.name }, select: { id: true } });
+      contactId = made.id;
+      if (!quotation.contactId) await tx.quotation.update({ where: { id: quotation.id }, data: { contactId } });
+    }
     const lines = record.lines.map((l, i) => {
       const data = lineData(l.isHeading ? l : { ...l, group: groupOf(l.group) }, i);
       return {
@@ -338,10 +391,10 @@ async function writeScoroInvoices(
       data: {
         number: record.number,
         status: record.status,
-        quotationId: record.quotation.id,
-        customerId: record.quotation.customerId,
+        quotationId: quotation.id,
+        customerId: quotation.customerId,
         contactId,
-        ownerId: record.ownerId,
+        ownerId,
         orderDate: record.orderDate,
         termsDays: record.termsDays,
         paymentMethod: record.paymentMethod,
@@ -358,17 +411,20 @@ async function writeScoroInvoices(
     });
     await rememberGroups(tx, [FALLBACK_GROUP]);
     await recalcOrder(order.id, tx);
-    const booked = await linkOrderBookings(tx, order.id);
+    // A stand-in mirrors its orders' lines; a real quotation's lines are booked.
+    const booked = quotation.directOrder
+      ? (await mirrorDirectQuotation(tx, order.id), { linked: lines.filter((l) => !l.isHeading).length })
+      : await linkOrderBookings(tx, order.id);
     // SCORO's numbers follow the series where they fit its shape; never lowered.
     const counter: CounterMove | null = await setCounter('sales_order', record.number.split('.')[0], tx, { mode: 'raise' });
 
-    const owner = await tx.user.findUnique({ where: { id: record.ownerId }, select: { name: true } });
+    const owner = await tx.user.findUnique({ where: { id: ownerId }, select: { name: true } });
     await audit(
       {
         entityType: 'sales_order',
         entityId: order.id,
         action: 'CREATED',
-        summary: `Imported from SCORO invoice ${record.number} (SCORO id ${record.scoroId ?? '—'}) on quotation ${record.quotation.number}`,
+        summary: `Imported from SCORO invoice ${record.number} (SCORO id ${record.scoroId ?? '—'}) on quotation ${quotation.number}${quotation.directOrder ? ' (a stand-in for SCORO’s)' : ''}`,
         after: {
           scoroId: record.scoroId,
           number: record.number,
@@ -394,7 +450,7 @@ async function writeScoroInvoices(
           entityId: order.id,
           action: 'COMPLETED',
           summary: `Issued in SCORO — imported by ${SOURCE}`,
-          actorId: record.ownerId,
+          actorId: ownerId,
           actorName: owner?.name ?? null,
         },
         undefined,
@@ -402,6 +458,77 @@ async function writeScoroInvoices(
       );
       await writeReceivable(tx, order.id, record, by);
     }
+  }
+
+  /**
+   * SCORO's quotation, made as a stand-in — or the stand-in an earlier invoice
+   * of this file (or an earlier run) made for the same quote_no, looked for
+   * again inside the transaction.
+   */
+  async function standInFor(tx: Tx, record: ScoroInvoiceRecord, ownerId: string): Promise<QuoteRef> {
+    const s = record.standIn!;
+    const select = { id: true, number: true, customerId: true, contactId: true, ownerId: true, currency: true, directOrder: true } as const;
+    const again = await tx.quotation.findFirst({ where: { number: { equals: s.number, mode: 'insensitive' } }, select });
+    if (again) {
+      if (again.currency !== s.currency) throw new Error(`currency ${s.currency} is not quotation ${again.number}’s (${again.currency})`);
+      return again;
+    }
+    let customerId = s.customerId ?? (await findCustomer(tx, record.payer, s.payerId))?.id ?? null;
+    if (!customerId) {
+      const made = await tx.customer.create({
+        data: {
+          code: await nextNumber('customer', tx, {}, async (code) => !!(await tx.customer.findUnique({ where: { code }, select: { id: true } }))),
+          name: record.payer,
+          notes: s.payerId ? `(SCORO id ${s.payerId})` : null,
+          createdById: actor?.id ?? null,
+        },
+        select: { id: true, code: true, name: true },
+      });
+      customerId = made.id;
+      await audit(
+        {
+          entityType: 'customer',
+          entityId: made.id,
+          action: 'CREATED',
+          summary: `Created customer ${made.code} ${made.name} from ${SOURCE}${s.payerId ? ` (SCORO id ${s.payerId})` : ''}`,
+          ...by,
+        },
+        undefined,
+        tx,
+      );
+    }
+    const team = await teamOf(ownerId);
+    const made = await tx.quotation.create({
+      data: {
+        number: s.number,
+        directOrder: true,
+        customerId,
+        ownerId,
+        subject: s.subject,
+        outcome: 'WON',
+        probability: 100,
+        decidedAt: record.orderDate,
+        currency: s.currency,
+        teamId: team?.id ?? null,
+        createdAt: record.orderDate,
+        revisions: { create: [{ revision: 0, status: 'APPROVED', vatRate: record.vatRate, discountPct: record.discountPct, createdAt: record.orderDate }] },
+      },
+      select,
+    });
+    const counter = await setCounter('quotation', s.number, tx, { mode: 'raise' });
+    await audit(
+      {
+        entityType: 'quotation',
+        entityId: made.id,
+        action: 'CREATED',
+        summary: `Stand-in for SCORO quotation ${s.number}, made by ${SOURCE} for invoice ${record.number} — SCORO’s quotation was not in G-CORE`,
+        after: { number: s.number, payer: record.payer, ...(counter ? { counter } : {}) },
+        ...by,
+      },
+      undefined,
+      tx,
+    );
+    return made;
   }
 
   async function catchUp(tx: Tx, orderId: string, record: ScoroInvoiceRecord) {

@@ -108,7 +108,7 @@ export const daysApart = (from: Date, to: Date) => Math.round((to.getTime() - fr
  * same file may have created the customer a moment ago. A customer switched
  * off is used as it is.
  */
-async function findCustomer(tx: Tx | typeof prisma, name: string, scoroId: string | null): Promise<{ id: string } | null> {
+export async function findCustomer(tx: Tx | typeof prisma, name: string, scoroId: string | null): Promise<{ id: string } | null> {
   if (scoroId) {
     const noted = await tx.customer.findMany({
       where: { notes: { contains: 'SCORO id', mode: 'insensitive' } },
@@ -199,11 +199,24 @@ export async function scoroLines(rows: Record<string, string>[], firstRowNumber:
       lines.push({ isHeading: true, title: heading, quantity: 0, unit: 'lot', unitPrice: 0 });
       continue;
     }
-    const quantity = scoroDecimal(row, 'amount') ?? new Prisma.Decimal(0);
-    const price = scoroDecimal(row, 'price') ?? new Prisma.Decimal(0);
+    let quantity = scoroDecimal(row, 'amount') ?? new Prisma.Decimal(0);
+    let price = scoroDecimal(row, 'price') ?? new Prisma.Decimal(0);
     const lineCost = scoroDecimal(row, 'line_cost');
     if (quantity.lt(0) || price.lt(0)) throw new Error(`${where}amount and price cannot be negative`);
-    const unitCost = lineCost && lineCost.gt(0) && quantity.gt(0) ? lineCost.div(quantity).toDecimalPlaces(2) : null;
+    // A quantity finer than G-CORE keeps (three decimals) — SCORO's progress
+    // bills charge 0.1535 of a lot — would bill another amount once rounded
+    // (2026-11-11: ₱109.82 short on one line, ₱1,278.32 over on another). Such
+    // a line comes across as ONE lot at SCORO's own line amount, what SCORO
+    // billed said under it, so the money is exactly SCORO's.
+    let wholeNote: string | null = null;
+    const exact = scoroDecimal(row, 'line_sum') ?? quantity.mul(price).toDecimalPlaces(2);
+    if (quantity.decimalPlaces() > 3 && !quantity.toDecimalPlaces(3).mul(price).toDecimalPlaces(2).eq(exact)) {
+      wholeNote = `SCORO billed ${quantity.toDecimalPlaces(6).toString()} ${(row['unit'] ?? '').trim() || 'lot'} × ${price.toFixed(2)}`;
+      quantity = new Prisma.Decimal(1);
+      price = exact;
+    }
+    const unitCost =
+      lineCost && lineCost.gt(0) && quantity.gt(0) ? (wholeNote ? lineCost.toDecimalPlaces(2) : lineCost.div(quantity).toDecimalPlaces(2)) : null;
 
     const notes: string[] = [];
     let providerSupplierId: string | null = null;
@@ -231,7 +244,7 @@ export async function scoroLines(rows: Record<string, string>[], firstRowNumber:
     lines.push({
       group: collapse(row['product_group'] ?? '') || null,
       title: name || null,
-      description: (row['line_comment'] ?? '').trim(),
+      description: [(row['line_comment'] ?? '').trim(), wholeNote].filter(Boolean).join('\n'),
       quantity: Number(quantity),
       unit: (row['unit'] ?? '').trim() || 'lot',
       unitPrice: Number(price),

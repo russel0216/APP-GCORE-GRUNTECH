@@ -2857,11 +2857,54 @@ async function main() {
         'a cancelled SCORO invoice raises no invoice',
         (await prisma.invoice.count({ where: { salesOrder: { number: `${TAG}4899.1` } } })) === 0,
       );
-      const noQuote = await importInvoices([invRow({ doc_no: `${TAG}5000`, quote_no: 'ZZ-NOT-A-QUOTE' })], false);
+      // A quotation not in G-CORE gets a STAND-IN (2026-11-11, the owner's
+      // January file): one quotation for an invoice and its .1, the payer
+      // made a customer once, SCORO's exact money on a 4-decimal quantity.
+      const standNo = `${TAG}SQ${Date.now() % 100000}`;
+      const standRows = [
+        invRow({ doc_no: `${TAG}6100`, quote_no: standNo, payer: `${TAG} STAND-IN PAYER`, payer_id: '987654', doc_description: `${TAG} PROGRESS BILLING #1`,
+          product_group: 'Gruntech Services', product_name: 'GRUNTECH, PROJECT MANAGEMENT', amount: '0.308516000000', unit: 'lot', price: '2641146.140000',
+          line_sum: '814835.84', line_cost: '0.0000', supplier_name: '', cost_comment: '', total_sum: '814835.84', total_vat: '97780.30', total_sum_vat: '912616.14', total_cost: '0.0000' }),
+        invRow({ doc_no: `${TAG}6100.1`, quote_no: standNo, payer: `${TAG} STAND-IN PAYER`, payer_id: '987654', doc_description: `${TAG} PROGRESS BILLING #2`,
+          product_group: 'Gruntech Services', product_name: 'GRUNTECH, PROJECT MANAGEMENT', amount: '0.153500000000', unit: 'lot', price: '219642.860000',
+          line_sum: '33715.18', line_cost: '0.0000', supplier_name: '', cost_comment: '', total_sum: '33715.18', total_vat: '4045.82', total_sum_vat: '37761.00', total_cost: '0.0000' }),
+      ];
+      const standCheck = await importInvoices(standRows, false);
+      const standDone = await importInvoices(standRows, true);
+      const stand = await prisma.quotation.findFirst({
+        where: { number: standNo },
+        include: { salesOrders: { include: { lines: true }, orderBy: { number: 'asc' } }, revisions: { include: { items: true } } },
+      });
+      const standCustomers = await prisma.customer.findMany({ where: { name: `${TAG} STAND-IN PAYER` } });
       check(
-        'an invoice whose quotation is not in G-CORE is refused, naming it and the way out',
-        noQuote.errors === 1 && (noQuote.rows[0]?.message ?? '').includes('Quotation ZZ-NOT-A-QUOTE is not in G-CORE'),
-        JSON.stringify(noQuote.rows),
+        'an invoice whose quotation is not in G-CORE gets a stand-in: one WON quotation numbered SCORO’s quote_no, both invoices on it, the payer made a customer once with its SCORO id',
+        standCheck.errors === 0 && standDone.created === 2 && !!stand && stand.directOrder && stand.outcome === 'WON' && stand.revisions[0]?.status === 'APPROVED' &&
+          stand.salesOrders.length === 2 && standCustomers.length === 1 && (standCustomers[0].notes ?? '').includes('SCORO id 987654') &&
+          stand.salesOrders.every((o) => o.customerId === standCustomers[0].id),
+        JSON.stringify({ check: standCheck.rows, created: standDone.created, orders: stand?.salesOrders.length, customers: standCustomers.length }),
+      );
+      const firstLine = stand?.salesOrders[0]?.lines[0];
+      const secondLine = stand?.salesOrders[1]?.lines[0];
+      check(
+        'a quantity finer than three decimals bills SCORO’s exact amount — one lot at the line amount, what SCORO billed said under it',
+        Number(firstLine?.amount) === 814835.84 && Number(firstLine?.quantity) === 1 && (firstLine?.description ?? '').includes('SCORO billed 0.308516 lot') &&
+          Number(secondLine?.amount) === 33715.18 && Number(stand?.salesOrders[1]?.total) === 37761,
+        JSON.stringify([firstLine?.amount, firstLine?.quantity, firstLine?.description, secondLine?.amount, stand?.salesOrders[1]?.total]),
+      );
+      const standItems = stand?.revisions[0]?.items ?? [];
+      check(
+        'the stand-in mirrors both invoices’ lines, each order line booking its own mirror — worth what was invoiced, nothing left to book',
+        standItems.length === 2 && Number(stand?.revisions[0]?.subtotal) === 848551.02 &&
+          stand!.salesOrders.flatMap((o) => o.lines).every((l) => standItems.some((i) => i.id === l.quotationItemId)),
+        JSON.stringify({ items: standItems.length, subtotal: stand?.revisions[0]?.subtotal }),
+      );
+      const standAgain = await importInvoices(standRows, true);
+      check(
+        'run again, the file changes nothing: no second stand-in, order or customer',
+        standAgain.created === 0 && (await prisma.quotation.count({ where: { number: standNo } })) === 1 &&
+          (await prisma.salesOrder.count({ where: { quotationId: stand?.id ?? '' } })) === 2 &&
+          (await prisma.customer.count({ where: { name: `${TAG} STAND-IN PAYER` } })) === 1,
+        JSON.stringify({ created: standAgain.created }),
       );
     } finally {
       // The series as it stood before the section, whatever happened.
