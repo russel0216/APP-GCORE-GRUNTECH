@@ -111,6 +111,38 @@ interface PayablesSummary {
 const BILL_TERMS = [7, 15, 30, 45, 60];
 const termsWords = (d: number) => (d === 0 ? 'On delivery' : `${d} Day${d === 1 ? '' : 's'}`);
 
+/** A quantity as a bill line's note prints it: thousands separators, three decimals at most. */
+const qtyWords = (n: number) => n.toLocaleString('en-PH', { maximumFractionDigits: 3 });
+
+/** A line on the bill form; one taken from the purchase order says what was ordered and received. */
+interface BillLine {
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  fromOrder?: { unit: string; ordered: number; receivedHere: number; receivedAll: number };
+}
+
+/** GET /supplier-bills/order-lines — the order's lines for a bill against it. */
+interface OrderLines {
+  orderId: string;
+  orderNumber: string;
+  currency: string;
+  exchangeRate: number | null;
+  rateMissing: boolean;
+  vatRate: number;
+  vatInclusive: boolean;
+  discountPct: number;
+  lines: {
+    orderItemId: string;
+    description: string;
+    unit: string;
+    quantity: number;
+    unitPrice: number;
+    receivedHere: number;
+    receivedAll: number;
+  }[];
+}
+
 interface UnbilledReceiving {
   id: string;
   number: string;
@@ -528,7 +560,7 @@ function NewBillModal({
     ewtRate: existing?.ewtRate ?? 0,
     notes: existing?.notes ?? '',
   });
-  const [lines, setLines] = useState(
+  const [lines, setLines] = useState<BillLine[]>(
     existing
       ? existing.lines.map((l) => ({ description: l.description, quantity: l.quantity, unitPrice: l.unitPrice }))
       : [
@@ -539,6 +571,30 @@ function NewBillModal({
           },
         ],
   );
+  // A bill against a receiving starts from its purchase order's lines
+  // (2026-11-11, the owner's call): every line at the ordered quantity and
+  // price, what was received beside it, and the order's discount and VAT.
+  const [orderLines, setOrderLines] = useState<OrderLines | null>(null);
+  useEffect(() => {
+    if (existing || !from) return;
+    api
+      .get<OrderLines>(`/supplier-bills/order-lines?orderId=${from.order.id}&receivingId=${from.id}`)
+      .then((o) => {
+        setOrderLines(o);
+        if (o.lines.length === 0) return;
+        setLines(
+          o.lines.map((l) => ({
+            description: l.description,
+            quantity: l.quantity,
+            unitPrice: l.unitPrice,
+            fromOrder: { unit: l.unit, ordered: l.quantity, receivedHere: l.receivedHere, receivedAll: l.receivedAll },
+          })),
+        );
+        setForm((f) => ({ ...f, vatInclusive: o.vatInclusive }));
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // What the bill is matched to: the queue's receiving, or the draft's own.
   const matchedTo = from?.number ?? existing?.receiving?.number ?? null;
   const onOrder = !!from || !!existing?.order;
@@ -560,12 +616,20 @@ function NewBillModal({
   }, []);
 
   // A draft keeps the VAT rate it was entered with; a new bill takes today's.
-  const vatRate = existing?.vatRate ?? settings?.vatRate ?? 0.12;
+  const vatRate = existing?.vatRate ?? orderLines?.vatRate ?? settings?.vatRate ?? 0.12;
   const goodsRate = settings?.supplierEwtGoods ?? 0.01;
   const servicesRate = settings?.supplierEwtServices ?? 0.02;
   // A rate the settings no longer offer stays choosable on the draft that has it.
   const otherRate = form.ewtRate > 0 && form.ewtRate !== goodsRate && form.ewtRate !== servicesRate ? form.ewtRate : null;
-  const lineTotal = lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
+  const linesGross = lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
+  // The order's discount, on what is left of its lines: a line of its own.
+  const discountPct = orderLines?.discountPct ?? 0;
+  const discount = discountPct > 0 ? Math.round(linesGross * discountPct) / 100 : 0;
+  const discountLine =
+    discount > 0
+      ? { description: `Less: discount (${+(discountPct).toFixed(4)}%) per ${orderLines?.orderNumber}`, quantity: 1, unitPrice: -discount }
+      : null;
+  const lineTotal = linesGross - discount;
   const subtotal = form.vatInclusive ? lineTotal / (1 + vatRate) : lineTotal;
   const vatAmount = subtotal * vatRate;
   const total = subtotal + vatAmount;
@@ -598,11 +662,16 @@ function NewBillModal({
         // Left empty on a bill against an order, the order's author is the purchaser.
         purchaserId: form.typingPurchaser ? null : form.purchaserId || null,
         purchaserName: form.typingPurchaser ? form.purchaserName.trim() || null : null,
-        ...(existing ? { vatRate: existing.vatRate } : {}),
+        ...(existing ? { vatRate: existing.vatRate } : orderLines ? { vatRate: orderLines.vatRate } : {}),
         vatInclusive: form.vatInclusive,
         ewtRate: form.ewtRate,
         notes: form.notes || null,
-        lines: lines.filter((l) => l.description.trim() && l.unitPrice !== 0),
+        lines: [
+          ...lines
+            .filter((l) => l.description.trim() && l.unitPrice !== 0 && l.quantity !== 0)
+            .map((l) => ({ description: l.description, quantity: l.quantity, unitPrice: l.unitPrice })),
+          ...(discountLine ? [discountLine] : []),
+        ],
       };
       const saved = existing
         ? await api.put<{ id: string }>(`/supplier-bills/${existing.id}`, body)
@@ -777,6 +846,21 @@ function NewBillModal({
       )}
 
       <h4 className="fin-section-title">Lines</h4>
+      {orderLines && (
+        <p className="muted">
+          The lines of {orderLines.orderNumber}, at the ordered quantity and price
+          {orderLines.exchangeRate
+            ? ` — ${orderLines.currency} prices in pesos at ${orderLines.exchangeRate} to one ${orderLines.currency}`
+            : ''}
+          . Remove a cancelled item, and change a quantity to what the supplier invoices.
+        </p>
+      )}
+      {orderLines?.rateMissing && (
+        <div className="alert warn">
+          {orderLines.orderNumber} is in {orderLines.currency} with no rate to PHP — its prices came as they are. Set the rate on the order
+          (Set landed cost) or type the peso prices here.
+        </div>
+      )}
       <div className="table-wrap">
         <table className="data">
           <thead>
@@ -802,6 +886,17 @@ function NewBillModal({
                       setLines(next);
                     }}
                   />
+                  {l.fromOrder && (
+                    <div className={`hint fin-line-note${l.fromOrder.receivedAll > 0 ? '' : ' is-missing'}`}>
+                      {l.fromOrder.receivedAll > 0
+                        ? `Ordered ${qtyWords(l.fromOrder.ordered)} ${l.fromOrder.unit}` +
+                          (l.fromOrder.receivedHere > 0 ? ` · ${qtyWords(l.fromOrder.receivedHere)} received on ${from?.number}` : '') +
+                          (l.fromOrder.receivedAll !== l.fromOrder.receivedHere
+                            ? ` · ${qtyWords(l.fromOrder.receivedAll)} received in all`
+                            : '')
+                        : `Ordered ${qtyWords(l.fromOrder.ordered)} ${l.fromOrder.unit} · nothing received — remove it if the item was cancelled`}
+                    </div>
+                  )}
                 </td>
                 <td>
                   <NumberInput
@@ -856,6 +951,21 @@ function NewBillModal({
                 </td>
               </tr>
             ))}
+            {discountLine && (
+              <tr>
+                <td>{discountLine.description}</td>
+                <td className="right mono">1</td>
+                <td className="right mono">{formatMoney(discountLine.unitPrice)}</td>
+                <td className="right mono">{formatMoney(discountLine.unitPrice)}</td>
+                <td className="right mono">
+                  {formatMoney(form.vatInclusive ? discountLine.unitPrice - discountLine.unitPrice / (1 + vatRate) : discountLine.unitPrice * vatRate)}
+                </td>
+                <td className="right mono">
+                  {formatMoney(form.vatInclusive ? discountLine.unitPrice : discountLine.unitPrice * (1 + vatRate))}
+                </td>
+                <td />
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

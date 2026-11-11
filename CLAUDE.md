@@ -837,7 +837,7 @@ inventory board, and one on chain for the purchase order's paper, and one on cha
 foundation
 438, masters 92, sales 643, costing 205, pipeline 132, calendar 103, numbering
 94, partners 120, delivery 229, chain 446, hr 661, plantilla 129, meetings
-114, evaluations 154, academy 145, finance 470, aftermarket 307, cad 122,
+114, evaluations 154, academy 145, finance 471, aftermarket 307, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145, marketing 69. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
@@ -7922,6 +7922,21 @@ module 3, on the supplier bill G-FIN already had.
   chips (`TermsPicker`) and the purchaser (`PersonSelect` over
   `gchain.purchase_orders.create`, "— the order's author —" on a bill
   against an order), the due date said under the terms.
+- **A bill against a receiving starts from its PURCHASE ORDER's lines**
+  (2026-11-11, the owner's call: "the content of the purchase order reflects
+  on the creation of the supplier bill; allow removal if there is a cancelled
+  item"). `GET /supplier-bills/order-lines?orderId=&receivingId=` (above
+  `/:id`, `gfin.ap.create`) sends every order line — part number, name and
+  description as one, its unit, the ORDERED quantity and price (a foreign
+  order's in pesos at the order's own rate; `rateMissing` when it has none),
+  what this receiving and every receiving took of it — with the order's VAT
+  rate, "prices include VAT" and discount. The form (`NewBillModal`) fills
+  its lines from it in place of the one "Goods received on …" line, each with
+  "Ordered … · received …" under it, or "nothing received — remove it if the
+  item was cancelled"; Remove takes any line; the order's discount is a line
+  of its own ("Less: discount (x%) per GT-PO-…"), worked out on the lines
+  left; a new bill takes the order's VAT rate. Saved, they are ordinary bill
+  lines.
 - **The AP Report Generator** is the `payables` kind of G-FIN › Reports
   (the A/P list's Report button; Payables aging in its ⋯): bills falling
   DUE in the range (pending approval and later, never a draft or

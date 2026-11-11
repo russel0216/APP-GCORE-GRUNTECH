@@ -121,3 +121,12 @@
 .ob-code {
   width: 6rem;
 }
+
+/* A bill line taken from its purchase order: what was ordered and received, under the description. */
+.fin-line-note {
+  margin-top: var(--s-1);
+}
+
+.fin-line-note.is-missing {
+  color: var(--warn);
+}

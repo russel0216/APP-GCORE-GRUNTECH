@@ -2030,6 +2030,83 @@ async function billListSummary(where: Prisma.SupplierBillWhereInput) {
   };
 }
 
+/**
+ * The purchase order's lines, for a bill entered against it (2026-11-11, the
+ * owner's call: "the content of the purchase order reflects on the creation of
+ * the supplier bill; allow removal of a cancelled item"). Every line of the
+ * order at its ordered quantity and price — the supplier invoices what was
+ * ordered — with what this receiving (and every receiving) took of it, so a
+ * line nobody delivered is plain to remove. A foreign order's prices come in
+ * pesos at the order's own rate (a bill is in pesos); without a rate they
+ * come as they are and `rateMissing` says so. The order's discount, VAT rate
+ * and "prices include VAT" come with them. Above `/:id`.
+ */
+billRoutes.get(
+  '/order-lines',
+  require_('gfin.ap.create'),
+  handler(async (req, res) => {
+    const orderId = String(req.query.orderId ?? '');
+    const receivingId = req.query.receivingId ? String(req.query.receivingId) : null;
+    if (!orderId) throw badRequest('Which purchase order?');
+    const order = await prisma.purchaseOrder.findUnique({
+      where: { id: orderId },
+      select: {
+        id: true,
+        number: true,
+        currency: true,
+        exchangeRate: true,
+        vatRate: true,
+        vatInclusive: true,
+        discountPct: true,
+        items: {
+          orderBy: { sortOrder: 'asc' },
+          select: {
+            id: true,
+            name: true,
+            partNumber: true,
+            description: true,
+            unit: true,
+            quantity: true,
+            unitPrice: true,
+            receivedQty: true,
+            receivingItems: {
+              where: receivingId ? { receivingId } : { id: '' },
+              select: { quantity: true },
+            },
+          },
+        },
+      },
+    });
+    if (!order) throw notFound('Purchase order not found');
+    const company = await companyCurrency();
+    const foreign = order.currency !== company;
+    const rate = foreign && order.exchangeRate ? num(order.exchangeRate) : null;
+    res.json({
+      orderId: order.id,
+      orderNumber: order.number,
+      currency: order.currency,
+      exchangeRate: rate,
+      rateMissing: foreign && rate === null,
+      vatRate: num(order.vatRate),
+      vatInclusive: order.vatInclusive,
+      discountPct: num(order.discountPct),
+      lines: order.items.map((i) => {
+        const title = [i.partNumber, i.name].filter(Boolean).join(' — ');
+        const description = title && title !== i.description ? `${title} — ${i.description}` : i.description;
+        return {
+          orderItemId: i.id,
+          description,
+          unit: i.unit,
+          quantity: num(i.quantity),
+          unitPrice: rate ? cents(num(i.unitPrice) * rate) : num(i.unitPrice),
+          receivedHere: i.receivingItems.reduce((s, r) => s + num(r.quantity), 0),
+          receivedAll: num(i.receivedQty),
+        };
+      }),
+    });
+  }),
+);
+
 billRoutes.get(
   '/',
   requireView('gfin', 'ap'),

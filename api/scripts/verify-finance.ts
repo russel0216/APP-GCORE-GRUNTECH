@@ -1927,6 +1927,24 @@ async function main() {
     };
     const eng = as(engineer);
     const fin = as(finance);
+    // A bill against a receiving starts from its purchase order's lines
+    // (2026-11-11): every line at the ordered quantity and price, and what this
+    // receiving took of it — so a cancelled item is plain to remove.
+    const orderLines = await fin('GET', `/supplier-bills/order-lines?orderId=${order.id}&receivingId=${receiving.id}`);
+    const firstLine = (orderLines.body.lines as { description: string; quantity: number; unitPrice: number; receivedHere: number }[] | undefined)?.[0];
+    const noOrder = await fin('GET', '/supplier-bills/order-lines');
+    check(
+      'the bill form reads the purchase order’s lines — ordered quantity, price and what the receiving took — and needs an order named',
+      orderLines.status === 200 &&
+        orderLines.body.orderNumber === order.number &&
+        (orderLines.body.lines as unknown[]).length === order.items.length &&
+        firstLine?.description.includes(`${TAG} Pipe`) === true &&
+        firstLine.quantity === 100 &&
+        firstLine.unitPrice === 1000 &&
+        firstLine.receivedHere === 100 &&
+        noOrder.status === 400,
+      `${orderLines.status} ${JSON.stringify(orderLines.body).slice(0, 240)} / ${noOrder.status}`,
+    );
     // Money on paper: a total names the company's currency, a table's figures do not.
     const currency = (await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } }))?.currency?.trim() || 'PHP';
     const peso = (n: number) => `${currency} ${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
