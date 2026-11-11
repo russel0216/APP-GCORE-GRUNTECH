@@ -1486,6 +1486,22 @@ quotationRoutes.get(
 );
 
 /**
+ * Who types quotation or sales order LINES (2026-11-11): the two editors
+ * share their line cells — the brand, product type and part number boxes,
+ * the suggestions and the provider lookup — so a sales order writer with no
+ * quotation right (the temporary order without a quotation) reaches them
+ * too. What each offers is still narrowed to what the caller may read.
+ */
+const LINE_WRITERS = [
+  'gops.quotations.create',
+  'gops.quotations.edit_own',
+  'gops.quotations.edit_all',
+  'gops.sales_orders.create',
+  'gops.sales_orders.edit_own',
+  'gops.sales_orders.edit_all',
+];
+
+/**
  * The number the next quotation WOULD get, so the form can show it before
  * saving. Declared above `/:id` or that route swallows it. Read-only —
  * nothing is consumed; the same contract as `/customers/next-code`.
@@ -1602,7 +1618,7 @@ const MEMORY_FIELD_WORDS: Record<QuotationMemoryField, string> = {
 
 quotationRoutes.get(
   '/suggest/fields',
-  requireAny('gops.quotations.create', 'gops.quotations.edit_own', 'gops.quotations.edit_all'),
+  requireAny(...LINE_WRITERS),
   handler(async (req, res) => {
     const me = currentUser(req);
     const field = choice(String(req.query.field ?? '') || undefined, QUOTATION_MEMORY_FIELDS, 'Field', (f) => MEMORY_FIELD_WORDS[f]) ?? 'brand';
@@ -1715,7 +1731,7 @@ quotationRoutes.get(
  */
 quotationRoutes.get(
   '/suggest',
-  requireAny('gops.quotations.create', 'gops.quotations.edit_own', 'gops.quotations.edit_all'),
+  requireAny(...LINE_WRITERS),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = String(req.query.q ?? '').trim().slice(0, 100);
@@ -1870,7 +1886,7 @@ quotationRoutes.get(
  */
 quotationRoutes.get(
   '/providers',
-  requireAny('gops.quotations.create', 'gops.quotations.edit_own', 'gops.quotations.edit_all'),
+  requireAny(...LINE_WRITERS),
   handler(async (req, res) => {
     const kind = String(req.query.kind ?? 'supplier');
     const term = String(req.query.q ?? '').trim();

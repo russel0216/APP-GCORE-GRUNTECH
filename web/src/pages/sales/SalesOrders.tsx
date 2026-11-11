@@ -517,7 +517,13 @@ function DirectOrderForm({ door, onCreated, onBack }: { door: DirectOpen; onCrea
 }
 
 function PickQuotationPanel({ onClose, onPick, onDirect }: { onClose: () => void; onPick: (quotationId: string) => void; onDirect: (orderId: string) => void }) {
-  const [door, setDoor] = useState<DirectOpen | null>(null);
+  const { can } = useAuth();
+  // Someone who may not read quotations cannot pick one (2026-11-11: the
+  // search answered "You need one of: gops.quotations.view_all …" over the
+  // panel). They go straight to the order without a quotation while that
+  // door is open, and are told in words once it has closed.
+  const mayPick = can('gops.quotations.view_all') || can('gops.quotations.view_team') || can('gops.quotations.view_own');
+  const [door, setDoor] = useState<DirectOpen | null | undefined>(undefined);
   const [direct, setDirect] = useState(false);
   useEffect(() => {
     api
@@ -525,7 +531,27 @@ function PickQuotationPanel({ onClose, onPick, onDirect }: { onClose: () => void
       .then(setDoor)
       .catch(() => setDoor(null));
   }, []);
-  if (direct && door?.open) {
+  if (!mayPick && !door?.open) {
+    return (
+      <section className="qe-append so-pick" aria-label="New sales order">
+        <div className="row qe-append-head">
+          <span className="qe-append-title">New sales order</span>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        {door === undefined ? (
+          <Loading />
+        ) : (
+          <p className="muted">
+            A sales order is raised from a quotation, and your role cannot read quotations. Ask an administrator for Quotations › View on
+            Admin › Roles.
+          </p>
+        )}
+      </section>
+    );
+  }
+  if ((direct || !mayPick) && door?.open) {
     return (
       <section className="qe-append so-pick" aria-label="New sales order without a quotation">
         <div className="row qe-append-head">
@@ -534,7 +560,7 @@ function PickQuotationPanel({ onClose, onPick, onDirect }: { onClose: () => void
             Close
           </button>
         </div>
-        <DirectOrderForm door={door} onCreated={onDirect} onBack={() => setDirect(false)} />
+        <DirectOrderForm door={door} onCreated={onDirect} onBack={mayPick ? () => setDirect(false) : onClose} />
       </section>
     );
   }
