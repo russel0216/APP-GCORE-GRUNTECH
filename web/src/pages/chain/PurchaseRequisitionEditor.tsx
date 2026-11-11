@@ -183,7 +183,7 @@ export function PurchaseRequisitionEditor() {
 
   const [existing, setExisting] = useState<ExistingPr | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
-  const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
+  const [warehouses, setWarehouses] = useState<{ id: string; code?: string; name: string }[]>([]);
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
   const [budget, setBudget] = useState<Budget | null>(null);
   const [orderBudget, setOrderBudget] = useState<OrderBudget | null>(null);
@@ -228,7 +228,7 @@ export function PurchaseRequisitionEditor() {
       try {
         const [cats, whs] = await Promise.all([
           api.get<Category[]>('/reference/cost-categories'),
-          api.get<{ id: string; name: string }[]>('/warehouses/lookup').catch(() => []),
+          api.get<{ id: string; code?: string; name: string }[]>('/warehouses/lookup').catch(() => []),
         ]);
         if (!live) return;
         const active = cats.filter((c) => (c as Category & { isActive?: boolean }).isActive !== false);
@@ -267,6 +267,15 @@ export function PurchaseRequisitionEditor() {
           if (!ls.length) ls = [blankLine()];
           setHeader(h);
           setLines(ls);
+        } else if (!h.warehouseId) {
+          // A new request starts on the Main Office Warehouse (2026-11-11, the
+          // owner's call) — the main one (code MAIN), else the only one there
+          // is; "straight to site" is still a choice in the list.
+          const main = whs.find((w) => w.code === 'MAIN') ?? (whs.length === 1 ? whs[0] : null);
+          if (main) {
+            h = { ...h, warehouseId: main.id };
+            setHeader(h);
+          }
         }
         setSaved(snapshot(h, ls));
       } catch (err) {
