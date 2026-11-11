@@ -677,7 +677,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts marketing; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**4,983 assertions across twenty-three scripts** (counted 2026-11-11, after 4 on sales
+**4,984 assertions across twenty-three scripts** (counted 2026-11-11, after one on sales
+for an imported SCORO order changed with no approval, and before it 4 on sales
 for the salesperson and team the SCORO invoices import asks, and before them a net 3 on
 sales for the stand-in quotation the SCORO invoices import makes, and before them 2 on
 chain for a purchase order with no request bought ahead for a quotation, and before them 7 on
@@ -838,7 +839,7 @@ and 19 on chain for Incoming and Outgoing on approval, and 15 on chain for
 borrow requests, and 17 on chain for pull-out slips, and 2 on chain for the
 inventory board, and one on chain for the purchase order's paper, and one on chain for goods received without a purchase order and 4 on meetings for the attendees agreeing the minutes, and 2 on chain for the stock states and the automatic reorder, and 7 on chain for Outgoing as the requestor's receive proof, and 5 on chain for the pull-out slip as the internal release slip, and 3 on chain for the borrower's slip and its return clearance, and 4 on chain for the G-CHAIN reports, and 30 on finance for Accounts Receivable's countering, terms, credit, sales-order invoices, collections and the finance reports, and 7 on finance for Accounts Payable's delivery, terms, purchaser, cards and AP report, and 6 on finance for the budget request and liquidation registers and their reports, and 4 on finance for the reimbursements' route, stage words, cards and report, and 7 on finance for the cash advance as money lent, and 7 on delivery for the Accomplishment Report on its route — project-scoped numbers, weights, days with pictures, the paper, and 2 on aftermarket for the Technical Manager as the project's manager, and 14 on finance for the invoice request, and 17 on cad and 4 on aftermarket for the owner's Job Orders and CAD J.O. samples, and 12 on finance for the invoice request from a sales order, the invoice no. and the countered date, and 5 on finance for the purchaser by name and the collection lines on account, and 2 on chain for the purchase order's pull-back and "+ New canvass", and 57 across sales, costing, chain, finance, delivery, aftermarket, cad, hr, evaluations and academy for pulling an approved document back to draft and the job order's own-team route, and 14 on finance for the commission request — the owner's sample through the arithmetic and its web copy, fully collected first, the route, the payout and its cash advance deduction, and 4 on foundation for every audited type and every report's list landing on a declared route, and 3 on foundation for one card head, no btn-ok and no form on the admin /users list, and 11 on sales for SCORO's invoices imported as sales orders, and 4 on delivery for progress billing at the quotation's VAT, and 6 on sales for SCORO's invoices in A/R and their collections kept as history, and one on sales for no commission on a deal invoiced in SCORO, and 3 on sales for foreign quotations converted to PHP in the summaries, and 5 on costing for the holidays, and 3 on calendar and one on foundation for the calendar's own boxes and the Access split, and 14 on chain for the project's own stock, and 15 on numbering, 4 on foundation and 3 on accounts for the employee number ruling of 2026-10-18 — GTC-0001-14 read as 001, the hire year, the raise-only counter, the refusal without a number, the write-through from Admin › Users, the engine's role keys and the emptied roles, and 5 on foundation for the roles replaced by the chart's titles, and 2 on foundation for the own pair on every screen with Edit All, and 4 on sales and 5 on delivery for a quotation and a project from two costings, and 2 on accounts for the details typed on Admin › Users written through to the employee record, and 22 on foundation for ROLE_REV1 — the shared team managers, the title from the highest role, six roles at most and the Checking step either role decides, and 2 on academy for the retired department on a course requirement, and a net 9 on foundation and a net −1 on meetings for the permission matrix — the levels' round trip over every screen, the Team scope, the overrides dropped):
 foundation
-438, masters 92, sales 650, costing 205, pipeline 132, calendar 103, numbering
+438, masters 92, sales 651, costing 205, pipeline 132, calendar 103, numbering
 94, partners 120, delivery 229, chain 446, hr 661, plantilla 129, meetings
 114, evaluations 154, academy 145, finance 471, aftermarket 307, cad 122,
 insights 98, insights-brief 50, workspace 82, accounts 145, marketing 69. The
@@ -4817,6 +4818,17 @@ SCORO.
   real quotation keeps its own), and its SCORO invoices' salesperson and
   team in A/R — one `sales_order` UPDATED row each, nothing where nothing
   differs or no answer was given.
+- **An imported order is changed with NO approval** (2026-11-11, the
+  owner's call: "make it don't need to approve for this import"; it was
+  issued in SCORO, so a change is a correction, not a booking).
+  `importedFromScoro(orderId)` in `routes/salesOrders.ts` (its CREATED row,
+  "Imported from SCORO invoice …", the one `catchUp` reads): Reopen is
+  allowed though its SCORO invoice stands in A/R (`refuseWhileInvoiced`
+  leaves `importedFrom` invoices out for it — the invoice stays as SCORO
+  billed it; a G-CORE invoice still refuses), `GET /:id` sends
+  `needsApproval: false` and `importedFromScoro`, `POST /:id/issue` issues
+  it with the route active (its COMPLETED row says so), and a draft's paper
+  names no route. The page's Reopen question says it.
 - **A SCORO group not on the list is the importer's call, else OTHERS**
   (2026-10-11, the owner's call: "let me decide or set it as OTHER"). The
   import never adds a group to the master: a file's group matched by

@@ -2906,6 +2906,22 @@ async function main() {
           (await prisma.customer.count({ where: { name: `${TAG} STAND-IN PAYER` } })) === 1,
         JSON.stringify({ created: standAgain.created }),
       );
+      // An imported order is changed with no approval (2026-11-11, the
+      // owner's call): reopened though its SCORO invoice stands in A/R, and
+      // issued again even while the sales order route is active.
+      const fixToken = signToken(sales.id, sales.email);
+      const routeOn = !!(await pickWorkflow('sales_order', Number(order?.total ?? 0), { requesterId: sales.id }));
+      const reopenImported = await http(fixToken, 'POST', `/sales-orders/${order?.id}/reopen`);
+      const draftView = await http(fixToken, 'GET', `/sales-orders/${order?.id}`);
+      const reissued = await http(fixToken, 'POST', `/sales-orders/${order?.id}/issue`);
+      const afterFix = await prisma.salesOrder.findUnique({ where: { id: order?.id ?? '' }, select: { status: true } });
+      check(
+        'an imported order is reopened though its SCORO invoice stands, asks no approval, and is issued again — its invoice kept',
+        routeOn && reopenImported.status === 200 && (draftView.body as { needsApproval?: boolean; importedFromScoro?: boolean }).needsApproval === false &&
+          (draftView.body as { importedFromScoro?: boolean }).importedFromScoro === true && reissued.status === 200 && afterFix?.status === 'ISSUED' &&
+          (await orderInvoices()).length === 1,
+        JSON.stringify({ routeOn, reopen: reopenImported.status, reopenBody: reopenImported.body, issue: reissued.status, issueBody: reissued.body, status: afterFix?.status }),
+      );
       // The check asks where each SCORO owner's invoices go, and a re-run
       // with the answer moves what was imported (2026-11-11, the owner's
       // report: an owner with no login landed on the importer, with no team).

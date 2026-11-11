@@ -144,6 +144,8 @@ interface SalesOrderDetailRow extends SalesOrderRow {
   canSeeCost: boolean;
   /** A route is active for sales orders: the order is submitted, not issued. */
   needsApproval?: boolean;
+  /** Made by the SCORO invoices import: changed and issued again with no approval. */
+  importedFromScoro?: boolean;
   /** After it is issued: its invoice requests and invoices, and whether the viewer may ask for one. */
   invoicing?: {
     net: number;
@@ -826,7 +828,11 @@ export function SalesOrderDetail() {
               hint: 'Back to draft, to change it',
               confirm: {
                 title: `Reopen ${order.number}?`,
-                body: order.needsApproval ? 'It goes back to draft and needs approval again before it is issued.' : 'It goes back to draft.',
+                body: order.importedFromScoro
+                  ? 'It goes back to draft. Imported from SCORO, it is issued again with no approval; its SCORO invoice stays in A/R as SCORO billed it.'
+                  : order.needsApproval
+                    ? 'It goes back to draft and needs approval again before it is issued.'
+                    : 'It goes back to draft.',
                 confirmLabel: 'Reopen',
                 tone: 'primary',
                 onConfirm: () => run(() => api.post(`/sales-orders/${order.id}/reopen`), 'Back to draft'),

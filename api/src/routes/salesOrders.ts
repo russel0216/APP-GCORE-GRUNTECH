@@ -655,7 +655,8 @@ salesOrderRoutes.get(
     // optional one, both data in Admin › Approval Workflows. With a route
     // active the order is submitted, not issued; the page names who decides.
     const total = num(order.total);
-    const workflow = await pickWorkflow('sales_order', total, { requesterId: me.id });
+    const fromScoro = await importedFromScoro(order.id);
+    const workflow = fromScoro ? null : await pickWorkflow('sales_order', total, { requesterId: me.id });
     const options = order.status === 'DRAFT' && workflow ? await approvalOptions('sales_order', total) : [];
     const approvalRoutes =
       order.status === 'DRAFT' && workflow
@@ -681,6 +682,7 @@ salesOrderRoutes.get(
       canSeeCost: showCost,
       taxOptions,
       needsApproval: !!workflow,
+      importedFromScoro: fromScoro,
       approvalOptions: options,
       approvalRoutes,
       invoicing: await orderInvoicing(me, order),
@@ -1359,7 +1361,8 @@ salesOrderRoutes.post(
     const { order } = await orderForEdit(req, req.params.id);
     const hasLine = await prisma.salesOrderLine.count({ where: { orderId: order.id, isHeading: false } });
     if (!hasLine) throw badRequest('Add at least one line before issuing it');
-    if (await pickWorkflow('sales_order', num(order.total), { requesterId: currentUser(req).id })) {
+    const fromScoro = await importedFromScoro(order.id);
+    if (!fromScoro && (await pickWorkflow('sales_order', num(order.total), { requesterId: currentUser(req).id }))) {
       throw badRequest('This sales order goes through approval — submit it for approval instead');
     }
     // Claimed, never simply written: two Issue clicks book once.
@@ -1372,7 +1375,12 @@ salesOrderRoutes.post(
     const me = currentUser(req);
     await prisma.$transaction((tx) => handOverToSalesOrder(tx, order.id, { id: me.id, name: me.name }));
     await audit(
-      { entityType: 'sales_order', entityId: order.id, action: 'COMPLETED', summary: `Issued sales order ${order.number} — booked at ${formatAmount(num(order.total))}` },
+      {
+        entityType: 'sales_order',
+        entityId: order.id,
+        action: 'COMPLETED',
+        summary: `Issued sales order ${order.number} — booked at ${formatAmount(num(order.total))}${fromScoro ? ' (imported from SCORO — no approval needed)' : ''}`,
+      },
       req,
     );
     res.json({ ok: true, status: 'ISSUED' });
@@ -1520,9 +1528,28 @@ async function refuseWhileBuying(orderId: string, number: string, verb: string) 
  * the customer holds, and the order is what it was raised against. Cancel
  * the invoice first.
  */
-async function refuseWhileInvoiced(orderId: string, number: string, verb: string) {
-  const invoices = await prisma.invoice.findMany({ where: { salesOrderId: orderId, status: { not: 'CANCELLED' } }, select: { number: true } });
+async function refuseWhileInvoiced(orderId: string, number: string, verb: string, ignoreScoro = false) {
+  const invoices = await prisma.invoice.findMany({
+    where: { salesOrderId: orderId, status: { not: 'CANCELLED' }, ...(ignoreScoro ? { importedFrom: null } : {}) },
+    select: { number: true },
+  });
   if (invoices.length) throw badRequest(`${number} cannot be ${verb} — invoice ${invoices.map((i) => i.number).join(', ')} bills it`);
+}
+
+/**
+ * An order the SCORO invoices import made (2026-11-11, the owner's call:
+ * "make it don't need to approve for this import"). It was issued in SCORO,
+ * so changing it is a correction, never a new booking: it is reopened even
+ * though its SCORO invoice stands in A/R (that invoice is history, as SCORO
+ * billed it), and issued again WITHOUT the approval route. Told by its own
+ * CREATED row, the one `catchUp` reads.
+ */
+export async function importedFromScoro(orderId: string): Promise<boolean> {
+  const row = await prisma.auditLog.findFirst({
+    where: { entityType: 'sales_order', entityId: orderId, action: 'CREATED', summary: { startsWith: 'Imported from SCORO invoice' } },
+    select: { id: true },
+  });
+  return !!row;
 }
 
 /**
@@ -1605,7 +1632,7 @@ salesOrderRoutes.post(
     const { order } = await orderForEdit(req, req.params.id, false);
     await refuseWhilePulledOut(order.id, order.number, 'reopened');
     await refuseWhileBuying(order.id, order.number, 'reopened');
-    await refuseWhileInvoiced(order.id, order.number, 'reopened');
+    await refuseWhileInvoiced(order.id, order.number, 'reopened', await importedFromScoro(order.id));
     const claimed = await prisma.salesOrder.updateMany({
       where: { id: order.id, status: 'ISSUED' },
       data: { status: 'DRAFT' },
@@ -1928,7 +1955,10 @@ async function unroutedOrderSignoff(order: { id: string; status: string }): Prom
  * nothing. None falls to `unroutedOrderSignoff`.
  */
 async function orderRouteSlots(order: { id: string; status: string; total: Prisma.Decimal; ownerId: string }): Promise<ApprovalSlot[]> {
-  if (order.status === 'DRAFT') return approvalSlots('sales_order', order.id, { amount: num(order.total), requesterId: order.ownerId });
+  if (order.status === 'DRAFT') {
+    if (await importedFromScoro(order.id)) return [];
+    return approvalSlots('sales_order', order.id, { amount: num(order.total), requesterId: order.ownerId });
+  }
   if (order.status === 'ISSUED' && !(await approvalStands('sales_order', order.id, 'Reopened sales order'))) return [];
   if (order.status === 'CANCELLED') {
     const request = await prisma.approvalRequest.findFirst({
