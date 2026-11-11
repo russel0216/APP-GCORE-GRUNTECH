@@ -1,0 +1,65 @@
+<!-- converted from EMPLOYEE NUMBER.xlsx -->
+
+## Sheet: Sheet1
+| NAME | EMPLOYEE NUMBER | ROLE 1 |
+| --- | --- | --- |
+| CARTER GASIONG | GTC-0001-14 |  |
+| RENEROSE YANG | GTC-0007-15 |  |
+| RICARDO MARTINEZ JR. | GTC-0015-17 |  |
+| BRIAN JAY TORRES |  |  |
+| SALVADOR UGABAN |  |  |
+| ROLANDO TAGALOG |  |  |
+| RODRIGO CATUDAY |  |  |
+| JONEL PADA |  |  |
+| RENIELLE ASCANO |  |  |
+| MARLON PISCOS |  |  |
+| REAGAN CAJOTO |  |  |
+| REY GUETAN |  |  |
+| JOBBY ACASILI |  |  |
+| ARNEL BELBES |  |  |
+| FLORENCIO OMEGA |  |  |
+| ARTURO  NAANEP |  |  |
+| CHRISTIAN ARGENTE |  |  |
+| RUSSEL RAMIREZ |  |  |
+| APOLONIO ABONITA |  |  |
+| RENUEL REYES |  |  |
+| CHARLIE MALUBAG |  |  |
+| ALDRIN DILINGON |  |  |
+| JULIUS DOMEGINA |  |  |
+| ALVIN ABAJAR |  |  |
+| JOSELITO MADARA |  |  |
+| JERICHO NAANEP |  |  |
+| JOHN HARBIE SALARZON |  |  |
+| LOYD FRANCISCO |  |  |
+| SAMUEL BALICAS |  |  |
+| REYNIEL EMHIE TOLENTINO |  |  |
+| DON LUIGI RIO |  |  |
+| ALEXIS BELBES |  |  |
+| EMIL MARTINEZ |  |  |
+| PAUL IVER YUMUL |  |  |
+| AMMAR YASIR |  |  |
+| MARK ANGELO URSULOM |  |  |
+| PAUL IGNACIO ROA |  |  |
+| CAMILLE GUILING |  |  |
+| IVAN IMMACULATA |  |  |
+| ERICA DIOLATA |  |  |
+| JERALD VENTURA |  |  |
+| RODOLFO ALMONTE |  |  |
+| DANIEL CABACUNGAN |  |  |
+| DINA GASIONG |  |  |
+| MYLIN SARCILLAS |  |  |
+| JOY KENNETH ROBINOS  |  |  |
+| WENCHIE MARCELLANO |  |  |
+| PRINCESS MARTINEZ |  |  |
+| ERWENN ANN CABAL |  |  |
+| CHRISTINE ANNE ROSARIO |  |  |
+| NOEL TALISIC |  |  |
+| JERIC GASIONG |  |  |
+| KAREN GASIONG |  |  |
+| MARIELLE SEVERINO |  |  |
+| SAMANTHA ACEBUTCH |  |  |
+| FILIPINA PELENO |  |  |
+| RODRIGO GIMENEZ |  |  |
+| JOHN PAUL MACABUDBOD |  |  |
+| JOVENN GRANDE |  |  |
+| AYESA JANE YAYA |  |  |
