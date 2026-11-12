@@ -1117,7 +1117,7 @@ async function main() {
     const sellerPaper = await fetch(`${BASE}/sales-reports/sales-orders.pdf`, { headers: { Authorization: `Bearer ${sellerToken}` } });
     check(
       'the Sales Order report prints landscape — the year by salesperson and team, the target and the bars on page 1, the flow on page 2',
-      paper.status === 200 && doc?.getPageCount() === 2 && doc.getPage(1).getSize().width > doc.getPage(1).getSize().height && !!page && page.width > page.height && sellerPaper.status === 403 && words.length > 2000,
+      paper.status === 200 && doc?.getPageCount() === 3 && doc.getPage(1).getSize().width > doc.getPage(1).getSize().height && !!page && page.width > page.height && sellerPaper.status === 403 && words.length > 2000,
       `${paper.status} ${doc?.getPageCount()} pages ${page?.width}x${page?.height} seller ${sellerPaper.status}`,
     );
   }
@@ -1140,6 +1140,7 @@ async function main() {
       customers: { id: string; revenue: number; to: string }[];
       people: { id: string; range: number; to: string }[];
       sankey: { root: { value: number }; teams: { id: string; value: number; pct: number }[]; people: { id: string; value: number; pct: number }[]; links: { team: string; person: string; value: number }[] };
+      customerSankey: Sales['sankey'];
     };
     const dash = await http(managerToken, 'GET', `/gops/sales?from=${day}&to=${day}`);
     const d = dash.body as unknown as Sales;
@@ -1161,6 +1162,19 @@ async function main() {
         Math.abs(d.sankey.teams.reduce((s, t) => s + t.pct, 0) - 100) < 0.5 &&
         d.sankey.people.every((p) => p.pct >= 0 && p.pct <= 100),
       JSON.stringify(d.sankey),
+    );
+    const cs = d.customerSankey;
+    const custIds = cs.people.map((p) => p.id);
+    check(
+      'the customer Sankey conserves too: Gruntech = the same teams = every customer once = the bands, the top customers leading it',
+      Math.abs(cs.root.value - d.total) < 0.01 &&
+        JSON.stringify(cs.teams) === JSON.stringify(d.sankey.teams) &&
+        Math.abs(sum(cs.people) - d.total) < 0.01 &&
+        Math.abs(sum(cs.links) - d.total) < 0.01 &&
+        new Set(custIds).size === custIds.length &&
+        custIds.length >= d.customers.length &&
+        d.customers.map((c) => c.id).join() === custIds.slice(0, d.customers.length).join(),
+      JSON.stringify(cs).slice(0, 400),
     );
     check(
       'a person holding two selling roles is ONE node, keyed by login, and the people match the personnel table',

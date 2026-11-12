@@ -2897,6 +2897,19 @@ async function main() {
     );
     const empty = layoutSankey({ root: { label: 'Gruntech', value: 0 }, teams: [], people: [], links: [] });
     check('nothing booked draws nothing', empty.nodes.length === 0 && empty.links.length === 0);
+    // A hundred customers, one line of label each (the customer flow).
+    const many = Array.from({ length: 100 }, (_, i) => ({ id: `c${i}`, label: `Customer ${i}`, value: i < 5 ? 100 : 1 }));
+    const whole = many.reduce((n, c) => n + c.value, 0);
+    const wide = layoutSankey(
+      { root: { label: 'Gruntech', value: whole }, teams: [{ id: 't', label: 'T', value: whole }], people: many, links: many.map((c) => ({ team: 't', person: c.id, value: c.value })) },
+      { width: 600, height: 2600, gap: 6, pitch: 20 },
+    );
+    const custs = wide.nodes.filter((n) => n.column === 2).sort((a, b) => a.y - b.y);
+    check(
+      'a hundred customers each keep a line of their own: every node a label apart from the next, all on the canvas',
+      custs.length === 100 && custs.every((n, i) => i === 0 || n.y - custs[i - 1].y >= 19.99) && custs[99].y + custs[99].h <= 2600.5,
+      `${custs.length} ${custs[99]?.y}`,
+    );
   }
 
   // ── The requisition page's lines (web/src/lib/prLines.ts) ─────────────────

@@ -252,6 +252,13 @@ export interface GopsSales {
     people: { id: string; label: string; value: number; pct: number; to: string }[];
     links: { team: string; person: string; value: number }[];
   };
+  /**
+   * Gruntech → team → CUSTOMER (2026-11-12, the owner's call: "add another
+   * sankey by Gruntech > Team > Customer"): the same shape and the same rows
+   * as `sankey`, `people` holding every customer once — a customer two teams
+   * sold to has two bands in and one node.
+   */
+  customerSankey: GopsSales['sankey'];
 }
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -343,7 +350,25 @@ export async function gopsSales(me: ResolvedUser, query: { from?: unknown; to?: 
     }),
   };
 
-  return { from, to, year, previousYear: year - 1, total, orders: inRange.length, months, customers, people, currentMonth, sankey };
+  // The same flow by customer: every customer of the range, once.
+  const customerLinks = new Map<string, number>();
+  for (const o of inRange) {
+    const lk = `${o.team ? o.team.id : 'none'} ${o.customerId}`;
+    customerLinks.set(lk, (customerLinks.get(lk) ?? 0) + o.net);
+  }
+  const customerSankey: GopsSales['sankey'] = {
+    root: sankey.root,
+    teams: sankey.teams,
+    people: [...byCustomer.entries()]
+      .sort((a, b) => b[1].revenue - a[1].revenue)
+      .map(([id, c]) => ({ id, label: c.name, value: cents(c.revenue), pct: share(c.revenue, total), to: listLink({ customerId: id }) })),
+    links: [...customerLinks.entries()].map(([k, v]) => {
+      const [team, person] = k.split(' ');
+      return { team, person, value: cents(v) };
+    }),
+  };
+
+  return { from, to, year, previousYear: year - 1, total, orders: inRange.length, months, customers, people, currentMonth, sankey, customerSankey };
 }
 
 /**

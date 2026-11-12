@@ -602,7 +602,7 @@ function niceStep(raw: number): number {
  * the whole — can be checked by eye. A team or a person opens the list it
  * counted.
  */
-export function Sankey({ input, format, caption }: { input: SankeyInput; format: (v: number) => string; caption?: string }) {
+export function Sankey({ input, format, caption, oneLine }: { input: SankeyInput; format: (v: number) => string; caption?: string; oneLine?: boolean }) {
   const W = 1080;
   // Two lines of label per node (the name, then the figure and share), so
   // every node needs about 40 units of height whatever its value; a margin
@@ -613,14 +613,22 @@ export function Sankey({ input, format, caption }: { input: SankeyInput; format:
   // Every node is given at least two lines of label (PITCH), so each name
   // sits beside its own bar (2026-11-10, the owner's report); the canvas
   // grows with the people so the large nodes keep room of their own.
-  const PITCH = 44;
-  const H = Math.max(360, 64 * rows + pad * 2);
+  // `oneLine` (2026-11-12, the owner's call for the customer flow: "customer
+  // name, the value and percent in one line") gives the last column one line
+  // of label a node, so a hundred customers fit without one name on another.
+  const PITCH = oneLine ? 20 : 44;
+  const teamRows = Math.max(input.teams.filter((t) => t.value > 0).length, 1);
+  const H = oneLine ? Math.max(360, 64 * teamRows + pad * 2, 26 * rows + pad * 2) : Math.max(360, 64 * rows + pad * 2);
   // Only Gruntech's label sits left of the flow and only the people's right
   // of it (2026-11-09, the owner's call: "widen, maximizing the left and
   // right space"), so each side keeps just the room its own labels need.
   const labelW = 130;
-  const labelR = 190;
-  const lay = layoutSankey(input, { width: W - labelW - labelR, height: H - pad * 2, nodeWidth: 14, gap: 22, pitch: PITCH });
+  const labelR = oneLine ? 400 : 190;
+  const lay = layoutSankey(input, { width: W - labelW - labelR, height: H - pad * 2, nodeWidth: 14, gap: oneLine ? 6 : 22, pitch: PITCH });
+  // One line holds the name, the figure and the share: a long name is cut
+  // so the figures always fit (the whole name is the node's tooltip).
+  const NAME_MAX = 34;
+  const short = (s: string) => (s.length > NAME_MAX ? `${s.slice(0, NAME_MAX - 1).trimEnd()}…` : s);
   if (lay.nodes.length === 0) return <Empty caption={caption} />;
   const navigate = useNavigate();
   const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, SANKEY_TONES[i % SANKEY_TONES.length]]));
@@ -636,18 +644,19 @@ export function Sankey({ input, format, caption }: { input: SankeyInput; format:
   // Labels never overlap (2026-11-09, the owner's report): each column's
   // labels are spread to at least two lines apart, top to bottom, then pulled
   // back up from the bottom edge if the last ran off the canvas.
-  const LINE = PITCH - 4;
   const labelY = new Map<string, number>();
   for (const col of [0, 1, 2] as const) {
+    const single = !!oneLine && col === 2;
+    const LINE = single ? PITCH : 40;
     const ns = lay.nodes.filter((n) => n.column === col).sort((a, b) => a.y - b.y);
     const ys = ns.map((n) => n.y + n.h / 2);
     for (let i = 1; i < ys.length; i++) ys[i] = Math.max(ys[i], ys[i - 1] + LINE);
-    const max = H - pad - 16;
+    const max = H - pad - (single ? pad + 8 : 16);
     if (ys.length && ys[ys.length - 1] > max) {
       ys[ys.length - 1] = max;
       for (let i = ys.length - 2; i >= 0; i--) ys[i] = Math.min(ys[i], ys[i + 1] - LINE);
     }
-    ns.forEach((n, i) => labelY.set(n.id, ys[i] - 8));
+    ns.forEach((n, i) => labelY.set(n.id, single ? ys[i] : ys[i] - 8));
   }
   return (
     <div className="chart">
@@ -664,14 +673,21 @@ export function Sankey({ input, format, caption }: { input: SankeyInput; format:
             const tx = left ? n.x + lay.nodeWidth + 8 : n.x - 8;
             const anchor = left ? 'start' : 'end';
             const words = n.column === 0 ? `${format(n.value)} · 100%` : `${format(n.value)} · ${n.pct}%`;
-            const label = (
-              <text x={tx} y={labelY.get(n.id) ?? n.y + n.h / 2} className="sankey-label" textAnchor={anchor}>
-                <tspan className="sankey-name">{n.label}</tspan>
-                <tspan className="sankey-figure" x={tx} dy="1.2em">
-                  {words}
-                </tspan>
-              </text>
-            );
+            const label =
+              oneLine && n.column === 2 ? (
+                <text x={tx} y={labelY.get(n.id) ?? n.y + n.h / 2} className="sankey-label" textAnchor={anchor}>
+                  <title>{`${n.label}: ${format(n.value)} (${n.pct}%)`}</title>
+                  <tspan className="sankey-name">{short(n.label)}</tspan>
+                  <tspan className="sankey-figure" dx="6">{`· ${words}`}</tspan>
+                </text>
+              ) : (
+                <text x={tx} y={labelY.get(n.id) ?? n.y + n.h / 2} className="sankey-label" textAnchor={anchor}>
+                  <tspan className="sankey-name">{n.label}</tspan>
+                  <tspan className="sankey-figure" x={tx} dy="1.2em">
+                    {words}
+                  </tspan>
+                </text>
+              );
             return (
               <g key={n.id}>
                 <rect x={n.x} y={n.y} width={lay.nodeWidth} height={Math.max(2, n.h)} rx={2} fill={n.column === 0 ? 'var(--text)' : toneOf(n.id)} className="sankey-node">

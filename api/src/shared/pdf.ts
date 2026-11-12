@@ -2243,6 +2243,8 @@ export interface SalesReportSpec {
   barSeries: [string, string];
   /** Gruntech → team → person; laid out here, to the room the page leaves. */
   sankey: SankeyInput | null;
+  /** Gruntech → team → customer, on a page of its own after it. */
+  customerSankey?: SankeyInput | null;
 }
 
 const FLOW_TONES = ['#2E9A4B', '#3B6FD8', '#A62CB5', '#B07A1A', '#1F7A4D', '#5B2A8C'];
@@ -2267,6 +2269,12 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
       root: { ...input.sankey.root, label: pdfSafe(input.sankey.root.label) },
       teams: input.sankey.teams.map((t) => ({ ...t, label: pdfSafe(t.label) })),
       people: input.sankey.people.map((p) => ({ ...p, label: pdfSafe(p.label) })),
+    },
+    customerSankey: input.customerSankey && {
+      ...input.customerSankey,
+      root: { ...input.customerSankey.root, label: pdfSafe(input.customerSankey.root.label) },
+      teams: input.customerSankey.teams.map((t) => ({ ...t, label: pdfSafe(t.label) })),
+      people: input.customerSankey.people.map((p) => ({ ...p, label: pdfSafe(p.label) })),
     },
   };
   const row = await prisma.company.findUnique({ where: { id: 'company' } });
@@ -2389,68 +2397,93 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
     });
   }
 
-  // ── Page 2: the flow, across the whole page.
-  if (spec.sankey) {
-    doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
-    if (name) drawLine(doc, fitLine(doc, name, W * 0.4, true, 12), left, M, W * 0.4, 'left', true, 12, PURPLE);
-    drawLine(doc, fitLine(doc, caps(spec.title), W * 0.6, true, 13), left + W * 0.4, M - 1, W * 0.6, 'right', true, 13, PURPLE);
-    drawLine(doc, fitLine(doc, spec.subtitle, W * 0.6, false, 7), left + W * 0.4, M + 15, W * 0.6, 'right', false, 7, GREY);
-    doc.moveTo(left, ruleY).lineTo(right, ruleY).strokeColor(GREEN).lineWidth(1.2).stroke();
+  // ── The flows, each across a page of its own: by person, then by customer.
+  // `oneLine` (the customer flow, 2026-11-12, the owner's call: "customer
+  // name, the value and percent in one line") gives the last column one line
+  // a node; past what a landscape page holds legibly the page is portrait,
+  // and the type shrinks with the room so no name sits on another.
+  const flowPage = (heading: string, input: SankeyInput, oneLine: boolean) => {
+    const count = input.people.filter((p) => p.value > 0).length;
+    const portrait = oneLine && count > 52;
+    doc.addPage({ size: 'A4', layout: portrait ? 'portrait' : 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
+    const pRight = doc.page.width - M;
+    const pW = pRight - left;
+    const pBottom = doc.page.height - M;
+    if (name) drawLine(doc, fitLine(doc, name, pW * 0.4, true, 12), left, M, pW * 0.4, 'left', true, 12, PURPLE);
+    drawLine(doc, fitLine(doc, caps(spec.title), pW * 0.6, true, 13), left + pW * 0.4, M - 1, pW * 0.6, 'right', true, 13, PURPLE);
+    drawLine(doc, fitLine(doc, spec.subtitle, pW * 0.6, false, 7), left + pW * 0.4, M + 15, pW * 0.6, 'right', false, 7, GREY);
+    doc.moveTo(left, ruleY).lineTo(pRight, ruleY).strokeColor(GREEN).lineWidth(1.2).stroke();
     const sTop = ruleY + 10;
-    const sx = left;
-    const half = W;
-    drawLine(doc, 'WHERE THE SALES COME FROM — GRUNTECH > TEAM > PERSON', sx, sTop, half, 'left', true, 9, PURPLE);
-    const input = spec.sankey;
-    const labelL = 96;
-    const labelR = 130;
+    drawLine(doc, heading, left, sTop, pW, 'left', true, 9, PURPLE);
     const areaTop = sTop + 26;
-    const areaH = bottom - areaTop;
-    const areaW = half - labelL - labelR;
-    const LINE_H = 20;
-    const rows = Math.max(input.people.filter((p) => p.value > 0).length, input.teams.filter((t) => t.value > 0).length, 1);
-    const sk = layoutSankey(input, { width: areaW, height: areaH, nodeWidth: 12, gap: Math.max(4, Math.min(LINE_H, (areaH * 0.45) / rows)), pitch: LINE_H });
-    if (sk.nodes.length) {
-      const ox = sx + labelL;
-      const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, FLOW_TONES[i % FLOW_TONES.length]]));
-      const toneOf = (id: string) => {
-        if (id.startsWith('0:')) return INK;
-        if (teamTone.has(id)) return teamTone.get(id)!;
-        const best = sk.links.filter((l) => l.target === id).sort((a, b) => b.value - a.value)[0];
-        return (best && teamTone.get(best.source)) ?? PURPLE;
-      };
-      doc.save();
-      doc.translate(ox, areaTop);
-      for (const l of sk.links) doc.path(l.path).fillOpacity(0.3).fill(toneOf(l.source.startsWith('0:') ? l.target : l.source));
-      doc.fillOpacity(1);
-      for (const nd of sk.nodes) doc.rect(nd.x, nd.y, sk.nodeWidth, Math.max(1.5, nd.h)).fill(toneOf(nd.id));
-      doc.restore();
-      // Labels never overlap: each column's spread to two lines apart.
-      for (const col of [0, 1, 2] as const) {
-        const ns = sk.nodes.filter((nd) => nd.column === col).sort((a, b) => a.y - b.y);
-        const ys = ns.map((nd) => areaTop + nd.y + nd.h / 2);
-        for (let i = 1; i < ys.length; i++) ys[i] = Math.max(ys[i], ys[i - 1] + LINE_H);
-        const maxY = bottom - LINE_H / 2;
-        if (ys.length && ys[ys.length - 1] > maxY) {
-          ys[ys.length - 1] = maxY;
-          for (let i = ys.length - 2; i >= 0; i--) ys[i] = Math.min(ys[i], ys[i + 1] - LINE_H);
-        }
-        ns.forEach((nd, i) => {
-          const cy = ys[i] - 9;
-          const figure = `${compactPeso(nd.value)} · ${col === 0 ? 100 : nd.pct}%`;
-          if (col === 2) {
-            const lx = ox + nd.x + sk.nodeWidth + 5;
-            drawLine(doc, fitLine(doc, nd.label, labelR - 8, true, 8.5), lx, cy, labelR - 8, 'left', true, 8.5, INK);
-            drawLine(doc, figure, lx, cy + 10, labelR - 8, 'left', false, 7.5, GREY);
-          } else {
-            const w = col === 0 ? labelL - 6 : 110;
-            const rx = ox + nd.x - 5 - w;
-            drawLine(doc, fitLine(doc, nd.label, w, true, 8.5), rx, cy, w, 'right', true, 8.5, INK);
-            drawLine(doc, figure, rx, cy + 10, w, 'right', false, 7.5, GREY);
-          }
-        });
+    const areaH = pBottom - areaTop;
+    const rows = Math.max(count, input.teams.filter((t) => t.value > 0).length, 1);
+    // One line a node: as tall as the page allows, 11pt at most.
+    const LINE_H = oneLine ? Math.min(11, (areaH * 0.9) / rows) : 20;
+    const size = oneLine ? Math.max(3.5, Math.min(8, LINE_H - 1)) : 8.5;
+    const labelL = 96;
+    const labelR = oneLine ? (portrait ? 230 : 280) : 130;
+    const areaW = pW - labelL - labelR;
+    const gap = oneLine ? Math.min(3, LINE_H / 3) : Math.max(4, Math.min(LINE_H, (areaH * 0.45) / rows));
+    const sk = layoutSankey(input, { width: areaW, height: areaH, nodeWidth: 12, gap, pitch: LINE_H });
+    if (!sk.nodes.length) return;
+    const ox = left + labelL;
+    const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, FLOW_TONES[i % FLOW_TONES.length]]));
+    const toneOf = (id: string) => {
+      if (id.startsWith('0:')) return INK;
+      if (teamTone.has(id)) return teamTone.get(id)!;
+      const best = sk.links.filter((l) => l.target === id).sort((x, y) => y.value - x.value)[0];
+      return (best && teamTone.get(best.source)) ?? PURPLE;
+    };
+    doc.save();
+    doc.translate(ox, areaTop);
+    for (const l of sk.links) doc.path(l.path).fillOpacity(0.3).fill(toneOf(l.source.startsWith('0:') ? l.target : l.source));
+    doc.fillOpacity(1);
+    for (const nd of sk.nodes) doc.rect(nd.x, nd.y, sk.nodeWidth, Math.max(oneLine ? 0.8 : 1.5, nd.h)).fill(toneOf(nd.id));
+    doc.restore();
+    // Labels never overlap: each column's are spread a label's height apart.
+    for (const col of [0, 1, 2] as const) {
+      const single = oneLine && col === 2;
+      const lineH = single ? LINE_H : 20;
+      const ns = sk.nodes.filter((nd) => nd.column === col).sort((x, y) => x.y - y.y);
+      const ys = ns.map((nd) => areaTop + nd.y + nd.h / 2);
+      for (let i = 1; i < ys.length; i++) ys[i] = Math.max(ys[i], ys[i - 1] + lineH);
+      const maxY = pBottom - lineH / 2;
+      if (ys.length && ys[ys.length - 1] > maxY) {
+        ys[ys.length - 1] = maxY;
+        for (let i = ys.length - 2; i >= 0; i--) ys[i] = Math.min(ys[i], ys[i + 1] - lineH);
       }
+      ns.forEach((nd, i) => {
+        const figure = `${compactPeso(nd.value)} · ${col === 0 ? 100 : nd.pct}%`;
+        if (single) {
+          // Name, value and share on one line; the name gives way to the figures.
+          const lx = ox + nd.x + sk.nodeWidth + 5;
+          const room = labelR - 8;
+          const tail = ` · ${figure}`;
+          const tailW = doc.font('Helvetica').fontSize(size).widthOfString(tail);
+          const nameText = fitLine(doc, nd.label, Math.max(20, room - tailW), true, size);
+          const nameW = doc.font('Helvetica-Bold').fontSize(size).widthOfString(nameText);
+          const cy = ys[i] - size / 2;
+          drawLine(doc, nameText, lx, cy, nameW + 2, 'left', true, size, INK);
+          drawLine(doc, tail, lx + nameW, cy, tailW + 2, 'left', false, size, GREY);
+          return;
+        }
+        const cy = ys[i] - 9;
+        if (col === 2) {
+          const lx = ox + nd.x + sk.nodeWidth + 5;
+          drawLine(doc, fitLine(doc, nd.label, labelR - 8, true, 8.5), lx, cy, labelR - 8, 'left', true, 8.5, INK);
+          drawLine(doc, figure, lx, cy + 10, labelR - 8, 'left', false, 7.5, GREY);
+        } else {
+          const w = col === 0 ? labelL - 6 : 110;
+          const rx = ox + nd.x - 5 - w;
+          drawLine(doc, fitLine(doc, nd.label, w, true, 8.5), rx, cy, w, 'right', true, 8.5, INK);
+          drawLine(doc, figure, rx, cy + 10, w, 'right', false, 7.5, GREY);
+        }
+      });
     }
-  }
+  };
+  if (spec.sankey) flowPage('WHERE THE SALES COME FROM — GRUNTECH > TEAM > PERSON', spec.sankey, false);
+  if (spec.customerSankey) flowPage('WHERE THE SALES GO — GRUNTECH > TEAM > CUSTOMER', spec.customerSankey, true);
 
   doc.end();
   return done;

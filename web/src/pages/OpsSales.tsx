@@ -36,6 +36,7 @@ interface Sales {
     people: { id: string; label: string; value: number; pct: number; to: string }[];
     links: { team: string; person: string; value: number }[];
   };
+  customerSankey?: Sales['sankey'];
 }
 
 export function OpsSales({ from, to }: { from: string; to: string }) {
@@ -167,6 +168,15 @@ export function OpsSales({ from, to }: { from: string; to: string }) {
       >
         <Sankey input={data.sankey} format={formatCompactMoney} caption={`${formatMoney(data.total)} before VAT, ${data.from} to ${data.to}`} />
       </Panel>
+
+      {data.customerSankey && (
+        <Panel
+          title="Where the sales go"
+          blurb="Gruntech → team → customer. Every customer of the period, once, with its revenue and its share of the whole; a customer two teams sold to has a band from each."
+        >
+          <Sankey input={data.customerSankey} format={formatCompactMoney} oneLine caption={`${formatMoney(data.total)} before VAT, ${data.from} to ${data.to} · ${data.customerSankey.people.length} customers`} />
+        </Panel>
+      )}
 
       <SalesMatrix year={data.year} />
     </div>

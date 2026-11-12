@@ -412,6 +412,7 @@ salesReportRoutes.get(
       bars: sales.months.map((m) => ({ label: m.label, current: m.state === 'future' ? 0 : m.current, previous: m.previous, partial: m.state === 'partial' })),
       barSeries: [`${year}`, `${year - 1}`],
       sankey: sales.sankey.root.value > 0 ? sales.sankey : null,
+      customerSankey: sales.customerSankey.root.value > 0 ? sales.customerSankey : null,
     });
     await audit({ entityType: 'sales_report', entityId: 'sales-orders', action: 'EXPORTED', summary: `${year} sales report printed (one page)` }, req);
     res.setHeader('Content-Type', 'application/pdf');
