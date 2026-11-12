@@ -258,6 +258,8 @@ export function salesOrderListWhere(
   q: ReturnType<typeof listQuery>,
   /** The viewer's team (shared/team.ts) for `?scope=team`; without one the Team view is Mine. */
   team: string | null = null,
+  /** `crossTeamOrderIds()` when `?crossTeam=yes` is asked. */
+  crossIds: string[] | null = null,
 ): { base: Prisma.SalesOrderWhereInput; where: Prisma.SalesOrderWhereInput } {
   const and: Prisma.SalesOrderWhereInput[] = [];
   const readable = salesOrdersReadable(me);
@@ -273,6 +275,11 @@ export function salesOrderListWhere(
   // Order report's rows open the list on it), `none` for no team at all.
   if (f.teamId === 'none') and.push({ quotation: { teamId: null, owner: { OR: [{ employee: null }, { employee: { industryId: null } }] } } });
   else if (f.teamId) and.push({ quotation: quotationTeamWhere(f.teamId) });
+  // Team differs from the salesperson's (2026-11-12, the owner's "fix the
+  // tags": the dashboard's Sankey crossed wherever a quotation's team was not
+  // the order's salesperson's) — the ids `crossTeamOrderIds()` read.
+  if (f.crossTeam === 'yes') and.push({ id: { in: crossIds ?? [] } });
+  else if (f.crossTeam) throw badRequest("Team differs is yes (the quotation's team is not the salesperson's)");
   // Booked: every order but a cancelled one — what the report counts.
   if (f.booked === 'yes') and.push({ status: { not: 'CANCELLED' } });
   else if (f.booked) throw badRequest('Booked is yes (every order but a cancelled one)');
@@ -402,6 +409,71 @@ export async function salesOrderListSummary(
   };
 }
 
+/**
+ * Orders whose team — the quotation's tag, else its author's team — is not
+ * their salesperson's own team, where the salesperson has one. A column
+ * compared across three tables, which a Prisma where cannot say.
+ */
+export async function crossTeamOrderIds(): Promise<string[]> {
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT so.id
+      FROM "SalesOrder" so
+      JOIN "Quotation" q ON q.id = so."quotationId"
+      LEFT JOIN "Employee" qe ON qe."userId" = q."ownerId"
+      JOIN "Employee" oe ON oe."userId" = so."ownerId"
+     WHERE oe."industryId" IS NOT NULL
+       AND COALESCE(q."teamId", qe."industryId") IS DISTINCT FROM oe."industryId"`;
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Put an order's quotation under its SALESPERSON's team (2026-11-12, the
+ * owner's "fix the tags"): the quotation's team becomes the order owner's own
+ * team, and the order's invoices credited to the old team follow. The Sales
+ * Order list's "Set team to the salesperson's" sends it per ticked order.
+ */
+salesOrderRoutes.post(
+  '/:id/retag-team',
+  requireAny('gops.sales_orders.edit_all', 'gops.quotations.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const order = await prisma.salesOrder.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        number: true,
+        owner: { select: { name: true, employee: { select: { industry: { select: { id: true, code: true } } } } } },
+        quotation: { select: { id: true, number: true, team: TEAM_REF_SELECT, owner: OWNER_TEAM_SELECT } },
+      },
+    });
+    if (!order) throw notFound('Sales order not found');
+    const target = order.owner.employee?.industry ?? null;
+    if (!target) throw badRequest(`${order.owner.name} has no team — set it on Admin › Users first`);
+    const before = quotationTeamOf(order.quotation);
+    if (before?.id === target.id) return res.json({ changed: false, team: target.code });
+    await prisma.$transaction(async (tx) => {
+      await tx.quotation.update({ where: { id: order.quotation.id }, data: { teamId: target.id } });
+      const invoices = before
+        ? await tx.invoice.updateMany({ where: { salesOrderId: order.id, teamId: before.id }, data: { teamId: target.id } })
+        : { count: 0 };
+      await audit(
+        {
+          entityType: 'quotation',
+          entityId: order.quotation.id,
+          action: 'UPDATED',
+          summary: `Team ${before?.code ?? 'none'} → ${target.code}, the salesperson's (${order.owner.name}) on sales order ${order.number}${invoices.count ? `; ${invoices.count} invoice(s) followed` : ''}`,
+          before: { teamId: before?.id ?? null },
+          after: { teamId: target.id, salesOrder: order.number, invoices: invoices.count },
+          actorId: me.id,
+        },
+        undefined,
+        tx,
+      );
+    });
+    res.json({ changed: true, team: target.code });
+  }),
+);
+
 const SO_SORTS = ['number', 'orderDate', 'total', 'createdAt'];
 
 function salesOrderOrderBy(q: ReturnType<typeof listQuery>): Prisma.SalesOrderOrderByWithRelationInput {
@@ -416,7 +488,8 @@ salesOrderRoutes.get(
     const me = currentUser(req);
     const q = listQuery(req);
     const team = await teamOf(me.id);
-    const { base, where } = salesOrderListWhere(me, q, team?.id ?? null);
+    const cross = q.filters.crossTeam === 'yes' ? await crossTeamOrderIds() : null;
+    const { base, where } = salesOrderListWhere(me, q, team?.id ?? null, cross);
 
     const [rows, total, summary] = await Promise.all([
       prisma.salesOrder.findMany({
@@ -487,7 +560,8 @@ salesOrderRoutes.get(
     const me = currentUser(req);
     const q = listQuery(req);
     const team = await teamOf(me.id);
-    const { base, where } = salesOrderListWhere(me, q, team?.id ?? null);
+    const cross = q.filters.crossTeam === 'yes' ? await crossTeamOrderIds() : null;
+    const { base, where } = salesOrderListWhere(me, q, team?.id ?? null, cross);
     const f = q.filters;
     const [rows, summary, currency, customer, owner, quotation] = await Promise.all([
       prisma.salesOrder.findMany({

@@ -3582,6 +3582,31 @@ async function main() {
         orderTeams.filter((t) => t.id !== uitTeam.id).every((t) => t.count === 0),
       JSON.stringify(orderTeams.map((t) => [t.code, t.count])),
     );
+    // "Fix the tags" (2026-11-12): an order whose quotation's team is not its
+    // salesperson's is listed under Team differs, and the retag puts it right.
+    const salesEmp = await prisma.employee.findUnique({ where: { userId: sales.id }, select: { id: true, industryId: true } });
+    const root = await prisma.user.findFirst({ where: { isSuperAdmin: true, isActive: true }, select: { id: true, email: true } });
+    if (salesEmp && root) {
+      await prisma.employee.update({ where: { id: salesEmp.id }, data: { industryId: hitTeam.id } });
+      try {
+        const rootToken = signToken(root.id, root.email);
+        const differs = await http(salesToken, 'GET', `/sales-orders?scope=all&crossTeam=yes&ids=${teamOrder.body.id}`);
+        const refused = await http(salesToken, 'POST', `/sales-orders/${teamOrder.body.id}/retag-team`, {});
+        const retag = await http(rootToken, 'POST', `/sales-orders/${teamOrder.body.id}/retag-team`, {});
+        const after = await prisma.quotation.findUniqueOrThrow({ where: { id: String(picked.body.id) }, select: { teamId: true } });
+        const again = await http(rootToken, 'GET', `/sales-orders?scope=all&crossTeam=yes&ids=${teamOrder.body.id}`);
+        check(
+          'an order on another team’s quotation is listed under Team differs, and Set team to the salesperson’s retags its quotation (Edit All only)',
+          differs.status === 200 && differs.body.total === 1 && refused.status === 403 && retag.status === 200 && retag.body.changed === true &&
+            after.teamId === hitTeam.id && again.body.total === 0,
+          `${differs.status} ${differs.body.total} / ${refused.status} / ${retag.status} ${retag.body.changed} ${after.teamId === hitTeam.id} / ${again.body.total}`,
+        );
+      } finally {
+        await prisma.employee.update({ where: { id: salesEmp.id }, data: { industryId: salesEmp.industryId } });
+      }
+    } else {
+      check('a salesperson with an employee record and a super admin are on file for the retag check', false, `${!!salesEmp} ${!!root}`);
+    }
     const partedRevs = await http(salesToken, 'GET', `/quotations/${partedId}`);
     const partedItems = ((partedRevs.body.revisions as { items: { brand: string | null; partNumber: string | null }[] }[])[0]?.items ?? []);
     check('and the page gets the three boxes back to edit', partedItems[0]?.brand === 'SCHNEIDER ELECTRIC' && partedItems[0]?.partNumber === 'EZC100H3030');

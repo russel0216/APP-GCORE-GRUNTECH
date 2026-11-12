@@ -4,12 +4,12 @@ import { ContactPicker, type ContactRef } from '../../components/ContactPicker';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { MemoryInput, ORDER_MEMORY } from '../../components/MemoryInput';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, openPdf, qs } from '../../lib/api';
+import { api, ApiError, openPdf, qs } from '../../lib/api';
 import { Attachments } from '../../components/Attachments';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { useAuth } from '../../lib/auth';
 import { ApprovalStepper, DocumentApproval, DecisionNote, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
-import { DataList, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { yearStartKey } from '../../lib/listUrl';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
 import { NumberInput } from '../../components/NumberInput';
@@ -316,6 +316,8 @@ export function SalesOrders() {
     // The team the order counts under — its quotation's (the Sales Order report's rows open on it).
     { key: 'teamId', label: 'Team', options: [...teams.map((t) => ({ value: t.id, label: t.code })), { value: 'none', label: 'No team' }] },
     { key: 'booked', label: 'Booked', options: [{ value: 'yes', label: 'Not cancelled' }] },
+    // The quotation's team is not the salesperson's own (2026-11-12): what crosses on the dashboard's Sankey.
+    { key: 'crossTeam', label: 'Team differs', options: [{ value: 'yes', label: "Not the salesperson's team" }] },
     {
       key: 'released',
       label: 'Released',
@@ -367,6 +369,11 @@ export function SalesOrders() {
         printPath="/api/sales-orders/pdf"
         selectable
         rowLabel={(r) => `${r.number} ${r.quotation.subject}`}
+        bulkActions={
+          can('gops.sales_orders.edit_all') || can('gops.quotations.edit_all')
+            ? (ctx) => <RetagTeamBulk ctx={ctx} />
+            : undefined
+        }
         reloadToken={reload}
         // Back on 2026-11-11 for the owner's January SCORO invoices (a quotation
         // not in G-CORE gets a stand-in); Edit All only — the team types orders in.
@@ -1937,5 +1944,39 @@ export function SalesOrderEditor() {
         </div>
       </section>
     </div>
+  );
+}
+
+/**
+ * "Fix the tags" (2026-11-12): put each ticked order's quotation under the
+ * order's salesperson's own team — `POST /sales-orders/:id/retag-team`, one
+ * order at a time; what could not move stays ticked with the reason.
+ */
+function RetagTeamBulk({ ctx }: { ctx: BulkContext<SalesOrderListRow> }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  async function apply() {
+    setBusy(true);
+    let moved = 0;
+    const failed: string[] = [];
+    for (const row of ctx.rows) {
+      try {
+        const r = await api.post<{ changed: boolean }>(`/sales-orders/${row.id}/retag-team`, {});
+        if (r.changed) moved++;
+      } catch (err) {
+        failed.push(row.id);
+        toast('error', `${row.number}: ${err instanceof ApiError ? err.message : 'could not be changed'}`);
+      }
+    }
+    setBusy(false);
+    toast(moved ? 'ok' : 'error', `${moved} order${moved === 1 ? '' : 's'} put under the salesperson's team${failed.length ? `; ${failed.length} unchanged` : ''}`);
+    if (failed.length) ctx.keep(failed);
+    else ctx.clear();
+    ctx.reload();
+  }
+  return (
+    <button className="btn btn-sm" disabled={busy} onClick={() => void apply()} title="Set each ticked order's quotation team to its salesperson's own team">
+      {busy ? 'Setting…' : "Set team to the salesperson's"}
+    </button>
   );
 }
