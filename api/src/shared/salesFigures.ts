@@ -106,3 +106,71 @@ export const live = (rows: OrderRow[]) => rows.filter((o) => o.status !== 'CANCE
 
 /** 'YYYY-MM' of a DATE column's value — the day as stored, never the host's zone. */
 export const orderMonth = (d: Date) => d.toISOString().slice(0, 7);
+
+/**
+ * The Sales Order report's narrowing (2026-11-12, the owner's batch: "the
+ * filter can be by personnel, by team, by customer and by product group"),
+ * decided once for the report's pictures, its paper and the dashboard's
+ * figures behind them.
+ *
+ * A PRODUCT GROUP narrows an order to that group's SHARE of it: each order
+ * keeps the fraction of its net (and total) that its priced lines under the
+ * group make of its subtotal, and an order with none of the group drops out.
+ * An order with no priced lines stands whole under "No group".
+ */
+export interface RowFilter {
+  ownerId?: string;
+  /** A team's id, or `none`. */
+  teamId?: string;
+  customerId?: string;
+  status?: string;
+  /** A product group's name (case- and space-blind), or `none` for "No group". */
+  group?: string;
+}
+
+export const NO_GROUP = 'No group';
+export const groupKeyOf = (name: string | null | undefined) => (name ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+const wantedGroup = (group: string) => (group === 'none' ? groupKeyOf(NO_GROUP) : groupKeyOf(group));
+
+export const isNarrowed = (f: RowFilter) => !!(f.ownerId || f.teamId || f.customerId || f.status || f.group);
+
+/** Each order's product groups as fractions of its subtotal (adding up to 1), named as its lines spell them. */
+export async function groupSharesOf(orderIds: string[]): Promise<Map<string, { group: string; share: number }[]>> {
+  const out = new Map<string, { group: string; share: number }[]>();
+  if (!orderIds.length) return out;
+  const lines = await prisma.salesOrderLine.findMany({ where: { orderId: { in: orderIds }, isHeading: false }, select: { orderId: true, group: true, amount: true } });
+  const perOrder = new Map<string, Map<string, { group: string; amount: number }>>();
+  for (const l of lines) {
+    const name = l.group?.trim() || NO_GROUP;
+    const m = perOrder.get(l.orderId) ?? new Map<string, { group: string; amount: number }>();
+    const cur = m.get(groupKeyOf(name)) ?? { group: name, amount: 0 };
+    m.set(groupKeyOf(name), { group: cur.group, amount: cur.amount + num(l.amount) });
+    perOrder.set(l.orderId, m);
+  }
+  for (const id of orderIds) {
+    const m = perOrder.get(id);
+    const sum = m ? [...m.values()].reduce((s, g) => s + g.amount, 0) : 0;
+    out.set(id, m && sum > 0 ? [...m.values()].map((g) => ({ group: g.group, share: g.amount / sum })) : [{ group: NO_GROUP, share: 1 }]);
+  }
+  return out;
+}
+
+/** The rows a filter admits; a product group leaves each order its share of that group. */
+export async function narrowRows(rows: OrderRow[], f: RowFilter): Promise<OrderRow[]> {
+  let out = rows.filter(
+    (o) =>
+      (!f.ownerId || o.ownerId === f.ownerId) &&
+      (!f.teamId || (o.team ? o.team.id : 'none') === f.teamId) &&
+      (!f.customerId || o.customerId === f.customerId) &&
+      (!f.status || o.status === f.status),
+  );
+  if (f.group) {
+    const want = wantedGroup(f.group);
+    const shares = await groupSharesOf(out.map((o) => o.id));
+    out = out.flatMap((o) => {
+      const share = (shares.get(o.id) ?? []).filter((g) => groupKeyOf(g.group) === want).reduce((s, g) => s + g.share, 0);
+      return share > 0 ? [{ ...o, total: cents(o.total * share), net: cents(o.net * share) }] : [];
+    });
+  }
+  return out;
+}

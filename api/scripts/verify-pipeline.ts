@@ -1117,7 +1117,7 @@ async function main() {
     const sellerPaper = await fetch(`${BASE}/sales-reports/sales-orders.pdf`, { headers: { Authorization: `Bearer ${sellerToken}` } });
     check(
       'the Sales Order report prints landscape — the year by salesperson and team, the target and the bars on page 1, the flow on page 2',
-      paper.status === 200 && doc?.getPageCount() === 3 && doc.getPage(1).getSize().width > doc.getPage(1).getSize().height && !!page && page.width > page.height && sellerPaper.status === 403 && words.length > 2000,
+      paper.status === 200 && doc?.getPageCount() === 5 && doc.getPage(1).getSize().width > doc.getPage(1).getSize().height && !!page && page.width > page.height && sellerPaper.status === 403 && words.length > 2000,
       `${paper.status} ${doc?.getPageCount()} pages ${page?.width}x${page?.height} seller ${sellerPaper.status}`,
     );
   }
@@ -1201,6 +1201,38 @@ async function main() {
         oneBody.filterLine.length > 0,
       `${oneFlow.status} ${oneBody?.total} vs ${mineOnly}`,
     );
+    // The report's customer and product-group filters (2026-11-12).
+    type Rep = { cards: { label: string; value: number }[]; tables: { title: string; rows: (string | number | null)[][]; links?: (string | null)[] }[] };
+    const whole = rep.body as unknown as Rep;
+    const beforeVatOf = (r: Rep) => r.cards.find((c) => c.label === 'Before VAT')?.value ?? -1;
+    const custTable = whole.tables.find((t) => t.title === 'By customer');
+    const custId = new URLSearchParams((custTable?.links?.[0] ?? '').split('?')[1] ?? '').get('customerId') ?? '';
+    const byCust = await http(managerToken, 'GET', `/sales-reports/sales-orders?from=${day}&to=${day}&customerId=${custId}`);
+    const custFlow = await http(managerToken, 'GET', `/sales-reports/flows?from=${day}&to=${day}&customerId=${custId}`);
+    check(
+      "the customer filter narrows the report and its pictures to that customer's own figure",
+      !!custId && byCust.status === 200 && Math.abs(beforeVatOf(byCust.body as unknown as Rep) - Number(custTable?.rows[0]?.[3])) < 0.01 && Math.abs(Number(custFlow.body.total) - Number(custTable?.rows[0]?.[3])) < 0.01,
+      `${byCust.status} ${custId}`,
+    );
+    const groupTable = whole.tables.find((t) => t.title.startsWith('By product group'));
+    const groupRows = (groupTable?.rows ?? []).slice(0, 3);
+    let groupsOk = groupRows.length > 0;
+    const seenGroups: string[] = [];
+    for (const g of groupRows) {
+      const name = String(g[0]);
+      const key = name === 'No group' ? 'none' : name;
+      const one = await http(managerToken, 'GET', `/sales-reports/sales-orders?from=${day}&to=${day}&group=${encodeURIComponent(key)}`);
+      const flow = await http(managerToken, 'GET', `/sales-reports/flows?from=${day}&to=${day}&group=${encodeURIComponent(key)}`);
+      const want = Number(g[1]);
+      const got = beforeVatOf(one.body as unknown as Rep);
+      // An order's share is rounded to the centavo, so a group over many orders may differ by a centavo an order.
+      const slack = 0.01 * Math.max(1, d.orders);
+      if (one.status !== 200 || Math.abs(got - want) > slack || Math.abs(Number(flow.body.total) - want) > slack) groupsOk = false;
+      seenGroups.push(`${name}: ${got} vs ${want} (flow ${flow.body.total})`);
+    }
+    check("the product group filter leaves each order its share of that group: the report and the pictures come to the group's own row", groupsOk, seenGroups.join('; '));
+    const narrowPaper = await fetch(`${BASE}/sales-reports/sales-orders.pdf?from=${day}&to=${day}&ownerId=${manager.id}`, { headers: { Authorization: `Bearer ${managerToken}` } });
+    check('the paper prints narrowed to one salesperson', narrowPaper.status === 200, `${narrowPaper.status}`);
     check(
       'a person holding two selling roles is ONE node, keyed by login, and the people match the personnel table',
       new Set(ids).size === ids.length && ids.includes(manager.id) && d.people.map((p) => p.id).join() === ids.join(),

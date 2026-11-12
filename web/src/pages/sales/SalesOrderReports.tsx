@@ -2,6 +2,7 @@ import { ReportPage, type ReportKind } from '../../components/ReportPage';
 import { PersonSelect, usePeople } from '../../components/People';
 import { useEffect, useState } from 'react';
 import { api, qs } from '../../lib/api';
+import { useAuth } from '../../lib/auth';
 import { NumberInput } from '../../components/NumberInput';
 import { formatDate, formatMoney, useToast } from '../../components/ui';
 import { FlowPicture } from '../../components/FlowPicture';
@@ -38,6 +39,17 @@ export function SalesOrderReports() {
   // or lost the right — their orders are still in the report.
   const [booked, setBooked] = useState<{ id: string; name: string }[]>([]);
   const people = [...sellers, ...booked.filter((b) => !sellers.some((p) => p.id === b.id))];
+  // The period's customers (from the flows) and the product groups on the list.
+  const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
+  const [groups, setGroups] = useState<string[]>([]);
+  const { me } = useAuth();
+  const myTeam = me?.user.team ?? null;
+  useEffect(() => {
+    api
+      .get<{ name: string; isActive?: boolean }[]>('/reference/quotation-groups')
+      .then((g) => setGroups(g.filter((x) => x.isActive !== false).map((x) => x.name)))
+      .catch(() => setGroups([]));
+  }, []);
   useEffect(() => {
     api
       .get<Team[]>('/reference/industries')
@@ -49,40 +61,66 @@ export function SalesOrderReports() {
       title="Sales Order Report"
       endpoint="/sales-reports"
       kinds={KINDS}
-      extraKeys={['ownerId', 'teamId', 'status', 'customers']}
+      extraKeys={['ownerId', 'teamId', 'customerId', 'group', 'status', 'customers']}
+      controlRows
+      actionsInCard
       controls={({ params, set }) => (
         <>
-          <span className="rep-label">Narrow</span>
-          <PersonSelect
-            people={people}
-            placeholder="— anyone —"
-            value={params.get('ownerId') ?? ''}
-            onChange={(v) => set({ ownerId: v })}
-          />
-          <select aria-label="Team" value={params.get('teamId') ?? ''} onChange={(e) => set({ teamId: e.target.value })}>
-            <option value="">Every team</option>
-            {teams.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.code} — {t.name}
-              </option>
-            ))}
-            <option value="none">No team</option>
-          </select>
-          <select aria-label="Status" value={params.get('status') ?? ''} onChange={(e) => set({ status: e.target.value })}>
-            <option value="">Every status</option>
-            {STATUSES.map((s) => (
-              <option key={s.value} value={s.value}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-          <select aria-label="Customers on the customer flow, printed and as a picture" value={params.get('customers') ?? ''} onChange={(e) => set({ customers: e.target.value })}>
-            <option value="">Customer flow: all customers</option>
-            <option value="10">Customer flow: top 10</option>
-            <option value="25">Customer flow: top 25</option>
-            <option value="50">Customer flow: top 50</option>
-          </select>
-          <TargetBox year={Number((params.get('to') ?? new Date().toISOString()).slice(0, 4))} />
+          <div className="rep-row">
+            <span className="rep-label">Filter by</span>
+            <PersonSelect people={people} placeholder="All personnel" value={params.get('ownerId') ?? ''} onChange={(v) => set({ ownerId: v })} />
+            <select aria-label="Team" value={params.get('teamId') ?? ''} onChange={(e) => set({ teamId: e.target.value })}>
+              <option value="">All teams</option>
+              {myTeam && (
+                <option value={myTeam.id}>
+                  My team — {myTeam.code}
+                </option>
+              )}
+              {teams
+                .filter((t) => t.id !== myTeam?.id)
+                .map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.code} — {t.name}
+                  </option>
+                ))}
+              <option value="none">No team</option>
+            </select>
+            <select aria-label="Customer" value={params.get('customerId') ?? ''} onChange={(e) => set({ customerId: e.target.value })}>
+              <option value="">All customers</option>
+              {customers.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <select aria-label="Product group" value={params.get('group') ?? ''} onChange={(e) => set({ group: e.target.value })}>
+              <option value="">All product groups</option>
+              {groups.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+              <option value="none">No group</option>
+            </select>
+            <select aria-label="Status" value={params.get('status') ?? ''} onChange={(e) => set({ status: e.target.value })}>
+              <option value="">Every status</option>
+              {STATUSES.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="rep-row">
+            <span className="rep-label">Show</span>
+            <select aria-label="Customers on the customer flow and the customer table" value={params.get('customers') ?? ''} onChange={(e) => set({ customers: e.target.value })}>
+              <option value="">All customers</option>
+              <option value="10">Top 10 customers</option>
+              <option value="25">Top 25 customers</option>
+              <option value="50">Top 50 customers</option>
+            </select>
+            <TargetBox year={Number((params.get('to') ?? new Date().toISOString()).slice(0, 4))} />
+          </div>
         </>
       )}
       below={({ from, to, params }) => (
@@ -93,7 +131,10 @@ export function SalesOrderReports() {
           ownerId={params.get('ownerId') ?? ''}
           teamId={params.get('teamId') ?? ''}
           status={params.get('status') ?? ''}
+          customerId={params.get('customerId') ?? ''}
+          group={params.get('group') ?? ''}
           onOwners={setBooked}
+          onCustomers={setCustomers}
         />
       )}
     />
@@ -144,6 +185,7 @@ interface Flows {
   total: number;
   filterLine?: string;
   owners?: { id: string; name: string }[];
+  customers?: { id: string; name: string }[];
   sankey: SankeyInput;
   customerSankey: SankeyInput;
 }
@@ -160,7 +202,10 @@ function SalesFlows({
   ownerId,
   teamId,
   status,
+  customerId,
+  group,
   onOwners,
+  onCustomers,
 }: {
   from: string;
   to: string;
@@ -168,24 +213,28 @@ function SalesFlows({
   ownerId: string;
   teamId: string;
   status: string;
+  customerId: string;
+  group: string;
   onOwners: (owners: { id: string; name: string }[]) => void;
+  onCustomers: (customers: { id: string; name: string }[]) => void;
 }) {
   const [flows, setFlows] = useState<Flows | null>(null);
   useEffect(() => {
     let live = true;
     api
-      .get<Flows>(`/sales-reports/flows${qs({ from, to, ownerId: ownerId || undefined, teamId: teamId || undefined, status: status || undefined })}`)
+      .get<Flows>(`/sales-reports/flows${qs({ from, to, ownerId: ownerId || undefined, teamId: teamId || undefined, status: status || undefined, customerId: customerId || undefined, group: group || undefined })}`)
       .then((f) => {
         if (!live) return;
         setFlows(f);
         onOwners(f.owners ?? []);
+        onCustomers(f.customers ?? []);
       })
       .catch(() => live && setFlows(null));
     return () => {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [from, to, ownerId, teamId, status]);
+  }, [from, to, ownerId, teamId, status, customerId, group]);
   if (!flows) return null;
   const days = `${formatMoney(flows.total)} before VAT · ${formatDate(flows.from)} to ${formatDate(flows.to)}${flows.filterLine ? ` · ${flows.filterLine}` : ''}`;
   const customers = topOfFlow(flows.customerSankey, top);

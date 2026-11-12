@@ -271,7 +271,7 @@ export function canSeeSales(me: ResolvedUser): boolean {
   return canSee(me, 'sales_orders');
 }
 
-export async function gopsSales(me: ResolvedUser, query: { from?: unknown; to?: unknown }, only?: (o: OrderRow) => boolean): Promise<GopsSales> {
+export async function gopsSales(me: ResolvedUser, query: { from?: unknown; to?: unknown }, narrow?: (rows: OrderRow[]) => Promise<OrderRow[]>): Promise<GopsSales> {
   const range = parseRange(typeof query.from === 'string' ? query.from : undefined, typeof query.to === 'string' ? query.to : undefined);
   const year = range.to.getUTCFullYear();
   const yearStart = new Date(Date.UTC(year - 1, 0, 1));
@@ -279,10 +279,10 @@ export async function gopsSales(me: ResolvedUser, query: { from?: unknown; to?: 
   // One read covers the chart's two years; the range's own rows are the
   // subset dated inside it (the range never reaches past its own year's end).
   const wide = range.from < yearStart ? range.from : yearStart;
-  // `only` narrows every figure to the orders it admits (the report's
-  // salesperson, team and status filters, for its pictures).
+  // `narrow` leaves every figure only the orders it admits (the report's
+  // filters — `narrowRows` — for its pictures and its paper).
   const all = live(await salesOrderRows(me, wide, yearEnd));
-  const rows = only ? all.filter(only) : all;
+  const rows = narrow ? await narrow(all) : all;
   const inRange = rows.filter((o) => o.orderDate >= range.from && o.orderDate <= range.to);
 
   const today = dayOf(manilaDate(new Date()));

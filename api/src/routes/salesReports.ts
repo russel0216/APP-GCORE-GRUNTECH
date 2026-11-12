@@ -14,7 +14,7 @@ import { type Range } from '../shared/insights';
 import { statusLabel } from '../shared/pdf';
 import { quotationTotals } from '../shared/quotation';
 import { orderTeamWhere } from '../shared/team';
-import { live as liveRows, salesOrderRows } from '../shared/salesFigures';
+import { NO_GROUP, groupKeyOf, groupSharesOf, isNarrowed, live as liveRows, narrowRows, salesOrderRows, type RowFilter } from '../shared/salesFigures';
 import { salesMatrix } from '../shared/gops';
 import { badRequest } from '../http/kit';
 import { Series, byValue, cents, linkTo, monthsOf, mountReports, num, pct, table, tally, type Cell, type Report, type ReportContext } from '../shared/reportKit';
@@ -62,6 +62,14 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
     and.push({ status: q.status as (typeof STATUSES)[number] });
     words.push(`status ${statusLabel(q.status)}`);
   }
+  if (q.customerId) {
+    and.push({ customerId: q.customerId });
+    const customer = await prisma.customer.findUnique({ where: { id: q.customerId }, select: { name: true } });
+    words.push(`customer ${customer?.name ?? 'not on file'}`);
+  }
+  // A product group narrows each order to that group's SHARE of it (below).
+  const wantGroup = q.group ? groupKeyOf(q.group === 'none' ? NO_GROUP : q.group) : null;
+  if (q.group) words.push(`product group ${q.group === 'none' ? NO_GROUP : q.group} (each order's share of it)`);
 
   // The rows and their pesos are shared/salesFigures.ts — the G-OPS dashboard
   // reads the same, so the two cannot disagree (2026-11-08). The range's
@@ -83,7 +91,7 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
 
   // Each live order in pesos: its total (with VAT), its net before VAT, what
   // live invoices bill of it (before VAT), and its margin where seen.
-  const figures = live.map((o) => {
+  const wholeFigures = live.map((o) => {
     const rate = o.rate;
     const t = quotationTotals({ lines: (linesOf.get(o.id) ?? []).filter((l) => !l.isHeading), discountPct: o.raw.discountPct, vatRate: o.raw.vatRate, vatInclusive: o.raw.vatInclusive });
     const seen = canSeeOrderCost(me, o.ownerId) && t.cost.costedLines > 0;
@@ -107,6 +115,17 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
       rate,
     };
   });
+  // With a product group chosen, an order keeps the fraction its lines under
+  // that group make of its subtotal — of its total, net, invoiced and margin
+  // alike — and an order with none of it drops out.
+  const figures = !wantGroup
+    ? wholeFigures
+    : wholeFigures.flatMap((x) => {
+        const mine = x.groups.filter((g) => groupKeyOf(g.group) === wantGroup);
+        const share = x.subtotalRaw > 0 ? mine.reduce((n, g) => n + g.amount, 0) / x.subtotalRaw : wantGroup === groupKeyOf(NO_GROUP) ? 1 : 0;
+        if (!(share > 0)) return [];
+        return [{ ...x, total: cents(x.total * share), net: cents(x.net * share), invoiced: cents(x.invoiced * share), margin: cents(x.margin * share), marginBase: cents(x.marginBase * share), groups: mine }];
+      });
   const sum = (f: (x: (typeof figures)[number]) => number) => cents(figures.reduce((s, x) => s + f(x), 0));
   const booked = sum((x) => x.total);
   const net = sum((x) => x.net);
@@ -154,6 +173,7 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
       scope: 'all',
       ownerId: q.ownerId || null,
       teamId: q.teamId || null,
+      customerId: q.customerId || null,
       ...(q.status ? { status: q.status } : { booked: 'yes' }),
       ...extra,
     });
@@ -174,7 +194,8 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
   }
 
   const byStatus = new Map<string, number[]>();
-  for (const o of orders) {
+  // With a product group chosen only the orders holding it are counted, at their share.
+  for (const o of wantGroup ? figures.map((x) => ({ status: x.o.status, total: x.total })) : orders) {
     const cur = byStatus.get(o.status) ?? [0, 0];
     byStatus.set(o.status, [cur[0] + 1, cur[1] + o.total]);
   }
@@ -202,11 +223,11 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
     ),
   ];
 
-  const cancelled = orders.length - live.length;
+  const cancelled = wantGroup ? 0 : orders.length - live.length;
   const notes: string[] = [];
   if (cancelled) notes.push(`${cancelled} cancelled order${cancelled === 1 ? '' : 's'} in the period book${cancelled === 1 ? 's' : ''} nothing and ${cancelled === 1 ? 'is' : 'are'} counted under By status only.`);
   if (figures.some((x) => x.o.currency !== 'PHP')) notes.push('Orders in a foreign currency are converted to pesos at their quotation’s own rate.');
-  if (live.length && seenCount < live.length) notes.push(`The margin is read off the ${seenCount} of ${live.length} orders whose cost you may see.`);
+  if (figures.length && seenCount < figures.length) notes.push(`The margin is read off the ${seenCount} of ${figures.length} orders whose cost you may see.`);
 
   return {
     kind: 'sales-orders',
@@ -215,7 +236,7 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
     to: range.to.toISOString().slice(0, 10),
     ...(words.length ? { filterLine: words.join(' · ') } : {}),
     cards: [
-      { label: 'Sales orders', value: live.length, ...(cancelled ? { sub: `${cancelled} cancelled, not counted` } : {}) },
+      { label: 'Sales orders', value: figures.length, ...(cancelled ? { sub: `${cancelled} cancelled, not counted` } : {}) },
       { label: 'Booked (with VAT)', value: booked, money: true },
       { label: 'Before VAT', value: net, money: true },
       { label: 'Invoiced', value: billed, money: true, sub: `${pct(billed, net)}% of before VAT` },
@@ -344,6 +365,25 @@ salesReportRoutes.put(
   }),
 );
 
+/** The report's filters off a query, checked: the pictures and the paper read them alike. */
+function rowFilterOf(query: Record<string, unknown>): RowFilter {
+  const one = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+  const status = one(query.status);
+  if (status && !(STATUSES as readonly string[]).includes(status)) throw badRequest(`Status is one of ${STATUSES.map(statusLabel).join(', ')}`);
+  return { ownerId: one(query.ownerId), teamId: one(query.teamId), customerId: one(query.customerId), status, group: one(query.group) };
+}
+
+/** What a filter narrowed to, in words. */
+async function filterWords(f: RowFilter): Promise<string[]> {
+  const words: string[] = [];
+  if (f.ownerId) words.push((await prisma.user.findUnique({ where: { id: f.ownerId }, select: { name: true } }))?.name ?? 'one salesperson');
+  if (f.teamId) words.push(f.teamId === 'none' ? 'no team' : `team ${(await prisma.industry.findUnique({ where: { id: f.teamId }, select: { code: true } }))?.code ?? ''}`.trim());
+  if (f.customerId) words.push((await prisma.customer.findUnique({ where: { id: f.customerId }, select: { name: true } }))?.name ?? 'one customer');
+  if (f.group) words.push(`product group ${f.group === 'none' ? NO_GROUP : f.group}`);
+  if (f.status) words.push(statusLabel(f.status));
+  return words;
+}
+
 // The two flows as figures (2026-11-12, the owner's call: "on sales order
 // report add download png or jpg for the sankey, salesperson and customer"):
 // Gruntech > team > person and Gruntech > team > customer over the report's
@@ -356,26 +396,16 @@ salesReportRoutes.get(
     const me = currentUser(req);
     // The report's own narrowing (2026-11-12, the owner's report: "the filter
     // is not working per person" — the pictures showed everybody): the
-    // salesperson, the team (an id or `none`) and the status.
-    const one = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
-    const ownerId = one(req.query.ownerId);
-    const teamId = one(req.query.teamId);
-    const status = one(req.query.status);
-    if (status && !(STATUSES as readonly string[]).includes(status)) throw badRequest(`Status is one of ${STATUSES.map(statusLabel).join(', ')}`);
-    const narrowed = !!(ownerId || teamId || status);
+    // salesperson, the team, the customer, the product group and the status.
+    const f = rowFilterOf(req.query);
+    const narrowed = isNarrowed(f);
     const range = { from: req.query.from, to: req.query.to };
-    const sales = await gopsSales(
-      me,
-      range,
-      narrowed ? (o) => (!ownerId || o.ownerId === ownerId) && (!teamId || (o.team ? o.team.id : 'none') === teamId) && (!status || o.status === status) : undefined,
-    );
-    // Everyone who booked in these days, whatever the narrowing — the page's
-    // salesperson picker lists them even once they have left.
+    const sales = await gopsSales(me, range, narrowed ? (rows) => narrowRows(rows, f) : undefined);
+    // Everyone who booked and every customer of these days, whatever the
+    // narrowing — the page's pickers list them (a salesperson even once gone).
     const everyone = narrowed ? await gopsSales(me, range) : sales;
-    const words: string[] = [];
-    if (ownerId) words.push(everyone.people.find((p) => p.id === ownerId)?.name ?? 'one salesperson');
-    if (teamId) words.push(teamId === 'none' ? 'no team' : `team ${everyone.sankey.teams.find((t) => t.id === teamId)?.label ?? ''}`.trim());
-    if (status) words.push(statusLabel(status));
+    const customers = new Map<string, string>();
+    for (const p of everyone.customerSankey.people) customers.set(p.of, p.label);
     res.json({
       from: sales.from,
       to: sales.to,
@@ -383,8 +413,9 @@ salesReportRoutes.get(
       orders: sales.orders,
       sankey: sales.sankey,
       customerSankey: sales.customerSankey,
-      filterLine: words.join(' · '),
+      filterLine: (await filterWords(f)).join(' · '),
       owners: everyone.people.map((p) => ({ id: p.id, name: p.name })),
+      customers: [...customers.entries()].map(([id, name]) => ({ id, name })).sort((x, y) => x.name.localeCompare(y.name)),
     });
   }),
 );
@@ -399,7 +430,11 @@ salesReportRoutes.get(
     const year = range.to.getUTCFullYear();
     const from = new Date(Date.UTC(year, 0, 1));
     const to = new Date(Date.UTC(year, 11, 31, 23, 59, 59, 999));
-    const rows = liveRows(await salesOrderRows(me, from, to));
+    // The paper follows the report's filters (2026-11-12, the owner's batch:
+    // "all report details will be about my team sales").
+    const f = rowFilterOf(q);
+    const narrowed = isNarrowed(f);
+    const rows = await narrowRows(liveRows(await salesOrderRows(me, from, to)), f);
     const month = (d: Date) => Number(d.toISOString().slice(5, 7)) - 1;
     const zero = () => MONTHS.map(() => 0);
 
@@ -434,15 +469,56 @@ salesReportRoutes.get(
     ].map((t) => ({ ...t, values: t.values.map(cents), total: cents(t.total) }));
     const grand = cents(total.reduce((a, b) => a + b, 0));
 
-    const sales = await gopsSales(me, { from: `${year}-01-01`, to: q.to ?? `${year}-12-31` });
+    const sales = await gopsSales(me, { from: `${year}-01-01`, to: q.to ?? `${year}-12-31` }, narrowed ? (all) => narrowRows(all, f) : undefined);
     // `customers=10|25|50` prints the top customers on the flow's page, the
     // rest gathered per team; anything else prints them all.
     const topN = ['10', '25', '50'].includes(q.customers ?? '') ? Number(q.customers) : 0;
+    // By customer, by month: every customer once, the largest first, the team
+    // that sold it most beside it; past the top n the rest are one row.
+    const share = (v: number) => (grand > 0 ? `${((v / grand) * 100).toFixed(1)}%` : '0%');
+    type Row = { name: string; second: string; values: number[]; total: number; teams: Map<string, number> };
+    const byCustomer = new Map<string, Row>();
+    for (const o of rows) {
+      const c = byCustomer.get(o.customerId) ?? { name: o.customerName, second: '', values: zero(), total: 0, teams: new Map<string, number>() };
+      c.values[month(o.orderDate)] += o.net;
+      c.total += o.net;
+      const code = o.team?.code ?? '';
+      c.teams.set(code, (c.teams.get(code) ?? 0) + o.net);
+      byCustomer.set(o.customerId, c);
+    }
+    const rankedCustomers = [...byCustomer.values()].filter((c) => Math.abs(c.total) >= 0.005).sort((a, b) => b.total - a.total);
+    const shownCustomers = topN ? rankedCustomers.slice(0, topN) : rankedCustomers;
+    const restCustomers = topN ? rankedCustomers.slice(topN) : [];
+    const customerRows = shownCustomers.map((c) => ({ name: c.name, second: [...c.teams.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '', values: c.values.map(cents), total: cents(c.total), pct: share(c.total) }));
+    if (restCustomers.length) {
+      const values = zero();
+      for (const c of restCustomers) c.values.forEach((v, i) => (values[i] += v));
+      const sum = restCustomers.reduce((n, c) => n + c.total, 0);
+      customerRows.push({ name: `Other customers (${restCustomers.length})`, second: '', values: values.map(cents), total: cents(sum), pct: share(sum) });
+    }
+    // By product group, by month: each order's net spread over its groups (an
+    // order narrowed to one group is already that group's share).
+    const shares = f.group ? null : await groupSharesOf(rows.map((o) => o.id));
+    const byGroup = new Map<string, { name: string; values: number[]; total: number }>();
+    for (const o of rows) {
+      const parts = shares ? shares.get(o.id) ?? [{ group: NO_GROUP, share: 1 }] : [{ group: f.group === 'none' ? NO_GROUP : f.group!, share: 1 }];
+      for (const part of parts) {
+        const g = byGroup.get(groupKeyOf(part.group)) ?? { name: part.group, values: zero(), total: 0 };
+        g.values[month(o.orderDate)] += o.net * part.share;
+        g.total += o.net * part.share;
+        byGroup.set(groupKeyOf(part.group), g);
+      }
+    }
+    const productRows = [...byGroup.values()]
+      .filter((g) => Math.abs(g.total) >= 0.005)
+      .sort((a, b) => b.total - a.total)
+      .map((g) => ({ name: g.name, second: '', values: g.values.map(cents), total: cents(g.total), pct: share(g.total) }));
+    const words = await filterWords(f);
     const target = await yearTarget(year);
     const currency = await companyCurrency();
     const pdf = await renderSalesReport({
       title: `${year} Monthly Sale Report`,
-      subtitle: `Booked sales orders before VAT, in ${currency} · January to December ${year}`,
+      subtitle: `Booked sales orders before VAT, in ${currency} · January to December ${year}${words.length ? ` · ${words.join(' · ')}` : ''}`,
       months: MONTHS,
       people: peopleRows,
       teams: teamRows,
@@ -453,13 +529,18 @@ salesReportRoutes.get(
           { label: 'Date of report', value: formatDate(new Date()) },
           { label: 'Data gathered by', value: me.name },
         ],
-        right: [
-          { label: `${year} Target`, value: target ? formatAmount(target) : 'Not set' },
-          { label: '% Achievement', value: target ? `${((grand / target) * 100).toFixed(2)}%` : '—' },
-        ],
+        // The target is the company's: a narrowed paper says what it shows instead.
+        right: narrowed
+          ? [{ label: 'Showing', value: words.join(' · ') }]
+          : [
+              { label: `${year} Target`, value: target ? formatAmount(target) : 'Not set' },
+              { label: '% Achievement', value: target ? `${((grand / target) * 100).toFixed(2)}%` : '—' },
+            ],
       },
       bars: sales.months.map((m) => ({ label: m.label, current: m.state === 'future' ? 0 : m.current, previous: m.previous, partial: m.state === 'partial' })),
       barSeries: [`${year}`, `${year - 1}`],
+      customerTable: customerRows,
+      productTable: productRows,
       sankey: sales.sankey.root.value > 0 ? sales.sankey : null,
       customerSankey: sales.customerSankey.root.value > 0 ? topOfFlow(sales.customerSankey, topN) : null,
     });

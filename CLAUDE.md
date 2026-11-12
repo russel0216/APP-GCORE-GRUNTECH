@@ -6394,7 +6394,41 @@ only)` — its new third argument, a predicate narrowing every figure — and
 answers `filterLine` (printed in the pictures' subtitle) and `owners`,
 everyone who booked in the days whatever the narrowing; the page adds them
 to its salesperson picker, so someone who has since left or lost the create
-right can still be picked. The printed report stays the whole company's.
+right can still be picked.
+
+**The Sales Order report's batch** (2026-11-12, the owner's six: "move the
+button for export csv and print; if I'm the manager I can also filter to my
+team — all report details about my team's sales; sales by product; rename
+Narrow; the filter can be by personnel, by team, by customer and by product
+group; on the PDF add the Sale Report table by customer and sale by product
+with %"). **Filters**: the row is labelled "Filter by" — personnel, team (the
+viewer's own first, "My team — GIB"), customer (the period's customers, from
+`/flows`' `customers`), product group (the active quotation groups, and "No
+group") and status — URL keys `ownerId`, `teamId`, `customerId`, `group`,
+`status`. `RowFilter`, `isNarrowed()`, `groupSharesOf()` and `narrowRows()`
+in `shared/salesFigures.ts` are the ONE narrowing for the pictures and the
+paper (`gopsSales`' third argument is `narrow`, a function over the rows);
+the on-screen report applies the same rule to its own figures. **A product
+group leaves each order its SHARE of that group** — the fraction its priced
+lines under the group make of its subtotal, of its total, net, invoiced and
+margin alike; an order with none drops out, one with no priced lines stands
+whole under "No group" — so a group's report comes to its own row of "By
+product group". **The paper follows the filters** (`rowFilterOf()` /
+`filterWords()` in `routes/salesReports.ts`): every page is the narrowed set,
+the subtitle says to what, and the target and achievement — the company's —
+give way to "Showing …" on a narrowed paper. **Five pages**: the personnel
+and team tables with the bars; **Sales by customer** and **Sales by product
+group** (`SalesReportSpec.customerTable` / `productTable`, `tablePage()` in
+`renderSalesReport`) — the months across, the year and its share, every row
+on ONE landscape page with rows and type shrinking to fit (a hundred
+customers print at about 4pt; the "Show: top 10 / 25 / 50 customers" select
+gathers the rest into one row), and where the table leaves room a bar a row
+to scale; then the two flows. **The page**: `ReportPage`'s `controlRows` (the
+controls lay out their own rows) and `actionsInCard` (Export CSV and Print at
+the foot of the controls card, `.rep-actions`, as card buttons) — this report
+alone; the other reports keep theirs in the page head. verify-pipeline pins
+the customer filter, the group filter against the group's own row, the
+narrowed paper and the five pages.
 
 ## Paper: one sign-off rule, one money block, a printed twin for every list (2026-10-10)
 

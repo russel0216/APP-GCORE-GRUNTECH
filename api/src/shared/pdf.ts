@@ -2245,6 +2245,20 @@ export interface SalesReportSpec {
   sankey: SankeyInput | null;
   /** Gruntech → team → customer, on a page of its own after it. */
   customerSankey?: SankeyInput | null;
+  /** Every customer by month, a page of its own after page 1. */
+  customerTable?: SalesReportTableRow[];
+  /** Every product group by month with its share, a page of its own. */
+  productTable?: SalesReportTableRow[];
+}
+
+export interface SalesReportTableRow {
+  name: string;
+  /** A short second column (the team's code); empty leaves the column out. */
+  second: string;
+  values: number[];
+  total: number;
+  /** Its share of the whole, as printed ("12.3%"). */
+  pct: string;
 }
 
 const FLOW_TONES = ['#2E9A4B', '#3B6FD8', '#A62CB5', '#B07A1A', '#1F7A4D', '#5B2A8C'];
@@ -2270,6 +2284,8 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
       teams: input.sankey.teams.map((t) => ({ ...t, label: pdfSafe(t.label) })),
       people: input.sankey.people.map((p) => ({ ...p, label: pdfSafe(p.label) })),
     },
+    customerTable: input.customerTable?.map((r) => ({ ...r, name: pdfSafe(r.name), second: pdfSafe(r.second) })),
+    productTable: input.productTable?.map((r) => ({ ...r, name: pdfSafe(r.name), second: pdfSafe(r.second) })),
     customerSankey: input.customerSankey && {
       ...input.customerSankey,
       root: { ...input.customerSankey.root, label: pdfSafe(input.customerSankey.root.label) },
@@ -2396,6 +2412,75 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
       drawLine(doc, b.label + (b.partial ? '*' : ''), bx + i * gw, plotBottom + 3, gw, 'center', false, 7, GREY);
     });
   }
+
+  // ── A table to a page (2026-11-12, the owner's batch: "add Sale Report
+  // table view by Customer (1 page, maximize space) and Sale by Product with
+  // %"): the months across, the year and its share of the whole, every row
+  // on ONE landscape page — the rows and the type shrink to fit. What the
+  // table leaves under it is a bar a row, to scale, when there is room.
+  const tablePage = (heading: string, firstHead: string, secondHead: string, tRows: SalesReportTableRow[]) => {
+    doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
+    if (name) drawLine(doc, fitLine(doc, name, W * 0.4, true, 12), left, M, W * 0.4, 'left', true, 12, PURPLE);
+    drawLine(doc, fitLine(doc, caps(spec.title), W * 0.6, true, 13), left + W * 0.4, M - 1, W * 0.6, 'right', true, 13, PURPLE);
+    drawLine(doc, fitLine(doc, spec.subtitle, W * 0.6, false, 7), left + W * 0.4, M + 15, W * 0.6, 'right', false, 7, GREY);
+    doc.moveTo(left, ruleY).lineTo(right, ruleY).strokeColor(GREEN).lineWidth(1.2).stroke();
+    drawLine(doc, heading, left, ruleY + 8, W, 'left', true, 9, PURPLE);
+    const top = ruleY + 24;
+    const tH = Math.max(3.6, Math.min(15, (bottom - top) / (tRows.length + 2)));
+    const tSize = Math.max(3, Math.min(7.5, tH * 0.76));
+    const hasSecond = tRows.some((r) => r.second);
+    const firstW = hasSecond ? 176 : 150;
+    const secondW = hasSecond ? 26 : 0;
+    const pctW = 34;
+    const cols = spec.months.length + 1;
+    const cW = (W - firstW - secondW - pctW) / cols;
+    const xOf = (i: number) => left + firstW + secondW + i * cW;
+    const row = (y: number, first: string, second: string, values: string[], share: string, o: { head?: boolean; bold?: boolean; shade?: boolean }) => {
+      if (o.shade) doc.rect(left, y, W, tH).fill('#F3EFF7');
+      const color = o.head ? PURPLE : INK;
+      const bold = !!o.head || !!o.bold;
+      const ty = y + (tH - tSize) / 2 + tSize * 0.07;
+      drawLine(doc, fitLine(doc, first, firstW - 4, bold, tSize), left + 2, ty, firstW - 4, 'left', bold, tSize, color);
+      if (secondW) drawLine(doc, second, left + firstW, ty, secondW - 2, 'left', bold, tSize, color);
+      values.forEach((v, i) => {
+        const fs = Math.min(tSize, fitSize(doc, v, cW - 3, tSize));
+        drawLine(doc, v, xOf(i) + 1, ty + (tSize - fs) / 2, cW - 3, 'right', bold, fs, color);
+      });
+      drawLine(doc, share, right - pctW, ty, pctW - 2, 'right', bold, tSize, color);
+      doc.moveTo(left, y + tH).lineTo(right, y + tH).strokeColor(o.head ? PURPLE : RULE).lineWidth(o.head ? 0.8 : tH < 7 ? 0.2 : 0.4).stroke();
+    };
+    const amount = (v: number) => (Math.abs(v) < 0.005 ? '' : formatAmount(v));
+    let ty = top;
+    row(ty, firstHead, secondHead, [...spec.months.map((m) => caps(tH < 8 ? m.slice(0, 3) : m)), 'ANNUAL'], '%', { head: true });
+    ty += tH;
+    for (const r of tRows) {
+      row(ty, r.name, r.second, [...r.values.map(amount), formatAmount(r.total)], r.pct, {});
+      ty += tH;
+    }
+    row(ty, 'TOTAL', '', [...spec.total.map((v) => formatAmount(v)), formatAmount(spec.grandTotal)], '100%', { bold: true, shade: true });
+    ty += tH + 18;
+    // The room left: a bar a row, to scale.
+    const room = bottom - ty;
+    if (tRows.length && room >= Math.max(90, tRows.length * 9)) {
+      drawLine(doc, 'SHARE OF THE YEAR — BEFORE VAT', left, ty, W, 'left', true, 7.5, PURPLE);
+      const bTop = ty + 14;
+      const bH = Math.min(22, (bottom - bTop) / tRows.length);
+      const bSize = Math.max(5, Math.min(8, bH * 0.55));
+      const labelW = 170;
+      const valueW = 120;
+      const maxV = Math.max(1, ...tRows.map((r) => r.total));
+      const barW = W - labelW - valueW;
+      tRows.forEach((r, i) => {
+        const by = bTop + i * bH;
+        drawLine(doc, fitLine(doc, r.name, labelW - 6, true, bSize), left, by + (bH - bSize) / 2, labelW - 6, 'right', true, bSize, INK);
+        const w = Math.max(0.8, (Math.max(0, r.total) / maxV) * barW);
+        doc.rect(left + labelW, by + bH * 0.18, w, bH * 0.64).fill(FLOW_TONES[i % FLOW_TONES.length]);
+        drawLine(doc, `${compactPeso(r.total)} · ${r.pct}`, left + labelW + w + 5, by + (bH - bSize) / 2, valueW, 'left', false, bSize, GREY);
+      });
+    }
+  };
+  if (spec.customerTable?.length) tablePage('SALES BY CUSTOMER — BEFORE VAT', 'CUSTOMER', 'TEAM', spec.customerTable);
+  if (spec.productTable?.length) tablePage('SALES BY PRODUCT GROUP — BEFORE VAT', 'PRODUCT GROUP', '', spec.productTable);
 
   // ── The flows, each across a page of its own: by person, then by customer.
   // `oneLine` (the customer flow, 2026-11-12, the owner's call: "customer

@@ -92,6 +92,8 @@ export function ReportPage({
   extraKeys = [],
   controls,
   below,
+  controlRows,
+  actionsInCard,
 }: {
   title: string;
   /** The API base, e.g. `/chain-reports`. */
@@ -100,6 +102,10 @@ export function ReportPage({
   /** URL keys the controls set, passed to the API as they are. */
   extraKeys?: string[];
   controls?: (ctx: { kind: string; params: URLSearchParams; set: (patch: Record<string, string>) => void }) => ReactNode;
+  /** The controls lay out their own `.rep-row`s instead of sharing one. */
+  controlRows?: boolean;
+  /** Export CSV and Print sit at the foot of the controls card, not in the page head. */
+  actionsInCard?: boolean;
   /** More of the screen's own, under the report's tables, on the same days. */
   below?: (ctx: { kind: string; from: string; to: string; params: URLSearchParams }) => ReactNode;
 }) {
@@ -150,26 +156,28 @@ export function ReportPage({
   const peakOf = (i: number) => Math.max(0, ...(report?.series.rows.map((r) => Math.abs(r.values[i] ?? 0)) ?? []));
   const firstMoney = report ? report.series.columns.findIndex((c) => c.money) : -1;
 
+  const actions = (className: string) => (
+    <>
+      <button
+        type="button"
+        className={className}
+        onClick={() => downloadBlob(`${endpoint}/${kind}.csv${qs(query)}`, `${kind}-${from}-${to}.csv`).catch(() => toast('error', 'The CSV could not be downloaded'))}
+      >
+        Export CSV
+      </button>
+      <button type="button" className={className} onClick={() => openPdf(`/api${endpoint}/${kind}.pdf${qs(query)}`, () => toast('error', 'The report could not be printed'))}>
+        Print
+      </button>
+    </>
+  );
+
   return (
     <div>
       <div className="page-head">
         <div>
           <h1>{title}</h1>
         </div>
-        <div className="row">
-          <button
-            type="button"
-            className="btn"
-            onClick={() =>
-              downloadBlob(`${endpoint}/${kind}.csv${qs(query)}`, `${kind}-${from}-${to}.csv`).catch(() => toast('error', 'The CSV could not be downloaded'))
-            }
-          >
-            Export CSV
-          </button>
-          <button type="button" className="btn" onClick={() => openPdf(`/api${endpoint}/${kind}.pdf${qs(query)}`, () => toast('error', 'The report could not be printed'))}>
-            Print
-          </button>
-        </div>
+        {!actionsInCard && <div className="row">{actions('btn')}</div>}
       </div>
 
       <div className="card rep-controls">
@@ -225,7 +233,8 @@ export function ReportPage({
             </>
           )}
         </div>
-        {controls && <div className="rep-row">{controls({ kind, params, set })}</div>}
+        {controls && (controlRows ? controls({ kind, params, set }) : <div className="rep-row">{controls({ kind, params, set })}</div>)}
+        {actionsInCard && <div className="rep-row rep-actions">{actions('btn btn-sm')}</div>}
       </div>
 
       <ErrorBox error={error} />

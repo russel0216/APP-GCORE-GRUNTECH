@@ -727,6 +727,10 @@ a.inv-move:hover .inv-move-what {
   flex-wrap: wrap;
   gap: var(--s-3);
 }
+/* Export CSV and Print at the foot of the controls card (the Sales Order report). */
+.rep-actions {
+  justify-content: flex-end;
+}
 .rep-label {
   min-width: 4.5rem;
   font-size: var(--fs-sm);
