@@ -599,7 +599,7 @@ export function ServiceJoModal({
 
 export function ServiceJobOrderDetail() {
   const { id } = useParams<{ id: string }>();
-  const { can } = useAuth();
+  const { can, mayDelete } = useAuth();
   const navigate = useNavigate();
   const toast = useToast();
   const [row, setRow] = useState<ServiceJoDetail | null>(null);
@@ -735,8 +735,9 @@ export function ServiceJobOrderDetail() {
               onConfirm: cancel,
             },
           },
-          r.status === 'CANCELLED' &&
-            can('gops.service_job_orders.delete') && {
+          (r.status === 'DRAFT' || r.status === 'CANCELLED') &&
+            can('gops.service_job_orders.delete') &&
+            mayDelete(r.requestedBy.id) && {
               label: 'Delete',
               danger: true,
               confirm: {

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, type ApprovalRequest, type CandidateStatus, type EmploymentType } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, conflict, forbidden, idsFilter, deleteOrRefuse, type ListQuery } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, conflict, forbidden, idsFilter, deleteOrRefuse, type ListQuery, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { authenticate, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { requireView, requireEdit, ownOnly, viewScope } from '../shared/ownScope';
@@ -128,7 +128,7 @@ async function presentMpr(me: ResolvedUser, r: MprRow, withRoute = false) {
     canSubmit: draft && editor,
     canWithdraw: r.status === 'PENDING_APPROVAL' && editor,
     canCancel: (draft || r.status === 'PENDING_APPROVAL' || (r.status === 'APPROVED' && !r.candidates.some((c) => c.status === 'HIRED'))) && editor,
-    canDelete: (draft || r.status === 'CANCELLED') && editor && can(me, 'ghr.manpower_requests.delete') && !r.candidates.length,
+    canDelete: (draft || r.status === 'CANCELLED') && mayDeleteDocument(me, r.requestedById) && can(me, 'ghr.manpower_requests.delete') && !r.candidates.length,
     approvalRoute: withRoute && draft ? await routeBrief(MPR, num(r.salaryMax), r.requestedById) : null,
   };
 }
@@ -437,8 +437,8 @@ hiringRoutes.delete(
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await loadMpr(me, req.params.id);
-    if (!mayEditMpr(me, row)) throw forbidden('That is someone else’s request');
-    if (!['DRAFT', 'CANCELLED'].includes(row.status)) throw badRequest('Only a draft or a cancelled request can be deleted');
+    assertMayDelete(me, row.requestedById, row.number);
+    if (!['DRAFT', 'CANCELLED'].includes(row.status)) throw badRequest('Only a draft or a cancelled request can be deleted — pull it back to draft first');
     if (row.candidates.length) throw badRequest(`${row.number} has ${row.candidates.length} candidate${row.candidates.length === 1 ? '' : 's'} on it — it is kept`);
     await deleteOrRefuse(row.number, () => prisma.manpowerRequest.delete({ where: { id: row.id } }));
     await audit({ entityType: MPR, entityId: row.id, action: 'DELETED', summary: `Deleted ${statusLabel(row.status).toLowerCase()} ${row.number}` }, req);
@@ -1052,7 +1052,7 @@ async function presentContract(me: ResolvedUser, k: ContractRow, withRoute = fal
     canSubmit: draft && editor,
     canWithdraw: k.status === 'PENDING_APPROVAL' && editor,
     canCancel: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'SIGNED'].includes(k.status) && editor && k.candidate.status !== 'HIRED',
-    canDelete: ['DRAFT', 'CANCELLED'].includes(k.status) && editor && can(me, 'ghr.employment_contracts.delete'),
+    canDelete: ['DRAFT', 'CANCELLED'].includes(k.status) && mayDeleteDocument(me, k.preparedById) && can(me, 'ghr.employment_contracts.delete'),
     canSign: k.status === 'APPROVED' && editor,
     canHire: k.status === 'SIGNED' && editor && k.candidate.status !== 'HIRED',
     approvalRoute: withRoute && draft ? await routeBrief(CONTRACT, r.amount, r.requesterId, null, { teamId: r.teamId }) : null,
@@ -1351,8 +1351,8 @@ hiringRoutes.delete(
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await loadContract(me, req.params.id);
-    if (!mayEditContract(me, row)) throw forbidden('That contract is someone else’s');
-    if (!['DRAFT', 'CANCELLED'].includes(row.status)) throw badRequest('Only a draft or a cancelled contract can be deleted — an approved one is a record');
+    assertMayDelete(me, row.preparedById, row.number);
+    if (!['DRAFT', 'CANCELLED'].includes(row.status)) throw badRequest('Only a draft or a cancelled contract can be deleted — pull it back to draft first');
     await deleteOrRefuse(row.number, () => prisma.employmentContract.delete({ where: { id: row.id } }));
     await deleteAttachmentsOf(CONTRACT, [row.id]);
     await audit({ entityType: CONTRACT, entityId: row.id, action: 'DELETED', summary: `Deleted ${statusLabel(row.status).toLowerCase()} ${row.number}` }, req);

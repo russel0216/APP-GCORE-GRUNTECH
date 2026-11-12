@@ -20,6 +20,13 @@ interface AuthValue {
   can: (permission: string) => boolean;
   /** True if the user can open a screen at all (either view scope). */
   canView: (moduleKey: string, submoduleKey: string) => boolean;
+  /**
+   * WHO may delete a document (2026-11-13, the owner's call): whoever created
+   * it, or the System Administrator — never Edit All on somebody else's. The
+   * web's twin of `mayDeleteDocument()` in api/src/http/kit.ts; the state
+   * (a draft or a cancelled one) stays each page's own check.
+   */
+  mayDelete: (creatorId: string | null | undefined) => boolean;
 }
 
 const AuthContext = createContext<AuthValue | null>(null);
@@ -75,6 +82,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       refresh,
       can,
       canView: (m, s) => can(`${m}.${s}.view_all`) || can(`${m}.${s}.view_own`),
+      mayDelete: (creatorId) => isSuper || (!!creatorId && creatorId === me?.user.id),
     };
   }, [me, loading, signIn, signOut, refresh]);
 

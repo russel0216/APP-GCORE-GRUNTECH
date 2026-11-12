@@ -3653,6 +3653,23 @@ async function main() {
       attachmentKind({ fileName: 'specs.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }) === 'other',
   );
 
+  // The delete rule (2026-11-13, the owner's call): a document is deleted by
+  // whoever created it or the System Administrator — never by Edit All.
+  {
+    const { mayDeleteDocument } = await import('../src/http/kit');
+    const routesDir = path.join(__dirname, '..', 'src', 'routes');
+    const askers = fs.readdirSync(routesDir).filter((n) => n.endsWith('.ts') && /assertMayDelete\(|mayDeleteDocument\(/.test(fs.readFileSync(path.join(routesDir, n), 'utf8')));
+    check(
+      'a document is deleted by its creator or the System Administrator — the one rule, asked by every document route',
+      mayDeleteDocument({ id: 'a', isSuperAdmin: false }, 'a') &&
+        !mayDeleteDocument({ id: 'a', isSuperAdmin: false }, 'b') &&
+        !mayDeleteDocument({ id: 'a', isSuperAdmin: false }, null) &&
+        mayDeleteDocument({ id: 'a', isSuperAdmin: true }, 'b') &&
+        askers.length >= 20,
+      `${askers.length} route files ask it`,
+    );
+  }
+
   // ── Done ───────────────────────────────────────────────────────────────────
   await cleanup();
 

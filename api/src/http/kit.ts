@@ -34,6 +34,26 @@ export async function deleteOrRefuse<T>(what: string, run: () => Promise<T>): Pr
 }
 export const conflict = (m: string, d?: unknown) => new HttpError(409, m, d);
 
+/**
+ * WHO may delete a document (2026-11-13, the owner's call: "make all the
+ * Delete function only by the one who created it or the System
+ * Administrator; but first pull it back to draft"). The ONE rule every
+ * document's DELETE route asks: whoever created it, or a super admin — never
+ * a holder of Edit All / Manage All on somebody else's document. The STATE
+ * (a draft or a cancelled one; pending or approved is pulled back first)
+ * stays each route's own check, beside what stands on the document.
+ */
+export function mayDeleteDocument(me: { id: string; isSuperAdmin: boolean }, creatorId: string | null | undefined): boolean {
+  return me.isSuperAdmin || (!!creatorId && creatorId === me.id);
+}
+
+/** The refusal, in one wording: a 403 naming the rule. */
+export function assertMayDelete(me: { id: string; isSuperAdmin: boolean }, creatorId: string | null | undefined, what = 'this document'): void {
+  if (!mayDeleteDocument(me, creatorId)) {
+    throw new HttpError(403, `Only whoever created ${what}, or the System Administrator, deletes it`);
+  }
+}
+
 /** Wraps an async handler so a rejected promise reaches the error middleware. */
 export function handler(fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>): RequestHandler {
   return (req, res, next) => {

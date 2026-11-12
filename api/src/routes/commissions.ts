@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, CommissionStatus, type ApprovalRequest } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -362,7 +362,7 @@ async function present(me: ResolvedUser, row: RequestRow) {
     canSubmit: draft && editor,
     canWithdraw: row.status === 'PENDING_APPROVAL' && editor,
     canCancel: (draft || row.status === 'PENDING_APPROVAL') && editor,
-    canDelete: (draft || row.status === 'CANCELLED') && editor && can(me, 'gfin.commissions.delete'),
+    canDelete: (draft || row.status === 'CANCELLED') && mayDeleteDocument(me, row.requestedById) && can(me, 'gfin.commissions.delete'),
     canPay: row.status === 'APPROVED' && mayPay(me),
     approvalRoute: draft ? await routeBrief(DOC, num(row.totalNet), row.requestedById, null, { jobId: row.jobId ?? undefined }) : null,
   };
@@ -865,8 +865,8 @@ commissionRoutes.delete(
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await loadVisible(me, req.params.id);
-    if (!mayEdit(me, row)) throw forbidden('That is someone else’s request');
-    if (row.status !== 'DRAFT' && row.status !== 'CANCELLED') throw badRequest('Only a draft or a cancelled request can be deleted — an approved one is a record');
+    assertMayDelete(me, row.requestedById, row.number);
+    if (row.status !== 'DRAFT' && row.status !== 'CANCELLED') throw badRequest('Only a draft or a cancelled request can be deleted — pull it back to draft first');
     await deleteOrRefuse(row.number, () => prisma.commissionRequest.delete({ where: { id: row.id } }));
     await deleteAttachmentsOf('commission_request', [row.id]);
     await audit({ entityType: DOC, entityId: row.id, action: 'DELETED', summary: `Deleted ${statusLabel(row.status).toLowerCase()} ${row.number}` }, req);

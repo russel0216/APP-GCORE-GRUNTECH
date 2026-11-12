@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Prisma, type MemoAudience } from '@prisma/client';
 import { prisma } from '../prisma';
 import { env } from '../env';
-import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, conflict, idsFilter } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, conflict, idsFilter, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { authenticate, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { requireView, requireEdit, ownOnly, assertCanView } from '../shared/ownScope';
@@ -416,7 +416,7 @@ memoRoutes.delete(
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await load(req.params.id);
-    if (!canEditRecord(me, 'ghr', 'memos', row.createdById)) throw notFound('Memo not found');
+    assertMayDelete(me, row.createdById, 'this memo');
     if (row.status !== 'DRAFT') throw badRequest('Only a draft is deleted — pull an issued memo back to draft first');
     const gone = await prisma.memo.deleteMany({ where: { id: row.id, status: 'DRAFT' } });
     if (!gone.count) throw conflict('The memo was issued a moment ago — reload it');
@@ -631,7 +631,7 @@ memoRoutes.get(
       canRemind: mayChange && row.status === 'ISSUED' && row._count.recipients > acknowledged,
       canArchive: mayChange && row.status === 'ISSUED',
       canPullBack: mayChange && row.status !== 'DRAFT',
-      canDelete: mayChange && row.status === 'DRAFT',
+      canDelete: mayDeleteDocument(me, row.createdById) && row.status === 'DRAFT',
       canReply: !!mine && !mine.acknowledgedAt && row.status === 'ISSUED',
       canRestore: mayChange && row.status === 'ARCHIVED',
       canAcknowledge: !!mine && !mine.acknowledgedAt,

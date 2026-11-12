@@ -1424,11 +1424,16 @@ async function main() {
       String(rfaLateTrail),
     );
     const rfa3Files = await prisma.attachment.findMany({ where: { entityType: 'approved_plan', entityId: rfa3Id } });
-    const rfaDeleted = await http(rfaPmToken, 'DELETE', `/plans/${rfa3Id}`);
+    // The delete rule of 2026-11-13: its creator or the System Administrator — never Edit All on somebody else's.
+    const rfaPmDelete = await http(rfaPmToken, 'DELETE', `/plans/${rfa3Id}`);
+    const rfaAdmin = await prisma.user.create({
+      data: { name: 'Verify Sysadmin', email: 'sysadmin@verifyd.local', passwordHash: await bcrypt.hash('x', 10), isSuperAdmin: true },
+    });
+    const rfaDeleted = await http(signToken(rfaAdmin.id, rfaAdmin.email), 'DELETE', `/plans/${rfa3Id}`);
     check(
-      'a cancelled request may be deleted, its files with it',
-      rfaDeleted.status === 200 && (await prisma.approvedPlan.count({ where: { id: rfa3Id } })) === 0 && (await prisma.attachment.count({ where: { id: { in: rfa3Files.map((f) => f.id) } } })) === 0,
-      String(rfaDeleted.status),
+      'a cancelled request is deleted by its creator or the System Administrator, never by a manager who did not raise it — its files with it',
+      rfaPmDelete.status === 403 && rfaDeleted.status === 200 && (await prisma.approvedPlan.count({ where: { id: rfa3Id } })) === 0 && (await prisma.attachment.count({ where: { id: { in: rfa3Files.map((f) => f.id) } } })) === 0,
+      `${rfaPmDelete.status} ${rfaDeleted.status}`,
     );
     const rfaNobody = await makeUser('Verify Nobody', 'nobody@verifyd.local', []);
     const rfaPeek = await http(signToken(rfaNobody.id, rfaNobody.email), 'GET', `/plans/${rfaId}`);

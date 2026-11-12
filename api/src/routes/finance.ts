@@ -10,20 +10,7 @@ import {
   type ApprovalRequest,
 } from '@prisma/client';
 import { prisma } from '../prisma';
-import {
-  handler,
-  parseBody,
-  listQuery,
-  listResult,
-  orderBy,
-  idsFilter,
-  notFound,
-  badRequest,
-  forbidden,
-  deleteOrRefuse,
-  conflict,
-  type ListQuery,
-} from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse, conflict, type ListQuery, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { requireView, requireEdit, ownOnly, assertCanView, assertCanEdit, mayEdit, viewScope, onMyTeam } from '../shared/ownScope';
@@ -945,7 +932,7 @@ invoiceRoutes.get(
       canEdit: mayEdit(me, 'gfin', 'ar', row.createdById === me.id, row.createdById),
       // The delete route's own door (2026-10-22): the creator or Edit All
       // holding the delete right, or a super admin; the status is the page's.
-      canDelete: me.isSuperAdmin || (can(me, 'gfin.ar.delete') && canEditRecord(me, 'gfin', 'ar', row.createdById)),
+      canDelete: can(me, 'gfin.ar.delete') && mayDeleteDocument(me, row.createdById),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
     });
   }),
@@ -1826,9 +1813,7 @@ invoiceRoutes.delete(
       include: { allocations: { select: { id: true } } },
     });
     if (!invoice) throw notFound('Invoice not found');
-    if (!me.isSuperAdmin && !canEditRecord(me, 'gfin', 'ar', invoice.createdById)) {
-      throw forbidden('Only whoever raised this invoice, or Edit All, may delete it');
-    }
+    assertMayDelete(me, invoice.createdById, invoice.number);
     if (invoice.status !== 'CANCELLED' && invoice.status !== 'DRAFT') {
       throw badRequest('Only a draft or a cancelled invoice can be deleted — cancel it first');
     }
@@ -4216,14 +4201,12 @@ expenseRoutes.delete(
     const me = currentUser(req);
     const claim = await prisma.expenseClaim.findUnique({ where: { id: req.params.id }, include: { allocations: { select: { id: true } } } });
     if (!claim) throw notFound('Expense claim not found');
-    if (claim.claimedById !== me.id && !me.isSuperAdmin && !canEditRecord(me, 'gfin', 'expenses', claim.claimedById)) {
-      throw forbidden('That is someone else’s claim');
-    }
-    if (claim.status !== 'CANCELLED') throw badRequest('Only a cancelled claim can be deleted — cancel it first');
+    assertMayDelete(me, claim.claimedById, claim.number);
+    if (claim.status !== 'DRAFT' && claim.status !== 'CANCELLED') throw badRequest('Only a draft or a cancelled claim can be deleted — pull it back to draft first');
     if (claim.allocations.length) throw badRequest('Money was applied to this claim — it is kept');
     await deleteOrRefuse(claim.number, () => prisma.expenseClaim.delete({ where: { id: claim.id } }));
     await deleteAttachmentsOf('expense_claim', [claim.id]);
-    await audit({ entityType: 'expense_claim', entityId: claim.id, action: 'DELETED', summary: `Deleted cancelled claim ${claim.number}` }, req);
+    await audit({ entityType: 'expense_claim', entityId: claim.id, action: 'DELETED', summary: `Deleted ${claim.status === 'DRAFT' ? 'draft' : 'cancelled'} claim ${claim.number}` }, req);
     res.json({ ok: true });
   }),
 );

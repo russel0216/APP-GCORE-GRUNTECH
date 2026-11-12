@@ -696,7 +696,7 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 export function SalesOrderDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { can } = useAuth();
+  const { can, mayDelete } = useAuth();
   const toast = useToast();
   // Cancel, Delete, Reopen and Pull back ask here, in the bar under the header.
   const confirm = useConfirm();
@@ -859,7 +859,7 @@ export function SalesOrderDetail() {
                 onConfirm: (reason) => run(() => api.post(`/sales-orders/${order.id}/cancel`, { reason }), 'Cancelled'),
               },
             },
-          order.canEdit &&
+          mayDelete(order.owner.id) &&
             (draft || order.status === 'CANCELLED') &&
             can('gops.sales_orders.delete') && {
               label: 'Delete',

@@ -815,7 +815,7 @@ export function BudgetRequestDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const toast = useToast();
-  const { me, can } = useAuth();
+  const { me, can, mayDelete } = useAuth();
   const confirm = useConfirm();
   const [row, setRow] = useState<BudgetRequest | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -982,7 +982,8 @@ export function BudgetRequestDetail() {
             },
           },
           (row.status === 'DRAFT' || row.status === 'CANCELLED') &&
-            can('gops.budget_requests.delete') && {
+            can('gops.budget_requests.delete') &&
+            mayDelete(row.requestedBy.id) && {
               label: 'Delete',
               danger: true,
               confirm: {

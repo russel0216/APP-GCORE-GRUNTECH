@@ -308,7 +308,7 @@ export function ExpenseClaimDetail() {
   const { id } = useParams<{ id: string }>();
   const toast = useToast();
   const navigate = useNavigate();
-  const { me, can } = useAuth();
+  const { me, can, mayDelete } = useAuth();
   const [row, setRow] = useState<Claim | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [paying, setPaying] = useState(false);
@@ -464,8 +464,8 @@ export function ExpenseClaimDetail() {
                 onConfirm: cancel,
               },
             },
-          row.status === 'CANCELLED' &&
-            (mine || can('gfin.expenses.edit_all')) &&
+          (row.status === 'DRAFT' || row.status === 'CANCELLED') &&
+            mayDelete(row.claimedBy.id) &&
             can('gfin.expenses.delete') && {
               label: 'Delete',
               danger: true,

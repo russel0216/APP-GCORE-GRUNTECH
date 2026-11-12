@@ -5,18 +5,7 @@ import { z } from 'zod';
 import { LeadStatus, Prisma, QuotationOutcome } from '@prisma/client';
 import { prisma } from '../prisma';
 import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, quotationTeamWhere, quotationsReadable, readsQuotation, teamMembers, teamOf, teamShares, visibleOwners, type TeamRef, type TeamShare } from '../shared/team';
-import {
-  handler,
-  parseBody,
-  listQuery,
-  listResult,
-  orderBy,
-  notFound,
-  badRequest,
-  forbidden,
-  conflict,
-  idsFilter,
-} from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, conflict, idsFilter, assertMayDelete } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { requireEdit, viewScope } from '../shared/ownScope';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
@@ -2810,9 +2799,7 @@ quotationRoutes.delete(
       },
     });
     if (!quotation) throw notFound('Quotation not found');
-    if (!canEditRecord(me, 'gops', 'quotations', quotation.ownerId)) {
-      throw forbidden('Only the author can delete this quotation');
-    }
+    assertMayDelete(me, quotation.ownerId, quotation.number);
     if (quotation.budgetRequests.length) {
       throw badRequest(`Budget request ${quotation.budgetRequests.map((b) => b.number).join(', ')} was raised on ${quotation.number} — delete ${quotation.budgetRequests.length === 1 ? 'it' : 'them'} first`);
     }

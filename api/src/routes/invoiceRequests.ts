@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, InvoiceRequestStatus, type ApprovalRequest } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -291,7 +291,7 @@ async function present(me: ResolvedUser, row: RequestRow) {
     canSubmit: editable && editor,
     canWithdraw: row.status === 'PENDING_APPROVAL' && editor,
     canCancel: (editable || row.status === 'PENDING_APPROVAL') && editor,
-    canDelete: (editable || row.status === 'CANCELLED') && editor && can(me, 'gfin.invoice_requests.delete'),
+    canDelete: (editable || row.status === 'CANCELLED') && mayDeleteDocument(me, row.requestedById) && can(me, 'gfin.invoice_requests.delete'),
     approvalRoute: editable ? await routeBrief(DOC, money.netCollectible, row.requestedById, null, { jobId: row.jobId ?? undefined }) : null,
   };
 }
@@ -824,9 +824,9 @@ invoiceRequestRoutes.delete(
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await loadVisible(me, req.params.id);
-    if (!mayEdit(me, row)) throw forbidden('That is someone else’s request');
+    assertMayDelete(me, row.requestedById, row.number);
     if (row.status !== 'DRAFT' && row.status !== 'CANCELLED') {
-      throw badRequest('Only a draft or a cancelled request can be deleted — an approved one is a record');
+      throw badRequest('Only a draft or a cancelled request can be deleted — pull it back to draft first');
     }
     await deleteOrRefuse(row.number, () => prisma.invoiceRequest.delete({ where: { id: row.id } }));
     await deleteAttachmentsOf('invoice_request', [row.id]);

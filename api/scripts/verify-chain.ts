@@ -3561,6 +3561,12 @@ async function main() {
     ]);
     const boss = await mkUser('Verify Store Supervisor', 'storeboss@verifyc.local', bossRole.id);
     const bossToken = signToken(boss.id, boss.email);
+    // The delete rule of 2026-11-13: whoever created the document, or the
+    // System Administrator — never a delete holder on somebody else's.
+    const sysAdmin = await prisma.user.create({
+      data: { name: 'Verify Sysadmin', email: 'sysadmin@verifyc.local', passwordHash: await bcrypt.hash('x', 10), isSuperAdmin: true },
+    });
+    const adminToken = signToken(sysAdmin.id, sysAdmin.email);
     // Outgoing and Incoming go to the issuer's or receiver's "Reports to".
     await prisma.user.update({ where: { id: keeper.id }, data: { supervisorId: boss.id } });
     const siteStore = await prisma.warehouse.create({ data: { code: `${TAG}W2`, name: `${TAG} Site Store` } });
@@ -3610,11 +3616,12 @@ async function main() {
     check('and refused for a warehouse that never held the item', toEmpty.status === 400, `${toEmpty.status} ${JSON.stringify(toEmpty.body).slice(0, 120)}`);
     const issueStranger = await api(buyerToken, 'PATCH', `/stock-issues/${draftIssueId}`, { purpose: `${TAG} not allowed` });
     check('someone without the stock issuance rights cannot modify it', issueStranger.status === 403, String(issueStranger.status));
-    const issueFlags = await api(bossToken, 'GET', `/stock-issues/${draftIssueId}`);
+    const issueFlags = await api(adminToken, 'GET', `/stock-issues/${draftIssueId}`);
+    const bossIssueFlags = await api(bossToken, 'GET', `/stock-issues/${draftIssueId}`);
     check(
-      'a draft says it may be modified and deleted',
-      issueFlags.body.canEdit === true && issueFlags.body.canDelete === true,
-      `${issueFlags.body.canEdit} ${issueFlags.body.canDelete}`,
+      'a draft says it may be modified and deleted — deleted by its creator or the System Administrator, never by a delete holder who did not raise it',
+      issueFlags.body.canEdit === true && issueFlags.body.canDelete === true && bossIssueFlags.body.canDelete === false,
+      `${issueFlags.body.canEdit} ${issueFlags.body.canDelete} ${bossIssueFlags.body.canDelete}`,
     );
     const issueAudits = await prisma.auditLog.count({ where: { entityType: 'stock_issue', entityId: draftIssueId, action: { in: ['CREATED', 'UPDATED'] } } });
     check('raising it and every change to it are audited', issueAudits >= 7, String(issueAudits));
@@ -3784,8 +3791,8 @@ async function main() {
     }
 
     const issuedEdit = await api(keeperToken, 'PATCH', `/stock-issues/${draftIssueId}`, { purpose: `${TAG} after the fact` });
-    const issuedDelete = await api(bossToken, 'DELETE', `/stock-issues/${draftIssueId}`);
-    const issuedFlags = await api(bossToken, 'GET', `/stock-issues/${draftIssueId}`);
+    const issuedDelete = await api(adminToken, 'DELETE', `/stock-issues/${draftIssueId}`);
+    const issuedFlags = await api(adminToken, 'GET', `/stock-issues/${draftIssueId}`);
     check(
       'issued, it refuses both Modify and Delete — the stock has moved',
       issuedEdit.status === 400 && issuedDelete.status === 400 && issuedFlags.body.canEdit === false && issuedFlags.body.canDelete === false,
@@ -3803,8 +3810,8 @@ async function main() {
       const cancelled = await api(keeperToken, 'POST', `/stock-issues/${goneId}/cancel`, { reason: `${TAG} not needed` });
       const request = await prisma.approvalRequest.findFirst({ where: { documentType: 'stock_issue', documentId: goneId }, orderBy: { createdAt: 'desc' } });
       const issuedCancel = await api(bossToken, 'POST', `/stock-issues/${draftIssueId}/cancel`, { reason: `${TAG} too late` });
-      const flags = await api(bossToken, 'GET', `/stock-issues/${goneId}`);
-      const deleted = await api(bossToken, 'DELETE', `/stock-issues/${goneId}`);
+      const flags = await api(adminToken, 'GET', `/stock-issues/${goneId}`);
+      const deleted = await api(adminToken, 'DELETE', `/stock-issues/${goneId}`);
       const row = await prisma.stockIssue.findUnique({ where: { id: goneId } });
       check(
         'a pending outgoing slip is cancelled with its reason, its request withdrawn, then deleted; an issued one cannot be cancelled',
@@ -4011,12 +4018,13 @@ async function main() {
     const spareId = String(spareIssue.body.id);
     const keeperDelete = await api(keeperToken, 'DELETE', `/stock-issues/${spareId}`);
     const bossDelete = await api(bossToken, 'DELETE', `/stock-issues/${spareId}`);
+    const adminDelete = await api(adminToken, 'DELETE', `/stock-issues/${spareId}`);
     const spareGone = await prisma.stockIssue.findUnique({ where: { id: spareId } });
     const spareAudit = await prisma.auditLog.count({ where: { entityType: 'stock_issue', entityId: spareId, action: 'DELETED' } });
     check(
-      'a draft is deleted by a delete holder only, and the deletion is audited',
-      keeperDelete.status === 403 && bossDelete.status === 200 && spareGone === null && spareAudit === 1,
-      `${keeperDelete.status} ${bossDelete.status} ${spareAudit}`,
+      'a draft is deleted by its creator with the right or the System Administrator — never by a delete holder who did not raise it — and the deletion is audited',
+      keeperDelete.status === 403 && bossDelete.status === 403 && adminDelete.status === 200 && spareGone === null && spareAudit === 1,
+      `${keeperDelete.status} ${bossDelete.status} ${adminDelete.status} ${spareAudit}`,
     );
 
     // A borrow slip: who, when due, what for — never the warehouse or items.
@@ -4379,12 +4387,14 @@ async function main() {
       const borrowDeleter = await mkUser('Verify Borrow Deleter', 'borrowdel@verifyc.local', borrowDelRole.id);
       const borrowDelToken = signToken(borrowDeleter.id, borrowDeleter.email);
       const noRight = await api(borrowerToken, 'DELETE', `/borrow-slips/${thirdId}`);
-      const delFlags = await api(borrowDelToken, 'GET', `/borrow-slips/${thirdId}`);
-      const outDelete = await api(borrowDelToken, 'DELETE', `/borrow-slips/${dueId}`);
-      const goneDelete = await api(borrowDelToken, 'DELETE', `/borrow-slips/${thirdId}`);
+      const holderDelete = await api(borrowDelToken, 'DELETE', `/borrow-slips/${thirdId}`);
+      const delFlags = await api(adminToken, 'GET', `/borrow-slips/${thirdId}`);
+      const outDelete = await api(adminToken, 'DELETE', `/borrow-slips/${dueId}`);
+      const goneDelete = await api(adminToken, 'DELETE', `/borrow-slips/${thirdId}`);
       check(
-        'a cancelled borrow request is deleted by a delete holder; without the right, or once on loan, it is refused',
+        'a cancelled borrow request is deleted by the System Administrator (or its creator), never by a delete holder who did not raise it; without the right, or once on loan, it is refused',
         noRight.status === 403 &&
+          holderDelete.status === 403 &&
           delFlags.body.canDelete === true &&
           outDelete.status === 400 &&
           goneDelete.status === 200 &&
@@ -4575,12 +4585,14 @@ async function main() {
         const deleter = await mkUser('Verify Pull Deleter', 'pulldel@verifyc.local', deleterRole.id);
         const deleterToken = signToken(deleter.id, deleter.email);
         const noRight = await api(pullerToken, 'DELETE', `/pullout-slips/${secondId}`);
-        const flags = await api(deleterToken, 'GET', `/pullout-slips/${secondId}`);
-        const pulledDelete = await api(deleterToken, 'DELETE', `/pullout-slips/${slipId}`);
-        const gone = await api(deleterToken, 'DELETE', `/pullout-slips/${secondId}`);
+        const holderDelete = await api(deleterToken, 'DELETE', `/pullout-slips/${secondId}`);
+        const flags = await api(adminToken, 'GET', `/pullout-slips/${secondId}`);
+        const pulledDelete = await api(adminToken, 'DELETE', `/pullout-slips/${slipId}`);
+        const gone = await api(adminToken, 'DELETE', `/pullout-slips/${secondId}`);
         check(
-          'a cancelled pull-out slip is deleted by a delete holder; without the right, or once pulled out, it is refused',
+          'a cancelled pull-out slip is deleted by the System Administrator (or its creator), never by a delete holder who did not raise it; without the right, or once pulled out, it is refused',
           noRight.status === 403 &&
+            holderDelete.status === 403 &&
             flags.body.canDelete === true &&
             pulledDelete.status === 400 &&
             gone.status === 200 &&

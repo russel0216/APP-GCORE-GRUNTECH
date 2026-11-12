@@ -221,7 +221,7 @@ const TAB_ALIASES: Record<string, Tab> = {
 export function ProjectWorkspace() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { can } = useAuth();
+  const { can, mayDelete } = useAuth();
   const toast = useToast();
   const confirm = useConfirm();
   const [params, setParams] = useSearchParams();
@@ -456,7 +456,8 @@ export function ProjectWorkspace() {
               },
             },
           job.status === 'CANCELLED' &&
-            can('gops.projects.delete') && {
+            can('gops.projects.delete') &&
+            mayDelete(job.createdBy?.id ?? job.projectManager?.id) && {
               label: 'Delete',
               danger: true,
               confirm: {

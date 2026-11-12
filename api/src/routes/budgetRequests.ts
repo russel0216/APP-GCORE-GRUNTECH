@@ -4,7 +4,7 @@ import { Prisma, RequestStatus, type ApprovalRequest } from '@prisma/client';
 import { prisma } from '../prisma';
 import { deleteAttachmentsOf, registerAttachmentGuard } from '../shared/attachments';
 import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
-import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse, assertMayDelete } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { canEditRecord } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -1351,7 +1351,7 @@ budgetRequestRoutes.delete(
     const me = currentUser(req);
     const request = await prisma.budgetRequest.findUnique({ where: { id: req.params.id } });
     if (!request) throw notFound('Budget request not found');
-    if (!canEditRecord(me, 'gops', 'budget_requests', request.requestedById)) throw forbidden('That is someone else’s budget request');
+    assertMayDelete(me, request.requestedById, request.number);
     if (request.status !== 'DRAFT' && request.status !== 'CANCELLED') {
       throw badRequest('Only a draft or a cancelled budget request can be deleted — cancel it first');
     }

@@ -3,19 +3,7 @@ import { handOverToProject } from '../shared/quotationBuying';
 import { z } from 'zod';
 import { Prisma, JobStatus, JobType, CostState } from '@prisma/client';
 import { prisma } from '../prisma';
-import {
-  handler,
-  parseBody,
-  listQuery,
-  listResult,
-  orderBy,
-  idsFilter,
-  notFound,
-  badRequest,
-  forbidden,
-  deleteOrRefuse,
-  type ListQuery,
-} from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse, type ListQuery, assertMayDelete } from '../http/kit';
 import { deleteAttachmentsOf } from '../shared/attachments';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { canEditRecord, type ResolvedUser } from '../permissions/resolve';
@@ -1264,9 +1252,10 @@ jobRoutes.delete(
   require_('gops.projects.delete'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const job = await prisma.job.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, name: true, status: true, projectManagerId: true } });
+    const job = await prisma.job.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, name: true, status: true, projectManagerId: true, createdById: true } });
     if (!job) throw notFound('Project not found');
-    if (!canEditRecord(me, 'gops', 'projects', job.projectManagerId ?? '')) throw forbidden('Only the project’s manager can delete it');
+    // Whoever created it; a project with no creator on file answers to its manager.
+    assertMayDelete(me, job.createdById ?? job.projectManagerId, job.number);
     if (job.status !== 'CANCELLED') throw badRequest('Only a cancelled project can be deleted — cancel it first');
     const inJob = { jobId: job.id };
     // Orders that go with the project: a draft or cancelled one, nothing

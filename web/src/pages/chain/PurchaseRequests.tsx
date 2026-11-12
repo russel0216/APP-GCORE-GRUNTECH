@@ -254,7 +254,7 @@ export function PurchaseRequestDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const base = usePrBase();
-  const { can } = useAuth();
+  const { can, mayDelete } = useAuth();
   const toast = useToast();
   const confirm = useConfirm();
 
@@ -359,10 +359,11 @@ export function PurchaseRequestDetail() {
 
   const sourcing = pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED';
   // The API's own rule: a draft or rejected request with no order raised from it.
-  const mayDelete =
+  const deletable =
     (pr.status === 'DRAFT' || pr.status === 'REJECTED' || pr.status === 'CANCELLED') &&
     pr.orders.length === 0 &&
-    can('gchain.purchase_requests.delete');
+    can('gchain.purchase_requests.delete') &&
+    mayDelete(pr.requestedBy.id);
 
   async function cancel(reason: string) {
     if (!pr) return;
@@ -497,7 +498,7 @@ export function PurchaseRequestDetail() {
               onConfirm: cancel,
             },
           },
-          mayDelete && {
+          deletable && {
             label: 'Delete',
             danger: true,
             confirm: {

@@ -3,19 +3,7 @@ import { z } from 'zod';
 import { Prisma, RfqStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import { termsSections } from '../shared/procurementTerms';
-import {
-  handler,
-  parseBody,
-  listQuery,
-  listResult,
-  orderBy,
-  notFound,
-  badRequest,
-  forbidden,
-  idsFilter,
-  deleteOrRefuse,
-  type ListQuery,
-} from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { deleteAttachmentsOf, registerAttachmentGuard } from '../shared/attachments';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
@@ -496,7 +484,7 @@ function presentRfq(rfq: LoadedRfq, me: ResolvedUser) {
     // The next step once quotes are in: the comparison sheet (one live at a time).
     canStartCanvass:
       (rfq.status === 'SENT' || rfq.status === 'QUOTED') && !liveCanvass && suppliers.some((s) => s.quotedCount > 0) && can(me, 'gchain.canvass.create'),
-    canDelete: (rfq.status === 'DRAFT' || rfq.status === 'CANCELLED') && can(me, 'gchain.rfq.delete') && mayEditRfq(me, rfq),
+    canDelete: (rfq.status === 'DRAFT' || rfq.status === 'CANCELLED') && can(me, 'gchain.rfq.delete') && mayDeleteDocument(me, rfq.preparedById),
   };
 }
 
@@ -844,7 +832,7 @@ rfqRoutes.delete(
     const me = currentUser(req);
     const rfq = await prisma.rfq.findUnique({ where: { id: req.params.id }, include: { suppliers: { select: { id: true } } } });
     if (!rfq) throw notFound('RFQ not found');
-    if (!mayEditRfq(me, rfq)) throw forbidden('This RFQ belongs to someone else');
+    assertMayDelete(me, rfq.preparedById, rfq.number);
     if (rfq.status !== 'DRAFT' && rfq.status !== 'CANCELLED') throw badRequest('Only a draft or a cancelled RFQ can be deleted — cancel it first');
     await deleteOrRefuse(rfq.number, () => prisma.rfq.delete({ where: { id: rfq.id } }));
     await deleteAttachmentsOf('rfq_supplier', rfq.suppliers.map((s) => s.id));

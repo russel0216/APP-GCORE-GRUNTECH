@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, type ApprovalRequest } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { authenticate, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -111,7 +111,7 @@ async function present(me: ResolvedUser, r: Row, withRoute = false) {
     canSubmit: draft && editor,
     canWithdraw: r.status === 'PENDING_APPROVAL' && editor,
     canCancel: (draft || r.status === 'PENDING_APPROVAL') && editor,
-    canDelete: ['DRAFT', 'REJECTED', 'CANCELLED'].includes(r.status) && editor && can(me, 'ghr.attendance_corrections.delete'),
+    canDelete: ['DRAFT', 'REJECTED', 'CANCELLED'].includes(r.status) && mayDeleteDocument(me, r.requestedById) && can(me, 'ghr.attendance_corrections.delete'),
     approvalRoute: withRoute && draft && r.employee.userId ? await routeBrief(DOC, null, r.employee.userId) : null,
   };
 }
@@ -386,7 +386,7 @@ attendanceCorrectionRoutes.delete(
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await load(me, req.params.id);
-    if (!mayChange(me, row)) throw forbidden('That is someone else’s correction');
+    assertMayDelete(me, row.requestedById, row.number);
     if (!['DRAFT', 'REJECTED', 'CANCELLED'].includes(row.status)) throw badRequest('Only a draft, a rejected or a cancelled correction is deleted');
     await deleteOrRefuse(row.number, () => prisma.attendanceCorrection.delete({ where: { id: row.id } }));
     await audit({ entityType: DOC, entityId: row.id, action: 'DELETED', summary: `Deleted ${statusLabel(row.status).toLowerCase()} ${row.number}` }, req);

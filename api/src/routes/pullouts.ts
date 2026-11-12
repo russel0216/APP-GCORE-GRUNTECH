@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, PulloutKind, PulloutPurpose, PulloutStatus } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -926,7 +926,7 @@ async function presentSlip(slip: LoadedSlip, me: ResolvedUser) {
     canPullOut: draft && handles && !route && slip.items.length > 0,
     canWithdraw: slip.status === 'PENDING_APPROVAL' && handles,
     canCancel: (draft || slip.status === 'PENDING_APPROVAL') && handles,
-    canDelete: (draft || slip.status === 'CANCELLED') && handles && can(me, 'gchain.pullout_slips.delete'),
+    canDelete: (draft || slip.status === 'CANCELLED') && mayDeleteDocument(me, slip.preparedById) && can(me, 'gchain.pullout_slips.delete'),
     approvalRoute: draft && route ? await routeBrief(DOC, null, requesterOf(slip)) : null,
     items: slip.items.map((i) => ({
       ...i,
@@ -1260,7 +1260,7 @@ pulloutRoutes.delete(
     const me = currentUser(req);
     const slip = await prisma.pulloutSlip.findUnique({ where: { id: req.params.id } });
     if (!slip) throw notFound('Pull-out slip not found');
-    if (!mayHandle(me, slip)) throw forbidden('This slip is someone else’s');
+    assertMayDelete(me, slip.preparedById, slip.number);
     if (slip.status !== 'DRAFT' && slip.status !== 'CANCELLED') {
       throw badRequest(`Only a draft or a cancelled slip can be deleted — ${slip.number} is ${statusLabel(slip.status).toLowerCase()}`);
     }

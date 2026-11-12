@@ -790,7 +790,7 @@ export function QuotationDetail() {
   // `?order=1` opens the Create Sales Order panel: the sales order list's
   // "+ New sales order" lands here with the quotation chosen (2026-10-09).
   const [params] = useSearchParams();
-  const { me, can } = useAuth();
+  const { me, can, mayDelete } = useAuth();
   const toast = useToast();
   // Delete, Lost and the rarer moves ask here, in the bar under the header.
   const confirm = useConfirm();
@@ -849,7 +849,7 @@ export function QuotationDetail() {
   // or, once no revision is a draft, the quotation's own details.
   const editHref = `/g-ops/quotations/${quotation.id}/edit`;
   const canDelete =
-    quotation.canEdit &&
+    mayDelete(quotation.owner.id) &&
     can('gops.quotations.delete') &&
     quotation.outcome !== 'WON' &&
     jobs.length === 0 &&

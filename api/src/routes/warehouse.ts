@@ -2,19 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, IssueStatus, BorrowStatus, BorrowType, ReturnCondition, ReceivingStatus } from '@prisma/client';
 import { prisma } from '../prisma';
-import {
-  handler,
-  parseBody,
-  listQuery,
-  listResult,
-  orderBy,
-  notFound,
-  badRequest,
-  forbidden,
-  idsFilter,
-  deleteOrRefuse,
-  type ListQuery,
-} from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { requireView, requireEdit, ownOnly, viewScope, assertCanView, assertCanEdit, mayEdit } from '../shared/ownScope';
@@ -605,7 +593,7 @@ async function presentReceiving(receiving: LoadedReceiving, me: ResolvedUser) {
     canWithdraw: receiving.status === 'PENDING_APPROVAL' && handler_,
     canCancel: (draft || receiving.status === 'PENDING_APPROVAL') && handler_,
     // A draft or a cancelled report posted nothing (2026-10-19): its handler deletes it.
-    canDelete: (draft || receiving.status === 'CANCELLED') && handler_ && can(me, 'gchain.receiving.delete'),
+    canDelete: (draft || receiving.status === 'CANCELLED') && mayDeleteDocument(me, receiving.receivedById) && can(me, 'gchain.receiving.delete'),
     // A received report's peso costs are corrected by Edit All (2026-10-23).
     canCorrectCost: receiving.status === 'RECEIVED' && can(me, 'gchain.receiving.edit_all'),
     approvalRoute: draft && route ? await routeBrief(RECEIVING_DOC, value, receiving.receivedById, null, { importation: isImportation(receiving) }) : null,
@@ -1582,7 +1570,7 @@ receivingRoutes.delete(
       include: { bills: { where: { status: { not: 'CANCELLED' } }, select: { number: true } } },
     });
     if (!receiving) throw notFound('Incoming report not found');
-    if (!mayHandleReceiving(me, receiving)) throw forbidden('This report is someone else’s');
+    assertMayDelete(me, receiving.receivedById, receiving.number);
     if (receiving.status !== 'DRAFT' && receiving.status !== 'CANCELLED') {
       throw badRequest(`Only a draft or a cancelled incoming report can be deleted — ${receiving.number} is ${statusLabel(receiving.status).toLowerCase()}`);
     }
@@ -2218,7 +2206,7 @@ async function issueView(issue: NonNullable<Awaited<ReturnType<typeof loadIssue>
     // by a delete holder; a pending one is pulled back first; issued stock
     // has moved.
     canEdit: draft && raiser,
-    canDelete: (draft || issue.status === 'CANCELLED') && raiser && can(me, 'gchain.stock_issuance.delete'),
+    canDelete: (draft || issue.status === 'CANCELLED') && mayDeleteDocument(me, issue.issuedById) && can(me, 'gchain.stock_issuance.delete'),
     canCancel: (draft || issue.status === 'PENDING_APPROVAL') && raiser,
     needsApproval: draft ? !!route : null,
     canSubmit: draft && !!route && raiser && issue.items.length > 0,
@@ -2812,7 +2800,7 @@ stockIssueRoutes.delete(
     const me = currentUser(req);
     const issue = await prisma.stockIssue.findUnique({ where: { id: req.params.id } });
     if (!issue) throw notFound('Stock issue not found');
-    assertChangeIssue(me, issue);
+    assertMayDelete(me, issue.issuedById, issue.number);
     if (issue.status !== 'DRAFT' && issue.status !== 'CANCELLED') {
       throw badRequest(`Only a draft or a cancelled slip can be deleted — ${issue.number} is ${statusLabel(issue.status).toLowerCase()}`);
     }
@@ -3634,7 +3622,7 @@ async function presentSlip(slip: LoadedSlip, me: ResolvedUser) {
     canSubmit: draft && handles && !!route && slip.items.length > 0,
     canWithdraw: slip.status === 'PENDING_APPROVAL' && handles,
     canCancel: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'].includes(slip.status) && handles,
-    canDelete: (draft || slip.status === 'CANCELLED') && handles && can(me, 'gchain.borrow_slips.delete'),
+    canDelete: (draft || slip.status === 'CANCELLED') && mayDeleteDocument(me, slip.requestedById) && can(me, 'gchain.borrow_slips.delete'),
     canRelease: slip.status === 'APPROVED' && warehouse,
     canReturn: ON_LOAN.includes(slip.status) && warehouse,
     approvalRoute: draft && route ? await routeBrief(BORROW_DOC, null, slip.requestedById ?? me.id) : null,
@@ -4259,7 +4247,7 @@ borrowRoutes.delete(
     const me = currentUser(req);
     const slip = await prisma.borrowSlip.findUnique({ where: { id: req.params.id } });
     if (!slip) throw notFound('Borrow slip not found');
-    if (!mayHandleRequest(me, slip)) throw forbidden('This request is someone else’s');
+    assertMayDelete(me, slip.requestedById, slip.number);
     if (slip.status !== 'DRAFT' && slip.status !== 'CANCELLED') {
       throw badRequest(`Only a draft or a cancelled slip can be deleted — ${slip.number} is ${statusLabel(slip.status).toLowerCase()}`);
     }

@@ -671,6 +671,41 @@ four databases and four copies of "customer".
       API allows; Mark cleared, and Delete in ⋯ for a delete right), and an
       old `?payment=` link redirects there.
 
+## The delete rule (2026-11-13)
+
+The owner's call: "make all the Delete function only by the one who created
+it or the System Administrator; but first pull it back to draft" — his
+answers: a draft or a cancelled document; the super admin only (never Edit
+All / Manage All on somebody else's); documents, not masters. It REPLACES
+every "its raiser or edit_all" wording on a document's DELETE above.
+
+- **WHO is one function**: `mayDeleteDocument(me, creatorId)` /
+  `assertMayDelete(me, creatorId, what)` in `api/src/http/kit.ts` — the
+  creator or a super admin, a 403 "Only whoever created X, or the System
+  Administrator, deletes it". The route's delete permission key is still
+  required of the creator (Manage Own carries it). The web's twin is
+  `mayDelete(creatorId)` on `useAuth()`. Every `canDelete` flag the API
+  sends reads the same function. verify-foundation fails when fewer than
+  twenty route files ask it.
+- **The creator is**: `requestedById` (purchase request, budget request,
+  CAD J.O., commission, invoice request, job order, Service JO, man power
+  request, attendance correction, borrow slip), `ownerId` (quotation, sales
+  order, costing), `createdById` (invoice, purchase order, canvass, memo,
+  project — else its manager where none is on file), `preparedById` (RFQ,
+  pull-out slip, progress report and billing, employment contract),
+  `claimedById` (reimbursement), `receivedById` (incoming), `issuedById`
+  (outgoing), `uploadedById` (Request for Approval).
+- **The STATE stays each route's**: a draft or a cancelled one (rejected too
+  where it was); a pending or approved document is pulled back to draft
+  first. Three now also take a DRAFT (they took only a cancelled one): the
+  reimbursement, the job order and the Service JO. A costing is deleted only
+  as a DRAFT (a final one is pulled back first). A canvass and a project
+  have no draft and stay cancelled-only. What stands on a document (money,
+  goods, a later document) still refuses, as before.
+- **Not covered, on purpose**: masters and reference lists (customers,
+  suppliers, items, employees, categories), leads, calendar activities,
+  meetings, training sessions, payments, and the two "sample" purges.
+
 ## Verification
 
 ```bash

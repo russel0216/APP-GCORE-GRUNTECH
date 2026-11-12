@@ -5,18 +5,7 @@ import path from 'node:path';
 import { Prisma, CadJobOrderStatus, CadPriority } from '@prisma/client';
 import { prisma } from '../prisma';
 import { env } from '../env';
-import {
-  handler,
-  parseBody,
-  listQuery,
-  listResult,
-  orderBy,
-  idsFilter,
-  notFound,
-  badRequest,
-  forbidden,
-  deleteOrRefuse,
-} from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse, mayDeleteDocument } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, impliedBy, resolveUser, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -165,7 +154,7 @@ function flags(me: ResolvedUser, row: CadRow) {
     canResume: row.status === 'ON_HOLD' && (requestor || worker),
     canCancel: (open || BEFORE_QUEUE.includes(row.status)) && (requestor || lead),
     // A cancelled request is the one that may go, by its requestor or the lead, with the delete right.
-    canDelete: (row.status === 'CANCELLED' || row.status === 'DRAFT') && can(me, P.delete) && (requestor || lead || me.isSuperAdmin),
+    canDelete: (row.status === 'CANCELLED' || row.status === 'DRAFT') && can(me, P.delete) && mayDeleteDocument(me, row.requestedById),
     canComment: !CLOSED.includes(row.status) || requestor || worker,
     canFilePlan: row.status === 'COMPLETED' && !!row.jobId && !row.approvedPlanId && (requestor || worker),
     isDesigner: isDesigner(me),
@@ -1007,7 +996,7 @@ cadJobOrderRoutes.delete(
     const me = currentUser(req);
     const row = await load(req.params.id);
     if (!flags(me, row).canDelete) {
-      throw badRequest(row.status !== 'CANCELLED' && row.status !== 'DRAFT' ? 'Only a draft or a cancelled request can be deleted — cancel it first' : 'Only whoever raised this request, or the Designer Lead, deletes it');
+      throw badRequest(row.status !== 'CANCELLED' && row.status !== 'DRAFT' ? 'Only a draft or a cancelled request can be deleted — pull it back to draft first' : 'Only whoever created this request, or the System Administrator, deletes it');
     }
     const [revisions, comments] = await Promise.all([
       prisma.cadRevision.findMany({ where: { cadJobOrderId: row.id }, select: { id: true } }),

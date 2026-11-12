@@ -3,18 +3,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { JobType, Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import {
-  handler,
-  parseBody,
-  listQuery,
-  listResult,
-  orderBy,
-  notFound,
-  badRequest,
-  forbidden,
-  idsFilter,
-  type ListQuery,
-} from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, type ListQuery, assertMayDelete } from '../http/kit';
 import { manilaDayStart, manilaMonthKey, workingDayDate } from '../shared/day';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, resolveUser } from '../permissions/resolve';
@@ -1699,11 +1688,9 @@ costingRoutes.delete(
       include: { _count: { select: { quotationRevisions: true, jobs: true, revisionLinks: true, jobLinks: true } } },
     });
     if (!costing) throw notFound('Costing not found');
-    if (!canEditRecord(me, 'gops', 'costing', costing.ownerId)) {
-      throw forbidden('Only the author can delete this costing');
-    }
-    if (costing.status === 'PENDING_APPROVAL') {
-      throw badRequest('This costing is with the approver and cannot be deleted while they decide.');
+    assertMayDelete(me, costing.ownerId, costing.number);
+    if (costing.status !== 'DRAFT') {
+      throw badRequest('Only a draft costing can be deleted — pull it back to draft first');
     }
     // As the first costing or one of several (2026-10-19).
     const onRevisions = costing._count.quotationRevisions + costing._count.revisionLinks;

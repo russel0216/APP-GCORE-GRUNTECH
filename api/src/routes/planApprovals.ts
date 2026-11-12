@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, PlanStatus, type ApprovalRequest } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -120,7 +120,7 @@ async function present(me: ResolvedUser, row: PlanRow) {
     canSubmit: editable && editor,
     canWithdraw: row.status === 'PENDING_APPROVAL' && editor,
     canCancel: (editable || row.status === 'PENDING_APPROVAL') && editor,
-    canDelete: (editable || row.status === 'CANCELLED') && editor && can(me, 'gops.plans.delete'),
+    canDelete: (editable || row.status === 'CANCELLED') && mayDeleteDocument(me, row.uploadedById) && can(me, 'gops.plans.delete'),
     // POST /:id/customer's rule: once the team approved it, its requester or edit_all.
     canRecordCustomer: row.status === 'APPROVED' && editor,
     customerDecisionLabel: decisionLabel(row.customerDecision),
@@ -593,9 +593,9 @@ planApprovalRoutes.delete(
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await loadVisible(me, req.params.id);
-    if (!mayEdit(me, row)) throw forbidden('That is someone else’s request');
+    assertMayDelete(me, row.uploadedById, row.number ?? 'this request');
     if (![...EDITABLE, 'CANCELLED'].includes(row.status)) {
-      throw badRequest('Only a draft or a cancelled request can be deleted — an approved one is a record');
+      throw badRequest('Only a draft or a cancelled request can be deleted — pull it back to draft first');
     }
     await deleteOrRefuse(row.number ?? row.title, () =>
       prisma.$transaction(async (tx) => {

@@ -5,19 +5,7 @@ import { z } from 'zod';
 import { Prisma, PrStatus, PurchaseKind, PoStatus, CanvassStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import { termsSections } from '../shared/procurementTerms';
-import {
-  handler,
-  parseBody,
-  listQuery,
-  listResult,
-  orderBy,
-  notFound,
-  badRequest,
-  forbidden,
-  idsFilter,
-  deleteOrRefuse,
-  type ListQuery,
-} from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { deleteAttachmentsOf, registerAttachmentGuard } from '../shared/attachments';
 import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
@@ -1730,6 +1718,7 @@ purchaseRequestRoutes.delete(
       include: { _count: { select: { orders: true } }, rfqs: { select: { suppliers: { select: { id: true } } } } },
     });
     if (!pr) throw notFound('Purchase request not found');
+    assertMayDelete(currentUser(req), pr.requestedById, pr.number);
     if (pr.status !== 'DRAFT' && pr.status !== 'REJECTED' && pr.status !== 'CANCELLED') {
       throw badRequest('Only a draft, rejected or cancelled request can be deleted — cancel it first');
     }
@@ -2094,7 +2083,7 @@ function presentCanvass(canvass: LoadedCanvass, me: ResolvedUser, orders: { id: 
     // POST /:id/reopen's rule (2026-10-20): an award whose orders are all
     // still drafts — returned or pulled back — or were cancelled.
     canReopen: canvass.status === 'AWARDED' && can(me, 'gchain.canvass.edit_all') && orders.every((o) => o.status === 'DRAFT'),
-    canDelete: canvass.status === 'CANCELLED' && can(me, 'gchain.canvass.delete') && mayEditCanvass(me, canvass),
+    canDelete: canvass.status === 'CANCELLED' && can(me, 'gchain.canvass.delete') && mayDeleteDocument(me, canvass.createdById),
   };
 }
 
@@ -2277,7 +2266,7 @@ canvassRoutes.delete(
     const me = currentUser(req);
     const canvass = await prisma.canvass.findUnique({ where: { id: req.params.id } });
     if (!canvass) throw notFound('Canvass not found');
-    if (!mayEditCanvass(me, canvass)) throw forbidden('This canvass belongs to someone else');
+    assertMayDelete(me, canvass.createdById, canvass.number);
     if (canvass.status !== 'CANCELLED') throw badRequest('Only a cancelled canvass can be deleted — cancel it first');
     await deleteOrRefuse(canvass.number, () => prisma.canvass.delete({ where: { id: canvass.id } }));
     await deleteAttachmentsOf('canvass', [canvass.id]);
@@ -3312,7 +3301,7 @@ function presentPo(po: LoadedPo, me?: ResolvedUser) {
       (po.status === 'DRAFT' || po.status === 'CANCELLED') &&
       po.receivings.every((r) => r.status === 'CANCELLED') &&
       can(me, 'gchain.purchase_orders.delete') &&
-      mayEditPo(me, po),
+      mayDeleteDocument(me, po.createdById),
     /** What the order page's save claims on (`PUT /:id/sheet`'s `version`). */
     version: po.updatedAt.toISOString(),
     vatRate: num(po.vatRate),
@@ -4746,7 +4735,7 @@ purchaseOrderRoutes.delete(
       },
     });
     if (!po) throw notFound('Purchase order not found');
-    if (!mayEditPo(me, po)) throw forbidden('This order belongs to someone else');
+    assertMayDelete(me, po.createdById, po.number);
     const liveReports = po.receivings.filter((r) => r.status !== 'CANCELLED');
     if (liveReports.length) {
       throw badRequest(`Incoming report ${liveReports.map((r) => r.number).join(', ')} stands on ${po.number} — cancel it first`);

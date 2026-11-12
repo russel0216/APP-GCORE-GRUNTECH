@@ -21,18 +21,7 @@ import {
   teamOf,
   teamShares,
 } from '../shared/team';
-import {
-  handler,
-  parseBody,
-  listQuery,
-  listResult,
-  orderBy,
-  notFound,
-  badRequest,
-  forbidden,
-  idsFilter,
-  deleteOrRefuse,
-} from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, assertMayDelete } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord } from '../permissions/resolve';
 import { viewScope } from '../shared/ownScope';
@@ -1768,8 +1757,9 @@ salesOrderRoutes.delete(
   require_('gops.sales_orders.delete'),
   handler(async (req, res) => {
     const { order } = await orderForEdit(req, req.params.id, false);
+    assertMayDelete(currentUser(req), order.ownerId, order.number);
     if (order.status !== 'DRAFT' && order.status !== 'CANCELLED') {
-      throw badRequest('Only a draft or a cancelled sales order can be deleted — cancel it first');
+      throw badRequest('Only a draft or a cancelled sales order can be deleted — pull it back to draft first');
     }
     // Whatever names the order — live or cancelled — is deleted first
     // (2026-10-21, the owner's call); the refusal says what, by number and

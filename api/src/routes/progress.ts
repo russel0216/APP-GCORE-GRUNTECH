@@ -3,18 +3,7 @@ import { mayRequestInvoice } from './invoiceRequests';
 import { z } from 'zod';
 import { Prisma, ProgressStatus, BillingStatus } from '@prisma/client';
 import { prisma } from '../prisma';
-import {
-  handler,
-  parseBody,
-  listQuery,
-  listResult,
-  orderBy,
-  notFound,
-  badRequest,
-  forbidden,
-  idsFilter,
-  type ListQuery,
-} from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, type ListQuery, assertMayDelete, mayDeleteDocument } from '../http/kit';
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -367,7 +356,7 @@ async function reportView(me: ResolvedUser, report: NonNullable<Awaited<ReturnTy
     canEdit: draft && editor,
     canSubmit: draft && editor,
     canWithdraw: report.status === 'PENDING_APPROVAL' && editor,
-    canDelete: draft && (me.isSuperAdmin || (can(me, 'gops.progress_billing.delete') && editor)),
+    canDelete: draft && can(me, 'gops.progress_billing.delete') && mayDeleteDocument(me, report.preparedById),
     approvalRoute: draft ? await routeBrief(DOC, num(report.job.contractValue), report.preparedById, null, { jobId: report.jobId }) : null,
   };
 }
@@ -892,7 +881,7 @@ progressRoutes.delete(
     if (report.status === 'PENDING_APPROVAL') throw badRequest('Pull it back from its approvers first');
     if (report.billing) throw badRequest('A billing was raised from this report');
     if (report.nextReport) throw badRequest('A later report is chained to this one');
-    if (!mayEditReport(currentUser(req), report)) throw forbidden('This report belongs to someone else');
+    assertMayDelete(currentUser(req), report.preparedById, report.number);
 
     const days = await prisma.progressReportDay.findMany({ where: { reportId: report.id }, select: { id: true } });
     await prisma.progressReport.delete({ where: { id: req.params.id } });
@@ -1594,6 +1583,7 @@ billingRoutes.delete(
       throw badRequest('An approved billing cannot be deleted');
     }
     if (billing.status === 'PENDING_APPROVAL') throw badRequest('Pull it back from its approvers first');
+    assertMayDelete(currentUser(req), billing.preparedById, billing.number);
     await prisma.progressBilling.delete({ where: { id: req.params.id } });
     await audit(
       { entityType: 'progress_billing', entityId: req.params.id, action: 'DELETED', summary: `Deleted ${billing.number}` },

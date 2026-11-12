@@ -139,7 +139,7 @@ const pct = (v: number) => `${Number((v * 100).toFixed(2))}%`;
 export function CostingDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { can } = useAuth();
+  const { can, mayDelete } = useAuth();
   const toast = useToast();
   const [params] = useSearchParams();
 
@@ -357,7 +357,7 @@ export function CostingDetailPage() {
                 onConfirm: reopen,
               },
             },
-          costing.canEdit &&
+          mayDelete(costing.owner.id) &&
             can('gops.costing.delete') &&
             isDraft && {
               label: 'Delete',

@@ -840,7 +840,7 @@ export function JobOrderModal({
 
 export function JobOrderDetail() {
   const { id } = useParams<{ id: string }>();
-  const { can } = useAuth();
+  const { can, mayDelete } = useAuth();
   const navigate = useNavigate();
   const toast = useToast();
   const [row, setRow] = useState<JobOrderDetailRow | null>(null);
@@ -970,8 +970,9 @@ export function JobOrderDetail() {
               onConfirm: cancel,
             },
           },
-          r.status === 'CANCELLED' &&
-            can('gops.job_orders.delete') && {
+          (r.status === 'DRAFT' || r.status === 'CANCELLED') &&
+            can('gops.job_orders.delete') &&
+            mayDelete(r.requestedBy.id) && {
               label: 'Delete',
               danger: true,
               confirm: {

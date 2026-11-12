@@ -2,19 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, JobOrderStatus } from '@prisma/client';
 import { prisma } from '../prisma';
-import {
-  handler,
-  parseBody,
-  listQuery,
-  listResult,
-  orderBy,
-  notFound,
-  badRequest,
-  forbidden,
-  idsFilter,
-  deleteOrRefuse,
-  type ListQuery,
-} from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden, idsFilter, deleteOrRefuse, type ListQuery, assertMayDelete } from '../http/kit';
 import { deleteAttachmentsOf } from '../shared/attachments';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
@@ -1078,10 +1066,8 @@ jobOrderRoutes.delete(
   handler(async (req, res) => {
     const me = currentUser(req);
     const row = await load(req.params.id);
-    if (!canEditRecord(me, 'gops', 'job_orders', row.requestedById)) {
-      throw forbidden('Only whoever raised this job order can delete it');
-    }
-    if (row.status !== 'CANCELLED') throw badRequest('Only a cancelled job order can be deleted — cancel it first');
+    assertMayDelete(me, row.requestedById, row.number);
+    if (row.status !== 'DRAFT' && row.status !== 'CANCELLED') throw badRequest('Only a draft or a cancelled job order can be deleted — pull it back to draft first');
     if (await prisma.invoice.count({ where: { jobOrderId: row.id } })) {
       throw badRequest('This job order has been invoiced — it stays as that invoice’s record');
     }
