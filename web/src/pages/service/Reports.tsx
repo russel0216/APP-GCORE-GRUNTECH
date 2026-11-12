@@ -739,7 +739,7 @@ export function ServiceReportDetail() {
           editable && (
             <>
               <button className="btn" onClick={save} disabled={busy || !dirty}>
-                {busy ? 'Saving…' : 'Save draft'}
+                {busy ? 'Saving…' : 'Save as draft'}
               </button>
               {canSubmit && (
                 <button

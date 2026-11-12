@@ -322,11 +322,11 @@ export function JobOrders() {
         actions={
           <>
             <button type="button" className="btn btn-sm" onClick={() => setReporting(true)}>
-              Generate Report
+              Report
             </button>
             {canCreate ? (
               <button type="button" className="btn btn-primary btn-sm" onClick={() => setRaising(true)}>
-                + New Job Order Request
+                + New job order request
               </button>
             ) : null}
           </>

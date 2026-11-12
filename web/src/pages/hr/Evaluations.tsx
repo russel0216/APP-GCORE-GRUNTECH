@@ -882,7 +882,7 @@ export function EvaluationDetail() {
           <>
             {editing && (
               <button type="button" className="btn" onClick={saveDraft} disabled={busy !== null || !dirty}>
-                {busy === 'save' ? 'Saving…' : 'Save draft'}
+                {busy === 'save' ? 'Saving…' : 'Save as draft'}
               </button>
             )}
             {editing && (
@@ -949,6 +949,9 @@ export function EvaluationDetail() {
         <div className="alert error">Rejected — nothing changed on the employee record. The milestone falls due again for a fresh evaluation.</div>
       )}
       {ev.status === 'CANCELLED' && <div className="alert">Cancelled. It covers nothing, and the milestone is due again.</div>}
+
+      <DecisionNote documentType="evaluation" documentId={ev.id} reloadToken={approvalToken} />
+      <DocumentApproval documentType="evaluation" documentId={ev.id} reloadToken={approvalToken} />
 
       <div className="eval-body">
         <section className="card eval-ratings" aria-label="Ratings">
@@ -1121,9 +1124,6 @@ export function EvaluationDetail() {
           )}
         </div>
       </div>
-
-      <DecisionNote documentType="evaluation" documentId={ev.id} reloadToken={approvalToken} />
-      <DocumentApproval documentType="evaluation" documentId={ev.id} reloadToken={approvalToken} />
 
       <div className="eval-attachments">
         <Attachments

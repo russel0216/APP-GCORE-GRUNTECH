@@ -413,7 +413,7 @@ function FileLeaveModal({
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
           <button className={maySend ? 'btn' : 'btn btn-primary'} onClick={() => save(false)} disabled={busy || !valid}>
-            {existing ? 'Save' : 'Save draft'}
+            {existing ? 'Save' : 'Save as draft'}
           </button>
           {maySend && (
             <button className="btn btn-primary" onClick={() => save(true)} disabled={busy || !valid}>
@@ -533,7 +533,7 @@ function FileLeaveModal({
  *
  * A DRAFT is modified and submitted here — including one whose submission the
  * engine refused, which used to be stranded with no way to send it again. A
- * pending one is pulled back to draft first ("Pull back and edit").
+ * pending one is pulled back to draft first ("Pull back to draft").
  */
 function LeaveRecord({ id }: { id: string }) {
   const toast = useToast();
@@ -643,7 +643,7 @@ function LeaveRecord({ id }: { id: string }) {
         }
         more={[
           row.canWithdraw && {
-            label: 'Pull back and edit',
+            label: 'Pull back to draft',
             hint: 'Withdraw it from the approver and return it to draft',
             confirm: {
               title: `Pull ${row.number} back to draft?`,
@@ -693,6 +693,9 @@ function LeaveRecord({ id }: { id: string }) {
         </div>
       )}
 
+      <DecisionNote documentType="leave_request" documentId={row.id} reloadToken={reload} />
+      <DocumentApproval documentType="leave_request" documentId={row.id} reloadToken={reload} />
+
       <div className="card">
         <h3 className="card-title">Request</h3>
         <dl className="kv">
@@ -730,9 +733,6 @@ function LeaveRecord({ id }: { id: string }) {
           <dd>{formatDateTime(row.createdAt)}</dd>
         </dl>
       </div>
-
-      <DecisionNote documentType="leave_request" documentId={row.id} reloadToken={reload} />
-      <DocumentApproval documentType="leave_request" documentId={row.id} reloadToken={reload} />
 
       {modifying && (
         <FileLeaveModal

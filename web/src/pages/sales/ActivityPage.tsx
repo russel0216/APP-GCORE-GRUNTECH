@@ -529,7 +529,7 @@ export function ActivityPage() {
         )}
       </section>
 
-      <Attachments entityType="sales_activity" entityId={activity.id} title="Files" hint="Agenda, directions, a photo from the site — anything the people on it need." />
+      <Attachments entityType="sales_activity" entityId={activity.id} hint="Agenda, directions, a photo from the site — anything the people on it need." />
         </>
       )}
 

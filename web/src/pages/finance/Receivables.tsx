@@ -1029,11 +1029,13 @@ function InvoiceModal({
                       <td className="right">
                         {lines.length > 1 && (
                           <button
-                            className="btn btn-ghost btn-sm"
+                            type="button"
+                            className="btn btn-sm btn-icon"
+                            title="Remove"
                             aria-label={`Remove line ${i + 1}`}
                             onClick={() => setLines(lines.filter((_, j) => j !== i))}
                           >
-                            Remove
+                            ✕
                           </button>
                         )}
                       </td>
@@ -1986,8 +1988,14 @@ export function RecordPaymentModal({
                 </td>
                 <td className="right faint">
                   On account{' '}
-                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => setManual(manual.filter((_, j) => j !== i))}>
-                    Remove
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-icon"
+                    title="Remove"
+                    aria-label={`Remove line ${i + 1}`}
+                    onClick={() => setManual(manual.filter((_, j) => j !== i))}
+                  >
+                    ✕
                   </button>
                 </td>
                 {collection && <td />}

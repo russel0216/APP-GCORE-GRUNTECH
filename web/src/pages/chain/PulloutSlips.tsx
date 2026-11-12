@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, qs } from '../../lib/api';
+import { api, qs, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { Empty, ErrorBox, Field, Loading, StatusBadge, formatDate, useToast } from '../../components/ui';
@@ -1080,7 +1080,7 @@ export function PulloutEditor() {
                             setDirty(true);
                           }}
                         >
-                          ×
+                          ✕
                         </button>
                       </td>
                     </tr>
@@ -1340,8 +1340,13 @@ export function PulloutDetail() {
         }
         print={`/api/pullout-slips/${id}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The slip alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/pullout-slips/${id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           slip.canWithdraw === true && {
-            label: 'Pull back to a draft',
+            label: 'Pull back to draft',
             hint: 'Withdraws it from the approver',
             confirm: {
               title: `Pull ${number} back to a draft?`,

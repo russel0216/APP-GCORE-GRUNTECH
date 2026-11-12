@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, qs } from '../../lib/api';
+import { api, qs, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { Empty, ErrorBox, Field, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
@@ -688,7 +688,7 @@ export function OutgoingEditor() {
                                 })
                               }
                             >
-                              ×
+                              ✕
                             </button>
                           </td>
                         </tr>
@@ -1032,8 +1032,13 @@ export function StockIssueDetail() {
         actions={nextStep}
         print={`/api/stock-issues/${id}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The slip alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/stock-issues/${id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           issue.canWithdraw && {
-            label: 'Pull back to a draft',
+            label: 'Pull back to draft',
             hint: 'Withdraws it from the approver',
             confirm: {
               title: `Pull ${number} back to a draft?`,

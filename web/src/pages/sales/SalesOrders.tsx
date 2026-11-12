@@ -357,7 +357,7 @@ export function SalesOrders() {
         searchPlaceholder="Search number, PO, SI/DR, customer, quotation…"
         onRowClick={(r) => navigate(`/g-ops/sales-orders/${r.id}`)}
         emptyTitle="Nothing booked yet"
-        emptyHint="An order books a quotation: + New sales order asks which, or open the quotation and press Create Sales Order."
+        emptyHint="An order books a quotation: + New sales order asks which, or open the quotation and press Create sales order."
         actions={
           can('gops.sales_orders.create') ? (
             <button className="btn btn-primary btn-sm" aria-expanded={picking} onClick={() => setPicking((v) => !v)}>
@@ -819,7 +819,7 @@ export function SalesOrderDetail() {
             },
           order.canEdit &&
             pending && {
-              label: 'Pull back and edit',
+              label: 'Pull back to draft',
               hint: 'Withdraw it from the approvers and return it to draft',
               confirm: {
                 title: `Pull ${order.number} back to draft?`,
@@ -1708,7 +1708,7 @@ export function SalesOrderEditor() {
                 );
                 const removeCell = (
                   <td className="qe-col-remove">
-                    <button type="button" className="btn btn-sm btn-icon btn-ghost" aria-label={`Remove ${what}`} onClick={() => removeLine(l.key)}>
+                    <button type="button" className="btn btn-sm btn-icon" title="Remove" aria-label={`Remove ${what}`} onClick={() => removeLine(l.key)}>
                       ✕
                     </button>
                   </td>

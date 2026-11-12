@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -151,7 +151,7 @@ export function ProjectPlanApprovalsCard({
       <div className="card-head">
         <h3 className="card-title">Request for Approval</h3>
         {can('gops.plans.create') && (
-          <button className="btn btn-sm" onClick={() => setRaising(true)}>
+          <button type="button" className="btn btn-primary btn-sm" onClick={() => setRaising(true)}>
             + New request for approval
           </button>
         )}
@@ -407,6 +407,11 @@ export function PlanApprovalPage() {
         }
         print={`/api/plans/${row.id}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The request alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/plans/${row.id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           row.canWithdraw && {
             label: 'Pull back to draft',
             confirm: {

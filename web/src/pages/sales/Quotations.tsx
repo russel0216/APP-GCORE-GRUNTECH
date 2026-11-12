@@ -1035,7 +1035,7 @@ export function QuotationDetail() {
                 disabled={!hasPricedLine}
                 title="Book this quotation in operations — SCORO's Create invoice"
               >
-                Create Sales Order
+                Create sales order
               </button>
             )}
             {canRequestJobOrder && (
@@ -1081,7 +1081,7 @@ export function QuotationDetail() {
           // back to draft, no number burned on what the customer never saw.
           quotation.canEdit &&
             pendingLatest && {
-              label: 'Pull back and edit',
+              label: 'Pull back to draft',
               hint: 'Withdraw it from the approvers and return it to draft',
               confirm: {
                 title: `Pull R${pendingLatest.revision} back to draft?`,
@@ -1165,12 +1165,12 @@ export function QuotationDetail() {
           },
           !canDelete &&
             me?.user.isSuperAdmin && {
-              label: 'Purge (sample data)',
+              label: 'Delete sample with everything on it',
               danger: true,
               confirm: {
-                title: `Purge ${quotation.number}?`,
+                title: `Delete ${quotation.number} and everything on it?`,
                 body: `Removes the quotation with its sales orders, job orders and the project built from it${jobs.length ? ` (${jobs.map((j) => j.number).join(', ')})` : ''}. For sample and test data — refused if an invoice, bill, PR, PO, stock issue, claim or advance is filed against the project. It cannot be undone.`,
-                confirmLabel: 'Purge',
+                confirmLabel: 'Delete everything',
                 onConfirm: purge,
               },
             },
@@ -1439,7 +1439,7 @@ export function QuotationDetail() {
           {revision.status === 'PENDING_APPROVAL' && (
             <div className="alert info">
               Revision {revision.revision} is with the approver. It cannot be edited until they
-              decide — ⋯ › Pull back and edit returns it to draft, or raise a new revision if
+              decide — ⋯ › Pull back to draft returns it to draft, or raise a new revision if
               something must change; either way it is withdrawn from their queue.
             </div>
           )}
@@ -1551,18 +1551,6 @@ export function QuotationDetail() {
             />
           )}
 
-          {/* Between the sales orders and the activity (2026-10-12, the owner's
-              call): a PO, a drawing, a photo — printed behind the quotation, and
-              copied onto every sales order raised from it. */}
-          <div className="sales-card-gap">
-            <Attachments
-              entityType="quotation"
-              entityId={quotation.id}
-              hint="A purchase order, a drawing, a photo — printed after the quotation, and copied onto the sales order raised from it."
-              canEdit={quotation.canEdit || can('gops.sales_orders.create')}
-            />
-          </div>
-
           {quotation.buying && <QuotationBuying quotationId={quotation.id} buying={quotation.buying} onChanged={() => void load()} />}
 
           {/* Cash on an open or won quotation (2026-10-26), checked against its costing. */}
@@ -1571,6 +1559,19 @@ export function QuotationDetail() {
             record={{ key: 'quotationId', id: quotation.id }}
             open={['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON'].includes(quotation.outcome)}
           />
+
+          {/* After the related documents, before the activity — every record
+              page's place for its files (the audit of 2026-11-13). A PO, a
+              drawing, a photo — printed behind the quotation, and copied onto
+              every sales order raised from it. */}
+          <div className="sales-card-gap">
+            <Attachments
+              entityType="quotation"
+              entityId={quotation.id}
+              hint="A purchase order, a drawing, a photo — printed after the quotation, and copied onto the sales order raised from it."
+              canEdit={quotation.canEdit || can('gops.sales_orders.create')}
+            />
+          </div>
 
           <div className="sales-card-gap">
             <ActivityLog quotationId={quotation.id} canEdit={quotation.canEdit} />
@@ -1642,7 +1643,7 @@ function QuotationSalesOrders({
       {rows === null && !error ? (
         <Loading />
       ) : !rows?.length ? (
-        <Empty title="No sales order yet" hint="Nothing has been booked from this quotation — Create Sales Order, above, books it." />
+        <Empty title="No sales order yet" hint="Nothing has been booked from this quotation — Create sales order, above, books it." />
       ) : (
         <div className="table-wrap">
           <table className="data so-table">
@@ -1936,7 +1937,7 @@ function CreateSalesOrderPanel({ quotation, onClose }: { quotation: QuotationDet
   const total = booking ? (booking.vatInclusive ? net : Math.round(net * (1 + booking.vatRate) * 100) / 100) : 0;
 
   return (
-    <div id="qd-create-so" className="card qd-route so-create sales-card-gap" role="group" aria-label="Create Sales Order">
+    <div id="qd-create-so" className="card qd-route so-create sales-card-gap" role="group" aria-label="Create sales order">
       <ErrorBox error={error} />
       {!booking && !error && <Loading />}
       {booking && (

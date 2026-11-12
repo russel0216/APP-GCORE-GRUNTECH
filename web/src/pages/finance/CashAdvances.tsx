@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
 import { Stat } from '../../components/charts';
@@ -525,6 +525,11 @@ export function CashAdvanceDetail() {
         }
         print={`/api/cash-advances/${row.id}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The advance alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/cash-advances/${row.id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           canCancel && {
             label: 'Cancel cash advance',
             danger: true,

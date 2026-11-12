@@ -847,7 +847,7 @@ export function IncomingEditor() {
                               })
                             }
                           >
-                            ×
+                            ✕
                           </button>
                         </td>
                       </tr>

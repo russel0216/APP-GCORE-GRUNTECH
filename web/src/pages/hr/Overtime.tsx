@@ -598,7 +598,7 @@ export function OvertimeDetail() {
         }
         more={[
           row.canWithdraw && {
-            label: 'Pull back and edit',
+            label: 'Pull back to draft',
             hint: 'Withdraw the actual hours from the approvers, to change and file them again',
             confirm: {
               title: `Pull the hours on ${row.number} back?`,

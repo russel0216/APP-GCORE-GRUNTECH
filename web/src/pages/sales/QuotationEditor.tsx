@@ -1523,7 +1523,8 @@ export function QuotationEditor() {
                     <button
                       type="button"
                       id={lineField(l.key, 'remove')}
-                      className="btn btn-sm btn-icon btn-ghost"
+                      className="btn btn-sm btn-icon"
+                      title="Remove"
                       aria-label={`Remove ${what}`}
                       onClick={() => removeLine(l.key)}
                     >

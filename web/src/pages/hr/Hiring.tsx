@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -440,7 +440,7 @@ export function ManpowerRequestPage() {
             )}
             {r.status === 'APPROVED' && can('ghr.candidates.create') && (
               <button type="button" className="btn btn-primary" onClick={() => setAddingCandidate(true)}>
-                + Add new applicant
+                + Add applicant
               </button>
             )}
           </>
@@ -707,7 +707,7 @@ export function Candidates() {
         actions={
           can('ghr.candidates.create') ? (
             <button type="button" className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
-              + Add new applicant
+              + Add applicant
             </button>
           ) : null
         }
@@ -1179,7 +1179,7 @@ export function CandidatePage() {
           </ul>
         </section>
 
-        <Attachments entityType="candidate" entityId={c.id} title="Files" hint="CV, licence, IDs, the exam papers" canEdit={c.canEdit} />
+        <Attachments entityType="candidate" entityId={c.id} hint="CV, licence, IDs, the exam papers" canEdit={c.canEdit} />
       </div>
 
       {modifying && (
@@ -1756,7 +1756,7 @@ function SignedModal({ contract, onClose, onDone }: { contract: ContractRow; onC
       }
     >
       <ErrorBox error={error} />
-      <p>Record the day {contract.candidateName} signed the printed contract. Attach the signed copy under Files.</p>
+      <p>Record the day {contract.candidateName} signed the printed contract. Attach the signed copy under Attachments.</p>
       <Field label="Signed on">
         <input type="date" max={today()} value={on} onChange={(e) => setOn(e.target.value)} />
       </Field>
@@ -1847,6 +1847,11 @@ export function ContractPage() {
         }
         print={`/api/hiring/contracts/${k.id}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The contract alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/hiring/contracts/${k.id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           k.canWithdraw && {
             label: 'Pull back to draft',
             confirm: {
@@ -1899,7 +1904,7 @@ export function ContractPage() {
       {k.status !== 'DRAFT' && k.status !== 'CANCELLED' && <DocumentApproval documentType="employment_contract" documentId={k.id} reloadToken={reload} />}
       <ErrorBox error={error} />
       {k.status === 'APPROVED' && (
-        <div className="alert info">Approved. Print it for the wet signature, then mark it signed and attach the signed copy under Files.</div>
+        <div className="alert info">Approved. Print it for the wet signature, then mark it signed and attach the signed copy under Attachments.</div>
       )}
 
       <div className="stack">
@@ -1966,7 +1971,7 @@ export function ContractPage() {
             <p className="hiring-terms">{k.terms}</p>
           </section>
         )}
-        <Attachments entityType="employment_contract" entityId={k.id} title="Files" hint="The signed copy, the offer, IDs" canEdit={k.canEdit || k.canSign || k.canHire} />
+        <Attachments entityType="employment_contract" entityId={k.id} hint="The signed copy, the offer, IDs" canEdit={k.canEdit || k.canSign || k.canHire} />
       </div>
 
       {modifying && (

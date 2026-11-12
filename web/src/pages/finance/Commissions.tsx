@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { commissionFigures } from '../../lib/commission';
 import { DataList, type Column } from '../../components/DataList';
@@ -124,7 +124,7 @@ export function Commissions() {
         actions={
           can('gfin.commissions.create') ? (
             <Link className="btn btn-primary btn-sm" to="/g-fin/commissions/new">
-              + New Commission Request
+              + New commission request
             </Link>
           ) : undefined
         }
@@ -632,8 +632,14 @@ export function CommissionEditor() {
                         <b>{formatMoney(f?.net ?? 0)}</b>
                       </td>
                       <td>
-                        <button type="button" className="btn btn-sm" onClick={() => change(() => setLines((ls) => ls.filter((_, j) => j !== i)))}>
-                          Remove
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-icon"
+                          title="Remove"
+                          aria-label={`Remove line ${i + 1}`}
+                          onClick={() => change(() => setLines((ls) => ls.filter((_, j) => j !== i)))}
+                        >
+                          ✕
                         </button>
                       </td>
                     </tr>
@@ -715,7 +721,7 @@ export function CommissionEditor() {
         </section>
       )}
 
-      <div className="row qe-foot">{actions}</div>
+      <div className="page-foot">{actions}</div>
     </div>
   );
 }
@@ -807,6 +813,11 @@ export function CommissionPage() {
         }
         print={`/api/commissions/${row.id}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The request alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/commissions/${row.id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           row.canWithdraw && {
             label: 'Pull back to draft',
             confirm: {
@@ -903,7 +914,7 @@ export function CommissionPage() {
       {row.status === 'PAID' && <div className="alert ok">Paid{row.paidAt ? ` on ${formatDate(row.paidAt)}` : ''}.</div>}
 
       <div className="stack">
-        <div className="grid-2">
+        <div className="grid grid-2">
           <section className="card">
             <h3 className="card-title">The deal</h3>
             <dl className="kv">
@@ -1078,7 +1089,6 @@ export function CommissionPage() {
         <Attachments
           entityType="commission_request"
           entityId={row.id}
-          title="Files"
           hint={draft ? 'Printed behind the request.' : 'What the approvers were sent. Files change only on a draft.'}
           canEdit={!!row.canEdit}
         />
@@ -1111,7 +1121,7 @@ export function CommissionsCard({ salesOrderId, jobId }: { salesOrderId?: string
         <h3 className="card-title">Commissions</h3>
         {salesOrderId && can('gfin.commissions.create') && !rows.some((r) => r.status !== 'CANCELLED') && (
           <Link className="btn btn-sm" to={`/g-fin/commissions/new?salesOrder=${salesOrderId}`}>
-            + New Commission Request
+            + New commission request
           </Link>
         )}
       </div>

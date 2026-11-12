@@ -618,14 +618,15 @@ export function BorrowRequestEditor() {
                           {/* An unsaved row of this form: nothing on record is lost, so no question. */}
                           <button
                             type="button"
-                            className="btn btn-sm"
+                            className="btn btn-sm btn-icon"
+                            title="Remove"
                             aria-label={`Remove item ${i + 1}`}
                             onClick={() => {
                               setLines((ls) => (ls.length === 1 ? [blank()] : ls.filter((_, n) => n !== i)));
                               setDirty(true);
                             }}
                           >
-                            Remove
+                            ✕
                           </button>
                         </div>
                       </td>
@@ -818,7 +819,7 @@ export function BorrowSlipDetail() {
         print={`/api/borrow-slips/${id}/pdf`}
         more={[
           slip.canWithdraw === true && {
-            label: 'Pull back to a draft',
+            label: 'Pull back to draft',
             hint: 'Withdraws it from the approver',
             confirm: {
               title: `Pull ${number} back to a draft?`,

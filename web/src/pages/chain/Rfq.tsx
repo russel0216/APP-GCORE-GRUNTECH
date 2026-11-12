@@ -130,7 +130,7 @@ export function Rfqs() {
         }}
         actions={
           can('gchain.rfq.create') ? (
-            <button className="btn btn-primary" onClick={() => navigate('/g-chain/rfq/new')}>
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => navigate('/g-chain/rfq/new')}>
               + New RFQ
             </button>
           ) : null
@@ -635,13 +635,13 @@ export function RfqEditor() {
                       <td>
                         <button
                           type="button"
-                          className="btn btn-sm"
+                          className="btn btn-sm btn-icon"
                           disabled={r.quoted}
-                          title={r.quoted ? 'This supplier quoted — they stay on the RFQ' : undefined}
+                          title={r.quoted ? 'This supplier quoted — they stay on the RFQ' : 'Remove'}
                           aria-label={`Remove ${r.supplier?.name ?? 'this row'}`}
                           onClick={() => setRows((rs) => (rs.length > 1 ? rs.filter((o) => o.key !== r.key) : [blankRow()]))}
                         >
-                          Remove
+                          ✕
                         </button>
                       </td>
                     </tr>

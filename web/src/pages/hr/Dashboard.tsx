@@ -198,7 +198,7 @@ export function HrDashboard() {
             onClick={() => setRange({ from: date, to: date })}
             disabled={exporting}
           >
-            Extract CSV…
+            Export CSV…
           </button>
         </div>
       </div>
@@ -305,7 +305,7 @@ export function HrDashboard() {
                 onClick={() => exportCsv(range.from, range.to)}
                 disabled={exporting || !range.from || !range.to || range.to < range.from}
               >
-                {exporting ? 'Building…' : 'Download CSV'}
+                {exporting ? 'Building…' : 'Export CSV'}
               </button>
             </ModalFoot>
           }

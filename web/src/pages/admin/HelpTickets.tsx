@@ -410,7 +410,7 @@ export function HelpTicketPage() {
       <ErrorBox error={error} />
       {own && closed && <div className="alert info">This ticket is {r.statusLabel.toLowerCase()}. If it is not, reply below — that opens it again.</div>}
 
-      <div className="grid-2">
+      <div className="grid grid-2">
         <section className="card">
           <h3 className="card-title">The ticket</h3>
           <p className="help-description">{r.description}</p>

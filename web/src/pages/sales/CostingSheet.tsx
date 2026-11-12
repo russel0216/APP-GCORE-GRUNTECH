@@ -1145,7 +1145,7 @@ export function CostingSheet() {
                                   <button type="button" className="btn btn-sm btn-icon btn-ghost" aria-label={`Move ${label} down`} disabled={i === rows.length - 1} onClick={() => moveLine(l.key, 1)}>
                                     ↓
                                   </button>
-                                  <button type="button" className="btn btn-sm btn-icon btn-ghost" aria-label={`Remove ${label}`} onClick={() => removeLine(l.key)}>
+                                  <button type="button" className="btn btn-sm btn-icon" title="Remove" aria-label={`Remove ${label}`} onClick={() => removeLine(l.key)}>
                                     ✕
                                   </button>
                                 </div>
@@ -1542,7 +1542,7 @@ export function CostingSheet() {
                               <button type="button" className="btn btn-sm btn-icon btn-ghost" aria-label={`Move ${taskLabel} down`} disabled={ti === s.tasks.length - 1} onClick={() => updateSection(s.key, { tasks: move(s.tasks, ti, 1) })}>
                                 ↓
                               </button>
-                              <button type="button" className="btn btn-sm btn-icon btn-ghost" aria-label={`Remove ${taskLabel}`} onClick={() => updateSection(s.key, { tasks: s.tasks.filter((x) => x.key !== t.key) })}>
+                              <button type="button" className="btn btn-sm btn-icon" title="Remove" aria-label={`Remove ${taskLabel}`} onClick={() => updateSection(s.key, { tasks: s.tasks.filter((x) => x.key !== t.key) })}>
                                 ✕
                               </button>
                             </div>

@@ -66,7 +66,7 @@ export function ProcurementSettings() {
 
       <ErrorBox error={error} />
 
-      <fieldset disabled={!editable} className="fin-fieldset">
+      <fieldset disabled={!editable} className="fin-fieldset stack">
         <div className="grid grid-2">
           {(['goods', 'services'] as const).map((key) => (
             <div className="card" key={key}>

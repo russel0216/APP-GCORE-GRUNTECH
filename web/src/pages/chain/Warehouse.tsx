@@ -1,7 +1,7 @@
 import { Icon } from '../../components/Icon';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, qs } from '../../lib/api';
+import { api, qs, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
@@ -444,8 +444,13 @@ export function ReceivingDetail() {
         }
         print={`/api/receivings/${recId}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The report alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/receivings/${recId}/pdf?attachments=0`, (e) => setError(e)),
+          },
           rec.canWithdraw === true && {
-            label: 'Pull back to a draft',
+            label: 'Pull back to draft',
             hint: 'Withdraws it from the approver',
             confirm: {
               title: `Pull ${String(rec.number)} back to a draft?`,
@@ -456,12 +461,12 @@ export function ReceivingDetail() {
             },
           },
           rec.canCancel === true && {
-            label: 'Cancel receiving',
+            label: 'Cancel incoming report',
             danger: true,
             confirm: {
               title: `Cancel ${String(rec.number)}?`,
               body: 'Nothing was received on it, and nothing moves. The goods can be received again on a new report.',
-              confirmLabel: 'Cancel receiving',
+              confirmLabel: 'Cancel incoming report',
               reason: 'required',
               minReason: 3,
               reasonLabel: 'Why is it cancelled?',

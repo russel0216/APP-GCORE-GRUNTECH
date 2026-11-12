@@ -743,7 +743,7 @@ export function AssetDetailPage() {
           <div className="card-head">
             <h3 className="card-title">Service JOs</h3>
             {can('gops.service_job_orders.create') && row.status !== 'DECOMMISSIONED' && (
-              <Link className="btn btn-primary btn-sm" to={`/g-ops/service-job-orders?new=1&customerId=${row.customer.id}&assetId=${row.id}`}>
+              <Link className="btn btn-sm" to={`/g-ops/service-job-orders?new=1&customerId=${row.customer.id}&assetId=${row.id}`}>
                 + New service JO
               </Link>
             )}
@@ -796,7 +796,7 @@ export function AssetDetailPage() {
             <h3 className="card-title">Technical documents</h3>
             {can('gops.service_documents.create') && (
               <Link
-                className="btn btn-primary btn-sm"
+                className="btn btn-sm"
                 to={`/g-ops/service-documents?new=1&assetId=${row.id}&assetName=${encodeURIComponent(`${row.name}${row.serialNo ? ` · ${row.serialNo}` : ''} — ${row.customer.name}`)}`}
               >
                 + New service document

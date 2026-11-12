@@ -354,7 +354,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--s-2) var(--s-4);
-  margin: calc(var(--s-3) * -1) 0 var(--s-4);
+  margin: 0 0 var(--block-gap);
   font-size: var(--fs-sm);
   color: var(--muted);
 }

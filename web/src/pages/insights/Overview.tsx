@@ -654,8 +654,8 @@ export function Profitability() {
         </div>
       </div>
 
-      <div className="grid grid-4" style={{ marginBottom: 'var(--block-gap)' }}>
-        <Tile label="Contract value" value={formatMoney(data.totals.contractValue)} sub={`${data.totals.jobs} job${data.totals.jobs === 1 ? '' : 's'}`} />
+      <div className="grid grid-4">
+<Tile label="Contract value" value={formatMoney(data.totals.contractValue)} sub={`${data.totals.jobs} job${data.totals.jobs === 1 ? '' : 's'}`} />
         <Tile label="Budgeted cost" value={formatMoney(data.totals.budgetedCost)} sub="what they were costed at" />
         <Tile
           label="Expected profit"

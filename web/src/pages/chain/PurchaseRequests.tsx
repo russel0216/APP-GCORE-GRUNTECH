@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
@@ -455,6 +455,11 @@ export function PurchaseRequestDetail() {
         }
         print={`/api/purchase-requests/${pr.id}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The request alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/purchase-requests/${pr.id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           // A project's request may be filled from the shelf instead of bought (2026-10-14).
           pr.kind === 'DIRECT_TO_JOB' &&
             (pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED') &&
@@ -464,7 +469,7 @@ export function PurchaseRequestDetail() {
               onSelect: () => navigate(`/g-chain/pullout-slips/new?request=${pr.id}`),
             },
           pr.canWithdraw && {
-            label: 'Pull back and edit',
+            label: 'Pull back to draft',
             hint: 'Withdraws it from the approver',
             confirm: {
               title: `Pull ${pr.number} back to draft?`,

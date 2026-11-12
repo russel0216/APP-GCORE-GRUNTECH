@@ -776,7 +776,7 @@ export function AssetPage() {
           )}
         </section>
 
-        <Attachments entityType="company_asset" entityId={r.id} title="Files" hint="The receipt, a vehicle's OR/CR, photos" canEdit={r.canEdit} />
+        <Attachments entityType="company_asset" entityId={r.id} hint="The receipt, a vehicle's OR/CR, photos" canEdit={r.canEdit} />
       </div>
 
       {modifying && (

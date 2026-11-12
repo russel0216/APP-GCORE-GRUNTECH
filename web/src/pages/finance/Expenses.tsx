@@ -440,12 +440,12 @@ export function ExpenseClaimDetail() {
             onSelect: () => openPdf(`/api/expense-claims/${row.id}/pdf?attachments=0`, (e) => setError(e)),
           },
           canPullBack && {
-            label: 'Pull back and edit',
+            label: 'Pull back to draft',
             hint: 'Back to a draft; the approvers are told',
             confirm: {
               title: `Pull ${row.number} back to draft?`,
               body: 'The approval request is withdrawn and the approvers are told. Submit it again once it is right.',
-              confirmLabel: 'Pull back and edit',
+              confirmLabel: 'Pull back to draft',
               tone: 'primary',
               onConfirm: pullBack,
             },

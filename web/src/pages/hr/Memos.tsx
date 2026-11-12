@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { parseDay } from '../../lib/day';
 import { DataList, type Column } from '../../components/DataList';
@@ -405,6 +405,11 @@ export function MemoPage() {
         }
         print={`/api/memos/${r.id}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The memo alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/memos/${r.id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           r.canArchive && {
             label: 'Archive',
             confirm: { title: `Archive memo ${r.number}?`, body: 'It stays on every recipient’s list, marked archived.', confirmLabel: 'Archive', onConfirm: () => post('archive', {}, 'Archived') },
@@ -472,8 +477,6 @@ export function MemoPage() {
 
         {r.mine && (r.canReply || r.mine.reply) && <MemoReply memoId={r.id} mine={r.mine} canReply={r.canReply} onSaved={load} />}
 
-        <Attachments entityType="memo" entityId={r.id} title="Files" hint="The signed copy, a policy — added while the memo is a draft" canEdit={r.canEdit} />
-
         {r.seesRecipients && r.status !== 'DRAFT' && (
           <section className="card">
             <div className="card-head">
@@ -522,6 +525,8 @@ export function MemoPage() {
             )}
           </section>
         )}
+
+        <Attachments entityType="memo" entityId={r.id} hint="The signed copy, a policy — added while the memo is a draft" canEdit={r.canEdit} />
       </div>
 
       {modifying && (

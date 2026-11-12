@@ -991,7 +991,6 @@ export function LeadDetail() {
           <Attachments
             entityType="lead"
             entityId={lead.id}
-            title="Documents"
             hint="Scope of work, drawings, specifications — whatever they sent. These stay with the lead and carry through to the quotation raised from it."
             canEdit={lead.canEdit}
           />

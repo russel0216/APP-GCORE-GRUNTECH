@@ -1067,7 +1067,6 @@ export function MeetingDetail() {
         <Attachments
           entityType="meeting"
           entityId={m.id}
-          title="Documents"
           hint="Pre-reads, minutes, presentations — whatever the meeting needs, kept with it."
           canEdit={m.canEdit || m.myResponse !== null}
         />
@@ -1106,7 +1105,7 @@ export function MeetingDetail() {
  * the minutes" — those who said Going): the organiser sends them, each
  * attendee agrees or asks for a change, and once every one has agreed they
  * read Agreed. Changing them after that sends them round again. Files go on
- * the Documents card; Print is the minutes on paper.
+ * the Attachments card; Print is the minutes on paper.
  */
 const MINUTES_TONES = { DRAFT: '', FOR_AGREEMENT: 'warn', AGREED: 'ok' } as const;
 const MINUTES_LABEL = { DRAFT: 'Draft', FOR_AGREEMENT: 'Out for agreement', AGREED: 'Agreed' } as const;

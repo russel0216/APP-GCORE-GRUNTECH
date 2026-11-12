@@ -93,10 +93,10 @@ export function ListReportModal({
             Reset filters
           </button>
           <button type="button" className="btn" onClick={() => void csv()} disabled={busy}>
-            Download Excel (CSV)
+            Export CSV
           </button>
           <button type="button" className="btn btn-primary" onClick={() => openPdf(`${pdfPath}${query()}`, (m) => setError(new Error(m)))} disabled={busy}>
-            Download PDF report
+            Print
           </button>
         </ModalFoot>
       }

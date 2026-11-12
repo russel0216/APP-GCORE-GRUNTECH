@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, type ListResult } from '../../lib/api';
+import { api, type ListResult, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
 import { Stat } from '../../components/charts';
@@ -959,6 +959,11 @@ export function BudgetRequestDetail() {
         }
         print={`/api/budget-requests/${row.id}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The request alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/budget-requests/${row.id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           canCancel && {
             label: row.isTravel ? 'Cancel travel request' : 'Cancel budget request',
             danger: true,

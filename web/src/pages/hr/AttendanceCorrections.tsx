@@ -164,7 +164,7 @@ function CorrectionModal({ existing, date, onClose, onSaved }: { existing?: Deta
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn" onClick={() => save(false)} disabled={busy || !valid}>
-            {existing ? 'Save' : 'Save draft'}
+            {existing ? 'Save' : 'Save as draft'}
           </button>
           <button className="btn btn-primary" onClick={() => save(true)} disabled={busy || !valid}>
             {busy ? 'Submitting…' : 'Submit for approval'}
@@ -251,7 +251,7 @@ function CorrectionRecord({ id }: { id: string }) {
         }
         more={[
           row.canWithdraw && {
-            label: 'Pull back and edit',
+            label: 'Pull back to draft',
             confirm: {
               title: `Pull ${row.number} back to draft?`,
               body: 'It is withdrawn from the approver, who is told.',
@@ -303,6 +303,8 @@ function CorrectionRecord({ id }: { id: string }) {
         <div className="alert ok">Approved — the day was corrected{row.appliedAt ? ` on ${formatDateTime(row.appliedAt)}` : ''}.</div>
       )}
       {row.status === 'PENDING_APPROVAL' && <div className="alert info">Awaiting a decision — the day changes only once every step has approved.</div>}
+      <DecisionNote documentType="attendance_correction" documentId={row.id} reloadToken={reload} />
+      {row.status !== 'DRAFT' && <DocumentApproval documentType="attendance_correction" documentId={row.id} reloadToken={reload} />}
       <div className="card">
         <h3 className="card-title">Correction</h3>
         <dl className="kv">
@@ -332,8 +334,6 @@ function CorrectionRecord({ id }: { id: string }) {
           )}
         </dl>
       </div>
-      <DecisionNote documentType="attendance_correction" documentId={row.id} reloadToken={reload} />
-      {row.status !== 'DRAFT' && <DocumentApproval documentType="attendance_correction" documentId={row.id} reloadToken={reload} />}
       {modifying && (
         <CorrectionModal
           existing={row}

@@ -126,7 +126,7 @@ export function TurnoverReport() {
           </Field>
           {can('ghr.reports.export') && (
             <button className="btn btn-sm" onClick={download} disabled={busy || !data}>
-              {busy ? 'Preparing…' : 'Download CSV'}
+              {busy ? 'Preparing…' : 'Export CSV'}
             </button>
           )}
         </div>

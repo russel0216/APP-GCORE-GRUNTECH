@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -560,6 +560,11 @@ export function InvoiceRequestPage() {
         }
         print={`/api/invoice-requests/${row.id}/pdf`}
         more={[
+          {
+            label: 'Print without attachments',
+            hint: 'The request alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/invoice-requests/${row.id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           row.canWithdraw && {
             label: 'Pull back to draft',
             confirm: {
@@ -630,7 +635,7 @@ export function InvoiceRequestPage() {
       {row.status === 'CANCELLED' && <div className="alert warn">Cancelled{row.cancelReason ? ` — ${row.cancelReason}` : ''}.</div>}
 
       <div className="stack">
-        <div className="grid-2">
+        <div className="grid grid-2">
           <section className="card">
             <h3 className="card-title">What is to be invoiced</h3>
             <dl className="kv">
@@ -742,7 +747,6 @@ export function InvoiceRequestPage() {
         <Attachments
           entityType="invoice_request"
           entityId={row.id}
-          title="Files"
           hint={draft ? 'The customer’s PO, an acceptance — printed behind the request.' : 'What Back Support was sent. Files change only on a draft.'}
           canEdit={!!row.canEdit}
         />

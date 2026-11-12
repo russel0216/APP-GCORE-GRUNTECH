@@ -599,6 +599,31 @@ export function ClaimEditor() {
             )}
           </section>
 
+          <section className="card" aria-labelledby="cl-summary">
+            <h2 id="cl-summary" className="card-title">Summary</h2>
+            <dl className="prq-total">
+              <dt>No. of receipts</dt>
+              <dd>{sent.length}</dd>
+              {source && (
+                <>
+                  <dt>Released</dt>
+                  <dd className="mono">{formatMoney(source.amountReleased)}</dd>
+                </>
+              )}
+              <dt className="prq-total-big">Total spent</dt>
+              <dd className="prq-total-big mono">{formatMoney(total)}</dd>
+            </dl>
+            {source && total > 0 && (
+              <p className="prq-hint">
+                {difference > 0.005
+                  ? `You spent ${formatMoney(difference)} more than the ${cashWord} — once approved, finance reimburses the excess.`
+                  : difference < -0.005
+                    ? `${formatMoney(-difference)} of the ${cashWord} was not spent — once approved, return it to finance.`
+                    : `The receipts match the ${cashWord} exactly — nothing will be owed either way.`}
+              </p>
+            )}
+          </section>
+
           <section className="card" aria-labelledby="cl-files">
             <h2 id="cl-files" className="card-title">Attachments</h2>
             <p className="prq-hint">
@@ -628,31 +653,6 @@ export function ClaimEditor() {
                   </li>
                 ))}
               </ul>
-            )}
-          </section>
-
-          <section className="card" aria-labelledby="cl-summary">
-            <h2 id="cl-summary" className="card-title">Summary</h2>
-            <dl className="prq-total">
-              <dt>No. of receipts</dt>
-              <dd>{sent.length}</dd>
-              {source && (
-                <>
-                  <dt>Released</dt>
-                  <dd className="mono">{formatMoney(source.amountReleased)}</dd>
-                </>
-              )}
-              <dt className="prq-total-big">Total spent</dt>
-              <dd className="prq-total-big mono">{formatMoney(total)}</dd>
-            </dl>
-            {source && total > 0 && (
-              <p className="prq-hint">
-                {difference > 0.005
-                  ? `You spent ${formatMoney(difference)} more than the ${cashWord} — once approved, finance reimburses the excess.`
-                  : difference < -0.005
-                    ? `${formatMoney(-difference)} of the ${cashWord} was not spent — once approved, return it to finance.`
-                    : `The receipts match the ${cashWord} exactly — nothing will be owed either way.`}
-              </p>
             )}
           </section>
 
