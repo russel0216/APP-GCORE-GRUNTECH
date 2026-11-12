@@ -1188,6 +1188,19 @@ async function main() {
       flows.status === 200 && JSON.stringify(flows.body.sankey) === JSON.stringify(d.sankey) && JSON.stringify(flows.body.customerSankey) === JSON.stringify(d.customerSankey) && flows.body.total === d.total && noFlows.status === 403,
       `${flows.status} ${noFlows.status}`,
     );
+    const oneFlow = await http(managerToken, 'GET', `/sales-reports/flows?from=${day}&to=${day}&ownerId=${manager.id}`);
+    const oneBody = oneFlow.body as unknown as { total: number; sankey: Sales['sankey']; owners: { id: string }[]; filterLine: string };
+    const mineOnly = d.people.find((p) => p.id === manager.id)?.range ?? -1;
+    check(
+      "the report's pictures follow its salesperson filter: one person's flow is their own figure, the picker still lists everyone who booked",
+      oneFlow.status === 200 &&
+        Math.abs(oneBody.total - mineOnly) < 0.01 &&
+        oneBody.sankey.people.length === 1 &&
+        oneBody.sankey.people[0].id === manager.id &&
+        oneBody.owners.length === d.people.length &&
+        oneBody.filterLine.length > 0,
+      `${oneFlow.status} ${oneBody?.total} vs ${mineOnly}`,
+    );
     check(
       'a person holding two selling roles is ONE node, keyed by login, and the people match the personnel table',
       new Set(ids).size === ids.length && ids.includes(manager.id) && d.people.map((p) => p.id).join() === ids.join(),

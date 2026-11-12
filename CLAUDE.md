@@ -6387,6 +6387,14 @@ theme), `side` for the salespeople and for 26 customer nodes or fewer, `down`
 (3200 x 1800) and saves it — nothing leaves the browser. Text widths in the
 picture are estimated (there is no page to measure on), so a name is cut by
 characters. verify-pipeline pins the endpoint against the dashboard's flows.
+**The pictures follow the report's filters** (the same day, the owner's
+report: "the filter is not working per person"): `/flows` takes `ownerId`,
+`teamId` (an id or `none`) and `status`, passed to `gopsSales(me, range,
+only)` — its new third argument, a predicate narrowing every figure — and
+answers `filterLine` (printed in the pictures' subtitle) and `owners`,
+everyone who booked in the days whatever the narrowing; the page adds them
+to its salesperson picker, so someone who has since left or lost the create
+right can still be picked. The printed report stays the whole company's.
 
 ## Paper: one sign-off rule, one money block, a printed twin for every list (2026-10-10)
 

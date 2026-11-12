@@ -354,8 +354,38 @@ salesReportRoutes.get(
   require_('gops.sales_orders.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const sales = await gopsSales(me, { from: req.query.from, to: req.query.to });
-    res.json({ from: sales.from, to: sales.to, total: sales.total, orders: sales.orders, sankey: sales.sankey, customerSankey: sales.customerSankey });
+    // The report's own narrowing (2026-11-12, the owner's report: "the filter
+    // is not working per person" — the pictures showed everybody): the
+    // salesperson, the team (an id or `none`) and the status.
+    const one = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+    const ownerId = one(req.query.ownerId);
+    const teamId = one(req.query.teamId);
+    const status = one(req.query.status);
+    if (status && !(STATUSES as readonly string[]).includes(status)) throw badRequest(`Status is one of ${STATUSES.map(statusLabel).join(', ')}`);
+    const narrowed = !!(ownerId || teamId || status);
+    const range = { from: req.query.from, to: req.query.to };
+    const sales = await gopsSales(
+      me,
+      range,
+      narrowed ? (o) => (!ownerId || o.ownerId === ownerId) && (!teamId || (o.team ? o.team.id : 'none') === teamId) && (!status || o.status === status) : undefined,
+    );
+    // Everyone who booked in these days, whatever the narrowing — the page's
+    // salesperson picker lists them even once they have left.
+    const everyone = narrowed ? await gopsSales(me, range) : sales;
+    const words: string[] = [];
+    if (ownerId) words.push(everyone.people.find((p) => p.id === ownerId)?.name ?? 'one salesperson');
+    if (teamId) words.push(teamId === 'none' ? 'no team' : `team ${everyone.sankey.teams.find((t) => t.id === teamId)?.label ?? ''}`.trim());
+    if (status) words.push(statusLabel(status));
+    res.json({
+      from: sales.from,
+      to: sales.to,
+      total: sales.total,
+      orders: sales.orders,
+      sankey: sales.sankey,
+      customerSankey: sales.customerSankey,
+      filterLine: words.join(' · '),
+      owners: everyone.people.map((p) => ({ id: p.id, name: p.name })),
+    });
   }),
 );
 

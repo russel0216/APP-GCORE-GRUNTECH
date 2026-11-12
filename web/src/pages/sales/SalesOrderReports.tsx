@@ -1,7 +1,7 @@
 import { ReportPage, type ReportKind } from '../../components/ReportPage';
 import { PersonSelect, usePeople } from '../../components/People';
 import { useEffect, useState } from 'react';
-import { api } from '../../lib/api';
+import { api, qs } from '../../lib/api';
 import { NumberInput } from '../../components/NumberInput';
 import { formatDate, formatMoney, useToast } from '../../components/ui';
 import { FlowPicture } from '../../components/FlowPicture';
@@ -33,7 +33,11 @@ interface Team {
 
 export function SalesOrderReports() {
   const [teams, setTeams] = useState<Team[]>([]);
-  const { people } = usePeople('gops.sales_orders.create');
+  const { people: sellers } = usePeople('gops.sales_orders.create');
+  // Whoever booked in the period is listed too, though they have since left
+  // or lost the right — their orders are still in the report.
+  const [booked, setBooked] = useState<{ id: string; name: string }[]>([]);
+  const people = [...sellers, ...booked.filter((b) => !sellers.some((p) => p.id === b.id))];
   useEffect(() => {
     api
       .get<Team[]>('/reference/industries')
@@ -81,7 +85,17 @@ export function SalesOrderReports() {
           <TargetBox year={Number((params.get('to') ?? new Date().toISOString()).slice(0, 4))} />
         </>
       )}
-      below={({ from, to, params }) => <SalesFlows from={from} to={to} top={Number(params.get('customers')) || 0} />}
+      below={({ from, to, params }) => (
+        <SalesFlows
+          from={from}
+          to={to}
+          top={Number(params.get('customers')) || 0}
+          ownerId={params.get('ownerId') ?? ''}
+          teamId={params.get('teamId') ?? ''}
+          status={params.get('status') ?? ''}
+          onOwners={setBooked}
+        />
+      )}
     />
   );
 }
@@ -128,6 +142,8 @@ interface Flows {
   from: string;
   to: string;
   total: number;
+  filterLine?: string;
+  owners?: { id: string; name: string }[];
   sankey: SankeyInput;
   customerSankey: SankeyInput;
 }
@@ -137,20 +153,41 @@ interface Flows {
  * salespeople's and the customers', over the report's own days, each with
  * Download PNG. The customers shown follow the "Print: …" choice.
  */
-function SalesFlows({ from, to, top }: { from: string; to: string; top: number }) {
+function SalesFlows({
+  from,
+  to,
+  top,
+  ownerId,
+  teamId,
+  status,
+  onOwners,
+}: {
+  from: string;
+  to: string;
+  top: number;
+  ownerId: string;
+  teamId: string;
+  status: string;
+  onOwners: (owners: { id: string; name: string }[]) => void;
+}) {
   const [flows, setFlows] = useState<Flows | null>(null);
   useEffect(() => {
     let live = true;
     api
-      .get<Flows>(`/sales-reports/flows?from=${from}&to=${to}`)
-      .then((f) => live && setFlows(f))
+      .get<Flows>(`/sales-reports/flows${qs({ from, to, ownerId: ownerId || undefined, teamId: teamId || undefined, status: status || undefined })}`)
+      .then((f) => {
+        if (!live) return;
+        setFlows(f);
+        onOwners(f.owners ?? []);
+      })
       .catch(() => live && setFlows(null));
     return () => {
       live = false;
     };
-  }, [from, to]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [from, to, ownerId, teamId, status]);
   if (!flows) return null;
-  const days = `${formatMoney(flows.total)} before VAT · ${formatDate(flows.from)} to ${formatDate(flows.to)}`;
+  const days = `${formatMoney(flows.total)} before VAT · ${formatDate(flows.from)} to ${formatDate(flows.to)}${flows.filterLine ? ` · ${flows.filterLine}` : ''}`;
   const customers = topOfFlow(flows.customerSankey, top);
   const count = new Set(flows.customerSankey.people.map((p) => p.of ?? p.id)).size;
   return (
