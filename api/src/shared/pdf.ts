@@ -2413,61 +2413,96 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
     });
   }
 
-  // ── A table to a page (2026-11-12, the owner's batch: "add Sale Report
-  // table view by Customer (1 page, maximize space) and Sale by Product with
-  // %"): the months across, the year and its share of the whole, every row
-  // on ONE landscape page — the rows and the type shrink to fit. What the
-  // table leaves under it is a bar a row, to scale, when there is room.
+  // ── The year by customer, and by product group (2026-11-12, the owner's
+  // batch, then: "too small — make the font size smallest 10 and separate the
+  // table for the next page"). The months across, the year and its share of
+  // the whole, in 10pt type: the table runs on to as many landscape pages as
+  // its rows need, the head repeated, the total closing the last. Figures are
+  // WHOLE pesos — thirteen columns of centavos do not fit a page at 10pt — and
+  // a figure too wide for its column alone is set smaller; a name too long for
+  // its column runs on to a second line at the same size, its row taller. What
+  // the last page leaves under the table is a bar a row, to scale, when there
+  // is room.
   const tablePage = (heading: string, firstHead: string, secondHead: string, tRows: SalesReportTableRow[]) => {
-    doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
-    if (name) drawLine(doc, fitLine(doc, name, W * 0.4, true, 12), left, M, W * 0.4, 'left', true, 12, PURPLE);
-    drawLine(doc, fitLine(doc, caps(spec.title), W * 0.6, true, 13), left + W * 0.4, M - 1, W * 0.6, 'right', true, 13, PURPLE);
-    drawLine(doc, fitLine(doc, spec.subtitle, W * 0.6, false, 7), left + W * 0.4, M + 15, W * 0.6, 'right', false, 7, GREY);
-    doc.moveTo(left, ruleY).lineTo(right, ruleY).strokeColor(GREEN).lineWidth(1.2).stroke();
-    drawLine(doc, heading, left, ruleY + 8, W, 'left', true, 9, PURPLE);
-    const top = ruleY + 24;
-    const tH = Math.max(3.6, Math.min(15, (bottom - top) / (tRows.length + 2)));
-    const tSize = Math.max(3, Math.min(7.5, tH * 0.76));
+    const tSize = 10;
+    const tH = 14.5;
     const hasSecond = tRows.some((r) => r.second);
-    const firstW = hasSecond ? 176 : 150;
-    const secondW = hasSecond ? 26 : 0;
-    const pctW = 34;
-    const cols = spec.months.length + 1;
-    const cW = (W - firstW - secondW - pctW) / cols;
+    const secondW = hasSecond ? 28 : 0;
+    const pctW = 38;
+    const annualW = 66;
+    const firstW = hasSecond ? 150 : 170;
+    const months = spec.months.length;
+    const cW = (W - firstW - secondW - pctW - annualW) / months;
     const xOf = (i: number) => left + firstW + secondW + i * cW;
-    const row = (y: number, first: string, second: string, values: string[], share: string, o: { head?: boolean; bold?: boolean; shade?: boolean }) => {
-      if (o.shade) doc.rect(left, y, W, tH).fill('#F3EFF7');
+    const top = ruleY + 24;
+    const lineH = 11;
+    // Each row's name as it will be written: one line, or two.
+    const named = tRows.map((r) => {
+      const lines = wrapText(doc, r.name, firstW - 4, false, tSize);
+      const two = lines.length > 1 ? [lines[0], fitLine(doc, lines.slice(1).join(' '), firstW - 4, false, tSize)] : lines;
+      return { r, lines: two, h: tH + (two.length - 1) * lineH };
+    });
+    // The pages: rows fill each under its head; the total closes the last.
+    const room0 = bottom - top - tH;
+    const sheets: (typeof named)[] = [[]];
+    let used = 0;
+    for (const n of named) {
+      if (used + n.h > room0 && sheets[sheets.length - 1].length) {
+        sheets.push([]);
+        used = 0;
+      }
+      sheets[sheets.length - 1].push(n);
+      used += n.h;
+    }
+    if (used + tH > room0) sheets.push([]);
+    const pages = sheets.length;
+    const whole = (v: number) => (Math.abs(v) < 0.5 ? '' : Math.round(v).toLocaleString('en-US'));
+    const row = (y: number, first: string[], second: string, values: string[], annual: string, share: string, o: { head?: boolean; bold?: boolean; shade?: boolean }) => {
+      const h = tH + (first.length - 1) * lineH;
+      if (o.shade) doc.rect(left, y, W, h).fill('#F3EFF7');
       const color = o.head ? PURPLE : INK;
       const bold = !!o.head || !!o.bold;
-      const ty = y + (tH - tSize) / 2 + tSize * 0.07;
-      drawLine(doc, fitLine(doc, first, firstW - 4, bold, tSize), left + 2, ty, firstW - 4, 'left', bold, tSize, color);
-      if (secondW) drawLine(doc, second, left + firstW, ty, secondW - 2, 'left', bold, tSize, color);
+      const hSize = o.head ? 8 : tSize;
+      const at = (size: number) => y + (h - size) / 2 + size * 0.07;
+      first.forEach((line, i) => drawLine(doc, fitLine(doc, line, firstW - 4, bold, hSize), left + 2, y + (tH - hSize) / 2 + hSize * 0.07 + i * lineH, firstW - 4, 'left', bold, hSize, color));
+      if (secondW) drawLine(doc, second, left + firstW, at(hSize), secondW - 2, 'left', bold, hSize, color);
       values.forEach((v, i) => {
-        const fs = Math.min(tSize, fitSize(doc, v, cW - 3, tSize));
-        drawLine(doc, v, xOf(i) + 1, ty + (tSize - fs) / 2, cW - 3, 'right', bold, fs, color);
+        const fs = Math.min(hSize, fitSize(doc, v, cW - 3, hSize));
+        drawLine(doc, v, xOf(i) + 1, at(fs), cW - 3, 'right', bold, fs, color);
       });
-      drawLine(doc, share, right - pctW, ty, pctW - 2, 'right', bold, tSize, color);
-      doc.moveTo(left, y + tH).lineTo(right, y + tH).strokeColor(o.head ? PURPLE : RULE).lineWidth(o.head ? 0.8 : tH < 7 ? 0.2 : 0.4).stroke();
+      const as = Math.min(hSize, fitSize(doc, annual, annualW - 3, hSize));
+      drawLine(doc, annual, xOf(months) + 1, at(as), annualW - 3, 'right', true, as, color);
+      drawLine(doc, share, right - pctW, at(hSize), pctW - 2, 'right', bold, hSize, color);
+      doc.moveTo(left, y + h).lineTo(right, y + h).strokeColor(o.head ? PURPLE : RULE).lineWidth(o.head ? 0.8 : 0.4).stroke();
     };
-    const amount = (v: number) => (Math.abs(v) < 0.005 ? '' : formatAmount(v));
     let ty = top;
-    row(ty, firstHead, secondHead, [...spec.months.map((m) => caps(tH < 8 ? m.slice(0, 3) : m)), 'ANNUAL'], '%', { head: true });
-    ty += tH;
-    for (const r of tRows) {
-      row(ty, r.name, r.second, [...r.values.map(amount), formatAmount(r.total)], r.pct, {});
+    for (let pg = 0; pg < pages; pg++) {
+      doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
+      if (name) drawLine(doc, fitLine(doc, name, W * 0.4, true, 12), left, M, W * 0.4, 'left', true, 12, PURPLE);
+      drawLine(doc, fitLine(doc, caps(spec.title), W * 0.6, true, 13), left + W * 0.4, M - 1, W * 0.6, 'right', true, 13, PURPLE);
+      drawLine(doc, fitLine(doc, spec.subtitle, W * 0.6, false, 7), left + W * 0.4, M + 15, W * 0.6, 'right', false, 7, GREY);
+      doc.moveTo(left, ruleY).lineTo(right, ruleY).strokeColor(GREEN).lineWidth(1.2).stroke();
+      drawLine(doc, `${heading}${pages > 1 ? ` — ${pg + 1} OF ${pages}` : ''}`, left, ruleY + 8, W * 0.7, 'left', true, 9, PURPLE);
+      drawLine(doc, 'Whole pesos', left + W * 0.7, ruleY + 9, W * 0.3, 'right', false, 7, GREY);
+      ty = top;
+      row(ty, [firstHead], secondHead, spec.months.map((m) => caps(m.slice(0, 3))), 'ANNUAL', '%', { head: true });
       ty += tH;
+      for (const n of sheets[pg]) {
+        row(ty, n.lines, n.r.second, n.r.values.map(whole), whole(n.r.total) || '0', n.r.pct, {});
+        ty += n.h;
+      }
     }
-    row(ty, 'TOTAL', '', [...spec.total.map((v) => formatAmount(v)), formatAmount(spec.grandTotal)], '100%', { bold: true, shade: true });
+    row(ty, ['TOTAL'], '', spec.total.map((v) => whole(v) || '0'), whole(spec.grandTotal) || '0', '100%', { bold: true, shade: true });
     ty += tH + 18;
-    // The room left: a bar a row, to scale.
+    // The room left on the last page: a bar a row, to scale.
     const room = bottom - ty;
-    if (tRows.length && room >= Math.max(90, tRows.length * 9)) {
+    if (pages === 1 && tRows.length && room >= Math.max(90, tRows.length * 11)) {
       drawLine(doc, 'SHARE OF THE YEAR — BEFORE VAT', left, ty, W, 'left', true, 7.5, PURPLE);
       const bTop = ty + 14;
       const bH = Math.min(22, (bottom - bTop) / tRows.length);
-      const bSize = Math.max(5, Math.min(8, bH * 0.55));
-      const labelW = 170;
-      const valueW = 120;
+      const bSize = Math.max(6, Math.min(10, bH * 0.6));
+      const labelW = 190;
+      const valueW = 130;
       const maxV = Math.max(1, ...tRows.map((r) => r.total));
       const barW = W - labelW - valueW;
       tRows.forEach((r, i) => {

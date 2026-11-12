@@ -6416,14 +6416,20 @@ whole under "No group" — so a group's report comes to its own row of "By
 product group". **The paper follows the filters** (`rowFilterOf()` /
 `filterWords()` in `routes/salesReports.ts`): every page is the narrowed set,
 the subtitle says to what, and the target and achievement — the company's —
-give way to "Showing …" on a narrowed paper. **Five pages**: the personnel
+give way to "Showing …" on a narrowed paper. **Five pages and up**: the personnel
 and team tables with the bars; **Sales by customer** and **Sales by product
 group** (`SalesReportSpec.customerTable` / `productTable`, `tablePage()` in
 `renderSalesReport`) — the months across, the year and its share, every row
-on ONE landscape page with rows and type shrinking to fit (a hundred
-customers print at about 4pt; the "Show: top 10 / 25 / 50 customers" select
-gathers the rest into one row), and where the table leaves room a bar a row
-to scale; then the two flows. **The page**: `ReportPage`'s `controlRows` (the
+in 10pt type (the owner's call the same day: "too small — make the font size
+smallest 10 and separate the table for the next page"): the table runs on to
+as many landscape pages as its rows need, the head repeated ("1 OF 3"), the
+total closing the last; figures are WHOLE pesos (thirteen columns of centavos
+do not fit a page at 10pt) and a figure too wide for its column alone is set
+smaller; a name too long for its column runs on to a second line at the same
+size, its row taller; the "Show: top 10 / 25 / 50 customers" select gathers
+the rest into one row; where a one-page table leaves room, a bar a row to
+scale; then the two flows. The filter card's pickers sit in even columns
+(`.rep-grid`, five across), the target on a row of its own. **The page**: `ReportPage`'s `controlRows` (the
 controls lay out their own rows) and `actionsInCard` (Export CSV and Print at
 the foot of the controls card, `.rep-actions`, as card buttons) — this report
 alone; the other reports keep theirs in the page head. verify-pipeline pins

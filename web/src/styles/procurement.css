@@ -732,7 +732,8 @@ a.inv-move:hover .inv-move-what {
   justify-content: flex-end;
 }
 .rep-label {
-  min-width: 4.5rem;
+  flex: none;
+  min-width: 5.5rem;
   font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--muted);
@@ -740,6 +741,25 @@ a.inv-move:hover .inv-move-what {
 .rep-row select {
   width: auto;
   min-width: 14rem;
+}
+/* A row of pickers in even columns (the Sales Order report's filters, 2026-11-12). */
+.rep-grid {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--s-3);
+  align-items: center;
+}
+.rep-grid select,
+.rep-grid input {
+  width: 100%;
+  min-width: 0;
+}
+@media (max-width: 1100px) {
+  .rep-grid {
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  }
 }
 .rep-date {
   display: inline-flex;

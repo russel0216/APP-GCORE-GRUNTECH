@@ -68,6 +68,7 @@ export function SalesOrderReports() {
         <>
           <div className="rep-row">
             <span className="rep-label">Filter by</span>
+            <div className="rep-grid">
             <PersonSelect people={people} placeholder="All personnel" value={params.get('ownerId') ?? ''} onChange={(v) => set({ ownerId: v })} />
             <select aria-label="Team" value={params.get('teamId') ?? ''} onChange={(e) => set({ teamId: e.target.value })}>
               <option value="">All teams</option>
@@ -110,17 +111,20 @@ export function SalesOrderReports() {
                 </option>
               ))}
             </select>
+            </div>
           </div>
           <div className="rep-row">
             <span className="rep-label">Show</span>
-            <select aria-label="Customers on the customer flow and the customer table" value={params.get('customers') ?? ''} onChange={(e) => set({ customers: e.target.value })}>
-              <option value="">All customers</option>
-              <option value="10">Top 10 customers</option>
-              <option value="25">Top 25 customers</option>
-              <option value="50">Top 50 customers</option>
-            </select>
-            <TargetBox year={Number((params.get('to') ?? new Date().toISOString()).slice(0, 4))} />
+            <div className="rep-grid">
+              <select aria-label="Customers on the customer flow and the customer table" value={params.get('customers') ?? ''} onChange={(e) => set({ customers: e.target.value })}>
+                <option value="">All customers</option>
+                <option value="10">Top 10 customers</option>
+                <option value="25">Top 25 customers</option>
+                <option value="50">Top 50 customers</option>
+              </select>
+            </div>
           </div>
+          <TargetBox year={Number((params.get('to') ?? new Date().toISOString()).slice(0, 4))} />
         </>
       )}
       below={({ from, to, params }) => (
@@ -167,15 +171,19 @@ function TargetBox({ year }: { year: number }) {
     }
   };
   return (
-    <>
+    <div className="rep-row">
       <span className="rep-label">{year} target</span>
-      <NumberInput kind="money" aria-label={`${year} sales target`} value={amount} disabled={!canEdit} onChange={(e) => setAmount(e.target.value)} />
-      {canEdit && (
-        <button type="button" className="btn btn-sm" onClick={() => void save()}>
-          Save target
-        </button>
-      )}
-    </>
+      <div className="rep-grid">
+        <NumberInput kind="money" aria-label={`${year} sales target`} value={amount} disabled={!canEdit} onChange={(e) => setAmount(e.target.value)} />
+        {canEdit && (
+          <div>
+            <button type="button" className="btn btn-sm" onClick={() => void save()}>
+              Save target
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
