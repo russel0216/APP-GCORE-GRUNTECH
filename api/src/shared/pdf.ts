@@ -2467,24 +2467,24 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
       drawLine(doc, words, cx - 150, py(root.x) - 13, 300, 'center', true, 9, INK);
     }
     // The teams stand side by side under Gruntech (the owner's slide,
-    // 2026-11-12). Their labels stay level in ONE row over the bars: where the
-    // bars are too narrow for the labels to sit over them the row spreads
-    // evenly about the teams, a hairline tying each label to its bar.
+    // 2026-11-12), each labelled as a customer is — name, value and share on
+    // one line written down the page — but ENDING at its bar, so the label
+    // sits in its own band over the bar it names.
     const teamNodes = sk.nodes.filter((nd) => nd.column === 1).sort((a, b) => a.y - b.y);
-    const teamLabels = teamNodes.map((nd) => {
-      const figure = `${compactPeso(nd.value)} · ${nd.pct}%`;
-      const w = Math.max(doc.font('Helvetica-Bold').fontSize(8.5).widthOfString(nd.label), doc.font('Helvetica').fontSize(7).widthOfString(figure)) + 10;
-      return { nd, figure, w, bar: px(nd.y + nd.h / 2), x: px(nd.y + nd.h / 2) };
-    });
-    for (let i = 1; i < teamLabels.length; i++) teamLabels[i].x = Math.max(teamLabels[i].x, teamLabels[i - 1].x + (teamLabels[i - 1].w + teamLabels[i].w) / 2);
-    const drift = teamLabels.reduce((n, t) => n + (t.x - t.bar), 0) / Math.max(1, teamLabels.length);
-    for (const t of teamLabels) t.x = Math.max(left + t.w / 2, Math.min(pRight - t.w / 2, t.x - drift));
-    for (const t of teamLabels) {
-      const barTop = py(t.nd.x);
-      const ty = barTop - 34;
-      doc.moveTo(t.x, ty + 19).lineTo(t.bar, barTop).strokeColor(GREY).lineWidth(0.4).stroke();
-      drawLine(doc, t.nd.label, t.x - t.w / 2, ty, t.w, 'center', true, 8.5, INK);
-      drawLine(doc, t.figure, t.x - t.w / 2, ty + 10, t.w, 'center', false, 7, INK);
+    const teamRoom = (root ? py(teamNodes[0]?.x ?? 0) - py(root.x + nodeW) : 60) - 8;
+    for (const nd of teamNodes) {
+      const tail = ` · ${compactPeso(nd.value)} · ${nd.pct}%`;
+      let ts = Math.min(8.5, Math.max(4, nd.h - 1));
+      const wide = () => doc.font('Helvetica-Bold').fontSize(ts).widthOfString(nd.label) + doc.font('Helvetica').fontSize(ts).widthOfString(tail);
+      while (ts > 4 && wide() > teamRoom) ts -= 0.25;
+      const nameW = doc.font('Helvetica-Bold').fontSize(ts).widthOfString(nd.label);
+      const tailW = doc.font('Helvetica').fontSize(ts).widthOfString(tail);
+      doc.save();
+      doc.translate(px(nd.y + nd.h / 2), py(nd.x) - 4);
+      doc.rotate(90);
+      drawLine(doc, nd.label, -(nameW + tailW), -ts * 0.42, nameW + 2, 'left', true, ts, INK);
+      drawLine(doc, tail, -tailW, -ts * 0.42, tailW + 2, 'left', false, ts, INK);
+      doc.restore();
     }
     // The customers: each name written down the page under its bar, a column apart.
     const custs = sk.nodes.filter((nd) => nd.column === 2).sort((a, b) => a.y - b.y);

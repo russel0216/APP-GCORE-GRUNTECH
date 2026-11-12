@@ -6369,8 +6369,11 @@ jpg for the sankey, salesperson and customer, for a PowerPoint
 presentation"). On the printed customer page (`flowDown`) the teams stand
 SIDE BY SIDE under Gruntech, never spread over their customers; the customer
 columns take 85% of the width so the bars keep room to stand to scale; the
-teams' labels stay level in ONE row over the bars, spread evenly about them
-where the bars are narrow, a hairline to each bar. `GET /sales-reports/flows
+teams are labelled as the customers are (the owner's call the same day:
+"make the team rotate alignment, like the customer, right alignment") — name,
+value and share on ONE line written down the page, ENDING at the bar, in the
+team's own band; Gruntech's label stays level. On the picture the team row
+stands at 60% of the flow so those labels have room. `GET /sales-reports/flows
 ?from=&to=` (before `/:kind`, the sales order view right) sends `gopsSales`'
 `sankey` and `customerSankey` for the report's own days, and the Sales Order
 report page draws both under its tables (`ReportPage`'s new `below` prop,

@@ -145,12 +145,14 @@ function Down({ input }: { input: SankeyInput }) {
   const size = Math.max(7, Math.min(17, colW - 1.5));
   const tailOf = (n: { value: number; pct: number }) => ` · ${compact(n.value)} · ${n.pct}%`;
   const longest = input.people.reduce((w, p) => Math.max(w, widthOf(p.label, size, true) + widthOf(' · 000.00M · 00.0%', size, false)), 0);
-  const labelRoom = Math.min(430, Math.max(140, longest + 8));
-  const top = 150;
+  const labelRoom = Math.min(390, Math.max(140, longest + 8));
+  const top = 140;
   const nodeW = 18;
   const flowLen = bottom - labelRoom - 10 - top;
   // The layout's own axes run along the flow (x) and across it (y); the picture turns them.
   const lay = layoutSankey(input, { width: flowLen, height: pW, nodeWidth: nodeW, gap: Math.min(4, colW / 4), pitch: colW });
+  // The teams stand lower than midway, so their labels have room over them.
+  for (const n of lay.nodes) if (n.column === 1) n.x = Math.round(flowLen * 0.6 - nodeW / 2);
   const toneOf = tones(input, lay.links);
   const byId = new Map(lay.nodes.map((n) => [n.id, n]));
   const px = (across: number) => left + across;
@@ -164,20 +166,17 @@ function Down({ input }: { input: SankeyInput }) {
     return `M${px(l.y0)},${y0} C${px(l.y0)},${cy} ${px(l.y1)},${cy} ${px(l.y1)},${y1} L${px(l.y1 + l.h)},${y1} C${px(l.y1 + l.h)},${cy} ${px(l.y0 + l.h)},${cy} ${px(l.y0 + l.h)},${y0} Z`;
   };
   const root = byId.get('0:root');
-  // The teams' labels stay level in ONE row over the bars; where the bars are
-  // too narrow the row spreads evenly about them, a hairline to each bar.
-  const teamLabels = lay.nodes
-    .filter((n) => n.column === 1)
-    .sort((a, b) => a.y - b.y)
-    .map((n) => {
-      const figure = `${compact(n.value)} · ${n.pct}%`;
-      const w = Math.max(widthOf(n.label, 19, true), widthOf(figure, 15, false)) + 22;
-      const bar = px(n.y + n.h / 2);
-      return { n, figure, w, bar, x: bar };
-    });
-  for (let i = 1; i < teamLabels.length; i++) teamLabels[i].x = Math.max(teamLabels[i].x, teamLabels[i - 1].x + (teamLabels[i - 1].w + teamLabels[i].w) / 2);
-  const drift = teamLabels.reduce((sum, t) => sum + (t.x - t.bar), 0) / Math.max(1, teamLabels.length);
-  for (const t of teamLabels) t.x = Math.max(left + t.w / 2, Math.min(left + pW - t.w / 2, t.x - drift));
+  // The teams are labelled as the customers are — name, value and share on
+  // one line written down the picture — but ENDING at the bar, so each label
+  // sits in its own band over the bar it names.
+  const teamNodes = lay.nodes.filter((n) => n.column === 1).sort((a, b) => a.y - b.y);
+  const teamRoom = (root && teamNodes[0] ? py(teamNodes[0].x) - py(root.x + nodeW) : 120) - 16;
+  const teamLabels = teamNodes.map((n) => {
+    const tail = ` · ${compact(n.value)} · ${n.pct}%`;
+    let ts = Math.min(17, Math.max(8, n.h - 2));
+    while (ts > 8 && widthOf(n.label, ts, true) + widthOf(tail, ts, false) > teamRoom) ts -= 0.5;
+    return { n, tail, ts, cx: px(n.y + n.h / 2) };
+  });
   const custs = lay.nodes.filter((n) => n.column === 2).sort((a, b) => a.y - b.y);
   const cxs = custs.map((n) => px(n.y + n.h / 2));
   for (let i = 1; i < cxs.length; i++) cxs[i] = Math.max(cxs[i], cxs[i - 1] + colW);
@@ -201,21 +200,12 @@ function Down({ input }: { input: SankeyInput }) {
           {`${root.label}  ·  ${compact(root.value)} · 100%`}
         </text>
       )}
-      {teamLabels.map(({ n, figure, bar, x }) => {
-        const barTop = py(n.x);
-        const ty = barTop - 62;
-        return (
-          <g key={n.id}>
-            <line x1={x} y1={ty + 26} x2={bar} y2={barTop} stroke={GREY} strokeWidth={0.8} />
-            <text x={x} y={ty} textAnchor="middle" fontFamily={FONT} fontSize={19} fontWeight={700} fill={INK}>
-              {n.label}
-            </text>
-            <text x={x} y={ty + 19} textAnchor="middle" fontFamily={FONT} fontSize={15} fill={INK}>
-              {figure}
-            </text>
-          </g>
-        );
-      })}
+      {teamLabels.map(({ n, tail, ts, cx }) => (
+        <text key={n.id} transform={`translate(${cx - ts * 0.35},${py(n.x) - 6}) rotate(90)`} textAnchor="end" fontFamily={FONT} fontSize={ts} fill={INK}>
+          <tspan fontWeight={700}>{n.label}</tspan>
+          {tail}
+        </text>
+      ))}
       {custs.map((n, i) => {
         const tail = tailOf(n);
         const name = cut(n.label, Math.max(40, room - widthOf(tail, size, false)), size, true);
