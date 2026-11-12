@@ -1140,7 +1140,7 @@ async function main() {
       customers: { id: string; revenue: number; to: string }[];
       people: { id: string; range: number; to: string }[];
       sankey: { root: { value: number }; teams: { id: string; value: number; pct: number }[]; people: { id: string; value: number; pct: number }[]; links: { team: string; person: string; value: number }[] };
-      customerSankey: Sales['sankey'];
+      customerSankey: Omit<Sales['sankey'], 'people'> & { people: { id: string; of: string; value: number; pct: number }[] };
     };
     const dash = await http(managerToken, 'GET', `/gops/sales?from=${day}&to=${day}`);
     const d = dash.body as unknown as Sales;
@@ -1165,17 +1165,22 @@ async function main() {
     );
     const cs = d.customerSankey;
     const custIds = cs.people.map((p) => p.id);
+    const perCustomer = new Map<string, number>();
+    for (const p of cs.people) perCustomer.set(p.of, Math.round(((perCustomer.get(p.of) ?? 0) + p.value) * 100) / 100);
+    const bandsOf = (id: string) => cs.links.filter((l) => l.person === id);
     check(
-      'the customer Sankey conserves too: Gruntech = the same teams = every customer once = the bands, the top customers leading it',
+      'the customer Sankey conserves and never crosses: the same teams, a node per team and customer fed by that team alone, each customer adding up to the customers table',
       Math.abs(cs.root.value - d.total) < 0.01 &&
         JSON.stringify(cs.teams) === JSON.stringify(d.sankey.teams) &&
         Math.abs(sum(cs.people) - d.total) < 0.01 &&
         Math.abs(sum(cs.links) - d.total) < 0.01 &&
         new Set(custIds).size === custIds.length &&
-        custIds.length >= d.customers.length &&
-        d.customers.map((c) => c.id).join() === custIds.slice(0, d.customers.length).join(),
+        cs.people.every((p) => bandsOf(p.id).length === 1 && p.id === `${bandsOf(p.id)[0].team}:${p.of}`) &&
+        d.customers.every((c) => Math.abs((perCustomer.get(c.id) ?? -1) - c.revenue) < 0.01),
       JSON.stringify(cs).slice(0, 400),
     );
+    const topPaper = await fetch(`${BASE}/sales-reports/sales-orders.pdf?from=${day}&to=${day}&customers=10`, { headers: { Authorization: `Bearer ${managerToken}` } });
+    check('the Sales Report prints with the top 10 customers asked for', topPaper.status === 200, `${topPaper.status}`);
     check(
       'a person holding two selling roles is ONE node, keyed by login, and the people match the personnel table',
       new Set(ids).size === ids.length && ids.includes(manager.id) && d.people.map((p) => p.id).join() === ids.join(),

@@ -15,7 +15,8 @@
 export interface SankeyInput {
   root: { label: string; value: number };
   teams: { id: string; label: string; value: number; to?: string }[];
-  people: { id: string; label: string; value: number; to?: string }[];
+  /** `of` groups the nodes of one thing (a customer shown under each team that sold to it); `last` sorts a node after its team's others. */
+  people: { id: string; label: string; value: number; to?: string; of?: string; last?: boolean }[];
   links: { team: string; person: string; value: number }[];
 }
 
@@ -91,7 +92,7 @@ export function layoutSankey(input: SankeyInput, opts: { width: number; height: 
       });
       return { ...p, at };
     })
-    .sort((a, b) => a.at - b.at || b.value - a.value);
+    .sort((a, b) => a.at - b.at || Number(!!a.last) - Number(!!b.last) || b.value - a.value);
 
   if (total <= 0 || teams.length === 0) {
     return { width: opts.width, height: opts.height, nodeWidth, nodes: [], links: [] };
@@ -170,4 +171,44 @@ export function layoutSankey(input: SankeyInput, opts: { width: number; height: 
     }
   }
   return { width: opts.width, height: opts.height, nodeWidth, nodes, links };
+}
+
+/**
+ * The top `n` of a flow's last column, the rest gathered (2026-11-12, the
+ * owner's call: "can also select top 25 or top 10 etc. customer"). Nodes are
+ * ranked by what their `of` group holds in all (a customer under two teams is
+ * one customer), and every node outside the top `n` groups is folded into ONE
+ * node per team, "Other customers (k)", drawn last under its team — so the
+ * columns still add up to the root. `n` of 0 or less keeps everything.
+ */
+export function topOfFlow(input: SankeyInput, n: number, otherLabel = 'Other customers'): SankeyInput {
+  if (!(n > 0)) return input;
+  const groupOf = (p: { id: string; of?: string }) => p.of ?? p.id;
+  const totals = new Map<string, number>();
+  for (const p of input.people) totals.set(groupOf(p), (totals.get(groupOf(p)) ?? 0) + p.value);
+  if (totals.size <= n) return input;
+  const keep = new Set(
+    [...totals.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, n)
+      .map(([k]) => k),
+  );
+  const kept = input.people.filter((p) => keep.has(groupOf(p)));
+  const keptIds = new Set(kept.map((p) => p.id));
+  const groupById = new Map(input.people.map((p) => [p.id, groupOf(p)]));
+  const rest = new Map<string, { value: number; groups: Set<string> }>();
+  for (const l of input.links) {
+    if (keptIds.has(l.person)) continue;
+    const cur = rest.get(l.team) ?? { value: 0, groups: new Set<string>() };
+    cur.value += l.value;
+    cur.groups.add(groupById.get(l.person) ?? l.person);
+    rest.set(l.team, cur);
+  }
+  const others = [...rest.entries()].map(([team, r]) => ({ team, node: { id: `other:${team}`, label: `${otherLabel} (${r.groups.size})`, value: round(r.value), last: true } }));
+  return {
+    root: input.root,
+    teams: input.teams,
+    people: [...kept, ...others.map((o) => o.node)],
+    links: [...input.links.filter((l) => keptIds.has(l.person)), ...others.map((o) => ({ team: o.team, person: o.node.id, value: o.node.value }))],
+  };
 }

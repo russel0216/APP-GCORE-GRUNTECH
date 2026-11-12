@@ -43,7 +43,7 @@ export function SalesOrderReports() {
       title="Sales Order Report"
       endpoint="/sales-reports"
       kinds={KINDS}
-      extraKeys={['ownerId', 'teamId', 'status']}
+      extraKeys={['ownerId', 'teamId', 'status', 'customers']}
       controls={({ params, set }) => (
         <>
           <span className="rep-label">Narrow</span>
@@ -69,6 +69,12 @@ export function SalesOrderReports() {
                 {s.label}
               </option>
             ))}
+          </select>
+          <select aria-label="Customers on the printed flow" value={params.get('customers') ?? ''} onChange={(e) => set({ customers: e.target.value })}>
+            <option value="">Print: all customers</option>
+            <option value="10">Print: top 10 customers</option>
+            <option value="25">Print: top 25 customers</option>
+            <option value="50">Print: top 50 customers</option>
           </select>
           <TargetBox year={Number((params.get('to') ?? new Date().toISOString()).slice(0, 4))} />
         </>

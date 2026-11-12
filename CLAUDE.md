@@ -6335,21 +6335,33 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
   the server still decides each one. What did not move stays ticked, with
   the reason. There is no bulk endpoint, deliberately.
 
-**The flow by customer** (2026-11-12, the owner's call: "add another sankey
+**The flow by customer** (2026-11-12, the owner's calls: "add another sankey
 by Gruntech > Team > Customer and in Sales Order Report another page for the
 sankey; don't overlap text; customer name, the value and percent in one
-line"; his answer: every customer, none grouped). `gopsSales()` sends
-`customerSankey` — `sankey`'s shape and teams, `people` every customer of the
-range once (a customer two teams sold to has two bands in), each linking to
-the sales order list on it. The dashboard's "Where the sales go" panel draws
-it with `Sankey`'s `oneLine`: the last column's label is ONE line (name cut
-at 34 characters, the whole name its tooltip, then value · share), a 20-unit
-pitch, the canvas growing 26 units a customer. The Sales Report's Print gains
-a THIRD page (`SalesReportSpec.customerSankey`, `flowPage()` in
-`renderSalesReport`): landscape up to 52 customers, portrait past that, the
-line height what the page allows (11pt at most) and the type a point under
-it, the name giving way to the figures. verify-pipeline pins the conservation
-and the three pages, verify-foundation a hundred customers a line apart.
+line", then "some crosses — it should be determined by the salesperson who
+handles the account or created the sales order; can also select top 25 or
+top 10"). `gopsSales()` sends `customerSankey` — `sankey`'s root and teams,
+`people` a node per TEAM x CUSTOMER (`id` `<team>:<customer>`, `of` the
+customer): a customer stands under the team of the salesperson who booked
+each order (the order's own team), so one that two teams sold to is listed
+under each and NO band crosses to another team's customer; each links to the
+sales order list on that customer and team. `topOfFlow(input, n)`
+(`lib/sankey.ts` and its API copy, pinned) keeps the top n customers (ranked
+by what a customer holds across teams) and gathers the rest into ONE "Other
+customers (k)" node per team, drawn last under its team (`last`), the columns
+still adding up; 0 keeps all. The dashboard's "Where the sales go" panel
+(`CustomerFlow` in `OpsSales.tsx`) has Top 10 / Top 25 / Top 50 / All (All by
+default, the choice kept per browser in `gcore_flow_customers`) and draws
+`Sankey` with `oneLine`: the last column's label is ONE line (name cut at 34
+characters, the whole name its tooltip, then value and share), a 20-unit
+pitch, the canvas growing 26 units a node. The Sales Report's Print has a
+THIRD page (`SalesReportSpec.customerSankey`, `flowPage()` in
+`renderSalesReport`), `?customers=10|25|50` (the report page's "Print: ..."
+select, an `extraKey`) printing the top n: landscape up to 52 nodes, portrait
+past that, the line height what the page allows (11pt at most) and the type
+a point under it, the name giving way to the figures. verify-pipeline pins
+the conservation, one band a node and the three pages; verify-foundation the
+top-n fold and a hundred customers a line apart.
 
 ## Paper: one sign-off rule, one money block, a printed twin for every list (2026-10-10)
 

@@ -255,10 +255,11 @@ export interface GopsSales {
   /**
    * Gruntech → team → CUSTOMER (2026-11-12, the owner's call: "add another
    * sankey by Gruntech > Team > Customer"): the same shape and the same rows
-   * as `sankey`, `people` holding every customer once — a customer two teams
-   * sold to has two bands in and one node.
+   * as `sankey`, `people` holding a node per team × customer (`of` the
+   * customer): a customer two teams sold to stands under each, so no band
+   * crosses from one team to another's customer.
    */
-  customerSankey: GopsSales['sankey'];
+  customerSankey: Omit<GopsSales['sankey'], 'people'> & { people: { id: string; of: string; label: string; value: number; pct: number; to: string }[] };
 }
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -350,22 +351,25 @@ export async function gopsSales(me: ResolvedUser, query: { from?: unknown; to?: 
     }),
   };
 
-  // The same flow by customer: every customer of the range, once.
-  const customerLinks = new Map<string, number>();
+  // The same flow by customer. A customer stands under the TEAM OF THE
+  // SALESPERSON who booked each order (the order's own team), so one that two
+  // teams sold to is a node under each — no band ever crosses to another team
+  // (2026-11-12, the owner's call: "some crosses; it should be determined by
+  // the salesperson who handles the account or created the sales order").
+  // `of` is the customer, for ranking the top n.
+  const byTeamCustomer = new Map<string, { team: string; customerId: string; name: string; value: number }>();
   for (const o of inRange) {
-    const lk = `${o.team ? o.team.id : 'none'} ${o.customerId}`;
-    customerLinks.set(lk, (customerLinks.get(lk) ?? 0) + o.net);
+    const team = o.team ? o.team.id : 'none';
+    const k = `${team}:${o.customerId}`;
+    const cur = byTeamCustomer.get(k) ?? { team, customerId: o.customerId, name: o.customerName, value: 0 };
+    byTeamCustomer.set(k, { ...cur, value: cur.value + o.net });
   }
-  const customerSankey: GopsSales['sankey'] = {
+  const custNodes = [...byTeamCustomer.entries()].sort((a, b) => b[1].value - a[1].value);
+  const customerSankey: GopsSales['customerSankey'] = {
     root: sankey.root,
     teams: sankey.teams,
-    people: [...byCustomer.entries()]
-      .sort((a, b) => b[1].revenue - a[1].revenue)
-      .map(([id, c]) => ({ id, label: c.name, value: cents(c.revenue), pct: share(c.revenue, total), to: listLink({ customerId: id }) })),
-    links: [...customerLinks.entries()].map(([k, v]) => {
-      const [team, person] = k.split(' ');
-      return { team, person, value: cents(v) };
-    }),
+    people: custNodes.map(([id, c]) => ({ id, of: c.customerId, label: c.name, value: cents(c.value), pct: share(c.value, total), to: listLink({ customerId: c.customerId, teamId: c.team }) })),
+    links: custNodes.map(([id, c]) => ({ team: c.team, person: id, value: cents(c.value) })),
   };
 
   return { from, to, year, previousYear: year - 1, total, orders: inRange.length, months, customers, people, currentMonth, sankey, customerSankey };

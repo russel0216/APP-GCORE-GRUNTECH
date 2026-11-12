@@ -122,7 +122,7 @@ import { ARCHIVE_ATTACHMENT, ARCHIVE_LIST_KEY, SCORO_ARCHIVE_REMOVED, removeScor
 import { recordLink } from '../../web/src/lib/links';
 import { parseDelimited, rowsToPrLines, prLineAmount, matchCategory, orderTotals, preferredFrom } from '../../web/src/lib/prLines';
 import * as webCanvassMath from '../../web/src/lib/canvassMath';
-import { layoutSankey } from '../../web/src/lib/sankey';
+import { layoutSankey, topOfFlow } from '../../web/src/lib/sankey';
 import * as apiCanvassMath from '../src/shared/canvassMath';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
@@ -2905,6 +2905,39 @@ async function main() {
       { width: 600, height: 2600, gap: 6, pitch: 20 },
     );
     const custs = wide.nodes.filter((n) => n.column === 2).sort((a, b) => a.y - b.y);
+    // Top n: a customer under two teams is one customer; the rest are gathered per team.
+    const shared = {
+      root: { label: 'Gruntech', value: 100 },
+      teams: [{ id: 'a', label: 'A', value: 60 }, { id: 'b', label: 'B', value: 40 }],
+      people: [
+        { id: 'a:x', of: 'x', label: 'X', value: 30 },
+        { id: 'b:x', of: 'x', label: 'X', value: 25 },
+        { id: 'a:y', of: 'y', label: 'Y', value: 20 },
+        { id: 'a:z', of: 'z', label: 'Z', value: 10 },
+        { id: 'b:w', of: 'w', label: 'W', value: 15 },
+      ],
+      links: [
+        { team: 'a', person: 'a:x', value: 30 },
+        { team: 'b', person: 'b:x', value: 25 },
+        { team: 'a', person: 'a:y', value: 20 },
+        { team: 'a', person: 'a:z', value: 10 },
+        { team: 'b', person: 'b:w', value: 15 },
+      ],
+    };
+    const top1 = topOfFlow(shared, 1);
+    const top1Lay = layoutSankey(top1, { width: 600, height: 400 });
+    const lastOf = (team: string) => top1Lay.nodes.filter((n) => n.column === 2 && top1.links.some((l) => l.team === team && `2:${l.person}` === n.id)).sort((x, y) => y.y - x.y)[0]?.label;
+    check(
+      'the top 1 customer keeps its node under BOTH teams, the rest gathered per team and drawn last, the whole conserved; all asked for changes nothing',
+      top1.people.map((p) => `${p.id}=${p.value}`).join() === 'a:x=30,b:x=25,other:a=30,other:b=15' &&
+        top1.people.find((p) => p.id === 'other:a')?.label === 'Other customers (2)' &&
+        top1.links.reduce((n, l) => n + l.value, 0) === 100 &&
+        lastOf('a') === 'Other customers (2)' &&
+        lastOf('b') === 'Other customers (1)' &&
+        topOfFlow(shared, 0) === shared &&
+        topOfFlow(shared, 4) === shared,
+      JSON.stringify(top1.people),
+    );
     check(
       'a hundred customers each keep a line of their own: every node a label apart from the next, all on the canvas',
       custs.length === 100 && custs.every((n, i) => i === 0 || n.y - custs[i - 1].y >= 19.99) && custs[99].y + custs[99].h <= 2600.5,

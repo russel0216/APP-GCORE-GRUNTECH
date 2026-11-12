@@ -1,3 +1,4 @@
+import { topOfFlow } from '../lib/sankey';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, downloadBlob, openPdf, qs } from '../lib/api';
@@ -36,7 +37,7 @@ interface Sales {
     people: { id: string; label: string; value: number; pct: number; to: string }[];
     links: { team: string; person: string; value: number }[];
   };
-  customerSankey?: Sales['sankey'];
+  customerSankey?: Omit<Sales['sankey'], 'people'> & { people: { id: string; of?: string; label: string; value: number; pct: number; to: string }[] };
 }
 
 export function OpsSales({ from, to }: { from: string; to: string }) {
@@ -169,14 +170,7 @@ export function OpsSales({ from, to }: { from: string; to: string }) {
         <Sankey input={data.sankey} format={formatCompactMoney} caption={`${formatMoney(data.total)} before VAT, ${data.from} to ${data.to}`} />
       </Panel>
 
-      {data.customerSankey && (
-        <Panel
-          title="Where the sales go"
-          blurb="Gruntech → team → customer. Every customer of the period, once, with its revenue and its share of the whole; a customer two teams sold to has a band from each."
-        >
-          <Sankey input={data.customerSankey} format={formatCompactMoney} oneLine caption={`${formatMoney(data.total)} before VAT, ${data.from} to ${data.to} · ${data.customerSankey.people.length} customers`} />
-        </Panel>
-      )}
+      {data.customerSankey && <CustomerFlow flow={data.customerSankey} caption={`${formatMoney(data.total)} before VAT, ${data.from} to ${data.to}`} />}
 
       <SalesMatrix year={data.year} />
     </div>
@@ -305,6 +299,53 @@ function SalesMatrix({ year: initialYear }: { year: number }) {
           </table>
         </div>
       )}
+    </Panel>
+  );
+}
+
+const FLOW_TOPS = [
+  { value: 10, label: 'Top 10' },
+  { value: 25, label: 'Top 25' },
+  { value: 50, label: 'Top 50' },
+  { value: 0, label: 'All' },
+];
+
+/**
+ * Gruntech → team → customer (2026-11-12). A customer stands under the team
+ * of the salesperson who booked, so one that two teams sold to is listed
+ * under each and no band crosses; Top 10 / 25 / 50 gathers the rest per team.
+ */
+function CustomerFlow({ flow, caption }: { flow: NonNullable<Sales['customerSankey']>; caption: string }) {
+  const [top, setTop] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem('gcore_flow_customers'));
+      return FLOW_TOPS.some((t) => t.value === v) ? v : 0;
+    } catch {
+      return 0;
+    }
+  });
+  const choose = (v: number) => {
+    setTop(v);
+    try {
+      localStorage.setItem('gcore_flow_customers', String(v));
+    } catch {
+      /* the choice is a convenience */
+    }
+  };
+  const customers = new Set(flow.people.map((p) => p.of ?? p.id)).size;
+  return (
+    <Panel
+      title="Where the sales go"
+      blurb="Gruntech → team → customer. A customer stands under the team of the salesperson who booked the order, so one that two teams sold to is listed under each."
+    >
+      <div className="scope-switch" role="group" aria-label="Customers shown">
+        {FLOW_TOPS.map((t) => (
+          <button key={t.value} type="button" className={top === t.value ? 'active' : ''} aria-pressed={top === t.value} onClick={() => choose(t.value)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <Sankey input={topOfFlow(flow, top)} format={formatCompactMoney} oneLine caption={`${caption} · ${customers} customers`} />
     </Panel>
   );
 }

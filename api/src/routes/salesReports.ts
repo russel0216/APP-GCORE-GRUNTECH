@@ -1,3 +1,4 @@
+import { topOfFlow } from '../shared/sankey';
 import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -389,6 +390,9 @@ salesReportRoutes.get(
     const grand = cents(total.reduce((a, b) => a + b, 0));
 
     const sales = await gopsSales(me, { from: `${year}-01-01`, to: q.to ?? `${year}-12-31` });
+    // `customers=10|25|50` prints the top customers on the flow's page, the
+    // rest gathered per team; anything else prints them all.
+    const topN = ['10', '25', '50'].includes(q.customers ?? '') ? Number(q.customers) : 0;
     const target = await yearTarget(year);
     const currency = await companyCurrency();
     const pdf = await renderSalesReport({
@@ -412,7 +416,7 @@ salesReportRoutes.get(
       bars: sales.months.map((m) => ({ label: m.label, current: m.state === 'future' ? 0 : m.current, previous: m.previous, partial: m.state === 'partial' })),
       barSeries: [`${year}`, `${year - 1}`],
       sankey: sales.sankey.root.value > 0 ? sales.sankey : null,
-      customerSankey: sales.customerSankey.root.value > 0 ? sales.customerSankey : null,
+      customerSankey: sales.customerSankey.root.value > 0 ? topOfFlow(sales.customerSankey, topN) : null,
     });
     await audit({ entityType: 'sales_report', entityId: 'sales-orders', action: 'EXPORTED', summary: `${year} sales report printed (one page)` }, req);
     res.setHeader('Content-Type', 'application/pdf');
