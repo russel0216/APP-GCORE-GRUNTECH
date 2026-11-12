@@ -2400,11 +2400,127 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
   // ── The flows, each across a page of its own: by person, then by customer.
   // `oneLine` (the customer flow, 2026-11-12, the owner's call: "customer
   // name, the value and percent in one line") gives the last column one line
-  // a node; past what a landscape page holds legibly the page is portrait,
-  // and the type shrinks with the room so no name sits on another.
+  // a node; past what a sideways page holds legibly the flow runs DOWN a
+  // landscape page (`flowDown`), so no name sits on another.
+  // The customer flow past what a sideways page holds (2026-11-12, the
+  // owner's sketch): LANDSCAPE, the flow running DOWN the page — Gruntech
+  // across the top, the teams under it, the customers along the foot, each
+  // name written down the page under its own bar. Gruntech's and the teams'
+  // labels stay level; the flow takes the page's whole width.
+  const flowDown = (heading: string, input: SankeyInput) => {
+    doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
+    const pRight = doc.page.width - M;
+    const pW = pRight - left;
+    const pBottom = doc.page.height - M;
+    if (name) drawLine(doc, fitLine(doc, name, pW * 0.4, true, 12), left, M, pW * 0.4, 'left', true, 12, PURPLE);
+    drawLine(doc, fitLine(doc, caps(spec.title), pW * 0.6, true, 13), left + pW * 0.4, M - 1, pW * 0.6, 'right', true, 13, PURPLE);
+    drawLine(doc, fitLine(doc, spec.subtitle, pW * 0.6, false, 7), left + pW * 0.4, M + 15, pW * 0.6, 'right', false, 7, GREY);
+    doc.moveTo(left, ruleY).lineTo(pRight, ruleY).strokeColor(GREEN).lineWidth(1.2).stroke();
+    drawLine(doc, heading, left, ruleY + 8, pW, 'left', true, 9, PURPLE);
+    const count = Math.max(1, input.people.filter((p) => p.value > 0).length);
+    // One customer a column: as wide as the page allows, 11pt at most.
+    const colW = Math.min(11, pW / count);
+    const size = Math.max(3.5, Math.min(8, colW - 0.8));
+    // The names' room at the foot: the longest label as it will be written, 300 at most.
+    const tailOf = (nd: { value: number; pct: number }) => ` · ${compactPeso(nd.value)} · ${nd.pct}%`;
+    const longest = input.people.reduce((w, p) => Math.max(w, doc.font('Helvetica-Bold').fontSize(size).widthOfString(p.label) + doc.font('Helvetica').fontSize(size).widthOfString(' · 000.00M · 00.0%')), 0);
+    const labelRoom = Math.min(300, Math.max(80, longest + 4));
+    const top = ruleY + 36;
+    const flowLen = pBottom - labelRoom - 6 - top;
+    const nodeW = 9;
+    // The layout's own axes are along the flow (x) and across it (y); the page turns them.
+    const sk = layoutSankey(input, { width: flowLen, height: pW, nodeWidth: nodeW, gap: Math.min(2, colW / 4), pitch: colW });
+    if (!sk.nodes.length) return;
+    // Each team stands over the middle of its own customers, so the page's
+    // whole width is used and the bands fall straight; its bands move with it.
+    for (const tn of sk.nodes.filter((nd) => nd.column === 1)) {
+      const mine = sk.links.filter((l) => l.source === tn.id);
+      if (!mine.length) continue;
+      const lo = Math.min(...mine.map((l) => l.y1));
+      const hi = Math.max(...mine.map((l) => l.y1 + l.h));
+      const to = Math.max(0, Math.min(pW - tn.h, (lo + hi) / 2 - tn.h / 2));
+      const shift = to - tn.y;
+      tn.y = to;
+      for (const l of sk.links) {
+        if (l.source === tn.id) l.y0 += shift;
+        if (l.target === tn.id) l.y1 += shift;
+      }
+    }
+    const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, FLOW_TONES[i % FLOW_TONES.length]]));
+    const toneOf = (id: string) => {
+      if (id.startsWith('0:')) return INK;
+      if (teamTone.has(id)) return teamTone.get(id)!;
+      const best = sk.links.filter((l) => l.target === id).sort((x, y) => y.value - x.value)[0];
+      return (best && teamTone.get(best.source)) ?? PURPLE;
+    };
+    const byId = new Map(sk.nodes.map((nd) => [nd.id, nd]));
+    const px = (across: number) => left + across;
+    const py = (along: number) => top + along;
+    for (const l of sk.links) {
+      const s = byId.get(l.source)!;
+      const t = byId.get(l.target)!;
+      const y0 = py(s.x + nodeW);
+      const y1 = py(t.x);
+      const cy = (y0 + y1) / 2;
+      doc
+        .moveTo(px(l.y0), y0)
+        .bezierCurveTo(px(l.y0), cy, px(l.y1), cy, px(l.y1), y1)
+        .lineTo(px(l.y1 + l.h), y1)
+        .bezierCurveTo(px(l.y1 + l.h), cy, px(l.y0 + l.h), cy, px(l.y0 + l.h), y0)
+        .closePath()
+        .fillOpacity(0.3)
+        .fill(toneOf(l.source.startsWith('0:') ? l.target : l.source));
+    }
+    doc.fillOpacity(1);
+    for (const nd of sk.nodes) doc.rect(px(nd.y), py(nd.x), Math.max(0.8, nd.h), nodeW).fill(toneOf(nd.id));
+    // Gruntech: one level line over its bar.
+    const root = byId.get('0:root');
+    if (root) {
+      const cx = px(root.y + root.h / 2);
+      const words = `${root.label}  ·  ${compactPeso(root.value)} · 100%`;
+      drawLine(doc, words, cx - 150, py(root.x) - 13, 300, 'center', true, 9, INK);
+    }
+    // The teams: level, two lines over each bar, pushed apart where the bars are narrow.
+    const teamNodes = sk.nodes.filter((nd) => nd.column === 1).sort((a, b) => a.y - b.y);
+    const teamW = 64;
+    const xs = teamNodes.map((nd) => px(nd.y + nd.h / 2));
+    for (let i = 1; i < xs.length; i++) xs[i] = Math.max(xs[i], xs[i - 1] + teamW);
+    if (xs.length && xs[xs.length - 1] > pRight - teamW / 2) {
+      xs[xs.length - 1] = pRight - teamW / 2;
+      for (let i = xs.length - 2; i >= 0; i--) xs[i] = Math.min(xs[i], xs[i + 1] - teamW);
+    }
+    teamNodes.forEach((nd, i) => {
+      const ty = py(nd.x) - 21;
+      drawLine(doc, fitLine(doc, nd.label, teamW, true, 8.5), xs[i] - teamW / 2, ty, teamW, 'center', true, 8.5, INK);
+      drawLine(doc, `${compactPeso(nd.value)} · ${nd.pct}%`, xs[i] - teamW / 2, ty + 10, teamW, 'center', false, 7, INK);
+    });
+    // The customers: each name written down the page under its bar, a column apart.
+    const custs = sk.nodes.filter((nd) => nd.column === 2).sort((a, b) => a.y - b.y);
+    const cxs = custs.map((nd) => px(nd.y + nd.h / 2));
+    for (let i = 1; i < cxs.length; i++) cxs[i] = Math.max(cxs[i], cxs[i - 1] + colW);
+    if (cxs.length && cxs[cxs.length - 1] > pRight - colW / 2) {
+      cxs[cxs.length - 1] = pRight - colW / 2;
+      for (let i = cxs.length - 2; i >= 0; i--) cxs[i] = Math.min(cxs[i], cxs[i + 1] - colW);
+    }
+    const labelTop = py(flowLen) + 5;
+    const room = pBottom - labelTop;
+    custs.forEach((nd, i) => {
+      const tail = tailOf(nd);
+      const tailW = doc.font('Helvetica').fontSize(size).widthOfString(tail);
+      const nameText = fitLine(doc, nd.label, Math.max(20, room - tailW), true, size);
+      const nameW = doc.font('Helvetica-Bold').fontSize(size).widthOfString(nameText);
+      doc.save();
+      doc.translate(cxs[i], labelTop);
+      doc.rotate(90);
+      drawLine(doc, nameText, 0, -size * 0.42, nameW + 2, 'left', true, size, INK);
+      drawLine(doc, tail, nameW, -size * 0.42, tailW + 2, 'left', false, size, GREY);
+      doc.restore();
+    });
+  };
   const flowPage = (heading: string, input: SankeyInput, oneLine: boolean) => {
     const count = input.people.filter((p) => p.value > 0).length;
-    const portrait = oneLine && count > 52;
+    if (oneLine && count > 52) return flowDown(heading, input);
+    const portrait = false;
     doc.addPage({ size: 'A4', layout: portrait ? 'portrait' : 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
     const pRight = doc.page.width - M;
     const pW = pRight - left;

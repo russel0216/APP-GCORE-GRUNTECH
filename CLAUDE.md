@@ -6357,8 +6357,8 @@ characters, the whole name its tooltip, then value and share), a 20-unit
 pitch, the canvas growing 26 units a node. The Sales Report's Print has a
 THIRD page (`SalesReportSpec.customerSankey`, `flowPage()` in
 `renderSalesReport`), `?customers=10|25|50` (the report page's "Print: ..."
-select, an `extraKey`) printing the top n: landscape up to 52 nodes, portrait
-past that, the line height what the page allows (11pt at most) and the type
+select, an `extraKey`) printing the top n: sideways up to 52 nodes; past that
+`flowDown()` — still LANDSCAPE, the flow running down the page (the owner's sketch): Gruntech level across the top, each team level over the middle of its own customers, every customer a column with its name written down the page;
 a point under it, the name giving way to the figures. verify-pipeline pins
 the conservation, one band a node and the three pages; verify-foundation the
 top-n fold and a hundred customers a line apart.
