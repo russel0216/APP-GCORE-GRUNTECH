@@ -2425,21 +2425,42 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
   // is room.
   const tablePage = (heading: string, firstHead: string, secondHead: string, tRows: SalesReportTableRow[]) => {
     const tSize = 10;
-    const tH = 14.5;
     const hasSecond = tRows.some((r) => r.second);
     const secondW = hasSecond ? 28 : 0;
-    const pctW = 38;
-    const annualW = 66;
-    const firstW = hasSecond ? 150 : 170;
+    const pctW = 36;
+    const annualW = 64;
+    const firstW = hasSecond ? 132 : 150;
+    const pad = 3;
     const months = spec.months.length;
     const cW = (W - firstW - secondW - pctW - annualW) / months;
     const xOf = (i: number) => left + firstW + secondW + i * cW;
     const top = ruleY + 24;
-    const lineH = 11;
+    const whole = (v: number) => (Math.abs(v) < 0.5 ? '' : Math.round(v).toLocaleString('en-US'));
+    // ONE size for the whole table — names, teams and figures alike
+    // (2026-11-12, the owner's report: "the numbers are messy — add a thin
+    // line and make the font size uniform"): the largest, 10pt at most, at
+    // which the widest month figure and the widest annual figure both fit
+    // their columns. The total row is bold and wider, so it takes one size of
+    // its own the same way.
+    const sizeFor = (texts: string[], width: number, bold: boolean) => {
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(tSize);
+      const widest = Math.max(1, ...texts.map((t) => doc.widthOfString(t)));
+      return Math.min(tSize, Math.floor(((tSize * (width - pad * 2)) / widest) * 10) / 10);
+    };
+    const bodySize = Math.max(
+      5,
+      Math.min(
+        sizeFor(tRows.flatMap((r) => r.values.map(whole)), cW, false),
+        sizeFor(tRows.map((r) => whole(r.total) || '0'), annualW, true),
+      ),
+    );
+    const totalSize = Math.max(5, Math.min(bodySize, sizeFor(spec.total.map((v) => whole(v) || '0'), cW, true), sizeFor([whole(spec.grandTotal) || '0'], annualW, true)));
+    const tH = bodySize + 6;
+    const lineH = bodySize + 1.5;
     // Each row's name as it will be written: one line, or two.
     const named = tRows.map((r) => {
-      const lines = wrapText(doc, r.name, firstW - 4, false, tSize);
-      const two = lines.length > 1 ? [lines[0], fitLine(doc, lines.slice(1).join(' '), firstW - 4, false, tSize)] : lines;
+      const lines = wrapText(doc, r.name, firstW - pad * 2, false, bodySize);
+      const two = lines.length > 1 ? [lines[0], fitLine(doc, lines.slice(1).join(' '), firstW - pad * 2, false, bodySize)] : lines;
       return { r, lines: two, h: tH + (two.length - 1) * lineH };
     });
     // The pages: rows fill each under its head; the total closes the last.
@@ -2456,23 +2477,23 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
     }
     if (used + tH > room0) sheets.push([]);
     const pages = sheets.length;
-    const whole = (v: number) => (Math.abs(v) < 0.5 ? '' : Math.round(v).toLocaleString('en-US'));
+    // The column edges, for the thin lines between them.
+    const edges = [left, left + firstW, ...(secondW ? [left + firstW + secondW] : []), ...Array.from({ length: months }, (_, i) => xOf(i + 1)), right - pctW, right];
     const row = (y: number, first: string[], second: string, values: string[], annual: string, share: string, o: { head?: boolean; bold?: boolean; shade?: boolean }) => {
       const h = tH + (first.length - 1) * lineH;
       if (o.shade) doc.rect(left, y, W, h).fill('#F3EFF7');
       const color = o.head ? PURPLE : INK;
       const bold = !!o.head || !!o.bold;
-      const hSize = o.head ? 8 : tSize;
+      const hSize = o.head ? Math.min(8, bodySize + 0.5) : o.bold ? totalSize : bodySize;
       const at = (size: number) => y + (h - size) / 2 + size * 0.07;
-      first.forEach((line, i) => drawLine(doc, fitLine(doc, line, firstW - 4, bold, hSize), left + 2, y + (tH - hSize) / 2 + hSize * 0.07 + i * lineH, firstW - 4, 'left', bold, hSize, color));
-      if (secondW) drawLine(doc, second, left + firstW, at(hSize), secondW - 2, 'left', bold, hSize, color);
-      values.forEach((v, i) => {
-        const fs = Math.min(hSize, fitSize(doc, v, cW - 3, hSize));
-        drawLine(doc, v, xOf(i) + 1, at(fs), cW - 3, 'right', bold, fs, color);
-      });
-      const as = Math.min(hSize, fitSize(doc, annual, annualW - 3, hSize));
-      drawLine(doc, annual, xOf(months) + 1, at(as), annualW - 3, 'right', true, as, color);
-      drawLine(doc, share, right - pctW, at(hSize), pctW - 2, 'right', bold, hSize, color);
+      first.forEach((line, i) => drawLine(doc, fitLine(doc, line, firstW - pad * 2, bold, hSize), left + pad, y + (tH - hSize) / 2 + hSize * 0.07 + i * lineH, firstW - pad * 2, 'left', bold, hSize, color));
+      if (secondW) drawLine(doc, second, left + firstW + pad, at(hSize), secondW - pad * 2, 'left', bold, hSize, color);
+      const fs = hSize;
+      values.forEach((v, i) => drawLine(doc, v, xOf(i) + pad, at(fs), cW - pad * 2, 'right', bold, fs, color));
+      drawLine(doc, annual, xOf(months) + pad, at(fs), annualW - pad * 2, 'right', true, fs, color);
+      drawLine(doc, share, right - pctW + pad, at(fs), pctW - pad * 2, 'right', bold, fs, color);
+      // Thin lines between the columns, and under the row.
+      for (const x of edges) doc.moveTo(x, y).lineTo(x, y + h).strokeColor(RULE).lineWidth(0.4).stroke();
       doc.moveTo(left, y + h).lineTo(right, y + h).strokeColor(o.head ? PURPLE : RULE).lineWidth(o.head ? 0.8 : 0.4).stroke();
     };
     let ty = top;
@@ -2485,6 +2506,7 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
       drawLine(doc, `${heading}${pages > 1 ? ` — ${pg + 1} OF ${pages}` : ''}`, left, ruleY + 8, W * 0.7, 'left', true, 9, PURPLE);
       drawLine(doc, 'Whole pesos', left + W * 0.7, ruleY + 9, W * 0.3, 'right', false, 7, GREY);
       ty = top;
+      doc.moveTo(left, ty).lineTo(right, ty).strokeColor(RULE).lineWidth(0.4).stroke();
       row(ty, [firstHead], secondHead, spec.months.map((m) => caps(m.slice(0, 3))), 'ANNUAL', '%', { head: true });
       ty += tH;
       for (const n of sheets[pg]) {

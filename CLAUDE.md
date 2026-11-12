@@ -6420,13 +6420,16 @@ give way to "Showing …" on a narrowed paper. **Five pages and up**: the person
 and team tables with the bars; **Sales by customer** and **Sales by product
 group** (`SalesReportSpec.customerTable` / `productTable`, `tablePage()` in
 `renderSalesReport`) — the months across, the year and its share, every row
-in 10pt type (the owner's call the same day: "too small — make the font size
-smallest 10 and separate the table for the next page"): the table runs on to
-as many landscape pages as its rows need, the head repeated ("1 OF 3"), the
-total closing the last; figures are WHOLE pesos (thirteen columns of centavos
-do not fit a page at 10pt) and a figure too wide for its column alone is set
-smaller; a name too long for its column runs on to a second line at the same
-size, its row taller; the "Show: top 10 / 25 / 50 customers" select gathers
+as a ruled grid in ONE type size (the owner's calls the same day: "too small
+— separate the table for the next page", then "the numbers are messy — add a
+thin line and make the font size uniform"): the table runs on to as many
+landscape pages as its rows need, the head repeated ("1 OF 3"), the total
+closing the last; thin lines between the columns and under every row; figures
+are WHOLE pesos, and names, teams and figures share one size — the largest,
+10pt at most, at which the widest month figure and the widest annual figure
+fit their columns (about 7.5pt with eight-digit months; never a cell smaller
+than its neighbours), the bold total row one size of its own the same way; a
+name too long for its column runs on to a second line, its row taller; the "Show: top 10 / 25 / 50 customers" select gathers
 the rest into one row; where a one-page table leaves room, a bar a row to
 scale; then the two flows. The filter card's pickers sit in even columns
 (`.rep-grid`, five across), the target on a row of its own. **The page**: `ReportPage`'s `controlRows` (the
