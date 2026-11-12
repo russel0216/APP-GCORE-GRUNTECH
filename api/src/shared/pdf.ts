@@ -2404,7 +2404,7 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
   // landscape page (`flowDown`), so no name sits on another.
   // The customer flow past what a sideways page holds (2026-11-12, the
   // owner's sketch): LANDSCAPE, the flow running DOWN the page — Gruntech
-  // across the top, the teams under it, the customers along the foot, each
+  // across the top, the teams side by side under it, the customers along the foot, each
   // name written down the page under its own bar. Gruntech's and the teams'
   // labels stay level; the flow takes the page's whole width.
   const flowDown = (heading: string, input: SankeyInput) => {
@@ -2418,8 +2418,9 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
     doc.moveTo(left, ruleY).lineTo(pRight, ruleY).strokeColor(GREEN).lineWidth(1.2).stroke();
     drawLine(doc, heading, left, ruleY + 8, pW, 'left', true, 9, PURPLE);
     const count = Math.max(1, input.people.filter((p) => p.value > 0).length);
-    // One customer a column: as wide as the page allows, 11pt at most.
-    const colW = Math.min(11, pW / count);
+    // One customer a column, 11pt at most; the columns take 85% of the width,
+    // so the bars keep room to stand to scale (the largest customers wider).
+    const colW = Math.min(11, (pW * 0.85) / count);
     const size = Math.max(3.5, Math.min(8, colW - 0.8));
     // The names' room at the foot: the longest label as it will be written, 300 at most.
     const tailOf = (nd: { value: number; pct: number }) => ` · ${compactPeso(nd.value)} · ${nd.pct}%`;
@@ -2431,21 +2432,6 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
     // The layout's own axes are along the flow (x) and across it (y); the page turns them.
     const sk = layoutSankey(input, { width: flowLen, height: pW, nodeWidth: nodeW, gap: Math.min(2, colW / 4), pitch: colW });
     if (!sk.nodes.length) return;
-    // Each team stands over the middle of its own customers, so the page's
-    // whole width is used and the bands fall straight; its bands move with it.
-    for (const tn of sk.nodes.filter((nd) => nd.column === 1)) {
-      const mine = sk.links.filter((l) => l.source === tn.id);
-      if (!mine.length) continue;
-      const lo = Math.min(...mine.map((l) => l.y1));
-      const hi = Math.max(...mine.map((l) => l.y1 + l.h));
-      const to = Math.max(0, Math.min(pW - tn.h, (lo + hi) / 2 - tn.h / 2));
-      const shift = to - tn.y;
-      tn.y = to;
-      for (const l of sk.links) {
-        if (l.source === tn.id) l.y0 += shift;
-        if (l.target === tn.id) l.y1 += shift;
-      }
-    }
     const teamTone = new Map(input.teams.map((t, i) => [`1:${t.id}`, FLOW_TONES[i % FLOW_TONES.length]]));
     const toneOf = (id: string) => {
       if (id.startsWith('0:')) return INK;
@@ -2480,20 +2466,26 @@ export async function renderSalesReport(input: SalesReportSpec): Promise<Buffer>
       const words = `${root.label}  ·  ${compactPeso(root.value)} · 100%`;
       drawLine(doc, words, cx - 150, py(root.x) - 13, 300, 'center', true, 9, INK);
     }
-    // The teams: level, two lines over each bar, pushed apart where the bars are narrow.
+    // The teams stand side by side under Gruntech (the owner's slide,
+    // 2026-11-12). Their labels stay level in ONE row over the bars: where the
+    // bars are too narrow for the labels to sit over them the row spreads
+    // evenly about the teams, a hairline tying each label to its bar.
     const teamNodes = sk.nodes.filter((nd) => nd.column === 1).sort((a, b) => a.y - b.y);
-    const teamW = 64;
-    const xs = teamNodes.map((nd) => px(nd.y + nd.h / 2));
-    for (let i = 1; i < xs.length; i++) xs[i] = Math.max(xs[i], xs[i - 1] + teamW);
-    if (xs.length && xs[xs.length - 1] > pRight - teamW / 2) {
-      xs[xs.length - 1] = pRight - teamW / 2;
-      for (let i = xs.length - 2; i >= 0; i--) xs[i] = Math.min(xs[i], xs[i + 1] - teamW);
-    }
-    teamNodes.forEach((nd, i) => {
-      const ty = py(nd.x) - 21;
-      drawLine(doc, fitLine(doc, nd.label, teamW, true, 8.5), xs[i] - teamW / 2, ty, teamW, 'center', true, 8.5, INK);
-      drawLine(doc, `${compactPeso(nd.value)} · ${nd.pct}%`, xs[i] - teamW / 2, ty + 10, teamW, 'center', false, 7, INK);
+    const teamLabels = teamNodes.map((nd) => {
+      const figure = `${compactPeso(nd.value)} · ${nd.pct}%`;
+      const w = Math.max(doc.font('Helvetica-Bold').fontSize(8.5).widthOfString(nd.label), doc.font('Helvetica').fontSize(7).widthOfString(figure)) + 10;
+      return { nd, figure, w, bar: px(nd.y + nd.h / 2), x: px(nd.y + nd.h / 2) };
     });
+    for (let i = 1; i < teamLabels.length; i++) teamLabels[i].x = Math.max(teamLabels[i].x, teamLabels[i - 1].x + (teamLabels[i - 1].w + teamLabels[i].w) / 2);
+    const drift = teamLabels.reduce((n, t) => n + (t.x - t.bar), 0) / Math.max(1, teamLabels.length);
+    for (const t of teamLabels) t.x = Math.max(left + t.w / 2, Math.min(pRight - t.w / 2, t.x - drift));
+    for (const t of teamLabels) {
+      const barTop = py(t.nd.x);
+      const ty = barTop - 34;
+      doc.moveTo(t.x, ty + 19).lineTo(t.bar, barTop).strokeColor(GREY).lineWidth(0.4).stroke();
+      drawLine(doc, t.nd.label, t.x - t.w / 2, ty, t.w, 'center', true, 8.5, INK);
+      drawLine(doc, t.figure, t.x - t.w / 2, ty + 10, t.w, 'center', false, 7, INK);
+    }
     // The customers: each name written down the page under its bar, a column apart.
     const custs = sk.nodes.filter((nd) => nd.column === 2).sort((a, b) => a.y - b.y);
     const cxs = custs.map((nd) => px(nd.y + nd.h / 2));

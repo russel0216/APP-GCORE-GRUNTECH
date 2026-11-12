@@ -3,7 +3,9 @@ import { PersonSelect, usePeople } from '../../components/People';
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { NumberInput } from '../../components/NumberInput';
-import { useToast } from '../../components/ui';
+import { formatDate, formatMoney, useToast } from '../../components/ui';
+import { FlowPicture } from '../../components/FlowPicture';
+import { topOfFlow, type SankeyInput } from '../../lib/sankey';
 
 /**
  * The Sales Order report (2026-10-23, the owner's call: "create a button
@@ -70,15 +72,16 @@ export function SalesOrderReports() {
               </option>
             ))}
           </select>
-          <select aria-label="Customers on the printed flow" value={params.get('customers') ?? ''} onChange={(e) => set({ customers: e.target.value })}>
-            <option value="">Print: all customers</option>
-            <option value="10">Print: top 10 customers</option>
-            <option value="25">Print: top 25 customers</option>
-            <option value="50">Print: top 50 customers</option>
+          <select aria-label="Customers on the customer flow, printed and as a picture" value={params.get('customers') ?? ''} onChange={(e) => set({ customers: e.target.value })}>
+            <option value="">Customer flow: all customers</option>
+            <option value="10">Customer flow: top 10</option>
+            <option value="25">Customer flow: top 25</option>
+            <option value="50">Customer flow: top 50</option>
           </select>
           <TargetBox year={Number((params.get('to') ?? new Date().toISOString()).slice(0, 4))} />
         </>
       )}
+      below={({ from, to, params }) => <SalesFlows from={from} to={to} top={Number(params.get('customers')) || 0} />}
     />
   );
 }
@@ -117,6 +120,49 @@ function TargetBox({ year }: { year: number }) {
           Save target
         </button>
       )}
+    </>
+  );
+}
+
+interface Flows {
+  from: string;
+  to: string;
+  total: number;
+  sankey: SankeyInput;
+  customerSankey: SankeyInput;
+}
+
+/**
+ * The two Sankeys as pictures to save for a slide (2026-11-12): the
+ * salespeople's and the customers', over the report's own days, each with
+ * Download PNG. The customers shown follow the "Print: …" choice.
+ */
+function SalesFlows({ from, to, top }: { from: string; to: string; top: number }) {
+  const [flows, setFlows] = useState<Flows | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .get<Flows>(`/sales-reports/flows?from=${from}&to=${to}`)
+      .then((f) => live && setFlows(f))
+      .catch(() => live && setFlows(null));
+    return () => {
+      live = false;
+    };
+  }, [from, to]);
+  if (!flows) return null;
+  const days = `${formatMoney(flows.total)} before VAT · ${formatDate(flows.from)} to ${formatDate(flows.to)}`;
+  const customers = topOfFlow(flows.customerSankey, top);
+  const count = new Set(flows.customerSankey.people.map((p) => p.of ?? p.id)).size;
+  return (
+    <>
+      <FlowPicture input={flows.sankey} mode="side" title="Where the sales come from — Gruntech > team > salesperson" subtitle={days} fileName={`sales-by-salesperson-${flows.from}-to-${flows.to}.png`} />
+      <FlowPicture
+        input={customers}
+        mode={customers.people.length > 26 ? 'down' : 'side'}
+        title="Where the sales go — Gruntech > team > customer"
+        subtitle={`${days} · ${top ? `top ${Math.min(top, count)} of ${count} customers` : `${count} customers`}`}
+        fileName={`sales-by-customer-${flows.from}-to-${flows.to}.png`}
+      />
     </>
   );
 }

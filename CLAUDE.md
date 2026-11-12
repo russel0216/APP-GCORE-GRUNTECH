@@ -6363,6 +6363,28 @@ a point under it, the name giving way to the figures. verify-pipeline pins
 the conservation, one band a node and the three pages; verify-foundation the
 top-n fold and a hundred customers a line apart.
 
+**The flows as pictures, and the teams side by side** (2026-11-12, the owner's
+slide: "the arrangement should look like this, on team … add download png or
+jpg for the sankey, salesperson and customer, for a PowerPoint
+presentation"). On the printed customer page (`flowDown`) the teams stand
+SIDE BY SIDE under Gruntech, never spread over their customers; the customer
+columns take 85% of the width so the bars keep room to stand to scale; the
+teams' labels stay level in ONE row over the bars, spread evenly about them
+where the bars are narrow, a hairline to each bar. `GET /sales-reports/flows
+?from=&to=` (before `/:kind`, the sales order view right) sends `gopsSales`'
+`sankey` and `customerSankey` for the report's own days, and the Sales Order
+report page draws both under its tables (`ReportPage`'s new `below` prop,
+`SalesFlows` in `SalesOrderReports.tsx`) as `FlowPicture`s
+(`components/FlowPicture.tsx`): one 1600 x 900 white SVG each, every colour
+and font on the element itself (no class, no token — the same in either
+theme), `side` for the salespeople and for 26 customer nodes or fewer, `down`
+(the printed page's arrangement) past that, the "Customer flow: all / top 10
+/ 25 / 50" select deciding the customers on the picture and on the print.
+**Download PNG** serialises that SVG onto a canvas at twice its size
+(3200 x 1800) and saves it — nothing leaves the browser. Text widths in the
+picture are estimated (there is no page to measure on), so a name is cut by
+characters. verify-pipeline pins the endpoint against the dashboard's flows.
+
 ## Paper: one sign-off rule, one money block, a printed twin for every list (2026-10-10)
 
 The owner approved the review's A3–A5 (2026-10-10). Rule 6 is the dress;

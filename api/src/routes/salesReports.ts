@@ -344,6 +344,21 @@ salesReportRoutes.put(
   }),
 );
 
+// The two flows as figures (2026-11-12, the owner's call: "on sales order
+// report add download png or jpg for the sankey, salesperson and customer"):
+// Gruntech > team > person and Gruntech > team > customer over the report's
+// own days — the dashboard's `gopsSales`, so the pictures, the dashboard and
+// the paper agree. Declared before mountReports' `/:kind`.
+salesReportRoutes.get(
+  '/flows',
+  require_('gops.sales_orders.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const sales = await gopsSales(me, { from: req.query.from, to: req.query.to });
+    res.json({ from: sales.from, to: sales.to, total: sales.total, orders: sales.orders, sankey: sales.sankey, customerSankey: sales.customerSankey });
+  }),
+);
+
 salesReportRoutes.get(
   '/sales-orders.pdf',
   require_('gops.sales_orders.view_own'),

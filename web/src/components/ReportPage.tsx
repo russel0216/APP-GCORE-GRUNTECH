@@ -91,6 +91,7 @@ export function ReportPage({
   kinds,
   extraKeys = [],
   controls,
+  below,
 }: {
   title: string;
   /** The API base, e.g. `/chain-reports`. */
@@ -99,6 +100,8 @@ export function ReportPage({
   /** URL keys the controls set, passed to the API as they are. */
   extraKeys?: string[];
   controls?: (ctx: { kind: string; params: URLSearchParams; set: (patch: Record<string, string>) => void }) => ReactNode;
+  /** More of the screen's own, under the report's tables, on the same days. */
+  below?: (ctx: { kind: string; from: string; to: string; params: URLSearchParams }) => ReactNode;
 }) {
   const [params, setParams] = useSearchParams();
   const toast = useToast();
@@ -319,6 +322,7 @@ export function ReportPage({
           {report.notes?.length ? <p className="faint">{report.notes.join(' ')}</p> : null}
         </>
       ) : null}
+      {below?.({ kind, from, to, params })}
     </div>
   );
 }

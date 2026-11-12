@@ -1181,6 +1181,13 @@ async function main() {
     );
     const topPaper = await fetch(`${BASE}/sales-reports/sales-orders.pdf?from=${day}&to=${day}&customers=10`, { headers: { Authorization: `Bearer ${managerToken}` } });
     check('the Sales Report prints with the top 10 customers asked for', topPaper.status === 200, `${topPaper.status}`);
+    const flows = await http(managerToken, 'GET', `/sales-reports/flows?from=${day}&to=${day}`);
+    const noFlows = await http(sellerToken, 'GET', `/sales-reports/flows?from=${day}&to=${day}`);
+    check(
+      "the report's pictures read the dashboard's own flows for the same days, behind the sales order right",
+      flows.status === 200 && JSON.stringify(flows.body.sankey) === JSON.stringify(d.sankey) && JSON.stringify(flows.body.customerSankey) === JSON.stringify(d.customerSankey) && flows.body.total === d.total && noFlows.status === 403,
+      `${flows.status} ${noFlows.status}`,
+    );
     check(
       'a person holding two selling roles is ONE node, keyed by login, and the people match the personnel table',
       new Set(ids).size === ids.length && ids.includes(manager.id) && d.people.map((p) => p.id).join() === ids.join(),
