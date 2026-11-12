@@ -4810,8 +4810,22 @@ SCORO.
   author's team, distinct from the order owner's team, where the owner has
   one); the mass action **Set team to the salesperson's** (Edit All on sales
   orders or quotations) sends `POST /sales-orders/:id/retag-team` per order —
-  the quotation's team becomes the salesperson's, the order's invoices
-  credited to the old team follow, one `quotation` UPDATED row.
+  the order's invoices credited to the old team follow.
+- **Each sales order its own team** (2026-11-12, the owner's call, after
+  the live data showed 19 quotations each booked by two salespeople on two
+  teams — Daniel's order and Ricardo's .1 — so retagging the quotation
+  flip-flopped). `SalesOrder.teamId` (nullable, SetNull): a new order takes
+  its SALESPERSON's own team, else its quotation's (`teamForNewOrder()` in
+  `shared/team.ts`; the SCORO invoices import takes the team picked for the
+  owner); `orderTeamOf()` / `orderTeamWhere()` read it, an order with none
+  reading as its quotation's. The sales order list's Team filter, Team
+  view, team cards, `salesOrdersReadable`, the G-OPS dashboard's Sankey and
+  matrix (`salesOrderRows`), the Sales Order report, a commission's and an
+  invoice request's team and `invoiceCredit()` all read the ORDER's team.
+  `fillOrderTeams()` (the seed, every deploy, only blanks) gave every order
+  its salesperson's team. The retag now sets the ORDER's team, never the
+  quotation's; Team differs compares the order's team (else the
+  quotation's) with its salesperson's.
 - **The invoices import asks who each SCORO owner's invoices go under**
   (2026-11-11, the owner's report after his first run: "the file when check
   didn't ask me where group it will go" — owners with no login landed on the

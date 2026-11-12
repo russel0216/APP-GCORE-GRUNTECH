@@ -14,7 +14,7 @@ import { invoiceCredit, termsLabel } from '../../shared/receivables';
 import { addDays } from '../../shared/day';
 import { mirrorDirectQuotation } from '../../shared/directOrders';
 import { QUOTATION_CURRENCY_CODES, upperText } from '../../shared/quotation';
-import { teamOf } from '../../shared/team';
+import { teamForNewOrder, teamOf } from '../../shared/team';
 import type { Registered } from '../imports';
 import {
   ROW_TRANSACTION,
@@ -477,6 +477,8 @@ async function writeScoroInvoices(
         customerId: quotation.customerId,
         contactId,
         ownerId,
+        // Each order its own team (2026-11-12): the one picked, else the salesperson's.
+        teamId: choice?.teamId ?? (await teamForNewOrder(ownerId, quotation.id, tx)),
         orderDate: record.orderDate,
         termsDays: record.termsDays,
         paymentMethod: record.paymentMethod,
@@ -640,21 +642,25 @@ async function writeScoroInvoices(
     if (!choice) return;
     const order = await tx.salesOrder.findUnique({
       where: { id: orderId },
-      select: { id: true, number: true, ownerId: true, quotation: { select: { id: true, directOrder: true, ownerId: true, teamId: true } } },
+      select: { id: true, number: true, ownerId: true, teamId: true, quotation: { select: { id: true, directOrder: true, ownerId: true, teamId: true } } },
     });
     if (!order) return;
     const ownerId = choice.userId ?? order.ownerId;
     const standIn = order.quotation.directOrder ? order.quotation : null;
     // The team: the one chosen, else — when the salesperson changed — theirs.
     const teamId = standIn ? (choice.teamId ?? (choice.userId && choice.userId !== standIn.ownerId ? ((await teamOf(ownerId))?.id ?? null) : standIn.teamId)) : null;
+    // The ORDER's own team (2026-11-12): the one chosen, else — when the salesperson changed — theirs.
+    const orderTeamId =
+      choice.teamId ?? (choice.userId && choice.userId !== order.ownerId ? ((await teamOf(ownerId))?.id ?? order.teamId) : order.teamId);
     const moved: string[] = [];
-    if (ownerId !== order.ownerId) {
-      await tx.salesOrder.update({ where: { id: order.id }, data: { ownerId } });
-      moved.push('salesperson');
+    if (ownerId !== order.ownerId || orderTeamId !== order.teamId) {
+      await tx.salesOrder.update({ where: { id: order.id }, data: { ownerId, teamId: orderTeamId } });
+      if (ownerId !== order.ownerId) moved.push('salesperson');
+      if (orderTeamId !== order.teamId) moved.push('team');
     }
     if (standIn && (standIn.ownerId !== ownerId || standIn.teamId !== teamId)) {
       await tx.quotation.update({ where: { id: standIn.id }, data: { ownerId, teamId } });
-      if (standIn.teamId !== teamId) moved.push('team');
+      if (standIn.teamId !== teamId && !moved.includes('team')) moved.push('team');
       if (standIn.ownerId !== ownerId && !moved.includes('salesperson')) moved.push('salesperson');
     }
     const invoices = await tx.invoice.findMany({
@@ -662,22 +668,22 @@ async function writeScoroInvoices(
       select: { id: true, salespersonId: true, teamId: true },
     });
     for (const inv of invoices) {
-      const data = { salespersonId: ownerId, teamId: standIn ? teamId : inv.teamId };
+      const data = { salespersonId: ownerId, teamId: orderTeamId ?? (standIn ? teamId : inv.teamId) };
       if (inv.salespersonId === data.salespersonId && inv.teamId === data.teamId) continue;
       await tx.invoice.update({ where: { id: inv.id }, data });
       if (!moved.includes('invoice')) moved.push('invoice');
     }
     if (!moved.length) return;
     const owner = await tx.user.findUnique({ where: { id: ownerId }, select: { name: true } });
-    const team = teamId ? await tx.industry.findUnique({ where: { id: teamId }, select: { code: true } }) : null;
+    const team = orderTeamId ? await tx.industry.findUnique({ where: { id: orderTeamId }, select: { code: true } }) : null;
     await audit(
       {
         entityType: 'sales_order',
         entityId: order.id,
         action: 'UPDATED',
-        summary: `Salesperson and team set from ${SOURCE}: ${owner?.name ?? '—'}${standIn ? `, team ${team?.code ?? 'none'}` : ''}`,
-        before: { ownerId: order.ownerId, ...(standIn ? { teamId: standIn.teamId } : {}) },
-        after: { ownerId, ...(standIn ? { teamId } : {}), scoroOwner: record.scoroOwner, changed: moved },
+        summary: `Salesperson and team set from ${SOURCE}: ${owner?.name ?? '—'}, team ${team?.code ?? 'none'}`,
+        before: { ownerId: order.ownerId, teamId: order.teamId },
+        after: { ownerId, teamId: orderTeamId, scoroOwner: record.scoroOwner, changed: moved },
         ...by,
       },
       undefined,

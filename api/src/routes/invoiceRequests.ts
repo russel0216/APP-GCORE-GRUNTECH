@@ -140,6 +140,7 @@ async function orderHolders(salesOrderId: string) {
     where: { id: salesOrderId },
     select: {
       ownerId: true,
+      team: { select: { id: true, code: true, name: true } },
       quotation: {
         select: {
           id: true,
@@ -151,7 +152,7 @@ async function orderHolders(salesOrderId: string) {
     },
   });
   if (!so) throw notFound('Sales order not found');
-  return { quotation: so.quotation, team: quotationTeamOf(so.quotation), orderOwnerId: so.ownerId };
+  return { quotation: so.quotation, team: so.team ?? quotationTeamOf(so.quotation), orderOwnerId: so.ownerId };
 }
 
 /**

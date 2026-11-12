@@ -42,6 +42,31 @@ export function quotationTeamWhere(teamId: string): Prisma.QuotationWhereInput {
   return { OR: [{ teamId }, { teamId: null, owner: teamMembers(teamId) }] };
 }
 
+/**
+ * The team a SALES ORDER counts under (2026-11-12, the owner's call: "each
+ * order its own team"): its own `teamId` — its salesperson's at booking —
+ * else, for an order from before, its quotation's.
+ */
+export function orderTeamWhere(teamId: string): Prisma.SalesOrderWhereInput {
+  return { OR: [{ teamId }, { teamId: null, quotation: quotationTeamWhere(teamId) }] };
+}
+
+export function orderTeamOf(row: { team: TeamRef; quotation: { team: TeamRef; owner: { employee: { industry: TeamRef } | null } } }): TeamRef {
+  return row.team ?? quotationTeamOf(row.quotation);
+}
+
+/** The team a new order takes: its salesperson's own, else the quotation's (tag, else author's). */
+export async function teamForNewOrder(
+  ownerId: string,
+  quotationId: string,
+  db: Prisma.TransactionClient | typeof prisma = prisma,
+): Promise<string | null> {
+  const own = await db.employee.findUnique({ where: { userId: ownerId }, select: { industryId: true } });
+  if (own?.industryId) return own.industryId;
+  const q = await db.quotation.findUnique({ where: { id: quotationId }, select: { team: TEAM_REF_SELECT, owner: OWNER_TEAM_SELECT } });
+  return q ? (quotationTeamOf(q)?.id ?? null) : null;
+}
+
 /** The tag if there is one, else the owner's team — `team` and `owner` as QUOTATION_TEAM_SELECT brings them. */
 export function quotationTeamOf(row: { team: TeamRef; owner: { employee: { industry: TeamRef } | null } }): TeamRef {
   return row.team ?? row.owner.employee?.industry ?? null;
@@ -186,6 +211,35 @@ export async function fillQuotationTeams(): Promise<number> {
 }
 
 /**
+ * Each order its own team (2026-11-12, the owner's call): an order with no
+ * team takes its SALESPERSON's own team. Run by the seed on every deploy;
+ * only ever fills a blank, claimed on `teamId` still null, so a team set
+ * since is kept. An order whose salesperson has no team stays blank and
+ * reads as its quotation's (`orderTeamOf`).
+ */
+export async function fillOrderTeams(): Promise<number> {
+  const teams = await prisma.industry.findMany({ select: { id: true, code: true } });
+  let filled = 0;
+  for (const team of teams) {
+    const ids = (await prisma.salesOrder.findMany({ where: { teamId: null, owner: teamMembers(team.id) }, select: { id: true } })).map((o) => o.id);
+    if (!ids.length) continue;
+    const done = await prisma.salesOrder.updateMany({ where: { id: { in: ids }, teamId: null }, data: { teamId: team.id } });
+    if (!done.count) continue;
+    filled += done.count;
+    await prisma.auditLog.create({
+      data: {
+        entityType: 'sales_order',
+        entityId: 'list',
+        action: 'UPDATED',
+        summary: `Set the team of ${done.count} sales order(s) to their salesperson's team ${team.code}`,
+        after: { teamId: team.id, salesOrderIds: ids },
+      },
+    });
+  }
+  return filled;
+}
+
+/**
  * A person's TEAM (the money-out registers' Team column: budget requests,
  * reimbursements, cash advances). It read "team, else department" from
  * 2026-10-15 until departments were retired (2026-10-19, the owner's call:
@@ -262,18 +316,19 @@ export function readsQuotation(me: ResolvedUser, q: { ownerId: string; teamId?: 
 export function salesOrdersReadable(me: ResolvedUser): Prisma.SalesOrderWhereInput | null {
   const scope = viewScope(me, 'gops', 'sales_orders');
   if (scope === 'all') return null;
-  if (scope === 'team' && me.teamId) return { OR: [{ ownerId: me.id }, { quotation: quotationTeamWhere(me.teamId) }] };
+  if (scope === 'team' && me.teamId) return { OR: [{ ownerId: me.id }, orderTeamWhere(me.teamId)] };
   return { ownerId: me.id };
 }
 
 /** A sales order's single-record read without View All: its author, or — View Team — one on the team's quotation. */
 export function readsSalesOrder(
   me: ResolvedUser,
-  o: { ownerId: string; quotation?: { ownerId: string; teamId: string | null } | null },
+  o: { ownerId: string; teamId?: string | null; quotation?: { ownerId: string; teamId: string | null } | null },
 ): boolean {
   const scope = viewScope(me, 'gops', 'sales_orders');
   if (scope === 'all' || o.ownerId === me.id) return true;
   if (scope !== 'team' || !me.teamId) return false;
+  if (o.teamId) return o.teamId === me.teamId;
   const q = o.quotation;
   if (!q) return me.teamMemberIds.includes(o.ownerId);
   return q.teamId ? q.teamId === me.teamId : me.teamMemberIds.includes(q.ownerId);

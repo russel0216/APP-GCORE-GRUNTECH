@@ -804,6 +804,7 @@ model Industry {
   /// Quotations tagged with this team (the SCORO import, 2026-10-12).
   quotationsTagged   Quotation[]         @relation("QuotationTeam")
   invoicesCredited   Invoice[]           @relation("InvoiceTeam")
+  salesOrders        SalesOrder[]        @relation("SalesOrderTeam")
   supporters         UserSupportTeam[]
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
@@ -1727,6 +1728,11 @@ model SalesOrder {
   /// Record ownership — the author; "only the author can edit" as on quotations.
   ownerId String
   owner   User   @relation("SalesOrderOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  /// The team the order counts under (2026-11-12, the owner's call: "each order
+  /// its own team") — its salesperson's at booking, else the quotation's.
+  /// Null on an order from before, read through `orderTeamOf()` as the quotation's.
+  teamId  String?
+  team    Industry? @relation("SalesOrderTeam", fields: [teamId], references: [id], onDelete: SetNull)
 
   orderDate     DateTime @db.Date
   /// "Payment Terms : 30" on the paper.

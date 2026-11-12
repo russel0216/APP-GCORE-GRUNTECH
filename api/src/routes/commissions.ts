@@ -109,6 +109,7 @@ export async function orderSource(salesOrderId: string) {
       lines: { orderBy: { sortOrder: 'asc' } },
       customer: { select: { id: true, name: true } },
       owner: { select: { id: true, name: true, position: true, supervisorId: true } },
+      team: { select: { id: true, code: true, name: true } },
       quotation: {
         select: {
           id: true,
@@ -186,7 +187,7 @@ export async function orderSource(salesOrderId: string) {
     collectedOn,
     collections,
     job,
-    team: quotationTeamOf(order.quotation),
+    team: order.team ?? quotationTeamOf(order.quotation),
   };
 }
 

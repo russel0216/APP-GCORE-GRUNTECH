@@ -3576,10 +3576,13 @@ async function main() {
     const teamOrder = await http(salesToken, 'POST', '/sales-orders', { quotationId: picked.body.id, mode: 'all' });
     const teamOrderList = await http(salesToken, 'GET', `/sales-orders?scope=all&ids=${teamOrder.body.id}`);
     const orderTeams = ((teamOrderList.body.summary as { teams?: { id: string | null; code: string; count: number }[] } | undefined)?.teams ?? []);
+    // Each order its own team (2026-11-12): a new order counts under its
+    // SALESPERSON's team, whatever team the quotation carries.
+    const orderTeamExpected = authorTeam ?? uitTeam.id;
     check(
-      'and its sales order counts under the quotation’s team, not the author’s',
-      teamOrder.status === 201 && orderTeams.find((t) => t.id === uitTeam.id)?.count === 1 &&
-        orderTeams.filter((t) => t.id !== uitTeam.id).every((t) => t.count === 0),
+      'and its sales order counts under its salesperson’s own team, not the quotation’s',
+      teamOrder.status === 201 && orderTeams.find((t) => t.id === orderTeamExpected)?.count === 1 &&
+        orderTeams.filter((t) => t.id !== orderTeamExpected).every((t) => t.count === 0),
       JSON.stringify(orderTeams.map((t) => [t.code, t.count])),
     );
     // "Fix the tags" (2026-11-12): an order whose quotation's team is not its
@@ -3588,18 +3591,22 @@ async function main() {
     const root = await prisma.user.findFirst({ where: { isSuperAdmin: true, isActive: true }, select: { id: true, email: true } });
     if (salesEmp && root) {
       await prisma.employee.update({ where: { id: salesEmp.id }, data: { industryId: hitTeam.id } });
+      // An order from before: no team of its own, so it reads as its quotation's (UIT).
+      await prisma.salesOrder.update({ where: { id: String(teamOrder.body.id) }, data: { teamId: null } });
       try {
         const rootToken = signToken(root.id, root.email);
         const differs = await http(salesToken, 'GET', `/sales-orders?scope=all&crossTeam=yes&ids=${teamOrder.body.id}`);
         const refused = await http(salesToken, 'POST', `/sales-orders/${teamOrder.body.id}/retag-team`, {});
         const retag = await http(rootToken, 'POST', `/sales-orders/${teamOrder.body.id}/retag-team`, {});
-        const after = await prisma.quotation.findUniqueOrThrow({ where: { id: String(picked.body.id) }, select: { teamId: true } });
+        const after = await prisma.salesOrder.findUniqueOrThrow({ where: { id: String(teamOrder.body.id) }, select: { teamId: true } });
+        const quote = await prisma.quotation.findUniqueOrThrow({ where: { id: String(picked.body.id) }, select: { teamId: true } });
         const again = await http(rootToken, 'GET', `/sales-orders?scope=all&crossTeam=yes&ids=${teamOrder.body.id}`);
+        const counted = await http(rootToken, 'GET', `/sales-orders?scope=all&teamId=${hitTeam.id}&ids=${teamOrder.body.id}`);
         check(
-          'an order on another team’s quotation is listed under Team differs, and Set team to the salesperson’s retags its quotation (Edit All only)',
+          'an order on another team’s quotation is listed under Team differs, and Set team to the salesperson’s gives the ORDER its own team, the quotation left as it is (Edit All only)',
           differs.status === 200 && differs.body.total === 1 && refused.status === 403 && retag.status === 200 && retag.body.changed === true &&
-            after.teamId === hitTeam.id && again.body.total === 0,
-          `${differs.status} ${differs.body.total} / ${refused.status} / ${retag.status} ${retag.body.changed} ${after.teamId === hitTeam.id} / ${again.body.total}`,
+            after.teamId === hitTeam.id && quote.teamId === uitTeam.id && again.body.total === 0 && counted.body.total === 1,
+          `${differs.status} ${differs.body.total} / ${refused.status} / ${retag.status} ${retag.body.changed} ${after.teamId === hitTeam.id} ${quote.teamId === uitTeam.id} / ${again.body.total} ${counted.body.total}`,
         );
       } finally {
         await prisma.employee.update({ where: { id: salesEmp.id }, data: { industryId: salesEmp.industryId } });

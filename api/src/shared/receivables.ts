@@ -109,11 +109,13 @@ export async function invoiceCredit(
   if (source.salesOrderId) {
     const so = await db.salesOrder.findUnique({
       where: { id: source.salesOrderId },
-      select: { ownerId: true, quotation: { select: OWNER_TEAM } },
+      select: { ownerId: true, teamId: true, quotation: { select: OWNER_TEAM } },
     });
     if (so) {
       fromQuotation(so.quotation);
       credit.salespersonId = so.ownerId;
+      // Each order its own team (2026-11-12): the order's, where it has one.
+      if (so.teamId) credit.teamId = so.teamId;
     }
   }
   if (!credit.salespersonId && source.jobOrderId) {

@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import type { ResolvedUser } from '../permissions/resolve';
 import { inBase, rateOf, RATE_SELECT } from './exchangeRates';
-import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, salesOrdersReadable, type TeamRef } from './team';
+import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, orderTeamOf, salesOrdersReadable, type TeamRef } from './team';
 
 /**
  * What a sales order is WORTH, decided once (2026-11-08).
@@ -74,6 +74,7 @@ export async function salesOrderRows(me: ResolvedUser, from: Date, to: Date, ext
       vatInclusive: true,
       owner: { select: { name: true, ...OWNER_TEAM_SELECT.select } },
       customer: { select: { name: true } },
+      team: TEAM_REF_SELECT,
       quotation: { select: { ...RATE_SELECT, team: TEAM_REF_SELECT, owner: OWNER_TEAM_SELECT } },
     },
     orderBy: { orderDate: 'asc' },
@@ -89,7 +90,7 @@ export async function salesOrderRows(me: ResolvedUser, from: Date, to: Date, ext
       ownerName: o.owner.name,
       customerId: o.customerId,
       customerName: o.customer.name,
-      team: quotationTeamOf(o.quotation),
+      team: orderTeamOf(o),
       ownerTeam: o.owner.employee?.industry ?? null,
       rate,
       currency: o.quotation.currency ?? 'PHP',

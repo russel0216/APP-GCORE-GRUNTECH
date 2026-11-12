@@ -12,7 +12,7 @@ import { handler, forbidden } from '../http/kit';
 import { type Range } from '../shared/insights';
 import { statusLabel } from '../shared/pdf';
 import { quotationTotals } from '../shared/quotation';
-import { quotationTeamWhere } from '../shared/team';
+import { orderTeamWhere } from '../shared/team';
 import { live as liveRows, salesOrderRows } from '../shared/salesFigures';
 import { salesMatrix } from '../shared/gops';
 import { badRequest } from '../http/kit';
@@ -49,10 +49,10 @@ async function salesOrdersReport(range: Range, ctx: ReportContext): Promise<Repo
     words.push(`booked by ${owner?.name ?? 'someone not on file'}`);
   }
   if (q.teamId === 'none') {
-    and.push({ quotation: { teamId: null, owner: { OR: [{ employee: null }, { employee: { industryId: null } }] } } });
+    and.push({ teamId: null, quotation: { teamId: null, owner: { OR: [{ employee: null }, { employee: { industryId: null } }] } } });
     words.push('no team');
   } else if (q.teamId) {
-    and.push({ quotation: quotationTeamWhere(q.teamId) });
+    and.push(orderTeamWhere(q.teamId));
     const team = await prisma.industry.findUnique({ where: { id: q.teamId }, select: { code: true } });
     words.push(`team ${team?.code ?? 'not found'}`);
   }

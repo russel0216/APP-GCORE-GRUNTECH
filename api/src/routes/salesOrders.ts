@@ -9,8 +9,11 @@ import { prisma } from '../prisma';
 import {
   OWNER_TEAM_SELECT,
   TEAM_REF_SELECT,
+  orderTeamOf,
+  orderTeamWhere,
   quotationTeamOf,
   quotationTeamWhere,
+  teamForNewOrder,
   quotationsReadable,
   readsQuotation,
   readsSalesOrder,
@@ -266,15 +269,15 @@ export function salesOrderListWhere(
   if (q.scope === 'mine') and.push({ ownerId: me.id });
   else if (readable) and.push(readable);
   // An order counts under its QUOTATION's team (2026-10-12): the team picked on the quotation, else its author's.
-  if (q.scope === 'team') and.push(team ? { quotation: quotationTeamWhere(team) } : { ownerId: me.id });
+  if (q.scope === 'team') and.push(team ? orderTeamWhere(team) : { ownerId: me.id });
   const f = q.filters;
   if (f.customerId) and.push({ customerId: f.customerId });
   if (f.quotationId) and.push({ quotationId: f.quotationId });
   if (f.ownerId) and.push({ ownerId: f.ownerId });
   // The team the order counts under — its quotation's (2026-11-04: the Sales
   // Order report's rows open the list on it), `none` for no team at all.
-  if (f.teamId === 'none') and.push({ quotation: { teamId: null, owner: { OR: [{ employee: null }, { employee: { industryId: null } }] } } });
-  else if (f.teamId) and.push({ quotation: quotationTeamWhere(f.teamId) });
+  if (f.teamId === 'none') and.push({ teamId: null, quotation: { teamId: null, owner: { OR: [{ employee: null }, { employee: { industryId: null } }] } } });
+  else if (f.teamId) and.push(orderTeamWhere(f.teamId));
   // Team differs from the salesperson's (2026-11-12, the owner's "fix the
   // tags": the dashboard's Sankey crossed wherever a quotation's team was not
   // the order's salesperson's) — the ids `crossTeamOrderIds()` read.
@@ -351,7 +354,7 @@ export async function salesOrderListSummary(
     // quotation it books (2026-10-12) — picked there, else its author's.
     prisma.salesOrder.findMany({
       where: { AND: [where, LIVE] },
-      select: { total: true, quotation: { select: { ...RATE_SELECT, team: TEAM_REF_SELECT, owner: OWNER_TEAM_SELECT } } },
+      select: { total: true, team: TEAM_REF_SELECT, quotation: { select: { ...RATE_SELECT, team: TEAM_REF_SELECT, owner: OWNER_TEAM_SELECT } } },
     }),
   ]);
   // In pesos: an order is in its quotation's currency, converted at the
@@ -359,7 +362,7 @@ export async function salesOrderListSummary(
   const centsOf = (o: { total: Prisma.Decimal; quotation: { currency: string; exchangeRate: Prisma.Decimal | null } }) =>
     Math.round(inBase(num(o.total), o.quotation) * 100);
   const liveCents = owned.reduce((t, o) => t + centsOf(o), 0);
-  const teams = await teamShares(owned.map((o) => ({ team: quotationTeamOf(o.quotation), cents: centsOf(o) })));
+  const teams = await teamShares(owned.map((o) => ({ team: orderTeamOf(o), cents: centsOf(o) })));
   // The totals row's margin: every live order with a costed line, the row's
   // own figure summed, against the orders' sums without tax (the quotation
   // list's rule, over SalesOrderLine).
@@ -422,14 +425,14 @@ export async function crossTeamOrderIds(): Promise<string[]> {
       LEFT JOIN "Employee" qe ON qe."userId" = q."ownerId"
       JOIN "Employee" oe ON oe."userId" = so."ownerId"
      WHERE oe."industryId" IS NOT NULL
-       AND COALESCE(q."teamId", qe."industryId") IS DISTINCT FROM oe."industryId"`;
+       AND COALESCE(so."teamId", q."teamId", qe."industryId") IS DISTINCT FROM oe."industryId"`;
   return rows.map((r) => r.id);
 }
 
 /**
- * Put an order's quotation under its SALESPERSON's team (2026-11-12, the
- * owner's "fix the tags"): the quotation's team becomes the order owner's own
- * team, and the order's invoices credited to the old team follow. The Sales
+ * Put an order under its SALESPERSON's team (2026-11-12, the owner's "fix the
+ * tags", then "each order its own team"): the order's own team becomes its
+ * owner's, and the order's invoices credited to the old team follow. The Sales
  * Order list's "Set team to the salesperson's" sends it per ticked order.
  */
 salesOrderRoutes.post(
@@ -443,27 +446,30 @@ salesOrderRoutes.post(
         id: true,
         number: true,
         owner: { select: { name: true, employee: { select: { industry: { select: { id: true, code: true } } } } } },
+        team: TEAM_REF_SELECT,
         quotation: { select: { id: true, number: true, team: TEAM_REF_SELECT, owner: OWNER_TEAM_SELECT } },
       },
     });
     if (!order) throw notFound('Sales order not found');
     const target = order.owner.employee?.industry ?? null;
     if (!target) throw badRequest(`${order.owner.name} has no team — set it on Admin › Users first`);
-    const before = quotationTeamOf(order.quotation);
-    if (before?.id === target.id) return res.json({ changed: false, team: target.code });
+    const before = orderTeamOf(order);
+    if (before?.id === target.id && order.team) return res.json({ changed: false, team: target.code });
+    // The ORDER's own team (2026-11-12, "each order its own team"): the
+    // quotation is left as it is — another salesperson's order may book it.
     await prisma.$transaction(async (tx) => {
-      await tx.quotation.update({ where: { id: order.quotation.id }, data: { teamId: target.id } });
-      const invoices = before
+      await tx.salesOrder.update({ where: { id: order.id }, data: { teamId: target.id } });
+      const invoices = before && before.id !== target.id
         ? await tx.invoice.updateMany({ where: { salesOrderId: order.id, teamId: before.id }, data: { teamId: target.id } })
         : { count: 0 };
       await audit(
         {
-          entityType: 'quotation',
-          entityId: order.quotation.id,
+          entityType: 'sales_order',
+          entityId: order.id,
           action: 'UPDATED',
-          summary: `Team ${before?.code ?? 'none'} → ${target.code}, the salesperson's (${order.owner.name}) on sales order ${order.number}${invoices.count ? `; ${invoices.count} invoice(s) followed` : ''}`,
+          summary: `Team ${before?.code ?? 'none'} → ${target.code}, the salesperson's (${order.owner.name})${invoices.count ? `; ${invoices.count} invoice(s) followed` : ''}`,
           before: { teamId: before?.id ?? null },
-          after: { teamId: target.id, salesOrder: order.number, invoices: invoices.count },
+          after: { teamId: target.id, invoices: invoices.count },
           actorId: me.id,
         },
         undefined,
@@ -501,7 +507,7 @@ salesOrderRoutes.get(
       }),
       prisma.salesOrder.count({ where }),
       salesOrderListSummary(base, where, {
-        teamWhere: team ? { quotation: quotationTeamWhere(team.id) } : null,
+        teamWhere: team ? orderTeamWhere(team.id) : null,
         margin:
           me.isSuperAdmin ||
           me.permissions.has('gops.sales_orders.edit_all') ||
@@ -962,6 +968,7 @@ salesOrderRoutes.post(
           customerId: customer.id,
           contactId: body.contactId || null,
           ownerId: me.id,
+          teamId: (await teamForNewOrder(me.id, quotation.id, tx)) ?? teamId ?? null,
           orderDate,
           poNumber: body.poNumber || null,
           discountPct: d(0),
@@ -1083,6 +1090,7 @@ salesOrderRoutes.post(
           customerId: quotation.customerId,
           contactId: quotation.contactId,
           ownerId: me.id,
+          teamId: await teamForNewOrder(me.id, quotation.id, tx),
           orderDate: manilaDate(new Date()),
           poNumber: revision.prNumber ?? null,
           // A summary line already carries the discount inside its one price.
@@ -1975,7 +1983,7 @@ export async function printableSalesOrder(me: ReturnType<typeof currentUser>, id
  */
 async function assertOrderVisible(
   me: ReturnType<typeof currentUser>,
-  order: { id: string; ownerId: string; quotationId: string },
+  order: { id: string; ownerId: string; quotationId: string; teamId?: string | null },
   deciderOnly: boolean,
 ) {
   // View Team reads an order on the team's quotation — fetched only when that is the question.
@@ -1983,7 +1991,7 @@ async function assertOrderVisible(
     !deciderOnly && order.ownerId !== me.id && viewScope(me, 'gops', 'sales_orders') === 'team'
       ? await prisma.quotation.findUnique({ where: { id: order.quotationId }, select: { ownerId: true, teamId: true } })
       : null;
-  const visible = !deciderOnly && (me.isSuperAdmin || readsSalesOrder(me, { ownerId: order.ownerId, quotation }));
+  const visible = !deciderOnly && (me.isSuperAdmin || readsSalesOrder(me, { ownerId: order.ownerId, teamId: order.teamId ?? null, quotation }));
   if (visible || (await mayDecide(me.id, 'sales_order', [order.id]))) return;
   // Back Support opens the orders of the teams it handles — it writes their SI and DR numbers.
   if (await mayReleaseOrder(me, order)) return;

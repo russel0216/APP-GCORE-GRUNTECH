@@ -18,7 +18,7 @@ import { applyDeclaredValueRule } from '../src/shared/declaredValue';
 import { migrateCostingMargins } from '../src/shared/costingLegacy';
 import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGroups';
 import { seedActivityTypes } from '../src/shared/activityTypes';
-import { TEAMS, fillQuotationTeams, retireFirstIndustries } from '../src/shared/team';
+import { TEAMS, fillOrderTeams, fillQuotationTeams, retireFirstIndustries } from '../src/shared/team';
 import { fillQuotationRates } from '../src/shared/exchangeRates';
 import { prefillHolidays } from '../src/shared/holidays';
 import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
@@ -1229,6 +1229,13 @@ async function main() {
   {
     const filled = await fillQuotationTeams();
     if (filled) console.log(`  · Set the team of ${filled} older quotation(s) to their author's team`);
+  }
+
+  // Each sales order its own team (2026-11-12): an order with none takes its
+  // salesperson's. Only blanks; a second run fills none.
+  {
+    const filled = await fillOrderTeams();
+    if (filled) console.log(`  · Set the team of ${filled} sales order(s) to their salesperson's team`);
   }
 
   // A quotation in another currency with no rate takes Settings' rate for it
