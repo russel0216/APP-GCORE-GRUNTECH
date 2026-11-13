@@ -83,6 +83,8 @@ interface QuotationRow {
   margin: { amount: number; pct: number | null; costedLines: number; lineCount: number } | null;
   /** What Change status plans with; the PATCH still decides. */
   canEdit: boolean;
+  /** Who may move its status (2026-11-14): its owner, their Team Leader or Sales Manager, the CEO, the System Administrator. */
+  canMove?: boolean;
   hasApprovedRevision: boolean;
   hasJob: boolean;
 }
@@ -462,7 +464,7 @@ export function planMove(
   target = bulkOutcome(target);
   for (const r of rows) {
     if (r.outcome === target) stay.push({ row: r, why: `already in ${label}` });
-    else if (!r.canEdit) stay.push({ row: r, why: 'only its author can move it' });
+    else if (!(r.canMove ?? r.canEdit)) stay.push({ row: r, why: 'only its owner, their team leader or sales manager, or the CEO moves it' });
     else if (r.outcome === 'WON' && r.hasJob) stay.push({ row: r, why: 'a project was built from it' });
     else if (!(NEXT_OUTCOMES[r.outcome] ?? []).includes(target)) {
       stay.push({ row: r, why: `${r.stageLabel ?? stageLabelFor(r.outcome)} cannot go to ${label}` });
@@ -719,6 +721,8 @@ export interface QuotationDetail {
   /** Settings' rates, the default when the currency changes. */
   exchangeRates?: Record<string, number>;
   canEdit: boolean;
+  /** Who may move its status — not the same as who may edit it (2026-11-14). */
+  canMove?: boolean;
   /** Whether the server sent the cost half of each line. */
   canSeeCost: boolean;
   /** Bought ahead for it, and — lost — what must be re-allocated (2026-11-10). */
@@ -914,7 +918,8 @@ export function QuotationDetail() {
   const issued = revision ? dayKeyOf(new Date(revision.createdAt)) : null;
   const due = revision && issued ? addDays(issued, revision.validityDays) : null;
   const canSubmit = editable && !!revision && revision.items.length > 0 && !revision.importedUnchanged;
-  const canSend = quotation.canEdit && moves.some((m) => m.value === 'SUBMITTED');
+  const canMove = quotation.canMove ?? quotation.canEdit;
+  const canSend = canMove && moves.some((m) => m.value === 'SUBMITTED');
   const address = quotation.site?.address
     ? [quotation.site.address, quotation.site.city].filter(Boolean).join(', ')
     : quotation.customer.address;
@@ -924,7 +929,7 @@ export function QuotationDetail() {
 
   // Lost is the ⋯ menu's "Mark lost" (red, asking why in the bar under the
   // header); the Change status select carries only the moves that destroy nothing.
-  const canMarkLost = quotation.canEdit && moves.some((m) => m.value === 'LOST');
+  const canMarkLost = canMove && moves.some((m) => m.value === 'LOST');
   const statusMoves = moves.filter((m) => m.value !== 'LOST');
 
   function changeOutcome(next: string) {
@@ -1364,7 +1369,7 @@ export function QuotationDetail() {
                     {quotation.closedInDays != null ? ` · ${quotation.outcome === 'WON' ? 'won' : 'lost'} in ${dayCount(quotation.closedInDays)}` : ''}
                   </div>
                 )}
-                {quotation.canEdit && statusMoves.length > 0 && (
+                {canMove && statusMoves.length > 0 && (
                   <div className="qd-status-change">
                     <select
                       aria-label="Change status"

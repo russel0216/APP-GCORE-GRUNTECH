@@ -9,6 +9,7 @@ import { handler, parseBody, listQuery, listResult, orderBy, notFound, badReques
 import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { requireEdit, viewScope } from '../shared/ownScope';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
+import { MOVER_REFUSAL, mayMoveQuotation, moverScope } from '../shared/quotationMovers';
 import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
 import { nextNumber, previewNext, setCounter, type CounterMove } from '../shared/numbering';
@@ -1315,6 +1316,7 @@ quotationRoutes.get(
       }),
     ]);
 
+    const movers = await moverScope(me);
     // Margin, only where the caller may see this quotation's cost — the
     // quotation's own rule — read off the value revision's lines.
     const costed = rows
@@ -1379,6 +1381,7 @@ quotationRoutes.get(
             // What the bulk status change needs to plan a move the way the
             // PATCH will judge it (assertOutcomeChange); the PATCH still decides.
             canEdit: canEditRecord(me, 'gops', 'quotations', r.ownerId),
+            canMove: mayMoveQuotation(movers, r),
             hasApprovedRevision: r.revisions.some(standsApproved),
             hasJob: r.revisions.some((v) => v.jobs.length > 0),
           };
@@ -2029,6 +2032,8 @@ quotationRoutes.get(
         presentRevision(r as unknown as Record<string, unknown>, showCost),
       ),
       canEdit: canEditRecord(me, 'gops', 'quotations', quotation.ownerId),
+      // Who may move its status (shared/quotationMovers.ts) — not the same as who may edit it.
+      canMove: mayMoveQuotation(await moverScope(me), quotation),
       // Tells the screen whether to draw the cost columns — the keys are
       // already absent when it is false; this only saves it guessing.
       canSeeCost: showCost,
@@ -2466,8 +2471,17 @@ quotationRoutes.patch(
       },
     });
     if (!before) throw notFound('Quotation not found');
+    // The STATUS has its own rule (2026-11-14): its owner, their Team Leader
+    // or Sales Manager, the CEO or a super admin. Everything else on the
+    // quotation is still its editor's. A mover who is not its editor may send
+    // the move and what goes with it, nothing more.
+    const moving = body.outcome !== undefined && body.outcome !== before.outcome;
+    const MOVE_KEYS = ['outcome', 'lostReason', 'lostKind', 'probability'];
+    const mayMove = mayMoveQuotation(await moverScope(me), before);
+    if (moving && !mayMove) throw forbidden(MOVER_REFUSAL);
     if (!canEditRecord(me, 'gops', 'quotations', before.ownerId)) {
-      throw forbidden('Only the author can edit this quotation');
+      const others = Object.keys(body).filter((k) => !MOVE_KEYS.includes(k) && (body as Record<string, unknown>)[k] !== undefined);
+      if (!moving || !mayMove || others.length) throw forbidden('Only the author can edit this quotation');
     }
 
     // One set of move rules for the detail page and the board (shared/pipeline).
@@ -4367,6 +4381,7 @@ async function loadBoard(req: Parameters<typeof currentUser>[0]): Promise<BoardR
     now,
     decidedWithinDays,
     me,
+    movers: await moverScope(me),
     stages,
   });
 }

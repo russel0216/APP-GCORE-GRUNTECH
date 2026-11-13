@@ -3,6 +3,7 @@ import { badRequest } from '../http/kit';
 import { canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { manilaDayKey, manilaMonthKey } from './day';
 import { inBase } from './exchangeRates';
+import { basicMoverScope, mayMoveQuotation, type MoverScope } from './quotationMovers';
 
 /**
  * Pipeline rules shared by the sales board and Insights.
@@ -609,7 +610,7 @@ function leadCard(lead: BoardLead, now: Date, me: ResolvedUser): Card | null {
   };
 }
 
-function quotationCard(q: BoardQuotation, now: Date, me: ResolvedUser): Card | null {
+function quotationCard(q: BoardQuotation, now: Date, movers: MoverScope): Card | null {
   const column = columnFor({ kind: 'quotation', outcome: q.outcome });
   if (!column) return null;
   // In pesos: the board adds cards, so a quotation in another currency
@@ -626,7 +627,8 @@ function quotationCard(q: BoardQuotation, now: Date, me: ResolvedUser): Card | n
   const planned = q.activities[0];
   const expectedClosing = q.expectedClosing ?? q.lead?.expectedClosing ?? null;
   const open = QUOTATION_OPEN_KEYS.includes(column);
-  const canMove = canEditRecord(me, 'gops', 'quotations', q.ownerId);
+  // Its owner, their Team Leader or Sales Manager, the CEO, a super admin (2026-11-14).
+  const canMove = mayMoveQuotation(movers, q);
   return {
     ref: `quotation:${q.id}`,
     kind: 'quotation',
@@ -802,11 +804,14 @@ export function buildBoard(input: {
   now: Date;
   decidedWithinDays: number;
   me: ResolvedUser;
+  /** Who may move a quotation's status, with the shared team posts read; from `me` alone when not passed. */
+  movers?: MoverScope;
   /** The stages as configured; the defaults when a caller has not read them. */
   stages?: Stage[];
 }): BoardResponse {
   const { now, me } = input;
   const stages = input.stages ?? STAGE_DEFAULTS;
+  const movers = input.movers ?? basicMoverScope(me);
   const decidedFrom = new Date(now.getTime() - input.decidedWithinDays * 86_400_000);
 
   const cards: Card[] = [];
@@ -821,7 +826,7 @@ export function buildBoard(input: {
     // (an imported or continued quotation) stays — dropping it hid a WON
     // quotation that the list and the quotation page both showed.
     if ((q.outcome === 'WON' || q.outcome === 'LOST') && q.decidedAt && q.decidedAt < decidedFrom) continue;
-    const c = quotationCard(q, now, me);
+    const c = quotationCard(q, now, movers);
     if (c) {
       cards.push(c);
       quotationById.set(q.id, q);

@@ -1260,7 +1260,9 @@ export function QuotationEditor() {
               <Field
                 label="Status"
                 hint={
-                  statusOptions.length > 1
+                  quotation && quotation.canMove === false
+                    ? 'Moved by its owner, their Team Leader or Sales Manager, the CEO or the System Administrator'
+                    : statusOptions.length > 1
                     ? 'Applied when you save — it moves the lead too, so the pipeline stays honest'
                     : current === 'WON' && jobs.length > 0
                       ? 'It became a project, so it stays won'
@@ -1270,7 +1272,7 @@ export function QuotationEditor() {
                 <select
                   id="qe-outcome"
                   value={header.outcome}
-                  disabled={statusOptions.length <= 1}
+                  disabled={statusOptions.length <= 1 || quotation?.canMove === false}
                   onChange={(e) => set('outcome', e.target.value)}
                 >
                   {statusOptions.map((o) => (
@@ -2257,10 +2259,13 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
                 onChange={(e) => setForm((f) => ({ ...f, expectedClosing: e.target.value }))}
               />
             </Field>
-            <Field label="Status" hint="Applied when you save — it moves the lead too">
+            <Field
+              label="Status"
+              hint={quotation.canMove === false ? 'Moved by its owner, their Team Leader or Sales Manager, the CEO or the System Administrator' : 'Applied when you save — it moves the lead too'}
+            >
               <select
                 value={form.outcome}
-                disabled={statusOptions.length <= 1}
+                disabled={statusOptions.length <= 1 || quotation.canMove === false}
                 onChange={(e) => setForm((f) => ({ ...f, outcome: e.target.value }))}
               >
                 {statusOptions.map((o) => (

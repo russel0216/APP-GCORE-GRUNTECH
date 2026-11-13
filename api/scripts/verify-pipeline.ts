@@ -689,13 +689,50 @@ async function main() {
   const won = await http(managerToken, 'PATCH', `/quotations/${negotiating.id}`, { outcome: 'WON' });
   check('a quotation with an approved revision can be won', won.status === 200, `${won.status} ${errorOf(won)}`);
 
-  // A manager moving somebody else's card tells them.
-  const moved = await http(managerToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'SUBMITTED' });
-  check("the manager may move a salesperson's quotation", moved.status === 200, `${moved.status}`);
+  // Who moves a status (2026-11-14, the owner's call): its owner, their Team
+  // Leader or Sales Manager, the CEO, the System Administrator — never Manage
+  // All by itself. The manager here holds Manage All and none of those roles.
+  const moverTeam = await prisma.industry.findFirstOrThrow({ where: { isActive: true }, orderBy: { code: 'asc' } });
+  const realRole = async (key: string, name: string) =>
+    prisma.role.upsert({ where: { key }, create: { key, name, isSystem: false }, update: {}, select: { id: true } });
+  const leader = await makeUser('Verify Team Leader', 'leader@verifyp.local', [boardRole.id, (await realRole('team_leader', 'Team Leader')).id]);
+  await prisma.employee.create({
+    data: { employeeNo: `${TAG}-EMP-2026-0008`, firstName: 'Verify', lastName: `${TAG} Leader`, userId: leader.id, industryId: moverTeam.id },
+  });
+  const chief = await makeUser('Verify Chief', 'chief@verifyp.local', [boardRole.id, (await realRole('ceo', 'CEO / President')).id]);
+  const leaderToken = signToken(leader.id, leader.email);
+  const chiefToken = signToken(chief.id, chief.email);
+  const canMoveOf = async (token: string) => (await http(token, 'GET', `/quotations/${sellersOwn.id}`)).body.canMove;
+
+  const byEditAll = await http(managerToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'SUBMITTED' });
+  const otherTeam = await http(leaderToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'SUBMITTED' });
+  const stillOpen = await prisma.quotation.findUniqueOrThrow({ where: { id: sellersOwn.id }, select: { outcome: true } });
+  check(
+    'Manage All alone does not move somebody else’s quotation, nor does a Team Leader of another team — and the page says so',
+    byEditAll.status === 403 && /team leader or sales manager/.test(errorOf(byEditAll)) && otherTeam.status === 403 && stillOpen.outcome === 'OPEN' &&
+      (await canMoveOf(managerToken)) === false && (await canMoveOf(leaderToken)) === false,
+    `${byEditAll.status} ${otherTeam.status} ${stillOpen.outcome} ${errorOf(byEditAll)} ${await canMoveOf(managerToken)} ${await canMoveOf(leaderToken)}`,
+  );
+  const editStill = await http(managerToken, 'PATCH', `/quotations/${sellersOwn.id}`, { probability: 41 });
+  check('Manage All still edits its other details', editStill.status === 200, `${editStill.status}`);
+  await prisma.quotation.update({ where: { id: sellersOwn.id }, data: { teamId: moverTeam.id } });
+  const boardFor = async (token: string) =>
+    ((await http(token, 'GET', `/pipeline?search=${encodeURIComponent(TAG)}`)).body as unknown as BoardBody).columns
+      .flatMap((c) => c.cards)
+      .find((c) => c.ref === `quotation:${sellersOwn.id}`) as unknown as { canMove: boolean; allowedTargets: string[] } | undefined;
+  const [cardLeader, cardManager, cardChief] = [await boardFor(leaderToken), await boardFor(managerToken), await boardFor(chiefToken)];
+  check(
+    'its team’s leader, the CEO and its owner may move it — the page and the board card agree; the Manage All holder’s card offers no move',
+    (await canMoveOf(leaderToken)) === true && (await canMoveOf(chiefToken)) === true && (await canMoveOf(sellerToken)) === true &&
+      cardLeader?.canMove === true && cardChief?.canMove === true && cardManager?.canMove === false && cardManager?.allowedTargets.length === 0,
+    JSON.stringify([cardLeader?.canMove, cardManager?.canMove, cardChief?.canMove]),
+  );
+  const moved = await http(leaderToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'SUBMITTED' });
+  check("the team's leader may move a salesperson's quotation", moved.status === 200, `${moved.status} ${errorOf(moved)}`);
   const told = await prisma.notification.findFirst({
     where: { userId: seller.id, title: { contains: 'moved to Negotiation (submitted)' } },
   });
-  check('and the salesperson is told who moved it, by the stage the board shows, with the step after it', !!told && told.title.includes(manager.name), told?.title);
+  check('and the salesperson is told who moved it, by the stage the board shows, with the step after it', !!told && told.title.includes(leader.name), told?.title);
   const notMine = await http(sellerToken, 'PATCH', `/quotations/${draftOnly.id}`, { outcome: 'NEGOTIATION' });
   check("a salesperson cannot move someone else's quotation", notMine.status === 403, `${notMine.status}`);
 
@@ -723,7 +760,7 @@ async function main() {
     stagesSeen,
   );
   // A drop on Closing is a PATCH to NEGOTIATION — the board's own move.
-  const dropped = await http(managerToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'NEGOTIATION' });
+  const dropped = await http(chiefToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'NEGOTIATION' });
   const boardNow = await http(managerToken, 'GET', `/pipeline?search=${encodeURIComponent(TAG)}`);
   const cardNow = (boardNow.body as unknown as BoardBody).columns.flatMap((c) => c.cards).find((c) => c.ref === `quotation:${sellersOwn.id}`);
   const listNow = await http(managerToken, 'GET', `/quotations?search=${encodeURIComponent(`${TAG} Seller owned`)}&scope=all`);

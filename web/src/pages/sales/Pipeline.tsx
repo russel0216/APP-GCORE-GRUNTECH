@@ -323,7 +323,10 @@ const LABELS: Record<string, string> = {
 function refusalFor(card: Card, key: string): string | null {
   if (key === card.column) return null;
   if (card.allowedTargets.includes(key)) return null;
-  if (!card.canMove) return 'Only the owner (or a manager) can move this';
+  if (!card.canMove)
+    return card.kind === 'quotation'
+      ? 'Only its owner, their Team Leader or Sales Manager, or the CEO can move this'
+      : 'Only the owner (or a manager) can move this';
   if (card.kind === 'lead') return 'Raise a quotation from this lead first — a lead is won by its quotation';
   if (card.column === 'WON' && card.job) return `This quotation became ${card.job.number} — it stays won`;
   if (LEAD_KEYS.includes(key)) return 'A quotation is not a lead; put its lead on hold from the lead';

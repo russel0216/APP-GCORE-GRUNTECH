@@ -2745,6 +2745,27 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   has "Cancel quotation" and the lead page "Cancel lead" in ⋯ beside
   Mark lost, and the quotation list's Change status gains On hold and
   Cancelled.
+- **Who moves a quotation's STATUS is `shared/quotationMovers.ts`**
+  (2026-11-14, the owner's call: "only the owner of the quotation can move
+  the status, or the System Administrator, or the team leader or sales
+  manager, and/or the CEO"): its owner, a super admin, the CEO / President
+  (role key `ceo`, any quotation), and a Team Leader or Sales Manager
+  (`team_leader`, `sales_manager`) of the QUOTATION's team — the team picked
+  on it, else its owner's; their own team, or one whose Team managers post
+  names them or shares their team's. **Manage Team / Manage All no longer
+  move a status by themselves** — they still edit the quotation's other
+  details. `moverScope(me)` (one read of the team posts) then
+  `mayMoveQuotation(scope, { ownerId, teamId })`; `basicMoverScope(me)` is
+  the same from the login alone, what the pure `buildBoard` falls back to.
+  `PATCH /quotations/:id` refuses a changed `outcome` with `MOVER_REFUSAL`
+  (403), and lets a mover who is not the quotation's editor send only
+  `outcome`, `lostReason`, `lostKind` and `probability` (the route's
+  `gops.quotations.edit_own` guard still stands). The board card's
+  `canMove`, the list row's `canMove` (the mass Change status plans with it)
+  and `GET /quotations/:id`'s `canMove` (Change status, Mark as sent, Mark
+  lost / Cancel on the page; the Status select on both Modify pages, greyed
+  with the reason) all read it. A LEAD's card is still its editor's
+  (`canEditRecord`). verify-pipeline pins it.
 - **The move rules are `assertLeadStatusChange` / `assertOutcomeChange`** in
   `shared/pipeline.ts`, called from the PATCH routes; the board's drop targets
   come from `allowedTargets()` on the same rules. Do not add a board-only move
