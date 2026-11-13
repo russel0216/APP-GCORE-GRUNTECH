@@ -866,3 +866,9 @@ h4.quote-panel-title {
 .pipe-kpis .kpi-subtext {
   display: none;
 }
+
+/* "Show all 262" under a column's first twenty cards (2026-11-13). */
+.pipe-more {
+  align-self: stretch;
+  justify-content: center;
+}

@@ -2632,6 +2632,18 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   no `forecast`, the board draws no such column and its CSV no such rows —
   the Forecast menu consolidates closing dates. The optional "This month
   forecast" tile (off by default) still reads `kpis.forecast*`.
+- **A column draws its first twenty cards** (2026-11-13, the audit: the
+  SCORO import left 262 cards in Opportunity and a page 51 screens tall):
+  `COLUMN_LIMIT` in `Pipeline.tsx`, then "Show all N — M more" / "Show the
+  first 20" per column (of the visit, never saved); the band keeps the full
+  count and sum. The toolbar carries the **Sort** (the view's own `sort`) and
+  **Overdue only** (`overdueOnly()`, counts and sums narrowed with it). The
+  working view opens with **Completed folded** — `DEFAULT_VIEW.collapsed`,
+  and a view stored before takes it and the Weighted value tile ONCE
+  (`VIEW_REVISION`, the view's `m`). The tiles say what they count: **Open
+  quotations**, **Open value**, **Weighted value**. "Create project ›" shows
+  on a won card only while it is not booked (Confirmed), never on a
+  Completed one.
 - **"Forecast deal" on the board is manual forecast input** (the owner's
   call): "+ New → Forecast deal" asks company, value, probability and
   expected closing and files a LEAD with `source: "Forecast"` — the

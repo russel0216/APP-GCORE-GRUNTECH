@@ -174,20 +174,26 @@ const CARD_FIELDS = [
   { key: 'job', label: 'Project' },
 ];
 
-// SCORO's strip, in its order: Total, Average quote, Average discount, Sum,
-// Margin, Overdue — then G-CORE's own three, off by default.
+// The strip over the board. Each tile says what it counts (2026-11-13, the
+// audit: "Total 302" beside 410 cards read as a mistake): open quotations,
+// their value, and that value weighted by each deal's odds.
 const KPI_TILES = [
-  { key: 'open', label: 'Total (open quotes)' },
+  { key: 'open', label: 'Open quotations' },
+  { key: 'quoted', label: 'Open value' },
+  { key: 'weighted', label: 'Weighted value' },
   { key: 'average', label: 'Average quote' },
   { key: 'discount', label: 'Average discount' },
-  { key: 'quoted', label: 'Sum (quoted value)' },
   { key: 'margin', label: 'Margin' },
   { key: 'overdue', label: 'Overdue' },
-  { key: 'weighted', label: 'Weighted' },
   { key: 'won', label: 'Won this period' },
   { key: 'forecast', label: 'This month forecast' },
 ];
-const DEFAULT_KPIS = ['open', 'average', 'discount', 'quoted', 'margin', 'overdue'];
+const DEFAULT_KPIS = ['open', 'quoted', 'weighted', 'average', 'discount', 'margin', 'overdue'];
+
+/** How many cards a column draws before "Show all" (2026-11-13: one column held 262). */
+const COLUMN_LIMIT = 20;
+/** The working view's revision — a view stored before it is brought up once (`sanitiseView`). */
+const VIEW_REVISION = 2;
 
 const SORTS = [
   { value: 'weighted', label: 'Weighted value' },
@@ -210,19 +216,24 @@ interface PipelineView {
   ownerId: string;
   decidedWithinDays: number;
   sort: Sort;
+  /** `VIEW_REVISION` once the view has taken the changes of 2026-11-13. */
+  m?: number;
 }
 
 const DEFAULT_VIEW: PipelineView = {
   v: 1,
   stages: 'stages',
   columns: [...BOARD_KEYS],
-  collapsed: ['ON_HOLD'],
+  // Completed is finished business — a won deal with its order or project —
+  // so the working board opens with it folded (2026-11-13).
+  collapsed: ['ON_HOLD', 'COMPLETED'],
   cardFields: CARD_FIELDS.map((f) => f.key),
   kpis: DEFAULT_KPIS,
   groupBy: 'none',
   ownerId: '',
   decidedWithinDays: 90,
   sort: 'weighted',
+  m: VIEW_REVISION,
 };
 
 const VIEW_STORAGE = 'gcore_pipeline_view';
@@ -242,13 +253,20 @@ function sanitiseView(raw: unknown): PipelineView {
   // never removing, so nothing a drop could land on is ever out of reach.
   const ordered = columns ? [...new Set([...columns, ...all.filter((k) => !columns.includes(k))])] : DEFAULT_VIEW.columns;
   const days = Number(r.decidedWithinDays);
+  // A view kept from before 2026-11-13 takes that day's changes ONCE: the
+  // Completed stage folded and the Weighted value tile shown. Unfolded or
+  // hidden again afterwards, it stays as the person left it.
+  const old = r.m !== VIEW_REVISION;
+  const collapsed = list(r.collapsed, [...all, ...STAGE_KEYS]) ?? DEFAULT_VIEW.collapsed;
+  const kpis = list(r.kpis, KPI_TILES.map((k) => k.key)) ?? DEFAULT_VIEW.kpis;
   return {
     v: 1,
+    m: VIEW_REVISION,
     stages: r.stages === 'detailed' ? 'detailed' : 'stages',
     columns: ordered,
-    collapsed: list(r.collapsed, [...all, ...STAGE_KEYS]) ?? DEFAULT_VIEW.collapsed,
+    collapsed: old && !collapsed.includes('COMPLETED') ? [...collapsed, 'COMPLETED'] : collapsed,
     cardFields: list(r.cardFields, CARD_FIELDS.map((f) => f.key)) ?? DEFAULT_VIEW.cardFields,
-    kpis: list(r.kpis, KPI_TILES.map((k) => k.key)) ?? DEFAULT_VIEW.kpis,
+    kpis: old && !kpis.includes('weighted') ? [...kpis, 'weighted'] : kpis,
     groupBy: r.groupBy === 'owner' ? 'owner' : 'none',
     ownerId: typeof r.ownerId === 'string' ? r.ownerId : '',
     decidedWithinDays: Number.isFinite(days) ? Math.min(730, Math.max(30, Math.round(days))) : 90,
@@ -436,6 +454,10 @@ export function Pipeline() {
   const [over, setOver] = useState<string | null>(null);
   const [refused, setRefused] = useState<{ key: string; reason: string } | null>(null);
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  // Columns drawn in full ("Show all"), and the Overdue-only narrowing — of
+  // this visit, never part of a saved view.
+  const [shownAll, setShownAll] = useState<Set<string>>(new Set());
+  const [onlyOverdue, setOnlyOverdue] = useState(false);
   const [live, setLive] = useState('');
   const pendingFocus = useRef<string | null>(null);
 
@@ -819,11 +841,12 @@ export function Pipeline() {
     return map;
   }, [board]);
 
-  const ordered = stageMode
+  const everyColumn = stageMode
     ? board
       ? stageColumns(board)
       : []
     : view.columns.map((k) => columnsByKey.get(k)).filter((c): c is Column => !!c);
+  const ordered = onlyOverdue ? everyColumn.map(overdueOnly) : everyColumn;
   const peopleList = [...knownPeople.values()].sort((a, b) => a.name.localeCompare(b.name));
   const lanes =
     view.groupBy === 'owner'
@@ -891,7 +914,7 @@ export function Pipeline() {
           }}
           onDrop={(e) => drop(e, col.key)}
         >
-          {sortCards(col.cards, view.sort).map((card) => (
+          {(shownAll.has(`${laneKey}|${col.key}`) ? sortCards(col.cards, view.sort) : sortCards(col.cards, view.sort).slice(0, COLUMN_LIMIT)).map((card) => (
             <PipeCard
               key={`${col.key}-${card.ref}`}
               card={card}
@@ -914,6 +937,26 @@ export function Pipeline() {
               }}
             />
           ))}
+          {col.cards.length > COLUMN_LIMIT && (
+            <button
+              type="button"
+              className="btn btn-sm pipe-more"
+              aria-expanded={shownAll.has(`${laneKey}|${col.key}`)}
+              onClick={() =>
+                setShownAll((prev) => {
+                  const next = new Set(prev);
+                  const key = `${laneKey}|${col.key}`;
+                  if (next.has(key)) next.delete(key);
+                  else next.add(key);
+                  return next;
+                })
+              }
+            >
+              {shownAll.has(`${laneKey}|${col.key}`)
+                ? `Show the first ${COLUMN_LIMIT}`
+                : `Show all ${col.cards.length} — ${col.cards.length - COLUMN_LIMIT} more`}
+            </button>
+          )}
         </PipeColumn>
       ))}
     </div>
@@ -925,8 +968,8 @@ export function Pipeline() {
         <div>
           <h1>Sales Pipeline</h1>
           <p>
-            Every open lead and quotation in SCORO’s stages. Drag a card to move it, or press Enter on it
-            for the Move menu; a move sets the deal’s odds the way the stage says.
+            Every open lead and quotation, by stage. Drag a card to move it, or press Enter on it for the Move
+            menu; a move sets the deal’s odds the way the stage says. A column shows its first {COLUMN_LIMIT} cards.
           </p>
         </div>
         {newMenuButton}
@@ -990,12 +1033,38 @@ export function Pipeline() {
           onChange={(e) => setSearch(e.target.value)}
         />
 
+        <label className="visually-hidden" htmlFor="pipe-sort">
+          Sort the cards
+        </label>
+        <select
+          id="pipe-sort"
+          className="pipe-select"
+          value={view.sort}
+          title="The order of the cards in every column"
+          onChange={(e) => setView((v) => ({ ...v, sort: e.target.value as Sort }))}
+        >
+          {SORTS.map((o) => (
+            <option key={o.value} value={o.value}>
+              Sort: {o.label}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className={`btn btn-sm${onlyOverdue ? ' btn-active' : ''}`}
+          aria-pressed={onlyOverdue}
+          title="Only the cards past their expected close, next action or validity"
+          onClick={() => setOnlyOverdue((o) => !o)}
+        >
+          Overdue only
+        </button>
+
         <div className="scope-switch" role="group" aria-label="Which columns">
           <button
             className={stageMode ? 'active' : ''}
             aria-pressed={stageMode}
             onClick={() => setView((v) => ({ ...v, stages: 'stages' }))}
-            title="SCORO’s stages: Opportunity, Negotiation, Closing, Confirmed, Completed"
+            title="The stages: Opportunity, Negotiation, Closing, Confirmed, Completed"
           >
             Stages
           </button>
@@ -1116,6 +1185,12 @@ export function Pipeline() {
 }
 
 /** One owner's slice of a column, with its own totals. */
+/** A column's overdue cards alone, with their own totals. */
+function overdueOnly(col: Column): Column {
+  const cards = col.cards.filter((c) => c.overdue);
+  return { ...col, cards, count: cards.length, value: valueOf(cards), weighted: weightedOf(cards) };
+}
+
 function narrow(col: Column, ownerId: string): Column {
   const cards = col.cards.filter((c) => c.owner.id === ownerId);
   return { ...col, cards, count: cards.length, value: valueOf(cards), weighted: weightedOf(cards) };
@@ -1162,13 +1237,13 @@ function KpiRow({ kpis, board, show, canInsights }: { kpis: Kpis; board: Board; 
     open: (
       <Stat
         key="open"
-        label="Total"
+        label="Open quotations"
         value={kpis.openQuotes}
         sub={`and ${kpis.leadCount} lead${kpis.leadCount === 1 ? '' : 's'} estimated at ${formatMoney(kpis.leadEstimate)}`}
       />
     ),
-    quoted: <Stat key="quoted" label="Sum" value={formatMoney(kpis.quotedValue)} figure sub="open quotations, approved revision else latest" />,
-    weighted: <Stat key="weighted" label="Weighted" value={formatMoney(kpis.weightedValue)} figure tone="neon" sub="amount × probability" />,
+    quoted: <Stat key="quoted" label="Open value" value={formatMoney(kpis.quotedValue)} figure sub="open quotations at their full value — won and completed deals are not in it" />,
+    weighted: <Stat key="weighted" label="Weighted value" value={formatMoney(kpis.weightedValue)} figure tone="neon" sub="each open quotation × its odds of closing" />,
     average: (
       <Stat
         key="average"
@@ -1429,7 +1504,9 @@ function PipeCard({
             <Link to={`/g-ops/projects/${card.job.id}`} className="tag">
               Job {card.job.number}
             </Link>
-          ) : (
+          ) : card.booked ? null : (
+            // Only while it waits on its sales order or project (Confirmed); a
+            // completed deal — booked, or invoiced in SCORO — needs no nudge.
             <Link to={`/g-ops/quotations/${card.id}`}>Create project ›</Link>
           )}
         </div>
