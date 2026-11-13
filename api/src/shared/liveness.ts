@@ -44,7 +44,8 @@ export const CHALLENGE_KINDS: readonly ChallengeKind[] = ['blink', 'turn'];
 export const ISSUED_KINDS: readonly ChallengeKind[] = ['turn'];
 
 /** How long the ring runs on the Clock page — the burst the browser records: left, right and back. */
-export const CHALLENGE_SECONDS = 3.5;
+// 2.5 s since 2026-11-13 (the owner's call: "shorten the turn to 2.5 seconds"); it was 3.5 s from 2026-10-16.
+export const CHALLENGE_SECONDS = 2.5;
 /** A challenge is good for this long after it is issued. */
 export const CHALLENGE_TTL_MS = 90_000;
 

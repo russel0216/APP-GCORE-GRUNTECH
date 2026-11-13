@@ -766,6 +766,13 @@ a.inv-move:hover .inv-move-what {
   width: 100%;
   min-width: 0;
 }
+
+/* A tick box in a picker's list keeps its own size (the rule above is for
+   text boxes): the box at the left, its name beside it. */
+.rep-grid .tick-menu input[type='checkbox'] {
+  width: 15px;
+  flex: none;
+}
 @media (max-width: 1100px) {
   .rep-grid {
     grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));

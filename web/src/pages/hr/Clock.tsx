@@ -31,9 +31,9 @@ import { ATTENDANCE_TONES } from './Dashboard';
  * With the liveness check on (`liveness` from /clock/me; HR Settings ›
  * "Ask for a blink or a head turn"), one press of Capture sample / Clock In /
  * Clock Out is one sequence: a fresh challenge is fetched FIRST
- * (GET /clock/challenge — a head turn since 2026-10-16, 3.5 s, single use), then the settle
+ * (GET /clock/challenge — a head turn since 2026-10-16, 2.5 s since 2026-11-13, single use), then the settle
  * and burst as before for the still, then the challenge itself — the prompt
- * under the oval says what to do, a ring around it drains over the 3.5 s
+ * under the oval says what to do, a ring around it drains over that time
  * (a plain countdown under prefers-reduced-motion) while a frame is grabbed
  * every ~150 ms at 640 px wide — and the still, the frames and the token go
  * up together. The server decides whether the movement was seen; its refusal
